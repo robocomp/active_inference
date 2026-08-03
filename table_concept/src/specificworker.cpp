@@ -31,6 +31,7 @@
 #include "specificworker.h"
 #include "table_geometry.h"   // rc::geom pure footprint/uncertainty helpers
 
+#include <locale>
 #include <print>
 #include <format>    // stall-transition log formatting (std::println on cout, survives Verbose=false)
 #include <cstdlib>   // std::_Exit — crash-free terminal shutdown
@@ -354,6 +355,10 @@ void SpecificWorker::initialize()
     // Stale affordance nodes are swept on entering Operating (presence hook) and on shutdown — see
     // remove_stale_affordance_nodes(), keyed on the parent object type (robust to node-name renames).
 
+    // Shadow-mode birth/death record (CONCEPT_AGENT_LIFECYCLE.md §4.2). Recording only — see
+    // log_phantom_event(). Truncating, like the sibling *_events.csv writers: one file per run.
+    phantom_log_.open("etc/table_phantom_events.csv");
+
     // Standalone Qt dashboard + evidence-monitor windows (belief plots + per-instance snapshot).
     build_dashboard();
 }
@@ -373,6 +378,15 @@ void SpecificWorker::initialize()
 void SpecificWorker::refresh_room_geometry()
 {
     if (not G or room_node_id_ == 0 or not fitter_) return;
+    // LATCH. The polygon is authored ONCE and never edited: room_scene_graph.cpp writes it at room-node
+    // creation and otherwise only backfills it if missing (guarded by `not has_poly`). Re-localisation moves
+    // the room FRAME, not these vertices. Re-reading it every cycle cost a full G->get_node(), which returns
+    // the Node BY VALUE and deep-copies both its attribute map and its m_fano edge map — and the room node is
+    // the RT parent of the robot and every concept instance, so that is on the order of hundreds of
+    // allocations per call, ~10×/s, under the graph's shared_mutex where it contends with the FastDDS reader
+    // threads. All to re-read six floats that cannot have changed.
+    // Re-arms when the room node id changes, which is the only way a different polygon can appear.
+    if (polygon_room_id_ == room_node_id_) return;
     const auto room = G->get_node(room_node_id_);
     if (not room.has_value()) return;
     const auto px = G->get_attrib_by_name<delimiting_polygon_x_att>(room.value());
@@ -386,6 +400,50 @@ void SpecificWorker::refresh_room_geometry()
     for (std::size_t i = 0; i < n; ++i)
         poly.emplace_back(xs[i], ys[i]);
     fitter_->set_room_polygon(std::move(poly));
+    polygon_room_id_ = room_node_id_;   // latched; re-reads only if the room node is replaced
+    std::print("table_concept: [room] wall polygon loaded ({} verts) — silhouette line-of-sight ARMED\n", n);
+}
+
+// SHADOW-MODE birth/death recorder — CONCEPT_AGENT_LIFECYCLE.md §4.2, theory in MODEL_HISTORY.md §4.
+// RECORDS ONLY. Nothing here feeds back into a belief, a birth or a removal, and it must stay that way until
+// the removal path is validated: a birth→death event is evidence of EITHER a classifier false positive OR a
+// removal false positive, and the attribution fields below (p_detect / in_fov / central / fixated) are what
+// tells the two apart. Deaths clustering where p_detect was LOW mean the log is recording our own removal
+// bugs, not YOLO's errors — which is exactly the check that gates arming the p_FA field.
+void SpecificWorker::log_phantom_event(std::string_view event, std::uint64_t id, std::string_view name,
+                                       float x, float y, const rc::TableInstance* inst, std::string_view note)
+{
+    if (not phantom_log_.is_open())
+        return;
+    rc::history::PhantomEvent e;
+    e.event = event; e.id = id; e.name = name; e.x = x; e.y = y; e.note = note;
+    // Observer pose → view bearing. The classifier failure is VIEWPOINT-dependent (a radiator only reads as a
+    // chair from certain angles), so the eventual false-alarm field is keyed on (world cell × bearing); a
+    // place-only key would suppress a genuine object placed there from every direction.
+    if (inner_eigen_)
+        if (const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", 0); rtb.has_value())
+        {
+            const auto& Tm = rtb.value();
+            e.robot_x = static_cast<float>(Tm(0, 3));
+            e.robot_y = static_cast<float>(Tm(1, 3));
+            e.robot_yaw = std::atan2(static_cast<float>(Tm(1, 0)), static_cast<float>(Tm(0, 0)));
+            e.view_bearing = std::atan2(e.robot_y - y, e.robot_x - x);   // instance → camera, room frame
+            e.range_m = std::hypot(e.robot_x - x, e.robot_y - y);
+        }
+    if (inst)   // death: carry the existence-channel state that decides whether this was a CONFIDENT kill
+    {
+        e.age_cycles    = inst->processed_cycles;
+        e.p_detect      = inst->dbg_ex_pdetect;
+        e.central_frac  = inst->dbg_ex_central;
+        // The REAL fraction (detectable / attempted), not a 0-or-1 stand-in: the attribution question is
+        // "how much of the object could the sensor actually have seen", which a bare probed/not-probed flag
+        // cannot answer — and a flag in a column documented as a fraction reads as data while carrying none.
+        e.in_fov_frac   = (inst->dbg_ex_sil_ntotal > 0)
+                        ? static_cast<float>(inst->dbg_ex_sil_ndet) / inst->dbg_ex_sil_ntotal : 0.0f;
+        e.fixated       = inst->dbg_fixated ? 1 : 0;
+        e.exist_logodds = inst->existence.logodds();
+    }
+    phantom_log_.write(e);
 }
 
 void SpecificWorker::compute()
@@ -448,7 +506,16 @@ void SpecificWorker::compute()
     // fresh mask frame, LiDAR carve on a fresh sweep) — a camera-only cycle still accrues absence, a LiDAR-only
     // cycle still carves free space. After the fits so footprints are current. OFF unless enabled.
     if (cfg_.existence_removal_enabled)
-        existence_->update_and_remove(*fitter_, lidar_ingestor_.get(), fresh_masks, fresh_sweep, ev_g_);
+        existence_->update_and_remove(*fitter_, lidar_ingestor_.get(), fresh_masks, fresh_sweep, ev_g_,
+            [this](std::uint64_t id, const rc::TableInstance& inst)
+            {   // shadow-mode death record (§4.2) — carries the p_detect/fixated state that says whether this
+                // was a CONFIDENT disconfirmation (a real phantom) or a weak one (likely our own removal bug)
+                // note is for what the SCHEMA cannot express; the log-odds already has its own column
+                // (PhantomEvent::exist_logodds), so formatting it in here would duplicate it at lower
+                // precision and leave the analysis guessing which is authoritative.
+                log_phantom_event("DEATH", id, inst.node_name,
+                                  inst.ai2_belief.state().cx, inst.ai2_belief.state().cy, &inst, "");
+            });
 
     // ── Evidence monitor: global counters + throttled snapshot push ──
     ev_g_.instances    = static_cast<int>(fitter_->instances().size());
@@ -519,6 +586,12 @@ void SpecificWorker::log_birth_surprise()
     if (not birth_surprise_csv_.is_open())
     {
         birth_surprise_csv_.open("etc/birth_surprise.csv", std::ios::out | std::ios::trunc);
+        birth_surprise_csv_.imbue(std::locale::classic());   // ★Qt imbues the GLOBAL locale, so operator<< inserts THOUSANDS
+                                            // SEPARATORS into integers (pkt_ts 1785763853131 → "1,785,763,853,131"),
+                                            // splitting one CSV field into five. Field counts then vary per row and
+                                            // the whole log is unreadable by column name — every value past the
+                                            // first big integer is shifted, which silently invalidates any analysis.
+                                            // Pin "C" so the log is machine-readable regardless of the UI locale.
         if (birth_surprise_csv_.is_open())
             birth_surprise_csv_ << "cycle,region,cx,cy,cells,mass,ext_x,ext_y,mean_p,mean_var,covered,"
                                 << "n_tables,tracker_births,instances\n";
@@ -541,6 +614,12 @@ void SpecificWorker::log_birth_surprise()
     if (not birth_fusion_csv_.is_open())
     {
         birth_fusion_csv_.open("etc/birth_fusion.csv", std::ios::out | std::ios::trunc);
+        birth_fusion_csv_.imbue(std::locale::classic());   // ★Qt imbues the GLOBAL locale, so operator<< inserts THOUSANDS
+                                            // SEPARATORS into integers (pkt_ts 1785763853131 → "1,785,763,853,131"),
+                                            // splitting one CSV field into five. Field counts then vary per row and
+                                            // the whole log is unreadable by column name — every value past the
+                                            // first big integer is shifted, which silently invalidates any analysis.
+                                            // Pin "C" so the log is machine-readable regardless of the UI locale.
         if (birth_fusion_csv_.is_open())
             birth_fusion_csv_ << "cycle,det,det_x,det_y,mass_r05,mass_r03,near_dist,near_mass,covered,"
                               << "n_tables,tracker_births,instances\n";

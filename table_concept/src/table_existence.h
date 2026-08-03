@@ -14,6 +14,8 @@
 
 #pragma once
 
+#include <cstdint>
+#include <functional>
 #include <memory>
 
 #include <dsr/api/dsr_api.h>
@@ -23,6 +25,7 @@
 namespace rc {
 
 class TableFitter;             // owns the instances (+ silhouette existence)
+struct TableInstance;          // one tracked table (referenced by the on_remove sink below)
 class TableLidarIngestor;      // stages the per-plane room-frame sweeps
 struct EvidenceGlobals;        // dashboard/evidence_monitor.h — removal counters
 
@@ -35,8 +38,13 @@ public:
     // Integrate each existence channel on its own sensor clock (silhouette on a fresh mask frame, LiDAR carve
     // on a fresh sweep) and delete the demonstrably-empty tables. Removed ids are forgotten in the fitter and
     // deleted from the graph; removal counters are accrued into ev_g. No-op when no channel has fresh evidence.
+    // on_remove (optional) is invoked for each doomed instance BEFORE it is forgotten/deleted, so the caller
+    // can record the death while the existence-channel state that justified it is still readable. Used for the
+    // shadow-mode phantom log (CONCEPT_AGENT_LIFECYCLE.md §4.2) — RECORDING ONLY, it must never influence the
+    // removal decision, which is why it is a sink and not a veto.
     void update_and_remove(TableFitter& fitter, TableLidarIngestor* lidar,
-                           bool fresh_masks, bool fresh_sweep, EvidenceGlobals& ev_g);
+                           bool fresh_masks, bool fresh_sweep, EvidenceGlobals& ev_g,
+                           const std::function<void(std::uint64_t, const TableInstance&)>& on_remove = {});
 
 private:
     std::shared_ptr<DSR::DSRGraph> G_;

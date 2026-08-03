@@ -220,6 +220,10 @@ struct TableInstance
     // absence-confidence scaling AND the observed-guard (so raw→eff shows how much the absence was degraded).
     float dbg_ex_lidar_occ = 0.0f, dbg_ex_lidar_free = 0.0f, dbg_ex_lidar_free_eff = 0.0f;  int dbg_ex_lidar_n   = 0;
     float dbg_ex_sil_occ   = 0.0f, dbg_ex_sil_free   = 0.0f, dbg_ex_sil_free_eff   = 0.0f;  int dbg_ex_sil_ndet  = 0;
+    // Silhouette samples ATTEMPTED (SilhouetteExistence::n_total). Kept alongside n_detectable so the real
+    // in-FoV FRACTION (ndet/ntotal) is recoverable — the phantom log's attribution needs "how much of the
+    // object could the sensor actually have seen", which a bare detectable COUNT cannot answer.
+    int   dbg_ex_sil_ntotal = 0;
     // Verification-gated removal diagnostics: p_detect (how resolving this view is), central_frac, and the
     // decayed go-verify surprise. Show why an absence went to REMOVAL (high p_detect) vs VERIFICATION (low).
     float dbg_ex_pdetect = 1.0f, dbg_ex_central = 0.0f;

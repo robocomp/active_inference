@@ -206,7 +206,12 @@ void SpecificWorker::run_instance_tracker()
         const Eigen::Vector3f& c = pkt.slices[dets[d].slice_index].centroid;
         const auto new_id = scene_graph_->create_instance_from_detection(c, room_node_id_);
         if (new_id != 0)
+        {
             fitter_->note_birth(new_id, Eigen::Vector2f(c.x(), c.y()));
+            // Shadow-mode record (§4.2): a phantom is a birth that dies young from a confident view, so the
+            // birth half is where the place + viewpoint that produced it is captured.
+            log_phantom_event("BIRTH", new_id, "", c.x(), c.y(), nullptr, "");
+        }
     }
 
     // Per-instance ZED-slice count for the EvidenceMonitor. Every assigned slice is a ZED detection now

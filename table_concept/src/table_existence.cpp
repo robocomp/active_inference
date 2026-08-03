@@ -25,7 +25,8 @@ namespace rc {
 // Carve the LiDAR sweep(s) + silhouette against every table footprint, integrate the per-instance existence
 // log-odds, and remove the tables whose volume is demonstrably empty (debounced). See table_existence.h.
 void TableExistence::update_and_remove(TableFitter& fitter, TableLidarIngestor* lidar,
-                                       bool fresh_masks, bool fresh_sweep, EvidenceGlobals& ev_g)
+                                       bool fresh_masks, bool fresh_sweep, EvidenceGlobals& ev_g,
+                                       const std::function<void(std::uint64_t, const TableInstance&)>& on_remove)
 {
     // Decoupled cadence: the SILHOUETTE/mask channel integrates on a fresh MASK frame (camera clock), the LiDAR
     // free-space carve on a fresh SWEEP (LiDAR clock). Each accrues its evidence independently, so a camera-only
@@ -85,6 +86,7 @@ void TableExistence::update_and_remove(TableFitter& fitter, TableLidarIngestor* 
         {
             const auto sil = fitter.compute_silhouette_existence(inst);
             inst.dbg_ex_sil_occ = sil.e_occ; inst.dbg_ex_sil_free = sil.e_free; inst.dbg_ex_sil_ndet = sil.n_detectable;
+            inst.dbg_ex_sil_ntotal = sil.n_total;   // → the real in-FoV fraction for the phantom log
             if (sil.n_detectable > 0)
             {
                 // Observed-guard (mirrors the LiDAR hollow guard): if the table was DETECTED by any sensor this
@@ -92,7 +94,23 @@ void TableExistence::update_and_remove(TableFitter& fitter, TableLidarIngestor* 
                 // only by the ricoh whose silhouette the ZED-based check can't confirm, must never vote it away.
                 // Occupancy always counts. (The ricoh-projected silhouette, once the producer ships 360 mask
                 // pixels, will let absence be judged in the ricoh view directly instead of relying on this guard.)
-                const float raw_free = observed ? 0.0f : sil.e_free;
+                // ★A frame that may not MOVE the geometry may not DESTROY the object either. `dbg_gated` is the
+                // fit's own admissibility verdict for this frame (truncated mask, or the robot moving with the
+                // mask off-centre): when it is set the belief was frozen, so the projected silhouette is a
+                // STALE box compared against a LIVE image, and any mismatch measures our registration rather
+                // than the table's existence.
+                //
+                // Ported from refrigerator_concept, where the absence of this rule deleted a healthy fridge in
+                // 5 seconds: the robot drove 2.3 m → 1.15 m, the motion gate froze the belief, and the frozen
+                // box stopped projecting onto a mask that was still arriving with ~55000 points (socc 570 → 0).
+                // Every cycle that contributed removal evidence had gated=1. At ~1 m a small pose-chain error
+                // is a whole frame of pixel error, so a frozen belief cannot be checked against the image at
+                // all. Occupancy is untouched — a mask pixel that lights the silhouette can only ever confirm.
+                //
+                // ⚠Consequence: a phantom is now only removable from an admissible viewpoint — still, and
+                // reasonably framed. That is what the epistemic planner exists to produce, but removal now
+                // waits for a good look instead of happening while driving past.
+                const float raw_free = (observed or inst.dbg_gated) ? 0.0f : sil.e_free;
                 // P(detect | present, geometry): how confidently the ZED would resolve this table FROM HERE.
                 // in_fov_frac folds the real FRUSTUM + occlusion; range_conf the angular-size drop; central_frac
                 // whether the robot is actually LOOKING at it (a peripheral table clipping the wide FoV edge is
@@ -156,7 +174,7 @@ void TableExistence::update_and_remove(TableFitter& fitter, TableLidarIngestor* 
                 for (const auto& [swp, org] : leg_srcs)
                 {
                     if (swp == nullptr) continue;
-                    for (const auto [llx, lly] : {std::pair{ix, iy}, std::pair{-ix, iy}, std::pair{ix, -iy}, std::pair{-ix, -iy}})
+                    for (const auto& [llx, lly] : {std::pair{ix, iy}, std::pair{-ix, iy}, std::pair{ix, -iy}, std::pair{-ix, -iy}})
                     {
                         const float lx = bs.cx + cyaw * llx - syaw * lly;
                         const float ly = bs.cy + syaw * llx + cyaw * lly;
@@ -215,7 +233,12 @@ void TableExistence::update_and_remove(TableFitter& fitter, TableLidarIngestor* 
     {
         std::print("table_concept: [existence] removing table id={} — free-space evidence (empty volume)\n", id);
         if (auto it = fitter.instances().find(id); it != fitter.instances().end())
+        {
+            // Record BEFORE teardown, while the existence state that justified the kill is still readable.
+            // Shadow mode: this cannot alter the decision (see the header comment on on_remove).
+            if (on_remove) on_remove(id, it->second);
             it->second.affordance.remove();
+        }
         fitter.forget_node(id);
         G_->delete_node(id);
     }

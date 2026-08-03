@@ -19,6 +19,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <locale>
 #include <print>
 #include <unordered_map>
 #include <unordered_set>
@@ -817,6 +818,12 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
     if (not ai2_csv_.is_open())
     {
         ai2_csv_.open(cfg_.ai2_csv_path, std::ios::out | std::ios::trunc);
+        ai2_csv_.imbue(std::locale::classic());   // ★Qt imbues the GLOBAL locale, so operator<< inserts THOUSANDS
+                                            // SEPARATORS into integers (pkt_ts 1785763853131 → "1,785,763,853,131"),
+                                            // splitting one CSV field into five. Field counts then vary per row and
+                                            // the whole log is unreadable by column name — every value past the
+                                            // first big integer is shifted, which silently invalidates any analysis.
+                                            // Pin "C" so the log is machine-readable regardless of the UI locale.
         if (not ai2_csv_.is_open()) { cfg_.ai2_csv_path.clear(); return; }
         ai2_csv_ << "cycle,node,pkt_fid,pkt_ts,npts,gated,energy,fe_baseline,fe_surprise,R,motion_var,depth_var,motion_dotd,trunc_frac,range,"
                  << "cx,cy,H,w,h,yaw,std_cx,std_cy,std_H,std_w,std_h,std_yaw,"

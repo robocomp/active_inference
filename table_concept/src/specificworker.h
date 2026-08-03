@@ -53,6 +53,7 @@
 #include "../../common/instance_tracker/instance_tracker.h"   // rc::InstanceTracker (birth/associate/death)
 #include "table_scene_graph.h" // rc::TableSceneGraph (DSR node/RT I/O)
 #include "table_fitter.h"      // rc::TableFitter (active-inference core)
+#include "../../common/phantom_log/phantom_log.h"   // rc::history::PhantomLog (shadow-mode birth/death record)
 #include "table_existence.h"   // rc::TableExistence (evidence-based removal)
 #include "birth_surprise_probe.h"   // rc::BirthSurpriseProbe (read-only: residual grid → birth surprise)
 #include "epistemic_planner.h"
@@ -80,6 +81,11 @@ public slots:
     // Room wall polygon → fitter → projection: the silhouette channel's line-of-sight test, so a table behind
     // a wall is NOT scored "predicted visible but absent". See the definition for the failure it fixes.
     void refresh_room_geometry();
+    // SHADOW-MODE birth/death recorder (CONCEPT_AGENT_LIFECYCLE.md §4.2). Records ONLY — never feeds back into
+    // any belief or birth/removal decision. Fills the observer pose + view bearing from the current robot
+    // transform so the eventual p_FA field can be keyed on (world cell × bearing), not place alone.
+    void log_phantom_event(std::string_view event, std::uint64_t id, std::string_view name,
+                           float x, float y, const rc::TableInstance* inst, std::string_view note);
     void emergency();
     void restore();
     int  startup_check();
@@ -172,6 +178,10 @@ private:
     rc::TableConfig                                         cfg_;
     rc::EpistemicPlanner                                    epistemic_planner_;
     std::unique_ptr<rc::TableFitter>                        fitter_;    // active-inference fit core (owns instances)
+    rc::history::PhantomLog                                 phantom_log_;   // shadow-mode birth/death record
+    // Room id whose wall polygon is already loaded into the projection. Latches refresh_room_geometry() so a
+    // constant polygon is not re-read (and the room node not deep-copied) every cycle. 0 = not yet loaded.
+    std::uint64_t                                           polygon_room_id_ = 0;
     std::unique_ptr<rc::TableExistence>                    existence_; // evidence-based removal (existence log-odds)
 
     // Live belief dashboard — its OWN top-level window (extracted from the DSR graph dock so it shows

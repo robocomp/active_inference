@@ -239,17 +239,6 @@ SilhouetteExistence TableProjection::compute_silhouette_existence(const TableIns
     {
         ++out.n_total;                                                 // one silhouette sample of the WHOLE object
         const Eigen::Vector4d Pr(s.cx + c * lx - sn * ly, s.cy + sn * lx + c * ly, lz, 1.0);
-        // A room WALL between the camera and this sample hides it just as surely as a nearer object does — and
-        // unlike an object, no YOLO mask will ever report it. Same verdict: OCCLUDED ⇒ excluded from
-        // n_detectable ⇒ HOLD, never false absence. This is what stops a table in the NEXT ROOM voting its own
-        // removal. Shared helper, same call the door and fridge make. own_wall_skip_m keeps a table standing
-        // flush against a wall from occluding itself with that wall.
-        const Eigen::Vector2f p_xy(static_cast<float>(Pr.x()), static_cast<float>(Pr.y()));
-        if (rc::occlusion::walls_block(cam_xy, p_xy, room_polygon_, kOwnWallSkipM))
-        { ++out.n_occluded; return; }
-        // Optional extra: non-wall solid occluders (furniture, people) from the LiDAR sweep. OFF by default.
-        if (los_blocked(Eigen::Vector3f(p_xy.x(), p_xy.y(), static_cast<float>(Pr.z()))))
-        { ++out.n_occluded; return; }
         const Eigen::Vector4d Pc = zed_T_room * Pr;
         const double X = Pc.x(), Y = Pc.y(), Z = Pc.z();
         if (Y <= 0.20) return;                                         // behind / at the image plane (near clip)
@@ -259,6 +248,26 @@ SilhouetteExistence TableProjection::compute_silhouette_existence(const TableIns
         const Eigen::Vector2d uv = camera_api_->project(Eigen::Vector3d(Pc.x(), Pc.y(), Pc.z()));
         const float col = static_cast<float>(uv.x()), row = static_cast<float>(uv.y());
         if (col < 0.f or col >= W or row < 0.f or row >= Himg) return; // out of frustum ⇒ not detectable
+        // ── OCCLUSION, tested only for samples that reached the image ──────────────────────────────────
+        // Ordered AFTER the near-clip + frustum tests on purpose: the wall test is by far the most expensive
+        // step here (a segment intersection per room-polygon edge, i.e. 640 samples × n_walls per instance
+        // per cycle), and 60–90% of samples are discarded by those two cheap tests anyway — an instance
+        // behind the robot used to pay the full cost before being thrown away. Verdicts are unchanged:
+        // occlusion still precedes ++n_detectable, so n_detectable / n_central / e_occ / e_free / range_sum
+        // are all bit-identical. Only n_occluded shrinks, to exactly what its own doc-comment already claims
+        // ("IN-FRUSTUM samples hidden by a nearer object"); nothing in table_concept reads it.
+        //
+        // A room WALL between the camera and this sample hides it just as surely as a nearer object does —
+        // and unlike an object, no YOLO mask will ever report it. Same verdict: OCCLUDED ⇒ excluded from
+        // n_detectable ⇒ HOLD, never false absence. This is what stops a table in the NEXT ROOM voting its
+        // own removal. Shared helper, same call door/fridge/cabinet make. own_wall_skip_m keeps a table
+        // standing flush against a wall from occluding itself with that wall.
+        const Eigen::Vector2f p_xy(static_cast<float>(Pr.x()), static_cast<float>(Pr.y()));
+        if (rc::occlusion::walls_block(cam_xy, p_xy, room_polygon_, kOwnWallSkipM))
+        { ++out.n_occluded; return; }
+        // Optional extra: non-wall solid occluders (furniture, people) from the LiDAR sweep. OFF by default.
+        if (los_blocked(Eigen::Vector3f(p_xy.x(), p_xy.y(), static_cast<float>(Pr.z()))))
+        { ++out.n_occluded; return; }
         const std::int64_t k = key(col, row);
         if (occluder_cells.contains(k) and not table_cells.contains(k))
         { ++out.n_occluded; return; }                                 // nearer object hides it ⇒ HOLD
