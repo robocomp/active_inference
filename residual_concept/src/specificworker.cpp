@@ -110,6 +110,10 @@ void SpecificWorker::terminal_shutdown()
 void SpecificWorker::initialize()
 {
     std::print("residual_concept: initialize()\n");
+
+    // Shadow-mode birth/death record (CONCEPT_AGENT_LIFECYCLE.md §4.2). Recording only — see
+    // log_phantom_event(). Truncating: one file per run.
+    phantom_log_.open("etc/residual_phantom_events.csv");
     GenericWorker::initialize();
 
     if (not G)
@@ -376,6 +380,38 @@ std::vector<Eigen::Vector2f> SpecificWorker::read_room_polygon() const
         if (f.is_open()) { f << "i,x,y\n"; for (std::size_t i = 0; i < n; ++i) f << i << ',' << xs[i] << ',' << ys[i] << '\n'; }
     }
     return poly;
+}
+
+// SHADOW-MODE birth/death recorder — CONCEPT_AGENT_LIFECYCLE.md §4.2, theory in MODEL_HISTORY.md §4.
+// RECORDS ONLY; it can never alter a birth or a removal. NOTE: residual retires on divergence, not on sensor absence — p_detect does not apply.
+void SpecificWorker::log_phantom_event(std::string_view event, std::uint64_t id, std::string_view name,
+                                       float x, float y, const rc::ResidualInstance* inst, std::string_view note)
+{
+    if (not phantom_log_.is_open())
+        return;
+    rc::history::PhantomEvent e;
+    e.event = event; e.id = id; e.name = name; e.x = x; e.y = y; e.note = note;
+    // Observer pose → view bearing: the classifier failure is VIEWPOINT-dependent, so the eventual p_FA field
+    // is keyed on (world cell × bearing), never place alone.
+    if (inner_eigen_)
+        if (const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", 0); rtb.has_value())
+        {
+            const auto& Tm = rtb.value();
+            e.robot_x = static_cast<float>(Tm(0, 3));
+            e.robot_y = static_cast<float>(Tm(1, 3));
+            e.robot_yaw = std::atan2(static_cast<float>(Tm(1, 0)), static_cast<float>(Tm(0, 0)));
+            e.view_bearing = std::atan2(e.robot_y - y, e.robot_x - x);
+            e.range_m = std::hypot(e.robot_x - x, e.robot_y - y);
+        }
+    if (inst)
+    {
+        e.age_cycles    = inst->processed_cycles;
+        e.p_detect      = 0.0f;
+        e.central_frac  = 0.0f;
+        e.in_fov_frac   = (0 > 0) ? 1.0f : 0.0f;
+        e.exist_logodds = 0.0f;
+    }
+    phantom_log_.write(e);
 }
 
 void SpecificWorker::compute()
@@ -662,6 +698,12 @@ void SpecificWorker::retire_diverged_instances()
     for (const std::uint64_t id : doomed)
     {
         std::print("residual_concept: [tracker] RETIRE-DIVERGED id={}\n", id);
+        // Shadow-mode death record (§4.2). residual retires on DIVERGENCE, not on sensor absence, so
+        // p_detect does not apply — recorded as unattributable so it is never read as a phantom.
+        if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
+            log_phantom_event("DEATH", id, it->second.node_name,
+                              it->second.model.state().cx, it->second.model.state().cy, &it->second,
+                              "retire-diverged (no existence channel)");
         fitter_->forget_node(id);
         G->delete_node(id);
         graph_dirty_ = true;                              // node deleted → relayout at end of cycle
@@ -751,6 +793,9 @@ void SpecificWorker::run_instance_tracker(const std::vector<rc::SpecialistSdf>& 
         if (new_id != 0)
         {
             fitter_->note_birth(new_id, cl.centroid);
+            // Shadow-mode birth record (CONCEPT_AGENT_LIFECYCLE.md §4.2): place + viewpoint that
+            // produced it, so a phantom that dies young is attributable to both.
+            log_phantom_event("BIRTH", new_id, "", cl.centroid.x(), cl.centroid.y(), nullptr, "");
             graph_dirty_ = true;                          // node created → relayout at end of cycle
         }
     }

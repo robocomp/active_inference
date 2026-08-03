@@ -37,6 +37,7 @@
 #include "residual_occupancy_grid.h"   // PHASE-0 REBUILD: occupancy-grid safety layer
 #include "residual_scene_graph.h"
 #include "residual_fitter.h"
+#include "../../common/phantom_log/phantom_log.h"   // rc::history::PhantomLog (shadow-mode birth/death record)
 #include "residual_lidar_ingestor.h"
 #include "residual_zed_ingestor.h"
 
@@ -50,6 +51,12 @@ public:
 public slots:
     void initialize();
     void compute();
+    // SHADOW-MODE birth/death recorder (CONCEPT_AGENT_LIFECYCLE.md §4.2). Records ONLY — it can never
+    // alter a birth or a removal. Attribution fields captured at death separate a genuine classifier
+    // phantom from one of our own removal defects.
+    void log_phantom_event(std::string_view event, std::uint64_t id, std::string_view name,
+                           float x, float y, const rc::ResidualInstance* inst, std::string_view note);
+
     void emergency();
     void restore();
     int  startup_check();
@@ -197,6 +204,7 @@ private:
     // Collaborators (constructed in initialize()). Declared in dependency order.
     std::unique_ptr<rc::ResidualSceneGraph>    scene_graph_;
     std::unique_ptr<rc::ResidualFitter>        fitter_;
+    rc::history::PhantomLog                             phantom_log_;   // shadow-mode birth/death record
     std::unique_ptr<rc::ResidualLidarIngestor> lidar_ingestor_;
     std::unique_ptr<rc::ResidualZedIngestor>   zed_ingestor_;   // ZED dense-depth boost
     rc::ResidualClusterer                      clusterer_;

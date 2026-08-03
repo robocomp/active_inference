@@ -1,5 +1,20 @@
 set(ACTIVE_INFERENCE_COMMON_DIR "${CMAKE_CURRENT_LIST_DIR}/../../common")
 
+# AddressSanitizer (opt-in, separate build dir):
+#   cmake -B build-asan -DENABLE_ASAN=ON && cmake --build build-asan -j
+# Declared BEFORE add_subdirectory() so the ai_common targets are instrumented too — behind a
+# library boundary they no longer pick this up from the directory-scope add_compile_options below.
+option(ENABLE_ASAN "Build residual_concept with AddressSanitizer" OFF)
+
+# Shared ai_common::* libraries (see common/CMakeLists.txt). Placed FIRST, so these targets carry
+# their own explicit flags instead of silently inheriting the ones set further down this file.
+add_subdirectory(${ACTIVE_INFERENCE_COMMON_DIR} ${CMAKE_CURRENT_BINARY_DIR}/ai_common EXCLUDE_FROM_ALL)
+LIST(APPEND LIBS
+  ai_common::media       # zero-copy media plane: lidar3D + ZED depth consumers (was 10 spliced IDL paths)
+  ai_common::presence    # agent presence monitor + coordinator
+  ai_common::core        # header-only beliefs/geometry
+)
+
 # Sources set
 LIST(APPEND SOURCES
   ../src/specificworker.cpp
@@ -15,39 +30,7 @@ LIST(APPEND SOURCES
   ../src/residual_semantic.cpp      # RGB-semantic floor down-weighting of ZED grid hits (2nd uncorrelated cue)
   ../src/residual_floor_plane.cpp   # data-driven floor-plane fit → grid floor band follows an offset/tilted floor
   ../src/residual_zed_ingestor.cpp  # ZED depth media-plane consumer
-  # Zero-copy media plane (lidar3D consumer for the YOLO-independent range factor). Mirrors room_concept:
-  # media_transport.cpp is type-agnostic but references all IDL frame types, so link every PubSubTypes pair.
-  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/media_transport.cpp
-  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/lidar_plane_reader.cpp
-  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/image_framePubSubTypes.cxx
-  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/image_frameTypeObjectSupport.cxx
-  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/image360_framePubSubTypes.cxx
-  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/image360_frameTypeObjectSupport.cxx
-  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/lidar_framePubSubTypes.cxx
-  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/lidar_frameTypeObjectSupport.cxx
-  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/imu_framePubSubTypes.cxx
-  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/imu_frameTypeObjectSupport.cxx
   ../src/residual_model.cpp
-  ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_monitor/agent_presence_monitor.cpp
-  ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_coordinator/agent_presence_coordinator.cpp
-)
-
-# Headers set
-LIST(APPEND HEADERS
-  ../src/specificworker.h
-  ../src/residual_config.h
-  ../src/residual_instance.h
-  ../src/residual_scene_graph.h
-  ../src/residual_belief.h
-  ../src/residual_clusterer.h
-  ../src/residual_zed_boost.h
-  ../src/residual_semantic.h
-  ../src/residual_floor_plane.h
-  ../src/residual_zed_ingestor.h
-  ../src/residual_fitter.h
-  ../src/residual_model.h
-  ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_monitor/agent_presence_monitor.h
-  ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_coordinator/agent_presence_coordinator.h
 )
 
 # libdsr_core defines symbols that libdsr_{api,gui} only reference (UND). The
@@ -56,9 +39,6 @@ LIST(APPEND HEADERS
 # libs so a light-DSR build links too.
 add_link_options(-Wl,--no-as-needed)
 
-# Media plane (zero-copy DDS) headers — used by bottle_lidar_ingestor.
-include_directories(${ACTIVE_INFERENCE_COMMON_DIR}/media_transport)
-
 # no-char8_t to avoid a problem with ICE Connection lib.
 # CRITICAL — match the prebuilt libdsr's Eigen ABI: use DEFAULT alignment (alignof(Transform)=16).
 # NEITHER -march=native (→32) NOR -DEIGEN_MAX_ALIGN_BYTES=0 (→8): either changes
@@ -66,12 +46,8 @@ include_directories(${ACTIVE_INFERENCE_COMMON_DIR}/media_transport)
 # caller's stack slot (stack smash) or misaligns it (SIGBUS). libdsr uses default Eigen alignment; match it.
 add_definitions(-O3 -fmax-errors=1 -fno-char8_t)
 
-# AddressSanitizer (opt-in, separate build dir):
-#   cmake -B build-asan -DENABLE_ASAN=ON && cmake --build build-asan -j
-# Instruments bottle_concept's OWN code to pin the Ctrl-C shutdown segfault. See run_asan.sh.
-option(ENABLE_ASAN "Build bottle_concept with AddressSanitizer" OFF)
 if(ENABLE_ASAN)
-  message(STATUS "AddressSanitizer ENABLED for bottle_concept (-O1, frame pointers; -lasan-direct link)")
+  message(STATUS "AddressSanitizer ENABLED for residual_concept (-O1, frame pointers; -lasan-direct link)")
   add_compile_options(-fsanitize=address -fno-omit-frame-pointer -O1)
   # Link libasan DIRECTLY (not via the -fsanitize driver). The driver injects an __asan_init entry
   # into .preinit_array, which runs BEFORE any shared-library init -> ASan is active during
