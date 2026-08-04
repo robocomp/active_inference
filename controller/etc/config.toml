@@ -217,6 +217,16 @@ PdCrossTrackSoft = 0.30
 # Gain 0 disables. Dist is the gap FROM THE BODY at which a side starts pushing back.
 # ★Watch bump_push / gap_l / gap_r in mppi_diag.csv: "it still clips" and "the bumper never engaged"
 # are indistinguishable without them.
+# (A fast-attack / slow-release hysteresis on the gate lived here as GateReleaseTauS. BUILT, RUN TWICE
+# AND REVERTED 2026-08-04. It did reduce jerk — -18% per second, -12% per metre against the preceding
+# lap — but the per-metre figure sits INSIDE the archived spread (2.58-3.55), while genuine gate
+# DETECTIONS rose to 4.34 and 4.45 per metre against an archived max of 3.55, in both laps, and speed
+# and clearance drifted down with them. Bought little, cost consistently.
+# ★Two things learned that outlive the change: (a) safety_guard_cycles counts risk.trigger, i.e. real
+# detections, not cycles-with-scale-below-1, so that rise was not an artefact of the ramp; (b) the
+# gate's horizon is computed from the PRE-gate speed, so slowing the robot canNOT shrink its own
+# foresight — a coupling I hypothesised and the code disproves. See TRACKER_REVIEW.md R2: the jerk is
+# structural, and the fix is moving the safety cut INSIDE the speed profile, not damping its output.)
 PdBumperGain = 1.0
 PdBumperDist = 0.25
 # ── CARROT RATE LIMIT ──

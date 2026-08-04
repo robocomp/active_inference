@@ -708,7 +708,9 @@ void MissionRunner::stop(const std::string &reason, std::uint64_t now_ms)
                 s2.progress_m, s2.route_length_m, s2.duration_s,
                 s2.cross_track_rms_m, s2.cross_track_max_m, s2.heading_err_rms_rad,
                 s2.rot_effort_rad, s2.rot_reversals, s2.lin_accel_effort, s2.lin_accel_max,
-                s2.lin_jerk_effort, s2.lin_jerk_max, s2.lat_accel_rms, s2.lat_accel_max,
+                s2.lin_jerk_effort,
+                s2.rot_accel_effort, s2.smooth_lin, s2.smooth_rot, s2.dev_norm, s2.mission_cost,
+                s2.lin_jerk_max, s2.lat_accel_rms, s2.lat_accel_max,
                 s2.min_clearance_m, s2.p05_clearance_m,
                 s2.safety_guard_cycles, s2.escapes, s2.replans,
                 s2.lap_repeat_mean_m, s2.lap_repeat_max_m);
@@ -819,6 +821,13 @@ void MissionRunner::sample(const Eigen::Vector2f &pos, float rot_rps, float spee
     }
     prev_cmd_speed_ = speed_mps;
 
+    // Total variation of the turn RATE — the rotational twin of lin_accel_effort above. Same argument:
+    // sum|domega| is sampling-rate independent, and neither rot_effort_rad nor rot_energy can tell a
+    // steady turn from one assembled out of steps.
+    if (prev_cmd_rot_.has_value())
+        stats_.rot_accel_effort += std::abs(rot_rps - *prev_cmd_rot_);
+    prev_cmd_rot_ = rot_rps;
+
     // Yaw reversals. Integral omega^2 cannot distinguish a steady turn from an alternating one at the
     // cycle rate, and only the second is the stutter this controller has been chased over. Deadbanded so
     // a command dithering about zero is not read as a sequence of reversals.
@@ -867,6 +876,20 @@ TrajectoryStats MissionRunner::summary() const
         t.p05_clearance_m = c[static_cast<std::size_t>(0.05 * (c.size() - 1))];
     }
     else { t.min_clearance_m = kNaN; t.p05_clearance_m = kNaN; }
+
+    // Composed quality metric — see TrajectoryStats::mission_cost for the units argument. Guarded on
+    // every denominator: a run with no context, no distance or a zero envelope yields 0, not a NaN or
+    // an infinity that would poison a CSV column nothing downstream checks.
+    {
+        const float v_max = run_ctx_.max_adv_mps > 1e-3f ? run_ctx_.max_adv_mps : 0.f;
+        const float w_max = run_ctx_.max_rot_rps > 1e-3f ? run_ctx_.max_rot_rps : 0.f;
+        const float cell  = run_ctx_.planner_cell_size_m > 1e-4f ? run_ctx_.planner_cell_size_m : 0.f;
+        const float dist  = t.distance_m > 0.1f ? t.distance_m : 0.f;
+        if (v_max > 0.f and dist > 0.f) t.smooth_lin = (t.lin_accel_effort / v_max) / dist;
+        if (w_max > 0.f and dist > 0.f) t.smooth_rot = (t.rot_accel_effort / w_max) / dist;
+        if (cell > 0.f)                 t.dev_norm   = t.cross_track_rms_m / cell;
+        t.mission_cost = t.smooth_lin + t.smooth_rot + t.dev_norm;
+    }
     return t;
 }
 
@@ -914,6 +937,7 @@ bool MissionRunner::write_csv(const std::string &path) const
         "mission,mode,run_start_ms,stop_reason,laps,duration_s,distance_m,route_length_m,progress_m,"
         "mean_speed_mps,max_speed_mps,cross_track_rms_m,cross_track_max_m,heading_err_rms_rad,"
         "rot_effort_rad,rot_energy,rot_reversals,lin_accel_effort,lin_accel_max,lin_jerk_effort,"
+        "rot_accel_effort,smooth_lin,smooth_rot,dev_norm,mission_cost,"
         "lin_jerk_max,lat_accel_rms,lat_accel_max,min_clearance_m,p05_clearance_m,"
         "safety_guard_cycles,escapes,replans,lap_repeat_mean_m,lap_repeat_max_m";
 
@@ -961,6 +985,8 @@ bool MissionRunner::write_csv(const std::string &path) const
         << t.cross_track_rms_m << ',' << t.cross_track_max_m << ',' << t.heading_err_rms_rad << ','
         << t.rot_effort_rad << ',' << t.rot_energy << ',' << t.rot_reversals << ','
         << t.lin_accel_effort << ',' << t.lin_accel_max << ',' << t.lin_jerk_effort << ','
+        << t.rot_accel_effort << ',' << t.smooth_lin << ',' << t.smooth_rot << ','
+        << t.dev_norm << ',' << t.mission_cost << ','
         << t.lin_jerk_max << ',' << t.lat_accel_rms << ',' << t.lat_accel_max << ','
         << t.min_clearance_m << ',' << t.p05_clearance_m << ','
         << t.safety_guard_cycles << ',' << t.escapes << ',' << t.replans << ','

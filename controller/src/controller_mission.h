@@ -114,8 +114,29 @@ struct TrajectoryStats
     float lin_accel_effort = 0.f;    // sum |dv|  — total variation of speed, sampling-rate independent
     float lin_accel_max = 0.f;
     float lin_jerk_effort = 0.f;     // sum |d2v| — total variation of acceleration
+    float rot_accel_effort = 0.f;    // sum |domega| — total variation of turn RATE (the rotational
+                                     // analogue of lin_accel_effort; rot_effort_rad and rot_energy are
+                                     // both integrals of omega itself and cannot see how it was reached)
     float lin_jerk_max = 0.f;
     float lat_accel_rms = 0.f;
+    // ── ONE NUMBER FOR "DID IT DRIVE WELL" ────────────────────────────────────────────────────────
+    // J = smooth_lin + smooth_rot + dev_norm, all three DIMENSIONLESS so they can be added at all —
+    // the same discipline route_optimizer.h imposes on its own objective, and for the same reason:
+    // with their natural units these terms carry m/s, rad/s and m, and a sum of those is meaningless.
+    //   smooth_lin = (sum|dv| / v_max)     / (distance / 1 m)   "speed-range traversals per metre"
+    //   smooth_rot = (sum|domega| / w_max) / (distance / 1 m)   same for the turn rate
+    //   dev_norm   = cross_track_rms / planner_cell_size        deviation in units of a planning cell
+    // ★PER METRE, not per run: the extensive terms otherwise grow with mission length and a long tour
+    // looks worse than a short one for no reason. (Learned the hard way 2026-08-04 — a 118 s tour was
+    // compared against 30 s laps and three metrics read ABOVE baseline purely from duration.)
+    // ★UNWEIGHTED on purpose. Every term is already in units of its own budget, so a weight would be a
+    // second opinion about the same physics. If one term needs weighting, that is a finding about the
+    // NORMALISER, not about the weight.
+    // ★Comparable only within one MissionRunContext: v_max, w_max and the cell size are the units.
+    float smooth_lin = 0.f;
+    float smooth_rot = 0.f;
+    float dev_norm = 0.f;
+    float mission_cost = 0.f;   // J, lower is better
     float lat_accel_max = 0.f;
 
     // Safety — reported as a CONSTRAINT, never folded into an objective.
@@ -385,7 +406,8 @@ private:
     long   ct_n_ = 0;
     std::vector<float> clearances_;
     std::optional<float> prev_cmd_speed_;   // for sum|dv|
-    std::optional<float> prev_cmd_dv_;      // for sum|d2v|
+    std::optional<float> prev_cmd_dv_;
+    std::optional<float> prev_cmd_rot_;      // for sum|d2v|
     int prev_rot_sign_ = 0;                 // for the reversal count
     std::optional<Eigen::Vector2f> last_pos_;
 

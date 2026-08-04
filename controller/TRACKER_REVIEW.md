@@ -103,6 +103,45 @@ and stop at the RMS minimum; do not set `t_ff` to the identified lag on faith. A
 assumed constant over `t_ff` (Seiffer et al. state this); 0.29 m of travel at 0.7 m/s, fine here,
 wrong if speed is changing hard.
 
+> ### ★★ R1(a) WAS BUILT AND IT FAILED — 2026-08-04. Do not rebuild it standalone.
+>
+> `ω_ff = −1.0·v·κ(s)` added to `cmd_rot`, κ sampled at the robot's own projection, sign taken from
+> the data (`cmd_rot = −0.535·(v·κ)`). The term fired on **100%** of driving cycles, so this was a real
+> test. Matched unsaturated bins (|v·κ| < 0.4), before → after:
+>
+> | | before | after |
+> |---|---|---|
+> | rms cross-track | 7.94 cm | **9.83 cm** |
+> | slope a | +0.100 | **+0.123** |
+> | cmd_rot / (v·κ) | −0.637 | **−0.349** |
+>
+> `mission_cost` 9.591; on the two-thirds comparable to earlier runs (smooth_lin + dev_norm) 5.901
+> against a 4.49–5.86 baseline — worse than all five prior tours. p05 clearance 0.104, below every one.
+>
+> **★THE TELL.** Adding a feedforward of −1.0·v·κ should make the TOTAL command *bigger*. It got
+> **smaller**. The feedback opposes the new term by more than one-for-one — the robot is being pushed
+> off the path by the term meant to hold it on.
+>
+> **★CAUSE: pure pursuit ALREADY supplies this implicitly.** On a curve the carrot sits off-axis by
+> exactly the angle that produces the right steering, so `Kp·carrot_angle` *is* a feedforward. An
+> explicit `v·κ` on top DOUBLE-COUNTS it: the robot over-turns into the corner (slope a rises = further
+> inside, which is what was measured) and the cross-track term then fights its own controller.
+>
+> Secondary defect, real but not the main one: the term used the PRE-brake, pre-gate speed. `max_adv`
+> is correctly clamped by the route speed limit, but smoothing, the Gaussian brake and the safety gate
+> cut speed further downstream, so on 4% of cycles `|ω_ff|` ALONE exceeded `max_rot` (peak 1.83 vs 0.8)
+> and the clamp discarded the feedback entirely. Saturation 6.0% → 8.6%.
+>
+> **★★CONSEQUENCE FOR THE PLAN: there is no standalone R1(a).** A feedforward must REPLACE the
+> carrot-bearing term, not stack on it — which is R3's law exactly (`ω = ω_ff + k_y·e_y + k_θ·e_θ`,
+> geometric term gone, gains from the plant rather than the lookahead). The prerequisite framing was
+> right; doing it as an addition to pure pursuit was wrong. ⚠n=1 per arm and the laps differed in
+> length (131.6 s vs 118–121 s), but the direction is consistent across four independent measures and
+> the causal story explains the sign.
+>
+> Code fully removed 2026-08-04 at the user's request — no dead flag, no dormant term. This note is the
+> record.
+
 ### R2 — One speed profile, one optimisation, with the safety cut **inside** it
 
 Delete the chain `cos^p(bearing) × dist → EMA → Gaussian brake → multiplicative gate`. Replace with a
@@ -540,6 +579,58 @@ Robotics & Automation Magazine* 4(1):23–33, 1997, [DOI 10.1109/100.580977](htt
 specifically, make the "move the safety cut inside the profile computation" half of R2.**
 
 ---
+
+## 8b. §8 STEP 1 EXECUTED — 2026-08-04, and it moves R1
+
+Measured on a completed "complete tour" lap: 2339 cycles / 117 s / 38 m, Webots. Conventions grounded
+from the data first, not assumed — `cmd_rot` is sign-flipped vs pose θ (the known negation),
+sign(κ) = sign(dθ/dt), and the tracker's own `proj_robot.x > 0 ⇒ path to the right`. Together these make
+**corr(e, κ) < 0 the outward signature**.
+
+**1. The bias is INWARD, not outward — R1's motivating signature is absent.**
+`corr(e, κ) = +0.757` over all driving, **+0.785** on curved stretches. Positive = the robot rides
+*inside* the curve. It cuts corners; it does not bulge outward. Reproduces the 08-02 figure (+0.67), so
+it is a stable property. **The `1/0.89` sub-claim of R1 loses its evidence** — not refuted (the gain
+deficit is a measured plant property) but its predicted signature is not there, possibly masked by the
+larger inward term. Test it alone, after the others, so they do not confound.
+
+**2. The residual is NOT geometric corner-cutting either.** Pure pursuit predicts `e = κ·L²/2`, so the
+slope should scale as L². Binned by achieved carrot distance:
+
+| carrot L | 0.35 m | 0.72 m | 1.09 m | 1.72 m |
+|---|---|---|---|---|
+| slope a | +0.079 | +0.081 | +0.077 | +0.057 |
+| a / L² | 0.635 | 0.156 | 0.065 | 0.019 |
+
+`a` is essentially **constant at ~0.08 m per (1/m)** while `a/L²` varies 33×. So the residual is not set
+by the lookahead geometry. What is left is the **steady-state error the cross-track loop must build in
+order to generate the turn rate at all** — exactly what §2 predicts for a lag-limited loop, and exactly
+what feedforward removes for free. ★**This STRENGTHENS R1(a), explicit `ω_ff = v·κ`**, which the
+controller does not have today (pure pursuit supplies it only implicitly through carrot geometry).
+
+**3. The error ANTICIPATES curvature; it does not lag it.** Peak of `corr(e(t), κ(t−lag))` at
+**−550 ms** (+0.782) against +0.757 at zero lag, decreasing monotonically toward positive lag. A
+delay-induced error would correlate with PAST curvature. ⚠The magnitude is weakly identified — κ's own
+autocorrelation is +0.87 at 450 ms — so only the SIGN survives. **R1(b), the preview shift, is
+contraindicated as a first move**: shifting the evaluation point further ahead pushes the wrong way.
+Re-test it after R1(a), since removing the steady-state term may expose a lateness underneath.
+
+**4. Delay decomposition, partial.** `cmd_rot → meas_rot` peaks at **+200 ms** (corr +0.932), matching
+the 08-02 identification. `pose_stamp_age` p50 **84 ms**, p90 183 ms ⇒ roughly **40% of the loop delay
+is measurement staleness**, not actuation. This data cannot split it further: `meas_rot` and the pose
+come through the same DSR path. On the real robot the IMU gives the clean split — compare
+`cmd_rot → IMU rate` against `cmd_rot → DSR-published rate`; the difference is transport. That decides
+whether R3's inner yaw-rate loop can help at all.
+
+**Revised ordering.** R1 splits: **(a) explicit `v·κ` feedforward — do first**, strengthened by finding
+2, and a prerequisite for R3 anyway (`ω = ω_ff + k_y·e_y + k_θ·e_θ` needs an ω_ff to exist).
+**(b) preview shift — hold**, contraindicated by finding 3. **(c) `1/0.89` + τ lead — test alone**,
+unsupported by finding 1.
+
+⚠**Experimental-design limit.** The route is 418 left-turn samples to 54 right, so κ is almost always
+positive: intercept and slope are collinear (the fit says +3.2 cm constant offset while the
+straight-only subset says −2.3 cm), and a left/right asymmetry would be invisible. **A constant lateral
+offset is NOT established.** A mission with balanced turns would settle both.
 
 ## 9. What our own measurements already say about this
 
