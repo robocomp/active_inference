@@ -106,22 +106,10 @@ ClearancePref = 0.9
 # reach of the push and steepens it: at the 0.44 m ESDF reading the tour used to hold near walls, the
 # penalty goes from 0.12 to 0.30. Measured body clearance was 0.117 min / 0.128 p05 against a 0.175 m
 # target; expect roughly 0.19 against the new 0.275 m target. Verify with p05_clearance_m, not min.
-# ── DATA-DRIVEN CONTROL (A/B, default off = every run so far) ──
-# false: the pipeline runs when the presence hook on_operating_loop sets a flag — i.e. at Period.Compute
-#        ON THE GUI THREAD. Lidar is drained at the control thread's own wake rate and mostly discarded;
-#        whichever scan survives to the next gate opening is the one used.
-#        ★Measured 2026-08-02: lidar age at decision p50 103 ms, sd 17 ms — against scans arriving every
-#        50 ms. The sd is the beat between the two rates; the median is a full extra scan period of
-#        avoidable dead time in a loop that is already delay-limited.
-# true:  the pipeline runs when a FRESH SCAN ARRIVES. Rate = sensor rate = 20 Hz = the DSR RT update, so
-#        the three line up instead of beating. The GUI hook becomes a liveness signal only.
-# ★The control thread is already independent (a real std::thread, measured period 100.0 ms mean / 103 ms
-# worst at 14-17% CPU) — what was coupled to the GUI was the CADENCE, not the work.
-# ★2026-08-02 ON. Prediction: lidar age at decision should collapse from p50 103 ms toward the poll
-# interval, and the control rate should go 10 -> ~20 Hz (watch [CTRL] fps). Falsified if gap_ms does not
-# move — that would mean the scan is already old when poll_lidar_media returns it, i.e. the latency is
-# upstream in the reader or the sensor, not in the gating.
-ControlDataDriven = true
+# (ControlDataDriven lived here. FLAG REMOVED 2026-08-04 after it settled ON: the pipeline now always
+# runs on a FRESH SCAN, so the rate is the sensor's 20 Hz and the decision is aligned to the data it is
+# made from. The GUI-timer alternative measured p50 103 ms of lidar age at the decision, sd 17 ms — a
+# full extra scan period of dead time in a delay-limited loop. See specificworker.cpp control_loop().)
 # ★2026-08-02 20 -> 10. Measured with 20 ms: the control period came out BIMODAL — p05 25 / p50 48 /
 # p90 66 ms — because a scan landing just after a poll waits a full interval while one landing just
 # before is taken immediately. That is poll granularity, not sensor jitter, and it is the cheapest
@@ -484,21 +472,47 @@ ProximityLogEnabled = true
 ProximityCsvPath = "proximity_obstacles.csv"
 ProximityLogDistance = 0.8   # m; gate distance for logging a row (raw lidar / tracked obstacle / ESDF)
 
-Target.EdgeType = "target"
-Transforms.interpolate_rt = true
+# ★★ SECTION HEADERS ARE LOAD-BEARING. These used to be written as bare `Target.x` / `x`
+# lines down here, i.e. INSIDE the [Controller] section that starts far above — so TOML namespaced
+# them as `Controller.x`, the code's load_optional("x") found nothing, and every
+# one of them silently kept its built-in default. Discovered 2026-08-04 when setting
+# overlay_draw_one_frame_old = false had no effect whatsoever on a lap. A dotted key only means what
+# you think when it sits ABOVE the first [section] header. Check with:
+#   ConfigLoader::exists("foo")   (or the key sweep in the session notes)
+[Target]
+EdgeType = "target"
 
-# Dead-reckon the DISPLAYED lidar cloud + robot icon forward to "now" using base velocity,
-# so the overlay tracks the robot instead of trailing it by the lidar/pose latency.
-Transforms.overlay_extrapolate_to_now = true
-Transforms.overlay_extrapolation_max_dt_s = 0.4
+[Transforms]
+interpolate_rt = true
 
-# Draw the cloud one lidar frame old (query the prior scan's stamp, which room_concept has published)
-# → exact registration, no extrapolation, ~60 ms older. Takes precedence over the extrapolation.
-Transforms.overlay_draw_one_frame_old = true
+# (Display-side dead-reckoning of the cloud/icon to "now" lived here. REMOVED 2026-08-04: it only ever
+# applied when overlay_draw_one_frame_old was OFF, and that A/B settled ON — the cloud is registered
+# exactly at its scan stamp, so pushing it forward would undo the exactness it was compensating for.)
+
+# Register the cloud one lidar frame old (query the prior scan's stamp, which room_concept has already
+# published) → exact registration by WAITING rather than correcting. Takes precedence over the display
+# extrapolation. NOTE this is NOT display-only: the delayed cloud feeds the ESDF and the obstacle set,
+# so the cost is reaction latency in the control path.
+# (The one-frame registration hold lived here as `overlay_draw_one_frame_old`. FLAG REMOVED
+# 2026-08-04 after the A/B settled it ON — the behaviour is now unconditional, and the measured
+# evidence for it lives at the code site in controller_obstacle_tracker.cpp::handle_lidar_points.)
+
+# ── RT LEADING-EDGE CLAMP REPAIR (registration, NOT display) ──
+# The freshest scan is normally NEWER than the freshest room←robot block — the pose is computed FROM
+# a scan, so it can only arrive after one — and DSR's 5-block ring never extrapolates: it silently
+# returns the newest block instead. The whole cloud then lands with a pose Δt ms off, which is
+# invisible standing still and turns into a bulk ω·Δt rotation the moment the robot turns (and
+# "comes back" when it stops). This composes the clamped pose with the body twist room_concept
+# publishes on that same edge, which is exact rather than merely patient.
+# ★UNRUN on the robot as of 2026-08-04. New CSV columns rt_lead_ms (signed lead of the newest block
+# over the registered scan; NEGATIVE = the feed is behind and every query clamps) and rt_fix_dt_ms
+# (signed ms this correction actually walked; |rt_fix_dt_ms|·omega is the rotation it removed).
+# Set false to A/B against the buffered-only behaviour.
+rt_twist_compensation = true
 
 # Append per-cycle overlay-lag diagnostics to this CSV (empty = off). Columns:
 # t_ms,lidar_ts,gap_ms,vx,vy,omega,extrap_dt_s,disp_m,dtheta_rad,RTdelta_m
-Transforms.overlay_csv_path = "overlay_lag_eval.csv"
+overlay_csv_path = "overlay_lag_eval.csv"
 
 # NOTE: the zero-copy media plane (LiDAR) needs NO config here. The DDS domain +
 # topic are read from the media descriptor JSON attribute the producer

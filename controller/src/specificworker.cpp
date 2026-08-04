@@ -693,16 +693,10 @@ void SpecificWorker::load_params()
 	load_optional_cast<double>("Controller.PosGain", params.pos_gain);
 	load_optional_cast<double>("Controller.RotGain", params.rot_gain);
 	load_optional_cast<double>("Controller.VelocityOutputPeriodMs", params.velocity_output_period_ms);
-	// Run the pipeline on FRESH LIDAR rather than on the GUI-thread timer — see
-	// ControllerParams::control_data_driven. The rate then comes from the sensor (20 Hz) instead of
-	// from Period.Compute, and the decision is aligned to the scan it is made from.
-	load_optional("Controller.ControlDataDriven", params.control_data_driven);
 	load_optional_cast<double>("Controller.ControlPollMs", params.control_poll_ms);
 	load_optional_cast<double>("Controller.CommandFreshnessTauMs", params.command_freshness_tau_ms);
 	load_optional("Transforms.interpolate_rt", params.interpolate_rt);
-	load_optional("Transforms.overlay_extrapolate_to_now", params.overlay_extrapolate_to_now);
-	load_optional("Transforms.overlay_draw_one_frame_old", params.overlay_draw_one_frame_old);
-	load_optional_cast<double>("Transforms.overlay_extrapolation_max_dt_s", params.overlay_extrapolation_max_dt_s);
+	load_optional("Transforms.rt_twist_compensation", params.rt_twist_compensation);
 	load_optional("Transforms.overlay_csv_path", params.overlay_csv_path);
 	load_optional("Viewer2D.MaxLidarDrawPoints", params.max_lidar_draw_points);
 	load_optional("Lidar.Name", params.lidar_name);
@@ -1056,12 +1050,14 @@ void SpecificWorker::control_loop()
 		// 3) Heavy pipeline (planning + MPPI + command emission), guarded by the LiDAR
 		//    stream watchdog: if the stream stalls, hold the robot in a local emergency
 		//    state and wait for recovery rather than planning on stale perception.
-		// ── WHAT TRIGGERS A DECISION ──────────────────────────────────────────────────────────
-		// Data-driven: a FRESH SCAN. The rate is then the sensor's (20 Hz, same as the DSR RT update)
-		// and the decision is aligned to the data it is made from, instead of to a GUI-thread timer
-		// that opens a gate every Period.Compute and uses whichever scan happened to survive.
-		// Legacy: the edge set by on_operating_loop, consumed here — the behaviour every run so far.
-		const bool data_driven = params.control_data_driven;
+		// ── WHAT TRIGGERS A DECISION: A FRESH SCAN ────────────────────────────────────────────
+		// The rate is the sensor's (20 Hz, same as the DSR RT update) and the decision is aligned to the
+		// data it is made from. The alternative — a GUI-thread timer opening a gate every Period.Compute
+		// and using whichever scan happened to survive — was measured at p50 103 ms of lidar age at the
+		// decision with sd 17 ms (the beat between two unrelated rates), i.e. a full extra scan period of
+		// dead time in a loop that is already delay-limited. It was removed 2026-08-04 along with its
+		// ControlDataDriven flag; on_operating_loop now only WAKES this thread (control_operating_ is the
+		// CV predicate below), it no longer gates the pipeline.
 		// ★BOOTSTRAP. poll_lidar_media() returns false while graph_state().robot_name is empty, and that
 		// name is filled by sync_world_state() — which runs INSIDE the pipeline. Gating the pipeline on
 		// fresh lidar alone is therefore a deadlock: no scan without the graph, no graph without a cycle.
@@ -1069,16 +1065,14 @@ void SpecificWorker::control_loop()
 		// did; once ready the sensor takes over the cadence. Costs one branch and removes a hang that
 		// only appears on a cold start, which is the worst kind to leave in.
 		const bool world_ready = world_model_.graph_state().ready();
-		const bool trigger = data_driven
-		                   ? (operating_latched_.load(std::memory_order_acquire)
-		                      and (fresh_lidar or not world_ready))
-		                   : control_operating_.exchange(false, std::memory_order_acq_rel);
-		if (data_driven)
-			control_operating_.store(false, std::memory_order_release);   // keep the edge from piling up
+		const bool trigger = operating_latched_.load(std::memory_order_acquire)
+		                     and (fresh_lidar or not world_ready);
+		// Clear the wake edge every pass: it is the CV predicate, so leaving it set would spin this loop.
+		control_operating_.store(false, std::memory_order_release);
 		// Say WHY the pipeline is idle, throttled. A data-driven loop that never triggers is silent
 		// otherwise, and the two possible causes need different fixes: no scan is arriving (reader /
 		// media plane) versus the state latch never being set (presence hooks).
-		if (data_driven and not trigger)
+		if (not trigger)
 		{
 			static std::uint64_t last_idle_log = 0;
 			const auto now_ms = static_cast<std::uint64_t>(
@@ -1150,7 +1144,7 @@ bool SpecificWorker::poll_lidar_media()
 	if (robot_name.empty())
 		return false;
 
-	const auto sweep = lidar_reader_->poll(robot_name, /*interpolate=*/false);
+	auto sweep = lidar_reader_->poll(robot_name, /*interpolate=*/false);   // non-const: its tags are MOVED below
 	if (!sweep.has_value() || sweep->points.empty())
 		return false;
 
@@ -1159,9 +1153,14 @@ bool SpecificWorker::poll_lidar_media()
 	for (const auto &p : sweep->points) { xs.push_back(p.x()); ys.push_back(p.y()); zs.push_back(p.z()); }
 
 	// Feed as a single robot-frame scan: the tracker sees robot<-robot = identity for the height
-	// filter and applies the dynamic room<-robot pose at the merged stamp. Dedup is by that stamp.
+	// filter and applies the dynamic room<-robot pose. Dedup is by the merged stamp. The per-point
+	// plane tags + per-plane capture stamps ride along so the tracker can register EACH plane at its
+	// own instant instead of all of them at the merged maximum — helios and bpearl are out of phase,
+	// and that offset turns into a bulk placement error the moment the robot rotates.
 	return obstacle_tracker_.handle_lidar_points(robot_name, std::move(xs), std::move(ys), std::move(zs),
-	                                             static_cast<std::uint64_t>(sweep->stamp_ms));
+	                                             static_cast<std::uint64_t>(sweep->stamp_ms),
+	                                             std::move(sweep->plane_id),
+	                                             std::move(sweep->plane_stamp_ms));
 }
 
 void SpecificWorker::stop_control_thread()

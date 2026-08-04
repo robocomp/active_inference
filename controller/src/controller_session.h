@@ -118,11 +118,17 @@ private:
     // Contract observation-stillness gate: track the base speed (finite-difference of the room-frame
     // robot pose → m/s, rad/s) and test it against the active contract's max_observe_vel/omega.
     void update_base_speed(const ControllerRobotPose &pose, std::uint64_t timestamp_ms);
-    // Dead-reckon the displayed cloud + icon from the last lidar stamp to "now" (stores the icon pose
-    // and the cloud correction), and append a lag-diagnostics row to the overlay CSV.
+    // Append a lag-diagnostics row to the overlay CSV (lidar staleness, pose age, RT ring state,
+    // twist-correction and twist-accuracy columns). Diagnostics only — nothing here steers.
+    // `rt_block_lead_ms` is ControllerObstacleTracker::rt_block_lead_ms() — signed ms by which the
+    // newest room←robot RT block leads the registered scan. Logged beside RTdelta_m because it is
+    // the column that disambiguates it (see update_rt_block_lead).
     void update_overlay_extrapolation(const ControllerWorldModel &world_model,
                                       const ControllerRobotPose &robot_pose,
-                                      std::uint64_t timestamp_ms);
+                                      std::uint64_t timestamp_ms,
+                                      const std::optional<std::int64_t> &rt_block_lead_ms,
+                                      std::int64_t rt_twist_fix_dt_ms,
+                                      const ControllerObstacleTracker &obstacle_tracker);
     bool robot_still() const;
     // `arrived_at` / `now_ms` let a running mission close out the leg it just finished and step to the
     // next waypoint. The affordance path ignores them.
@@ -171,8 +177,6 @@ private:
     ControllerRoomVelocity room_vel_;              // room-frame base velocity (EMA), for overlay dead-reckoning
     std::uint64_t overlay_now_ms_ = 0;             // current compute time (overlay extrapolation target)
     std::optional<std::uint64_t> overlay_lidar_ts_ms_;  // last lidar stamp (overlay extrapolation base time)
-    std::optional<ControllerRobotPose> overlay_icon_pose_;   // dead-reckoned robot pose for the icon
-    std::optional<Eigen::Affine2f> overlay_correction_;      // room(now)←room(scan) for the cloud
     std::ofstream overlay_csv_;                    // per-cycle overlay-lag diagnostics
     bool overlay_csv_open_ = false;
     std::uint64_t overlay_csv_last_ms_ = 0;        // throttle for CSV rows

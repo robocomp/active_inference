@@ -345,9 +345,19 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose,
 
     // ── Body-frame twist, written BEFORE the RT block ───────────────────────
     // Consumers read velocity DIRECTLY from here instead of differentiating the pose (which is what
-    // produced correction-induced velocity spikes). Convention: rt_translation_velocity =
-    // [adv(fwd,+x), side(lat,+y), 0], rt_rotation_euler_xyz_velocity = [0,0,rot]; last_adv_/side_/rot_
-    // are the measured odometry set in update(). Covariance is a config diagonal.
+    // produced correction-induced velocity spikes). Layout: rt_translation_velocity = [adv, side, 0],
+    // rt_rotation_euler_xyz_velocity = [0,0,rot]; last_adv_/side_/rot_ are the measured odometry set
+    // in update(). Covariance is a config diagonal.
+    //
+    // ★★ THAT IS ARRAY ORDER, NOT FRAME AXES. This comment used to read "[adv(fwd,+x), side(lat,+y)]"
+    // and the parentheticals were WRONG: the robot body frame these rates live in is **+Y FORWARD,
+    // +X lateral**. A consumer composing them into a transform must therefore put `adv` on the frame's
+    // y axis and `side` on its x. Getting that backwards rotates the predicted displacement by 90°, so
+    // it lands √2·|motion| from the truth — WORSE than assuming the robot never moved, which is how it
+    // was found (controller twist compensation, 2026-08-04). Measured on 421 logged forward-driving
+    // cycles, predicting the next pose from the true body twist: adv→x p50 25.86 mm, adv→y p50 0.07 mm.
+    // The same frame is stated by the controller's safety-gate integrator (`x += adv*sin(th);
+    // y += adv*cos(th)`) and by its carrot bearing being atan2(x, y) rather than atan2(y, x).
     //
     // ★ ORDER IS LOAD-BEARING. This used to run AFTER insert_or_assign_edge_RT, as a get_edge →
     // add attributes → insert_or_assign_edge(copy) write-back. That copy is a snapshot of the edge

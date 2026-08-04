@@ -171,7 +171,8 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     update_base_speed(*robot_pose, timestamp_ms);   // base speed for the contract stillness gate
     overlay_now_ms_ = timestamp_ms;                 // overlay dead-reckoning target + base time
     overlay_lidar_ts_ms_ = obstacle_tracker.last_lidar_timestamp_ms();
-    update_overlay_extrapolation(world_model, *robot_pose, timestamp_ms);
+    update_overlay_extrapolation(world_model, *robot_pose, timestamp_ms, obstacle_tracker.rt_block_lead_ms(),
+                                 obstacle_tracker.rt_twist_fix_dt_ms(), obstacle_tracker);
 
     ControllerPlanningStep step;
     step.robot_pose = *robot_pose;
@@ -911,17 +912,12 @@ void ControllerSession::update_display(const std::optional<ControllerRobotPose> 
                                        const ControllerPolygons &obstacle_rfe_points,
                                        int max_lidar_draw_points) const
 {
-    // Dead-reckoning of the DISPLAYED cloud + icon to "now" is computed once per cycle in
-    // update_overlay_extrapolation (stored in overlay_icon_pose_ / overlay_correction_); here we
-    // just apply it. The lidar buffer (obstacle detection) stays anchored at scan time.
-    auto icon_pose = robot_pose;
-    std::optional<Eigen::Affine2f> lidar_correction;
-    if (robot_pose.has_value())
-    {
-        if (overlay_icon_pose_.has_value())
-            icon_pose = overlay_icon_pose_;
-        lidar_correction = overlay_correction_;
-    }
+    // The displayed cloud and icon are drawn at the scan's own pose. Display-side dead-reckoning to
+    // "now" was removed 2026-08-04: it only ever applied when overlay_draw_one_frame_old was OFF, and
+    // that A/B settled ON (see etc/config.toml) — the cloud is registered exactly at its scan stamp,
+    // so pushing it forward would undo that.
+    const auto &icon_pose = robot_pose;
+    const std::optional<Eigen::Affine2f> lidar_correction;
 
     display.update(icon_pose,
                    room_polygon_,
@@ -1793,35 +1789,20 @@ void ControllerSession::update_base_speed(const ControllerRobotPose &pose, std::
 
 void ControllerSession::update_overlay_extrapolation(const ControllerWorldModel &world_model,
                                                      const ControllerRobotPose &robot_pose,
-                                                     std::uint64_t timestamp_ms)
+                                                     std::uint64_t timestamp_ms,
+                                                     const std::optional<std::int64_t> &rt_block_lead_ms,
+                                                     std::int64_t rt_twist_fix_dt_ms,
+                                                     const ControllerObstacleTracker &obstacle_tracker)
 {
-    overlay_icon_pose_.reset();
-    overlay_correction_.reset();
     if (!params_)
         return;
     if (!overlay_lidar_ts_ms_.has_value() || timestamp_ms <= *overlay_lidar_ts_ms_)
         return;
 
-    const std::uint64_t gap_ms = timestamp_ms - *overlay_lidar_ts_ms_;   // lidar staleness (informational)
+    const std::uint64_t gap_ms = timestamp_ms - *overlay_lidar_ts_ms_;   // lidar staleness
     // The room←robot value updates coarser than the lidar, so the cloud's anchor pose is as old as
-    // the time since that value last changed — extrapolate by THAT, not just the lidar gap.
+    // the time since that value last changed. Reported, not acted on.
     const std::uint64_t pose_age_ms = timestamp_ms >= last_pose_change_ms_ ? timestamp_ms - last_pose_change_ms_ : 0;
-    const float raw_dt = static_cast<float>(pose_age_ms) * 1e-3f;
-    const float dt = std::min(raw_dt, std::max(0.f, params_->overlay_extrapolation_max_dt_s));
-    const auto now_pose = extrapolate_room_pose(robot_pose, room_vel_, dt);
-
-    // Apply the correction to the drawn cloud + icon only when extrapolating to "now". When the
-    // cloud is drawn one frame old it is already exactly registered (the pose is bracketed, not
-    // clamped), so the correction is left identity — pushing it forward would undo the exactness.
-    // The diagnostics below run regardless, so the CSV still logs a baseline for A/B.
-    if (params_->overlay_extrapolate_to_now && !params_->overlay_draw_one_frame_old)
-    {
-        overlay_icon_pose_ = now_pose;
-        overlay_correction_ = now_pose.as_transform() * robot_pose.as_transform().inverse();
-    }
-
-    const Eigen::Vector2f disp = now_pose.pos - robot_pose.pos;
-    const float dtheta = now_pose.theta - robot_pose.theta;
 
     // RT-staleness probe: the room←robot pose the tree returns at "now" vs at the lidar stamp. If
     // RTdelta≈0 while the robot moves, the upstream pose feed is stale/clamped — the real lag source.
@@ -1855,8 +1836,9 @@ void ControllerSession::update_overlay_extrapolation(const ControllerWorldModel 
         {
             overlay_csv_.open(params_->overlay_csv_path, std::ios::out | std::ios::trunc);
             if (overlay_csv_.is_open())
-                overlay_csv_ << "t_ms,lidar_ts,gap_ms,pose_age_ms,vx,vy,omega,extrap_dt_s,disp_m,dtheta_rad,RTdelta_m,"
-                                "cmd_adv,cmd_rot,cur_adv,cur_rot\n";
+                overlay_csv_ << "t_ms,lidar_ts,gap_ms,pose_age_ms,vx,vy,omega,RTdelta_m,"
+                                "cmd_adv,cmd_rot,cur_adv,cur_rot,rt_lead_ms,rt_fix_dt_ms,"
+                                "twist_pred_dt_ms,twist_pred_err_m,twist_pred_err_deg\n";
             // Announce the resolved absolute path (it's a relative path → lands in the process CWD,
             // which is easy to miss), or the failure — so this is never silently a no-op again.
             std::error_code ec;
@@ -1869,8 +1851,31 @@ void ControllerSession::update_overlay_extrapolation(const ControllerWorldModel 
         {
             overlay_csv_ << timestamp_ms << ',' << *overlay_lidar_ts_ms_ << ',' << gap_ms << ',' << pose_age_ms << ','
                          << room_vel_.vx << ',' << room_vel_.vy << ',' << room_vel_.omega << ','
-                         << dt << ',' << disp.norm() << ',' << dtheta << ',' << rt_delta << ','
-                         << cmd_adv << ',' << cmd_rot << ',' << cur_adv << ',' << cur_rot << '\n';
+                         << rt_delta << ','
+                         << cmd_adv << ',' << cmd_rot << ',' << cur_adv << ',' << cur_rot << ','
+                         // empty (not 0) when the ring carries no timestamps at all — that is a
+                         // different failure from "the feed is level with the scan".
+                         << (rt_block_lead_ms.has_value() ? std::to_string(*rt_block_lead_ms) : std::string{}) << ','
+                         // signed ms the twist walked the pose onto the scan (0 = query was inside
+                         // the ring, nothing to repair). |rt_fix_dt_ms| * omega is the bulk cloud
+                         // rotation this removed.
+                         << rt_twist_fix_dt_ms << ','
+                         // Twist-vs-RT residual over one lidar period: what dropping the one-frame
+                         // buffer would cost in registration accuracy. Empty when the probe could
+                         // not run (ring too short to hold both ends).
+                         << obstacle_tracker.twist_pred_dt_ms() << ','
+                         // ★ NOT std::to_string for floats: it formats through the C locale, which is
+                         // es_ES on this machine, so it emits a decimal COMMA — the field splits in two,
+                         // the row grows past the header and every parse downstream is silently wrong
+                         // (hit exactly that on 2026-08-04). Stream insertion uses the ofstream's own
+                         // locale, same as every other float column in this row.
+                         ;
+            if (obstacle_tracker.twist_pred_err_m().has_value())
+                overlay_csv_ << *obstacle_tracker.twist_pred_err_m();
+            overlay_csv_ << ',';
+            if (obstacle_tracker.twist_pred_err_deg().has_value())
+                overlay_csv_ << *obstacle_tracker.twist_pred_err_deg();
+            overlay_csv_ << '\n';
             overlay_csv_.flush();
         }
     }

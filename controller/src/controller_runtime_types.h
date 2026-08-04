@@ -74,13 +74,23 @@ struct ControllerParams
     float route_spacing_m = 0.05f;
     float route_smoothing_m = 0.40f;
     // Variationally optimise the route's control polygon before it is driven (route_optimizer.h).
-    // ★OFF by default — DISABLED 2026-08-01 after it wrecked a live route. Measured on the apartment tour:
-    // max control-point movement 24.8 m, min clearance 0.020 -> 0.000 m (it made its OWN safety term
-    // worse), 913 of 1324 samples rejected by the feasibility pass, and a route that doubled back around
-    // the table. The objective was ~69 with the clearance term bounded above by 1, so the anchor term was
-    // swamping everything — the same dilution failure the MPPI's G_info had, in a new place. Do not turn
-    // this on again until the term balance is diagnosed and the corridor test is extended to a real tour.
-    bool route_optimize = false;
+    // ★ON. Re-enabled after the term balance was fixed; measured on this exact tour with
+    // tools/route_bench against the world snapshot the controller writes (route_world.txt): it removes
+    // 3 of the 4 places where the route demanded a turn radius below the robot's 0.23 m inscribed (all
+    // three planner artefacts around (0,-1.9)) and raises min clearance 0.334 -> 0.431 m, costing 0.06 m
+    // of waypoint fidelity and no traversal time. The 4th is AUTHORED (wp21/wp22 are 0.35 m apart with a
+    // 104° turn between them) and no optimiser can remove it without abandoning the waypoints.
+    // ★HISTORY, kept because the failure mode is worth recognising: this was DISABLED 2026-08-01 after
+    // it wrecked a live route — max control-point movement 24.8 m, min clearance 0.020 -> 0.000 m (it
+    // made its OWN safety term worse), 913 of 1324 samples rejected by the feasibility pass, a route
+    // that doubled back around the table. The objective was ~69 with the clearance term bounded above
+    // by 1, so the anchor term swamped everything — the dilution failure the MPPI's G_info also had.
+    // ★KEEP THIS SWITCHABLE. An optimised route CHANGES THE STIMULUS: a run under this flag measures
+    // the route, not the controller, so isolating a controller change means being able to turn it off.
+    // (This default read `false` with the disabling note above until 2026-08-04, while etc/config.toml
+    // had said `true` for some time — the config won every run, and the stale default misled a reader
+    // into believing the feature was dead. Defaults and config must agree or the comment is a trap.)
+    bool route_optimize = true;
     // ── LOCAL ELASTIC BAND (route deformed at control rate against the LIVE field) ────────────────
     // The route optimiser above runs ONCE, when the route is installed, against GridPlanner's static
     // room-frame EDT — polygons only. The band re-runs the SAME objective every cycle on a window of
@@ -134,12 +144,6 @@ struct ControllerParams
     // false = the pipeline runs when the presence state machine's on_operating_loop hook sets a flag,
     //         i.e. at Period.Compute on the GUI THREAD. Lidar is drained at the control thread's own
     //         wake rate and mostly discarded, and whichever scan survives to the next gate opening is
-    //         the one used — measured lidar age at decision p50 103 ms against scans arriving every
-    //         50 ms, with sd 17 ms which is the beat between the two rates.
-    // true  = the pipeline runs when a FRESH SCAN ARRIVES. The rate then comes from the sensor (20 Hz,
-    //         matching the DSR RT update) instead of from a timer, and the decision is aligned to the
-    //         data it is made from. The GUI hook becomes a liveness signal only.
-    bool  control_data_driven = false;
     // How often the control thread wakes to look for a new scan. Only an upper bound on how late a
     // fresh scan can be noticed; it is not the control rate, which is the scan rate.
     float control_poll_ms = 20.f;
@@ -167,15 +171,16 @@ struct ControllerParams
     // Dead-reckon the DISPLAYED lidar cloud + robot icon forward from the last lidar
     // timestamp to "now" using the measured base velocity, so the overlay tracks the robot
     // instead of trailing it by the lidar/pose latency. Display-only — the obstacle buffer
-    // stays anchored at scan time.
-    bool overlay_extrapolate_to_now = true;
-    float overlay_extrapolation_max_dt_s = 0.4f;   // clamp the extrapolation horizon
     // Draw the cloud (and read the pose) one lidar frame OLD — query the RT at the PREVIOUS scan's
-    // stamp, which room_concept has had a full frame to publish, so InterpolatedRT brackets it
-    // exactly instead of clamping at the leading edge. Exact registration, no extrapolation, at the
-    // cost of ~one lidar period (~60 ms) of overlay age. Takes precedence over the extrapolation
-    // (which would push the exact past pose back toward now and defeat the point).
-    bool overlay_draw_one_frame_old = true;
+    // Compose the room←robot pose with room_concept's published body twist when the RT query fell
+    // OUTSIDE the ring and the tree could only clamp to an end block. That clamp is the normal case
+    // for a freshly-arrived scan — the pose is derived FROM a scan, so it always trails one — and it
+    // registers the whole cloud with a pose |Δt| ms off, which shows up as a bulk ω·Δt rotation the
+    // moment the robot turns and vanishes at rest. See ControllerObstacleTracker::twist_corrected.
+    // It repairs the clamp the RT ring cannot avoid:
+    // the correction is exact where the buffer was merely patient, and drops a full lidar period of
+    // latency from the obstacle path. Turn OFF to A/B against the buffered-only behaviour.
+    bool rt_twist_compensation = true;
     // When non-empty, append per-cycle overlay-lag diagnostics to this CSV (for plotting the lag /
     // velocity / RT-staleness evolution). Empty = disabled. Relative → lands in the launch CWD; the
     // resolved absolute path is printed once on first write so it's findable.
@@ -371,16 +376,6 @@ struct ControllerRoomVelocity
     float omega = 0.f;  // rad/s
 };
 
-// Constant-velocity dead-reckoning of a room pose over dt seconds.
-inline ControllerRobotPose extrapolate_room_pose(const ControllerRobotPose &pose,
-                                                 const ControllerRoomVelocity &vel,
-                                                 float dt_s)
-{
-    ControllerRobotPose out;
-    out.pos = pose.pos + Eigen::Vector2f(vel.vx, vel.vy) * dt_s;
-    out.theta = pose.theta + vel.omega * dt_s;
-    return out;
-}
 
 struct ControllerPlanningStep
 {

@@ -54,6 +54,13 @@ struct LidarSweep
     std::vector<Eigen::Vector3f> points;                             // merged returns, target frame
     std::vector<std::uint8_t>    plane_id;                           // per-point source-plane index (0-based
                                                                      //   over emitted planes: helios=0, bpearl=1)
+    // CAPTURE stamp of each plane, indexed by plane_id. `stamp_ms` below is their MAX, so on a
+    // rotating robot the older plane's points are up to one full period out of date with respect to
+    // it — a consumer that then applies ONE world←robot pose to the whole merged cloud misregisters
+    // that plane by ω·(stamp_ms − plane_stamp_ms[k]). Consumers that transform into a WORLD frame
+    // should query the pose per plane at these stamps; consumers staying in the robot frame can
+    // ignore them (the device→robot mounts are static, which is why the merge is safe at all).
+    std::vector<std::int64_t>    plane_stamp_ms;
     Eigen::Vector3f              origin   = Eigen::Vector3f::Zero();  // sensor centre, target frame
     std::int64_t                 stamp_ms = 0;                       // max source stamp of the merged planes
     // NOTE: `origin` is the sensor centre and is only meaningful when the reader consumes a SINGLE

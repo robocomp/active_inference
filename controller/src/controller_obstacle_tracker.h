@@ -76,16 +76,38 @@ class ControllerObstacleTracker
         };
         const RawCloudProximity &raw_cloud_proximity() const { return raw_cloud_proximity_; }
         const std::optional<std::uint64_t> &last_lidar_timestamp_ms() const { return last_lidar_timestamp_ms_; }
+        // How far the NEWEST room←robot RT block leads the scan we just registered, in ms
+        // (positive ⇒ a pose newer than the scan exists, so the query could bracket; negative ⇒ the
+        // pose feed is BEHIND the scan and every query clamps to a stale block). Empty until a scan
+        // has been processed or when the ring carries no timestamps. See update_rt_block_lead().
+        const std::optional<std::int64_t> &rt_block_lead_ms() const { return rt_block_lead_ms_; }
+        // Signed ms the twist correction walked the pose for the last registered scan (0 = the RT
+        // query was inside the ring, so nothing needed repairing). Pairs with rt_block_lead_ms().
+        std::int64_t rt_twist_fix_dt_ms() const { return rt_twist_fix_dt_ms_; }
+        // Twist-accuracy probe over one lidar period: the horizon used (0 = probe did not run this
+        // scan) and the position / heading residual against the RT tree. This is what says whether
+        // the one-frame hold in handle_lidar_points can eventually be dropped (it cannot yet — see
+        // the note there; the hold also smooths, which this does not measure).
+        std::int64_t twist_pred_dt_ms() const { return twist_pred_dt_ms_; }
+        const std::optional<float> &twist_pred_err_m() const { return twist_pred_err_m_; }
+        const std::optional<float> &twist_pred_err_deg() const { return twist_pred_err_deg_; }
         void clear_published_obstacles();
 
         // Ingest a raw LiDAR point cloud (lidar frame, from the zero-copy media plane)
         // into the room buffer via the RT tree. lidar_node_name is the graph node the RT
         // transforms are queried against (e.g. "lidar3D"). Dedups by timestamp.
+        // plane_ids/plane_stamps come from rc::media::LidarSweep: the cloud is a MERGE of several
+        // LiDARs captured at different instants, so each plane is registered with the room←robot
+        // pose at ITS OWN stamp instead of one pose at the merged maximum. Both may be empty, which
+        // restores the single-pose behaviour (a one-plane sweep, or a caller that has no per-plane
+        // information).
         bool handle_lidar_points(const std::string &lidar_node_name,
                                  std::vector<float> xs,
                                  std::vector<float> ys,
                                  std::vector<float> zs,
-                                 std::uint64_t timestamp_ms);
+                                 std::uint64_t timestamp_ms,
+                                 std::vector<std::uint8_t> plane_ids = {},
+                                 std::vector<std::int64_t> plane_stamps = {});
         void update_active_obstacle_polygons(std::uint64_t timestamp_ms, rc::TrajectoryController &path_controller);
         void refresh_temporary_lidar_obstacle(std::uint64_t timestamp_ms,
                                             const ControllerRobotPose &robot_pose,
@@ -165,7 +187,27 @@ class ControllerObstacleTracker
         {
             std::vector<float> xs, ys, zs;
             std::uint64_t ts = 0;
+            // Carried with the held-back scan: the per-plane registration below must use the stamps
+            // of the frame it actually processes, not the one that arrived meanwhile.
+            std::vector<std::uint8_t> plane_ids;
+            std::vector<std::int64_t> plane_stamps;
         };
+
+        // Read the room←robot RT ring (newest/oldest block stamps) and the body twist published on
+        // that same edge, and record how far the newest block leads `scan_ts`. The lead itself is a
+        // diagnostic; the ring bounds + twist are what twist_corrected() below acts on.
+        void update_rt_block_lead(std::uint64_t scan_ts);
+        // Walk a CLAMPED room←robot pose along the published twist onto `target_ts`. Returns the
+        // pose unchanged when the RT query was inside the ring (already interpolated) or when the
+        // twist is unavailable. Writes the applied Δt (ms, signed; 0 = untouched) if asked.
+        Eigen::Matrix4d twist_corrected(const Eigen::Matrix4d &room_T_robot,
+                                        std::uint64_t target_ts,
+                                        std::int64_t *applied_dt_ms = nullptr) const;
+        // Exp(ξ·Δt) for the cached body twist, Δt in ms and signed.
+        Eigen::Matrix4d twist_delta(std::int64_t dt_ms) const;
+        // Measure how well the twist predicts ONE LIDAR PERIOD of motion, against the RT tree itself.
+        // Health monitor for the twist the correction relies on — see the definition.
+        void update_twist_prediction_error(std::uint64_t scan_ts);
 
         std::vector<Eigen::Vector2f> read_temporary_obstacle_points(std::uint64_t timestamp_ms,
                                                                     const ControllerRobotPose &robot_pose,
@@ -260,6 +302,13 @@ class ControllerObstacleTracker
         std::uint64_t last_scan_ms_ = 0;   // throttle for scan_for_unmodelled_obstacles
         mutable std::optional<std::uint64_t> last_lidar_timestamp_ms_;   // stamp of the scan actually buffered
         std::optional<std::uint64_t> newest_raw_lidar_ts_;               // newest RAW stamp (dedup + period)
+        std::optional<std::int64_t> rt_block_lead_ms_;                   // newest RT block − buffered scan stamp
+        std::optional<std::uint64_t> rt_block_newest_ts_, rt_block_oldest_ts_;   // RT ring bounds
+        float rt_twist_adv_ = 0.f, rt_twist_side_ = 0.f, rt_twist_rot_ = 0.f;    // body twist, robot frame
+        bool rt_twist_valid_ = false;
+        std::int64_t rt_twist_fix_dt_ms_ = 0;                            // Δt the last correction walked
+        std::int64_t twist_pred_dt_ms_ = 0;                              // horizon the probe used (0 = not run)
+        std::optional<float> twist_pred_err_m_, twist_pred_err_deg_;     // twist-vs-RT residual over it
         std::optional<PendingLidarScan> pending_lidar_scan_;             // held-back frame (draw-one-frame-old)
         mutable std::uint64_t lidar_period_ms_ = 100;
         mutable std::string obstacle_debug_report_;

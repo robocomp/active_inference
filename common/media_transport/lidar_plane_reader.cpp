@@ -238,6 +238,9 @@ std::optional<LidarSweep> LidarPlaneReader::poll(const std::string& target_frame
     //    is transformed at ITS OWN capture stamp (correct per-plane registration on a moving robot).
     LidarSweep sweep;
     bool any = false;
+    // One slot per emitted plane id, so a consumer can recover WHEN each plane's points were taken
+    // rather than only the merged maximum. 0 means "this plane contributed nothing this poll".
+    sweep.plane_stamp_ms.assign(any_preferred_live ? preferred_planes_.size() : 1u, 0);
     auto merge_plane = [&](const Plane& p, std::uint8_t pid)   // NOT 'emit' — that is a Qt macro
     {
         if (p.raw_cache.empty())
@@ -246,6 +249,8 @@ std::optional<LidarSweep> LidarPlaneReader::poll(const std::string& target_frame
         if (not append_transformed(p.node, target_frame, p.cache_ts, interpolate, p.raw_cache, sweep.points, origin))
             return;   // RT edge not ready yet — skip this plane this poll
         sweep.plane_id.resize(sweep.points.size(), pid);   // tag the points just appended with their plane
+        if (pid < sweep.plane_stamp_ms.size())
+            sweep.plane_stamp_ms[pid] = p.cache_ts;
         sweep.origin   = origin;
         sweep.stamp_ms = std::max(sweep.stamp_ms, p.cache_ts);
         any = true;

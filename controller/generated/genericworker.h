@@ -31,6 +31,7 @@
 #include <variant>
 #include <unordered_map>
 #include <unordered_set>
+#include <iostream>
 #include <string>
 
 #include "dsr/api/dsr_api.h"
@@ -68,6 +69,44 @@ public:
 protected:
 	std::unordered_map<std::string, std::unique_ptr<GRAFCETStep>> states;
 	ConfigLoader configLoader;
+	// ── WHY THE `catch (...)` BELOW IS NOT SILENT ANY MORE ────────────────────────────────────────
+	// An optional key that fails to load is indistinguishable, at runtime, from a key nobody wrote —
+	// both leave the built-in default in place and print nothing. That is correct for the intended
+	// case and catastrophic for the two unintended ones, which have cost real debugging time:
+	//   • SHADOWED  — the key IS in the file but under a different prefix, because a dotted key
+	//     written below a [Section] header is namespaced under it. `Transforms.foo` placed inside
+	//     [Controller] becomes `Controller.Transforms.foo`; the lookup misses and the default wins.
+	//     (2026-08-04: seven controller keys, incl. one being actively toggled for an experiment,
+	//     had NEVER been read. A whole lap was run and analysed before the flag was found inert.)
+	//   • TYPE MISMATCH — the key is there and readable, but as the wrong variant arm, so `get`
+	//     throws. (2026-08-03: `VelocityOutputPeriodMs = 25` is an int; read as double it threw and
+	//     the agent silently ran the 50 ms default.)
+	// Both are now reported. A key that is simply ABSENT stays quiet — that is the supported way to
+	// say "use the default", and warning on it would bury the two real faults in noise.
+	void report_config_miss(const std::string& key, const char* what) const
+	{
+		if (configLoader.exists(key))
+		{
+			std::cerr << "[config] ★ key '" << key << "' EXISTS but could not be read as the requested "
+			          << "type — the built-in default is in force. " << what << '\n';
+			return;
+		}
+		for (const auto candidate : configLoader.getKeys())
+		{
+			const std::string full{candidate};
+			if (full.size() > key.size() + 1 and full.compare(full.size() - key.size(), key.size(), key) == 0
+			    and full[full.size() - key.size() - 1] == '.')
+			{
+				std::cerr << "[config] ★ key '" << key << "' NOT FOUND, but the file defines '" << full
+				          << "' — a dotted key written below a [Section] header is namespaced under it. "
+				          << "The built-in default is in force; move it above the first [Section] or give "
+				          << "it its own header.\n";
+				return;
+			}
+		}
+		// Absent and unshadowed: deliberate default, nothing to report.
+	}
+
 	template <typename ValueType>
 	void load_optional(const std::string& key, ValueType& value) const
 	{
@@ -75,7 +114,8 @@ protected:
 		{
 			value = configLoader.get<ValueType>(key);
 		}
-		catch (...) {}
+		catch (const std::exception& e) { report_config_miss(key, e.what()); }
+		catch (...) { report_config_miss(key, "(unknown exception)"); }
 	}
 
 	template <typename ConfigType, typename ValueType>
@@ -85,7 +125,8 @@ protected:
 		{
 			value = static_cast<ValueType>(configLoader.get<ConfigType>(key));
 		}
-		catch (...) {}
+		catch (const std::exception& e) { report_config_miss(key, e.what()); }
+		catch (...) { report_config_miss(key, "(unknown exception)"); }
 	}
 
 	//DSR params

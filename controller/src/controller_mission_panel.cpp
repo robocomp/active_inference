@@ -59,20 +59,25 @@ MissionPanel::MissionPanel(QWidget *parent, Callbacks callbacks)
     // rather than in a config file because its effect is a JUDGEMENT — how much lap time a metre of
     // clearance is worth — and that is the operator's call, made while watching the robot.
     // ★It applies to the NEXT route build or repair; it does not reshape the curve under the robot.
-    row->addWidget(new QLabel("Route:", frame));
+    // ★The end labels follow the VALUE, not the reading order of the phrase: safety_bias 0 is
+    // "faster, closer" and 1 is "safer" (RouteOptimizerConfig::safety_bias), so Risk sits at the left
+    // end and Safe at the right. Swapping the two words without also inverting the mapping would
+    // mislabel a clearance control, which is the one kind of label worth being pedantic about.
+    row->addWidget(new QLabel("Risk", frame));
     safety_ = new QSlider(Qt::Horizontal, frame);
     safety_->setRange(0, 100);
     safety_->setValue(50);
     safety_->setFixedWidth(90);
     safety_->setToolTip(
-        QStringLiteral("Route optimiser: speed <-> safety.\n"
-                       "Left  — curvature dominates: wider, smoother corners, hugging obstacles to get\n"
-                       "        them, and a higher speed allowed through v = sqrt(a_lat/kappa).\n"
-                       "Right — clearance dominates: the route climbs onto the medial axis and accepts\n"
-                       "        winding to stay there.\n"
+        QStringLiteral("Route optimiser: Risk <-> Safe.\n"
+                       "Risk (left)  — curvature dominates: wider, smoother corners, hugging obstacles\n"
+                       "               to get them, and a higher speed allowed through v = sqrt(a_lat/kappa).\n"
+                       "Safe (right) — clearance dominates: the route climbs onto the medial axis and\n"
+                       "               accepts winding to stay there.\n"
                        "Measured on the 30-waypoint tour, the full sweep buys +32% p05 clearance for\n"
                        "+4.4% lap time. Applies to the NEXT route build or repair."));
     row->addWidget(safety_);
+    row->addWidget(new QLabel("Safe", frame));
     safety_label_ = new QLabel("0.50", frame);
     safety_label_->setFixedWidth(30);
     row->addWidget(safety_label_);

@@ -1626,11 +1626,213 @@ ControllerPolygon ControllerObstacleTracker::make_obstacle_polygon(const Eigen::
     return polygon;
 }
 
+// Is there a room←robot pose NEWER than the scan we are about to register?
+//
+// This is the question `RTdelta_m` in the overlay CSV could never answer. That probe compares the
+// pose the tree returns at "now" with the one at the scan stamp, and reports 0 both when the ring
+// is bracketing perfectly (the newest block IS the scan's block) and when it has nothing newer to
+// offer and clamps — opposite situations with the same reading. The RT ring is only
+// RT_API::HISTORY_SIZE (5) blocks deep and never extrapolates, so the sign of this lead is what
+// decides which case you are in:
+//   lead > 0  the pose feed is ahead of the scan; InterpolatedRT can bracket it → registration exact.
+//   lead ≈ 0  the newest block IS this scan's pose; correct, but nothing to interpolate against.
+//   lead < 0  the pose feed is BEHIND the scan; every query clamps to a stale block and the whole
+//             cloud is registered with a pose |lead| ms too old → a bulk ω·|lead| rotation error
+//             that grows with turn rate and vanishes at rest.
+// Reads the ring directly rather than inferring it from returned poses. Diagnostic only.
+void ControllerObstacleTracker::update_rt_block_lead(std::uint64_t scan_ts)
+{
+    rt_block_lead_ms_.reset();
+    if (!graph_ || !graph_state_ || !graph_state_->ready() || scan_ts == 0)
+        return;
+
+    // room_concept writes the edge parent→child, and which of the two is the parent depends on
+    // whether the room is anchored to the robot or the other way round — so try both directions.
+    auto edge = graph_->get_edge(graph_state_->room_id, graph_state_->robot_id, "RT");
+    if (!edge.has_value())
+        edge = graph_->get_edge(graph_state_->robot_id, graph_state_->room_id, "RT");
+    if (!edge.has_value())
+        return;
+
+    const auto stamps = graph_->get_attrib_by_name<rt_timestamps_att>(edge.value());
+    if (!stamps.has_value())
+        return;
+    const std::vector<std::uint64_t> &ring = stamps->get();
+    std::uint64_t newest = 0, oldest = std::numeric_limits<std::uint64_t>::max();
+    for (const auto ts : ring)          // min/max over the ring, so head-index semantics don't matter
+    {
+        if (ts == 0) continue;          // unused slot
+        newest = std::max(newest, ts);
+        oldest = std::min(oldest, ts);
+    }
+    if (newest == 0)
+        return;                          // untimestamped edge: InterpolatedRT is a no-op entirely
+
+    rt_block_newest_ts_ = newest;
+    rt_block_oldest_ts_ = oldest;
+    rt_block_lead_ms_ = static_cast<std::int64_t>(newest) - static_cast<std::int64_t>(scan_ts);
+
+    // The body twist room_concept publishes on this same edge, written there expressly so consumers
+    // reconstruct motion between blocks instead of differentiating pose. [adv(+x fwd), side(+y), _]
+    // and [_, _, rot] in the ROBOT frame — the writer does not invert them when the edge runs
+    // robot→room, so they are the robot's own twist in either direction.
+    rt_twist_valid_ = false;
+    const auto lin = graph_->get_attrib_by_name<rt_translation_velocity_att>(edge.value());
+    const auto ang = graph_->get_attrib_by_name<rt_rotation_euler_xyz_velocity_att>(edge.value());
+    if (lin.has_value() and ang.has_value() and lin->get().size() >= 2 and ang->get().size() >= 3)
+    {
+        rt_twist_adv_  = lin->get()[0];
+        rt_twist_side_ = lin->get()[1];
+        rt_twist_rot_  = ang->get()[2];
+        rt_twist_valid_ = std::isfinite(rt_twist_adv_) and std::isfinite(rt_twist_side_)
+                          and std::isfinite(rt_twist_rot_);
+    }
+}
+
+// Bring a room←robot pose that the RT tree could only CLAMP onto the instant the scan was actually
+// taken, by walking the robot along its own published twist.
+//
+// The identity is exact and direction-free:
+//     room←robot(t_scan) = room←robot(t_block) · robot(t_block)←robot(t_scan)
+//                                                └─ Exp(ξ·Δt), Δt = t_scan − t_block ─┘
+// so "extrapolate the pose forward" and "move the cloud back onto the pose" are the same single
+// matrix compose — this does it on the pose side, once per plane, instead of per point.
+//
+// Applied ONLY when the query fell outside the ring and the returned pose is therefore a clamped
+// end block: that is the case the RT API gets wrong and the one we can detect (inside the ring its
+// own interpolation is already exact and is left alone). Δt of either sign works — beyond the
+// leading edge it walks forward, before the trailing edge it walks back.
+//
+// NO horizon cap, deliberately. Skipping the correction is not the neutral choice it looks like: it
+// is the same extrapolation with the velocity assumed to be ZERO, which is strictly worse than
+// integrating a twist that was actually measured. A stale pose feed is already handled where it
+// belongs — as growing covariance in the speed throttle, and by the LiDAR stall hold.
+Eigen::Matrix4d ControllerObstacleTracker::twist_corrected(const Eigen::Matrix4d &room_T_robot,
+                                                           std::uint64_t target_ts,
+                                                           std::int64_t *applied_dt_ms) const
+{
+    if (applied_dt_ms) *applied_dt_ms = 0;
+    if (!params_ || !params_->rt_twist_compensation || !rt_twist_valid_
+        || !rt_block_newest_ts_.has_value() || !rt_block_oldest_ts_.has_value() || target_ts == 0)
+        return room_T_robot;
+
+    // Inside the ring the RT API interpolated properly — nothing to repair.
+    std::int64_t dt_ms = 0;
+    if (target_ts > *rt_block_newest_ts_)
+        dt_ms = static_cast<std::int64_t>(target_ts) - static_cast<std::int64_t>(*rt_block_newest_ts_);
+    else if (target_ts < *rt_block_oldest_ts_)
+        dt_ms = static_cast<std::int64_t>(target_ts) - static_cast<std::int64_t>(*rt_block_oldest_ts_);
+    if (dt_ms == 0)
+        return room_T_robot;
+
+    if (applied_dt_ms) *applied_dt_ms = dt_ms;
+    return room_T_robot * twist_delta(dt_ms);   // right-multiply: delta is in the robot frame at t_block
+}
+
+// Exp(ξ·Δt) for the cached body twist — the robot's own motion over Δt, expressed in the robot frame
+// it started in. Δt may be negative (walk back). Split out of twist_corrected() so the accuracy probe
+// exercises the SAME arithmetic the correction relies on, rather than a re-derivation of it.
+Eigen::Matrix4d ControllerObstacleTracker::twist_delta(std::int64_t dt_ms) const
+{
+    const double dt = static_cast<double>(dt_ms) * 1e-3;
+    const double phi = static_cast<double>(rt_twist_rot_) * dt;       // yaw swept in the interval
+    // ★ AXIS ASSIGNMENT — this robot's frame is +Y FORWARD, +X lateral. The twist ARRAY is ordered
+    // [adv, side, _], so index 0 is the FORWARD rate and belongs on the frame's y axis, not its x.
+    // Getting this backwards is not a small error: it rotates the predicted displacement by 90°, so
+    // the prediction lands √2·|motion| away from the truth — WORSE than assuming the robot never
+    // moved. Measured 2026-08-04 against 421 logged forward-driving cycles, predicting the next pose
+    // from the true body twist: adv→x gives p50 25.86 mm, adv→y gives p50 0.07 mm.
+    // (The frame is stated by the safety gate's own integrator, `x += adv*sin(th); y += adv*cos(th)`,
+    // and by the carrot bearing being atan2(x, y) rather than atan2(y, x).)
+    const double vx = static_cast<double>(rt_twist_side_) * dt;
+    const double vy = static_cast<double>(rt_twist_adv_) * dt;
+
+    // SE(2) exponential. The left Jacobian V turns the body velocity into the CHORD of the arc the
+    // robot actually drove; using v·dt straight would cut the corner, and at ω·dt ≈ 0.1 rad that
+    // error is already ~0.2% of the displacement — small, but free to do right.
+    double dx = vx, dy = vy;
+    if (std::abs(phi) > 1e-6)
+    {
+        const double s = std::sin(phi), c = std::cos(phi);
+        dx = ( s * vx - (1.0 - c) * vy) / phi;
+        dy = ((1.0 - c) * vx +  s   * vy) / phi;
+    }
+
+    Eigen::Matrix4d delta = Eigen::Matrix4d::Identity();
+    delta(0, 0) =  std::cos(phi); delta(0, 1) = -std::sin(phi);
+    delta(1, 0) =  std::sin(phi); delta(1, 1) =  std::cos(phi);
+    delta(0, 3) = dx;             delta(1, 3) = dy;
+    return delta;
+}
+
+// How much can the twist actually be TRUSTED over one lidar period?
+//
+// This is the number the one-frame buffer decision turns on. Keeping the buffer means registering an
+// exact pose 78 ms late; dropping it means registering a fresh scan whose pose was walked forward by
+// twist_corrected() over ~one period. Which is better is not a matter of opinion — it is whether the
+// twist predicts that interval to better than the ω·Δt error the buffer exists to avoid. Nobody had
+// measured it, in either simulation or the robot, so the flag was being argued from assumption.
+//
+// Method: take two instants one lidar period apart that are BOTH strictly inside the RT ring, so both
+// poses are genuine interpolations rather than clamped end blocks. Predict the later from the earlier
+// with the same Exp(ξ·Δt) the correction uses, and compare against what the tree reports. The residual
+// is exactly the error dropping the buffer would introduce.
+//
+// Standing still it is trivially ~0, so read it filtered by motion — that is an analysis choice, not
+// a gate here: this logs what it measures and never suppresses a sample.
+void ControllerObstacleTracker::update_twist_prediction_error(std::uint64_t scan_ts)
+{
+    twist_pred_err_m_.reset();
+    twist_pred_err_deg_.reset();
+    twist_pred_dt_ms_ = 0;
+    if (!params_ || !inner_eigen_api_ || !graph_state_ || !rt_twist_valid_
+        || !rt_block_newest_ts_.has_value() || !rt_block_oldest_ts_.has_value())
+        return;
+
+    const std::int64_t dt_ms = static_cast<std::int64_t>(lidar_period_ms_);
+    if (dt_ms <= 0)
+        return;
+    // Anchor at the scan when the ring reaches it, else at the newest block; both ends must sit
+    // inside the ring or we would be comparing against a clamp and measuring nothing.
+    const std::uint64_t t_late = std::min<std::uint64_t>(scan_ts, *rt_block_newest_ts_);
+    if (t_late < *rt_block_oldest_ts_ + static_cast<std::uint64_t>(dt_ms))
+        return;
+    const std::uint64_t t_early = t_late - static_cast<std::uint64_t>(dt_ms);
+
+    const auto interp = params_->interpolate_rt ? DSR::RT_API::TimeQuery::Interpolated
+                                                : DSR::RT_API::TimeQuery::Nearest;
+    const auto early = inner_eigen_api_->get_transformation_matrix(graph_state_->room_name,
+                                                                   graph_state_->robot_name,
+                                                                   t_early, "RT", interp);
+    const auto late  = inner_eigen_api_->get_transformation_matrix(graph_state_->room_name,
+                                                                   graph_state_->robot_name,
+                                                                   t_late, "RT", interp);
+    if (!early.has_value() || !late.has_value())
+        return;
+
+    const Eigen::Matrix4d predicted = early->matrix() * twist_delta(dt_ms);
+    const Eigen::Matrix4d actual    = late->matrix();
+
+    const double dx = predicted(0, 3) - actual(0, 3);
+    const double dy = predicted(1, 3) - actual(1, 3);
+    const double yaw_pred = std::atan2(predicted(1, 0), predicted(0, 0));
+    const double yaw_act  = std::atan2(actual(1, 0), actual(0, 0));
+    double dyaw = yaw_pred - yaw_act;
+    while (dyaw >  M_PI) dyaw -= 2.0 * M_PI;          // shortest signed angle
+    while (dyaw < -M_PI) dyaw += 2.0 * M_PI;
+
+    twist_pred_dt_ms_ = dt_ms;
+    twist_pred_err_m_ = static_cast<float>(std::hypot(dx, dy));
+    twist_pred_err_deg_ = static_cast<float>(std::abs(dyaw) * 180.0 / M_PI);
+}
+
 bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_node_name,
                                                     std::vector<float> xs,
                                                     std::vector<float> ys,
                                                     std::vector<float> zs,
-                                                    std::uint64_t timestamp_ms)
+                                                    std::uint64_t timestamp_ms,
+                                                    std::vector<std::uint8_t> plane_ids,
+                                                    std::vector<std::int64_t> plane_stamps)
 {
     if (!params_ || !inner_eigen_api_ || !graph_state_ || !graph_state_->ready())
         return false;
@@ -1654,32 +1856,42 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
     }
     newest_raw_lidar_ts_ = timestamp_ms;
 
-    // "Draw one frame old": transform+buffer the PREVIOUS scan, whose room←robot pose room_concept
-    // has now had a full frame to publish → InterpolatedRT brackets it exactly instead of clamping
-    // at the leading edge. The newest scan is held until the next call. Everything keys off the
-    // BUFFERED stamp (last_lidar_timestamp_ms_), so cloud + pose stay consistent — exact, ~1 frame old.
-    std::vector<float> proc_xs, proc_ys, proc_zs;
-    std::uint64_t proc_ts = timestamp_ms;
-    if (params_->overlay_draw_one_frame_old)
+    // ── ONE-FRAME HOLD (not optional; was Transforms.overlay_draw_one_frame_old until 2026-08-04) ──
+    // Register the PREVIOUS scan, not the newest one. Two things come of the delay, and only the first
+    // is obvious:
+    //  1. REGISTRATION. room_concept has had a full frame to publish that scan's room←robot pose, so
+    //     InterpolatedRT brackets it exactly instead of clamping at the leading edge.
+    //  2. SMOOTHING. A one-frame-old cloud is also a temporally smoothed one, and the safety gate
+    //     downstream is exquisitely sensitive to transient returns.
+    // ★A/B'd and SETTLED, do not re-litigate without reading this. twist_corrected() made (1)
+    // unnecessary — it reproduces the pose at the scan instant to 0.22 cm p50, against the 2.8 cm of
+    // obstacle lag the wait costs — so the hold was removed to reclaim ~48 ms of reaction latency.
+    // Measured with it off (gap_ms 78 → 30 ms, so the change demonstrably took): cross-track and
+    // clearance UNCHANGED exactly as predicted, but safety_guard_cycles 124 vs a 16-61 baseline (2x the
+    // worst lap), lin_jerk_effort 92.6 vs 17.5-55.0, rot_reversals 54 vs 17-28, and the slowest lap of
+    // the nine. The freshest scan puts more transient returns in front of a gate that already fires in
+    // 1-cycle pulses, and it fired three times as often — so the 12x-favourable registration trade was
+    // real and measured the axis that did not matter.
+    // ★To reclaim the latency, fix the GATE (TRACKER_REVIEW.md R2: move the safety cut inside the speed
+    // profile so it stops emitting 1-cycle pulses). Once the gate is continuous, (2) is redundant and
+    // this hold can go. n=1, Webots — but 2x clear of the baseline spread on three consistent metrics.
+    if (!pending_lidar_scan_.has_value())
     {
-        if (!pending_lidar_scan_.has_value())
-        {
-            pending_lidar_scan_ = PendingLidarScan{std::move(xs), std::move(ys), std::move(zs), timestamp_ms};
-            return true;   // first frame: nothing to buffer yet
-        }
-        proc_xs = std::move(pending_lidar_scan_->xs);
-        proc_ys = std::move(pending_lidar_scan_->ys);
-        proc_zs = std::move(pending_lidar_scan_->zs);
-        proc_ts = pending_lidar_scan_->ts;
-        pending_lidar_scan_ = PendingLidarScan{std::move(xs), std::move(ys), std::move(zs), timestamp_ms};
+        pending_lidar_scan_ = PendingLidarScan{std::move(xs), std::move(ys), std::move(zs), timestamp_ms,
+                                              std::move(plane_ids), std::move(plane_stamps)};
+        return true;   // first frame: nothing held back yet
     }
-    else
-    {
-        proc_xs = std::move(xs);
-        proc_ys = std::move(ys);
-        proc_zs = std::move(zs);
-    }
+    std::vector<float> proc_xs = std::move(pending_lidar_scan_->xs);
+    std::vector<float> proc_ys = std::move(pending_lidar_scan_->ys);
+    std::vector<float> proc_zs = std::move(pending_lidar_scan_->zs);
+    const std::uint64_t proc_ts = pending_lidar_scan_->ts;
+    std::vector<std::uint8_t> proc_plane_ids = std::move(pending_lidar_scan_->plane_ids);
+    std::vector<std::int64_t> proc_plane_stamps = std::move(pending_lidar_scan_->plane_stamps);
+    pending_lidar_scan_ = PendingLidarScan{std::move(xs), std::move(ys), std::move(zs), timestamp_ms,
+                                          std::move(plane_ids), std::move(plane_stamps)};
     last_lidar_timestamp_ms_ = proc_ts;
+    update_rt_block_lead(proc_ts);            // caches the ring bounds + twist the two calls below use
+    update_twist_prediction_error(proc_ts);
 
     const auto interp = params_->interpolate_rt ? DSR::RT_API::TimeQuery::Interpolated
                                                 : DSR::RT_API::TimeQuery::Nearest;
@@ -1700,8 +1912,39 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
     if (raw_count == 0)
         return false;
 
-    const auto room_from_lidar_matrix = room_from_lidar->matrix();
+    // Repair the leading-edge clamp before anything is registered: the freshest scan is normally
+    // NEWER than the freshest pose block (the pose is computed FROM a scan, so it can only arrive
+    // after one), which is precisely when InterpolatedRT silently returns the newest block instead.
+    rt_twist_fix_dt_ms_ = 0;
+    const Eigen::Matrix4d room_from_lidar_matrix =
+        twist_corrected(room_from_lidar->matrix(), proc_ts, &rt_twist_fix_dt_ms_);
     const auto robot_from_lidar_matrix = robot_from_lidar->matrix();
+
+    // ── PER-PLANE REGISTRATION ────────────────────────────────────────────────────────────────────
+    // `proc_ts` is the MAX of the merged planes' capture stamps, so registering the whole cloud with
+    // the pose at that one instant misplaces every plane that fired earlier by ω·(proc_ts − its own
+    // stamp) — up to a full LiDAR period between helios and bpearl. Invisible standing still, and
+    // exactly the term that grows with turn rate. So resolve room←lidar once PER PLANE, at that
+    // plane's own stamp. A plane whose query fails, or whose stamp matches proc_ts, falls back to the
+    // single matrix above, which is also what a one-plane sweep and any caller without per-plane
+    // information get — i.e. the previous behaviour, unchanged.
+    std::vector<Eigen::Matrix4d> room_from_plane;
+    if (not proc_plane_stamps.empty() and not proc_plane_ids.empty())
+    {
+        room_from_plane.assign(proc_plane_stamps.size(), room_from_lidar_matrix);
+        for (std::size_t k = 0; k < proc_plane_stamps.size(); ++k)
+        {
+            const std::int64_t stamp = proc_plane_stamps[k];
+            if (stamp <= 0 or static_cast<std::uint64_t>(stamp) == proc_ts)
+                continue;
+            if (const auto plane_T = inner_eigen_api_->get_transformation_matrix(
+                    graph_state_->room_name, lidar_node_name,
+                    static_cast<std::uint64_t>(stamp), "RT", interp);
+                plane_T.has_value())
+                room_from_plane[k] = twist_corrected(plane_T->matrix(),
+                                                     static_cast<std::uint64_t>(stamp));
+        }
+    }
     // NOTE: the RoboComp Lidar3D source already returns points in the robot/base frame (floor ≈ z=0),
     // so the robot→lidar RT edge is deliberately identity; robot_z below is therefore height above the
     // floor. If someone ever moves the lidar node to its true mount height in shadow.json this shortcut
@@ -1750,13 +1993,31 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
             raw_cloud_proximity_.distance_m = best;
     }
 
+    // Flatten each plane's room←lidar into the 12 coefficients the hot loop actually uses, indexed by
+    // plane id. One entry ⇒ every point takes it, which is the single-matrix path this replaced.
+    std::vector<std::array<double, 12>> plane_coeffs;
+    {
+        const auto flatten = [](const Eigen::Matrix4d &m)
+        {
+            return std::array<double, 12>{m(0,0), m(0,1), m(0,2), m(0,3),
+                                          m(1,0), m(1,1), m(1,2), m(1,3),
+                                          m(2,0), m(2,1), m(2,2), m(2,3)};
+        };
+        if (room_from_plane.empty())
+            plane_coeffs.push_back(flatten(room_from_lidar_matrix));
+        else
+            for (const auto &m : room_from_plane)
+                plane_coeffs.push_back(flatten(m));
+    }
+
     lidar_room_buffer_.put<0>(
         rc::RawLidarPointVectors{
             .xs = std::move(proc_xs),
             .ys = std::move(proc_ys),
             .zs = std::move(proc_zs)},
         proc_ts,
-        [room_from_lidar_matrix, robot_from_lidar_matrix, robot_from_lidar_is_identity, raw_count, min_h, max_h](rc::RawLidarPointVectors &&raw_points, rc::LidarPointVectors &room_points)
+        [plane_coeffs = std::move(plane_coeffs), plane_sel = std::move(proc_plane_ids),
+         robot_from_lidar_matrix, robot_from_lidar_is_identity, raw_count, min_h, max_h](rc::RawLidarPointVectors &&raw_points, rc::LidarPointVectors &room_points)
         {
             auto &[room_xs, room_ys, room_zs] = room_points;
             const auto &xs_in = raw_points.xs;
@@ -1766,18 +2027,8 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
             if (count == 0)
                 return;
 
-            const double m00 = room_from_lidar_matrix(0, 0);
-            const double m01 = room_from_lidar_matrix(0, 1);
-            const double m02 = room_from_lidar_matrix(0, 2);
-            const double m03 = room_from_lidar_matrix(0, 3);
-            const double m10 = room_from_lidar_matrix(1, 0);
-            const double m11 = room_from_lidar_matrix(1, 1);
-            const double m12 = room_from_lidar_matrix(1, 2);
-            const double m13 = room_from_lidar_matrix(1, 3);
-            const double m20 = room_from_lidar_matrix(2, 0);
-            const double m21 = room_from_lidar_matrix(2, 1);
-            const double m22 = room_from_lidar_matrix(2, 2);
-            const double m23 = room_from_lidar_matrix(2, 3);
+            const bool per_plane = plane_coeffs.size() > 1 and plane_sel.size() >= count;
+            const auto &m0 = plane_coeffs.front();
             const double r20 = robot_from_lidar_matrix(2, 0);
             const double r21 = robot_from_lidar_matrix(2, 1);
             const double r22 = robot_from_lidar_matrix(2, 2);
@@ -1801,9 +2052,13 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
                 if (robot_z < min_h || robot_z > max_h)
                     continue;
 
-                const float room_x = static_cast<float>(m00 * x + m01 * y + m02 * z + m03);
-                const float room_y = static_cast<float>(m10 * x + m11 * y + m12 * z + m13);
-                const float room_z = static_cast<float>(m20 * x + m21 * y + m22 * z + m23);
+                // Each point is placed with ITS OWN plane's pose (see PER-PLANE REGISTRATION above).
+                const auto &m = per_plane
+                    ? plane_coeffs[std::min<std::size_t>(plane_sel[index], plane_coeffs.size() - 1)]
+                    : m0;
+                const float room_x = static_cast<float>(m[0] * x + m[1] * y + m[2]  * z + m[3]);
+                const float room_y = static_cast<float>(m[4] * x + m[5] * y + m[6]  * z + m[7]);
+                const float room_z = static_cast<float>(m[8] * x + m[9] * y + m[10] * z + m[11]);
 
                 room_xs.push_back(room_x);
                 room_ys.push_back(room_y);
