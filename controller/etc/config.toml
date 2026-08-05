@@ -191,7 +191,41 @@ RouteOptimize = true
 #  band's avoidance replaces the sampler's rather than shadowing it, so this is the real test.
 # ★2026-08-02 set to "pd" for the first stage-2 lap. BandEnabled is true, so avoidance is the band's.
 # Restore "mppi" to get every previous lap's controller back.
-ControlMode = "pd"
+# ★2026-08-05 "pd" -> "route". The route tracker (curvature feedforward + critically damped Frenet
+# feedback + a continuous clearance BOUND) replaces the carrot, Stanley term, bumper, Kd, in-loop EMA,
+# Gaussian brake and the pulsing safety gate. Verified offline only — kappa_avg against an analytic
+# circle, the law in tools/tracker_sim against the identified plant, the signs through the session's
+# own negation, and the bound against the downstream slew limiter. NOTHING HAS DRIVEN A ROBOT.
+# ★FIRST-LAP WATCH LIST, in the order they would bite:
+#   1. Does it turn the right way at all? A sign error shows up in the first corner, not subtly.
+#   2. cross_track_rms — sim says ~75-95 mm on this tour; the PD baseline is 85-130 mm.
+#   3. safety_guard_cycles now means "the clearance bound is limiting us", NOT a trigger count. It
+#      cannot pulse any more, so a high number means a long slow section, not chatter.
+#   4. lin_jerk_effort — this is the number the whole exercise is for. Gate-injected roughness was
+#      79% of it, and that mechanism is gone in this mode.
+#   5. The band is still what does obstacle AVOIDANCE (this tracker follows the route, it does not
+#      dodge), so BandEnabled must stay true — same coherence requirement "pd" had.
+# Revert with ControlMode = "pd"; the PD path is untouched and still the tested one.
+# ── "route" = THE FRENET FEEDFORWARD TRACKER ──
+# The error pair it regulates (cross-track e_y, heading e_psi) is the FRENET frame of the route, and
+# the nominal turn rate is FEEDFORWARD from the route's own curvature — previewed by the identified
+# actuator lag — rather than earned by the feedback loop with a standing tracking error. Those two
+# words are the whole design; everything else follows. It replaces the carrot, the Stanley term, the
+# bumper, the Kd term, the in-loop EMA, the Gaussian brake and the triggered safety gate.
+#
+# ★2026-08-05 FIRST LAP FROZE THE ROBOT, and both causes are fixed:
+#   1. omega = g_dc * v * kappa_cmd made STEERING proportional to speed, so a clearance bound that
+#      drove v to zero took the steering with it — the robot could neither move nor turn, and since it
+#      could not move the geometry never changed. 568 of 1187 cycles frozen, with min_esdf at the robot
+#      a healthy 0.50 m. FIXED by splitting the law: the feedforward keeps the real speed (omega = v*kappa
+#      is a kinematic relation, and at a standstill there is correctly no arc to follow) while the
+#      FEEDBACK gets a 0.15 m/s reference floor, so a stopped robot can still rotate back onto the route.
+#   2. The clearance bound used the CIRCUMSCRIBED body disc (0.325 m) + 0.10 m standoff, demanding
+#      0.425 m of ESDF along the route while this tour's p05 is 0.421 — so it sat at zero on ordinary
+#      sections. FIXED to the DIRECTIONAL support_radius at the heading the robot will hold there.
+# ⚠The offline simulator has NO OBSTACLES, so it cannot exercise the clearance bound at all — this
+# entire class of failure is invisible to it. Extending it with the recorded grid is the next job.
+ControlMode = "route"
 # Cross-track feedback for the PD tracker, in Stanley's form: the steering error becomes
 #   carrot_bearing + atan(gain * cross_track / max(soft, speed))
 # 0 = pure pursuit, which steers at the carrot ONLY and therefore converges to the carrot's DIRECTION
@@ -203,7 +237,17 @@ ControlMode = "pd"
 # oscillation about zero with NEGATIVE autocorrelation at half a period. So 1.0 was at worst too low and
 # could not have been too high. Expect cross_track_rms to fall from ~0.10; if it instead starts
 # oscillating, that autocorrelation goes negative and the tool will say so.
-# ── ROUTE TRACKER (ControlMode = "route") ──
+# ── ROUTE TRACKER (# ★2026-08-05 REVERTED to "pd" after the first lap: the robot froze mid-route, permanently.
+# ROOT CAUSE, and it is structural: omega = g_dc * v * kappa_cmd. When the clearance bound drove
+# v to zero the STEERING went to zero with it, so the robot could neither move nor turn, and since
+# it could not move the geometry never changed — a deadlock with no escape. 568 of 1187 cycles were
+# frozen, the first at cycle 28. The old PD gate's hard-stop branch rotated away precisely to avoid
+# this; the route law has no equivalent because its only steering authority is proportional to speed.
+# Compounding it: d_min used the CIRCUMSCRIBED body radius (0.325 m) plus a 0.10 m standoff, so it
+# demanded 0.425 m of ESDF along the route while this tour's p05 is 0.421 — the bound was at zero on
+# ordinary sections, not tight ones. Do not re-enable until steering is decoupled from the clearance
+# speed AND the body extent is the directional support_radius rather than the circumscribed disc.
+ControlMode = "pd") ──
 # omega = g_dc * v * [ kappa_bar(s + v*T_lag) - (2/L)*e_psi - (1/L^2)*e_y ]
 # Replaces the carrot, Stanley term, bumper, Kd, EMA and Gaussian brake with one law. The curvature
 # term is the ONLY one reading the route, so feedback cannot double-count the nominal turn — the

@@ -24,6 +24,9 @@ namespace rc
 class TrajectoryController
 {
 public:
+    // ROUTE = the FRENET FEEDFORWARD TRACKER. Curvature feedforward previewed by the identified
+    // actuator lag, plus critically-damped feedback on the Frenet error pair (e_y, e_psi), plus a
+    // continuous clearance speed BOUND in place of a triggered gate. See compute_route_tracker.
     enum class ControlMode { MPPI, PD, ROUTE };
 
     struct Params
@@ -301,7 +304,7 @@ public:
         float pd_Kd_rot = 0.3f;         // derivative gain for angular error
         float pd_speed_cos_power = 1.0f; // adv = max_adv * cos^power(angle_err)
 
-        // ── ROUTE TRACKER (ControlMode::ROUTE) ────────────────────────────────────────────────
+        // ── FRENET FEEDFORWARD TRACKER (ControlMode::ROUTE) ───────────────────────────────────
         // omega = g_dc * v * [ kappa_bar(s + v*T_lag) - (2/L)*e_psi - (1/L^2)*e_y ]
         //
         // The curvature term is the ONLY one that reads the route, so feedback sees a zero-mean
@@ -844,7 +847,8 @@ private:
     float obstacle_repulsion_strength(float esdf_val, float d_safe_eff, float body_r) const;
 
     // PD carrot-follower (alternative to MPPI)
-    // ControlMode::ROUTE. Needs no carrot, no EMA, no derivative, no clock and no velocity feedback —
+    // THE FRENET FEEDFORWARD TRACKER (ControlMode::ROUTE).
+    // Needs no carrot, no EMA, no derivative, no clock and no velocity feedback —
     // the only state it keeps is route_s_hint_.
     ControlOutput compute_route_tracker(ControlOutput& out, const Eigen::Affine2f& robot_pose);
 

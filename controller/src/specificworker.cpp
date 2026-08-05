@@ -888,13 +888,13 @@ void SpecificWorker::load_params()
 		// would otherwise produce a confident "mode = MPPI" and a mislabelled lap.
 		if (not pd and not route and mode != "mppi")
 			std::println("[control] ⚠ unrecognised Controller.ControlMode '{}' — falling back to MPPI. "
-			             "Valid: mppi | pd (aliases: pursuit, tracker) | route.", mode);
+			             "Valid: mppi | pd (aliases: pursuit, tracker) | route (the Frenet Feedforward Tracker).", mode);
 		path_controller_.set_control_mode(route ? rc::TrajectoryController::ControlMode::ROUTE
 		                                 : pd    ? rc::TrajectoryController::ControlMode::PD
 		                                         : rc::TrajectoryController::ControlMode::MPPI);
 		session_.set_route_tracker(route, path_controller_.params.route_rot_headroom);
 		if (route)
-			std::println("[control] mode = ROUTE tracker (curvature feedforward + Frenet feedback)"
+			std::println("[control] mode = FRENET FEEDFORWARD TRACKER (route curvature FF + Frenet feedback)"
 			             "   (L={:.2f} m, T_lag={:.2f} s, g_dc={:.3f}, rot headroom={:.2f})",
 			             path_controller_.params.route_L, path_controller_.params.route_T_lag,
 			             path_controller_.params.route_g_dc, path_controller_.params.route_rot_headroom);

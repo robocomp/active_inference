@@ -1517,8 +1517,17 @@ static constexpr float kRouteClearScanM = 1.0f;
 // Comfort standoff BEYOND the body's own extent at which the bound reaches zero speed. The footprint
 // is the hard limit; this is the only chosen number in the speed law.
 static constexpr float kRouteStandoffM = 0.10f;
+// Reference speed at which the FEEDBACK's rotation authority is evaluated when the robot is stopped or
+// crawling, so that authority never reaches zero (see the deadlock note in compute_route_tracker).
+// ★NOT min_adv_cmd: the agent forces that to 0 at specificworker.cpp:842 so the robot can come to a
+// genuine halt, which would have made the floor a no-op and left the deadlock exactly as it was.
+// 0.15 m/s is route_speed_limit's own numerical floor, reused so there is one such number, not two.
+static constexpr float kRouteSteerFloorMps = 0.15f;
 
-// ── ROUTE TRACKER ────────────────────────────────────────────────────────────────────────────────
+// ── THE FRENET FEEDFORWARD TRACKER ───────────────────────────────────────────────────────────────
+// Named so it can be talked about: the error pair (e_y, e_psi) is the FRENET frame of the route,
+// and the nominal turn is FEEDFORWARD from the route's own curvature rather than earned by the
+// feedback loop with a tracking error. Everything else follows from those two words.
 // omega = g_dc * v * [ kappa_bar(s + v*T_lag) - (2/L)*e_psi - (1/L^2)*e_y ]
 //
 // See Params::route_L for where each number comes from. Three things are worth stating because each
@@ -1579,7 +1588,14 @@ TrajectoryController::ControlOutput TrajectoryController::compute_route_tracker(
     for (float ds = 0.f; ds <= kRouteClearScanM; ds += 0.10f)
     {
         const Eigen::Vector2f q = room_to_robot(sp.position_at(s + ds), robot_pose);
-        d_min = std::min(d_min, query_esdf(q.x(), q.y()) - body_extent_max());
+        // DIRECTIONAL body extent at the heading the robot will hold there, not the circumscribed
+        // disc. ★2026-08-05: the disc (0.325 m) plus the 0.10 m standoff demanded 0.425 m of ESDF
+        // along the route while this tour's p05 is 0.421, so the bound sat at ZERO on ordinary
+        // sections and froze the robot. The disc overestimates the body by ~0.1 m — the whole standoff
+        // budget — and "conservative" is not free when it makes a passable route impassable.
+        // Heading convention: body angles are clockwise from +Y, room angles CCW, hence the negation.
+        const float dpsi = wrap_pi(sp.heading_at(s + ds) - theta_fwd);
+        d_min = std::min(d_min, query_esdf(q.x(), q.y()) - body_extent_toward_obstacle(q.x(), q.y(), -dpsi));
     }
     const float v_clear = std::sqrt(2.f * a_dec * std::max(0.f, d_min - kRouteStandoffM));
 
@@ -1594,9 +1610,24 @@ TrajectoryController::ControlOutput TrajectoryController::compute_route_tracker(
     // one and only lookahead in the law; a forward-windowed estimator would silently add a second.
     const float k_ff = sp.kappa_avg(s + v_cmd * active_params_.route_T_lag, active_params_.route_W);
     const float L = std::max(0.05f, active_params_.route_L);
-    const float k_cmd = k_ff - (2.f / L) * e_psi - (1.f / (L * L)) * e_y;
-    const float omega_ccw = std::clamp(active_params_.route_g_dc * v_cmd * k_cmd,
-                                       -active_params_.max_rot, active_params_.max_rot);
+
+    // ── STEERING AUTHORITY MUST NOT VANISH WITH SPEED ───────────────────────────────────────────
+    // ★2026-08-05, found on the first lap: with omega = g_dc * v * kappa_cmd, a clearance bound that
+    // drives v to zero takes the STEERING to zero with it. The robot then can neither move nor turn,
+    // and because it cannot move the geometry never changes — a permanent deadlock. 568 of 1187
+    // cycles frozen, with min_esdf at the robot a perfectly healthy 0.50 m.
+    // The split is not a patch, it is the correct kinematics:
+    //   FEEDFORWARD is the relation omega = v*kappa — to follow an arc of curvature kappa AT SPEED v
+    //     you need exactly that rate, so it MUST use the real commanded speed. At a standstill there
+    //     is no arc to follow and this term is correctly zero.
+    //   FEEDBACK corrects a heading/position error, which is worth doing whether or not the robot is
+    //     advancing — a stopped robot aligning itself with the route is exactly the escape the old
+    //     gate's hard-stop branch performed by hand. So it gets a floored reference speed.
+    const float v_steer = std::max(v_cmd, kRouteSteerFloorMps);
+    const float omega_ccw = std::clamp(
+        active_params_.route_g_dc * (v_cmd * k_ff
+                                     + v_steer * (-(2.f / L) * e_psi - (1.f / (L * L)) * e_y)),
+        -active_params_.max_rot, active_params_.max_rot);
 
     out.adv = v_cmd;
     out.side = 0.f;
