@@ -853,6 +853,11 @@ void SpecificWorker::load_params()
 	// the band-plus-tracker architecture, separately they are half of one.
 	// Cross-track feedback for the PD tracker. Without it the tracker is pure pursuit and cuts corners:
 	// it converges to the carrot's direction, not to the route the band just optimised.
+	load_optional_cast<double>("Controller.RouteTrackerL", path_controller_.params.route_L);
+	load_optional_cast<double>("Controller.RouteTrackerTLag", path_controller_.params.route_T_lag);
+	load_optional_cast<double>("Controller.RouteTrackerGdc", path_controller_.params.route_g_dc);
+	load_optional_cast<double>("Controller.RouteTrackerW", path_controller_.params.route_W);
+	load_optional_cast<double>("Controller.RouteTrackerRotHeadroom", path_controller_.params.route_rot_headroom);
 	load_optional_cast<double>("Controller.PdCrossTrackGain", path_controller_.params.pd_cross_track_gain);
 	load_optional_cast<double>("Controller.PdCrossTrackSoft", path_controller_.params.pd_cross_track_soft_mps);
 	// Lateral bumper — the reactive half. The A* clearance preference and the band keep the ROUTE off
@@ -876,15 +881,23 @@ void SpecificWorker::load_params()
 		std::string mode = "mppi";
 		load_optional("Controller.ControlMode", mode);
 		std::ranges::transform(mode, mode.begin(), [](unsigned char c) { return std::tolower(c); });
+		const bool route = (mode == "route");
 		const bool pd = (mode == "pd" or mode == "pursuit" or mode == "tracker");
 		// WARN on an unrecognised value rather than silently falling back. This switch's entire purpose
 		// is that one printed line settles which arm ran; a typo ("mpi", "PD-tracker", a trailing space)
 		// would otherwise produce a confident "mode = MPPI" and a mislabelled lap.
-		if (not pd and mode != "mppi")
+		if (not pd and not route and mode != "mppi")
 			std::println("[control] ⚠ unrecognised Controller.ControlMode '{}' — falling back to MPPI. "
-			             "Valid: mppi | pd (aliases: pursuit, tracker).", mode);
-		path_controller_.set_control_mode(pd ? rc::TrajectoryController::ControlMode::PD
-		                                     : rc::TrajectoryController::ControlMode::MPPI);
+			             "Valid: mppi | pd (aliases: pursuit, tracker) | route.", mode);
+		path_controller_.set_control_mode(route ? rc::TrajectoryController::ControlMode::ROUTE
+		                                 : pd    ? rc::TrajectoryController::ControlMode::PD
+		                                         : rc::TrajectoryController::ControlMode::MPPI);
+		session_.set_route_tracker(route, path_controller_.params.route_rot_headroom);
+		if (route)
+			std::println("[control] mode = ROUTE tracker (curvature feedforward + Frenet feedback)"
+			             "   (L={:.2f} m, T_lag={:.2f} s, g_dc={:.3f}, rot headroom={:.2f})",
+			             path_controller_.params.route_L, path_controller_.params.route_T_lag,
+			             path_controller_.params.route_g_dc, path_controller_.params.route_rot_headroom);
 		if (pd and not params.band_enabled)
 			std::println("[control] ⚠ ControlMode=pd with BandEnabled=false: NOTHING is doing obstacle "
 			             "avoidance except the safety gate. This is not the stage-2 architecture.");

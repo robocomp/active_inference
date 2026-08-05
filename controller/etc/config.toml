@@ -203,6 +203,22 @@ ControlMode = "pd"
 # oscillation about zero with NEGATIVE autocorrelation at half a period. So 1.0 was at worst too low and
 # could not have been too high. Expect cross_track_rms to fall from ~0.10; if it instead starts
 # oscillating, that autocorrelation goes negative and the tool will say so.
+# ── ROUTE TRACKER (ControlMode = "route") ──
+# omega = g_dc * v * [ kappa_bar(s + v*T_lag) - (2/L)*e_psi - (1/L^2)*e_y ]
+# Replaces the carrot, Stanley term, bumper, Kd, EMA and Gaussian brake with one law. The curvature
+# term is the ONLY one reading the route, so feedback cannot double-count the nominal turn — the
+# failure mode that killed the 2026-08-04 attempt to ADD a feedforward to pure pursuit.
+# T_lag and g_dc are the ROBOT (identified from logged cmd_rot/meas_rot, r^2 0.94-0.95): re-identify
+# them per mission to close a sim2real gap. L is the CONTROLLER and is deliberately NOT adapted —
+# measured in tools/tracker_sim to be the same 0.60 on the identified plant AND on a deliberately
+# different one (tau 0.35, delay 0.30, gain 0.75), where the margin rule's prescription of 1.37 was
+# 3.8x worse. RotHeadroom is the fraction of omega_max the feedforward may claim; without it the
+# feedforward saturates the clamp and the feedback loop is open on curves (rms 154 -> 94 mm at 0.70).
+RouteTrackerL = 0.60
+RouteTrackerTLag = 0.42
+RouteTrackerGdc = 1.124
+RouteTrackerW = 0.40
+RouteTrackerRotHeadroom = 0.70
 PdCrossTrackGain = 1.4
 PdCrossTrackSoft = 0.30
 # ── LATERAL BUMPER (PD mode only) ──

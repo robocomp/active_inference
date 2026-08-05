@@ -10,6 +10,8 @@
 
 #include "lidar_buffer_types.h"
 
+namespace rc { class RouteSpline; }   // set_route: non-owning, the session's RouteFollower owns it
+
 namespace rc
 {
 /**
@@ -22,7 +24,7 @@ namespace rc
 class TrajectoryController
 {
 public:
-    enum class ControlMode { MPPI, PD };
+    enum class ControlMode { MPPI, PD, ROUTE };
 
     struct Params
     {
@@ -298,6 +300,32 @@ public:
         float pd_Kp_rot = 2.0f;         // proportional gain for angular error
         float pd_Kd_rot = 0.3f;         // derivative gain for angular error
         float pd_speed_cos_power = 1.0f; // adv = max_adv * cos^power(angle_err)
+
+        // ── ROUTE TRACKER (ControlMode::ROUTE) ────────────────────────────────────────────────
+        // omega = g_dc * v * [ kappa_bar(s + v*T_lag) - (2/L)*e_psi - (1/L^2)*e_y ]
+        //
+        // The curvature term is the ONLY one that reads the route, so feedback sees a zero-mean
+        // residual and cannot double-count the nominal turn — the failure that killed the 2026-08-04
+        // attempt to ADD a feedforward to pure pursuit (Kp*carrot_angle already IS one).
+        // Feedback is critically damped in the ARC-LENGTH domain: e_y'' + (2/L)e_y' + (1/L^2)e_y = 0,
+        // so an error decays over L metres at any speed and the time-domain bandwidth v/L falls as the
+        // robot slows — always on the safe side of the 0.36 Hz lag ceiling.
+        float route_T_lag = 0.42f;    // EXACT: identified tau 0.213-0.236 + delay 0.20, r^2 0.94-0.95
+        float route_g_dc  = 1.124f;   // EXACT: 1 / 0.89 identified DC gain
+        float route_W     = 0.40f;    // EXACT: the route's own smoothing scale (kappa_avg window)
+        // ★MEASURED IN tools/tracker_sim, NOT DERIVED. The margin rule L >= 3*T_lag*v_max said 1.0 and
+        // predicted that a laggier robot would need MORE. Both halves were wrong: on the identified
+        // plant L=0.60 beats 1.0/1.5/2.0, and on a slow plant (tau 0.35, delay 0.30, gain 0.75) the
+        // rule's own prescription of 1.37 gave 380 mm rms against 100 mm at 0.60. The rule's LOWER
+        // bound survives — the sweep does degrade below ~0.45 m — so 0.60 sits just above it.
+        // ★L is a constant of the CONTROLLER, not of the robot: it is deliberately NOT adapted.
+        float route_L = 0.60f;
+        // ★THE TERM THE DESIGN FORGOT. The curvature speed limit permits v = omega_max/kappa, which
+        // hands the FEEDFORWARD the entire rotation budget — and g_dc pushes it past the clamp — so on
+        // every curve the command saturates and the feedback loop is effectively open. Measured in
+        // tracker_sim: reserving headroom moves rms 154 -> 94 -> 75 mm at 1.00 -> 0.70 -> 0.55, and
+        // corr(e,kappa) from -0.160 (riding OUTSIDE the curve) to ~0. Costs speed: TV(v)/m 0.72 -> 1.13.
+        float route_rot_headroom = 0.70f;
         // Cross-track feedback for the PD tracker (Stanley's second term). 0 disables it, which is pure
         // pursuit and cuts corners — see compute_pd. Units: the gain is 1/s (it divides a metre by a
         // speed), the softening constant is m/s and only sets how the term behaves near a standstill.
@@ -533,6 +561,11 @@ public:
     // Seed the carrot's forward-only anchor when a path is (re)installed mid-route — after a repair the
     // robot is somewhere in the middle, and starting the search from segment 0 would aim it back at the
     // route's beginning. set_path resets this to 0, which is correct for a path that starts at the robot.
+    // The curve the ROUTE tracker follows. Non-owning: the session's RouteFollower owns it, and the
+    // elastic band deforms it in place on this same thread just before compute — so the pointer stays
+    // valid and the tracker automatically reads the deformed curve. nullptr = fall back to PD.
+    void set_route(const RouteSpline *spline) { route_spline_ = spline; }
+
     void set_carrot_hint(int segment_index) { carrot_seg_hint_ = std::max(0, segment_index); }
 
     ControlOutput compute(const Eigen::Affine2f& robot_pose);
@@ -637,6 +670,8 @@ private:
     int wp_index_ = 0;
     std::optional<float> goal_facing_yaw_;
     std::optional<float> speed_limit_;   // see set_speed_limit
+    const RouteSpline *route_spline_ = nullptr;   // see set_route
+    float route_s_hint_ = 0.f;                    // monotone arc-length projection; reset with the path
     int carrot_seg_hint_ = 0;            // forward-only anchor for compute_carrot; see the comment there
     std::optional<Eigen::Vector2f> arrival_point_room_;
     std::optional<Eigen::Vector2f> arrival_outgoing_room_;  // desired room-frame facing dir after arrival
@@ -809,6 +844,10 @@ private:
     float obstacle_repulsion_strength(float esdf_val, float d_safe_eff, float body_r) const;
 
     // PD carrot-follower (alternative to MPPI)
+    // ControlMode::ROUTE. Needs no carrot, no EMA, no derivative, no clock and no velocity feedback —
+    // the only state it keeps is route_s_hint_.
+    ControlOutput compute_route_tracker(ControlOutput& out, const Eigen::Affine2f& robot_pose);
+
     ControlOutput compute_pd(ControlOutput& out,
                              const Eigen::Vector2f& carrot_robot,
                              const std::vector<Eigen::Vector3f>& lidar_points,

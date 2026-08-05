@@ -1,4 +1,5 @@
 #include "trajectory_controller.h"
+#include "route_spline.h"
 #include <array>
 #include <cmath>
 #include <algorithm>
@@ -768,7 +769,12 @@ TrajectoryController::ControlOutput TrajectoryController::compute(
     out.carrot_dist_m = carrot_robot.norm();
 
     // ---- PD carrot-follower mode: simple proportional-derivative controller ----
-    if (control_mode_ == ControlMode::PD)
+    if (control_mode_ == ControlMode::ROUTE and route_spline_ != nullptr and route_spline_->valid())
+    {
+        detect_path_blockage(out, robot_pose);
+        return compute_route_tracker(out, robot_pose);
+    }
+    if (control_mode_ == ControlMode::PD or control_mode_ == ControlMode::ROUTE)
     {
         // Blockage detection BEFORE the early return, or the planner can never be triggered in this
         // mode — it is the ONLY thing that notices the route has become undrivable once the sampler is
@@ -1502,6 +1508,71 @@ void TrajectoryController::detect_path_blockage(ControlOutput &out, const Eigen:
     }
 
 
+}
+
+// ── ROUTE TRACKER ────────────────────────────────────────────────────────────────────────────────
+// omega = g_dc * v * [ kappa_bar(s + v*T_lag) - (2/L)*e_psi - (1/L^2)*e_y ]
+//
+// See Params::route_L for where each number comes from. Three things are worth stating because each
+// is a trap the previous tracker fell into:
+//
+//  1. THE CURVATURE TERM IS THE ONLY THING THAT READS THE ROUTE'S SHAPE. Feedback sees a zero-mean
+//     residual and nothing else, so it cannot double-count the nominal turn. Adding a v*kappa term to
+//     pure pursuit failed on 2026-08-04 precisely because Kp*carrot_angle already WAS one.
+//  2. NO CLOCK, NO dt, NO FILTER, NO DERIVATIVE, NO INTEGRATOR. The gains are per METRE, so no dt is
+//     needed; the actuator (tau 0.22 s) and the downstream 50 ms slew limiter are the only smoothing,
+//     and another filter here would cost phase margin the loop does not have. The single piece of
+//     retained state is route_s_hint_, so the "prev_angle_err_ is never reset" bug cannot recur here.
+//  3. FRAME. Everything below is ROOM frame, math convention (CCW, x = cos). The body frame is
+//     +Y forward / +X right, so the forward axis is theta_pose + pi/2, and the session negates rot on
+//     the way out. Both conversions happen once, at the two marked lines.
+TrajectoryController::ControlOutput TrajectoryController::compute_route_tracker(
+    ControlOutput& out,
+    const Eigen::Affine2f& robot_pose)
+{
+    const RouteSpline &sp = *route_spline_;
+    const Eigen::Vector2f p{robot_pose.translation().x(), robot_pose.translation().y()};
+    const float theta_pose = std::atan2(robot_pose.linear()(1, 0), robot_pose.linear()(0, 0));
+    const float theta_fwd = wrap_pi(theta_pose + static_cast<float>(M_PI_2));   // FRAME conversion (1/2)
+
+    // Monotone-forward projection, the same protection compute_carrot uses: this tour crosses itself,
+    // and a global nearest-point search would snap onto a branch driven ten metres ago.
+    route_s_hint_ = sp.project(p, route_s_hint_, 2.0f);
+    const float s = route_s_hint_;
+
+    const Eigen::Vector2f r = sp.position_at(s);
+    const float psi = sp.heading_at(s);
+    // Cross-track, LEFT POSITIVE — the session's convention, deliberately NOT compute_pd's opposite
+    // one. Two disagreeing sign conventions for the same quantity is why this is spelled out.
+    const float e_y = -std::sin(psi) * (p.x() - r.x()) + std::cos(psi) * (p.y() - r.y());
+    const float e_psi = wrap_pi(theta_fwd - psi);
+
+    // Speed: the session's curvature-limited ceiling (already folded into active_params_.max_adv by
+    // set_speed_limit) plus a stop taper at the route end. The clearance bound that will replace the
+    // safety gate is NOT here yet; the gate below is still the speed authority near obstacles.
+    const float s_remaining = std::max(0.f, sp.length() - s);
+    const float v_stop = std::sqrt(0.15f * 0.15f
+                                   + 2.f * std::max(0.1f, active_params_.cbf_max_decel) * s_remaining);
+    const float v_cmd = std::clamp(std::min(active_params_.max_adv, v_stop),
+                                   active_params_.min_adv_cmd, active_params_.max_adv);
+
+    // Preview the FEEDFORWARD only, by exactly the identified lag. kappa_avg is CENTRED, so this is the
+    // one and only lookahead in the law; a forward-windowed estimator would silently add a second.
+    const float k_ff = sp.kappa_avg(s + v_cmd * active_params_.route_T_lag, active_params_.route_W);
+    const float L = std::max(0.05f, active_params_.route_L);
+    const float k_cmd = k_ff - (2.f / L) * e_psi - (1.f / (L * L)) * e_y;
+    const float omega_ccw = std::clamp(active_params_.route_g_dc * v_cmd * k_cmd,
+                                       -active_params_.max_rot, active_params_.max_rot);
+
+    out.adv = v_cmd;
+    out.side = 0.f;
+    out.rot = -omega_ccw;                                    // FRAME conversion (2/2)
+    out.cross_track_m = e_y;
+    out.carrot_bearing_rad = e_psi;                          // now the heading error, not a bearing
+    out.carrot_dist_m = v_cmd * active_params_.route_T_lag;  // the preview distance, for the overlay
+    out.dist_to_goal = s_remaining;
+    out.min_esdf = query_esdf(0.f, 0.f);
+    return out;
 }
 
 TrajectoryController::ControlOutput TrajectoryController::compute_pd(

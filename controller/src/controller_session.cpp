@@ -676,7 +676,14 @@ float ControllerSession::route_speed_limit(float v_cap, float a_decel) const
         // tracker has no such foresight and simply cannot comply.
         const float v_lat = std::sqrt(a_lat / k);      // v^2·kappa = a_lat — comfort, POINT curvature
         const float k_avg = kappa_avg_at(s_now + ds);  // net heading change / arc length — see above
-        const float v_rot = k_avg > 1e-3f ? std::max(0.05f, params_->max_rot_speed_rps) / k_avg : v_cap;
+        // ★HEADROOM. omega_max/kappa hands the FEEDFORWARD the entire rotation budget, so on a curve
+        // the command saturates and the feedback loop is effectively open — measured in tracker_sim as
+        // a systematic UNDER-turn (the robot rides outside the curve, corr(e,kappa) -0.160). Reserving
+        // a fraction for feedback moved rms 154 -> 94 mm at 0.70 and corr to ~0. Inert for the PD
+        // tracker, which has no feedforward to saturate, so it is applied in ROUTE mode only.
+        const float rot_budget = std::max(0.05f, params_->max_rot_speed_rps)
+                               * (route_tracker_active_ ? rot_headroom_ : 1.0f);
+        const float v_rot = k_avg > 1e-3f ? rot_budget / k_avg : v_cap;
         const float v_here = std::min(v_lat, v_rot);
         // The bound is on the speed we may hold NOW: we must be able to shed the difference over ds.
         const float v_allowed = std::sqrt(v_here * v_here + 2.f * a_dec * ds);
@@ -795,6 +802,10 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
             // set_path_presmoothed: the curve is already C2 and already footprint-checked, so the
             // elastic band and the C1 spline inside set_path would only undo both.
             path_controller.set_path_presmoothed(route_.path());
+    // The ROUTE tracker reads s, psi(s) and kappa_avg(s) from the curve itself. Non-owning: the band
+    // deforms this same spline in place just before compute, so the tracker sees the deformed curve
+    // without a state reset — which is the whole reason update_path_geometry exists for the polyline.
+    path_controller.set_route(&route_.spline());
             // Seed the carrot's forward-only anchor at the robot's own arc length. After a repair the
             // route is re-installed mid-drive, and a hint of 0 would aim the carrot at the route's start.
             path_controller.set_carrot_hint(

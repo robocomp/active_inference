@@ -2,6 +2,7 @@
 
 #include <QPointF>
 
+#include <algorithm>
 #include <fstream>
 #include <functional>
 #include <limits>
@@ -94,6 +95,12 @@ public:
     // The session is where targets are arbitrated (mouse > mission > affordance), so the mission runner
     // lives here rather than in the worker — the alternative is a fourth party that has to be consulted
     // by everyone who asks "what are we driving to".
+    // ROUTE mode: the tracker supplies its own turn rate from route curvature, so the curvature speed
+    // limit must leave it headroom (see the note in route_speed_limit). Inert in PD/MPPI mode, which
+    // have no feedforward to saturate.
+    void set_route_tracker(bool active, float rot_headroom)
+    { route_tracker_active_ = active; rot_headroom_ = std::clamp(rot_headroom, 0.1f, 1.0f); }
+
     rc::MissionRunner &mission() { return mission_; }
     // Smooth the selected mission against the SAME grid + footprint predicate the planner drives with,
     // so a smoothed route cannot contain a pose the planner would then refuse. Returns waypoints moved.
@@ -174,6 +181,8 @@ private:
     // Base speed (room frame) for the contract stillness gate, plus the previous pose it differences.
     float base_speed_lin_ = 0.0f;                  // m/s   (EMA-smoothed)
     float base_speed_ang_ = 0.0f;                  // rad/s (EMA-smoothed)
+    bool  route_tracker_active_ = false;   // see set_route_tracker
+    float rot_headroom_ = 0.70f;
     ControllerRoomVelocity room_vel_;              // room-frame base velocity (EMA), for overlay dead-reckoning
     std::uint64_t overlay_now_ms_ = 0;             // current compute time (overlay extrapolation target)
     std::optional<std::uint64_t> overlay_lidar_ts_ms_;  // last lidar stamp (overlay extrapolation base time)
