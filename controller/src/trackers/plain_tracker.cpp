@@ -67,15 +67,34 @@ ControlOutput& PlainTracker::compute(ControlOutput& out, const TrackerInput& in,
     const float a_dec = std::max(0.1f, p.cbf_max_decel);
     const float s_remaining = std::max(0.f, sp.length() - s);
     const float v_stop = std::sqrt(2.f * a_dec * s_remaining);
-    const float v_cmd = std::clamp(std::min(p.max_adv, v_stop), 0.f, p.max_adv);
+    const float v_profile = std::clamp(std::min(p.max_adv, v_stop), 0.f, p.max_adv);
 
     // kappa_avg is CENTRED, so this preview is the one and only lookahead in the law.
-    const float k_ff = sp.kappa_avg(s + v_cmd * p.plain_T_lag, p.plain_W);
+    const float k_ff = sp.kappa_avg(s + v_profile * p.plain_T_lag, p.plain_W);
     const float L = std::max(0.05f, p.plain_L);
-    const float v_steer = std::max(v_cmd, kSteerFloorMps);
-    const float omega_ccw = std::clamp(
-        p.plain_g_dc * (v_cmd * k_ff + v_steer * (-(2.f / L) * e_psi - (1.f / (L * L)) * e_y)),
-        -p.max_rot, p.max_rot);
+    const float k_fb = -(2.f / L) * e_psi - (1.f / (L * L)) * e_y;
+
+    // ── ADVANCE IS BOUND BY THE TURN THE ROBOT CAN ACTUALLY DELIVER ─────────────────────────────
+    // omega = g_dc*v*(k_ff + k_fb), so requiring |omega| <= max_rot inverts to a speed limit. Without
+    // it omega simply CLIPS at max_rot while v carries on: the robot cannot come round, overshoots,
+    // and the error that caused the demand persists.
+    // ★MEASURED 20:54, the lap that hit the counter at the hairpin: |cmd_rot| sat at the 0.8 rad/s cap
+    // on 1614 of 3039 cycles — 53.1% — with mean cmd_adv 0.677 m/s. It drove 63.9 m of a 37.6 m route
+    // (ratio 1.70) with cross-track max 2.24 m. Mean |kappa| at those cycles was only 0.65, so v*kappa
+    // = 0.44 and the FEEDFORWARD alone never saturates: it is the FEEDBACK, (1/L^2)*e_y = 2.78 per
+    // metre, so 0.3 m off-route demands 0.83 rad/s by itself. Off-route -> saturate -> cannot converge
+    // -> stay off-route.
+    // ★The rotation is computed FIRST, at the speed the route would allow; then the advance is scaled by
+    // exactly the factor the rotation had to be clipped by. That factor preserves the commanded ARC:
+    // kappa = omega/v is unchanged, so a saturated turn becomes a slower turn of the SAME shape rather
+    // than a wider one. Clipping omega alone silently changes the arc, which is the failure above.
+    // ★No new parameter: max_rot and g_dc already exist, and this is omega = v*kappa read backwards.
+    const float omega_want = p.plain_g_dc * (v_profile * k_ff
+                                             + std::max(v_profile, kSteerFloorMps) * k_fb);
+    const float omega_ccw = std::clamp(omega_want, -p.max_rot, p.max_rot);
+    const float scale = std::abs(omega_want) > 1e-6f
+                      ? std::abs(omega_ccw) / std::abs(omega_want) : 1.f;
+    const float v_cmd = std::clamp(v_profile * scale, 0.f, p.max_adv);
 
     out.adv  = v_cmd;
     out.side = 0.f;

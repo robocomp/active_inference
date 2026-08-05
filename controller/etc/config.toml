@@ -377,7 +377,16 @@ BlockageCooldownCycles = 100
 
 BandEnabled = true
 BandIterations = 4        # warm-started incremental solve; 30 (the build value) would re-solve from scratch at 10 Hz
-BandLead = 1.0            # m of route ahead of the robot left frozen
+# ★2026-08-05 1.0 -> 0.5. This is the BLIND ZONE: the band cannot deform the route inside it, so a
+# locally-detected obstacle nearer than this gets no path response at all — and since the plain tracker
+# carries no avoidance, nothing else responds either. At 0.7 m/s a 1 m lead was 1.4 s of travel the band
+# could not touch.
+# ★0.5 IS THE FLOOR, and it is set by the tracker's own lookahead rather than by preference. The lead
+# must stay outside what the tracker READS, or the band deforms curvature the tracker is actively using
+# and the deformation arrives as a step in its error signal. The tracker reads the curvature preview
+# v*T_lag +- W/2 = 0.42*v +- 0.20, which reaches 0.37 m at a typical 0.40 m/s and 0.49 m at max_adv 0.7.
+# 0.5 clears that by 1 cm. Going lower puts the band inside the tracker's window.
+BandLead = 0.5            # m of route ahead of the robot left frozen
 BandWindow = 4.0          # m of deformable window beyond the lead
 BandPeriodCycles = 1      # run every N cycles
 
