@@ -1510,6 +1510,14 @@ void TrajectoryController::detect_path_blockage(ControlOutput &out, const Eigen:
 
 }
 
+// Fixed scan distance for the clearance bound: stopping distance from v_max (0.7^2/2 = 0.245 m) plus
+// the reaction travel over the identified lag (0.7 * 0.42 = 0.294 m), rounded up. ★FIXED ON PURPOSE —
+// making it a function of the commanded speed is exactly what made the old gate self-clearing.
+static constexpr float kRouteClearScanM = 1.0f;
+// Comfort standoff BEYOND the body's own extent at which the bound reaches zero speed. The footprint
+// is the hard limit; this is the only chosen number in the speed law.
+static constexpr float kRouteStandoffM = 0.10f;
+
 // ── ROUTE TRACKER ────────────────────────────────────────────────────────────────────────────────
 // omega = g_dc * v * [ kappa_bar(s + v*T_lag) - (2/L)*e_psi - (1/L^2)*e_y ]
 //
@@ -1547,14 +1555,40 @@ TrajectoryController::ControlOutput TrajectoryController::compute_route_tracker(
     const float e_y = -std::sin(psi) * (p.x() - r.x()) + std::cos(psi) * (p.y() - r.y());
     const float e_psi = wrap_pi(theta_fwd - psi);
 
-    // Speed: the session's curvature-limited ceiling (already folded into active_params_.max_adv by
-    // set_speed_limit) plus a stop taper at the route end. The clearance bound that will replace the
-    // safety gate is NOT here yet; the gate below is still the speed authority near obstacles.
+    // ── SPEED: ONE min(), EVERY TERM CONTINUOUS ─────────────────────────────────────────────────
+    //   curvature   — already folded into active_params_.max_adv by the session's set_speed_limit
+    //   clearance   — v_clear below, the SAFETY term, a bound rather than a trigger
+    //   route end   — a stop taper on the remaining arc length
+    // ★WHY A BOUND AND NOT A GATE. The PD gate multiplies the speed AFTER the smoother, on a boolean
+    // trigger whose horizon is v/a_dec + 0.15 — so cutting v shortens the horizon, which clears the
+    // prediction that caused the cut, which restores v. Measured: 33 firings in a lap, EVERY ONE
+    // exactly one cycle long, 79% of all commanded-speed roughness, and safety_guard_cycles correlates
+    // with lin_jerk_effort at r = 0.995 across six laps. Here the horizon is FIXED and the result is a
+    // continuous, monotone function of measured clearance, so that limit cycle cannot form: there is no
+    // threshold to cross and no state to latch. This is the codebase's own CBF relation
+    // (h = d - r - v^2/2a, trajectory_controller.h) solved for v.
+    const float a_dec = std::max(0.1f, active_params_.cbf_max_decel);
     const float s_remaining = std::max(0.f, sp.length() - s);
-    const float v_stop = std::sqrt(0.15f * 0.15f
-                                   + 2.f * std::max(0.1f, active_params_.cbf_max_decel) * s_remaining);
-    const float v_cmd = std::clamp(std::min(active_params_.max_adv, v_stop),
-                                   active_params_.min_adv_cmd, active_params_.max_adv);
+    const float v_stop = std::sqrt(0.15f * 0.15f + 2.f * a_dec * s_remaining);
+
+    // Scan the ROUTE AHEAD, not a rollout of the command: the robot is going to be on this curve, so
+    // this asks for room where it will actually pass. Body extent is the CIRCUMSCRIBED radius —
+    // heading-free and therefore conservative, which is the correct direction to err for a safety
+    // bound (the exact directional support_radius would permit MORE speed, not less).
+    float d_min = std::numeric_limits<float>::max();
+    for (float ds = 0.f; ds <= kRouteClearScanM; ds += 0.10f)
+    {
+        const Eigen::Vector2f q = room_to_robot(sp.position_at(s + ds), robot_pose);
+        d_min = std::min(d_min, query_esdf(q.x(), q.y()) - body_extent_max());
+    }
+    const float v_clear = std::sqrt(2.f * a_dec * std::max(0.f, d_min - kRouteStandoffM));
+
+    const float v_cmd = std::clamp(std::min({active_params_.max_adv, v_stop, v_clear}),
+                                   0.f, active_params_.max_adv);
+    out.gate_speed_scale = active_params_.max_adv > 1e-3f ? v_cmd / active_params_.max_adv : 1.f;
+    // Reported so the CSVs keep meaning what they meant: "the clearance term is what is limiting us",
+    // not "a trigger fired". It can no longer pulse, so a high count here is a long slow section.
+    out.safety_guard_triggered = v_clear < std::min(active_params_.max_adv, v_stop);
 
     // Preview the FEEDFORWARD only, by exactly the identified lag. kappa_avg is CENTRED, so this is the
     // one and only lookahead in the law; a forward-windowed estimator would silently add a second.
@@ -1572,6 +1606,19 @@ TrajectoryController::ControlOutput TrajectoryController::compute_route_tracker(
     out.carrot_dist_m = v_cmd * active_params_.route_T_lag;  // the preview distance, for the overlay
     out.dist_to_goal = s_remaining;
     out.min_esdf = query_esdf(0.f, 0.f);
+
+    // LAST-RESORT STOP. v_clear enforces stopping distance continuously, so this should essentially
+    // never fire; it exists because "essentially never" is not "never" and the ESDF can change under
+    // the robot faster than any bound can anticipate. Deliberately NOT the PD gate's arc rollout — that
+    // code is live on the PD path and is not worth destabilising to save twelve lines here.
+    if (out.min_esdf - body_extent_here() < 0.01f)
+    {
+        out.gate_hard_stop = true;
+        out.gate_speed_scale = 0.f;
+        out.safety_guard_triggered = true;
+        out.adv = 0.f;
+        out.rot = (out.rot >= 0.f ? 1.f : -1.f) * 0.5f * active_params_.max_rot;   // rotate away
+    }
     return out;
 }
 
