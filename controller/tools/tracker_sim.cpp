@@ -344,6 +344,20 @@ int main(int argc, char **argv)
                 FfArm arm; arm.L = 0.60f; arm.T_lag = c.T_lag; arm.g_dc = c.g_dc;
                 report(c.tag, run(route, arm, w.v_max, kWmax, w.a_lat, kADec, kW, false));
             }
+            // ★ IS L PART OF THE ADAPTATION? The margin rule that set L in the first place is
+            // L >= 3*T_lag*v_max, so a robot with MORE lag needs a LONGER length scale — L is not an
+            // independent gain, it is a function of the identified lag. If that is right, sweeping L on
+            // the slow robot should peak near 3*0.65*0.7 = 1.37 m and recover the rest of the gap; if
+            // the peak stays near the fast robot's 0.60, then L is independent and adaptation is two
+            // numbers, not three.
+            std::printf("\n  does L follow T_lag? slow robot (tau 0.35, delay 0.30, gain 0.75), T_lag/g_dc adapted\n");
+            g_plant_tau = 0.35f; g_plant_delay = 0.30f; g_plant_gain = 0.75f;
+            for (const float L : {0.60f, 0.90f, 1.20f, 1.37f, 1.60f, 2.00f})
+            {
+                FfArm arm; arm.L = L; arm.T_lag = 0.65f; arm.g_dc = 1.f / 0.75f;
+                char tag[32]; std::snprintf(tag, sizeof tag, "L=%.2f (rule 1.37)", L);
+                report(tag, run(route, arm, w.v_max, kWmax, w.a_lat, kADec, kW, false));
+            }
             g_plant_tau = 0.22f; g_plant_delay = 0.20f; g_plant_gain = 0.89f;
         }
         g_headroom = 1.0f;
