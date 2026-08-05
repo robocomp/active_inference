@@ -178,61 +178,71 @@ RouteSmoothing = 0.40
 # about the tour, not about this switch.
 # ★An optimised route CHANGES THE STIMULUS: a run under this flag measures the route, not the controller.
 RouteOptimize = true
+# ── ONE DIAL: SPEED (0) <-> SAFETY (1) for the route optimiser ──
+# In a quadratic objective the weights ARE precisions, so trading precision between the clearance
+# PREFERENCE and the curvature PRIOR is one meaningful scalar: w_clear *= g, w_kappa /= g. 0.5 leaves
+# both exactly as written (it was the built-in default and this key was previously ABSENT from the file,
+# so the dial had never actually been moved). Toward 0: smoother, wider corners, the route hugs
+# obstacles to get them. Toward 1: the route climbs onto the medial axis and accepts winding to stay there.
+# ★2026-08-05 0.5 -> 0.75, on measurement, not feel. tools/route_bench over the recorded world:
+#   bias        0      0.25     0.5     0.75      1.0
+#   clr_min   0.332   0.332   0.376   0.432    0.473   <- route's own minimum clearance
+#   clr_p05   0.473   0.456   0.480   0.520    0.546
+#   len_m    110.8   112.6   113.4   114.4    115.5
+#   pivots      13       9       5       8       11    <- points where R < inscribed, i.e. point turns
+#   (0 is REJECTED and 0.25 INFEASIBLE, so the low end is not even available.)
+# Body circumscribed radius is 0.325, so the TIGHTEST BODY MARGIN goes 0.051 -> 0.107 m: it roughly
+# DOUBLES the pinch the robot must squeeze through, for +0.9% length and +1.2% ideal traversal time.
+# ★WHY, from the robot and not from theory: at 0.5 the plain tracker's last-resort halt fired 296 times
+# in 32 episodes (median 2 cycles) on the 18:47 lap, because at 0.69 m/s its threshold is 0.103 m while
+# the tour's actual body margin there is ~0.10 m — the operating point sat exactly ON the threshold, and
+# body_extent_here() is taken along the noisy ESDF GRADIENT, so it chattered across it. That cost jerk/m
+# 1.07 -> 2.34. The cure is MARGIN, not a different threshold: move the operating point, not the test.
+# ★COST TO WATCH: pivots 5 -> 8. Each point turn observed on the robot took ~4.3 s, so expect roughly
+# +12 s on a 145 s lap. That currency only became payable once the tracker could pivot at all (2026-08-05);
+# before that, extra cusps were what made it diverge.
+RouteSafetyBias = 0.75
 
-# ── WHICH CONTROLLER DRIVES (stage 2 A/B) ──
+# ── WHICH CONTROLLER DRIVES ──
 # "mppi"  = samples K rollouts and scores them; does its own obstacle avoidance (g_obs + g_lat are ~99%
-#           of its objective). This is what has driven every lap so far.
-# "pd"    = geometric carrot tracker (PD on carrot bearing + cos-shaped speed). It does NOT avoid
-#           obstacles; it assumes the route is already clear, which is the BAND's job.
-# ★"pd" is only coherent with BandEnabled = true. Together they are the band-plus-tracker architecture
-#  the whole exercise is aimed at; "pd" alone leaves NOTHING doing avoidance but the safety gate, and
-#  the agent prints a warning at startup if you do that.
-# ★Stage 1 measured a NULL because MPPI and the band duplicate each other's work. Stage 2 is where the
-#  band's avoidance replaces the sampler's rather than shadowing it, so this is the real test.
-# ★2026-08-02 set to "pd" for the first stage-2 lap. BandEnabled is true, so avoidance is the band's.
-# Restore "mppi" to get every previous lap's controller back.
-# ★2026-08-05 "pd" -> "route". The route tracker (curvature feedforward + critically damped Frenet
-# feedback + a continuous clearance BOUND) replaces the carrot, Stanley term, bumper, Kd, in-loop EMA,
-# Gaussian brake and the pulsing safety gate. Verified offline only — kappa_avg against an analytic
-# circle, the law in tools/tracker_sim against the identified plant, the signs through the session's
-# own negation, and the bound against the downstream slew limiter. NOTHING HAS DRIVEN A ROBOT.
-# ★FIRST-LAP WATCH LIST, in the order they would bite:
-#   1. Does it turn the right way at all? A sign error shows up in the first corner, not subtly.
-#   2. cross_track_rms — sim says ~75-95 mm on this tour; the PD baseline is 85-130 mm.
-#   3. safety_guard_cycles now means "the clearance bound is limiting us", NOT a trigger count. It
-#      cannot pulse any more, so a high number means a long slow section, not chatter.
-#   4. lin_jerk_effort — this is the number the whole exercise is for. Gate-injected roughness was
-#      79% of it, and that mechanism is gone in this mode.
-#   5. The band is still what does obstacle AVOIDANCE (this tracker follows the route, it does not
-#      dodge), so BandEnabled must stay true — same coherence requirement "pd" had.
-# Revert with ControlMode = "pd"; the PD path is untouched and still the tested one.
-# ── "route" = THE FRENET FEEDFORWARD TRACKER ──
-# The error pair it regulates (cross-track e_y, heading e_psi) is the FRENET frame of the route, and
-# the nominal turn rate is FEEDFORWARD from the route's own curvature — previewed by the identified
-# actuator lag — rather than earned by the feedback loop with a standing tracking error. Those two
-# words are the whole design; everything else follows. It replaces the carrot, the Stanley term, the
-# bumper, the Kd term, the in-loop EMA, the Gaussian brake and the triggered safety gate.
+#           of its objective). This drove every lap up to 2026-08-01.
+# "pd"    = geometric carrot tracker (PD on carrot bearing + cos-shaped speed) plus a triggered safety
+#           gate. Avoidance is the BAND's. This is the best-measured controller on the robot so far.
+# "plain" = THE PLAIN TRACKER (src/trackers/plain_tracker.cpp). Curvature feedforward previewed by the
+#           identified actuator lag + critically damped Frenet feedback on (e_y, e_psi). It performs NO
+#           avoidance and queries no obstacle field: the premise is that the PATH IS SELF-ADJUSTING AND
+#           SAFE, which the planner's footprint predicate, the band, and repair->replan are what make
+#           true. Its constructor takes a PathWorld and not a FieldWorld, so that premise is enforced by
+#           the compiler rather than by this comment.
+# ★"pd" and "plain" both REQUIRE BandEnabled = true — neither does avoidance, so with the band off
+#  nothing does. The agent warns at startup for "pd"; the same applies to "plain".
 #
-# ★2026-08-05 FIRST LAP FROZE THE ROBOT, and both causes are fixed:
-#   1. omega = g_dc * v * kappa_cmd made STEERING proportional to speed, so a clearance bound that
-#      drove v to zero took the steering with it — the robot could neither move nor turn, and since it
-#      could not move the geometry never changed. 568 of 1187 cycles frozen, with min_esdf at the robot
-#      a healthy 0.50 m. FIXED by splitting the law: the feedforward keeps the real speed (omega = v*kappa
-#      is a kinematic relation, and at a standstill there is correctly no arc to follow) while the
-#      FEEDBACK gets a 0.15 m/s reference floor, so a stopped robot can still rotate back onto the route.
-#   2. The clearance bound used the CIRCUMSCRIBED body disc (0.325 m) + 0.10 m standoff, demanding
-#      0.425 m of ESDF along the route while this tour's p05 is 0.421 — so it sat at zero on ordinary
-#      sections. FIXED to the DIRECTIONAL support_radius at the heading the robot will hold there.
-# ⚠The offline simulator has NO OBSTACLES, so it cannot exercise the clearance bound at all — this
-# entire class of failure is invisible to it. Extending it with the recorded grid is the next job.
-# ★2026-08-05 back to "pd": the second route lap ALSO stopped mid-tour, but differently — cmd_rot was
-# non-zero (+-0.003), so the deadlock fix works and the robot was NOT frozen; it was on the route, 2.4 cm
-# off, aligned, with 0.686 m of clearance at its own centre, and v_clear was still 0. So d_min over the
-# 1 m scan reads <= 0.10 m while the robot plainly has room. The scan or the body-extent lookup inside it
-# is wrong, and NOTHING IN THE CSV SAYS WHICH — d_min is not logged. Diagnosing that on the robot costs a
-# lap per hypothesis, so the offline sim is being extended with the recorded grid to exercise the
-# clearance bound instead. Do not re-enable until the sim reproduces this stop and explains it.
-ControlMode = "pd"
+# ── WHY "plain" REPLACED THE "route" TRACKER (deleted 2026-08-05) ──
+# "route" was the same steering law plus its own CLEARANCE BOUND, and every one of its four failures came
+# from that bound — never from the steering:
+#   lap 1  omega was proportional to v, so a zero bound took the steering to zero too. Deadlock: 568 of
+#          1187 cycles frozen with 0.50 m of clearance at the robot.
+#   lap 2  a 0.10 m standoff forbade a route whose tightest CERTIFIED margin is 0.011 m. The planner
+#          promises FIT, not comfort — a standoff above the route's own margin makes it undrivable.
+#   lap 4  the bound scanned a FIXED 1 m at any speed, so one bad far-field sample stopped the robot dead
+#          and, stopped, it could not change the geometry stopping it: 178 stop episodes of MEDIAN LENGTH
+#          1 CYCLE, 24% of cycles at zero, cross-track +144% and jerk +173% vs the pd path.
+#   lap 5  the bound was repaired to scan only the braking distance. The repair WORKED — stops fell to 19
+#          episodes (2.1%, pd is 2.5%) — and the lap was WORSE: unbraked, mean commanded speed rose
+#          0.35 -> 0.53, pose sigma DOUBLED to 0.204 m, measured speed went non-physical on 27 cycles and
+#          the robot left the route by 4.3 m, forcing 9 replans and a manual stop.
+# ★THE LESSON, and it is why the bound is gone rather than tuned: the broken bound had been holding the
+# system together BY ACCIDENT, as a speed limiter nobody designed. The binding constraint on this robot
+# is not obstacles — it is how fast it can go and still know where it is. That belongs to the
+# pose-confidence ramp in controller_motion_commander (PoseXYStdSlow/Stop), which is DOWNSTREAM of every
+# mode. A tracker carrying its own copy duplicates the band, which is the same NULL stage 1 measured when
+# MPPI and the band shadowed each other.
+# ★ALSO SETTLED, so it is not re-derived: the ESDF is NOT at fault. pd reads the same field with the same
+# pose jumps and stops 10 times in three laps. tools/tracker_sim against the recorded grid gives d_min
+# worst +0.009 m, zero of 148 scan points at v_clear==0 — the STATIC field never goes negative. The
+# difference was always how much of the field each controller consulted (pd: adv*0.30 = 0.104 m ahead;
+# route: a fixed 1.0 m), which is a property of the tracker, not of the field.
+ControlMode = "plain"
 # Cross-track feedback for the PD tracker, in Stanley's form: the steering error becomes
 #   carrot_bearing + atan(gain * cross_track / max(soft, speed))
 # 0 = pure pursuit, which steers at the carrot ONLY and therefore converges to the carrot's DIRECTION
@@ -244,8 +254,8 @@ ControlMode = "pd"
 # oscillation about zero with NEGATIVE autocorrelation at half a period. So 1.0 was at worst too low and
 # could not have been too high. Expect cross_track_rms to fall from ~0.10; if it instead starts
 # oscillating, that autocorrelation goes negative and the tool will say so.
-# ── FRENET FEEDFORWARD TRACKER (ControlMode = "route") ──
-# omega = g_dc * v * [ kappa_bar(s + v*T_lag) - (2/L)*e_psi - (1/L^2)*e_y ]
+# ── THE PLAIN TRACKER (ControlMode = "plain") — src/trackers/plain_tracker.cpp ──
+# omega = g_dc * [ v*kappa_bar(s + v*T_lag) - v_steer*( (2/L)*e_psi + (1/L^2)*e_y ) ]
 # Replaces the carrot, Stanley term, bumper, Kd, EMA and Gaussian brake with one law. The curvature
 # term is the ONLY one reading the route, so feedback cannot double-count the nominal turn — the
 # failure mode that killed the 2026-08-04 attempt to ADD a feedforward to pure pursuit.
@@ -255,11 +265,22 @@ ControlMode = "pd"
 # different one (tau 0.35, delay 0.30, gain 0.75), where the margin rule's prescription of 1.37 was
 # 3.8x worse. RotHeadroom is the fraction of omega_max the feedforward may claim; without it the
 # feedforward saturates the clamp and the feedback loop is open on curves (rms 154 -> 94 mm at 0.70).
-RouteTrackerL = 0.60
-RouteTrackerTLag = 0.42
-RouteTrackerGdc = 1.124
-RouteTrackerW = 0.40
-RouteTrackerRotHeadroom = 0.70
+PlainTrackerL = 0.60
+PlainTrackerTLag = 0.42
+PlainTrackerGdc = 1.124
+PlainTrackerW = 0.40
+PlainTrackerRotHeadroom = 0.70
+# ★2026-08-05 THREE KEYS REMOVED HERE — PlainTrackerAlignPower, PlainTrackerOffsetGateRef and
+# PlainTrackerFfDenomMin — together with a hidden 0.15 m/s steering floor in the tracker. They were added
+# one per lap across a single session, and they were four approximations of ONE statement that the
+# tracker now writes directly and without any new parameter:
+#     k_eff = k_path/(1 - k_path*e_y);  k_cmd = k_eff - (2/L)e_psi - (1/L^2)e_y
+#     v = min(v_profile, max_rot/|k_cmd|);  omega = g_dc*v*k_cmd
+# At a cusp |k_cmd| is large, so v collapses and omega saturates at max_rot — that is the point turn,
+# with no cos power and no mode. Off the path, k_eff grows as k_path*e_y approaches 1, so v collapses —
+# that was the offset gate. And omega = v*k_cmd cannot die at a standstill, so the steering floor went too.
+# ★The tracker is back to five parameters, three of them (TLag, Gdc, W) IDENTIFIED constants rather than
+# choices. If a knob looks necessary here, the law is probably wrong somewhere else.
 PdCrossTrackGain = 1.4
 PdCrossTrackSoft = 0.30
 # ── LATERAL BUMPER (PD mode only) ──

@@ -101,6 +101,10 @@ float speed_limit(const rc::RouteSpline &sp, float s_now, float v_cap,
                   float a_lat, float a_dec, float w_max, float W, float headroom = 1.0f)
 {
     float v = v_cap;
+    // ★Mirrors ControllerSession::route_speed_limit, INCLUDING the 2026-08-05 fix: the noise floor may
+    // not overrule the rotation budget. Without that, a cusp demands a turn rate the robot cannot
+    // deliver, the command saturates, and the FF arm diverges — which is exactly what this bench caught.
+    float v_rot_min = v_cap;
     const float horizon = v_cap * v_cap / (2.f * a_dec) + 1.0f;
     for (float ds = 0.f; ds <= horizon; ds += 0.10f)
     {
@@ -109,46 +113,17 @@ float speed_limit(const rc::RouteSpline &sp, float s_now, float v_cap,
         if (k_pt < 1e-3f and k_av < 1e-3f) continue;
         const float v_lat = k_pt > 1e-3f ? std::sqrt(a_lat / k_pt) : v_cap;
         const float v_rot = k_av > 1e-3f ? headroom * w_max / k_av : v_cap;
+        v_rot_min = std::min(v_rot_min, v_rot);
         v = std::min(v, std::sqrt(std::min(v_lat, v_rot) * std::min(v_lat, v_rot) + 2.f * a_dec * ds));
     }
-    return std::clamp(v, 0.15f, v_cap);
+    return std::clamp(v, std::min(0.15f, v_rot_min), v_cap);
 }
 
-// ── THE CLEARANCE SPEED BOUND, as compute_route_tracker computes it ──────────────────────────────
-// The production code queries the tracker's robot-frame ESDF (rebuilt each cycle from lidar); here the
-// stand-in is the recorded grid's exact EDT, which IS the static geometry the route was planned
-// against. That difference matters for the absolute numbers but not for the question this reproduces:
-// does d_min collapse where the robot plainly has room?
-struct Clearance
-{
-    const rc::GridPlanner *grid = nullptr;
-    float scan_m = 1.0f, standoff = 0.0f;   // production default; see kRouteStandoffM
-    bool  directional = true;      // false = the circumscribed disc (the first, frozen version)
-
-    // Returns v_clear and writes the limiting d_min.
-    float v_clear(const rc::RouteSpline &sp, float s, float th_fwd, float a_dec, float &d_min_out) const
-    {
-        const rc::RobotFootprint &fp = rc::RobotFootprint::shadow();
-        float d_min = std::numeric_limits<float>::max();
-        for (float ds = 0.f; ds <= scan_m; ds += 0.10f)
-        {
-            const Vector2f q = sp.position_at(s + ds);
-            const float d = grid->distance_at(q);
-            float extent = fp.circumscribed_radius();
-            if (directional)
-            {
-                const Vector2f g = grid->distance_gradient_at(q);
-                const float dpsi = wrap(sp.heading_at(s + ds) - th_fwd);
-                extent = fp.support_radius(-dpsi, -g);
-            }
-            d_min = std::min(d_min, d - extent);
-        }
-        d_min_out = d_min;
-        return std::sqrt(2.f * a_dec * std::max(0.f, d_min - standoff));
-    }
-};
-
-// ── ARM A: the CURRENT law (carrot + Stanley + PD + EMA + Gaussian brake), unclipped ─────────────
+// The clearance bound and its phantom test went with the "route" tracker on 2026-08-05: the PLAIN
+// tracker queries no obstacle field, so there is nothing left here to exercise. The two arms below are
+// now exactly the two live modes — ControlMode "pd" and ControlMode "plain".
+//
+// ── ARM A: "pd" — the carrot + Stanley + PD + EMA + Gaussian brake law, unclipped ────────────────
 struct PdArm
 {
     float lookahead = 2.0f, k_ct = 1.4f, ct_soft = 0.30f;
@@ -180,16 +155,16 @@ struct PdArm
     }
 };
 
-// ── ARM B: the design under test — curvature feedforward + critically damped Frenet feedback ─────
+// ── ARM B: "plain" — curvature feedforward + critically damped Frenet feedback ──────────────────
 struct FfArm
 {
     float L = 1.0f;             // the ONE chosen gain; both feedback gains follow by critical damping
     float T_lag = 0.42f;        // identified total lag
     float g_dc = 1.f / 0.89f;   // identified DC gain, inverted
+    bool  preview_at_cmd = true;  // BENCH SWITCH (not a robot param): false = preview at the profile
+                                  // speed, which looked further ahead than the robot travels and cut corners.
     float W = 0.40f;            // route's own smoothing scale
 
-    const Clearance *clear = nullptr;   // null = no obstacles (the original, tracking-only bench)
-    mutable float last_d_min = 1e9f, last_v_clear = 1e9f;
 
     void control(const rc::RouteSpline &sp, float s, float px, float py, float th,
                  float v_limit, float w_max, float &v_cmd, float &w_cmd) const
@@ -198,28 +173,37 @@ struct FfArm
         const float psi = sp.heading_at(s);
         const float e_y = -std::sin(psi) * (px - r.x()) + std::cos(psi) * (py - r.y());  // left positive
         const float e_psi = wrap(th - psi);
-        v_cmd = v_limit;
-        if (clear != nullptr)
+        // ★No clearance term: the PLAIN tracker queries no obstacle field. Speed is the route's own
+        // geometric profile, scaled by ALIGNMENT — see plain_tracker.cpp. The cos term is the pivot:
+        // through a cusp the tangent swings away, the speed collapses, and the floored-reference
+        // feedback below rotates the robot onto the new tangent instead of driving off the route.
+        // ★2026-08-05 THE SIMPLIFICATION — mirrors src/trackers/plain_tracker.cpp exactly.
+        // One law, no tuning constants beyond L and w_max which already existed:
+        //   k_eff = k_path/(1 - k_path*e_y);  k_cmd = k_eff - (2/L)e_psi - (1/L^2)e_y
+        //   v = min(v_profile, w_max/|k_cmd|);  omega = g_dc*v*k_cmd
+        // At a cusp |k_cmd| is large so v collapses and omega saturates at w_max: that is the point turn.
+        // Off-path k_eff grows as k_path*e_y approaches 1, so v collapses there too.
+        constexpr float kTiny = 1e-3f;
+        // Two-pass fixed point: preview at the speed we will actually command (see plain_tracker.cpp).
+        float vv = v_limit, kc = 0.f;
+        for (int pass = 0; pass < 2; ++pass)
         {
-            float d_min = 1e9f;
-            const float vc = clear->v_clear(sp, s, th, 1.0f, d_min);
-            last_d_min = d_min; last_v_clear = vc;
-            v_cmd = std::min(v_cmd, vc);
+            const float kp = sp.kappa_avg(s + (preview_at_cmd ? vv : v_limit) * T_lag, W);
+            const float dr = 1.f - kp * e_y;
+            const float dd = std::fabs(dr) > kTiny ? dr : (dr >= 0.f ? kTiny : -kTiny);
+            kc = kp / dd - (2.f / L) * e_psi - (1.f / (L * L)) * e_y;
+            vv = std::min(v_limit, w_max / std::max(std::fabs(kc), kTiny));
         }
-        // Preview the FEEDFORWARD only, by exactly the measured lag. kappa_avg is centred, so this is
-        // the only lookahead in the law — a forward-windowed estimator would add a second one.
-        const float k_ff = sp.kappa_avg(s + v_cmd * T_lag, W);
-        // Feedforward on the REAL speed; feedback on a floored one, so steering authority never
-        // vanishes with the clearance bound (the deadlock that froze the first route lap).
-        const float v_steer = std::max(v_cmd, 0.15f);
-        w_cmd = std::clamp(g_dc * (v_cmd * k_ff
-                                   + v_steer * (-(2.f / L) * e_psi - (1.f / (L * L)) * e_y)),
-                           -w_max, w_max);
+        v_cmd = vv;
+        w_cmd = std::clamp(g_dc * vv * kc, -w_max, w_max);
     }
 };
 
 struct Result
 {
+    // First loss of the route, for locating a divergence instead of only sizing it.
+    float s_lost = -1.f, kappa_lost = 0.f, v_lost = 0.f, t_lost = 0.f, s_end = 0.f;
+
     int n = 0;
     double e_sq = 0, tv_v = 0, tv_w = 0, dist = 0, t_end = 0;
     float e_max = 0;
@@ -260,10 +244,15 @@ Result run(const rc::RouteFollower &route, Arm arm, float v_cap, float w_max,
     constexpr float kCtrlDt = 0.05f;    // 20 Hz, the data-driven control rate
     constexpr float kSubDt  = 0.005f;   // plant integration
     float s_hint = 0.f, last_v = 0.f, last_w = 0.f;
+    float lx = P.x, ly = P.y; bool have_last = false;
     bool  first = true;
 
     for (float t = 0.f; t < 400.f; t += kCtrlDt)
     {
+        // ★Rate limit REVERTED with the tracker (see plain_tracker.cpp): it forbade ACQUISITION, not
+        // just jumping. This bench never exercised that, because it always starts exactly on the route.
+        // Baseline 2 m window, matching plain_tracker.cpp.
+        (void)lx; (void)ly; (void)have_last;
         s_hint = sp.project({P.x, P.y}, s_hint, 2.0f);
         if (s_hint >= sp.length() - 0.15f) { R.t_end = t; break; }
 
@@ -280,6 +269,16 @@ Result run(const rc::RouteFollower &route, Arm arm, float v_cap, float w_max,
         R.e_sq += double(e) * e; R.e_max = std::max(R.e_max, std::abs(e)); ++R.n;
         R.e.push_back(e);
         R.kappa.push_back(sp.kappa_avg(s_hint, W));
+        // WHERE does it come apart? An rms figure cannot distinguish "slightly loose everywhere" from
+        // "fine until s=X, then gone", and those want completely different fixes.
+        if (R.s_lost < 0.f and std::abs(e) > 0.5f)
+        {
+            R.s_lost = s_hint;
+            R.kappa_lost = sp.kappa_avg(s_hint, W);
+            R.v_lost = v_lim;
+            R.t_lost = t;
+        }
+        R.s_end = s_hint;
 
         const float x0 = P.x, y0 = P.y;
         for (float u = 0.f; u < kCtrlDt - 1e-6f; u += kSubDt) P.step(v_cmd, w_cmd, kSubDt);
@@ -302,6 +301,10 @@ void report(const char *tag, const Result &R)
                 " | TV(v)/m %.3f | TV(w)/m %.3f | %.0f s\n",
                 tag, rms * 1000, R.e_max * 1000, corr(R.e, R.kappa, 0), best, best_lag * 50,
                 R.dist > 0.1 ? R.tv_v / R.dist : 0.0, R.dist > 0.1 ? R.tv_w / R.dist : 0.0, R.t_end);
+    if (R.s_lost >= 0.f)
+        std::printf("      ↳ LOST THE ROUTE at s=%.1f m (t=%.0f s): |e_y| passed 0.5 m where "
+                    "kappa_avg=%.2f 1/m and the speed profile allowed %.3f m/s; ended at s=%.1f\n",
+                    R.s_lost, R.t_lost, R.kappa_lost, R.v_lost, R.s_end);
 }
 
 struct World
@@ -349,7 +352,16 @@ int main(int argc, char **argv)
     if (not load_world(path, w)) return 1;
 
     rc::RouteFollower route;
-    auto plan = [&w](const Vector2f &a, const Vector2f &b) { return w.planner.plan(a, b); };
+    // Capture the RAW A* polyline as it comes back from the planner, before the spline fit, the
+    // feasibility pass or the optimiser touch it. That is stage 1 of the pipeline, and the only way to
+    // tell WHICH stage loses the clearance the waypoints plainly have.
+    std::vector<Vector2f> raw_poly;
+    auto plan = [&w, &raw_poly](const Vector2f &a, const Vector2f &b)
+    {
+        auto seg = w.planner.plan(a, b);           // std::optional<std::vector<Vector2f>>
+        if (seg) for (const auto &q : *seg) raw_poly.push_back(q);
+        return seg;
+    };
     auto free_at = [&w](const Vector2f &p, float h) { return w.planner.pose_free(p, h); };
     if (not route.build(w.start, w.wp_safe, w.laps, plan, free_at, w.spacing, w.smoothing))
     { std::printf("route build failed\n"); return 1; }
@@ -420,67 +432,162 @@ int main(int argc, char **argv)
         return 0;
     }
 
+
     {
-        // ── REPRODUCE THE ROBOT'S MID-ROUTE STOP ────────────────────────────────────────────────
-        // Walk the whole route and evaluate the clearance bound at every metre, exactly as the tracker
-        // would. If d_min collapses below the standoff anywhere the robot plainly has room, this prints
-        // where — which is the diagnostic the CSV could not give because d_min is not logged.
-        Clearance cl; cl.grid = &w.planner;
+        // ── PROJECTION SELF-TEST: is the Frenet anchor even correct? ─────────────────────────────
+        // Put a PERFECT robot exactly ON the curve and walk it forward. project() should then return
+        // the arc length it was handed, to within a sample. Any deviation is the anchor binding to the
+        // wrong part of the route — and since the plain tracker's entire error pair (e_y, e_psi) is
+        // measured against that anchor, an anchor error IS a phantom tracking error that the feedback
+        // will faithfully steer at. Needs no controller, no plant and no noise.
         const rc::RouteSpline &sp = route.spline();
-        const rc::RobotFootprint &fp = rc::RobotFootprint::shadow();
-        std::printf("  clearance scan along the route (standoff %.2f m, body inscribed %.3f circumscribed %.3f)\n",
-                    cl.standoff, fp.inscribed_radius(), fp.circumscribed_radius());
-        int n_zero_dir = 0, n_zero_disc = 0; float worst_dir = 1e9f, worst_disc = 1e9f, worst_s = 0.f;
-        for (float s = 0.f; s < sp.length(); s += 0.25f)
+        float hint = 0.f, worst = 0.f, worst_s = 0.f, first_bad = -1.f;
+        int n_bad = 0, n = 0;
+        for (float s_true = 0.f; s_true <= sp.length(); s_true += 0.05f)
         {
-            const float th = sp.heading_at(s);
-            float d_dir = 0.f, d_disc = 0.f;
-            cl.directional = true;  const float v_dir  = cl.v_clear(sp, s, th, 1.0f, d_dir);
-            cl.directional = false; const float v_disc = cl.v_clear(sp, s, th, 1.0f, d_disc);
-            if (v_dir  <= 1e-3f) ++n_zero_dir;
-            if (v_disc <= 1e-3f) ++n_zero_disc;
-            if (d_dir < worst_dir) { worst_dir = d_dir; worst_s = s; }
-            worst_disc = std::min(worst_disc, d_disc);
+            ++n;
+            hint = sp.project(sp.position_at(s_true), hint, 2.0f);
+            const float err = std::fabs(hint - s_true);
+            if (err > worst) { worst = err; worst_s = s_true; }
+            if (err > 0.15f) { ++n_bad; if (first_bad < 0.f) first_bad = s_true; }
         }
-        const int n = static_cast<int>(sp.length() / 0.25f) + 1;
-        std::printf("    directional extent : d_min worst %+.3f m at s=%.1f, v_clear==0 at %d/%d points\n",
-                    worst_dir, worst_s, n_zero_dir, n);
-        std::printf("    circumscribed disc : d_min worst %+.3f m,                v_clear==0 at %d/%d points\n",
-                    worst_disc, n_zero_disc, n);
-        // What standoff does this route actually admit? The bound reaches zero at d_min = standoff, so
-        // a standoff larger than the route's tightest body margin forbids a route the planner already
-        // certified as FEASIBLE — the planner's job is fit, not comfort.
-        std::printf("    standoff sweep (v_clear==0 count, and the slowest crawl it permits):\n");
-        for (const float c : {0.10f, 0.05f, 0.02f, 0.0f})
+        std::printf("\n  projection self-test (perfect robot ON the curve, window 2.0 m):\n");
+        std::printf("    worst |s_est - s_true| = %.3f m at s=%.1f;  %d of %d samples off by >0.15 m",
+                    worst, worst_s, n_bad, n);
+        if (first_bad >= 0.f) std::printf(";  FIRST at s=%.2f m", first_bad);
+        std::printf("\n");
+        // Curvature profile, and specifically the LAP SEAM: a 2-lap route rejoins its own start, and
+        // whatever the route builder does there is traversed at speed by a law whose feedforward is a
+        // curvature. A cusp or a curvature step at the seam would be invisible on a 1-lap route.
         {
-            cl.standoff = c; cl.directional = true;
-            int zeros = 0; float v_slowest = 1e9f;
-            for (float s = 0.f; s < sp.length(); s += 0.25f)
+            float kmax = 0.f, kmax_s = 0.f;
+            for (float t = 0.f; t <= sp.length(); t += 0.05f)
             {
-                float d = 0.f;
-                const float v = cl.v_clear(sp, s, sp.heading_at(s), 1.0f, d);
-                if (v <= 1e-3f) ++zeros;
-                v_slowest = std::min(v_slowest, v);
+                const float k = std::fabs(sp.kappa_avg(t, 0.40f));
+                if (k > kmax) { kmax = k; kmax_s = t; }
             }
-            std::printf("      standoff %.2f m -> %2d/%d zero, slowest %.3f m/s\n", c, zeros, n, v_slowest);
-        }
-        cl.standoff = 0.0f;
-        // Does the clearance bound disagree with route_speed_limit's own 0.15 m/s floor at the tight
-        // point? The floor lives INSIDE route_speed_limit (curvature only), and the tracker takes a
-        // min() of that with v_clear — so v_clear may legitimately go below 0.15 and does win. Checked
-        // rather than assumed, because two floors that disagree is how a robot ends up crawling or
-        // refusing to move for reasons nobody can find.
-        {
-            float d = 0.f;
-            const float v = cl.v_clear(sp, worst_s, sp.heading_at(worst_s), 1.0f, d);
-            std::printf("    at the tightest point (s=%.1f): d_min %+.3f m -> v_clear %.3f m/s;"
-                        " route_speed_limit floors at 0.150 and the tracker takes the min => %.3f\n\n",
-                        worst_s, d, v, std::min(v, 0.150f));
+            std::printf("    |kappa_avg| max %.2f 1/m (r=%.2f m) at s=%.1f\n", kmax, 1.f / std::max(kmax, 1e-3f), kmax_s);
+            const float seam = 0.5f * sp.length();
+            float kseam = 0.f;
+            for (float t = seam - 3.f; t <= seam + 3.f; t += 0.05f)
+                kseam = std::max(kseam, std::fabs(sp.kappa_avg(t, 0.40f)));
+            std::printf("    |kappa_avg| max within +-3 m of the half-way point (s=%.1f): %.2f 1/m\n", seam, kseam);
+            // Heading continuity: a cusp shows as a large heading jump between adjacent samples.
+            float dpsi_max = 0.f, dpsi_s = 0.f;
+            for (float t = 0.05f; t <= sp.length(); t += 0.05f)
+            {
+                const float d = std::fabs(wrap(sp.heading_at(t) - sp.heading_at(t - 0.05f)));
+                if (d > dpsi_max) { dpsi_max = d; dpsi_s = t; }
+            }
+            std::printf("    max heading step between 5 cm samples: %.3f rad (%.1f deg) at s=%.1f\n",
+                        dpsi_max, dpsi_max * 180.f / kPi, dpsi_s);
         }
     }
 
-    report("PD (current)", run(route, PdArm{}, w.v_max, kWmax, w.a_lat, kADec, kW, true));
-    report("FF+Frenet", run(route, FfArm{}, w.v_max, kWmax, w.a_lat, kADec, kW, true));
+    const float sp_len_for_sweep = route.spline().length();
+    {
+        // ── THE RECORDED FAILURE GEOMETRY, CHECKED DIRECTLY ──────────────────────────────────────
+        // ★The closed-loop A/B above is INCONCLUSIVE and must not be read as validation: this bench
+        // never reaches kappa*e_y anywhere near 1 (its errors stay ~50 mm), so the failure cannot occur
+        // here at all. What CAN be checked is the arithmetic at the state the robot actually logged at
+        // t=461.6 s: kappa = +3.5 1/m, e_y = +0.51 m, v ~ 0.15 m/s.
+        {
+            const float kap = 3.5f, ey = 0.51f, v = 0.15f, gdc = 1.f / 0.89f, Lg = 0.60f, epsi = 0.05f;
+            const float ke = kap * ey;
+            const float fb = gdc * std::max(v, 0.15f) * (-(2.f / Lg) * epsi - (1.f / (Lg * Lg)) * ey);
+            const float ff_old = gdc * v * kap;
+            const float draw = 1.f - ke, dmn = 0.4f;
+            const float keff = kap / (draw >= 0.f ? std::max(draw, dmn) : std::min(draw, -dmn));
+            const float gate = 1.f / (1.f + (ke / 0.5f) * (ke / 0.5f));
+            const float ff_new = gdc * (v * gate) * keff;
+            std::printf("\n  recorded failure geometry (kappa=%.1f, e_y=%.2f, v=%.2f):  kappa*e_y = %.2f\n", kap, ey, v, ke);
+            std::printf("    feedback                     %+.3f rad/s  (toward the route)\n", fb);
+            std::printf("    OLD feedforward  (raw kappa) %+.3f rad/s  -> sum %+.3f  CANCELS, robot goes straight on\n",
+                        ff_old, ff_old + fb);
+            std::printf("    NEW feedforward  kappa_eff=%+.2f, speed gate x%.3f  %+.3f rad/s  -> sum %+.3f  REINFORCES\n",
+                        keff, gate, ff_new, ff_new + fb);
+        }
+    }
+
+    {
+        // ── CAN THE BAND EVEN MOVE? CLEARANCE AT THE AUTHORED WAYPOINTS ──────────────────────────
+        // The route carries an ANCHOR likelihood pinning it to the waypoints the user clicked. If those
+        // are themselves close to obstacles, no optimiser can win: the clearance preference and the
+        // anchor are in direct opposition, and the anchor is the mission. Measuring this decides whether
+        // "the band gains 1 mm" is a band defect or a MISSION defect.
+        const rc::RobotFootprint &fp = rc::RobotFootprint::shadow();
+        int tight = 0; float worst = 1e9f; std::size_t worst_i = 0;
+        std::printf("\n  clearance AT the authored waypoints (body inscribed %.3f circumscribed %.3f):\n",
+                    fp.inscribed_radius(), fp.circumscribed_radius());
+        for (std::size_t i = 0; i < w.wp_safe.size(); ++i)
+        {
+            const float d = w.planner.distance_at(w.wp_safe[i]);
+            if (d < worst) { worst = d; worst_i = i; }
+            if (d < fp.circumscribed_radius()) ++tight;
+        }
+        std::printf("    worst waypoint: #%zu at %.3f m from an obstacle;  %d of %zu are closer than the "
+                    "circumscribed radius\n", worst_i, worst, tight, w.wp_safe.size());
+        std::printf("    all: ");
+        for (std::size_t i = 0; i < w.wp_safe.size(); ++i)
+            std::printf("%.2f ", w.planner.distance_at(w.wp_safe[i]));
+        std::printf("\n");
+    }
+
+    {
+        // ── WHICH STAGE LOSES THE CLEARANCE? ─────────────────────────────────────────────────────
+        // The authored waypoints have 0.48-1.08 m of room, yet the driven route sits at ~0.19 m. Three
+        // stages sit between them: the A* polyline, the spline fit + feasibility pass, and the optimiser.
+        // Measure clearance on the same footing at each.
+        auto stats = [&w](const std::vector<Vector2f> &pts, float &mn, float &p05)
+        {
+            std::vector<float> d;
+            for (std::size_t i = 1; i < pts.size(); ++i)
+            {
+                const Vector2f a = pts[i-1], b = pts[i];
+                const float len = (b - a).norm();
+                const int n = std::max(1, static_cast<int>(len / 0.05f));
+                for (int k = 0; k <= n; ++k) d.push_back(w.planner.distance_at(a + (b - a) * (float(k) / n)));
+            }
+            if (d.empty()) { mn = p05 = 0.f; return; }
+            std::sort(d.begin(), d.end());
+            mn = d.front(); p05 = d[static_cast<std::size_t>(d.size() * 0.05)];
+        };
+        std::vector<Vector2f> spline_pts;
+        for (float t = 0.f; t <= route.spline().length(); t += 0.05f)
+            spline_pts.push_back(route.spline().position_at(t));
+        float rmn, rp5, smn, sp5;
+        stats(raw_poly, rmn, rp5);
+        stats(spline_pts, smn, sp5);
+        float wmn = 1e9f;
+        for (const auto &q : w.wp_safe) wmn = std::min(wmn, w.planner.distance_at(q));
+        std::printf("\n  WHERE THE CLEARANCE GOES (raw ESDF distance, body needs 0.230-0.325 m):\n");
+        std::printf("    authored waypoints        min %.3f\n", wmn);
+        std::printf("    stage 1  A* polyline      min %.3f   p05 %.3f   (%zu pts)\n", rmn, rp5, raw_poly.size());
+        std::printf("    stage 2+3 fitted route    min %.3f   p05 %.3f   (%zu samples)\n", smn, sp5, spline_pts.size());
+    }
+
+    {
+        // ── DOES PREVIEWING AT THE COMMANDED SPEED STOP THE CUTTING? ─────────────────────────────
+        // The metric is DRIVEN DISTANCE / ROUTE LENGTH. Below 1.0 the robot took a shorter path than
+        // the route it was following, which is cutting — and cross-track cannot see it, because e_y is
+        // measured at the projection and the projection skips with the robot.
+        const float len = route.spline().length();
+        std::printf("\n  preview source (route length %.2f m):\n", len);
+        std::printf("      %-26s %9s %9s %9s %9s\n", "preview at", "driven m", "ratio", "rms mm", "time s");
+        for (const bool at_cmd : {false, true})
+        {
+            FfArm arm; arm.preview_at_cmd = at_cmd;
+            const Result R = run(route, arm, w.v_max, kWmax, w.a_lat, kADec, kW, false);
+            const double rms = R.n ? std::sqrt(R.e_sq / R.n) : 0.0;
+            std::printf("      %-26s %9.2f %9.3f %9.1f %9.0f%s\n",
+                        at_cmd ? "commanded speed (fixed)" : "profile speed (cutting)",
+                        R.dist, R.dist / len, rms * 1000, R.t_end,
+                        R.dist / len < 0.99 ? "   <- CUTS" : "");
+        }
+    }
+
+    report("pd", run(route, PdArm{}, w.v_max, kWmax, w.a_lat, kADec, kW, true));
+    report("plain (FF+Frenet)", run(route, FfArm{}, w.v_max, kWmax, w.a_lat, kADec, kW, true));
     std::printf("\n  reminder: no obstacles here, so no gate and no carrot clip — the PD arm is an\n"
                 "  OPTIMISTIC baseline (on the robot its carrot is clipped on 75%% of cycles).\n");
     return 0;

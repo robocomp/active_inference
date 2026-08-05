@@ -439,6 +439,13 @@ void SpecificWorker::initialize()
 	session_.mission().archive_on_stop("band_diag.csv");
 	session_.mission().archive_on_stop("route_events.csv");
 	session_.mission().archive_on_stop("route_geometry.csv");
+	// ★2026-08-05 — THE WORLD SNAPSHOT MUST BE ARCHIVED PER RUN TOO. route_world.txt is what
+	// tools/route_bench and tools/tracker_sim replay, and it is REWRITTEN AT EVERY ROUTE BUILD. Two sim
+	// results taken on different days therefore described DIFFERENT ROUTES while appearing comparable —
+	// a 94.7 mm reference measured on a 72.7 m world was compared against 266.9 mm on a 74.8 m world and
+	// read as a regression. Archiving it under the run stamp makes every offline number reproducible
+	// against the exact route it came from, and lets an old run be re-benched after a code change.
+	session_.mission().archive_on_stop("route_world.txt");
 	session_.mission().archive_on_stop("mppi_cycle.txt");
 	session_.mission().archive_on_stop("mppi_reversal.txt");
 	session_.mission().load(missions_path_);
@@ -853,11 +860,11 @@ void SpecificWorker::load_params()
 	// the band-plus-tracker architecture, separately they are half of one.
 	// Cross-track feedback for the PD tracker. Without it the tracker is pure pursuit and cuts corners:
 	// it converges to the carrot's direction, not to the route the band just optimised.
-	load_optional_cast<double>("Controller.RouteTrackerL", path_controller_.params.route_L);
-	load_optional_cast<double>("Controller.RouteTrackerTLag", path_controller_.params.route_T_lag);
-	load_optional_cast<double>("Controller.RouteTrackerGdc", path_controller_.params.route_g_dc);
-	load_optional_cast<double>("Controller.RouteTrackerW", path_controller_.params.route_W);
-	load_optional_cast<double>("Controller.RouteTrackerRotHeadroom", path_controller_.params.route_rot_headroom);
+	load_optional_cast<double>("Controller.PlainTrackerL", path_controller_.params.plain_L);
+	load_optional_cast<double>("Controller.PlainTrackerTLag", path_controller_.params.plain_T_lag);
+	load_optional_cast<double>("Controller.PlainTrackerGdc", path_controller_.params.plain_g_dc);
+	load_optional_cast<double>("Controller.PlainTrackerW", path_controller_.params.plain_W);
+	load_optional_cast<double>("Controller.PlainTrackerRotHeadroom", path_controller_.params.plain_rot_headroom);
 	load_optional_cast<double>("Controller.PdCrossTrackGain", path_controller_.params.pd_cross_track_gain);
 	load_optional_cast<double>("Controller.PdCrossTrackSoft", path_controller_.params.pd_cross_track_soft_mps);
 	// Lateral bumper — the reactive half. The A* clearance preference and the band keep the ROUTE off
@@ -881,28 +888,30 @@ void SpecificWorker::load_params()
 		std::string mode = "mppi";
 		load_optional("Controller.ControlMode", mode);
 		std::ranges::transform(mode, mode.begin(), [](unsigned char c) { return std::tolower(c); });
-		const bool route = (mode == "route");
+		const bool plain = (mode == "plain");
 		const bool pd = (mode == "pd" or mode == "pursuit" or mode == "tracker");
 		// WARN on an unrecognised value rather than silently falling back. This switch's entire purpose
 		// is that one printed line settles which arm ran; a typo ("mpi", "PD-tracker", a trailing space)
 		// would otherwise produce a confident "mode = MPPI" and a mislabelled lap.
-		if (not pd and not route and mode != "mppi")
+		if (not pd and not plain and mode != "mppi")
 			std::println("[control] ⚠ unrecognised Controller.ControlMode '{}' — falling back to MPPI. "
-			             "Valid: mppi | pd (aliases: pursuit, tracker) | route (the Frenet Feedforward Tracker).", mode);
-		path_controller_.set_control_mode(route ? rc::TrajectoryController::ControlMode::ROUTE
+			             "Valid: mppi | pd (aliases: pursuit, tracker) | plain (the route-following tracker).", mode);
+		path_controller_.set_control_mode(plain ? rc::TrajectoryController::ControlMode::PLAIN
 		                                 : pd    ? rc::TrajectoryController::ControlMode::PD
 		                                         : rc::TrajectoryController::ControlMode::MPPI);
-		session_.set_route_tracker(route, path_controller_.params.route_rot_headroom);
-		if (route)
-			std::println("[control] mode = FRENET FEEDFORWARD TRACKER (route curvature FF + Frenet feedback)"
-			             "   (L={:.2f} m, T_lag={:.2f} s, g_dc={:.3f}, rot headroom={:.2f})",
-			             path_controller_.params.route_L, path_controller_.params.route_T_lag,
-			             path_controller_.params.route_g_dc, path_controller_.params.route_rot_headroom);
+		session_.set_route_tracker(plain, path_controller_.params.plain_rot_headroom);
+		if (plain)
+			std::println("[control] mode = PLAIN tracker (curvature FF + Frenet feedback; NO avoidance — "
+			             "the band and the planner own that)   (L={:.2f} m, T_lag={:.2f} s, g_dc={:.3f}, "
+			             "rot headroom={:.2f})",
+			             path_controller_.params.plain_L, path_controller_.params.plain_T_lag,
+			             path_controller_.params.plain_g_dc, path_controller_.params.plain_rot_headroom);
 		if (pd and not params.band_enabled)
 			std::println("[control] ⚠ ControlMode=pd with BandEnabled=false: NOTHING is doing obstacle "
 			             "avoidance except the safety gate. This is not the stage-2 architecture.");
-		std::println("[control] mode = {}", pd ? "PD carrot tracker (avoidance delegated to the band)"
-		                                       : "MPPI (samples and scores its own avoidance)");
+		if (not plain)
+			std::println("[control] mode = {}", pd ? "PD carrot tracker (avoidance delegated to the band)"
+			                                       : "MPPI (samples and scores its own avoidance)");
 	}
 	// Say which way the robot will be driven, at startup, unconditionally. Two attempts at diagnosing
 	// "it still does the old thing" were spent reasoning about whether a flag had arrived; one printed

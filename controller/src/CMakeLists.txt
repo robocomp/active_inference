@@ -29,6 +29,9 @@ LIST(APPEND SOURCES
   ../src/route_optimizer.cpp
   ../src/grid_planner.cpp
   ../src/trajectory_controller.cpp
+  ../src/trackers/plain_tracker.cpp
+  ../src/trackers/pd_tracker.cpp
+  ../src/trackers/mppi_tracker.cpp
   ../src/viewer_2d.cpp
 )
 

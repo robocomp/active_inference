@@ -25,6 +25,7 @@ const char *obstacle_kind_tag(ControllerObstacleKind kind)
 #include <cstdio>
 #include <filesystem>
 #include <iomanip>
+#include <locale>
 #include <iostream>
 #include <limits>
 #include <print>
@@ -367,6 +368,11 @@ void ControllerSession::dump_route_world(const Eigen::Vector2f &start,
 {
     std::ofstream f("route_world.txt", std::ios::out | std::ios::trunc);
     if (not f.is_open()) return;
+    // Locale-proof the writer (CLAUDE.md): these machines run es_ES, where the decimal separator is a
+    // COMMA. std::ofstream formats through the C++ global locale, which stays "C" unless someone calls
+    // std::locale::global — but this file is parsed back by tools that read with the C library, and a
+    // comma here would silently truncate every coordinate to its integer part. Cheap insurance.
+    f.imbue(std::locale::classic());
     f << std::setprecision(9);
     f << "# route world snapshot — ControllerSession::build_route. Replay with tools/route_bench.\n";
     f << "version 1\n";
@@ -465,7 +471,7 @@ void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
                          "g_goal,g_obs,g_vel,g_smooth,g_lat,g_cbf,n_collisions,"
                          "cmd_adv,cmd_rot,meas_speed,min_esdf,explore,p_free,steer_conc,side_asym,"
                          "sg_trig,gate_scale,gate_horizon,gate_min_esdf,gate_hard_stop,gate_hard_coll,"
-                         "pd_cross_err_m,path_kappa,route_d_min,meas_rot,bump_push,gap_l,gap_r,pose_xy_std,"
+                         "pd_cross_err_m,path_kappa,meas_rot,bump_push,gap_l,gap_r,pose_xy_std,"
                          "pose_theta_std,carrot_bear,carrot_dist,pose_x,pose_y,pose_th,model_dropped,"
                          "out_ticks,out_period_ms,out_period_max,ice_ms,ice_max,cmd_age_max,fresh_min,"
                          "pose_stamp_age\n";
@@ -482,7 +488,7 @@ void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
               << (o.safety_guard_triggered ? 1 : 0) << ',' << o.gate_speed_scale << ','
               << o.gate_horizon_s << ',' << o.gate_min_esdf << ','
               << (o.gate_hard_stop ? 1 : 0) << ',' << (o.gate_hard_collision ? 1 : 0) << ','
-              << o.cross_track_m << ',' << path_kappa << ',' << o.route_d_min << ',' << measured_rot << ','
+              << o.cross_track_m << ',' << path_kappa << ',' << measured_rot << ','
               << o.pd_bumper_push << ',' << o.pd_gap_left_m << ',' << o.pd_gap_right_m << ','
               << pose_xy_std << ',' << pose_theta_std << ','
               << o.carrot_bearing_rad << ',' << o.carrot_dist_m << ','
@@ -657,6 +663,9 @@ float ControllerSession::route_speed_limit(float v_cap, float a_decel) const
     { return std::abs(route_.spline().kappa_avg(s + 0.5f * w_kappa, w_kappa)); };
 
     float v = v_cap;
+    // The tightest rotation-limited speed the scan finds. The floor at the bottom may not exceed it —
+    // see the note there; it is what makes a cusp followable at all.
+    float v_rot_min = v_cap;
     // Sampled at 10 cm against a 5 cm curve — deliberately coarser than the curve's own spacing, because
     // curvature_at is a second difference of the samples and is therefore noisiest at that scale.
     for (float ds = 0.f; ds <= horizon; ds += 0.10f)
@@ -684,16 +693,30 @@ float ControllerSession::route_speed_limit(float v_cap, float a_decel) const
         const float rot_budget = std::max(0.05f, params_->max_rot_speed_rps)
                                * (route_tracker_active_ ? rot_headroom_ : 1.0f);
         const float v_rot = k_avg > 1e-3f ? rot_budget / k_avg : v_cap;
+        v_rot_min = std::min(v_rot_min, v_rot);
         const float v_here = std::min(v_lat, v_rot);
         // The bound is on the speed we may hold NOW: we must be able to shed the difference over ds.
         const float v_allowed = std::sqrt(v_here * v_here + 2.f * a_dec * ds);
         v = std::min(v, v_allowed);
     }
-    // A floor purely against numerical noise in the curvature estimate, not a behavioural knob: a
-    // spurious kappa spike must not be able to command a standstill. A differential drive has no minimum
-    // turn radius — it can rotate in place — so a genuinely sharp corner is handled by the rotation, and
-    // the forward speed never needs to reach zero for geometric reasons.
-    return std::clamp(v, 0.15f, v_cap);
+    // A floor purely against numerical noise in the curvature estimate: a spurious kappa spike must not
+    // be able to command a standstill.
+    // ★2026-08-05 — IT MUST NEVER OVERRULE THE ROTATION BUDGET, and until now it did. The old form was a
+    // flat clamp to 0.15 m/s, justified by "a differential drive has no minimum turn radius — it can
+    // rotate in place — so a sharp corner is handled by the rotation". That is true of the ROBOT and
+    // FALSE of the TRACKER: the plain tracker's omega = g_dc*v*kappa is PROPORTIONAL to v, so it cannot
+    // rotate in place, and flooring v is therefore the same as demanding a turn rate.
+    // Measured on this tour (tools/tracker_sim): the route reaches |kappa_avg| = 7.79 1/m — radius
+    // 0.13 m, against a 0.325 m circumscribed body — at s=23.9, with a 52.5 degree heading step between
+    // adjacent 5 cm samples, i.e. a cusp. At the 0.15 floor that demands omega = 1.17 rad/s against a
+    // 0.8 limit, so the command saturates, the robot under-turns, leaves the route and the Frenet
+    // feedback diverges: 4675 mm rms on the two-lap tour against 157 mm on one lap, with a PERFECT pose
+    // and no obstacles. The robot's lap 5 carried the same signature — 1.03 m rms, 4.32 m max, and 31%
+    // extra distance driven.
+    // Flooring at min(0.15, v_rot_min) keeps the noise protection everywhere it was doing a job — on a
+    // straight v_rot is metres per second, so the floor is unchanged at 0.15 — while letting a genuine
+    // corner slow to the speed the robot can actually turn through it (about 0.07 m/s at that cusp).
+    return std::clamp(v, std::min(0.15f, v_rot_min), v_cap);
 }
 
 bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,

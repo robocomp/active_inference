@@ -18,6 +18,12 @@ SET(RC_COMPONENT_INSTALL_PATH $ENV{ROBOCOMP} CACHE STRING "component install pat
 #SET(COMPONENT_NAME ${COMPONENT_NAME} CACHE STRING "component name" FORCE)
 
 add_subdirectory(generated)
+# Offline benches (route_bench, mppi_bench, tracker_sim). ★They were never wired in: tools/CMakeLists.txt
+# existed but nothing add_subdirectory()'d it, so `make tracker_sim` failed with "No rule to make target"
+# — which is easy to miss when you grep the build output for "error:". Every bench was therefore built by
+# hand, and a stale binary silently answered questions about source that had changed. Must come AFTER
+# generated/, which creates the ai_common::geometry target these link.
+add_subdirectory(tools)
 
 INSTALL(FILES etc/config DESTINATION ${RC_COMPONENT_INSTALL_PATH}/etc-default/ RENAME controller.conf )
 
