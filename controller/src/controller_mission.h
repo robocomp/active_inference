@@ -148,15 +148,24 @@ struct TrajectoryStats
     // matters — an unbounded barrier would make J useless for ranking anything else — and so does the
     // fact that it never falls below ~1, so it is a constant offset among safe runs and only starts
     // moving the ranking when a run is actually tight.
+    // ⚠DIAGNOSTIC, NOT PART OF J — see the note where it is computed. Clearance belongs to the PATH
+    // layer, and a run's worst margin is a fact about the route it was given, not about how well the
+    // tracker followed it.
     float clear_norm = 0.f;
-    float mission_cost = 0.f;   // J = smooth_lin + smooth_rot + dev_norm + clear_norm, lower is better
+    float mission_cost = 0.f;   // J = smooth_lin + smooth_rot + dev_norm, lower is better
     // ── J_route: THE SAME QUALITY, MADE ROUTE-INDEPENDENT ────────────────────────────────────────
     // J above is dominated by the ROUTE, not the tracker — a straight route scores ~0 on smooth_rot for
     // anybody — so it cannot be compared across missions and a gain tuned on one tour does not transfer.
     // These divide the measured totals by what the route itself makes unavoidable (rc::route_ideal):
     //   r_lin = sum|dv| / TV(v*),  r_rot = sum|domega| / TV(w*),  r_dev = cross_track_rms / rms(e*)
     // where v* is the geometric speed profile, w* = v*·kappa, and e* is the lateral error a PERFECT but
-    // LAGGED tracker still incurs. Each is >= 1, and 1 means "as well as the plant permits here".
+    // LAGGED tracker still incurs.
+    // ★ONLY r_dev IS A TRUE FLOOR RATIO. The lag error really is unavoidable, so r_dev >= 1 and is the
+    // one that repeats: cv 4.1% over nine laps. TV(v*) and TV(w*) are NOT lower bounds — they are the
+    // variation of an idealised profile that wiggles at every curvature feature, and a real robot,
+    // smoothed by its own dynamics, need not reproduce those wiggles and can legitimately vary LESS.
+    // Measured: r_lin came out 0.602 and r_rot 0.774 on one run, which the original ">= 1" framing said
+    // was impossible. They are SCALES, not floors, and they are the noisy terms (cv 45-52%).
     // NaN when the run had no continuous route to compare against.
     float r_lin = 0.f;
     float r_rot = 0.f;

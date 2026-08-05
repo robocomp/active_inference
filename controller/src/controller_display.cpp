@@ -211,7 +211,7 @@ void ControllerDisplay::update_mission_j(float smooth_lin, float smooth_rot, flo
         plot->add_series("smooth_lin", QColor(120, 190, 255), 1.2f);
         plot->add_series("smooth_rot", QColor(255, 190, 110), 1.2f);
         plot->add_series("dev_norm",   QColor(150, 235, 150), 1.2f);
-        plot->add_series("clear_norm", QColor(255, 120, 120), 1.6f);   // red: the safety term
+        plot->add_series("clear_norm", QColor(255, 120, 120), 1.6f);   // red: PATH diagnostic, not in J
         j_series_ready_ = true;
     }
     const auto ok = [](float v) { return std::isfinite(v) ? v : 0.f; };

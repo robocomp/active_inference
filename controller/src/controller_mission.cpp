@@ -704,7 +704,7 @@ void MissionRunner::stop(const std::string &reason, std::uint64_t now_ms)
                 "d2v %.1f (peak %.1f m/s3) | a_lat %.2f rms %.2f max\n"
                 "[mission]   safety: clearance %.3f min / %.3f p05 | %d guard, %d escapes, %d replans\n"
                 "[mission]   repeat: lap-to-lap %.3f m mean / %.3f m max (NaN = single lap)\n"
-                "[mission]   J = %.3f (lin %.3f + rot %.3f + dev %.3f + clr %.3f)\n"
+                "[mission]   J = %.3f (lin %.3f + rot %.3f + dev %.3f)   [path: clr %.2f — NOT in J]\n"
                 "[mission]   J_route = %.3f (lin x%.2f  rot x%.2f  dev x%.2f  vs THIS route's own floor; "
                 "1.0 = as well as the plant permits here)\n",
                 active_.name.c_str(), reason.c_str(), s2.laps_completed, loops_,
@@ -898,8 +898,18 @@ TrajectoryStats MissionRunner::summary() const
         if (cell > 0.f and std::isfinite(t.min_clearance_m))
             t.clear_norm = cell / std::max(t.min_clearance_m, 0.1f * cell);
         else t.clear_norm = kNaN;
-        t.mission_cost = t.smooth_lin + t.smooth_rot + t.dev_norm
-                       + (std::isfinite(t.clear_norm) ? t.clear_norm : 0.f);
+        // ★clear_norm is NOT summed into J, and that is architectural rather than statistical. Clearance
+        // is the PATH's responsibility — the planner's footprint predicate, the band, repair->replan —
+        // not the tracker's, which carries no obstacle data at all by construction. Scoring the
+        // controller on it charges one layer for another's work, and makes safety TRADEABLE: an
+        // optimiser would happily sell 3 mm of margin for a smoothness gain.
+        // The nine-lap trial settled it empirically too: across three 3-lap runs on identical config,
+        // cross_track_rms held to cv 2.7% while min_clearance swung cv 132% (0.0016 .. 0.0784 m). The
+        // controller did the same thing every lap; what moved was where the path put it. A term with
+        // that variance also made J unusable as an objective — cv 36% against 4% for r_dev.
+        // It stays COMPUTED and LOGGED, because it is the number that says a run came within 2 mm of
+        // something, and that must never stop being visible. It is simply not a controller cost.
+        t.mission_cost = t.smooth_lin + t.smooth_rot + t.dev_norm;
         // ── J_route ── the same three quantities, divided by what the ROUTE makes unavoidable rather
         // than by the actuator limits and a planning cell. See TrajectoryStats for why J alone cannot
         // be compared across missions. Left at NaN when there was no continuous route: a route-relative
