@@ -136,7 +136,32 @@ struct TrajectoryStats
     float smooth_lin = 0.f;
     float smooth_rot = 0.f;
     float dev_norm = 0.f;
-    float mission_cost = 0.f;   // J, lower is better
+    // ── clear_norm: THE TERM J WAS MISSING ───────────────────────────────────────────────────────
+    // Measured 2026-08-05: two 3-lap runs scored J 5.212 and 5.191 — indistinguishable — while
+    // min_clearance was 0.0585 m on one and 0.0016 m on the other, and lap_repeat max doubled. J saw a
+    // run that grazes to 1.6 mm as equivalent to one holding 58 mm, because none of its three terms
+    // contains clearance at all. A self-adapting controller handed that J would optimise straight into
+    // the wall, and this tracker has no obstacle defence of its own to catch it.
+    //   clear_norm = cell / max(min_clearance, cell/10)
+    // Mirrors dev_norm's use of the planner cell as the length scale, but INVERTED so it grows as the
+    // margin shrinks: ~1 when the robot keeps a cell of room, hard-capped at 10 at contact. The cap
+    // matters — an unbounded barrier would make J useless for ranking anything else — and so does the
+    // fact that it never falls below ~1, so it is a constant offset among safe runs and only starts
+    // moving the ranking when a run is actually tight.
+    float clear_norm = 0.f;
+    float mission_cost = 0.f;   // J = smooth_lin + smooth_rot + dev_norm + clear_norm, lower is better
+    // ── J_route: THE SAME QUALITY, MADE ROUTE-INDEPENDENT ────────────────────────────────────────
+    // J above is dominated by the ROUTE, not the tracker — a straight route scores ~0 on smooth_rot for
+    // anybody — so it cannot be compared across missions and a gain tuned on one tour does not transfer.
+    // These divide the measured totals by what the route itself makes unavoidable (rc::route_ideal):
+    //   r_lin = sum|dv| / TV(v*),  r_rot = sum|domega| / TV(w*),  r_dev = cross_track_rms / rms(e*)
+    // where v* is the geometric speed profile, w* = v*·kappa, and e* is the lateral error a PERFECT but
+    // LAGGED tracker still incurs. Each is >= 1, and 1 means "as well as the plant permits here".
+    // NaN when the run had no continuous route to compare against.
+    float r_lin = 0.f;
+    float r_rot = 0.f;
+    float r_dev = 0.f;
+    float mission_cost_route = 0.f;   // J_route = r_lin + r_rot + r_dev
     float lat_accel_max = 0.f;
 
     // Safety — reported as a CONSTRAINT, never folded into an objective.
@@ -204,6 +229,12 @@ struct MissionRunContext
     float planner_cell_size_m = 0.f;
     float body_inscribed_m = 0.f;
     float body_circumscribed_m = 0.f;
+    // What THIS route makes unavoidable (rc::route_ideal). Zero/invalid when the mission is not running
+    // a continuous route, in which case J_route is left at NaN rather than guessed.
+    float ideal_tv_v = 0.f;
+    float ideal_tv_w = 0.f;
+    float ideal_rms_e = 0.f;
+    bool  ideal_valid = false;
 };
 
 class MissionRunner
@@ -325,6 +356,11 @@ public:
     // WRITE-ONLY from C++. Nothing here is ever read back to drive behaviour, so a hand-edited or
     // half-written record can change an analysis but can never change what the robot does.
     void set_run_context(const MissionRunContext &ctx) { run_ctx_ = ctx; }
+    // What the ROUTE makes unavoidable, pushed after build_route. Separate from set_run_context because
+    // that runs at Run press, when there is no route yet to measure. Without this J_route stays NaN.
+    void set_route_ideal(float tv_v, float tv_w, float rms_e, bool valid)
+    { run_ctx_.ideal_tv_v = tv_v; run_ctx_.ideal_tv_w = tv_w;
+      run_ctx_.ideal_rms_e = rms_e; run_ctx_.ideal_valid = valid; }
     void set_run_dir(std::string dir) { run_dir_ = std::move(dir); }
 
     // Called from the VELOCITY-OUTPUT thread (see MissionProfileSample). Buffered in memory and written

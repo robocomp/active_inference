@@ -94,6 +94,9 @@ public:
     // vertical gap between them is λ·dist. Thread-safe (the plot buffers under its own mutex).
     struct AffordanceEfeSample { std::string name; float gain = 0.f; float score = 0.f; };
     void update_affordance_efe(const std::vector<AffordanceEfeSample> &samples);
+    // Running J for the plot below the EFE panel — the same four terms the run is graded on at STOP,
+    // accumulated live. Thread-safe; the plot buffers under its own mutex.
+    void update_mission_j(float smooth_lin, float smooth_rot, float dev_norm, float clear_norm);
     void clear_robot_trajectory();
 
     // Presentation — MUST be called on the GUI thread only. Reads the latest
@@ -149,6 +152,7 @@ private:
     std::unique_ptr<rc::Viewer2D> viewer_2d_;
     bool room_view_fitted_ = false;
     std::unordered_set<std::string> efe_series_known_;   // plot series already registered
+    bool j_series_ready_ = false;                        // running-J series registered once
     std::size_t efe_color_next_ = 0;                     // next palette colour for a new affordance
 
     mutable std::mutex snapshot_mutex_;

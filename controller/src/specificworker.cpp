@@ -527,6 +527,22 @@ void SpecificWorker::compute()
 		display_.update_affordance_efe(efe);
 	}
 
+	// Running J, plotted below the EFE panel. summary() is the SAME accumulator the run is graded on at
+	// STOP, so the live curve and the final number cannot disagree — which is the point: a bad stretch
+	// is visible while it happens instead of in a CSV afterwards, and the four series say WHICH term is
+	// paying for it. ★clear_norm is drawn in red because J was blind to clearance until 2026-08-05: two
+	// 3-lap runs scored 5.212 and 5.191 while min_clearance differed 36-fold.
+	// ⚠THROTTLED, and it must stay that way: summary() COPIES AND SORTS the clearance vector on every
+	// call, which is ~1900 samples per lap and ~5700 over three. At the 20 Hz control rate that is a
+	// growing O(n log n) inside the loop whose notice latency the timing work exists to protect. A plot
+	// with a 120 s window gains nothing from 20 Hz, so it runs at 2.
+	if (++mission_j_plot_tick_ >= 10)
+	{
+		mission_j_plot_tick_ = 0;
+		const auto js = session_.mission().summary();
+		display_.update_mission_j(js.smooth_lin, js.smooth_rot, js.dev_norm, js.clear_norm);
+	}
+
 	log_first_compute_once();
 
 	if (!G)

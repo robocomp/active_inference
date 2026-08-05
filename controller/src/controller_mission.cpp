@@ -703,7 +703,10 @@ void MissionRunner::stop(const std::string &reason, std::uint64_t now_ms)
                 "[mission]   smooth: yaw %.1f rad in %d reversals | dv %.1f (peak %.2f m/s2) | "
                 "d2v %.1f (peak %.1f m/s3) | a_lat %.2f rms %.2f max\n"
                 "[mission]   safety: clearance %.3f min / %.3f p05 | %d guard, %d escapes, %d replans\n"
-                "[mission]   repeat: lap-to-lap %.3f m mean / %.3f m max (NaN = single lap)\n",
+                "[mission]   repeat: lap-to-lap %.3f m mean / %.3f m max (NaN = single lap)\n"
+                "[mission]   J = %.3f (lin %.3f + rot %.3f + dev %.3f + clr %.3f)\n"
+                "[mission]   J_route = %.3f (lin x%.2f  rot x%.2f  dev x%.2f  vs THIS route's own floor; "
+                "1.0 = as well as the plant permits here)\n",
                 active_.name.c_str(), reason.c_str(), s2.laps_completed, loops_,
                 s2.progress_m, s2.route_length_m, s2.duration_s,
                 s2.cross_track_rms_m, s2.cross_track_max_m, s2.heading_err_rms_rad,
@@ -713,7 +716,9 @@ void MissionRunner::stop(const std::string &reason, std::uint64_t now_ms)
                 s2.lin_jerk_max, s2.lat_accel_rms, s2.lat_accel_max,
                 s2.min_clearance_m, s2.p05_clearance_m,
                 s2.safety_guard_cycles, s2.escapes, s2.replans,
-                s2.lap_repeat_mean_m, s2.lap_repeat_max_m);
+                s2.lap_repeat_mean_m, s2.lap_repeat_max_m,
+                s2.mission_cost, s2.smooth_lin, s2.smooth_rot, s2.dev_norm, s2.clear_norm,
+                s2.mission_cost_route, s2.r_lin, s2.r_rot, s2.r_dev);
     std::fflush(stdout);
     if (not csv_path_.empty() and stats_.duration_s > 0.f)
         write_csv(csv_path_);
@@ -888,7 +893,25 @@ TrajectoryStats MissionRunner::summary() const
         if (v_max > 0.f and dist > 0.f) t.smooth_lin = (t.lin_accel_effort / v_max) / dist;
         if (w_max > 0.f and dist > 0.f) t.smooth_rot = (t.rot_accel_effort / w_max) / dist;
         if (cell > 0.f)                 t.dev_norm   = t.cross_track_rms_m / cell;
-        t.mission_cost = t.smooth_lin + t.smooth_rot + t.dev_norm;
+        // ★clear_norm — see TrajectoryStats. Guarded on a finite min_clearance: a run with no clearance
+        // samples at all must not be scored as if it were perfectly safe.
+        if (cell > 0.f and std::isfinite(t.min_clearance_m))
+            t.clear_norm = cell / std::max(t.min_clearance_m, 0.1f * cell);
+        else t.clear_norm = kNaN;
+        t.mission_cost = t.smooth_lin + t.smooth_rot + t.dev_norm
+                       + (std::isfinite(t.clear_norm) ? t.clear_norm : 0.f);
+        // ── J_route ── the same three quantities, divided by what the ROUTE makes unavoidable rather
+        // than by the actuator limits and a planning cell. See TrajectoryStats for why J alone cannot
+        // be compared across missions. Left at NaN when there was no continuous route: a route-relative
+        // score with no route is not a small error, it is a category error.
+        if (run_ctx_.ideal_valid)
+        {
+            t.r_lin = run_ctx_.ideal_tv_v  > 1e-3f ? t.lin_accel_effort / run_ctx_.ideal_tv_v  : kNaN;
+            t.r_rot = run_ctx_.ideal_tv_w  > 1e-3f ? t.rot_accel_effort / run_ctx_.ideal_tv_w  : kNaN;
+            t.r_dev = run_ctx_.ideal_rms_e > 1e-6f ? t.cross_track_rms_m / run_ctx_.ideal_rms_e : kNaN;
+            t.mission_cost_route = t.r_lin + t.r_rot + t.r_dev;
+        }
+        else { t.r_lin = t.r_rot = t.r_dev = t.mission_cost_route = kNaN; }
     }
     return t;
 }
@@ -937,7 +960,8 @@ bool MissionRunner::write_csv(const std::string &path) const
         "mission,mode,run_start_ms,stop_reason,laps,duration_s,distance_m,route_length_m,progress_m,"
         "mean_speed_mps,max_speed_mps,cross_track_rms_m,cross_track_max_m,heading_err_rms_rad,"
         "rot_effort_rad,rot_energy,rot_reversals,lin_accel_effort,lin_accel_max,lin_jerk_effort,"
-        "rot_accel_effort,smooth_lin,smooth_rot,dev_norm,mission_cost,"
+        "rot_accel_effort,smooth_lin,smooth_rot,dev_norm,clear_norm,mission_cost,"
+        "r_lin,r_rot,r_dev,mission_cost_route,"
         "lin_jerk_max,lat_accel_rms,lat_accel_max,min_clearance_m,p05_clearance_m,"
         "safety_guard_cycles,escapes,replans,lap_repeat_mean_m,lap_repeat_max_m";
 
@@ -986,7 +1010,8 @@ bool MissionRunner::write_csv(const std::string &path) const
         << t.rot_effort_rad << ',' << t.rot_energy << ',' << t.rot_reversals << ','
         << t.lin_accel_effort << ',' << t.lin_accel_max << ',' << t.lin_jerk_effort << ','
         << t.rot_accel_effort << ',' << t.smooth_lin << ',' << t.smooth_rot << ','
-        << t.dev_norm << ',' << t.mission_cost << ','
+        << t.dev_norm << ',' << t.clear_norm << ',' << t.mission_cost << ','
+        << t.r_lin << ',' << t.r_rot << ',' << t.r_dev << ',' << t.mission_cost_route << ','
         << t.lin_jerk_max << ',' << t.lat_accel_rms << ',' << t.lat_accel_max << ','
         << t.min_clearance_m << ',' << t.p05_clearance_m << ','
         << t.safety_guard_cycles << ',' << t.escapes << ',' << t.replans << ','

@@ -171,6 +171,24 @@ public:
         affordance_efe_plot->set_visible_window(60.f);
         efe_layout->addWidget(affordance_efe_plot, 1);
         main_layout->addWidget(efe_panel, 1);
+
+        // ── RUNNING J, directly below the EFE score ──────────────────────────────────────────────
+        // The same quality metric the run is graded on at STOP, accumulated live so a bad stretch is
+        // visible while it happens rather than in a CSV afterwards. Four series, the terms of J, so the
+        // plot says WHICH part is costing: smoothness of speed, of rotation, deviation, or clearance.
+        auto *j_panel = new QFrame(this);
+        j_panel->setFrameShape(QFrame::StyledPanel);
+        j_panel->setFrameShadow(QFrame::Sunken);
+        auto *j_layout = new QVBoxLayout(j_panel);
+        j_layout->setContentsMargins(4, 2, 4, 2);
+        j_layout->setSpacing(2);
+        j_layout->addWidget(new QLabel("Running J = smooth_lin + smooth_rot + dev_norm + clear_norm "
+                                       "(lower = better)", j_panel));
+        mission_j_plot = new rc::TimeSeriesPlot(j_panel);
+        mission_j_plot->setMinimumHeight(80);
+        mission_j_plot->set_visible_window(120.f);   // a lap is ~95 s, so one window holds a whole lap
+        j_layout->addWidget(mission_j_plot, 1);
+        main_layout->addWidget(j_panel, 1);
     }
 	~Custom_widget()
     {
@@ -291,6 +309,7 @@ public:
     }
 
     rc::TimeSeriesPlot *affordance_efe_plot = nullptr;
+    rc::TimeSeriesPlot *mission_j_plot = nullptr;   // running J, below the EFE panel
     QPushButton *lidar_toggle_btn = nullptr;
     QPushButton *mppi_paths_toggle_btn = nullptr;
 

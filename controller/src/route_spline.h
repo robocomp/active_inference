@@ -148,4 +148,34 @@ private:
     float max_dev_ = 0.f, mean_dev_ = 0.f;
 };
 
+// ── WHAT THE ROUTE ITSELF MAKES UNAVOIDABLE ──────────────────────────────────────────────────────
+// The mission cost J = smooth_lin + smooth_rot + dev_norm answers "how did this run go", not "how good
+// is this controller", because every one of its terms is dominated by the ROUTE rather than by the
+// tracker: a straight route scores ~0 on smooth_rot for anybody, and a cusped one produces cross-track
+// error for anybody. So J cannot be compared across missions, and a gain tuned on one tour does not
+// transfer to another.
+// These three quantities are the route's own floor, computed from the spline and the IDENTIFIED plant
+// with no robot involved:
+//   v*(s) = the geometric speed profile (the same curvature and lateral-accel limits route_speed_limit
+//           applies), w*(s) = v*(s)*kappa(s), and e*(s) = (v*(s)*T_lag)^2*|kappa(s)|/2, the lateral
+//           offset a PERFECT tracker still incurs because the actuator lags by T_lag.
+// Dividing a run's measured totals by these gives a J' whose terms are each >= 1, where 1 means "as
+// well as the plant permits on this route" — dimensionless, and comparable across routes.
+// ⚠On a near-straight stretch tv_w -> 0 and the ratio explodes, so samples below a floor are dropped
+// rather than allowed to dominate; `w_span` reports how much of the route actually contributed.
+struct RouteIdeal
+{
+    float tv_v  = 0.f;    // total variation of v*(s) — irreducible speed changes
+    float tv_w  = 0.f;    // total variation of w*(s) — irreducible turn-rate changes
+    float rms_e = 0.f;    // rms of e*(s) — the lag-induced error floor
+    float length_m = 0.f;
+    float w_span = 0.f;   // metres of route where |w*| was above the floor and the tv_w ratio is meaningful
+    bool  valid = false;
+};
+
+// v_cap/a_lat/a_dec/w_max/headroom mirror ControllerSession::route_speed_limit; W is the curvature
+// window (plain_W) and T_lag the identified actuator lag.
+RouteIdeal route_ideal(const RouteSpline &sp, float v_cap, float a_lat, float a_dec,
+                       float w_max, float W, float T_lag, float headroom);
+
 }  // namespace rc

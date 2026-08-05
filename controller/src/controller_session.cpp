@@ -825,10 +825,30 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
             // set_path_presmoothed: the curve is already C2 and already footprint-checked, so the
             // elastic band and the C1 spline inside set_path would only undo both.
             path_controller.set_path_presmoothed(route_.path());
-    // The ROUTE tracker reads s, psi(s) and kappa_avg(s) from the curve itself. Non-owning: the band
-    // deforms this same spline in place just before compute, so the tracker sees the deformed curve
-    // without a state reset — which is the whole reason update_path_geometry exists for the polyline.
-    path_controller.set_route(&route_.spline());
+        // The ROUTE tracker reads s, psi(s) and kappa_avg(s) from the curve itself. Non-owning: the band
+        // deforms this same spline in place just before compute, so the tracker sees the deformed curve
+        // without a state reset — which is the whole reason update_path_geometry exists for the polyline.
+        path_controller.set_route(&route_.spline());
+        // ── WHAT THIS ROUTE MAKES UNAVOIDABLE ───────────────────────────────────────────────────────
+        // Computed ONCE per route, from the spline and the identified plant. It is what makes J_route
+        // route-independent: the run's totals are divided by these, so each term reads ">= 1, where 1 is as
+        // well as the plant permits HERE" instead of being dominated by how much this particular tour turns.
+        // Same inputs route_speed_limit uses, so v* is the profile the robot will actually be held to.
+        {
+        const float v_cap = params_ ? params_->max_adv_speed_mps : 0.7f;
+        const float a_lat = params_ ? params_->max_lateral_accel_mps2 : 1.0f;
+        const float w_max = params_ ? params_->max_rot_speed_rps : 0.8f;
+        const auto &tp = path_controller.params;
+        const rc::RouteIdeal ideal = rc::route_ideal(route_.spline(), v_cap, a_lat, tp.cbf_max_decel,
+                                                     w_max, tp.plain_W, tp.plain_T_lag,
+                                                     route_tracker_active_ ? rot_headroom_ : 1.0f);
+        mission_.set_route_ideal(ideal.tv_v, ideal.tv_w, ideal.rms_e, ideal.valid);
+        std::println("[route] ideal floor: TV(v*)={:.2f} m/s  TV(w*)={:.2f} rad/s  rms(e*)={:.4f} m "
+                     "over {:.1f} m ({:.0f}% of the route contributes to TV(w*)){}",
+                     ideal.tv_v, ideal.tv_w, ideal.rms_e, ideal.length_m,
+                     ideal.length_m > 0.f ? 100.f * ideal.w_span / ideal.length_m : 0.f,
+                     ideal.valid ? "" : "   ⚠INVALID — J_route will be NaN");
+        }
             // Seed the carrot's forward-only anchor at the robot's own arc length. After a repair the
             // route is re-installed mid-drive, and a hint of 0 would aim the carrot at the route's start.
             path_controller.set_carrot_hint(

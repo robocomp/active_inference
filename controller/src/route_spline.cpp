@@ -489,4 +489,68 @@ bool RouteSpline::self_test()
     return ok;
 }
 
+// See route_spline.h. Walks the curve once at its own sample spacing, building the ideal profiles and
+// accumulating their total variation. Everything here is a property of the ROUTE and the IDENTIFIED
+// plant — nothing about a particular run enters.
+RouteIdeal route_ideal(const RouteSpline &sp, float v_cap, float a_lat, float a_dec,
+                       float w_max, float W, float T_lag, float headroom)
+{
+    RouteIdeal out;
+    if (not sp.valid() or sp.length() < 1e-3f) return out;
+    out.length_m = sp.length();
+    const float step = std::max(0.02f, sp.spacing());
+    // Below this the route is effectively straight and w* carries no information; including those
+    // samples would put a near-zero in the denominator of the tv_w ratio.
+    constexpr float kOmegaFloor = 0.02f;   // rad/s
+
+    // The same speed profile route_speed_limit computes, evaluated along the whole curve. It is a
+    // BACK-PROPAGATED bound, so it must be built in a reverse pass: the speed permitted here is limited
+    // by every tighter point ahead that the robot must still be able to slow down for.
+    const int n = std::max(2, static_cast<int>(sp.length() / step) + 1);
+    std::vector<float> vstar(static_cast<std::size_t>(n), v_cap);
+    for (int i = 0; i < n; ++i)
+    {
+        const float s = static_cast<float>(i) * step;
+        const float k_pt = std::abs(sp.curvature_at(s));
+        const float k_av = std::abs(sp.kappa_avg(s + 0.5f * W, W));
+        float v = v_cap;
+        if (k_pt > 1e-3f) v = std::min(v, std::sqrt(a_lat / k_pt));
+        if (k_av > 1e-3f) v = std::min(v, headroom * w_max / k_av);
+        vstar[static_cast<std::size_t>(i)] = std::clamp(v, 0.f, v_cap);
+    }
+    for (int i = n - 2; i >= 0; --i)   // back-propagate the braking bound
+    {
+        const float reachable = std::sqrt(vstar[static_cast<std::size_t>(i + 1)] *
+                                          vstar[static_cast<std::size_t>(i + 1)] + 2.f * a_dec * step);
+        vstar[static_cast<std::size_t>(i)] = std::min(vstar[static_cast<std::size_t>(i)], reachable);
+    }
+
+    double sq = 0.0; int ne = 0;
+    float prev_v = 0.f, prev_w = 0.f; bool first = true;
+    for (int i = 0; i < n; ++i)
+    {
+        const float s = static_cast<float>(i) * step;
+        const float v = vstar[static_cast<std::size_t>(i)];
+        const float k = sp.kappa_avg(s, W);
+        const float w = v * k;
+        // The error a perfect-but-lagged tracker still makes: it is following the curve from where the
+        // robot WAS T_lag ago, and the chord-to-arc offset over that distance is (v*T_lag)^2*|k|/2.
+        const float e = 0.5f * (v * T_lag) * (v * T_lag) * std::abs(k);
+        sq += double(e) * e; ++ne;
+        if (not first)
+        {
+            out.tv_v += std::abs(v - prev_v);
+            if (std::abs(w) > kOmegaFloor or std::abs(prev_w) > kOmegaFloor)
+            {
+                out.tv_w += std::abs(w - prev_w);
+                out.w_span += step;
+            }
+        }
+        prev_v = v; prev_w = w; first = false;
+    }
+    out.rms_e = ne ? static_cast<float>(std::sqrt(sq / ne)) : 0.f;
+    out.valid = out.tv_v > 1e-3f and out.tv_w > 1e-3f and out.rms_e > 1e-6f;
+    return out;
+}
+
 }  // namespace rc

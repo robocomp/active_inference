@@ -193,6 +193,35 @@ void ControllerDisplay::set_goal_distance(std::optional<float> dist_m, std::opti
     snapshot_.goal_aligning = aligning;
 }
 
+// The four terms of J, live. Series are registered once on the first call; after that this is four
+// add_point()s per cycle, which the plot buffers under its own mutex.
+void ControllerDisplay::update_mission_j(float smooth_lin, float smooth_rot, float dev_norm,
+                                         float clear_norm)
+{
+    auto *plot = custom_widget_ ? custom_widget_->mission_j_plot : nullptr;
+    if (plot == nullptr) return;
+    if (not j_series_ready_)
+    {
+        // ★Dark grey, and heavier than the components: J is the TOTAL, so it should read as the line the
+        // others sum to rather than as a fourth colour competing with them. It was 235,235,235 — which
+        // is invisible, because draw_legend paints a white box behind the swatch and the plot background
+        // is light. The legend already prints each series' current value next to its name, so this is
+        // also what makes the J NUMBER readable.
+        plot->add_series("J",          QColor(55, 55, 55), 2.4f);
+        plot->add_series("smooth_lin", QColor(120, 190, 255), 1.2f);
+        plot->add_series("smooth_rot", QColor(255, 190, 110), 1.2f);
+        plot->add_series("dev_norm",   QColor(150, 235, 150), 1.2f);
+        plot->add_series("clear_norm", QColor(255, 120, 120), 1.6f);   // red: the safety term
+        j_series_ready_ = true;
+    }
+    const auto ok = [](float v) { return std::isfinite(v) ? v : 0.f; };
+    plot->add_point("smooth_lin", ok(smooth_lin));
+    plot->add_point("smooth_rot", ok(smooth_rot));
+    plot->add_point("dev_norm",   ok(dev_norm));
+    plot->add_point("clear_norm", ok(clear_norm));
+    plot->add_point("J", ok(smooth_lin) + ok(smooth_rot) + ok(dev_norm) + ok(clear_norm));
+}
+
 void ControllerDisplay::update_affordance_efe(const std::vector<AffordanceEfeSample> &samples)
 {
     auto *plot = custom_widget_ ? custom_widget_->affordance_efe_plot : nullptr;
