@@ -225,7 +225,14 @@ RouteOptimize = true
 #      sections. FIXED to the DIRECTIONAL support_radius at the heading the robot will hold there.
 # ⚠The offline simulator has NO OBSTACLES, so it cannot exercise the clearance bound at all — this
 # entire class of failure is invisible to it. Extending it with the recorded grid is the next job.
-ControlMode = "route"
+# ★2026-08-05 back to "pd": the second route lap ALSO stopped mid-tour, but differently — cmd_rot was
+# non-zero (+-0.003), so the deadlock fix works and the robot was NOT frozen; it was on the route, 2.4 cm
+# off, aligned, with 0.686 m of clearance at its own centre, and v_clear was still 0. So d_min over the
+# 1 m scan reads <= 0.10 m while the robot plainly has room. The scan or the body-extent lookup inside it
+# is wrong, and NOTHING IN THE CSV SAYS WHICH — d_min is not logged. Diagnosing that on the robot costs a
+# lap per hypothesis, so the offline sim is being extended with the recorded grid to exercise the
+# clearance bound instead. Do not re-enable until the sim reproduces this stop and explains it.
+ControlMode = "pd"
 # Cross-track feedback for the PD tracker, in Stanley's form: the steering error becomes
 #   carrot_bearing + atan(gain * cross_track / max(soft, speed))
 # 0 = pure pursuit, which steers at the carrot ONLY and therefore converges to the carrot's DIRECTION

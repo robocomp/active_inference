@@ -404,6 +404,11 @@ public:
         // has drifted left). The session computes a cross-track RMS for the run summary, but nothing
         // recorded it per cycle, so "it wanders off the route" could not be turned into a number.
         float cross_track_m = 0.f;
+        // ROUTE mode: the tightest (esdf - body extent) found along the scanned route ahead — the
+        // quantity the clearance bound is a function of. ★Logged because NOT logging it cost two laps:
+        // the CSV showed gate_speed_scale = 0 with no way to see whether the field, the scan or the
+        // standoff was responsible. A bound whose input is invisible is not diagnosable.
+        float route_d_min = 1e9f;
         // Lateral bumper: signed push in [-1,1] (+ = pushed right, i.e. something close on the left)
         // and the two body-to-obstacle gaps it was computed from. Recorded because "it still clips the
         // wall" and "the bumper never engaged" look identical without them.

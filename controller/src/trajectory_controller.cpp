@@ -1514,9 +1514,18 @@ void TrajectoryController::detect_path_blockage(ControlOutput &out, const Eigen:
 // the reaction travel over the identified lag (0.7 * 0.42 = 0.294 m), rounded up. ★FIXED ON PURPOSE —
 // making it a function of the commanded speed is exactly what made the old gate self-clearing.
 static constexpr float kRouteClearScanM = 1.0f;
-// Comfort standoff BEYOND the body's own extent at which the bound reaches zero speed. The footprint
-// is the hard limit; this is the only chosen number in the speed law.
-static constexpr float kRouteStandoffM = 0.10f;
+// Extra margin BEYOND the body's own extent at which the bound reaches zero speed.
+// ★★NOT A COMFORT KNOB, and it is bounded above by the ROUTE. At 0.10 m it stopped the robot dead
+// twice, mid-tour, with 0.686 m of clearance at its own centre — because "stop with 10 cm of margin"
+// forbids a route whose tightest body margin is 1.1 cm, which this tour's is (measured at s=14.0 m in
+// tools/tracker_sim). The planner certifies a route FEASIBLE, i.e. the footprint fits; it does not
+// promise comfort, and a standoff larger than the margin it left makes a certified route undrivable.
+// ★At 0 the bound still does its whole job: sqrt(2*a*d) alone enforces stopping distance, and at that
+// same tightest point it permits a 0.151 m/s crawl rather than a halt. The standoff was adding a hard
+// floor that bought nothing. Comfort near obstacles belongs to the route optimiser and the band, which
+// shape the geometry, rather than to a term that refuses to drive the geometry it was given.
+// Raising this above the route's minimum margin WILL freeze the robot again.
+static constexpr float kRouteStandoffM = 0.0f;
 // Reference speed at which the FEEDBACK's rotation authority is evaluated when the robot is stopped or
 // crawling, so that authority never reaches zero (see the deadlock note in compute_route_tracker).
 // ★NOT min_adv_cmd: the agent forces that to 0 at specificworker.cpp:842 so the robot can come to a
@@ -1598,6 +1607,7 @@ TrajectoryController::ControlOutput TrajectoryController::compute_route_tracker(
         d_min = std::min(d_min, query_esdf(q.x(), q.y()) - body_extent_toward_obstacle(q.x(), q.y(), -dpsi));
     }
     const float v_clear = std::sqrt(2.f * a_dec * std::max(0.f, d_min - kRouteStandoffM));
+    out.route_d_min = d_min;   // ★logged: this is the number that decides whether the robot moves
 
     const float v_cmd = std::clamp(std::min({active_params_.max_adv, v_stop, v_clear}),
                                    0.f, active_params_.max_adv);

@@ -28,6 +28,7 @@
 #include "../src/route_follower.h"
 #include "../src/route_spline.h"
 #include "../src/grid_planner.h"
+#include "../../common/robot_footprint/robot_footprint.h"
 
 #include <Eigen/Dense>
 
@@ -113,6 +114,40 @@ float speed_limit(const rc::RouteSpline &sp, float s_now, float v_cap,
     return std::clamp(v, 0.15f, v_cap);
 }
 
+// ── THE CLEARANCE SPEED BOUND, as compute_route_tracker computes it ──────────────────────────────
+// The production code queries the tracker's robot-frame ESDF (rebuilt each cycle from lidar); here the
+// stand-in is the recorded grid's exact EDT, which IS the static geometry the route was planned
+// against. That difference matters for the absolute numbers but not for the question this reproduces:
+// does d_min collapse where the robot plainly has room?
+struct Clearance
+{
+    const rc::GridPlanner *grid = nullptr;
+    float scan_m = 1.0f, standoff = 0.0f;   // production default; see kRouteStandoffM
+    bool  directional = true;      // false = the circumscribed disc (the first, frozen version)
+
+    // Returns v_clear and writes the limiting d_min.
+    float v_clear(const rc::RouteSpline &sp, float s, float th_fwd, float a_dec, float &d_min_out) const
+    {
+        const rc::RobotFootprint &fp = rc::RobotFootprint::shadow();
+        float d_min = std::numeric_limits<float>::max();
+        for (float ds = 0.f; ds <= scan_m; ds += 0.10f)
+        {
+            const Vector2f q = sp.position_at(s + ds);
+            const float d = grid->distance_at(q);
+            float extent = fp.circumscribed_radius();
+            if (directional)
+            {
+                const Vector2f g = grid->distance_gradient_at(q);
+                const float dpsi = wrap(sp.heading_at(s + ds) - th_fwd);
+                extent = fp.support_radius(-dpsi, -g);
+            }
+            d_min = std::min(d_min, d - extent);
+        }
+        d_min_out = d_min;
+        return std::sqrt(2.f * a_dec * std::max(0.f, d_min - standoff));
+    }
+};
+
 // ── ARM A: the CURRENT law (carrot + Stanley + PD + EMA + Gaussian brake), unclipped ─────────────
 struct PdArm
 {
@@ -153,6 +188,9 @@ struct FfArm
     float g_dc = 1.f / 0.89f;   // identified DC gain, inverted
     float W = 0.40f;            // route's own smoothing scale
 
+    const Clearance *clear = nullptr;   // null = no obstacles (the original, tracking-only bench)
+    mutable float last_d_min = 1e9f, last_v_clear = 1e9f;
+
     void control(const rc::RouteSpline &sp, float s, float px, float py, float th,
                  float v_limit, float w_max, float &v_cmd, float &w_cmd) const
     {
@@ -161,11 +199,22 @@ struct FfArm
         const float e_y = -std::sin(psi) * (px - r.x()) + std::cos(psi) * (py - r.y());  // left positive
         const float e_psi = wrap(th - psi);
         v_cmd = v_limit;
+        if (clear != nullptr)
+        {
+            float d_min = 1e9f;
+            const float vc = clear->v_clear(sp, s, th, 1.0f, d_min);
+            last_d_min = d_min; last_v_clear = vc;
+            v_cmd = std::min(v_cmd, vc);
+        }
         // Preview the FEEDFORWARD only, by exactly the measured lag. kappa_avg is centred, so this is
         // the only lookahead in the law — a forward-windowed estimator would add a second one.
         const float k_ff = sp.kappa_avg(s + v_cmd * T_lag, W);
-        const float k_cmd = k_ff - (2.f / L) * e_psi - (1.f / (L * L)) * e_y;
-        w_cmd = std::clamp(g_dc * v_cmd * k_cmd, -w_max, w_max);
+        // Feedforward on the REAL speed; feedback on a floored one, so steering authority never
+        // vanishes with the clearance bound (the deadlock that froze the first route lap).
+        const float v_steer = std::max(v_cmd, 0.15f);
+        w_cmd = std::clamp(g_dc * (v_cmd * k_ff
+                                   + v_steer * (-(2.f / L) * e_psi - (1.f / (L * L)) * e_y)),
+                           -w_max, w_max);
     }
 };
 
@@ -369,6 +418,65 @@ int main(int argc, char **argv)
             report(tag, run(route, arm, w.v_max, kWmax, w.a_lat, kADec, kW, false));
         }
         return 0;
+    }
+
+    {
+        // ── REPRODUCE THE ROBOT'S MID-ROUTE STOP ────────────────────────────────────────────────
+        // Walk the whole route and evaluate the clearance bound at every metre, exactly as the tracker
+        // would. If d_min collapses below the standoff anywhere the robot plainly has room, this prints
+        // where — which is the diagnostic the CSV could not give because d_min is not logged.
+        Clearance cl; cl.grid = &w.planner;
+        const rc::RouteSpline &sp = route.spline();
+        const rc::RobotFootprint &fp = rc::RobotFootprint::shadow();
+        std::printf("  clearance scan along the route (standoff %.2f m, body inscribed %.3f circumscribed %.3f)\n",
+                    cl.standoff, fp.inscribed_radius(), fp.circumscribed_radius());
+        int n_zero_dir = 0, n_zero_disc = 0; float worst_dir = 1e9f, worst_disc = 1e9f, worst_s = 0.f;
+        for (float s = 0.f; s < sp.length(); s += 0.25f)
+        {
+            const float th = sp.heading_at(s);
+            float d_dir = 0.f, d_disc = 0.f;
+            cl.directional = true;  const float v_dir  = cl.v_clear(sp, s, th, 1.0f, d_dir);
+            cl.directional = false; const float v_disc = cl.v_clear(sp, s, th, 1.0f, d_disc);
+            if (v_dir  <= 1e-3f) ++n_zero_dir;
+            if (v_disc <= 1e-3f) ++n_zero_disc;
+            if (d_dir < worst_dir) { worst_dir = d_dir; worst_s = s; }
+            worst_disc = std::min(worst_disc, d_disc);
+        }
+        const int n = static_cast<int>(sp.length() / 0.25f) + 1;
+        std::printf("    directional extent : d_min worst %+.3f m at s=%.1f, v_clear==0 at %d/%d points\n",
+                    worst_dir, worst_s, n_zero_dir, n);
+        std::printf("    circumscribed disc : d_min worst %+.3f m,                v_clear==0 at %d/%d points\n",
+                    worst_disc, n_zero_disc, n);
+        // What standoff does this route actually admit? The bound reaches zero at d_min = standoff, so
+        // a standoff larger than the route's tightest body margin forbids a route the planner already
+        // certified as FEASIBLE — the planner's job is fit, not comfort.
+        std::printf("    standoff sweep (v_clear==0 count, and the slowest crawl it permits):\n");
+        for (const float c : {0.10f, 0.05f, 0.02f, 0.0f})
+        {
+            cl.standoff = c; cl.directional = true;
+            int zeros = 0; float v_slowest = 1e9f;
+            for (float s = 0.f; s < sp.length(); s += 0.25f)
+            {
+                float d = 0.f;
+                const float v = cl.v_clear(sp, s, sp.heading_at(s), 1.0f, d);
+                if (v <= 1e-3f) ++zeros;
+                v_slowest = std::min(v_slowest, v);
+            }
+            std::printf("      standoff %.2f m -> %2d/%d zero, slowest %.3f m/s\n", c, zeros, n, v_slowest);
+        }
+        cl.standoff = 0.0f;
+        // Does the clearance bound disagree with route_speed_limit's own 0.15 m/s floor at the tight
+        // point? The floor lives INSIDE route_speed_limit (curvature only), and the tracker takes a
+        // min() of that with v_clear — so v_clear may legitimately go below 0.15 and does win. Checked
+        // rather than assumed, because two floors that disagree is how a robot ends up crawling or
+        // refusing to move for reasons nobody can find.
+        {
+            float d = 0.f;
+            const float v = cl.v_clear(sp, worst_s, sp.heading_at(worst_s), 1.0f, d);
+            std::printf("    at the tightest point (s=%.1f): d_min %+.3f m -> v_clear %.3f m/s;"
+                        " route_speed_limit floors at 0.150 and the tracker takes the min => %.3f\n\n",
+                        worst_s, d, v, std::min(v, 0.150f));
+        }
     }
 
     report("PD (current)", run(route, PdArm{}, w.v_max, kWmax, w.a_lat, kADec, kW, true));

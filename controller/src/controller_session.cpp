@@ -465,7 +465,7 @@ void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
                          "g_goal,g_obs,g_vel,g_smooth,g_lat,g_cbf,n_collisions,"
                          "cmd_adv,cmd_rot,meas_speed,min_esdf,explore,p_free,steer_conc,side_asym,"
                          "sg_trig,gate_scale,gate_horizon,gate_min_esdf,gate_hard_stop,gate_hard_coll,"
-                         "pd_cross_err_m,path_kappa,meas_rot,bump_push,gap_l,gap_r,pose_xy_std,"
+                         "pd_cross_err_m,path_kappa,route_d_min,meas_rot,bump_push,gap_l,gap_r,pose_xy_std,"
                          "pose_theta_std,carrot_bear,carrot_dist,pose_x,pose_y,pose_th,model_dropped,"
                          "out_ticks,out_period_ms,out_period_max,ice_ms,ice_max,cmd_age_max,fresh_min,"
                          "pose_stamp_age\n";
@@ -482,7 +482,7 @@ void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
               << (o.safety_guard_triggered ? 1 : 0) << ',' << o.gate_speed_scale << ','
               << o.gate_horizon_s << ',' << o.gate_min_esdf << ','
               << (o.gate_hard_stop ? 1 : 0) << ',' << (o.gate_hard_collision ? 1 : 0) << ','
-              << o.cross_track_m << ',' << path_kappa << ',' << measured_rot << ','
+              << o.cross_track_m << ',' << path_kappa << ',' << o.route_d_min << ',' << measured_rot << ','
               << o.pd_bumper_push << ',' << o.pd_gap_left_m << ',' << o.pd_gap_right_m << ','
               << pose_xy_std << ',' << pose_theta_std << ','
               << o.carrot_bearing_rad << ',' << o.carrot_dist_m << ','
