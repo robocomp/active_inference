@@ -10,6 +10,8 @@
 
 #include <genericworker.h>   // ConfigLoader
 
+#include "csv_parse.h"       // locale-independent number parsing (see the header)
+
 namespace rc {
 
 namespace
@@ -20,7 +22,7 @@ std::vector<int> parse_int_list(const std::string& s)
     std::stringstream ss(s);
     std::string tok;
     while (std::getline(ss, tok, ','))
-        if (not tok.empty()) out.push_back(std::atoi(tok.c_str()));
+        if (not tok.empty()) out.push_back(csv::parse_int(tok));
     return out;
 }
 }  // namespace

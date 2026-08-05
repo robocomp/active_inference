@@ -5,9 +5,7 @@
 #include "skeleton_source.h"
 
 #include <algorithm>
-#include <cctype>
 #include <cmath>
-#include <cstdlib>
 #include <fstream>
 #include <limits>
 #include <print>
@@ -16,24 +14,12 @@
 #include <dsr/api/dsr_api.h>
 #include <dsr/api/dsr_eigen_defs.h>
 
+#include "csv_parse.h"   // ★locale-independent parsing — NEVER strtof here (see the header)
+
 namespace rc {
 
 namespace
 {
-constexpr float kNaN = std::numeric_limits<float>::quiet_NaN();
-
-float parse_float(const std::string& s)
-{
-    std::string t = s;
-    t.erase(0, t.find_first_not_of(" \t\r\n"));
-    t.erase(t.find_last_not_of(" \t\r\n") + 1);
-    if (t.empty()) return kNaN;
-    std::string lo = t;
-    std::transform(lo.begin(), lo.end(), lo.begin(), [](unsigned char c){ return std::tolower(c); });
-    if (lo == "nan" or lo == "-nan") return kNaN;
-    return std::strtof(t.c_str(), nullptr);
-}
-
 std::vector<std::string> split(const std::string& line)
 {
     std::vector<std::string> cols;
@@ -77,17 +63,17 @@ ReplaySkeletonSource::ReplaySkeletonSource(std::string path, bool loop)
         }
 
         SkeletonBody b;
-        b.id = has_id ? std::atoi(c[1].c_str()) : 0;
+        b.id = has_id ? csv::parse_int(c[1]) : 0;
         b.kp.resize(human::NUM_KP, 3);
         for (int i = 0; i < human::NUM_KP; ++i)
             for (int k = 0; k < 3; ++k)
-                b.kp(i, k) = parse_float(c[base + i * 3 + k]);
+                b.kp(i, k) = csv::parse_float(c[base + i * 3 + k]);
 
         if (static_cast<int>(c.size()) >= base + 54 + human::NUM_KP)
         {
             std::array<float, human::NUM_KP> cf{};
             for (int i = 0; i < human::NUM_KP; ++i)
-                cf[i] = parse_float(c[base + 54 + i]);
+                cf[i] = csv::parse_float(c[base + 54 + i]);
             b.conf = cf;
         }
         rows_.push_back(std::move(b));

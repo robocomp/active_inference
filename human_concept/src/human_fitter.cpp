@@ -6,24 +6,27 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
 #include <print>
+#include <string_view>
 
 #include <Eigen/Geometry>
 
+#include "csv_parse.h"
 #include "human_controller.h"
 
 namespace rc {
 
 namespace
 {
-// Parse the track id from a "person_<id>" node name; fallback 0.
+// Parse the track id from a "person_<id>" node name; fallback 0. from_chars, not atoi — an integer
+// suffix is not itself locale-sensitive, but keeping ONE parser here means the fleet-wide
+// strtof/atoi grep stays a reliable signal (see cpp/core/csv_parse.h).
 int track_id_from_name(const std::string& name)
 {
     const auto us = name.rfind('_');
     if (us == std::string::npos or us + 1 >= name.size())
         return 0;
-    return std::atoi(name.c_str() + us + 1);
+    return csv::parse_int(std::string_view(name).substr(us + 1));
 }
 
 int count_valid(const human::KpArray& kp)

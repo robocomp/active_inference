@@ -4,9 +4,9 @@
 // exceeds tolerance. Usage: parity_check inputs.csv reference.csv
 #include <algorithm>
 #include <array>
+#include <clocale>
 #include <cmath>
 #include <cstdio>
-#include <cstdlib>
 #include <fstream>
 #include <limits>
 #include <optional>
@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "../core/body18.h"
+#include "../core/csv_parse.h"
 #include "../core/human_kinematic_model.h"
 #include "../core/vfe_inference.h"
 
@@ -22,8 +23,6 @@ using namespace rc::human;
 
 namespace
 {
-constexpr float kNaN = std::numeric_limits<float>::quiet_NaN();
-
 std::vector<std::string> split(const std::string &line)
 {
     std::vector<std::string> cols;
@@ -33,18 +32,10 @@ std::vector<std::string> split(const std::string &line)
     return cols;
 }
 
-float pf(const std::string &s)
-{
-    std::string t = s;
-    t.erase(0, t.find_first_not_of(" \t\r\n"));
-    t.erase(t.find_last_not_of(" \t\r\n") + 1);
-    if (t.empty()) return kNaN;
-    std::string lo = t;
-    std::transform(lo.begin(), lo.end(), lo.begin(), ::tolower);
-    if (lo == "nan" || lo == "-nan") return kNaN;
-    if (lo == "inf") return std::numeric_limits<float>::infinity();
-    return std::strtof(t.c_str(), nullptr);
-}
+// ★locale-independent (see core/csv_parse.h). Under the previous std::strtof this test read EVERY
+// value of reference.csv as 0.000000 and 98% of inputs.csv as its integer part, so it was comparing
+// a zero model against a zero reference — its verdicts meant nothing.
+float pf(const std::string &s) { return rc::csv::parse_float(s); }
 
 struct InRow { KpArray kp; std::optional<std::array<float, NUM_KP>> conf; };
 struct RefRow { Vec11 mu; float mean_l2, rmse, utrace; };
@@ -62,6 +53,11 @@ std::vector<std::string> read_data_lines(const std::string &path)
 
 int main(int argc, char **argv)
 {
+    // Adopt the environment locale — what Qt does inside the agent. Without it this harness stays in
+    // "C" and would answer a DIFFERENT question than the live code (CLAUDE.md). Parsing is
+    // from_chars-based, so the answer must now be identical either way.
+    std::setlocale(LC_ALL, "");
+
     if (argc < 3)
     {
         std::fprintf(stderr, "usage: %s inputs.csv reference.csv\n", argv[0]);

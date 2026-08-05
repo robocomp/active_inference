@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <locale>
 #include <print>
 #include <thread>
 
@@ -391,6 +392,9 @@ void SpecificWorker::log_epistemic_csv(const rc::HumanInstance& inst, const rc::
             cfg_.epistemic_csv_path.clear();
             return;
         }
+        // Decimal POINT always, whatever locale the process booted into — the readers (and any
+        // future re-parse of our own log) assume it. Cheap insurance; see cpp/core/csv_parse.h.
+        epistemic_csv_.imbue(std::locale::classic());
         epistemic_csv_ << "cycle,node,gain,pending,cooldown,aff_state,aff_node,"
                           "target_x,target_y,target_yaw,cam_x,cam_y,valid,tr_cov\n";
     }
@@ -421,6 +425,7 @@ void SpecificWorker::log_fit_csv(const rc::HumanInstance& inst, float free_energ
             cfg_.fit_csv_path.clear();
             return;
         }
+        fit_csv_.imbue(std::locale::classic());   // decimal POINT always (see above)
         // mu0..mu10 = the 11 joint-angle DOFs (the belief TARGET θ*); sig_* = positional posterior σ
         // (mm); track_err = mean |θ* − θ_cmd| (controller lag); vel_sat/acc_sat = #DOFs the controller
         // held at its speed/accel limit this step.

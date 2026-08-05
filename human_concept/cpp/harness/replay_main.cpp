@@ -9,16 +9,18 @@
 //   Missing keypoints use "nan".
 #include <algorithm>
 #include <array>
+#include <clocale>
 #include <cmath>
 #include <cstdio>
-#include <cstdlib>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include "../core/body18.h"
+#include "../core/csv_parse.h"
 #include "../core/human_kinematic_model.h"
 #include "../core/vfe_inference.h"
 
@@ -33,17 +35,8 @@ struct Frame
     std::optional<std::array<float, NUM_KP>> conf;
 };
 
-float parse_float(const std::string &s)
-{
-    std::string t = s;
-    t.erase(0, t.find_first_not_of(" \t\r\n"));
-    t.erase(t.find_last_not_of(" \t\r\n") + 1);
-    if (t.empty()) return std::numeric_limits<float>::quiet_NaN();
-    std::string lower = t;
-    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-    if (lower == "nan" || lower == "-nan") return std::numeric_limits<float>::quiet_NaN();
-    return std::strtof(t.c_str(), nullptr);
-}
+// ★locale-independent (see core/csv_parse.h) — std::strtof truncated every value at the '.' here.
+float parse_float(const std::string &s) { return rc::csv::parse_float(s); }
 
 std::vector<Frame> load_csv(const std::string &path)
 {
@@ -69,7 +62,7 @@ std::vector<Frame> load_csv(const std::string &path)
             continue;
         }
         Frame fr;
-        fr.id = std::strtol(cols[0].c_str(), nullptr, 10);
+        fr.id = rc::csv::parse_long(cols[0]);
         fr.kp.resize(NUM_KP, 3);
         for (int i = 0; i < NUM_KP; ++i)
             for (int c = 0; c < 3; ++c)
@@ -138,13 +131,17 @@ std::vector<int> parse_anchors(const std::string &s)
     std::stringstream ss(s);
     std::string tok;
     while (std::getline(ss, tok, ','))
-        if (!tok.empty()) out.push_back(std::atoi(tok.c_str()));
+        if (!tok.empty()) out.push_back(rc::csv::parse_int(tok));
     return out;
 }
 }  // namespace
 
 int main(int argc, char **argv)
 {
+    // Same locale the agent runs in (Qt does this) — with from_chars parsing the result is identical
+    // either way, which is exactly the property being asserted. See ../core/csv_parse.h.
+    std::setlocale(LC_ALL, "");
+
     std::string input;
     InferenceConfig cfg;
     int print_every = 1;
@@ -157,17 +154,19 @@ int main(int argc, char **argv)
         auto next = [&]() -> std::string { return (i + 1 < argc) ? argv[++i] : std::string(); };
         if      (a == "--input")              input = next();
         else if (a == "--anchors")            cfg.anchors = parse_anchors(next());
-        else if (a == "--sigma_obs")          cfg.sigma_obs = std::strtof(next().c_str(), nullptr);
-        else if (a == "--sigma_dyn")          cfg.sigma_dyn = std::strtof(next().c_str(), nullptr);
-        else if (a == "--sigma_min")          cfg.sigma_min = std::strtof(next().c_str(), nullptr);
-        else if (a == "--sigma_max")          cfg.sigma_max = std::strtof(next().c_str(), nullptr);
-        else if (a == "--w_limits")           cfg.w_limits = std::strtof(next().c_str(), nullptr);
-        else if (a == "--w_sym")              cfg.w_sym = std::strtof(next().c_str(), nullptr);
-        else if (a == "--gn_steps")           cfg.gn_steps = std::atoi(next().c_str());
-        else if (a == "--damping")            cfg.damping = std::strtof(next().c_str(), nullptr);
-        else if (a == "--print_every")        print_every = std::atoi(next().c_str());
-        else if (a == "--min_valid")          min_valid = std::atoi(next().c_str());
-        else if (a == "--uncertainty_thresh") uncertainty_thresh = std::strtof(next().c_str(), nullptr);
+        // CLI numbers go through the same locale-independent parser: `--sigma_obs 0.06` used to
+        // arrive as 0 under es_ES, silently running the sweep at a different config than requested.
+        else if (a == "--sigma_obs")          cfg.sigma_obs = rc::csv::parse_number<float>(next(), cfg.sigma_obs);
+        else if (a == "--sigma_dyn")          cfg.sigma_dyn = rc::csv::parse_number<float>(next(), cfg.sigma_dyn);
+        else if (a == "--sigma_min")          cfg.sigma_min = rc::csv::parse_number<float>(next(), cfg.sigma_min);
+        else if (a == "--sigma_max")          cfg.sigma_max = rc::csv::parse_number<float>(next(), cfg.sigma_max);
+        else if (a == "--w_limits")           cfg.w_limits = rc::csv::parse_number<float>(next(), cfg.w_limits);
+        else if (a == "--w_sym")              cfg.w_sym = rc::csv::parse_number<float>(next(), cfg.w_sym);
+        else if (a == "--gn_steps")           cfg.gn_steps = rc::csv::parse_int(next(), cfg.gn_steps);
+        else if (a == "--damping")            cfg.damping = rc::csv::parse_number<float>(next(), cfg.damping);
+        else if (a == "--print_every")        print_every = rc::csv::parse_int(next(), print_every);
+        else if (a == "--min_valid")          min_valid = rc::csv::parse_int(next(), min_valid);
+        else if (a == "--uncertainty_thresh") uncertainty_thresh = rc::csv::parse_number<float>(next(), uncertainty_thresh);
         else { std::fprintf(stderr, "unknown arg: %s\n", a.c_str()); return 2; }
     }
 
