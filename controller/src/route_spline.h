@@ -92,6 +92,23 @@ public:
     float heading_at(float s) const;      // atan2(dy,dx) of the tangent
     float curvature_at(float s) const;    // 1/radius, signed
 
+    // SIGNED AVERAGE curvature over a window of `window_m` CENTRED on s: the net heading change across
+    // the window divided by its length, which is the mean value theorem applied honestly.
+    //
+    // ★PREFER THIS TO curvature_at FOR ANYTHING THAT ACTS ON THE ROBOT. curvature_at is a SECOND
+    // difference of positions on a piecewise-linear 5 cm resample; this is a FIRST difference of
+    // headings. One order less differentiation is one order less noise amplification, and a lone 5 cm
+    // spike stops mattering BY CONSTRUCTION (it contributes almost nothing to a net heading change)
+    // rather than by being filtered afterwards — while a sustained tight curve accumulates its full
+    // turn and still binds. The natural window is the route's own smoothing scale (route_smoothing_m,
+    // 0.40 m): the curve was fitted with control points that far apart, so curvature structure finer
+    // than that is a property of the fit, not of the route.
+    //
+    // ★CENTRED, not forward-looking. A forward window is itself a half-window of preview, which would
+    // silently add to any explicit lookahead a caller applies and double-count it. A caller that WANTS
+    // the forward window [s, s+W] asks for kappa_avg(s + W/2, W) and says so.
+    float kappa_avg(float s, float window_m) const;
+
     // Arc length of the closest point, searched FORWARD from `s_hint` within `window_m`. Monotone by
     // construction: a route that crosses itself (this tour does) would otherwise let the projection jump
     // to a distant branch and teleport progress backwards or forwards.

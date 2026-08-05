@@ -650,12 +650,11 @@ float ControllerSession::route_speed_limit(float v_cap, float a_decel) const
     // W is the route's own smoothing scale: the curve was fitted with control points that far apart, so
     // curvature structure finer than W is a property of the fit, not of the route.
     const float w_kappa = std::max(0.10f, params_->route_smoothing_m);
+    // ONE estimator, shared with the tracker: RouteSpline::kappa_avg is CENTRED, so the forward window
+    // [s, s+W] this limit wants is the centred window at s + W/2. Expressing it that way keeps a single
+    // implementation instead of two that can drift apart, and is exactly the previous arithmetic.
     const auto kappa_avg_at = [this, w_kappa](float s)
-    {
-        const float h0 = route_.spline().heading_at(s);
-        const float h1 = route_.spline().heading_at(s + w_kappa);
-        return std::abs(std::remainder(h1 - h0, 2.f * std::numbers::pi_v<float>)) / w_kappa;
-    };
+    { return std::abs(route_.spline().kappa_avg(s + 0.5f * w_kappa, w_kappa)); };
 
     float v = v_cap;
     // Sampled at 10 cm against a 5 cm curve — deliberately coarser than the curve's own spacing, because

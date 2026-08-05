@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numbers>
 #include <cstdio>
 
 namespace rc
@@ -270,6 +271,17 @@ float RouteSpline::curvature_at(float s) const
     return den > 1e-9f ? (d1.x() * d2.y() - d1.y() * d2.x()) / den : 0.f;
 }
 
+float RouteSpline::kappa_avg(float s, float window_m) const
+{
+    if (samples_.size() < 2 or window_m < 1e-3f) return 0.f;
+    const float half = 0.5f * window_m;
+    const float h0 = heading_at(s - half);
+    const float h1 = heading_at(s + half);
+    // remainder(), not a manual wrap: the heading difference across a window straddling +-pi must come
+    // back as the SHORT way round, and the sign of that difference is the sign of the curvature.
+    return std::remainder(h1 - h0, 2.f * std::numbers::pi_v<float>) / window_m;
+}
+
 float RouteSpline::project(const Eigen::Vector2f &p, float s_hint, float window_m) const
 {
     if (samples_.size() < 2) return 0.f;
@@ -300,6 +312,57 @@ bool RouteSpline::self_test()
         check(std::abs(r.position_at(2.5f).x() - 2.5f) < 0.02f, "s must BE distance along the curve");
         check(std::abs(r.curvature_at(2.5f)) < 1e-3f, "a straight line has zero curvature");
         check(std::abs(r.heading_at(2.5f)) < 1e-3f, "heading along +x must be 0");
+    }
+
+    // (1b) kappa_avg must be SIGNED and CENTRED. A circle of radius R has curvature 1/R everywhere, so
+    //      the estimator has an exact answer to be wrong about — and traversing the SAME circle the other
+    //      way must flip only the sign. The centring is checked separately: on a curvature RAMP a centred
+    //      window has no phase bias, so its estimate at s must bracket the point value rather than lead
+    //      or lag it. A forward window would fail that by half a window.
+    {
+        for (const int dir : {+1, -1})
+        {
+            RouteSpline r;
+            std::vector<Eigen::Vector2f> circle;
+            const float R = 2.0f;
+            for (int i = 0; i <= 90; ++i)
+            {
+                const float a = static_cast<float>(dir) * static_cast<float>(i) * 0.02f;
+                circle.push_back({R * std::sin(a), R * (1.f - std::cos(a))});
+            }
+            check(r.build(circle, 0.05f, {}), "a circular arc must build");
+            const float k = r.kappa_avg(r.length() * 0.5f, 0.40f);
+            std::printf("  circle R=%.1f dir=%+d: kappa_avg %+.4f (exact %+.4f)\n",
+                        R, dir, k, static_cast<float>(dir) / R);
+            check(std::abs(k - static_cast<float>(dir) / R) < 0.06f,
+                  "kappa_avg must recover 1/R with the right SIGN on a circle");
+        }
+    }
+
+    // (1c) CENTRING, which the circle above cannot test (constant curvature reads the same either way).
+    //      On a curvature RAMP the two differ by half a window: a centred estimate at s tracks kappa(s),
+    //      a forward one tracks kappa(s + W/2). This matters because the tracker previews by an explicit
+    //      v*T_lag — a forward window would silently add a second, unasked-for preview on top of it.
+    {
+        RouteSpline r;
+        std::vector<Eigen::Vector2f> ramp;   // heading grows quadratically => curvature grows linearly
+        float x = 0.f, y = 0.f, th = 0.f;
+        for (int i = 0; i < 400; ++i)
+        {
+            const float ds = 0.02f;
+            x += ds * std::cos(th); y += ds * std::sin(th);
+            th += ds * (0.20f * static_cast<float>(i) * ds);       // kappa(s) ~ 0.20*s
+            ramp.push_back({x, y});
+        }
+        check(r.build(ramp, 0.05f, {}), "a curvature ramp must build");
+        const float W = 0.40f, s_mid = r.length() * 0.5f;
+        const float centred = r.kappa_avg(s_mid, W);
+        const float forward = r.kappa_avg(s_mid + 0.5f * W, W);    // what a forward window would give
+        const float local   = r.kappa_avg(s_mid, 0.10f);           // near-point reference
+        std::printf("  curvature ramp: local %+.3f, centred %+.3f, forward %+.3f (1/m)\n",
+                    local, centred, forward);
+        check(std::abs(centred - local) < std::abs(forward - local),
+              "a CENTRED window must track kappa(s) more closely than a forward one");
     }
 
     // (2) CURVATURE CONTINUITY is the whole point. Across a sharp corner the curvature of a C1 curve
