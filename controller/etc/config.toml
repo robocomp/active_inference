@@ -237,17 +237,7 @@ ControlMode = "route"
 # oscillation about zero with NEGATIVE autocorrelation at half a period. So 1.0 was at worst too low and
 # could not have been too high. Expect cross_track_rms to fall from ~0.10; if it instead starts
 # oscillating, that autocorrelation goes negative and the tool will say so.
-# ── ROUTE TRACKER (# ★2026-08-05 REVERTED to "pd" after the first lap: the robot froze mid-route, permanently.
-# ROOT CAUSE, and it is structural: omega = g_dc * v * kappa_cmd. When the clearance bound drove
-# v to zero the STEERING went to zero with it, so the robot could neither move nor turn, and since
-# it could not move the geometry never changed — a deadlock with no escape. 568 of 1187 cycles were
-# frozen, the first at cycle 28. The old PD gate's hard-stop branch rotated away precisely to avoid
-# this; the route law has no equivalent because its only steering authority is proportional to speed.
-# Compounding it: d_min used the CIRCUMSCRIBED body radius (0.325 m) plus a 0.10 m standoff, so it
-# demanded 0.425 m of ESDF along the route while this tour's p05 is 0.421 — the bound was at zero on
-# ordinary sections, not tight ones. Do not re-enable until steering is decoupled from the clearance
-# speed AND the body extent is the directional support_radius rather than the circumscribed disc.
-ControlMode = "pd") ──
+# ── FRENET FEEDFORWARD TRACKER (ControlMode = "route") ──
 # omega = g_dc * v * [ kappa_bar(s + v*T_lag) - (2/L)*e_psi - (1/L^2)*e_y ]
 # Replaces the carrot, Stanley term, bumper, Kd, EMA and Gaussian brake with one law. The curvature
 # term is the ONLY one reading the route, so feedback cannot double-count the nominal turn — the
