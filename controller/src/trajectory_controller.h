@@ -240,6 +240,7 @@ private:
     bool active_ = false;
     ControlMode control_mode_ = ControlMode::MPPI;
     PlainTracker plain_tracker_{*this};
+    bool plain_no_curve_logged_ = false;   // the PD-fallback notice is worth saying once, not at 20 Hz
     PdTracker    pd_tracker_{*this, *this};
     MppiTracker  mppi_tracker_{*this, *this};
     // Fills the fields every tracker reads. One place, so a new tracker cannot be handed a stale carrot.

@@ -655,14 +655,25 @@ TrajectoryController::ControlOutput TrajectoryController::compute(
     // PLAIN always drives in PLAIN mode — including click targets, which now carry a fitted
     // plan_spline_. PlainTracker returns a zero command when handed no curve at all, so the "is there a
     // curve" test belongs in ONE place (the session, per cycle) rather than being duplicated here.
-    if (control_mode_ == ControlMode::PLAIN)
+    // ★PLAIN WITH NO CURVE FALLS BACK TO PD, LOUDLY. PlainTracker steers at a curve and returns zero
+    // without one, so making the curve a precondition turned a failed spline fit into a robot that sits
+    // still with a valid plan and says nothing — the worst possible failure mode, and one this dispatch
+    // introduced. smooth_plan's own contract is that smoothing is "an improvement, never a
+    // precondition"; PD honours that by following the polyline directly.
+    if (control_mode_ == ControlMode::PLAIN and route_spline_ != nullptr and route_spline_->valid())
     {
         detect_path_blockage(out, robot_pose);
         return plain_tracker_.compute(out, make_tracker_input(robot_pose, carrot_robot, goal_robot),
                                      active_params_);
     }
     // ---- PD carrot-follower mode: simple proportional-derivative controller ----
-    if (control_mode_ == ControlMode::PD)
+    if (control_mode_ == ControlMode::PLAIN and not plain_no_curve_logged_)
+    {
+        plain_no_curve_logged_ = true;
+        std::println("[controller] PLAIN has no fitted curve for this path — following it with the PD "
+                     "tracker instead. The robot still drives; the spline fit is what failed.");
+    }
+    if (control_mode_ == ControlMode::PD or control_mode_ == ControlMode::PLAIN)
     {
         // Blockage detection BEFORE the early return, or the planner can never be triggered in this
         // mode — it is the ONLY thing that notices the route has become undrivable once the sampler is

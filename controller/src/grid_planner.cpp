@@ -334,6 +334,49 @@ std::optional<Eigen::Vector2f> GridPlanner::nearest_free(const Eigen::Vector2f& 
     return std::nullopt;
 }
 
+std::optional<Eigen::Vector2f> GridPlanner::nearest_reachable(const Eigen::Vector2f& start_room,
+                                                              const Eigen::Vector2f& goal_room)
+{
+    if (w_ <= 0 or h_ <= 0) return std::nullopt;
+    rebuild_offsets();
+    int sx, sy;
+    if (not world_to_cell(start_room, sx, sy)) return std::nullopt;
+
+    // The transition rule is COPIED FROM plan() on purpose: a move to (nx,ny) adopts the heading of its
+    // own direction of travel, so feasibility is tested at that heading. Any other rule here would return
+    // poses the planner then refuses — the precise failure this function exists to end.
+    constexpr int DX[kHeadings] = {1, 1, 0, -1, -1, -1, 0, 1};
+    constexpr int DY[kHeadings] = {0, 1, 1, 1, 0, -1, -1, -1};
+    const int n_states = w_ * h_ * kHeadings;
+    const auto sid = [&](int ix, int iy, int hh) { return (iy * w_ + ix) * kHeadings + hh; };
+
+    std::vector<std::uint8_t> seen(static_cast<std::size_t>(n_states), 0);
+    std::queue<int> q;
+    for (int hh = 0; hh < kHeadings; ++hh)
+        if (cell_free(sx, sy, hh)) { seen[sid(sx, sy, hh)] = 1; q.push(sid(sx, sy, hh)); }
+    if (q.empty()) return std::nullopt;   // cannot even stand where we are; the caller's escape path owns this
+
+    std::optional<Eigen::Vector2f> best;
+    float best_d2 = std::numeric_limits<float>::max();
+    while (not q.empty())
+    {
+        const int s = q.front(); q.pop();
+        const int cell = s / kHeadings;
+        const int ix = cell % w_, iy = cell / w_;
+        if (const float d2 = (cell_to_world(ix, iy) - goal_room).squaredNorm(); d2 < best_d2)
+        { best_d2 = d2; best = cell_to_world(ix, iy); }
+        for (int nh = 0; nh < kHeadings; ++nh)
+        {
+            const int nx = ix + DX[nh], ny = iy + DY[nh];
+            if (not in_bounds(nx, ny) or seen[sid(nx, ny, nh)]) continue;
+            if (not cell_free(nx, ny, nh)) continue;
+            seen[sid(nx, ny, nh)] = 1;
+            q.push(sid(nx, ny, nh));
+        }
+    }
+    return best;
+}
+
 std::optional<std::vector<Eigen::Vector2f>> GridPlanner::plan(const Eigen::Vector2f& start_room,
                                                               const Eigen::Vector2f& goal_room)
 {
@@ -640,6 +683,32 @@ bool GridPlanner::self_test()
                     fixed ? std::format("({:.2f},{:.2f})", fixed->x(), fixed->y()).c_str() : "none");
         check(fixed.has_value(), "a blocked pose must be repairable nearby");
         check(fixed and p.pose_free(*fixed, 0.f), "the repaired pose must satisfy the planner's OWN predicate");
+    }
+
+    // (6) THE BUG THIS EXISTS FOR: free floor that is SEALED OFF. nearest_free is happy — the footprint
+    // fits inside the pocket — but no route exists, so repair handed back the same unroutable pose every
+    // cycle and the robot held forever. nearest_reachable must refuse the pocket and return something the
+    // robot can actually drive to.
+    {
+        GridPlanner p; p.params.safety_margin_m = 0.f;
+        const std::vector<Eigen::Vector2f> room{{0.f, 0.f}, {10.f, 0.f}, {10.f, 10.f}, {0.f, 10.f}};
+        // A pocket in the top-right corner, walled off on both open sides. Its interior is clear floor.
+        p.set_world(room, {{{6.f, 5.9f}, {10.f, 5.9f}, {10.f, 6.1f}, {6.f, 6.1f}},
+                           {{5.9f, 5.9f}, {6.1f, 5.9f}, {6.1f, 10.f}, {5.9f, 10.f}}});
+        const Eigen::Vector2f start{2.f, 2.f}, inside{8.f, 8.f};
+        const bool fits = p.pose_free(inside, 0.f);
+        const bool routes = p.plan(start, inside).has_value();
+        const auto reach = p.nearest_reachable(start, inside);
+        std::printf("  sealed pocket: footprint fits=%s  routable=%s  nearest_reachable=%s\n",
+                    fits ? "yes" : "no", routes ? "yes" : "no",
+                    reach ? std::format("({:.2f},{:.2f})", reach->x(), reach->y()).c_str() : "none");
+        check(fits, "the pocket interior must be footprint-feasible — that is what fooled nearest_free");
+        check(not routes, "the pocket must be genuinely unroutable, or this test proves nothing");
+        check(reach.has_value(), "a reachable alternative must always exist when the robot can move");
+        check(reach and p.plan(start, *reach).has_value(),
+              "★the returned pose must ROUTE — that is the entire contract nearest_free could not meet");
+        check(reach and (*reach - inside).norm() < (start - inside).norm(),
+              "and it must be closer to the goal than standing still, else driving buys nothing");
     }
 
     std::printf("GridPlanner::self_test %s\n", ok ? "PASS" : "FAIL");

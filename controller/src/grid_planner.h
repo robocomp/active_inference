@@ -116,6 +116,17 @@ public:
     std::optional<Eigen::Vector2f> nearest_free(const Eigen::Vector2f& pos_room, float theta,
                                                 float max_radius_m = 3.0f) const;
 
+    // Nearest pose to `goal_room` that is ACTUALLY REACHABLE from `start_room`, under exactly the move
+    // model plan() uses. This is the missing half of nearest_free: that one tests whether the footprint
+    // FITS, which is a purely LOCAL question, so it happily returns a pose sealed inside a pocket the
+    // robot can never enter. Repair then produced the same infeasible-to-route target every cycle, the
+    // planner correctly reported "no route", and the robot held forever — with the repair line and the
+    // hold line both repeating, which is exactly what a disconnected free space looks like from outside.
+    // One flood fill over the (cell, heading) graph; every state it reaches is routable by construction.
+    // Returns nullopt only if the robot cannot leave its own cell.
+    std::optional<Eigen::Vector2f> nearest_reachable(const Eigen::Vector2f& start_room,
+                                                     const Eigen::Vector2f& goal_room);
+
     // ── DISTANCE FIELD ────────────────────────────────────────────────────────────────────────────
     // Metres from `p` to the nearest occupied cell (outside-the-room counts as occupied, so walls are
     // included). Zero inside an obstacle. Returns a large positive value if there is no world yet, so a

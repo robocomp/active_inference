@@ -255,12 +255,35 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     // repair guaranteed 0.20 m of clearance while the controller enforced 0.425 m at the goal — which left a
     // 0.225 m band where repair reported success and the robot then hunted forever at a target it was never
     // permitted to reach.
-    const auto safe = grid_planner_.nearest_free(step.target.room_pos, step.target.yaw_rad);
+    // ── REACHABILITY IS PART OF "REPAIRED" ────────────────────────────────────────────────────────
+    // nearest_free asks "does the footprint FIT here", which is purely LOCAL: it cannot tell clear floor
+    // from clear floor sealed behind a wall. So for a target in a pocket it returned the same pose every
+    // cycle, the planner correctly said "no route", and the robot held forever — the repair line and the
+    // hold line alternating at 20 Hz with no way out. That is the whole bug.
+    // The flood fill runs ONLY after a route has actually failed for this target (ensure_current_plan
+    // records it), so the fast path still pays for nothing but the ring search.
+    const bool routing_failed_here = unroutable_target_.has_value()
+                                     and (*unroutable_target_ - step.target.room_pos).norm() < 0.05f;
+    const auto safe = routing_failed_here
+                    ? grid_planner_.nearest_reachable(step.plan_origin, step.target.room_pos)
+                    : grid_planner_.nearest_free(step.target.room_pos, step.target.yaw_rad);
     if (safe.has_value() && (*safe - step.target.room_pos).squaredNorm() > 1e-6f)
     {
-        std::println("[controller] target '{}' blocked → repaired ({:.2f},{:.2f}) → ({:.2f},{:.2f}){}",
-                     step.target.node_name, step.target.room_pos.x(), step.target.room_pos.y(),
-                     safe->x(), safe->y(), "");
+        // Logged only when the ANSWER changes. Repair is deterministic and runs every cycle, so an
+        // unchanged repair printed an identical line at 20 Hz — which buried the one line that mattered
+        // (the hold) and made a steady state look like thrashing.
+        if (not last_repair_.has_value() or (*last_repair_ - *safe).squaredNorm() > 1e-6f
+            or last_repair_name_ != step.target.node_name)
+        {
+            last_repair_ = *safe;
+            last_repair_name_ = step.target.node_name;
+            std::println("[controller] target '{}' {} ({:.2f},{:.2f}) → ({:.2f},{:.2f}), {:.2f} m short{}",
+                         step.target.node_name,
+                         routing_failed_here ? "NOT REACHABLE → closest reachable" : "blocked → repaired",
+                         step.target.room_pos.x(), step.target.room_pos.y(), safe->x(), safe->y(),
+                         (*safe - step.target.room_pos).norm(),
+                         routing_failed_here ? " [" + grid_planner_.last_failure() + "]" : "");
+        }
         step.target.room_pos = *safe;
 
         // Re-aim the heading at the object now that the standpoint moved (the producer's yaw faced the
@@ -326,7 +349,12 @@ ControllerPolygon ControllerSession::smooth_plan(const ControllerPolygon &poly)
 {
     plan_spline_valid_ = false;
     plan_progress_s_ = 0.f;
-    if (poly.size() < 2 or params_ == nullptr or not params_->smooth_planned_path) return poly;
+    // ★THE CURVE IS BUILT EVEN WHEN SMOOTHING IS OFF. PlainTracker steers at a curve, so plan_spline_
+    // is what makes it able to drive a click target at all; SmoothPlannedPath governs only whether the
+    // smoothed SAMPLES replace the polyline handed downstream. Conflating the two made a display-level
+    // preference silently decide whether the robot moves.
+    if (poly.size() < 2 or params_ == nullptr) return poly;
+    const bool replace_samples = params_->smooth_planned_path;
     rc::RouteSpline &spline = plan_spline_;
     // ★OPTIMISE THIS PATH TOO. It used to pass no optimiser at all, so an AFFORDANCE or click target
     // got A* + a C2 fit and nothing else: the clearance term never ran, the safety slider did nothing,
@@ -339,7 +367,7 @@ ControllerPolygon ControllerSession::smooth_plan(const ControllerPolygon &poly)
                          params_->route_smoothing_m, &opt))
         return poly;   // smoothing is an improvement, never a precondition: fall back to the polyline
     plan_spline_valid_ = true;
-    return spline.samples();
+    return replace_samples ? spline.samples() : poly;
 }
 
 void ControllerSession::log_route_geometry()
@@ -888,6 +916,7 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
             // either way — a C1 polyline steps it at every turning point regardless of who asked.
             plan.room_path = smooth_plan(plan.room_path);
             current_plan_ = std::move(plan);
+            unroutable_target_.reset();   // routed successfully; the reachability fallback is not needed
         }
         else
         {
@@ -896,6 +925,10 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
             // then never deform a plan, silently, while every flag said it was enabled.
             current_plan_.reset();
             plan_spline_valid_ = false;   // the fitted curve belongs to the plan being dropped
+            // Tell the REPAIR stage that this exact target could not be routed. It cannot be discovered
+            // there — reachability is global, and only the search knows it — so the next cycle's repair
+            // asks for the nearest REACHABLE pose instead of merely the nearest free one.
+            unroutable_target_ = step.target.room_pos;
         }
     }
 

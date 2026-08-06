@@ -280,6 +280,14 @@ private:
     std::uint64_t odo_last_ms_ = 0;
     std::uint64_t session_start_ms_ = 0;
 
+    // Log dedup: repair and unreachability are both DETERMINISTIC and re-evaluated every cycle, so an
+    // unchanged answer must not reprint. Steady state should look steady in the log.
+    std::optional<Eigen::Vector2f> last_repair_;
+    std::string last_repair_name_;
+    // The target ensure_current_plan could not route to. Reachability is GLOBAL, so the repair stage
+    // cannot discover it on its own — this is how the search tells it to widen the question.
+    std::optional<Eigen::Vector2f> unroutable_target_;
+
     rc::MissionRunner mission_;
     // CONTINUOUS ROUTE MODE. The whole mission as one arc-length curve; no per-waypoint target, no
     // arrival test, no per-waypoint replan. Built once when a mission starts.
