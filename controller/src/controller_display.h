@@ -89,7 +89,7 @@ public:
     void set_stuck_active(bool active);
     // Push the live arrival state to the toolbar readout. Called every cycle; the widget dedups.
     void set_goal_distance(std::optional<float> dist_m, std::optional<float> yaw_err_rad, bool aligning);
-    void set_session_distance(float metres);   // toolbar odometer: metres driven since startup
+    void set_session_totals(float metres, float seconds);   // top row: metres and time since startup
     // One sample per evaluated affordance for the EFE panel below the 2D view. Plots TWO lines per
     // affordance: the selection score (gain − λ·dist, solid) and the raw gain (ΔH, lighter) — so the
     // vertical gap between them is λ·dist. Thread-safe (the plot buffers under its own mutex).
@@ -140,6 +140,7 @@ private:
         std::optional<float> goal_yaw_err_rad;
         bool goal_aligning = false;
         float session_distance_m = 0.f;
+        float session_elapsed_s = 0.f;
         // Mission overlay + readout.
         rc::MissionPanel::View mission_view;
         std::vector<Eigen::Vector2f> mission_waypoints;

@@ -93,6 +93,20 @@ public:
 
         pose_row->addStretch();
 
+        // ── SESSION TOTALS ──────────────────────────────────────────────────────────────────────
+        // Distance driven and time elapsed since the agent started — every mission, click target and
+        // affordance, NOT per run. MissionRunner integrates both, but only while a mission is RUNNING,
+        // so nothing ever counted a target or the drive back to a start point. LCDs like the rest of
+        // this row: these tick continuously, and a proportional label re-flows as digits change.
+        pose_row->addWidget(new QLabel("run", pose_panel));
+        session_dist_lcd_ = make_lcd(pose_panel, 6,
+            QStringLiteral("Distance driven this session (m, or km past 1000).\n"
+                           "All missions, targets and affordances since the agent started."));
+        pose_row->addWidget(session_dist_lcd_);
+        session_time_lcd_ = make_lcd(pose_panel, 8,
+            QStringLiteral("Wall time since the agent started (mm:ss, or h:mm:ss past an hour)."));
+        pose_row->addWidget(session_time_lcd_);
+
         // Right end: what the ARRIVAL test is waiting on — remaining distance and heading error.
         pose_row->addWidget(new QLabel("d", pose_panel));
         goal_dist_lcd_ = make_lcd(pose_panel, 5,
@@ -123,16 +137,6 @@ public:
         mppi_paths_toggle_btn->setCheckable(true);
         mppi_paths_toggle_btn->setChecked(false);
         toolbar_layout->addWidget(mppi_paths_toggle_btn);
-
-        // ── SESSION ODOMETER ─────────────────────────────────────────────────────────────────────
-        // Total metres driven since the agent started, across every mission, target and affordance —
-        // NOT per run. mission_metrics only records mission runs, so before this there was no way to
-        // ask "how far has this robot driven today".
-        session_metres_label_ = new QLabel(QStringLiteral("0.0 m"), toolbar);
-        session_metres_label_->setToolTip(QStringLiteral("Total distance driven this session "
-                                                         "(all missions, targets and affordances)"));
-        toolbar_layout->addWidget(new QLabel(QStringLiteral("session"), toolbar));
-        toolbar_layout->addWidget(session_metres_label_);
 
         toolbar_layout->addStretch();
 
@@ -209,16 +213,29 @@ public:
 
     }
 
-    // Session odometer. Dedups to 0.1 m: called every cycle, and re-rendering an unchanged string
-    // churns Qt for nothing (the same reasoning as set_cmd_vel below).
-    void set_session_metres(float metres)
+    // Session totals. Dedups: called every cycle, and re-rendering an unchanged string churns Qt for
+    // nothing (the same reasoning as set_cmd_vel below). 0.1 m and 1 s are the displayed resolutions.
+    void set_session(float metres, float seconds)
     {
-        if (session_metres_label_ == nullptr) return;
-        if (std::isfinite(session_metres_shown_) and std::abs(metres - session_metres_shown_) < 0.1f) return;
-        session_metres_shown_ = metres;
-        session_metres_label_->setText(metres >= 1000.f
-            ? QString::number(static_cast<double>(metres) / 1000.0, 'f', 2) + " km"
-            : QString::number(static_cast<double>(metres), 'f', 1) + " m");
+        if (session_dist_lcd_ != nullptr
+            and (not std::isfinite(session_metres_shown_) or std::abs(metres - session_metres_shown_) >= 0.1f))
+        {
+            session_metres_shown_ = metres;
+            session_dist_lcd_->display(metres >= 1000.f
+                ? QString::number(static_cast<double>(metres) / 1000.0, 'f', 2) + "k"
+                : QString::number(static_cast<double>(metres), 'f', 1));
+        }
+        const int secs = static_cast<int>(seconds);
+        if (session_time_lcd_ != nullptr and secs != session_secs_shown_)
+        {
+            session_secs_shown_ = secs;
+            const int h = secs / 3600, m = (secs / 60) % 60, sec = secs % 60;
+            session_time_lcd_->display(h > 0
+                ? QStringLiteral("%1:%2:%3").arg(h).arg(m, 2, 10, QLatin1Char('0'))
+                                            .arg(sec, 2, 10, QLatin1Char('0'))
+                : QStringLiteral("%1:%2").arg(m, 2, 10, QLatin1Char('0'))
+                                         .arg(sec, 2, 10, QLatin1Char('0')));
+        }
     }
 
     // The commanded base velocity, as numbers rather than a sentence. Dedups: this is called on every
@@ -355,9 +372,11 @@ private:
     QString affordance_shown_;
     QLabel *stuck_status_label_ = nullptr;
 
-    QLabel *session_metres_label_ = nullptr;   // session odometer, toolbar
+    QLCDNumber *session_dist_lcd_ = nullptr;   // session totals, top row
+    QLCDNumber *session_time_lcd_ = nullptr;
 
     float session_metres_shown_ = std::numeric_limits<float>::quiet_NaN();
+    int session_secs_shown_ = -1;
     bool stuck_active_shown_ = false;
     bool goal_aligning_shown_ = false;
 };

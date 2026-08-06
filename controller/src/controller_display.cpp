@@ -184,10 +184,11 @@ void ControllerDisplay::set_stuck_active(bool active)
     snapshot_.stuck_active = active;
 }
 
-void ControllerDisplay::set_session_distance(float metres)
+void ControllerDisplay::set_session_totals(float metres, float seconds)
 {
     std::lock_guard<std::mutex> lock(snapshot_mutex_);
     snapshot_.session_distance_m = metres;
+    snapshot_.session_elapsed_s = seconds;
 }
 
 void ControllerDisplay::set_goal_distance(std::optional<float> dist_m, std::optional<float> yaw_err_rad,
@@ -300,7 +301,7 @@ void ControllerDisplay::present()
 
     custom_widget_->set_stuck_active(snap.stuck_active);   // widget dedups same-state calls
     custom_widget_->set_goal_distance(snap.goal_dist_m, snap.goal_yaw_err_rad, snap.goal_aligning);
-    custom_widget_->set_session_metres(snap.session_distance_m);
+    custom_widget_->set_session(snap.session_distance_m, snap.session_elapsed_s);
     if (mission_panel_)
     {
         if (snap.mission_list_pending)

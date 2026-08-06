@@ -1229,6 +1229,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // travel, and one 2 m re-anchor would silently add 2 m to the odometer. The bound is the machine's
     // own envelope, not a tuned number.
     {
+        if (session_start_ms_ == 0) session_start_ms_ = overlay_now_ms_;
         const Eigen::Vector2f &pos = robot_pose.pos;
         if (odo_last_pos_.has_value() and overlay_now_ms_ > odo_last_ms_)
         {
@@ -1268,7 +1269,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     const auto control_output = path_controller.compute(robot_pose.as_transform());
     // Surface what the ARRIVAL test is waiting on, every cycle, before any of the branches below can return
     // early — otherwise the readout would freeze exactly in the states worth watching (aligning, blocked).
-    display.set_session_distance(session_distance_m_);
+    display.set_session_totals(session_distance_m_, session_elapsed_s());
     display.set_goal_distance(control_output.dist_to_goal, control_output.goal_yaw_err_rad,
                               control_output.aligning);
     last_mppi_trajectories_ = control_output.trajectories_room;
