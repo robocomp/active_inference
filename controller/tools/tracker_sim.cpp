@@ -158,13 +158,14 @@ struct PdArm
 // ── ARM B: "plain" — curvature feedforward + critically damped Frenet feedback ──────────────────
 struct FfArm
 {
-    float L = 1.0f;             // the ONE chosen gain; both feedback gains follow by critical damping
+    // ★SYNCED to src/trackers/plain_tracker.cpp as committed (2487aeb). It previously carried a REVERTED
+    // design — an offset-corrected feedforward kappa/(1-kappa*e_y) and a two-pass fixed point — so any
+    // sweep run here would have optimised a controller that is not the one on the robot.
+    float L = 0.60f;            // THE free parameter: feedback error-decay length, in metres of arc
     float T_lag = 0.42f;        // identified total lag
     float g_dc = 1.f / 0.89f;   // identified DC gain, inverted
-    bool  preview_at_cmd = true;  // BENCH SWITCH (not a robot param): false = preview at the profile
-                                  // speed, which looked further ahead than the robot travels and cut corners.
     float W = 0.40f;            // route's own smoothing scale
-
+    static constexpr float kSteerFloor = 0.15f;
 
     void control(const rc::RouteSpline &sp, float s, float px, float py, float th,
                  float v_limit, float w_max, float &v_cmd, float &w_cmd) const
@@ -173,29 +174,17 @@ struct FfArm
         const float psi = sp.heading_at(s);
         const float e_y = -std::sin(psi) * (px - r.x()) + std::cos(psi) * (py - r.y());  // left positive
         const float e_psi = wrap(th - psi);
-        // ★No clearance term: the PLAIN tracker queries no obstacle field. Speed is the route's own
-        // geometric profile, scaled by ALIGNMENT — see plain_tracker.cpp. The cos term is the pivot:
-        // through a cusp the tangent swings away, the speed collapses, and the floored-reference
-        // feedback below rotates the robot onto the new tangent instead of driving off the route.
-        // ★2026-08-05 THE SIMPLIFICATION — mirrors src/trackers/plain_tracker.cpp exactly.
-        // One law, no tuning constants beyond L and w_max which already existed:
-        //   k_eff = k_path/(1 - k_path*e_y);  k_cmd = k_eff - (2/L)e_psi - (1/L^2)e_y
-        //   v = min(v_profile, w_max/|k_cmd|);  omega = g_dc*v*k_cmd
-        // At a cusp |k_cmd| is large so v collapses and omega saturates at w_max: that is the point turn.
-        // Off-path k_eff grows as k_path*e_y approaches 1, so v collapses there too.
-        constexpr float kTiny = 1e-3f;
-        // Two-pass fixed point: preview at the speed we will actually command (see plain_tracker.cpp).
-        float vv = v_limit, kc = 0.f;
-        for (int pass = 0; pass < 2; ++pass)
-        {
-            const float kp = sp.kappa_avg(s + (preview_at_cmd ? vv : v_limit) * T_lag, W);
-            const float dr = 1.f - kp * e_y;
-            const float dd = std::fabs(dr) > kTiny ? dr : (dr >= 0.f ? kTiny : -kTiny);
-            kc = kp / dd - (2.f / L) * e_psi - (1.f / (L * L)) * e_y;
-            vv = std::min(v_limit, w_max / std::max(std::fabs(kc), kTiny));
-        }
-        v_cmd = vv;
-        w_cmd = std::clamp(g_dc * vv * kc, -w_max, w_max);
+
+        const float k_ff = sp.kappa_avg(s + v_limit * T_lag, W);
+        const float k_fb = -(2.f / L) * e_psi - (1.f / (L * L)) * e_y;
+        // omega FIRST, then the advance scaled by the factor omega had to be clipped by. That ratio
+        // preserves the commanded ARC (kappa = omega/v), so a saturated turn becomes a slower turn of
+        // the SAME shape rather than a wider one.
+        const float omega_want = g_dc * (v_limit * k_ff + std::max(v_limit, kSteerFloor) * k_fb);
+        w_cmd = std::clamp(omega_want, -w_max, w_max);
+        const float scale = std::fabs(omega_want) > 1e-6f
+                          ? std::fabs(w_cmd) / std::fabs(omega_want) : 1.f;
+        v_cmd = v_limit * scale;
     }
 };
 
@@ -288,6 +277,20 @@ Result run(const rc::RouteFollower &route, Arm arm, float v_cap, float w_max,
     if (verbose)
         std::printf("    (ran %d cycles, %.1f m, %.1f s)\n", R.n, R.dist, R.t_end);
     return R;
+}
+
+// J, exactly as MissionRunner computes it (controller_mission.cpp:888-891):
+//   smooth_lin = (lin_accel_effort/v_max)/distance,  smooth_rot = (rot_accel_effort/w_max)/distance,
+//   dev_norm   = cross_track_rms/planner_cell_size,  J = the sum. Per metre, dimensionless, lower better.
+// ⚠TV(v)/TV(w) are the TOTAL VARIATION OF THE COMMAND — the closest this bench has to the agent's accel
+// efforts, which integrate |a| over the profile. Same normalisation, so J here RANKS configurations; it
+// is NOT numerically comparable to the robot's J.
+constexpr float kCellSizeM = 0.06f;   // Planner.CellSize — the length scale dev_norm is measured in
+double mission_J(const Result &R, float v_max, float w_max)
+{
+    if (R.dist < 0.1 or R.n == 0) return 1e9;
+    const double rms = std::sqrt(R.e_sq / R.n);
+    return (R.tv_v / v_max) / R.dist + (R.tv_w / w_max) / R.dist + rms / kCellSizeM;
 }
 
 void report(const char *tag, const Result &R)
@@ -566,24 +569,39 @@ int main(int argc, char **argv)
         std::printf("    stage 2+3 fitted route    min %.3f   p05 %.3f   (%zu samples)\n", smn, sp5, spline_pts.size());
     }
 
+
     {
-        // ── DOES PREVIEWING AT THE COMMANDED SPEED STOP THE CUTTING? ─────────────────────────────
-        // The metric is DRIVEN DISTANCE / ROUTE LENGTH. Below 1.0 the robot took a shorter path than
-        // the route it was following, which is cutting — and cross-track cannot see it, because e_y is
-        // measured at the projection and the projection skips with the robot.
-        const float len = route.spline().length();
-        std::printf("\n  preview source (route length %.2f m):\n", len);
-        std::printf("      %-26s %9s %9s %9s %9s\n", "preview at", "driven m", "ratio", "rms mm", "time s");
-        for (const bool at_cmd : {false, true})
+        // ── J(L, rot_headroom) ───────────────────────────────────────────────────────────────────
+        // L is the ONLY free parameter of the tracker: T_lag and g_dc are IDENTIFIED from the robot, and
+        // W is the route's own fitting scale. rot_headroom sits one layer up, in route_speed_limit, and
+        // trades the same quantities by reserving turn budget for feedback — so they interact, and are
+        // swept together rather than one at a time.
+        // J's terms pull opposite ways in L: small L tracks tightly and rotates violently, large L is
+        // smooth and sloppy. An interior minimum is what would make self-adaptation possible at all.
+        std::printf("\n  J(L, headroom), lower is better    [robot: J=5.212 at L=0.60, hr=0.70]\n");
+        const float HRS[] = {0.55f, 0.70f, 0.85f, 1.00f};
+        std::printf("      %-9s", "L / hr");
+        for (const float hr : HRS) std::printf("%9.2f", hr);
+        std::printf("\n");
+        float bestJ = 1e9f, bestL = 0.f, bestH = 0.f;
+        for (const float Lv : {0.30f, 0.45f, 0.60f, 0.80f, 1.00f, 1.30f, 1.70f})
         {
-            FfArm arm; arm.preview_at_cmd = at_cmd;
-            const Result R = run(route, arm, w.v_max, kWmax, w.a_lat, kADec, kW, false);
-            const double rms = R.n ? std::sqrt(R.e_sq / R.n) : 0.0;
-            std::printf("      %-26s %9.2f %9.3f %9.1f %9.0f%s\n",
-                        at_cmd ? "commanded speed (fixed)" : "profile speed (cutting)",
-                        R.dist, R.dist / len, rms * 1000, R.t_end,
-                        R.dist / len < 0.99 ? "   <- CUTS" : "");
+            std::printf("      %-9.2f", Lv);
+            for (const float hr : HRS)
+            {
+                FfArm arm; arm.L = Lv;
+                const float saved = g_headroom; g_headroom = hr;
+                const Result R = run(route, arm, w.v_max, kWmax, w.a_lat, kADec, kW, false);
+                g_headroom = saved;
+                const double J = mission_J(R, w.v_max, kWmax);
+                const bool fin = R.s_end >= route.spline().length() - 0.5f;
+                if (fin) { std::printf("%9.2f", J); if (J < bestJ) { bestJ = J; bestL = Lv; bestH = hr; } }
+                else       std::printf("%9s", "DNF");
+            }
+            std::printf("\n");
         }
+        std::printf("      MINIMUM J = %.2f at L = %.2f, headroom = %.2f     (current: L=0.60, hr=0.70)\n",
+                    bestJ, bestL, bestH);
     }
 
     report("pd", run(route, PdArm{}, w.v_max, kWmax, w.a_lat, kADec, kW, true));
