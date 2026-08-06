@@ -304,6 +304,9 @@ private:
     // The target ensure_current_plan could not route to. Reachability is GLOBAL, so the repair stage
     // cannot discover it on its own — this is how the search tells it to widen the question.
     std::string unroutable_target_name_;
+    // The reachability repair, computed ONCE for a given raw standpoint and held. Recomputing it per
+    // cycle makes the target follow the robot (nearest_reachable is measured FROM the robot).
+    std::optional<Eigen::Vector2f> unroutable_fix_;
 
     rc::MissionRunner mission_;
     // CONTINUOUS ROUTE MODE. The whole mission as one arc-length curve; no per-waypoint target, no

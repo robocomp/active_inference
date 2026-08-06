@@ -274,8 +274,18 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     // costs nothing to hold: once the goal IS reachable, nearest_reachable returns it exactly.
     const bool routing_failed_here = not unroutable_target_name_.empty()
                                      and unroutable_target_name_ == step.target.node_name;
+    // ★COMPUTED ONCE AND HELD. nearest_reachable takes the ROBOT's position as its origin, so
+    // re-running it every cycle returns a DIFFERENT point every cycle as the robot moves — and
+    // same_target_instance calls a target "changed" once it shifts 5 cm. The repaired target therefore
+    // chased the robot: replan every cycle, a fresh curve every cycle, the tracker's arc length pinned
+    // at 0 (measured: track_s never exceeded 0.05 m over 300 cycles) while it orbited its own start at
+    // 0.55 m/s with rot saturated. A target that moves when the robot moves is not a target.
+    // Held for as long as the sticky flag is — same key, no second notion of identity and no new number.
+    if (not routing_failed_here) unroutable_fix_.reset();
+    else if (not unroutable_fix_.has_value())
+        unroutable_fix_ = grid_planner_.nearest_reachable(step.plan_origin, step.target.room_pos);
     const auto safe = routing_failed_here
-                    ? grid_planner_.nearest_reachable(step.plan_origin, step.target.room_pos)
+                    ? unroutable_fix_
                     : grid_planner_.nearest_free(step.target.room_pos, step.target.yaw_rad);
     if (safe.has_value() && (*safe - step.target.room_pos).squaredNorm() > 1e-6f)
     {
