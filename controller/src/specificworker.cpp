@@ -274,6 +274,16 @@ void SpecificWorker::initialize()
 			session_.mission().set_mode(rc::DriveMode::Target);
 			session_.mission().set_click_target(Eigen::Vector2f{static_cast<float>(point.x()),
 			                                                    static_cast<float>(point.y())});
+			// ★CLICKING A POINT IS A "GO", SO IT MUST ARM THE BASE OUTPUT — the same thing Run does.
+			// Stop disarms the output (set_output_enabled(false)) and until now ONLY Run re-armed it, so
+			// after any Stop or mission abort a clicked target planned a route, computed 0.33 m/s of
+			// commanded speed, and drove precisely nowhere: out_ticks stayed 0 and the commander sat
+			// silent. The wedge detector then reported the discrepancy honestly and the ESCAPE could not
+			// move either, because escape commands go through the same disarmed commander. Two switches
+			// had to be on — driving_enabled_ and output_enabled_ — and clicking set only one, which made
+			// driving_enabled_ a lie.
+			paused_ = false;
+			motion_commander_.set_output_enabled(true);
 			driving_enabled_ = true;
 			set_manual_target(point);
 		});

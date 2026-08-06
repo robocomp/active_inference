@@ -141,6 +141,7 @@ private:
     // destructor wake the loop immediately instead of waiting out a tick.
     mutable std::mutex mutex_;
     bool output_enabled_ = true;      // false ⇒ the loop stays silent (see set_output_enabled)
+    bool disarmed_notice_given_ = false;   // the "commands are being discarded" line, once per disarm
     int  quiet_burst_left_ = 0;       // zero commands still to send before going silent
     std::condition_variable_any cv_;
     PendingCommand pending_;

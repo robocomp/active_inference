@@ -178,6 +178,27 @@ void ControllerMotionCommander::send_speed_command(float adv_mps, float side_mps
     if (!omnirobot_proxy_)
         return;
 
+    // ── A SWALLOWED COMMAND MUST NOT BE A SILENT ONE ─────────────────────────────────────────────
+    // When the output is disarmed this class does exactly what it should — nothing — but it did it
+    // WITHOUT SAYING SO, and a robot that plans, computes a speed and never moves looks like a broken
+    // controller from every angle: the cycle runs at 20 Hz, the plan is valid, the tracker is on the
+    // path, and the base does not turn a wheel. That cost hours of chasing the planner and the tracker.
+    // Said once per disarm, so re-arming makes it sayable again.
+    {
+        const std::scoped_lock lock(mutex_);
+        if (not output_enabled_
+            and (std::abs(adv_mps) > 1e-3f or std::abs(side_mps) > 1e-3f or std::abs(rot_rps) > 1e-3f))
+        {
+            if (not disarmed_notice_given_)
+            {
+                disarmed_notice_given_ = true;
+                std::println("[vel-out] ⚠ BASE OUTPUT IS DISARMED — commands are being computed "
+                             "({:.2f} m/s, {:.2f} rad/s) and DISCARDED. Stop disarms it; press Run, or "
+                             "click a target, to re-arm.", adv_mps, rot_rps);
+            }
+        }
+    }
+
     const auto timestamp_ms = current_time_ms();
 
     // Hand the command to the fixed-rate output thread. The Ice call itself is NOT made here any more: it is
@@ -213,6 +234,7 @@ void ControllerMotionCommander::set_output_enabled(bool enabled)
     const std::scoped_lock lock(mutex_);
     if (output_enabled_ == enabled) return;
     output_enabled_ = enabled;
+    disarmed_notice_given_ = false;   // each disarm gets its own notice
     if (not enabled)
     {
         // Stop MEANS stop: zero the pending command and queue a burst of explicit zeros so the base
