@@ -239,6 +239,23 @@ private:
     bool reversal_captured_ = false;
 
     std::ofstream proximity_csv_;                  // near-obstacle black box ("why didn't it react")
+
+    // ── FINAL-APPROACH BLACK BOX ─────────────────────────────────────────────────────────────────
+    // The last metre into an affordance standpoint, and the terminal rotation. That rotation is driven
+    // by TrajectoryController's align branch, which returns BEFORE every safety stage — no ESDF, no
+    // footprint test — so nothing in the running system could say whether the robot had room to turn.
+    // This records it per cycle instead of inferring it after the collision.
+    std::ofstream approach_csv_;
+    bool approach_csv_open_ = false;
+    bool approach_active_ = false;                 // are we inside a logged approach right now
+    std::string approach_target_;                  // which standpoint this approach belongs to
+    float approach_min_clear_ = 0.f;               // tightest body clearance seen during the approach
+    float approach_min_clear_align_ = 0.f;         // ... and during the rotation alone
+    std::uint64_t approach_start_ms_ = 0;
+    std::string approach_warned_;                  // standpoint we have already warned about
+    void log_approach_diagnostics(std::uint64_t t_ms,
+                                  const rc::TrajectoryController::ControlOutput &o,
+                                  const ControllerRobotPose &robot_pose);
     bool proximity_csv_open_ = false;
     std::uint64_t proximity_csv_last_ms_ = 0;      // throttle for proximity CSV rows
     std::optional<ControllerRobotPose> prev_robot_pose_;   // last pose at which the value actually changed

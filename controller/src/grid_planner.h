@@ -127,6 +127,21 @@ public:
     std::optional<Eigen::Vector2f> nearest_reachable(const Eigen::Vector2f& start_room,
                                                      const Eigen::Vector2f& goal_room);
 
+    // ── FINAL-APPROACH DIAGNOSTICS ────────────────────────────────────────────────────────────────
+    // How much slack the FOOTPRINT has at this pose: the smallest distance-to-obstacle over the cells
+    // the body actually covers, in metres. 0 means a body cell is on an obstacle. This is the continuous
+    // form of pose_free, which only ever answers yes/no and so cannot say "feasible, but barely".
+    float pose_clearance(const Eigen::Vector2f& pos_room, float theta) const;
+
+    // Can the robot TURN IN PLACE here, from `theta_from` to `theta_to` the short way round? Returns the
+    // tightest clearance over the swept headings, and whether every one of them is footprint-feasible.
+    // ★This is the question nothing in the arrival path has ever asked. A standpoint is verified feasible
+    // at ONE heading — the facing yaw for the repair, the travel heading for the plan — but the terminal
+    // rotation sweeps everything in between, and the body is 0.65 m wide against a 0.46 m inscribed
+    // width. Feasible at both ends does not imply feasible in the middle.
+    struct RotationSweep { float min_clearance_m = 0.f; bool feasible = false; float worst_heading_rad = 0.f; };
+    RotationSweep rotation_sweep(const Eigen::Vector2f& pos_room, float theta_from, float theta_to) const;
+
     // ── DISTANCE FIELD ────────────────────────────────────────────────────────────────────────────
     // Metres from `p` to the nearest occupied cell (outside-the-room counts as occupied, so walls are
     // included). Zero inside an obstacle. Returns a large positive value if there is no world yet, so a

@@ -304,6 +304,49 @@ bool GridPlanner::pose_free(const Eigen::Vector2f& pos_room, float theta) const
     return cell_free(ix, iy, h);
 }
 
+float GridPlanner::pose_clearance(const Eigen::Vector2f& pos_room, float theta) const
+{
+    int ix, iy;
+    if (not world_to_cell(pos_room, ix, iy)) return 0.f;
+    const_cast<GridPlanner*>(this)->rebuild_offsets();
+    const_cast<GridPlanner*>(this)->build_distance_field();
+    if (offsets_.size() != kHeadings or dist_.empty()) return 0.f;
+    float t = std::fmod(theta, 2.0f * static_cast<float>(M_PI));
+    if (t < 0) t += 2.0f * static_cast<float>(M_PI);
+    const int h = static_cast<int>(std::lround(t / (2.0f * static_cast<float>(M_PI)) * kHeadings)) % kHeadings;
+    float worst = std::numeric_limits<float>::max();
+    for (const auto& o : offsets_[h])
+    {
+        const int nx = ix + o.x(), ny = iy + o.y();
+        if (not in_bounds(nx, ny)) return 0.f;   // off the map counts as touching, same as cell_free
+        worst = std::min(worst, dist_[idx(nx, ny)]);
+    }
+    return worst == std::numeric_limits<float>::max() ? 0.f : worst;
+}
+
+GridPlanner::RotationSweep GridPlanner::rotation_sweep(const Eigen::Vector2f& pos_room,
+                                                      float theta_from, float theta_to) const
+{
+    // The SHORT way round, because that is the arc the alignment controller actually drives
+    // (yaw_err = wrap_pi(desired - current), and it servos that to zero).
+    const float two_pi = 2.0f * static_cast<float>(M_PI);
+    float sweep = std::remainder(theta_to - theta_from, two_pi);
+    // Sample finely enough that no planner heading bucket can be skipped, plus both endpoints exactly.
+    const int n = std::max(2, static_cast<int>(std::ceil(std::abs(sweep) / (two_pi / (4 * kHeadings)))));
+    RotationSweep r;
+    r.min_clearance_m = std::numeric_limits<float>::max();
+    r.feasible = true;
+    for (int i = 0; i <= n; ++i)
+    {
+        const float th = theta_from + sweep * (static_cast<float>(i) / static_cast<float>(n));
+        if (not pose_free(pos_room, th)) r.feasible = false;
+        if (const float c = pose_clearance(pos_room, th); c < r.min_clearance_m)
+        { r.min_clearance_m = c; r.worst_heading_rad = th; }
+    }
+    if (r.min_clearance_m == std::numeric_limits<float>::max()) r.min_clearance_m = 0.f;
+    return r;
+}
+
 std::optional<Eigen::Vector2f> GridPlanner::nearest_free(const Eigen::Vector2f& pos_room, float theta,
                                                          float max_radius_m) const
 {
@@ -725,6 +768,32 @@ bool GridPlanner::self_test()
                     same ? std::format("({:.4f},{:.4f})", same->x(), same->y()).c_str() : "none");
         check(same.has_value() and (*same - open_goal).norm() < 1e-6f,
               "a reachable goal must come back bit-identical, not snapped to a cell centre");
+    }
+
+    // (7) FEASIBLE AT BOTH ENDS, IMPOSSIBLE IN THE MIDDLE — the failure the arrival path cannot see.
+    // A standpoint is verified at ONE heading; the terminal rotation sweeps the whole arc. For a
+    // 0.46 x 0.65 body the width swept peaks at the DIAGONAL (0.796 m), so a slot between 0.65 and
+    // 0.796 m admits the robot pointing along it and across it, and traps it at 45 degrees.
+    {
+        GridPlanner p; p.params.safety_margin_m = 0.f;
+        const std::vector<Eigen::Vector2f> room{{0.f, 0.f}, {6.f, 0.f}, {6.f, 6.f}, {0.f, 6.f}};
+        // A 0.75 m slot running along x at y = 3.
+        p.set_world(room, {{{0.f, 0.f}, {6.f, 0.f}, {6.f, 2.625f}, {0.f, 2.625f}},
+                           {{0.f, 3.375f}, {6.f, 3.375f}, {6.f, 6.f}, {0.f, 6.f}}});
+        const Eigen::Vector2f spot{3.f, 3.f};
+        const float along = 0.f, back = static_cast<float>(M_PI);
+        const auto sweep = p.rotation_sweep(spot, along, back);
+        std::printf("  narrow slot: free along=%s free reversed=%s | can it TURN? %s (tightest %.3f m at %.0f deg)\n",
+                    p.pose_free(spot, along) ? "yes" : "no", p.pose_free(spot, back) ? "yes" : "no",
+                    sweep.feasible ? "yes" : "NO", sweep.min_clearance_m,
+                    sweep.worst_heading_rad * 180.f / static_cast<float>(M_PI));
+        check(p.pose_free(spot, along) and p.pose_free(spot, back),
+              "the body must FIT at both ends, or the test says nothing about the arc between them");
+        check(not sweep.feasible,
+              "★rotation_sweep must REFUSE it — this is the case pose_free cannot express and the "
+              "terminal rotation runs straight into");
+        check(p.pose_clearance(spot, along) > 0.f,
+              "pose_clearance must be positive where the body fits, so it can grade 'barely'");
     }
 
     std::printf("GridPlanner::self_test %s\n", ok ? "PASS" : "FAIL");

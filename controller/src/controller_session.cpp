@@ -1003,6 +1003,147 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
     return true;
 }
 
+
+// ── FINAL-APPROACH BLACK BOX ─────────────────────────────────────────────────────────────────────
+// WHY THIS EXISTS. An affordance standpoint is verified footprint-feasible at exactly ONE heading —
+// the facing yaw, by the repair — and the plan is verified at the TRAVEL heading. Neither verifies the
+// arc between them, and the terminal rotation sweeps precisely that arc. The body is 0.65 m wide with
+// a 0.46 m inscribed width, so "feasible at both ends" does not imply "feasible in the middle", and a
+// spot that is fine to stand in can be impossible to turn in.
+//
+// Worse, TrajectoryController's align branch sets adv=side=0, computes rot, and RETURNS — ahead of
+// out.min_esdf and ahead of every safety stage. So while the robot turns at a standpoint it is running
+// open-loop against the world: no ESDF, no footprint test, no guard of any kind. Nothing in the running
+// system could answer "did it have room to turn", which is why this is a per-cycle record and not a
+// post-hoc reconstruction.
+//
+// Three poses matter and they are NOT the same pose:
+//   the TARGET      — the standpoint, the only one anything ever checked
+//   where it STOPS  — anywhere within goal_threshold (0.25 m) of it, or beyond via passed_arrival
+//   the SWEEP       — every heading the body passes through while turning, at wherever it stopped
+// The columns below carry all three so a collision can be attributed to one of them.
+void ControllerSession::log_approach_diagnostics(std::uint64_t t_ms,
+                                                 const rc::TrajectoryController::ControlOutput &o,
+                                                 const ControllerRobotPose &robot_pose)
+{
+    if (not last_target_info_.has_value() or not last_target_info_->from_affordance) { approach_active_ = false; return; }
+    const auto &tgt = *last_target_info_;
+
+    // The zone: the last metre in, plus the whole rotation regardless of distance. One metre is the
+    // reporting window, not a control decision — nothing branches on it.
+    const float d_target = (robot_pose.pos - tgt.room_pos).norm();
+    const bool in_zone = o.aligning or d_target < 1.0f;
+    if (not in_zone)
+    {
+        if (approach_active_) approach_active_ = false;
+        return;
+    }
+
+    // Body theta -> the FORWARD heading the planner and the footprint both speak (+X right, +Y forward).
+    const float facing_now = std::remainder(robot_pose.theta + static_cast<float>(M_PI_2), 2.f * static_cast<float>(M_PI));
+    const float facing_des = tgt.yaw_rad;
+
+    const float clear_now  = grid_planner_.pose_clearance(robot_pose.pos, facing_now);
+    const float clear_des  = grid_planner_.pose_clearance(robot_pose.pos, facing_des);
+    const bool  free_now   = grid_planner_.pose_free(robot_pose.pos, facing_now);
+    const bool  free_des   = grid_planner_.pose_free(robot_pose.pos, facing_des);
+    // ★The measurement that did not exist: can it turn where it ACTUALLY IS, not where it was aimed.
+    const auto sweep       = grid_planner_.rotation_sweep(robot_pose.pos, facing_now, facing_des);
+    // ... and the same question asked at the standpoint itself, which is what the repair should have
+    // checked. Comparing the two separates "bad standpoint" from "stopped in a bad place".
+    const auto sweep_tgt   = grid_planner_.rotation_sweep(tgt.room_pos, facing_now, facing_des);
+
+    if (not approach_active_)
+    {
+        approach_active_ = true;
+        approach_target_ = tgt.node_name;
+        approach_start_ms_ = t_ms;
+        approach_min_clear_ = std::numeric_limits<float>::max();
+        approach_min_clear_align_ = std::numeric_limits<float>::max();
+        // Say it BEFORE the robot commits, once per standpoint. This is the line that predicts the
+        // collision instead of describing it: the sweep is evaluated at the standpoint, so it is known
+        // as soon as the approach starts, a metre out, while there is still room to do something.
+        if (approach_warned_ != tgt.node_name and not sweep_tgt.feasible)
+            std::println("[approach] ⚠ '{}' — the standpoint ({:.2f},{:.2f}) is NOT rotatable: turning to "
+                         "face {:.0f}° passes through {:.0f}° where the footprint does NOT fit "
+                         "(tightest body clearance {:.3f} m). The terminal rotation runs with NO obstacle "
+                         "check, so this is where a wall gets hit.",
+                         tgt.node_name, tgt.room_pos.x(), tgt.room_pos.y(),
+                         facing_des * 180.f / static_cast<float>(M_PI),
+                         sweep_tgt.worst_heading_rad * 180.f / static_cast<float>(M_PI),
+                         sweep_tgt.min_clearance_m);
+        approach_warned_ = tgt.node_name;
+    }
+    approach_min_clear_ = std::min(approach_min_clear_, clear_now);
+    if (o.aligning) approach_min_clear_align_ = std::min(approach_min_clear_align_, clear_now);
+
+    if (not approach_csv_open_)
+    {
+        approach_csv_.open("approach_diag.csv", std::ios::out | std::ios::trunc);
+        approach_csv_.imbue(std::locale::classic());   // decimal POINT regardless of LANG (see CLAUDE.md)
+        approach_csv_open_ = approach_csv_.is_open();
+        if (approach_csv_open_)
+            approach_csv_
+                << "# FINAL APPROACH to an affordance standpoint. One row per cycle inside 1 m, plus every\n"
+                   "# cycle of the terminal rotation (which has NO obstacle check of its own).\n"
+                   "# phase        = approach | ALIGN (rotating in place) | reached\n"
+                   "# d_target_m   = robot to the STANDPOINT.  d_arrival_m = what the arrival test compares\n"
+                   "#                against goal_threshold. They differ once the path is extended past it.\n"
+                   "# clear_now/des_m = footprint slack at the CURRENT / DESIRED heading, at the robot's\n"
+                   "#                actual pose. free_now/des = the same as the planner's yes/no predicate.\n"
+                   "# sweep_min_m / sweep_ok = tightest slack over the headings the rotation passes through,\n"
+                   "#                at the robot's ACTUAL pose. sweep_ok=0 means it cannot turn here.\n"
+                   "# tgt_sweep_min_m / tgt_sweep_ok = the same asked at the STANDPOINT. tgt_sweep_ok=0 and\n"
+                   "#                sweep_ok=0 => bad standpoint; tgt_sweep_ok=1 and sweep_ok=0 => it\n"
+                   "#                stopped somewhere worse than where it was sent.\n"
+                   "# min_esdf_m   = the LIVE field (residual + dynamic obstacles), which the model layers\n"
+                   "#                above do not include. A gap between it and clear_now is a moving thing.\n"
+                   "#                ★nan DURING ALIGN, AND THAT IS THE POINT: the align branch returns\n"
+                   "#                before out.min_esdf is ever assigned, so the controller does not even\n"
+                   "#                SAMPLE the field while turning. A 0 here would read as 'no clearance';\n"
+                   "#                nan says 'not measured'. clear_now_m is the model-side answer instead.\n"
+                   "t_ms,target,phase,tgt_x,tgt_y,tgt_facing_deg,rob_x,rob_y,rob_facing_deg,"
+                   "d_target_m,d_arrival_m,yaw_err_deg,cmd_adv,cmd_rot,"
+                   "clear_now_m,clear_des_m,free_now,free_des,sweep_min_m,sweep_ok,sweep_worst_deg,"
+                   "tgt_sweep_min_m,tgt_sweep_ok,min_esdf_m,goal_reached\n";
+    }
+    if (not approach_csv_open_) return;
+
+    constexpr float kDeg = 180.f / static_cast<float>(M_PI);
+    approach_csv_ << t_ms << ',' << tgt.node_name << ','
+                  << (o.goal_reached ? "reached" : (o.aligning ? "ALIGN" : "approach")) << ','
+                  << tgt.room_pos.x() << ',' << tgt.room_pos.y() << ',' << facing_des * kDeg << ','
+                  << robot_pose.pos.x() << ',' << robot_pose.pos.y() << ',' << facing_now * kDeg << ','
+                  << d_target << ',' << o.dist_to_goal << ','
+                  << (o.goal_yaw_err_rad.has_value() ? *o.goal_yaw_err_rad * kDeg : 0.f) << ','
+                  << o.adv << ',' << o.rot << ','
+                  << clear_now << ',' << clear_des << ',' << (free_now ? 1 : 0) << ',' << (free_des ? 1 : 0) << ','
+                  << sweep.min_clearance_m << ',' << (sweep.feasible ? 1 : 0) << ','
+                  << sweep.worst_heading_rad * kDeg << ','
+                  << sweep_tgt.min_clearance_m << ',' << (sweep_tgt.feasible ? 1 : 0) << ','
+                  << (o.aligning ? std::numeric_limits<float>::quiet_NaN() : o.min_esdf) << ','
+                  << (o.goal_reached ? 1 : 0) << '\n';
+
+    // On arrival, one console line that says how it actually went — the three quantities you would
+    // otherwise reconstruct from the CSV by hand every time.
+    if (o.goal_reached)
+    {
+        std::println("[approach] '{}' reached in {:.1f} s — stopped {:.3f} m from the standpoint, "
+                     "yaw err {:.1f}°, tightest body clearance {:.3f} m (during rotation {:.3f} m), "
+                     "live min_esdf {}{}",
+                     tgt.node_name, static_cast<float>(t_ms - approach_start_ms_) * 1e-3f,
+                     d_target, o.goal_yaw_err_rad.has_value() ? *o.goal_yaw_err_rad * kDeg : 0.f,
+                     approach_min_clear_ == std::numeric_limits<float>::max() ? 0.f : approach_min_clear_,
+                     approach_min_clear_align_ == std::numeric_limits<float>::max()
+                         ? 0.f : approach_min_clear_align_,
+                     o.aligning ? std::string("not sampled while aligning")
+                                : std::format("{:.3f} m", o.min_esdf),
+                     sweep.feasible ? "" : "  ⚠ROTATED THROUGH AN INFEASIBLE HEADING");
+        approach_csv_.flush();
+        approach_active_ = false;
+    }
+}
+
 void ControllerSession::update_display(const std::optional<ControllerRobotPose> &robot_pose,
                                        ControllerDisplay &display,
                                        const ControllerObstacleVisuals &obstacle_polys,
@@ -1357,6 +1498,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         // s only because PlainTracker happens to put s_remaining in dist_to_goal; in PD/MPPI that field
         // is a EUCLIDEAN norm, so the same CSV column meant two different things by mode.
         const float track_s = path_controller.tracker_arc_length().value_or(-1.f);
+        log_approach_diagnostics(overlay_now_ms_, control_output, robot_pose);
         log_mppi_diagnostics(overlay_now_ms_, control_output, control_output.adv, base_speed_lin_,
                              kappa_here, track_s, room_vel_.omega, ud.xy_std_m, ud.theta_std_rad, robot_pose,
                              motion_commander.last_output_rate_stats(),
