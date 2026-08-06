@@ -33,7 +33,13 @@ stale_grace_ms = 120000
 agent_info_period_ms = 1000
 
 [Owns]
-nodes = ["door_concept 20"]
+# ★FIXED 2026-07-31: this read "door_concept 20" while [Agent].id above is 15 — a stale copy from
+# chair_concept. Owns.nodes matches by EXACT name (or a prefix when the entry ends in '*'), and this agent's
+# own node is named "<name> <id>" = "door_concept 15", so the old entry matched NOTHING: the agent's own node
+# leaked into the persistent graph on every graceful shutdown. Keep in sync with [Agent].id.
+# "door_*" covers the per-instance door nodes (door_scene_graph.cpp names them "door_<N>") so they are torn
+# down by the SHARED presence-coordinator cleanup. See CONCEPT_AGENT_LIFECYCLE.md §5 (OWNERSHIP).
+nodes = ["door_concept 15", "door_*"]
 
 [Period]
 Compute = 100

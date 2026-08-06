@@ -92,10 +92,14 @@ struct DoorConfig
     float ai2_still_dotd          = 0.05f;  // (hard gate) per-mask ego-motion corruption speed (m/s) still-level
     float ai2_moving_update_center_radius = 0.35f;  // (hard gate) mask centroid radius below which a moving update is allowed
     // Obliquity yaw cap (TABLE.md §6): the backrest (the door's yaw-carrying surface) is a vertical plate, so
-    // a view that grazes it edge-on can barely observe yaw. Grow the SHARED yaw variance as 1/obliquity_cos−1
-    // so a grazing frame confirms the door but can't rotate a converged one. Continuous covariance, no gate.
-    // ⚠ Starts at table's value; the surface geometry differs (vertical backrest vs horizontal top) so treat
-    // it as UNVALIDATED for door and re-tune from the logged obliquity_cos before trusting it. 0 = OFF.
+    // ⚠★DEAD KEY (confirmed 2026-07-31) — loaded by door_config.cpp but READ BY NOTHING. It was inherited
+    // from the chair/table lineage, where a grazing view of a yaw-carrying surface inflates the shared yaw
+    // variance. A door has NO free yaw DOF: the wall fixes yaw, lateral and floor, so the state is [s,w,h]
+    // and door_fitter.cpp hard-sets dbg_obliquity_cos = 1.0f with the comment "there is no orientation to
+    // observe — the backrest-obliquity yaw cap (chair) is gone". DoorFitter::door_view_obliquity() exists but
+    // is explicitly diagnostic-only (a log column).
+    // Kept, not deleted, because the leaf angle phi is a fitted DOF on the open-door path and a future
+    // leaf-obliquity term would land exactly here. Do not tune it expecting an effect; wire it first.
     float ai2_obliquity_yaw_gain = 0.05f;
     // Ego-motion reliability of the discrete orientation vote: w = 1/(1+(dotd/ref)²). A smeared/moving frame
     // (large motion_dotd) barely votes on the 4-way mode — the observed 180° flips arrived on motion frames.

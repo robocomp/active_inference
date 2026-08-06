@@ -48,7 +48,8 @@
 #include "door_instance.h"    // rc::DoorInstance
 #include "../../common/mask_ingestor/mask_ingestor.h"     // rc::MaskIngestor (perception)
 #include "door_scene_graph.h" // rc::DoorSceneGraph (DSR node/RT I/O)
-#include "door_fitter.h"      // rc::DoorFitter (active-inference core)
+#include "door_fitter.h"
+#include "../../common/phantom_log/phantom_log.h"   // rc::history::PhantomLog (shadow-mode birth/death record)      // rc::DoorFitter (active-inference core)
 #include "epistemic_planner.h"
 #include "door_affordance.h"
 #include "door_model.h"
@@ -73,6 +74,12 @@ public:
 public slots:
     void initialize();
     void compute();
+    // SHADOW-MODE birth/death recorder (CONCEPT_AGENT_LIFECYCLE.md §4.2). Records ONLY — it can never
+    // alter a birth or a removal. Attribution fields captured at death separate a genuine classifier
+    // phantom from one of our own removal defects.
+    void log_phantom_event(std::string_view event, std::uint64_t id, std::string_view name,
+                           float x, float y, const rc::DoorInstance* inst, std::string_view note);
+
     void emergency();
     void restore();
     int  startup_check();
@@ -174,6 +181,7 @@ private:
     rc::DoorConfig                                         cfg_;
     rc::EpistemicPlanner                                    epistemic_planner_;
     std::unique_ptr<rc::DoorFitter>                    fitter_;   // active-inference fit core (owns instances)
+    rc::history::PhantomLog                             phantom_log_;   // shadow-mode birth/death record
 
     // Live belief dashboard — its OWN top-level window (extracted from the DSR graph dock so it shows
     // independently of Agent.graph; mirrors room_concept/kinova_controller). Geometry persisted via QSettings.
