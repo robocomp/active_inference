@@ -1287,6 +1287,15 @@ void ControllerSession::update_affordance_view(const ControllerRobotPose &robot_
         if (const auto pn = graph_->get_node(last_target_info_->parent_node_id); pn.has_value())
             v.object = pn->name();
 
+    // ★THE FEEDBACK NODE, RESOLVED THE WAY THE CONTRACT SAYS — not taken from feedback_node_id_.
+    // That member is only set at ARRIVAL (execute_plan), so gating the clause rows on it meant they
+    // could not populate during the approach at all, and worse: it is not cleared between affordances,
+    // so a leftover value would have shown this affordance's clauses evaluated against the PREVIOUS
+    // object's node. read_contract already defaults feedback_node_id to the affordance's parent, which
+    // is the same rule the executor applies — so applying it here needs no new convention.
+    const std::uint64_t fb = view_contract_.feedback_node_id != 0 ? view_contract_.feedback_node_id
+                                                                  : last_target_info_->parent_node_id;
+
     const bool servo = view_contract_.policy == rc::affordance::Policy::Servo;
     const bool orient = view_contract_.policy == rc::affordance::Policy::Orient;
     // The timeout clock only means anything once the servo loop owns it.
@@ -1331,32 +1340,46 @@ void ControllerSession::update_affordance_view(const ControllerRobotPose &robot_
         Step s{.label = "align to facing yaw"};
         const float tol = align_tol_rad;
         const float err = o.goal_yaw_err_rad.value_or(0.f);
-        s.state = aligning ? S::Active : (o.goal_reached or lockon_.active()) ? S::Done : S::Pending;
-        if (o.goal_yaw_err_rad.has_value())
+        // ★SKIPPED, NOT PENDING, when the executor is configured never to run it. want_facing in
+        // ensure_current_plan is `from_affordance and goal_facing_yaw_enabled`, so with
+        // GoalFacingYawEnabled=false the controller is handed no facing yaw and NEVER aligns. Showing
+        // that as a pending step reads as "stuck here", which is the opposite of the truth.
+        const bool facing_enabled = params_ == nullptr or params_->goal_facing_yaw_enabled;
+        if (not facing_enabled)
         {
-            s.progress = std::clamp(1.f - std::abs(err) / std::max(1e-3f, std::abs(err) + tol), 0.f, 1.f);
-            s.detail = std::format("yaw err {:.1f} deg (tol {:.1f})",
-                                   err * 180.f / static_cast<float>(M_PI),
-                                   tol * 180.f / static_cast<float>(M_PI));
+            s.state = S::Skipped;
+            s.detail = "GoalFacingYawEnabled=false — the robot is never asked to face the object";
+            v.steps.push_back(std::move(s));
         }
-        if (aligning)
+        else
         {
-            if (not disarmed.empty()) s.blocked_why = disarmed;
-            else
+            s.state = aligning ? S::Active : (o.goal_reached or lockon_.active()) ? S::Done : S::Pending;
+            if (o.goal_yaw_err_rad.has_value())
             {
-                const float facing_now = std::remainder(robot_pose.theta + static_cast<float>(M_PI_2),
-                                                        2.f * static_cast<float>(M_PI));
-                const auto sweep = grid_planner_.rotation_sweep(robot_pose.pos, facing_now,
-                                                                last_target_info_->yaw_rad);
-                if (not sweep.feasible)
-                    s.blocked_why = std::format("NO ROOM TO TURN HERE — footprint does not fit at "
-                                                "{:.0f} deg on the way (tightest {:.3f} m). The terminal "
-                                                "rotation runs with no obstacle check.",
-                                                sweep.worst_heading_rad * 180.f / static_cast<float>(M_PI),
-                                                sweep.min_clearance_m);
+                s.progress = std::clamp(1.f - std::abs(err) / std::max(1e-3f, std::abs(err) + tol), 0.f, 1.f);
+                s.detail = std::format("yaw err {:.1f} deg (tol {:.1f})",
+                                       err * 180.f / static_cast<float>(M_PI),
+                                       tol * 180.f / static_cast<float>(M_PI));
             }
+            if (aligning)
+            {
+                if (not disarmed.empty()) s.blocked_why = disarmed;
+                else
+                {
+                    const float facing_now = std::remainder(robot_pose.theta + static_cast<float>(M_PI_2),
+                                                            2.f * static_cast<float>(M_PI));
+                    const auto sweep = grid_planner_.rotation_sweep(robot_pose.pos, facing_now,
+                                                                    last_target_info_->yaw_rad);
+                    if (not sweep.feasible)
+                        s.blocked_why = std::format("NO ROOM TO TURN HERE — footprint does not fit at "
+                                                    "{:.0f} deg on the way (tightest {:.3f} m). The terminal "
+                                                    "rotation runs with no obstacle check.",
+                                                    sweep.worst_heading_rad * 180.f / static_cast<float>(M_PI),
+                                                    sweep.min_clearance_m);
+                }
+            }
+            v.steps.push_back(std::move(s));
         }
-        v.steps.push_back(std::move(s));
     }
 
     // 4. SERVO — the contract's micro-search, only under a Servo policy.
@@ -1370,9 +1393,9 @@ void ControllerSession::update_affordance_view(const ControllerRobotPose &robot_
         s.state = lockon_.locked() ? S::Done
                 : ph == rc::LockOn::Phase::GiveUp ? S::Failed
                 : lockon_.active() ? S::Active : S::Pending;
-        if (feedback_node_id_ != 0 and lockon_.active())
+        if (fb != 0 and lockon_.active())
         {
-            const auto r = read_servo_reading(feedback_node_id_);
+            const auto r = read_servo_reading(fb);
             s.detail = std::format("err_x {:+.3f}  scalar {:.3f} -> {:.3f}{}",
                                    r.err_x, r.scalar, view_contract_.scalar_target,
                                    r.valid ? "" : "   [feedback INVALID — dithering to reacquire]");
@@ -1387,12 +1410,12 @@ void ControllerSession::update_affordance_view(const ControllerRobotPose &robot_
 
     // 5. THE COMPLETION CLAUSES — one row each, straight from the contract, because they are per
     // affordance and a hardcoded list would describe a different program.
-    if (view_contract_known_ and feedback_node_id_ != 0)
+    if (view_contract_known_ and fb != 0)
     {
         for (const auto &c : view_contract_.goal)
         {
             Step s{.label = std::format("{} {} {:.3f}", c.attr, compare_symbol(c.op), c.value)};
-            const auto now = feedback_scalar(feedback_node_id_, c.attr);
+            const auto now = feedback_scalar(fb, c.attr);
             if (now.has_value())
             {
                 const bool holds = rc::affordance::clause_ok(*now, c.op, c.value);
