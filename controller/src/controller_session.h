@@ -286,7 +286,7 @@ private:
     std::string last_repair_name_;
     // The target ensure_current_plan could not route to. Reachability is GLOBAL, so the repair stage
     // cannot discover it on its own — this is how the search tells it to widen the question.
-    std::optional<Eigen::Vector2f> unroutable_target_;
+    std::string unroutable_target_name_;
 
     rc::MissionRunner mission_;
     // CONTINUOUS ROUTE MODE. The whole mission as one arc-length curve; no per-waypoint target, no

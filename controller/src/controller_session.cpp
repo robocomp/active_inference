@@ -262,8 +262,18 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     // hold line alternating at 20 Hz with no way out. That is the whole bug.
     // The flood fill runs ONLY after a route has actually failed for this target (ensure_current_plan
     // records it), so the fast path still pays for nothing but the ring search.
-    const bool routing_failed_here = unroutable_target_.has_value()
-                                     and (*unroutable_target_ - step.target.room_pos).norm() < 0.05f;
+    // ★KEYED BY NODE NAME, not by position. It was a position, and that made the whole fallback DEAD
+    // CODE: ensure_current_plan records the target it tried to route to, which is the pose AFTER this
+    // repair moved it, while the test here runs BEFORE the repair, against the raw DSR pose. The two
+    // are 0.60 m apart for aff_refrigerator_1 — the repair's own displacement — so the match never
+    // fired and nearest_reachable was never called. The name is the identity that survives the repair,
+    // and it needs no tolerance to compare.
+    // ★STICKY FOR THE LIFE OF THE TARGET. Clearing it on a successful plan OSCILLATES: the success is
+    // itself the product of this repair, so clearing re-enables nearest_free, which moves the target
+    // back into the pocket, which fails again — a good plan and a failed plan on alternate cycles. It
+    // costs nothing to hold: once the goal IS reachable, nearest_reachable returns it exactly.
+    const bool routing_failed_here = not unroutable_target_name_.empty()
+                                     and unroutable_target_name_ == step.target.node_name;
     const auto safe = routing_failed_here
                     ? grid_planner_.nearest_reachable(step.plan_origin, step.target.room_pos)
                     : grid_planner_.nearest_free(step.target.room_pos, step.target.yaw_rad);
@@ -916,7 +926,6 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
             // either way — a C1 polyline steps it at every turning point regardless of who asked.
             plan.room_path = smooth_plan(plan.room_path);
             current_plan_ = std::move(plan);
-            unroutable_target_.reset();   // routed successfully; the reachability fallback is not needed
         }
         else
         {
@@ -928,7 +937,7 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
             // Tell the REPAIR stage that this exact target could not be routed. It cannot be discovered
             // there — reachability is global, and only the search knows it — so the next cycle's repair
             // asks for the nearest REACHABLE pose instead of merely the nearest free one.
-            unroutable_target_ = step.target.room_pos;
+            unroutable_target_name_ = step.target.node_name;
         }
     }
 

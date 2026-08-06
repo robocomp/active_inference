@@ -356,6 +356,12 @@ std::optional<Eigen::Vector2f> GridPlanner::nearest_reachable(const Eigen::Vecto
         if (cell_free(sx, sy, hh)) { seen[sid(sx, sy, hh)] = 1; q.push(sid(sx, sy, hh)); }
     if (q.empty()) return std::nullopt;   // cannot even stand where we are; the caller's escape path owns this
 
+    // If the goal itself turns out to be reachable this must return it EXACTLY, not the centre of the
+    // cell containing it: the caller may hold this mode for as long as a target lives, and half a cell
+    // of drift applied to an affordance standpoint every cycle is a bug of its own.
+    int ggx, ggy;
+    const bool goal_in_grid = world_to_cell(goal_room, ggx, ggy);
+
     std::optional<Eigen::Vector2f> best;
     float best_d2 = std::numeric_limits<float>::max();
     while (not q.empty())
@@ -363,6 +369,7 @@ std::optional<Eigen::Vector2f> GridPlanner::nearest_reachable(const Eigen::Vecto
         const int s = q.front(); q.pop();
         const int cell = s / kHeadings;
         const int ix = cell % w_, iy = cell / w_;
+        if (goal_in_grid and ix == ggx and iy == ggy) return goal_room;
         if (const float d2 = (cell_to_world(ix, iy) - goal_room).squaredNorm(); d2 < best_d2)
         { best_d2 = d2; best = cell_to_world(ix, iy); }
         for (int nh = 0; nh < kHeadings; ++nh)
@@ -709,6 +716,15 @@ bool GridPlanner::self_test()
               "★the returned pose must ROUTE — that is the entire contract nearest_free could not meet");
         check(reach and (*reach - inside).norm() < (start - inside).norm(),
               "and it must be closer to the goal than standing still, else driving buys nothing");
+        // ★IDENTITY WHEN THE GOAL IS REACHABLE. The session holds the reachability repair for the whole
+        // life of a target (clearing it oscillates), so this must be an EXACT no-op on a normal target
+        // — half a cell of drift re-applied every cycle would be a bug introduced by the fix.
+        const Eigen::Vector2f open_goal{3.17f, 2.43f};   // deliberately not on a cell centre
+        const auto same = p.nearest_reachable(start, open_goal);
+        std::printf("  reachable goal is returned EXACTLY: (%.4f,%.4f) -> %s\n", open_goal.x(), open_goal.y(),
+                    same ? std::format("({:.4f},{:.4f})", same->x(), same->y()).c_str() : "none");
+        check(same.has_value() and (*same - open_goal).norm() < 1e-6f,
+              "a reachable goal must come back bit-identical, not snapped to a cell centre");
     }
 
     std::printf("GridPlanner::self_test %s\n", ok ? "PASS" : "FAIL");
