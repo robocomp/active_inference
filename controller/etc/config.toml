@@ -265,11 +265,61 @@ ControlMode = "plain"
 # different one (tau 0.35, delay 0.30, gain 0.75), where the margin rule's prescription of 1.37 was
 # 3.8x worse. RotHeadroom is the fraction of omega_max the feedforward may claim; without it the
 # feedforward saturates the clamp and the feedback loop is open on curves (rms 154 -> 94 mm at 0.70).
-PlainTrackerL = 0.60
+# ★2026-08-06 0.60 -> 0.50, proposed by tools/adapt_L.py from the run history. The policy is
+# "minimise cross_track_rms subject to rot_effort/distance <= 0.87 rad/m" — a hard constraint rather
+# than a weighted sum, because rms(L) has NO interior minimum (it falls monotonically as L shrinks, so
+# minimising it alone drives 2/L and 1/L^2 up until the loop rings). The budget came from measurement:
+# the robot's own runs sat at 0.850 / 0.863 / 0.818, so 0.87 means "never rougher than it already is".
+# Evidence at 0.60: two 3-lap runs, rms 0.1196 / 0.1107, rot/m 0.851 / 0.810 — feasible with margin.
+# tools/tracker_sim on the pinned world predicts 0.60 -> 0.50 gives rms 64.9 -> 59.0 mm (-9%) for
+# rot/m 0.776 -> 0.823 (+6%). The robot runs ~7% above the sim on rot/m, so expect ~0.88 — right on the
+# budget line, which makes this a genuinely informative run rather than a foregone one.
+# ★0.45 is predicted OVER budget (0.874) and no better on rms (64.1), so the search should stop at 0.50.
+# The budget and the loop-margin floor independently agree on that, which is the reassuring part.
+PlainTrackerL = 0.50
 PlainTrackerTLag = 0.42
 PlainTrackerGdc = 1.124
 PlainTrackerW = 0.40
 PlainTrackerRotHeadroom = 0.70
+# ── THE HAIRPIN PAIR — neither works without the other (see controller_types.h) ──
+# This tour turns 178 deg at s=24.18. BrakeK is an exponential brake on advance vs the DEMANDED turn
+# rate, v *= exp(-k*(omega_want/max_rot)^2). The ratio coupling alone braked only on SATURATION, so just
+# under the cap the robot drove flat out while turning flat out. ProjWindow is how far forward in ARC
+# LENGTH the projection may search: at 2 m the hairpin's fold sat inside it, the search snapped to the
+# returning leg, and the robot turned around where the two legs touch instead of driving to the tip.
+# ★MEASURED together (tools/tracker_sim, pinned world, window 0.60), route is 73.85 m:
+#   BrakeK    0.0    0.5    1.0    2.0    3.0    5.0
+#   reached  24.2   24.2   61.0  73.70  73.70  73.70
+#   rms mm   1543   1584   1930   74.0   80.6   86.0
+# Below 2.0 it STALLS at the hairpin. PD's equivalent (gauss_k 0.5) is not enough here — PD's carrot
+# cuts the corner, this tracker has to turn.
+# ⚠Tightening ProjWindow WITHOUT BrakeK stalls the robot at the hairpin; BrakeK without tightening
+# ProjWindow changes nothing, because the search still leaps the fold.
+# ★★2026-08-06, THE GAIN WAS WRONG, NOT THE IDEA. Shipped at 2.0 with a tightened window, both were
+# backed out when the robot measured rms 0.0962 -> 0.1579. Then the brake was tested ALONE, at the
+# shipped window, which is the comparison that should have been run first (L=0.50, pinned world):
+#     k       0.00   0.25   0.50   1.00   2.00   3.00
+#     rms mm  59.0   32.8   40.7   52.4   63.5   67.2
+#     max mm 294.2   93.6  130.5  149.8  152.9  184.1
+#     rot/m  0.823  0.805  0.803  0.873  0.947  0.976
+# ★k=0.25 is the optimum and it is a LARGE win: rms -44%, worst-case error -68%, and rot/m slightly
+# BETTER, for 4% more lap time. Unlike L, this parameter has a clear interior optimum.
+# ★k=2.0 is WORSE THAN NO BRAKE (63.5 vs 59.0) and busts the 0.87 budget at 0.947 — which explains the
+# robot regression far better than the window does. 2.0 came from a different question entirely ("can
+# it get through a 178 deg reversal with a tight projection window"), and applying it to ordinary
+# corners just makes the robot crawl through all of them.
+# ★PD's long-standing gauss_k = 0.5 sits right next to the optimum (40.7 mm).
+# ⚠AND THE DIAGNOSIS THAT MOTIVATED THEM WAS BUILT ON THE WRONG SIGNAL. Every "projection jump" number
+# quoted for this work — including the 2.52 m at s=24.2 — came from route_s_m, which is
+# RouteFollower::progress(), the SESSION's projection. PlainTrackerProjWindow governs only
+# PlainTracker::s_hint_. The two are different projections with different windows, so the measurement
+# could never have evaluated the change. The tracker's own s_hint_ has never been instrumented.
+# ⚠The hairpin problem is REAL and still open (the robot turns around where the outbound and inbound
+# legs touch instead of driving to the tip). Four fixes have been tried and all measured worse:
+# a projection rate limit, a first-local-minimum search, a heading gate, and this pair. Do not attempt
+# a fifth until PlainTracker::s_hint_ is logged per cycle and the jump is confirmed to happen THERE.
+PlainTrackerBrakeK = 0.25
+PlainTrackerProjWindow = 2.00
 # ★2026-08-05 THREE KEYS REMOVED HERE — PlainTrackerAlignPower, PlainTrackerOffsetGateRef and
 # PlainTrackerFfDenomMin — together with a hidden 0.15 m/s steering floor in the tracker. They were added
 # one per lap across a single session, and they were four approximations of ONE statement that the

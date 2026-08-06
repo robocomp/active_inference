@@ -224,7 +224,7 @@ private:
     bool mppi_csv_open_ = false;
     void log_mppi_diagnostics(std::uint64_t t_ms, const rc::TrajectoryController::ControlOutput &o,
                               float commanded_adv, float measured_speed,
-                              float path_kappa, float measured_rot,
+                              float path_kappa, float track_s, float measured_rot,
                               float pose_xy_std, float pose_theta_std,
                               const ControllerRobotPose &robot_pose,
                               const ControllerMotionCommander::OutputRateStats &ors,

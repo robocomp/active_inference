@@ -318,6 +318,37 @@ struct TrackerParams
     // tracker_sim: reserving headroom moves rms 154 -> 94 -> 75 mm at 1.00 -> 0.70 -> 0.55, and
     // corr(e,kappa) from -0.160 (riding OUTSIDE the curve) to ~0. Costs speed: TV(v)/m 0.72 -> 1.13.
     float plain_rot_headroom = 0.70f;
+    // ── THE HAIRPIN PAIR. Neither works without the other. ───────────────────────────────────────
+    // This tour turns 178 degrees at s=24.18 (kappa_avg 6.81). Two separate things stopped the robot
+    // driving it, and both are fixed here.
+    //
+    // 1. plain_brake_k — an EXPONENTIAL brake on advance against the DEMANDED turn rate:
+    //        v *= exp(-k * (omega_want/max_rot)^2)
+    //    The ratio coupling alone brakes only when omega SATURATES, so at omega_want just under the cap
+    //    the robot drove at FULL speed while turning at maximum rate — precisely the approach to a
+    //    hairpin. This brakes continuously and reaches zero, which is what makes a true point turn
+    //    possible. ★PdArm has had exactly this as gauss_k = 0.5 since long before; the PD tracker
+    //    survives this corner and the plain one did not.
+    //    ★2.0 is MEASURED, not chosen (tools/tracker_sim, pinned world, projection window 0.60):
+    //        k    0.0    0.5    1.0    2.0    3.0    5.0
+    //        s   24.2   24.2   61.0  73.70  73.70  73.70   (route is 73.85 m)
+    //      rms  1543   1584   1930   74.0   80.6   86.0    mm
+    //    Below 2.0 it stalls at the hairpin outright. 2.0 is the knee: through, best rms, fastest.
+    //    ⚠PD's 0.5 is NOT enough here — PD gets away with it because its carrot cuts the corner, while
+    //    this tracker has to actually turn.
+    float plain_brake_k = 2.0f;
+    // 2. plain_proj_window — how far FORWARD IN ARC LENGTH the projection may search.
+    //    The route is a DIRECTED curve, so arc length only moves forward and a projection cannot
+    //    legitimately jump 2.5 m in one cycle however close the two points are in space. It did, because
+    //    the window was 2 m and the hairpin's fold sits inside it: the search snapped to the RETURNING
+    //    leg, the tip was never projected onto, and the robot turned around where the two legs touch.
+    //    Measured: 3 cycles skipping 3.52 m of arc, 9.2% of the route, largest leap 2.52 m at s=24.2.
+    //    The robot covers ~0.035 m per cycle, so 2 m was ~57x what TRACKING needs — the width existed
+    //    for catch-up, which reset()'s whole-route re-acquire now handles separately.
+    //    ⚠THE TWO ARE A PAIR. Tightening this without the brake STALLS the robot at the hairpin (it is
+    //    then held to the curve and cannot execute the reversal); adding the brake without tightening
+    //    this changes nothing, because the search still leaps the fold and skips the corner entirely.
+    float plain_proj_window = 0.60f;
     // ★NOTE FOR ANYONE TEMPTED TO ADD ONE HERE. Between them, plain_align_power (a cos^5 pivot),
     // plain_offset_gate_ref (an offset speed gate) and plain_ff_denom_min (a feedforward denominator
     // floor) were added across four laps in one session and then ALL THREE DELETED on 2026-08-05, along

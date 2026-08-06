@@ -967,7 +967,7 @@ bool MissionRunner::write_csv(const std::string &path) const
     // ONE ROW PER RUN. There is no segmentation left to make rows out of, and inventing one would put
     // back the artefact this change removed. The per-instant detail lives in the profile CSV.
     static constexpr const char *kHeader =
-        "mission,mode,run_start_ms,stop_reason,laps,duration_s,distance_m,route_length_m,progress_m,"
+        "mission,mode,run_start_ms,stop_reason,laps,control_mode,plain_L,duration_s,distance_m,route_length_m,progress_m,"
         "mean_speed_mps,max_speed_mps,cross_track_rms_m,cross_track_max_m,heading_err_rms_rad,"
         "rot_effort_rad,rot_energy,rot_reversals,lin_accel_effort,lin_accel_max,lin_jerk_effort,"
         "rot_accel_effort,smooth_lin,smooth_rot,dev_norm,clear_norm,mission_cost,"
@@ -1014,6 +1014,7 @@ bool MissionRunner::write_csv(const std::string &path) const
     const auto t = summary();
     out << active_.name << ',' << to_string(mode_) << ',' << run_start_ms_ << ','
         << (stop_reason_.empty() ? "?" : stop_reason_) << ',' << t.laps_completed << ','
+        << (run_ctx_.control_mode.empty() ? "?" : run_ctx_.control_mode) << ',' << run_ctx_.plain_L << ','
         << t.duration_s << ',' << t.distance_m << ',' << t.route_length_m << ',' << t.progress_m << ','
         << t.mean_speed_mps << ',' << t.max_speed_mps << ','
         << t.cross_track_rms_m << ',' << t.cross_track_max_m << ',' << t.heading_err_rms_rad << ','

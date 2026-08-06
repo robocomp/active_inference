@@ -182,8 +182,12 @@ public:
         auto *j_layout = new QVBoxLayout(j_panel);
         j_layout->setContentsMargins(4, 2, 4, 2);
         j_layout->setSpacing(2);
-        j_layout->addWidget(new QLabel("Running J = smooth_lin + smooth_rot + dev_norm + clear_norm "
-                                       "(lower = better)", j_panel));
+        // ★cross_track_rms, not J. Measured over nine laps: rms repeats to cv 2.3% — through a mission
+        // edit AND a 119 mm waypoint relocation — while every smoothness term swings 23-43% because
+        // they are properties of the ROUTE, which is re-planned against a live grid every run. rms is
+        // the one quantity that measures what the TRACKER does: follow whatever curve it was handed.
+        j_layout->addWidget(new QLabel("L adaptation — objective: cross_rms (m, minimise)   |   "
+                                       "constraint: rot_per_m (rad/m, budget 0.87)", j_panel));
         mission_j_plot = new rc::TimeSeriesPlot(j_panel);
         mission_j_plot->setMinimumHeight(80);
         mission_j_plot->set_visible_window(120.f);   // a lap is ~95 s, so one window holds a whole lap

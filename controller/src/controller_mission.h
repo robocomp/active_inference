@@ -238,6 +238,11 @@ struct MissionRunContext
     float planner_cell_size_m = 0.f;
     float body_inscribed_m = 0.f;
     float body_circumscribed_m = 0.f;
+    // ★THE TRACKER'S FREE PARAMETER, recorded per run. Without it the metrics file cannot say which
+    // gain produced which error, so no adaptation — manual or automatic — can read its own history.
+    // T_lag, g_dc and W are identified constants and do not vary; L is the only thing anyone tunes.
+    float plain_L = 0.f;
+    std::string control_mode;
     // What THIS route makes unavoidable (rc::route_ideal). Zero/invalid when the mission is not running
     // a continuous route, in which case J_route is left at NaN rather than guessed.
     float ideal_tv_v = 0.f;

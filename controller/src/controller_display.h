@@ -94,9 +94,11 @@ public:
     // vertical gap between them is λ·dist. Thread-safe (the plot buffers under its own mutex).
     struct AffordanceEfeSample { std::string name; float gain = 0.f; float score = 0.f; };
     void update_affordance_efe(const std::vector<AffordanceEfeSample> &samples);
-    // Running J for the plot below the EFE panel — the same four terms the run is graded on at STOP,
-    // accumulated live. Thread-safe; the plot buffers under its own mutex.
-    void update_mission_j(float smooth_lin, float smooth_rot, float dev_norm, float clear_norm);
+    // The two quantities the L-adaptation policy uses, live: cross-track rms (the OBJECTIVE it
+    // minimises) and rotational effort per metre (the CONSTRAINT that stops it driving the gains up
+    // until the loop rings). Plus the worst cross-track so far, for context.
+    // Thread-safe; the plot buffers under its own mutex.
+    void update_tracking_error(float rms_m, float max_m, float rot_per_m);
     void clear_robot_trajectory();
 
     // Presentation — MUST be called on the GUI thread only. Reads the latest

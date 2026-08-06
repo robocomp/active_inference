@@ -401,7 +401,7 @@ void ControllerSession::dump_route_world(const Eigen::Vector2f &start,
 void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
                                              const rc::TrajectoryController::ControlOutput &o,
                                              float commanded_adv, float measured_speed,
-                                             float path_kappa, float measured_rot,
+                                             float path_kappa, float track_s, float measured_rot,
                                              float pose_xy_std, float pose_theta_std,
                                              const ControllerRobotPose &robot_pose,
                                              const ControllerMotionCommander::OutputRateStats &ors,
@@ -422,6 +422,10 @@ void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
                          "#   gate_horizon = its lookahead this cycle (speed-dependent: v/a_decel + 0.15)\n"
                          "#   gate_min_esdf= worst clearance along the PREDICTED arc; -1 = gate did not run\n"
                          "#   gate_hard_stop = even adv=0 was unsafe, so it rotated away instead (pd only)\n"
+                         "# track_s = the TRACKER's OWN arc length (m), route_length - dist_to_goal.\n"
+                         "#   DISTINCT from profile.csv's route_s_m, which is RouteFollower::progress() —\n"
+                         "#   a different projection with a different search window. They can disagree, and\n"
+                         "#   only THIS one drives the control law. -1 = no continuous route.\n"
                          "# path_kappa = SIGNED route curvature at the robot's projection (1/m). Sentinel\n"
                          "#   -999 = no continuous route, which is NOT the same as a straight (kappa=0).\n"
                          "# pd_cross_err_m = the cross-track error THE PD LAW SAW: signed lateral offset of the\n"
@@ -471,7 +475,7 @@ void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
                          "g_goal,g_obs,g_vel,g_smooth,g_lat,g_cbf,n_collisions,"
                          "cmd_adv,cmd_rot,meas_speed,min_esdf,explore,p_free,steer_conc,side_asym,"
                          "sg_trig,gate_scale,gate_horizon,gate_min_esdf,gate_hard_stop,gate_hard_coll,"
-                         "pd_cross_err_m,path_kappa,meas_rot,bump_push,gap_l,gap_r,pose_xy_std,"
+                         "pd_cross_err_m,path_kappa,track_s,meas_rot,bump_push,gap_l,gap_r,pose_xy_std,"
                          "pose_theta_std,carrot_bear,carrot_dist,pose_x,pose_y,pose_th,model_dropped,"
                          "out_ticks,out_period_ms,out_period_max,ice_ms,ice_max,cmd_age_max,fresh_min,"
                          "pose_stamp_age\n";
@@ -488,7 +492,7 @@ void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
               << (o.safety_guard_triggered ? 1 : 0) << ',' << o.gate_speed_scale << ','
               << o.gate_horizon_s << ',' << o.gate_min_esdf << ','
               << (o.gate_hard_stop ? 1 : 0) << ',' << (o.gate_hard_collision ? 1 : 0) << ','
-              << o.cross_track_m << ',' << path_kappa << ',' << measured_rot << ','
+              << o.cross_track_m << ',' << path_kappa << ',' << track_s << ',' << measured_rot << ','
               << o.pd_bumper_push << ',' << o.pd_gap_left_m << ',' << o.pd_gap_right_m << ','
               << pose_xy_std << ',' << pose_theta_std << ','
               << o.carrot_bearing_rad << ',' << o.carrot_dist_m << ','
@@ -1267,8 +1271,14 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         // the previous cycle's read. The localiser publishes at ~5 Hz, so a 100 ms lag is well inside
         // one update and cannot change any conclusion drawn from it.
         const auto ud = motion_commander.last_uncertainty_diag();
+        // track_s: the TRACKER's own arc length, route_length - dist_to_goal. DISTINCT from
+        // profile.csv's route_s_m (RouteFollower::progress()) — different projection, different window.
+        // Only this one drives the control law, and it had never been recorded, so every "projection
+        // jump" measured before now described the session's projection instead of the tracker's.
+        const float track_s = (route_active_ and route_.valid())
+                            ? route_.spline().length() - control_output.dist_to_goal : -1.f;
         log_mppi_diagnostics(overlay_now_ms_, control_output, control_output.adv, base_speed_lin_,
-                             kappa_here, room_vel_.omega, ud.xy_std_m, ud.theta_std_rad, robot_pose,
+                             kappa_here, track_s, room_vel_.omega, ud.xy_std_m, ud.theta_std_rad, robot_pose,
                              motion_commander.last_output_rate_stats(),
                              world_model_pose_stamp_age_ms_);
         // CAPTURE THE HARDEST CYCLE OF THE RUN for offline replay (tools/mppi_bench). "Hardest" is where

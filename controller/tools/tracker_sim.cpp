@@ -161,11 +161,16 @@ struct FfArm
     // ★SYNCED to src/trackers/plain_tracker.cpp as committed (2487aeb). It previously carried a REVERTED
     // design — an offset-corrected feedforward kappa/(1-kappa*e_y) and a two-pass fixed point — so any
     // sweep run here would have optimised a controller that is not the one on the robot.
-    float L = 0.60f;            // THE free parameter: feedback error-decay length, in metres of arc
+    float L = 0.50f;            // THE free parameter (robot is at 0.50): feedback error-decay length, in metres of arc
     float T_lag = 0.42f;        // identified total lag
     float g_dc = 1.f / 0.89f;   // identified DC gain, inverted
     float W = 0.40f;            // route's own smoothing scale
     static constexpr float kSteerFloor = 0.15f;
+    // Exponential brake on advance vs DEMANDED turn rate: v *= exp(-k*(omega_want/w_max)^2). 0 = off
+    // (the shipped ratio-only coupling, which brakes ONLY on saturation and so runs at full speed at
+    // omega_want just below the cap). PdArm has had this as gauss_k = 0.5 all along.
+    float brake_k = 0.25f;   // shipped
+    float steer_floor = 0.15f;   // 0 = removed; the feedback then evaluates at the real speed
 
     void control(const rc::RouteSpline &sp, float s, float px, float py, float th,
                  float v_limit, float w_max, float &v_cmd, float &w_cmd) const
@@ -180,11 +185,15 @@ struct FfArm
         // omega FIRST, then the advance scaled by the factor omega had to be clipped by. That ratio
         // preserves the commanded ARC (kappa = omega/v), so a saturated turn becomes a slower turn of
         // the SAME shape rather than a wider one.
-        const float omega_want = g_dc * (v_limit * k_ff + std::max(v_limit, kSteerFloor) * k_fb);
+        // Mirrors plain_tracker.cpp: omega first, then v cut by min(saturation ratio, exponential brake).
+        const float v_fb = steer_floor > 0.f ? std::max(v_limit, steer_floor) : v_limit;
+        const float omega_want = g_dc * (v_limit * k_ff + v_fb * k_fb);
         w_cmd = std::clamp(omega_want, -w_max, w_max);
         const float scale = std::fabs(omega_want) > 1e-6f
                           ? std::fabs(w_cmd) / std::fabs(omega_want) : 1.f;
-        v_cmd = v_limit * scale;
+        const float r_om = omega_want / w_max;   // 'r' is the route point above
+        const float brake = std::exp(-std::max(0.f, brake_k) * r_om * r_om);
+        v_cmd = v_limit * std::min(scale, brake);
     }
 };
 
@@ -192,6 +201,7 @@ struct Result
 {
     // First loss of the route, for locating a divergence instead of only sizing it.
     float s_lost = -1.f, kappa_lost = 0.f, v_lost = 0.f, t_lost = 0.f, s_end = 0.f;
+    double rot_effort = 0.0;   // integral |omega| dt — the quantity the L policy constrains
 
     int n = 0;
     double e_sq = 0, tv_v = 0, tv_w = 0, dist = 0, t_end = 0;
@@ -216,7 +226,9 @@ double corr(const std::vector<float> &a, const std::vector<float> &b, int lag)
 }
 
 float g_plant_tau = 0.22f, g_plant_delay = 0.20f, g_plant_gain = 0.89f;   // the ROBOT, for sim2real tests
-float g_headroom = 1.0f;   // fraction of the omega budget the FEEDFORWARD may claim; the rest is
+float g_headroom = 1.0f;
+bool  g_heading_gate = false;   // FAILED experiment, kept as a negative result; see the A/B below
+float g_proj_window = 2.0f;    // forward arc-length search window for the projection   // fraction of the omega budget the FEEDFORWARD may claim; the rest is
                            // reserved for feedback authority. 1.0 = the naive limit.
 
 template <typename Arm>
@@ -240,9 +252,29 @@ Result run(const rc::RouteFollower &route, Arm arm, float v_cap, float w_max,
     {
         // ★Rate limit REVERTED with the tracker (see plain_tracker.cpp): it forbade ACQUISITION, not
         // just jumping. This bench never exercised that, because it always starts exactly on the route.
-        // Baseline 2 m window, matching plain_tracker.cpp.
+        // ── PROJECTION: reject branches the robot is pointing AWAY from ──────────────────────────
+        // At a hairpin the outbound and inbound legs are centimetres apart in SPACE, so a nearest-point
+        // search cannot tell them apart and snaps to the returning leg — the tip is never projected onto
+        // and the robot turns around where the two legs touch. Distance cannot separate them; HEADING
+        // can: the two branches are anti-parallel, and a robot cannot be following a segment that points
+        // backwards relative to it. Accept a sample only where cos(psi(s) - theta) > 0.
         (void)lx; (void)ly; (void)have_last;
-        s_hint = sp.project({P.x, P.y}, s_hint, 2.0f);
+        if (g_heading_gate)
+        {
+            const Vector2f rp{P.x, P.y};
+            const float step = std::max(0.01f, sp.spacing());
+            float bs = s_hint, bd = 1e9f; bool any = false;
+            for (float ds = -0.5f * step; ds <= 2.0f; ds += step)
+            {
+                const float t = s_hint + ds;
+                if (t < 0.f or t > sp.length()) continue;
+                if (std::cos(wrap(sp.heading_at(t) - P.th)) <= 0.f) continue;   // wrong branch
+                const float d = (sp.position_at(t) - rp).norm();
+                if (d < bd) { bd = d; bs = t; any = true; }
+            }
+            s_hint = any ? bs : sp.project(rp, s_hint, 2.0f);   // all rejected -> fall back
+        }
+        else s_hint = sp.project({P.x, P.y}, s_hint, g_proj_window);
         if (s_hint >= sp.length() - 0.15f) { R.t_end = t; break; }
 
         const float v_lim = speed_limit(sp, s_hint, v_cap, a_lat, a_dec, w_max, W, g_headroom);
@@ -250,6 +282,7 @@ Result run(const rc::RouteFollower &route, Arm arm, float v_cap, float w_max,
         arm.control(sp, s_hint, P.x, P.y, P.th, v_lim, w_max, v_cmd, w_cmd);
 
         if (not first) { R.tv_v += std::abs(v_cmd - last_v); R.tv_w += std::abs(w_cmd - last_w); }
+        R.rot_effort += std::abs(P.w_real) * kCtrlDt;   // REALISED turn, not commanded
         last_v = v_cmd; last_w = w_cmd; first = false;
 
         const Vector2f r = sp.position_at(s_hint);
@@ -571,37 +604,158 @@ int main(int argc, char **argv)
 
 
     {
-        // ── J(L, rot_headroom) ───────────────────────────────────────────────────────────────────
-        // L is the ONLY free parameter of the tracker: T_lag and g_dc are IDENTIFIED from the robot, and
-        // W is the route's own fitting scale. rot_headroom sits one layer up, in route_speed_limit, and
-        // trades the same quantities by reserving turn budget for feedback — so they interact, and are
-        // swept together rather than one at a time.
-        // J's terms pull opposite ways in L: small L tracks tightly and rotates violently, large L is
-        // smooth and sloppy. An interior minimum is what would make self-adaptation possible at all.
-        std::printf("\n  J(L, headroom), lower is better    [robot: J=5.212 at L=0.60, hr=0.70]\n");
-        const float HRS[] = {0.55f, 0.70f, 0.85f, 1.00f};
-        std::printf("      %-9s", "L / hr");
-        for (const float hr : HRS) std::printf("%9.2f", hr);
-        std::printf("\n");
-        float bestJ = 1e9f, bestL = 0.f, bestH = 0.f;
-        for (const float Lv : {0.30f, 0.45f, 0.60f, 0.80f, 1.00f, 1.30f, 1.70f})
+        // ── rms(L): IS THE ADAPTATION PROBLEM EVEN WELL-POSED? ───────────────────────────────────
+        // The policy minimises cross_track_rms, the one quantity that repeats on the robot (cv 2.3%
+        // over nine laps, through a mission edit and a 119 mm waypoint repair). But minimising it is
+        // only safe if rms(L) has an INTERIOR minimum. If rms fell monotonically as L shrank, the policy
+        // would drive the gains up without bound until the loop rings — and 2/L, 1/L^2 grow fast.
+        std::printf("\n  rms(L) — does minimising cross-track have an interior optimum?\n");
+        std::printf("      %-8s %10s %10s %10s %9s\n", "L", "rms mm", "max mm", "TV(w)/m", "time s");
+        float bestR = 1e9f, bestL = 0.f;
+        for (const float Lv : {0.25f, 0.30f, 0.40f, 0.50f, 0.60f, 0.75f, 0.90f, 1.10f, 1.40f})
         {
-            std::printf("      %-9.2f", Lv);
-            for (const float hr : HRS)
-            {
-                FfArm arm; arm.L = Lv;
-                const float saved = g_headroom; g_headroom = hr;
-                const Result R = run(route, arm, w.v_max, kWmax, w.a_lat, kADec, kW, false);
-                g_headroom = saved;
-                const double J = mission_J(R, w.v_max, kWmax);
-                const bool fin = R.s_end >= route.spline().length() - 0.5f;
-                if (fin) { std::printf("%9.2f", J); if (J < bestJ) { bestJ = J; bestL = Lv; bestH = hr; } }
-                else       std::printf("%9s", "DNF");
-            }
-            std::printf("\n");
+            FfArm arm; arm.L = Lv;
+            const Result R = run(route, arm, w.v_max, kWmax, w.a_lat, kADec, kW, false);
+            const double rms = R.n ? std::sqrt(R.e_sq / R.n) : 0.0;
+            const bool fin = R.s_end >= route.spline().length() - 0.5f;
+            std::printf("      %-8.2f %10s %10.1f %10.3f %9.0f%s\n", Lv,
+                        fin ? (std::to_string(static_cast<int>(rms*1000))).c_str() : "DNF",
+                        R.e_max*1000, R.dist>0.1 ? R.tv_w/R.dist : 0.0, R.t_end,
+                        fin && rms*1000 < bestR ? "   <- best" : "");
+            if (fin && rms*1000 < bestR) { bestR = static_cast<float>(rms*1000); bestL = Lv; }
         }
-        std::printf("      MINIMUM J = %.2f at L = %.2f, headroom = %.2f     (current: L=0.60, hr=0.70)\n",
-                    bestJ, bestL, bestH);
+        std::printf("      MINIMUM rms = %.1f mm at L = %.2f   (current L = 0.60)\n", bestR, bestL);
+    }
+
+    {
+        std::printf("\n  projection heading gate (hairpin fix) — same world, same gains:\n");
+        std::printf("      %-22s %9s %9s %9s %9s\n", "projection", "rms mm", "max mm", "driven m", "time s");
+        for (const bool gate : {false, true})
+        {
+            g_heading_gate = gate;
+            const Result R = run(route, FfArm{}, w.v_max, kWmax, w.a_lat, kADec, kW, false);
+            const double rms = R.n ? std::sqrt(R.e_sq / R.n) : 0.0;
+            const bool fin = R.s_end >= route.spline().length() - 0.5f;
+            std::printf("      %-22s %9.1f %9.1f %9.2f %9.0f%s\n",
+                        gate ? "heading-gated" : "plain 2 m window",
+                        rms*1000, R.e_max*1000, R.dist, R.t_end, fin ? "" : "   DID NOT FINISH");
+        }
+        g_heading_gate = false;
+    }
+
+    {
+        // ── DOES THE PIPELINE PUSH THE ROUTE ONTO ITSELF? ────────────────────────────────────────
+        // In a narrow passage driven twice, the clearance term pushes BOTH legs toward the medial axis
+        // — and nothing in the objective keeps the route away from itself, so they converge. Where they
+        // meet, a nearest-point projection cannot tell the outbound leg from the inbound one, the search
+        // snaps across, and the robot turns around where the legs touch instead of driving to the tip.
+        // Measure it: the closest approach between two points of the route that are FAR APART in arc
+        // length (so genuinely different passes, not neighbours on the same curve).
+        auto self_min = [](const std::vector<Vector2f> &pts, float arc_sep, float step)
+        {
+            float best = 1e9f; std::size_t bi = 0, bj = 0;
+            for (std::size_t i = 0; i < pts.size(); ++i)
+                for (std::size_t j = i + static_cast<std::size_t>(arc_sep / step); j < pts.size(); ++j)
+                {
+                    const float d = (pts[i] - pts[j]).norm();
+                    if (d < best) { best = d; bi = i; bj = j; }
+                }
+            return std::tuple<float, std::size_t, std::size_t>{best, bi, bj};
+        };
+        const rc::RouteSpline &sp2 = route.spline();
+        std::vector<Vector2f> curve;
+        for (float t = 0.f; t <= sp2.length(); t += 0.05f) curve.push_back(sp2.position_at(t));
+        const auto [d_raw, ri, rj] = self_min(raw_poly, 2.0f, 0.10f);
+        const auto [d_fit, fi, fj] = self_min(curve, 2.0f, 0.05f);
+        const rc::RobotFootprint &fp2 = rc::RobotFootprint::shadow();
+        std::printf("\n  route SELF-PROXIMITY (closest approach between passes >2 m apart in arc):\n");
+        std::printf("      A* polyline      %.3f m\n", d_raw);
+        std::printf("      fitted+optimised %.3f m   at (%.2f,%.2f)\n", d_fit,
+                    curve[fi].x(), curve[fi].y());
+        std::printf("      the body is %.3f m wide (circumscribed %.3f).\n",
+                    2.f * fp2.circumscribed_radius(), fp2.circumscribed_radius());
+        // How wide is the passage there? Two lanes need 2*body + a gap; one lane needs body + margin.
+        const float free_here = w.planner.distance_at(curve[fi]);
+        std::printf("      passage at that point: %.3f m to the nearest obstacle, so ~%.3f m wide.\n",
+                    free_here, 2.f * free_here);
+        std::printf("      two lanes would need %.3f m; %s\n", 4.f * fp2.circumscribed_radius(),
+                    4.f * fp2.circumscribed_radius() <= 2.f * free_here
+                        ? "IT FITS — the passes could be split left/right."
+                        : "IT DOES NOT FIT — one lane only, the legs must share a line.");
+    }
+
+    {
+        // ── THE PROJECTION WINDOW ────────────────────────────────────────────────────────────────
+        // The route is a DIRECTED curve: arc length only moves forward, so a projection cannot
+        // legitimately jump 2.5 m in one cycle however close the two points are in space. It does only
+        // because the forward search window is 2 m and the fold at a hairpin sits inside it. The robot
+        // covers ~0.035 m per cycle, so 2 m is ~57x what TRACKING needs — the width exists for catch-up,
+        // which reacquire_ now handles separately.
+        std::printf("\n  projection window sweep (robot moves ~0.035 m/cycle):\n");
+        std::printf("      %-10s %9s %9s %9s %9s\n", "window m", "rms mm", "max mm", "driven m", "time s");
+        for (const float wdw : {2.00f})
+        {
+            g_proj_window = wdw;
+            const Result R = run(route, FfArm{}, w.v_max, kWmax, w.a_lat, kADec, kW, false);
+            const double rms = R.n ? std::sqrt(R.e_sq / R.n) : 0.0;
+            const bool fin = R.s_end >= route.spline().length() - 0.5f;
+            std::printf("      %-10.2f %9.1f %9.1f %9.2f %9.0f%s   ended at s=%.2f of %.2f\n",
+                        wdw, rms*1000, R.e_max*1000, R.dist, R.t_end,
+                        fin ? "" : "   STALLED", R.s_end, route.spline().length());
+            if (not fin)
+            {
+                // Where it stalled, and what the route is doing there.
+                const float st = R.s_end;
+                std::printf("                 stall point: kappa_avg=%.2f 1/m  heading turns %.0f deg\n",
+                            route.spline().kappa_avg(st, 0.40f),
+                            180.f / kPi * std::fabs(wrap(route.spline().heading_at(st + 1.0f)
+                                                       - route.spline().heading_at(st - 0.2f))));
+                const Vector2f sp_pos = route.spline().position_at(st);
+                std::printf("                 at (%.2f, %.2f)\n", sp_pos.x(), sp_pos.y());
+            }
+        }
+        g_proj_window = 2.0f;
+    }
+
+    {
+        // ── WILL THE POLICY'S NEXT STEP BUST THE BUDGET? ─────────────────────────────────────────
+        // The constraint is rot_effort/distance (integral |omega| dt per metre), NOT TV(w). They differ:
+        // rot_effort is how much heading the robot actually turns through, which is mostly set by the
+        // ROUTE; TV(w) is how roughly it does it. Tightening L should raise the second a lot and the
+        // first only a little — if so the constraint barely binds and the policy will walk L to its
+        // floor. Worth knowing before spending three laps per step.
+        std::printf("\n  does the constraint bind? (robot at L=0.60: rot/m 0.831, budget 0.870)\n");
+        std::printf("      %-8s %9s %10s %10s\n", "L", "rms mm", "rot/m", "TV(w)/m");
+        for (const float Lv : {0.45f, 0.50f, 0.60f, 0.75f, 1.00f})
+        {
+            FfArm arm; arm.L = Lv;
+            const Result R = run(route, arm, w.v_max, kWmax, w.a_lat, kADec, kW, false);
+            const double rms = R.n ? std::sqrt(R.e_sq / R.n) : 0.0;
+            std::printf("      %-8.2f %9.1f %10.3f %10.3f\n", Lv, rms*1000,
+                        R.dist > 0.1 ? R.rot_effort / R.dist : 0.0,
+                        R.dist > 0.1 ? R.tv_w / R.dist : 0.0);
+        }
+    }
+
+    {
+        // ── DOES THE STEER FLOOR STILL DO ANYTHING? ──────────────────────────────────────────────
+        // omega_want evaluates the FEEDBACK at max(v_profile, 0.15). But route_speed_limit already
+        // floors v_profile at 0.15 mid-route, so the max can only bind at the END TAPER, where
+        // v_profile -> 0 — and there it keeps the robot ROTATING after it should have stopped. Same
+        // class of bug as the sqrt(0.15^2 + 2ad) taper floor removed earlier today.
+        // It also matters at any genuine standstill: with it, feedback keeps authority; without it,
+        // omega -> 0 as v -> 0 and the robot cannot turn on the spot at all.
+        std::printf("\n  steer floor (feedback reference speed), brake_k = 0.25, L = %.2f:\n", FfArm{}.L);
+        std::printf("      %-14s %9s %9s %10s %9s %10s\n", "floor m/s", "rms mm", "max mm", "rot/m", "time s", "reached s");
+        for (const float fl : {0.0f, 0.05f, 0.15f, 0.30f})
+        {
+            FfArm arm; arm.steer_floor = fl;
+            const Result R = run(route, arm, w.v_max, kWmax, w.a_lat, kADec, kW, false);
+            const double rms = R.n ? std::sqrt(R.e_sq / R.n) : 0.0;
+            const bool fin = R.s_end >= route.spline().length() - 0.5f;
+            std::printf("      %-14.2f %9.1f %9.1f %10.3f %9.0f %10.2f%s\n", fl, rms*1000, R.e_max*1000,
+                        R.dist>0.1 ? R.rot_effort/R.dist : 0.0, R.t_end, R.s_end, fin ? "" : "   DNF");
+        }
     }
 
     report("pd", run(route, PdArm{}, w.v_max, kWmax, w.a_lat, kADec, kW, true));

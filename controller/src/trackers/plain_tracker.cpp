@@ -49,7 +49,7 @@ ControlOutput& PlainTracker::compute(ControlOutput& out, const TrackerInput& in,
     // at 0.20 m, robot driving into a wall). Re-acquiring searches the whole route once and adopts the
     // nearest point: the route start after a stop, the robot's own position after a repair.
     if (reacquire_) { s_hint_ = sp.project(pos, 0.f, sp.length()); reacquire_ = false; }
-    else            { s_hint_ = sp.project(pos, s_hint_, 2.0f); }
+    else            { s_hint_ = sp.project(pos, s_hint_, std::max(0.05f, p.plain_proj_window)); }
     const float s = s_hint_;
 
     const Eigen::Vector2f r = sp.position_at(s);
@@ -94,7 +94,23 @@ ControlOutput& PlainTracker::compute(ControlOutput& out, const TrackerInput& in,
     const float omega_ccw = std::clamp(omega_want, -p.max_rot, p.max_rot);
     const float scale = std::abs(omega_want) > 1e-6f
                       ? std::abs(omega_ccw) / std::abs(omega_want) : 1.f;
-    const float v_cmd = std::clamp(v_profile * scale, 0.f, p.max_adv);
+    // ★EXPONENTIAL BRAKE on the DEMANDED turn rate — see plain_brake_k. It subsumes the saturation
+    // ratio above (it keeps falling past the cap, where the ratio is all that acted before) and, unlike
+    // it, brakes BEFORE saturation: at omega_want just under max_rot the ratio is 1 and the robot would
+    // otherwise drive at full speed while turning flat out, which is the approach to every hairpin.
+    // At k=0 this reduces to the ratio coupling exactly.
+    // ★BOTH, not either. They answer different questions and the robot needs both answers:
+    //   scale — "do not demand a turn rate the robot cannot deliver" (acts only once omega SATURATES)
+    //   brake — "slow down as the demand grows"            (acts BEFORE saturation, and keeps acting after)
+    // It was a ternary, so setting brake_k = 0 silently removed the coupling ENTIRELY rather than
+    // falling back to the ratio — i.e. back to the law that drove into a counter at the hairpin with
+    // |cmd_rot| pinned at the cap on 53% of cycles. A min() cannot do that: at k = 0 the brake is 1 and
+    // the ratio still holds, and at any k > 0 the brake dominates well before the ratio would act.
+    // Measured on the robot at k = 0.25 (L = 0.50, single variable): cross_track_max 0.407 -> 0.276,
+    // rot/m 0.865 -> 0.800, min_clearance 0.0138 -> 0.0706, and 4% FASTER.
+    const float r_om = omega_want / std::max(0.05f, p.max_rot);
+    const float brake = std::exp(-std::max(0.f, p.plain_brake_k) * r_om * r_om);
+    const float v_cmd = std::clamp(v_profile * std::min(scale, brake), 0.f, p.max_adv);
 
     out.adv  = v_cmd;
     out.side = 0.f;

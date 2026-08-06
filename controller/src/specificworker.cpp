@@ -364,7 +364,13 @@ void SpecificWorker::initialize()
 			    .footprint_safety_margin_m = params.footprint_safety_margin_m,
 			    .planner_cell_size_m = params.planner_cell_size_m,
 			    .body_inscribed_m = path_controller_.footprint().inscribed_radius(),
-			    .body_circumscribed_m = path_controller_.footprint().circumscribed_radius()});
+			    .body_circumscribed_m = path_controller_.footprint().circumscribed_radius(),
+			    // The tuned gain and the mode it belongs to, so a run's error can be attributed to the
+			    // configuration that produced it. An adaptation policy reads exactly these two columns.
+			    .plain_L = path_controller_.params.plain_L,
+			    .control_mode = path_controller_.control_mode() == rc::TrajectoryController::ControlMode::PLAIN ? "plain"
+			                  : path_controller_.control_mode() == rc::TrajectoryController::ControlMode::PD    ? "pd"
+			                                                                                                    : "mppi"});
 			// Without a mission there is nothing to start — Run just lets whatever is driving, drive.
 			// Run always re-arms: Stop disarmed the base output, and a Run that left it silent would
 			// look like a dead robot. It also clears a stale pause, so Run is unambiguously "go".
@@ -540,7 +546,8 @@ void SpecificWorker::compute()
 	{
 		mission_j_plot_tick_ = 0;
 		const auto js = session_.mission().summary();
-		display_.update_mission_j(js.smooth_lin, js.smooth_rot, js.dev_norm, js.clear_norm);
+		display_.update_tracking_error(js.cross_track_rms_m, js.cross_track_max_m,
+		                               js.distance_m > 1.f ? js.rot_effort_rad / js.distance_m : 0.f);
 	}
 
 	log_first_compute_once();
@@ -881,6 +888,8 @@ void SpecificWorker::load_params()
 	load_optional_cast<double>("Controller.PlainTrackerGdc", path_controller_.params.plain_g_dc);
 	load_optional_cast<double>("Controller.PlainTrackerW", path_controller_.params.plain_W);
 	load_optional_cast<double>("Controller.PlainTrackerRotHeadroom", path_controller_.params.plain_rot_headroom);
+	load_optional_cast<double>("Controller.PlainTrackerBrakeK", path_controller_.params.plain_brake_k);
+	load_optional_cast<double>("Controller.PlainTrackerProjWindow", path_controller_.params.plain_proj_window);
 	load_optional_cast<double>("Controller.PdCrossTrackGain", path_controller_.params.pd_cross_track_gain);
 	load_optional_cast<double>("Controller.PdCrossTrackSoft", path_controller_.params.pd_cross_track_soft_mps);
 	// Lateral bumper — the reactive half. The A* clearance preference and the band keep the ROUTE off

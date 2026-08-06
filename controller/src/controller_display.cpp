@@ -193,33 +193,26 @@ void ControllerDisplay::set_goal_distance(std::optional<float> dist_m, std::opti
     snapshot_.goal_aligning = aligning;
 }
 
-// The four terms of J, live. Series are registered once on the first call; after that this is four
-// add_point()s per cycle, which the plot buffers under its own mutex.
-void ControllerDisplay::update_mission_j(float smooth_lin, float smooth_rot, float dev_norm,
-                                         float clear_norm)
+// Running cross-track error. This replaced a four-series J plot: J's smoothness terms are properties
+// of the ROUTE (re-planned against a live grid each run, so a 119 mm waypoint repair moved jerk/m by
+// 38%), while rms repeats to cv 2.3% and is what the tracker itself controls.
+void ControllerDisplay::update_tracking_error(float rms_m, float max_m, float rot_per_m)
 {
     auto *plot = custom_widget_ ? custom_widget_->mission_j_plot : nullptr;
     if (plot == nullptr) return;
     if (not j_series_ready_)
     {
-        // ★Dark grey, and heavier than the components: J is the TOTAL, so it should read as the line the
-        // others sum to rather than as a fourth colour competing with them. It was 235,235,235 — which
-        // is invisible, because draw_legend paints a white box behind the swatch and the plot background
-        // is light. The legend already prints each series' current value next to its name, so this is
-        // also what makes the J NUMBER readable.
-        plot->add_series("J",          QColor(55, 55, 55), 2.4f);
-        plot->add_series("smooth_lin", QColor(120, 190, 255), 1.2f);
-        plot->add_series("smooth_rot", QColor(255, 190, 110), 1.2f);
-        plot->add_series("dev_norm",   QColor(150, 235, 150), 1.2f);
-        plot->add_series("clear_norm", QColor(255, 120, 120), 1.6f);   // red: PATH diagnostic, not in J
+        // Objective in dark grey, constraint in blue — the two the policy reads. Both happen to live
+        // in 0.1..0.9 (m and rad/m), so they share an axis legibly despite the different units.
+        plot->add_series("cross_rms", QColor(55, 55, 55), 2.4f);     // OBJECTIVE: minimise
+        plot->add_series("rot_per_m", QColor(70, 130, 200), 2.0f);   // CONSTRAINT: keep under budget
+        plot->add_series("cross_max", QColor(190, 120, 120), 1.2f);  // context
         j_series_ready_ = true;
     }
     const auto ok = [](float v) { return std::isfinite(v) ? v : 0.f; };
-    plot->add_point("smooth_lin", ok(smooth_lin));
-    plot->add_point("smooth_rot", ok(smooth_rot));
-    plot->add_point("dev_norm",   ok(dev_norm));
-    plot->add_point("clear_norm", ok(clear_norm));
-    plot->add_point("J", ok(smooth_lin) + ok(smooth_rot) + ok(dev_norm) + ok(clear_norm));
+    plot->add_point("cross_rms", ok(rms_m));
+    plot->add_point("rot_per_m", ok(rot_per_m));
+    plot->add_point("cross_max", ok(max_m));
 }
 
 void ControllerDisplay::update_affordance_efe(const std::vector<AffordanceEfeSample> &samples)
