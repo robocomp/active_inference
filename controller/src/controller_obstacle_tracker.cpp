@@ -13,6 +13,7 @@
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
+#include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
 
 std::array<Eigen::Vector2f, ControllerObstacleTracker::kRememberedEdgeCount>
 ControllerObstacleTracker::make_local_obstacle_corners(const ControllerObstacleState &state)
@@ -304,6 +305,7 @@ void ControllerObstacleTracker::sync_temporary_obstacles_to_dsr(std::uint64_t ti
             graph_->add_or_modify_attrib_local<parent_att>(obstacle_node, graph_state_->room_id);
             graph_->add_or_modify_attrib_local<pos_x_att>(obstacle_node, room_pos_x + 120.f + 18.f * static_cast<float>(instance.id % 6));
             graph_->add_or_modify_attrib_local<pos_y_att>(obstacle_node, room_pos_y + 40.f + 18.f * static_cast<float>(instance.id / 6));
+            rc::provenance::stamp_creation(*graph_, obstacle_node);   // birth stamp: epoch ms + local ISO-8601
             const auto node_id = graph_->insert_node(obstacle_node);
             if (!node_id.has_value())
                 continue;
