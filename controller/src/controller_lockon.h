@@ -77,6 +77,9 @@ public:
     bool  active() const { return phase_ == Phase::Settle || phase_ == Phase::Step; }
     bool  done()   const { return phase_ == Phase::Locked || phase_ == Phase::GiveUp; }
     bool  locked() const { return phase_ == Phase::Locked; }
+    // How many CONSECUTIVE cycles the contract predicate has held. Read-only, for the affordance panel:
+    // a predicate that flickers true is not one that HOLDS, and without this the difference is invisible.
+    int   stable() const { return stable_; }
 
     // Advance one control cycle. `goal_met` = the contract predicate holds THIS cycle (session-evaluated).
     Command update(const Reading& r, bool goal_met, std::uint64_t t_ms)

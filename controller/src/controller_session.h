@@ -11,6 +11,7 @@
 
 #include "controller_display.h"
 #include "controller_lockon.h"
+#include "controller_affordance_view.h"
 #include "controller_mission.h"
 #include "../../common/affordance_protocol/affordance_protocol.h"
 #include "controller_motion_commander.h"
@@ -189,6 +190,26 @@ private:
     void reset_stuck_state();
 
     const ControllerParams *params_ = nullptr;
+    // ── AFFORDANCE PANEL (display only) ──────────────────────────────────────────────────────────
+    // view_contract_ is a SEPARATE, display-only read of the same node. active_contract_ is still
+    // resolved exactly where it always was (on arrival, in execute_plan) — moving that would change
+    // when a policy takes effect, and this window is not worth a behaviour change.
+    rc::AffordanceExecution affordance_view_;
+    rc::affordance::Contract view_contract_;
+    bool view_contract_known_ = false;
+    std::vector<std::string> affordance_recent_;
+    std::uint64_t affordance_started_ms_ = 0;
+    std::uint64_t affordance_step_since_ms_ = 0;
+    std::string affordance_prev_step_;
+    float affordance_nav_total_m_ = 1.f;
+    void update_affordance_view(const ControllerRobotPose &robot_pose,
+                                const rc::TrajectoryController::ControlOutput &o,
+                                bool output_enabled, float align_tol_rad, std::uint64_t now_ms);
+    std::optional<float> feedback_scalar(std::uint64_t node_id, const std::string &attr) const;
+public:
+    [[nodiscard]] const rc::AffordanceExecution &affordance_view() const { return affordance_view_; }
+private:
+
     rc::LockOn lockon_;
     rc::affordance::Contract active_contract_;     // resolved contract of the affordance in lock-on
     std::uint64_t feedback_node_id_ = 0;           // node carrying the contract's feedback attributes

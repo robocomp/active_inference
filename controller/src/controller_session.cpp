@@ -1200,6 +1200,238 @@ void ControllerSession::log_approach_diagnostics(std::uint64_t t_ms,
     }
 }
 
+
+// One scalar off the feedback node, by contract-declared NAME. Uses the protocol's own attr_scalar so
+// the panel and the executor read an attribute the same way.
+std::optional<float> ControllerSession::feedback_scalar(std::uint64_t node_id, const std::string &attr) const
+{
+    if (not graph_ or node_id == 0) return std::nullopt;
+    const auto node = graph_->get_node(node_id);
+    if (not node.has_value()) return std::nullopt;
+    const auto &attrs = node->attrs();
+    const auto it = attrs.find(attr);
+    if (it == attrs.end()) return std::nullopt;
+    return rc::affordance::detail::attr_scalar(it->second);
+}
+
+namespace
+{
+const char *compare_symbol(rc::affordance::CompareOp op)
+{
+    using CO = rc::affordance::CompareOp;
+    switch (op) { case CO::LE: return "<="; case CO::EQ: return "=="; case CO::NE: return "!="; default: return ">="; }
+}
+}   // namespace
+
+// ── THE AFFORDANCE PROGRAM, AS DATA ──────────────────────────────────────────────────────────────
+// Built fresh each cycle from state that already exists — nothing here drives anything, and nothing
+// here is allowed to. In particular the contract is read into a DISPLAY-ONLY copy: active_contract_ is
+// still resolved exactly where it always was (on arrival, in execute_plan), because moving that would
+// change when a policy takes effect. The panel just wants to show the program BEFORE it starts, so it
+// reads the same node itself.
+void ControllerSession::update_affordance_view(const ControllerRobotPose &robot_pose,
+                                               const rc::TrajectoryController::ControlOutput &o,
+                                               bool output_enabled, float align_tol_rad,
+                                               std::uint64_t now_ms)
+{
+    using Step = rc::AffordanceStepView;
+    using S = rc::AffordanceStepView::State;
+    rc::AffordanceExecution v;
+    v.recent = affordance_recent_;
+
+    const bool on_affordance = last_target_info_.has_value() and last_target_info_->from_affordance;
+    if (not on_affordance)
+    {
+        // Retire the live run into `recent` once, then keep showing the last steps: a window opened
+        // after the fact must still say what happened.
+        if (affordance_view_.active and not affordance_view_.affordance.empty())
+        {
+            affordance_recent_.insert(affordance_recent_.begin(),
+                std::format("{} {:.1f}s {}", affordance_view_.affordance, affordance_view_.elapsed_s,
+                            lockon_.locked() ? "locked" : lockon_.phase() == rc::LockOn::Phase::GiveUp
+                                                            ? "gave up" : "reached"));
+            if (affordance_recent_.size() > 4) affordance_recent_.resize(4);
+        }
+        affordance_view_.active = false;
+        affordance_view_.recent = affordance_recent_;
+        return;
+    }
+
+    if (affordance_view_.affordance != last_target_info_->node_name)
+    {
+        affordance_started_ms_ = now_ms;
+        affordance_step_since_ms_ = now_ms;
+        affordance_prev_step_.clear();
+        affordance_nav_total_m_ = std::max(0.05f, o.dist_to_goal);   // the distance this run began with
+        // Display-only contract read. Cheap (one node fetch) and done once per affordance.
+        view_contract_ = {};
+        view_contract_known_ = false;
+        if (graph_ and active_target_id_ != 0)
+            if (const auto n = graph_->get_node(active_target_id_); n.has_value())
+            {
+                std::string parent_type;
+                if (last_target_info_->parent_node_id != 0)
+                    if (const auto pn = graph_->get_node(last_target_info_->parent_node_id); pn.has_value())
+                        parent_type = parent_contract_key(pn.value());
+                view_contract_ = rc::affordance::read_contract(n.value(), parent_type);
+                view_contract_known_ = true;
+            }
+    }
+
+    v.active = true;
+    v.affordance = last_target_info_->node_name;
+    v.contract_known = view_contract_known_;
+    v.policy = std::string(rc::affordance::to_string(view_contract_.policy));
+    v.elapsed_s = static_cast<float>(now_ms - affordance_started_ms_) * 1e-3f;
+    if (graph_ and last_target_info_->parent_node_id != 0)
+        if (const auto pn = graph_->get_node(last_target_info_->parent_node_id); pn.has_value())
+            v.object = pn->name();
+
+    const bool servo = view_contract_.policy == rc::affordance::Policy::Servo;
+    const bool orient = view_contract_.policy == rc::affordance::Policy::Orient;
+    // The timeout clock only means anything once the servo loop owns it.
+    if (servo and lockon_.active()) v.timeout_s = view_contract_.timeout_ms * 1e-3f;
+
+    // The one reason that is worth saying on EVERY row it applies to: a command computed and discarded.
+    // This is the failure that looks like every other failure from the outside.
+    const bool cmd_nonzero = std::abs(o.adv) > 1e-3f or std::abs(o.rot) > 1e-3f;
+    const std::string disarmed = (not output_enabled and cmd_nonzero)
+        ? std::format("BASE OUTPUT DISARMED — commanding {:.2f} m/s, {:.2f} rad/s, all discarded",
+                      o.adv, -o.rot)
+        : std::string{};
+
+    const bool navigating = not o.aligning and not o.goal_reached and not lockon_.active();
+    const bool aligning = o.aligning;
+
+    // 1. CLAIM — by the time anything else runs, this is behind us.
+    v.steps.push_back({.label = "claim affordance", .state = S::Done, .progress = -1.f,
+                       .detail = std::format("target ({:.2f},{:.2f}) facing {:.0f} deg",
+                                             last_target_info_->room_pos.x(), last_target_info_->room_pos.y(),
+                                             last_target_info_->yaw_rad * 180.f / static_cast<float>(M_PI))});
+
+    // 2. NAVIGATE — skipped by Orient, which is a rotation in place and has no (x,y) target at all.
+    {
+        Step s{.label = "navigate to standpoint"};
+        if (orient) { s.state = S::Skipped; s.detail = "orient policy — no standpoint"; }
+        else
+        {
+            const float remaining = o.dist_to_goal;
+            s.state = navigating ? S::Active : S::Done;
+            s.progress = std::clamp(1.f - remaining / affordance_nav_total_m_, 0.f, 1.f);
+            s.detail = std::format("{:.2f} m to go of {:.2f}", remaining, affordance_nav_total_m_);
+            if (navigating and not disarmed.empty()) s.blocked_why = disarmed;
+        }
+        v.steps.push_back(std::move(s));
+    }
+
+    // 3. ALIGN — and this is where the rotation the controller performs WITHOUT ANY OBSTACLE CHECK
+    // becomes visible. rotation_sweep asks the question the arrival path never asks: is there room to
+    // turn HERE, at the pose the robot actually stopped in, through every heading on the way.
+    {
+        Step s{.label = "align to facing yaw"};
+        const float tol = align_tol_rad;
+        const float err = o.goal_yaw_err_rad.value_or(0.f);
+        s.state = aligning ? S::Active : (o.goal_reached or lockon_.active()) ? S::Done : S::Pending;
+        if (o.goal_yaw_err_rad.has_value())
+        {
+            s.progress = std::clamp(1.f - std::abs(err) / std::max(1e-3f, std::abs(err) + tol), 0.f, 1.f);
+            s.detail = std::format("yaw err {:.1f} deg (tol {:.1f})",
+                                   err * 180.f / static_cast<float>(M_PI),
+                                   tol * 180.f / static_cast<float>(M_PI));
+        }
+        if (aligning)
+        {
+            if (not disarmed.empty()) s.blocked_why = disarmed;
+            else
+            {
+                const float facing_now = std::remainder(robot_pose.theta + static_cast<float>(M_PI_2),
+                                                        2.f * static_cast<float>(M_PI));
+                const auto sweep = grid_planner_.rotation_sweep(robot_pose.pos, facing_now,
+                                                                last_target_info_->yaw_rad);
+                if (not sweep.feasible)
+                    s.blocked_why = std::format("NO ROOM TO TURN HERE — footprint does not fit at "
+                                                "{:.0f} deg on the way (tightest {:.3f} m). The terminal "
+                                                "rotation runs with no obstacle check.",
+                                                sweep.worst_heading_rad * 180.f / static_cast<float>(M_PI),
+                                                sweep.min_clearance_m);
+            }
+        }
+        v.steps.push_back(std::move(s));
+    }
+
+    // 4. SERVO — the contract's micro-search, only under a Servo policy.
+    if (servo)
+    {
+        Step s{.label = "servo lock-on"};
+        const auto ph = lockon_.phase();
+        v.phase = ph == rc::LockOn::Phase::Settle ? "settle" : ph == rc::LockOn::Phase::Step ? "step"
+                : ph == rc::LockOn::Phase::Locked ? "locked" : ph == rc::LockOn::Phase::GiveUp ? "gave up"
+                                                             : "idle";
+        s.state = lockon_.locked() ? S::Done
+                : ph == rc::LockOn::Phase::GiveUp ? S::Failed
+                : lockon_.active() ? S::Active : S::Pending;
+        if (feedback_node_id_ != 0 and lockon_.active())
+        {
+            const auto r = read_servo_reading(feedback_node_id_);
+            s.detail = std::format("err_x {:+.3f}  scalar {:.3f} -> {:.3f}{}",
+                                   r.err_x, r.scalar, view_contract_.scalar_target,
+                                   r.valid ? "" : "   [feedback INVALID — dithering to reacquire]");
+            if (not disarmed.empty()) s.blocked_why = disarmed;
+        }
+        else if (s.state == S::Pending)
+            s.detail = "waiting for arrival";
+        v.steps.push_back(std::move(s));
+    }
+    else
+        v.phase = o.goal_reached ? "reached" : aligning ? "aligning" : "driving";
+
+    // 5. THE COMPLETION CLAUSES — one row each, straight from the contract, because they are per
+    // affordance and a hardcoded list would describe a different program.
+    if (view_contract_known_ and feedback_node_id_ != 0)
+    {
+        for (const auto &c : view_contract_.goal)
+        {
+            Step s{.label = std::format("{} {} {:.3f}", c.attr, compare_symbol(c.op), c.value)};
+            const auto now = feedback_scalar(feedback_node_id_, c.attr);
+            if (now.has_value())
+            {
+                const bool holds = rc::affordance::clause_ok(*now, c.op, c.value);
+                s.state = holds ? S::Done : S::Active;
+                s.detail = std::format("now {:.3f}{}", *now, holds ? "  OK" : "");
+            }
+            else
+            {
+                s.state = S::Pending;
+                s.blocked_why = std::format("'{}' is not published on the feedback node", c.attr);
+            }
+            v.steps.push_back(std::move(s));
+        }
+        // The stability requirement is a step of its own: a predicate that keeps flickering true is not
+        // the same as one that HOLDS, and without this row the difference is invisible.
+        if (not view_contract_.goal.empty())
+        {
+            Step s{.label = "hold stable"};
+            s.state = lockon_.locked() ? S::Done : lockon_.active() ? S::Active : S::Pending;
+            s.progress = view_contract_.stable_n > 0
+                       ? std::clamp(static_cast<float>(lockon_.stable()) /
+                                    static_cast<float>(view_contract_.stable_n), 0.f, 1.f) : -1.f;
+            s.detail = std::format("{} of {} consecutive", lockon_.stable(), view_contract_.stable_n);
+            v.steps.push_back(std::move(s));
+        }
+    }
+
+    // Per-step elapsed: time since the ACTIVE row last changed, so a stall reads as a growing number on
+    // the row that is stalling.
+    std::string active_label;
+    for (const auto &s : v.steps) if (s.state == S::Active) { active_label = s.label; break; }
+    if (active_label != affordance_prev_step_) { affordance_prev_step_ = active_label; affordance_step_since_ms_ = now_ms; }
+    const float in_step = static_cast<float>(now_ms - affordance_step_since_ms_) * 1e-3f;
+    for (auto &s : v.steps)
+        s.elapsed_s = s.state == S::Active ? in_step : (s.state == S::Done ? 0.f : 0.f);
+
+    affordance_view_ = std::move(v);
+}
+
 void ControllerSession::update_display(const std::optional<ControllerRobotPose> &robot_pose,
                                        ControllerDisplay &display,
                                        const ControllerObstacleVisuals &obstacle_polys,
@@ -1502,6 +1734,12 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     const auto control_output = path_controller.compute(robot_pose.as_transform());
     // Surface what the ARRIVAL test is waiting on, every cycle, before any of the branches below can return
     // early — otherwise the readout would freeze exactly in the states worth watching (aligning, blocked).
+    // The affordance program, rebuilt from state that already exists. Runs EVERY cycle an affordance is
+    // live, not only while the window is open: these runs last seconds, and a view you must open in time
+    // to catch a failure is one that never catches it.
+    update_affordance_view(robot_pose, control_output, motion_commander.output_enabled(),
+                           path_controller.params.align_yaw_tol_rad, overlay_now_ms_);
+    display.set_affordance_execution(affordance_view_);
     display.set_session_totals(session_distance_m_, session_elapsed_s());
     display.set_goal_distance(control_output.dist_to_goal, control_output.goal_yaw_err_rad,
                               control_output.aligning);

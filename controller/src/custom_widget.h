@@ -152,6 +152,13 @@ public:
         // the answer to "why is it going there", not a pose readout.
         toolbar_layout->addWidget(new QLabel("affordance", toolbar));
         selected_affordance_value_ = new QLabel(toolbar);
+        // CLICKABLE: it opens the affordance program window. An affordance is a small program with
+        // steps, and the name alone says only WHICH one is running, never how far in it is or what is
+        // holding it up.
+        selected_affordance_value_->setCursor(Qt::PointingHandCursor);
+        selected_affordance_value_->setToolTip(QStringLiteral("Click to open the affordance program "
+                                                              "— steps, progress, and what is blocking."));
+        selected_affordance_value_->installEventFilter(this);
         selected_affordance_value_->setTextFormat(Qt::RichText);
         selected_affordance_value_->setTextInteractionFlags(Qt::TextSelectableByMouse);
         // Bounded: affordance names come from graph nodes and can be long, and an unbounded label at the
@@ -267,6 +274,8 @@ public:
     // worker knows which affordance is selected, not what colour "selected" should be.
     // "none" is deliberately styled as absence (grey, italic) — a selection and the lack of one must not
     // read the same at a glance.
+    void set_affordance_clicked(std::function<void()> cb) { affordance_clicked_ = std::move(cb); }
+
     void set_selected_affordance(const QString &current, const QString &previous)
     {
         if (selected_affordance_value_ == nullptr) return;
@@ -356,6 +365,24 @@ public:
     QPushButton *lidar_toggle_btn = nullptr;
     QPushButton *mppi_paths_toggle_btn = nullptr;
 
+protected:
+    // QLabel carries no clicked() signal and this widget has no Q_OBJECT (the fleet dashboard
+    // convention), so the affordance name's click is hit-tested here instead of pulling in a subclass
+    // just to get one signal. Mapped through the label's own parent, because it lives in the toolbar
+    // frame and its geometry() is in THAT frame's coordinates, not this widget's.
+    // ★AN EVENT FILTER, NOT mousePressEvent. The label sets TextSelectableByMouse (so a long node name
+    // can be copied), and that makes QLabel CONSUME the press — it never reaches this widget's handler,
+    // so hit-testing there would silently never fire. A filter sees the event before the label does.
+    // Returns false on purpose: the label still gets it, so selecting the text keeps working.
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (watched == selected_affordance_value_ and event->type() == QEvent::MouseButtonRelease
+            and affordance_clicked_)
+            if (const auto *me = static_cast<QMouseEvent *>(event); me->button() == Qt::LeftButton)
+                affordance_clicked_();
+        return QWidget::eventFilter(watched, event);
+    }
+
 private:
     QLCDNumber *cmd_adv_lcd_ = nullptr;
     QLCDNumber *cmd_side_lcd_ = nullptr;
@@ -372,6 +399,7 @@ private:
     QString affordance_shown_;
     QLabel *stuck_status_label_ = nullptr;
 
+    std::function<void()> affordance_clicked_;   // opens the affordance program window
     QLCDNumber *session_dist_lcd_ = nullptr;   // session totals, top row
     QLCDNumber *session_time_lcd_ = nullptr;
 

@@ -93,6 +93,16 @@ void ControllerDisplay::initialize(rc::LidarPointBuffer *lidar_buffer, Callbacks
                      });
 
     mission_panel_ = std::make_unique<rc::MissionPanel>(custom_widget_.get(), callbacks.mission);
+    // The affordance program window. Constructed hidden and fed every cycle; clicking the affordance
+    // name in the toolbar shows it. It is a QDialog with the Tool flag, so it floats over the 2D view
+    // without taking focus from it — this is meant to be watched WHILE driving.
+    affordance_panel_ = std::make_unique<rc::AffordancePanel>(custom_widget_.get());
+    custom_widget_->set_affordance_clicked([this]
+    {
+        if (affordance_panel_ == nullptr) return;
+        affordance_panel_->setVisible(not affordance_panel_->isVisible());
+        if (affordance_panel_->isVisible()) affordance_panel_->raise();
+    });
     custom_widget_->attach_mission_panel(mission_panel_.get());
 
 }
@@ -168,6 +178,12 @@ void ControllerDisplay::set_command_text(const QString &text)
     std::lock_guard<std::mutex> lock(snapshot_mutex_);
     snapshot_.command_text = text;
     snapshot_.command_text_pending = true;
+}
+
+void ControllerDisplay::set_affordance_execution(const rc::AffordanceExecution &v)
+{
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    snapshot_.affordance = v;
 }
 
 void ControllerDisplay::set_selected_affordance(const QString &current, const QString &previous)
@@ -298,6 +314,8 @@ void ControllerDisplay::present()
 
     if (snap.selected_affordance_text_pending)
         custom_widget_->set_selected_affordance(snap.affordance_current, snap.affordance_previous);
+    if (affordance_panel_ and affordance_panel_->isVisible())
+        affordance_panel_->update_view(snap.affordance);
 
     custom_widget_->set_stuck_active(snap.stuck_active);   // widget dedups same-state calls
     custom_widget_->set_goal_distance(snap.goal_dist_m, snap.goal_yaw_err_rad, snap.goal_aligning);

@@ -17,6 +17,7 @@
 
 #include "controller_runtime_types.h"
 #include "controller_mission_panel.h"
+#include "controller_affordance_panel.h"
 #include "custom_widget.h"
 #include "viewer_2d.h"
 
@@ -90,6 +91,7 @@ public:
     // Push the live arrival state to the toolbar readout. Called every cycle; the widget dedups.
     void set_goal_distance(std::optional<float> dist_m, std::optional<float> yaw_err_rad, bool aligning);
     void set_session_totals(float metres, float seconds);   // top row: metres and time since startup
+    void set_affordance_execution(const rc::AffordanceExecution &v);   // the affordance-program window
     // One sample per evaluated affordance for the EFE panel below the 2D view. Plots TWO lines per
     // affordance: the selection score (gain − λ·dist, solid) and the raw gain (ΔH, lighter) — so the
     // vertical gap between them is λ·dist. Thread-safe (the plot buffers under its own mutex).
@@ -141,6 +143,7 @@ private:
         bool goal_aligning = false;
         float session_distance_m = 0.f;
         float session_elapsed_s = 0.f;
+        rc::AffordanceExecution affordance;
         // Mission overlay + readout.
         rc::MissionPanel::View mission_view;
         std::vector<Eigen::Vector2f> mission_waypoints;
@@ -154,6 +157,7 @@ private:
 
     std::unique_ptr<Custom_widget> custom_widget_;
     std::unique_ptr<rc::MissionPanel> mission_panel_;
+    std::unique_ptr<rc::AffordancePanel> affordance_panel_;
     std::unique_ptr<rc::Viewer2D> viewer_2d_;
     bool room_view_fitted_ = false;
     std::unordered_set<std::string> efe_series_known_;   // plot series already registered
