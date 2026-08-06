@@ -877,8 +877,10 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
             // set_path_presmoothed: the curve is already C2 and already footprint-checked, so the
             // elastic band and the C1 spline inside set_path would only undo both.
             path_controller.set_path_presmoothed(route_.path());
-        // (The tracker's curve is chosen per cycle just before compute — route, plan, or none — so it
-        // is not set here any more; a one-shot assignment could not be un-set when the mission ended.)
+        // The ROUTE tracker reads s, psi(s) and kappa_avg(s) from the curve itself. Non-owning: the band
+        // deforms this same spline in place just before compute, so the tracker sees the deformed curve
+        // without a state reset — which is the whole reason update_path_geometry exists for the polyline.
+        path_controller.set_route(&route_.spline());
         // ── WHAT THIS ROUTE MAKES UNAVOIDABLE ───────────────────────────────────────────────────────
         // Computed ONCE per route, from the spline and the identified plant. It is what makes J_route
         // route-independent: the run's totals are divided by these, so each term reads ">= 1, where 1 is as
@@ -1434,22 +1436,6 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         odo_last_pos_ = pos;
         odo_last_ms_ = overlay_now_ms_;
     }
-
-    // ── WHICH CURVE IS THE TRACKER FOLLOWING? ───────────────────────────────────────────────────
-    // Decided every cycle, for exactly the reason the speed ceiling below is: a STALE one is worse than
-    // none. set_route used to be called once, from the mission path, with &route_.spline() — and
-    // route_spline_ was NEVER CLEARED. So after a mission ended the tracker kept following the old
-    // route while the user drove a click target: cross-track of metres, feedback demanding ~10 rad/s,
-    // and the robot pivoting on the spot instead of moving (measured: cmd_adv 7.5e-19, cmd_rot pinned
-    // at -0.800).
-    // ★AND A CLICK TARGET DOES HAVE A CURVE. smooth_plan() fits plan_spline_ for targets and
-    // affordances — it was simply never handed over, so PLAIN could not drive one even in principle.
-    if (route_active_ and mission_.running() and route_.valid())
-        path_controller.set_route(&route_.spline());
-    else if (plan_spline_valid_ and plan_spline_.valid())
-        path_controller.set_route(&plan_spline_);
-    else
-        path_controller.set_route(nullptr);
 
     // Curvature-limited speed. Only a continuous ROUTE carries a speed profile; a plan keeps the full
     // envelope, and the ceiling is cleared rather than left stale from a previous mission.
