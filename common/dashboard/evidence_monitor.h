@@ -46,6 +46,11 @@ struct EvidenceGlobals
     int  assigned      = 0;    int  discarded  = 0;   // tracker: matched to an instance / dropped
     int  births = 0, merges = 0, removals = 0;                  // this cycle
     long births_cum = 0, merges_cum = 0, removals_cum = 0;      // cumulative
+    // Candidates that matured their birth streak but whose ACCUMULATED probation burst was refused on
+    // inspection (common/birth_fragment): objects that never entered the graph, so they appear in no other
+    // counter. The number that matters when judging the birth gate — a phantom refused here is one the
+    // removal channel never has to retract.
+    int  births_refused = 0;   long births_refused_cum = 0;
     int  instances = 0;        int  sweep_points = 0;
     int  seam_splits = 0;      long seam_splits_cum = 0;  // instances fusing ≥2 ricoh slices (table only)
     int  ricoh_attention = 0;  // unassigned ricoh bearings this cycle (peripheral "seek a ZED view" targets)
@@ -95,6 +100,9 @@ private:
             g.removals, g.removals_cum, g.compute_hz);
         // Agent-specific extras appear only when the agent actually uses them, so the strip stays
         // identical across agents in the common case.
+        if (g.births_refused_cum > 0)
+            s += QString::asprintf(" &nbsp;|&nbsp; <b style='color:#c07020'>refused=%d/%ld</b>",
+                                   g.births_refused, g.births_refused_cum);
         if (g.seam_splits_cum > 0)
             s += QString::asprintf(" &nbsp;|&nbsp; seam-split=%d/%ld", g.seam_splits, g.seam_splits_cum);
         if (g.ricoh_attention > 0)

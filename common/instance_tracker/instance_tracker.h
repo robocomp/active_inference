@@ -115,6 +115,18 @@ struct TrackerResult
     std::vector<int>           assignment;   // per detection: index into `tracks` (-1 = unassigned)
     std::vector<int>           births;       // detection indices that should spawn a new instance
     std::vector<std::uint64_t> deaths;       // track ids to retire
+
+    // ── Candidate identity: lets an agent ACCUMULATE the probation burst (common/birth_fragment) ──
+    // A pending candidate matures over birth_frames observations, but the tracker only ever kept a
+    // streak counter and the LATEST xy — every mask cloud seen while maturing was discarded, so an
+    // instance was born from ONE frame's centroid despite several frames of evidence having been
+    // examined. Exposing a stable id per candidate lets the agent bank that evidence next to the
+    // candidate and hand the whole burst to the fitter at promotion (deferred commitment: choose the
+    // representation, and whether to commit at all, with all the data in hand). Agents that don't
+    // care simply ignore these three fields.
+    std::vector<std::uint64_t> cand_of_det;        // per detection: candidate id it fed (0 = none)
+    std::vector<std::uint64_t> expired_candidates; // candidate ids dropped this cycle (free their burst)
+    std::vector<std::uint64_t> birth_cand_ids;     // parallel to `births`: the promoted candidate's id
 };
 
 // Stateful multi-object tracker: carries the miss-counters and pending birth candidates across cycles.
@@ -130,6 +142,7 @@ public:
     {
         TrackerResult out;
         out.assignment.assign(dets.size(), -1);
+        out.cand_of_det.assign(dets.size(), 0);
 
         // ── 1. Gated cost for every (det, track) pair ────────────────────────────────────────────
         struct Pair { float cost; int det; int trk; };
@@ -227,6 +240,7 @@ public:
             }
             Candidate cand;
             if (best >= 0) { cand = candidates_[best]; candidates_[best].claimed = true; }
+            else           { cand.id = ++next_cand_id_; }      // fresh blob → new identity for its burst
             cand.xy     = xy;                                 // track the blob's latest position
             cand.streak = (best >= 0 ? cand.streak : 0.0f) + dets[d].birth_evidence;   // accumulate birth evidence
 
@@ -236,10 +250,30 @@ public:
                 if ((nc.xy - xy).norm() < params_.birth_min_sep_m) { dup = true; break; }
             if (dup) continue;
 
+            // This detection's evidence belongs to `cand` — the agent banks its mask cloud under this id.
+            out.cand_of_det[d] = cand.id;
+
             if (cand.streak >= params_.birth_frames)
+            {
                 out.births.push_back(d);                      // promote: spawn an instance from this det
+                out.birth_cand_ids.push_back(cand.id);        // …and hand over its accumulated burst
+            }
             else
                 next_cand.push_back(cand);                    // keep maturing
+        }
+
+        // EXPIRY: every id carried into this cycle that is neither still maturing nor promoted is gone
+        // (blob vanished, or lost the anti-duplicate test) — tell the agent so it can free the burst.
+        // Computed against the survivor set rather than the `claimed` flag so the `dup`-drop path, which
+        // claims a candidate and then abandons it, cannot leak a bank entry.
+        for (const auto& c : candidates_)
+        {
+            if (c.id == 0) continue;                          // pre-existing candidate from an older build
+            bool survives = false;
+            for (const auto& nc : next_cand)      if (nc.id == c.id) { survives = true; break; }
+            if (not survives)
+                for (const auto id : out.birth_cand_ids) if (id == c.id) { survives = true; break; }
+            if (not survives) out.expired_candidates.push_back(c.id);
         }
         candidates_.swap(next_cand);                          // unmatched candidates expire (blob gone)
 
@@ -249,11 +283,15 @@ public:
     void reset() { miss_count_.clear(); candidates_.clear(); }
 
 private:
-    struct Candidate { Eigen::Vector2f xy = Eigen::Vector2f::Zero(); float streak = 0.0f; bool claimed = false; };
+    // `id` is a tracker-local monotonic identity for a pending birth, stable across the frames it
+    // matures over. It is the key an agent banks the candidate's mask clouds under (see TrackerResult).
+    struct Candidate { std::uint64_t id = 0; Eigen::Vector2f xy = Eigen::Vector2f::Zero();
+                       float streak = 0.0f; bool claimed = false; };
 
     TrackerParams                          params_;
     std::unordered_map<std::uint64_t, int> miss_count_;   // track id → consecutive unsupported frames
     std::vector<Candidate>                 candidates_;   // pending births (not yet promoted)
+    std::uint64_t                          next_cand_id_ = 0;   // never reused; 0 means "no candidate"
 };
 
 }  // namespace rc
