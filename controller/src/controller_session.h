@@ -158,7 +158,11 @@ private:
     // no route → escape, with the base pinned at the escape constants indefinitely. Reversing changes the
     // robot's position, which is the right response to being physically trapped and no response at all to a
     // planner that cannot return a path. That branch now HOLDS and reports instead.
-    bool detect_stuck(bool pursuing, bool stalled_this_cycle, std::uint64_t now_ms);
+    // Wedge = the robot was told to travel and did not GET anywhere. Judged on net displacement from
+    // where the clock started, never on an instantaneous speed reading (pose jitter reads as speed).
+    bool detect_stuck(bool pursuing, float cmd_lin_mps, const Eigen::Vector2f &pos_room,
+                      std::uint64_t now_ms);
+    void reset_stuck_window();
     // Begin an escape: choose turn direction from side clearance, drop a temp obstacle at
     // the stuck spot, reset the plan, and record the start pose/time.
     void begin_escape(const ControllerRobotPose &robot_pose,
@@ -280,6 +284,11 @@ private:
 
     // Physical-stuck recovery state.
     std::uint64_t stuck_since_ms_ = 0;          // start of the current wedge window (0 = not wedged)
+    // Anchor for the wedge judgement: where the robot was when the clock started, and how far it has
+    // been TOLD to travel since. Compared as distances — an oscillating pose adds nothing to the first.
+    Eigen::Vector2f stuck_anchor_pos_ = Eigen::Vector2f::Zero();
+    float stuck_cmd_travel_m_ = 0.f;
+    std::uint64_t stuck_last_ms_ = 0;
     // Rate limit for the planner-failure HOLD message. Planner failure is deliberately NOT routed into the
     // stuck/escape reflex (reversing cannot fix a planner), so this line is the only signal that it happened.
     std::uint64_t last_no_route_log_ms_ = 0;

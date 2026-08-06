@@ -1977,8 +1977,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // above; this catches the INVISIBLE wedge the planner can't see. Sustained → escape: reverse+turn out
     // and drop a marker so the next plan routes around. base_speed_lin_ is the EMA measured base speed.
     const float cmd_lin = std::hypot(adv_mps, side_mps);
-    const bool wedged_this_cycle = base_speed_lin_ < params_->stuck_slip_ratio * cmd_lin;
-    if (detect_stuck(/*pursuing=*/true, wedged_this_cycle, time_source()))
+    if (detect_stuck(/*pursuing=*/true, cmd_lin, robot_pose.pos, time_source()))
     {
         begin_escape(robot_pose, obstacle_tracker, path_controller, time_source());
         step_escape(robot_pose, path_controller, motion_commander, time_source());
@@ -2364,34 +2363,73 @@ void ControllerSession::clear_manual_target(rc::AffordanceManager &affordance_ma
 
 void ControllerSession::reset_stuck_state()
 {
-    stuck_since_ms_ = 0;
+    reset_stuck_window();   // the anchor and the commanded-travel accumulator go with the clock
     escape_active_ = false;
 }
 
-bool ControllerSession::detect_stuck(bool pursuing, bool stalled_this_cycle, std::uint64_t now_ms)
+bool ControllerSession::detect_stuck(bool pursuing, float cmd_lin_mps,
+                                     const Eigen::Vector2f &pos_room, std::uint64_t now_ms)
 {
-    if (!params_ || !params_->stuck_recovery_enabled)
-    {
-        stuck_since_ms_ = 0;
-        return false;
-    }
-    // Pure debounce over the caller's per-cycle wedge signal. `pursuing` means an active, unreached
-    // target (goal_reached / lock-on / orient / path_blocked all returned before this). `stalled_this_
-    // cycle` is a PREDICTION ERROR: the robot is commanding translation but the base isn't achieving it
-    // (execute_plan), or there is no route at all (ensure_current_plan). A robot that IS moving as
-    // commanded — detour, slow nav, arrival rotation, a creep that is still sliding — is not stalled, so
-    // none of those false-fire. Only a command-without-motion sustained for stuck_confirm_ms is a wedge.
-    if (!pursuing || !stalled_this_cycle)
-    {
-        stuck_since_ms_ = 0;
-        return false;
-    }
+    if (!params_ || !params_->stuck_recovery_enabled) { reset_stuck_window(); return false; }
+    // Not commanding translation ⇒ nothing is being predicted, so nothing can be contradicted.
+    if (!pursuing || cmd_lin_mps <= 0.f) { reset_stuck_window(); return false; }
+
+    // ── A WEDGE IS UNACHIEVED NET DISPLACEMENT, NOT A LOW SPEED READING ──────────────────────────
+    // This used to compare base_speed_lin_ against stuck_slip_ratio * commanded. base_speed_lin_ is an
+    // EMA of |dpos|/dt evaluated ONLY on cycles where the pose changed, dividing by the pose-CHANGE
+    // interval — a design that is right for a smooth velocity readout and structurally unable to express
+    // a wedge. A robot jittering +-3 cm about a fixed point produces large |dpos| over a short dt, so it
+    // reports a healthy speed while going nowhere. MEASURED on the run that prompted this: commanded
+    // 10.33 m of travel over 20 s, path length 2.13 m, NET DISPLACEMENT 0.008 m — eight millimetres —
+    // with the base pinned at 0.55 m/s and 0.80 rad/s, no safety guard firing, and the wedge silent.
+    //
+    // So compare the two quantities the prediction is actually about: how far the robot was TOLD to
+    // travel since the clock started, against how far it ACTUALLY GOT from where it started. Net
+    // displacement is immune to oscillation by construction — jitter contributes nothing to it, which is
+    // the whole point — and no new parameter appears: stuck_slip_ratio and stuck_confirm_ms keep their
+    // meanings, applied to distance instead of to speed.
     if (stuck_since_ms_ == 0)
     {
-        stuck_since_ms_ = now_ms;   // start the wedge clock (a brief slip/hesitation is not a wedge)
+        stuck_since_ms_ = now_ms;
+        stuck_anchor_pos_ = pos_room;
+        stuck_cmd_travel_m_ = 0.f;
+        stuck_last_ms_ = now_ms;
         return false;
     }
-    return now_ms - stuck_since_ms_ > static_cast<std::uint64_t>(params_->stuck_confirm_ms);
+    const float dt = static_cast<float>(now_ms - stuck_last_ms_) * 1e-3f;
+    stuck_last_ms_ = now_ms;
+    if (dt > 0.f) stuck_cmd_travel_m_ += cmd_lin_mps * dt;
+
+    // ★JUDGED AT THE END OF A FULL WINDOW, NOT CONTINUOUSLY. Testing the ratio on every cycle looks
+    // natural and is wrong: early in the window the commanded travel is a few centimetres, so ANY pose
+    // jitter clears stuck_slip_ratio * that, restarts the clock, and the window can never mature. (My
+    // first version did exactly this and the replay below never fired.) Over a full stuck_confirm_ms the
+    // commanded travel is ~0.8 m at cruise, so the bar is ~0.2 m — far above jitter, and far below what
+    // a healthy robot covers. Same two parameters, and stuck_confirm_ms now also means what it says:
+    // how long the robot is watched before being judged.
+    if (now_ms - stuck_since_ms_ <= static_cast<std::uint64_t>(params_->stuck_confirm_ms)) return false;
+
+    const float achieved_m = (pos_room - stuck_anchor_pos_).norm();
+    if (achieved_m >= params_->stuck_slip_ratio * stuck_cmd_travel_m_)
+    {
+        // It went where it was told. Start the next window HERE, so each verdict is about one stretch.
+        stuck_since_ms_ = now_ms;
+        stuck_anchor_pos_ = pos_room;
+        stuck_cmd_travel_m_ = 0.f;
+        return false;
+    }
+    std::println("[controller] WEDGE — commanded {:.2f} m of travel over {:.1f} s and achieved {:.3f} m "
+                 "net ({:.0f}% of it, floor {:.0f}%). Escaping.",
+                 stuck_cmd_travel_m_, static_cast<float>(now_ms - stuck_since_ms_) * 1e-3f, achieved_m,
+                 stuck_cmd_travel_m_ > 1e-6f ? 100.f * achieved_m / stuck_cmd_travel_m_ : 0.f,
+                 100.f * params_->stuck_slip_ratio);
+    return true;
+}
+
+void ControllerSession::reset_stuck_window()
+{
+    stuck_since_ms_ = 0;
+    stuck_cmd_travel_m_ = 0.f;
 }
 
 void ControllerSession::begin_escape(const ControllerRobotPose &robot_pose,
