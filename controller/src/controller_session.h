@@ -46,6 +46,17 @@ public:
                                                               ControllerMotionCommander &motion_commander,
                                                               ControllerDisplay &display);
 
+    // Dispatcher: what both modes share, then hand off. Neither helper below serves the other's mode.
+    bool drive_mission_route(const ControllerPlanningStep &step,
+                             rc::TrajectoryController &path_controller,
+                             ControllerMotionCommander &motion_commander,
+                             const TimeSource &time_source);
+    bool drive_point_target(const ControllerPlanningStep &step,
+                            ControllerObstacleTracker &obstacle_tracker,
+                            rc::TrajectoryController &path_controller,
+                            ControllerMotionCommander &motion_commander,
+                            ControllerDisplay &display,
+                            const TimeSource &time_source);
     bool ensure_current_plan(const ControllerPlanningStep &step,
                              ControllerObstacleTracker &obstacle_tracker,
                              rc::TrajectoryController &path_controller,
@@ -339,7 +350,29 @@ private:
     // Deform the installed route in a window ahead of the robot against the live ESDF, every cycle.
     // Per-solve evidence lives in band_diag.csv (one row per ATTEMPT, so an inert band reads as inert);
     // there is deliberately no in-memory aggregate — it would be a second, unreadable copy of the file.
-    void step_route_band(const ControllerRobotPose &robot_pose, rc::TrajectoryController &path_controller);
+    // ── WHO OWNS THE CURVE BEING DRIVEN ──────────────────────────────────────────────────────────
+    // ONE decision, made in ONE place, then CONSULTED. It used to be re-derived independently by
+    // ensure_current_plan and by step_route_band from the same raw flags
+    // (route_active_ && mission_.running() && route_.valid(), plus plan_spline_valid_ &&
+    // plan_spline_.valid()) — two answers to one question, which is a disagreement waiting to happen.
+    // It happened: the band deformed a curve in place while another path toggled that curve's validity,
+    // and a consumer keyed on pointer identity saw the pointer alternate and reset itself every other
+    // cycle. A mission route and a point-target plan are the SAME TYPE reached by different paths, so
+    // nothing in the type system was ever going to catch that. This seam is what catches it: no consumer
+    // may pick a curve, so no consumer can pick a different one.
+    enum class DriveOwner { None, MissionRoute, PointPlan };
+    struct DrivenCurve
+    {
+        DriveOwner owner = DriveOwner::None;
+        const rc::RouteSpline *spline = nullptr;
+        const std::vector<Eigen::Vector2f> *samples = nullptr;   // deformed in place; stays current
+        std::size_t control_count = 0;
+        [[nodiscard]] bool valid() const { return owner != DriveOwner::None and spline != nullptr; }
+        [[nodiscard]] bool on_mission() const { return owner == DriveOwner::MissionRoute; }
+    };
+    [[nodiscard]] DrivenCurve driven_curve() const;
+
+    void step_route_band(const DrivenCurve &curve, const ControllerRobotPose &robot_pose, rc::TrajectoryController &path_controller);
     // Truncate band_diag.csv for THIS run, whether or not the band is enabled. Called before any early
     // return in step_route_band: a disabled run that never opens the file leaves the previous run's
     // rows at the fixed path for archive_on_stop to copy under this run's stamp.

@@ -771,6 +771,14 @@ float ControllerSession::route_speed_limit(float v_cap, float a_decel) const
     return std::clamp(v, std::min(0.15f, v_rot_min), v_cap);
 }
 
+// ── DRIVE-MODE SEPARATION ────────────────────────────────────────────────────────────────────────
+// ensure_current_plan is a DISPATCHER now, nothing more. It used to hold both regimes back to back in
+// one 260-line function, sharing current_plan_, plan_spline_valid_ and route_repair_pending_ between
+// them, so a reader had to track which of the two any given line belonged to — and a mission-side
+// mechanism could reach a point target's geometry without anything looking wrong. The two answer
+// different questions: "keep driving the curve I already have" versus "plan me a path to there".
+// What stays here is only what genuinely belongs to BOTH: the escape maneuver owns the base regardless
+// of mode, and a fresh target clears the stuck clock regardless of mode.
 bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
                                             ControllerObstacleTracker &obstacle_tracker,
                                             rc::TrajectoryController &path_controller,
@@ -796,130 +804,153 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
     // Built once, driven in arc-length coordinates. Nothing below this block runs in that mode: there is
     // no target to replan to, and re-issuing a path is exactly what destroys the follower's continuity.
     if (params_ and params_->route_continuous and mission_.running())
+        return drive_mission_route(step, path_controller, motion_commander, time_source);
+    return drive_point_target(step, obstacle_tracker, path_controller, motion_commander,
+                             display, time_source);
+}
+
+// ── MISSION ROUTE ────────────────────────────────────────────────────────────────────────────────
+// Built once and driven in ARC-LENGTH coordinates. There is no target to replan to here, and
+// re-issuing a path is exactly what destroys the follower's continuity — so this regime repairs
+// its curve in place and never re-plans. Nothing in drive_point_target runs in this mode.
+bool ControllerSession::drive_mission_route(const ControllerPlanningStep &step,
+                                           rc::TrajectoryController &path_controller,
+                                           ControllerMotionCommander &motion_commander,
+                                           const TimeSource &time_source)
+{
+    // A failed build must not be retried every cycle: that is ~30 A* calls and a screenful of log
+    // at 10 Hz, which buries the one line that says why. Try, then wait before trying again.
+    if (not route_active_ and time_source() - last_route_build_ms_ >= 2000)
     {
-        // A failed build must not be retried every cycle: that is ~30 A* calls and a screenful of log
-        // at 10 Hz, which buries the one line that says why. Try, then wait before trying again.
-        if (not route_active_ and time_source() - last_route_build_ms_ >= 2000)
+        last_route_build_ms_ = time_source();
+        const bool ok = build_route(step.robot_pose);
+        log_route_event("build", ok, time_source(), path_controller, 0.f);
+    }
+    if (not route_active_)
+    {
+        path_controller.stop();
+        motion_commander.stop_robot();
+        if (time_source() - last_no_route_log_ms_ >= 3000)
         {
-            last_route_build_ms_ = time_source();
-            const bool ok = build_route(step.robot_pose);
-            log_route_event("build", ok, time_source(), path_controller, 0.f);
+            last_no_route_log_ms_ = time_source();
+            std::println("[controller] HOLDING — the mission route could not be built.");
         }
-        if (not route_active_)
+        return false;
+    }
+    // ── LOCAL REPAIR ──
+    // A recovery reflex fired and put a new obstacle in the planner's world. In leg mode the next
+    // cycle simply replanned to the current target; here there is no target to replan to, so the
+    // route itself has to be re-authored around the blocker or nothing changes at all. Rate-limited
+    // for the same reason the build is: a repair is ~one A* call plus a refit, and retrying it every
+    // cycle would bury the one line that says whether it worked.
+    if (route_repair_pending_ and route_active_
+        and time_source() - last_route_repair_ms_ >= 1500)
+    {
+        last_route_repair_ms_ = time_source();
+        // How much route may be re-authored. Behind: the robot has just reversed out, so the detour
+        // must start somewhere it can still reach. Ahead: far enough to clear the blocker and rejoin.
+        constexpr float kRepairBackM = 1.0f;
+        constexpr float kRepairAheadM = 4.0f;
+        const auto result = route_.repair(step.robot_pose.pos, kRepairBackM, kRepairAheadM,
+                          [this](const Eigen::Vector2f &a, const Eigen::Vector2f &b)
+                          {
+                              auto r = grid_planner_.plan(a, b);
+                              if (not r.has_value()) last_plan_failure_ = grid_planner_.last_failure();
+                              return r;
+                          },
+                          [this](const Eigen::Vector2f &p, float hdg) { return grid_planner_.pose_free(p, hdg); });
+
+        using RR = rc::RouteFollower::RepairResult;
+        if (result == RR::NotNeeded)
         {
+            // The reflex fired but the route across the window is still footprint-feasible: whatever
+            // was seen is not on our path. Clear the request and KEEP DRIVING — the expensive mistake
+            // here is not a missed repair, it is re-authoring a good route and stopping to do it.
+            route_repair_pending_ = false;
+            log_route_event("repair_skipped", true, time_source(), path_controller, kRepairBackM + kRepairAheadM);
+        }
+        else if (result == RR::Repaired)
+        {
+            route_repair_pending_ = false;
+            ++route_repair_count_;
+            mission_.note_replan();   // count the repair that HAPPENED, not the reflex that asked for one
+            // Force the repaired curve to be installed: the follower is still holding the old one.
+            path_controller.stop();
+            current_plan_.reset();
+            plan_spline_valid_ = false;   // the fitted curve belongs to the plan being dropped
+            log_route_event("repair", true, time_source(), path_controller, kRepairBackM + kRepairAheadM);
+        }
+        else
+        {
+            // HOLD, and stay pending. The obstacle carries a TTL, so the retry after the cooldown
+            // either finds a detour or finds the blocker gone. Rebuilding the whole route would get
+            // the robot moving again, but it resets progress_ — laps and finished() would believe the
+            // robot was back at the start, and the run's metrics would silently stop meaning anything.
+            mission_.note_replan();
             path_controller.stop();
             motion_commander.stop_robot();
-            if (time_source() - last_no_route_log_ms_ >= 3000)
-            {
-                last_no_route_log_ms_ = time_source();
-                std::println("[controller] HOLDING — the mission route could not be built.");
-            }
+            log_route_event("repair_failed", false, time_source(), path_controller, kRepairBackM + kRepairAheadM);
             return false;
         }
-        // ── LOCAL REPAIR ──
-        // A recovery reflex fired and put a new obstacle in the planner's world. In leg mode the next
-        // cycle simply replanned to the current target; here there is no target to replan to, so the
-        // route itself has to be re-authored around the blocker or nothing changes at all. Rate-limited
-        // for the same reason the build is: a repair is ~one A* call plus a refit, and retrying it every
-        // cycle would bury the one line that says whether it worked.
-        if (route_repair_pending_ and route_active_
-            and time_source() - last_route_repair_ms_ >= 1500)
-        {
-            last_route_repair_ms_ = time_source();
-            // How much route may be re-authored. Behind: the robot has just reversed out, so the detour
-            // must start somewhere it can still reach. Ahead: far enough to clear the blocker and rejoin.
-            constexpr float kRepairBackM = 1.0f;
-            constexpr float kRepairAheadM = 4.0f;
-            const auto result = route_.repair(step.robot_pose.pos, kRepairBackM, kRepairAheadM,
-                              [this](const Eigen::Vector2f &a, const Eigen::Vector2f &b)
-                              {
-                                  auto r = grid_planner_.plan(a, b);
-                                  if (not r.has_value()) last_plan_failure_ = grid_planner_.last_failure();
-                                  return r;
-                              },
-                              [this](const Eigen::Vector2f &p, float hdg) { return grid_planner_.pose_free(p, hdg); });
-
-            using RR = rc::RouteFollower::RepairResult;
-            if (result == RR::NotNeeded)
-            {
-                // The reflex fired but the route across the window is still footprint-feasible: whatever
-                // was seen is not on our path. Clear the request and KEEP DRIVING — the expensive mistake
-                // here is not a missed repair, it is re-authoring a good route and stopping to do it.
-                route_repair_pending_ = false;
-                log_route_event("repair_skipped", true, time_source(), path_controller, kRepairBackM + kRepairAheadM);
-            }
-            else if (result == RR::Repaired)
-            {
-                route_repair_pending_ = false;
-                ++route_repair_count_;
-                mission_.note_replan();   // count the repair that HAPPENED, not the reflex that asked for one
-                // Force the repaired curve to be installed: the follower is still holding the old one.
-                path_controller.stop();
-                current_plan_.reset();
-                plan_spline_valid_ = false;   // the fitted curve belongs to the plan being dropped
-                log_route_event("repair", true, time_source(), path_controller, kRepairBackM + kRepairAheadM);
-            }
-            else
-            {
-                // HOLD, and stay pending. The obstacle carries a TTL, so the retry after the cooldown
-                // either finds a detour or finds the blocker gone. Rebuilding the whole route would get
-                // the robot moving again, but it resets progress_ — laps and finished() would believe the
-                // robot was back at the start, and the run's metrics would silently stop meaning anything.
-                mission_.note_replan();
-                path_controller.stop();
-                motion_commander.stop_robot();
-                log_route_event("repair_failed", false, time_source(), path_controller, kRepairBackM + kRepairAheadM);
-                return false;
-            }
-        }
-        if (not path_controller.is_active())
-        {
-            // set_path_presmoothed: the curve is already C2 and already footprint-checked, so the
-            // elastic band and the C1 spline inside set_path would only undo both.
-            path_controller.set_path_presmoothed(route_.path());
-        // The ROUTE tracker reads s, psi(s) and kappa_avg(s) from the curve itself. Non-owning: the band
-        // deforms this same spline in place just before compute, so the tracker sees the deformed curve
-        // without a state reset — which is the whole reason update_path_geometry exists for the polyline.
-        path_controller.set_route(&route_.spline());
-        // ── WHAT THIS ROUTE MAKES UNAVOIDABLE ───────────────────────────────────────────────────────
-        // Computed ONCE per route, from the spline and the identified plant. It is what makes J_route
-        // route-independent: the run's totals are divided by these, so each term reads ">= 1, where 1 is as
-        // well as the plant permits HERE" instead of being dominated by how much this particular tour turns.
-        // Same inputs route_speed_limit uses, so v* is the profile the robot will actually be held to.
-        {
-        const float v_cap = params_ ? params_->max_adv_speed_mps : 0.7f;
-        const float a_lat = params_ ? params_->max_lateral_accel_mps2 : 1.0f;
-        const float w_max = params_ ? params_->max_rot_speed_rps : 0.8f;
-        const auto &tp = path_controller.params;
-        const rc::RouteIdeal ideal = rc::route_ideal(route_.spline(), v_cap, a_lat, tp.cbf_max_decel,
-                                                     w_max, tp.plain_W, tp.plain_T_lag,
-                                                     route_tracker_active_ ? rot_headroom_ : 1.0f);
-        mission_.set_route_ideal(ideal.tv_v, ideal.tv_w, ideal.rms_e, ideal.valid);
-        std::println("[route] ideal floor: TV(v*)={:.2f} m/s  TV(w*)={:.2f} rad/s  rms(e*)={:.4f} m "
-                     "over {:.1f} m ({:.0f}% of the route contributes to TV(w*)){}",
-                     ideal.tv_v, ideal.tv_w, ideal.rms_e, ideal.length_m,
-                     ideal.length_m > 0.f ? 100.f * ideal.w_span / ideal.length_m : 0.f,
-                     ideal.valid ? "" : "   ⚠INVALID — J_route will be NaN");
-        }
-            // Seed the carrot's forward-only anchor at the robot's own arc length. After a repair the
-            // route is re-installed mid-drive, and a hint of 0 would aim the carrot at the route's start.
-            path_controller.set_carrot_hint(
-                static_cast<int>(route_.progress() / std::max(0.01f, route_.spline().spacing())));
-            path_controller.set_goal_facing_yaw(std::nullopt);
-            path_controller.set_arrival_point(std::nullopt);
-            // A TOUR ENDS WHERE IT BEGAN, so the follower's euclidean "am I near the last point?" test is
-            // true before the robot has moved: the route is installed, arrival fires on cycle 1, the
-            // session consumes it as an affordance arrival ("reached -> REACH") and stops. Measured:
-            // 09:34 completed the tour (progress 35.15/35.33 m); the next two runs recorded progress
-            // 0.00 m and 0.10 m of motion, because the robot was now parked on the endpoint. The mission
-            // is ended by arc length below (route_.finished()), which knows the difference between not
-            // yet departed and returned — so that is the only arrival test left running here.
-            path_controller.set_endpoint_arrival(false);
-            current_plan_ = ControllerPathPlan{.room_path = route_.path()};
-        }
-        return true;
     }
+    if (not path_controller.is_active())
+    {
+        // set_path_presmoothed: the curve is already C2 and already footprint-checked, so the
+        // elastic band and the C1 spline inside set_path would only undo both.
+        path_controller.set_path_presmoothed(route_.path());
+    // The ROUTE tracker reads s, psi(s) and kappa_avg(s) from the curve itself. Non-owning: the band
+    // deforms this same spline in place just before compute, so the tracker sees the deformed curve
+    // without a state reset — which is the whole reason update_path_geometry exists for the polyline.
+    path_controller.set_route(&route_.spline());
+    // ── WHAT THIS ROUTE MAKES UNAVOIDABLE ───────────────────────────────────────────────────────
+    // Computed ONCE per route, from the spline and the identified plant. It is what makes J_route
+    // route-independent: the run's totals are divided by these, so each term reads ">= 1, where 1 is as
+    // well as the plant permits HERE" instead of being dominated by how much this particular tour turns.
+    // Same inputs route_speed_limit uses, so v* is the profile the robot will actually be held to.
+    {
+    const float v_cap = params_ ? params_->max_adv_speed_mps : 0.7f;
+    const float a_lat = params_ ? params_->max_lateral_accel_mps2 : 1.0f;
+    const float w_max = params_ ? params_->max_rot_speed_rps : 0.8f;
+    const auto &tp = path_controller.params;
+    const rc::RouteIdeal ideal = rc::route_ideal(route_.spline(), v_cap, a_lat, tp.cbf_max_decel,
+                                                 w_max, tp.plain_W, tp.plain_T_lag,
+                                                 route_tracker_active_ ? rot_headroom_ : 1.0f);
+    mission_.set_route_ideal(ideal.tv_v, ideal.tv_w, ideal.rms_e, ideal.valid);
+    std::println("[route] ideal floor: TV(v*)={:.2f} m/s  TV(w*)={:.2f} rad/s  rms(e*)={:.4f} m "
+                 "over {:.1f} m ({:.0f}% of the route contributes to TV(w*)){}",
+                 ideal.tv_v, ideal.tv_w, ideal.rms_e, ideal.length_m,
+                 ideal.length_m > 0.f ? 100.f * ideal.w_span / ideal.length_m : 0.f,
+                 ideal.valid ? "" : "   ⚠INVALID — J_route will be NaN");
+    }
+        // Seed the carrot's forward-only anchor at the robot's own arc length. After a repair the
+        // route is re-installed mid-drive, and a hint of 0 would aim the carrot at the route's start.
+        path_controller.set_carrot_hint(
+            static_cast<int>(route_.progress() / std::max(0.01f, route_.spline().spacing())));
+        path_controller.set_goal_facing_yaw(std::nullopt);
+        path_controller.set_arrival_point(std::nullopt);
+        // A TOUR ENDS WHERE IT BEGAN, so the follower's euclidean "am I near the last point?" test is
+        // true before the robot has moved: the route is installed, arrival fires on cycle 1, the
+        // session consumes it as an affordance arrival ("reached -> REACH") and stops. Measured:
+        // 09:34 completed the tour (progress 35.15/35.33 m); the next two runs recorded progress
+        // 0.00 m and 0.10 m of motion, because the robot was now parked on the endpoint. The mission
+        // is ended by arc length below (route_.finished()), which knows the difference between not
+        // yet departed and returned — so that is the only arrival test left running here.
+        path_controller.set_endpoint_arrival(false);
+        current_plan_ = ControllerPathPlan{.room_path = route_.path()};
+    }
+    return true;
+}
 
+// ── POINT TARGET ─────────────────────────────────────────────────────────────────────────────────
+// A click target or an affordance standpoint: plan a path to a POINT, smooth it, install it, and
+// hold with a reason if no path exists. Never touches route_ — a mission owns that.
+bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
+                                          ControllerObstacleTracker &obstacle_tracker,
+                                          rc::TrajectoryController &path_controller,
+                                          ControllerMotionCommander &motion_commander,
+                                          ControllerDisplay &display,
+                                          const TimeSource &time_source)
+{
     if (mission_.running() and params_ and not params_->route_continuous and not waypoint_mode_logged_)
     {
         waypoint_mode_logged_ = true;
@@ -1187,7 +1218,21 @@ void ControllerSession::update_display(const std::optional<ControllerRobotPose> 
     display.set_stuck_active(escape_active_);
 }
 
-void ControllerSession::step_route_band(const ControllerRobotPose &robot_pose,
+ControllerSession::DrivenCurve ControllerSession::driven_curve() const
+{
+    // A MISSION route lives in route_; every point target — click or affordance — lives in plan_spline_.
+    // Mission wins when it is running, which is the same precedence every consumer used to implement
+    // for itself.
+    if (route_active_ and mission_.running() and route_.valid())
+        return {DriveOwner::MissionRoute, &route_.spline(), &route_.path(), route_.control_count()};
+    if (plan_spline_valid_ and plan_spline_.valid())
+        return {DriveOwner::PointPlan, &plan_spline_, &plan_spline_.samples(),
+                plan_spline_.control_points().size()};
+    return {};
+}
+
+void ControllerSession::step_route_band(const DrivenCurve &curve,
+                                        const ControllerRobotPose &robot_pose,
                                         rc::TrajectoryController &path_controller)
 {
     // Truncate the diagnostic FIRST, before any early return. Otherwise a run with the band OFF never
@@ -1197,17 +1242,13 @@ void ControllerSession::step_route_band(const ControllerRobotPose &robot_pose,
     ensure_band_csv(params_ != nullptr and params_->band_enabled);
     if (params_ == nullptr or not params_->band_enabled) return;
     if (not path_controller.is_active()) return;
-    // A MISSION route lives in route_; everything else (affordance target, click target) lives in
-    // plan_spline_. Both are the same object with the same retained control polygon, so the band works
-    // on either — it used to require a running mission, which is why an affordance route never moved.
-    // Narrow spaces and corners are exactly where a one-shot fit is weakest, so this is where the
-    // continuous version earns its keep.
-    const bool on_mission = route_active_ and mission_.running() and route_.valid();
-    if (not on_mission and not (plan_spline_valid_ and plan_spline_.valid())) return;
-    // Read-only for the window arithmetic; the deform itself goes through whichever owner holds the
-    // curve, so nothing needs to cast away constness to reach it.
-    const rc::RouteSpline &spline = on_mission ? route_.spline() : plan_spline_;
-    const std::size_t M = on_mission ? route_.control_count() : spline.control_points().size();
+    // The band no longer decides WHAT it may deform — it is told. Narrow spaces and corners are exactly
+    // where a one-shot fit is weakest, so this is where the continuous version earns its keep, on either
+    // owner's curve.
+    if (not curve.valid()) return;
+    const bool on_mission = curve.on_mission();
+    const rc::RouteSpline &spline = *curve.spline;
+    const std::size_t M = curve.control_count;
     if (M < 8) return;                       // nothing a window can be carved out of
     if (params_->band_period_cycles > 1 and (band_cycle_++ % params_->band_period_cycles) != 0) return;
 
@@ -1283,7 +1324,7 @@ void ControllerSession::step_route_band(const ControllerRobotPose &robot_pose,
     // Hand the follower the deformed geometry WITHOUT resetting it — see update_path_geometry. The
     // prefix is frozen, so arc length behind the robot is unchanged and progress()/waypoint arc lengths
     // still mean what they did.
-    const auto &deformed = on_mission ? route_.path() : plan_spline_.samples();
+    const auto &deformed = *curve.samples;
     path_controller.update_path_geometry(deformed);
     current_plan_ = ControllerPathPlan{.room_path = deformed};
 }
@@ -1414,7 +1455,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // itself against it. Runs on the ESDF built by the PREVIOUS compute — one cycle old, which is the
     // same age as everything else here and self-guarding on cycle 1, where the field is empty and every
     // query returns esdf_unknown_distance ⇒ no deficit ⇒ no force ⇒ the polygon does not move.
-    step_route_band(robot_pose, path_controller);
+    step_route_band(driven_curve(), robot_pose, path_controller);
 
     // ── SESSION ODOMETER ────────────────────────────────────────────────────────────────────────
     // Metres actually driven since the agent started — every mission, target and affordance, not per
