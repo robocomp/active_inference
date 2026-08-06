@@ -124,6 +124,16 @@ public:
         mppi_paths_toggle_btn->setChecked(false);
         toolbar_layout->addWidget(mppi_paths_toggle_btn);
 
+        // ── SESSION ODOMETER ─────────────────────────────────────────────────────────────────────
+        // Total metres driven since the agent started, across every mission, target and affordance —
+        // NOT per run. mission_metrics only records mission runs, so before this there was no way to
+        // ask "how far has this robot driven today".
+        session_metres_label_ = new QLabel(QStringLiteral("0.0 m"), toolbar);
+        session_metres_label_->setToolTip(QStringLiteral("Total distance driven this session "
+                                                         "(all missions, targets and affordances)"));
+        toolbar_layout->addWidget(new QLabel(QStringLiteral("session"), toolbar));
+        toolbar_layout->addWidget(session_metres_label_);
+
         toolbar_layout->addStretch();
 
         // Stuck-recovery indicator, pinned to the right of the toolbar. Hidden while the robot
@@ -197,6 +207,18 @@ public:
 	~Custom_widget()
     {
 
+    }
+
+    // Session odometer. Dedups to 0.1 m: called every cycle, and re-rendering an unchanged string
+    // churns Qt for nothing (the same reasoning as set_cmd_vel below).
+    void set_session_metres(float metres)
+    {
+        if (session_metres_label_ == nullptr) return;
+        if (std::isfinite(session_metres_shown_) and std::abs(metres - session_metres_shown_) < 0.1f) return;
+        session_metres_shown_ = metres;
+        session_metres_label_->setText(metres >= 1000.f
+            ? QString::number(static_cast<double>(metres) / 1000.0, 'f', 2) + " km"
+            : QString::number(static_cast<double>(metres), 'f', 1) + " m");
     }
 
     // The commanded base velocity, as numbers rather than a sentence. Dedups: this is called on every
@@ -332,6 +354,10 @@ private:
     QLabel *selected_affordance_value_ = nullptr;
     QString affordance_shown_;
     QLabel *stuck_status_label_ = nullptr;
+
+    QLabel *session_metres_label_ = nullptr;   // session odometer, toolbar
+
+    float session_metres_shown_ = std::numeric_limits<float>::quiet_NaN();
     bool stuck_active_shown_ = false;
     bool goal_aligning_shown_ = false;
 };

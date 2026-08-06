@@ -829,10 +829,8 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
             // set_path_presmoothed: the curve is already C2 and already footprint-checked, so the
             // elastic band and the C1 spline inside set_path would only undo both.
             path_controller.set_path_presmoothed(route_.path());
-        // The ROUTE tracker reads s, psi(s) and kappa_avg(s) from the curve itself. Non-owning: the band
-        // deforms this same spline in place just before compute, so the tracker sees the deformed curve
-        // without a state reset — which is the whole reason update_path_geometry exists for the polyline.
-        path_controller.set_route(&route_.spline());
+        // (The tracker's curve is chosen per cycle just before compute — route, plan, or none — so it
+        // is not set here any more; a one-shot assignment could not be un-set when the mission ended.)
         // ── WHAT THIS ROUTE MAKES UNAVOIDABLE ───────────────────────────────────────────────────────
         // Computed ONCE per route, from the spline and the identified plant. It is what makes J_route
         // route-independent: the run's totals are divided by these, so each term reads ">= 1, where 1 is as
@@ -1223,8 +1221,44 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // query returns esdf_unknown_distance ⇒ no deficit ⇒ no force ⇒ the polygon does not move.
     step_route_band(robot_pose, path_controller);
 
-    // Curvature-limited speed. Only a continuous route carries kappa(s); a click target has no curve, so
-    // it keeps the full envelope and the ceiling is cleared rather than left stale from a previous mission.
+    // ── SESSION ODOMETER ────────────────────────────────────────────────────────────────────────
+    // Metres actually driven since the agent started — every mission, target and affordance, not per
+    // run. MissionRunner integrates the same quantity but only while a mission is RUNNING, so nothing
+    // counted a click target or the drive back to a start point.
+    // The step is rejected when it implies a speed the base cannot produce: a localization jump is not
+    // travel, and one 2 m re-anchor would silently add 2 m to the odometer. The bound is the machine's
+    // own envelope, not a tuned number.
+    {
+        const Eigen::Vector2f &pos = robot_pose.pos;
+        if (odo_last_pos_.has_value() and overlay_now_ms_ > odo_last_ms_)
+        {
+            const float step = (pos - *odo_last_pos_).norm();
+            const float dt = static_cast<float>(overlay_now_ms_ - odo_last_ms_) * 1e-3f;
+            if (step <= (params_ ? params_->max_adv_speed_mps : 0.7f) * dt * 2.f)
+                session_distance_m_ += step;
+        }
+        odo_last_pos_ = pos;
+        odo_last_ms_ = overlay_now_ms_;
+    }
+
+    // ── WHICH CURVE IS THE TRACKER FOLLOWING? ───────────────────────────────────────────────────
+    // Decided every cycle, for exactly the reason the speed ceiling below is: a STALE one is worse than
+    // none. set_route used to be called once, from the mission path, with &route_.spline() — and
+    // route_spline_ was NEVER CLEARED. So after a mission ended the tracker kept following the old
+    // route while the user drove a click target: cross-track of metres, feedback demanding ~10 rad/s,
+    // and the robot pivoting on the spot instead of moving (measured: cmd_adv 7.5e-19, cmd_rot pinned
+    // at -0.800).
+    // ★AND A CLICK TARGET DOES HAVE A CURVE. smooth_plan() fits plan_spline_ for targets and
+    // affordances — it was simply never handed over, so PLAIN could not drive one even in principle.
+    if (route_active_ and mission_.running() and route_.valid())
+        path_controller.set_route(&route_.spline());
+    else if (plan_spline_valid_ and plan_spline_.valid())
+        path_controller.set_route(&plan_spline_);
+    else
+        path_controller.set_route(nullptr);
+
+    // Curvature-limited speed. Only a continuous ROUTE carries a speed profile; a plan keeps the full
+    // envelope, and the ceiling is cleared rather than left stale from a previous mission.
     if (route_active_ and mission_.running())
         path_controller.set_speed_limit(route_speed_limit(params_ ? params_->max_adv_speed_mps : 0.7f,
                                                           path_controller.params.cbf_max_decel));
@@ -1234,6 +1268,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     const auto control_output = path_controller.compute(robot_pose.as_transform());
     // Surface what the ARRIVAL test is waiting on, every cycle, before any of the branches below can return
     // early — otherwise the readout would freeze exactly in the states worth watching (aligning, blocked).
+    display.set_session_distance(session_distance_m_);
     display.set_goal_distance(control_output.dist_to_goal, control_output.goal_yaw_err_rad,
                               control_output.aligning);
     last_mppi_trajectories_ = control_output.trajectories_room;
@@ -1275,8 +1310,10 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         // profile.csv's route_s_m (RouteFollower::progress()) — different projection, different window.
         // Only this one drives the control law, and it had never been recorded, so every "projection
         // jump" measured before now described the session's projection instead of the tracker's.
-        const float track_s = (route_active_ and route_.valid())
-                            ? route_.spline().length() - control_output.dist_to_goal : -1.f;
+        // ★Read from the tracker, not reconstructed. It used to be route_length - dist_to_goal, which is
+        // s only because PlainTracker happens to put s_remaining in dist_to_goal; in PD/MPPI that field
+        // is a EUCLIDEAN norm, so the same CSV column meant two different things by mode.
+        const float track_s = path_controller.tracker_arc_length().value_or(-1.f);
         log_mppi_diagnostics(overlay_now_ms_, control_output, control_output.adv, base_speed_lin_,
                              kappa_here, track_s, room_vel_.omega, ud.xy_std_m, ud.theta_std_rad, robot_pose,
                              motion_commander.last_output_rate_stats(),
@@ -1364,7 +1401,18 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         // reference (a click target has no route), and the stats skip it rather than inventing a zero.
         float cross_track = std::numeric_limits<float>::quiet_NaN();
         float heading_err = 0.f, ref_kappa = 0.f;
-        if (route_active_)
+        // ★SCORE THE RUN ON THE PROJECTION THAT STEERED IT. PlainTracker publishes the Frenet pair it
+        // actually used (out.cross_track_m, out.carrot_bearing_rad at its own s_hint_); recomputing it
+        // here at route_.progress() scored the run on the OTHER projection — the one measured jumping
+        // 2.98 m against the tracker's 0.73 m. cross_track_rms is the objective tools/adapt_L.py
+        // minimises, so it must be the tracker's error, not a bystander's.
+        if (route_tracker_active_ and route_active_ and std::isfinite(control_output.cross_track_m))
+        {
+            cross_track = control_output.cross_track_m;
+            heading_err = control_output.carrot_bearing_rad;
+            ref_kappa = route_.valid() ? route_.spline().curvature_at(route_.progress()) : 0.f;
+        }
+        else if (route_active_)
         {
             const float s_now = route_.progress();
             const Eigen::Vector2f ref = route_.spline().position_at(s_now);

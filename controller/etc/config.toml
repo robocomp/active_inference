@@ -283,7 +283,8 @@ PlainTrackerW = 0.40
 PlainTrackerRotHeadroom = 0.70
 # ── THE HAIRPIN PAIR — neither works without the other (see controller_types.h) ──
 # This tour turns 178 deg at s=24.18. BrakeK is an exponential brake on advance vs the DEMANDED turn
-# rate, v *= exp(-k*(omega_want/max_rot)^2). The ratio coupling alone braked only on SATURATION, so just
+# rate, v *= exp(-k*(omega_ccw/max_rot)^2)  [omega_ccw = CLAMPED; the exponent was the unbounded
+# demand when k=0.25 was measured — see plain_tracker.cpp]. The ratio coupling alone braked only on SATURATION, so just
 # under the cap the robot drove flat out while turning flat out. ProjWindow is how far forward in ARC
 # LENGTH the projection may search: at 2 m the hairpin's fold sat inside it, the search snapped to the
 # returning leg, and the robot turned around where the two legs touch instead of driving to the tip.
@@ -328,7 +329,14 @@ PlainTrackerProjWindow = 2.00
 #     v = min(v_profile, max_rot/|k_cmd|);  omega = g_dc*v*k_cmd
 # At a cusp |k_cmd| is large, so v collapses and omega saturates at max_rot — that is the point turn,
 # with no cos power and no mode. Off the path, k_eff grows as k_path*e_y approaches 1, so v collapses —
-# that was the offset gate. And omega = v*k_cmd cannot die at a standstill, so the steering floor went too.
+# that was the offset gate.
+# ⚠CORRECTION (2026-08-06): the third claim — "omega = v*k_cmd cannot die at a standstill, so the
+# steering floor went too" — is WRONG on both counts. The shipped law is not omega = v*k_cmd but
+# omega = g_dc*(v*k_ff + v_steer*k_fb), and kSteerFloorMps = 0.15 is STILL IN plain_tracker.cpp,
+# committed and live. It is also BINDING, in exactly two places: at the s=23.9 cusp, where
+# route_speed_limit deliberately returns ~0.07 m/s via clamp(v, min(0.15, v_rot_min), v_cap), and
+# through the end-of-route taper, where v_stop -> 0 by construction. Every plain lap measured to date
+# ran WITH it. Left in place: removing it is a change to the control law and needs its own lap.
 # ★The tracker is back to five parameters, three of them (TLag, Gdc, W) IDENTIFIED constants rather than
 # choices. If a knob looks necessary here, the law is probably wrong somewhere else.
 PdCrossTrackGain = 1.4

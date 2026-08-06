@@ -33,6 +33,7 @@ set_target_properties(route_bench PROPERTIES
 # one command away.
 add_executable(tracker_sim
   tracker_sim.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/../src/trackers/plain_tracker.cpp
   ${CMAKE_CURRENT_LIST_DIR}/../src/grid_planner.cpp
   ${CMAKE_CURRENT_LIST_DIR}/../src/route_spline.cpp
   ${CMAKE_CURRENT_LIST_DIR}/../src/route_follower.cpp

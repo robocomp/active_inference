@@ -273,6 +273,11 @@ private:
     // ~1.2e8 segment tests at 154 polygons and stopped returning). Collision is the authored footprint, not an
     // inflated obstacle, so the six stacked C-space margins collapse to one explicit safety_margin_m.
     rc::GridPlanner grid_planner_;
+    // Session odometer: metres driven since startup, across every mission and target (see the cycle).
+    float session_distance_m_ = 0.f;
+    std::optional<Eigen::Vector2f> odo_last_pos_;
+    std::uint64_t odo_last_ms_ = 0;
+
     rc::MissionRunner mission_;
     // CONTINUOUS ROUTE MODE. The whole mission as one arc-length curve; no per-waypoint target, no
     // arrival test, no per-waypoint replan. Built once when a mission starts.
@@ -283,6 +288,9 @@ private:
     bool  plan_spline_valid_ = false;
     float plan_progress_s_ = 0.f;      // robot's arc length along plan_spline_, forward-only
     rc::RouteFollower route_;
+public:
+    [[nodiscard]] float session_distance_m() const { return session_distance_m_; }
+private:
     // ── Local elastic band (see step_route_band / ControllerParams::band_*) ──
     // Deform the installed route in a window ahead of the robot against the live ESDF, every cycle.
     // Per-solve evidence lives in band_diag.csv (one row per ATTEMPT, so an inert band reads as inert);

@@ -311,7 +311,7 @@ struct TrackerParams
     // rule's own prescription of 1.37 gave 380 mm rms against 100 mm at 0.60. The rule's LOWER
     // bound survives — the sweep does degrade below ~0.45 m — so 0.60 sits just above it.
     // ★L is a constant of the CONTROLLER, not of the robot: it is deliberately NOT adapted.
-    float plain_L = 0.60f;
+    float plain_L = 0.50f;
     // ★THE TERM THE DESIGN FORGOT. The curvature speed limit permits v = omega_max/kappa, which
     // hands the FEEDFORWARD the entire rotation budget — and g_dc pushes it past the clamp — so on
     // every curve the command saturates and the feedback loop is effectively open. Measured in
@@ -323,7 +323,7 @@ struct TrackerParams
     // driving it, and both are fixed here.
     //
     // 1. plain_brake_k — an EXPONENTIAL brake on advance against the DEMANDED turn rate:
-    //        v *= exp(-k * (omega_want/max_rot)^2)
+    //        v *= exp(-k * (omega_ccw/max_rot)^2)   // omega_ccw = the CLAMPED rate
     //    The ratio coupling alone brakes only when omega SATURATES, so at omega_want just under the cap
     //    the robot drove at FULL speed while turning at maximum rate — precisely the approach to a
     //    hairpin. This brakes continuously and reaches zero, which is what makes a true point turn
@@ -336,7 +336,7 @@ struct TrackerParams
     //    Below 2.0 it stalls at the hairpin outright. 2.0 is the knee: through, best rms, fastest.
     //    ⚠PD's 0.5 is NOT enough here — PD gets away with it because its carrot cuts the corner, while
     //    this tracker has to actually turn.
-    float plain_brake_k = 2.0f;
+    float plain_brake_k = 0.25f;
     // 2. plain_proj_window — how far FORWARD IN ARC LENGTH the projection may search.
     //    The route is a DIRECTED curve, so arc length only moves forward and a projection cannot
     //    legitimately jump 2.5 m in one cycle however close the two points are in space. It did, because
@@ -348,7 +348,7 @@ struct TrackerParams
     //    ⚠THE TWO ARE A PAIR. Tightening this without the brake STALLS the robot at the hairpin (it is
     //    then held to the curve and cannot execute the reversal); adding the brake without tightening
     //    this changes nothing, because the search still leaps the fold and skips the corner entirely.
-    float plain_proj_window = 0.60f;
+    float plain_proj_window = 2.00f;
     // ★NOTE FOR ANYONE TEMPTED TO ADD ONE HERE. Between them, plain_align_power (a cos^5 pivot),
     // plain_offset_gate_ref (an offset speed gate) and plain_ff_denom_min (a feedforward denominator
     // floor) were added across four laps in one session and then ALL THREE DELETED on 2026-08-05, along

@@ -43,14 +43,15 @@ ControlOutput& PlainTracker::compute(ControlOutput& out, const TrackerInput& in,
 
     // Monotone-forward projection: the tour crosses itself, so a global nearest-point search would snap
     // onto a branch driven ten metres ago.
-    // ★reacquire_ is set by reset(), which TrajectoryController::stop() calls. A monotone projection is
+    // ★An EMPTY s_hint_ means re-acquire; reset() empties it, and TrajectoryController::stop() and
+    // set_route (on a curve change) both call reset(). A monotone projection is
     // only meaningful within ONE traversal — across a mission stop, or a repaired curve, it is stale,
     // and stale arc length pointed the tracker at the route's END POINT after a restart (route_s pinned
     // at 0.20 m, robot driving into a wall). Re-acquiring searches the whole route once and adopts the
     // nearest point: the route start after a stop, the robot's own position after a repair.
-    if (reacquire_) { s_hint_ = sp.project(pos, 0.f, sp.length()); reacquire_ = false; }
-    else            { s_hint_ = sp.project(pos, s_hint_, std::max(0.05f, p.plain_proj_window)); }
-    const float s = s_hint_;
+    s_hint_ = s_hint_ ? sp.project(pos, *s_hint_, std::max(0.05f, p.plain_proj_window))
+                      : sp.project(pos, 0.f, sp.length());
+    const float s = *s_hint_;
 
     const Eigen::Vector2f r = sp.position_at(s);
     const float psi = sp.heading_at(s);
@@ -94,21 +95,23 @@ ControlOutput& PlainTracker::compute(ControlOutput& out, const TrackerInput& in,
     const float omega_ccw = std::clamp(omega_want, -p.max_rot, p.max_rot);
     const float scale = std::abs(omega_want) > 1e-6f
                       ? std::abs(omega_ccw) / std::abs(omega_want) : 1.f;
-    // ★EXPONENTIAL BRAKE on the DEMANDED turn rate — see plain_brake_k. It subsumes the saturation
-    // ratio above (it keeps falling past the cap, where the ratio is all that acted before) and, unlike
-    // it, brakes BEFORE saturation: at omega_want just under max_rot the ratio is 1 and the robot would
-    // otherwise drive at full speed while turning flat out, which is the approach to every hairpin.
-    // At k=0 this reduces to the ratio coupling exactly.
-    // ★BOTH, not either. They answer different questions and the robot needs both answers:
-    //   scale — "do not demand a turn rate the robot cannot deliver" (acts only once omega SATURATES)
-    //   brake — "slow down as the demand grows"            (acts BEFORE saturation, and keeps acting after)
-    // It was a ternary, so setting brake_k = 0 silently removed the coupling ENTIRELY rather than
-    // falling back to the ratio — i.e. back to the law that drove into a counter at the hairpin with
-    // |cmd_rot| pinned at the cap on 53% of cycles. A min() cannot do that: at k = 0 the brake is 1 and
-    // the ratio still holds, and at any k > 0 the brake dominates well before the ratio would act.
-    // Measured on the robot at k = 0.25 (L = 0.50, single variable): cross_track_max 0.407 -> 0.276,
-    // rot/m 0.865 -> 0.800, min_clearance 0.0138 -> 0.0706, and 4% FASTER.
-    const float r_om = omega_want / std::max(0.05f, p.max_rot);
+    // ★EXPONENTIAL BRAKE on the turn rate, times the saturation ratio's job — BOTH, not either:
+    //   brake — "slow down as the turn demand grows". Acts BEFORE saturation, which is the approach to
+    //           every hairpin: at omega just under max_rot the ratio is still 1 and the robot would
+    //           otherwise drive flat out through the turn.
+    //   scale — "do not demand a turn the robot cannot deliver". Acts only ONCE omega saturates,
+    //           decaying as 1/demand.
+    // ★THE EXPONENT USES THE DELIVERABLE RATE (omega_ccw, clamped), NOT THE DEMAND. With omega_want
+    // unbounded the brake goes to ZERO and that DEADLOCKS: e_y can only be reduced by MOVING, so a
+    // robot at v = 0 pivots at max rate forever and never approaches the path. Observed driving a
+    // single-shot target, whose plan starts off-path: cmd_adv = 7.5e-19, cmd_rot pinned at -0.800,
+    // demand ~10 rad/s (at L = 0.50 the feedback alone gives 4 rad/s per metre of cross-track).
+    // ⚠CONSEQUENCE: r_om is pinned at 1 past the cap, so the brake is CONSTANT there at exp(-k) —
+    // it no longer "keeps falling past saturation", and scale is what acts beyond the cap. That is why
+    // both terms are kept. It also means the k = 0.25 optimum was measured on the UNBOUNDED exponent
+    // (3 laps, 2026-08-05, before this bound) and has not been re-measured since.
+    // At k = 0 this reduces to the saturation ratio alone.
+    const float r_om = omega_ccw / std::max(0.05f, p.max_rot);
     const float brake = std::exp(-std::max(0.f, p.plain_brake_k) * r_om * r_om);
     const float v_cmd = std::clamp(v_profile * std::min(scale, brake), 0.f, p.max_adv);
 

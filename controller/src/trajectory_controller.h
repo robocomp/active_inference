@@ -125,6 +125,11 @@ public:
     // ★Handing over a DIFFERENT spline invalidates any arc length measured against the previous one, so
     // the trackers' projections are dropped here too. Same defect as in stop(): s_hint_ is monotone
     // within one traversal and means nothing across two.
+    // The arc length the PLAIN control law actually used this cycle. Empty in any other mode, and
+    // before the first cycle of a traversal. NOT RouteFollower::progress() — a different projection
+    // with a different window, which is why both are logged.
+    [[nodiscard]] std::optional<float> tracker_arc_length() const { return plain_tracker_.arc_length_hint(); }
+
     void set_route(const RouteSpline *spline)
     {
         if (spline != route_spline_) { plain_tracker_.reset(); pd_tracker_.reset(); }

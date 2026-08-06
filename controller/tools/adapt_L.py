@@ -17,13 +17,22 @@ against a live grid every run — one 119 mm waypoint repair moved jerk/m by 38%
 byte-identical authored waypoints. So they cannot be optimised against on hardware, and neither can J,
 which is built from them.
 
-WHY A CONSTRAINT AND NOT A WEIGHTED SUM. rms(L) has NO interior minimum: it falls monotonically as L
-shrinks (tools/tracker_sim on the pinned world: 160 mm at L=1.40 down to 50 mm at L=0.25). Minimising
-it alone drives the gains 2/L and 1/L^2 up until the loop rings — the policy would find the stability
-boundary, not an optimum. What tightening actually costs shows up elsewhere: at L=0.25 the lap takes
-213 s against 145, and TV(w)/m is 2.2x worse. The constraint is what puts that cost back in, and a
-hard limit keeps "how much roughness is acceptable" an explicit engineering choice rather than a
-weight someone has to justify.
+WHY A CONSTRAINT AND NOT A WEIGHTED SUM. Minimising rms alone drives the gains 2/L and 1/L^2 up until
+the loop rings — the policy would find the stability boundary, not an optimum. What tightening costs
+shows up elsewhere (TV(w)/m, lap time), so the hard limit is what puts that cost back in, and it keeps
+"how much roughness is acceptable" an explicit engineering choice rather than a weight to justify.
+
+⚠THE "rms FALLS MONOTONICALLY WITH L" CLAIM IS WITHDRAWN (2026-08-06). It came from tracker_sim back
+when that bench carried a hand-written REPLICA of the tracker; the bench now links PlainTracker itself,
+and the same sweep is NOT monotone:
+
+    L      0.45    0.50    0.60    0.75    1.00
+    rms mm 75.1    98.0    90.7   108.3   236.1
+    rot/m  1.293   1.314   1.185   1.117   1.137
+
+So there may well be an interior minimum, and the step-down search below can walk past one. It is still
+sound as a bracketing search under the constraint — it just no longer has a monotonicity argument
+behind it. Treat a reversal as information, not noise, and halve --step.
 
 ⚠THE SIM IS A PRIOR, NOT AN ANSWER. It has no pose noise, and low L means high gain on a noisy
 measurement, so the robot suffers where the bench does not. Its rms-optimal L=0.25 also sits below the

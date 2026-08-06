@@ -652,10 +652,12 @@ TrajectoryController::ControlOutput TrajectoryController::compute(
     // ---- PLAIN: the route-following tracker. It does no avoidance, so blockage detection (which is
     // what triggers a replan) MUST run first — it is the only thing that notices the route has become
     // undrivable, and in this mode nothing else is looking. ----
-    if (control_mode_ == ControlMode::PLAIN and route_spline_ != nullptr and route_spline_->valid())
+    // PLAIN always drives in PLAIN mode — including click targets, which now carry a fitted
+    // plan_spline_. PlainTracker returns a zero command when handed no curve at all, so the "is there a
+    // curve" test belongs in ONE place (the session, per cycle) rather than being duplicated here.
+    if (control_mode_ == ControlMode::PLAIN)
     {
         detect_path_blockage(out, robot_pose);
-        out.min_esdf = query_esdf(0.f, 0.f);
         return plain_tracker_.compute(out, make_tracker_input(robot_pose, carrot_robot, goal_robot),
                                      active_params_);
     }

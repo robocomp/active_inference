@@ -56,19 +56,24 @@ public:
     //     -> the robot is somewhere in the middle, and the nearest point is right where it stands.
     // Forcing s_hint_ to 0 would satisfy the first and break the second — the tracker would steer at the
     // route's beginning from thirty metres away, which is the same "drives into a wall" failure.
-    void reset() override { reacquire_ = true; }
+    void reset() override { s_hint_.reset(); }
 
     ControlOutput& compute(ControlOutput& out, const TrackerInput& in, const TrackerParams& p) override;
 
-    float arc_length_hint() const { return s_hint_; }
+    // The arc length the control law actually used. Empty before the first cycle of a traversal.
+    [[nodiscard]] std::optional<float> arc_length_hint() const { return s_hint_; }
+
+    // Pin the projection. For OFFLINE BENCHES only (tools/tracker_sim), which sweep s themselves so the
+    // steering law can be measured independently of the projection. The agent never calls this.
+    void seed_arc_length(float s) { s_hint_ = s; }
 
 private:
     const PathWorld& world_;
-    // The state this tracker keeps: a monotone-forward arc-length projection, and the previous position
-    // used to bound how fast that projection may advance. The tour crosses itself, so a global
-    // nearest-point search would snap onto a branch driven ten metres ago.
-    float s_hint_ = 0.f;
-    // Set by reset(); consumed by the next compute(), which then searches the whole route once.
+    // The monotone-forward arc-length projection. EMPTY means "re-acquire": one optional carries
+
+    // both the value and its validity, so a stale hint cannot be read as a live one.
+
+    std::optional<float> s_hint_;
     bool  reacquire_ = true;
 };
 

@@ -27,6 +27,7 @@
 
 #include "../src/route_follower.h"
 #include "../src/route_spline.h"
+#include "../src/trackers/plain_tracker.h"
 #include "../src/grid_planner.h"
 #include "../../common/robot_footprint/robot_footprint.h"
 
@@ -155,45 +156,63 @@ struct PdArm
     }
 };
 
-// ── ARM B: "plain" — curvature feedforward + critically damped Frenet feedback ──────────────────
+// ── ARM B: "plain" — THE REAL TRACKER, LINKED, NOT COPIED ──────────────────────────────────────
+// This used to be a hand-written replica of plain_tracker.cpp, kept in sync by a comment. It drifted
+// TWICE: first to a reverted feedforward design, then (silently, after the comment was written) the
+// robot moved its brake exponent to the CLAMPED rate while the copy kept the unbounded demand — so the
+// k = 0.25 sweep optimised a law the robot was no longer running. PlainTracker::compute depends only on
+// PathWorld::route_spline() — never on body_extent, never on a field — so a four-line stub world links
+// the real thing and the class of bug is gone.
+struct SimWorld : rc::PathWorld
+{
+    const rc::RouteSpline *sp = nullptr;
+    [[nodiscard]] const rc::RouteSpline *route_spline() const override { return sp; }
+    // PlainTracker never calls these — the compiler cannot know that, but the whole point of the
+    // PathWorld/FieldWorld split is that this file can assert it. If a future tracker change makes one
+    // of them fire, the bench aborts loudly rather than measuring a made-up robot.
+    float body_extent(const Eigen::Vector2f &, float) const override { std::abort(); }
+    float body_extent_max() const override { std::abort(); }
+};
+
 struct FfArm
 {
-    // ★SYNCED to src/trackers/plain_tracker.cpp as committed (2487aeb). It previously carried a REVERTED
-    // design — an offset-corrected feedforward kappa/(1-kappa*e_y) and a two-pass fixed point — so any
-    // sweep run here would have optimised a controller that is not the one on the robot.
-    float L = 0.50f;            // THE free parameter (robot is at 0.50): feedback error-decay length, in metres of arc
+    float L = 0.50f;            // THE free parameter (robot is at 0.50): error-decay length, metres of arc
     float T_lag = 0.42f;        // identified total lag
     float g_dc = 1.f / 0.89f;   // identified DC gain, inverted
     float W = 0.40f;            // route's own smoothing scale
-    static constexpr float kSteerFloor = 0.15f;
-    // Exponential brake on advance vs DEMANDED turn rate: v *= exp(-k*(omega_want/w_max)^2). 0 = off
-    // (the shipped ratio-only coupling, which brakes ONLY on saturation and so runs at full speed at
-    // omega_want just below the cap). PdArm has had this as gauss_k = 0.5 all along.
-    float brake_k = 0.25f;   // shipped
-    float steer_floor = 0.15f;   // 0 = removed; the feedback then evaluates at the real speed
+    float brake_k = 0.25f;      // shipped
 
+    // The sim drives s itself (it sweeps the route open-loop), so the tracker's own projection is
+    // overridden each step to keep the two benches comparable.
     void control(const rc::RouteSpline &sp, float s, float px, float py, float th,
                  float v_limit, float w_max, float &v_cmd, float &w_cmd) const
     {
-        const Vector2f r = sp.position_at(s);
-        const float psi = sp.heading_at(s);
-        const float e_y = -std::sin(psi) * (px - r.x()) + std::cos(psi) * (py - r.y());  // left positive
-        const float e_psi = wrap(th - psi);
+        // ★LOCAL, not a member. A member tracker holds a REFERENCE to a member world, so copying the
+        // arm (the sweeps do: `FfArm a; a.L = x;` then pass it on) leaves the copy's tracker pointing at
+        // the ORIGINAL's world — sp stays null, PlainTracker returns adv = 0, and every sweep row reads
+        // a flawless 0.0 mm because the robot never moved. PlainTracker's only state is s_hint_, which
+        // this bench seeds every call, so a fresh one per step is exactly equivalent and cannot alias.
+        SimWorld world;
+        world.sp = &sp;
+        rc::PlainTracker tracker{world};
+        rc::TrackerParams p;
+        p.plain_L = L; p.plain_T_lag = T_lag; p.plain_g_dc = g_dc; p.plain_W = W;
+        p.plain_brake_k = brake_k;
+        p.plain_proj_window = 0.f;      // clamped to 0.05 inside; s is re-seeded below anyway
+        p.max_adv = v_limit; p.max_rot = w_max;
+        p.cbf_max_decel = 1e6f;         // no end taper: this bench measures the steering law alone
 
-        const float k_ff = sp.kappa_avg(s + v_limit * T_lag, W);
-        const float k_fb = -(2.f / L) * e_psi - (1.f / (L * L)) * e_y;
-        // omega FIRST, then the advance scaled by the factor omega had to be clipped by. That ratio
-        // preserves the commanded ARC (kappa = omega/v), so a saturated turn becomes a slower turn of
-        // the SAME shape rather than a wider one.
-        // Mirrors plain_tracker.cpp: omega first, then v cut by min(saturation ratio, exponential brake).
-        const float v_fb = steer_floor > 0.f ? std::max(v_limit, steer_floor) : v_limit;
-        const float omega_want = g_dc * (v_limit * k_ff + v_fb * k_fb);
-        w_cmd = std::clamp(omega_want, -w_max, w_max);
-        const float scale = std::fabs(omega_want) > 1e-6f
-                          ? std::fabs(w_cmd) / std::fabs(omega_want) : 1.f;
-        const float r_om = omega_want / w_max;   // 'r' is the route point above
-        const float brake = std::exp(-std::max(0.f, brake_k) * r_om * r_om);
-        v_cmd = v_limit * std::min(scale, brake);
+        rc::TrackerInput in;
+        in.robot_pose = Eigen::Affine2f::Identity();
+        in.robot_pose.translation() = Eigen::Vector2f{px, py};
+        // PlainTracker takes the ROBOT frame convention (+Y forward); the sim carries maths heading.
+        in.robot_pose.linear() = Eigen::Rotation2Df(th - static_cast<float>(M_PI_2)).toRotationMatrix();
+
+        tracker.seed_arc_length(s);
+        rc::ControlOutput out;
+        tracker.compute(out, in, p);
+        v_cmd = out.adv;
+        w_cmd = -out.rot;               // back to CCW-positive, the sim's convention
     }
 };
 
@@ -737,26 +756,11 @@ int main(int argc, char **argv)
         }
     }
 
-    {
-        // ── DOES THE STEER FLOOR STILL DO ANYTHING? ──────────────────────────────────────────────
-        // omega_want evaluates the FEEDBACK at max(v_profile, 0.15). But route_speed_limit already
-        // floors v_profile at 0.15 mid-route, so the max can only bind at the END TAPER, where
-        // v_profile -> 0 — and there it keeps the robot ROTATING after it should have stopped. Same
-        // class of bug as the sqrt(0.15^2 + 2ad) taper floor removed earlier today.
-        // It also matters at any genuine standstill: with it, feedback keeps authority; without it,
-        // omega -> 0 as v -> 0 and the robot cannot turn on the spot at all.
-        std::printf("\n  steer floor (feedback reference speed), brake_k = 0.25, L = %.2f:\n", FfArm{}.L);
-        std::printf("      %-14s %9s %9s %10s %9s %10s\n", "floor m/s", "rms mm", "max mm", "rot/m", "time s", "reached s");
-        for (const float fl : {0.0f, 0.05f, 0.15f, 0.30f})
-        {
-            FfArm arm; arm.steer_floor = fl;
-            const Result R = run(route, arm, w.v_max, kWmax, w.a_lat, kADec, kW, false);
-            const double rms = R.n ? std::sqrt(R.e_sq / R.n) : 0.0;
-            const bool fin = R.s_end >= route.spline().length() - 0.5f;
-            std::printf("      %-14.2f %9.1f %9.1f %10.3f %9.0f %10.2f%s\n", fl, rms*1000, R.e_max*1000,
-                        R.dist>0.1 ? R.rot_effort/R.dist : 0.0, R.t_end, R.s_end, fin ? "" : "   DNF");
-        }
-    }
+
+    // (The steer-floor sweep lived here. It cannot run any more: the floor is a constant inside
+    // PlainTracker, not a parameter, and this bench now LINKS the tracker instead of copying it —
+    // sweeping it would mean adding a knob to the robot to serve the bench. Its answer is already
+    // recorded in etc/config.toml; re-run it by editing kSteerFloorMps if it is ever reopened.)
 
     report("pd", run(route, PdArm{}, w.v_max, kWmax, w.a_lat, kADec, kW, true));
     report("plain (FF+Frenet)", run(route, FfArm{}, w.v_max, kWmax, w.a_lat, kADec, kW, true));
