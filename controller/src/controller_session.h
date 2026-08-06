@@ -289,6 +289,9 @@ private:
     bool manual_target_dirty_ = false;
     std::uint64_t active_target_id_ = 0;
     bool room_wait_logged_ = false;
+    // Latched on the MODE, not a bool: the idle notice must speak again after a mode change, and once
+    // per process is how a Target-mode idle stayed invisible.
+    std::optional<rc::DriveMode> target_wait_logged_mode_;
     bool target_wait_logged_ = false;
     // Rate limit for the "target is boxed in" warning — the condition persists as long as the target does.
     std::uint64_t last_unreachable_log_ms_ = 0;

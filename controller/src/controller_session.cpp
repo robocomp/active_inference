@@ -222,10 +222,23 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
                             : world_model.read_target_in_room(timestamp_ms);
     if (!target.has_value())
     {
-        if (!target_wait_logged_ and mission_.mode() == rc::DriveMode::AffordancesOnly)
+        // ── IDLE FOR WANT OF A TARGET, AND SAY SO — IN EVERY MODE ────────────────────────────────
+        // This spoke only in AffordancesOnly. In Target mode it stopped the base and returned in total
+        // silence, writing not even a diagnostic row, which is indistinguishable from a hang: the CSV
+        // freezes, the [CTRL] fps line keeps ticking, and the robot sits there.
+        // It is reachable in Target mode by an ordinary sequence: finishing an affordance runs
+        // finalize_reached, which clears manual_target_room_ along with everything else it retires, so
+        // switching to Target afterwards finds no clicked point and idles — correctly, but mutely.
+        // Latched on the MODE, so it speaks again after a mode change rather than once per process.
+        if (target_wait_logged_mode_ != mission_.mode())
         {
-            qInfo() << "Controller waiting for an affordance target in DSR";
-            target_wait_logged_ = true;
+            target_wait_logged_mode_ = mission_.mode();
+            if (mission_.mode() == rc::DriveMode::Target)
+                std::println("[controller] IDLE in Target mode — no point has been clicked. "
+                             "(Finishing an affordance clears the previous one.) Click to drive.");
+            else
+                std::println("[controller] IDLE in {} mode — waiting for a target.",
+                             rc::to_string(mission_.mode()));
         }
         current_plan_.reset();
         plan_spline_valid_ = false;   // the fitted curve belongs to the plan being dropped
