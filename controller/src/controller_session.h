@@ -199,6 +199,10 @@ private:
     bool target_contract_known_ = false;
     std::uint64_t contract_for_node_id_ = 0;     // which affordance target_contract_ belongs to
     [[nodiscard]] bool wants_final_facing(const ControllerTargetInfo &target) const;
+    // Is a standpoint chosen earlier still usable against the map as it stands NOW? The residual field
+    // fills in as the robot approaches, so an answer computed once is an answer frozen at the moment of
+    // least information.
+    [[nodiscard]] bool fix_still_good(const Eigen::Vector2f &pos, const ControllerTargetInfo &target) const;
     void resolve_target_contract(const ControllerTargetInfo &target);
     std::vector<std::string> affordance_recent_;
     std::uint64_t affordance_started_ms_ = 0;

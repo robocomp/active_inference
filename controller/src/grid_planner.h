@@ -154,6 +154,11 @@ public:
     std::optional<Eigen::Vector2f> nearest_rotatable(const Eigen::Vector2f& pos_room,
                                                      float max_radius_m = 3.0f) const;
 
+    // Can the robot turn all the way round HERE? The predicate nearest_rotatable searches on, exposed
+    // so a caller re-checking a standpoint later asks the identical question — the heading count is not
+    // something two files should each know.
+    bool can_turn_here(const Eigen::Vector2f& pos_room) const;
+
     // ── DISTANCE FIELD ────────────────────────────────────────────────────────────────────────────
     // Metres from `p` to the nearest occupied cell (outside-the-room counts as occupied, so walls are
     // included). Zero inside an obstacle. Returns a large positive value if there is no world yet, so a

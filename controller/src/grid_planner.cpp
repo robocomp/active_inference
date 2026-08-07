@@ -385,15 +385,17 @@ std::optional<Eigen::Vector2f> GridPlanner::nearest_free(const Eigen::Vector2f& 
     return std::nullopt;
 }
 
+bool GridPlanner::can_turn_here(const Eigen::Vector2f& pos_room) const
+{
+    for (int h = 0; h < kHeadings; ++h)
+        if (not cell_free_at(pos_room, h)) return false;
+    return true;
+}
+
 std::optional<Eigen::Vector2f> GridPlanner::nearest_rotatable(const Eigen::Vector2f& pos_room,
                                                               float max_radius_m) const
 {
-    const auto turnable = [&](const Eigen::Vector2f& w)
-    {
-        for (int h = 0; h < kHeadings; ++h)
-            if (not cell_free_at(w, h)) return false;
-        return true;
-    };
+    const auto turnable = [&](const Eigen::Vector2f& w) { return can_turn_here(w); };
     // Best on the ORIGINAL spot still wins: never move a target that is already fine.
     if (turnable(pos_room)) return pos_room;
 

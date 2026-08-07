@@ -299,9 +299,30 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     // at 0 (measured: track_s never exceeded 0.05 m over 300 cycles) while it orbited its own start at
     // 0.55 m/s with rot saturated. A target that moves when the robot moves is not a target.
     // Held for as long as the sticky flag is — same key, no second notion of identity and no new number.
+    //
+    // ★BUT REVALIDATED AGAINST THE LIVE GRID EVERY CYCLE. Computing it once and holding it froze the
+    // answer at the instant the robot knew LEAST: the residual field fills in as the robot approaches
+    // and sees the space, so a standpoint that was genuinely the closest reachable one from three
+    // metres away can be inside an obstacle by the time the robot arrives — and nothing would have
+    // re-asked. The cheap half of the question (is the footprint still free there, can it still turn
+    // there) is a local lookup, so it is asked every cycle; failing it drops the cache and the flood
+    // fill runs ONCE more against what is now known. That is the difference between caching an answer
+    // and freezing it.
+    // Recompute-on-invalidation only — never per cycle — because per cycle is what made the target
+    // chase the robot.
     if (not routing_failed_here) unroutable_fix_.reset();
-    else if (not unroutable_fix_.has_value())
-        unroutable_fix_ = grid_planner_.nearest_reachable(step.plan_origin, step.target.room_pos);
+    else
+    {
+        if (unroutable_fix_.has_value() and not fix_still_good(*unroutable_fix_, step.target))
+        {
+            std::println("[controller] '{}' — the repaired standpoint ({:.2f},{:.2f}) is no longer "
+                         "usable against the current map; re-solving.",
+                         step.target.node_name, unroutable_fix_->x(), unroutable_fix_->y());
+            unroutable_fix_.reset();
+        }
+        if (not unroutable_fix_.has_value())
+            unroutable_fix_ = grid_planner_.nearest_reachable(step.plan_origin, step.target.room_pos);
+    }
     // ── THE STANDPOINT MUST BE SOMEWHERE THE ROBOT CAN TURN, NOT JUST STAND ──────────────────────
     // With GoalFacingYawEnabled the robot performs a terminal rotation IN PLACE here, and that rotation
     // runs with no obstacle check of any kind — the align branch returns ahead of every safety stage.
@@ -1251,6 +1272,18 @@ void ControllerSession::log_approach_diagnostics(std::uint64_t t_ms,
 // GoalFacingYawEnabled stays, as a kill switch over all of it, which is what a global flag is for. It
 // was previously the WHOLE answer, ANDed only with "is this an affordance" — so enabling it for the
 // refrigerator enabled it for every room waypoint too.
+
+// Is a previously-chosen standpoint STILL good, against the map as it stands now? Deliberately the
+// cheap half of the question — footprint feasibility, plus room to turn when this target ends in a
+// rotation. Both are local lookups. Reachability is not re-tested here: that is a flood fill, and the
+// planner already reports it immediately (a failed plan sets unroutable_target_name_ on the very next
+// cycle), so paying for it every cycle would buy nothing.
+bool ControllerSession::fix_still_good(const Eigen::Vector2f &pos, const ControllerTargetInfo &target) const
+{
+    return wants_final_facing(target) ? grid_planner_.can_turn_here(pos)
+                                      : grid_planner_.pose_free(pos, target.yaw_rad);
+}
+
 bool ControllerSession::wants_final_facing(const ControllerTargetInfo &target) const
 {
     if (not target.from_affordance) return false;                       // a clicked point has no facing
