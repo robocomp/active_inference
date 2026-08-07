@@ -11,6 +11,7 @@
 #include <cmath>
 
 #include "../../common/affordance_protocol/affordance_protocol.h"
+#include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
@@ -40,6 +41,35 @@ void RefrigeratorAffordance::update(const EpistemicProposal& prop)
         create_node(prop);
     else
         update_node(prop);
+}
+
+void RefrigeratorAffordance::hold_offered()
+{
+    if (not G_ or not node_created_ or affordance_node_id_ == 0)
+        return;
+    auto node_opt = G_->get_node(affordance_node_id_);
+    if (not node_opt.has_value())
+        return;
+    auto& n = node_opt.value();
+
+    const bool active = G_->get_attrib_by_name<active_att>(n).value_or(false);
+    const bool pending = G_->get_attrib_by_name<epistemic_pending_att>(n).value_or(true);
+    if (active and pending)
+        return;                         // Executing: the controller owns it, do not touch the flags
+    if (not active and pending)
+        return;                         // already Offered — nothing to repair
+
+    // Back on offer, with a gain of ZERO. Not the last one: a stale gain would send the robot across
+    // the room on the strength of a number we can no longer justify. Zero is the honest floor — the
+    // affordance stays in the contest, and starts attracting travel again when a real proposal returns.
+    G_->add_or_modify_attrib_local<active_att>           (n, false);
+    G_->add_or_modify_attrib_local<epistemic_pending_att>(n, true);
+    G_->add_or_modify_attrib_local<epistemic_gain_att>   (n, 0.0f);
+    state_ = State::pending;
+    G_->update_node(n);
+    refresh_edge();
+    std::print("[affordance] '{}' re-offered with gain 0 — no proposal this cycle "
+               "(it was left Completed, which no producer ever intended)\n", refrigerator_node_name_);
 }
 
 void RefrigeratorAffordance::remove()
@@ -157,10 +187,19 @@ void RefrigeratorAffordance::create_node(const EpistemicProposal& prop)
     // Declare the execution contract: how the controller should complete this affordance (Servo
     // lock-on bound to the refrigerator's projected-ROI / detection feedback attributes + completion
     // predicate). Uses the shared type-level default; producers can override per node here.
-    rc::affordance::write_contract(*G_, aff_node, rc::affordance::default_contract_for("refrigerator"));
+    //
+    // ★The servo's advance target is the framing OUR sensor model chose, not the type-level 0.45 literal. The
+    // contract tells the executor to drive `table_roi_fill` to a value; if that value is not the one the
+    // stand-off realises, the servo spends the approach undoing the planner's choice — and for a tall box the
+    // two disagree badly, because 0.45 was picked against a horizontal-only framing model.
+    auto contract = rc::affordance::default_contract_for("refrigerator");
+    if (prop.framing_fill > 0.0f and not contract.scalar_attr.empty())
+        contract.scalar_target = prop.framing_fill;
+    rc::affordance::write_contract(*G_, aff_node, contract);
     // Object-relative viewpoint constraint (the authoritative epistemic target the controller resolves).
     rc::affordance::write_viewpoint(*G_, aff_node, make_viewpoint(prop));
 
+    rc::provenance::stamp_creation(*G_, aff_node);   // birth stamp: epoch ms + local ISO-8601
     const auto id_opt = G_->insert_node(aff_node);
     if (not id_opt.has_value())
     {

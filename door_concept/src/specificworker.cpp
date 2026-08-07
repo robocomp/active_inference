@@ -32,11 +32,17 @@
  */
 
 #include "specificworker.h"
+#include "../../common/nbv/graph_obstacles.h"   // rc::nbv::collect_graph_obstacles — shared, DSR-side
 #include "door_dof.h"   // rc::kDoorDofs — names/units for the BeliefInspector rows
 
 #include <QTimer>
 #include <QSettings>   // persist the standalone dashboard window geometry
 #include <QByteArray>
+#include <QFont>
+#include <QFontMetrics>
+#include <QHBoxLayout>
+#include <QPushButton>
+#include <QVBoxLayout>
 #include <QDateTime>   // wall-clock ms for the primary-input (masks) stream gate
 #include <filesystem>
 #include <print>
@@ -221,7 +227,8 @@ void SpecificWorker::request_shutdown()
         return;
 
     save_window_settings();
-    save_dashboard_geometry();   // the standalone dashboard is not in `windows`, so save it explicitly
+    save_dashboard_geometry();
+    save_strip_geometry();       // …nor is the compact belief strip   // the standalone dashboard is not in `windows`, so save it explicitly
 
     cleanup_owned_nodes();
 
@@ -275,6 +282,75 @@ void SpecificWorker::save_dashboard_geometry() const
     settings.setValue(QStringLiteral("DashboardWindow_geometry"), dashboard_window_->saveGeometry());
     settings.sync();
 }
+
+// ─── Compact belief strip ────────────────────────────────────────────────────────────────────────
+
+// One row per instance: the certainty channel (adequacy gap in nats, or ½·ln|Σ| when this agent
+// publishes no σ*), p(existence), the FE surprise, and the node's birth stamp. The widget owns the
+// history — this only pushes the current instant, on the same ~5 Hz tick as the panels above.
+void SpecificWorker::refresh_belief_strip()
+{
+    if (not belief_strip_)
+        return;   // headless (no dashboard built)
+
+    std::vector<rc::BeliefStripRow> rows;
+    rows.reserve(fitter_->instances().size());
+    for (const auto& [id, inst] : fitter_->instances())
+    {
+        rc::BeliefStripRow r;
+        r.node        = inst.node_name;
+        r.surprise    = inst.fe_surprise;
+        r.initialized = inst.ai2_initialized;
+        // p(exists) stays NaN until the existence channel's first visit — the strip then draws "–"
+        // rather than a fake 0.5 (mirrors the inspector card).
+        if (inst.existence_seeded) r.p_exists = inst.existence.p_exists();
+        // Same REPORTED covariance the inspector and the NBV planner use, so the views cannot disagree.
+        const auto S = inst.ai2_belief.covariance_reported();
+        // `adequacy_gap_nats` returns 0 for a DOF table with no σ* anywhere — an empty sum — and 0 is
+        // exactly the value that means "adequate". Ask first, and carry "no demand" as the -1 sentinel;
+        // the strip then falls back to ½·ln|Σ| and says so in its heading.
+        r.gap_nats = rc::any_sigma_star(rc::kDoorDofs)
+                   ? rc::adequacy_gap_nats(rc::kDoorDofs, [&](std::size_t j) { return S(j, j); })
+                   : -1.0f;
+
+        // Fallback certainty channel: ½·ln det Σ via the Cholesky (Σ log L_ii), not log(det()) — a
+        // covariance with centimetre σ has a determinant near the floor of float, where a direct
+        // determinant is numerical noise.
+        const auto llt = S.llt();
+        if (llt.info() == Eigen::Success)
+            r.logdet_nats = llt.matrixL().toDenseMatrix().diagonal().array().log().sum();
+
+        // Birth from the node's own creation stamp, so `age` survives a dashboard opened long after the
+        // instance was born. Absent ⇒ 0 ⇒ the widget falls back to when it first saw the row.
+        if (const auto n = G->get_node(inst.node_id); n.has_value())
+            r.birth_ms = G->get_attrib_by_name<timestamp_creation_att>(n.value()).value_or(0);
+
+        rows.push_back(std::move(r));
+    }
+    belief_strip_->update_view(rows);
+}
+
+void SpecificWorker::restore_strip_geometry()
+{
+    if (not strip_window_)
+        return;
+    QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("door_concept"));
+    const QByteArray geom = settings.value(QStringLiteral("BeliefStripWindow_geometry")).toByteArray();
+    if (not geom.isEmpty())
+        strip_window_->restoreGeometry(geom);
+    else
+        strip_window_->resize(520, 210);   // small ON PURPOSE — meant to sit in a corner, always open
+}
+
+void SpecificWorker::save_strip_geometry() const
+{
+    if (not strip_window_)
+        return;
+    QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("door_concept"));
+    settings.setValue(QStringLiteral("BeliefStripWindow_geometry"), strip_window_->saveGeometry());
+    settings.sync();
+}
+
 
 // ─── Initialisation ──────────────────────────────────────────────────────────
 
@@ -472,7 +548,21 @@ void SpecificWorker::initialize()
 
     // Build rc::EpistemicPlanner (Σ-based D-optimal NBV) with the configured stand-off.
     epistemic_planner_ = rc::EpistemicPlanner(cfg_.obs_distance);
-    epistemic_planner_.set_min_standoff(cfg_.min_standoff_m);   // push viewpoints further out (YOLO needs a gap)
+    // ONE detector envelope: the viewpoint the planner asks for is the argmax of the same model absence
+    // should be weighted by. Replaces cfg_.min_standoff_m (DoorConcept.MinStandOffM), a hand-picked
+    // stand-in for the near shoulder of exactly this curve.
+    epistemic_planner_.set_detector_envelope(rc::detect::DetectorEnvelope{});
+    epistemic_planner_.set_robot_radius(0.30f);   // Shadow's footprint radius
+
+    // The camera's REAL geometry, read once (intrinsics and the zed mount are both static). BOTH FoVs: a door
+    // is ~2 m tall, so the VERTICAL axis binds well before the horizontal one, and the horizontal-only model
+    // this replaced was blind to it. Height from inner_eigen room->zed, NOT a body-relative constant: the room
+    // floor datum is offset from the body origin and the z-span is room-frame. ts==0 on the main thread.
+    // ★The camera model is read PER CYCLE at the compute site (rc::nbv::sensor_from_graph),
+    // NOT once here: the zed intrinsics are published by robot_concept when frames start
+    // arriving, so reading them in initialize() races the producer. Losing that race leaves
+    // vfov = 0, which silently collapses the fill model to horizontal-only — the exact bug
+    // rc::nbv exists to fix, and it drives the robot nose-to-nose with tall objects.
 
     // Stale affordance nodes are swept on entering Operating (presence hook) and on shutdown — see
     // remove_stale_affordance_nodes(), keyed on the parent object type (robust to node-name renames).
@@ -543,8 +633,50 @@ void SpecificWorker::initialize()
     outer->addWidget(evidence_monitor_, 0);   // section 1 — natural height
     outer->addWidget(custom_widget_, 1);      // sections 2 + 3 — all remaining space
 
+    // NOT shown at startup: the strip below is the standing display and this is its drill-down,
+    // opened by the strip's "details ▸" button. Geometry is still restored, so the first click
+    // puts it back where you left it. (Want it up from the start? add `->show()`.)
     restore_dashboard_geometry();
-    dashboard_window_->show();
+
+    // ── Compact belief strip — a SEPARATE, small top-level window ──────────────────────────────────
+    // Not another panel inside the big window: the point is a display small enough to keep in a corner
+    // while the 1180×900 dashboard stays closed until something looks wrong. One row per instance, each
+    // row a 60 s trace of the certainty channel + p(existence) + FE surprise.
+    strip_window_ = new QWidget;
+    strip_window_->setWindowTitle(QStringLiteral("doors — beliefs"));
+    auto* strip_layout = new QVBoxLayout(strip_window_);
+    strip_layout->setContentsMargins(0, 0, 0, 0);
+    belief_strip_ = new rc::BeliefStrip(QStringLiteral("doors"), strip_window_);
+    belief_strip_->set_visible_window(60.f);
+    strip_layout->addWidget(belief_strip_, 1);
+
+    // "details ▸" — reveal the big dashboard on demand. A lambda connect needs no Q_OBJECT on either
+    // side, so the moc-free widget pattern is preserved; strip_window_ is the context object, so the
+    // connection dies with the window. show() alone is not enough for a minimised or buried window.
+    {
+        auto* bar = new QHBoxLayout;
+        bar->setContentsMargins(4, 0, 4, 3);
+        bar->addStretch(1);
+        auto* details = new QPushButton(QStringLiteral("details ▸"), strip_window_);
+        details->setToolTip(QStringLiteral("open the full dashboard: evidence counters, FE/surprise/Σ "
+                                           "time series, and the per-DOF belief inspector"));
+        QFont bf = details->font(); bf.setPointSizeF(bf.pointSizeF() - 1.0); details->setFont(bf);
+        details->setFixedHeight(QFontMetrics(bf).height() + 8);
+        QObject::connect(details, &QPushButton::clicked, strip_window_, [this]()
+        {
+            if (not dashboard_window_) return;
+            dashboard_window_->show();
+            dashboard_window_->setWindowState((dashboard_window_->windowState() & ~Qt::WindowMinimized)
+                                              | Qt::WindowActive);
+            dashboard_window_->raise();
+            dashboard_window_->activateWindow();
+        });
+        bar->addWidget(details, 0);
+        strip_layout->addLayout(bar, 0);
+    }
+
+    restore_strip_geometry();
+    strip_window_->show();
 }
 
 // ─── Belief inspector ────────────────────────────────────────────────────────
@@ -566,6 +698,7 @@ void SpecificWorker::refresh_evidence_monitor()
 
     evidence_monitor_->update_view(ev_g_);
     refresh_belief_inspector();
+    refresh_belief_strip();   // same tick, same instance pass — the views can never disagree
 }
 
 void SpecificWorker::refresh_belief_inspector()
@@ -1241,6 +1374,69 @@ const SpecificWorker::DoorGhost* SpecificWorker::match_ghost(const Eigen::Vector
     return best;
 }
 
+// ─── NBV decision monitor (etc/door_nbv_log.csv) ────────────────────────────────────────────────
+//
+// "The robot is still being sent into the door" has THREE possible authors — the four-face plan, the pose we
+// publish, or the controller's own standpoint repair downstream — and no artefact could tell them apart. This
+// row is the producer's full confession: where the door is, where we told the robot to stand, how far apart
+// those are, and the per-face evidence behind the choice. If `dist_m` here is healthy (~the stand-off) and the
+// robot still ends up at the leaf, the defect is downstream of this agent and the CSV proves it.
+//
+// One row per PUBLISHED proposal (i.e. per affordance refresh), so it lines up 1:1 with what the controller
+// can see. Written through the classic locale — see CLAUDE.md: these machines run es_ES, and an ofstream that
+// picks up a comma separator would corrupt its own columns on read-back.
+void SpecificWorker::log_nbv_decision(const rc::DoorInstance& inst, const rc::nbv::Plan& plan,
+                                      const rc::EpistemicProposal& prop)
+{
+    static std::ofstream csv = []
+    {
+        std::ofstream f("etc/door_nbv_log.csv", std::ios::trunc);
+        f.imbue(std::locale::classic());
+        f << "cycle,node,valid,door_cx,door_cy,door_yaw,door_w,ap_cx,ap_cy,"
+             "face,standoff_m,band_min_m,band_max_m,tgt_x,tgt_y,tgt_yaw,dist_to_door_m,tgt_in_room,gain,"
+             "vis_px,vis_nx,vis_py,vis_ny,reach_px,reach_nx,reach_py,reach_ny,"
+             "pdet_px,pdet_nx,pdet_py,pdet_ny,exp_px,exp_nx,exp_py,exp_ny,n_obstacles\n";
+        return f;
+    }();
+    if (not csv)
+        return;
+
+    const auto& ms = inst.model.state();
+    // THE number to read first: how far the published standpoint is from the door the robot must photograph.
+    // A value near 0 means we are driving it into the leaf; it should sit inside [band_min, band_max].
+    const float dist = std::hypot(prop.epistemic_target_x_m - ms.cx, prop.epistemic_target_y_m - ms.cy);
+    const bool in_room = fitter_->has_room_polygon()
+                       ? fitter_->point_in_room(Eigen::Vector2f(prop.epistemic_target_x_m,
+                                                                prop.epistemic_target_y_m), 0.0f)
+                       : true;
+    static const char* fn[4] = {"+x", "-x", "+y", "-y"};
+    csv << inst.processed_cycles << ',' << inst.node_name << ',' << (plan.valid ? 1 : 0) << ','
+        << ms.cx << ',' << ms.cy << ',' << ms.yaw << ',' << ms.w << ',' << ms.ap_cx << ',' << ms.ap_cy << ','
+        << (plan.valid ? fn[plan.best_face] : "-") << ',' << plan.best_standoff_m << ','
+        << plan.standoff_min_m << ',' << plan.standoff_max_m << ','
+        << prop.epistemic_target_x_m << ',' << prop.epistemic_target_y_m << ','
+        << prop.epistemic_target_yaw_rad << ',' << dist << ',' << (in_room ? 1 : 0) << ','
+        << prop.epistemic_gain;
+    for (int i = 0; i < 4; ++i) csv << ',' << plan.face_visible[i];
+    for (int i = 0; i < 4; ++i) csv << ',' << (plan.face_reachable[i] ? 1 : 0);
+    for (int i = 0; i < 4; ++i) csv << ',' << plan.face_p_detect[i];
+    for (int i = 0; i < 4; ++i) csv << ',' << plan.face_gains[i];
+    csv << ',' << nbv_obstacle_count_ << '\n';
+    csv.flush();
+
+    // Loud, once, if we ever publish a standpoint ON the door: that is the user-visible "crash into it"
+    // symptom, and it must never pass silently just because a CSV recorded it.
+    if (plan.valid and dist < plan.standoff_min_m * 0.5f)
+    {
+        static int shouted = 0;
+        if (shouted++ < 5)
+            std::print("door_concept: [NBV] ★PUBLISHING A STANDPOINT ON THE DOOR — {} target=({:.2f},{:.2f}) is "
+                       "{:.2f} m from the leaf, band=[{:.2f},{:.2f}] face={} in_room={}\n",
+                       inst.node_name, prop.epistemic_target_x_m, prop.epistemic_target_y_m, dist,
+                       plan.standoff_min_m, plan.standoff_max_m, fn[plan.best_face], in_room ? 1 : 0);
+    }
+}
+
 void SpecificWorker::forget_ghost(const std::string& name)
 {
     std::erase_if(ghosts_, [&](const DoorGhost& g) { return g.name == name; });
@@ -1383,7 +1579,30 @@ void SpecificWorker::update_existence_beliefs()
         // honest form of "ricoh confirms, never removes": the old code enforced it on the positive side while
         // the negative side removed through range_detectability, which is precisely the ricoh's own reach.
         const bool observed = inst.frames_since_detection == 0;
-        const float raw_free = observed ? 0.0f : sil.e_free;
+        // ★A frame that may not MOVE the geometry may not DESTROY the object either. `dbg_gated` is the fit's
+        // own admissibility verdict (door_fitter.cpp: truncated mask, or the robot moving with the mask
+        // off-centre ⇒ predict-only). When it is set the belief is FROZEN, so the projected silhouette is a
+        // stale panel compared against a live image and any mismatch measures our registration, not the door's
+        // existence. Ported from refrigerator_concept, where the absence of this rule deleted a healthy fridge
+        // in 5 s: the robot drove 2.3 m → 1.15 m, the motion gate froze the belief, and the frozen box stopped
+        // projecting onto a mask that was still arriving with ~55000 points. Every cycle that contributed
+        // removal evidence had gated=1. Occupancy is untouched — a lit sample can only ever confirm.
+        // ⚠A phantom is now only removable from an admissible viewpoint; removal waits for a good look.
+        //
+        // ★2026-08-07 — THE GUARD MUST READ THE GATE'S *FRESHNESS*, NOT THE BARE VERDICT (same defect table_concept
+        // fixed on 08-06). `run_inference` returns early when no mask reaches the fit, so `dbg_gated` — and the
+        // `last_trunc_frac` it is computed from — are STALE on exactly the cycles this guard fires: they are the
+        // verdict of whenever the door was last SEEN. A phantom is by definition never seen again, so one
+        // truncated frame at birth pinned dbg_gated=true for the rest of its life and its absence evidence was
+        // zeroed for good — the channel demanded a good mask on the door in order to believe there is no mask on
+        // the door. Live proof (etc/door_existence_log.csv, door_3 phantom at (1.82,−4.57), robot parked and
+        // staring at it): n_detectable 409/420, e_free 409, occ 0, central 0.76, p_detect 0.76 — a textbook
+        // resolving look — yet sil_free_eff ≡ 0.00, remove_streak ≡ 0 and L pinned at the +4 clamp for 1928
+        // frames, because trunc=0.155 > TruncGateFrac 0.10 was carried over from its last detection.
+        // Reading gate_fresh makes the guard mean what its comment always claimed: it suppresses absence only
+        // when THIS frame's fit really was frozen while a mask was in fact arriving.
+        const bool view_untrustworthy = inst.dbg_gate_fresh and (inst.dbg_trunc_gated or inst.dbg_motion_gated);
+        const float raw_free = (observed or view_untrustworthy) ? 0.0f : sil.e_free;
         // P(detect | present, geometry): could this view have resolved a door that IS there?
         //   resolvability — is the panel big enough in the image to segment (range × foreshortening),
         //   in_fov_frac  — how much of it the real frustum + occluders actually left visible,
@@ -1431,13 +1650,14 @@ void SpecificWorker::update_existence_beliefs()
                 const float oblq = fitter_->door_view_obliquity(inst);   // diagnostic only (see door_fitter.h)
                 std::print("door_concept: [existence] {} L={:.2f} p={:.2f} pos=({:.2f},{:.2f}) inroom={} roomprior={} "
                            "won={} since_det={} | sil occ={:.0f} free={:.0f} free_eff={:.1f} ndet={}/{} occl={} "
-                           "resolv={:.2f} central={:.2f} pdet={:.2f} oblq={:.2f} strk={}\n",
+                           "resolv={:.2f} central={:.2f} pdet={:.2f} oblq={:.2f} gate={}/{} strk={}\n",
                            inst.node_name, inst.existence.logodds(), inst.existence.p_exists(), ms.cx, ms.cy,
                            inroom ? 1 : 0, has_poly ? 1 : 0,
                            inst.assigned_mask_idx >= 0 ? 1 : 0, inst.frames_since_detection,
                            inst.dbg_sil_occ, inst.dbg_sil_free, inst.dbg_sil_free_eff,
                            inst.dbg_sil_ndet, inst.dbg_sil_ntotal, inst.dbg_sil_noccl,
                            inst.dbg_sil_resolv, inst.dbg_sil_central, inst.dbg_sil_pdetect, oblq,
+                           inst.dbg_gated ? 1 : 0, inst.dbg_gate_fresh ? 1 : 0,
                            inst.existence_remove_streak);
                 // Minimum-height evidence: obs_top is the support top over UNTRUNCATED views only, so a door
                 // whose top is always clipped by the image border shows conf→0 and is never judged short.
@@ -1452,7 +1672,7 @@ void SpecificWorker::update_existence_beliefs()
                     f << "cycle,node,L,p_exists,cx,cy,inroom,roomprior_loaded,won,since_det,"
                          "sil_occ,sil_free,sil_free_eff,n_detectable,n_total,n_occluded,"
                          "resolvability,central_frac,p_detect,oblq,remove_streak,"
-                         "obs_top_z,obs_top_conf,trunc\n"; return f; }();
+                         "obs_top_z,obs_top_conf,trunc,gated,gate_fresh\n"; return f; }();
                 if (ex_csv)
                 {
                     ex_csv << ex_dbg << ',' << inst.node_name << ',' << inst.existence.logodds() << ','
@@ -1463,7 +1683,10 @@ void SpecificWorker::update_existence_beliefs()
                            << ',' << inst.dbg_sil_ndet << ',' << inst.dbg_sil_ntotal << ',' << inst.dbg_sil_noccl
                            << ',' << inst.dbg_sil_resolv << ',' << inst.dbg_sil_central << ',' << inst.dbg_sil_pdetect
                            << ',' << oblq << ',' << inst.existence_remove_streak
-                           << ',' << inst.obs_top_z << ',' << inst.obs_top_conf << ',' << inst.last_trunc_frac << '\n';
+                           << ',' << inst.obs_top_z << ',' << inst.obs_top_conf << ',' << inst.last_trunc_frac
+                           // gated=1 with gate_fresh=0 is the stale-verdict trap: the flag is left over from the
+                           // last frame that carried a mask, and must NOT suppress absence (see view_untrustworthy).
+                           << ',' << (inst.dbg_gated ? 1 : 0) << ',' << (inst.dbg_gate_fresh ? 1 : 0) << '\n';
                     ex_csv.flush();
                 }
             }
@@ -1726,10 +1949,50 @@ void SpecificWorker::step_epistemic(rc::DoorInstance& inst, DSR::Node& node)
     // the broad prior and the proposal is moot).
     if (not inst.ai2_initialized)
         return;
+    // Obstacles = the other fitted objects PLUS THE WALLS. The walls are what makes an edge-on view of a door
+    // impossible, and without them the planner sent the affordance to a point ON the wall: the leaf's ±x faces
+    // have normals lying in the wall plane, so their viewpoints sit several metres along it (live 2026-08-07:
+    // `face=-x d=3.67m`). Furniture alone could never say that — `collect_graph_obstacles` reads only
+    // `object`/`box` nodes. With the wall present, a grazing sightline has to traverse metres of it and
+    // `visible_fraction` collapses continuously, so "view the door from a cone about its normal" is a
+    // CONSEQUENCE of the geometry rather than an angular rule anyone had to write down.
+    //
+    // Every known aperture is punched out of the run, this door's included — otherwise the wall would block
+    // the honest head-on views too, since the leaf sits inside the wall's own footprint. Other doors are gaps
+    // as well: you really can see through a doorway across the room.
+    auto obstacles = rc::nbv::collect_graph_obstacles(*G, inner_eigen_.get(), inst.node_id);
+    if (fitter_->has_room_polygon())
+    {
+        std::vector<rc::nbv::WallGap> gaps;
+        gaps.reserve(fitter_->instances().size());
+        for (const auto& [oid, other] : fitter_->instances())
+        {
+            if (other.is_bearing_hypothesis or not other.ai2_initialized)
+                continue;   // no trustworthy aperture yet — punching a hole here would invent a sightline
+            const auto& os = other.model.state();
+            gaps.push_back({Eigen::Vector2f(os.ap_cx, os.ap_cy), 0.5f * os.w});
+        }
+        // Wall depth = the depth of material this aperture is cut through, i.e. the leaf's own fitted
+        // thickness. A derived physical quantity, not a new knob — and occlusion by a plane is insensitive
+        // to it anyway (a ray either crosses the plane or runs along it).
+        const auto walls = rc::nbv::wall_obstacles(fitter_->room_polygon(),
+                                                   std::max(1e-3f, inst.model.state().thickness), gaps);
+        obstacles.insert(obstacles.end(), walls.begin(), walls.end());
+    }
+    nbv_obstacle_count_ = static_cast<int>(obstacles.size());   // 0 walls ⇒ the room polygon never arrived
+    rc::nbv::Plan nbv_plan;
     rc::EpistemicProposal prop =
-        epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m);
+        epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m,
+                                   rc::nbv::sensor_from_graph(*G, inner_eigen_.get()), obstacles,
+                                   fitter_->room_polygon(), &nbv_plan);
+    log_nbv_decision(inst, nbv_plan, prop);
     if (not prop.valid or not prop.is_finite())
-        return;   // degenerate (non-finite) fit — leave the existing affordance node as-is, retry next cycle
+    {
+        // Degenerate (non-finite) fit — retry next cycle. But "leave the node as-is" is not neutral:
+        // as-is is Completed, which the controller reads as a withdrawal and which never recovers.
+        inst.affordance.hold_offered();
+        return;
+    }
 
     // Belief→knowledge governor WITHOUT deleting the node: keep publishing the affordance every cycle
     // with its TRUE expected information gain ΔH (nats). A low gain is published as-is so the controller's

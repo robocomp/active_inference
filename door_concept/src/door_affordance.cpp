@@ -7,6 +7,7 @@
 #include <cmath>
 
 #include "../../common/affordance_protocol/affordance_protocol.h"
+#include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
@@ -37,6 +38,35 @@ void DoorAffordance::update(const EpistemicProposal& prop, bool orient_mode)
         create_node(prop);
     else
         update_node(prop);
+}
+
+void DoorAffordance::hold_offered()
+{
+    if (not G_ or not node_created_ or affordance_node_id_ == 0)
+        return;
+    auto node_opt = G_->get_node(affordance_node_id_);
+    if (not node_opt.has_value())
+        return;
+    auto& n = node_opt.value();
+
+    const bool active = G_->get_attrib_by_name<active_att>(n).value_or(false);
+    const bool pending = G_->get_attrib_by_name<epistemic_pending_att>(n).value_or(true);
+    if (active and pending)
+        return;                         // Executing: the controller owns it, do not touch the flags
+    if (not active and pending)
+        return;                         // already Offered — nothing to repair
+
+    // Back on offer, with a gain of ZERO. Not the last one: a stale gain would send the robot across
+    // the room on the strength of a number we can no longer justify. Zero is the honest floor — the
+    // affordance stays in the contest, and starts attracting travel again when a real proposal returns.
+    G_->add_or_modify_attrib_local<active_att>           (n, false);
+    G_->add_or_modify_attrib_local<epistemic_pending_att>(n, true);
+    G_->add_or_modify_attrib_local<epistemic_gain_att>   (n, 0.0f);
+    state_ = State::pending;
+    G_->update_node(n);
+    refresh_edge();
+    std::print("[affordance] '{}' re-offered with gain 0 — no proposal this cycle "
+               "(it was left Completed, which no producer ever intended)\n", door_node_name_);
 }
 
 void DoorAffordance::remove()
@@ -142,6 +172,7 @@ void DoorAffordance::create_node(const EpistemicProposal& prop)
     // Servo lock-on. Both complete on the door's detection feedback attributes.
     write_policy_contract(aff_node);
 
+    rc::provenance::stamp_creation(*G_, aff_node);   // birth stamp: epoch ms + local ISO-8601
     const auto id_opt = G_->insert_node(aff_node);
     if (!id_opt.has_value())
     {

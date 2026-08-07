@@ -55,6 +55,19 @@ public:
     /// No-op if not initialised.
     void update(const EpistemicProposal& prop);
 
+    // ── NO PROPOSAL THIS CYCLE IS NOT A WITHDRAWAL ────────────────────────────────────────────────
+    // Call on any cycle where a proposal could NOT be computed — the belief has not started, the NBV
+    // planner refused (incomplete camera model, degenerate extent, no reachable face). update() is
+    // skipped on those paths, and the RE-OFFER lives inside update(), so an affordance the controller
+    // had just completed stayed Completed for ever: skipped by every selection branch, its gain frozen
+    // at whatever it last published. Measured live 2026-08-07 — aff_table_1 sat at gain=5 (the
+    // verify-me maximum) and Completed, while afford_room's gain ticked on beside it.
+    // The two things are DIFFERENT statements and must not share a code path: the protocol state says
+    // whether the producer still WANTS this look; the target and gain say where and how much. Failing
+    // to compute the second must never silently answer the first.
+    // Leaves an EXECUTING claim alone — that one belongs to the controller.
+    void hold_offered();
+
     /// Delete the affordance node (model became stable or instance reset).
     void remove();
 

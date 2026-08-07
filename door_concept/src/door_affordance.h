@@ -57,6 +57,16 @@ public:
     /// normal Servo one — used for a bearing-only hypothesis (Part C-birth); switched back when depth arrives.
     void update(const EpistemicProposal& prop, bool orient_mode = false);
 
+    // ── NO PROPOSAL THIS CYCLE IS NOT A WITHDRAWAL ────────────────────────────────────────────────
+    // Call on any cycle where a proposal could NOT be computed (belief not started, NBV planner
+    // refused). update() is skipped on those paths and the RE-OFFER lives inside update(), so an
+    // affordance the controller had just completed stayed Completed for ever — skipped by every
+    // selection branch, gain frozen at whatever it last published. "Leave the node as-is" reads as
+    // neutral and is not: as-is is Completed. The protocol state says whether the producer still WANTS
+    // this look; the target and gain say where and how much. Failing to compute the second must never
+    // silently answer the first. Leaves an EXECUTING claim alone — that one belongs to the controller.
+    void hold_offered();
+
     /// Delete the affordance node (model became stable or instance reset).
     void remove();
 

@@ -116,7 +116,8 @@ void SpecificWorker::request_shutdown()
         return;
 
     save_window_settings();
-    save_dashboard_geometry();   // the standalone dashboard is not in `windows`, so save it explicitly
+    save_dashboard_geometry();
+    save_strip_geometry();       // …nor is the compact belief strip   // the standalone dashboard is not in `windows`, so save it explicitly
 
     cleanup_owned_nodes();
 
@@ -166,6 +167,8 @@ void SpecificWorker::initialize()
     rc::RefrigeratorFitter::self_test();
     // Appearance door-ness metric self-check (OpenCV; a vertical-lined patch must out-score a plain one).
     rc::RefrigeratorProjection::self_test();
+    // Birth-burst store self-check (voxel dedup, cap, expiry, take-erases, local-consistency δ).
+    rc::BirthFragment::self_test();
  
     // Ignore payload attributes in local graph updates to avoid unnecessary copying and processing of potentially large data
     G->set_ignored_attributes<cam_rgb_att, cam_depth_att, laser_X_att, laser_Y_att, laser_Z_att>();
@@ -363,8 +366,13 @@ void SpecificWorker::initialize()
     // the "zed" node + media descriptor exist (media-plane consumer pattern).
     rgb_ingestor_ = std::make_unique<rc::RefrigeratorRgbIngestor>(G, cfg_);
 
-    // Build rc::EpistemicPlanner (info-gain scoring only; stand-off distance is the sole parameter).
-    epistemic_planner_ = rc::EpistemicPlanner(cfg_.obs_distance);
+    // rc::EpistemicPlanner owns the BELIEF half of the NBV (Σ, ΔI, the adequacy gap); the SENSOR half — where
+    // the detector can actually fire — comes from the camera model it is handed each cycle in step_epistemic().
+    // ONE detector envelope, both directions: the viewpoint the planner asks for is the argmax of the same
+    // model the removal channel uses to decide how much a missing mask is worth.
+    const rc::detect::DetectorEnvelope det_env{cfg_.detect_min_fill, cfg_.detect_max_fill, cfg_.detect_soft};
+    epistemic_planner_.set_detector_envelope(det_env);
+    if (existence_) existence_->set_detector_envelope(det_env);
 
     // Stale affordance nodes are swept on entering Operating (presence hook) and on shutdown — see
     // remove_stale_affordance_nodes(), keyed on the parent object type (robust to node-name renames).
@@ -457,7 +465,7 @@ void SpecificWorker::compute()
 
     // EvidenceMonitor per-cycle counters (cumulative *_cum fields persist across cycles). The producers below
     // (tracker / merge / removal) add to these; the snapshot is pushed at the end of the cycle.
-    ev_g_.births = ev_g_.merges = ev_g_.removals = 0;
+    ev_g_.births = ev_g_.merges = ev_g_.removals = ev_g_.births_refused = 0;
     ev_g_.mask_stale = not fresh_masks;
 
     // Snapshot the residual (surprise) field ONCE per cycle before the tracker, so fused birth (run_instance_
@@ -865,29 +873,36 @@ void SpecificWorker::load_config(const ConfigLoader& cfg)
 
 
 
-// Every OTHER object the graph knows about, as robot-inflated oriented footprints, so the NBV never proposes a
-// viewpoint standing on the furniture. Reads `object` and `box` nodes (the two types concept agents publish),
-// skips this refrigerator itself, and inflates each footprint by the robot radius so a mere point-in-rectangle
-// test at the viewpoint is equivalent to a footprint overlap. See [[refrigerator-standoff-and-obstacles]].
-std::vector<rc::EpistemicPlanner::Obstacle> SpecificWorker::collect_viewpoint_obstacles(std::uint64_t self_id) const
+// The ZED as the NBV's forward model: both FoVs from the REAL intrinsics, and the optical centre's height above
+// the FLOOR datum — the same datum the refrigerator box's z ∈ [0, H] is expressed in, which is what makes the
+// vertical framing term mean anything.
+//
+// ★The VERTICAL channel is the whole point. `roi_fill` is max(Δcol/W, Δrow/H) and for a 1.7 m refrigerator seen
+// from a camera at ~0.95 m the row term dominates by ~4×: the box overflows the frame vertically at 1.2 m,
+// where it still fills only a quarter of it horizontally. Supplying hfov alone (what this did) hides the axis
+// that actually truncates the mask, and the planner then proposes a pose where no mask can form at all.
+// A missing zed node / camera API / room→zed transform leaves the corresponding field at its default, which
+// disables the vertical channel rather than inventing a mount height.
+rc::nbv::Sensor SpecificWorker::zed_sensor_model() const
 {
-    constexpr float kRobotRadiusM = 0.30f;   // must match the planner's collision floor
-    std::vector<rc::EpistemicPlanner::Obstacle> obs;
-    for (const char* type : {"object", "box"})
-        for (const auto& n : G->get_nodes_by_type(type))
-        {
-            if (n.id() == self_id) continue;
-            const auto wo = G->get_attrib_by_name<obj_width_att>(n);
-            const auto do_ = G->get_attrib_by_name<obj_depth_att>(n);
-            if (not (wo.has_value() and do_.has_value())) continue;         // no footprint ⇒ cannot avoid it
-            const auto tr = inner_eigen_->get_transformation_matrix("room", n.name(), 0);
-            if (not tr.has_value()) continue;                               // unlocatable ⇒ skip, never guess
-            const auto& M = tr.value();
-            const float yaw = std::atan2(static_cast<float>(M(1, 0)), static_cast<float>(M(0, 0)));
-            obs.push_back({static_cast<float>(M(0, 3)), static_cast<float>(M(1, 3)),
-                           wo.value() + 2.0f * kRobotRadiusM, do_.value() + 2.0f * kRobotRadiusM, yaw});
-        }
-    return obs;
+    rc::nbv::Sensor s;
+    const auto zed = G->get_node("zed");
+    if (not zed.has_value())
+        return s;
+    if (auto cam = G->get_camera_api(zed.value()); cam)
+    {
+        const float fx = cam->get_focal_x(), fy = cam->get_focal_y();
+        const float W  = static_cast<float>(cam->get_width()), H = static_cast<float>(cam->get_height());
+        if (fx > 0.0f and W > 0.0f) s.hfov_rad = 2.0f * std::atan(0.5f * W / fx);
+        if (fy > 0.0f and H > 0.0f) s.vfov_rad = 2.0f * std::atan(0.5f * H / fy);
+    }
+    // Mount height in ROOM frame (ts=0, main thread — the InnerEigen cache rule in CLAUDE.md). Not the proto's
+    // body-relative 0.945: the room's floor datum is offset from the body origin, and the box heights are in
+    // room frame, so mixing the two would bias the binding axis by that offset.
+    if (inner_eigen_)
+        if (const auto rtz = inner_eigen_->get_transformation_matrix("room", "zed", 0); rtz.has_value())
+            s.height_m = static_cast<float>(rtz.value()(2, 3));
+    return s;
 }
 
 // ─── Per-cycle steps ─────────────────────────────────────────────────────────────────────────────
@@ -980,20 +995,31 @@ void SpecificWorker::step_epistemic(rc::RefrigeratorInstance& inst, DSR::Node& n
     // Σ-based D-optimal NBV from the belief. Skip until the belief has seen its first frame (else Σ is
     // the broad prior and the proposal is moot).
     if (not inst.ai2_initialized)
+    {
+        inst.affordance.hold_offered();   // no proposal is not a withdrawal — see hold_offered()
         return;
-    // The camera's REAL horizontal FoV, so the stand-off is framed on this sensor rather than a literal.
-    float hfov_rad = -1.0f;
-    if (const auto zed = G->get_node("zed"); zed.has_value())
-        if (auto cam = G->get_camera_api(zed.value()); cam)
-        {
-            const float fx = cam->get_focal_x(), W = static_cast<float>(cam->get_width());
-            if (fx > 0.0f and W > 0.0f) hfov_rad = 2.0f * std::atan(0.5f * W / fx);
-        }
+    }
     rc::EpistemicProposal prop =
         epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m,
-                                   hfov_rad, collect_viewpoint_obstacles(inst.node_id));
+                                   zed_sensor_model(),
+                                   rc::nbv::collect_graph_obstacles(*G, inner_eigen_.get(), inst.node_id));
     if (not prop.valid or not prop.is_finite())
-        return;   // degenerate (non-finite) fit — leave the existing affordance node as-is, retry next cycle
+    {
+        // Degenerate fit, or no sensor model yet — retry next cycle. But "leave the affordance as-is"
+        // is not neutral: as-is is Completed, which the controller reads as a withdrawal and which
+        // never recovers on its own.
+        inst.affordance.hold_offered();
+        return;
+    }
+
+    // Mirror the proposal onto the instance so ai2_log records what was actually proposed. Without this the
+    // only record was stdout, and the affordance node carries the FROZEN pose during an executing claim — so
+    // "the target is too close" was unanswerable after the fact from either source.
+    inst.dbg_nbv_standoff = prop.chosen_standoff_m;
+    inst.dbg_nbv_target_x = prop.epistemic_target_x_m;
+    inst.dbg_nbv_target_y = prop.epistemic_target_y_m;
+    inst.dbg_nbv_pdetect  = prop.chosen_p_detect;
+    inst.dbg_nbv_vfov     = prop.sensor_vfov_rad;
 
     // Belief→knowledge governor WITHOUT deleting the node: keep publishing the affordance every cycle
     // with its TRUE expected information gain ΔH (nats). A low gain is published as-is so the controller's
@@ -1060,6 +1086,8 @@ void SpecificWorker::modify_node_slot(std::uint64_t /*id*/, const std::string& /
 void SpecificWorker::modify_node_attrs_slot(std::uint64_t id,
                                              const std::vector<std::string>& att_names)
 {
+    if (not fitter_)
+        return;   // connected before the fit core exists — see del_node_slot for the crash this prevents
     // Delegate to the affordance state machine for any instance whose affordance
     // node was modified (controller claim/completion updates active/pending)
     for (auto& [refrigerator_id, inst] : fitter_->instances())
@@ -1087,6 +1115,15 @@ void SpecificWorker::modify_node_attrs_slot(std::uint64_t id,
 
 void SpecificWorker::del_node_slot(std::uint64_t id)
 {
+    // ★A graph slot must be safe at ANY time, including before the fit core exists. del_node_signal is
+    // connected in initialize() BEFORE `fitter_` is constructed, and the startup stale-sweep
+    // remove_owned_refrigerator_nodes() then calls G->delete_node() on the MAIN thread — same-thread emit ⇒
+    // Auto resolves to DIRECT ⇒ this slot runs synchronously with `fitter_` still null. Dormant unless a
+    // previous run actually left "refrigerator*" nodes behind, which is why it had not been seen; it SIGSEGV'd
+    // table_concept exactly this way on 2026-08-06. cabinet_concept guards its del_node_slot for the same
+    // reason (and missed its attrs slot).
+    if (not fitter_)
+        return;
     // Notify affordance in case its own DSR node was deleted externally
     for (auto& [refrigerator_id, inst] : fitter_->instances())
         if (inst.affordance.node_id() == id)

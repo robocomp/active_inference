@@ -29,6 +29,7 @@
  */
 
 #include "specificworker.h"
+#include "../../common/nbv/graph_obstacles.h"   // rc::nbv::collect_graph_obstacles — shared, DSR-side
 #include "table_geometry.h"   // rc::geom pure footprint/uncertainty helpers
 
 #include <locale>
@@ -117,6 +118,7 @@ void SpecificWorker::request_shutdown()
 
     save_window_settings();
     save_dashboard_geometry();   // the standalone dashboard is not in `windows`, so save it explicitly
+    save_strip_geometry();       // …nor is the compact belief strip
 
     cleanup_owned_nodes();
 
@@ -351,6 +353,24 @@ void SpecificWorker::initialize()
 
     // Build rc::EpistemicPlanner (info-gain scoring only; stand-off distance is the sole parameter).
     epistemic_planner_ = rc::EpistemicPlanner(cfg_.obs_distance);
+    // ONE detector envelope, both directions: the viewpoint the planner asks for is the argmax of the same
+    // model absence should be weighted by. Defaults until table exposes its own config keys.
+    const rc::detect::DetectorEnvelope det_env{};
+    epistemic_planner_.set_detector_envelope(det_env);
+    existence_->set_detector_envelope(det_env);   // …and REMOVAL weights absence by the very same model, which
+                                                  // is what "both directions" above has always meant. Until
+                                                  // 2026-08-06 only the planner used it and removal kept a
+                                                  // one-sided range curve that deleted the real table at 0.46 m.
+
+    // The camera's REAL geometry, read once (intrinsics and the zed mount are both static). BOTH FoVs: for a
+    // low, wide tabletop viewed from a camera at ~1 m the VERTICAL axis is the one that binds, and the
+    // horizontal-only model this replaced could not see it. Height is the zed optical centre above the room
+    // floor — ts==0 on the main thread, which is the only safe way to use that cache (CLAUDE.md).
+    // ★The camera model is read PER CYCLE at the compute site (rc::nbv::sensor_from_graph),
+    // NOT once here: the zed intrinsics are published by robot_concept when frames start
+    // arriving, so reading them in initialize() races the producer. Losing that race leaves
+    // vfov = 0, which silently collapses the fill model to horizontal-only — the exact bug
+    // rc::nbv exists to fix, and it drives the robot nose-to-nose with tall objects.
 
     // Stale affordance nodes are swept on entering Operating (presence hook) and on shutdown — see
     // remove_stale_affordance_nodes(), keyed on the parent object type (robust to node-name renames).
@@ -863,6 +883,19 @@ void SpecificWorker::load_config(const ConfigLoader& cfg)
 }
 
 
+
+// Every OTHER object the graph knows about, as robot-inflated oriented footprints, so the NBV never proposes a
+// viewpoint standing on the furniture or looking through it. Reads `object` and `box` nodes, skips this table,
+// and inflates each footprint by the robot radius so a point-in-rectangle test at the viewpoint is equivalent
+// to a footprint overlap. A node with no footprint attrs, or one inner_eigen cannot locate, is SKIPPED rather
+// than guessed at. Mirrors refrigerator_concept.
+std::vector<rc::EpistemicPlanner::Obstacle> SpecificWorker::collect_viewpoint_obstacles(std::uint64_t self_id) const
+{
+    // One shared implementation (common/nbv/graph_obstacles.h) — this used to be a local copy that read the
+    // deprecated obj_width/obj_depth and pre-inflated by the robot radius. Both bugs are documented there.
+    return rc::nbv::collect_graph_obstacles(*G, inner_eigen_.get(), self_id);
+}
+
 // ─── Per-cycle steps ─────────────────────────────────────────────────────────────────────────────
 
 // Convergence latch for one table: measure how far the accepted state moved this cycle and, once it holds
@@ -953,11 +986,32 @@ void SpecificWorker::step_epistemic(rc::TableInstance& inst, DSR::Node& node)
     // Σ-based D-optimal NBV from the belief. Skip until the belief has seen its first frame (else Σ is
     // the broad prior and the proposal is moot).
     if (not inst.ai2_initialized)
+    {
+        inst.affordance.hold_offered();   // no proposal is not a withdrawal — see hold_offered()
         return;
+    }
     rc::EpistemicProposal prop =
-        epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m);
+        epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m,
+                                   rc::nbv::sensor_from_graph(*G, inner_eigen_.get()),
+                                   collect_viewpoint_obstacles(inst.node_id));
     if (not prop.valid or not prop.is_finite())
-        return;   // degenerate (non-finite) fit — leave the existing affordance node as-is, retry next cycle
+    {
+        // Degenerate fit, or the camera model is still incomplete — retry next cycle. But do NOT leave
+        // the affordance retired while we retry: that is the state the controller reads as "the
+        // producer no longer wants this look", and it never recovers on its own.
+        inst.affordance.hold_offered();
+        return;
+    }
+
+    // Mirror the proposal onto the instance so ai2_log records what was actually proposed THIS cycle. The
+    // affordance node carries the FROZEN pose while the controller owns a claim, so neither the graph nor
+    // stdout could answer "what is it proposing now?" after the fact.
+    inst.dbg_nbv_standoff = prop.chosen_standoff_m;
+    inst.dbg_nbv_target_x = prop.epistemic_target_x_m;
+    inst.dbg_nbv_target_y = prop.epistemic_target_y_m;
+    inst.dbg_nbv_pdetect  = prop.chosen_p_detect;
+    inst.dbg_nbv_fill     = prop.chosen_fill;
+    inst.dbg_nbv_vfov     = prop.sensor_vfov_rad;
 
     // Belief→knowledge governor WITHOUT deleting the node: keep publishing the affordance every cycle
     // with its TRUE expected information gain ΔH (nats). A low gain is published as-is so the controller's
@@ -1024,6 +1078,8 @@ void SpecificWorker::modify_node_slot(std::uint64_t /*id*/, const std::string& /
 void SpecificWorker::modify_node_attrs_slot(std::uint64_t id,
                                              const std::vector<std::string>& att_names)
 {
+    if (not fitter_)
+        return;   // connected before the fit core exists — see del_node_slot for the crash this prevents
     // Delegate to the affordance state machine for any instance whose affordance
     // node was modified (controller claim/completion updates active/pending)
     for (auto& [table_id, inst] : fitter_->instances())
@@ -1051,6 +1107,15 @@ void SpecificWorker::modify_node_attrs_slot(std::uint64_t id,
 
 void SpecificWorker::del_node_slot(std::uint64_t id)
 {
+    // ★A graph slot must be safe at ANY time, including before the fit core exists. The signals are connected
+    // in initialize() BEFORE `fitter_` is constructed, and the very next statement — the startup stale-sweep
+    // remove_owned_table_nodes() — calls G->delete_node() on the MAIN thread. Emitter and receiver on the same
+    // thread makes the Auto connection DIRECT, so this slot ran synchronously with `fitter_` still null and
+    // dereferencing it SIGSEGV'd. Only reproducible when a previous run actually left "table*" nodes behind,
+    // which is why it lay dormant: a clean start sweeps nothing and never enters this slot.
+    // (cleanup_owned_nodes() already guards with `if (G and fitter_)` — same idiom, this slot just lacked it.)
+    if (not fitter_)
+        return;
     // Notify affordance in case its own DSR node was deleted externally
     for (auto& [table_id, inst] : fitter_->instances())
         if (inst.affordance.node_id() == id)
