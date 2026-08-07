@@ -71,6 +71,20 @@ public:
     // the commitment hysteresis (a held affordance must be beaten by this many nats to be dropped).
     void set_selection_params(float lambda_cost, float switch_margin);
 
+    // ── ROOM-vs-OBJECT ARBITRATION ────────────────────────────────────────────────────────────────
+    // Scale applied to a ROOM affordance's epistemic gain WHILE at least one non-room affordance is
+    // also in the running. Both gains are quoted in nats and the selector treats them as one currency,
+    // but they are not equally spendable: re-localising is a standing background need that recovers on
+    // its own and can be paid at any time, while an object's look is opportunistic — the robot is near
+    // it NOW, and the chance is gone once it drives away. A room affordance that wins every contest
+    // starves the objects permanently, which is what this expresses a preference against.
+    // ★A PREFERENCE, NOT A GATE. The room can still win on a large enough gain, which is exactly what
+    // should happen when the pose belief has genuinely degraded. 1.0 = no preference (old behaviour);
+    // it is inert whenever no object affordance is competing, so a lost robot in an empty room is
+    // unaffected. The principled fix is in whichever producer is overstating its ΔH — this is the
+    // arbitration knob, not a correction to either belief.
+    void set_room_gain_scale(float scale);
+
     // robot_pos (room frame) feeds the nav-cost term. Pass std::nullopt (the default) to ignore
     // distance entirely — selection then uses epistemic_gain + hysteresis only. Do NOT pass a
     // Zero vector to mean "unknown": that would score every affordance by its distance from the
@@ -78,6 +92,15 @@ public:
     std::optional<Target> select_target(const std::shared_ptr<DSR::DSRGraph> &graph,
                                         std::optional<Eigen::Vector2f> robot_pos = std::nullopt);
     void mark_reached(const std::shared_ptr<DSR::DSRGraph> &graph);
+
+    // ── NO TWO IN A ROW ───────────────────────────────────────────────────────────────────────────
+    // The affordance that was just completed is skipped by the next selection, however good its score.
+    // Its producer re-offers it within a cycle or two (that is the protocol working as designed), and
+    // its epistemic gain has not yet had time to fall — so the same affordance wins again immediately
+    // and the robot loops on one object while everything else waits. Suppression lifts as soon as a
+    // DIFFERENT affordance is selected, so this forbids repetition, not revisiting.
+    // Name of the affordance suppressed on the last select_target call; empty when none was.
+    [[nodiscard]] const std::string &suppressed_name() const { return suppressed_name_; }
     void clear_current();
     bool has_current() const;
     std::string current_name() const;
@@ -132,6 +155,9 @@ private:
     // Grounded EFE selection (set_selection_params): nav-cost weight (nats/m) + hysteresis (nats).
     float select_lambda_cost_ = 0.2f;
     float select_switch_margin_ = 0.5f;
+    float select_room_gain_scale_ = 1.0f;   // see set_room_gain_scale
+    std::uint64_t last_completed_id_ = 0;   // skip this one on the next selection (see suppressed_name)
+    std::string   suppressed_name_;         // what that skip cost, for the viewer
     std::uint64_t last_selected_id_ = 0;   // for commitment hysteresis across cycles
     std::vector<Candidate> last_candidates_;   // all affordances evaluated in the last select_target()
     State state_ = State::Idle;

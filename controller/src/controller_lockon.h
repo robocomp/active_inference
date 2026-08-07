@@ -37,10 +37,23 @@ struct LockOnConfig
     float k_yaw           = 0.8f;    // rps per unit horizontal error (secondary centring)
     float max_yaw_rps     = 0.12f;
     float dither_yaw_rps  = 0.10f;   // reacquire (yaw) when feedback is invalid
-    float settle_ms       = 400.0f;  // dwell before each measurement (kills motion blur / flicker)
+    float settle_ms       = 400.0f;  // MINIMUM dwell before each measurement (see settle_max_ms)
     float step_ms         = 400.0f;  // duration of one sweep step
     float offset_tol      = 0.15f;   // |err_x| deadband for centring (loose; distance dominates)
     int   max_attempts    = 30;
+    // ── HOW LONG A "MEASUREMENT" REALLY TAKES ─────────────────────────────────────────────────────
+    // settle_ms alone was a GUESS at the perception pipeline's latency, and the guess decided whether
+    // the loop could see anything at all: camera → YOLO → mask node → concept agent → feedback attribute
+    // is easily longer than one settle, so the predicate sampled at the end of the dwell could still be
+    // describing a frame captured during the PRECEDING nudge — while the base was moving and the mask
+    // was smeared. The loop then moved again, and a good detection arriving 200 ms later was never
+    // sampled at all. That is the "the mask is visible but the loop cannot capture it" failure.
+    // The cure is to stop guessing the latency and WAIT FOR THE EVIDENCE: hold still until the mask
+    // producer has published `settle_new_frames` frames since the base stopped, so the measurement is
+    // taken on looks the robot actually held still for. Counted in FRAMES, not milliseconds, because a
+    // frame counter needs no clock agreement between two agents — see ControllerSession::masks_frame_seq.
+    float settle_max_ms      = 2500.0f;  // bound: never wait forever on a dead producer
+    int   settle_new_frames  = 2;        // post-stop frames to wait for (0 = old fixed-dwell behaviour)
 };
 
 class LockOn
@@ -70,6 +83,7 @@ public:
         timeout_ms_ = timeout_ms;
         stable_ = 0; attempts_ = 0; dither_sign_ = 1; cur_ = {};
         sweep_offset_ = 0.0f; sweep_dir_ = 1;
+        settle_seq_at_stop_ = -1; settle_hit_ = false;
     }
     void reset() { phase_ = Phase::Idle; cur_ = {}; }
 
@@ -80,9 +94,17 @@ public:
     // How many CONSECUTIVE cycles the contract predicate has held. Read-only, for the affordance panel:
     // a predicate that flickers true is not one that HOLDS, and without this the difference is invisible.
     int   stable() const { return stable_; }
+    // What it is counting TOWARD. Exposed because the panel used to read the requirement from a
+    // SECOND resolution of the contract (target_contract_, resolved at selection) while the loop
+    // counted against a different one (active_contract_, resolved at arrival). Two readings of one
+    // contract are two chances to disagree, and when they did the row read "1 of 1" while the loop
+    // was waiting for 3 — a row that says the goal is met beside a loop that says it is not.
+    int   stable_needed() const { return stable_needed_; }
 
     // Advance one control cycle. `goal_met` = the contract predicate holds THIS cycle (session-evaluated).
-    Command update(const Reading& r, bool goal_met, std::uint64_t t_ms)
+    // `evidence_seq` = the perception producer's monotonic frame counter (mask_frame_id), or <0 when it
+    // is unavailable — in which case the settle falls back to the plain settle_ms dwell.
+    Command update(const Reading& r, bool goal_met, std::uint64_t t_ms, int evidence_seq = -1)
     {
         const float since = static_cast<float>(t_ms - phase_start_ms_);
         if (static_cast<float>(t_ms - begin_ms_) > timeout_ms_ || attempts_ > cfg_.max_attempts)
@@ -93,9 +115,18 @@ public:
 
         if (phase_ == Phase::Settle)
         {
-            if (since < cfg_.settle_ms)
-                return {};                       // hold still, let the sensor settle, then measure
+            // ★A MEASUREMENT IS THE WHOLE STILL WINDOW, NOT THE INSTANT IT ENDS. The predicate is
+            // sampled EVERY cycle the robot is holding still and latched, so a detection that fires at
+            // any point during the dwell counts. Sampling only at the end asked the perception stack to
+            // be true at one nominated millisecond; an intermittent YOLO mask is exactly the thing that
+            // will not oblige, and the loop was throwing away sightings it had already been given.
+            // Nothing false can latch early: the session's predicate already ANDs in robot_still(), and
+            // the base-speed EMA is still decaying just after the stop.
             if (goal_met)
+                settle_hit_ = true;
+            if (not settle_ready(since, evidence_seq))
+                return {};                       // hold still: the look is not finished yet
+            if (settle_hit_)
             {
                 if (++stable_ >= stable_needed_) { phase_ = Phase::Locked; return {}; }
             }
@@ -111,13 +142,29 @@ public:
         {
             if (since < cfg_.step_ms)
                 return cur_;                     // keep nudging
-            phase_ = Phase::Settle; phase_start_ms_ = t_ms;   // stop & settle before next measurement
+            // Stop and settle. The evidence counter is stamped HERE, at the moment the nudge ends, so
+            // "frames since the base stopped" means what it says.
+            phase_ = Phase::Settle; phase_start_ms_ = t_ms;
+            settle_seq_at_stop_ = evidence_seq;
+            settle_hit_ = false;
             return {};
         }
         return {};
     }
 
 private:
+    // Is this still-window's look finished? The minimum dwell must have passed AND the producer must
+    // have delivered `settle_new_frames` frames since the base stopped — bounded by settle_max_ms so a
+    // dead or stalled producer degrades to the old fixed dwell instead of freezing the search.
+    bool settle_ready(float since, int evidence_seq) const
+    {
+        if (since >= cfg_.settle_max_ms) return true;      // bound first: it outranks every other wait
+        if (since < cfg_.settle_ms)      return false;
+        if (cfg_.settle_new_frames <= 0) return true;      // feature off
+        if (evidence_seq < 0 or settle_seq_at_stop_ < 0) return true;   // no counter ⇒ cannot wait on it
+        return evidence_seq - settle_seq_at_stop_ >= cfg_.settle_new_frames;
+    }
+
     Command decide_step(const Reading& r)
     {
         Command c;
@@ -145,6 +192,8 @@ private:
     float         timeout_ms_ = 10000.0f;
     float         sweep_offset_ = 0.0f;   // accumulated (open-loop) advance from the start pose
     int           stable_ = 0, stable_needed_ = 3, attempts_ = 0, dither_sign_ = 1, sweep_dir_ = 1;
+    int           settle_seq_at_stop_ = -1;   // producer frame counter when this still-window began
+    bool          settle_hit_ = false;        // the predicate held at some point during this window
     Command       cur_;
 };
 

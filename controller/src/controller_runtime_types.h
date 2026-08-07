@@ -33,6 +33,16 @@ struct ControllerObstacleVisual
     ControllerPolygon polygon;
     ControllerObstacleKind kind = ControllerObstacleKind::Obstacle;
     std::string label;   // short tag drawn on the footprint: t_1/c_1/b_1 (objects), o_1/o_2 (obstacles)
+    // ── ROUND FOOTPRINT (display only) ────────────────────────────────────────────────────────────
+    // A round table's belief has no yaw and no width/depth — it has a RADIUS — and drawing it as the
+    // axis-aligned box its w/h attributes imply asserts corners and an orientation the agent never
+    // inferred. When the concept agent says the shape is round (table_concept picks round_table.obj
+    // over table.obj by free-energy model evidence), the canvas draws the disc instead.
+    // DISPLAY ONLY: `polygon` is untouched and remains what the planner avoids, which stays the
+    // conservative circumscribing box. Changing what the robot plans around is a separate decision
+    // from changing what the operator is shown.
+    bool  round = false;
+    float round_radius_m = 0.f;   // max(width, depth) / 2 — the disc spans the same extent as the box
 };
 
 using ControllerObstacleVisuals = std::vector<ControllerObstacleVisual>;
@@ -201,6 +211,9 @@ struct ControllerParams
     // the controller falls back to lidar_name (already robot-frame) only while neither is live.
     std::string lidar_helios_name = "helios";
     std::string lidar_bpearl_name = "bpearl";
+    // The camera node whose rgb media descriptor backs the affordance panel's picture. DISPLAY ONLY —
+    // nothing the robot does depends on it, so an absent node costs a backdrop and nothing else.
+    std::string camera_node_name = "zed";
     // Zero-copy media plane (LiDAR). When lidar_use_media is true, the LiDAR point
     // cloud is drained from the DDS media plane instead of the DSR laser_* attrs.
     // The DDS domain + topic are NOT configured here: they are read from the media
@@ -283,15 +296,44 @@ struct ControllerParams
     // (scalar_target, completion predicate, stable_n, timeout) is per-affordance and comes from the
     // affordance_protocol Contract. Off by default. See controller_lockon.h / affordance_protocol.h.
     bool  lockon_enabled         = false;
-    float lockon_sweep_speed_mps = 0.12f;   // PRIMARY: distance-sweep advance speed
+    // ★HALVED 2026-08-07. The search moves to CHANGE THE VIEW, and every centimetre of that motion
+    // costs mask quality: the producer's own ego-motion channel (mask_motion_var / motion_dotd) grows
+    // with base speed, so a fast sweep degrades the very evidence it is sweeping to collect. Measured
+    // symptom: a mask plainly visible to the eye that the loop never captured.
+    float lockon_sweep_speed_mps = 0.06f;   // PRIMARY: distance-sweep advance speed
     float lockon_sweep_range_m   = 0.45f;   // oscillate ± this far from the arrival pose
     float lockon_offset_tol      = 0.15f;
     float lockon_k_yaw           = 0.8f;
-    float lockon_max_yaw_rps     = 0.12f;
-    float lockon_dither_yaw_rps  = 0.10f;
-    float lockon_settle_ms       = 400.0f;
-    float lockon_step_ms         = 400.0f;
+    float lockon_max_yaw_rps     = 0.06f;
+    float lockon_dither_yaw_rps  = 0.05f;
+    float lockon_settle_ms       = 900.0f;   // MINIMUM still-window before a measurement
+    float lockon_settle_max_ms   = 2500.0f;  // bound on waiting for post-stop evidence
+    int   lockon_settle_new_frames = 2;      // producer frames to wait for after the base stops
+    float lockon_step_ms         = 300.0f;
     int   lockon_max_attempts    = 30;
+
+    // ── DWELL AFTER AN AFFORDANCE ─────────────────────────────────────────────────────────────────
+    // Hold still for this long after finishing one affordance before the planner is allowed to select
+    // the next. An affordance is an EPISTEMIC action: the robot goes somewhere to LOOK. Its result is
+    // whatever perception acquired at the final pose — masks, and the belief update they drive — and
+    // the moment the next affordance is selected the base turns away and that result is gone before
+    // anyone (or the mask pipeline, which runs at camera rate with its own latency) has seen it. The
+    // dwell is where the affordance panel's camera view is worth looking at.
+    // NOT a settling gate on the servo: the contract's own stable_n already decides when the LOOK is
+    // finished. This is time held afterwards, for the observer and for the producer's latency.
+    // 0 disables it and the old back-to-back behaviour returns.
+    float affordance_dwell_ms = 3000.0f;
+    // ── AND WAIT FOR THE ACQUISITION, NOT JUST FOR THE CLOCK ──────────────────────────────────────
+    // A fixed dwell is a bet that the mask will arrive inside it. When the affordance exists to acquire
+    // a mask of a particular object, the honest end condition is the ACQUISITION: hold until that
+    // object's mask has been seen in this many separate producer frames. One sighting proves nothing —
+    // YOLO flickers, and a single frame is exactly what an intermittent detection can produce by
+    // accident — so the count is what makes it evidence rather than a coincidence.
+    // 0 disables it and the dwell is the clock alone.
+    int   affordance_dwell_mask_hits = 5;
+    // BOUND on the whole wait. A mask that is never going to arrive must not park the robot forever:
+    // past this the dwell ends regardless and the log says the acquisition failed, which is a result.
+    float affordance_dwell_max_ms = 12000.0f;
 
     // Physical-WEDGE detection + reverse-and-turn escape. Distinct from the MPPI's geometric
     // path_blocked (a VISIBLE obstacle on the planned path, handled by modelling + replanning): a wedge

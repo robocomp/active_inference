@@ -11,6 +11,7 @@
 #include <print>
 #include <sstream>
 #include <utility>
+#include "../graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
 
 namespace
 {
@@ -56,6 +57,11 @@ void AffordanceManager::set_selection_params(float lambda_cost, float switch_mar
 {
     select_lambda_cost_ = std::max(0.0f, lambda_cost);
     select_switch_margin_ = std::max(0.0f, switch_margin);
+}
+
+void AffordanceManager::set_room_gain_scale(float scale)
+{
+    select_room_gain_scale_ = std::clamp(scale, 0.0f, 1.0f);
 }
 
 std::string_view AffordanceManager::state_name(State state)
@@ -323,6 +329,7 @@ bool AffordanceManager::publish_target(const std::shared_ptr<DSR::DSRGraph> &gra
         graph->add_or_modify_attrib_local<epistemic_gain_att>(aff_node, gain);
         graph->add_or_modify_attrib_local<epistemic_pending_att>(aff_node, true);
 
+        rc::provenance::stamp_creation(*graph, aff_node);   // birth stamp: epoch ms + local ISO-8601
         const auto id_opt = graph->insert_node(aff_node);
         if (!id_opt.has_value())
         {
@@ -442,6 +449,7 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
                                                                           std::optional<Eigen::Vector2f> robot_pos)
 {
     transition_to(State::Searching, "select_target called", current_affordance_id_, current_affordance_name_);
+    suppressed_name_.clear();
 
     if (!graph)
     {
@@ -454,11 +462,40 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
     // producers (expected entropy reduction in nats: afford_table = shape-belief ΔH, afford_room =
     // pose-belief ΔH). The previously-selected affordance gets a switch-margin bonus so the choice
     // commits and does not thrash (hysteresis).
+    const auto affordances = graph->get_nodes_by_type("affordance");
+
+    // ── IS ANY OBJECT AFFORDANCE IN THE RUNNING? ──────────────────────────────────────────────────
+    // Decided over the ELIGIBLE set only (Offered or Executing): an object affordance its own producer
+    // has retired is not a competitor, and demoting the room in favour of something nobody is offering
+    // would leave the robot doing neither. Computed once, before scoring, because the demotion is a
+    // property of the CONTEST and must be the same for every candidate in it.
+    bool object_competing = false;
+    for (const auto &node : affordances)
+    {
+        const auto t = read_target(graph, node);
+        if (!t.has_value() || t->parent_node_type == "room")
+            continue;
+        const auto a = graph->get_attrib_by_name<active_att>(node).value_or(false);
+        const auto pd = graph->get_attrib_by_name<epistemic_pending_att>(node).value_or(true);
+        if (const auto st = decode_protocol_state(a, pd);
+            st == ProtocolState::Offered || st == ProtocolState::Executing)
+        {
+            object_competing = true;
+            break;
+        }
+    }
+
     const auto neg_efe = [&](const Target &t) -> float
     {
         // No robot position ⇒ nav-cost disabled (rank by epistemic_gain + hysteresis only).
         const float nav_dist = robot_pos ? (t.room_pos - *robot_pos).norm() : 0.f;
-        float score = t.epistemic_gain - select_lambda_cost_ * nav_dist;
+        // The room's gain is discounted only while an object is actually competing for the robot —
+        // see set_room_gain_scale. Applied to the GAIN, not to the final score, so the nav-cost stays
+        // in metres-of-driving and the discount stays in units of information.
+        const float gain = (t.parent_node_type == "room" and object_competing)
+                               ? t.epistemic_gain * select_room_gain_scale_
+                               : t.epistemic_gain;
+        float score = gain - select_lambda_cost_ * nav_dist;
         if (t.node_id == last_selected_id_)
             score += select_switch_margin_;
         return score;
@@ -469,8 +506,6 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
         if (dc != dk) return dc > dk;
         return candidate.node_id < current.node_id;   // stable tie-break
     };
-
-    const auto affordances = graph->get_nodes_by_type("affordance");
 
     // Snapshot every evaluated affordance (gain + EFE score + eligibility) for the controller's EFE
     // plot — done up front so it is populated regardless of which selection branch returns below.
@@ -483,10 +518,13 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
         const auto active = graph->get_attrib_by_name<active_att>(node).value_or(false);
         const auto pending = graph->get_attrib_by_name<epistemic_pending_att>(node).value_or(true);
         const auto state = decode_protocol_state(active, pending);
+        const bool just_done = node.id() == last_completed_id_;
         last_candidates_.push_back({target->node_name, target->parent_node_type,
                                     target->epistemic_gain, neg_efe(*target),
-                                    state == ProtocolState::Offered || state == ProtocolState::Executing,
-                                    std::string(protocol_state_name(state))});
+                                    (state == ProtocolState::Offered
+                                     || state == ProtocolState::Executing) && !just_done,
+                                    just_done ? std::string("JustCompleted")
+                                              : std::string(protocol_state_name(state))});
     }
 
     // One compact line listing EVERY affordance with its protocol state — shows WHY the eligible set
@@ -575,6 +613,7 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
     }
 
     std::optional<Target> best_target;
+    std::optional<Target> suppressed_target;
     for (const auto &node : affordances)
     {
         const auto target = read_target(graph, node);
@@ -586,16 +625,53 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
         if (decode_protocol_state(active, pending) != ProtocolState::Offered)
             continue;
 
+        // NOT THE ONE THAT JUST FINISHED. Its producer re-offers it immediately and its gain has not
+        // had time to fall, so without this it wins again on the very next cycle and the robot works
+        // one object forever. Reported rather than silent: an affordance that is Offered, top-scoring
+        // and passed over is otherwise indistinguishable from a selector that is broken.
+        if (node.id() == last_completed_id_)
+        {
+            suppressed_name_ = target->node_name;
+            suppressed_target = target;      // kept: the rule YIELDS rather than deadlocks — see below
+            continue;
+        }
+
         if (!best_target.has_value() || better(*target, *best_target))
             best_target = target;
     }
 
+    // ── THE RULE YIELDS RATHER THAN DEADLOCKS ─────────────────────────────────────────────────────
+    // "Not twice in a row" is a preference for spreading attention, not an instruction to stand still.
+    // When the affordance just completed is the ONLY one on offer, refusing it leaves the robot with
+    // nothing to do FOREVER — which is exactly what happened: three object affordances sat Completed
+    // (their producers were not re-offering them) and the one live candidate was the one suppressed.
+    // A rule that can bring the whole agent to a permanent halt is not a preference, it is a deadlock.
+    if (!best_target.has_value() and suppressed_target.has_value())
+    {
+        std::print("[aff-select] '{}' was the only affordance on offer — taking it again rather than "
+                   "idling (no-two-in-a-row yields when it would leave nothing)\n",
+                   suppressed_target->node_name);
+        std::fflush(stdout);
+        best_target = suppressed_target;
+        suppressed_name_.clear();
+        last_completed_id_ = 0;
+    }
+
     if (!best_target.has_value())
     {
-        if (selected_target_debug_report_ != "[aff-select] none")
+        // ★SAY WHICH ONES WERE THERE AND WHAT STATE THEY WERE IN. This used to print the bare word
+        // "none", which is the least informative thing it could say in the one situation where the
+        // question is loudest: the EFE panel is showing several affordances with healthy gains and the
+        // robot is going to none of them. Gain and score cannot answer that — only the protocol state
+        // can, because a Completed or Invalid node is skipped by every selection branch above however
+        // good its score is. Dedup on the STATES, so a set that is merely sitting there stays quiet and
+        // any change speaks.
+        if (const std::string key = "[aff-select] none" + candidates_str;
+            key != selected_target_debug_report_)
         {
-            selected_target_debug_report_ = "[aff-select] none";
-            std::print("{}\n", selected_target_debug_report_);
+            selected_target_debug_report_ = key;
+            std::print("[aff-select] NONE ELIGIBLE — nothing is Offered or Executing."
+                       "  [candidates:{} ]\n", candidates_str);
             std::fflush(stdout);
         }
         transition_to(State::Idle, "no eligible affordance found");
@@ -620,6 +696,9 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
 
         current_affordance_id_ = best_target->node_id;
         current_affordance_name_ = best_target->node_name;
+        // A DIFFERENT affordance has been chosen, so the previous one is no longer "in a row" — it may
+        // win the next contest on its merits. This forbids repetition, not revisiting.
+        last_completed_id_ = 0;
         if (const auto key = make_affordance_key(*best_target); key != selected_target_debug_report_)
         {
             selected_target_debug_report_ = key;
@@ -662,6 +741,8 @@ void AffordanceManager::mark_reached(const std::shared_ptr<DSR::DSRGraph> &graph
         return;
 
     transition_to(State::Completing, "mark_reached called", current_affordance_id_, current_affordance_name_);
+    // Remember it so the next selection cannot hand back the affordance that just finished.
+    last_completed_id_ = current_affordance_id_;
 
     if (auto node_opt = graph->get_node(current_affordance_id_); node_opt.has_value())
     {

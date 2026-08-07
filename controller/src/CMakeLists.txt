@@ -8,6 +8,7 @@ LIST(APPEND LIBS
   ai_common::presence     # agent presence monitor + coordinator
   ai_common::geometry     # robot_footprint + robust_metrics (pure Eigen; also used by tools/)
   ai_common::affordance   # affordance_manager
+  ai_common::perception   # mask_ingestor — the shared "masks" node parse, for the affordance panel
   ai_common::ui           # TimeSeriesPlot (compiled Q_OBJECT)
   ai_common::core         # header-only geometry/beliefs
 )
@@ -17,6 +18,7 @@ LIST(APPEND SOURCES
   ../src/specificworker.cpp
   ../src/specificworker_presence.cpp
   ../src/controller_display.cpp
+  ../src/controller_camera_masks.cpp
   ../src/controller_motion_commander.cpp
   ../src/controller_obstacle_model.cpp
   ../src/controller_obstacle_tracker.cpp

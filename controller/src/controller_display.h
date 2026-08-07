@@ -18,6 +18,7 @@
 #include "controller_runtime_types.h"
 #include "controller_mission_panel.h"
 #include "controller_affordance_panel.h"
+#include "controller_camera_masks.h"
 #include "custom_widget.h"
 #include "viewer_2d.h"
 
@@ -32,6 +33,8 @@ public:
         std::function<void()>                on_clear_target;    // Ctrl+right click
         // A mission waypoint was dragged to a new place (index, room x, room y).
         std::function<void(int, float, float)> on_waypoint_moved;
+        // Skip pressed in the affordance window: abandon the running affordance, take the next.
+        std::function<void()>                on_skip_affordance;
         // Everything mission-shaped is the panel's own vocabulary; the display just forwards it.
         rc::MissionPanel::Callbacks          mission;
     };
@@ -95,13 +98,34 @@ public:
     // One sample per evaluated affordance for the EFE panel below the 2D view. Plots TWO lines per
     // affordance: the selection score (gain − λ·dist, solid) and the raw gain (ΔH, lighter) — so the
     // vertical gap between them is λ·dist. Thread-safe (the plot buffers under its own mutex).
-    struct AffordanceEfeSample { std::string name; float gain = 0.f; float score = 0.f; };
+    // `eligible` is the protocol state's verdict: is this affordance actually IN the contest (Offered or
+    // Executing) or merely present in the graph? The plot draws neg_efe, the exact quantity selection
+    // maximises, so among eligible candidates the highest line ALWAYS wins — which means a line that
+    // stays highest and is never chosen is not losing, it is not competing. Plotting the two alike made
+    // that indistinguishable, and a viewer that cannot tell "lost" from "not entered" is worse than none.
+    struct AffordanceEfeSample
+    {
+        std::string name;
+        float gain = 0.f;
+        float score = 0.f;
+        bool  eligible = true;
+        std::string state;   // Offered / Executing / Completed / Missing / Invalid
+    };
     void update_affordance_efe(const std::vector<AffordanceEfeSample> &samples);
     // The two quantities the L-adaptation policy uses, live: cross-track rms (the OBJECTIVE it
     // minimises) and rotational effort per metre (the CONSTRAINT that stops it driving the gains up
     // until the loop rings). Plus the worst cross-track so far, for context.
     // Thread-safe; the plot buffers under its own mutex.
     void update_tracking_error(float rms_m, float max_m, float rot_per_m);
+    // The camera frame with the YOLO silhouettes on it, for the affordance panel. Composed on the
+    // control thread and handed over whole (see controller_camera_masks.h) — the QImage inside is
+    // already private to this snapshot, so nothing shares a pixel buffer across the thread boundary.
+    void set_camera_masks(const rc::CameraMasksView &view);
+    // Is the affordance window open? Read from the CONTROL thread to decide whether composing a camera
+    // frame is worth anything, so it is an atomic mirror written on the GUI thread — never the widget's
+    // own isVisible(), which may not be queried off the GUI thread.
+    [[nodiscard]] bool affordance_panel_visible() const
+    { return affordance_panel_visible_.load(std::memory_order_relaxed); }
     void clear_robot_trajectory();
 
     // Presentation — MUST be called on the GUI thread only. Reads the latest
@@ -109,6 +133,7 @@ public:
     void present();
 
 private:
+    std::atomic<bool>  affordance_panel_visible_{false};
     std::atomic<float> control_hz_{0.f};
     std::atomic<float> control_worst_ms_{0.f};
 
@@ -144,6 +169,8 @@ private:
         float session_distance_m = 0.f;
         float session_elapsed_s = 0.f;
         rc::AffordanceExecution affordance;
+        rc::CameraMasksView camera_masks;
+        bool camera_masks_pending = false;
         // Mission overlay + readout.
         rc::MissionPanel::View mission_view;
         std::vector<Eigen::Vector2f> mission_waypoints;

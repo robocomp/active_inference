@@ -38,6 +38,10 @@ public:
                     float line_width = 1.5f, int avg_window = 0);
 
     // Append a sample to the named series (call from any thread); updates the running-average companion if any.
+    // A NON-FINITE value (NaN) is a GAP MARKER, not a reading: the line breaks there, autoscale ignores
+    // it, the latest-sample dot skips it and the running average does not see it. Use it for a series
+    // that is genuinely UNDEFINED for a stretch — joining across that stretch would draw a line through
+    // time when the quantity did not exist, which reads as "unchanged" rather than "absent".
     void add_point(const std::string& name, float value);
 
     // Drop a series (and its running-average companion). No-op if absent.

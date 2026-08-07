@@ -16,6 +16,13 @@
  * spinning when the window is closed.
  *
  * Header-only, NO Q_OBJECT, painted on the GUI thread — the fleet dashboard convention.
+ *
+ * ★IT PAINTS ITS OWN GROUND. Every colour below was chosen against a DARK background, but the widget
+ * used to draw straight onto the theme's palette — light — so 0xdd label text landed on a near-white
+ * fill and the whole chart read as washed-out grey. A widget whose palette assumes a ground must PAINT
+ * that ground; inheriting the theme's is how a legible design becomes an unreadable one on a different
+ * desktop. Labels are bold unconditionally (liveness is carried by colour and the pulse, which do not
+ * have to compete with weight), and the secondary greys are lifted well clear of the ground.
  */
 
 #include "controller_affordance_view.h"
@@ -63,10 +70,15 @@ protected:
     {
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing, true);
+        p.fillRect(rect(), kGround);
+        // One step up from the widget's default: this chart is read at a glance while the robot moves.
+        QFont base = p.font();
+        base.setPointSizeF(base.pointSizeF() + 0.5);
+        p.setFont(base);
 
         if (not view_.active and view_.steps.empty())
         {
-            p.setPen(QColor(0x88, 0x88, 0x88));
+            p.setPen(kMuted);
             p.drawText(rect(), Qt::AlignCenter,
                        QStringLiteral("no affordance has run yet"));
             return;
@@ -108,16 +120,16 @@ protected:
             // loop, and it is going round"), the label, and the timeout draining left to right.
             const int cx = box.left() + 22, cy = box.top() + 18;
             draw_loop_glyph(p, cx, cy, colour(*servo), live ? view_.elapsed_s : 0.f);
-            p.setPen(QColor(0xdd, 0xdd, 0xdd));
-            QFont f = p.font(); f.setBold(live); p.setFont(f);
+            p.setPen(kLabel);
+            QFont f = p.font(); f.setBold(true); p.setFont(f);
             p.drawText(box.left() + 40, box.top() + 23, QString::fromStdString(servo->label));
             f.setBold(false); p.setFont(f);
-            p.setPen(QColor(0x99, 0x99, 0x99));
+            p.setPen(kDetail);
             const QString right = QString::fromStdString(
                 servo->blocked_why.empty() ? servo->detail : servo->blocked_why);
             if (not right.isEmpty())
             {
-                p.setPen(servo->blocked_why.empty() ? QColor(0x99, 0x99, 0x99) : QColor(0xc0, 0x39, 0x2b));
+                p.setPen(servo->blocked_why.empty() ? kDetail : kAlert);
                 p.drawText(QRect(box.left() + 190, box.top() + 8, box.width() - 200, 18),
                            Qt::AlignLeft | Qt::AlignVCenter, right);
             }
@@ -126,9 +138,9 @@ protected:
                 const float left_frac = std::clamp(1.f - view_.elapsed_s / view_.timeout_s, 0.f, 1.f);
                 const QRect bar(box.left() + 10, box.top() + 28, box.width() - 20, 3);
                 p.setPen(Qt::NoPen);
-                p.setBrush(QColor(0x44, 0x44, 0x44));
+                p.setBrush(kTrack);
                 p.drawRect(bar);
-                p.setBrush(left_frac < 0.15f ? QColor(0xc0, 0x39, 0x2b) : QColor(0x77, 0x77, 0x77));
+                p.setBrush(left_frac < 0.15f ? kAlert : kMuted);
                 p.drawRect(QRect(bar.left(), bar.top(), int(bar.width() * left_frac), bar.height()));
             }
 
@@ -152,10 +164,10 @@ protected:
                 {
                     // The AND brace: one vertical bar spanning the clauses, joining into the gate.
                     const int bx = box.right() - 74;
-                    p.setPen(QPen(QColor(0x77, 0x77, 0x77), 1.2));
+                    p.setPen(QPen(kMuted, 1.4));
                     p.drawLine(bx, first_chip, bx, last_chip);
                     p.drawLine(bx, (first_chip + last_chip) / 2, bx + 10, (first_chip + last_chip) / 2);
-                    p.setPen(QColor(0x99, 0x99, 0x99));
+                    p.setPen(kDetail);
                     p.drawText(QRect(bx - 30, (first_chip + last_chip) / 2 - 9, 28, 18),
                                Qt::AlignRight | Qt::AlignVCenter, QStringLiteral("AND"));
                 }
@@ -184,6 +196,15 @@ protected:
 private:
     static constexpr int kNodeH = 34, kGap = 18, kChipH = 22;
 
+    // The ground this palette was designed against, and three text weights lifted well clear of it.
+    // Anything dimmer than kMuted is unreadable at a glance, which is the only way this window is read.
+    static inline const QColor kGround{0x23, 0x25, 0x28};
+    static inline const QColor kLabel {0xf2, 0xf2, 0xf2};   // node + chip labels (always bold)
+    static inline const QColor kDetail{0xc4, 0xc8, 0xcc};   // the NUMBERS beside a label
+    static inline const QColor kMuted {0x93, 0x99, 0x9f};   // structure: edges, braces, skipped
+    static inline const QColor kTrack {0x3a, 0x3d, 0x41};   // unfilled progress/timeout track
+    static inline const QColor kAlert {0xe7, 0x4c, 0x3c};   // blocked / out of time
+
     const AffordanceStepView *find(AffordanceStepView::Kind k) const
     {
         for (const auto &s : view_.steps) if (s.kind == k) return &s;
@@ -198,11 +219,13 @@ private:
         using S = AffordanceStepView::State;
         switch (s.state)
         {
-            case S::Done:    return {0x27, 0xae, 0x60};
-            case S::Failed:  return {0xc0, 0x39, 0x2b};
-            case S::Active:  return {0x29, 0x80, 0xb9};
-            case S::Skipped: return {0x66, 0x66, 0x66};
-            default:         return {0x88, 0x88, 0x88};
+            // Brightened for the dark ground: the 0x27/0xc0/0x29 originals are mid-tones that a dark
+            // fill swallows, and these are OUTLINE colours — a swallowed outline is a missing node.
+            case S::Done:    return {0x2e, 0xcc, 0x71};
+            case S::Failed:  return {0xe7, 0x4c, 0x3c};
+            case S::Active:  return {0x4a, 0xa3, 0xe0};
+            case S::Skipped: return {0x7a, 0x80, 0x86};
+            default:         return kMuted;
         }
     }
 
@@ -210,11 +233,11 @@ private:
     // flowing, which a static arrow does not.
     static void draw_edge(QPainter &p, int cx, int y0, int y1, bool past)
     {
-        p.setPen(QPen(past ? QColor(0x27, 0xae, 0x60) : QColor(0x66, 0x66, 0x66), 1.4));
+        p.setPen(QPen(past ? QColor(0x2e, 0xcc, 0x71) : kMuted, 1.6));
         p.drawLine(cx, y0, cx, y1);
         QPainterPath head;
         head.moveTo(cx, y1); head.lineTo(cx - 4, y1 - 6); head.lineTo(cx + 4, y1 - 6); head.closeSubpath();
-        p.setBrush(past ? QColor(0x27, 0xae, 0x60) : QColor(0x66, 0x66, 0x66));
+        p.setBrush(past ? QColor(0x2e, 0xcc, 0x71) : kMuted);
         p.setPen(Qt::NoPen);
         p.drawPath(head);
     }
@@ -232,8 +255,8 @@ private:
         p.setPen(QPen(c, live ? 2.0 : 1.0, s.state == S::Skipped ? Qt::DashLine : Qt::SolidLine));
         p.drawRoundedRect(r, radius, radius);
 
-        QFont f = p.font(); f.setBold(live); p.setFont(f);
-        p.setPen(s.state == S::Skipped ? QColor(0x77, 0x77, 0x77) : QColor(0xdd, 0xdd, 0xdd));
+        QFont f = p.font(); f.setBold(true); p.setFont(f);
+        p.setPen(s.state == S::Skipped ? kMuted : kLabel);
         p.drawText(QRect(r.left() + 12, r.top(), 190, r.height()), Qt::AlignLeft | Qt::AlignVCenter,
                    QString::fromStdString(s.label));
         f.setBold(false); p.setFont(f);
@@ -244,19 +267,19 @@ private:
         {
             const QRect u(r.left() + 12, r.bottom() - 7, 170, 3);
             p.setPen(Qt::NoPen);
-            p.setBrush(QColor(0x44, 0x44, 0x44)); p.drawRect(u);
+            p.setBrush(kTrack); p.drawRect(u);
             p.setBrush(c);
             p.drawRect(QRect(u.left(), u.top(), int(u.width() * std::clamp(s.progress, 0.f, 1.f)), u.height()));
         }
         // blocked_why WINS: if something is stuck, the reason is the only thing worth reading here.
         const bool blocked = not s.blocked_why.empty();
-        p.setPen(blocked ? QColor(0xc0, 0x39, 0x2b) : QColor(0x99, 0x99, 0x99));
+        p.setPen(blocked ? kAlert : kDetail);
         p.drawText(QRect(r.left() + 210, r.top(), r.width() - 260, r.height()),
                    Qt::AlignLeft | Qt::AlignVCenter,
                    QString::fromStdString(blocked ? s.blocked_why : s.detail));
         if (s.state != S::Pending and s.state != S::Skipped and s.elapsed_s > 0.f)
         {
-            p.setPen(QColor(0x77, 0x77, 0x77));
+            p.setPen(kMuted);
             p.drawText(QRect(r.right() - 46, r.top(), 40, r.height()), Qt::AlignRight | Qt::AlignVCenter,
                        QStringLiteral("%1s").arg(double(s.elapsed_s), 0, 'f', 1));
         }
@@ -268,11 +291,11 @@ private:
         p.setBrush(QColor(c.red(), c.green(), c.blue(), 22));
         p.setPen(QPen(c, 1.0));
         p.drawRoundedRect(r, 7, 7);
-        p.setPen(QColor(0xcc, 0xcc, 0xcc));
+        p.setPen(kLabel);
         p.drawText(QRect(r.left() + 8, r.top(), r.width() - 120, r.height()),
                    Qt::AlignLeft | Qt::AlignVCenter, QString::fromStdString(s.label));
         const bool blocked = not s.blocked_why.empty();
-        p.setPen(blocked ? QColor(0xc0, 0x39, 0x2b) : QColor(0x99, 0x99, 0x99));
+        p.setPen(blocked ? kAlert : kDetail);
         p.drawText(QRect(r.right() - 150, r.top(), 144, r.height()), Qt::AlignRight | Qt::AlignVCenter,
                    QString::fromStdString(blocked ? s.blocked_why : s.detail));
     }

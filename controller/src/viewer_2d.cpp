@@ -499,14 +499,36 @@ void Viewer2D::draw_path(const PathDrawData &data)
             const QBrush obstacle_center_brush(palette.center);
             const QBrush obstacle_edge_brush(palette.edge);
 
-            QPolygonF qpoly;
+            // The centre is needed by the round branch as well as by the marker + label below.
+            QPointF center;
             for (const auto &vertex : obstacle)
-                qpoly << QPointF(vertex.x(), vertex.y());
-            qpoly << QPointF(obstacle.front().x(), obstacle.front().y());
+                center += QPointF(vertex.x(), vertex.y());
+            center /= obstacle.size();
 
-            auto *polygon = agv_->scene.addPolygon(qpoly, obstacle_pen, obstacle_brush);
-            polygon->setZValue(18);
-            path_draw_items_.push_back(polygon);
+            if (obstacle_visual.round and obstacle_visual.round_radius_m > 0.f)
+            {
+                // A ROUND table is drawn as the disc it is. The box would draw four corners and an
+                // orientation that the round belief does not contain — it has no yaw at all — so the
+                // rectangle was showing structure that had never been inferred. See the note on
+                // ControllerObstacleVisual::round: this is the DISPLAY only; the planner still avoids
+                // the circumscribing polygon.
+                const qreal r = obstacle_visual.round_radius_m;
+                auto *disc = agv_->scene.addEllipse(QRectF(center.x() - r, center.y() - r, 2 * r, 2 * r),
+                                                    obstacle_pen, obstacle_brush);
+                disc->setZValue(18);
+                path_draw_items_.push_back(disc);
+            }
+            else
+            {
+                QPolygonF qpoly;
+                for (const auto &vertex : obstacle)
+                    qpoly << QPointF(vertex.x(), vertex.y());
+                qpoly << QPointF(obstacle.front().x(), obstacle.front().y());
+
+                auto *polygon = agv_->scene.addPolygon(qpoly, obstacle_pen, obstacle_brush);
+                polygon->setZValue(18);
+                path_draw_items_.push_back(polygon);
+            }
 
             // Grid-occupancy hulls read as a filled region only — skip the dense contour dots + centre
             // marker (they are the "small points" that made occupied/free space unreadable).
@@ -517,10 +539,6 @@ void Viewer2D::draw_path(const PathDrawData &data)
             // already show, and they were expensive: one QGraphicsEllipseItem every 0.12 m of perimeter,
             // rebuilt every frame for every obstacle. That is hundreds of scene items per redraw, which is a
             // real contributor to the viewer's jank. The outline is the polygon's own pen.
-            QPointF center;
-            for (const auto &vertex : obstacle)
-                center += QPointF(vertex.x(), vertex.y());
-            center /= obstacle.size();
             auto *dot = agv_->scene.addEllipse(-0.06, -0.06, 0.12, 0.12, Qt::NoPen, obstacle_center_brush);
             dot->setPos(center);
             dot->setZValue(19);

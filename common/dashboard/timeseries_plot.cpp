@@ -110,9 +110,10 @@ void TimeSeriesPlot::add_point(const std::string& name, float value)
     while (!q.empty() && q.front().t < cutoff)
         q.pop_front();
 
-    // Update running average companion if configured
+    // Update running average companion if configured. A GAP marker is not a value: folding it into the
+    // ring would poison the average with NaN for the whole window.
     auto& s = it->second;
-    if (s.avg_window > 0 && !s.avg_companion.empty())
+    if (std::isfinite(value) && s.avg_window > 0 && !s.avg_companion.empty())
     {
         s.avg_ring.push_back(value);
         s.avg_sum += value;
@@ -188,6 +189,7 @@ void TimeSeriesPlot::paintEvent(QPaintEvent*)
             for (const auto& pt : s.samples)
             {
                 if (pt.t < t_min) continue;
+                if (!std::isfinite(pt.v)) continue;   // a GAP marker carries no value — see add_point
                 v_min = std::min(v_min, pt.v);
                 v_max = std::max(v_max, pt.v);
             }
@@ -225,6 +227,11 @@ void TimeSeriesPlot::paintEvent(QPaintEvent*)
         for (const auto& pt : s.samples)
         {
             if (pt.t < t_min) continue;
+            // ★NON-FINITE = A GAP, NOT A VALUE. A series can be legitimately UNDEFINED for a stretch —
+            // a quantity that only exists while some condition holds — and joining across that stretch
+            // would draw a line through time when the thing was not there. Breaking the path says
+            // "absent" where a straight segment would have said "unchanged".
+            if (!std::isfinite(pt.v)) { started = false; continue; }
             const float sx = map_x(pt.t);
             const float sy = map_y(pt.v);
             if (!started) { path.moveTo(sx, sy); started = true; }
@@ -235,8 +242,14 @@ void TimeSeriesPlot::paintEvent(QPaintEvent*)
                                    // drawPath FILLS the (implicitly closed) polyline, filling peaks
         p.drawPath(path);
 
-        // Mark the latest sample without drawing a full-width guide line.
-        const auto& last = s.samples.back();
+        // Mark the latest sample without drawing a full-width guide line. The latest FINITE one: a dot
+        // at a gap marker has no y to sit at, and drawing it at the last known value would assert a
+        // current reading for a series that currently has none.
+        const Sample* last_finite = nullptr;
+        for (auto it = s.samples.rbegin(); it != s.samples.rend(); ++it)
+            if (std::isfinite(it->v) && it->t >= t_min) { last_finite = &*it; break; }
+        if (last_finite == nullptr) continue;
+        const auto& last = *last_finite;
         const float last_x = map_x(last.t);
         const float last_y = map_y(last.v);
         p.setPen(QPen(s.colour, 1.0f));

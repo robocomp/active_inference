@@ -1026,13 +1026,24 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
             ? ControllerObstacleKind::Obstacle
             : ControllerObstacleKind::Object;
         std::string visual_label;
+        bool round_footprint = false;
         if (kind == ControllerObstacleKind::Object)
         {
             // Post-migration the node type is generic "object"; the class label lives in the
             // object_subtype attribute (cosmetic log label). Fall back to type() for legacy nodes.
             const auto subtype_attr = graph_->get_attrib_by_name<object_subtype_att>(node);
-            const std::string prefix = object_label_prefix(subtype_attr.value_or(node.type()));
+            const std::string subtype = subtype_attr.value_or(node.type());
+            const std::string prefix = object_label_prefix(subtype);
             visual_label = prefix + "_" + std::to_string(++object_label_counts_[prefix]);
+            // ROUND-vs-SQUARE comes off mesh_path, not off a shape attribute, because that IS the
+            // contract: object_subtype carries the CLASS ("table") for every table, and table_concept
+            // publishes its inferred SHAPE by choosing round_table.obj over table.obj (free-energy
+            // model evidence — see TableFitter::evaluate_shape). Sniffing the path is what the
+            // voxelizer's 3D viewer already does; if that contract ever grows a real attribute this is
+            // the one line that has to follow it.
+            if (subtype == "table")
+                if (const auto mesh = graph_->get_attrib_by_name<mesh_path_att>(node); mesh.has_value())
+                    round_footprint = mesh.value().find("round") != std::string::npos;
         }
         else
         {
@@ -1049,9 +1060,16 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
                                                              .node_name = node.name(),
                                                              .state = state,
                                                              .kind = kind});
-        display_obstacle_polygons_.push_back(ControllerObstacleVisual{.polygon = polygon,
-                                                                      .kind = kind,
-                                                                      .label = visual_label});
+        display_obstacle_polygons_.push_back(ControllerObstacleVisual{
+            .polygon = polygon,
+            .kind = kind,
+            .label = visual_label,
+            .round = round_footprint,
+            // The disc spans the same extent as the box it replaces: a round table whose belief says
+            // 0.90 m across is drawn 0.90 m across. Taking the LARGER of the two is what makes it a
+            // bound rather than a guess — the two are equal for a true disc and differ only while the
+            // fit is still settling, and under-drawing a footprint is the failure that matters.
+            .round_radius_m = round_footprint ? 0.5f * std::max(state.width_m, state.depth_m) : 0.f});
         obstacles.push_back(std::move(polygon));
     }
 

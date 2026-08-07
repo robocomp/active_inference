@@ -496,6 +496,16 @@ LambdaContinuity = 0.0
 ContinuityRotFactor = 1.0
 AffordanceLambdaCost = 0.2    # grounded EFE selection nav-cost weight (nats per metre): G = λ·dist − ΔH
 AffordanceSwitchMargin = 0.5  # commitment hysteresis (nats): held affordance must be beaten by this much to switch
+# ── ROOM-vs-OBJECT ARBITRATION ──────────────────────────────────────────────────────────────────────
+# Scale on a ROOM affordance's epistemic gain WHILE at least one OBJECT affordance is also Offered or
+# Executing. Both are quoted in nats and the selector treats them as one currency, but they are not
+# equally spendable: re-localising is a standing background need that recovers on its own and can be
+# paid at any time, whereas an object's look is opportunistic — the robot is beside it NOW and the
+# chance is gone once it drives away. Without this the room wins nearly every contest and the objects
+# are never visited. A PREFERENCE, not a gate: the room still wins on a large enough gain, which is
+# what should happen when the pose belief has genuinely degraded. Inert when no object is competing,
+# so a lost robot in an empty room is unaffected. 1.0 restores the old behaviour.
+AffordanceRoomGainScale = 0.35
 MaxAdvSpeed = 0.7
 # Lateral-acceleration budget, m/s^2. Sets BOTH the curvature speed ceiling (v = sqrt(a_lat/kappa), so the
 # robot arrives at a corner already slow enough to follow it) and the route optimiser's curvature
@@ -608,15 +618,52 @@ GoalFacingYawEnabled = true
 # producing agent via the affordance_protocol Contract. Room affordances are policy=Reach (this is
 # inert for them); the table affordance is policy=Servo and uses this loop.
 LockOnEnabled = true
-LockOnSweepSpeedMps = 0.12   # PRIMARY: distance-sweep advance speed (detectability ~ distance)
+# ★SLOWED 2026-08-07. The search moves in order to CHANGE THE VIEW, but every centimetre of that
+# motion costs mask quality — the voxelizer's own ego-motion channel (mask_motion_var/motion_dotd)
+# grows with base speed, so a brisk sweep degrades the evidence it is sweeping to collect. Symptom:
+# a mask plainly visible to the eye that the loop never captured. Speeds halved, and the still window
+# more than doubled while each nudge got shorter — the loop now spends most of its time LOOKING.
+LockOnSweepSpeedMps = 0.06   # PRIMARY: distance-sweep advance speed (detectability ~ distance)
 LockOnSweepRangeM = 0.45     # oscillate ± this far (m) from the arrival pose
 LockOnOffsetTol = 0.15       # |normalized centre offset| deadband for yaw centring (secondary)
 LockOnKYaw = 0.8             # rps per unit centre error
-LockOnMaxYawRps = 0.12       # tiny caps: micro-search, not navigation
-LockOnDitherYawRps = 0.10
-LockOnSettleMs = 400.0       # dwell before each measurement (kills motion blur / detection flicker)
-LockOnStepMs = 400.0         # duration of one sweep step
+LockOnMaxYawRps = 0.06       # tiny caps: micro-search, not navigation
+LockOnDitherYawRps = 0.05
+LockOnSettleMs = 900.0       # MINIMUM still window before a measurement is taken
+LockOnStepMs = 300.0         # duration of one sweep step (18 mm at the speed above)
+# WAIT FOR THE EVIDENCE INSTEAD OF GUESSING THE LATENCY. A fixed dwell was a guess at how long
+# camera → YOLO → mask node → concept agent → feedback attribute takes, and when the guess was short
+# the predicate sampled at the end of the dwell still described a frame captured during the previous
+# NUDGE — blurred, and rejected — while a good detection arriving moments later was never sampled,
+# because the robot had already moved on. The still window now ends only once the mask producer has
+# published this many frames SINCE THE BASE STOPPED, so the measurement is taken on looks the robot
+# actually held still for. Counted in frames, not milliseconds: a frame counter needs no clock
+# agreement between two agents. Bounded by LockOnSettleMaxMs so a dead producer degrades to the plain
+# dwell rather than freezing the search. 0 restores the old fixed-dwell behaviour.
+LockOnSettleNewFrames = 2
+LockOnSettleMaxMs = 2500.0
 LockOnMaxAttempts = 30
+
+# ── DWELL AFTER AN AFFORDANCE ────────────────────────────────────────────────────────────────────────
+# Stand still for this long after finishing an affordance before the next one may be SELECTED (not just
+# before driving to it: selection claims the affordance in the shared graph). An affordance is taken in
+# order to LOOK at something, and its result — the YOLO masks acquired at the final pose and whatever
+# the concept agents make of them — used to be gone before it could be seen, because the next selection
+# turned the robot away at the next control cycle. The affordance window's camera view is what this time
+# is for. 0 restores the old back-to-back behaviour.
+AffordanceDwellMs = 3000.0
+# ★AND WAIT FOR THE ACQUISITION, NOT JUST FOR THE CLOCK. When the affordance went to look at a named
+# object, the dwell also holds until that object's mask has come back in this many SEPARATE producer
+# frames. One sighting proves nothing — an intermittent detector produces single frames by accident —
+# so the count is what turns a sighting into evidence. Counted off the "masks" node directly, so it
+# does not depend on the affordance window being open. 0 = the dwell is the clock alone.
+AffordanceDwellMaskHits = 5
+# BOUND on the whole wait (clock + acquisition). A mask that is never coming must not park the robot:
+# past this the dwell ends anyway and the log says the acquisition failed, which is itself a result.
+AffordanceDwellMaxMs = 12000.0
+# The camera node whose rgb media descriptor backs that view. DISPLAY ONLY: if the node or its stream is
+# absent the panel draws the mask silhouettes on a plain ground and says the picture is missing.
+CameraNodeName = "zed"
 
 # Physical-WEDGE detection + reverse-and-turn escape. Fires when the robot commands translation but the
 # base doesn't achieve it (a PREDICTION ERROR: measured base speed < StuckSlipRatio × commanded), or

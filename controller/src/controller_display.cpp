@@ -1,6 +1,7 @@
 #include "controller_display.h"
 
 #include <QByteArray>
+#include <limits>
 #include <QComboBox>
 #include <QInputDialog>
 #include <QPushButton>
@@ -97,11 +98,16 @@ void ControllerDisplay::initialize(rc::LidarPointBuffer *lidar_buffer, Callbacks
     // name in the toolbar shows it. It is a QDialog with the Tool flag, so it floats over the 2D view
     // without taking focus from it — this is meant to be watched WHILE driving.
     affordance_panel_ = std::make_unique<rc::AffordancePanel>(custom_widget_.get());
+    // The button runs on the GUI thread; the session it acts on lives on the control thread. The
+    // callback the worker installs is an enqueue, never a direct call — same rule as every other
+    // control the panels own.
+    affordance_panel_->set_skip_callback(callbacks.on_skip_affordance);
     custom_widget_->set_affordance_clicked([this]
     {
         if (affordance_panel_ == nullptr) return;
         affordance_panel_->setVisible(not affordance_panel_->isVisible());
         if (affordance_panel_->isVisible()) affordance_panel_->raise();
+        affordance_panel_visible_.store(affordance_panel_->isVisible(), std::memory_order_relaxed);
     });
     custom_widget_->attach_mission_panel(mission_panel_.get());
 
@@ -186,6 +192,13 @@ void ControllerDisplay::set_affordance_execution(const rc::AffordanceExecution &
     snapshot_.affordance = v;
 }
 
+void ControllerDisplay::set_camera_masks(const rc::CameraMasksView &view)
+{
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    snapshot_.camera_masks = view;
+    snapshot_.camera_masks_pending = true;
+}
+
 void ControllerDisplay::set_selected_affordance(const QString &current, const QString &previous)
 {
     std::lock_guard<std::mutex> lock(snapshot_mutex_);
@@ -267,7 +280,13 @@ void ControllerDisplay::update_affordance_efe(const std::vector<AffordanceEfeSam
             ++it;
     }
 
-    // One line per affordance: the selection score (gain − λ·dist) — the value used to choose.
+    // One line per affordance: the selection score (gain − λ·dist + hysteresis) — the EXACT value
+    // selection maximises, so the highest line among the eligible ones is the one that gets chosen.
+    // ★AN INELIGIBLE AFFORDANCE PLOTS A GAP, NOT A VALUE. Its score is still computable and still high,
+    // but it is not in the contest — a Completed or Invalid node is skipped by every selection branch —
+    // and drawing it as a continuous line said "this keeps winning on merit and keeps being passed
+    // over", which is a bug report about the selector rather than what it is: a node whose owning agent
+    // is not offering it. The break in the line is the answer.
     for (const auto &s : samples)
     {
         if (efe_series_known_.find(s.name) == efe_series_known_.end())
@@ -276,7 +295,7 @@ void ControllerDisplay::update_affordance_efe(const std::vector<AffordanceEfeSam
             ++efe_color_next_;
             efe_series_known_.insert(s.name);
         }
-        plot->add_point(s.name, s.score);
+        plot->add_point(s.name, s.eligible ? s.score : std::numeric_limits<float>::quiet_NaN());
     }
 }
 
@@ -314,8 +333,15 @@ void ControllerDisplay::present()
 
     if (snap.selected_affordance_text_pending)
         custom_widget_->set_selected_affordance(snap.affordance_current, snap.affordance_previous);
+    // Re-published every frame, not only on the toggle: the window can also be closed by its own
+    // title-bar button, which never runs the toggle lambda and would leave the mirror stuck on true.
+    if (affordance_panel_)
+        affordance_panel_visible_.store(affordance_panel_->isVisible(), std::memory_order_relaxed);
     if (affordance_panel_ and affordance_panel_->isVisible())
+    {
         affordance_panel_->update_view(snap.affordance);
+        affordance_panel_->set_camera_view(snap.camera_masks);
+    }
 
     custom_widget_->set_stuck_active(snap.stuck_active);   // widget dedups same-state calls
     custom_widget_->set_goal_distance(snap.goal_dist_m, snap.goal_yaw_err_rad, snap.goal_aligning);

@@ -228,6 +228,13 @@ void SpecificWorker::initialize()
 	// back to the DSR laser_* path.
 	init_lidar_media();
 
+	// Camera + YOLO masks for the affordance panel. Built here (graph loaded, main thread) but it
+	// touches NO DDS in its constructor — its rgb subscriber comes up lazily from the control thread,
+	// the same media-plane consumer pattern as the LiDAR reader above. The masks half needs only the
+	// graph, so the panel is useful even where the camera stream never arrives.
+	if (G)
+		camera_masks_ = std::make_unique<rc::ControllerCameraMasks>(G, params.camera_node_name);
+
 	// DSR graph update signals — QUEUED connections only. NEVER Qt::DirectConnection:
 	// DSR emits update_node_signal/update_edge_signal from the raw FastDDS reader threads,
 	// and a DirectConnection runs the slot ON that reader thread, corrupting the heap
@@ -316,6 +323,18 @@ void SpecificWorker::initialize()
 			// is persisted immediately; a route silently lost on exit would be worse than a stray write.
 			if (session_.mission().move_waypoint(index, {x, y}))
 				session_.mission().save(missions_path_);
+		});
+	};
+	// Skip the running affordance. Enqueued, never called through: the button is pressed on the GUI
+	// thread and this touches the session, the lock-on state and the graph, all of which belong to the
+	// control thread. Also WAKES the loop, so the next affordance is chosen immediately rather than at
+	// whatever the next scan happens to be.
+	gui.on_skip_affordance = [this]()
+	{
+		enqueue_command([this]()
+		{
+			session_.skip_current_affordance(affordance_manager_, path_controller_, motion_commander_,
+			                                 display_, [this] { return current_time_ms(); });
 		});
 	};
 	gui.mission.on_record_begin = [this]()
@@ -538,8 +557,11 @@ void SpecificWorker::compute()
 	// affordance evaluated last cycle. The gap between the two lines is λ·dist.
 	{
 		std::vector<ControllerDisplay::AffordanceEfeSample> efe;
+		// ★ELIGIBILITY TRAVELS WITH THE SAMPLE. The manager already decides it and already carries it on
+		// the Candidate; dropping it here is what made a Completed affordance plot as a permanent
+		// front-runner that never wins.
 		for (const auto &c : affordance_manager_.last_candidates())
-			efe.push_back({c.node_name, c.gain, c.efe_score});
+			efe.push_back({c.node_name, c.gain, c.efe_score, c.eligible, c.state});
 		display_.update_affordance_efe(efe);
 	}
 
@@ -548,16 +570,32 @@ void SpecificWorker::compute()
 	// is visible while it happens instead of in a CSV afterwards, and the four series say WHICH term is
 	// paying for it. ★clear_norm is drawn in red because J was blind to clearance until 2026-08-05: two
 	// 3-lap runs scored 5.212 and 5.191 while min_clearance differed 36-fold.
-	// ⚠THROTTLED, and it must stay that way: summary() COPIES AND SORTS the clearance vector on every
-	// call, which is ~1900 samples per lap and ~5700 over three. At the 20 Hz control rate that is a
-	// growing O(n log n) inside the loop whose notice latency the timing work exists to protect. A plot
-	// with a 120 s window gains nothing from 20 Hz, so it runs at 2.
+	// ⚠THROTTLED, and it must stay that way: on the mission path live_tracking() calls summary(), which
+	// COPIES AND SORTS the clearance vector on every call — ~1900 samples per lap and ~5700 over three.
+	// At the 20 Hz control rate that is a growing O(n log n) inside the loop whose notice latency the
+	// timing work exists to protect. A plot with a 120 s window gains nothing from 20 Hz, so it runs at 2.
 	if (++mission_j_plot_tick_ >= 10)
 	{
 		mission_j_plot_tick_ = 0;
-		const auto js = session_.mission().summary();
-		display_.update_tracking_error(js.cross_track_rms_m, js.cross_track_max_m,
-		                               js.distance_m > 1.f ? js.rot_effort_rad / js.distance_m : 0.f);
+		// ★NOT mission().summary() directly: that is zero unless a MISSION is running, so the panel
+		// drew three flat zeros through every clicked target and every affordance — the driving L is
+		// actually adapted on. live_tracking() still returns the graded summary while a mission runs.
+		const auto lt = session_.live_tracking();
+		display_.update_tracking_error(lt.cross_rms_m, lt.cross_max_m, lt.rot_per_m);
+	}
+
+	// Camera + YOLO masks for the affordance panel. Self-throttled internally (it recomposes at ~6 Hz),
+	// so this call is cheap at the control rate; it is skipped entirely while the panel is closed
+	// because the only consumer of the composed image is that window, and composing a frame nobody is
+	// looking at would spend a full-frame paint per cycle on nothing.
+	if (camera_masks_ and display_.affordance_panel_visible())
+	{
+		// The projection needs both frame names and cannot know them before the graph has loaded.
+		camera_masks_->set_frames(world_model_.graph_state().room_name,
+		                          world_model_.graph_state().robot_name);
+		if (camera_masks_->pump(session_.attention_object(), current_time_ms(),
+		                        session_.look_step_active()))
+			display_.set_camera_masks(camera_masks_->view());
 	}
 
 	log_first_compute_once();
@@ -717,11 +755,13 @@ void SpecificWorker::load_params()
 	// commitment hysteresis (nats). G = λ_cost·dist − epistemic_gain; the room/table choice is now
 	// in one information currency instead of a hard table>room priority.
 	{
-		double aff_lambda_cost = 0.2, aff_switch_margin = 0.5;
+		double aff_lambda_cost = 0.2, aff_switch_margin = 0.5, aff_room_gain_scale = 0.35;
 		load_optional_cast<double>("Controller.AffordanceLambdaCost", aff_lambda_cost);
 		load_optional_cast<double>("Controller.AffordanceSwitchMargin", aff_switch_margin);
+		load_optional_cast<double>("Controller.AffordanceRoomGainScale", aff_room_gain_scale);
 		affordance_manager_.set_selection_params(static_cast<float>(aff_lambda_cost),
 		                                         static_cast<float>(aff_switch_margin));
+		affordance_manager_.set_room_gain_scale(static_cast<float>(aff_room_gain_scale));
 	}
 	load_optional_cast<double>("Controller.MaxAdvSpeed", params.max_adv_speed_mps);
 	load_optional_cast<double>("Controller.MaxLateralAccel", params.max_lateral_accel_mps2);
@@ -808,8 +848,14 @@ void SpecificWorker::load_params()
 	load_optional_cast<double>("Controller.LockOnMaxYawRps",    params.lockon_max_yaw_rps);
 	load_optional_cast<double>("Controller.LockOnDitherYawRps", params.lockon_dither_yaw_rps);
 	load_optional_cast<double>("Controller.LockOnSettleMs",     params.lockon_settle_ms);
+	load_optional_cast<double>("Controller.LockOnSettleMaxMs",  params.lockon_settle_max_ms);
+	load_optional("Controller.LockOnSettleNewFrames",           params.lockon_settle_new_frames);
 	load_optional_cast<double>("Controller.LockOnStepMs",       params.lockon_step_ms);
 	load_optional("Controller.LockOnMaxAttempts",              params.lockon_max_attempts);
+	load_optional_cast<double>("Controller.AffordanceDwellMs", params.affordance_dwell_ms);
+	load_optional("Controller.AffordanceDwellMaskHits",        params.affordance_dwell_mask_hits);
+	load_optional_cast<double>("Controller.AffordanceDwellMaxMs", params.affordance_dwell_max_ms);
+	load_optional("Controller.CameraNodeName",                 params.camera_node_name);
 
 	// Physical-stuck detection + reverse-and-turn escape (see ControllerParams).
 	load_optional("Controller.StuckRecoveryEnabled",            params.stuck_recovery_enabled);

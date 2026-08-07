@@ -59,6 +59,18 @@ struct AffordanceExecution
     float         elapsed_s = 0.f;
     float         timeout_s = 0.f;      // contract timeout; 0 = none. Shown as a clock that runs out.
     bool          contract_known = false;   // false ⇒ the rows below are the pipeline only, no clauses
+    // Seconds left of the post-affordance dwell (see ControllerParams::affordance_dwell_ms). 0 = not
+    // dwelling. While it counts down the affordance is FINISHED and the robot is deliberately still,
+    // which is a different thing from idle and has to look different, or a held robot reads as a hung one.
+    float         dwell_left_s = 0.f;
+    // Confirming looks of the affordance's object during the dwell: how many separate producer frames
+    // have carried its mask, and how many are wanted. needed == 0 ⇒ the dwell is the clock alone.
+    int           dwell_mask_hits = 0;
+    int           dwell_mask_needed = 0;
+    // The affordance the selector PASSED OVER this cycle because it was the one that just finished
+    // (no two in a row). Empty when none was. Shown because a top-scoring, Offered affordance that is
+    // silently skipped is indistinguishable from a broken selector.
+    std::string   suppressed;
     std::vector<AffordanceStepView> steps;
 
     // A short history of finished executions, newest first: "<name>  12.4 s  locked / gave up / reached".

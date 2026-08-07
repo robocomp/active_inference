@@ -95,6 +95,19 @@ public:
     void stop(rc::TrajectoryController &path_controller,
               ControllerMotionCommander &motion_commander);
 
+    /// ABANDON the affordance being executed and let the planner choose the next one.
+    /// The operator's override on the epistemic policy: the selector optimises expected information
+    /// gain and cannot know that a particular look is hopeless — occluded, mis-posed, or simply not
+    /// worth the wait — so there has to be a way to say so. It RETIRES the affordance (clears active +
+    /// epistemic_pending on the node, exactly as a completed one) rather than merely dropping it: an
+    /// affordance that is only released goes straight back into the pool and wins the very next
+    /// selection, so the button would appear to do nothing. Returns false when nothing was running.
+    bool skip_current_affordance(rc::AffordanceManager &affordance_manager,
+                                 rc::TrajectoryController &path_controller,
+                                 ControllerMotionCommander &motion_commander,
+                                 ControllerDisplay &display,
+                                 const TimeSource &time_source);
+
     /// ABORT: throw away the current activity entirely, leaving the session ready for a fresh Run.
     ///
     /// stop() halts the robot but keeps the route, the plan and the follower's progress, which is what
@@ -119,6 +132,23 @@ public:
     int smooth_selected_mission();
     const rc::MissionRunner &mission() const { return mission_; }
 
+    // ── Live tracking error, for the L-adaptation panel ────────────────────────────────────────────
+    // The objective the panel plots, available in EVERY drive mode. It used to read MissionRunner's
+    // summary directly, which is gated twice on things a click target and an affordance both lack — a
+    // RUNNING mission, and a continuous ROUTE to measure deviation from — so the panel drew three flat
+    // zeros through exactly the driving L is being adapted on. (Same absent-vs-zero confusion the
+    // per-cycle CSV had before it was moved off the mission gate; see the note at the log site.)
+    // The signal is the tracker's OWN cross-track (control_output.cross_track_m), the deviation from
+    // whatever curve it is following, mission route or point plan alike.
+    struct TrackingLive
+    {
+        float cross_rms_m = 0.f;
+        float cross_max_m = 0.f;
+        float rot_per_m   = 0.f;   // rotation effort per metre — the constraint series
+        bool  on_mission  = false; // true while a mission runs: the numbers are then the GRADED ones
+    };
+    [[nodiscard]] TrackingLive live_tracking() const;
+
 private:
     void clear_tracking_state();
 
@@ -126,6 +156,8 @@ private:
     // (LOCKED or GIVE_UP); drives the base directly via the motion commander.
     bool step_lockon(ControllerMotionCommander &motion_commander, const TimeSource &time_source);
     rc::LockOn::Reading read_servo_reading(std::uint64_t feedback_node_id) const;
+    // Perception producer's monotonic frame counter (mask_frame_id), or -1. See the definition.
+    [[nodiscard]] int masks_frame_seq() const;
     bool goal_met(std::uint64_t feedback_node_id) const;
     // Contract-driven Orient (Policy::Orient): rotate IN PLACE toward `target_yaw` (no navigation) until the
     // contract's completion predicate fires (a depth detection arrives) or the contract times out. Returns
@@ -156,7 +188,12 @@ private:
                           ControllerMotionCommander &motion_commander,
                           ControllerDisplay &display,
                           const Eigen::Vector2f &arrived_at,
-                          std::uint64_t now_ms);
+                          std::uint64_t now_ms,
+                          // A SKIP is not an arrival: there is no acquisition to inspect, so it must not
+                          // arm the post-affordance dwell. Everything else about retiring the run is the
+                          // same, which is why this is a flag rather than a second teardown path — two
+                          // of those would drift apart and one of them would forget to clear something.
+                          bool allow_dwell = true);
 
     // ── Physical-wedge recovery ──────────────────────────────────────────────────────
     // Debounce over a per-cycle wedge signal supplied by the caller. A wedge is a PREDICTION ERROR and
@@ -321,6 +358,81 @@ private:
     // per process is how a Target-mode idle stayed invisible.
     std::optional<rc::DriveMode> target_wait_logged_mode_;
     bool target_wait_logged_ = false;
+
+    // ── Post-affordance dwell (see ControllerParams::affordance_dwell_ms) ─────────────────────────
+    // Set at finalize_reached; until it passes, build_planning_step holds the base still and does NOT
+    // consult the affordance planner. Gating BEFORE select_target matters: merely refusing to drive
+    // would still let the manager claim the next affordance and publish an execution edge, so the
+    // graph would say the robot is servicing an affordance it has not started.
+    std::uint64_t affordance_dwell_until_ms_ = 0;   // the CLOCK part of the wait
+    std::uint64_t affordance_dwell_deadline_ms_ = 0;   // the hard bound on the whole wait
+    bool          dwell_logged_ = false;
+    // ── CONFIRMING LOOKS (see ControllerParams::affordance_dwell_mask_hits) ───────────────────────
+    // How many separate producer frames have carried a mask of the affordance's object since the dwell
+    // began. Counted off the "masks" node directly rather than through the panel's composer: the
+    // composer only runs while the affordance WINDOW IS OPEN, and behaviour that depends on whether a
+    // window is open is not behaviour, it is a coincidence.
+    int           dwell_mask_hits_ = 0;
+    int           dwell_last_mask_frame_ = -1;
+    // Whether THIS dwell is waiting on an acquisition at all — decided once, when it is armed, from the
+    // finished affordance's contract and whether its look succeeded. Latched rather than recomputed:
+    // the contract is re-resolved as soon as the next target is picked, so asking again mid-dwell would
+    // answer about a different affordance.
+    bool          dwell_wants_mask_ = false;
+    // WHAT counts as a confirming look, captured when the dwell is armed: the finished contract's own
+    // completion clauses, and the feedback node they are evaluated on. Using the producer's own
+    // detection predicate — the very signal the servo used to declare success — instead of re-deriving
+    // "is my object in the masks" by matching a YOLO class label against a graph node NAME. That match
+    // can never succeed for an affordance whose object is not named after a COCO class (a room, a
+    // metaconcept), so the wait it gated was unsatisfiable BY CONSTRUCTION, not merely unlucky.
+    std::vector<rc::affordance::GoalClause> dwell_goal_;
+    std::uint64_t dwell_feedback_node_ = 0;
+    std::uint64_t dwell_last_log_ms_ = 0;
+    // Did the last affordance's look actually SUCCEED (locked / detection fired), as opposed to timing
+    // out? Set by the two executors that know — step_lockon and step_orient.
+    bool          last_look_succeeded_ = false;
+    // Count the looks and report the outcome, so the log distinguishes "acquired" from "gave up on".
+    void count_dwell_mask_hits();
+    // What the dwell is showing off — the object of the affordance that just finished. Carried only so
+    // the camera/masks view can highlight the masks that action was TAKEN TO ACQUIRE.
+    std::string   dwell_object_;
+public:
+    // The object whose masks the panel should highlight: the live affordance's, or during the dwell the
+    // one that just finished. Empty when neither. Read by the worker each cycle.
+    [[nodiscard]] const std::string &attention_object() const { return attention_object_; }
+    // Seconds left of the post-affordance dwell (0 when not dwelling) — shown in the affordance panel.
+    // Two phases: the CLOCK floor, then the bounded wait for the acquisition. Once the clock has passed
+    // and the dwell is still armed, the number that means something is how long the bound will keep
+    // waiting for the mask — a countdown that hit zero while the robot was still standing there would
+    // be the panel contradicting the robot.
+    [[nodiscard]] float dwell_left_s(std::uint64_t now_ms) const
+    {
+        if (affordance_dwell_until_ms_ == 0) return 0.f;
+        if (affordance_dwell_until_ms_ > now_ms)
+            return static_cast<float>(affordance_dwell_until_ms_ - now_ms) / 1000.f;
+        return affordance_dwell_deadline_ms_ > now_ms
+                   ? static_cast<float>(affordance_dwell_deadline_ms_ - now_ms) / 1000.f : 0.f;
+    }
+    // Confirming looks counted so far, and how many are wanted (0 = the dwell is the clock alone).
+    [[nodiscard]] int dwell_mask_hits() const { return dwell_mask_hits_; }
+
+    /// Is the affordance at a step whose completion actually READS the masks?
+    /// True during the servo lock-on, during an Orient glance, and through a dwell that is counting
+    /// confirming looks — the three places the detection predicate is evaluated. False while claiming,
+    /// navigating or aligning, where the masks are on screen but nothing is being decided by them.
+    /// The affordance view uses it to decide whether to draw the YOLO ROIs at all: silhouettes shown
+    /// during the drive are clutter over the one thing worth watching then (where the belief puts the
+    /// object), and worse, they invite reading a detection as progress at a step that ignores it.
+    [[nodiscard]] bool look_step_active() const
+    {
+        return lockon_.active() or orient_start_ms_.has_value()
+            or (affordance_dwell_until_ms_ != 0 and dwell_wants_mask_);
+    }
+private:
+    std::string attention_object_;
+    // Mirror of AffordanceManager::suppressed_name(), pushed into the view. Held on the session because
+    // the panel snapshot is assembled here and the manager is not reachable from the publish site.
+    std::string suppressed_affordance_;
     // Rate limit for the "target is boxed in" warning — the condition persists as long as the target does.
     std::uint64_t last_unreachable_log_ms_ = 0;
 
@@ -414,6 +526,21 @@ private:
     bool band_csv_open_ = false;
     long long band_cycle_ = 0;
     bool route_active_ = false;
+    // ── Live tracking accumulator (see live_tracking) ──────────────────────────────────────────────
+    // Deliberately NOT hosted in MissionRunner. Sampling that outside a run would fold idle affordance
+    // driving into the stats the run is graded on, and its clearance vector — copied and SORTED by
+    // summary() — would grow without bound between missions. This is three sums and a max, reset on
+    // each rising edge of "the controller is driving", so every target gets its own curve.
+    double live_ct_sq_sum_ = 0.0;
+    double live_rot_effort_rad_ = 0.0;
+    double live_dist_m_ = 0.0;
+    std::size_t live_ct_n_ = 0;
+    float live_ct_max_m_ = 0.f;
+    bool live_active_ = false;
+    std::optional<Eigen::Vector2f> live_last_pos_;
+    std::uint64_t live_last_ms_ = 0;
+    void sample_live_tracking(bool driving, const ControllerRobotPose &robot_pose, float cross_track_m,
+                              float rot_rps, std::uint64_t now_ms);
     bool waypoint_mode_logged_ = false;
     std::uint64_t last_route_build_ms_ = 0;
     bool build_route(const ControllerRobotPose &robot_pose);

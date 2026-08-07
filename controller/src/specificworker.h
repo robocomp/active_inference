@@ -41,6 +41,7 @@
 #include <vector>
 
 #include "controller_display.h"
+#include "controller_camera_masks.h"
 #include "controller_motion_commander.h"
 #include "controller_obstacle_tracker.h"
 #include "controller_runtime_types.h"
@@ -135,6 +136,10 @@ private:
 	ControllerDisplay display_;
 	ControllerSession session_;
 	rc::AffordanceManager affordance_manager_;
+	// The camera picture + YOLO masks shown in the affordance panel. Owns its own rgb subscriber and a
+	// MaskIngestor; pumped from the control loop and pushed into the display as a finished image.
+	// See controller_camera_masks.h for why the controller reads masks at all.
+	std::unique_ptr<rc::ControllerCameraMasks> camera_masks_;
 	std::string last_selected_affordance_;   // most recent distinct selection (for the "prev" label)
 	std::string prev_selected_affordance_;   // the one selected before it
 	// Driving is ON by default. The old Start/Stop toggle duplicated the mission bar's Stop and could

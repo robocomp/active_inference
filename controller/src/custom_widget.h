@@ -98,14 +98,22 @@ public:
         // affordance, NOT per run. MissionRunner integrates both, but only while a mission is RUNNING,
         // so nothing ever counted a target or the drive back to a start point. LCDs like the rest of
         // this row: these tick continuously, and a proportional label re-flows as digits change.
-        pose_row->addWidget(new QLabel("run", pose_panel));
+        // ★UNITS TRAIL THE NUMBER, and there is no group label. "run" named the pair but left both
+        // readings unitless, so the odometer and the clock were two anonymous numbers side by side;
+        // "12.4 m." and "07:31 mins." each say what they are without a caption to bind them to.
+        // A stretch on BOTH sides floats the pair mid-row between the command LCDs and the goal
+        // readout, instead of leaving it crowded against the right end.
         session_dist_lcd_ = make_lcd(pose_panel, 6,
             QStringLiteral("Distance driven this session (m, or km past 1000).\n"
                            "All missions, targets and affordances since the agent started."));
         pose_row->addWidget(session_dist_lcd_);
+        pose_row->addWidget(new QLabel("m.", pose_panel));
         session_time_lcd_ = make_lcd(pose_panel, 8,
             QStringLiteral("Wall time since the agent started (mm:ss, or h:mm:ss past an hour)."));
         pose_row->addWidget(session_time_lcd_);
+        pose_row->addWidget(new QLabel("mins.", pose_panel));
+
+        pose_row->addStretch();
 
         // Right end: what the ARRIVAL test is waiting on — remaining distance and heading error.
         pose_row->addWidget(new QLabel("d", pose_panel));
