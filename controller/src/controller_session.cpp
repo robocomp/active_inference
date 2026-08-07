@@ -257,6 +257,11 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
 
     target_wait_logged_ = false;
     step.target = *target;
+    // The contract has to be known HERE, before the repair below, because the policy now decides both
+    // whether there will be a terminal rotation and therefore whether the standpoint needs room for
+    // one. active_contract_ is resolved at ARRIVAL and stays that way — it is what the servo executor
+    // uses, and moving it would change when a policy takes effect mid-run.
+    resolve_target_contract(step.target);
 
     // TARGET REPAIR ON THE PLANNER'S OWN PREDICATE.
     // A producer's affordance viewpoint can land inside an obstacle footprint (its own object, or one that grew
@@ -307,7 +312,7 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     // Falls back to nearest_free rather than failing: a standpoint that is merely reachable still beats
     // no standpoint, and this is a preference for clearance, not a new precondition for servicing an
     // object. When facing yaw is off there is no terminal rotation, so the old question is the right one.
-    const bool will_rotate_here = params_ == nullptr or params_->goal_facing_yaw_enabled;
+    const bool will_rotate_here = wants_final_facing(step.target);
     const auto safe = routing_failed_here
                     ? unroutable_fix_
                     : will_rotate_here
@@ -1067,8 +1072,12 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
         // judged on POSITION alone and the robot never turns in place at the goal. Wanted for pure
         // navigation runs, where the terminal rotation is wasted motion and an extra way to hang at a
         // target; object affordances that must actually look at their object need it back on.
-        const bool want_facing = step.target.from_affordance
-                              and (params_ == nullptr or params_->goal_facing_yaw_enabled);
+        // ★DERIVED FROM THE CONTRACT'S POLICY, not from a global switch alone — see
+        // wants_final_facing(). GoalFacingYawEnabled remains a kill switch, but it is no longer the
+        // whole answer: it used to be `from_affordance and <flag>`, so turning it on for an object
+        // affordance also turned it on for every room waypoint, which is a Reach and has no use for
+        // an orientation at all.
+        const bool want_facing = wants_final_facing(step.target);
         path_controller.set_goal_facing_yaw(want_facing
                                                 ? std::optional<float>(step.target.yaw_rad)
                                                 : std::nullopt);
@@ -1224,6 +1233,52 @@ void ControllerSession::log_approach_diagnostics(std::uint64_t t_ms,
 
 // One scalar off the feedback node, by contract-declared NAME. Uses the protocol's own attr_scalar so
 // the panel and the executor read an attribute the same way.
+
+// ── DOES THIS TARGET END WITH A TERMINAL ROTATION? ───────────────────────────────────────────────
+// ONE rule, consulted by the two places that care: the executor (does it rotate at the goal?) and the
+// target repair (does the standpoint need room to rotate?). They were computing it separately, and the
+// repair's copy had already drifted — it was moving ROOM WAYPOINTS to spots they could turn around in,
+// for a rotation those targets never perform.
+//
+// It comes from the contract's POLICY, because the policy is where the semantics already live:
+//   Reach  — "navigate to the pose, then consume". Purely positional; nothing in a Reach contract
+//            mentions an orientation and nothing downstream consumes one. A room_concept waypoint is
+//            a Reach, and a terminal rotation there is wasted motion at every waypoint of every lap.
+//   Servo  — the rotation has a real job: it aims the camera so the servo STARTS with valid feedback.
+//            Without it valid_attr is false on arrival and LockOn dithers to reacquire.
+//   Orient — rotating to the yaw IS the affordance.
+//
+// GoalFacingYawEnabled stays, as a kill switch over all of it, which is what a global flag is for. It
+// was previously the WHOLE answer, ANDed only with "is this an affordance" — so enabling it for the
+// refrigerator enabled it for every room waypoint too.
+bool ControllerSession::wants_final_facing(const ControllerTargetInfo &target) const
+{
+    if (not target.from_affordance) return false;                       // a clicked point has no facing
+    if (params_ != nullptr and not params_->goal_facing_yaw_enabled) return false;
+    if (not target_contract_known_) return false;   // unknown policy ⇒ do not invent a rotation
+    using P = rc::affordance::Policy;
+    return target_contract_.policy == P::Servo or target_contract_.policy == P::Orient;
+}
+
+// Resolved once per target, when it is SELECTED. Same read the executor performs at arrival, done
+// early because the policy now decides behaviour before the robot gets there.
+void ControllerSession::resolve_target_contract(const ControllerTargetInfo &target)
+{
+    if (target.node_id == contract_for_node_id_) return;
+    contract_for_node_id_ = target.node_id;
+    target_contract_ = {};
+    target_contract_known_ = false;
+    if (not graph_ or not target.from_affordance or target.node_id == 0) return;
+    const auto n = graph_->get_node(target.node_id);
+    if (not n.has_value()) return;
+    std::string parent_type;
+    if (target.parent_node_id != 0)
+        if (const auto pn = graph_->get_node(target.parent_node_id); pn.has_value())
+            parent_type = parent_contract_key(pn.value());
+    target_contract_ = rc::affordance::read_contract(n.value(), parent_type);
+    target_contract_known_ = true;
+}
+
 std::optional<float> ControllerSession::feedback_scalar(std::uint64_t node_id, const std::string &attr) const
 {
     if (not graph_ or node_id == 0) return std::nullopt;
@@ -1284,25 +1339,14 @@ void ControllerSession::update_affordance_view(const ControllerRobotPose &robot_
         affordance_step_since_ms_ = now_ms;
         affordance_prev_step_.clear();
         affordance_nav_total_m_ = std::max(0.05f, o.dist_to_goal);   // the distance this run began with
-        // Display-only contract read. Cheap (one node fetch) and done once per affordance.
-        view_contract_ = {};
-        view_contract_known_ = false;
-        if (graph_ and active_target_id_ != 0)
-            if (const auto n = graph_->get_node(active_target_id_); n.has_value())
-            {
-                std::string parent_type;
-                if (last_target_info_->parent_node_id != 0)
-                    if (const auto pn = graph_->get_node(last_target_info_->parent_node_id); pn.has_value())
-                        parent_type = parent_contract_key(pn.value());
-                view_contract_ = rc::affordance::read_contract(n.value(), parent_type);
-                view_contract_known_ = true;
-            }
+        // The contract is already resolved — build_planning_step does it when the target is selected,
+        // because the policy decides real behaviour now and not just what this window draws.
     }
 
     v.active = true;
     v.affordance = last_target_info_->node_name;
-    v.contract_known = view_contract_known_;
-    v.policy = std::string(rc::affordance::to_string(view_contract_.policy));
+    v.contract_known = target_contract_known_;
+    v.policy = std::string(rc::affordance::to_string(target_contract_.policy));
     v.elapsed_s = static_cast<float>(now_ms - affordance_started_ms_) * 1e-3f;
     if (graph_ and last_target_info_->parent_node_id != 0)
         if (const auto pn = graph_->get_node(last_target_info_->parent_node_id); pn.has_value())
@@ -1314,13 +1358,13 @@ void ControllerSession::update_affordance_view(const ControllerRobotPose &robot_
     // so a leftover value would have shown this affordance's clauses evaluated against the PREVIOUS
     // object's node. read_contract already defaults feedback_node_id to the affordance's parent, which
     // is the same rule the executor applies — so applying it here needs no new convention.
-    const std::uint64_t fb = view_contract_.feedback_node_id != 0 ? view_contract_.feedback_node_id
+    const std::uint64_t fb = target_contract_.feedback_node_id != 0 ? target_contract_.feedback_node_id
                                                                   : last_target_info_->parent_node_id;
 
-    const bool servo = view_contract_.policy == rc::affordance::Policy::Servo;
-    const bool orient = view_contract_.policy == rc::affordance::Policy::Orient;
+    const bool servo = target_contract_.policy == rc::affordance::Policy::Servo;
+    const bool orient = target_contract_.policy == rc::affordance::Policy::Orient;
     // The timeout clock only means anything once the servo loop owns it.
-    if (servo and lockon_.active()) v.timeout_s = view_contract_.timeout_ms * 1e-3f;
+    if (servo and lockon_.active()) v.timeout_s = target_contract_.timeout_ms * 1e-3f;
 
     // The one reason that is worth saying on EVERY row it applies to: a command computed and discarded.
     // This is the failure that looks like every other failure from the outside.
@@ -1365,11 +1409,17 @@ void ControllerSession::update_affordance_view(const ControllerRobotPose &robot_
         // ensure_current_plan is `from_affordance and goal_facing_yaw_enabled`, so with
         // GoalFacingYawEnabled=false the controller is handed no facing yaw and NEVER aligns. Showing
         // that as a pending step reads as "stuck here", which is the opposite of the truth.
-        const bool facing_enabled = params_ == nullptr or params_->goal_facing_yaw_enabled;
+        // Same rule the executor uses — wants_final_facing() — not a third copy of it. The reason is
+        // worth distinguishing: "this policy has no final orientation" is a property of the affordance,
+        // while the kill switch being off is a property of the run.
+        const bool facing_enabled = wants_final_facing(*last_target_info_);
         if (not facing_enabled)
         {
             s.state = S::Skipped;
-            s.detail = "GoalFacingYawEnabled=false — the robot is never asked to face the object";
+            const bool killed = params_ != nullptr and not params_->goal_facing_yaw_enabled;
+            s.detail = killed
+                ? "GoalFacingYawEnabled=false — disabled for this run"
+                : std::format("policy '{}' has no final orientation", v.policy);
             v.steps.push_back(std::move(s));
         }
         else
@@ -1418,7 +1468,7 @@ void ControllerSession::update_affordance_view(const ControllerRobotPose &robot_
         {
             const auto r = read_servo_reading(fb);
             s.detail = std::format("err_x {:+.3f}  scalar {:.3f} -> {:.3f}{}",
-                                   r.err_x, r.scalar, view_contract_.scalar_target,
+                                   r.err_x, r.scalar, target_contract_.scalar_target,
                                    r.valid ? "" : "   [feedback INVALID — dithering to reacquire]");
             if (not disarmed.empty()) s.blocked_why = disarmed;
         }
@@ -1431,9 +1481,9 @@ void ControllerSession::update_affordance_view(const ControllerRobotPose &robot_
 
     // 5. THE COMPLETION CLAUSES — one row each, straight from the contract, because they are per
     // affordance and a hardcoded list would describe a different program.
-    if (view_contract_known_ and fb != 0)
+    if (target_contract_known_ and fb != 0)
     {
-        for (const auto &c : view_contract_.goal)
+        for (const auto &c : target_contract_.goal)
         {
             Step s{.label = std::format("{} {} {:.3f}", c.attr, compare_symbol(c.op), c.value)};
             const auto now = feedback_scalar(fb, c.attr);
@@ -1452,14 +1502,14 @@ void ControllerSession::update_affordance_view(const ControllerRobotPose &robot_
         }
         // The stability requirement is a step of its own: a predicate that keeps flickering true is not
         // the same as one that HOLDS, and without this row the difference is invisible.
-        if (not view_contract_.goal.empty())
+        if (not target_contract_.goal.empty())
         {
             Step s{.label = "hold stable"};
             s.state = lockon_.locked() ? S::Done : lockon_.active() ? S::Active : S::Pending;
-            s.progress = view_contract_.stable_n > 0
+            s.progress = target_contract_.stable_n > 0
                        ? std::clamp(static_cast<float>(lockon_.stable()) /
-                                    static_cast<float>(view_contract_.stable_n), 0.f, 1.f) : -1.f;
-            s.detail = std::format("{} of {} consecutive", lockon_.stable(), view_contract_.stable_n);
+                                    static_cast<float>(target_contract_.stable_n), 0.f, 1.f) : -1.f;
+            s.detail = std::format("{} of {} consecutive", lockon_.stable(), target_contract_.stable_n);
             v.steps.push_back(std::move(s));
         }
     }

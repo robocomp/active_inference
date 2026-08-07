@@ -195,8 +195,11 @@ private:
     // resolved exactly where it always was (on arrival, in execute_plan) — moving that would change
     // when a policy takes effect, and this window is not worth a behaviour change.
     rc::AffordanceExecution affordance_view_;
-    rc::affordance::Contract view_contract_;
-    bool view_contract_known_ = false;
+    rc::affordance::Contract target_contract_;   // resolved when the target is SELECTED (see resolve_)
+    bool target_contract_known_ = false;
+    std::uint64_t contract_for_node_id_ = 0;     // which affordance target_contract_ belongs to
+    [[nodiscard]] bool wants_final_facing(const ControllerTargetInfo &target) const;
+    void resolve_target_contract(const ControllerTargetInfo &target);
     std::vector<std::string> affordance_recent_;
     std::uint64_t affordance_started_ms_ = 0;
     std::uint64_t affordance_step_since_ms_ = 0;
