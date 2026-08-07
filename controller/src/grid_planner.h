@@ -142,6 +142,18 @@ public:
     struct RotationSweep { float min_clearance_m = 0.f; bool feasible = false; float worst_heading_rad = 0.f; };
     RotationSweep rotation_sweep(const Eigen::Vector2f& pos_room, float theta_from, float theta_to) const;
 
+    // Nearest pose to `pos_room` the robot can TURN AROUND IN — footprint-feasible at EVERY heading —
+    // and, among equally distant candidates, the one with the most room to spare.
+    // WHY THIS AND NOT nearest_free: a standpoint is only ever verified at ONE heading, but with
+    // GoalFacingYawEnabled the robot performs a terminal rotation in place there, sweeping every
+    // heading between its arrival and the facing yaw — with NO obstacle check while it does. The
+    // arrival heading is not known when the target is repaired, so the guarantee has to be
+    // heading-independent: "you can turn to anything from here".
+    // Clearance is a PREFERENCE, not a cutoff — the ring search already bounds the distance, so among
+    // the candidates it admits we take the roomiest rather than the first. No threshold to pick.
+    std::optional<Eigen::Vector2f> nearest_rotatable(const Eigen::Vector2f& pos_room,
+                                                     float max_radius_m = 3.0f) const;
+
     // ── DISTANCE FIELD ────────────────────────────────────────────────────────────────────────────
     // Metres from `p` to the nearest occupied cell (outside-the-room counts as occupied, so walls are
     // included). Zero inside an obstacle. Returns a large positive value if there is no world yet, so a
@@ -187,6 +199,7 @@ private:
     Eigen::Vector2f cell_to_world(int ix, int iy) const;
     // Footprint at heading bucket `h` centred on cell (ix,iy) overlaps no occupied cell and stays in bounds.
     bool  cell_free(int ix, int iy, int h) const;
+    bool  cell_free_at(const Eigen::Vector2f& pos_room, int heading_index) const;
     void  rebuild_offsets();
     void  build_distance_field() const;   // lazy; fills dist_ with metres, sets dist_valid_
 

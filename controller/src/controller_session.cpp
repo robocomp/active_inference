@@ -297,9 +297,28 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     if (not routing_failed_here) unroutable_fix_.reset();
     else if (not unroutable_fix_.has_value())
         unroutable_fix_ = grid_planner_.nearest_reachable(step.plan_origin, step.target.room_pos);
+    // ── THE STANDPOINT MUST BE SOMEWHERE THE ROBOT CAN TURN, NOT JUST STAND ──────────────────────
+    // With GoalFacingYawEnabled the robot performs a terminal rotation IN PLACE here, and that rotation
+    // runs with no obstacle check of any kind — the align branch returns ahead of every safety stage.
+    // nearest_free only ever asked "does the footprint fit at the facing heading", which is one heading
+    // out of the whole arc the body sweeps; for a 0.46 x 0.65 body the swept width peaks at the DIAGONAL
+    // (0.796 m), so a spot that is fine to stand in can be impossible to turn in. Ask for the stronger
+    // property, and prefer the roomiest spot that has it.
+    // Falls back to nearest_free rather than failing: a standpoint that is merely reachable still beats
+    // no standpoint, and this is a preference for clearance, not a new precondition for servicing an
+    // object. When facing yaw is off there is no terminal rotation, so the old question is the right one.
+    const bool will_rotate_here = params_ == nullptr or params_->goal_facing_yaw_enabled;
     const auto safe = routing_failed_here
                     ? unroutable_fix_
-                    : grid_planner_.nearest_free(step.target.room_pos, step.target.yaw_rad);
+                    : will_rotate_here
+                        ? [&]() -> std::optional<Eigen::Vector2f>
+                          {
+                              if (const auto r = grid_planner_.nearest_rotatable(step.target.room_pos);
+                                  r.has_value())
+                                  return r;
+                              return grid_planner_.nearest_free(step.target.room_pos, step.target.yaw_rad);
+                          }()
+                        : grid_planner_.nearest_free(step.target.room_pos, step.target.yaw_rad);
     if (safe.has_value() && (*safe - step.target.room_pos).squaredNorm() > 1e-6f)
     {
         // Logged only when the ANSWER changes. Repair is deterministic and runs every cycle, so an
@@ -312,7 +331,9 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
             last_repair_name_ = step.target.node_name;
             std::println("[controller] target '{}' {} ({:.2f},{:.2f}) → ({:.2f},{:.2f}), {:.2f} m short{}",
                          step.target.node_name,
-                         routing_failed_here ? "NOT REACHABLE → closest reachable" : "blocked → repaired",
+                         routing_failed_here ? "NOT REACHABLE → closest reachable"
+                                            : will_rotate_here ? "→ moved to a spot it can TURN in"
+                                                               : "blocked → repaired",
                          step.target.room_pos.x(), step.target.room_pos.y(), safe->x(), safe->y(),
                          (*safe - step.target.room_pos).norm(),
                          routing_failed_here ? " [" + grid_planner_.last_failure() + "]" : "");

@@ -593,7 +593,15 @@ StraightSpeedMinGoalDist = 1.5
 # false ⇒ arrival is judged on POSITION alone and the robot never orients at the target. Off for
 # navigation validation runs: the terminal rotation is wasted motion there, and it is one more way to
 # hang at a goal. Turn back on when object affordances need the robot to actually look at the object.
-GoalFacingYawEnabled = false
+# ★ON since 2026-08-07: the object affordances need the robot to actually look at the object.
+# CONSEQUENCE, and it is why nearest_rotatable exists: with this on, the robot performs a TERMINAL
+# ROTATION IN PLACE at the standpoint — and that rotation runs with no obstacle check of any kind
+# (TrajectoryController's align branch returns ahead of every safety stage). A standpoint verified
+# "footprint fits" is verified at ONE heading; for a 0.46 x 0.65 body the width swept peaks at the
+# DIAGONAL (0.796 m), so a spot you can stand in is not necessarily one you can turn in. The affordance
+# target repair therefore now asks for a spot that is rotatable THROUGH EVERY HEADING, preferring more
+# clearance, instead of merely free.
+GoalFacingYawEnabled = true
 
 # Affordance servo ("lock-on") executor — HOW (gains/caps/timing). The WHAT/WHEN (which feedback
 # attributes, completion predicate, scalar target, timeout) is per-affordance and declared by the

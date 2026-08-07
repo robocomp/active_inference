@@ -294,6 +294,14 @@ bool GridPlanner::cell_free(int ix, int iy, int h) const
     return true;
 }
 
+bool GridPlanner::cell_free_at(const Eigen::Vector2f& pos_room, int heading_index) const
+{
+    int ix, iy;
+    if (not world_to_cell(pos_room, ix, iy)) return false;
+    const_cast<GridPlanner*>(this)->rebuild_offsets();
+    return cell_free(ix, iy, heading_index);
+}
+
 bool GridPlanner::pose_free(const Eigen::Vector2f& pos_room, float theta) const
 {
     int ix, iy;
@@ -371,6 +379,42 @@ std::optional<Eigen::Vector2f> GridPlanner::nearest_free(const Eigen::Vector2f& 
                 if (not pose_free(w, theta)) continue;
                 const float d2 = (w - pos_room).squaredNorm();
                 if (d2 < best_d2) { best_d2 = d2; best = w; }
+            }
+        if (best.has_value()) return best;
+    }
+    return std::nullopt;
+}
+
+std::optional<Eigen::Vector2f> GridPlanner::nearest_rotatable(const Eigen::Vector2f& pos_room,
+                                                              float max_radius_m) const
+{
+    const auto turnable = [&](const Eigen::Vector2f& w)
+    {
+        for (int h = 0; h < kHeadings; ++h)
+            if (not cell_free_at(w, h)) return false;
+        return true;
+    };
+    // Best on the ORIGINAL spot still wins: never move a target that is already fine.
+    if (turnable(pos_room)) return pos_room;
+
+    const int max_r = static_cast<int>(std::ceil(max_radius_m / cell_));
+    int cx, cy;
+    if (not world_to_cell(pos_room, cx, cy)) return std::nullopt;
+    for (int r = 1; r <= max_r; ++r)
+    {
+        std::optional<Eigen::Vector2f> best;
+        float best_clear = -1.f;
+        for (int dy = -r; dy <= r; ++dy)
+            for (int dx = -r; dx <= r; ++dx)
+            {
+                if (std::max(std::abs(dx), std::abs(dy)) != r) continue;   // this ring only
+                const int nx = cx + dx, ny = cy + dy;
+                if (not in_bounds(nx, ny)) continue;
+                const auto w = cell_to_world(nx, ny);
+                if (not turnable(w)) continue;
+                // Among candidates the ring admits, the roomiest — "more clearance", as a preference
+                // over equally-near options rather than a bar anything has to clear.
+                if (const float c = pose_clearance(w, 0.f); c > best_clear) { best_clear = c; best = w; }
             }
         if (best.has_value()) return best;
     }
@@ -794,6 +838,31 @@ bool GridPlanner::self_test()
               "terminal rotation runs straight into");
         check(p.pose_clearance(spot, along) > 0.f,
               "pose_clearance must be positive where the body fits, so it can grade 'barely'");
+    }
+
+    // (8) nearest_rotatable must REFUSE the slot from (7) and move OUT of it, because that is the
+    // whole point: with GoalFacingYawEnabled the robot turns in place at the standpoint.
+    {
+        GridPlanner p; p.params.safety_margin_m = 0.f;
+        const std::vector<Eigen::Vector2f> room{{0.f, 0.f}, {6.f, 0.f}, {6.f, 6.f}, {0.f, 6.f}};
+        p.set_world(room, {{{0.f, 0.f}, {4.f, 0.f}, {4.f, 2.625f}, {0.f, 2.625f}},
+                           {{0.f, 3.375f}, {4.f, 3.375f}, {4.f, 6.f}, {0.f, 6.f}}});
+        const Eigen::Vector2f slot{2.f, 3.f};        // inside the 0.75 m slot: stand yes, turn no
+        const auto out = p.nearest_rotatable(slot);
+        std::printf("  nearest_rotatable from a slot you cannot turn in: %s (moved %.2f m)\n",
+                    out ? std::format("({:.2f},{:.2f})", out->x(), out->y()).c_str() : "none",
+                    out ? (*out - slot).norm() : 0.f);
+        check(p.pose_free(slot, 0.f), "the slot must be STANDABLE, or the test proves nothing");
+        check(out.has_value(), "the open half of the room is right there — something must be found");
+        check(out and (*out - slot).norm() > 1e-6f, "it must MOVE: the slot cannot be turned in");
+        if (out) for (int h = 0; h < kHeadings; ++h)
+            check(p.pose_free(*out, h * 2.f * static_cast<float>(M_PI) / kHeadings),
+                  "★the chosen spot must admit the body at EVERY heading — that is the guarantee");
+        // And it must never move a target that was already fine.
+        const Eigen::Vector2f open_spot{5.f, 3.f};
+        const auto same = p.nearest_rotatable(open_spot);
+        check(same.has_value() and (*same - open_spot).norm() < 1e-6f,
+              "an already-rotatable standpoint must be returned untouched");
     }
 
     std::printf("GridPlanner::self_test %s\n", ok ? "PASS" : "FAIL");
