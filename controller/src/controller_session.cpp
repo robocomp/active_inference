@@ -1411,10 +1411,16 @@ void ControllerSession::update_affordance_view(const ControllerRobotPose &robot_
     const bool aligning = o.aligning;
 
     // 1. CLAIM — by the time anything else runs, this is behind us.
+    // The yaw is only worth showing when something ACTS on it. A Reach carries a yaw in the target
+    // struct like every other target does, but nothing consumes it — printing "facing 156 deg" for a
+    // room waypoint states a requirement that does not exist.
     v.steps.push_back({.label = "claim affordance", .state = S::Done, .progress = -1.f,
-                       .detail = std::format("target ({:.2f},{:.2f}) facing {:.0f} deg",
-                                             last_target_info_->room_pos.x(), last_target_info_->room_pos.y(),
-                                             last_target_info_->yaw_rad * 180.f / static_cast<float>(M_PI))});
+                       .detail = wants_final_facing(*last_target_info_)
+                           ? std::format("({:.2f},{:.2f}) facing {:.0f} deg",
+                                         last_target_info_->room_pos.x(), last_target_info_->room_pos.y(),
+                                         last_target_info_->yaw_rad * 180.f / static_cast<float>(M_PI))
+                           : std::format("({:.2f},{:.2f}) — orientation not used",
+                                         last_target_info_->room_pos.x(), last_target_info_->room_pos.y())});
 
     // 2. NAVIGATE — skipped by Orient, which is a rotation in place and has no (x,y) target at all.
     {
@@ -1489,7 +1495,7 @@ void ControllerSession::update_affordance_view(const ControllerRobotPose &robot_
     // 4. SERVO — the contract's micro-search, only under a Servo policy.
     if (servo)
     {
-        Step s{.label = "servo lock-on"};
+        Step s{.label = "servo lock-on", .kind = Step::Kind::ServoLoop};
         const auto ph = lockon_.phase();
         v.phase = ph == rc::LockOn::Phase::Settle ? "settle" : ph == rc::LockOn::Phase::Step ? "step"
                 : ph == rc::LockOn::Phase::Locked ? "locked" : ph == rc::LockOn::Phase::GiveUp ? "gave up"
@@ -1518,7 +1524,8 @@ void ControllerSession::update_affordance_view(const ControllerRobotPose &robot_
     {
         for (const auto &c : target_contract_.goal)
         {
-            Step s{.label = std::format("{} {} {:.3f}", c.attr, compare_symbol(c.op), c.value)};
+            Step s{.label = std::format("{} {} {:.3f}", c.attr, compare_symbol(c.op), c.value),
+                   .kind = Step::Kind::Clause};
             const auto now = feedback_scalar(fb, c.attr);
             if (now.has_value())
             {
@@ -1537,7 +1544,7 @@ void ControllerSession::update_affordance_view(const ControllerRobotPose &robot_
         // the same as one that HOLDS, and without this row the difference is invisible.
         if (not target_contract_.goal.empty())
         {
-            Step s{.label = "hold stable"};
+            Step s{.label = "hold stable", .kind = Step::Kind::Stable};
             s.state = lockon_.locked() ? S::Done : lockon_.active() ? S::Active : S::Pending;
             s.progress = target_contract_.stable_n > 0
                        ? std::clamp(static_cast<float>(lockon_.stable()) /

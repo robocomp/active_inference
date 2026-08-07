@@ -33,7 +33,15 @@ struct AffordanceStepView
     // silently omitted it would be a different program from the one the contract describes.
     enum class State { Pending, Active, Done, Failed, Skipped };
 
+    // WHAT ROLE this step plays in the program — the flow chart needs the STRUCTURE, not a flat list.
+    // A pipeline runs once, top to bottom; the servo is a LOOP (settle <-> step) that the pipeline
+    // enters; the clauses are AND-ed inputs to a gate, not successive stages; and Stable is the gate's
+    // output held over time. Drawn as a list, a loop and a sequence look identical, which is the one
+    // thing about this program worth seeing.
+    enum class Kind { Pipeline, ServoLoop, Clause, Stable, Terminal };
+
     std::string label;              // "navigate", "align", "distance_m >= 0.35"
+    Kind        kind = Kind::Pipeline;
     State       state = State::Pending;
     float       progress = -1.f;    // 0..1; NEGATIVE means "this step has no meaningful fraction"
     std::string detail;             // the NUMBERS: "1.42 m to go of 3.10", "yaw 23.4 deg (tol 3.4)"
