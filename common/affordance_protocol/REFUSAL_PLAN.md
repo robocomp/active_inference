@@ -40,33 +40,47 @@ Neither of the two that a consumer could reach is honest here:
 
 There is no way to say *"your gain may well be real; the approach is not."* That is the missing sentence.
 
-## 3. Design: refuse the VIEWPOINT, not the affordance
+## 3. Design: refuse the OFFER, annotated — do not leave it Offered
 
 The affordance is not the problem — `refrigerator_1` genuinely is worth looking at. **The pose is the
-problem.** So a refusal carries a pose, and the producer's job is to propose a different one.
+problem.** But the refusal must also *end* the current offer.
+
+An earlier draft of this plan left the affordance `Offered` and expected the producer to notice the flag
+and replace the pose. That is a send/wait protocol with no termination guarantee: between the refusal and
+the producer's next publish, the affordance is still Offered carrying a pose already known to be
+unreachable, so the consumer can select it again, refuse it again, and nothing in the design says the
+loop ever stops. The consumer would need its own timer or memory to stay out — which is exactly the
+workaround in §6, not a protocol.
+
+So: **the refusal retires the offer**, annotated so nobody mistakes it for success.
 
 Consumer writes, at the moment it gives up:
 
 | attribute | type | meaning |
 |---|---|---|
-| `epistemic_refused` | `bool` | the consumer could not reach the published standpoint |
+| `epistemic_refused` | `bool` | this offer was refused — the consumer could not reach the standpoint |
 | `epistemic_refused_x_m` | `float` | the standpoint it failed at (as PUBLISHED, pre-repair) |
 | `epistemic_refused_y_m` | `float` | ditto |
 
-Producer, on seeing `epistemic_refused == true`:
+and drives the affordance to the not-offered state, exactly as a completion does. The annotation is what
+separates the two: **Completed means observed** — update the belief, reset the neglect clock; **Refused
+means not attempted** — change nothing about what is believed, only about where to stand.
 
-1. exclude that pose from its viewpoint candidates (a small exclusion radius — the controller uses
-   0.30 m, roughly a body width; a standpoint half a body from one that wedged is the same approach
-   through the same gap);
-2. re-plan and publish the **next-best** viewpoint;
-3. clear `epistemic_refused` as part of publishing the new target — the flag describes one proposal, not
-   the affordance.
+Then the producer publishes a new target *later*, when it has a different one, through the path it
+already uses. Nothing waits on anything.
 
-The affordance stays `Offered` throughout. Nothing is marked done, no belief is updated, no neglect clock
-is reset. The only thing that changes is *where* the robot is asked to stand.
+**The termination is structural, and already implemented.** `publish_target` declines to re-arm a
+non-offered affordance whose proposed target is unchanged. A producer that has not changed its mind
+therefore does not re-offer, and one that proposes a genuinely different viewpoint re-arms it as a normal
+publish. The same rule that once deadlocked the rotate-in-place recovery (`room_scene_graph.cpp:648`) is
+the right rule here: it says "an unchanged proposal is not news", which is precisely the guarantee a
+refusal needs.
 
-**Why a pose and not just a flag:** a bare flag makes the producer guess which proposal was rejected, and
-it will guess wrong as soon as it has re-planned once in the interim.
+**Why the pose is still carried:** so the producer can exclude that viewpoint from its next NBV ranking
+rather than re-deriving the same best answer and being refused again — and so a human reading the graph
+can see *what* was refused. Use a small exclusion radius; the controller uses 0.30 m, roughly a body
+width, on the grounds that a standpoint half a body from one that wedged is the same approach through the
+same gap.
 
 ## 4. Who changes
 
@@ -118,7 +132,10 @@ knowledge belong to the producer, where it can actually change the proposal.
 ## 7. Verification
 
 - A refused standpoint is never re-proposed by that producer within the session.
-- The affordance stays `Offered` across a refusal — no spurious Completed, no reset neglect clock.
+- A refusal leaves the affordance **not offered** and annotated — and the producer's belief is unchanged
+  across it: no neglect-clock reset, no tightened posterior, nothing that a real observation would do.
+- It comes back **only** with a different pose, and it does come back (a refusal must not retire an
+  affordance permanently — that is the failure mode on the other side of this rule).
 - The robot serves the other affordances while one is refused (it did not, before: 12 escapes with three
   affordances idle).
 - Escapes per affordance fall to ~0 in a run where a producer proposes an unreachable pose.
@@ -129,6 +146,8 @@ knowledge belong to the producer, where it can actually change the proposal.
 
 1. Should a refusal decay? A pose unreachable because of a moved chair becomes reachable later. Leaning
    yes on the producer side (it re-plans anyway), no on the controller's backstop (see §6).
+   ★The retire-the-offer design makes this safer than it looks: a producer that later believes the pose
+   is fine simply publishes it again, and that is a *new* offer rather than a stale one being retried.
 2. Should the refusal say *why* — `not_footprint_feasible` vs `wedged_repeatedly`? The first is a map
    fact the producer could check itself; the second it cannot know. That argues for at least a reason
    code, so producers can treat "your pose is inside geometry" differently from "my body could not do it".
