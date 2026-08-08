@@ -600,17 +600,47 @@ RouteOptimizerReport optimize_route(std::vector<Eigen::Vector2f> &ctrl, const Ro
     const bool ran_away = rep.max_move_m > move_limit;
     // Not "clearance got worse" — that is a legitimate trade (see clearance_floor). This asks whether the
     // solve pushed the route BELOW what the body needs, and did so by making things worse than it found them.
-    const bool lost_clearance = cfg.clearance_floor > 0.f
+    //
+    // ★"WHAT THE BODY NEEDS" IS NOT A NUMBER, IT IS A SHAPE AT A HEADING. Comparing one scalar minimum
+    // against one scalar floor cannot express that, and the disc that made the comparison possible was
+    // the worst case over every heading at once — so in a real apartment the floor sat above every
+    // achievable route and this guard degenerated into "reject any solve that lowered the minimum",
+    // discarding 96% of them (see clearance_floor). When the caller can answer the exact question, ask
+    // it instead: at each control point, with the route's own tangent as the heading and the field
+    // gradient pointing away from the nearest obstacle, the body fits iff distance >= support_radius.
+    // A solve is rejected only if it turned a point that FIT into one that does not — a physical event,
+    // not a scalar dipping under a proxy.
+    bool broke_feasibility = false;
+    if (cfg.support_radius and cfg.distance and cfg.distance_gradient and initial.size() == ctrl.size())
+    {
+        const auto fits = [&cfg](const std::vector<Eigen::Vector2f> &c, std::size_t i)
+        {
+            const Eigen::Vector2f tangent = c[i + 1] - c[i - 1];
+            if (tangent.squaredNorm() < 1e-12f) return true;   // degenerate: nothing to orient the body by
+            const float heading = std::atan2(tangent.y(), tangent.x());
+            const Eigen::Vector2f g = cfg.distance_gradient(c[i]);
+            // The field's gradient points AWAY from obstacles, so the body reaches toward -grad. With no
+            // usable gradient there is no direction to test, and support_radius falls back to the
+            // worst case on its own.
+            return cfg.distance(c[i]) >= cfg.support_radius(heading, -g);
+        };
+        for (std::size_t i = 1; i + 1 < ctrl.size() and not broke_feasibility; ++i)
+            if (fits(initial, i) and not fits(ctrl, i))
+                broke_feasibility = true;
+    }
+    const bool lost_clearance = not cfg.support_radius
+                            and cfg.clearance_floor > 0.f
                             and rep.min_clearance_after < cfg.clearance_floor
                             and rep.min_clearance_after < rep.min_clearance_before - 1e-4f;
-    if (ran_away or lost_clearance or not uvd_ok)
+    if (ran_away or lost_clearance or broke_feasibility or not uvd_ok)
     {
-        std::printf("[route-opt] REJECTED and reverted: %s%s%s%s (max move %.2f m vs limit %.2f, "
+        std::printf("[route-opt] REJECTED and reverted: %s%s%s%s%s (max move %.2f m vs limit %.2f, "
                     "clearance %.3f -> %.3f m) [kappa %.3f | clear %.3f | anchor %.3f | gauge %.3f]. "
                     "The un-optimised route is used.\n",
                     ran_away ? "control points ran away" : "",
-                    (ran_away and lost_clearance) ? " and " : "",
+                    (ran_away and (lost_clearance or broke_feasibility)) ? " and " : "",
                     lost_clearance ? "route driven below the feasibility floor" : "",
+                    broke_feasibility ? "the body no longer FITS where it did (exact footprint test)" : "",
                     not uvd_ok ? " the route was deformed ACROSS an obstacle (UVD)" : "",
                     rep.max_move_m, move_limit, rep.min_clearance_before, rep.min_clearance_after,
                     rep.e_kappa, rep.e_clear, rep.e_anchor, rep.e_gauge);
@@ -946,6 +976,63 @@ bool route_optimizer_self_test()
                     rep.uvd_violated ? 1 : 0, rep.rejected ? 1 : 0, moved_frozen, moved_win);
         check(not rep.uvd_violated, "an obstacle in a FROZEN stretch must not count as a UVD violation");
         check(moved_frozen == 0.f, "the frozen prefix must not move");
+    }
+
+    // (6a-ter) THE ACCEPTANCE TEST ASKS WHETHER THE BODY STILL FITS, NOT WHETHER A SCALAR DIPPED.
+    // The disc floor it replaces was the CIRCUMSCRIBED radius — the worst case over every heading at
+    // once — which in a real apartment sits above the clearance any route can achieve, so its second
+    // clause was permanently true and the guard collapsed into "reject any solve that lowered the
+    // minimum at all": 197 rejections in one live run, 96% of every solve, mean clearance 0.254 ->
+    // 0.237 m against a floor of ~0.45 m. All three cases below run the SAME solve and differ only in
+    // how big the body is, which is the whole point — feasibility is a property of the body, not of the
+    // number.
+    {
+        // Obstacle = the half-plane y >= 0.30. Distance grows as y falls, so the gradient points at
+        // -y, away from the obstacle, and the body reaches toward -grad = +y.
+        const auto wall   = [](const Eigen::Vector2f &p) { return std::max(0.f, 0.30f - p.y()); };
+        const auto wall_g = [](const Eigen::Vector2f &)  { return Eigen::Vector2f(0.f, -1.f); };
+        std::vector<Eigen::Vector2f> base;
+        for (int i = 0; i <= 20; ++i) base.push_back({0.4f * static_cast<float>(i), 0.05f});
+        RouteOptimizerConfig k;
+        k.distance = wall; k.distance_gradient = wall_g;
+        k.h = 0.40f; k.d_target = 0.30f; k.rho = 0.49f;
+        k.sigma_a = 0.05f;                  // an insistent waypoint, nearer the wall than the route is
+        k.anchors = {{4.0f, 0.22f}};
+        k.anchor_s = {4.0f};
+        k.iterations = 40; k.verbose = false;
+
+        auto c1 = base;
+        const auto r1 = optimize_route(c1, k);     // no footprint, no floor ⇒ nothing can reject it
+        const float before = r1.min_clearance_before, after = r1.min_clearance_after;
+        check(not r1.rejected, "the baseline solve must be accepted when nothing is guarding it");
+        check(after < before, "the anchor must actually pull the route wallward, or this proves nothing");
+
+        // A body that still fits after the solve. The OLD disc floor rejected exactly this case.
+        auto c2 = base; auto k2 = k;
+        k2.support_radius = [after](float, const Eigen::Vector2f &) { return 0.5f * after; };
+        k2.clearance_floor = 10.f;   // absurd on purpose: if it is still consulted, this test fails
+        const auto r2 = optimize_route(c2, k2);
+        check(not r2.rejected, "a solve the body still fits through must be accepted, whatever a disc says");
+
+        // A body that fitted BEFORE and does not fit AFTER — a real physical regression.
+        auto c3 = base; auto k3 = k;
+        const float between = 0.5f * (before + after);
+        k3.support_radius = [between](float, const Eigen::Vector2f &) { return between; };
+        const auto r3 = optimize_route(c3, k3);
+        float moved3 = 0.f;
+        for (std::size_t i = 0; i < c3.size(); ++i) moved3 = std::max(moved3, (c3[i] - base[i]).norm());
+        check(r3.rejected, "a solve that stops the body fitting must be rejected");
+        check(moved3 < 1e-6f, "a rejected solve must leave the control polygon untouched");
+
+        // A body that did not fit even before: nothing was broken by this solve, so it is not this
+        // guard's business. Otherwise an already-tight route could never be improved again.
+        auto c4 = base; auto k4 = k;
+        k4.support_radius = [](float, const Eigen::Vector2f &) { return 5.0f; };
+        const auto r4 = optimize_route(c4, k4);
+        std::printf("  footprint acceptance: clearance %.3f -> %.3f m | small body rejected=%d | "
+                    "body %.3f m rejected=%d | already-infeasible rejected=%d\n",
+                    before, after, r2.rejected ? 1 : 0, between, r3.rejected ? 1 : 0, r4.rejected ? 1 : 0);
+        check(not r4.rejected, "a route the body never fitted through must not be blamed on this solve");
     }
 
     // (6b) IS THE CURVATURE BOUND ACTUALLY A BOUND? The formula is taken from the literature, so it is

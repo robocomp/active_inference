@@ -40,6 +40,8 @@
 #include <utility>
 #include <vector>
 
+#include "controller_runtime_types.h"
+
 class QPainter;
 
 namespace DSR { class DSRGraph; class InnerEigenAPI; }
@@ -102,7 +104,11 @@ public:
     // begins they are clutter over the marker that matters, and a detection visible at a step that
     // ignores it reads as progress that is not happening. The masks are still ingested — the frame
     // counter and the item list stay live — only the drawing is withheld.
-    bool pump(const std::string &target_object, std::uint64_t now_ms, bool draw_rois);
+    // `standpoint` is the affordance's OWN target — the pose it designed for the robot to stand in —
+    // and is what the cross marks. It belongs to the same affordance as `target_object` (the session
+    // publishes the pair together) so the marker and the highlight can never describe different actions.
+    bool pump(const std::string &target_object, const std::optional<ControllerStandpoint> &standpoint,
+              std::uint64_t now_ms, bool draw_rois);
 
     // The room and robot frame names, pushed each cycle by the worker (they are not known until the
     // graph has loaded). REQUIRED for the target projection: room←zed cannot be asked for in one query
@@ -116,12 +122,20 @@ private:
     bool try_discover();
     bool poll_camera();
     // ── THE MODEL, DRAWN ON TOP OF THE MEASUREMENT ────────────────────────────────────────────────
-    // Project the affordance object's BELIEVED 3D box into this image, where the belief says it should
-    // appear. The comparison is the whole value: a mask with no box on it is a detection the model does
-    // not know about; a box with no mask in it is a model asserting something the camera will not
-    // confirm; and a box sitting BESIDE its mask is a pose error you can read off in pixels instead of
-    // inferring from a residual. Returns false when it could not be drawn, and says why in `note`.
-    bool draw_target_pose(QPainter &p, const std::string &object, const QSize &canvas,
+    // TWO different things, both magenta because both are the MODEL, and deliberately drawn as two
+    // different marks because they are metres apart and mean opposite halves of one action:
+    //   • THE CROSS is the AFFORDANCE'S TARGET — the standpoint it designed for the robot. It used to
+    //     be drawn on the object's centre, which made the overlay claim the action was aimed at a place
+    //     it was never aimed at, and hid the one error worth seeing (a standpoint the robot is not
+    //     reaching). It is a floor point: it approaches through the frame while driving and is
+    //     underfoot, hence out of view, once the robot has arrived — which the note then says.
+    //   • THE OBJECT'S BELIEF (stick + axes + label, no cross) is where the model says the object is.
+    //     The comparison against the silhouettes is the whole value: a mask with no model on it is a
+    //     detection the model does not know about; a model with no mask in it is an assertion the camera
+    //     will not confirm; and one sitting BESIDE its mask is a pose error you can read off in pixels.
+    // Returns false when NEITHER could be drawn, and says why in `note`.
+    bool draw_target_pose(QPainter &p, const std::string &object,
+                          const std::optional<ControllerStandpoint> &standpoint, const QSize &canvas,
                           std::uint64_t stamp_ms, QString &note);
     // Static zed intrinsics, read once off the camera node. False until they are available.
     bool ensure_intrinsics();

@@ -400,6 +400,13 @@ public:
     // The object whose masks the panel should highlight: the live affordance's, or during the dwell the
     // one that just finished. Empty when neither. Read by the worker each cycle.
     [[nodiscard]] const std::string &attention_object() const { return attention_object_; }
+    // The standpoint that object is being observed FROM — the affordance's own target pose. Mirrors
+    // attention_object() exactly (live affordance, or the just-finished one through the dwell) so the
+    // overlay can never mark a standpoint belonging to a different affordance than the object it
+    // highlights. Empty when no affordance is in play, or when the target is a clicked point (which
+    // designs no standpoint at all — it IS the point).
+    [[nodiscard]] const std::optional<ControllerStandpoint> &attention_standpoint() const
+    { return attention_standpoint_; }
     // Seconds left of the post-affordance dwell (0 when not dwelling) — shown in the affordance panel.
     // Two phases: the CLOCK floor, then the bounded wait for the acquisition. Once the clock has passed
     // and the dwell is still armed, the number that means something is how long the bound will keep
@@ -430,6 +437,10 @@ public:
     }
 private:
     std::string attention_object_;
+    std::optional<ControllerStandpoint> attention_standpoint_;
+    // The standpoint of the target currently in force, or nothing when it is not an affordance's.
+    // ONE derivation, called from every place attention_object_ is written, so the pair cannot drift.
+    [[nodiscard]] std::optional<ControllerStandpoint> current_standpoint() const;
     // Mirror of AffordanceManager::suppressed_name(), pushed into the view. Held on the session because
     // the panel snapshot is assembled here and the manager is not reachable from the publish site.
     std::string suppressed_affordance_;
@@ -573,4 +584,28 @@ private:
     Eigen::Vector2f escape_start_pos_ = Eigen::Vector2f::Zero();  // pose at escape start (distance bound)
     float         escape_turn_sign_ = 1.0f;     // +1 / −1: rotation direction during escape
     int           escape_count_ = 0;            // consecutive escapes (alternating fallback for turn dir)
+    // ── REJECT RATHER THAN STRUGGLE ──────────────────────────────────────────────────────────────
+    // Escapes charged to the affordance they happened under, because escape_count_ is a session-lifetime
+    // counter and says nothing about WHICH target the robot keeps failing to reach. Measured live: 12
+    // escapes in 3 minutes, all against one refrigerator standpoint, while three other affordances sat
+    // Offered — the robot achieving 2-19% of every commanded metre. An affordance the robot cannot
+    // physically reach is worth abandoning, not grinding at; the gain it advertises is unreachable gain.
+    std::uint64_t escapes_target_id_ = 0;       // which affordance the count below belongs to
+    int           escapes_on_target_ = 0;
+    std::uint64_t reject_affordance_id_ = 0;    // set by begin_escape, acted on where the manager is reachable
+    std::string   reject_affordance_name_;
+    // ── SPOTS THE ROBOT HAS ALREADY FAILED TO REACH ──────────────────────────────────────────────
+    // Remembered by POSITION, not by affordance id: the producer is not told that the approach failed,
+    // so it re-publishes the same standpoint the moment the suppression lapses — and a re-created node
+    // would carry a new id anyway. The position is the thing that was actually useless.
+    // ★NOT revalidated against the map, deliberately. These spots failed PHYSICALLY: the grid said
+    // 0.31-0.38 m of clearance while the base achieved 2-19% of every commanded metre. pose_free() would
+    // therefore call them fine and forget them instantly, and the robot would go back and wedge again.
+    // The map is not the arbiter of a failure the map cannot see. They live for the session.
+    struct UselessSpot { Eigen::Vector2f pos = Eigen::Vector2f::Zero(); std::string name; int hits = 0; };
+    std::vector<UselessSpot> useless_spots_;
+    std::optional<Eigen::Vector2f> last_raw_target_pos_;   // as PUBLISHED, before our repair moved it
+    std::uint64_t last_useless_log_ms_ = 0;
+    [[nodiscard]] const UselessSpot *known_useless_spot(const Eigen::Vector2f &pos) const;
+    void remember_useless_spot(const Eigen::Vector2f &pos, const std::string &name);
 };

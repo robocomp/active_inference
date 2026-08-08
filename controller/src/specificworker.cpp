@@ -516,6 +516,7 @@ void SpecificWorker::compute()
 	};
 	ScopedComputePerfLog perf_log{compute_perf_counter, &display_};
 
+
 	// Verify the output-rate guarantee rather than assume it. period_max is the number that matters: it is the
 	// longest the base went without a command, and it must stay near VelocityOutputPeriodMs no matter how badly
 	// this cycle overran. cmd_age_max / scale_min show how stale the planner got and how much the freshness
@@ -593,8 +594,10 @@ void SpecificWorker::compute()
 		// The projection needs both frame names and cannot know them before the graph has loaded.
 		camera_masks_->set_frames(world_model_.graph_state().room_name,
 		                          world_model_.graph_state().robot_name);
-		if (camera_masks_->pump(session_.attention_object(), current_time_ms(),
-		                        session_.look_step_active()))
+		// The object AND the standpoint the affordance designed to observe it from — published as a
+		// pair by the session, so the cross and the highlight always describe the same action.
+		if (camera_masks_->pump(session_.attention_object(), session_.attention_standpoint(),
+		                        current_time_ms(), session_.look_step_active()))
 			display_.set_camera_masks(camera_masks_->view());
 	}
 

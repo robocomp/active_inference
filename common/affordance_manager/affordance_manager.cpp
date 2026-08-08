@@ -450,6 +450,9 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
 {
     transition_to(State::Searching, "select_target called", current_affordance_id_, current_affordance_name_);
     suppressed_name_.clear();
+    // One selection round has passed for every affordance the consumer could not reach.
+    for (auto it = unreachable_rounds_.begin(); it != unreachable_rounds_.end();)
+        if (--it->second <= 0) it = unreachable_rounds_.erase(it); else ++it;
 
     if (!graph)
     {
@@ -636,6 +639,18 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
             continue;
         }
 
+        // NOT ONE THE ROBOT COULD NOT REACH. See suppress_target. Deliberately NOT kept as a
+        // `suppressed_target` fallback: the no-two-in-a-row rule yields rather than deadlock because
+        // taking that affordance again is merely impatient, whereas taking THIS one again is known to
+        // end in the same wedge. Idling for a few rounds is the cheaper outcome, and the counter
+        // expires on its own.
+        if (const auto it = unreachable_rounds_.find(node.id());
+            it != unreachable_rounds_.end() and it->second > 0)
+        {
+            suppressed_name_ = target->node_name;
+            continue;
+        }
+
         if (!best_target.has_value() || better(*target, *best_target))
             best_target = target;
     }
@@ -756,6 +771,20 @@ void AffordanceManager::mark_reached(const std::shared_ptr<DSR::DSRGraph> &graph
     current_affordance_name_.clear();
     reset_observation();
     transition_to(State::Idle, "affordance completed and cleared");
+}
+
+void AffordanceManager::suppress_target(std::uint64_t node_id, int rounds)
+{
+    if (node_id == 0 or rounds <= 0)
+        return;
+    // Take the LONGER of any existing suppression: two independent reports that this one is
+    // unreachable should not shorten the wait.
+    auto &r = unreachable_rounds_[node_id];
+    r = std::max(r, rounds);
+    // If it is the one being held, stop holding it — otherwise the resume-executing branch above hands
+    // it straight back on the next call and the suppression never gets a chance to apply.
+    if (current_affordance_id_ == node_id)
+        clear_current();
 }
 
 void AffordanceManager::clear_current()

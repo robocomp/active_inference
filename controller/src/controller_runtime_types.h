@@ -395,6 +395,24 @@ struct ControllerTargetInfo
     std::uint64_t parent_node_id = 0;   // object the affordance hangs from (carries feedback attrs)
 };
 
+// ── WHERE THE AFFORDANCE SAID TO STAND ───────────────────────────────────────────────────────────
+// The affordance's own target: the pose it designed for the ROBOT to occupy in order to observe the
+// object it services. Carried out to the camera overlay, which marks THIS — the target of the action —
+// rather than the object, which is what the action is ABOUT. The two are metres apart by construction
+// (the standpoint sits at the sensor's stand-off distance off a chosen face), so a marker on the object
+// centre was never the target it claimed to be.
+// ★This is the standpoint IN FORCE, i.e. after the reachability/rotatability repair in
+// select_target — what the robot is actually driving to. Marking the pre-repair value would put the
+// cross where nobody is going.
+struct ControllerStandpoint
+{
+    Eigen::Vector2f room_pos = Eigen::Vector2f::Zero();
+    float yaw_rad = 0.f;
+    // Did the CONTRACT design a final orientation (Servo/Orient), or is this a plain Reach? Only a
+    // designed facing is ever drawn — see the same rule in ControllerSession::wants_final_facing.
+    bool  has_facing = false;
+};
+
 struct ControllerRobotPose
 {
     Eigen::Vector2f pos = Eigen::Vector2f::Zero();

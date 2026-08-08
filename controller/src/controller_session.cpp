@@ -292,6 +292,9 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         // aimed at whatever was live before. A viewer that stops updating during the ONE interval it
         // exists to cover is worse than no viewer, because it looks like it is still reporting.
         attention_object_ = dwell_object_;
+        // The finished affordance's standpoint is where the robot is STANDING right now — which is
+        // exactly what makes the dwell readable: the marker is underfoot, not ahead.
+        attention_standpoint_ = current_standpoint();
         affordance_view_.active = false;              // it FINISHED; the dwell is not execution
         affordance_view_.dwell_left_s = dwell_left_s(timestamp_ms);
         affordance_view_.dwell_mask_hits = dwell_mask_hits_;
@@ -302,6 +305,37 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         return std::nullopt;
     }
     dwell_logged_ = false;
+
+    // ── ACT ON A PENDING REJECTION, BEFORE THE NEXT SELECTION ────────────────────────────────────
+    // Set by begin_escape after kMaxEscapesPerAffordance wedges against one standpoint. Done here
+    // because this is where the manager is reachable, and it must land BEFORE read_target_in_room or
+    // the very next selection hands the same unreachable affordance straight back.
+    if (reject_affordance_id_ != 0)
+    {
+        // ~20 s at the 20 Hz control rate. Rounds rather than milliseconds keeps the manager clock-free;
+        // the number only has to outlast the situation that caused the wedge.
+        constexpr int kUnreachableRounds = 400;
+        std::println("[controller] ABANDONING '{}' after {} escapes without reaching it — releasing the "
+                     "claim so another affordance can win. An affordance the body cannot reach advertises "
+                     "gain it cannot deliver; grinding at it serves nothing.",
+                     reject_affordance_name_, escapes_on_target_);
+        affordance_manager.suppress_target(reject_affordance_id_, kUnreachableRounds);
+        affordance_manager.release_execution_claim(graph_);
+        // Remember the spot as PUBLISHED, so the same proposal is recognised next time it arrives.
+        if (last_raw_target_pos_.has_value())
+            remember_useless_spot(*last_raw_target_pos_, reject_affordance_name_);
+        reject_affordance_id_ = 0;
+        reject_affordance_name_.clear();
+        escapes_on_target_ = 0;
+        escapes_target_id_ = 0;
+        // Drop every trace of the abandoned goal so the next selection starts clean rather than
+        // re-planning to the pose we just gave up on.
+        last_target_info_.reset();
+        current_target_room_.reset();
+        active_target_id_ = 0;
+        current_plan_.reset();
+        plan_spline_valid_ = false;
+    }
 
     const auto target = rc::uses_mission(mission_.mode()) or mission_.mode() == rc::DriveMode::Target
                             ? std::nullopt
@@ -348,6 +382,7 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         affordance_view_.phase = "idle — no eligible affordance";
         display.set_affordance_execution(affordance_view_);
         attention_object_.clear();
+        attention_standpoint_.reset();
         update_display(robot_pose,
                        display,
                        obstacle_tracker.display_obstacle_polygons(),
@@ -358,7 +393,36 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     }
 
     target_wait_logged_ = false;
+
+    // ── A SPOT WE ALREADY FAILED AT, RECOGNISED BEFORE DRIVING TO IT AGAIN ───────────────────────
+    // The producer does not know the approach failed — nothing tells it — so it re-publishes the same
+    // standpoint as soon as the suppression lapses, and without this we would re-learn it the expensive
+    // way every time: drive over, wedge three times, abandon, repeat. Matched on the RAW published pose,
+    // because that is what the producer will send again; the repaired pose is ours, not theirs.
+    if (target->from_affordance)
+        if (const auto *spot = known_useless_spot(target->room_pos); spot != nullptr)
+        {
+            // Rate-limited: the producer re-offers continuously, and one line per cycle would bury the run.
+            if (timestamp_ms - last_useless_log_ms_ >= 5000)
+            {
+                last_useless_log_ms_ = timestamp_ms;
+                std::println("[controller] '{}' is offering ({:.2f},{:.2f}) again — the robot already failed "
+                             "to reach that spot {}x. Skipping it without driving there.",
+                             target->node_name, target->room_pos.x(), target->room_pos.y(), spot->hits);
+            }
+            affordance_manager.suppress_target(target->node_id, 400);
+            current_plan_.reset();
+            plan_spline_valid_ = false;
+            stop(path_controller, motion_commander);
+            update_display(robot_pose, display, obstacle_tracker.display_obstacle_polygons(),
+                           obstacle_tracker.temporary_obstacle_rfe_points(),
+                           params_ ? params_->max_lidar_draw_points : 0);
+            return std::nullopt;   // next cycle the selector picks something else
+        }
+
     step.target = *target;
+    // Remembered for the rejection path: what the PRODUCER published, before our repair moves it.
+    last_raw_target_pos_ = target->room_pos;
     // The contract has to be known HERE, before the repair below, because the policy now decides both
     // whether there will be a terminal rotation and therefore whether the standpoint needs room for
     // one. active_contract_ is resolved at ARRIVAL and stays that way — it is what the servo executor
@@ -521,7 +585,17 @@ rc::RouteOptimizerConfig ControllerSession::make_route_optimizer_config() const
     const float v_max = params_ ? params_->max_adv_speed_mps : 0.7f;
     opt.rho = v_max * v_max / std::max(0.05f, params_ ? params_->max_lateral_accel_mps2 : 1.0f);
     opt.sigma_a = 0.30f;
-    opt.clearance_floor = rc::RobotFootprint::shadow().circumscribed_radius();
+    // THE EXACT TEST, not a disc. The acceptance guard asks "does the body still fit where it fit
+    // before", answered by the footprint's own support function at the route's heading — the same
+    // machinery robot_footprint.h was written to provide, and the reason it exists ("a rectangle
+    // reaches further along its diagonal than across its width, and a disc model has to assume the
+    // worst case in every direction").
+    opt.support_radius = [](float heading, const Eigen::Vector2f &dir_world)
+    { return rc::RobotFootprint::shadow().support_radius(heading, dir_world); };
+    // Only used if support_radius is ever unset. INSCRIBED, not circumscribed: below the inscribed
+    // radius the body cannot fit at ANY heading, so it is a true bound; the circumscribed radius is the
+    // worst case over all headings at once and sits above every clearance this apartment affords.
+    opt.clearance_floor = rc::RobotFootprint::shadow().inscribed_radius();
     opt.iterations = 30;
     opt.safety_bias = params_ ? params_->route_safety_bias : 0.5f;
     return opt;
@@ -1187,6 +1261,15 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
             path_controller.set_path_presmoothed(current_plan_->room_path);
         else
             path_controller.set_path(current_plan_->room_path);
+        // ★HAND THE CURVE TO THE TRACKER, or PLAIN cannot drive this target. set_route() had exactly ONE
+        // caller — the mission branch — so `route_spline_` stayed null for every point target and the
+        // PLAIN dispatch fell through to PD on every affordance and every click. Silent until the
+        // fallback got a counter: 901 consecutive cycles on PD with zero recoveries, i.e. the whole run.
+        // driven_curve() already states the precedence (mission route, else point plan); this installs
+        // what it resolves rather than restating the rule. force_reset because the curve is new even
+        // though plan_spline_'s address is not — see set_route().
+        path_controller.set_route(plan_spline_valid_ and plan_spline_.valid() ? &plan_spline_ : nullptr,
+                                  /*force_reset=*/true);
         // Arrival is judged at the waypoint we are actually going to, not at the end of the extended
         // path. Without this the mission would skip every waypoint but the last one on the horizon.
         // Affordance targets carry a desired facing yaw (point AT the table); manual
@@ -1393,6 +1476,41 @@ bool ControllerSession::wants_final_facing(const ControllerTargetInfo &target) c
     if (not target_contract_known_) return false;   // unknown policy ⇒ do not invent a rotation
     using P = rc::affordance::Policy;
     return target_contract_.policy == P::Servo or target_contract_.policy == P::Orient;
+}
+
+// Same spot, within the width of the robot: a standpoint half a body away from one that wedged is the
+// same approach through the same gap, not a new opportunity.
+const ControllerSession::UselessSpot *ControllerSession::known_useless_spot(const Eigen::Vector2f &pos) const
+{
+    constexpr float kSameSpotM = 0.30f;
+    for (const auto &s : useless_spots_)
+        if ((s.pos - pos).norm() <= kSameSpotM)
+            return &s;
+    return nullptr;
+}
+
+void ControllerSession::remember_useless_spot(const Eigen::Vector2f &pos, const std::string &name)
+{
+    for (auto &s : useless_spots_)
+        if ((s.pos - pos).norm() <= 0.30f) { ++s.hits; return; }   // same spot, one more failure
+    useless_spots_.push_back({pos, name, 1});
+    std::println("[controller] remembering ({:.2f},{:.2f}) as unreachable — {} spot(s) now known bad. "
+                 "The producer is not told, so it will offer this again; we will not drive there again.",
+                 pos.x(), pos.y(), useless_spots_.size());
+}
+
+// ── THE AFFORDANCE'S TARGET, FOR THE OVERLAY ─────────────────────────────────────────────────────
+// last_target_info_ carries the standpoint AFTER select_target's repair, which is the one the robot is
+// driving to and therefore the only one worth marking; the pre-repair value is a pose the controller
+// has already rejected. The facing comes from wants_final_facing() rather than a second reading of the
+// contract, so the overlay draws a heading exactly when the executor will turn to it.
+std::optional<ControllerStandpoint> ControllerSession::current_standpoint() const
+{
+    if (not last_target_info_.has_value() or not last_target_info_->from_affordance)
+        return std::nullopt;
+    return ControllerStandpoint{.room_pos = last_target_info_->room_pos,
+                                .yaw_rad = last_target_info_->yaw_rad,
+                                .has_facing = wants_final_facing(*last_target_info_)};
 }
 
 // Resolved once per target, when it is SELECTED. Same read the executor performs at arrival, done
@@ -1991,6 +2109,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // acquisition being inspected belongs to an action that has ended.
     attention_object_ = affordance_view_.active ? affordance_view_.object
                       : (overlay_now_ms_ < affordance_dwell_until_ms_ ? dwell_object_ : std::string{});
+    attention_standpoint_ = attention_object_.empty() ? std::nullopt : current_standpoint();
     affordance_view_.dwell_left_s = dwell_left_s(overlay_now_ms_);
     affordance_view_.dwell_mask_hits = dwell_mask_hits_;
     affordance_view_.suppressed = suppressed_affordance_;
@@ -3275,6 +3394,27 @@ void ControllerSession::begin_escape(const ControllerRobotPose &robot_pose,
     escape_start_pos_ = robot_pose.pos;
     ++escape_count_;
     stuck_since_ms_ = 0;
+
+    // ── CHARGE THIS ESCAPE TO THE AFFORDANCE IT HAPPENED UNDER ───────────────────────────────────
+    // An escape is a reflex, not a plan: it reverses out and lets the planner try again. That is right
+    // ONCE. Repeated against the same standpoint it becomes a livelock — wedge, escape, retry, wedge —
+    // and the robot spends minutes achieving a few centimetres while other affordances go unserved.
+    // After kMaxEscapesPerAffordance the honest conclusion is that this approach is not available to
+    // this body right now, so give the affordance up and let the selector choose another.
+    if (last_target_info_.has_value() and last_target_info_->from_affordance and active_target_id_ != 0)
+    {
+        constexpr int kMaxEscapesPerAffordance = 3;
+        if (active_target_id_ != escapes_target_id_)
+        {
+            escapes_target_id_ = active_target_id_;
+            escapes_on_target_ = 0;
+        }
+        if (++escapes_on_target_ >= kMaxEscapesPerAffordance)
+        {
+            reject_affordance_id_ = active_target_id_;
+            reject_affordance_name_ = last_target_info_->node_name;
+        }
+    }
 
     clear_tracking_state();
     current_plan_.reset();

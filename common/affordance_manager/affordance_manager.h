@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -66,6 +67,17 @@ public:
                         const std::function<void()> &on_node_inserted = {},
                         const std::function<void()> &on_edge_inserted = {});
     bool release_execution_claim(const std::shared_ptr<DSR::DSRGraph> &graph);
+
+    // ── TAKE AN AFFORDANCE OUT OF CONTENTION FOR A WHILE ─────────────────────────────────────────
+    // The CONSUMER could not physically get there — repeated wedges, no footprint-feasible standpoint,
+    // a goal the repair keeps landing on top of the object itself. That is NOT a completion (nothing was
+    // observed) and NOT a defect in the producer's belief (the gain may be entirely real); it is a
+    // statement about the APPROACH. Rejecting beats struggling: with other affordances on offer, grinding
+    // at an unreachable one buys nothing and costs the robot.
+    // Counted in selection ROUNDS rather than milliseconds so this stays clock-free — and it expires on
+    // its own, because the world moves: an obstacle clears, the producer proposes a different viewpoint,
+    // and the affordance deserves another chance without anyone having to remember to un-suppress it.
+    void suppress_target(std::uint64_t node_id, int rounds);
 
     // Grounded EFE selection weights: G = λ_cost·nav_dist − epistemic_gain (nats). switch_margin is
     // the commitment hysteresis (a held affordance must be beaten by this many nats to be dropped).
@@ -157,6 +169,8 @@ private:
     float select_switch_margin_ = 0.5f;
     float select_room_gain_scale_ = 1.0f;   // see set_room_gain_scale
     std::uint64_t last_completed_id_ = 0;   // skip this one on the next selection (see suppressed_name)
+    // node id -> selection rounds still to skip. See suppress_target: the consumer could not reach it.
+    std::map<std::uint64_t, int> unreachable_rounds_;
     std::string   suppressed_name_;         // what that skip cost, for the viewer
     std::uint64_t last_selected_id_ = 0;   // for commitment hysteresis across cycles
     std::vector<Candidate> last_candidates_;   // all affordances evaluated in the last select_target()

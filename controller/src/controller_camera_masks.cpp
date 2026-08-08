@@ -123,10 +123,11 @@ bool ControllerCameraMasks::ensure_intrinsics()
     return fx_ > 0.f and fy_ > 0.f;
 }
 
-bool ControllerCameraMasks::draw_target_pose(QPainter &p, const std::string &object, const QSize &canvas,
-                                             std::uint64_t stamp_ms, QString &note)
+bool ControllerCameraMasks::draw_target_pose(QPainter &p, const std::string &object,
+                                             const std::optional<ControllerStandpoint> &standpoint,
+                                             const QSize &canvas, std::uint64_t stamp_ms, QString &note)
 {
-    if (object.empty() or not graph_ or not inner_)
+    if ((object.empty() and not standpoint.has_value()) or not graph_ or not inner_)
         return false;
     if (not ensure_intrinsics())
     {
@@ -142,16 +143,13 @@ bool ControllerCameraMasks::draw_target_pose(QPainter &p, const std::string &obj
         note = QStringLiteral("masks carry no capture stamp — target pose not projected");
         return false;
     }
-    const auto node = graph_->get_node(object);
-    if (not node.has_value())
-    {
-        note = QStringLiteral("target node '%1' is not in the graph")
+    const auto node = object.empty() ? std::nullopt : graph_->get_node(object);
+    if (not object.empty() and not node.has_value())
+        note = QStringLiteral("object node '%1' is not in the graph")
                    .arg(QString::fromStdString(object));
-        return false;
-    }
 
     // ── THE CHAIN HAS TO BE BUILT IN TWO PIECES, WITH TWO DIFFERENT TIME QUERIES ──────────────────
-    // ★THIS IS WHY THE CROSS LANDED IN THE WRONG PLACE. Asking for zed←object in ONE call pins the
+    // ★THIS IS WHY THE MARKER LANDED IN THE WRONG PLACE. Asking for zed←object in ONE call pins the
     // WHOLE chain to the capture stamp, and that chain contains the rigid robot→zed camera mount,
     // which carries only its bootstrap timestamp — a per-frame Nearest query against it is answered
     // from a single ancient entry, or not at all. The voxelizer composes room_T_zed the same way and
@@ -180,60 +178,35 @@ bool ControllerCameraMasks::draw_target_pose(QPainter &p, const std::string &obj
     // ALWAYS check the optional — get_transformation_matrix bails to {} at every missing node/edge in
     // the chain, and dereferencing that is the documented crash mode.
     const auto room_T_robot = inner_->get_transformation_matrix(room_name_, robot_name_, stamp_ms);
-    const auto room_T_obj   = inner_->get_transformation_matrix(room_name_, object, stamp_ms);
-    if (not room_T_robot.has_value() or not room_T_obj.has_value())
+    if (not room_T_robot.has_value())
     {
-        note = QStringLiteral("no RT at the capture stamp (%1←%2 %3, %1←%4 %5)")
-                   .arg(QString::fromStdString(room_name_), QString::fromStdString(robot_name_))
-                   .arg(room_T_robot.has_value() ? "ok" : "MISSING")
-                   .arg(QString::fromStdString(object))
-                   .arg(room_T_obj.has_value() ? "ok" : "MISSING");
+        note = QStringLiteral("no %1←%2 RT at the capture stamp")
+                   .arg(QString::fromStdString(room_name_), QString::fromStdString(robot_name_));
         return false;
     }
-    const std::optional<Eigen::Affine3d> cam_T_obj =
-        (room_T_robot.value() * robot_T_zed_.value()).inverse() * room_T_obj.value();
-
-    // ── A FLOATING CROSS ON THE TARGET'S VERTICAL ─────────────────────────────────────────────────
-    // ★THIS IS WHY THE BOX AND THE CIRCLE DREW NOTHING. A furniture node's RT origin sits at the FLOOR
-    // (the base-origin convention — see the z_lo note in the voxelizer's build_graph_object_box), the
-    // zed is mounted about 1.5 m up, and row = cy − fy·z/y. For an object 1 m away that puts the origin
-    // roughly fy·1.5 pixels BELOW the image — comfortably off the bottom of a 720-row frame. Every
-    // marker anchored at the origin was being drawn correctly, off-screen.
-    // So the marker climbs the object's own vertical axis to where the object actually is in frame, and
-    // the STICK from the base to it is drawn too: the stick says where the belief is standing, the
-    // cross rides at eye height where it can be seen, and neither pretends the other is unnecessary.
-    const auto w = graph_->get_attrib_by_name<width_m_att>(node.value());
-    const auto d = graph_->get_attrib_by_name<depth_m_att>(node.value());
-    const auto h = graph_->get_attrib_by_name<height_m_att>(node.value());
-    // Where to float it: the object's MID-HEIGHT. The top was wrong in the obvious way — it put the
-    // marker above a 1.8 m fridge and hovering off the edge of a table, reading as "not in place" when
-    // the pose was fine. Mid-height is where the object visually is, for a low table and a tall box
-    // alike, and it is still well clear of the floor origin that was projecting off the bottom of the
-    // frame. Never zero: that is the original off-screen failure.
-    const double z_obj = (h.has_value() and h.value() > 0.05f) ? static_cast<double>(h.value()) : 1.0;
-    const double z_mid = 0.5 * z_obj;
+    // ONE camera pose, both marks. The object is quoted in its own frame and the standpoint in the
+    // room's, so the shared quantity is cam←room; deriving each from its own chain would let the two
+    // marks disagree about where the camera was, which is the only thing they must agree on.
+    const Eigen::Affine3d cam_T_room = (room_T_robot.value() * robot_T_zed_.value()).inverse();
+    const auto room_T_obj = object.empty()
+                                ? std::nullopt
+                                : inner_->get_transformation_matrix(room_name_, object, stamp_ms);
+    if (not object.empty() and not room_T_obj.has_value() and note.isEmpty())
+        note = QStringLiteral("no %1←%2 RT at the capture stamp")
+                   .arg(QString::fromStdString(room_name_), QString::fromStdString(object));
 
     constexpr double kNearY = 0.05;   // 5 cm: nearer than this the projection diverges
     const double cx = 0.5 * canvas.width(), cy = 0.5 * canvas.height();
     // zed frame: x right, y DEPTH, z up (CLAUDE.md / ROBOT_GEOMETRY.md). Exactly the inverse of the
     // voxelizer's unprojection, so a point it turned into a mask pixel lands back on that pixel.
-    const auto project = [&](const Eigen::Vector3d &local, QPointF &out) -> bool
+    // Takes a point ALREADY IN CAMERA COORDINATES: the two marks live in different frames and each
+    // brings its own transform, so the projection itself must not assume either one.
+    const auto project = [&](const Eigen::Vector3d &c, QPointF &out) -> bool
     {
-        const Eigen::Vector3d c = cam_T_obj.value() * local;
         if (c.y() < kNearY) return false;
         out = QPointF(cx + fx_ * c.x() / c.y(), cy - fy_ * c.z() / c.y());
         return true;
     };
-
-    QPointF base_px, top_px;
-    const bool have_base = project(Eigen::Vector3d::Zero(), base_px);
-    const bool have_top  = project(Eigen::Vector3d(0.0, 0.0, z_mid), top_px);
-    if (not have_top and not have_base)
-    {
-        note = QStringLiteral("target is BEHIND the camera — the robot is not looking at it");
-        return false;
-    }
-    const QPointF anchor = have_top ? top_px : base_px;
 
     // MAGENTA, and nothing else in this image is magenta. The silhouettes are the MEASUREMENT and this
     // is the MODEL; drawn in related colours, the one comparison the overlay exists for would be the
@@ -261,55 +234,156 @@ bool ControllerCameraMasks::draw_target_pose(QPainter &p, const std::string &obj
         return len <= kMaxSeg or len < 1e-6 ? to : from + d * (kMaxSeg / len);
     };
 
-    // The vertical stick down toward the base. Drawn thin: it is context for the cross, not the mark.
-    if (have_base and have_top)
-    {
-        p.setPen(QPen(kModel, 1.6 * k, Qt::DashLine));
-        p.drawLine(top_px, shortened(top_px, base_px));
-    }
-
-    // THE CROSS. Sized in pixels, not metres: this is a MARKER — it says "the belief puts the object
-    // here" — and a marker that shrinks to nothing at range stops doing its job exactly when the robot
-    // is far enough away for the question to be interesting.
     const double kArm = 18.0 * k;
-    p.setPen(QPen(kModel, 3.0 * k));
-    p.drawLine(anchor + QPointF(-kArm, 0), anchor + QPointF(kArm, 0));
-    p.drawLine(anchor + QPointF(0, -kArm), anchor + QPointF(0, kArm));
-
-    // The object's own x/y axes through the anchor, half-extent long, projected. These carry what the
-    // cross cannot: the believed ORIENTATION, and the foreshortening that says how obliquely the robot
-    // is looking at it. The +x arm is thicker, so which way the object thinks it faces is readable.
-    const double ax = (w.has_value() and w.value() > 0.f) ? 0.5 * static_cast<double>(w.value()) : 0.0;
-    const double ay = (d.has_value() and d.value() > 0.f) ? 0.5 * static_cast<double>(d.value()) : 0.0;
-    const auto axis = [&](double lx, double ly, double width_px)
-    {
-        QPointF tip;
-        if (not project(Eigen::Vector3d(lx, ly, have_top ? z_mid : 0.0), tip)) return;
-        p.setPen(QPen(kModel, width_px * k));
-        p.drawLine(anchor, shortened(anchor, tip));
-    };
-    if (ax > 0.0) { axis(+ax, 0.0, 3.0); axis(-ax, 0.0, 1.4); }
-    if (ay > 0.0) { axis(0.0, +ay, 1.4); axis(0.0, -ay, 1.4); }
-
     QFont f = p.font();
     f.setBold(true);
     f.setPointSizeF(std::max(9.0, canvas.height() / 22.0));
     p.setFont(f);
-    p.setPen(kModel);
-    const Eigen::Vector3d o_cam = cam_T_obj.value() * Eigen::Vector3d::Zero();
-    p.drawText(anchor + QPointF(kArm + 6, -6),
-               QStringLiteral("%1 @%2 m").arg(QString::fromStdString(object))
-                   .arg(o_cam.norm(), 0, 'f', 2));
+    // Notes accumulate: two independent marks can fail for two independent reasons, and a single slot
+    // that the second overwrites hides the first.
+    const auto add_note = [&note](const QString &s)
+    { note = note.isEmpty() ? s : note + QStringLiteral(" · ") + s; };
+    const auto off_frame = [&canvas](const QPointF &px)
+    { return px.x() < 0 or px.y() < 0 or px.x() >= canvas.width() or px.y() >= canvas.height(); };
 
-    // OFF-FRAME IS NOT THE SAME AS ABSENT, and the difference is the whole of the last hour: a marker
-    // drawn at row 1400 of a 720-row image is working perfectly and looks identical to one that never
-    // ran. Say where it went, so "nothing on the image" can never again mean two different things.
-    if (anchor.x() < 0 or anchor.y() < 0
-        or anchor.x() >= canvas.width() or anchor.y() >= canvas.height())
-        note = QStringLiteral("target projects OFF-FRAME at (%1,%2) of %3x%4 — it is outside the view")
-                   .arg(anchor.x(), 0, 'f', 0).arg(anchor.y(), 0, 'f', 0)
-                   .arg(canvas.width()).arg(canvas.height());
-    return true;
+    bool drew = false;
+
+    // ── 1. THE OBJECT'S BELIEF: A STICK AND ITS AXES, ON THE OBJECT'S VERTICAL ────────────────────
+    // ★THIS IS WHY THE BOX AND THE CIRCLE DREW NOTHING. A furniture node's RT origin sits at the FLOOR
+    // (the base-origin convention — see the z_lo note in the voxelizer's build_graph_object_box), the
+    // zed is mounted about 1.5 m up, and row = cy − fy·z/y. For an object 1 m away that puts the origin
+    // roughly fy·1.5 pixels BELOW the image — comfortably off the bottom of a 720-row frame. Every
+    // marker anchored at the origin was being drawn correctly, off-screen.
+    // So the mark climbs the object's own vertical axis to where the object actually is in frame, and
+    // the STICK from the base to it is drawn too: the stick says where the belief is standing, the axes
+    // ride at eye height where they can be seen, and neither pretends the other is unnecessary.
+    // NO CROSS HERE. The cross means "the affordance is aimed at this" and the object is not what the
+    // affordance is aimed AT — it is what the aim is FOR. The axes already meet at the anchor, so the
+    // belief's position is marked without borrowing the mark that belongs to the standpoint.
+    if (node.has_value() and room_T_obj.has_value())
+    {
+        const Eigen::Affine3d cam_T_obj = cam_T_room * room_T_obj.value();
+        const auto w = graph_->get_attrib_by_name<width_m_att>(node.value());
+        const auto d = graph_->get_attrib_by_name<depth_m_att>(node.value());
+        const auto h = graph_->get_attrib_by_name<height_m_att>(node.value());
+        // Where to float it: the object's MID-HEIGHT. The top was wrong in the obvious way — it put the
+        // marker above a 1.8 m fridge and hovering off the edge of a table, reading as "not in place"
+        // when the pose was fine. Mid-height is where the object visually is, for a low table and a tall
+        // box alike, and it is still well clear of the floor origin that was projecting off the bottom
+        // of the frame. Never zero: that is the original off-screen failure.
+        const double z_obj = (h.has_value() and h.value() > 0.05f) ? static_cast<double>(h.value()) : 1.0;
+        const double z_mid = 0.5 * z_obj;
+        const auto obj_px = [&](double lx, double ly, double lz, QPointF &out)
+        { return project(cam_T_obj * Eigen::Vector3d(lx, ly, lz), out); };
+
+        QPointF base_px, top_px;
+        const bool have_base = obj_px(0.0, 0.0, 0.0, base_px);
+        const bool have_top  = obj_px(0.0, 0.0, z_mid, top_px);
+        if (not have_base and not have_top)
+            add_note(QStringLiteral("the object is BEHIND the camera — the robot is not looking at it"));
+        else
+        {
+            const QPointF anchor = have_top ? top_px : base_px;
+            // The vertical stick down toward the base. Drawn thin: it is context, not the mark.
+            if (have_base and have_top)
+            {
+                p.setPen(QPen(kModel, 1.6 * k, Qt::DashLine));
+                p.drawLine(top_px, shortened(top_px, base_px));
+            }
+            // The object's own x/y axes through the anchor, half-extent long, projected. These carry the
+            // believed ORIENTATION and the foreshortening that says how obliquely the robot is looking
+            // at it. The +x arm is thicker, so which way the object thinks it faces is readable.
+            const double ax = (w.has_value() and w.value() > 0.f) ? 0.5 * static_cast<double>(w.value()) : 0.0;
+            const double ay = (d.has_value() and d.value() > 0.f) ? 0.5 * static_cast<double>(d.value()) : 0.0;
+            const auto axis = [&](double lx, double ly, double width_px)
+            {
+                QPointF tip;
+                if (not obj_px(lx, ly, have_top ? z_mid : 0.0, tip)) return;
+                p.setPen(QPen(kModel, width_px * k));
+                p.drawLine(anchor, shortened(anchor, tip));
+            };
+            if (ax > 0.0) { axis(+ax, 0.0, 3.0); axis(-ax, 0.0, 1.4); }
+            if (ay > 0.0) { axis(0.0, +ay, 1.4); axis(0.0, -ay, 1.4); }
+
+            p.setPen(kModel);
+            const Eigen::Vector3d o_cam = cam_T_obj * Eigen::Vector3d::Zero();
+            p.drawText(anchor + QPointF(kArm + 6, -6),
+                       QStringLiteral("%1 @%2 m").arg(QString::fromStdString(object))
+                           .arg(o_cam.norm(), 0, 'f', 2));
+            drew = true;
+            // OFF-FRAME IS NOT THE SAME AS ABSENT: a marker drawn at row 1400 of a 720-row image is
+            // working perfectly and looks identical to one that never ran. Say where it went, so
+            // "nothing on the image" can never mean two different things.
+            if (off_frame(anchor))
+                add_note(QStringLiteral("the object projects OFF-FRAME at (%1,%2) of %3x%4")
+                             .arg(anchor.x(), 0, 'f', 0).arg(anchor.y(), 0, 'f', 0)
+                             .arg(canvas.width()).arg(canvas.height()));
+        }
+    }
+
+    // ── 2. THE CROSS: THE AFFORDANCE'S TARGET, WHICH IS THE STANDPOINT ────────────────────────────
+    // A FLOOR point in the ROOM frame, not a point on the object: the affordance's target is a place
+    // for the ROBOT, chosen at the sensor's stand-off distance off the face it wants to see. Marking
+    // the object's centre instead put the cross metres from anything the action was aimed at, and made
+    // the one failure worth seeing — driving to a standpoint that is not where the affordance asked for
+    // — invisible, because the mark tracked the object no matter where the robot went.
+    if (standpoint.has_value())
+    {
+        const Eigen::Vector3d sp_room(static_cast<double>(standpoint->room_pos.x()),
+                                      static_cast<double>(standpoint->room_pos.y()), 0.0);
+        // Distance ALONG THE FLOOR from the robot, not from the camera: this number is "how far is
+        // there still to go", and a camera 1.5 m up would inflate it by its own mount height.
+        const Eigen::Vector3d robot_room = room_T_robot.value().translation();
+        const double to_go = std::hypot(sp_room.x() - robot_room.x(), sp_room.y() - robot_room.y());
+
+        QPointF sp_px;
+        if (not project(cam_T_room * sp_room, sp_px))
+            // Expected, and NOT a fault, once the robot has arrived: it is standing on it. Said in
+            // those words, because an orange band reading "behind the camera" during the dwell would
+            // report the success of the drive as a failure of the overlay.
+            add_note(to_go < 0.6
+                         ? QStringLiteral("standpoint REACHED (%1 m) — it is underfoot, out of view")
+                               .arg(to_go, 0, 'f', 2)
+                         : QStringLiteral("the standpoint is BEHIND the camera (%1 m away)")
+                               .arg(to_go, 0, 'f', 2));
+        else
+        {
+            // Sized in pixels, not metres: this is a MARKER, and one that shrinks to nothing at range
+            // stops doing its job exactly when the robot is far enough away for the question to matter.
+            p.setPen(QPen(kModel, 3.0 * k));
+            p.drawLine(sp_px + QPointF(-kArm, 0), sp_px + QPointF(kArm, 0));
+            p.drawLine(sp_px + QPointF(0, -kArm), sp_px + QPointF(0, kArm));
+
+            // The heading arm, along the floor — ONLY when the contract designed a final orientation.
+            // A Reach ends wherever the drive ends, and drawing an arrow for it would claim a facing
+            // the executor never turns to.
+            if (standpoint->has_facing)
+            {
+                constexpr double kHeadingArm_m = 0.6;
+                QPointF tip_px;
+                const Eigen::Vector3d tip_room =
+                    sp_room + kHeadingArm_m * Eigen::Vector3d(std::cos(standpoint->yaw_rad),
+                                                              std::sin(standpoint->yaw_rad), 0.0);
+                if (project(cam_T_room * tip_room, tip_px))
+                {
+                    p.setPen(QPen(kModel, 2.2 * k));
+                    p.drawLine(sp_px, shortened(sp_px, tip_px));
+                }
+            }
+
+            p.setPen(kModel);
+            p.drawText(sp_px + QPointF(kArm + 6, -6),
+                       QStringLiteral("standpoint %1 m%2").arg(to_go, 0, 'f', 2)
+                           .arg(standpoint->has_facing ? QStringLiteral(" ↷") : QString()));
+            drew = true;
+            if (off_frame(sp_px))
+                add_note(QStringLiteral("the standpoint projects OFF-FRAME at (%1,%2) of %3x%4")
+                             .arg(sp_px.x(), 0, 'f', 0).arg(sp_px.y(), 0, 'f', 0)
+                             .arg(canvas.width()).arg(canvas.height()));
+        }
+    }
+
+    return drew;
 }
 
 ControllerCameraMasks::~ControllerCameraMasks() = default;
@@ -392,7 +466,9 @@ const QImage *ControllerCameraMasks::frame_for(std::uint64_t stamp_ms, std::int6
     return best;
 }
 
-bool ControllerCameraMasks::pump(const std::string &target_object, std::uint64_t now_ms, bool draw_rois)
+bool ControllerCameraMasks::pump(const std::string &target_object,
+                                 const std::optional<ControllerStandpoint> &standpoint,
+                                 std::uint64_t now_ms, bool draw_rois)
 {
     if (not masks_)
         return false;
@@ -529,12 +605,13 @@ bool ControllerCameraMasks::pump(const std::string &target_object, std::uint64_t
     // was WHEN THE SHUTTER OPENED, not where it is now: comparing a live pose against an old frame would
     // manufacture an offset on every moving cycle and read as a pose error that is not there.
     QString project_note;
-    v.target_projected = draw_target_pose(p, target_object, canvas.size(), packet.timestamp_ms,
-                                          project_note);
-    // "There is no affordance running" is the commonest reason for no box, and the only one
+    v.target_projected = draw_target_pose(p, target_object, standpoint, canvas.size(),
+                                          packet.timestamp_ms, project_note);
+    // "There is no affordance running" is the commonest reason for no marker, and the only one
     // draw_target_pose cannot report — it has nothing to report ABOUT. Say it here, or an absent
     // overlay looks like a broken overlay.
-    if (not v.target_projected and project_note.isEmpty() and target_object.empty())
+    if (not v.target_projected and project_note.isEmpty()
+        and target_object.empty() and not standpoint.has_value())
         project_note = QStringLiteral("no affordance target — nothing to project");
 
     // An alignment the pairing could not achieve is worth saying: silhouettes drawn on a frame 200 ms
@@ -586,9 +663,15 @@ bool ControllerCameraMasks::pump(const std::string &target_object, std::uint64_t
     if (now_ms - last_report_ms_ >= 3000)
     {
         last_report_ms_ = now_ms;
-        std::print("[aff-view] target='{}' projected={} camera={}x{} masks={} stamp={} "
+        std::print("[aff-view] object='{}' standpoint={} projected={} camera={}x{} masks={} stamp={} "
                    "align_err={}ms ring={} note='{}'\n",
                    target_object.empty() ? std::string("(none)") : target_object,
+                   standpoint.has_value()
+                       ? std::format("({:.2f},{:.2f}) yaw {:.0f}deg{}", standpoint->room_pos.x(),
+                                     standpoint->room_pos.y(),
+                                     standpoint->yaw_rad * 180.0 / M_PI,
+                                     standpoint->has_facing ? "" : " (no facing)")
+                       : std::string("(none)"),
                    v.target_projected, canvas.width(), canvas.height(),
                    packet.slices.size(), packet.timestamp_ms, align_err_ms,
                    camera_ring_.size(), v.note.toStdString());

@@ -130,9 +130,14 @@ public:
     // with a different window, which is why both are logged.
     [[nodiscard]] std::optional<float> tracker_arc_length() const { return plain_tracker_.arc_length_hint(); }
 
-    void set_route(const RouteSpline *spline)
+    // `force_reset` = "this is a NEW curve", even if it arrives in the SAME object. A mission route is
+    // built once and its address identifies it, but every point target — click or affordance — is
+    // refitted into the session's one `plan_spline_` member, whose address never changes. Comparing
+    // pointers alone would then carry the previous traversal's arc-length hint into a different curve,
+    // which is the tracker steering at the old route's geometry from the new route's start.
+    void set_route(const RouteSpline *spline, bool force_reset = false)
     {
-        if (spline != route_spline_) { plain_tracker_.reset(); pd_tracker_.reset(); }
+        if (force_reset or spline != route_spline_) { plain_tracker_.reset(); pd_tracker_.reset(); }
         route_spline_ = spline;
     }
 
@@ -241,6 +246,10 @@ private:
     ControlMode control_mode_ = ControlMode::MPPI;
     PlainTracker plain_tracker_{*this};
     bool plain_no_curve_logged_ = false;   // the PD-fallback notice is worth saying once, not at 20 Hz
+    // How long the PD fallback has been driving. A latch alone made "one cycle" and "the whole session"
+    // print the same single line, so the fallback could not be measured at all — which is how a silent
+    // tracker swap survives a validation run.
+    int  plain_no_curve_cycles_ = 0;
     PdTracker    pd_tracker_{*this, *this};
     MppiTracker  mppi_tracker_{*this, *this};
     // Fills the fields every tracker reads. One place, so a new tracker cannot be handed a stale carrot.
@@ -271,6 +280,21 @@ private:
     // the in-place rotation so it cannot overshoot the tolerance band (see the arrival block). Measured p99 of
     // the compute cadence is ~1 s with a tail to 1.5 s, so this is deliberately pessimistic — being slow to
     // finish an alignment is harmless; overshooting it means never finishing at all.
+    // ── THE ALIGN BOUND'S IDEA OF A CYCLE — AND WHY IT IS NOT THE MEASURED ONE ───────────────────
+    // The terminal rotation is capped at |yaw_err| / this, so one cycle can never sweep more than the
+    // error that remains: overshoot becomes impossible without a damping term. 1.0 s is far longer than
+    // the measured 50 ms loop, so on paper it is twentyfold too conservative.
+    // ★TRIED AND REVERTED (2026-08-08): feeding the MEASURED cycle here. It is wrong, and the reason is
+    // that this bound is not only a safety backstop — it is also the APPROACH PROFILE. At 1.0 s the cap
+    // is |yaw_err| rad/s, which sits below align_kp (1.5) everywhere and keeps the turn off its ceiling
+    // until 0.8 rad of error. Set it to the real cycle and the cap goes slack, align_kp takes over, and
+    // the rotation saturates at max_rot (0.8 rad/s ~ 45 deg/s) for any error past 0.53 rad — measured
+    // live: 65% of align cycles above 0.7 rad/s, a base swinging at full speed right in front of the
+    // object it is trying to photograph, and NO benefit (episodes 1.46 s vs 1.50 s before).
+    // So the slow turn is not this number's fault, and speeding it up here costs the profile. If the
+    // terminal rotation should be quicker, the honest lever is align_kp with a deceleration envelope
+    // that lands inside the contract's own .still() omega — the rate a clean look actually permits —
+    // not the removal of the bound that happens to be shaping the approach.
     float align_worst_cycle_s_ = 1.0f;
 
     // Pending snapshot request (see request_snapshot). Written at the END of compute(), when the cycle's

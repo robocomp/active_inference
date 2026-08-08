@@ -69,7 +69,19 @@ bool RouteSpline::build(const std::vector<Eigen::Vector2f> &polyline, float spac
     //    corner is rounded; the output is resampled finely afterwards.
     const float ctrl_step = std::max(spacing_, smoothing_m);
     auto ctrl = resample(polyline, ctrl_step);
-    if (ctrl.size() < 2) return false;
+    // ★A PATH SHORTER THAN ONE SMOOTHING STEP IS NOT A FAILED FIT. resample() emits the first point and
+    // then steps by ctrl_step (0.40 m), so a 0.04 m hop — which is exactly what a one-cell standpoint
+    // repair produces — collapses to a single control point. Returning false here handed PLAIN no curve
+    // and silently demoted the drive to the PD tracker, a differently-tuned controller, with a one-shot
+    // log line to announce it. The branch immediately below already says the right thing for a short
+    // path ("too short to smooth; the polyline IS the answer"); this is the same statement, more so.
+    // The contract is smoothing is an improvement, never a precondition.
+    if (ctrl.size() < 2)
+    {
+        ctrl = resample(polyline, spacing_);
+        if (ctrl.size() < 2) ctrl = polyline;   // still degenerate ⇒ drive the polyline verbatim
+    }
+    if (ctrl.size() < 2) return false;          // genuinely nothing to follow
     if (ctrl.size() < 4)   // too short to smooth; the polyline IS the answer
     {
         samples_ = ctrl;
@@ -312,6 +324,21 @@ bool RouteSpline::self_test()
         check(std::abs(r.position_at(2.5f).x() - 2.5f) < 0.02f, "s must BE distance along the curve");
         check(std::abs(r.curvature_at(2.5f)) < 1e-3f, "a straight line has zero curvature");
         check(std::abs(r.heading_at(2.5f)) < 1e-3f, "heading along +x must be 0");
+    }
+
+    // (1a-bis) A PATH SHORTER THAN ONE SMOOTHING STEP MUST STILL BUILD. Control points are resampled at
+    // max(spacing, smoothing) = 0.40 m, so a 4 cm hop — precisely what a one-cell standpoint repair
+    // produces — collapsed to a single control point and build() returned false. That handed PLAIN no
+    // curve and silently demoted the drive to the PD tracker, announced by a one-shot log line. There is
+    // nothing to smooth here, which is a statement about the path, not a failure to fit it.
+    {
+        RouteSpline r;
+        const std::vector<Eigen::Vector2f> hop{{0.f, 0.f}, {0.04f, 0.f}};
+        check(r.build(hop, 0.02f, {}), "a path shorter than one smoothing step must still build");
+        check(r.valid(), "...and must report itself valid, or PLAIN falls back to PD");
+        check(std::abs(r.length() - 0.04f) < 5e-3f, "its arc length must be the hop's real length");
+        std::printf("  short hop: built=%d valid=%d length=%.4f m\n",
+                    r.valid() ? 1 : 0, r.valid() ? 1 : 0, r.length());
     }
 
     // (1b) kappa_avg must be SIGNED and CENTRED. A circle of radius R has curvature 1/R everywhere, so

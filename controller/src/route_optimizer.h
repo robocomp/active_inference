@@ -87,7 +87,23 @@ struct RouteOptimizerConfig
     // traded. Distinct from d_target, which is a PREFERENCE the anchor term is allowed to outvote:
     // a waypoint pulling the route off the medial axis costs clearance BY DESIGN, and a guard that
     // rejected any clearance regression would forbid the likelihood term from ever winning. 0 disables.
+    // ★A DISC IS THE WRONG SHAPE FOR THIS TEST — supply `support_radius` below and it is not used.
+    // Set to the INSCRIBED radius when it is used at all: below that the body cannot fit at any
+    // heading, so it is a true physical bound. The circumscribed radius is not — it is the worst case
+    // over every heading at once, and in a real apartment it sits ABOVE the clearance any route can
+    // achieve, which turns this guard into "reject any solve that lowered the minimum at all" and
+    // rejected 96% of solves (measured 2026-08-08: 197 rejections, mean clearance 0.254 -> 0.237 m
+    // against a floor of ~0.45 m).
     float clearance_floor = 0.f;
+
+    // ── THE EXACT FEASIBILITY TEST, WHEN THE CALLER CAN SUPPLY IT ────────────────────────────────
+    // Body extent in a world direction for a body travelling along `heading` — the footprint's SUPPORT
+    // function. The body collides iff distance(p) < support_radius(heading, -grad(p)), which is exact
+    // and direction dependent: a rectangle reaches further along its diagonal than across its width,
+    // and a disc model has to assume the worst case in every direction. Passed as a callable so this
+    // module keeps its "pure Eigen/STL" contract and never learns what a footprint is.
+    // When empty the acceptance test falls back to `clearance_floor`.
+    std::function<float(float heading, const Eigen::Vector2f &dir_world)> support_radius;
 
     // ── ONE DIAL: SPEED (0) <-> SAFETY (1) ────────────────────────────────────────────────────────
     // In a quadratic objective the weights ARE precisions — inverse variances on how strongly each belief

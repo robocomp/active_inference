@@ -662,16 +662,35 @@ TrajectoryController::ControlOutput TrajectoryController::compute(
     // precondition"; PD honours that by following the polyline directly.
     if (control_mode_ == ControlMode::PLAIN and route_spline_ != nullptr and route_spline_->valid())
     {
+        // Say what it COST, once the curve is back. Without this the fallback is unmeasurable: the
+        // notice below was a one-shot latch for the whole process, so "PD drove one cycle" and "PD drove
+        // the entire session" printed exactly the same single line, and nothing downstream recorded
+        // which tracker was actually steering.
+        if (plain_no_curve_cycles_ > 0)
+        {
+            std::println("[controller] PLAIN curve restored after {} cycles ({:.1f} s) on the PD "
+                         "fallback.", plain_no_curve_cycles_, plain_no_curve_cycles_ * 0.05f);
+            plain_no_curve_cycles_ = 0;
+            plain_no_curve_logged_ = false;
+        }
         detect_path_blockage(out, robot_pose);
         return plain_tracker_.compute(out, make_tracker_input(robot_pose, carrot_robot, goal_robot),
                                      active_params_);
     }
     // ---- PD carrot-follower mode: simple proportional-derivative controller ----
-    if (control_mode_ == ControlMode::PLAIN and not plain_no_curve_logged_)
+    if (control_mode_ == ControlMode::PLAIN)
     {
-        plain_no_curve_logged_ = true;
-        std::println("[controller] PLAIN has no fitted curve for this path — following it with the PD "
-                     "tracker instead. The robot still drives; the spline fit is what failed.");
+        // COUNTED, not latched. Rate-limited to one line per 100 cycles (5 s at 20 Hz) so a persistent
+        // fallback keeps saying so — a fault that announces itself once and then goes quiet reads as a
+        // fault that stopped.
+        if (not plain_no_curve_logged_ or plain_no_curve_cycles_ % 100 == 0)
+        {
+            plain_no_curve_logged_ = true;
+            std::println("[controller] PLAIN has no fitted curve for this path — following it with the PD "
+                         "tracker instead ({} cycles so far). The robot still drives; the spline fit is "
+                         "what failed.", plain_no_curve_cycles_ + 1);
+        }
+        ++plain_no_curve_cycles_;
     }
     if (control_mode_ == ControlMode::PD or control_mode_ == ControlMode::PLAIN)
     {
