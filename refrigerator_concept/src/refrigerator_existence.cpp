@@ -142,7 +142,21 @@ void RefrigeratorExistence::update_and_remove(RefrigeratorFitter& fitter, Refrig
                 const float d_full = rc::exist::mask_evidence(sil.e_occ, raw_free, sil.n_detectable, sm).log_odds_delta;
                 rc::exist::Evidence ev_sil;
                 ev_sil.e_occ = sil.e_occ; ev_sil.e_free = raw_free; ev_sil.n_reached = sil.n_detectable;
-                ev_sil.log_odds_delta = d_conf + p_detect * (d_full - d_conf);
+                // ★INTERPOLATE FROM ZERO, NOT FROM THE OCCUPANCY-ONLY FLOOR. The old form was
+                //     delta = d_conf + p_detect * (d_full - d_conf)
+                // whose comment claimed "p_detect -> 0 => pure HOLD". It does not: it leaves +d_conf, and
+                // d_conf is an OCCUPANCY-ONLY likelihood, which is always positive. That is precisely the
+                // RATCHET this header warns about — "an occupancy-only channel is not a likelihood ratio,
+                // it can only push L to +L_max, where it sticks forever" — and it is what it did again:
+                // a phantom refrigerator standing INSIDE the dining set collected occupancy from the real
+                // table and chairs in its volume, sat at L = +4.00 with lfree = 483 against locc = 206, and
+                // could not be removed while the robot stared straight at it.
+                //
+                // A probe that could not have resolved the object is not evidence EITHER WAY, so the honest
+                // update is 0. Scaling the full likelihood ratio by p_detect gives exactly that, keeps the
+                // update SYMMETRIC as this file requires, and still reproduces the old behaviour at
+                // p_detect -> 1 where the two forms coincide.
+                ev_sil.log_odds_delta = p_detect * d_full;
                 inst.dbg_ex_sil_free_eff = raw_free * p_detect;   // diagnostic: absence mass actually admitted
                 inst.dbg_ex_pdetect = p_detect; inst.dbg_ex_central = sil.central_frac();
                 inst.existence.integrate(ev_sil);
@@ -231,7 +245,8 @@ void RefrigeratorExistence::update_and_remove(RefrigeratorFitter& fitter, Refrig
                 const float l_conf = rc::exist::solid_delta(ev_conf, sm);   // occupancy only
                 const float l_full = rc::exist::solid_delta(ev, sm);        // occupancy + absence
                 inst.dbg_ex_lidar_free_eff = (ev.e_free + ev.e_interior) * p_detect_lidar;
-                ev.log_odds_delta = l_conf + p_detect_lidar * (l_full - l_conf);
+                // Same correction as the silhouette channel above: interpolate from ZERO.
+                ev.log_odds_delta = p_detect_lidar * l_full;
                 inst.existence.integrate(ev);
                 integrated = true;
             }

@@ -172,8 +172,11 @@ void TableExistence::update_and_remove(TableFitter& fitter, TableLidarIngestor* 
                 const rc::exist::Evidence e_conf = rc::exist::mask_evidence(sil.e_occ, 0.0f, sil.n_detectable, sm);
                 const rc::exist::Evidence e_full = rc::exist::mask_evidence(sil.e_occ, raw_free, sil.n_detectable, sm);
                 rc::exist::Evidence e_use = e_full;
-                e_use.log_odds_delta = e_conf.log_odds_delta
-                                     + p_detect * (e_full.log_odds_delta - e_conf.log_odds_delta);
+                // ★From ZERO, not from the occupancy-only floor — see refrigerator_existence.cpp.
+                // The old form left +e_conf at p_detect -> 0, and an occupancy-only likelihood can only
+                // push L upward: the ratchet that makes a phantom immortal. A probe that could not have
+                // resolved the object is not evidence either way.
+                e_use.log_odds_delta = p_detect * e_full.log_odds_delta;
                 inst.dbg_ex_sil_free_eff = raw_free * p_detect;   // diagnostic: absence mass actually admitted
                 inst.dbg_ex_pdetect = p_detect; inst.dbg_ex_central = sil.central_frac();
                 // Pass p_detect: the frame-correlation damping scales with (1 - p_detect), because
