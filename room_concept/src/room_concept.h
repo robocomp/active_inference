@@ -192,12 +192,13 @@ public:
         // ===== Prior covariance model =====
         // Process noise for commanded velocity prior (open-loop, less reliable)
         float cmd_noise_trans = 0.20f;   // Fractional position noise per meter of motion
-        // Fractional rotation noise per radian of COMMANDED rotation. 0.18, not 0.10: measured
-        // 08-09 over 20 in-place turns against the room-anchored SDF posterior, the command channel
-        // delivers 0.822 +-0.025 of the rotation that actually happens (the encoder 1.108). The
-        // command is the channel whose error is proportional to omega, so it is the one that needs a
-        // covariance growing with the rotation increment — the speed-proportional term used to sit on
-        // the encoder instead, which is why the fusion trusted the wrong prior during turns.
+        // Fractional rotation noise per radian of COMMANDED rotation. 0.18, not 0.10, kept on
+        // measured outcome: it shifts fusion weight to the encoder (the better per-frame predictor),
+        // and early exit while rotating went 91.6% -> 95.6% with over-gate frames 3.6% -> 0.5% on
+        // matched populations. It is NOT the command's measured error -- properly integrated (the
+        // localizer's own cmd_dth/meas_dth, not a re-integration of the velocity columns, which
+        // mangles the sparse stepwise command signal) the command runs ~10% below the encoder and
+        // ~3% below the room-anchored posterior. See config_apartamento.toml for the full retraction.
         float cmd_noise_rot   = 0.18f;
         float cmd_noise_base  = 0.05f;   // Base position noise even when stationary (m)
         float stationary_noise_damping = 0.7f;  // Multiplier applied to base noise when near-stationary
@@ -216,12 +217,17 @@ public:
         // (~16x at the 62 ms update interval); see build_motion_covariance for the measurement.
         //
         // NOTE the premise above this line was also backwards. It read "encoders under-report
-        // rotation at high angular speed, so make the fusion trust the COMMAND more". Measured
-        // 08-09 over 11 in-place turns against the SDF posterior (anchored by the room geometry):
-        // the encoder reports 1.068 +-0.022 of the true rotation and the command 0.747 +-0.025.
-        // It is the COMMAND that under-reports, by 25%, and it is the channel with the
-        // speed-proportional error — so if either prior deserves an inflation term growing with
-        // |omega| it is that one, not this. Set to 0 to disable.
+        // rotation at high angular speed, so make the fusion trust the COMMAND more". The command is
+        // the WORSE per-frame predictor of the two, not the better one: with this term inflated the
+        // prior collapsed onto it and the SDF had to push heading further into the turn on 100% of
+        // frames. So if either prior deserves an inflation term growing with |omega| it is the
+        // command (CmdNoiseRot), not this one. Set to 0 to disable.
+        // (An earlier version of this note quoted "encoder 1.068, command 0.747 of true rotation".
+        // Those ratios were measurement artefacts — corrected figures are cmd/post 0.967 and
+        // meas/post 1.072; see the retraction in config_apartamento.toml. Note also that under
+        // webots-bridge the reported angular speed is the supervisor's GROUND TRUTH
+        // (specificworker.cpp: pose_data.rot = shadow_velocity[5]), not wheel odometry, so in sim
+        // this term is modelling noise that does not exist on the input.)
         float encoder_rot_slip_k = 0.15f;  // dimensionless: fraction of the rotation that slips
 
         // ===== Online Motion Model Learning =====

@@ -269,23 +269,27 @@ WeightSmoothingAlpha     = 0.3   # EMA de transición entre perfiles
 OdomNoiseScale  = 1.0   # Sin inflado artificial (anterior 1.5 distorsionaba
                          # el balance boundary/obs/motion en la pérdida RFE)
 CmdNoiseTrans   = 0.20  # Fracción de ruido translacional del comando (m/m)
-CmdNoiseRot     = 0.18  # Fracción de ruido rotacional del comando (rad/rad). CALIBRATED 08-09 from
-                        # 20 in-place turns, both directions, 0.27-1.55 rad/s, arbitrated against the
-                        # SDF posterior (anchored by the room geometry): the command channel delivers
-                        # 0.822 +-0.025 of the rotation that actually happens, so its 1-sigma error on
-                        # the increment is 0.178, not the 0.10 assumed here. The encoder delivers
-                        # 1.108 and keeps OdomNoiseRot 0.04 + EncoderRotSlipK 0.05 (0.064 combined).
-                        # This is the asymmetry that was backwards: the speed-proportional inflation
-                        # sat on the ACCURATE channel while the one with a demonstrably
-                        # speed-proportional error was modelled as the more certain of the two.
-                        # rotation_std = rotation_noise_base + CmdNoiseRot*|dtheta| already has the
-                        # right functional form (it grows with the covariate) — only the number was
-                        # wrong, so this is calibration from data, not a tuning knob.
-                        # NOTE this models a systematic ~1.34x command/actual GAIN as if it were
-                        # zero-mean noise. That is the honest thing to do here (the fusion has no bias
-                        # term for the command, and inflating variance only ever says "trust this
-                        # less"), but the real cure is upstream: see the base-driver gain in
-                        # robot_concept. If that is ever fixed, re-measure before lowering this.
+CmdNoiseRot     = 0.18  # Fracción de ruido rotacional del comando (rad/rad). Raised from 0.10 on
+                        # 08-09 and KEPT ON MEASURED OUTCOME, not on the calibration story that first
+                        # justified it — that story was wrong, see below. Matched in-place populations,
+                        # n=798 vs 833 frames: early exit above 0.4 rad/s 91.6% → 95.6%, frames over
+                        # the early-exit gate 3.6% → 0.5%, w_enc 0.552 → 0.647, cov_tt 9.8e-4 → 8.8e-4,
+                        # zero recovery episodes. rotation_std = rotation_noise_base +
+                        # CmdNoiseRot*|dtheta| already had the right functional form; this shifts
+                        # fusion weight toward the encoder, which is the better per-frame predictor.
+                        #
+                        # ⚠ 0.18 is NOT the command channel's measured error. The first version of this
+                        # comment claimed the command delivers 0.822 of the real rotation (a 0.178
+                        # error); that came from integrating the velocity columns as Σ ω(row)*wall-gap,
+                        # which mangles the COMMAND because it is a sparse stepwise signal sampled at
+                        # frame times. Integrated properly — use the localizer's own meas_dth/cmd_dth
+                        # columns, which clip segments and use midpoint theta — 15 in-place turns give
+                        # cmd/post 0.967 ±0.014, meas/post 1.072 ±0.011, cmd/meas 0.902. Per-frame
+                        # 0.908 and summed 0.902 agree and a lag scan is best at zero shift with a 40x
+                        # smaller residual, so the command/encoder gap is a clean in-phase SCALE of
+                        # ~10%, not 34% and not lag. 0.18 therefore over-weights the encoder relative
+                        # to what the scale alone supports, and part of the benefit may be
+                        # compensating the ~7% meas/post residual below. Re-derive it if that is fixed.
 CmdNoiseBase    = 0.05  # Ruido base translacional del comando (m)
 OdomNoiseTrans  = 0.08  # Fracción de ruido translacional de odometría
 OdomNoiseRot    = 0.04  # Fracción de ruido rotacional de odometría
@@ -294,14 +298,17 @@ EncoderRotSlipK = 0.05  # RESTORED 08-09 (the 07-16 A/B below said "restore afte
                         # At 0.25 this made meas_cov_tt = (0.25|ω|)² = 1.5e-2 at ω=0.5 rad/s against a
                         # cmd_cov_tt of 1.5e-4 — 95x — so the command/measured fusion put weight 0.011
                         # on the ENCODER and the motion prior was effectively the command alone
-                        # (sel_dth/cmd_dth = 1.002, sel_dth/meas_dth = 0.680). Measured 08-09 over 11
-                        # deliberate in-place turns, 0.27–1.10 rad/s, both directions: the command
-                        # channel reports only 0.747 ±0.025 of the rotation that actually happened,
-                        # odometry 1.068 ±0.022 (posterior = SDF fit, anchored by the room geometry).
-                        # Direction-symmetric and flat in speed ⇒ a scale factor, not a lag. Signature:
-                        # sign(innov_th) == sign(ω) in 171/171 rotation frames — the SDF had to push
-                        # heading further into the turn on EVERY frame, against a confident (σ=0.012 rad)
-                        # prior that was 25% short. That fight is the elevated loss_init while turning.
+                        # so the motion prior was effectively the command alone (sel_dth/cmd_dth =
+                        # 1.002). Signature: sign(innov_th) == sign(ω) on 100% of rotation frames —
+                        # the SDF had to push heading further into the turn on EVERY frame, against a
+                        # confident (σ=0.012 rad) prior that was short. That fight is the elevated
+                        # loss_init while turning, and it is what the fix removed: early exit above
+                        # 0.4 rad/s went 79.3% → 91.5%, and the sign test 100% → 95%.
+                        # ⚠ Earlier versions of this comment quoted "the command is 25% short,
+                        # odometry 1.068" from ratios that were measurement artefacts — see the
+                        # CmdNoiseRot note above for the corrected figures (cmd/post 0.967,
+                        # meas/post 1.072). The units bug and every measured OUTCOME stand; only the
+                        # channel-vs-truth magnitudes were wrong.
 StationaryMotionThreshold = 0.02  # FIX 1: de 0.001 a 0.02 m. Cuando el robot
                                    # está parado, position_std = este valor y
                                    # cov(0,0) = (0.02)² = 4e-4 m². El valor
