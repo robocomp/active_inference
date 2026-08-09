@@ -176,7 +176,10 @@ void TableExistence::update_and_remove(TableFitter& fitter, TableLidarIngestor* 
                                      + p_detect * (e_full.log_odds_delta - e_conf.log_odds_delta);
                 inst.dbg_ex_sil_free_eff = raw_free * p_detect;   // diagnostic: absence mass actually admitted
                 inst.dbg_ex_pdetect = p_detect; inst.dbg_ex_central = sil.central_frac();
-                inst.existence.integrate(e_use);
+                // Pass p_detect: the frame-correlation damping scales with (1 - p_detect), because
+                // consecutive misses are only correlated while a shared CAUSE (marginal framing)
+                // can explain them. Omitting it would leave this channel undamped.
+                inst.existence.integrate(e_use, p_detect);
                 integrated = true;
                 // Route the un-resolvable absence into an epistemic VERIFY pull (decayed accumulator). When it
                 // builds up, the table is flagged for verification (the epistemic planner drives the robot to a
@@ -293,7 +296,9 @@ void TableExistence::update_and_remove(TableFitter& fitter, TableLidarIngestor* 
                 inst.dbg_ex_lidar_llr = cfg_.existence_lidar_confirms ? ev.log_odds_delta : 0.0f;
                 if (cfg_.existence_lidar_confirms)
                 {
-                    inst.existence.integrate(ev);
+                    // LiDAR carve: this channel has no framing shoulder, so its observations are
+                    // independent — pass 1.0 explicitly rather than inherit a default silently.
+                    inst.existence.integrate(ev, 1.0f);
                     integrated = true;
                 }
             }

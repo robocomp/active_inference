@@ -364,7 +364,10 @@ public:
     int   run_length() const { return run_k_; }   // consecutive same-sign observations (diagnostic)
 
     // Fold one modality's per-cycle evidence. HOLD (no change) when the instance wasn't probed this cycle.
-    void integrate(const Evidence& e)
+    // `p_detect` = P(the detector could have fired | the object is there) at THIS observation, i.e. how
+    // unambiguous the conditions were. Pass it whenever the caller has it; the default of 1 means
+    // "conditions were ideal", which is the independent case and reproduces the pre-correlation behaviour.
+    void integrate(const Evidence& e, float p_detect = 1.0f)
     {
         if (e.n_reached == 0) return;
         const int sign = (e.log_odds_delta > 0.0f) - (e.log_odds_delta < 0.0f);
@@ -373,7 +376,7 @@ public:
             if (sign == run_sign_) ++run_k_;
             else { run_sign_ = sign; run_k_ = 1; }
         }
-        L_ = std::clamp(L_ + e.log_odds_delta * marginal_weight(run_k_), -L_max_, L_max_);
+        L_ = std::clamp(L_ + e.log_odds_delta * marginal_weight(run_k_, p_detect), -L_max_, L_max_);
     }
     float logodds()  const { return L_; }
     float p_exists() const { return 1.0f / (1.0f + std::exp(-L_)); }
@@ -389,11 +392,28 @@ public:
 private:
     // Marginal worth of the k-th consecutive same-sign observation: N_eff(k) − N_eff(k−1), with
     // N_eff(n) = n / (1 + (n−1)·rho). rho = 0 ⇒ 1 for every k (independent trials, the previous behaviour).
-    float marginal_weight(int k) const
+    // ★rho IS NOT A CONSTANT — it falls as the conditions get less ambiguous, and that is what the data
+    // says. Measured on table_concept's log, conditioned on the p_detect band the observation sat in:
+    //     p_detect>0.3  rho=0.602      p_detect>0.5  rho=0.327      p_detect>0.7  rho=0.198
+    // Consecutive misses are correlated when they share a CAUSE — marginal framing, the detector sitting
+    // on its envelope shoulder — and that cause weakens as p_detect rises. With the object squarely in
+    // view and p_detect near 1 there is no shared excuse left, so a miss is genuine evidence of absence
+    // and successive misses count almost independently.
+    //
+    // rho_eff = rho * (1 - p_detect) has the two limits that matter and no extra parameter:
+    //   · p_detect -> 1 (clear conditions): rho_eff -> 0, misses are independent, an absent object is
+    //     REMOVED after a few of them. Without this the run saturated at 1/rho observations' worth, which
+    //     BOUNDS the total absence evidence — measured at rho=0.327 that is 3.06 observations ~ 4.6 nats
+    //     against the 8 nats needed to walk L from the +4 ceiling to the -4 floor, so a phantom the robot
+    //     was staring straight at could never be removed at all. That was a real regression, seen live.
+    //   · p_detect -> 0 (a look that could never have resolved it): rho_eff -> rho, fully damped — though
+    //     there the charge is already ~0, since ΔL is p_detect-weighted upstream.
+    float marginal_weight(int k, float p_detect) const
     {
-        if (rho_ <= 0.0f or k <= 1) return 1.0f;
+        const float rho = rho_ * std::clamp(1.0f - p_detect, 0.0f, 1.0f);
+        if (rho <= 1e-4f or k <= 1) return 1.0f;
         const auto n_eff = [&](int n) { return n <= 0 ? 0.0f
-                                                      : static_cast<float>(n) / (1.0f + (n - 1) * rho_); };
+                                                      : static_cast<float>(n) / (1.0f + (n - 1) * rho); };
         return std::max(0.0f, n_eff(k) - n_eff(k - 1));
     }
 
