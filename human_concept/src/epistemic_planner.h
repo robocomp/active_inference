@@ -22,6 +22,8 @@
 
 #include <Eigen/Dense>
 
+#include "../../common/nbv/viewpoint_score.h"   // rc::nbv — the shared DETECTION-WEIGHTED NBV core
+
 namespace rc {
 
 struct EpistemicProposal
@@ -56,13 +58,30 @@ public:
      * @param worst_info  Smallest accumulated posterior precision across DOFs (the most uncertain joint).
      * Returns valid==false only if the camera→person ray is degenerate.
      */
+    /// The returned gain is DETECTION-WEIGHTED: P(detect at the far-side viewpoint) · ΔH. An occlusion-
+    /// reducing orbit we could not get a detection from is worth ~0 nats, so it cannot out-bid nav_dist in
+    /// the controller's EFE — which matters here because this affordance asks the robot to walk AROUND a
+    /// person, the most expensive and most socially costly move it makes.
     EpistemicProposal compute(const Eigen::Vector2f& person_xy,
                               const Eigen::Vector2f& camera_xy,
-                              float worst_info) const;
+                              float worst_info,
+                              const rc::nbv::Sensor& sensor_in,
+                              const std::vector<rc::nbv::Obstacle>& obstacles = {}) const;
+
+    // The detector's operating envelope. The stand-off is the argmax of THIS, retiring d_obs_ as the thing
+    // that set the viewing distance.
+    void set_detector_envelope(const rc::detect::DetectorEnvelope& e) { det_env_ = e; }
+
+
+    void set_robot_radius(float m) { robot_radius_m_ = m; }
 
 private:
     float d_obs_;
     float view_info_;
+    // The envelope is OWNED (config-driven); the camera GEOMETRY arrives per call, because the zed
+    // intrinsics appear only once robot_concept starts publishing frames. See sensor_from_graph().
+    rc::detect::DetectorEnvelope det_env_{};
+    float robot_radius_m_ = 0.30f;   // Shadow
 };
 
 }  // namespace rc

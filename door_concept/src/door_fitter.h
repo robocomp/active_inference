@@ -103,6 +103,9 @@ public:
     void set_room_geometry(const Eigen::Vector2f& interior, std::vector<Eigen::Vector2f> polygon)
     { room_interior_ = interior; room_polygon_ = std::move(polygon); }
     bool has_room_polygon() const { return room_polygon_.size() >= 3; }
+    // The walls, for anything that needs them as GEOMETRY rather than as a containment prior — notably the
+    // NBV sight test, which must know the wall a door is set into is opaque. See rc::nbv::wall_obstacles.
+    const std::vector<Eigen::Vector2f>& room_polygon() const { return room_polygon_; }
 
     // Robot/camera ego-motion (room frame), from the transform chain — producer-independent. Call once per
     // compute cycle; run_inference then gates the pose/shape update to STILLNESS ("be-still-to-update").

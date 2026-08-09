@@ -485,6 +485,7 @@ float DoorFitter::run_inference(DoorInstance& inst, const DoorObservation& obser
             inst.ai2_belief.inflate_for_age(dt, cfg_.ai2_age_nominal_dt_s);
         }
         inst.last_belief_touch = now;
+        inst.dbg_gate_fresh = false;   // no mask reached the fit ⇒ the gate flags below are STALE this cycle
         compute_projected_roi(inst);
         return inst.dbg_energy;   // HOLD last FE — an aged cycle took no measurement (no new energy)
     }
@@ -507,7 +508,12 @@ float DoorFitter::run_inference(DoorInstance& inst, const DoorObservation& obser
     // "Be-still-to-update" invariant: a truncated view (gated) OR a MOVING robot may only CONFIRM the door, never
     // move/reshape it. A moving frame's mask is a shared smear whose centroid is unreliable — predict-only here
     // (mean held, Σ carries its one-step Q); the existence belief still confirms it (its mask reset stops vacate).
-    const bool gated = inst.last_trunc_frac > cfg_.ai2_trunc_gate_frac or confirm_only(inst);
+    const bool trunc_gated  = inst.last_trunc_frac > cfg_.ai2_trunc_gate_frac;
+    const bool motion_gated = confirm_only(inst);
+    const bool gated = trunc_gated or motion_gated;
+    inst.dbg_gated = gated;   // the existence channel needs this verdict (removal requires an admissible frame)
+    // …split by mechanism, and stamped as computed from THIS frame's mask — see DoorInstance.
+    inst.dbg_trunc_gated = trunc_gated; inst.dbg_motion_gated = motion_gated; inst.dbg_gate_fresh = true;
     compute_chain_cov(inst);
 
     float energy = inst.dbg_energy;   // default = HOLD last FE (a gated cycle takes no measurement)

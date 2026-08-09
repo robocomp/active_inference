@@ -21,6 +21,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
 
 // ─── Room geometry (wall-flush factor + C2v yaw reference) ───────────────────────────────────────
 
@@ -432,6 +433,7 @@ void SpecificWorker::publish_kitchen_boxes()
             G->add_or_modify_attrib_local<parent_att>  (node, room_node_id_);
             G->add_or_modify_attrib_local<pos_x_att>   (node, rpx + 150.f + 40.f * static_cast<float>(slot));
             G->add_or_modify_attrib_local<pos_y_att>   (node, rpy + 50.f);
+            rc::provenance::stamp_creation(*G, node);   // birth stamp: epoch ms + local ISO-8601
             const auto id_opt = G->insert_node(node);
             if (not id_opt.has_value()) { ++slot; continue; }
             kitchen_nodes_[b.id] = id_opt.value();
@@ -715,7 +717,12 @@ void SpecificWorker::run_instance_tracker()
         const Eigen::Vector3f& c = pkt.slices[dets[d].slice_index].centroid;
         const auto new_id = scene_graph_->create_instance_from_detection(c, room_node_id_);
         if (new_id != 0)
+        {
             fitter_->note_birth(new_id, c);   // full XYZ: z seeds the tier so a WALL unit is born high
+            // Shadow-mode birth record (CONCEPT_AGENT_LIFECYCLE.md §4.2): captures the place AND the
+            // viewpoint that produced it, so a phantom that dies young is attributable to both.
+            log_phantom_event("BIRTH", new_id, "", c.x(), c.y(), nullptr, "");
+        }
     }
 
     // Per-instance ZED-slice count for the EvidenceMonitor. Every assigned slice is a ZED detection now

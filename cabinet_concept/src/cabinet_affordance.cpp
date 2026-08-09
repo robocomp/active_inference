@@ -11,6 +11,7 @@
 #include <cmath>
 
 #include "../../common/affordance_protocol/affordance_protocol.h"
+#include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
@@ -164,6 +165,7 @@ void CabinetAffordance::create_node(const EpistemicProposal& prop)
     // Object-relative viewpoint constraint (the authoritative epistemic target the controller resolves).
     rc::affordance::write_viewpoint(*G_, aff_node, make_viewpoint(prop));
 
+    rc::provenance::stamp_creation(*G_, aff_node);   // birth stamp: epoch ms + local ISO-8601
     const auto id_opt = G_->insert_node(aff_node);
     if (!id_opt.has_value())
     {

@@ -33,7 +33,12 @@ stale_grace_ms = 120000
 agent_info_period_ms = 1000
 
 [Owns]
-nodes = ["chair_concept 20"]
+# "chair_*" added 2026-07-31: the per-instance chair nodes (chair_scene_graph.cpp names them "chair_<N>")
+# were swept ONLY by the bespoke SpecificWorker::remove_owned_chair_nodes(), duplicating what the shared
+# presence-coordinator cleanup already does for every other agent. Declaring them here makes chair follow the
+# one sanctioned ownership mechanism; the startup sweep stays as the crash safety net (a SIGKILLed previous
+# run never reaches cleanup). See CONCEPT_AGENT_LIFECYCLE.md §5 (OWNERSHIP).
+nodes = ["chair_concept 20", "chair_*"]
 
 [Period]
 Compute = 100

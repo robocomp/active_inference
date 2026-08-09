@@ -20,6 +20,7 @@
 
 #include "cabinet_model.h"   // rc::CabinetModel statics (TOP_THICKNESS, LEG_RADIUS)
 #include "../../common/object_anchor/object_anchor_contract.h"
+#include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
 
 namespace rc {
 
@@ -68,6 +69,7 @@ std::uint64_t CabinetSceneGraph::create_instance_from_detection(const Eigen::Vec
         G_->add_or_modify_attrib_local<pos_y_att>(cabinet_node, rpy +  50.f);
     }
 
+    rc::provenance::stamp_creation(*G_, cabinet_node);   // birth stamp: epoch ms + local ISO-8601
     const auto id_opt = G_->insert_node(cabinet_node);
     if (not id_opt.has_value())
         return 0;

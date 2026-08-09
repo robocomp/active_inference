@@ -10,6 +10,7 @@
  */
 
 #include "specificworker.h"
+#include "../../common/nbv/graph_obstacles.h"   // rc::nbv::sensor_from_graph / collect_graph_obstacles
 
 #include <algorithm>
 #include <chrono>
@@ -198,7 +199,16 @@ void SpecificWorker::initialize()
     skeleton_source_ = rc::make_skeleton_source(cfg_.source_kind, cfg_.replay_path, cfg_.replay_loop,
                                                 G, inner_eigen_.get());
     epistemic_planner_ = rc::EpistemicPlanner(cfg_.epistemic_obs_distance, cfg_.epistemic_view_info);
-    fitter_ = std::make_unique<rc::HumanFitter>(G, cfg_);
+    // ONE detector envelope: the far-side viewpoint is the argmax of the same model absence is weighted by,
+    // and the published gain is multiplied by P(detect) there — so an orbit the detector could not fire from
+    // stops bidding for the walk AROUND a person.
+    epistemic_planner_.set_detector_envelope(rc::detect::DetectorEnvelope{});
+    epistemic_planner_.set_robot_radius(0.30f);   // Shadow's footprint radius
+    // ★The camera model is read PER CYCLE at the compute site (rc::nbv::sensor_from_graph),
+    // NOT once here: the zed intrinsics are published by robot_concept when frames start
+    // arriving, so reading them in initialize() races the producer. Losing that race leaves
+    // vfov = 0, which silently collapses the fill model to horizontal-only — the exact bug
+    // rc::nbv exists to fix, and it drives the robot nose-to-nose with tall objects.
 
     // ── Live "Human Inference" dashboard ─────────────────────────────────────────
     if (not graph_viewers.empty())
@@ -360,7 +370,8 @@ void SpecificWorker::step_epistemic(rc::HumanInstance& inst)
     if (not std::isfinite(worst_info))
         worst_info = 1e-3f;
 
-    auto prop = epistemic_planner_.compute(person_xy, camera_xy, worst_info);
+    auto prop = epistemic_planner_.compute(person_xy, camera_xy, worst_info,
+                                           rc::nbv::sensor_from_graph(*G, inner_eigen_.get()));
     if (not prop.valid or not prop.is_finite())
         return;
 

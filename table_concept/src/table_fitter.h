@@ -87,6 +87,13 @@ public:
     void note_birth(std::uint64_t id, const Eigen::Vector2f& xy) { birth_seeds_[id] = xy; }
     bool should_log(const TableInstance& inst) const;
 
+    // May THIS mask frame move geometry? — the agent's UPDATE-admissibility predicate, evaluated on a raw slice
+    // that has no instance yet. rc::birth (common/instance_tracker/birth_evidence.h) rule 2: a frame that may not
+    // MOVE an existing table's geometry must not CREATE one, so birth is admitted by the same predicate the fit
+    // uses — the FIXATION gate — rather than a second, weaker birth-only notion of "good enough". Mirrors
+    // RefrigeratorFitter::frame_admissible; the conditions here are table_fitter.cpp's fixation block.
+    bool frame_admissible(const MaskIngestor::MaskSlice& sl) const;
+
     // Emit a CSV row for an OUT-OF-VIEW instance whose EXISTENCE evidence integrated this cycle (LiDAR/silhouette
     // carve) but which the fitter did NOT fit (no fresh mask) — so the existence log-odds trajectory that drives a
     // removal is captured even across the silent out-of-FoV stretch where no fit row is written. Fit fields are the

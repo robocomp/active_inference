@@ -7,6 +7,7 @@
 #include <cmath>
 
 #include "../../common/affordance_protocol/affordance_protocol.h"
+#include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
@@ -142,6 +143,7 @@ void ChairAffordance::create_node(const EpistemicProposal& prop)
     // Servo lock-on. Both complete on the chair's detection feedback attributes.
     write_policy_contract(aff_node);
 
+    rc::provenance::stamp_creation(*G_, aff_node);   // birth stamp: epoch ms + local ISO-8601
     const auto id_opt = G_->insert_node(aff_node);
     if (!id_opt.has_value())
     {

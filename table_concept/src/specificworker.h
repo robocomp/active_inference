@@ -60,6 +60,7 @@
 #include "table_affordance.h"
 #include "table_model.h"
 #include "../../common/dashboard/belief_inspector.h"
+#include "../../common/dashboard/belief_strip.h"
 #include "../../common/dashboard/custom_widget.h"
 #include "../../common/dashboard/evidence_monitor.h"
 #include "../../common/dashboard/timeseries_plot.h"
@@ -91,7 +92,9 @@ public slots:
     int  startup_check();
 
     void modify_node_slot(std::uint64_t id, const std::string& type);
-    void modify_node_attrs_slot(std::uint64_t id, const std::vector<std::string>& att_names);
+    // Replaces the update_node_attr_signal slot: the controller-owned protocol flags are POLLED once per
+    // cycle instead of pushed per graph attribute write. See the connect block in initialize().
+    void poll_affordance_protocol();
     void modify_edge_slot(std::uint64_t from, std::uint64_t to, const std::string& type){};
     void modify_edge_attrs_slot(std::uint64_t from, std::uint64_t to,
                                 const std::string& type, const std::vector<std::string>& att_names){};
@@ -126,6 +129,9 @@ private:
     // Multi-instance birth/associate/merge (shared rc::InstanceTracker; the only instance-lifecycle path).
     // Associates "table" masks to instances, spawns a table from an unexplained mask, merges overlaps.
     rc::InstanceTracker tracker_;
+    // Other objects in the graph as robot-inflated footprints, so the NBV never proposes standing on — or
+    // looking through — the furniture.
+    std::vector<rc::EpistemicPlanner::Obstacle> collect_viewpoint_obstacles(std::uint64_t self_id) const;
     void run_instance_tracker();   // called every cycle from compute()
     void retire_instance(std::uint64_t id);   // shared teardown: affordance + fitter forget + graph delete
     // Physical-exclusion invariant: two tables cannot share space. Collapse any pair of instances whose
@@ -182,6 +188,11 @@ private:
     // Room id whose wall polygon is already loaded into the projection. Latches refresh_room_geometry() so a
     // constant polygon is not re-read (and the room node not deep-copied) every cycle. 0 = not yet loaded.
     std::uint64_t                                           polygon_room_id_ = 0;
+    // The room polygon kept HERE as well as forwarded to the fitter. The fitter's set_room_polygon() hands
+    // it straight to the projection unit and keeps no copy, but the NBV needs it too: without it
+    // rc::nbv::is_reachable imposes no constraint (it refuses to guess), so a viewpoint outside the room
+    // reads as reachable and the direction-blind information term cannot break the tie.
+    std::vector<Eigen::Vector2f>                            room_polygon_;
     std::unique_ptr<rc::TableExistence>                    existence_; // evidence-based removal (existence log-odds)
 
     // Live belief dashboard — its OWN top-level window (extracted from the DSR graph dock so it shows
@@ -212,6 +223,16 @@ private:
     void restore_dashboard_geometry();
     void save_dashboard_geometry() const;
 
+    // ── Compact belief strip — its OWN SMALL top-level window ─────────────────────────────────────────
+    // One row per table, and the row is a 60 s time series of the adequacy gap (nats remaining to the
+    // consumer's σ*) + the existence probability. This is the window meant to stay open: the big
+    // dashboard above answers "why", this one answers "which instance needs me, and is it improving".
+    QWidget*         strip_window_ = nullptr;
+    rc::BeliefStrip* belief_strip_ = nullptr;
+    void refresh_belief_strip();
+    void restore_strip_geometry();
+    void save_strip_geometry() const;
+
     // Live "evidence consuming" monitor — its OWN top-level window (per-instance snapshot + global counters).
     rc::EvidenceMonitor* evidence_monitor_ = nullptr;
     rc::EvidenceGlobals  ev_g_{};                       // pipeline counters (per-cycle fields reset in compute)
@@ -224,6 +245,9 @@ private:
     int                  birth_surprise_log_ctr_ = 0;   // console-throttle counter
     long                 birth_surprise_cycle_ = 0;     // probe cycle index (advances only when the grid was read)
     std::vector<Eigen::Vector2f> last_table_dets_xy_;   // this cycle's ZED "table" detection centroids (room frame)
+    // Highest mask frame_id the tracker has already accrued birth evidence from. A repeat frame_id is a REPEAT
+    // of one observation, not a second one (rc::birth rule 1) — see run_instance_tracker.
+    long last_tracker_mask_frame_ = -1;
     std::chrono::steady_clock::time_point last_monitor_tp_{};   // ~5 Hz throttle
     std::chrono::steady_clock::time_point last_compute_tp_{};   // compute-rate EMA
     FPSCounter                            fps_counter_;         // overall compute()-cycle rate (std::cout heartbeat)

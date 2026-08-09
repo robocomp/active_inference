@@ -103,6 +103,11 @@ void SpecificWorker::cleanup_owned_nodes()
         return;
     owned_nodes_cleaned_ = true;
 
+    // Which door was which, written down before the nodes go. The graph cannot carry it (we delete our own
+    // nodes on the way out by contract), so etc/door_identities.csv is what the next run reads to keep
+    // door_1 on the same physical door instead of renumbering by whatever it sees first.
+    remember_live_identities();
+
     // Sweep every affordance node parented to a door (robust to renames / orphans not tracked in
     // instances_), while the door parents still exist for the parent-type lookup.
     remove_stale_affordance_nodes();

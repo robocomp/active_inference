@@ -21,6 +21,7 @@
 #include <dsr/api/dsr_api.h>
 
 #include "table_config.h"      // rc::TableConfig
+#include "../../common/detectability/detectability.h"   // rc::detect::DetectorEnvelope / p_detect
 
 namespace rc {
 
@@ -46,9 +47,15 @@ public:
                            bool fresh_masks, bool fresh_sweep, EvidenceGlobals& ev_g,
                            const std::function<void(std::uint64_t, const TableInstance&)>& on_remove = {});
 
+    // ONE detector envelope, BOTH directions — pass the same instance the epistemic planner scores viewpoints
+    // with. The viewpoint the planner drives to must be the argmax of the very model that absence is weighted
+    // by, or the robot goes somewhere its own removal test does not trust. See update_and_remove.
+    void set_detector_envelope(const rc::detect::DetectorEnvelope& e) { det_env_ = e; }
+
 private:
     std::shared_ptr<DSR::DSRGraph> G_;
     const TableConfig&             cfg_;
+    rc::detect::DetectorEnvelope   det_env_{};
 };
 
 }  // namespace rc

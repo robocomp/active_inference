@@ -66,10 +66,16 @@ EpistemicPlanner::EpistemicPlanner(float d_obs)
 {}
 
 // ── AI2-native Σ-based D-optimal next-best-view ──────────────────────────────────────────────
-EpistemicProposal EpistemicPlanner::compute(const DoorBelief& belief, float lat_rate, float sigma_base) const
+EpistemicProposal EpistemicPlanner::compute(const DoorBelief& belief, float lat_rate, float sigma_base,
+                                            const rc::nbv::Sensor& sensor_in,
+                                            const std::vector<rc::nbv::Obstacle>& obstacles,
+                                            const std::vector<Eigen::Vector2f>& room_polygon,
+                                            rc::nbv::Plan* plan_out) const
 {
-    constexpr float kEffectiveHorizontalFovRad = 70.0f * std::numbers::pi_v<float> / 180.0f;
-    constexpr float kStandOffSafetyMarginM = 0.45f;    // extra stand-off beyond the FoV-fit distance
+    // The camera geometry arrives from the caller (read fresh from the graph each cycle); the
+    // detector envelope is ours. Merging here keeps the two concerns in their right owners.
+    rc::nbv::Sensor sensor = sensor_in;
+    sensor.env = det_env_;
 
     // Σ over the wall-frame [s,w,h]: the D-optimal score ranks which viewpoint most reduces the panel's
     // along-wall offset + size uncertainty. (No orientation entropy — the wall fixes yaw.)
@@ -79,34 +85,51 @@ EpistemicProposal EpistemicPlanner::compute(const DoorBelief& belief, float lat_
     // robot to stand square to the WALL rather than to the panel it is trying to observe.
     const door::LeafPose L = belief.leaf_pose();
     const Eigen::Vector2f ctr = L.centre_xy;
-    const float hw = L.half_w, hh = L.half_t;
-    struct Face { Eigen::Vector2f normal, centre; float half_span; };
-    const std::array<Face, 4> faces = {{
-        {  L.ex, Eigen::Vector2f(ctr + hw * L.ex), hh },   // +x (free-edge side)
-        { -L.ex, Eigen::Vector2f(ctr - hw * L.ex), hh },   // -x (hinge side)
-        {  L.ey, Eigen::Vector2f(ctr + hh * L.ey), hw },   // +y (front panel face)
-        { -L.ey, Eigen::Vector2f(ctr - hh * L.ey), hw },   // -y (back panel face)
-    }};
-    const float max_stand_off = std::max(min_standoff_, d_obs_);
-    const auto standoff_for = [&](float half_span)
-    { return std::clamp(half_span / std::tan(kEffectiveHorizontalFovRad * 0.5f) + kStandOffSafetyMarginM,
-                        min_standoff_, max_stand_off); };
+    // Face order, preserved exactly from the local enumeration this replaced:
+    //   0 = +x free-edge side · 1 = -x hinge side · 2 = +y front panel · 3 = -y back panel
+    // ── The shared detection-weighted plan (common/nbv) ───────────────────────────────────
+    // The LEAF as the belief holds it. Its axes map 1:1 onto rc::nbv::Target's: LeafPose builds
+    // ey = (-ex.y, ex.x) (door_geometry.h:133), which is exactly Target::axis_y(), so the [+x,-x,+y,-y] face
+    // order is preserved. w = the leaf WIDTH, h = its THICKNESS (a few cm — the ±x edge faces are slivers,
+    // and the D-optimal gain already demotes them because an edge view constrains [s,w,h] barely at all).
+    rc::nbv::Target target;
+    target.cx = ctr.x(); target.cy = ctr.y(); target.yaw = L.yaw();
+    target.w  = 2.0f * L.half_w; target.h = 2.0f * L.half_t;
+    target.z0 = belief.cz(); target.z1 = belief.cz() + 2.0f * L.half_h;
+    target.sigma_pos_m    = std::sqrt(std::max(0.0f, S(0, 0)));   // s — the along-wall offset
+    target.sigma_extent_m = std::sqrt(std::max({0.0f, S(1, 1), S(2, 2)}));   // w, h
 
     const Eigen::Matrix<float, 3, 3> I3 = Eigen::Matrix<float, 3, 3>::Identity();
-    int   best_idx = 0;
-    float best_gain = -std::numeric_limits<float>::max();
-    float best_standoff = min_standoff_;
-    std::array<float, 4> face_gain{};
-    for (int i = 0; i < 4; ++i)
+    const auto raw_gain_of = [&](int i, float standoff)
     {
-        const float standoff = standoff_for(faces[i].half_span);
         const float Ri = sigma_base * sigma_base + (lat_rate * standoff) * (lat_rate * standoff);
         const auto  dI = belief.predicted_information(sample_face_surface(L, belief.cz(), i), Ri);
-        const float gain = 0.5f * std::log(std::max(1e-9f, (I3 + S * dI).determinant()));
-        face_gain[i] = gain;
-        if (gain > best_gain) { best_gain = gain; best_idx = i; best_standoff = standoff; }
+        return 0.5f * std::log(std::max(1e-9f, (I3 + S * dI).determinant()));
+    };
+
+    const rc::nbv::Plan plan = rc::nbv::plan_faces(target, sensor, robot_radius_m_, obstacles, raw_gain_of,
+                                                   room_polygon);
+    if (plan_out != nullptr)
+        *plan_out = plan;          // monitoring: the caller logs the whole decision, not just its result
+    if (not plan.valid)
+        return {};
+    // ★NO USABLE FACE ⇒ REFUSE, never publish the hint. plan.best_pos is then the raw argmax, and for a thin
+    // panel that is an EDGE face whose pose lies IN the wall. Publishing it hands the controller an unroutable
+    // standpoint, which its repair snaps to the nearest reachable cell — the floor at the door itself. The
+    // robot then drives into the leaf it was supposed to photograph. An invalid proposal makes the caller
+    // hold_offered() instead, which is the honest answer: "no viewpoint from here".
+    if (not plan.any_usable)
+    {
+        static int shouted = 0;
+        if (shouted++ < 5)
+            std::print("door_concept: [NBV] no usable face — every viewpoint is inside an obstacle or outside "
+                       "the room. REFUSING (the raw argmax would stand in the wall).\n");
+        return {};
     }
-    if (!std::isfinite(best_gain))
+    const int   best_idx  = plan.best_face;
+    const float best_gain = plan.face_gains[best_idx];   // DETECTION-WEIGHTED
+    const auto& face_gain = plan.face_gains;
+    if (not std::isfinite(best_gain))
         return {};
 
     static int dbg = 0;
@@ -120,17 +143,24 @@ EpistemicProposal EpistemicPlanner::compute(const DoorBelief& belief, float lat_
             const float n = std::sqrt(std::max(0.0f, S(j, j))) / kRef;
             if (n > best) { best = n; dom = j; }
         }
-        std::print("[epistemic-NBV] face={} gain={:.3f} | Σ dom-unc={} σ={:.3f}{} | gains +x={:.2f} -x={:.2f} +y={:.2f} -y={:.2f}\n",
+        // `exp` vs `raw`: a large gap says the best-informing face is one the detector cannot fire from.
+        // `vis` is the column that shows the WALL doing its job: with the room polygon in the obstacle set the
+        // two EDGE faces (+x/-x) must collapse toward 0 — their sightline runs along the wall — while the panel
+        // faces (+y/-y) stay near 1 through the aperture. Before the walls were passed, all four read ~1 and
+        // the winner was `face=-x`: a viewpoint 3.67 m along the wall, i.e. the affordance driving into it.
+        std::print("[epistemic-NBV] face={} gain={:.3f} | Σ dom-unc={} σ={:.3f}{} | d={:.2f}m fill*={:.2f} | "
+                   "exp {:.2f}/{:.2f}/{:.2f}/{:.2f} | raw {:.2f}/{:.2f}/{:.2f}/{:.2f} | "
+                   "pdet {:.2f}/{:.2f}/{:.2f}/{:.2f} | vis {:.2f}/{:.2f}/{:.2f}/{:.2f}\n",
                    fn[best_idx], best_gain, kDoorDofs[dom].name,
                    std::sqrt(std::max(0.0f, S(dom, dom))), kDoorDofs[dom].unit,
-                   face_gain[0], face_gain[1], face_gain[2], face_gain[3]);
+                   plan.best_standoff_m, plan.framing_fill,
+                   face_gain[0], face_gain[1], face_gain[2], face_gain[3],
+                   plan.face_raw_gains[0], plan.face_raw_gains[1], plan.face_raw_gains[2], plan.face_raw_gains[3],
+                   plan.face_p_detect[0], plan.face_p_detect[1], plan.face_p_detect[2], plan.face_p_detect[3],
+                   plan.face_visible[0], plan.face_visible[1], plan.face_visible[2], plan.face_visible[3]);
     }
 
-    const auto& f = faces[best_idx];
-    const float vx = f.centre.x() + f.normal.x() * best_standoff;
-    const float vy = f.centre.y() + f.normal.y() * best_standoff;
-    const float yaw_to_face = std::atan2(ctr.y() - vy, ctr.x() - vx);
-    EpistemicProposal proposal{vx, vy, yaw_to_face, best_gain, true};
+    EpistemicProposal proposal{plan.best_pos.x(), plan.best_pos.y(), plan.best_yaw, best_gain, true};
     if (!proposal.is_finite())
         return {};
     return proposal;

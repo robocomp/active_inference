@@ -315,11 +315,24 @@ void SpecificWorker::initialize()
     scene_graph_ = std::make_unique<rc::TableSceneGraph>(
         G, rt_api_.get(), cfg_, [this] { trigger_graph_layout_twopi(); });
 
-    // Subscribe to graph signals
+    // Subscribe to graph signals.
+    //
+    // ★NOT update_node_attr_signal. It fires for EVERY attribute change on EVERY node in the shared graph —
+    // every RT pose write from robot_concept, every other agent's per-cycle attribute writes — and each
+    // emission copies a std::vector<std::string> on the DDS reader thread and queues an event to this thread.
+    // Under a churn burst (a peer restarting is enough) the queue drains slower than it fills, and the main
+    // thread then does nothing but service slots: the timer-driven compute() is starved (ai2_log stops
+    // growing), and — the symptom that costs the most — Ctrl-C dies, because generated/main.cpp routes SIGINT
+    // through a QSocketNotifier serviced by this SAME event loop. The agent can then only be killed with -9,
+    // which cannot be caught, so every node it owns LEAKS into the shared graph.
+    // Measured on THIS agent 2026-08-07: main thread pegged at 100% of a core (301 jiffies/3 s), ai2_log.csv
+    // frozen, Ctrl-C inert, right after a voxelizer restart. residual_concept did the same on 08-06 under the
+    // same trigger. CLAUDE.md already states the rule this violated: if you don't need a signal, don't connect
+    // it at all (bottle_concept connects none).
+    // The two things the slot did are now POLLED once per cycle in poll_affordance_protocol() — a controller
+    // claim does not need sub-cycle latency, so nothing is lost and the firehose is gone.
     connect(G.get(), &DSR::DSRGraph::update_node_signal,
             this, &SpecificWorker::modify_node_slot);
-    connect(G.get(), &DSR::DSRGraph::update_node_attr_signal,
-            this, &SpecificWorker::modify_node_attrs_slot);
     connect(G.get(), &DSR::DSRGraph::del_node_signal,
             this, &SpecificWorker::del_node_slot);
 
@@ -354,8 +367,9 @@ void SpecificWorker::initialize()
     // Build rc::EpistemicPlanner (info-gain scoring only; stand-off distance is the sole parameter).
     epistemic_planner_ = rc::EpistemicPlanner(cfg_.obs_distance);
     // ONE detector envelope, both directions: the viewpoint the planner asks for is the argmax of the same
-    // model absence should be weighted by. Defaults until table exposes its own config keys.
-    const rc::detect::DetectorEnvelope det_env{};
+    // model absence should be weighted by. Now config-driven (TableModel.DetectMinFill/MaxFill/Soft); the
+    // defaults are still the fleet prior, so nothing changes until etc/config.toml sets them.
+    const rc::detect::DetectorEnvelope det_env{cfg_.detect_min_fill, cfg_.detect_max_fill, cfg_.detect_soft};
     epistemic_planner_.set_detector_envelope(det_env);
     existence_->set_detector_envelope(det_env);   // …and REMOVAL weights absence by the very same model, which
                                                   // is what "both directions" above has always meant. Until
@@ -419,6 +433,7 @@ void SpecificWorker::refresh_room_geometry()
     poly.reserve(n);
     for (std::size_t i = 0; i < n; ++i)
         poly.emplace_back(xs[i], ys[i]);
+    room_polygon_ = poly;                       // keep a copy for the NBV's reachability test
     fitter_->set_room_polygon(std::move(poly));
     polygon_room_id_ = room_node_id_;   // latched; re-reads only if the room node is replaced
     std::print("table_concept: [room] wall polygon loaded ({} verts) — silhouette line-of-sight ARMED\n", n);
@@ -480,6 +495,11 @@ void SpecificWorker::compute()
     }
 
     refresh_room_geometry();   // room walls → the silhouette line-of-sight test (see below)
+
+    // Controller-owned affordance flags (claim / completion / epistemic_pending). Polled here rather than
+    // pushed by update_node_attr_signal — see the connect block in initialize() for why that subscription
+    // could starve this very loop.
+    poll_affordance_protocol();
 
     const bool fresh_masks = mask_ingestor_->refresh();
 
@@ -993,7 +1013,11 @@ void SpecificWorker::step_epistemic(rc::TableInstance& inst, DSR::Node& node)
     rc::EpistemicProposal prop =
         epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m,
                                    rc::nbv::sensor_from_graph(*G, inner_eigen_.get()),
-                                   collect_viewpoint_obstacles(inst.node_id));
+                                   collect_viewpoint_obstacles(inst.node_id),
+                                   // The reachable region — kills the through-the-wall faces the
+                                   // direction-blind gain cannot tell apart. Empty until room_concept
+                                   // publishes; is_reachable then imposes no constraint (prior behaviour).
+                                   room_polygon_);
     if (not prop.valid or not prop.is_finite())
     {
         // Degenerate fit, or the camera model is still incomplete — retry next cycle. But do NOT leave
@@ -1075,32 +1099,34 @@ void SpecificWorker::modify_node_slot(std::uint64_t /*id*/, const std::string& /
     // table nodes (every cycle), so nothing is lost by not creating here.
 }
 
-void SpecificWorker::modify_node_attrs_slot(std::uint64_t id,
-                                             const std::vector<std::string>& att_names)
+// Poll the controller-owned protocol flags once per cycle. This REPLACES the update_node_attr_signal
+// subscription (see the connect block in initialize() for the starvation it caused). Both things it did are
+// pure reads of the CURRENT graph state, so polling gives the same answer — a controller claim or completion
+// simply lands on the next cycle instead of within the emitting DDS callback.
+//
+// Cost is bounded by OUR instance count (typically 1–3), not by the graph's global write rate, which is the
+// whole point: the old path did work proportional to what every other agent was writing.
+void SpecificWorker::poll_affordance_protocol()
 {
     if (not fitter_)
-        return;   // connected before the fit core exists — see del_node_slot for the crash this prevents
-    // Delegate to the affordance state machine for any instance whose affordance
-    // node was modified (controller claim/completion updates active/pending)
+        return;   // may be called before the fit core exists — same guard the slots carry
+
     for (auto& [table_id, inst] : fitter_->instances())
-        if (inst.affordance.node_id() == id)
-            inst.affordance.on_node_modified(id);
-
-    // React to mission-controller clearing epistemic_pending on the table node itself
-    if (fitter_->instances().count(id))
     {
-        const bool pending_cleared = std::any_of(att_names.begin(), att_names.end(),
-            [](const std::string& s) { return s == "epistemic_pending"; });
+        // Affordance state machine: idle→pending→executing→satisfied, driven by the controller-owned
+        // active/pending flags on the affordance node. on_node_modified() re-reads them itself, so handing it
+        // the id every cycle is exactly what the signal used to do.
+        if (const auto aid = inst.affordance.node_id(); aid != 0)
+            inst.affordance.on_node_modified(aid);
 
-        if (pending_cleared)
+        // Mission controller clearing epistemic_pending on the table node itself. The signal carried the
+        // changed-attribute list so it could skip the read; polling just reads the flag, which is the same
+        // graph lookup the slot did once it decided to look.
+        if (auto node_opt = G->get_node(table_id); node_opt.has_value())
         {
-            auto node_opt = G->get_node(id);
-            if (node_opt.has_value())
-            {
-                const auto v = G->get_attrib_by_name<epistemic_pending_att>(node_opt.value());
-                if (v.has_value() and not v.value())
-                    fitter_->instances().at(id).epistemic_pending = false;
-            }
+            const auto v = G->get_attrib_by_name<epistemic_pending_att>(node_opt.value());
+            if (v.has_value() and not v.value())
+                inst.epistemic_pending = false;
         }
     }
 }

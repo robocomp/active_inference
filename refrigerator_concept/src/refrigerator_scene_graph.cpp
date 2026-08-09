@@ -21,6 +21,7 @@
 
 #include "refrigerator_model.h"   // rc::RefrigeratorModel statics (TOP_THICKNESS, LEG_RADIUS)
 #include "../../common/object_anchor/object_anchor_contract.h"
+#include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
 
 namespace rc {
 
@@ -67,6 +68,7 @@ std::uint64_t RefrigeratorSceneGraph::create_instance_from_detection(const Eigen
         G_->add_or_modify_attrib_local<pos_y_att>(refrigerator_node, rpy +  50.f);
     }
 
+    rc::provenance::stamp_creation(*G_, refrigerator_node);   // birth stamp: epoch ms + local ISO-8601
     const auto id_opt = G_->insert_node(refrigerator_node);
     if (not id_opt.has_value())
         return 0;

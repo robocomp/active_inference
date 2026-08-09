@@ -155,7 +155,9 @@ void TableProjection::compute_projected_roi(TableInstance& inst)
     const float roi_cy = 0.5f * (min_row + max_row);
     const float off_x = (roi_cx - cx_px) / (0.5f * W);   // [-1,1], 0 = centred
     const float off_y = (roi_cy - cy_px) / (0.5f * H);
-    const float fill  = std::max((max_col - min_col) / W, (max_row - min_row) / H);
+    const float fill_h = (max_col - min_col) / W;
+    const float fill_v = (max_row - min_row) / H;
+    const float fill  = std::max(fill_h, fill_v);
     // Reject degenerate projections (robot too close / a corner grazing the image plane → the
     // bbox explodes to absurd offsets). Beyond a sane bound the ROI is unusable for centring:
     // mark invalid (the controller then keeps sweeping / treats framing as unknown) and clamp the
@@ -164,6 +166,8 @@ void TableProjection::compute_projected_roi(TableInstance& inst)
     inst.roi_offset_x = std::clamp(off_x, -3.0f, 3.0f);
     inst.roi_offset_y = std::clamp(off_y, -3.0f, 3.0f);
     inst.roi_fill     = std::clamp(fill, 0.0f, 4.0f);
+    inst.roi_fill_h   = std::clamp(fill_h, 0.0f, 4.0f);   // envelope-calibration columns; see table_instance.h
+    inst.roi_fill_v   = std::clamp(fill_v, 0.0f, 4.0f);
     inst.roi_valid    = sane;
 }
 

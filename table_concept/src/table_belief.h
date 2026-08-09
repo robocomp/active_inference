@@ -242,6 +242,15 @@ struct TableFrame
                                            // measurement: ego-motion corruption + a gentle range term. Makes the
                                            // moment ACCUMULATE over frames (a moving/near-far view backs off)
                                            // instead of snapping the belief to each frame's noisy footprint.
+    float moment_yaw_extra_var = 0.0f;     // SHARED per-frame variance added to the footprint-moment YAW row ONLY
+                                           // (rad², pre-anisotropy). Carries the terms whose error mechanism is
+                                           // ORIENTATION-specific — chiefly obliquity: a grazing view tilts the 2-D
+                                           // inertia AXES but still measures the footprint SCALE, and the extent's
+                                           // own error (foreshortening) is one-sided and already handled by the
+                                           // grow-only guard. Folding obliquity into moment_extra_var instead put a
+                                           // 0.43 m σ on w/h at the cos≈0.10 view a robot-mounted camera ALWAYS has
+                                           // of a tabletop, which froze the extent at its birth value (live
+                                           // 2026-08-06: belief 0.47×0.61 m vs an observed moment of 0.90×0.81 m).
     float chain_cov_size = 0.0f;           // extra shared SIZE variance (m²) on w,h,H — grows with view range so
                                            // a distant, vague mask cannot RESHAPE/inflate a converged table (the
                                            // per-frame info SATURATES lower with range → geometry freezes; only

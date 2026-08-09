@@ -662,7 +662,13 @@ void TableBelief::apply_footprint_moment(const TableFrame& frame)
     const float r_base = 1.0f / Pm + std::max(0.0f, frame.moment_extra_var) + compl_extra;
     float r_w   = r_base;                                             // measurement variance (m²)
     float r_h   = r_base;
-    const float r_yaw = r_base / std::max(aniso * aniso, 1e-3f);      // rad²; near-square → huge → no yaw pull
+    // YAW-ONLY inflation (frame.moment_yaw_extra_var): terms whose error mechanism is orientation-specific —
+    // obliquity above all. A grazing view rotates/biases the 2-D inertia AXES while still measuring the footprint
+    // SCALE, so charging the extent rows for it buys nothing: foreshortening can only UNDER-report an extent, and
+    // that direction is already dropped by the grow-only guard below. Charging them anyway is what froze the live
+    // table (σ_extent 0.43 m at cos≈0.10 ⇒ K≈0.004: the moment asked for +0.43 m and moved w by 0.1 mm/frame).
+    const float r_yaw = (r_base + std::max(0.0f, frame.moment_yaw_extra_var))
+                      / std::max(aniso * aniso, 1e-3f);               // rad²; near-square → huge → no yaw pull
     // DIAGNOSTIC (rogue-mask yaw attribution): record this frame's footprint anisotropy, the yaw variance the
     // moment actually used, the yaw move it requested, and the observed extents. Read by the fitter's [yaw-jump].
     dbg_moment_aniso_ = aniso; dbg_moment_r_yaw_ = r_yaw;
@@ -1194,6 +1200,74 @@ bool TableBelief::self_test()
         check(w_trim > gt.w - 0.12f,   "border-trimmed partial mask must NOT shrink a converged table");
         check(w_part > gt.w - 0.12f,   "SIDE-VIEW partial mask (in-view, trunc=0) must NOT shrink — the live failure");
         check(w_grow > gt.w + 0.10f,   "a genuinely LARGER mask must still GROW the extent");
+    }
+
+    // (l2) OBLIQUITY IS A YAW TERM, NOT AN EXTENT TERM (live regression, 2026-08-06). A robot-mounted camera sees
+    //      a 0.74 m tabletop at obliquity_cos ≈ 0.10–0.26 essentially ALWAYS — grazing is the NORMAL condition for
+    //      this concept, not an exceptional one. The fitter's obliquity backoff therefore has to be routed to the
+    //      row whose error it actually describes (the inertia AXES ⇒ yaw); charging the EXTENT rows for it puts a
+    //      permanent σ≈0.43 m on the only channel that measures footprint scale, and the extent then never leaves
+    //      its birth value however long the robot looks. That is exactly what happened live: table_1 sat at
+    //      0.47×0.61 m for 17k cycles while its own moment read 0.90×0.81 m (completeness 2.54, moment K→0.004).
+    //      Extent needs no obliquity guard — foreshortening can only UNDER-report an extent, and block (l) above
+    //      already drops that direction unconditionally.
+    {
+        rng.seed(7373);
+        const float Rb = P.sigma_base_m * P.sigma_base_m;
+        // The live obliquity variance: ObliquityMomentGain 0.05 at obliquity_cos 0.107 ⇒ σ = 0.42 m ⇒ var 0.174.
+        const float oblq_var = 0.05f * (1.0f / 0.107f - 1.0f) * (0.05f * (1.0f / 0.107f - 1.0f));
+        auto full_top = [&]() {                                       // a FULL, unforeshortened view of the top
+            std::vector<Eigen::Vector3f> pts;
+            for (int i = 0; i < 2000; ++i)
+                pts.push_back(to_world(U(rng) * 0.5f * gt.w, U(rng) * 0.5f * gt.h, gt.H + noise(rng)));
+            return pts;
+        };
+        // Belief born at HALF the true extent (the live under-size), fed 45 grazing-view frames of the full top.
+        // Per-point R is deliberately WEAK (σ 0.5 m): at a grazing view the top-face cloud carries almost no extent
+        // information (no rim, no legs; the outboard points the box misses are ceded to clutter) — the live regime
+        // in which the MOMENT is the only channel that can size the table. That isolates the routing under test.
+        auto fit_w = [&](bool yaw_only) {
+            TableBeliefParams pm = P; pm.footprint_moment_precision = 2000.0f;
+            TableBelief b(TableBeliefState{gt.cx, gt.cy, gt.H, 0.5f * gt.w, 0.5f * gt.h, gt.yaw}, pm);
+            for (int it = 0; it < 45; ++it)
+            { auto pts = full_top();
+              TableFrame fr; fr.points = pts; fr.R.assign(pts.size(), 0.25f);
+              fr.chain_cov_yaw = (0.03f * 3) * (0.03f * 3); fr.chain_cov_size = (0.08f * 3) * (0.08f * 3);
+              fr.moment_extra_var = (0.03f * 3) * (0.03f * 3);
+              (yaw_only ? fr.moment_yaw_extra_var : fr.moment_extra_var) += oblq_var;   // ROUTING under test
+              b.update(fr); }
+            return b.state().w;
+        };
+        const float w_extent_row = fit_w(false);   // obliquity charged to w/h too (the BUG) ⇒ extent stays frozen
+        const float w_yaw_row    = fit_w(true);    // obliquity on the yaw row only (the FIX) ⇒ extent recovers
+        // Yaw side of the same routing: a rotated sliver must still be unable to turn the box (what the term is FOR).
+        const float off = 0.52f, dc = std::cos(gt.yaw + off), ds = std::sin(gt.yaw + off);
+        auto fit_yaw_oblq = [&](bool with_oblq) {
+            TableBeliefParams pm = P; pm.footprint_moment_precision = 2000.0f;
+            pm.footprint_moment_completeness_gain = 0.0f;             // isolate the obliquity term
+            TableBelief b(TableBeliefState{gt.cx, gt.cy, gt.H, gt.w, gt.h, gt.yaw}, pm);
+            for (int it = 0; it < 30; ++it)
+            { std::vector<Eigen::Vector3f> pts;
+              for (int i = 0; i < 1500; ++i)
+              { const float t = U(rng) * 0.30f * gt.w, n = U(rng) * 0.03f;
+                pts.push_back({gt.cx + dc * t - ds * n, gt.cy + ds * t + dc * n, gt.H + noise(rng)}); }
+              TableFrame fr; fr.points = pts; fr.R.assign(pts.size(), Rb);
+              fr.chain_cov_yaw = (0.03f * 3) * (0.03f * 3); fr.chain_cov_size = (0.08f * 3) * (0.08f * 3);
+              fr.moment_extra_var = (0.03f * 3) * (0.03f * 3);
+              if (with_oblq) fr.moment_yaw_extra_var = oblq_var;
+              b.update(fr); }
+            return std::abs(std::remainder(b.state().yaw - gt.yaw, static_cast<float>(M_PI)));
+        };
+        const float dyaw_no_oblq = fit_yaw_oblq(false);
+        const float dyaw_oblq    = fit_yaw_oblq(true);
+        const float born = 0.5f * gt.w;                                       // fraction of the size gap recovered
+        const float rec_extent_row = (w_extent_row - born) / (gt.w - born), rec_yaw_row = (w_yaw_row - born) / (gt.w - born);
+        std::printf("  obliquity routing: w extent-row=%.2f (%.0f%% of gap)  yaw-row=%.2f (%.0f%%)  (gt=%.2f, born %.2f)  |  sliver dyaw no-oblq=%.3f oblq=%.3f rad\n",
+                    w_extent_row, 100.0f * rec_extent_row, w_yaw_row, 100.0f * rec_yaw_row, gt.w, born, dyaw_no_oblq, dyaw_oblq);
+        check(rec_extent_row < 0.5f,             "BASELINE: obliquity charged to the extent rows must visibly starve the size channel (the live bug)");
+        check(w_yaw_row > gt.w - 0.20f,          "obliquity on the YAW row only must let the extent recover to the observed footprint");
+        check(rec_yaw_row > rec_extent_row + 0.3f, "routing obliquity to yaw must recover materially more of the size gap");
+        check(dyaw_oblq <= dyaw_no_oblq + 1e-3f, "obliquity must still damp the moment's yaw pull (its actual purpose)");
     }
 
     // (m) COMPLETENESS backoff: a converged table hit by a FRAGMENTARY footprint (partial/foreshortened view)

@@ -140,6 +140,32 @@ AI2DoorClearanceGain = 3.0
 # retention τ=Σ/exp(ω) grows AND the precision floor falls. Stiffness is then EARNED by evidence instead of
 # imposed by a clamp, and the hyperprior pull-back keeps it recoverable — shove the fridge and ω climbs, so
 # it re-adapts in seconds. self_test: static → retention x7.2, moved → x0.04. Watch omega_w/tau_w in ai2_log.
+# ── DETECTOR ENVELOPE (common/detectability) — the YOLO inverse model ────────────────────────────────────
+# P(detect | geometry) is UNIMODAL in projected fill, not monotonic in range: below MinFill the object is too
+# few pixels to segment; above MaxFill it overflows the frame, the mask truncates and the network loses the
+# whole-object context. ONE model with TWO consumers — the epistemic planner puts the stand-off at its argmax,
+# and the removal channel weights absence by it, so a missing mask from nose-to-nose range reads as EXPECTED
+# rather than as evidence the fridge is gone (at 0.82 m: fill 0.80 -> P(detect) 0.035).
+# ★CALIBRATED 2026-08-08 from a deliberate approach/retreat tour (2296 rows, range 0.67–5.41 m, roi_fill
+# 0.22–1.81, label = a fresh mask that cycle, trials weighted by P(exists)). Weighted-MLE fit of the upper
+# shoulder with a detection CEILING (YOLO does not fire every cycle even when the framing is ideal — the
+# observed plateau is 0.889, which is frame timing, not geometry; folding it into the shoulder would drag
+# max_fill down). Replaces the previous prior 0.10 / 0.60 / 0.06, which was wrong by more than 2x:
+#     max_fill  1.317   95% CI [1.21, 1.49]      (was 0.60 — the fridge was being pushed ~1 m too far back)
+#     soft      0.258   95% CI [0.175, 0.51]     (was 0.06 — the real shoulder is gradual, not a cliff)
+# MinFill is NOT a measurement. This tour never went far enough for the fridge to become too SMALL to
+# segment: at the smallest fill sampled the mask rate was still 0.94, so the lower shoulder lies below the
+# measured range and is only bounded from above. 0.10 was actively wrong — holding it there made the fit
+# diverge, because the model then had to explain 94% detection at a fill it calls undetectable. Set to 0
+# meaning "inactive over this object's operating range", NOT "measured as 0". A tour that backs off until
+# the fridge stops being detected is what would measure it.
+# ⚠ ONE `soft` serves BOTH shoulders, and this object needs them different (a likelihood-ratio test on the
+# earlier dataset rejected the shared width at p<0.05). With soft=0.258 the inactive lower shoulder still
+# suppresses long range by ~40%, which is the residual model error here — the fix is separate soft_min/
+# soft_max in common/detectability, not further tuning of these three numbers.
+DetectMinFill = 0.0
+DetectMaxFill = 1.32
+DetectSoft = 0.26
 AI2VolatilityInfer = true    # ON 08-03 for the A/B tour. Watch omega_w/tau_w in ai2_log.csv
 AI2VolatilityLr = 0.02       # gradient step on ω per MEASURED cycle (predict-only cycles never touch it)
 AI2VolatilitySigma = 2.0     # hyperprior width σ_ω: how far evidence may pull ω from the configured Q
@@ -347,7 +373,9 @@ FrontLog = true             # log each adopted door-mode flip / accepted appeara
                             # new ai2_log columns front_mode/front_conf/cue_conf/cue_bearing.
 RefrigeratorLogPeriodFrames = 30   # per-cycle log throttle (cosmetic; no effect on the fit)
 ShowDashboard = true        # false = no GUI (belief dashboard + evidence monitor combined into one window)
-ObsDistance = 1.8           # comfortable maximum stand-off from the target face for epistemic poses
+# ObsDistance removed 2026-08-07: the epistemic stand-off is no longer a preference. It is the argmax of the
+# detector envelope over BOTH image axes (DetectMinFill/DetectMaxFill below, via common/nbv), so a comfort
+# distance here could only have fought the sensor model. Tune the envelope instead — that is the real knob.
 EpistemicCooldownCycles = 200 # min cycles a satisfied refrigerator stays withdrawn (anti-chatter)
 VoxelBankMaxPoints = 4000   # max number of refrigerator-owned voxels kept in memory
 VoxelBankQuantizationM = 0.02 # dedup grid (m) for voxel-bank hashing

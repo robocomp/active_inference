@@ -328,6 +328,26 @@ bool TableFitter::should_log(const TableInstance& inst) const
     return (inst.processed_cycles % period) == 0;
 }
 
+// May this mask frame move geometry? — see table_fitter.h. The FIXATION gate's conditions, evaluated on a raw
+// slice (no instance yet): RESOLVABLE (point mass + truncation), CENTRED (the fovea) and STILL (ego-motion mask
+// smear). Each condition is disabled by the same config key that disables it in the fit, so the two predicates
+// can never drift apart. Unlike the fit's version there is no roi_valid escape — a birth candidate always has a
+// mask centroid, so centring is always judgeable.
+bool TableFitter::frame_admissible(const MaskIngestor::MaskSlice& sl) const
+{
+    if (sl.trunc_frac > cfg_.ai2_trunc_gate_frac)
+        return false;                                    // truncated ⇒ extent is a lower bound ⇒ never births
+    if (not cfg_.fixation_enabled)
+        return true;
+    const int npts = static_cast<int>(sl.support_end - sl.support_begin);
+    const bool resolvable = (cfg_.fixation_min_pts   <= 0    or npts >= cfg_.fixation_min_pts)
+                       and (cfg_.fixation_max_trunc <= 0.0f or sl.trunc_frac <= cfg_.fixation_max_trunc)
+                       and (cfg_.fixation_range_m   <= 0.0f or (sl.range > 0.0f and sl.range <= cfg_.fixation_range_m));
+    const bool centred = cfg_.fixation_centre_frac <= 0.0f or sl.centroid_radius <= cfg_.fixation_centre_frac;
+    const bool still   = cfg_.fixation_still_dotd  <= 0.0f or std::abs(sl.motion_dotd) <= cfg_.fixation_still_dotd;
+    return resolvable and centred and still;
+}
+
 // ─── Inference ────────────────────────────────────────────────────────────────────────────────────
 
 // One recursive full-covariance belief update (or age-only step) for this instance; returns the free energy.
@@ -440,6 +460,7 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
             inst.ai2_belief.inflate_for_age(dt, cfg_.ai2_age_nominal_dt_s);
         }
         inst.last_belief_touch = now;
+        inst.dbg_gate_fresh = false;   // no mask reached the fit ⇒ the gate flags below are STALE this cycle
         projection_->compute_projected_roi(inst);
         return inst.dbg_energy;   // HOLD the last free energy — no new mask ≠ FE 0 (the fit is unchanged)
     }
@@ -517,6 +538,8 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
     const bool  fixated      = fix_close and fix_centred and fix_still;
     inst.dbg_fix_close = fix_close; inst.dbg_fix_centred = fix_centred;
     inst.dbg_fix_still = fix_still; inst.dbg_fixated = fixated;
+    inst.dbg_trunc_gated = trunc_gated;   // split by mechanism for the existence channel (see table_instance.h)
+    inst.dbg_gate_fresh  = true;          // …and mark the verdict as computed from THIS frame's mask
     // Outside a fixation take the SAME path as a truncated mask: predict() only, mean HELD. Association and
     // existence do not read this, so the table is still confirmed and tracked — only its geometry is frozen.
     const bool gated = trunc_gated or (cfg_.fixation_enabled and not fixated);
@@ -613,15 +636,23 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         // under-reported for split masks, so motion_dotd is the load-bearing signal here.
         const float moment_range_std  = cfg_.footprint_moment_range_per_m * range;
         const float moment_motion_std = cfg_.footprint_moment_motion_gain * std::abs(inst.last_motion_dotd);
-        // Obliquity → moment variance: a grazing/foreshortened view biases the 2D inertia tensor (the SAME cause
-        // that spoils the per-point yaw, but on the moment channel — where the CSV rogue rotations actually came
-        // in). Mirror the per-point obliquity cap onto moment_extra_var so an edge-on frame confirms the table but
-        // cannot rotate/reshape it via the moment. Reuses oblq_cos computed above for chain_cov_yaw. 0 = OFF.
+        // Obliquity → moment YAW variance: a grazing/foreshortened view biases the 2D inertia tensor's principal
+        // AXES (the SAME cause that spoils the per-point yaw, but on the moment channel — where the CSV rogue
+        // rotations actually came in). Mirror the per-point obliquity cap so an edge-on frame confirms the table
+        // but cannot ROTATE it via the moment. Reuses oblq_cos computed above for chain_cov_yaw. 0 = OFF.
+        //
+        // ★2026-08-06: this goes on the YAW row ONLY (moment_yaw_extra_var), not on w/h. A tabletop is viewed at
+        // cos≈0.10-0.26 by a robot-mounted camera essentially ALWAYS — it is the normal condition, not an
+        // exceptional one — so charging the extent rows for it put a permanent 0.43 m σ on the ONE channel that
+        // measures the footprint scale, and the live table froze at its birth 0.47×0.61 m while its own moment
+        // read 0.90×0.81 m (ai2_log.csv table_1: completeness 2.54, moment K decayed to 0.004). The extent needs
+        // no obliquity guard: foreshortening can only UNDER-report an extent and the grow-only guard in
+        // apply_footprint_moment already drops that direction.
         const float moment_oblq_std   = cfg_.obliquity_moment_gain * (1.0f / oblq_cos - 1.0f);
         frame.moment_extra_var = std::max(0.0f, inst.last_motion_var)
                                + moment_range_std * moment_range_std
-                               + moment_motion_std * moment_motion_std
-                               + moment_oblq_std * moment_oblq_std;
+                               + moment_motion_std * moment_motion_std;
+        frame.moment_yaw_extra_var = moment_oblq_std * moment_oblq_std;
         // YOLO-independent LiDAR range channel: stage returns landing on the legs/rim. No-op if precision==0
         // or no fresh sweep. The shared factor (accumulate_lidar_rays<6> in TableBelief::accumulate_extra)
         // sphere-traces this belief's own SDF, so the same call the bottle uses drops in unchanged.
@@ -832,7 +863,24 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
                  << "mom_major,mom_minor,mom_phi,mom_pts,"   // RAW footprint statistic (basin diagnosis)   // rogue-mask diag
                  << "ex_L,ex_p,ex_locc,ex_lfree,ex_lfree_eff,ex_ln,ex_socc,ex_sfree,ex_sfree_eff,ex_sndet,ex_streak,"
                  << "ex_pdetect,ex_central,ex_verify,ex_wantsverify,"   // existence-removal + verification-gate diag
-                 << "fixated,fix_close,fix_centred,fix_still,roi_off\n";  // FIXATION (attention) gate diag
+                 << "ex_q,ex_qn,ex_lllr,"   // MEASURED clutter prior: shell rate q, its beam count, the LiDAR ΔL admitted
+                 << "fixated,fix_close,fix_centred,fix_still,roi_off,roi_fill,roi_off_x,roi_off_y,"   // FIXATION (attention) gate diag
+                 // ── DETECTOR-ENVELOPE CALIBRATION ────────────────────────────────────────────────────
+                 // The columns needed to FIT rc::detect::DetectorEnvelope (min_fill/max_fill/soft) from real
+                 // data instead of the current admitted prior. A row is written on EVERY cycle — including
+                 // no-mask ones, via log_existence_cycle(npts=0) — so the NEGATIVES are present, which is what
+                 // makes a detection-rate fit possible at all.
+                 //   roi_fill_h/v : the two axes behind roi_fill's max. The model consumes only the max, but a
+                 //                  grazing view is a tall thin sliver whose max is large, so its misses would
+                 //                  otherwise drag the fitted max_fill shoulder down for the wrong reason.
+                 //   det_alive    : did YOLO actually fire this cycle. `npts` is NOT a substitute — it
+                 //                  conflates "no mask" with "mask present but gated/rejected".
+                 //   roi_valid    : drop rows where the projection is degenerate, or garbage fill pollutes it.
+                 << "roi_fill_h,roi_fill_v,roi_valid,det_alive,frames_since_det,"
+                 // NBV emission: what the planner proposed THIS cycle (the affordance node holds the
+                 // FROZEN pose during a claim, so it cannot answer this). nbv_vfov=0 ⇒ the camera
+                 // model was still incomplete when the proposal was made.
+                 << "nbv_standoff,nbv_tx,nbv_ty,nbv_pdetect,nbv_fill,nbv_vfov\n";
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
@@ -862,9 +910,20 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
              << inst.existence_remove_streak << ','
              << inst.dbg_ex_pdetect << ',' << inst.dbg_ex_central << ','
              << inst.verify_surprise << ',' << (inst.wants_verification ? 1 : 0) << ','   // existence-removal + verification-gate diag
+             << inst.dbg_ex_clutter_q << ',' << inst.dbg_ex_clutter_n << ',' << inst.dbg_ex_lidar_llr << ','
              << (inst.dbg_fixated ? 1 : 0) << ',' << (inst.dbg_fix_close ? 1 : 0) << ','
              << (inst.dbg_fix_centred ? 1 : 0) << ',' << (inst.dbg_fix_still ? 1 : 0) << ','
-             << std::hypot(inst.roi_offset_x, inst.roi_offset_y) << '\n';   // FIXATION (attention) gate diag
+             << std::hypot(inst.roi_offset_x, inst.roi_offset_y) << ',' << inst.roi_fill << ','
+             // Split the centring radius into its axes: the hypothesis is that roi_off is dominated by
+             // off_y because a 0.73 m tabletop seen from a ~1.2 m camera sits LOW in the frame — i.e. the
+             // fovea test is biased against tables by MOUNTING GEOMETRY, not by inattention.
+             << inst.roi_offset_x << ',' << inst.roi_offset_y << ','   // FIXATION (attention) gate diag
+             // Detector-envelope calibration — see the header comment for why each column is here.
+             << inst.roi_fill_h << ',' << inst.roi_fill_v << ','
+             << (inst.roi_valid ? 1 : 0) << ',' << (inst.detection_alive ? 1 : 0) << ','
+             << inst.frames_since_detection << ','
+             << inst.dbg_nbv_standoff << ',' << inst.dbg_nbv_target_x << ',' << inst.dbg_nbv_target_y << ','
+             << inst.dbg_nbv_pdetect << ',' << inst.dbg_nbv_fill << ',' << inst.dbg_nbv_vfov << '\n';
     ai2_csv_.flush();
 }
 

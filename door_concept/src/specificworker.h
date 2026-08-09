@@ -49,11 +49,13 @@
 #include "../../common/mask_ingestor/mask_ingestor.h"     // rc::MaskIngestor (perception)
 #include "door_scene_graph.h" // rc::DoorSceneGraph (DSR node/RT I/O)
 #include "door_fitter.h"
+#include "door_bearing_range.h"   // rc::door::ResidualField / range_along_bearing (bearing → range cascade)
 #include "../../common/phantom_log/phantom_log.h"   // rc::history::PhantomLog (shadow-mode birth/death record)      // rc::DoorFitter (active-inference core)
 #include "epistemic_planner.h"
 #include "door_affordance.h"
 #include "door_model.h"
 #include "../../common/dashboard/belief_inspector.h"
+#include "../../common/dashboard/belief_strip.h"
 #include "../../common/dashboard/evidence_monitor.h"
 #include "../../common/dashboard/custom_widget.h"
 #include "../../common/dashboard/timeseries_plot.h"
@@ -85,7 +87,9 @@ public slots:
     int  startup_check();
 
     void modify_node_slot(std::uint64_t id, const std::string& type);
-    void modify_node_attrs_slot(std::uint64_t id, const std::vector<std::string>& att_names);
+    // Replaces the update_node_attr_signal slot: the controller-owned protocol flags are POLLED once per
+    // cycle instead of pushed per graph attribute write. See the connect block in initialize().
+    void poll_affordance_protocol();
     void modify_edge_slot(std::uint64_t from, std::uint64_t to, const std::string& type){};
     void modify_edge_attrs_slot(std::uint64_t from, std::uint64_t to,
                                 const std::string& type, const std::vector<std::string>& att_names){};
@@ -103,6 +107,10 @@ private:
     void process_door_node(const DSR::Node& node);
     void run_instance_tracker();          // data-driven birth/associate/death (the only instance-lifecycle path)
     void merge_overlapping_instances();   // collapse two instances on the same door (seat-footprint overlap)
+    // NBV decision monitor → etc/door_nbv_log.csv (where the door is vs where we told the robot to stand).
+    void log_nbv_decision(const rc::DoorInstance& inst, const rc::nbv::Plan& plan,
+                          const rc::EpistemicProposal& prop);
+    int  nbv_obstacle_count_ = 0;   // obstacles fed to the last plan (0 ⇒ the walls never reached it)
     void update_existence_beliefs();      // continuous existence log-odds → evidence-based removal (no age immunity)
     // ── Identity re-acquisition ───────────────────────────────────────────────
     // A door that is removed leaves a GHOST: its name and the belief it had converged to. A later detection
@@ -118,9 +126,35 @@ private:
     };
     void remember_ghost(const rc::DoorInstance& inst);                 // called just before a node is deleted
     const DoorGhost* match_ghost(const Eigen::Vector2f& xy) const;     // nearest ghost within the radius, else null
-    void forget_ghost(const std::string& name);
+    void forget_ghost(const Eigen::Vector2f& xy);                      // consume the ghost(s) at a re-acquired place
+    std::vector<std::string> reserved_names() const;                   // names a ghost OR a stored identity still holds
     std::vector<DoorGhost> ghosts_;
+
+    // ── Identity ACROSS RUNS (etc/door_identities.csv) ────────────────────────────────────────────
+    // A ghost lives in RAM and every owned door node is deleted on shutdown, so at the next launch the
+    // numbering restarted from birth ORDER — i.e. from whichever door the robot happened to see first.
+    // Live 2026-08-09: door_1/door_2 traded physical doors across a restart, which is exactly what
+    // "the affordances are switched" looks like from outside. A door is a hole in a wall and outlives
+    // the process, so its name must too: this table maps NAME ↔ APERTURE PLACE and is written to disk.
+    // Identity only — no belief. A door coming back re-earns its geometry; it does not re-earn its name.
+    struct DoorIdentity
+    {
+        std::string     name;
+        Eigen::Vector2f xy = Eigen::Vector2f::Zero();
+    };
+    std::vector<DoorIdentity> identities_;
+    void load_identities();                                            // once, at startup
+    void save_identities() const;                                      // whole table, locale-independent
+    void note_identity(const std::string& name, const Eigen::Vector2f& ap);   // upsert by PLACE, then save
+    const DoorIdentity* match_identity(const Eigen::Vector2f& xy) const;
+    void remember_live_identities();                                   // shutdown: persist the doors still alive
     void refresh_room_geometry();         // load the room delimiting polygon into the fitter (containment pose prior)
+    // Residual field (residual_concept's `residual` node): P(occupied ∧ ¬explained) per cell. Read at the
+    // birth path only, and used ONLY to give a peripheral bearing a range — see door_bearing_range.h. The
+    // same attribute trio table/cabinet/refrigerator already consume, so this is one more reader, not a
+    // new dependency. Empty ⇒ the cascade falls through to the nominal range and the hypothesis stays a glance.
+    bool read_residual_field();
+    rc::door::ResidualField residual_field_;
     void publish_door_cycle(rc::DoorInstance& inst,
                              const DSR::Node& node,
                              const DoorObservation& observation,
@@ -204,6 +238,16 @@ private:
     std::chrono::steady_clock::time_point last_compute_tp_{};   // compute-rate estimate for the strip
     void restore_dashboard_geometry();
     void save_dashboard_geometry() const;
+
+    // ── Compact belief strip — its OWN SMALL top-level window ─────────────────────────────────────────
+    // One row per instance, and the row is a 60 s time series of the certainty channel + p(existence).
+    // This is the window meant to stay open; the big dashboard is the drill-down its "details ▸" opens.
+    QWidget*         strip_window_ = nullptr;
+    rc::BeliefStrip* belief_strip_ = nullptr;
+    void refresh_belief_strip();
+    void restore_strip_geometry();
+    void save_strip_geometry() const;
+
 
     std::unique_ptr<DSR::RT_API>                        rt_api_;
     std::unique_ptr<DSR::InnerEigenAPI>                inner_eigen_;     // for room↔body↔zed extrinsic (silhouette)

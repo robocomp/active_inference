@@ -234,23 +234,44 @@ void RefrigeratorBelief::update_volatility(const Eigen::Matrix<float, 6, 1>& dth
 {
     if (not params_.volatility_infer)
         return;
-    if (not omega_init_)   // seed ω at the configured constant: experience starts from the species prior
+    if (not omega_init_)   // seed at the configured constant: experience starts from the species prior
     {
-        const Eigen::Matrix<float, 6, 1> q0_saved = omega_;   // unused; keeps the intent explicit
-        (void) q0_saved;
         const float qm = params_.process_std_m   * params_.process_std_m;
         const float qy = params_.process_std_yaw * params_.process_std_yaw;
         for (int i = 0; i < 6; ++i) omega0_(i) = std::log(std::max(1e-12f, (i == 5) ? qy : qm));
         omega_ = omega0_;
+        vol_n_ = 0.0f;
+        for (int i = 0; i < 6; ++i) vol_s_(i) = 0.0f;
         omega_init_ = true;
     }
-    const float lr  = std::max(0.0f, params_.volatility_lr);
-    const float s2  = std::max(1e-6f, params_.volatility_sigma * params_.volatility_sigma);
+    // ★CONJUGATE running estimate, NOT a gradient step. The gradient form
+    //       ω ← ω + lr·[½(δθ²·e^{−ω} − 1) − (ω−ω₀)/σ²]
+    // is UNBOUNDED ABOVE: e^{−ω} ≈ 40000 at the configured Q, so a single 0.5 m correction gives a gradient of
+    // 5000 and one lr=0.02 step moves ω by +100 — past the ~88 where float exp() overflows. Live consequence
+    // (etc/ai2_log.csv 20:27): a birth at 0.48 m produced ω_yaw = 300.6, so Q = exp(300) = inf, Σ went inf then
+    // 0 through the inverse, the Mahalanobis association gate collapsed, NO mask could associate ever again
+    // (npts = 0 in 943 of 946 cycles), and the instance froze forever at its garbage birth state
+    // (w = 0.126, yaw = −102°) — a self-sealing zombie. See [[inferred-volatility-history-stage]].
+    //
+    // The variance of a Gaussian step has a conjugate posterior whose mean is a WEIGHTED AVERAGE of the prior
+    // and the observed squared steps, so Q can never leave [min, max] of what has actually been seen:
+    //
+    //     n ← λ·n + 1 ,  S ← λ·S + δθ² ,  Q = (n₀·Q₀ + S) / (n₀ + n)
+    //
+    // λ < 1 gives a finite memory, which is what lets ω RISE again when the object genuinely moves; n₀ is the
+    // hyperprior's strength in pseudo-observations, doing the job the (ω−ω₀)/σ² pull-back did. No learning
+    // rate, no exponent to overflow, and recoverability is structural exactly as before.
+    constexpr float kLambda = 0.995f;   // ~200-observation memory: long enough to earn stiffness, short enough to recant
+    const float n0 = 1.0f / std::max(1e-3f, params_.volatility_sigma * params_.volatility_sigma);
+    vol_n_ = kLambda * vol_n_ + 1.0f;
     for (int i = 0; i < 6; ++i)
     {
-        const float d2   = dtheta(i) * dtheta(i);
-        const float grad = 0.5f * (d2 * std::exp(-omega_(i)) - 1.0f) - (omega_(i) - omega0_(i)) / s2;
-        omega_(i) = std::max(params_.volatility_omega_min, omega_(i) + lr * grad);
+        const float d2 = dtheta(i) * dtheta(i);
+        if (not std::isfinite(d2)) continue;                       // never let a bad frame poison the estimate
+        vol_s_(i) = kLambda * vol_s_(i) + d2;
+        const float q0 = std::exp(omega0_(i));
+        const float q  = (n0 * q0 + vol_s_(i)) / (n0 + vol_n_);    // bounded by construction
+        omega_(i) = std::clamp(std::log(std::max(1e-12f, q)), params_.volatility_omega_min, 4.0f);
     }
 }
 
@@ -366,41 +387,48 @@ void RefrigeratorBelief::accumulate_extra(const RefrigeratorBeliefState& s, cons
     if (params_.prior_footprint_std > 0.0f)
     {
         const float lam_wd = 1.0f / (params_.prior_footprint_std * params_.prior_footprint_std);
-        Id(3, 3) += lam_wd;  bd(3) += lam_wd * (params_.prior_footprint_m - s.w);   // w   (index 3)
 
-        // Depth (h, idx 4) is IDENTIFIABLE only when points fall on BOTH depth faces (the +ly AND the −ly face) —
-        // that pair is what separates the extent h from the centre cy. A front-only view (even one that also grazes
-        // a SIDE face — side points sit BETWEEN the depth faces, |ly|≪h/2, and are excluded by the band) puts points
-        // on ONE depth face only; its many points still spuriously drag h to the clamp (the size common-mode caps σ,
-        // not the mean). So the footprint prior on depth must PREVAIL absent two-face evidence: grow its precision by
-        // depth_unobs_precision·(1 − two_sided), two_sided = 2·min(n₊,n₋)/(n₊+n₋) ∈ [0 one-face … 1 balanced]. A
-        // covariance keyed on the right physical covariate (CLAUDE.md), not a gate; relaxes to data-driven the moment
-        // the back face is genuinely observed. Robust to side/front clutter — only points AT a depth face count.
-        float lam_h = lam_wd;
-        if (params_.depth_unobs_precision > 0.0f and f.points.size() > 8)
+        // An extent is IDENTIFIABLE only when the cloud spans it — points on BOTH opposing faces, which is what
+        // separates the extent from the centre. A one-face view puts points on a single face and its many points
+        // still drag that extent outward (the size common-mode caps σ, not the mean), so the footprint prior must
+        // PREVAIL absent two-face evidence: grow its precision by depth_unobs_precision·(1 − two_sided).
+        //
+        // ★This is now computed PER FOOTPRINT AXIS. It used to be hard-wired to the depth axis (h/local-Y) only,
+        // which silently assumed the robot always approaches the FRONT. Approach from the SIDE and the roles swap:
+        // the ±Y faces are the ones being seen, so h reads as two-sided and its boost correctly switches off —
+        // while w, now the unobserved axis, had NO protection at all and inflated freely. Live: the robot came in
+        // from the side and w grew to 1.414 m against a 0.60 prior, which the identity LLR then scored at −15.5,
+        // and the fridge filter removed a real fridge for being the wrong shape. Which axis is unobservable is a
+        // property of the VIEWPOINT, not of the model's axis labelling. See [[refrigerator-unobserved-axis-prior]].
+        const auto two_sided_along = [&](bool along_x) -> float
         {
+            if (params_.depth_unobs_precision <= 0.0f or f.points.size() <= 8)
+                return 1.0f;                       // feature off / too few points ⇒ claim nothing, add no boost
             const float c = std::cos(-s.yaw), sn = std::sin(-s.yaw);
-            const float halfw = 0.5f * s.w, delta = params_.depth_obs_band_m;
+            const float delta = params_.depth_obs_band_m;
+            const float half_cross = 0.5f * (along_x ? s.h : s.w);   // the OTHER axis: the spanning core
             int nplus = 0, nminus = 0;
-            for (const auto& p : f.points)
+            for (const auto& q : f.points)
             {
-                const float px = p.x() - s.cx, py = p.y() - s.cy;
-                const float lx = px * c - py * sn;
-                if (std::abs(lx) > halfw + delta) continue;         // width-spanning core only (drop side clutter)
-                if (p.z() < 0.0f or p.z() > s.H + delta) continue;
-                const float ly = px * sn + py * c;
-                // Clearly FORWARD-of / BEHIND-centre by a FIXED margin δ (NOT keyed to the current half-depth). A
-                // point straddling the centre (|ly| ≤ δ) counts as NEITHER — so a COLLAPSED depth slab (all points
-                // near ly≈0) cannot masquerade as "both faces seen" and switch the boost OFF. That circularity was
-                // re-collapsing h once it dipped. Two-sided evidence now means genuine points on BOTH sides, apart.
-                if (ly >  delta)      ++nplus;
-                else if (ly < -delta) ++nminus;
+                const float px = q.x() - s.cx, py = q.y() - s.cy;
+                const float lx = px * c - py * sn, ly = px * sn + py * c;
+                const float along = along_x ? lx : ly;               // the axis being tested
+                const float cross = along_x ? ly : lx;               // must lie within the spanning core
+                if (std::abs(cross) > half_cross + delta) continue;  // drop clutter off the side of this face pair
+                if (q.z() < 0.0f or q.z() > s.H + delta) continue;
+                // Clearly on one side or the other by a FIXED margin δ (NOT keyed to the current half-extent). A
+                // point straddling the centre counts as NEITHER, so a COLLAPSED slab cannot masquerade as
+                // "both faces seen" and switch the boost off — that circularity re-collapsed the extent.
+                if (along >  delta)      ++nplus;
+                else if (along < -delta) ++nminus;
             }
             const int tot = nplus + nminus;
-            const float two_sided = (tot > 0) ? (2.0f * std::min(nplus, nminus) / static_cast<float>(tot)) : 0.0f;
-            lam_h += params_.depth_unobs_precision * (1.0f - two_sided);
-        }
-        Id(4, 4) += lam_h;  bd(4) += lam_h * (params_.prior_footprint_m - s.h);     // h≡depth (index 4)
+            return (tot > 0) ? (2.0f * std::min(nplus, nminus) / static_cast<float>(tot)) : 0.0f;
+        };
+        const float lam_w = lam_wd + params_.depth_unobs_precision * (1.0f - two_sided_along(true));
+        const float lam_h = lam_wd + params_.depth_unobs_precision * (1.0f - two_sided_along(false));
+        Id(3, 3) += lam_w;  bd(3) += lam_w * (params_.prior_footprint_m - s.w);   // w      (index 3)
+        Id(4, 4) += lam_h;  bd(4) += lam_h * (params_.prior_footprint_m - s.h);   // h≡depth(index 4)
     }
 
     // (2a) HEIGHT anchor (H, index 2): the box TOP is unconstrained-from-above — points at the real fridge top

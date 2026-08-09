@@ -14,6 +14,8 @@
 
 #pragma once
 
+#include "../../common/detectability/detectability.h"   // rc::detect::DetectorEnvelope
+
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -32,6 +34,10 @@ struct EvidenceGlobals;        // dashboard/evidence_monitor.h — removal count
 class RefrigeratorExistence
 {
 public:
+    // The detector's operating envelope (min/max projected fill). Set once from config; shared with the
+    // epistemic planner so the viewpoint we ASK for and the absence we BELIEVE use the same model.
+    void set_detector_envelope(const rc::detect::DetectorEnvelope& e) { det_env_ = e; }
+
     RefrigeratorExistence(std::shared_ptr<DSR::DSRGraph> graph, const RefrigeratorConfig& cfg)
         : G_(std::move(graph)), cfg_(cfg) {}
 
@@ -46,6 +52,8 @@ public:
                            const std::function<void(std::uint64_t, const RefrigeratorInstance&)>& on_remove = {});
 
 private:
+    rc::detect::DetectorEnvelope det_env_{};
+
     std::shared_ptr<DSR::DSRGraph> G_;
     const RefrigeratorConfig&             cfg_;
 };

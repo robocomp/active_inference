@@ -59,6 +59,9 @@ TableConfig load_table_config(const ConfigLoader& cfg)
 
     // ─── AI2 belief ────────────────────────────────────────────────────────────
     out.ai2_sigma_base_m     = getf("TableModel.AI2SigmaBaseM",       0.03f);
+    out.detect_min_fill      = getf("TableModel.DetectMinFill",       0.10f);
+    out.detect_max_fill      = getf("TableModel.DetectMaxFill",       0.60f);
+    out.detect_soft          = getf("TableModel.DetectSoft",          0.06f);
     out.ai2_clutter_frac     = getf("TableModel.AI2ClutterFrac",      0.10f);
     out.ai2_clutter_scale_m  = getf("TableModel.AI2ClutterScaleM",    0.12f);
     out.ai2_prior_size_std   = getf("TableModel.AI2PriorSizeStd",     0.30f);
@@ -162,6 +165,9 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.verify_surprise_smooth        = getf("TableModel.VerifySurpriseSmooth",       0.10f);
     out.existence_verify_gain         = getf("TableModel.ExistenceVerifyGain",       5.0f);
     out.existence_leg_occupancy       = getb("TableModel.ExistenceLegOccupancy", true);
+    out.existence_local_clutter       = getb("TableModel.ExistenceLocalClutter", true);
+    out.existence_lidar_confirms      = getb("TableModel.ExistenceLidarConfirms", false);
+    out.existence_absence_envelope    = getb("TableModel.ExistenceAbsenceEnvelope", true);
 
     std::print("table_concept: configuration loaded.\n");
     return out;

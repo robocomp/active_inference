@@ -30,6 +30,7 @@
  */
 
 #include "specificworker.h"
+#include "../../common/nbv/graph_obstacles.h"   // rc::nbv::collect_graph_obstacles — shared, DSR-side
 #include "cabinet_geometry.h"   // rc::geom pure footprint/uncertainty helpers
 
 #include <print>
@@ -117,6 +118,7 @@ void SpecificWorker::request_shutdown()
 
     save_window_settings();
     save_dashboard_geometry();   // the standalone dashboard is not in `windows`, so save it explicitly
+    save_strip_geometry();       // …nor is the compact belief strip
 
     cleanup_owned_nodes();
 
@@ -320,10 +322,20 @@ void SpecificWorker::initialize()
         G, rt_api_.get(), cfg_, [this] { trigger_graph_layout_twopi(); });
 
     // Subscribe to graph signals
+    // ★NOT update_node_attr_signal. It fires for EVERY attribute change on EVERY node in the shared graph —
+    // every RT pose write from robot_concept, every other agent's per-cycle attribute writes — and each
+    // emission copies a std::vector<std::string> on the DDS reader thread and queues an event to this thread.
+    // Under a churn burst (a peer restarting is enough) the queue drains slower than it fills, and the main
+    // thread then does nothing but service slots: the timer-driven compute() is starved (its log stops
+    // growing), and — the symptom that costs the most — Ctrl-C dies, because generated/main.cpp routes SIGINT
+    // through a QSocketNotifier serviced by this SAME event loop. The agent can then only be killed with -9,
+    // which cannot be caught, so every node it owns LEAKS into the shared graph.
+    // Measured 2026-08-07 on table_concept (identical subscription): main thread pegged at 100% of a core,
+    // ai2_log.csv frozen, Ctrl-C inert, right after a voxelizer restart. CLAUDE.md already states the rule
+    // this violated: if you don't need a signal, don't connect it at all (bottle_concept connects none).
+    // The two things the slot did are now POLLED once per cycle in poll_affordance_protocol().
     connect(G.get(), &DSR::DSRGraph::update_node_signal,
             this, &SpecificWorker::modify_node_slot);
-    connect(G.get(), &DSR::DSRGraph::update_node_attr_signal,
-            this, &SpecificWorker::modify_node_attrs_slot);
     connect(G.get(), &DSR::DSRGraph::del_node_signal,
             this, &SpecificWorker::del_node_slot);
 
@@ -357,15 +369,67 @@ void SpecificWorker::initialize()
 
     // Build rc::EpistemicPlanner (info-gain scoring only; stand-off distance is the sole parameter).
     epistemic_planner_ = rc::EpistemicPlanner(cfg_.obs_distance);
+    // ONE detector envelope: the viewpoint the planner asks for is the argmax of the same model absence
+    // should be weighted by. Replaces the old kMinimumStandOffM literal in the planner.
+    epistemic_planner_.set_detector_envelope(rc::detect::DetectorEnvelope{});
+    epistemic_planner_.set_robot_radius(0.30f);   // Shadow's footprint radius
+
+    // The camera's REAL geometry, read once (intrinsics and the zed mount are both static). BOTH FoVs: a
+    // WALL-TIER cabinet sits high, so the VERTICAL axis is the binding one and the horizontal-only model this
+    // replaced was blind to it. Height from inner_eigen room->zed, NOT the proto's body-relative z: the room
+    // floor datum is offset from the body origin, and the box z-span is room-frame. ts==0 on the main thread.
+    // ★The camera model is read PER CYCLE at the compute site (rc::nbv::sensor_from_graph),
+    // NOT once here: the zed intrinsics are published by robot_concept when frames start
+    // arriving, so reading them in initialize() races the producer. Losing that race leaves
+    // vfov = 0, which silently collapses the fill model to horizontal-only — the exact bug
+    // rc::nbv exists to fix, and it drives the robot nose-to-nose with tall objects.
 
     // Stale affordance nodes are swept on entering Operating (presence hook) and on shutdown — see
     // remove_stale_affordance_nodes(), keyed on the parent object type (robust to node-name renames).
 
     // Standalone Qt dashboard + evidence-monitor windows (belief plots + per-instance snapshot).
+    // Shadow-mode birth/death record (CONCEPT_AGENT_LIFECYCLE.md §4.2). Recording only — see
+    // log_phantom_event(). Truncating: one file per run.
+    phantom_log_.open("etc/cabinet_phantom_events.csv");
+
     build_dashboard();
 }
 
 // ─── Main compute loop ───────────────────────────────────────────────────────────────────────────
+
+// SHADOW-MODE birth/death recorder — CONCEPT_AGENT_LIFECYCLE.md §4.2, theory in MODEL_HISTORY.md §4.
+// RECORDS ONLY; it can never alter a birth or a removal. The attribution fields captured at death
+// (p_detect / in-FoV / central) are what tell a genuine classifier phantom from one of OUR removal defects —
+// a death with LOW p_detect means the log is recording a removal bug, and must not be learned from.
+void SpecificWorker::log_phantom_event(std::string_view event, std::uint64_t id, std::string_view name,
+                                       float x, float y, const rc::CabinetInstance* inst, std::string_view note)
+{
+    if (not phantom_log_.is_open())
+        return;
+    rc::history::PhantomEvent e;
+    e.event = event; e.id = id; e.name = name; e.x = x; e.y = y; e.note = note;
+    // Observer pose → view bearing. The classifier failure is VIEWPOINT-dependent, so the eventual p_FA field
+    // is keyed on (world cell × bearing); a place-only key would suppress a genuine object placed there.
+    if (inner_eigen_)
+        if (const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", 0); rtb.has_value())
+        {
+            const auto& Tm = rtb.value();
+            e.robot_x = static_cast<float>(Tm(0, 3));
+            e.robot_y = static_cast<float>(Tm(1, 3));
+            e.robot_yaw = std::atan2(static_cast<float>(Tm(1, 0)), static_cast<float>(Tm(0, 0)));
+            e.view_bearing = std::atan2(e.robot_y - y, e.robot_x - x);   // instance → camera, room frame
+            e.range_m = std::hypot(e.robot_x - x, e.robot_y - y);
+        }
+    if (inst)   // death: carry the existence state that says whether this was a CONFIDENT kill
+    {
+        e.age_cycles    = inst->processed_cycles;
+        e.p_detect      = inst->dbg_ex_pdetect;
+        e.central_frac  = inst->dbg_ex_central;
+        e.in_fov_frac   = (inst->dbg_ex_sil_ndet > 0) ? 1.0f : 0.0f;
+        e.exist_logodds = inst->existence.logodds();
+    }
+    phantom_log_.write(e);
+}
 
 void SpecificWorker::compute()
 {
@@ -379,6 +443,11 @@ void SpecificWorker::compute()
         if (rooms.empty()) return;
         room_node_id_ = rooms.front().id();
     }
+
+    // Controller-owned affordance flags (claim / completion / epistemic_pending). Polled here rather than
+    // pushed by update_node_attr_signal — see the connect block in initialize().
+    poll_affordance_protocol();
+
 
     // Push the room geometry (wall polygon + interior centroid) into the fitter each cycle: the wall-flush
     // factor needs the polygon and canonicalize needs the interior. Cheap, and room_concept may refine it.
@@ -447,7 +516,14 @@ void SpecificWorker::compute()
     // fresh mask frame, LiDAR carve on a fresh sweep) — a camera-only cycle still accrues absence, a LiDAR-only
     // cycle still carves free space. After the fits so footprints are current. OFF unless enabled.
     if (cfg_.existence_removal_enabled)
-        existence_->update_and_remove(*fitter_, lidar_ingestor_.get(), fresh_masks, fresh_sweep, ev_g_);
+        existence_->update_and_remove(*fitter_, lidar_ingestor_.get(), fresh_masks, fresh_sweep, ev_g_,
+            [this](std::uint64_t id, const rc::CabinetInstance& inst)
+            {   // shadow-mode death record (§4.2) — p_detect here says whether this was a CONFIDENT
+                // disconfirmation (a real phantom) or a weak one (more likely our own removal bug)
+                log_phantom_event("DEATH", id, inst.node_name,
+                                  inst.model.state().cx, inst.model.state().cy, &inst,
+                                  std::format("L {:.2f}", inst.existence.logodds()));
+            });
 
     }   // end classic instance pipeline (skipped when cfg_.kitchen_model)
 
@@ -860,7 +936,13 @@ void SpecificWorker::step_epistemic(rc::CabinetInstance& inst, DSR::Node& node)
     if (not inst.ai2_initialized)
         return;
     rc::EpistemicProposal prop =
-        epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m, cfg_.verbose_log);
+        epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m,
+                                   rc::nbv::sensor_from_graph(*G, inner_eigen_.get()), cfg_.verbose_log,
+                                   rc::nbv::collect_graph_obstacles(*G, inner_eigen_.get(), inst.node_id),
+                                   // The reachable region — kills the through-the-wall faces that the
+                                   // direction-blind gain cannot tell apart. Empty until room_concept publishes,
+                                   // and is_reachable then imposes no constraint (the pre-existing behaviour).
+                                   fitter_->room_polygon());
     if (not prop.valid or not prop.is_finite())
         return;   // degenerate (non-finite) fit — leave the existing affordance node as-is, retry next cycle
 
@@ -926,34 +1008,34 @@ void SpecificWorker::modify_node_slot(std::uint64_t /*id*/, const std::string& /
     // cabinet nodes (every cycle), so nothing is lost by not creating here.
 }
 
-void SpecificWorker::modify_node_attrs_slot(std::uint64_t id,
-                                             const std::vector<std::string>& att_names)
+// Poll the controller-owned protocol flags once per cycle. This REPLACES the update_node_attr_signal
+// subscription (see the connect block in initialize() for the starvation it caused). Both things it did are
+// pure reads of the CURRENT graph state, so polling gives the same answer — a controller claim or completion
+// simply lands on the next cycle instead of within the emitting DDS callback.
+//
+// Cost is bounded by OUR instance count (typically 1–3), not by the graph's global write rate, which is the
+// whole point: the old path did work proportional to what every other agent was writing.
+void SpecificWorker::poll_affordance_protocol()
 {
-    // Delegate to the affordance state machine for any instance whose affordance
-    // node was modified (controller claim/completion updates active/pending)
+    if (not fitter_)
+        return;   // may be called before the fit core exists — the guard every graph slot here needs
+
     for (auto& [cabinet_id, inst] : fitter_->instances())
-        if (inst.affordance.node_id() == id)
-            inst.affordance.on_node_modified(id);
-
-    // React to mission-controller clearing epistemic_pending on the cabinet node itself
-    if (fitter_->instances().count(id))
     {
-        const bool pending_cleared = std::any_of(att_names.begin(), att_names.end(),
-            [](const std::string& s) { return s == "epistemic_pending"; });
+        // Affordance state machine: idle→pending→executing→satisfied, driven by the controller-owned
+        // active/pending flags on the affordance node. on_node_modified() re-reads them itself.
+        if (const auto aid = inst.affordance.node_id(); aid != 0)
+            inst.affordance.on_node_modified(aid);
 
-        if (pending_cleared)
+        // Mission controller clearing epistemic_pending on the object node itself.
+        if (auto node_opt = G->get_node(cabinet_id); node_opt.has_value())
         {
-            auto node_opt = G->get_node(id);
-            if (node_opt.has_value())
-            {
-                const auto v = G->get_attrib_by_name<epistemic_pending_att>(node_opt.value());
-                if (v.has_value() and not v.value())
-                    fitter_->instances().at(id).epistemic_pending = false;
-            }
+            const auto v = G->get_attrib_by_name<epistemic_pending_att>(node_opt.value());
+            if (v.has_value() and not v.value())
+                inst.epistemic_pending = false;
         }
     }
 }
-
 void SpecificWorker::del_node_slot(std::uint64_t id)
 {
     // The del_node signal is connected BEFORE fitter_ is constructed, and initialize()'s startup

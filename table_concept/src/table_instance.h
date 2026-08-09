@@ -159,7 +159,10 @@ struct TableInstance
     // Removed only when the removal decision holds for existence_remove_frames consecutive cycles (debounce)
     // — deleting furniture warrants SUSTAINED evidence, not a transient hiccup.
     rc::exist::ExistenceBelief existence;
-    int existence_remove_streak = 0;
+    // Removal debounce, in units of ONE FULLY-RESOLVING LOOK (not cycles). A cycle contributes its own p_detect:
+    // a confident, centred, close view counts ~1, a view that cannot resolve the table counts ~0. Fractional
+    // because a timer would delete a table for the passage of uninformative time — see table_existence.cpp.
+    float existence_remove_streak = 0.0f;
     // Verification-gated removal (active-inference): a predicted-visible-but-absent observation from a view that
     // CANNOT resolve the table (far / peripheral / edge-on) does NOT vote removal — it raises this decayed
     // go-VERIFY surprise. When it crosses existence_verify_surprise, wants_verification arms the epistemic planner
@@ -182,6 +185,16 @@ struct TableInstance
     float fe_baseline = -1.0f;    // <0 = uninitialised
     float fe_surprise = 0.0f;
     bool  dbg_gated   = false;    // truncation-gated (predict-only, no geometric update) this frame
+    // WHY the frame was gated, split by error mechanism — the existence channel must distinguish them.
+    // A frozen belief compared against a live image measures REGISTRATION when the freeze came from a bad
+    // VIEWPOINT (truncated mask / robot moving / object off-centre), so silhouette absence is untrustworthy
+    // there. It does NOT when the freeze came from too few mask points: "no mask on this box" IS the absence
+    // observation, and suppressing it made a maskless phantom unremovable by construction (it can never reach
+    // FixationMinPts, so it was permanently gated ⇒ permanently immune). See table_existence.cpp.
+    bool  dbg_trunc_gated = false;   // the mask was truncation-gated this frame
+    bool  dbg_gate_fresh  = false;   // the gate verdict above was computed THIS cycle. false ⇒ no fresh mask
+                                     // reached the fit, so the flags are STALE (from whenever it was last
+                                     // seen) and carry no information about the current frame.
 
     // Provenance of the mask packet this fit consumed (instrumentation; NO effect on the fit). The CSV showed
     // long runs of fits whose GEOMETRY was bit-identical (npts/range pinned) while the belief ratcheted — i.e.
@@ -219,6 +232,11 @@ struct TableInstance
     // *_free is the RAW sensor count; *_free_eff is what actually drove the log-odds after the range/occlusion
     // absence-confidence scaling AND the observed-guard (so raw→eff shows how much the absence was degraded).
     float dbg_ex_lidar_occ = 0.0f, dbg_ex_lidar_free = 0.0f, dbg_ex_lidar_free_eff = 0.0f;  int dbg_ex_lidar_n   = 0;
+    // MEASURED clutter prior (rc::exist::measure_clutter): q = P(return | this neighbourhood, no table) from the
+    // equal-volume shell around the box, and the ΔL the contrast actually admitted. Read these to see WHY the
+    // LiDAR channel is confirming or silent: q ≈ the box's own return rate ⇒ indistinguishable ⇒ llr → 0.
+    float dbg_ex_clutter_q = 0.0f;   int dbg_ex_clutter_n = 0;
+    float dbg_ex_lidar_llr = 0.0f;   // the LiDAR channel's per-cycle ΔL after the contrast (was always +llr_occ)
     float dbg_ex_sil_occ   = 0.0f, dbg_ex_sil_free   = 0.0f, dbg_ex_sil_free_eff   = 0.0f;  int dbg_ex_sil_ndet  = 0;
     // Silhouette samples ATTEMPTED (SilhouetteExistence::n_total). Kept alongside n_detectable so the real
     // in-FoV FRACTION (ndet/ntotal) is recoverable — the phantom log's attribution needs "how much of the
@@ -235,6 +253,20 @@ struct TableInstance
     float roi_offset_x = 0.0f;   // [-1,1], 0 = horizontally centred in the image
     float roi_offset_y = 0.0f;   // [-1,1], 0 = vertically centred
     float roi_fill     = 0.0f;   // max(w/W, h/H): projected extent as a fraction of the image
+    // ★The two AXES behind that max, kept for DETECTOR-ENVELOPE CALIBRATION. p_detect is a function of the
+    // max alone, but fitting min_fill/max_fill from (roi_fill, fired) pairs without the axes is a trap: a
+    // grazing or edge-on view is a tall thin sliver whose MAX is large, so its misses land in high-fill bins
+    // and drag the fitted max_fill shoulder down to explain something that is not a framing effect at all.
+    // Logging both lets that bias be TESTED afterwards; it cannot be recovered from the max after the fact.
+    // ── NBV emission (what the planner PROPOSED this cycle) ────────────────────────────────────────
+    float dbg_nbv_standoff = 0.0f;   // face-relative stand-off chosen (m)
+    float dbg_nbv_target_x = 0.0f, dbg_nbv_target_y = 0.0f;
+    float dbg_nbv_pdetect  = 0.0f;   // P(detect) there
+    float dbg_nbv_fill     = 0.0f;   // predicted roi_fill there
+    float dbg_nbv_vfov     = 0.0f;   // camera vfov IN FORCE at proposal time; 0 ⇒ model was incomplete
+
+    float roi_fill_h   = 0.0f;   // Δcol / W
+    float roi_fill_v   = 0.0f;   // Δrow / H
 };
 
 }  // namespace rc

@@ -23,6 +23,22 @@
 
 // ─── Instance lifecycle: merge / tracker / birth ─────────────────────────────────────────────────
 
+// One mask slice's room-frame support points. Used both to score a birth candidate per-frame and to bank it
+// into the candidate's burst, so the two always see exactly the same cloud. Bounds-checked: a truncated
+// packet must not index past support_points.
+std::vector<Eigen::Vector3f> SpecificWorker::slice_cloud(const rc::MaskIngestor::MasksPacket& pkt, int slice_index)
+{
+    if (slice_index < 0 or slice_index >= static_cast<int>(pkt.slices.size()))
+        return {};
+    const auto& sl = pkt.slices[slice_index];
+    const std::size_t b = std::min<std::size_t>(sl.support_begin, pkt.support_points.size());
+    const std::size_t e = std::min<std::size_t>(sl.support_end,   pkt.support_points.size());
+    if (e <= b)
+        return {};
+    return {pkt.support_points.begin() + static_cast<std::ptrdiff_t>(b),
+            pkt.support_points.begin() + static_cast<std::ptrdiff_t>(e)};
+}
+
 // Retire one instance: drop its affordance node, forget it in the fitter, delete its graph node. The single
 // teardown path shared by every lifecycle exit (merge / death), keeping the affordance+fitter+graph invariant.
 void SpecificWorker::retire_instance(std::uint64_t id)
@@ -188,9 +204,7 @@ void SpecificWorker::run_instance_tracker()
             // RefrigeratorBelief::candidate_plausibility.
             if (cfg_.fridge_filter_enabled)
             {
-                const std::size_t b = std::min<std::size_t>(sl.support_begin, pkt.support_points.size());
-                const std::size_t e = std::min<std::size_t>(sl.support_end,   pkt.support_points.size());
-                std::vector<Eigen::Vector3f> cloud(pkt.support_points.begin() + b, pkt.support_points.begin() + e);
+                const auto cloud = slice_cloud(pkt, i);
                 const float cand_plaus = rc::RefrigeratorBelief::candidate_plausibility(cloud, plaus_p);
                 dv.birth_evidence *= cand_plaus;
                 if (cfg_.fridge_filter_log)
@@ -239,6 +253,19 @@ void SpecificWorker::run_instance_tracker()
 
     const auto res = tracker_.update(tracks, dets);
 
+    // ── BIRTH FRAGMENT: bank this observation's cloud against the candidate it fed ────────────────────
+    // Runs BEFORE the birth loop below, so a candidate promoted this cycle has the promoting frame in its
+    // burst too. Only genuinely new observations are banked: on a repeat frame_id the same cloud would be
+    // re-added (harmless — it dedups) but n_obs/span would count our compute cadence instead of the sensor's,
+    // which is exactly the confusion birth_evidence.h rule 1 exists to prevent.
+    if (cfg_.birth_frag_enabled and pkt.valid and new_observation)
+        for (int d = 0; d < static_cast<int>(dets.size()); ++d)
+            if (res.cand_of_det[d] != 0)
+                birth_frag_.accumulate(res.cand_of_det[d], slice_cloud(pkt, dets[d].slice_index),
+                                       pkt.timestamp_ms, cfg_.birth_frag_voxel_m,
+                                       static_cast<std::size_t>(std::max(1, cfg_.birth_frag_max_pts)));
+    birth_frag_.expire(res.expired_candidates);   // unconditional: frees bursts even if banking is disabled
+
     // Diagnostic (throttled, plus on any birth/death): reveals "1 slice" (upstream) vs "N slices, no birth".
     static int dbg = 0;
     const int n_assigned = static_cast<int>(std::count_if(res.assignment.begin(), res.assignment.end(),
@@ -278,11 +305,52 @@ void SpecificWorker::run_instance_tracker()
                 it->second.assigned_mask_idxs.push_back(dets[d].slice_index);
         }
 
-    // BIRTH: spawn an instance from each promoted (persistently-unexplained) detection, seeding the
-    // fitter with the detection XY so the model starts AT the refrigerator (not the 0,0 RT-read default).
-    for (const int d : res.births)
+    // BIRTH: spawn an instance from each promoted (persistently-unexplained) detection — but only if its
+    // accumulated probation burst still reads as a fridge once seen whole. The burst is used ONLY for that
+    // decision; the model is seeded with the detection XY alone, because cold-start geometry is owned by
+    // run_inference's lazy snap and seeding it from the burst measurably hurt (see the ★ note there).
+    for (std::size_t k = 0; k < res.births.size(); ++k)
     {
+        const int d = res.births[k];
         const Eigen::Vector3f& c = pkt.slices[dets[d].slice_index].centroid;
+
+        std::optional<rc::Burst> burst;
+        if (cfg_.birth_frag_enabled and k < res.birth_cand_ids.size())
+        {
+            burst = birth_frag_.take(res.birth_cand_ids[k]);
+            // LOCAL CONSISTENCY δ: observations too far apart in time are not one view of one object, so the
+            // union is not a surface. The birth still stands (the streak matured) — only the cloud is dropped.
+            if (burst and not rc::BirthFragment::span_ok(*burst, cfg_.birth_frag_delta_ms))
+            {
+                std::print("[fridge-filter] burst SPAN {} ms > delta {} ms → not locally consistent, "
+                           "falling back to default birth geometry\n",
+                           burst->span_ms(), cfg_.birth_frag_delta_ms);
+                burst.reset();
+            }
+        }
+
+        // ADMISSION on the whole burst. The same plausibility already applied per-frame as an evidence
+        // multiplier, but re-run on the union — where the z-range finally spans the object instead of one
+        // partial view, so it stops penalising real fridges — and read as a DECISION. A refused birth never
+        // reaches DSR; without this the mis-detection is created and must be retracted later by
+        // apply_fridge_filter, and in this agent `res.deaths` is ignored so that is the only way back out.
+        if (burst and cfg_.fridge_filter_enabled and cfg_.birth_admit_plausibility > 0.0f)
+        {
+            const float plaus = rc::RefrigeratorBelief::candidate_plausibility(burst->pts, plaus_p);
+            if (plaus < cfg_.birth_admit_plausibility)
+            {
+                std::print("[fridge-filter] BIRTH REFUSED at ({:.2f},{:.2f}): burst plaus={:.3f} < {:.3f} "
+                           "({} pts over {} obs, {} ms)\n",
+                           c.x(), c.y(), plaus, cfg_.birth_admit_plausibility,
+                           burst->pts.size(), burst->n_obs, burst->span_ms());
+                ++ev_g_.births_refused;
+                ++ev_g_.births_refused_cum;
+                // Recorded like a birth so a refusal is attributable to the same place + viewpoint.
+                log_phantom_event("BIRTH_REFUSED", 0, "", c.x(), c.y(), nullptr, "");
+                continue;
+            }
+        }
+
         const auto new_id = scene_graph_->create_instance_from_detection(c, room_node_id_);
         if (new_id != 0)
         {
@@ -365,7 +433,15 @@ void SpecificWorker::apply_fridge_filter()
         if (it == insts.end()) continue;
         auto& inst = it->second;
         inst.existence.set_max(cfg_.existence_logodds_max);
-        inst.existence.set(inst.existence.logodds() + deltas[k]);   // clamped by L_max
+        // ★Apply the shape/singleton delta ONLY on a cycle that actually measured this instance. I gated the
+        // ACCUMULATOR to measured cycles earlier but left the DELTA firing every cycle, so a frozen
+        // plaus_evidence kept pushing the existence log-odds at a constant rate with no new evidence — the same
+        // repetition-is-not-independence defect, one level up. Live: with the belief frozen (gated=1, npts=0)
+        // and BOTH sensor channels silent (sfree_eff≈0, lfree_eff=0), ex_L still fell a steady −0.65/cycle from
+        // +1.41 to the −4 clamp and the fridge was removed. Whatever the shape says, saying it again on a frame
+        // that observed nothing is not evidence. Same rule as CREATE, UPDATE and the sensor REMOVE channels.
+        if (inst.matched_frames == inst.plaus_seen_frames and not inst.dbg_gated)
+            inst.existence.set(inst.existence.logodds() + deltas[k]);   // clamped by L_max
 
         // Removal debounce (dedicated streak, independent of the sensor-existence streak). A freshly-born
         // instance is given the SAME warmup grace as the belief aging (matched_frames_before_aging) so a young

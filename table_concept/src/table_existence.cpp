@@ -76,6 +76,9 @@ void TableExistence::update_and_remove(TableFitter& fitter, TableLidarIngestor* 
         const float surf_sigma = std::sqrt(std::max(0.0f, 0.5f * (S(0, 0) + S(1, 1))));   // footprint position σ
         const bool observed = inst.frames_since_detection == 0;                      // fresh mask this cycle
         bool integrated = false;
+        // How resolving THIS cycle's look was, in units of one ideal observation (0 ⇒ the camera could not have
+        // seen the table from here even if it were present). Drives the removal debounce below.
+        float cycle_p_detect = 0.0f;
 
         // SILHOUETTE / MASK channel (pixel-level) — CAMERA clock: project the tabletop silhouette and compare,
         // per predicted-VISIBLE pixel, against the current YOLO foreground. Lit by a "table" mask ⇒ occupancy
@@ -110,7 +113,22 @@ void TableExistence::update_and_remove(TableFitter& fitter, TableLidarIngestor* 
                 // ⚠Consequence: a phantom is now only removable from an admissible viewpoint — still, and
                 // reasonably framed. That is what the epistemic planner exists to produce, but removal now
                 // waits for a good look instead of happening while driving past.
-                const float raw_free = (observed or inst.dbg_gated) ? 0.0f : sil.e_free;
+                //
+                // ★2026-08-06 — THE GUARD MUST READ THE GATE'S *REASON*, NOT THE GATE. `dbg_gated` is
+                // `trunc_gated or not fixated`, and `fixated` requires npts ≥ FixationMinPts. A PHANTOM HAS NO
+                // MASK BY DEFINITION, so npts = 0 ⇒ never fixated ⇒ permanently gated ⇒ its absence evidence was
+                // permanently zeroed: the channel demanded a mask on the object in order to believe there is no
+                // mask on the object. Live proof (table_2, a 2-frame YOLO blip at (-3.66,-0.07)): gated=1 on
+                // 3239/3239 cycles, and on the one confident look — sndet 640, central 1.000, p_detect 0.545,
+                // e_free 640, robot parked and staring — sfree_eff was still 0.00, with L pinned at the +4 clamp.
+                // Only the VIEWPOINT reasons make a silhouette comparison measure registration instead of
+                // existence; point-starvation is the observation itself. Second defect fixed here: the fit
+                // returns early when no mask arrives, so on exactly the cycles this guard fires the flags were
+                // STALE (from whenever the table was last seen) — dbg_gate_fresh says whether they mean anything.
+                const bool view_untrustworthy = inst.dbg_gate_fresh
+                                            and (inst.dbg_trunc_gated or not inst.dbg_fix_still
+                                                                      or not inst.dbg_fix_centred);
+                const float raw_free = (observed or view_untrustworthy) ? 0.0f : sil.e_free;
                 // P(detect | present, geometry): how confidently the ZED would resolve this table FROM HERE.
                 // in_fov_frac folds the real FRUSTUM + occlusion; range_conf the angular-size drop; central_frac
                 // whether the robot is actually LOOKING at it (a peripheral table clipping the wide FoV edge is
@@ -120,7 +138,27 @@ void TableExistence::update_and_remove(TableFitter& fitter, TableLidarIngestor* 
                 // A verifying view = CLOSE (range_conf) + in frustum & unoccluded (in_fov_frac) + the robot is
                 // LOOKING at it (central_frac). NOT obliquity: this robot is chronically edge-on and an edge-on
                 // table IS detectable up close (table_1), so obliquity would wrongly block legitimate removal.
-                const float p_detect = absence_range_conf(sil.mean_range_m) * sil.in_fov_frac() * sil.central_frac();
+                // ★2026-08-06 — P(detect) IS UNIMODAL IN FRAMING, NOT MONOTONIC IN RANGE. The old form was
+                // `absence_range_conf(range) · in_fov_frac · central_frac`, and absence_range_conf is
+                // min(1, (ref/range)^power): ONE-SIDED. It discounts absence only when the table is FAR, and
+                // returns FULL confidence up close — exactly where a ~0.9 m table overflows the ZED frame, YOLO
+                // loses the context it needs, and no mask comes back. That is not evidence of removal, it is a
+                // blind spot, and it deleted the REAL table on 2026-08-06: at range 0.46 m with npts=0 for ~35
+                // cycles, p_detect climbed 0.16 → 0.83 as the robot CENTRED on the table, L fell +2.24 → −4.00
+                // and the debounce ran to 15.16 (phantom_events DEATH row: range 0.88 m, in_fov 0.92,
+                // central 0.63, fixated 0). Driving closer made the agent MORE confident the table was gone.
+                //
+                // rc::detect::p_detect is the shared model that already gets this right — two logistics on the
+                // projected FILL fraction, so it → 0 both when the object is too few pixels AND when it crowds
+                // the frame. `initialize()` has always claimed "ONE detector envelope, both directions"; until
+                // now only the epistemic planner honoured it while removal kept its own one-sided range curve.
+                // Same envelope instance, so the viewpoint the planner drives to is the argmax of the model
+                // absence is weighted by. At the death geometry it returns ~0.002 instead of 0.83.
+                // roi_fill is refreshed every cycle by compute_projected_roi, including on no-mask cycles.
+                const float p_detect = cfg_.existence_absence_envelope
+                    ? rc::detect::p_detect(inst.roi_fill, sil.in_fov_frac(), det_env_) * sil.central_frac()
+                    : absence_range_conf(sil.mean_range_m) * sil.in_fov_frac() * sil.central_frac();
+                cycle_p_detect = p_detect;
                 const float verify = raw_free * (1.0f - p_detect);        // un-confident absence → go-verify surprise
                 // p_detect must scale the SATURATED per-cycle log-odds, NOT the raw pixel count. Scaling the count
                 // is a no-op in practice: e_free is thousands of pixels, so even p_detect=0.02 leaves the product
@@ -152,8 +190,22 @@ void TableExistence::update_and_remove(TableFitter& fitter, TableLidarIngestor* 
         // there, so a beam hits rim/top = occupancy or passes through = gone — no hollow ambiguity between legs).
         if (sweep)
         {
+            const float slab_lo = bs.H - rc::TableModel::TOP_THICKNESS;
             rc::exist::Evidence ev = rc::exist::carve_box(origin, *sweep, bs.cx, bs.cy, bs.yaw, bs.w, bs.h,
-                                                          bs.H - rc::TableModel::TOP_THICKNESS, bs.H, surf_sigma, sm);
+                                                          slab_lo, bs.H, surf_sigma, sm);
+            // NEIGHBOURHOOD SAMPLE for the measured clutter prior: the SAME slab band with the footprint scaled
+            // by √2, so the shell (outer minus this box) has exactly the box's own volume and the two return
+            // rates are comparable samples of the same structure, gathered by the same beams. See
+            // rc::exist::measure_clutter. Cheap: one extra carve of a box twice this one's footprint.
+            rc::exist::LocalClutter clutter;
+            if (cfg_.existence_local_clutter)
+            {
+                constexpr float kEqualVolumeDilation = 1.41421356f;   // √2 in x and y ⇒ 2× area ⇒ shell ≡ box
+                const rc::exist::Evidence ev_outer = rc::exist::carve_box(
+                    origin, *sweep, bs.cx, bs.cy, bs.yaw,
+                    kEqualVolumeDilation * bs.w, kEqualVolumeDilation * bs.h, slab_lo, bs.H, surf_sigma, sm);
+                clutter = rc::exist::measure_clutter(ev, ev_outer, sm);
+            }
             // Leg OCCUPANCY (the 3D model has 4 legs; the rings hit them too). Occupancy-ONLY: legs are thin, so a
             // MISS is not evidence of absence and the hollow space between them must never vote free. Carve each leg's
             // tall volume [0, H−t] and add only its e_occ — robustifies CONFIRMATION when the thin top slab sits at an
@@ -197,21 +249,78 @@ void TableExistence::update_and_remove(TableFitter& fitter, TableLidarIngestor* 
                 // REFUTED on live data (2026-07-12) and its flag has been removed; occupancy still counts and
                 // holds L up. e_free is computed above only for the diagnostic columns.
                 inst.dbg_ex_lidar_free_eff = 0.0f;
-                ev.log_odds_delta = rc::exist::hollow_guarded_delta(ev, true, sm);
-                inst.existence.integrate(ev);
-                integrated = true;
+                // ★2026-08-06 — the occupancy half is now a CONTRAST against the measured neighbourhood, not a
+                // count against an assumed-empty room. `hollow_guarded_delta` scored every returning beam at
+                // log(pd/0.05), so ANY occupancy was worth a full confident hit and re-pinned L at the +4 clamp
+                // every cycle, after the camera's absence and before should_remove — the RATCHET that
+                // existence_belief.h names as a bug. Live proof: the phantom's box returned 6.56% of beams and
+                // the REAL table's 1.96% (both saturating to the same +2.83), so the channel ranked the phantom
+                // 3.3× above the truth. Replaying the whole run, the LiDAR contributed +15073 log-odds against
+                // the camera's −710. A contrast is 0 where the object is indistinguishable from what surrounds
+                // it, which is the whole of the phantom-on-a-wall case. Set ExistenceLocalClutter=false to A/B
+                // back to the historic form.
+                ev.log_odds_delta = cfg_.existence_local_clutter
+                                  ? rc::exist::contrast_delta(ev, clutter, sm)
+                                  : rc::exist::hollow_guarded_delta(ev, true, sm);
+                inst.dbg_ex_clutter_q  = clutter.rate;
+                inst.dbg_ex_clutter_n  = clutter.n_reached;
+                //
+                // ★★THE LiDAR IS IDENTITY-BLIND, SO IT DOES NOT VOTE ON TABLE-NESS (default; 2026-08-06).
+                //
+                // The contrast above fixes the phantom-over-a-WALL case: object and neighbourhood become
+                // indistinguishable and the channel falls silent. It does NOT fix the case actually on the floor
+                // here — a REAL, COMPACT object that YOLO mistook for a table. There the shell is empty air, the
+                // contrast is large and positive, and the channel confirms the phantom forever. It is right to:
+                // the beams really do return. They are simply not evidence for the proposition being tracked.
+                //
+                // The existence log-odds is about "is there a TABLE here", and range data cannot separate a table
+                // from any other object of similar extent: P(return | table) ≈ P(return | that bin / box / chair),
+                // so the likelihood ratio is ≈1 and the honest ΔL is 0 — for confirmation as much as for removal.
+                // The measurement is unambiguous that this is not merely weak but INVERTED: over ~5400 cycles the
+                // real table returned 1.96% of the beams reaching it and the phantom 6.56%, and both saturated to
+                // the same +2.83. A channel that ranks the phantom 3.3× above the truth must not be allowed to
+                // outvote the one sensor that can read a LABEL.
+                //
+                // What remains is exactly the user's test, and it is the silhouette channel's job: from a
+                // viewpoint where we can infer YOLO SHOULD have detected a table (p_detect = range_conf ·
+                // in_fov_frac · central_frac), it repeatedly did not — ExistenceRemoveFrames cycles in a row.
+                // Nothing else gets a vote. LiDAR keeps its two real jobs untouched: the geometric fit
+                // (LidarPrecision) and occlusion reasoning.
+                //
+                // A/B: ExistenceLidarConfirms=true restores a voting LiDAR — with ExistenceLocalClutter it votes
+                // by contrast, without it by the historic ratchet that pinned L at the clamp forever.
+                inst.dbg_ex_lidar_llr = cfg_.existence_lidar_confirms ? ev.log_odds_delta : 0.0f;
+                if (cfg_.existence_lidar_confirms)
+                {
+                    inst.existence.integrate(ev);
+                    integrated = true;
+                }
             }
         }
 
         // Debounce advances ONLY on an evidence cycle, so it counts sustained EVIDENCE agreement (not wall-clock
         // cycles) regardless of the two sensors' rates. A transient hiccup still can't delete a real table.
+        //
+        // ★2026-08-06 — AND IT MUST COUNT LOOKS, NOT CYCLES. `++streak` on any cycle where should_remove(L) holds
+        // made this a TIMER: once L dipped below the threshold, cycles carrying ZERO evidence (p_detect = 0 —
+        // "I could not have seen it from here") kept the count climbing, so a table nudged under by two ambiguous
+        // frames was deleted 15 cycles later by the mere passage of uninformative time. The LiDAR ratchet hid
+        // this by pinning L at the clamp; removing that vote exposed it, and the replay deleted the REAL table at
+        // cycle 98 — its cycles 96–132 read sndet 14/16/14/7 with p_detect 0.000 throughout.
+        //
+        // A cycle now contributes its own p_detect, so ExistenceRemoveFrames means "this many FULLY-RESOLVING
+        // looks' worth of sustained absence" — which is exactly the stated test: from a viewpoint where we can
+        // infer YOLO should have detected a table, it did not, and enough times over. An unresolvable cycle adds
+        // 0 and HOLDS (it is neither evidence to delete nor evidence to forgive); occupancy still resets to 0.
         if (integrated)
         {
-            if (inst.existence.should_remove(cfg_.existence_removal_prob)) ++inst.existence_remove_streak;
-            else                                                          inst.existence_remove_streak = 0;
+            if (inst.existence.should_remove(cfg_.existence_removal_prob))
+                inst.existence_remove_streak += cycle_p_detect;
+            else
+                inst.existence_remove_streak = 0.0f;
 
             if (fitter.should_log(inst))
-                std::print("[{}] [existence] L={:.2f} p={:.2f} | lidar occ={:.1f} free={:.1f} n={} | sil occ={:.0f} free={:.0f} ndet={} | {} streak={}\n",
+                std::print("[{}] [existence] L={:.2f} p={:.2f} | lidar occ={:.1f} free={:.1f} n={} | sil occ={:.0f} free={:.0f} ndet={} | {} streak={:.1f}\n",
                            inst.node_name, inst.existence.logodds(), inst.existence.p_exists(),
                            inst.dbg_ex_lidar_occ, inst.dbg_ex_lidar_free, inst.dbg_ex_lidar_n,
                            inst.dbg_ex_sil_occ, inst.dbg_ex_sil_free, inst.dbg_ex_sil_ndet,

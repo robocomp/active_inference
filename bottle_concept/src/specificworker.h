@@ -62,7 +62,8 @@
 #include "bottle_evaluator.h"   // rc::BottleEvaluator (validation harness)
 #include "../../common/mask_ingestor/mask_ingestor.h"  // rc::MaskIngestor (masks reading)
 #include "bottle_scene_graph.h" // rc::BottleSceneGraph (DSR node/RT I/O)
-#include "bottle_fitter.h"      // rc::BottleFitter (active-inference fit core)
+#include "bottle_fitter.h"
+#include "../../common/phantom_log/phantom_log.h"   // rc::history::PhantomLog (shadow-mode birth/death record)      // rc::BottleFitter (active-inference fit core)
 #include "bottle_lidar_ingestor.h"  // rc::BottleLidarIngestor (lidar3D media plane → room-frame sweep)
 #include "../../common/instance_tracker/instance_tracker.h"   // rc::InstanceTracker (birth/associate/death)
 #include "../../common/dashboard/belief_inspector.h"   // rc::BeliefInspector (full-belief bottom panel)
@@ -85,6 +86,12 @@ public:
 public slots:
     void initialize();
     void compute();
+    // SHADOW-MODE birth/death recorder (CONCEPT_AGENT_LIFECYCLE.md §4.2). Records ONLY — it can never
+    // alter a birth or a removal. Attribution fields captured at death separate a genuine classifier
+    // phantom from one of our own removal defects.
+    void log_phantom_event(std::string_view event, std::uint64_t id, std::string_view name,
+                           float x, float y, const rc::BottleInstance* inst, std::string_view note);
+
     void emergency();
     void restore();
     int  startup_check();
@@ -205,6 +212,7 @@ private:
     std::unique_ptr<rc::BottleSceneGraph> scene_graph_;  // DSR node/RT I/O (table lookup, birth, write-back)
     std::unique_ptr<rc::BottleEvaluator>  evaluator_;    // Webots-GT / sweep / eval CSV (no-op unless flagged)
     std::unique_ptr<rc::BottleFitter>     fitter_;       // active-inference fit core (owns the instance map)
+    rc::history::PhantomLog                             phantom_log_;   // shadow-mode birth/death record
     std::unique_ptr<rc::BottleLidarIngestor> lidar_ingestor_;  // lidar3D media plane → room-frame sweep (feeds fitter)
 
     // Multi-instance birth/associate/death (shared rc::InstanceTracker) — the only instance-lifecycle

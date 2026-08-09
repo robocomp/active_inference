@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -45,9 +46,15 @@ public:
     // `preferred_name` (identity RE-ACQUISITION): reuse the name of a door that was removed and is now coming
     // back at this spot, so it keeps its identity in the graph instead of taking the next free door_N. Ignored
     // if empty or if a node of that name still exists.
+    // `reserved_names` — names still HELD BY A GHOST (a removed door that may yet come back). A freed number
+    // must not be handed to a different physical door while its owner can still re-acquire it: that is how
+    // "door_1" migrated across the room between lives, and how the original door lost its identity memory
+    // (see SpecificWorker::remember_ghost). Reserved names only raise the counter; they never block
+    // `preferred_name`, which IS the ghost being consumed.
     std::uint64_t create_instance_from_detection(const Eigen::Vector3f& centroid_room,
                                                  std::uint64_t room_node_id,
-                                                 std::string_view preferred_name = {});
+                                                 std::string_view preferred_name = {},
+                                                 std::span<const std::string> reserved_names = {});
 
     // Publish the instance's fitted model to its DSR node (geometry + FE + mesh + RFE/voxel-bank) and
     // the room→door RT edge. persist_* resolves the node by id first; both no-op if the node is gone.

@@ -18,7 +18,8 @@
 #include <array>
 #include <cmath>
 
-#include "door_belief.h"            // AI2 belief: Σ + predicted_information for the Σ-based NBV
+#include "door_belief.h"                             // AI2 belief: Σ + predicted_information for the NBV
+#include "../../common/nbv/viewpoint_score.h"        // rc::nbv — the shared DETECTION-WEIGHTED NBV core
 
 // ─── Proposal ────────────────────────────────────────────────────────────────
 
@@ -55,16 +56,38 @@ public:
      * (DoorBelief::predicted_information), Rᵢ = σ_base² + (lat_rate·standoffᵢ)². Targets the dominant
      * uncertainty eigen-direction (an unobserved extent / seat depth / yaw).
      */
-    EpistemicProposal compute(const DoorBelief& belief, float lat_rate, float sigma_base) const;
+    /// The returned gain is DETECTION-WEIGHTED: p_detect(face) · ΔH_D-optimal(face). A face the detector
+    /// cannot fire from is worth ~0 nats, so it cannot out-bid nav_dist in the controller's EFE and the robot
+    /// stops paying travel for a look that could not have produced a mask.
+    /// @param obstacles other objects, TRUE extents; a viewpoint inside one is rejected, a partly-occluded
+    ///                  one is degraded continuously via visible_frac — never dropped.
+    EpistemicProposal compute(const DoorBelief& belief, float lat_rate, float sigma_base,
+                              const rc::nbv::Sensor& sensor_in,
+                              const std::vector<rc::nbv::Obstacle>& obstacles = {},
+    /// @param room_polygon the REACHABLE region. Without it the winner can be the face on the far side of the
+    ///                  wall: it is fully visible through the aperture and completely unreachable (live
+    ///                  2026-08-07 — +y and -y tied exactly and the target landed at y=7.27 in a 4.63 m room).
+                              const std::vector<Eigen::Vector2f>& room_polygon = {},
+    /// @param plan_out optional: the full four-face plan behind the decision (per-face stand-off, visibility,
+    ///                  reachability, P(detect), expected gain). For monitoring — see etc/door_nbv_log.csv.
+                              rc::nbv::Plan* plan_out = nullptr) const;
 
-    // Minimum stand-off (m) from the target: for a small object like a door the FoV-fit distance is tiny,
-    // so the viewpoint always sits at this floor. Set it further out than the FoV needs — YOLO misses a
-    // door that fills/overflows the frame from too close. Config DoorConcept.MinStandOffM.
-    void set_min_standoff(float m) { min_standoff_ = m; }
+    // ★The old `MinStandOffM = 2.0` floor is GONE. It was a hand-picked stand-in for the near shoulder of the
+    // detector envelope ("YOLO misses doors seen too close") — which is now MODELLED: P(detect) is unimodal in
+    // projected fill, so the stand-off is its argmax and the near limit falls out of the same curve the
+    // removal channel weights absence by. Config DoorConcept.MinStandOffM is now unread.
+    void set_detector_envelope(const rc::detect::DetectorEnvelope& e) { det_env_ = e; }
+
+
+    // Footprint radius of the robot: the geometric floor under every stand-off. A physical dimension.
+    void set_robot_radius(float m) { robot_radius_m_ = m; }
 
 private:
     float d_obs_;
-    float min_standoff_ = 1.8f;   // door viewing distance floor (m)
+    // The envelope is OWNED (config-driven); the camera GEOMETRY arrives per call, because the zed
+    // intrinsics appear only once robot_concept starts publishing frames. See sensor_from_graph().
+    rc::detect::DetectorEnvelope det_env_{};
+    float robot_radius_m_ = 0.30f;   // Shadow
 };
 
 }  // namespace rc

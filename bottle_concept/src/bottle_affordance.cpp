@@ -7,6 +7,7 @@
 #include <cmath>
 
 #include "../../common/affordance_protocol/affordance_protocol.h"
+#include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
 
 namespace rc {
 
@@ -132,6 +133,7 @@ void BottleAffordance::create_node(const EpistemicProposal& prop)
     // default; producers can override per node here.
     rc::affordance::write_contract(*G_, aff_node, rc::affordance::default_contract_for("cylinder"));
 
+    rc::provenance::stamp_creation(*G_, aff_node);   // birth stamp: epoch ms + local ISO-8601
     const auto id_opt = G_->insert_node(aff_node);
     if (!id_opt.has_value())
     {

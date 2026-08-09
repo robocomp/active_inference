@@ -323,6 +323,9 @@ bool RefrigeratorFitter::ensure_instance(const DSR::Node& node, std::uint64_t ro
     // Tracker birth seed: authoritative for a freshly-born instance. The room→refrigerator RT edge written at
     // birth is not reliably queryable this same cycle (it reads as 0,0), and the warm-start would then
     // freeze the model at the origin forever → the tracker never associates and re-births endlessly.
+    // Only the XY is seeded here. All cold-start GEOMETRY (centre, height, footprint, yaw) is owned by
+    // run_inference's lazy snap, which overwrites it from the observed cloud on the first frame with points —
+    // anything set here beyond xy would simply be discarded one frame later.
     if (auto it = birth_seeds_.find(node.id()); it != birth_seeds_.end())
     {
         init_state.cx = it->second.x();
@@ -531,6 +534,18 @@ float RefrigeratorFitter::run_inference(RefrigeratorInstance& inst, const Refrig
     {
         const auto& m = inst.model.state();
         RefrigeratorBeliefState s0{m.cx, m.cy, m.refrigerator_height, m.w, m.h, m.yaw};
+
+        // The cold-start cloud is THIS FRAME's mask only.
+        //
+        // ★Do not union the candidate's probation burst in here. It was tried (common/birth_fragment) and
+        // measurably made birth WORSE: unioning ~8 frames of room-frame points spreads them by the robot-pose
+        // error accumulated over the window, and the footprint moment reads that spread as extent. Live A/B on
+        // the same fridge — single frame born at w=0.669 h=0.600, already the converged values; burst union
+        // born at w=0.915 (+37%) h=0.494, then ~255 cycles crawling back to w=0.673 h=0.626. The give-away is
+        // that ext_MAJOR inflated too: a genuine second face lifts only ext_minor, blur stretches both. This is
+        // Khronos's spatio-temporal local consistency (arXiv:2402.13817 eq. 8) failing over a birth window —
+        // and at BirthFrames=8 / ~10 Hz the robot cannot reach a second face anyway, so the union can only ever
+        // be the same face smeared. See [[refrigerator-birth-burst-smear]].
         if (npts > 0)
         {
             Eigen::Vector3f sum = Eigen::Vector3f::Zero();
@@ -574,6 +589,15 @@ float RefrigeratorFitter::run_inference(RefrigeratorInstance& inst, const Refrig
                     s0.w = std::max(0.10f, mom.ext_major);          // major axis = the seen face's width (reliable)
                     s0.h = (mom.ext_minor > cfg_.ai2_depth_obs_band_m) ? mom.ext_minor
                                                                        : cfg_.ai2_prior_footprint_m;
+                    // Expected: "prior". From ONE camera pose the footprint is a line, so ext_minor is mask
+                    // noise (live: ~0.03 against a 0.10 band) and depth correctly defers to the prior. A birth
+                    // reporting DEPTH RESOLVED from a single frame means the cloud is not one face — check
+                    // ext_major against the fridge's real width before believing it.
+                    std::print("[{}] cold-start footprint: {} pts → ext_major={:.3f} ext_minor={:.3f} "
+                               "(band={:.3f}) → h={:.3f} [{}]\n",
+                               inst.node_name, npts, mom.ext_major, mom.ext_minor,
+                               cfg_.ai2_depth_obs_band_m, s0.h,
+                               mom.ext_minor > cfg_.ai2_depth_obs_band_m ? "DEPTH RESOLVED" : "prior");
                     // Only commit the orientation when the footprint is clearly anisotropic. A near-square
                     // footprint has an ill-defined principal axis (phi swings ±90° on noise), so birthing yaw
                     // from a single frame would seed a random ±90°; leave yaw at its RT/default seed and let
@@ -644,6 +668,8 @@ float RefrigeratorFitter::run_inference(RefrigeratorInstance& inst, const Refrig
         p.plaus_height_prior_gain = cfg_.fridge_filter_enabled ? cfg_.plaus_height_prior_gain : 0.0f;
         inst.ai2_belief = RefrigeratorBelief(s0, p);
         inst.ai2_initialized = true;
+        std::print("[{}] cold-start state: cx={:.2f} cy={:.2f} H={:.2f} w={:.2f} h={:.2f} yaw={:.2f}\n",
+                   inst.node_name, s0.cx, s0.cy, s0.H, s0.w, s0.h, s0.yaw);
     }
 
     if (observation.has_fresh_data)
@@ -1041,7 +1067,17 @@ void RefrigeratorFitter::log_ai2_csv(const RefrigeratorInstance& inst, int npts,
                  << "mom_major,mom_minor,mom_phi,mom_pts,"   // RAW footprint statistic (basin diagnosis)   // rogue-mask diag
                  << "ex_L,ex_p,ex_locc,ex_lfree,ex_lfree_eff,ex_ln,ex_socc,ex_sfree,ex_sfree_eff,ex_sndet,ex_streak,"
                  << "ex_pdetect,ex_central,ex_verify,ex_wantsverify,"
-                 << "omega_w,omega_yaw,tau_w,tau_yaw\n";   // HISTORY: inferred log-volatility + retention (frames)   // existence-removal + verification-gate diag
+                 << "omega_w,omega_yaw,tau_w,tau_yaw,"   // HISTORY: inferred log-volatility + retention (frames)   // existence-removal + verification-gate diag
+                 // DETECTOR-ENVELOPE CALIBRATION. min_fill/max_fill/soft are an admitted PRIOR, never measured,
+                 // and every stand-off in the fleet now inherits them. These are the columns the offline fit
+                 // needs: (roi_fill, det_alive) is the (framing, hit) pair, ex_p above weights the trial so a
+                 // miss caused by the object not being there is not charged to the envelope, and the two axes
+                 // let the fit control for grazing views — see roi_fill_h/roi_fill_v in refrigerator_instance.h
+                 // for why the max alone biases the result.
+                 << "roi_fill,roi_fill_h,roi_fill_v,roi_valid,det_alive,frames_since_det,"
+                 // What the NBV actually proposed (lags the state columns by one cycle; see the instance).
+                 // nbv_vfov=0 ⇒ the sensor model was incomplete and NO proposal was made that cycle.
+                 << "nbv_standoff,nbv_tx,nbv_ty,nbv_pdetect,nbv_vfov\n";
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
@@ -1078,7 +1114,12 @@ void RefrigeratorFitter::log_ai2_csv(const RefrigeratorInstance& inst, int npts,
              << inst.dbg_ex_pdetect << ',' << inst.dbg_ex_central << ','
              << inst.verify_surprise << ',' << (inst.wants_verification ? 1 : 0) << ','
              << inst.ai2_belief.log_volatility()(3) << ',' << inst.ai2_belief.log_volatility()(5) << ','
-             << inst.ai2_belief.retention_frames()(3) << ',' << inst.ai2_belief.retention_frames()(5) << '\n';   // existence-removal + verification-gate diag
+             << inst.ai2_belief.retention_frames()(3) << ',' << inst.ai2_belief.retention_frames()(5) << ','   // existence-removal + verification-gate diag
+             << inst.roi_fill << ',' << inst.roi_fill_h << ',' << inst.roi_fill_v << ','
+             << (inst.roi_valid ? 1 : 0) << ',' << (inst.detection_alive ? 1 : 0) << ','
+             << inst.frames_since_detection << ','
+             << inst.dbg_nbv_standoff << ',' << inst.dbg_nbv_target_x << ',' << inst.dbg_nbv_target_y << ','
+             << inst.dbg_nbv_pdetect << ',' << inst.dbg_nbv_vfov << '\n';
     ai2_csv_.flush();
 }
 
@@ -1161,6 +1202,51 @@ bool RefrigeratorFitter::self_test()
     std::print("RefrigeratorFitter::self_test [confirm-only hold]  {}  |dPredict|={:.4f} |dUpdate|={:.4f}\n",
                ok_branch ? "PASS" : "FAIL", d_pred, d_upd);
     all = all and ok_branch;
+
+    // (4) Depth observability, the assumption the cold-start snap rests on: a footprint moment from ONE
+    //     viewpoint CANNOT resolve depth. One camera pose sees a single vertical face, whose footprint
+    //     projects to a line, so ext_minor measures mask noise (~0.03) and stays under the band — which is why
+    //     run_inference does h = (ext_minor > depth_obs_band) ? ext_minor : prior and lands on the prior.
+    //     The union of two perpendicular faces is what it would take to clear the band. This is also why the
+    //     probation burst is NOT unioned in: it never contains a second face at BirthFrames=8, so anything
+    //     that clears the band there is pose-error blur, not depth (see the ★ note in run_inference).
+    {
+        std::mt19937 rng(4242);
+        std::uniform_real_distribution<float> U01(0.0f, 1.0f);
+        std::normal_distribution<float> jitter(0.0f, 0.01f);            // mask/de-projection noise
+        const float H_gt = 1.85f, W_gt = 0.70f, D_gt = 0.60f, yaw_gt = 0.40f;
+        const float cg = std::cos(yaw_gt), sg = std::sin(yaw_gt);
+        const auto to_room = [&](float lx, float ly, float z) -> Eigen::Vector3f
+        { return {0.20f + cg * lx - sg * ly, -0.30f + sg * lx + cg * ly, z}; };
+        // The +y face: a line in footprint, spanning the WIDTH only.
+        std::vector<Eigen::Vector3f> face_y, face_x;
+        for (int i = 0; i < 600; ++i)
+            face_y.push_back(to_room((U01(rng) - 0.5f) * W_gt + jitter(rng),
+                                     0.5f * D_gt + jitter(rng), U01(rng) * H_gt));
+        // The +x face: perpendicular, spanning the DEPTH — only a second viewpoint ever sees this.
+        for (int i = 0; i < 600; ++i)
+            face_x.push_back(to_room(0.5f * W_gt + jitter(rng),
+                                     (U01(rng) - 0.5f) * D_gt + jitter(rng), U01(rng) * H_gt));
+
+        const float z_lo = 0.03f, z_hi = H_gt + 0.03f;
+        const auto m_single = RefrigeratorBelief::footprint_moment(face_y, z_lo, z_hi);
+        std::vector<Eigen::Vector3f> both = face_y;
+        both.insert(both.end(), face_x.begin(), face_x.end());
+        const auto m_union = RefrigeratorBelief::footprint_moment(both, z_lo, z_hi);
+
+        const float band = cfg.ai2_depth_obs_band_m;
+        const bool ok_depth = m_single.ok and m_union.ok
+                          and m_single.ext_minor < band       // one face   → depth UNRESOLVED, h stays at prior
+                          and m_union.ext_minor  > band       // two faces  → only then is depth observable
+                          and std::abs(m_union.ext_major - m_single.ext_major) < 0.30f;  // width must AGREE:
+                          // a true second face lifts only the minor axis. Blur stretches BOTH — that is how
+                          // the live burst gave itself away (ext_major 0.669 -> 0.915 while claiming depth).
+        std::print("RefrigeratorFitter::self_test [depth observ.]     {}  ext_minor: single={:.3f} union={:.3f}"
+                   "  (band={:.3f})  ext_major: single={:.3f} union={:.3f}\n",
+                   ok_depth ? "PASS" : "FAIL", m_single.ext_minor, m_union.ext_minor, band,
+                   m_single.ext_major, m_union.ext_major);
+        all = all and ok_depth;
+    }
 
     return all;
 }

@@ -116,6 +116,12 @@ public:
     { room_interior_ = interior; room_polygon_ = std::move(polygon); have_room_geometry_ = not room_polygon_.empty();
       // The projection unit needs the same walls: a silhouette sample behind one is NOT "predicted visible".
       if (projection_) projection_->set_room_polygon(room_polygon_); }
+    // The REACHABLE region, for the NBV. A refrigerator stands against a wall, so two of its four faces have
+    // their viewpoints outside the room; without this the planner cannot tell, because the raw information
+    // term is direction-blind and `is_reachable` imposes no constraint on an empty polygon. See the call in
+    // step_epistemic() and rc::nbv::is_reachable.
+    bool has_room_polygon() const { return room_polygon_.size() >= 3; }
+    const std::vector<Eigen::Vector2f>& room_polygon() const { return room_polygon_; }
     WallRef nearest_wall(const Eigen::Vector2f& q) const;
     // Part B (chain covariance): enable adding the localization/chain term J·Σ_chain·Jᵀ (measurement
     // frame → room, capture-stamp pinned) to each instance, read by the scene-graph's RT-cov write.
@@ -126,6 +132,13 @@ public:
     // Room-frame XY a NEWLY born instance's model should start at (from the tracker's detection). The
     // room→refrigerator RT edge written at birth is NOT reliably queryable in the same cycle, so ensure_instance
     // would read the 0,0 default and the model would freeze there. Consumed once by ensure_instance.
+    //
+    // XY only, on purpose. Cold-start GEOMETRY belongs to run_inference's lazy snap (centre + 95th-percentile
+    // height + footprint moment, depth left at the prior until the cloud spans it, yaw committed only on a
+    // clearly anisotropic footprint), which overwrites whatever is set here on the first frame with points.
+    // A candidate's probation burst was tried as a richer seed and measurably hurt — see the ★ note in
+    // run_inference. The burst is still collected, but it is used only to REFUSE implausible births
+    // (specificworker_lifecycle.cpp), never to seed geometry.
     void note_birth(std::uint64_t id, const Eigen::Vector2f& xy) { birth_seeds_[id] = xy; }
     bool should_log(const RefrigeratorInstance& inst) const;
 

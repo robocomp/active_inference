@@ -66,6 +66,12 @@ struct TableConfig
 
     // ── AI2 belief (TABLE.md) — full-covariance recursive filter ──────────────────────────
     float ai2_sigma_base_m    = 0.03f;   // base on-surface obs noise std (m); R = σ² (+ motion_var + …)
+    // ── DETECTOR ENVELOPE (common/detectability) — the YOLO inverse model ─────────────────────────
+    // Defaults are the fleet PRIOR, not a measurement, so behaviour is unchanged until these are set in
+    // etc/config.toml. See the block there for the fit measured from this agent's own ai2_log.
+    float detect_min_fill     = 0.10f;
+    float detect_max_fill     = 0.60f;
+    float detect_soft         = 0.06f;
     float ai2_clutter_frac    = 0.10f;   // ε: prior weight of the uniform clutter mixture component
     float ai2_clutter_scale_m = 0.12f;   // a point further than ~this from every surface is likely clutter
     float ai2_prior_size_std  = 0.30f;   // broad size prior std (m) on w,h,H
@@ -297,6 +303,33 @@ struct TableConfig
     // space between them must not vote absence). Robustifies confirmation when the thin top slab is at an awkward
     // height for the LiDAR rings (tall legs are far likelier to be struck). Occupancy-only ⇒ cannot false-remove.
     bool  existence_leg_occupancy = true;
+
+    // MEASURED clutter prior for the LiDAR occupancy half (rc::exist::measure_clutter / contrast_delta). The
+    // configured ExistenceClutterProb answers "P(a beam returns from an EMPTY footprint anyway)" — but the
+    // alternative to a table in a furnished room is a WALL, not empty space, and against that alternative a
+    // return carries no information at all. With this on, the prior is measured each cycle from an equal-volume
+    // shell around the box and the occupancy evidence becomes a CONTRAST: 0 wherever the box is indistinguishable
+    // from what surrounds it. false = the historic hollow_guarded_delta (any occupancy = a full confident hit,
+    // which pinned L at the clamp forever and made a phantom over real structure immortal). See table_existence.cpp.
+    bool  existence_local_clutter = true;
+
+    // Does the LiDAR get a VOTE on whether a TABLE exists? Default NO. Range data cannot separate a table from
+    // any other object of similar extent, so P(return | table) ≈ P(return | that other thing) and its likelihood
+    // ratio for table-ness is ≈1. Measured: the real table returned 1.96% of its beams and a phantom sitting on
+    // a mistaken object 6.56%, both saturating to the same +2.83/cycle — the channel ranked the phantom 3.3×
+    // above the truth and pinned L at the clamp forever. Removal is decided by the ONE sensor that reads a
+    // label: predicted-visible-but-absent in the camera silhouette, from a viewpoint where p_detect says YOLO
+    // should have seen it, for ExistenceRemoveFrames cycles running. true = restore a voting LiDAR (A/B).
+    bool  existence_lidar_confirms = false;
+
+    // Weight silhouette ABSENCE by the shared DETECTOR ENVELOPE (rc::detect::p_detect: two logistics on the
+    // projected fill fraction) instead of the one-sided range curve. P(detect) is unimodal in FRAMING — it
+    // falls to 0 both when the table is too few pixels AND when it overflows the frame — whereas
+    // ExistenceAbsenceRangeRefM/Power only ever discount a FAR view, leaving the agent maximally confident at
+    // point-blank range where YOLO is blind. That deleted the real table from 0.46 m. Uses the SAME envelope
+    // instance the epistemic planner scores viewpoints with, so the robot drives to the framing removal trusts.
+    // false = the historic range-only weighting (A/B). The range keys stay in use for the LiDAR free half.
+    bool  existence_absence_envelope = true;
 
     // ── RT-edge covariance upload ─────────────────────────────────────────────────────────────────
     // Upload the table pose covariance onto the room→table RT edge (rt_covariance_att, 6×6 SE3), mapped from

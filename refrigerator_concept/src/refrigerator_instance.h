@@ -228,6 +228,25 @@ struct RefrigeratorInstance
     float roi_offset_x = 0.0f;   // [-1,1], 0 = horizontally centred in the image
     float roi_offset_y = 0.0f;   // [-1,1], 0 = vertically centred
     float roi_fill     = 0.0f;   // max(w/W, h/H): projected extent as a fraction of the image
+    // ★The two axes SEPARATELY, for envelope calibration. The detector envelope is a function of roi_fill, the
+    // MAX, which cannot tell "large in both axes" from "tall sliver" — so an edge-on view reads as well-filled
+    // and its misses land in fill bins where framing was never the cause. A fit over a tour containing grazing
+    // views is dragged by that (measured: max_fill 0.850 → 0.715 with a third slivers). The max cannot be
+    // un-mixed afterwards, so log both axes now even though the model consumes only the max.
+    float roi_fill_h   = 0.0f;   // Δcol / W
+    float roi_fill_v   = 0.0f;   // Δrow / H
+
+    // ── Last NBV proposal (diagnostic mirror, written to ai2_log) ────────────────────────────────────
+    // The proposal only ever went to stdout, so "the target is too close" could not be checked without
+    // watching the agent's terminal live — and the affordance node holds the FROZEN pose while a claim is
+    // executing, not the current one, so the graph does not answer it either. These make the planner's
+    // actual output durable. Set in step_epistemic(); the CSV row is written earlier in the same cycle, so
+    // the logged values lag the state columns by one cycle. Diagnostic only — nothing reads them back.
+    float dbg_nbv_standoff = 0.0f;   // m, FACE-relative — the number "too close" is a claim about
+    float dbg_nbv_target_x = 0.0f;   // room frame
+    float dbg_nbv_target_y = 0.0f;
+    float dbg_nbv_pdetect  = 0.0f;   // P(detect) at the proposed pose: ~0 here means we are proposing a blind spot
+    float dbg_nbv_vfov     = 0.0f;   // rad; 0 ⇒ the sensor model was incomplete and NO proposal was made
 };
 
 }  // namespace rc

@@ -13,6 +13,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # stabiliser is header-only. So none of bottle/table's torch/robust_metrics wiring.
 include_directories(${HUMAN_CORE_DIR})
 
+# Shared ai_common::* libraries (see common/CMakeLists.txt). Placed after the C++23 clamp above so
+# the ai_common targets build at the same standard as the rest of this component (their
+# target_compile_features is a FLOOR of cxx_std_23, so the clamp is honoured, not overridden).
+add_subdirectory(${ACTIVE_INFERENCE_COMMON_DIR} ${CMAKE_CURRENT_BINARY_DIR}/ai_common EXCLUDE_FROM_ALL)
+LIST(APPEND LIBS
+  ai_common::presence     # agent presence monitor + coordinator
+  ai_common::ui           # TimeSeriesPlot (compiled Q_OBJECT)
+  ai_common::ui_headers   # custom_widget.h (header-only)
+  ai_common::core         # belief_stabilizer.h / affordance_protocol.h (header-only)
+)
+
 # Sources set
 LIST(APPEND SOURCES
   ../src/specificworker.cpp
@@ -26,31 +37,6 @@ LIST(APPEND SOURCES
   ../src/prior_store.cpp
   ${HUMAN_CORE_DIR}/human_kinematic_model.cpp
   ${HUMAN_CORE_DIR}/vfe_inference.cpp
-  ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/timeseries_plot.cpp
-  ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_monitor/agent_presence_monitor.cpp
-  ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_coordinator/agent_presence_coordinator.cpp
-)
-
-# Headers set (listed for AUTOMOC)
-LIST(APPEND HEADERS
-  ../src/specificworker.h
-  ../src/human_config.h
-  ../src/human_instance.h
-  ../src/skeleton_source.h
-  ../src/human_scene_graph.h
-  ../src/human_fitter.h
-  ../src/epistemic_planner.h
-  ../src/human_affordance.h
-  ../src/prior_store.h
-  ${HUMAN_CORE_DIR}/body18.h
-  ${HUMAN_CORE_DIR}/human_kinematic_model.h
-  ${HUMAN_CORE_DIR}/vfe_inference.h
-  ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/timeseries_plot.h
-  ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/custom_widget.h
-  ${ACTIVE_INFERENCE_COMMON_DIR}/belief_stabilizer/belief_stabilizer.h
-  ${ACTIVE_INFERENCE_COMMON_DIR}/affordance_protocol/affordance_protocol.h
-  ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_monitor/agent_presence_monitor.h
-  ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_coordinator/agent_presence_coordinator.h
 )
 
 # Force-keep libdsr_core (see bottle_concept rationale: --as-needed drops it on a light-DSR build).

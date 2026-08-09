@@ -18,7 +18,8 @@
 #include <array>
 #include <cmath>
 
-#include "chair_belief.h"            // AI2 belief: Σ + predicted_information for the Σ-based NBV
+#include "chair_belief.h"                             // AI2 belief: Σ + predicted_information for the NBV
+#include "../../common/nbv/viewpoint_score.h"          // rc::nbv — the shared DETECTION-WEIGHTED NBV core
 
 // ─── Proposal ────────────────────────────────────────────────────────────────
 
@@ -55,16 +56,38 @@ public:
      * (ChairBelief::predicted_information), Rᵢ = σ_base² + (lat_rate·standoffᵢ)². Targets the dominant
      * uncertainty eigen-direction (an unobserved extent / seat depth / yaw).
      */
-    EpistemicProposal compute(const ChairBelief& belief, float lat_rate, float sigma_base) const;
+    /// The returned gain is DETECTION-WEIGHTED: p_detect(face) · ΔH_D-optimal(face). A face the detector
+    /// cannot fire from is worth ~0 nats, so it cannot out-bid nav_dist in the controller's EFE and the robot
+    /// stops paying travel for a look that could not have produced a mask.
+    /// @param obstacles other objects, TRUE extents; a viewpoint inside one is rejected, a partly-occluded
+    ///                  one is degraded continuously via visible_frac — never dropped.
+    EpistemicProposal compute(const ChairBelief& belief, float lat_rate, float sigma_base,
+                              const rc::nbv::Sensor& sensor_in,
+    /// @param room_polygon the REACHABLE region (room_concept's `delimiting_polygon_x/y`). NOT optional in
+    ///                   practice: the raw information term is direction-blind, so a face whose viewpoint lies
+    ///                   OUTSIDE the room scores identically to the one inside and can win the tie. Nothing
+    ///                   downstream refuses it either — the controller REPAIRS an unroutable standpoint with
+    ///                   nearest_reachable, measured FROM the robot, which snaps it to the floor at the object.
+    ///                   Left empty, rc::nbv::is_reachable imposes no constraint (it refuses to guess).
+                              const std::vector<rc::nbv::Obstacle>& obstacles = {},
+                              const std::vector<Eigen::Vector2f>& room_polygon = {}) const;
 
-    // Minimum stand-off (m) from the target: for a small object like a chair the FoV-fit distance is tiny,
-    // so the viewpoint always sits at this floor. Set it further out than the FoV needs — YOLO misses a
-    // chair that fills/overflows the frame from too close. Config ChairConcept.MinStandOffM.
-    void set_min_standoff(float m) { min_standoff_ = m; }
+    // ★The old `MinStandOffM = 1.8` floor is GONE. It was a hand-picked stand-in for the near shoulder of the
+    // detector envelope ("YOLO misses a chair that fills the frame from too close") — which is now MODELLED:
+    // P(detect) is unimodal in projected fill, so the stand-off is its argmax and the near limit falls out of
+    // the same curve the removal channel weights absence by. Config ChairConcept.MinStandOffM is now unread.
+    void set_detector_envelope(const rc::detect::DetectorEnvelope& e) { det_env_ = e; }
+
+
+    // Footprint radius of the robot: the geometric floor under every stand-off. A physical dimension.
+    void set_robot_radius(float m) { robot_radius_m_ = m; }
 
 private:
     float d_obs_;
-    float min_standoff_ = 1.8f;   // chair viewing distance floor (m)
+    // The envelope is OWNED (config-driven); the camera GEOMETRY arrives per call, because the zed
+    // intrinsics appear only once robot_concept starts publishing frames. See sensor_from_graph().
+    rc::detect::DetectorEnvelope det_env_{};
+    float robot_radius_m_ = 0.30f;   // Shadow
 };
 
 }  // namespace rc

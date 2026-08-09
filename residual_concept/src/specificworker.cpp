@@ -13,14 +13,21 @@
 #include <thread>
 #include <chrono>
 #include <algorithm>
+#include <charconv>
 #include <cmath>
+#include <ctime>
+#include <filesystem>
+#include <format>
 #include <fstream>
+#include <locale>
 #include <print>
+#include <string_view>
 
 #include <QCoreApplication>
 #include <QTimer>
 
 #include <dsr/api/dsr_api.h>
+#include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
 
 SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check)
     : GenericWorker(configLoader, tprx)
@@ -414,8 +421,217 @@ void SpecificWorker::log_phantom_event(std::string_view event, std::uint64_t id,
     phantom_log_.write(e);
 }
 
+// One [perf] line per second: the loop's ACTUAL rate and what it costs.
+//   period mean/worst — measured call-to-call, so it reports the rate the loop really runs at, not the
+//     configured timer period. The worst gap in the window is what a stall feels like; the mean hides it.
+//   busy — mean time spent INSIDE compute(). This loop is SWEEP-DRIVEN: with no fresh LiDAR sweep the cycle
+//     returns immediately, so busy ≪ period is the healthy signature here, and busy → period means the
+//     clustering/fit/grid work has saturated the cycle.
+//   cpu — FPSCounter::get_cpu_use() is `times()`-based: user+sys ticks of the WHOLE PROCESS over the window's
+//     wall time. It therefore counts the LiDAR/ZED ingestor and DDS reader threads too, and >100% is normal
+//     on this multi-threaded agent (100% = one core saturated). Call it exactly once per window — it is
+//     stateful (each call consumes the interval since the previous one).
+namespace
+{
+// ── /proc/self/status field reader (kB) ───────────────────────────────────────────────────────────
+// Returns -1 if the field is absent/unparseable. std::from_chars, NEVER atoi/strtol/`>>`: this is a Qt
+// program and Qt calls setlocale(LC_ALL, "") at startup, which on these es_ES.UTF-8 machines makes every
+// locale-sensitive parse in the process suspect (CLAUDE.md, "Parsing numbers from files"). from_chars is
+// locale-independent by construction and reports failure instead of guessing.
+long read_proc_status_kb(std::string_view key)
+{
+    std::ifstream st("/proc/self/status");
+    if (not st.is_open())
+        return -1;
+    std::string line;
+    while (std::getline(st, line))
+    {
+        if (not std::string_view{line}.starts_with(key))
+            continue;
+        const char* b = line.data() + key.size();
+        const char* const e = line.data() + line.size();
+        while (b < e and (*b == ':' or *b == ' ' or *b == '\t')) ++b;
+        long v = -1;
+        return std::from_chars(b, e, v).ec == std::errc{} ? v : -1;
+    }
+    return -1;
+}
+
+// ── diagnostic-CSV rotation ───────────────────────────────────────────────────────────────────────
+// Open `path` for writing, ARCHIVING any existing file instead of truncating it.
+//
+// WHY: every diagnostic writer here used to open with ios::trunc, so the FIRST restart after an incident
+// destroyed the evidence for that incident. Exactly that happened on 2026-08-08: residual_concept was
+// OOM-killed holding 33.8 GB, and restarting it to investigate overwrote the floor_diag.csv rows for
+// cycle 4080 — the last cycle it ever completed, and the one that would have said whether the read-out
+// handed the publish path a pathological component set. The previous file now moves to
+// etc/archive/<stem>-<when>.csv. Only the newest KEEP_RUNS archives per stem are kept, so a long-lived
+// working copy cannot fill the disk with dead runs.
+//
+// The stamp is taken at ROTATION time (which is startup), so it reads as "archived when this run began",
+// and the fixed-width zero-padded fields sort chronologically as plain text. Built with std::format and
+// explicit integer fields rather than strftime, for the same locale reason as creation_stamp.h.
+constexpr std::size_t KEEP_RUNS = 20;
+
+void open_diag_csv(std::ofstream& f, const std::string& path)
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path p{path};
+
+    if (const auto sz = fs::file_size(p, ec); not ec and sz > 0)
+    {
+        const fs::path dir = p.parent_path() / "archive";
+        fs::create_directories(dir, ec);
+
+        const std::time_t secs = static_cast<std::time_t>(rc::provenance::now_ms() / 1000);
+        std::tm tmv{};
+        const std::string stamp = ::localtime_r(&secs, &tmv) != nullptr
+            ? std::format("{:04}{:02}{:02}-{:02}{:02}{:02}", tmv.tm_year + 1900, tmv.tm_mon + 1,
+                          tmv.tm_mday, tmv.tm_hour, tmv.tm_min, tmv.tm_sec)
+            : std::format("epoch{}", secs);
+        const std::string stem = p.stem().string();
+        const fs::path dst = dir / std::format("{}-{}{}", stem, stamp, p.extension().string());
+
+        fs::rename(p, dst, ec);
+        if (ec)   // different filesystem (or a racing reader): fall back to a copy, keep the evidence
+        {
+            ec.clear();
+            fs::copy_file(p, dst, fs::copy_options::overwrite_existing, ec);
+        }
+        if (ec)
+            std::println("[diag] ⚠ could not archive '{}' ({}) — it will be TRUNCATED", path, ec.message());
+
+        std::vector<fs::path> archived;
+        const std::string prefix = stem + "-";
+        for (const auto& entry : fs::directory_iterator(dir, ec))
+            if (entry.is_regular_file(ec) and entry.path().filename().string().starts_with(prefix))
+                archived.push_back(entry.path());
+        if (archived.size() > KEEP_RUNS)
+        {
+            std::ranges::sort(archived);   // "<stem>-<stamp>" sorts chronologically
+            for (std::size_t i = 0; i + KEEP_RUNS < archived.size(); ++i)
+                fs::remove(archived[i], ec);
+        }
+    }
+
+    f.open(path, std::ios::out | std::ios::trunc);
+    // imbue the classic locale so a float can never be written with a COMMA separator if the C++ global
+    // locale is ever changed — the write side of the same asymmetry that corrupted the depth dataset
+    // (CLAUDE.md; phantom_log.h does this for the same reason).
+    if (f.is_open())
+        f.imbue(std::locale::classic());
+}
+}  // namespace
+
+void SpecificWorker::log_compute_perf(double busy_ms)
+{
+    const auto now = std::chrono::steady_clock::now();
+    if (perf_window_begin_.time_since_epoch().count() == 0)
+        perf_window_begin_ = now;
+    if (perf_last_call_.time_since_epoch().count() != 0)
+        perf_worst_ms_ = std::max(perf_worst_ms_,
+                                  std::chrono::duration<double, std::milli>(now - perf_last_call_).count());
+    perf_last_call_ = now;
+    ++perf_calls_;
+    perf_busy_ms_ += busy_ms;
+
+    const double elapsed_ms = std::chrono::duration<double, std::milli>(now - perf_window_begin_).count();
+    if (elapsed_ms < 1000.0)
+        return;
+
+    const double period_ms = elapsed_ms / std::max(1u, perf_calls_);
+    const double cpu_pct   = std::max(0.0f, fps.get_cpu_use());
+
+    // ── LEAK WATCH ────────────────────────────────────────────────────────────────────────────────
+    // RSS every window, next to the timings, on DISK. Read straight from /proc/self/status rather than
+    // FPSCounter::get_mem_use() (which divides kB by 1000 and returns an int, so a 3 MB/min growth is
+    // invisible in it) and reported as a RATE, because the absolute number says nothing: what matters is
+    // whether it is monotonic. VmHWM comes along because peak==current is precisely what distinguishes a
+    // steady leak from an allocation spike glibc never returned to the OS.
+    //
+    // This pairs with grid_diag.csv via `grid_cycle`: the 2026-08-08 OOM run's telemetry stopped dead at
+    // grid cycle 4080 (25 min in) and then grew for 68 more minutes with no rows at all, so the one thing
+    // the logs could not answer was whether the loop stalled BEFORE or AFTER the memory ran away. A row
+    // per second carrying both the cycle number and RSS answers that on the next occurrence.
+    const long rss_kb = read_proc_status_kb("VmRSS");
+    const long hwm_kb = read_proc_status_kb("VmHWM");
+    if (perf_rss0_kb_ < 0 and rss_kb > 0)
+    {
+        perf_rss0_kb_ = rss_kb;
+        perf_t0_      = now;
+    }
+    const double since_start_s = perf_t0_.time_since_epoch().count() == 0
+        ? 0.0 : std::chrono::duration<double>(now - perf_t0_).count();
+    const long   grown_kb      = (rss_kb > 0 and perf_rss0_kb_ > 0) ? rss_kb - perf_rss0_kb_ : 0;
+    const double rate_avg_kb_min = since_start_s > 1.0 ? grown_kb / (since_start_s / 60.0) : 0.0;
+
+    // WINDOWED rate: RSS change across the trailing PERF_RATE_WINDOW_S seconds — the number to actually
+    // watch (see the header for why the lifetime average cannot detect onset). 0 until the window has
+    // spanned PERF_RATE_MIN_SPAN_S, because a rate over a two-second span is page-granularity noise.
+    double rate_win_kb_min = 0.0;
+    if (rss_kb > 0)
+    {
+        perf_rss_hist_.emplace_back(since_start_s, rss_kb);
+        while (perf_rss_hist_.size() > 1
+               and since_start_s - perf_rss_hist_.front().first > PERF_RATE_WINDOW_S)
+            perf_rss_hist_.pop_front();
+        const auto [t_old, rss_old] = perf_rss_hist_.front();
+        if (const double span = since_start_s - t_old; span >= PERF_RATE_MIN_SPAN_S)
+            rate_win_kb_min = static_cast<double>(rss_kb - rss_old) / (span / 60.0);
+    }
+
+    std::println("[perf] fps={:.1f} period mean {:.1f} ms WORST {:.1f} ms busy {:.1f} ms cpu={:.0f}% "
+                 "rss={:.1f} MB ({:+.1f} since start) growth {:+.2f} MB/min [{:.0f}s win] avg {:+.2f} "
+                 "hwm={:.1f} MB",
+                 1000.0 / std::max(1e-3, period_ms), period_ms, perf_worst_ms_,
+                 perf_busy_ms_ / std::max(1u, perf_calls_), cpu_pct,
+                 rss_kb / 1024.0, grown_kb / 1024.0, rate_win_kb_min / 1024.0, PERF_RATE_WINDOW_S,
+                 rate_avg_kb_min / 1024.0, hwm_kb / 1024.0);
+
+    // One-shot open: on failure do NOT retry, or every window would archive the file again and churn the
+    // whole archive directory through the KEEP_RUNS prune once per second.
+    static bool perf_csv_tried = false;
+    if (not perf_csv_tried)
+    {
+        perf_csv_tried = true;
+        open_diag_csv(perf_csv_, "etc/perf_diag.csv");
+        if (perf_csv_.is_open())
+            perf_csv_ << "t_s,iso_time,grid_cycle,calls,fps,period_mean_ms,period_worst_ms,busy_mean_ms,"
+                         "cpu_pct,rss_kb,hwm_kb,rss_delta_kb,rate_kb_per_min_win,rate_kb_per_min_avg\n";
+        else
+            std::println("[perf] ⚠ could not open etc/perf_diag.csv — leak watch is stdout-only this run");
+    }
+    if (perf_csv_.is_open())
+    {
+        const auto ms = rc::provenance::now_ms();
+        perf_csv_ << std::format("{:.1f},{},{},{},{:.2f},{:.2f},{:.2f},{:.2f},{:.0f},{},{},{},{:.1f},{:.1f}\n",
+                                 since_start_s, rc::provenance::iso8601_local(ms), grid_diag_cycle_,
+                                 perf_calls_, 1000.0 / std::max(1e-3, period_ms), period_ms,
+                                 perf_worst_ms_, perf_busy_ms_ / std::max(1u, perf_calls_), cpu_pct,
+                                 rss_kb, hwm_kb, grown_kb, rate_win_kb_min, rate_avg_kb_min);
+        perf_csv_.flush();   // one small row per second: flush so a SIGKILLed run still has its last rows
+    }
+
+    perf_window_begin_ = now;
+    perf_calls_ = 0;
+    perf_busy_ms_ = 0.0;
+    perf_worst_ms_ = 0.0;
+}
+
 void SpecificWorker::compute()
 {
+    // Rate/cost meter: RAII so EVERY exit path is timed — most cycles leave through one of the early returns
+    // below (no graph, no room, no fresh sweep), and a meter placed at the end would only ever see the
+    // expensive cycles and would report a period several times too long.
+    const auto perf_t0 = std::chrono::steady_clock::now();
+    struct PerfScope
+    {
+        SpecificWorker* self; const std::chrono::steady_clock::time_point& t0;
+        ~PerfScope() { self->log_compute_perf(std::chrono::duration<double, std::milli>(
+                           std::chrono::steady_clock::now() - t0).count()); }
+    } perf_scope{this, perf_t0};
+
     if (not G or not rt_api_)
         return;
     if (room_node_id_ == 0)
@@ -1082,11 +1298,11 @@ void SpecificWorker::log_grid_diag()
 {
     if (not grid_ready_) return;
     const auto& d = grid_.last_sweep_diag();
-    static long cyc = 0;
+    long& cyc = grid_diag_cycle_;   // member, not a static: log_compute_perf logs it as the join key
     static std::ofstream f;
     if (not f.is_open())
     {
-        f.open("etc/grid_diag.csv", std::ios::out | std::ios::trunc);
+        open_diag_csv(f, "etc/grid_diag.csv");
         // forgotten = cells released by the TIME-DECAY rather than by a see-through: space that no clearing beam
         // could ever have reached (occluded / behind us). self_damped = returns whose hit weight the self-body
         // sensor term attenuated. Both are 0 in the old never-forget build, so a run with zeros here means the
@@ -1139,7 +1355,7 @@ void SpecificWorker::log_floor_diag(const rc::OccupancyGrid::CellExplained& expl
     static std::ofstream f;
     if (not f.is_open())
     {
-        f.open("etc/floor_diag.csv", std::ios::out | std::ios::trunc);
+        open_diag_csv(f, "etc/floor_diag.csv");
         f << "cycle,applied,a,b,c,off_cm,tilt_deg,n_cand,rms_m,occupied,resid,ncomp,max_cells,"
              "r_le10,r_le15,r_le25,r_le40,r_le70,r_le120,r_gt120\n";
     }
@@ -1176,6 +1392,7 @@ void SpecificWorker::publish_grid_display(const rc::OccupancyGrid::CellExplained
         const float rpy = G->get_attrib_by_name<pos_y_att>(room.value()).value_or(200.f);
         G->add_or_modify_attrib_local<pos_x_att>(gn, rpx);
         G->add_or_modify_attrib_local<pos_y_att>(gn, rpy + 100.f);
+        rc::provenance::stamp_creation(*G, gn);   // birth stamp: epoch ms + local ISO-8601
         const auto idopt = G->insert_node(gn);
         if (not idopt.has_value()) return;
         rt_api_->insert_or_assign_edge_RT(room.value(), idopt.value(), {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f});

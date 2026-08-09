@@ -50,6 +50,8 @@
 #include <thread>    // brief DDS flush before _Exit
 #include <chrono>
 #include <fstream>   // per-cycle detection-slice diagnostic CSV
+#include <charconv>  // locale-independent parsing of etc/door_identities.csv (CLAUDE.md)
+#include <locale>    // classic-locale writers
 #include <format>
 #include <iostream>  // std::cout/cerr flush
 
@@ -535,10 +537,20 @@ void SpecificWorker::initialize()
 
     // Subscribe to graph signals ONLY now that fitter_ (which every slot dereferences) exists, and after
     // the startup stale-sweep above. Cross-thread Auto resolves to Queued (never add DirectConnection).
+    // ★NOT update_node_attr_signal. It fires for EVERY attribute change on EVERY node in the shared graph —
+    // every RT pose write from robot_concept, every other agent's per-cycle attribute writes — and each
+    // emission copies a std::vector<std::string> on the DDS reader thread and queues an event to this thread.
+    // Under a churn burst (a peer restarting is enough) the queue drains slower than it fills, and the main
+    // thread then does nothing but service slots: the timer-driven compute() is starved (its log stops
+    // growing), and — the symptom that costs the most — Ctrl-C dies, because generated/main.cpp routes SIGINT
+    // through a QSocketNotifier serviced by this SAME event loop. The agent can then only be killed with -9,
+    // which cannot be caught, so every node it owns LEAKS into the shared graph.
+    // Measured 2026-08-07 on table_concept (identical subscription): main thread pegged at 100% of a core,
+    // ai2_log.csv frozen, Ctrl-C inert, right after a voxelizer restart. CLAUDE.md already states the rule
+    // this violated: if you don't need a signal, don't connect it at all (bottle_concept connects none).
+    // The two things the slot did are now POLLED once per cycle in poll_affordance_protocol().
     connect(G.get(), &DSR::DSRGraph::update_node_signal,
             this, &SpecificWorker::modify_node_slot);
-    connect(G.get(), &DSR::DSRGraph::update_node_attr_signal,
-            this, &SpecificWorker::modify_node_attrs_slot);
     connect(G.get(), &DSR::DSRGraph::del_node_signal,
             this, &SpecificWorker::del_node_slot);
 
@@ -566,6 +578,10 @@ void SpecificWorker::initialize()
 
     // Stale affordance nodes are swept on entering Operating (presence hook) and on shutdown — see
     // remove_stale_affordance_nodes(), keyed on the parent object type (robust to node-name renames).
+
+    // Which door is which — remembered from earlier runs. Without this the numbering falls out of the order
+    // the robot happens to sweep the room, so the same door was door_1 one run and door_2 the next.
+    load_identities();
 
     // ── Time-series dashboard — its OWN top-level window ──────────────────────
     // Extracted from the DSR graph dock (add_custom_widget_to_dock) into a standalone window so it shows
@@ -799,6 +815,11 @@ void SpecificWorker::compute()
         if (rooms.empty()) return;
         room_node_id_ = rooms.front().id();
     }
+
+    // Controller-owned affordance flags (claim / completion / epistemic_pending). Polled here rather than
+    // pushed by update_node_attr_signal — see the connect block in initialize().
+    poll_affordance_protocol();
+
 
     // Evidence-pipeline per-cycle counters (the *_cum fields persist). Producers below add to these; the
     // snapshot is pushed at the end of the cycle.
@@ -1206,7 +1227,19 @@ void SpecificWorker::run_instance_tracker()
                        "removed after {} cycles; resuming its belief\n",
                        g->name, c.x(), c.y(), (g->xy - Eigen::Vector2f(c.x(), c.y())).norm(), g->lived_cycles);
         }
-        const auto new_id = scene_graph_->create_instance_from_detection(c, room_node_id_, preferred_name);
+        // No ghost from THIS run, but the place may still be a door we have met before. The persistent table
+        // returns the NAME only: geometry has to be re-earned from evidence (a remembered belief would be
+        // asserting a shape nothing in this session has seen), while the identity is a fact about the
+        // apartment, not about the session. This is what stops door_1/door_2 from trading doors on restart.
+        else if (const DoorIdentity* idn = match_identity(Eigen::Vector2f(c.x(), c.y())); idn != nullptr)
+        {
+            preferred_name = idn->name;
+            std::print("door_concept: [tracker] IDENTITY '{}' at ({:.2f},{:.2f}) — {:.2f} m from the aperture "
+                       "remembered in etc/door_identities.csv; same door, name restored (belief re-earned)\n",
+                       idn->name, c.x(), c.y(), (idn->xy - Eigen::Vector2f(c.x(), c.y())).norm());
+        }
+        const auto reserved = reserved_names();   // a number a ghost or a stored identity holds is not free
+        const auto new_id = scene_graph_->create_instance_from_detection(c, room_node_id_, preferred_name, reserved);
         if (new_id != 0)
         {
             fitter_->note_birth(new_id, Eigen::Vector2f(c.x(), c.y()));
@@ -1217,7 +1250,7 @@ void SpecificWorker::run_instance_tracker()
             {
                 fitter_->note_reacquire(new_id, *revive);
                 log_tracker_event("REACQUIRE", new_id, c.x(), c.y(), preferred_name);
-                forget_ghost(preferred_name);   // consumed — the door is alive again
+                forget_ghost(Eigen::Vector2f(c.x(), c.y()));   // consumed — the door is alive again
             }
             // Materialise the DoorInstance NOW, at birth — do not wait for the freshly inserted DSR node
             // to surface in get_nodes_by_type (it is not reliably visible the same cycle). Birth was
@@ -1232,6 +1265,10 @@ void SpecificWorker::run_instance_tracker()
                 fitter_->ensure_instance(nopt.value(), room_node_id_);
                 if (auto it = fitter_->instances().find(new_id); it != fitter_->instances().end())
                     it->second.assigned_mask_idx = slice;
+                // Write the identity down NOW, at the birth place. Waiting for removal or shutdown loses it
+                // to a SIGKILL — and the fleet gets SIGKILLed (see the attr-signal starvation note); the
+                // aperture is refined by the later upserts anyway.
+                note_identity(nopt->name(), Eigen::Vector2f(c.x(), c.y()));
             }
             log_tracker_event("BIRTH", new_id, c.x(), c.y(), "");
         }
@@ -1267,32 +1304,137 @@ void SpecificWorker::run_instance_tracker()
                 if (not matched[b]) unmatched.push_back(bearings[b].azimuth_room_rad);
 
             bearing_stager_.set_params(cfg_.bearing_birth_frames, cfg_.bearing_match_rad, cfg_.bearing_max_miss);
+            read_residual_field();   // one snapshot for every bearing promoted this cycle
             for (const float az : bearing_stager_.update(unmatched))
             {
-                // Anti-dup: skip if a live door already sits near the nominal point on this ray.
-                const Eigen::Vector2f p_nom = robot_xy + cfg_.bearing_nominal_range_m * Eigen::Vector2f(std::cos(az), std::sin(az));
+                // ── RANGE CASCADE (door_bearing_range.h) ────────────────────────────────────────────────
+                // Ask the best available rung for a range along this bearing. Today that is the residual
+                // field; when dense ricoh depth lands it goes in AHEAD of this call and the rest is unchanged.
+                // Whatever answers returns the same (range, σ), and σ — not the source — is what propagates.
+                const auto br = rc::door::range_along_bearing(residual_field_, robot_xy, az);
+                const float range_m  = br ? br->range_m : cfg_.bearing_nominal_range_m;
+                // No rung answered ⇒ keep the configured along-ray std, i.e. "range unknown", and the
+                // hypothesis stays a glance. A resolved range carries its OWN σ, so the constant is not used.
+                const float along_sd = br ? br->sigma_m  : cfg_.bearing_along_std_m;
+
+                const Eigen::Vector2f p_nom = robot_xy + range_m * Eigen::Vector2f(std::cos(az), std::sin(az));
+
+                // ── ASSOCIATE BEFORE BIRTHING, IN BEARING SPACE ────────────────────────────────────────
+                // An unchecked proto STAYS in the graph, so the next sighting of the same object must fuse
+                // with it, not birth a twin. Testing the new ray against the proto's placed POINT is exactly
+                // wrong here: a bearing-only proto's range is a guess, so the same door seen from a new angle
+                // lands metres away and a point test births a duplicate (measured: a proto guessed at 1.2 m
+                // whose truth is 3.0 m fails the 0.8 m separation test outright). The invariant that survives
+                // across observations is the BEARING, so the gate lives there.
+                //
+                // And the association is also the FIX: two bearings from two places triangulate, with the
+                // robot's own travel as the baseline. So re-sighting an unchecked proto while driving past it
+                // is what finally gives it a range — no detour, no glance.
+                bool fused = false;
+                for (auto& [oid, other] : fitter_->instances())
+                {
+                    if (not other.is_bearing_hypothesis) continue;   // fitted doors are handled by the tracker
+                    // Room-frame position lives on the DoorState (the belief is parameterised in the wall
+                    // frame: s/w/h). The APERTURE centre is the right anchor — it is rigid in the wall, so it
+                    // does not move when the leaf swings, which is exactly the invariant an association needs.
+                    const auto& os = other.model.state();
+                    const Eigen::Vector2f oxy(os.ap_cx, os.ap_cy);
+                    const float osig = std::max(0.10f, other.hypothesis_range_sigma);
+                    if (not rc::door::bearing_consistent(robot_xy, az, oxy, osig)) continue;
+
+                    if (const auto fix = rc::door::triangulate_bearings(other.hypothesis_obs_from,
+                                                                        other.hypothesis_azimuth,
+                                                                        robot_xy, az))
+                    {
+                        // Only accept a fix that is BETTER than what the proto already had — a re-sighting
+                        // from nearly the same place has almost no baseline and would widen it.
+                        if (not other.hypothesis_range_known or fix->sigma_m < other.hypothesis_range_sigma)
+                        {
+                            const float r = (fix->xy - robot_xy).norm();
+                            fitter_->seed_bearing_hypothesis(other, robot_xy, az, r, fix->sigma_m,
+                                                             cfg_.bearing_across_std_m, cfg_.bearing_yaw_std_rad);
+                            other.hypothesis_range_known = true;
+                            other.hypothesis_range_sigma = fix->sigma_m;
+                            other.hypothesis_obs_from    = robot_xy;   // newest observation becomes the anchor
+                            other.hypothesis_azimuth     = az;
+                            ++other.hypothesis_fixes;
+                            std::print("door_concept: [bearing] FUSE id={} -> ({:.2f},{:.2f}) sigma={:.2f}m "
+                                       "parallax={:.0f}deg fixes={}\n", oid, fix->xy.x(), fix->xy.y(),
+                                       fix->sigma_m, fix->parallax_rad * 180.0f / 3.14159265f,
+                                       other.hypothesis_fixes);
+                        }
+                    }
+                    fused = true;   // consistent with an existing proto ⇒ never birth, fix or not
+                    break;
+                }
+                if (fused) continue;
+
+                // Anti-dup against FITTED doors keeps the point test: those have a real, measured position,
+                // so proximity is a meaningful question for them in a way it is not for a guessed range.
                 bool near_existing = false;
                 for (const auto& t : tracks)
                     if ((t.xy - p_nom).norm() < cfg_.tracker_birth_min_sep_m) { near_existing = true; break; }
                 if (near_existing) continue;
 
                 const Eigen::Vector3f c_room(p_nom.x(), p_nom.y(), cfg_.ai2_floor_z);
-                const auto new_id = scene_graph_->create_instance_from_detection(c_room, room_node_id_);
+                const auto reserved = reserved_names();
+                // A proto-object standing where we already know a door is, IS that door — take its name so a
+                // glance that confirms it does not also invent a new identity. The guessed range is coarse, so
+                // this only fires when the cascade already put it on top of a remembered aperture.
+                const DoorIdentity* idn = match_identity(p_nom);
+                const auto new_id = scene_graph_->create_instance_from_detection(
+                        c_room, room_node_id_, idn != nullptr ? std::string_view(idn->name) : std::string_view{}, reserved);
                 if (new_id == 0) continue;
                 if (const auto nopt = G->get_node(new_id); nopt.has_value())
                 {
                     fitter_->ensure_instance(nopt.value(), room_node_id_);
                     if (auto it = fitter_->instances().find(new_id); it != fitter_->instances().end())
-                        fitter_->seed_bearing_hypothesis(it->second, robot_xy, az, cfg_.bearing_nominal_range_m,
-                                                         cfg_.bearing_along_std_m, cfg_.bearing_across_std_m,
+                    {
+                        fitter_->seed_bearing_hypothesis(it->second, robot_xy, az, range_m,
+                                                         along_sd, cfg_.bearing_across_std_m,
                                                          cfg_.bearing_yaw_std_rad);
+                        // A resolved range is what upgrades the affordance from "glance" to "go and check":
+                        // step_epistemic reads these to choose Orient vs Servo.
+                        it->second.hypothesis_range_known = br.has_value();
+                        it->second.hypothesis_range_sigma = along_sd;
+                        // Anchor the birth observation so a later sighting can triangulate against it.
+                        it->second.hypothesis_obs_from    = robot_xy;
+                        it->second.hypothesis_fixes       = 0;
+                    }
                 }
-                std::print("door_concept: [bearing] BIRTH hypothesis id={} az={:.0f}deg (nominal {:.1f}m on ray)\n",
-                           new_id, az * 180.0f / 3.14159265f, cfg_.bearing_nominal_range_m);
+                std::print("door_concept: [bearing] BIRTH hypothesis id={} az={:.0f}deg range={:.2f}m "
+                           "sigma={:.2f}m source={}\n",
+                           new_id, az * 180.0f / 3.14159265f, range_m, along_sd,
+                           br ? "residual-grid" : "nominal(no range ⇒ glance only)");
                 log_tracker_event("BEARING_BIRTH", new_id, p_nom.x(), p_nom.y(), "");
             }
         }
     }
+}
+
+// Snapshot residual_concept's published residual field. Mirrors table_concept::read_residual_field — same
+// node, same attribute trio — so this is one more consumer of an established channel. The field is already
+// EXPLAINED-COLLAPSED by the producer (cells a modelled object accounts for are attenuated toward zero), so
+// "first cell above p_occupied along a ray" means "first thing out there nothing explains" with no extra
+// filtering here. Returns false (and leaves the field empty ⇒ invalid ⇒ the cascade skips this rung) whenever
+// residual_concept is not up yet, which is the normal state during startup.
+bool SpecificWorker::read_residual_field()
+{
+    residual_field_ = rc::door::ResidualField{};
+    const auto gopt = G->get_node("residual");   // node named "residual" (type "grid")
+    if (not gopt.has_value()) return false;
+    const auto pa = G->get_attrib_by_name<grid_occupancy_prob_att>(gopt.value());
+    const auto ma = G->get_attrib_by_name<grid_field_meta_att>(gopt.value());
+    if (not (pa.has_value() and ma.has_value())) return false;
+    const auto& M = ma.value().get();
+    if (M.size() < 5) return false;
+    residual_field_.prob   = pa.value().get();   // snapshot copy
+    residual_field_.xmin   = M[0];
+    residual_field_.ymin   = M[1];
+    residual_field_.cell   = M[2];
+    residual_field_.width  = static_cast<int>(M[3]);
+    residual_field_.height = static_cast<int>(M[4]);
+    return residual_field_.valid();
 }
 
 // Load the room's delimiting polygon (a trusted NOMINAL model authored by room_concept, never fitted) into the
@@ -1356,11 +1498,126 @@ void SpecificWorker::remember_ghost(const rc::DoorInstance& inst)
     // Keyed on the APERTURE: the identity of a door is its hole in the wall, so a door that flickers out
     // while its leaf happens to be open must still be re-acquired at the same place.
     const auto& s = inst.model.state();
-    std::erase_if(ghosts_, [&](const DoorGhost& g) { return g.name == inst.node_name; });
-    ghosts_.push_back({inst.node_name, Eigen::Vector2f(s.ap_cx, s.ap_cy), inst.ai2_belief, inst.processed_cycles});
+    const Eigen::Vector2f ap(s.ap_cx, s.ap_cy);
+    // A GHOST IS A PLACE, NOT A NAME. Superseding by name was the identity defect: `door_1` died at the north
+    // door, its number was recycled to a different door across the room, and when THAT one died this line
+    // erased the north door's ghost — so the real door, reborn 0.50 m from where it died (well inside
+    // ReacquireRadiusM), had nothing to match and came back as door_3. Only a ghost of the SAME HOLE may be
+    // replaced; that is the one this removal actually supersedes. (Name recycling is now blocked upstream in
+    // create_instance_from_detection, so two ghosts cannot normally share a name either.)
+    std::erase_if(ghosts_, [&](const DoorGhost& g)
+                  { return (g.xy - ap).norm() < cfg_.exist_reacquire_radius_m; });
+    ghosts_.push_back({inst.node_name, ap, inst.ai2_belief, inst.processed_cycles});
+    note_identity(inst.node_name, ap);   // the RAM ghost expires with the process; the identity must not
     // Bounded, most-recent-first: this is a short-lived flicker memory, not a permanent map.
     while (static_cast<int>(ghosts_.size()) > std::max(1, cfg_.exist_ghost_max))
         ghosts_.erase(ghosts_.begin());
+}
+
+// The names still spoken for by a removed-but-remembered door — this run's ghosts AND the identities
+// persisted from earlier runs. Handed to the birth path so a freed number is never given to a DIFFERENT
+// physical door while its owner can still come back and claim it.
+std::vector<std::string> SpecificWorker::reserved_names() const
+{
+    std::vector<std::string> names;
+    names.reserve(ghosts_.size() + identities_.size());
+    for (const auto& g : ghosts_)      names.push_back(g.name);
+    for (const auto& i : identities_)  names.push_back(i.name);
+    return names;
+}
+
+// ─── Identity across runs (etc/door_identities.csv) ─────────────────────────────────────────────
+//
+// Ghosts are RAM: they cannot survive the process, and cleanup_owned_nodes deletes every door node on the
+// way out, so at the next launch nothing in the graph says which door was which. Names then fell out of
+// BIRTH ORDER — the order the robot happens to sweep the room — and the same physical door was door_1 one
+// run and door_2 the next. This table is the persistent half of the same idea as remember_ghost: keyed on
+// the APERTURE (the hole in the wall, which is what a door IS), carrying the name and nothing else.
+//
+// Locale: read with std::from_chars, write through the classic locale — CLAUDE.md. These machines run
+// es_ES, where strtof would silently truncate "4.61" to 4 and put every door on the wrong side of a wall.
+
+void SpecificWorker::load_identities()
+{
+    std::ifstream f("etc/door_identities.csv");
+    if (not f)
+        return;
+    identities_.clear();
+    std::string line;
+    std::getline(f, line);                       // header
+    while (std::getline(f, line))
+    {
+        const auto c1 = line.find(',');
+        if (c1 == std::string::npos) continue;
+        const auto c2 = line.find(',', c1 + 1);
+        if (c2 == std::string::npos) continue;
+        const std::string name = line.substr(0, c1);
+        float x = 0.f, y = 0.f;
+        const char* xb = line.data() + c1 + 1;
+        const char* xe = line.data() + c2;
+        const char* yb = line.data() + c2 + 1;
+        const char* ye = line.data() + line.size();
+        if (std::from_chars(xb, xe, x).ec != std::errc{}) continue;
+        if (std::from_chars(yb, ye, y).ec != std::errc{}) continue;
+        if (not name.starts_with("door_")) continue;
+        identities_.push_back({name, Eigen::Vector2f(x, y)});
+    }
+    if (not identities_.empty())
+    {
+        std::print("door_concept: [identity] loaded {} remembered door(s):", identities_.size());
+        for (const auto& i : identities_)
+            std::print(" {}@({:.2f},{:.2f})", i.name, i.xy.x(), i.xy.y());
+        std::print("\n");
+    }
+}
+
+void SpecificWorker::save_identities() const
+{
+    std::ofstream f("etc/door_identities.csv", std::ios::trunc);
+    if (not f)
+        return;
+    f.imbue(std::locale::classic());             // never emit a comma decimal separator
+    f << "name,ap_x,ap_y\n";
+    for (const auto& i : identities_)
+        f << i.name << ',' << i.xy.x() << ',' << i.xy.y() << '\n';
+}
+
+// Upsert BY PLACE: one hole in the wall carries one name. A door whose aperture drifts within the
+// re-acquisition radius updates its own row; a door somewhere else adds one.
+void SpecificWorker::note_identity(const std::string& name, const Eigen::Vector2f& ap)
+{
+    if (cfg_.exist_reacquire_radius_m <= 0.0f or not name.starts_with("door_") or not ap.allFinite())
+        return;
+    std::erase_if(identities_, [&](const DoorIdentity& i)
+                  { return i.name == name or (i.xy - ap).norm() < cfg_.exist_reacquire_radius_m; });
+    identities_.push_back({name, ap});
+    save_identities();
+}
+
+const SpecificWorker::DoorIdentity* SpecificWorker::match_identity(const Eigen::Vector2f& xy) const
+{
+    if (cfg_.exist_reacquire_radius_m <= 0.0f)
+        return nullptr;
+    const DoorIdentity* best = nullptr;
+    float best_d = cfg_.exist_reacquire_radius_m;
+    for (const auto& i : identities_)
+        if (const float d = (i.xy - xy).norm(); d < best_d) { best_d = d; best = &i; }
+    return best;
+}
+
+// Shutdown: the doors still alive have never been remembered (remember_ghost only fires on removal), and
+// they are about to be deleted from the graph. Write them down or the next run starts blind.
+void SpecificWorker::remember_live_identities()
+{
+    if (not fitter_)
+        return;
+    for (const auto& [id, inst] : fitter_->instances())
+    {
+        if (not inst.ai2_initialized or inst.is_bearing_hypothesis)
+            continue;
+        const auto& s = inst.model.state();
+        note_identity(inst.node_name, Eigen::Vector2f(s.ap_cx, s.ap_cy));
+    }
 }
 
 const SpecificWorker::DoorGhost* SpecificWorker::match_ghost(const Eigen::Vector2f& xy) const
@@ -1437,9 +1694,13 @@ void SpecificWorker::log_nbv_decision(const rc::DoorInstance& inst, const rc::nb
     }
 }
 
-void SpecificWorker::forget_ghost(const std::string& name)
+// Consume the ghost(s) at a place a door has just been re-acquired at. By PLACE, for the same reason
+// remember_ghost supersedes by place: a name can outlive its owner and be worn by a ghost somewhere else
+// entirely, and erasing that one would throw away an identity nobody claimed.
+void SpecificWorker::forget_ghost(const Eigen::Vector2f& xy)
 {
-    std::erase_if(ghosts_, [&](const DoorGhost& g) { return g.name == name; });
+    std::erase_if(ghosts_, [&](const DoorGhost& g)
+                  { return (g.xy - xy).norm() < cfg_.exist_reacquire_radius_m; });
 }
 
 // Continuous existence belief on the SHARED rc::exist channel (the one table/chair use): fold one sensor
@@ -2003,9 +2264,18 @@ void SpecificWorker::step_epistemic(rc::DoorInstance& inst, DSR::Node& node)
     if (inst.epistemic_cooldown > 0)
         prop.epistemic_gain = 0.0f;
 
-    // Bearing-only hypothesis (Part C-birth): author an ORIENT affordance whose target yaw IS the bearing,
-    // so the controller rotates to look down the ray (the broad along-ray Σ already makes prop's gain high).
-    const bool orient = inst.is_bearing_hypothesis;
+    // Peripheral hypothesis (Part C-birth) — GLANCE or GO-AND-CHECK, decided by whether it has a RANGE.
+    //
+    //   · bearing only  → ORIENT: rotate in place down the ray. There is no trustworthy (x,y) to drive to,
+    //                     so proposing one would be inventing a destination. The broad along-ray Σ already
+    //                     makes the gain high, and one glance usually collapses it.
+    //   · with a range  → the normal Servo path: the hypothesis has a real (x,y), so the planner's viewpoint
+    //                     is meaningful and the affordance becomes "GO THERE and check". This is the rung the
+    //                     range cascade unlocks (door_bearing_range.h).
+    //
+    // Note this reads `hypothesis_range_known`, not the σ, deliberately: how MUCH the range is trusted is
+    // already carried by Σ into the planner's gain and stand-off, so a second σ test here would double-count.
+    const bool orient = inst.is_bearing_hypothesis and not inst.hypothesis_range_known;
     if (orient)
         prop.epistemic_target_yaw_rad = inst.hypothesis_azimuth;
 
@@ -2057,34 +2327,34 @@ void SpecificWorker::modify_node_slot(std::uint64_t id, const std::string& type)
     fitter_->ensure_instance(node_opt.value(), room_node_id_);
 }
 
-void SpecificWorker::modify_node_attrs_slot(std::uint64_t id,
-                                             const std::vector<std::string>& att_names)
+// Poll the controller-owned protocol flags once per cycle. This REPLACES the update_node_attr_signal
+// subscription (see the connect block in initialize() for the starvation it caused). Both things it did are
+// pure reads of the CURRENT graph state, so polling gives the same answer — a controller claim or completion
+// simply lands on the next cycle instead of within the emitting DDS callback.
+//
+// Cost is bounded by OUR instance count (typically 1–3), not by the graph's global write rate, which is the
+// whole point: the old path did work proportional to what every other agent was writing.
+void SpecificWorker::poll_affordance_protocol()
 {
-    // Delegate to the affordance state machine for any instance whose affordance
-    // node was modified (controller claim/completion updates active/pending)
+    if (not fitter_)
+        return;   // may be called before the fit core exists — the guard every graph slot here needs
+
     for (auto& [door_id, inst] : fitter_->instances())
-        if (inst.affordance.node_id() == id)
-            inst.affordance.on_node_modified(id);
-
-    // React to mission-controller clearing epistemic_pending on the door node itself
-    if (fitter_->instances().count(id))
     {
-        const bool pending_cleared = std::any_of(att_names.begin(), att_names.end(),
-            [](const std::string& s) { return s == "epistemic_pending"; });
+        // Affordance state machine: idle→pending→executing→satisfied, driven by the controller-owned
+        // active/pending flags on the affordance node. on_node_modified() re-reads them itself.
+        if (const auto aid = inst.affordance.node_id(); aid != 0)
+            inst.affordance.on_node_modified(aid);
 
-        if (pending_cleared)
+        // Mission controller clearing epistemic_pending on the object node itself.
+        if (auto node_opt = G->get_node(door_id); node_opt.has_value())
         {
-            auto node_opt = G->get_node(id);
-            if (node_opt.has_value())
-            {
-                const auto v = G->get_attrib_by_name<epistemic_pending_att>(node_opt.value());
-                if (v.has_value() and not v.value())
-                    fitter_->instances().at(id).epistemic_pending = false;
-            }
+            const auto v = G->get_attrib_by_name<epistemic_pending_att>(node_opt.value());
+            if (v.has_value() and not v.value())
+                inst.epistemic_pending = false;
         }
     }
 }
-
 void SpecificWorker::del_node_slot(std::uint64_t id)
 {
     // Notify affordance in case its own DSR node was deleted externally

@@ -25,7 +25,8 @@ namespace rc {
 // Carve the LiDAR sweep(s) + silhouette against every cabinet footprint, integrate the per-instance existence
 // log-odds, and remove the cabinets whose volume is demonstrably empty (debounced). See cabinet_existence.h.
 void CabinetExistence::update_and_remove(CabinetFitter& fitter, CabinetLidarIngestor* lidar,
-                                       bool fresh_masks, bool fresh_sweep, EvidenceGlobals& ev_g)
+                                       bool fresh_masks, bool fresh_sweep, EvidenceGlobals& ev_g,
+                                       const std::function<void(std::uint64_t, const CabinetInstance&)>& on_remove)
 {
     // Decoupled cadence: the SILHOUETTE/mask channel integrates on a fresh MASK frame (camera clock), the LiDAR
     // free-space carve on a fresh SWEEP (LiDAR clock). Each accrues its evidence independently, so a camera-only
@@ -185,7 +186,11 @@ void CabinetExistence::update_and_remove(CabinetFitter& fitter, CabinetLidarInge
     {
         std::print("cabinet_concept: [existence] removing cabinet id={} — free-space evidence (empty volume)\n", id);
         if (auto it = fitter.instances().find(id); it != fitter.instances().end())
+        {
+            // Record BEFORE teardown, while the existence state that justified the kill is readable.
+            if (on_remove) on_remove(id, it->second);
             it->second.affordance.remove();
+        }
         fitter.forget_node(id);
         G_->delete_node(id);
     }

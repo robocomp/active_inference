@@ -52,7 +52,8 @@
 #include "cabinet_lidar_ingestor.h"                          // rc::CabinetLidarIngestor (YOLO-independent LiDAR)
 #include "../../common/instance_tracker/instance_tracker.h"   // rc::InstanceTracker (birth/associate/death)
 #include "cabinet_scene_graph.h" // rc::CabinetSceneGraph (DSR node/RT I/O)
-#include "cabinet_fitter.h"      // rc::CabinetFitter (active-inference core)
+#include "cabinet_fitter.h"
+#include "../../common/phantom_log/phantom_log.h"   // rc::history::PhantomLog (shadow-mode birth/death record)      // rc::CabinetFitter (active-inference core)
 #include "cabinet_kitchen.h"     // rc::KitchenManager (Stage 2 kitchen-of-runs model)
 #include "cabinet_existence.h"   // rc::CabinetExistence (evidence-based removal)
 #include "birth_surprise_probe.h"   // rc::BirthSurpriseProbe (read-only: residual grid → birth surprise)
@@ -60,6 +61,7 @@
 #include "cabinet_affordance.h"
 #include "cabinet_model.h"
 #include "../../common/dashboard/belief_inspector.h"
+#include "../../common/dashboard/belief_strip.h"
 #include "../../common/dashboard/custom_widget.h"
 #include "../../common/dashboard/evidence_monitor.h"
 #include "../../common/dashboard/timeseries_plot.h"
@@ -78,12 +80,20 @@ public:
 public slots:
     void initialize();
     void compute();
+    // SHADOW-MODE birth/death recorder (CONCEPT_AGENT_LIFECYCLE.md §4.2). Records ONLY — it can never
+    // alter a birth or a removal. The attribution fields it captures at death (p_detect, in-FoV, central)
+    // are what separate a genuine classifier phantom from one of our own removal defects.
+    void log_phantom_event(std::string_view event, std::uint64_t id, std::string_view name,
+                           float x, float y, const rc::CabinetInstance* inst, std::string_view note);
+
     void emergency();
     void restore();
     int  startup_check();
 
     void modify_node_slot(std::uint64_t id, const std::string& type);
-    void modify_node_attrs_slot(std::uint64_t id, const std::vector<std::string>& att_names);
+    // Replaces the update_node_attr_signal slot: the controller-owned protocol flags are POLLED once per
+    // cycle instead of pushed per graph attribute write. See the connect block in initialize().
+    void poll_affordance_protocol();
     void modify_edge_slot(std::uint64_t from, std::uint64_t to, const std::string& type){};
     void modify_edge_attrs_slot(std::uint64_t from, std::uint64_t to,
                                 const std::string& type, const std::vector<std::string>& att_names){};
@@ -199,6 +209,7 @@ private:
     rc::CabinetConfig                                         cfg_;
     rc::EpistemicPlanner                                    epistemic_planner_;
     std::unique_ptr<rc::CabinetFitter>                        fitter_;    // active-inference fit core (owns instances)
+    rc::history::PhantomLog                             phantom_log_;   // shadow-mode birth/death record
     rc::KitchenRouting                                        kitchen_routing_;   // Stage 0 shadow cell table
     std::unique_ptr<rc::CabinetExistence>                    existence_; // evidence-based removal (existence log-odds)
 
@@ -226,6 +237,15 @@ private:
     // posterior σ, the consumer's demand σ* and the remaining adequacy gap, Σ as a correlation heatmap,
     // and the discrete-tier posterior. Serves BOTH cabinet models (7-DOF box / 5-DOF wall run).
     rc::BeliefInspector* belief_inspector_ = nullptr;
+    // ── Compact belief strip: ONE ROW PER INSTANCE, and the row is a 60 s time series ──────────────
+    // A separate small top-level window, deliberately not another panel inside the big dashboard: this is
+    // the display you keep in a corner while the dashboard stays closed until something looks wrong.
+    // Mirrors table_concept / door_concept. See common/dashboard/belief_strip.h.
+    QWidget*         strip_window_ = nullptr;
+    rc::BeliefStrip* belief_strip_ = nullptr;
+    void refresh_belief_strip();
+    void restore_strip_geometry();
+    void save_strip_geometry() const;
     void refresh_belief_inspector();
     void build_dashboard();          // create the dashboard + evidence-monitor windows (called from initialize)
     void restore_dashboard_geometry();

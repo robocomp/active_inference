@@ -42,9 +42,22 @@ EpistemicPlanner::EpistemicPlanner(float d_obs, float view_info)
 
 EpistemicProposal EpistemicPlanner::compute(const BottleBelief& belief,
                                             const Eigen::Vector2f& camera_xy,
-                                            float sigma_base) const
+                                            float sigma_base,
+                                            const rc::nbv::Sensor& sensor_in,
+                                            const std::vector<rc::nbv::Obstacle>& obstacles) const
 {
+    // The camera geometry arrives from the caller (read fresh from the graph each cycle); the
+    // detector envelope is ours. Merging here keeps the two concerns in their right owners.
+    rc::nbv::Sensor sensor = sensor_in;
+    sensor.env = det_env_;
+
     EpistemicProposal p;
+
+    // ★Refuse on an incomplete camera model rather than guess. This path does NOT go through plan_faces, so
+    // it does not inherit that choke point: without it, a missing vfov or mount height silently collapses the
+    // fill model to horizontal-only and returns a confident, far-too-close viewpoint. See Sensor::complete().
+    if (not sensor.complete())
+        return p;
 
     const auto& s = belief.state();
     const Eigen::Vector2f bottle_xy(s.cx, s.cy);
@@ -52,8 +65,26 @@ EpistemicProposal EpistemicPlanner::compute(const BottleBelief& belief,
     if (not std::isfinite(ray.x()) or not std::isfinite(ray.y()) or ray.norm() < 1e-3f)
         return p;                                                // degenerate: can't resolve the hidden side
 
-    const Eigen::Vector2f dir    = ray.normalized();
-    const Eigen::Vector2f target = bottle_xy + dir * d_obs_;     // far side, beyond the bottle
+    const Eigen::Vector2f dir = ray.normalized();
+
+    // ── Where to stand: the argmax of the DETECTOR's model, not the d_obs_ constant ─────────────────────
+    // A bottle is small, so the old fixed 0.9 m was in roughly the right place by luck; but "roughly right
+    // for a 7 cm bottle" is not a model, and it says nothing about a 3 L one. rc::nbv scans P(detect) along
+    // the hidden-side ray and returns where it peaks. The bottle is a CYLINDER: a square 2r × 2r footprint
+    // presents the same silhouette from every bearing, which is exactly what a cylinder does.
+    rc::nbv::Target tgt;
+    tgt.cx = s.cx; tgt.cy = s.cy; tgt.yaw = 0.0f;
+    tgt.w  = 2.0f * s.radius; tgt.h = 2.0f * s.radius;
+    tgt.z0 = s.cz - 0.5f * s.height; tgt.z1 = s.cz + 0.5f * s.height;
+    tgt.sigma_pos_m    = std::sqrt(std::max({0.0f, belief.covariance()(0, 0), belief.covariance()(1, 1)}));
+    tgt.sigma_extent_m = 2.0f * std::sqrt(std::max(0.0f, belief.covariance()(3, 3)));   // radius → diameter
+
+    // Origin is the bottle CENTRE (the hidden-side viewpoint is centre-relative, unlike the four-face
+    // convention), so the geometric floor must clear the bottle's own radius as well as the robot's.
+    const auto band = rc::nbv::standoff_band(tgt, sensor, bottle_xy, dir,
+                                             robot_radius_m_ + s.radius);
+    const float standoff = band.best;
+    const Eigen::Vector2f target = bottle_xy + dir * standoff;   // far side, beyond the bottle
     p.epistemic_target_x_m     = target.x();
     p.epistemic_target_y_m     = target.y();
     p.epistemic_target_yaw_rad = std::atan2(bottle_xy.y() - target.y(),
@@ -68,7 +99,19 @@ EpistemicProposal EpistemicPlanner::compute(const BottleBelief& belief,
     const auto  dI = belief.predicted_information(back_pts, R);
     const auto& Sigma = belief.covariance();
     const float det = (Eigen::Matrix<float, 5, 5>::Identity() + Sigma * dI).determinant();
-    p.epistemic_gain = 0.5f * std::log(std::max(1e-9f, det));
+    const float raw_gain = 0.5f * std::log(std::max(1e-9f, det));
+
+    // ── Weight by the probability of ACTUALLY getting a detection ──────────────────────────────────────
+    // raw_gain is the information a mask from the far side would yield. Publishing it unweighted asks the
+    // controller to drive around the bottle for a gain that only materialises if YOLO fires there — and for
+    // a small object at the wrong range it does not. E[ΔH] = P(detect)·ΔH is the EFE-correct quantity, and
+    // it is what makes an unreachable-in-practice viewpoint lose to the travel cost instead of winning it.
+    rc::nbv::Candidate cand;
+    cand.pos      = target;
+    cand.yaw      = p.epistemic_target_yaw_rad;
+    cand.raw_gain = raw_gain;
+    const rc::nbv::Score sc = rc::nbv::score(cand, tgt, sensor, obstacles, robot_radius_m_);
+    p.epistemic_gain = sc.expected_gain;
 
     p.valid = p.is_finite();
     return p;

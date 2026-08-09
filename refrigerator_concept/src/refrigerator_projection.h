@@ -45,6 +45,12 @@ struct SilhouetteExistence
                                // peripheral refrigerator is unreliable — the robot isn't really looking AT it)
     int   n_occluded   = 0;    // in-frustum samples hidden by a nearer (non-refrigerator) mask
     float mean_range_m = 0.0f; // mean camera→silhouette depth over the detectable samples (absence confidence ∝ 1/range)
+    // Projected FILL: the silhouette's pixel span as a fraction of the image, max over the two axes. Measured
+    // over ALL forward-projecting samples INCLUDING those that land outside the frame — an object that
+    // overflows the frame must read fill > 1, which is exactly the "too close" signal. Feeds the shared
+    // detector envelope (common/detectability): P(detect) falls at BOTH ends of fill, so a mask missing from
+    // nose-to-nose range is expected rather than evidence of absence.
+    float fill = 0.0f;
     // "Should be visible" fraction: n_detectable / n_total. Absence is only evidence of removal in
     // proportion to how much of the object the sensor could actually have seen from here (real FoV).
     float in_fov_frac() const { return n_total > 0 ? static_cast<float>(n_detectable) / n_total : 0.0f; }

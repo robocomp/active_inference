@@ -9,6 +9,7 @@
 #include <cmath>
 
 #include "../../common/affordance_protocol/affordance_protocol.h"
+#include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
 
 namespace rc {
 
@@ -124,6 +125,7 @@ void HumanAffordance::create_node(const EpistemicProposal& prop)
     // type-level default for a person.
     rc::affordance::write_contract(*G_, aff_node, rc::affordance::default_contract_for("person"));
 
+    rc::provenance::stamp_creation(*G_, aff_node);   // birth stamp: epoch ms + local ISO-8601
     const auto id_opt = G_->insert_node(aff_node);
     if (not id_opt.has_value())
     {

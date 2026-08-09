@@ -16,6 +16,7 @@
 #include "refrigerator_lidar_ingestor.h"                              // rc::RefrigeratorLidarIngestor (per-plane sweeps)
 #include "refrigerator_model.h"                                       // RefrigeratorModel::TOP_THICKNESS / LEG_RADIUS
 #include "../../common/existence_belief/existence_belief.h"    // rc::exist:: carve_box / mask_evidence / …
+#include "../../common/detectability/detectability.h"          // rc::detect — the detector INVERSE model
 #include "../../common/dashboard/evidence_monitor.h"           // rc::EvidenceGlobals
 
 namespace rc {
@@ -117,12 +118,34 @@ void RefrigeratorExistence::update_and_remove(RefrigeratorFitter& fitter, Refrig
                 // A verifying view = CLOSE (range_conf) + in frustum & unoccluded (in_fov_frac) + the robot is
                 // LOOKING at it (central_frac). NOT obliquity: this robot is chronically edge-on and an edge-on
                 // refrigerator IS detectable up close (refrigerator_1), so obliquity would wrongly block legitimate removal.
-                const float p_detect = absence_range_conf(sil.mean_range_m) * sil.in_fov_frac() * sil.central_frac();
-                const float sfree  = raw_free * p_detect;                 // confident absence → removal log-odds
+                // ★P(detect) from the shared detector INVERSE model, not a far-range term alone. The old form
+                // was monotonic in range, so it had no way to say that standing TOO CLOSE also destroys
+                // detectability: at 0.82 m the fridge spans fill≈0.80 of the frame and the envelope gives
+                // P(detect)=0.035 — a missing mask there is EXPECTED, not evidence the fridge is gone. That
+                // asymmetry is what let a nose-to-nose approach read as absence. `sil.fill` is measured over all
+                // forward-projecting samples including those off-frame, so an overflowing object reads fill>1.
+                // Same model the epistemic planner uses to pick the viewpoint — one envelope, both directions.
+                const float p_detect = rc::detect::p_detect(sil.fill, sil.in_fov_frac(), det_env_)
+                                     * sil.central_frac();
                 const float verify = raw_free * (1.0f - p_detect);        // un-confident absence → go-verify surprise
-                inst.dbg_ex_sil_free_eff = sfree;
+
+                // ★p_detect scales the SATURATED delta, not the raw pixel COUNT — ported from door_concept,
+                // which documented this before I wrote the count-scaling form here. mask_evidence tanh-saturates
+                // the summed log-odds, and with hundreds of silhouette samples the sum sits far past the knee, so
+                // multiplying the COUNT by p_detect changes the delta almost not at all until p_detect hits
+                // exactly 0. That is why the two long-range deletions happened DESPITE a low p_detect: the 7 m
+                // through-a-wall removal ran at p_detect=0.126 and the 6 m one lower still, and both deleted at
+                // full strength. The range term was not too weak — it was very nearly INERT over its whole range,
+                // biting only at zero. Interpolating between the confirm-only delta and the full delta makes
+                // p_detect act linearly end to end, and leaves confirmation (+) untouched.
+                const float d_conf = rc::exist::mask_evidence(sil.e_occ, 0.0f,     sil.n_detectable, sm).log_odds_delta;
+                const float d_full = rc::exist::mask_evidence(sil.e_occ, raw_free, sil.n_detectable, sm).log_odds_delta;
+                rc::exist::Evidence ev_sil;
+                ev_sil.e_occ = sil.e_occ; ev_sil.e_free = raw_free; ev_sil.n_reached = sil.n_detectable;
+                ev_sil.log_odds_delta = d_conf + p_detect * (d_full - d_conf);
+                inst.dbg_ex_sil_free_eff = raw_free * p_detect;   // diagnostic: absence mass actually admitted
                 inst.dbg_ex_pdetect = p_detect; inst.dbg_ex_central = sil.central_frac();
-                inst.existence.integrate(rc::exist::mask_evidence(sil.e_occ, sfree, sil.n_detectable, sm));
+                inst.existence.integrate(ev_sil);
                 integrated = true;
                 // Route the un-resolvable absence into an epistemic VERIFY pull (decayed accumulator). When it
                 // builds up, the refrigerator is flagged for verification (the epistemic planner drives the robot to a
@@ -190,8 +213,6 @@ void RefrigeratorExistence::update_and_remove(RefrigeratorFitter& fitter, Refrig
                 // Occupancy is unaffected: a return that lands on the box can only ever confirm.
                 const float admissible = inst.dbg_gated ? 0.0f : 1.0f;
                 const float p_detect_lidar = absence_range_conf(lidar_range) * coverage * admissible;
-                ev.e_free     *= p_detect_lidar;
-                ev.e_interior *= p_detect_lidar;
                 // A refrigerator IS a faithful opaque solid, so it declares itself as one and gets the symmetric
                 // policy: a return at the near face is FOR; a through-beam and — the fix — a return metres deep
                 // INSIDE the volume are AGAINST, because a solid fridge would have blocked them.
@@ -202,8 +223,15 @@ void RefrigeratorExistence::update_and_remove(RefrigeratorFitter& fitter, Refrig
                 // (~5 min, mean sfree_eff 85.5) and its ex_L NEVER went below its initial 0.00, streak never
                 // left 0 — immortal. The wall behind it supplied ~54 interior returns/cycle that the old code
                 // scored as proof it existed. See [[existence-policy-unification]].
-                inst.dbg_ex_lidar_free_eff = ev.e_free + ev.e_interior;
-                ev.log_odds_delta = rc::exist::solid_delta(ev, sm);
+                // Same interpolation as the silhouette above: scale the SATURATED delta, not the raw beam
+                // counts. solid_delta tanh-saturates too, and with ~900 beams the sum is far past the knee, so
+                // multiplying e_free/e_interior by p_detect barely moved the result — exactly the inertness
+                // door_concept documented for the mask channel.
+                rc::exist::Evidence ev_conf = ev; ev_conf.e_free = 0.0f; ev_conf.e_interior = 0.0f;
+                const float l_conf = rc::exist::solid_delta(ev_conf, sm);   // occupancy only
+                const float l_full = rc::exist::solid_delta(ev, sm);        // occupancy + absence
+                inst.dbg_ex_lidar_free_eff = (ev.e_free + ev.e_interior) * p_detect_lidar;
+                ev.log_odds_delta = l_conf + p_detect_lidar * (l_full - l_conf);
                 inst.existence.integrate(ev);
                 integrated = true;
             }

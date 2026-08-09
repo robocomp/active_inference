@@ -10,6 +10,7 @@
 #include <limits>
 #include "specificworker.h"
 #include "table_geometry.h"   // rc::geom::footprint_overlap_ratio
+#include "../../common/instance_tracker/birth_evidence.h"   // rc::birth — the SHARED CREATE policy
 
 #include <algorithm>
 #include <cmath>
@@ -127,6 +128,23 @@ void SpecificWorker::run_instance_tracker()
     // the attention path (process_ricoh_bearings), never birth/associate/fit. Every ZED det is birthable.
     std::vector<rc::DetectionView> dets;
     const auto& pkt = mask_ingestor_->packet();
+    // ── Is this cycle a genuinely NEW observation? (rc::birth rule 1) ─────────────────────────────────
+    // The detections below are rebuilt EVERY cycle on purpose (see the comment above): a pending candidate that
+    // finds no matching detection expires, so skipping stale cycles would wipe every candidate and nothing would
+    // ever birth. But PERSISTING a candidate and ACCRUING evidence into it are different things, and conflating
+    // them made BirthFrames count COMPUTE CYCLES. At 10 Hz compute against a ~9.5 Hz mask stream one mask frame
+    // was counted several times — which is how table_2 (a YOLO blip that appears in 4 of 146 logged detection
+    // rows, cycles 202–205) became permanent furniture at cycle 203. A stale cycle now contributes 0: the
+    // candidate stays alive, its streak simply does not grow, so BirthFrames means N distinct OBSERVATIONS.
+    const bool new_observation = pkt.valid and static_cast<long>(pkt.frame_id) > last_tracker_mask_frame_;
+    if (new_observation)
+        last_tracker_mask_frame_ = static_cast<long>(pkt.frame_id);
+    // This sensor's detectability — the only thing the shared birth policy needs from the agent. Deliberately
+    // the SAME numbers the removal side weights absence by: an object the ZED cannot resolve well enough to
+    // DELETE is one it cannot resolve well enough to CREATE.
+    const rc::birth::Detectability birth_detectability{0.50f,
+                                                       cfg_.existence_absence_range_ref_m,
+                                                       cfg_.existence_absence_range_power};
     if (pkt.valid)
         for (int i = 0; i < static_cast<int>(pkt.slices.size()); ++i)
         {
@@ -150,6 +168,21 @@ void SpecificWorker::run_instance_tracker()
                 const float s = m / (m + std::max(1e-3f, cfg_.birth_fusion_mass_ref));   // half-saturated at ref
                 dv.birth_evidence = 1.0f + cfg_.birth_fusion_gain * s;
             }
+            // MASK QUALITY → what this ONE observation is worth toward CREATING a table. The policy is shared
+            // (common/instance_tracker/birth_evidence.h) so every concept agent births on the same terms; this
+            // agent supplies only its sensor's detectability, built once above. Two rules, neither a threshold:
+            // a repeat frame_id is worth 0 (rule 1), and a frame the FIT would refuse can never create an object
+            // (rule 2 — birth is admitted by the UPDATE rule, here the fixation gate). On top of that the
+            // observation is worth its reliability: confidence · (range_ref/range)^power (rule 3).
+            //
+            // ★Without this, corroboration alone decided birth: table_2's residual mass 42.3 gave
+            // 1 + 6·(42.3/50.3) = 6.05 evidence/frame, so the nominal 8-frame debounce was satisfied in TWO
+            // compute cycles — and the residual grid says "something unexplained is here", never "a table is
+            // here" (a wall or a box scores the same). The quality factor is what makes the corroboration
+            // bonus ride on a real, admissible, confident observation instead of substituting for one.
+            const bool admissible = fitter_->frame_admissible(sl);
+            const rc::birth::MaskQuality mq{sl.confidence, sl.range};
+            dv.birth_evidence *= rc::birth::evidence(mq, birth_detectability, new_observation, admissible);
             dets.push_back(dv);
         }
 

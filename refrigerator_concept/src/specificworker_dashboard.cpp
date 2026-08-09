@@ -12,6 +12,10 @@
 #include "refrigerator_dof.h"        // rc::kRefrigeratorDofs — names/units/σ* for the inspector rows
 
 #include <QByteArray>
+#include <QFont>
+#include <QFontMetrics>
+#include <QHBoxLayout>
+#include <QPushButton>
 #include <QSettings>
 #include <QVBoxLayout>
 #include <QColor>
@@ -40,7 +44,74 @@ void SpecificWorker::refresh_evidence_monitor()
 
     evidence_monitor_->update_view(ev_g_);
     refresh_belief_inspector();   // same tick, same instance pass — the two views can never disagree
+    refresh_belief_strip();       // …and the compact strip reads the same cycle as both
 }
+// ─── Compact belief strip ────────────────────────────────────────────────────────────────────────
+
+// One row per instance: the certainty channel (adequacy gap in nats, or ½·ln|Σ| when this agent
+// publishes no σ*), p(existence), the FE surprise, and the node's birth stamp. The widget owns the
+// history — this only pushes the current instant, on the same ~5 Hz tick as the panels above.
+void SpecificWorker::refresh_belief_strip()
+{
+    if (not belief_strip_)
+        return;   // headless (no dashboard built)
+
+    std::vector<rc::BeliefStripRow> rows;
+    rows.reserve(fitter_->instances().size());
+    for (const auto& [id, inst] : fitter_->instances())
+    {
+        rc::BeliefStripRow r;
+        r.node        = inst.node_name;
+        r.surprise    = inst.fe_surprise;
+        r.initialized = inst.ai2_initialized;
+        r.p_exists    = inst.existence.p_exists();
+        // Same REPORTED covariance the inspector and the NBV planner use, so the views cannot disagree.
+        const auto S = inst.ai2_belief.covariance_reported();
+        // `adequacy_gap_nats` returns 0 for a DOF table with no σ* anywhere — an empty sum — and 0 is
+        // exactly the value that means "adequate". Ask first, and carry "no demand" as the -1 sentinel;
+        // the strip then falls back to ½·ln|Σ| and says so in its heading.
+        r.gap_nats = rc::any_sigma_star(rc::kRefrigeratorDofs)
+                   ? rc::adequacy_gap_nats(rc::kRefrigeratorDofs, [&](std::size_t j) { return S(j, j); })
+                   : -1.0f;
+
+        // Fallback certainty channel: ½·ln det Σ via the Cholesky (Σ log L_ii), not log(det()) — a
+        // covariance with centimetre σ has a determinant near the floor of float, where a direct
+        // determinant is numerical noise.
+        const auto llt = S.llt();
+        if (llt.info() == Eigen::Success)
+            r.logdet_nats = llt.matrixL().toDenseMatrix().diagonal().array().log().sum();
+
+        // Birth from the node's own creation stamp, so `age` survives a dashboard opened long after the
+        // instance was born. Absent ⇒ 0 ⇒ the widget falls back to when it first saw the row.
+        if (const auto n = G->get_node(inst.node_id); n.has_value())
+            r.birth_ms = G->get_attrib_by_name<timestamp_creation_att>(n.value()).value_or(0);
+
+        rows.push_back(std::move(r));
+    }
+    belief_strip_->update_view(rows);
+}
+
+void SpecificWorker::restore_strip_geometry()
+{
+    if (not strip_window_)
+        return;
+    QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("refrigerator_concept"));
+    const QByteArray geom = settings.value(QStringLiteral("BeliefStripWindow_geometry")).toByteArray();
+    if (not geom.isEmpty())
+        strip_window_->restoreGeometry(geom);
+    else
+        strip_window_->resize(520, 210);   // small ON PURPOSE — meant to sit in a corner, always open
+}
+
+void SpecificWorker::save_strip_geometry() const
+{
+    if (not strip_window_)
+        return;
+    QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("refrigerator_concept"));
+    settings.setValue(QStringLiteral("BeliefStripWindow_geometry"), strip_window_->saveGeometry());
+    settings.sync();
+}
+
 
 // ─── Belief inspector ────────────────────────────────────────────────────────────────────────────
 
@@ -213,6 +284,48 @@ void SpecificWorker::build_dashboard()
     outer->addWidget(evidence_monitor_, 0);   // section 1 — natural height
     outer->addWidget(custom_widget_, 1);      // sections 2 + 3 — all remaining space
 
+    // NOT shown at startup: the strip below is the standing display and this is its drill-down,
+    // opened by the strip's "details ▸" button. Geometry is still restored, so the first click
+    // puts it back where you left it. (Want it up from the start? add `->show()`.)
     restore_dashboard_geometry();
-    dashboard_window_->show();
+
+    // ── Compact belief strip — a SEPARATE, small top-level window ──────────────────────────────────
+    // Not another panel inside the big window: the point is a display small enough to keep in a corner
+    // while the 1180×900 dashboard stays closed until something looks wrong. One row per instance, each
+    // row a 60 s trace of the certainty channel + p(existence) + FE surprise.
+    strip_window_ = new QWidget;
+    strip_window_->setWindowTitle(QStringLiteral("refrigerators — beliefs"));
+    auto* strip_layout = new QVBoxLayout(strip_window_);
+    strip_layout->setContentsMargins(0, 0, 0, 0);
+    belief_strip_ = new rc::BeliefStrip(QStringLiteral("refrigerators"), strip_window_);
+    belief_strip_->set_visible_window(60.f);
+    strip_layout->addWidget(belief_strip_, 1);
+
+    // "details ▸" — reveal the big dashboard on demand. A lambda connect needs no Q_OBJECT on either
+    // side, so the moc-free widget pattern is preserved; strip_window_ is the context object, so the
+    // connection dies with the window. show() alone is not enough for a minimised or buried window.
+    {
+        auto* bar = new QHBoxLayout;
+        bar->setContentsMargins(4, 0, 4, 3);
+        bar->addStretch(1);
+        auto* details = new QPushButton(QStringLiteral("details ▸"), strip_window_);
+        details->setToolTip(QStringLiteral("open the full dashboard: evidence counters, FE/surprise/Σ "
+                                           "time series, and the per-DOF belief inspector"));
+        QFont bf = details->font(); bf.setPointSizeF(bf.pointSizeF() - 1.0); details->setFont(bf);
+        details->setFixedHeight(QFontMetrics(bf).height() + 8);
+        QObject::connect(details, &QPushButton::clicked, strip_window_, [this]()
+        {
+            if (not dashboard_window_) return;
+            dashboard_window_->show();
+            dashboard_window_->setWindowState((dashboard_window_->windowState() & ~Qt::WindowMinimized)
+                                              | Qt::WindowActive);
+            dashboard_window_->raise();
+            dashboard_window_->activateWindow();
+        });
+        bar->addWidget(details, 0);
+        strip_layout->addLayout(bar, 0);
+    }
+
+    restore_strip_geometry();
+    strip_window_->show();
 }

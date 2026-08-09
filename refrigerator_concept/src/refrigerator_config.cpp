@@ -40,7 +40,6 @@ RefrigeratorConfig load_refrigerator_config(const ConfigLoader& cfg)
     out.detection_alive_max_frames = geti("RefrigeratorConcept.DetectionAliveMaxFrames", 40);
     out.matched_frames_before_aging = geti("RefrigeratorConcept.MatchedFramesBeforeAging", 5);
     out.central_region_frac      = getf("RefrigeratorConcept.CentralRegionFrac",     0.25f);
-    out.obs_distance             = getf("RefrigeratorConcept.ObsDistance",            1.8f);
     out.epistemic_cooldown_cycles= geti("RefrigeratorConcept.EpistemicCooldownCycles", 200);
     out.refrigerator_log_period_frames  = geti("RefrigeratorConcept.RefrigeratorLogPeriodFrames",   30);
     out.voxel_bank_max_points    = geti("RefrigeratorConcept.VoxelBankMaxPoints",     4000);
@@ -78,6 +77,9 @@ RefrigeratorConfig load_refrigerator_config(const ConfigLoader& cfg)
     out.ai2_wall_parallel_precision = getf("RefrigeratorModel.AI2WallParallelPrecision", 200.0f);
     out.ai2_wall_reach_m            = getf("RefrigeratorModel.AI2WallReachM",             0.15f);
     out.ai2_door_clearance_gain     = getf("RefrigeratorModel.AI2DoorClearanceGain",       3.0f);
+    out.detect_min_fill             = getf("RefrigeratorModel.DetectMinFill",              0.10f);
+    out.detect_max_fill             = getf("RefrigeratorModel.DetectMaxFill",              0.60f);
+    out.detect_soft                 = getf("RefrigeratorModel.DetectSoft",                 0.06f);
     out.ai2_volatility_infer        = getb("RefrigeratorModel.AI2VolatilityInfer",        false);
     out.ai2_volatility_lr           = getf("RefrigeratorModel.AI2VolatilityLr",           0.02f);
     out.ai2_volatility_sigma        = getf("RefrigeratorModel.AI2VolatilitySigma",        2.0f);
@@ -153,6 +155,13 @@ RefrigeratorConfig load_refrigerator_config(const ConfigLoader& cfg)
     out.tracker_birth_width_m    = getf("Tracker.BirthWidthM",      1.0f);
     out.tracker_birth_depth_m    = getf("Tracker.BirthDepthM",      0.6f);
     out.tracker_birth_height_m   = getf("Tracker.BirthHeightM",     0.75f);
+    // Birth fragment: keep the probation burst and admit the birth on it (see refrigerator_config.h).
+    out.birth_frag_enabled       = getb("Tracker.BirthFragment",          true);
+    out.birth_frag_voxel_m       = getf("Tracker.BirthFragmentVoxelM",    0.03f);
+    out.birth_frag_max_pts       = geti("Tracker.BirthFragmentMaxPts",    20000);
+    out.birth_frag_delta_ms      = static_cast<std::uint64_t>(
+                                       std::max(0, geti("Tracker.BirthFragmentDeltaMs", 4000)));
+    out.birth_admit_plausibility = getf("Tracker.BirthAdmitPlausibility", 0.35f);
     out.ricoh_attention_conf     = getf("Tracker.RicohAttentionConf", 0.60f);
     out.ricoh_attention_angle_margin_rad = getf("Tracker.RicohAttentionAngleMargin", 0.05f);
     out.ricoh_attention_range_band_m     = getf("Tracker.RicohAttentionRangeBandM",  1.0f);

@@ -21,6 +21,7 @@
 
 #include "table_model.h"   // rc::TableModel statics (TOP_THICKNESS, LEG_RADIUS)
 #include "../../common/object_anchor/object_anchor_contract.h"
+#include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
 
 namespace rc {
 
@@ -60,6 +61,7 @@ std::uint64_t TableSceneGraph::create_instance_from_detection(const Eigen::Vecto
         G_->add_or_modify_attrib_local<pos_y_att>(table_node, rpy +  50.f);
     }
 
+    rc::provenance::stamp_creation(*G_, table_node);   // birth stamp: epoch ms + local ISO-8601
     const auto id_opt = G_->insert_node(table_node);
     if (not id_opt.has_value())
         return 0;

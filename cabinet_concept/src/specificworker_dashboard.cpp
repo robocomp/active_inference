@@ -13,6 +13,10 @@
 
 #include <QByteArray>
 #include <QSettings>
+#include <QPushButton>
+#include <QHBoxLayout>
+#include <QFont>
+#include <QFontMetrics>
 #include <QVBoxLayout>
 #include <QWidget>
 #include <QColor>
@@ -41,6 +45,7 @@ void SpecificWorker::refresh_evidence_monitor()
 
     evidence_monitor_->update_view(ev_g_);
     refresh_belief_inspector();   // same tick, same instance pass — the two views can never disagree
+    refresh_belief_strip();       // …and the compact strip reads the same cycle as both
 }
 
 // ─── Belief inspector ────────────────────────────────────────────────────────────────────────────
@@ -256,6 +261,156 @@ void SpecificWorker::build_dashboard()
     outer->addWidget(evidence_monitor_, 0);   // section 1 — natural height
     outer->addWidget(custom_widget_, 1);      // sections 2 + 3 — all remaining space
 
+    // NOT shown at startup: the compact strip below is the standing display, and this window is the
+    // drill-down you ask for with its "details ▸" button. Geometry is still restored here, so the first
+    // click puts it back exactly where you last left it. (Want it up from the start again? add ->show().)
     restore_dashboard_geometry();
-    dashboard_window_->show();
+
+    // ── Compact belief strip — a SEPARATE, small top-level window ──────────────────────────────────
+    // One row per cabinet, each row a 60 s trace of the adequacy gap + p(exists) + FE surprise. Small on
+    // purpose: it is meant to sit in a corner and stay open, with the big dashboard above as the
+    // drill-down. Mirrors table_concept.
+    strip_window_ = new QWidget;
+    strip_window_->setWindowTitle(QStringLiteral("cabinet_concept — beliefs"));
+    auto* strip_layout = new QVBoxLayout(strip_window_);
+    strip_layout->setContentsMargins(0, 0, 0, 0);
+    belief_strip_ = new rc::BeliefStrip(QStringLiteral("cabinets"), strip_window_);
+    belief_strip_->set_visible_window(60.f);
+    strip_layout->addWidget(belief_strip_, 1);
+
+    // "details ▸" — reveal the big dashboard on demand. A lambda connect needs no Q_OBJECT on either side,
+    // so the moc-free widget pattern is preserved; strip_window_ is the context object, so the connection
+    // dies with the window rather than outliving it. show() alone is not enough: a window the user
+    // minimised or buried needs the un-minimise + raise + activate as well.
+    {
+        auto* bar = new QHBoxLayout;
+        bar->setContentsMargins(4, 0, 4, 3);
+        bar->addStretch(1);
+        auto* details = new QPushButton(QStringLiteral("details \u25B8"), strip_window_);
+        details->setToolTip(QStringLiteral("open the full dashboard: evidence counters, FE/surprise/\u03A3 "
+                                           "time series, and the per-DOF belief inspector"));
+        QFont bf = details->font(); bf.setPointSizeF(bf.pointSizeF() - 1.0); details->setFont(bf);
+        details->setFixedHeight(QFontMetrics(bf).height() + 8);
+        QObject::connect(details, &QPushButton::clicked, strip_window_, [this]()
+        {
+            if (not dashboard_window_) return;
+            dashboard_window_->show();
+            dashboard_window_->setWindowState((dashboard_window_->windowState() & ~Qt::WindowMinimized)
+                                              | Qt::WindowActive);
+            dashboard_window_->raise();
+            dashboard_window_->activateWindow();
+        });
+        bar->addWidget(details, 0);
+        strip_layout->addLayout(bar, 0);
+    }
+
+    restore_strip_geometry();
+    strip_window_->show();
+}
+
+// One row per cabinet: the adequacy gap (nats still missing before Σ meets the consumer's σ*), the
+// existence probability, the FE surprise, and the node's birth stamp. The widget owns the history — this
+// only pushes the current instant, on the same throttled tick as the panels above.
+void SpecificWorker::refresh_belief_strip()
+{
+    if (not belief_strip_)
+        return;   // headless: nothing was built
+
+    std::vector<rc::BeliefStripRow> rows;
+
+    // ★THE DISPLAY UNIT FOLLOWS THE MODEL, exactly as refresh_belief_inspector() does. Under the
+    // KITCHEN-OF-RUNS model the beliefs are owned by the (wall, tier) CELLS — `fitter_->instances()` is not
+    // the thing on screen, and iterating it here is why the strip came up empty. Keep the two views reading
+    // the same container or they will disagree about what exists.
+    if (cfg_.kitchen_model)
+    {
+        for (const auto& cell : kitchen_mgr_.cells())
+        {
+            if (not cell.active())
+                continue;   // a candidate cell has no belief yet — nothing to trace
+            rc::BeliefStripRow r;
+            r.node        = cell.geom.id;
+            r.model       = cell.geom.tier == 0 ? "wall-run base" : "wall-run upper";
+            r.p_exists    = 1.0f / (1.0f + std::exp(-cell.existence));
+            r.initialized = true;   // an active cell is by definition a live belief
+
+            const auto& S = cell.belief->covariance();
+            r.gap_nats = rc::any_sigma_star(rc::kWallRunDofs)
+                       ? rc::adequacy_gap_nats(rc::kWallRunDofs, [&](std::size_t j) { return S(j, j); })
+                       : -1.0f;
+            const auto llt = S.llt();
+            if (llt.info() == Eigen::Success)
+                r.logdet_nats = llt.matrixL().toDenseMatrix().diagonal().array().log().sum();
+            rows.push_back(std::move(r));
+        }
+        if (const auto* isl = kitchen_mgr_.island())   // the free-standing peninsula has no cell
+        {
+            rc::BeliefStripRow r;
+            r.node        = "island";
+            r.model       = "wall-run island";
+            r.p_exists    = 1.0f / (1.0f + std::exp(-kitchen_mgr_.island_existence()));
+            r.initialized = true;
+            const auto& S = isl->covariance();
+            r.gap_nats = rc::any_sigma_star(rc::kWallRunDofs)
+                       ? rc::adequacy_gap_nats(rc::kWallRunDofs, [&](std::size_t j) { return S(j, j); })
+                       : -1.0f;
+            const auto llt = S.llt();
+            if (llt.info() == Eigen::Success)
+                r.logdet_nats = llt.matrixL().toDenseMatrix().diagonal().array().log().sum();
+            rows.push_back(std::move(r));
+        }
+        belief_strip_->update_view(rows);
+        return;
+    }
+
+    // Per-instance model (kitchen_model off): one row per cabinet instance.
+    rows.reserve(fitter_->instances().size());
+    for (const auto& [id, inst] : fitter_->instances())
+    {
+        rc::BeliefStripRow r;
+        r.node        = inst.node_name;
+        r.p_exists    = inst.existence.p_exists();
+        r.surprise    = inst.fe_surprise;
+        r.initialized = inst.ai2_initialized;
+
+        // The same REPORTED covariance the inspector and the NBV planner use, so the strip cannot
+        // disagree with either.
+        const auto S = inst.ai2_belief.covariance_reported();
+        r.gap_nats = rc::any_sigma_star(rc::kCabinetDofs)
+                   ? rc::adequacy_gap_nats(rc::kCabinetDofs, [&](std::size_t j) { return S(j, j); })
+                   : -1.0f;
+
+        // Fallback channel: ½·ln det Σ via the Cholesky (Σ log L_ii), not log(det()) — a covariance with
+        // centimetre σ has a determinant where a direct determinant is numerical noise.
+        const auto llt = S.llt();
+        if (llt.info() == Eigen::Success)
+            r.logdet_nats = llt.matrixL().toDenseMatrix().diagonal().array().log().sum();
+
+        if (const auto n = G->get_node(inst.node_id); n.has_value())
+            r.birth_ms = G->get_attrib_by_name<timestamp_creation_att>(n.value()).value_or(0);
+
+        rows.push_back(std::move(r));
+    }
+    belief_strip_->update_view(rows);
+}
+
+void SpecificWorker::restore_strip_geometry()
+{
+    if (not strip_window_)
+        return;
+    QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("cabinet_concept"));
+    const QByteArray geom = settings.value(QStringLiteral("BeliefStripWindow_geometry")).toByteArray();
+    if (not geom.isEmpty())
+        strip_window_->restoreGeometry(geom);
+    else
+        strip_window_->resize(520, 210);   // small ON PURPOSE — it sits in a corner, always open
+}
+
+void SpecificWorker::save_strip_geometry() const
+{
+    if (not strip_window_)
+        return;
+    QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("cabinet_concept"));
+    settings.setValue(QStringLiteral("BeliefStripWindow_geometry"), strip_window_->saveGeometry());
+    settings.sync();
 }

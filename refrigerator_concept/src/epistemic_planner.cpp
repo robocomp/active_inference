@@ -1,19 +1,32 @@
 /*
- * epistemic_planner.cpp  —  Σ-based D-optimal next-best-view over the refrigerator's vertical faces.
+ * epistemic_planner.cpp  —  Σ-based D-optimal next-best-view over the refrigerator's vertical faces,
+ *                           weighted by the probability the detector fires from where we propose to stand.
  *
  * Only the four vertical faces (±X, ±Y in refrigerator frame) are considered: a floor-navigating robot cannot
  * observe the top face from above or the bottom face at all. Each face is scored by the expected entropy
- * reduction ½·ln det(I₆ + Σ·ΔI) on the belief's full covariance, bounded by the adequacy gap to Σ*, and * the winning face's framed viewpoint + heading is returned. See epistemic_planner.h for the formulas.
+ * reduction ½·ln det(I₆ + Σ·ΔI) on the belief's full covariance — the information a detection WOULD yield —
+ * and `rc::nbv` multiplies that by P(detect | framing) at that face's own stand-off, so the winner is the most
+ * informative view we can actually GET. The scalar affordance value stays bounded by the adequacy gap to Σ*.
+ *
+ * ★WHAT WAS WRONG BEFORE (fixed 2026-08-07). The stand-off inverted a HORIZONTAL-ONLY framing model:
+ * d = R_circ / (fill·tan(hfov/2)), with R_circ the footprint's circumscribed radius. But `roi_fill` — the
+ * quantity the detector envelope is a function of, and the one refrigerator_projection.cpp measures — is
+ * max(Δcol/W, Δrow/H), a max over BOTH image axes, and for a 1.7 m box seen from a camera mounted at 0.945 m
+ * the VERTICAL axis binds by ~4×. Measured on the live rig (ZED 1280×720, hfov 110°, fx=fy=448): the planner
+ * proposed 1.21 m from the face, where the predicted fill is 0.87 and P(detect) = 0.010. The robot was being
+ * sent to the one place a mask could not form, and the removal channel then read the resulting absence as
+ * evidence the refrigerator was gone. Two smaller errors pushed the same way — the fill inversion was
+ * small-angle (~12 % high at fill≈0.4) and R_circ was added to a FACE-relative stand-off. All three now live
+ * in common/nbv/viewpoint_score.h, which projects the box corners exactly as the projector does.
  */
 
 #include "epistemic_planner.h"
 #include "refrigerator_dof.h"   // kRefrigeratorDofs: names/units/σ* — shared with the dashboard
+#include "../../common/nbv/viewpoint_score.h"   // rc::nbv — the shared detection-weighted NBV core
 
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <limits>
-#include <numbers>
 #include <print>
 #include <vector>
 
@@ -52,66 +65,52 @@ std::vector<Eigen::Vector3f> sample_face_surface(const RefrigeratorBeliefState& 
     return pts;
 }
 
-
 }  // namespace
 
 // ─── EpistemicPlanner ────────────────────────────────────────────────────────
 
-EpistemicPlanner::EpistemicPlanner(float d_obs)
-    : d_obs_(d_obs)
-{}
-
 // AI2-native Σ-based D-optimal next-best-view: score the four faces, return the best framed viewpoint.
 EpistemicProposal EpistemicPlanner::compute(const RefrigeratorBelief& belief, float lat_rate, float sigma_base,
-                                            float hfov_rad, const std::vector<EpistemicPlanner::Obstacle>& obstacles) const
+                                            const rc::nbv::Sensor& sensor_in,
+                                            const std::vector<EpistemicPlanner::Obstacle>& obstacles,
+                                            const std::vector<Eigen::Vector2f>& room_polygon) const
 {
-    // HORIZONTAL FoV only, from the camera's REAL intrinsics when the caller supplies them (2·atan(W/2fx));
-    // the 70° literal is only the fallback for a caller that has no CameraAPI yet.
-    const float hfov = (hfov_rad > 0.1f and hfov_rad < 3.0f)
-                     ? hfov_rad : (70.0f * std::numbers::pi_v<float> / 180.0f);
     constexpr float kRobotRadiusM = 0.30f;   // Shadow's footprint radius — a physical dimension, not a knob
-    // Fraction of the half-FoV the object should subtend: 0.45 leaves ~55% of the half-frame as margin, so the
-    // silhouette stays whole and trunc_frac stays low. Same constant the servo contract already publishes.
-    constexpr float kFramingFill = 0.45f;
+
+    // The sensor arrives from the caller with the camera's real FoVs + mount height; the detector envelope is
+    // ours (the same one the removal channel weights absence by, so create and remove agree on "could we have
+    // seen it?"). One model, both directions.
+    rc::nbv::Sensor sensor = sensor_in;
+    sensor.env = det_env_;
+
+    // ★NO SENSOR MODEL ⇒ NO PROPOSAL. A refrigerator is a TALL box, so the VERTICAL axis is the one that binds:
+    // without vfov the fill model silently reverts to horizontal-only and proposes ~0.9 m, which is precisely
+    // the "no mask can form here" pose this whole rewrite exists to prevent. Degrading to a horizontal answer
+    // looks graceful and is not — and it is WORSE than no answer, because refrigerator_affordance freezes the
+    // target pose for the duration of an executing claim, so one proposal made in the startup window (before
+    // robot_concept has published cam_rgb_focaly, or before the room→zed chain resolves) is locked in for the
+    // whole execution. "I do not know the camera yet" must stay silent, not guess.
+    // The condition itself is rc::nbv::Sensor::complete() — ONE definition, shared with the choke point inside
+    // plan_faces() that refuses for every agent. Kept here as well only to name the REFRIGERATOR in the log and
+    // to skip the belief work; it is deliberately the same predicate, not a second opinion.
+    if (not sensor.complete())
+    {
+        static bool warned = false;
+        if (not warned)
+        {
+            warned = true;
+            std::print("[epistemic-NBV] NO PROPOSAL: incomplete sensor model (vfov={:.3f} rad, mount_z={:.3f} m). "
+                       "Waiting for the ZED intrinsics + room→zed transform; a horizontal-only stand-off would "
+                       "be locked in by the affordance freeze.\n", sensor.vfov_rad, sensor.height_m);
+        }
+        return {};
+    }
 
     // REPORTED covariance: Σ with the yaw entry inflated by the discrete-mode entropy (p(1−p)(π/2)²), so a
     // near-square refrigerator whose orientation mode is unresolved shows a large yaw variance → the D-optimal NBV
     // scores a mode-discriminating (side/leg) view highly and drives the orbit that resolves it.
     const Eigen::Matrix<float, 6, 6> S = belief.covariance_reported().topLeftCorner<6, 6>();   // [cx,cy,H,w,h,yaw] (drop the tilt-calibration DOF)
     const RefrigeratorBeliefState& s = belief.state();
-
-    const float cy = std::cos(s.yaw), sy = std::sin(s.yaw);
-    const float hw = s.w * 0.5f, hh = s.h * 0.5f;
-    struct Face { Eigen::Vector2f normal, centre; float half_span; };
-    const std::array<Face, 4> faces = {{
-        { { cy,  sy}, {s.cx + cy * hw, s.cy + sy * hw}, hh },   // +x
-        { {-cy, -sy}, {s.cx - cy * hw, s.cy - sy * hw}, hh },   // -x
-        { {-sy,  cy}, {s.cx - sy * hh, s.cy + cy * hh}, hw },   // +y
-        { { sy, -cy}, {s.cx + sy * hh, s.cy - cy * hh}, hw },   // -y
-    }};
-    // ── Stand-off: DERIVED framing distance, not a constant ────────────────────────────────────────────
-    // The old rule was half_span/tan(hfov/2) + 0.45, clamped into [1.15, d_obs]. Two faults: the "+0.45"
-    // margin was arbitrary, and half_span/tan(hfov/2) is the distance at which the face EXACTLY FILLS the
-    // frame width — the framing at which YOLO's mask is clipped by the image border, `trunc_frac` rises and
-    // the frame stops being admissible. For a 0.6 m fridge that evaluated to 0.89 m and then hit the 1.15 m
-    // floor, i.e. the floor was doing all the work and the geometry none. That is why standing close was
-    // producing truncated masks. See [[refrigerator-standoff-and-obstacles]].
-    //
-    // Instead: place the object so its horizontal extent occupies `fill` of the half-FoV, leaving (1−fill) as
-    // image margin, which is what keeps the silhouette whole:
-    //     d = R / tan(fill · hfov/2)
-    // R is the footprint's CIRCUMSCRIBED radius ½√(w²+h²), not the viewed face's half-width — the robot
-    // approaches from an arbitrary bearing, so the projected width can reach the diagonal. Using R makes the
-    // stand-off valid from every approach direction instead of only head-on.
-    const float R_circ = 0.5f * std::sqrt(s.w * s.w + s.h * s.h);
-    // Collision floor: the robot cannot stand closer than its own radius plus the object's. Geometry, not tuning.
-    const float collision_floor = R_circ + kRobotRadiusM;
-    const float framing_d = R_circ / std::max(1e-3f, std::tan(kFramingFill * 0.5f * hfov));
-    const float framed_standoff = std::max(framing_d, collision_floor);
-    // d_obs is a PREFERENCE for staying close enough to orbit; it must never pull the robot inside the
-    // framing distance, or we are back to truncated masks.
-    const float max_stand_off = std::max(framed_standoff, d_obs_);
-    const auto standoff_for = [&](float) { return framed_standoff; };
 
     // ── Adequacy gap (active-perception step 1, REFRIGERATOR.md) ─────────────────────────────────
     // Target precision Σ* and the gap formula now live in refrigerator_dof.h /
@@ -121,77 +120,66 @@ EpistemicProposal EpistemicPlanner::compute(const RefrigeratorBelief& belief, fl
     // resolves, so the robot keeps gathering evidence on it before releasing.
     const float adequacy_gap = adequacy_gap_nats(kRefrigeratorDofs, [&](std::size_t j) { return S(j, j); });
 
-    // ── Would this viewpoint stand ON another object? ───────────────────────────────────────────────
-    // The obstacles are every OTHER object the DSR graph knows about, already inflated by the robot radius by
-    // the caller, so the test is a plain point-in-oriented-rectangle. A face whose framed viewpoint lands
-    // inside one is skipped and the next-best face is taken — the ranking already exists for exactly this
-    // fallback, it was simply never consulted. If EVERY face is blocked we keep the argmax anyway and let the
-    // controller resolve it: this planner proposes, it does not own global occupancy.
-    const auto blocked = [&](float vx, float vy)
-    {
-        for (const auto& o : obstacles)
-        {
-            const float c = std::cos(-o.yaw), sn = std::sin(-o.yaw);
-            const float dx = vx - o.cx, dy = vy - o.cy;
-            const float lx = c * dx - sn * dy, ly = sn * dx + c * dy;   // into the obstacle's own frame
-            if (std::abs(lx) <= 0.5f * o.w and std::abs(ly) <= 0.5f * o.h)
-                return true;
-        }
-        return false;
-    };
-    const auto viewpoint_of = [&](int i, float standoff)
-    {
-        return Eigen::Vector2f{faces[i].centre.x() + faces[i].normal.x() * standoff,
-                               faces[i].centre.y() + faces[i].normal.y() * standoff};
-    };
+    // ── The object as the belief holds it — estimate AND uncertainty ────────────────────────────
+    // σ_pos/σ_extent are what make the FRAMING precision-aware: rc::nbv marginalises P(detect) over them, so a
+    // poorly-known refrigerator asks for a safer framing on its own. That is the model-level replacement for the
+    // hand-picked stand-off margin this planner used to carry.
+    rc::nbv::Target target;
+    target.cx = s.cx; target.cy = s.cy; target.yaw = s.yaw;
+    target.w  = s.w;  target.h  = s.h;
+    target.z0 = 0.0f; target.z1 = s.H;   // the box stands on the floor; z1 is what binds the vertical framing
+    target.sigma_pos_m    = std::sqrt(std::max(0.0f, 0.5f * (S(0, 0) + S(1, 1))));
+    target.sigma_extent_m = std::sqrt(std::max(0.0f, 0.5f * (S(3, 3) + S(4, 4))));
 
-    // Score each face by the D-optimal expected entropy reduction on Σ, with a range-aware R per face.
+    // ── The belief half: what a detection from face i at range d would tell us ───────────────────
+    // Rᵢ = σ_base² + (lat_rate·d)² — range-aware, so the same face is worth less from further away. rc::nbv
+    // calls this at each face's own stand-off, so the trade "further ⇒ detectable but less informative" is
+    // resolved with the real numbers on both sides instead of one shared range.
     const Eigen::Matrix<float, 6, 6> I6 = Eigen::Matrix<float, 6, 6>::Identity();
-    int   best_idx      = 0;
-    float best_raw      = -std::numeric_limits<float>::max();
-    float best_standoff = framed_standoff;
-    // RAW per-face D-optimal gain (nats), UNBOUNDED — this is the RANKING the controller uses to choose a
-    // feasible face, so it must NOT be adequacy-clamped. Each face's single-view info typically EXCEEDS the
-    // remaining gap, so clamping every face at the gap made all four tie (the degenerate ranked-set that
-    // erased the controller's basis to prefer one face). The adequacy bound belongs on the SCALAR value below.
-    std::array<float, 4> face_raw{};
-    for (int i = 0; i < 4; ++i)
+    const auto raw_gain = [&](int face_idx, float standoff) -> float
     {
-        const float standoff = standoff_for(faces[i].half_span);
         const float Ri = sigma_base * sigma_base + (lat_rate * standoff) * (lat_rate * standoff);
-        const Eigen::Matrix<float, 6, 6> dI = belief.predicted_information(sample_face_surface(s, i), Ri).topLeftCorner<6, 6>();
-        const float det  = (I6 + S * dI).determinant();
-        const float raw_gain = std::max(0.0f, 0.5f * std::log(std::max(1e-9f, det)));   // single-view D-optimal info (nats)
-        face_raw[i] = raw_gain;
-        if (raw_gain > best_raw) { best_raw = raw_gain; best_idx = i; best_standoff = standoff; }
-    }
-    if (not std::isfinite(best_raw))   // low-but-finite gain is NOT withdrawn (controller ranks it low)
+        const Eigen::Matrix<float, 6, 6> dI =
+            belief.predicted_information(sample_face_surface(s, face_idx), Ri).topLeftCorner<6, 6>();
+        const float det = (I6 + S * dI).determinant();
+        return std::max(0.0f, 0.5f * std::log(std::max(1e-9f, det)));   // single-view D-optimal info (nats)
+    };
+
+    // ★The room polygon is what kills the through-the-wall faces. A refrigerator is wall-anchored, so its back
+    // (and often one side) presents a perfectly VISIBLE face whose viewpoint is outside the room — and the raw
+    // information term cannot tell front from back. Without the polygon `is_reachable` returns true for every
+    // pose and such a face can win outright; nothing downstream refuses it either, because an unroutable goal
+    // is REPAIRED, not rejected. Passing it turns "the target is behind the wall" into "that face is not a
+    // viewpoint", which is a feasibility fact, not a preference.
+    const rc::nbv::Plan plan = rc::nbv::plan_faces(target, sensor, kRobotRadiusM, obstacles, raw_gain,
+                                                   room_polygon);
+    if (not plan.valid)
         return {};
-
-    // Re-pick the highest-gain face whose framed viewpoint is NOT inside another object.
-    int   free_idx = -1;
-    float free_raw = -std::numeric_limits<float>::max();
-    for (int i = 0; i < 4; ++i)
+    // ★NO USABLE FACE ⇒ REFUSE, never publish the hint. `plan.best_pos` is then the raw argmax, which for a
+    // wall-anchored box is a pose behind the wall. Publishing it hands the controller an unroutable standpoint,
+    // and the controller REPAIRS rather than rejects: nearest_reachable is measured from the robot, so the goal
+    // snaps to the nearest occupiable cell — the floor right at the fridge. An invalid proposal makes the caller
+    // hold_offered() instead, which is the honest answer: "no viewpoint from here". (door_concept already does
+    // this; the refrigerator did not, so the refusal path did not exist on this side.)
+    if (not plan.any_usable)
     {
-        const auto v = viewpoint_of(i, framed_standoff);
-        if (blocked(v.x(), v.y())) continue;
-        if (face_raw[i] > free_raw) { free_raw = face_raw[i]; free_idx = i; }
+        static int shouted = 0;
+        if (shouted++ < 5)
+            std::print("refrigerator_concept: [NBV] no usable face — every viewpoint is inside an obstacle or "
+                       "outside the room. REFUSING (the raw argmax would stand in the wall).\n");
+        return {};
     }
-    if (free_idx >= 0 and free_idx != best_idx)
-    {
-        std::print("[epistemic-NBV] argmax face blocked by another object → falling back (gain {:.3f} → {:.3f})\n",
-                   best_raw, free_raw);
-        best_idx = free_idx; best_raw = free_raw;
-    }
-    else if (free_idx < 0 and not obstacles.empty())
-        std::print("[epistemic-NBV] ALL four viewpoints blocked by other objects — keeping argmax, controller must resolve\n");
 
-    // SCALAR affordance value (epistemic_gain): the winning face's info BOUNDED by the adequacy gap to Σ*, so
-    // it → 0 as the belief reaches the consumer's precision — a threshold-free "done" AND the cross-affordance
-    // EFE currency. Information beyond Σ* is worthless to the consumer, so an adequate refrigerator stops attracting.
-    // p_observable hook = 1.0 (the standoff is a framed viewpoint by construction); wire reachability later.
-    constexpr float p_observable = 1.0f;
-    const float best_gain = p_observable * std::min(best_raw, adequacy_gap);
+    const int   bi        = plan.best_face;
+    const float best_raw  = plan.face_raw_gains[bi];
+    // SCALAR affordance value (epistemic_gain): the winning face's EXPECTED info (already P(detect)-weighted,
+    // and 0 if the pose stands inside another object) BOUNDED by the adequacy gap to Σ*, so it → 0 as the belief
+    // reaches the consumer's precision — a threshold-free "done" AND the cross-affordance EFE currency.
+    // Information beyond Σ* is worthless to the consumer, so an adequate refrigerator stops attracting.
+    // The bound applies to the USEFUL fraction of the raw information; the detection weighting rides along
+    // untouched, which is what makes the old p_observable=1.0 stub finally a real number.
+    const float useful_frac = (best_raw > 1e-9f) ? std::min(best_raw, adequacy_gap) / best_raw : 0.0f;
+    const float best_gain   = plan.face_gains[bi] * useful_frac;
 
     // Verification readout (throttled): the chosen face should be perpendicular to Σ's dominant
     // uncertainty direction — e.g. dom-unc = h ⇒ a ±y face wins. Confirms the NBV attacks the worst DOF.
@@ -209,28 +197,40 @@ EpistemicProposal EpistemicPlanner::compute(const RefrigeratorBelief& belief, fl
             const float n = std::sqrt(std::max(0.0f, S(j, j))) / kRef;
             if (n > best) { best = n; dom = j; }
         }
-        std::print("[epistemic-NBV] face={} gain={:.3f}(raw {:.3f}) adq_gap={:.3f} | Σ dom-unc={} σ={:.3f}{} | raw +x={:.2f} -x={:.2f} +y={:.2f} -y={:.2f}\n",
-                   fn[best_idx], best_gain, best_raw, adequacy_gap, kRefrigeratorDofs[dom].name,
+        // Emit the ACTUAL stand-off, the framing it realises and the detection probability there, so
+        // "the affordance is too close" is a readable number rather than something inferred from the viewer.
+        // The stand-off is FACE-relative; dist_from_centre is what the viewer shows.
+        const float fill = rc::nbv::predicted_fill(target, plan.best_pos, sensor, plan.best_yaw);
+        std::print("[epistemic-NBV] standoff={:.2f}m band=[{:.2f},{:.2f}] fov=({:.0f},{:.0f})deg cam_z={:.2f} "
+                   "fill={:.2f}→p_det={:.3f} vis={:.2f} target=({:.2f},{:.2f}) dist_from_centre={:.2f}m\n",
+                   plan.best_standoff_m, plan.standoff_min_m, plan.standoff_max_m,
+                   sensor.hfov_rad * 57.29578f, sensor.vfov_rad * 57.29578f, sensor.height_m,
+                   fill, plan.face_p_detect[bi], plan.face_visible[bi],
+                   plan.best_pos.x(), plan.best_pos.y(),
+                   std::hypot(plan.best_pos.x() - s.cx, plan.best_pos.y() - s.cy));
+        std::print("[epistemic-NBV] face={} gain={:.3f}(raw {:.3f}) adq_gap={:.3f} | Σ dom-unc={} σ={:.3f}{} | "
+                   "expected +x={:.2f} -x={:.2f} +y={:.2f} -y={:.2f} (p_det {:.2f},{:.2f},{:.2f},{:.2f})\n",
+                   fn[bi], best_gain, best_raw, adequacy_gap, kRefrigeratorDofs[dom].name,
                    std::sqrt(std::max(0.0f, S(dom, dom))), kRefrigeratorDofs[dom].unit,
-                   face_raw[0], face_raw[1], face_raw[2], face_raw[3]);
+                   plan.face_gains[0], plan.face_gains[1], plan.face_gains[2], plan.face_gains[3],
+                   plan.face_p_detect[0], plan.face_p_detect[1], plan.face_p_detect[2], plan.face_p_detect[3]);
     }
 
-    const auto& f = faces[best_idx];
-    const float vx = f.centre.x() + f.normal.x() * best_standoff;
-    const float vy = f.centre.y() + f.normal.y() * best_standoff;
-    const float yaw_to_face = std::atan2(s.cy - vy, s.cx - vx);
-
-    EpistemicProposal proposal{vx, vy, yaw_to_face, best_gain, true};
-    // Object-relative viewpoint constraint (authoritative): publish ALL four faces with their RAW per-face
-    // gains (the ranking — NOT adequacy-clamped, else they tie) + the sensor-model stand-off band + framing
-    // + Σ*, so the controller picks the best FEASIBLE face itself (a blocked argmax face falls back to the
-    // next reachable one). The affordance's scalar epistemic_gain stays adequacy-bounded (cross-affordance
-    // selection + "done"). Face order matches the [+x,-x,+y,-y] sampling order above.
-    proposal.face_gains    = face_raw;
-    proposal.standoff_min_m = collision_floor;
-    proposal.standoff_max_m = max_stand_off;
-    proposal.framing_fill   = kFramingFill;
+    EpistemicProposal proposal{plan.best_pos.x(), plan.best_pos.y(), plan.best_yaw, best_gain, true};
+    // Object-relative viewpoint constraint (authoritative): publish ALL four faces with their EXPECTED per-face
+    // gains (the ranking — P(detect)-weighted so an undetectable face cannot out-bid travel cost, and NOT
+    // adequacy-clamped, else they tie) + the winning face's stand-off band + the framing the servo must drive
+    // to + Σ*, so the controller picks the best FEASIBLE face itself. Face order matches [+x,-x,+y,-y].
+    proposal.face_gains     = plan.face_gains;
+    proposal.standoff_min_m = plan.standoff_min_m;
+    proposal.standoff_max_m = plan.standoff_max_m;
+    // The framing the servo advances to is the argmax of the SAME envelope the stand-off realises. Publishing a
+    // different constant (this shipped 0.45) makes the servo drive the robot off the pose the planner chose.
+    proposal.framing_fill   = plan.framing_fill;
     proposal.sigma_star     = sigma_star_array<6>(kRefrigeratorDofs);   // the SAME demands the adequacy gap used
+    proposal.chosen_standoff_m = plan.best_standoff_m;
+    proposal.chosen_p_detect   = plan.face_p_detect[bi];
+    proposal.sensor_vfov_rad   = sensor.vfov_rad;
     if (not proposal.is_finite())
         return {};
     return proposal;

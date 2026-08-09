@@ -58,6 +58,18 @@ struct DoorInstance
     // one; cleared the first time a real depth mask is observed (the glance paid off → normal instance).
     bool  is_bearing_hypothesis = false;
     float hypothesis_azimuth    = 0.0f;   // room-frame bearing to look toward (the Orient affordance's target yaw)
+    // ★Does this hypothesis have a RANGE, or only a bearing? Set when the birth path resolved one from the
+    // precision cascade in door_bearing_range.h (today: the residual grid; soon: dense ricoh depth). With a
+    // range the hypothesis has a real (x,y), so its affordance becomes "GO THERE and check" (Servo) instead
+    // of "glance that way" (Orient). Without one it stays a glance — the honest answer, not a fallback.
+    bool  hypothesis_range_known = false;
+    float hypothesis_range_sigma = 0.0f;   // 1σ along the ray (m), as reported by whichever rung answered
+    // ★The observation that BIRTHED this hypothesis: where the robot stood and what bearing it saw. Kept so a
+    // later sighting from somewhere else can be triangulated against it (rc::door::triangulate_bearings) —
+    // the robot's own travel is the baseline. Without this the proto could only ever be re-confirmed, never
+    // ranged, and an unchecked proto would sit at its guessed range forever.
+    Eigen::Vector2f hypothesis_obs_from{0.0f, 0.0f};
+    int   hypothesis_fixes = 0;            // how many bearings have been fused into it (diagnostic)
     float last_motion_var  = 0.0f;   // ego-motion downweight (added to R)
     float last_motion_dotd = 0.0f;   // motion-corruption speed (diagnostic)
     float last_trunc_frac  = 0.0f;   // silhouette truncation (predict-only gate)
@@ -108,6 +120,19 @@ struct DoorInstance
     float dbg_sil_occ = 0.0f, dbg_sil_free = 0.0f, dbg_sil_free_eff = 0.0f;
     int   dbg_sil_ndet = 0, dbg_sil_ntotal = 0, dbg_sil_noccl = 0, dbg_sil_ncells = 0;
     float dbg_sil_pdetect = 0.0f, dbg_sil_central = 0.0f, dbg_sil_resolv = 0.0f;
+    // The fit's own admissibility verdict for the last processed frame (truncated mask, or the robot moving
+    // with the mask off-centre ⇒ predict-only). Read by the existence channel: a frame that may not MOVE the
+    // geometry may not DESTROY the door either. See specificworker.cpp's absence term.
+    bool  dbg_gated = false;
+    // …split by MECHANISM, and stamped with whether it was computed from THIS cycle's mask. The existence
+    // channel must read the gate's REASON and its FRESHNESS, never the bare verdict: the fit returns early
+    // when no mask reaches it, so on exactly the cycles the absence guard fires, `dbg_gated` is STALE — the
+    // verdict of whenever the door was last seen. A phantom is by definition never seen again, so a single
+    // truncated birth frame pinned dbg_gated=true forever and its absence evidence was zeroed for good.
+    // See specificworker.cpp's `view_untrustworthy`, and [[table-phantom-immortality]] for the same defect.
+    bool  dbg_trunc_gated  = false;   // the mask was clipped by the image border this frame
+    bool  dbg_motion_gated = false;   // robot moving with the mask off-centre (AI2MotionConfirmOnly path)
+    bool  dbg_gate_fresh   = false;   // the two flags above were computed THIS cycle. false ⇒ they mean nothing
 
     // ── Observed vertical extent (the MINIMUM-HEIGHT prior) ─────────────────────────────────────────
     // A door is an aperture a person walks THROUGH, so P(door | its support tops out well below a door's

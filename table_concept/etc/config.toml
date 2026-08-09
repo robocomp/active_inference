@@ -285,6 +285,24 @@ ExistenceAbsenceRangePower = 2.0  # decay exponent (2 ≈ angular area ∝ 1/ran
 ExistenceLosMarginM = 0.25   # sample must lie this far BEYOND the first LiDAR hit to count as occluded
 ExistenceLosAzimBins = 0     # 0 = LiDAR oracle OFF (walls_block covers walls). 720 ~ 0.5 deg bins to enable
 
+# ── WHO GETS A VOTE ON "IS THERE A TABLE HERE" (2026-08-06) ──────────────────────────────────────────────────
+# The removal test is: from a viewpoint where we can INFER YOLO should have detected a table (p_detect =
+# range_conf x in_fov_frac x central_frac), it did NOT — for ExistenceRemoveFrames cycles in a row. That test
+# belongs to the camera silhouette, the only sensor that reads a LABEL.
+# The LiDAR is IDENTITY-BLIND: a return proves the volume is OCCUPIED, never that a TABLE occupies it, so
+# P(return|table) ~ P(return|that bin/box/chair) and its likelihood ratio for table-ness is ~1. Measured over
+# ~5400 cycles: the REAL table returned 1.96% of the beams reaching it, a phantom sitting on a mistaken object
+# 6.56% — and both saturated to the same +2.83/cycle, so the channel ranked the phantom 3.3x ABOVE the truth
+# and re-pinned L at the +4 clamp every cycle, after the camera's absence and before the removal test.
+ExistenceLidarConfirms = false  # false = LiDAR does not vote on existence (it still drives the FIT via
+                                # LidarPrecision, and occlusion reasoning, both untouched). true = A/B back to a
+                                # voting LiDAR, by contrast if ExistenceLocalClutter else the historic ratchet.
+# When the LiDAR does vote, measure the clutter prior instead of assuming free space: ExistenceClutterProb asks
+# "P(a beam returns from an EMPTY footprint anyway)", but the alternative to a table in a furnished room is a
+# WALL. An equal-volume shell around the box is carved each cycle and the occupancy becomes a CONTRAST, which is
+# 0 wherever the box is indistinguishable from its surroundings. Diagnose with the ex_q / ex_qn / ex_lllr columns.
+ExistenceLocalClutter = true
+
 # Verification-gated removal (active inference): a predicted-visible-but-absent observation is only evidence of
 # REMOVAL in proportion to P(detect | present, geometry) = range_conf × in_fov_frac × central_frac. The REMAINING
 # absence (from a far / peripheral / edge-on view that CAN'T resolve the table) is epistemic surprise, not removal:

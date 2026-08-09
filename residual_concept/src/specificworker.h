@@ -17,10 +17,13 @@
 #define SPECIFICWORKER_H
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <deque>
 #include <fstream>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <genericworker.h>
@@ -130,6 +133,35 @@ private:
     // mass of tall wall cells and says nothing about the handful of floor phantoms that block navigation.
     void  log_floor_diag(const rc::OccupancyGrid::CellExplained& explained,
                          const std::vector<rc::OccComponent>& comps);
+
+    // ── compute() rate + cost meter ──
+    // Accumulates one reporting window (1 s) of loop timings and prints a single [perf] line. `busy_ms` is the
+    // time spent INSIDE this compute() call; the period is measured call-to-call, so both the loop's real rate
+    // and the fraction of it this agent actually consumes are visible. See the .cpp for how CPU% is read.
+    void log_compute_perf(double busy_ms);
+    std::chrono::steady_clock::time_point perf_window_begin_{};   // start of the current 1 s reporting window
+    std::chrono::steady_clock::time_point perf_last_call_{};      // previous compute() entry (call-to-call period)
+    unsigned int perf_calls_ = 0;        // compute() calls in this window
+    double       perf_busy_ms_ = 0.0;    // summed time inside compute() in this window
+    double       perf_worst_ms_ = 0.0;   // worst call-to-call period in this window
+    // LEAK WATCH (see log_compute_perf). One row per reporting window carrying the timings AND VmRSS, so a
+    // slow leak is visible as a RATE and can be joined against grid_diag.csv on `grid_cycle`. The baseline
+    // is the FIRST window rather than construction time, so it excludes startup/graph-sync warm-up.
+    std::ofstream perf_csv_;                                     // etc/perf_diag.csv (rotated, see open_diag_csv)
+    long          perf_rss0_kb_ = -1;                            // VmRSS at the first window (growth baseline)
+    std::chrono::steady_clock::time_point perf_t0_{};            // when that baseline was taken
+    long          grid_diag_cycle_ = 0;                          // grid_diag.csv row counter (the join key)
+    // Trailing (t_s, VmRSS kB) samples for the WINDOWED growth rate.
+    //
+    // The lifetime average (rss - baseline)/elapsed is the WRONG statistic for leak detection and was
+    // actively misleading here: measured on 2026-08-08 it reported 7.84 → 1.93 MB/min across a stretch
+    // where RSS was CONSTANT, purely because the numerator froze while the denominator kept growing. The
+    // failure it cannot see is the one that matters — a leak that STARTS after warm-up gets diluted across
+    // the whole run, so the burst that killed this agent would have shown a small, reassuring average for
+    // many minutes. A trailing window reports what is happening NOW and surfaces onset within one window.
+    static constexpr double PERF_RATE_WINDOW_S   = 60.0;   // width of the trailing window
+    static constexpr double PERF_RATE_MIN_SPAN_S = 15.0;   // below this the span is too short to mean anything
+    std::deque<std::pair<double, long>> perf_rss_hist_;
 
     // ── Per-cycle orchestration ──
     void run_instance_tracker(const std::vector<rc::SpecialistSdf>& specialists);

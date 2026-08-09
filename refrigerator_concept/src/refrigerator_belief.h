@@ -18,6 +18,7 @@
 #pragma once
 
 #include <array>
+#include <cstdio>
 #include <vector>
 #include <Eigen/Dense>
 
@@ -279,11 +280,31 @@ public:
     // ── Inference (delegated to the shared engine) ────────────────────────────
     // Stash this frame's wall BEFORE the engine runs: the per-point mixture's wall component (explaining away)
     // needs it, and mixture_unnormalized is a const hook the engine calls with no access to the frame.
+    // ★A degenerate Σ is SELF-SEALING and must never survive a cycle. Σ = 0 (or NaN/inf) makes the tracker's
+    // Mahalanobis gate S = P + R²I collapse, so NO detection can ever associate again, so the belief can never
+    // be updated, so Σ can never recover — the instance freezes at whatever garbage state it held and sits
+    // there forever. Live (etc/ai2_log.csv 20:27): a volatility blow-up drove Q to inf, Σ through the inverse
+    // to exactly 0 with σ_yaw = inf, and the instance took 3 measured frames out of 946 before freezing as a
+    // 0.126 m slab at −102°. Re-seeding from the prior costs one cycle of confidence and breaks the trap.
+    // (Belongs in common/ai_belief eventually — every agent on this engine has the same exposure.)
+    void sanitize_covariance()
+    {
+        bool bad = not Sigma_.allFinite();
+        for (int i = 0; i < N and not bad; ++i) bad = not (Sigma_(i, i) > 0.0f);
+        if (not bad) return;
+        Sigma_.setZero();
+        Sigma_.diagonal() = prior_cov_diag();
+        omega_ = omega0_; vol_n_ = 0.0f; vol_s_.setZero();   // the volatility estimate is suspect too
+        std::printf("RefrigeratorBelief: DEGENERATE Σ (non-finite or non-positive diagonal) — re-seeded from prior\n");
+    }
+
     float update(const RefrigeratorFrame& frame)
     {
         point_wall_ = frame.wall;
+        sanitize_covariance();
         const Eigen::Matrix<float, 6, 1> before = state_.vec();
         const float fe = ai::update<N>(*this, state_, Sigma_, prior_mean_, frame);
+        sanitize_covariance();
         // ω is inferred ONLY on a cycle that actually took a measurement. A predict-only cycle has δθ = 0,
         // which under the update below would read as "this object never moves" and drive ω down — the same
         // repetition-is-not-independence error that has bitten this codebase four times.
@@ -294,7 +315,7 @@ public:
     const Eigen::Matrix<float, 6, 1>& log_volatility() const { return omega_; }
     // Retention time constant per DOF: τ = Σ_ii / exp(ω_i) frames — "how long this DOF remembers".
     Eigen::Matrix<float, 6, 1> retention_frames() const;
-    void  predict()                               { ai::predict<N>(*this, Sigma_, state_, prior_mean_); }
+    void  predict()                               { sanitize_covariance(); ai::predict<N>(*this, Sigma_, state_, prior_mean_); }
     void  inflate_for_age(float dt_s, float dt_nominal_s)
     { ai::inflate_for_age<N>(*this, Sigma_, state_, prior_mean_, dt_s, dt_nominal_s); }
     Eigen::Matrix<float, 6, 6> predicted_information(const std::vector<Eigen::Vector3f>& pts, float R) const
@@ -464,6 +485,10 @@ private:
     Eigen::Matrix<float, 6, 1> omega_  = Eigen::Matrix<float, 6, 1>::Zero();
     Eigen::Matrix<float, 6, 1> omega0_ = Eigen::Matrix<float, 6, 1>::Zero();
     bool                       omega_init_ = false;
+    // Conjugate sufficient statistics for the volatility estimate: discounted observation count and per-DOF
+    // discounted sum of squared steps. Q = (n₀·Q₀ + S)/(n₀ + n) — a weighted average, so it cannot diverge.
+    float                      vol_n_ = 0.0f;
+    Eigen::Matrix<float, 6, 1> vol_s_ = Eigen::Matrix<float, 6, 1>::Zero();
     void update_volatility(const Eigen::Matrix<float, 6, 1>& dtheta);
 public:
     // self_test only: drive one volatility step directly, so the test exercises the production update.

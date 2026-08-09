@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cmath>
 #include <print>
+#include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
 
 namespace rc
 {
@@ -82,6 +83,7 @@ std::uint64_t RingSceneGraph::ensure_rig_node(const RingBelief& belief, std::uin
         }
         // No mesh_path: a rig is an ABSTRACT grouping, not a solid. The viewer falls back to the
         // fitted box, which here is the ring's footprint — a flat disc-ish extent at floor level.
+        rc::provenance::stamp_creation(*G_, node);   // birth stamp: epoch ms + local ISO-8601
         const auto id_opt = G_->insert_node(node);
         if (not id_opt.has_value())
             return 0;

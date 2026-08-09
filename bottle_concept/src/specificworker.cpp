@@ -25,6 +25,7 @@
  */
 
 #include "specificworker.h"
+#include "../../common/nbv/graph_obstacles.h"   // rc::nbv::collect_graph_obstacles — shared, DSR-side
 #include <cstdlib>   // std::_Exit for the crash-free terminal shutdown
 #include <thread>    // std::this_thread::sleep_for — let DDS flush before _Exit
 #include <chrono>
@@ -200,6 +201,10 @@ void SpecificWorker::save_dashboard_geometry() const
 void SpecificWorker::initialize()
 {
     std::print("bottle_concept: initialize()\n");
+
+    // Shadow-mode birth/death record (CONCEPT_AGENT_LIFECYCLE.md §4.2). Recording only — see
+    // log_phantom_event(). Truncating: one file per run.
+    phantom_log_.open("etc/bottle_phantom_events.csv");
     GenericWorker::initialize();
 
     if (not G)
@@ -387,6 +392,16 @@ void SpecificWorker::initialize()
 
     // Hidden-face next-best-view planner (epistemic affordance).
     epistemic_planner_ = rc::EpistemicPlanner(cfg_.epistemic_obs_distance, cfg_.epistemic_view_info);
+    // ONE detector envelope: the far-side viewpoint is the argmax of the same model absence is weighted by,
+    // and the published gain is multiplied by P(detect) there — so a hidden-face look the detector could not
+    // fire from stops bidding for the drive AROUND the bottle.
+    epistemic_planner_.set_detector_envelope(rc::detect::DetectorEnvelope{});
+    epistemic_planner_.set_robot_radius(0.30f);   // Shadow's footprint radius
+    // ★The camera model is read PER CYCLE at the compute site (rc::nbv::sensor_from_graph),
+    // NOT once here: the zed intrinsics are published by robot_concept when frames start
+    // arriving, so reading them in initialize() races the producer. Losing that race leaves
+    // vfov = 0, which silently collapses the fill model to horizontal-only — the exact bug
+    // rc::nbv exists to fix, and it drives the robot nose-to-nose with tall objects.
 
     // Active-inference fit core (pure belief). Owns the instance map; READS via scene_graph_ but the
     // worker (process_bottle_node) owns the write-back + eval — see the canonical concept-agent loop.
@@ -456,6 +471,39 @@ void SpecificWorker::initialize()
 }
 
 namespace { constexpr int PLACE_SETTLE_CYCLES = 30; }   // ~settle time after a start-placement move
+
+// SHADOW-MODE birth/death recorder — CONCEPT_AGENT_LIFECYCLE.md §4.2, theory in MODEL_HISTORY.md §4.
+// RECORDS ONLY; it can never alter a birth or a removal. NOTE: bottle has NO existence channel (tracker death_frames only) — p_detect is
+    // unavailable, so every bottle death is UNATTRIBUTABLE and must not be learned from.
+void SpecificWorker::log_phantom_event(std::string_view event, std::uint64_t id, std::string_view name,
+                                       float x, float y, const rc::BottleInstance* inst, std::string_view note)
+{
+    if (not phantom_log_.is_open())
+        return;
+    rc::history::PhantomEvent e;
+    e.event = event; e.id = id; e.name = name; e.x = x; e.y = y; e.note = note;
+    // Observer pose → view bearing: the classifier failure is VIEWPOINT-dependent, so the eventual p_FA field
+    // is keyed on (world cell × bearing), never place alone.
+    if (inner_eigen_)
+        if (const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", 0); rtb.has_value())
+        {
+            const auto& Tm = rtb.value();
+            e.robot_x = static_cast<float>(Tm(0, 3));
+            e.robot_y = static_cast<float>(Tm(1, 3));
+            e.robot_yaw = std::atan2(static_cast<float>(Tm(1, 0)), static_cast<float>(Tm(0, 0)));
+            e.view_bearing = std::atan2(e.robot_y - y, e.robot_x - x);
+            e.range_m = std::hypot(e.robot_x - x, e.robot_y - y);
+        }
+    if (inst)
+    {
+        e.age_cycles    = inst->processed_cycles;
+        e.p_detect      = 0.0f;
+        e.central_frac  = 0.0f;
+        e.in_fov_frac   = (0 > 0) ? 1.0f : 0.0f;
+        e.exist_logodds = 0.0f;
+    }
+    phantom_log_.write(e);
+}
 
 void SpecificWorker::compute()
 {
@@ -621,7 +669,15 @@ void SpecificWorker::retire_diverged_instances()
         // Affordance FIRST (while the instance/id still exists), then the C++ instance, then the DSR node —
         // same ordering as a tracker DEATH so aff_<bottle> is never orphaned.
         if (auto it = insts.find(id); it != insts.end())
+        {
+            // Shadow-mode death record (§4.2). bottle retires on DIVERGENCE (clutter), not on sensor
+            // absence, so p_detect is unavailable — these deaths are UNATTRIBUTABLE by construction and
+            // the note records why, so the analysis does not mistake them for classifier phantoms.
+            log_phantom_event("DEATH", id, it->second.node_name,
+                              it->second.model.state().cx, it->second.model.state().cy, &it->second,
+                              "retire-diverged (no existence channel)");
             it->second.affordance.remove();
+        }
         fitter_->forget_node(id);
         G->delete_node(id);
     }
@@ -754,7 +810,12 @@ void SpecificWorker::run_instance_tracker()
         const Eigen::Vector3f& c = pkt.slices[dets[d].slice_index].centroid;
         const auto new_id = scene_graph_->create_instance_from_detection(c, room_node_id_);
         if (new_id != 0)
+        {
             fitter_->note_birth(new_id, Eigen::Vector2f(c.x(), c.y()));
+            // Shadow-mode birth record (CONCEPT_AGENT_LIFECYCLE.md §4.2): place + viewpoint that
+            // produced it, so a phantom that dies young is attributable to both.
+            log_phantom_event("BIRTH", new_id, "", c.x(), c.y(), nullptr, "");
+        }
     }
 }
 
@@ -939,7 +1000,9 @@ void SpecificWorker::step_epistemic(rc::BottleInstance& inst)
 
     if (not inst.ai2_initialized)
         return;   // belief not yet seeded (no fresh frame) → no NBV this cycle
-    auto prop = epistemic_planner_.compute(inst.ai2_belief, camera_xy, cfg_.ai2_sigma_base_m);
+    auto prop = epistemic_planner_.compute(inst.ai2_belief, camera_xy, cfg_.ai2_sigma_base_m,
+                                           rc::nbv::sensor_from_graph(*G, inner_eigen_.get()),
+                                           rc::nbv::collect_graph_obstacles(*G, inner_eigen_.get(), inst.node_id));
     if (not prop.valid or not prop.is_finite())
         return;   // no camera pose / degenerate ray this cycle → leave the existing affordance untouched
 

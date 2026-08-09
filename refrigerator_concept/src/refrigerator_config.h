@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 class ConfigLoader;   // RoboComp config façade (defined in genericworker.h)
@@ -25,7 +26,6 @@ struct RefrigeratorConfig
                                                   // it has ever been fit. Small integer; not a belief threshold.
     float central_region_frac          = 0.25f;   // central image box is [frac, 1-frac]×[frac, 1-frac]; a detectable
                                                   // sample inside it counts toward central_frac → p_detect → removal
-    float obs_distance                 = 1.8f;    // d_obs for the epistemic planner
     int   epistemic_cooldown_cycles    = 200;     // min cycles withdrawn after satisfaction
     int   refrigerator_log_period_frames      = 30;      // per-cycle log throttle
     int   voxel_bank_max_points        = 4000;    // cap on the refrigerator-owned voxel memory bank
@@ -104,6 +104,13 @@ struct RefrigeratorConfig
     // INFERRED VOLATILITY (MODEL_HISTORY.md §3) — the HISTORY stage. Q becomes exp(ω) per DOF, inferred from
     // how much the belief actually moves, so retention grows with consistent experience and collapses when the
     // object genuinely moves. false ⇒ Q is the constant process_std_* exactly as before.
+    // DETECTOR ENVELOPE (common/detectability): P(detect) is unimodal in projected fill — too far = too few
+    // pixels to segment, too close = the object overflows the frame and the mask truncates. Drives BOTH the
+    // viewpoint stand-off and the weight given to absence. Properties of YOLO+ZED, measurable from a tour
+    // (log fill vs mask-present and fit the shoulders); the defaults are a conservative prior, not a fit.
+    float detect_min_fill             = 0.10f;
+    float detect_max_fill             = 0.60f;
+    float detect_soft                 = 0.06f;
     bool  ai2_volatility_infer        = false;
     float ai2_volatility_lr           = 0.02f;
     float ai2_volatility_sigma        = 2.0f;
@@ -367,10 +374,32 @@ struct RefrigeratorConfig
     // Physical exclusion: collapse two instances whose oriented footprints overlap by ≥ this fraction of
     // the SMALLER footprint (two refrigerators cannot share space). 0 disables the merge.
     float tracker_merge_overlap = 0.05f;
-    // Default geometry for a refrigerator BORN from a mask (no prior to seed it); the belief refines from here.
+    // Default geometry for a refrigerator BORN from a mask, used only when no birth burst is available
+    // (see birth_frag_* below); the belief refines from here.
     float tracker_birth_width_m  = 1.0f;
     float tracker_birth_depth_m  = 0.6f;
     float tracker_birth_height_m = 0.75f;
+
+    // ── BIRTH FRAGMENT: keep the probation burst (common/birth_fragment/birth_fragment.h) ─────────────
+    // A candidate matures over tracker_birth_frames observations; until now every mask cloud seen on the way
+    // was discarded and the instance was seeded from ONE frame's centroid plus the constants above. Banking
+    // the burst buys two things: geometry measured from the object (above all the HEIGHT — the constant
+    // 0.75 m sits below plaus_height_min=1.20 and far from ai2_prior_height_m=1.90, so every real fridge
+    // was born implausible and had to climb out), and the right to REFUSE a birth before it reaches DSR.
+    bool  birth_frag_enabled  = true;
+    float birth_frag_voxel_m  = 0.03f;    // dedup grid for the burst (finer than the bank: a burst is short)
+    int   birth_frag_max_pts  = 20000;    // hard cap per candidate; a lingering blob cannot grow without bound
+    // LOCAL CONSISTENCY δ (ms), the Khronos fragment criterion: observations may only be fused as one view of
+    // one object if they are close enough in time that neither localization error nor scene change matters.
+    // A candidate whose burst spans longer (a blob flickering in and out across a room traverse) still births
+    // on its streak, but its cloud is discarded and the constants above are used. 0 disables the test.
+    std::uint64_t birth_frag_delta_ms = 4000;
+    // ADMISSION on the accumulated burst. RefrigeratorBelief::candidate_plausibility is already applied
+    // per-frame as a birth-evidence multiplier, but there it sees ONE partial view whose z-range understates
+    // the height — biasing it against genuine fridges. Re-run on the union it measures the real extent, and
+    // becomes a decision rather than a weight: below this, the birth is refused outright instead of being
+    // created and later retracted by the plausibility→existence channel. 0 disables the refusal.
+    float birth_admit_plausibility = 0.35f;
 
     // ── Ricoh-360 attention gate ──────────────────────────────────────────────────────────────────
     // A ricoh (depth_var>0) 360-RGB YOLO detection is bearing-only: it never births or fits, it only raises

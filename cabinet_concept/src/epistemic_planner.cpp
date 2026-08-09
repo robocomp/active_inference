@@ -68,11 +68,15 @@ EpistemicPlanner::EpistemicPlanner(float d_obs)
 
 // AI2-native Σ-based D-optimal next-best-view: score the four faces, return the best framed viewpoint.
 EpistemicProposal EpistemicPlanner::compute(const CabinetBelief& belief, float lat_rate, float sigma_base,
-                                            bool verbose) const
+                                            const rc::nbv::Sensor& sensor_in,
+                                            bool verbose,
+                                            const std::vector<rc::nbv::Obstacle>& obstacles,
+                                            const std::vector<Eigen::Vector2f>& room_polygon) const
 {
-    constexpr float kEffectiveHorizontalFovRad = 70.0f * std::numbers::pi_v<float> / 180.0f;
-    constexpr float kMinimumStandOffM = 1.15f;         // YOLO won't fire too close → keep a viewing gap
-    constexpr float kStandOffSafetyMarginM = 0.45f;    // extra stand-off beyond the FoV-fit distance
+    // The camera geometry arrives from the caller (read fresh from the graph each cycle); the
+    // detector envelope is ours. Merging here keeps the two concerns in their right owners.
+    rc::nbv::Sensor sensor = sensor_in;
+    sensor.env = det_env_;
 
     // REPORTED covariance: Σ with the (d,z0,z1) entries inflated by the discrete TIER-mode entropy
     // (p(1−p)Δ²), so a cabinet whose base-vs-wall tier is still unresolved shows a large σ_z → it stays
@@ -80,20 +84,6 @@ EpistemicProposal EpistemicPlanner::compute(const CabinetBelief& belief, float l
     // driving the view that resolves the mode.
     const Eigen::Matrix<float, 7, 7> S = belief.covariance_reported();   // [cx,cy,yaw,L,d,z0,z1] — full state, matching predicted_information's ordering
     const CabinetBeliefState& s = belief.state();
-
-    const float cy = std::cos(s.yaw), sy = std::sin(s.yaw);
-    const float hw = s.L * 0.5f, hh = s.d * 0.5f;
-    struct Face { Eigen::Vector2f normal, centre; float half_span; };
-    const std::array<Face, 4> faces = {{
-        { { cy,  sy}, {s.cx + cy * hw, s.cy + sy * hw}, hh },   // +x
-        { {-cy, -sy}, {s.cx - cy * hw, s.cy - sy * hw}, hh },   // -x
-        { {-sy,  cy}, {s.cx - sy * hh, s.cy + cy * hh}, hw },   // +y
-        { { sy, -cy}, {s.cx + sy * hh, s.cy - cy * hh}, hw },   // -y
-    }};
-    const float max_stand_off = std::max(kMinimumStandOffM, d_obs_);
-    const auto standoff_for = [&](float half_span)
-    { return std::clamp(half_span / std::tan(kEffectiveHorizontalFovRad * 0.5f) + kStandOffSafetyMarginM,
-                        kMinimumStandOffM, max_stand_off); };
 
     // ── Adequacy gap (active-perception step 1, CABINET.md) ─────────────────────────────────
     // Target precision Σ* and the gap formula now live in cabinet_dof.h / common/ai_belief/dof_spec.h —
@@ -103,35 +93,61 @@ EpistemicProposal EpistemicPlanner::compute(const CabinetBelief& belief, float l
     // on the yaw DOF until the mode resolves, so the robot keeps gathering evidence before releasing.
     const float adequacy_gap = adequacy_gap_nats(kCabinetDofs, [&](std::size_t j) { return S(j, j); });
 
-    // Score each face by the D-optimal expected entropy reduction on Σ, with a range-aware R per face.
+    // ── The shared detection-weighted plan (common/nbv) ───────────────────────────────────
+    // The cabinet as the BELIEF holds it — estimate AND uncertainty. The σ's make the framing precision-aware:
+    // P(detect) is unimodal in projected fill, so a poorly-known run is framed further from the overflow
+    // shoulder automatically. That is the model-level replacement for the 0.45 m margin constant.
+    // z0/z1 are real DOFs here, so a wall-tier cabinet (z0≈1.4 m) is correctly framed on the VERTICAL axis.
+    rc::nbv::Target target;
+    target.cx = s.cx; target.cy = s.cy; target.yaw = s.yaw;
+    target.w  = s.L;  target.h  = s.d;
+    target.z0 = s.z0; target.z1 = s.z1;
+    target.sigma_pos_m    = std::sqrt(std::max({0.0f, S(0, 0), S(1, 1)}));   // cx, cy
+    target.sigma_extent_m = std::sqrt(std::max({0.0f, S(3, 3), S(4, 4)}));   // L, d
+
+    // RAW per-face D-optimal gain (nats), UNBOUNDED — the information a DETECTION on that face would yield.
+    // Not adequacy-clamped: each face's single-view info typically EXCEEDS the remaining gap, so clamping made
+    // all four tie (the degenerate ranked-set that erased the controller's basis to prefer one face). The
+    // adequacy bound belongs on the SCALAR value below.
     const Eigen::Matrix<float, 7, 7> I6 = Eigen::Matrix<float, 7, 7>::Identity();
-    int   best_idx      = 0;
-    float best_raw      = -std::numeric_limits<float>::max();
-    float best_standoff = kMinimumStandOffM;
-    // RAW per-face D-optimal gain (nats), UNBOUNDED — this is the RANKING the controller uses to choose a
-    // feasible face, so it must NOT be adequacy-clamped. Each face's single-view info typically EXCEEDS the
-    // remaining gap, so clamping every face at the gap made all four tie (the degenerate ranked-set that
-    // erased the controller's basis to prefer one face). The adequacy bound belongs on the SCALAR value below.
-    std::array<float, 4> face_raw{};
-    for (int i = 0; i < 4; ++i)
+    const auto raw_gain_of = [&](int i, float standoff)
     {
-        const float standoff = standoff_for(faces[i].half_span);
         const float Ri = sigma_base * sigma_base + (lat_rate * standoff) * (lat_rate * standoff);
         const Eigen::Matrix<float, 7, 7> dI = belief.predicted_information(sample_face_surface(s, i), Ri);
-        const float det  = (I6 + S * dI).determinant();
-        const float raw_gain = std::max(0.0f, 0.5f * std::log(std::max(1e-9f, det)));   // single-view D-optimal info (nats)
-        face_raw[i] = raw_gain;
-        if (raw_gain > best_raw) { best_raw = raw_gain; best_idx = i; best_standoff = standoff; }
+        const float det = (I6 + S * dI).determinant();
+        return std::max(0.0f, 0.5f * std::log(std::max(1e-9f, det)));
+    };
+
+    const rc::nbv::Plan plan = rc::nbv::plan_faces(target, sensor, robot_radius_m_, obstacles, raw_gain_of,
+                                                   room_polygon);
+    if (not plan.valid)
+        return {};
+    // ★NO USABLE FACE ⇒ REFUSE, never publish the hint. plan.best_pos is then the raw argmax, which for a
+    // wall-anchored object is a pose behind the wall. Publishing it hands the controller an unroutable
+    // standpoint, and the controller REPAIRS rather than rejects: nearest_reachable is measured from the
+    // robot, so the goal snaps to the nearest occupiable cell — the floor right at the object. An invalid
+    // proposal makes the caller hold_offered() instead: "no viewpoint from here", which is the honest answer.
+    if (not plan.any_usable)
+    {
+        static int shouted = 0;
+        if (shouted++ < 5)
+            std::print("cabinet_concept: [NBV] no usable face — every viewpoint is inside an obstacle or "
+                       "outside the room. REFUSING (the raw argmax would stand in the wall).\n");
+        return {};
     }
-    if (!std::isfinite(best_raw))   // low-but-finite gain is NOT withdrawn (controller ranks it low)
+    const int   best_idx  = plan.best_face;
+    const float best_raw  = plan.face_gains[best_idx];   // DETECTION-WEIGHTED — the honest expected value
+    const auto& face_raw  = plan.face_gains;
+    if (not std::isfinite(best_raw))
         return {};
 
     // SCALAR affordance value (epistemic_gain): the winning face's info BOUNDED by the adequacy gap to Σ*, so
     // it → 0 as the belief reaches the consumer's precision — a threshold-free "done" AND the cross-affordance
     // EFE currency. Information beyond Σ* is worthless to the consumer, so an adequate cabinet stops attracting.
-    // p_observable hook = 1.0 (the standoff is a framed viewpoint by construction); wire reachability later.
-    constexpr float p_observable = 1.0f;
-    const float best_gain = p_observable * std::min(best_raw, adequacy_gap);
+    // The old `p_observable = 1.0` placeholder ("the standoff is a framed viewpoint by construction") is gone:
+    // P(detect) is now REAL and already folded into best_raw by plan_faces, so a cabinet we cannot actually get
+    // a mask of publishes a near-zero gain and stops bidding for travel.
+    const float best_gain = std::min(best_raw, adequacy_gap);
 
     // Verification readout (throttled): the chosen face should be perpendicular to Σ's dominant
     // uncertainty direction — e.g. dom-unc = h ⇒ a ±y face wins. Confirms the NBV attacks the worst DOF.
@@ -150,28 +166,31 @@ EpistemicProposal EpistemicPlanner::compute(const CabinetBelief& belief, float l
             if (n > best) { best = n; dom = j; }
         }
         if (verbose)
-        std::print("[epistemic-NBV] face={} gain={:.3f}(raw {:.3f}) adq_gap={:.3f} | Σ dom-unc={} σ={:.3f}{} | raw +x={:.2f} -x={:.2f} +y={:.2f} -y={:.2f}\n",
+        // `exp` vs `raw`: a large gap says the best-informing face is one the detector cannot fire from --
+        // exactly the failure the weighting exists to catch, so both columns are printed.
+        std::print("[epistemic-NBV] face={} gain={:.3f}(exp {:.3f}) adq_gap={:.3f} | Σ dom-unc={} σ={:.3f}{} | "
+                   "d={:.2f}m fill*={:.2f} | exp {:.2f}/{:.2f}/{:.2f}/{:.2f} | raw {:.2f}/{:.2f}/{:.2f}/{:.2f} | "
+                   "pdet {:.2f}/{:.2f}/{:.2f}/{:.2f}\n",
                    fn[best_idx], best_gain, best_raw, adequacy_gap, kCabinetDofs[dom].name,
                    std::sqrt(std::max(0.0f, S(dom, dom))), kCabinetDofs[dom].unit,
-                   face_raw[0], face_raw[1], face_raw[2], face_raw[3]);
+                   plan.best_standoff_m, plan.framing_fill,
+                   face_raw[0], face_raw[1], face_raw[2], face_raw[3],
+                   plan.face_raw_gains[0], plan.face_raw_gains[1], plan.face_raw_gains[2], plan.face_raw_gains[3],
+                   plan.face_p_detect[0], plan.face_p_detect[1], plan.face_p_detect[2], plan.face_p_detect[3]);
     }
 
-    const auto& f = faces[best_idx];
-    const float vx = f.centre.x() + f.normal.x() * best_standoff;
-    const float vy = f.centre.y() + f.normal.y() * best_standoff;
-    const float yaw_to_face = std::atan2(s.cy - vy, s.cx - vx);
-
-    EpistemicProposal proposal{vx, vy, yaw_to_face, best_gain, true};
-    // Object-relative viewpoint constraint (authoritative): publish ALL four faces with their RAW per-face
-    // gains (the ranking — NOT adequacy-clamped, else they tie) + the sensor-model stand-off band + framing
+    EpistemicProposal proposal{plan.best_pos.x(), plan.best_pos.y(), plan.best_yaw, best_gain, true};
+    // Object-relative viewpoint constraint (authoritative): publish ALL four faces with their DETECTION-WEIGHTED
+    // per-face gains (the ranking — NOT adequacy-clamped, else they tie) + the sensor-model stand-off band + framing
     // + Σ*, so the controller picks the best FEASIBLE face itself (a blocked argmax face falls back to the
     // next reachable one). The affordance's scalar epistemic_gain stays adequacy-bounded (cross-affordance
     // selection + "done"). Face order matches the [+x,-x,+y,-y] sampling order above.
-    constexpr float kFramingFill = 0.45f;   // FoV framing sweet spot (matches the cabinet servo contract's advance target)
-    proposal.face_gains    = face_raw;
-    proposal.standoff_min_m = kMinimumStandOffM;
-    proposal.standoff_max_m = max_stand_off;
-    proposal.framing_fill   = kFramingFill;
+    proposal.face_gains     = plan.face_gains;      // DETECTION-WEIGHTED, so the controller's own fallback to a
+    proposal.standoff_min_m = plan.standoff_min_m;  // lower-ranked face reads a number that already accounts
+    proposal.standoff_max_m = plan.standoff_max_m;  // for whether a mask is obtainable from there.
+    // The framing the servo drives to is the SAME argmax the stand-off realises. It used to be a separate 0.45
+    // literal, so the servo spent its approach undoing the planner's choice of range.
+    proposal.framing_fill   = plan.framing_fill;
     proposal.sigma_star     = sigma_star_array<7>(kCabinetDofs);   // the SAME demands the adequacy gap used
     if (!proposal.is_finite())
         return {};

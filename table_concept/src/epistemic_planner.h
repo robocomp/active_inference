@@ -12,8 +12,10 @@
 
 #include <array>
 #include <cmath>
+#include <vector>
 
-#include "table_belief.h"            // AI2 belief: Σ + predicted_information for the Σ-based NBV
+#include "table_belief.h"                                  // AI2 belief: Σ + predicted_information for the NBV
+#include "../../common/nbv/viewpoint_score.h"               // rc::nbv — the shared DETECTION-WEIGHTED NBV core
 
 // ─── Proposal ────────────────────────────────────────────────────────────────
 
@@ -39,6 +41,14 @@ struct EpistemicProposal
     float standoff_min_m = 0.0f;          // sensor-model stand-off band (FoV framing sweet spot)
     float standoff_max_m = 0.0f;
     float framing_fill   = 0.0f;          // desired projected fill fraction
+    // ── what the NBV actually CHOSE, for the record ──────────────────────────────────────────────────
+    // The affordance node holds the FROZEN pose during an executing claim, and stdout is gone the moment the
+    // terminal scrolls — so without these, "why is the target so close?" is unanswerable after the fact.
+    // nbv_vfov is here on purpose: 0 proves the camera model was still incomplete when this was proposed.
+    float chosen_standoff_m = 0.0f;       // face-relative stand-off the plan realised
+    float chosen_p_detect   = 0.0f;       // P(detect) at the chosen viewpoint
+    float chosen_fill       = 0.0f;       // predicted roi_fill there
+    float sensor_vfov_rad   = 0.0f;       // the camera model in force AT PROPOSAL TIME
     std::array<float, 6> sigma_star{};    // [cx,cy,H,w,h,yaw] precision demand (m / rad)
 
     bool is_finite() const
@@ -63,10 +73,37 @@ public:
     /// with Rᵢ = sigma_base² + (lat_rate·standoffᵢ)² — range-aware so far faces yield less information.
     /// Targets the dominant uncertainty eigen-direction of Σ (an unobserved extent / yaw). A low but
     /// finite gain is NOT withdrawn here; the controller's EFE selection simply won't pick a low-nat target.
-    EpistemicProposal compute(const TableBelief& belief, float lat_rate, float sigma_base) const;
+    // An obstacle the viewpoint must neither stand inside nor look through: an oriented footprint from the
+    // DSR graph, in TRUE extents. rc::nbv inflates by the robot radius only for the stand-inside test; the
+    // line-of-sight test needs the real ones (see the note on rc::nbv::stands_inside).
+    using Obstacle = rc::nbv::Obstacle;
+
+    /// @param obstacles  other objects; a viewpoint inside one is rejected, one that only partly SEES the
+    ///                   face is degraded continuously via visible_frac — never dropped.
+    ///
+    /// The returned per-face gains are DETECTION-WEIGHTED: p_detect(face) · ΔH_D-optimal(face). A face the
+    /// detector cannot fire from is worth ~0 nats, so it cannot out-bid nav_dist in the controller's EFE and
+    /// the robot stops paying travel for a look that could not have produced a mask.
+    EpistemicProposal compute(const TableBelief& belief, float lat_rate, float sigma_base,
+                              const rc::nbv::Sensor& sensor_in,
+                              const std::vector<Obstacle>& obstacles = {},
+                              const std::vector<Eigen::Vector2f>& room_polygon = {}) const;
+
+    // The detector's operating envelope. The stand-off is the argmax of THIS, so the viewpoint we ask for is
+    // the one where the detector is most likely to fire — the same model the removal channel weights absence by.
+    void set_detector_envelope(const rc::detect::DetectorEnvelope& e) { det_env_ = e; }
+
+
+    // Footprint radius of the robot: the geometric floor under every stand-off, and the clearance the
+    // stand-inside test allows. A physical dimension, not a knob.
+    void set_robot_radius(float m) { robot_radius_m_ = m; }
 
 private:
     float d_obs_;
+    // The envelope is OWNED (config-driven); the camera GEOMETRY arrives per call, because the zed
+    // intrinsics appear only once robot_concept starts publishing frames. See sensor_from_graph().
+    rc::detect::DetectorEnvelope det_env_{};
+    float robot_radius_m_ = 0.30f;   // Shadow
 };
 
 }  // namespace rc

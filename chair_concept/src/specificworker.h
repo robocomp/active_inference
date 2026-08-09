@@ -49,10 +49,12 @@
 #include "../../common/mask_ingestor/mask_ingestor.h"     // rc::MaskIngestor (perception)
 #include "chair_scene_graph.h" // rc::ChairSceneGraph (DSR node/RT I/O)
 #include "chair_fitter.h"      // rc::ChairFitter (active-inference core)
+#include "../../common/phantom_log/phantom_log.h"   // rc::history::PhantomLog (shadow-mode birth/death record)
 #include "epistemic_planner.h"
 #include "chair_affordance.h"
 #include "chair_model.h"
 #include "../../common/dashboard/belief_inspector.h"
+#include "../../common/dashboard/belief_strip.h"
 #include "../../common/dashboard/evidence_monitor.h"
 #include "../../common/dashboard/custom_widget.h"
 #include "../../common/dashboard/timeseries_plot.h"
@@ -78,7 +80,9 @@ public slots:
     int  startup_check();
 
     void modify_node_slot(std::uint64_t id, const std::string& type);
-    void modify_node_attrs_slot(std::uint64_t id, const std::vector<std::string>& att_names);
+    // Replaces the update_node_attr_signal slot: the controller-owned protocol flags are POLLED once per
+    // cycle instead of pushed per graph attribute write. See the connect block in initialize().
+    void poll_affordance_protocol();
     void modify_edge_slot(std::uint64_t from, std::uint64_t to, const std::string& type){};
     void modify_edge_attrs_slot(std::uint64_t from, std::uint64_t to,
                                 const std::string& type, const std::vector<std::string>& att_names){};
@@ -100,6 +104,11 @@ private:
     void run_instance_tracker();          // data-driven birth/associate/death (the only instance-lifecycle path)
     void merge_overlapping_instances();   // collapse two instances on the same chair (seat-footprint overlap)
     void update_existence_beliefs();      // continuous existence log-odds → evidence-based removal (no age immunity)
+    // SHADOW-MODE birth/death recorder (CONCEPT_AGENT_LIFECYCLE.md §4.2). Records ONLY — never feeds back into
+    // a belief, birth or removal. chair_concept matters most here: the radiator-reads-as-a-chair failure is a
+    // CHAIR phenomenon, so this is the agent whose log actually tests the (place × bearing) clustering claim.
+    void log_phantom_event(std::string_view event, std::uint64_t id, std::string_view name,
+                           float x, float y, const rc::ChairInstance* inst, std::string_view note);
     void refresh_room_geometry();         // load the room delimiting polygon into the fitter (containment pose prior)
     void publish_chair_cycle(rc::ChairInstance& inst,
                              const DSR::Node& node,
@@ -161,6 +170,7 @@ private:
     rc::ChairConfig                                         cfg_;
     rc::EpistemicPlanner                                    epistemic_planner_;
     std::unique_ptr<rc::ChairFitter>                    fitter_;   // active-inference fit core (owns instances)
+    rc::history::PhantomLog                             phantom_log_;   // shadow-mode birth/death record
 
     // Live belief dashboard — its OWN top-level window (extracted from the DSR graph dock so it shows
     // independently of Agent.graph; mirrors room_concept/kinova_controller). Geometry persisted via QSettings.
@@ -173,6 +183,14 @@ private:
     // posterior σ, Σ as a correlation heatmap, and the 4-mode yaw posterior. The chair publishes no σ*,
     // so the inspector drops the σ*/adequacy columns rather than show invented targets.
     rc::BeliefInspector* belief_inspector_ = nullptr;
+    // ── Compact belief strip: ONE ROW PER INSTANCE, and the row is a 60 s time series ──────────────
+    // A separate small top-level window: the standing display you keep in a corner while the big
+    // dashboard stays closed until something looks wrong. Mirrors table/cabinet/door/refrigerator.
+    QWidget*         strip_window_ = nullptr;
+    rc::BeliefStrip* belief_strip_ = nullptr;
+    void refresh_belief_strip();
+    void restore_strip_geometry();
+    void save_strip_geometry() const;
     void refresh_belief_inspector();
     // Section 1: the evidence-pipeline counter strip (same struct + widget as every other concept agent).
     QWidget*             dashboard_window_ = nullptr;   // combined window: counters over plots + inspector

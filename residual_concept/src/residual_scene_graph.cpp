@@ -8,6 +8,7 @@
 #include <cmath>
 #include <print>
 #include <utility>
+#include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
 
 namespace rc
 {
@@ -55,6 +56,7 @@ std::uint64_t ResidualSceneGraph::create_instance_from_detection(const Eigen::Ve
         G_->add_or_modify_attrib_local<pos_y_att>(node, rpy +  40.f + 18.f * static_cast<float>(max_n / 6));
     }
 
+    rc::provenance::stamp_creation(*G_, node);   // birth stamp: epoch ms + local ISO-8601
     const auto id_opt = G_->insert_node(node);
     if (not id_opt.has_value())
         return 0;

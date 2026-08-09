@@ -200,7 +200,9 @@ void RefrigeratorProjection::compute_projected_roi(RefrigeratorInstance& inst)
     const float roi_cy = 0.5f * (min_row + max_row);
     const float off_x = (roi_cx - cx_px) / (0.5f * W);   // [-1,1], 0 = centred
     const float off_y = (roi_cy - cy_px) / (0.5f * H);
-    const float fill  = std::max((max_col - min_col) / W, (max_row - min_row) / H);
+    const float fill_h = (max_col - min_col) / W;
+    const float fill_v = (max_row - min_row) / H;
+    const float fill   = std::max(fill_h, fill_v);   // roi_fill is the MAX; the two axes are kept for calibration
     // Reject degenerate projections (robot too close / a corner grazing the image plane → the
     // bbox explodes to absurd offsets). Beyond a sane bound the ROI is unusable for centring:
     // mark invalid (the controller then keeps sweeping / treats framing as unknown) and clamp the
@@ -209,6 +211,8 @@ void RefrigeratorProjection::compute_projected_roi(RefrigeratorInstance& inst)
     inst.roi_offset_x = std::clamp(off_x, -3.0f, 3.0f);
     inst.roi_offset_y = std::clamp(off_y, -3.0f, 3.0f);
     inst.roi_fill     = std::clamp(fill, 0.0f, 4.0f);
+    inst.roi_fill_h   = std::clamp(fill_h, 0.0f, 4.0f);
+    inst.roi_fill_v   = std::clamp(fill_v, 0.0f, 4.0f);
     inst.roi_valid    = sane;
 }
 
@@ -302,6 +306,8 @@ SilhouetteExistence RefrigeratorProjection::compute_silhouette_existence(const R
     // sample lit by a "refrigerator" mask is occupancy; lit by nothing is ABSENCE (the "gone" signal that fires even
     // with NO YOLO mask); lit by a non-refrigerator mask is OCCLUDED (a nearer object hides the point) ⇒ HOLD.
     double range_sum = 0.0;
+    // Full projected extent, accumulated BEFORE the frustum test so an overflowing object reads fill > 1.
+    float min_col = 1e9f, max_col = -1e9f, min_row = 1e9f, max_row = -1e9f;
     const auto classify = [&](float lx, float ly, float lz)
     {
         ++out.n_total;                                                 // one silhouette sample of the WHOLE object
@@ -314,6 +320,8 @@ SilhouetteExistence RefrigeratorProjection::compute_silhouette_existence(const R
         // visible" only if it lands inside the actual image, so out-of-FoV samples are NOT counted detectable.
         const Eigen::Vector2d uv = camera_api_->project(Eigen::Vector3d(Pc.x(), Pc.y(), Pc.z()));
         const float col = static_cast<float>(uv.x()), row = static_cast<float>(uv.y());
+        min_col = std::min(min_col, col); max_col = std::max(max_col, col);   // extent BEFORE the frustum reject
+        min_row = std::min(min_row, row); max_row = std::max(max_row, row);
         if (col < 0.f or col >= W or row < 0.f or row >= Himg) return; // out of frustum ⇒ not detectable
         // A room wall between the camera and this sample hides it just as surely as a nearer object does — and
         // unlike an object, no YOLO mask will ever report it. Same verdict: OCCLUDED ⇒ excluded from
@@ -380,6 +388,8 @@ SilhouetteExistence RefrigeratorProjection::compute_silhouette_existence(const R
     // No face qualified ⇒ the camera is inside the footprint (degenerate) ⇒ n_total==0 ⇒ the caller HOLDs.
     if (out.n_detectable > 0)
         out.mean_range_m = static_cast<float>(range_sum / out.n_detectable);
+    if (max_col > min_col and max_row > min_row)
+        out.fill = std::max((max_col - min_col) / W, (max_row - min_row) / Himg);
     return out;
 }
 

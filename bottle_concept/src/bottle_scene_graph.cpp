@@ -12,6 +12,7 @@
 #include <utility>
 
 #include <QDebug>
+#include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
 
 namespace rc {
 
@@ -194,6 +195,7 @@ std::uint64_t BottleSceneGraph::create_instance_from_detection(const Eigen::Vect
         G_->add_or_modify_attrib_local<pos_y_att>(bottle_node, rpy +  80.f);
     }
 
+    rc::provenance::stamp_creation(*G_, bottle_node);   // birth stamp: epoch ms + local ISO-8601
     const auto id_opt = G_->insert_node(bottle_node);
     if (not id_opt.has_value())
         return 0;

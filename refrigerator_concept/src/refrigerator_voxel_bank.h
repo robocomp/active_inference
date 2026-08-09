@@ -17,25 +17,18 @@
 
 #include <Eigen/Dense>
 
+#include "../../common/birth_fragment/birth_fragment.h"   // rc::voxel_key (shared with the birth burst)
 #include "refrigerator_config.h"     // rc::RefrigeratorConfig
 #include "refrigerator_instance.h"   // rc::RefrigeratorInstance
 
 namespace rc::voxel_bank {
 
 // FNV-1a hash of a point quantised to a quantization_m grid — the voxel bank's O(1) dedup key.
+// Defined once in common/birth_fragment so a candidate's PRE-birth burst dedups on exactly the same grid
+// as the bank it is used to seed; two definitions would let a seeded bank double-count its own points.
 inline std::uint64_t key(const Eigen::Vector3f& point, float quantization_m)
 {
-    const float q = std::max(1e-4f, quantization_m);
-    const int ix = static_cast<int>(std::floor(point.x() / q));
-    const int iy = static_cast<int>(std::floor(point.y() / q));
-    const int iz = static_cast<int>(std::floor(point.z() / q));
-
-    std::uint64_t h = 1469598103934665603ULL;  // FNV-1a offset basis
-    auto mix = [&](std::uint64_t v) { h ^= v; h *= 1099511628211ULL; };
-    mix(static_cast<std::uint64_t>(ix));
-    mix(static_cast<std::uint64_t>(iy));
-    mix(static_cast<std::uint64_t>(iz));
-    return h;
+    return rc::voxel_key(point, quantization_m);
 }
 
 // True iff a point belongs to THIS refrigerator's voxel bank (ownership gate rejecting foreign/floor points).

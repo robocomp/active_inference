@@ -5,6 +5,7 @@
 #include "door_scene_graph.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <limits>
 #include <optional>
@@ -14,6 +15,7 @@
 #include <QDebug>
 
 #include "door_model.h"   // rc::DoorModel statics (TOP_THICKNESS, LEG_RADIUS)
+#include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
 
 namespace rc {
 
@@ -75,22 +77,37 @@ DoorSceneGraph::WallRef DoorSceneGraph::resolve_wall(std::uint64_t room_id, cons
 
 std::uint64_t DoorSceneGraph::create_instance_from_detection(const Eigen::Vector3f& centroid_room,
                                                               std::uint64_t room_node_id,
-                                                              std::string_view preferred_name)
+                                                              std::string_view preferred_name,
+                                                              std::span<const std::string> reserved_names)
 {
     auto room_opt = G_->get_node(room_node_id);
     if (not room_opt.has_value())
         return 0;
 
-    // Auto-name: one past the highest existing "door_<N>". Doors are now generic `object` nodes
-    // named "door_*" (schema migration), so scan get_nodes_by_type("object") + name-prefix filter.
+    // Auto-name: one past the highest "door_<N>" that is LIVE OR REMEMBERED. Doors are now generic `object`
+    // nodes named "door_*" (schema migration), so scan get_nodes_by_type("object") + name-prefix filter.
     int max_n = 0;
+    const auto bump = [&](std::string_view nm)
+    {
+        if (not nm.starts_with("door_")) return;
+        int v = 0;
+        const std::string_view digits = nm.substr(5);   // "door_" = 5 chars
+        if (std::from_chars(digits.data(), digits.data() + digits.size(), v).ec == std::errc{})
+            max_n = std::max(max_n, v);
+    };
     bool preferred_free = not preferred_name.empty();
     for (const auto& n : G_->get_nodes_by_type("object"))
         if (n.name().rfind("door_", 0) == 0)
         {
             if (n.name() == preferred_name) preferred_free = false;   // still occupied → don't collide
-            try { max_n = std::max(max_n, std::stoi(n.name().substr(5))); } catch (...) {}   // "door_" = 5 chars
+            bump(n.name());
         }
+    // A number a GHOST still holds is not free either. Recycling it was the identity defect: `door_1` died,
+    // its number went straight to a different door across the room, and when THAT one died it overwrote the
+    // original's ghost — so the real door_1 came back as door_3. Reserved names only raise the counter; they
+    // never mark `preferred_name` occupied, since that ghost is precisely the one being consumed here.
+    for (const auto& nm : reserved_names)
+        bump(nm);
     // RE-ACQUISITION: a door that flickered out and came back keeps its name, so downstream consumers see the
     // same object rather than a fresh one. (The DSR id necessarily changes — the old node was deleted.)
     const std::string name = preferred_free ? std::string(preferred_name)
@@ -123,6 +140,7 @@ std::uint64_t DoorSceneGraph::create_instance_from_detection(const Eigen::Vector
         G_->add_or_modify_attrib_local<pos_y_att>(door_node, rpy +  50.f);
     }
 
+    rc::provenance::stamp_creation(*G_, door_node);   // birth stamp: epoch ms + local ISO-8601
     const auto id_opt = G_->insert_node(door_node);
     if (not id_opt.has_value())
         return 0;

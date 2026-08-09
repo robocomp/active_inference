@@ -82,6 +82,11 @@ public:
     void set_room_geometry(const Eigen::Vector2f& interior, std::vector<Eigen::Vector2f> polygon)
     { room_interior_ = interior; room_polygon_ = std::move(polygon); }
     bool has_room_polygon() const { return room_polygon_.size() >= 3; }
+    // The REACHABLE region, for the NBV. Without it rc::nbv::is_reachable imposes no constraint (it refuses
+    // to guess), so a viewpoint OUTSIDE the room reads as reachable — and the raw information term is
+    // direction-blind, so nothing else breaks the tie. The controller then REPAIRS the unroutable goal onto
+    // the object. Same defect the refrigerator had.
+    const std::vector<Eigen::Vector2f>& room_polygon() const { return room_polygon_; }
 
     // Robot/camera ego-motion (room frame), from the transform chain — producer-independent. Call once per
     // compute cycle; run_inference then gates the pose/shape update to STILLNESS ("be-still-to-update").

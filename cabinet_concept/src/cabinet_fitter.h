@@ -105,6 +105,13 @@ public:
       // The projection unit needs the same walls: a silhouette sample behind one is NOT "predicted visible".
       // Without it a cabinet in the next room votes its own removal — see CabinetProjection::set_room_polygon.
       if (projection_) projection_->set_room_polygon(room_polygon_); }
+    // The REACHABLE region, for the NBV. A cabinet is wall-anchored, so two of its four faces have their
+    // viewpoints OUTSIDE the room; without this rc::nbv::is_reachable imposes no constraint (it refuses to
+    // guess) and the direction-blind information term cannot break the tie, so a through-the-wall face can
+    // win outright. The controller then REPAIRS the unroutable goal onto the cabinet. Same defect the
+    // refrigerator had — see nbv-room-polygon-missing-wall-face.
+    bool has_room_polygon() const { return room_polygon_.size() >= 3; }
+    const std::vector<Eigen::Vector2f>& room_polygon() const { return room_polygon_; }
     bool should_log(const CabinetInstance& inst) const;
     // Kitchen-model Stage 0: the collinear-merged room walls as KitchenWall (corners + inward normal), one
     // per canonical wall id — the geometry the (wall_id, tier) cell table is built on. Empty if no polygon.

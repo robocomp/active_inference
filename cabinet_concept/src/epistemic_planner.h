@@ -13,7 +13,8 @@
 #include <array>
 #include <cmath>
 
-#include "cabinet_belief.h"            // AI2 belief: Σ + predicted_information for the Σ-based NBV
+#include "cabinet_belief.h"                          // AI2 belief: Σ + predicted_information for the NBV
+#include "../../common/nbv/viewpoint_score.h"        // rc::nbv — the shared DETECTION-WEIGHTED NBV core
 
 // ─── Proposal ────────────────────────────────────────────────────────────────
 
@@ -66,11 +67,39 @@ public:
     /// with Rᵢ = sigma_base² + (lat_rate·standoffᵢ)² — range-aware so far faces yield less information.
     /// Targets the dominant uncertainty eigen-direction of Σ (an unobserved extent / yaw). A low but
     /// finite gain is NOT withdrawn here; the controller's EFE selection simply won't pick a low-nat target.
+    /// The returned per-face gains are DETECTION-WEIGHTED: p_detect(face) · ΔH_D-optimal(face). A face the
+    /// detector cannot fire from is worth ~0 nats, so it cannot out-bid nav_dist in the controller's EFE and
+    /// the robot stops paying travel for a look that could not have produced a mask.
+    /// @param obstacles other objects, TRUE extents; a viewpoint inside one is rejected, a partly-occluded
+    ///                  one is degraded continuously via visible_frac — never dropped.
     EpistemicProposal compute(const CabinetBelief& belief, float lat_rate, float sigma_base,
-                              bool verbose = false) const;
+                              const rc::nbv::Sensor& sensor_in,
+                              bool verbose = false,
+    /// @param room_polygon the REACHABLE region (room_concept's `delimiting_polygon_x/y`). NOT optional in
+    ///                   practice: the raw information term is direction-blind, so a face whose viewpoint lies
+    ///                   OUTSIDE the room scores identically to the one inside and can win the tie. Nothing
+    ///                   downstream refuses it either — the controller REPAIRS an unroutable standpoint with
+    ///                   nearest_reachable, measured FROM the robot, which snaps it to the floor at the object.
+    ///                   Left empty, rc::nbv::is_reachable imposes no constraint (it refuses to guess).
+                              const std::vector<rc::nbv::Obstacle>& obstacles = {},
+                              const std::vector<Eigen::Vector2f>& room_polygon = {}) const;
+
+    // The detector's operating envelope. The stand-off is the argmax of THIS, so the viewpoint we ask for is
+    // the one where the detector is most likely to fire — the same model the removal channel weights absence by.
+    // This REPLACES the old kMinimumStandOffM = 1.15 literal ("YOLO won't fire too close"), which was a
+    // hand-picked stand-in for the near shoulder of exactly this curve.
+    void set_detector_envelope(const rc::detect::DetectorEnvelope& e) { det_env_ = e; }
+
+
+    // Footprint radius of the robot: the geometric floor under every stand-off. A physical dimension.
+    void set_robot_radius(float m) { robot_radius_m_ = m; }
 
 private:
     float d_obs_;
+    // The envelope is OWNED (config-driven); the camera GEOMETRY arrives per call, because the zed
+    // intrinsics appear only once robot_concept starts publishing frames. See sensor_from_graph().
+    rc::detect::DetectorEnvelope det_env_{};
+    float robot_radius_m_ = 0.30f;   // Shadow
 };
 
 }  // namespace rc

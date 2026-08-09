@@ -52,15 +52,18 @@
 #include "refrigerator_lidar_ingestor.h"                          // rc::RefrigeratorLidarIngestor (YOLO-independent LiDAR)
 #include "refrigerator_rgb_ingestor.h"                            // rc::RefrigeratorRgbIngestor (ZED RGB for door detection)
 #include "../../common/instance_tracker/instance_tracker.h"   // rc::InstanceTracker (birth/associate/death)
+#include "../../common/birth_fragment/birth_fragment.h"       // rc::BirthFragment — the probation burst
 #include "refrigerator_scene_graph.h" // rc::RefrigeratorSceneGraph (DSR node/RT I/O)
 #include "refrigerator_fitter.h"
 #include "../../common/phantom_log/phantom_log.h"   // rc::history::PhantomLog (shadow-mode birth/death record)      // rc::RefrigeratorFitter (active-inference core)
 #include "refrigerator_existence.h"   // rc::RefrigeratorExistence (evidence-based removal)
 #include "birth_surprise_probe.h"   // rc::BirthSurpriseProbe (read-only: residual grid → birth surprise)
 #include "epistemic_planner.h"
+#include "../../common/nbv/graph_obstacles.h"   // rc::nbv::collect_graph_obstacles — DSR-side viewpoint obstacles
 #include "refrigerator_affordance.h"
 #include "refrigerator_model.h"
 #include "../../common/dashboard/belief_inspector.h"
+#include "../../common/dashboard/belief_strip.h"
 #include "../../common/dashboard/custom_widget.h"
 #include "../../common/dashboard/evidence_monitor.h"
 #include "../../common/dashboard/timeseries_plot.h"
@@ -90,7 +93,9 @@ public slots:
     int  startup_check();
 
     void modify_node_slot(std::uint64_t id, const std::string& type);
-    void modify_node_attrs_slot(std::uint64_t id, const std::vector<std::string>& att_names);
+    // Replaces the update_node_attr_signal slot: the controller-owned protocol flags are POLLED once per
+    // cycle instead of pushed per graph attribute write. See the connect block in initialize().
+    void poll_affordance_protocol();
     void modify_edge_slot(std::uint64_t from, std::uint64_t to, const std::string& type){};
     void modify_edge_attrs_slot(std::uint64_t from, std::uint64_t to,
                                 const std::string& type, const std::vector<std::string>& att_names){};
@@ -128,8 +133,19 @@ private:
     // Multi-instance birth/associate/merge (shared rc::InstanceTracker; the only instance-lifecycle path).
     // Associates "refrigerator" masks to instances, spawns a refrigerator from an unexplained mask, merges overlaps.
     rc::InstanceTracker tracker_;
+    // Probation bursts of the tracker's pending births, keyed by candidate id. A candidate matures over
+    // Tracker.BirthFrames observations; this keeps those observations so the instance can be seeded from
+    // measured geometry — and refused if the union does not read as a fridge — instead of being created from
+    // one frame's centroid and retracted later. See common/birth_fragment/birth_fragment.h.
+    rc::BirthFragment birth_frag_;
+    // One mask slice's room-frame support points (bounds-checked). Shared by the per-frame candidate score
+    // and the burst banking so both see exactly the same cloud.
+    static std::vector<Eigen::Vector3f> slice_cloud(const rc::MaskIngestor::MasksPacket& pkt, int slice_index);
     // Other objects in the graph as robot-inflated footprints, so the NBV never proposes standing on furniture.
-    std::vector<rc::EpistemicPlanner::Obstacle> collect_viewpoint_obstacles(std::uint64_t self_id) const;
+    // Viewpoint obstacles come from rc::nbv::collect_graph_obstacles (common/nbv/graph_obstacles.h) — the
+    // shared DSR adapter. The local copy this agent carried read the deprecated int obj_width/obj_depth that
+    // nothing writes, so it silently returned an empty list on every call; see that header for both defects.
+    rc::nbv::Sensor zed_sensor_model() const;   // real FoVs + mount height for the NBV
     void run_instance_tracker();   // called every cycle from compute()
     void retire_instance(std::uint64_t id);   // shared teardown: affordance + fitter forget + graph delete
     // Physical-exclusion invariant: two refrigerators cannot share space. Collapse any pair of instances whose
@@ -213,6 +229,16 @@ private:
     void build_dashboard();          // create the dashboard + evidence-monitor windows (called from initialize)
     void restore_dashboard_geometry();
     void save_dashboard_geometry() const;
+
+    // ── Compact belief strip — its OWN SMALL top-level window ─────────────────────────────────────────
+    // One row per instance, and the row is a 60 s time series of the certainty channel + p(existence).
+    // This is the window meant to stay open; the big dashboard is the drill-down its "details ▸" opens.
+    QWidget*         strip_window_ = nullptr;
+    rc::BeliefStrip* belief_strip_ = nullptr;
+    void refresh_belief_strip();
+    void restore_strip_geometry();
+    void save_strip_geometry() const;
+
 
     // Live "evidence consuming" monitor — its OWN top-level window (per-instance snapshot + global counters).
     rc::EvidenceMonitor* evidence_monitor_ = nullptr;

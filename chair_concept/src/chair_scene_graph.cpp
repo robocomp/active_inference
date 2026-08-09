@@ -13,6 +13,7 @@
 #include <QDebug>
 
 #include "chair_model.h"   // rc::ChairModel statics (TOP_THICKNESS, LEG_RADIUS)
+#include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
 
 namespace rc {
 
@@ -61,6 +62,7 @@ std::uint64_t ChairSceneGraph::create_instance_from_detection(const Eigen::Vecto
         G_->add_or_modify_attrib_local<pos_y_att>(chair_node, rpy +  50.f);
     }
 
+    rc::provenance::stamp_creation(*G_, chair_node);   // birth stamp: epoch ms + local ISO-8601
     const auto id_opt = G_->insert_node(chair_node);
     if (not id_opt.has_value())
         return 0;

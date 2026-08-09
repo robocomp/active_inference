@@ -32,7 +32,11 @@
  */
 
 #include "specificworker.h"
+#include <QFontMetrics>
+#include <QHBoxLayout>
+#include <QPushButton>
 #include "chair_dof.h"   // rc::kChairDofs — names/units for the BeliefInspector rows
+#include "../../common/nbv/graph_obstacles.h"   // rc::nbv::collect_graph_obstacles — shared, DSR-side
 
 #include <QTimer>
 #include <QSettings>   // persist the standalone dashboard window geometry
@@ -214,6 +218,7 @@ void SpecificWorker::request_shutdown()
 
     save_window_settings();
     save_dashboard_geometry();   // the standalone dashboard is not in `windows`, so save it explicitly
+    save_strip_geometry();       // …nor is the compact belief strip
 
     cleanup_owned_nodes();
 
@@ -433,6 +438,10 @@ void SpecificWorker::initialize()
     // skips a pointless self-notification for our own cleanup deletions.
     remove_owned_chair_nodes();
 
+    // Shadow-mode birth/death record (CONCEPT_AGENT_LIFECYCLE.md §4.2). Recording only — see
+    // log_phantom_event(). Truncating, like the sibling chair_events.csv: one file per run.
+    phantom_log_.open("etc/chair_phantom_events.csv");
+
     // Resolve room node
     const auto rooms = G->get_nodes_by_type("room");
     if (not rooms.empty())
@@ -446,10 +455,20 @@ void SpecificWorker::initialize()
 
     // Subscribe to graph signals ONLY now that fitter_ (which every slot dereferences) exists, and after
     // the startup stale-sweep above. Cross-thread Auto resolves to Queued (never add DirectConnection).
+    // ★NOT update_node_attr_signal. It fires for EVERY attribute change on EVERY node in the shared graph —
+    // every RT pose write from robot_concept, every other agent's per-cycle attribute writes — and each
+    // emission copies a std::vector<std::string> on the DDS reader thread and queues an event to this thread.
+    // Under a churn burst (a peer restarting is enough) the queue drains slower than it fills, and the main
+    // thread then does nothing but service slots: the timer-driven compute() is starved (its log stops
+    // growing), and — the symptom that costs the most — Ctrl-C dies, because generated/main.cpp routes SIGINT
+    // through a QSocketNotifier serviced by this SAME event loop. The agent can then only be killed with -9,
+    // which cannot be caught, so every node it owns LEAKS into the shared graph.
+    // Measured 2026-08-07 on table_concept (identical subscription): main thread pegged at 100% of a core,
+    // ai2_log.csv frozen, Ctrl-C inert, right after a voxelizer restart. CLAUDE.md already states the rule
+    // this violated: if you don't need a signal, don't connect it at all (bottle_concept connects none).
+    // The two things the slot did are now POLLED once per cycle in poll_affordance_protocol().
     connect(G.get(), &DSR::DSRGraph::update_node_signal,
             this, &SpecificWorker::modify_node_slot);
-    connect(G.get(), &DSR::DSRGraph::update_node_attr_signal,
-            this, &SpecificWorker::modify_node_attrs_slot);
     connect(G.get(), &DSR::DSRGraph::del_node_signal,
             this, &SpecificWorker::del_node_slot);
 
@@ -459,7 +478,20 @@ void SpecificWorker::initialize()
 
     // Build rc::EpistemicPlanner (Σ-based D-optimal NBV) with the configured stand-off.
     epistemic_planner_ = rc::EpistemicPlanner(cfg_.obs_distance);
-    epistemic_planner_.set_min_standoff(cfg_.min_standoff_m);   // push viewpoints further out (YOLO needs a gap)
+    // ONE detector envelope: the viewpoint the planner asks for is the argmax of the same model absence
+    // should be weighted by. This REPLACES cfg_.min_standoff_m (ChairConcept.MinStandOffM), which was a
+    // hand-picked stand-in for the near shoulder of exactly this curve.
+    epistemic_planner_.set_detector_envelope(rc::detect::DetectorEnvelope{});
+    epistemic_planner_.set_robot_radius(0.30f);   // Shadow's footprint radius
+
+    // The camera's REAL geometry, read once (intrinsics and the zed mount are both static). BOTH FoVs: for a
+    // chair the backrest makes the VERTICAL extent the binding axis at close range, and the horizontal-only
+    // model this replaced was blind to it. ts==0 on the main thread — the only safe use of that cache.
+    // ★The camera model is read PER CYCLE at the compute site (rc::nbv::sensor_from_graph),
+    // NOT once here: the zed intrinsics are published by robot_concept when frames start
+    // arriving, so reading them in initialize() races the producer. Losing that race leaves
+    // vfov = 0, which silently collapses the fill model to horizontal-only — the exact bug
+    // rc::nbv exists to fix, and it drives the robot nose-to-nose with tall objects.
 
     // Stale affordance nodes are swept on entering Operating (presence hook) and on shutdown — see
     // remove_stale_affordance_nodes(), keyed on the parent object type (robust to node-name renames).
@@ -530,8 +562,105 @@ void SpecificWorker::initialize()
     outer->addWidget(evidence_monitor_, 0);   // section 1 — natural height
     outer->addWidget(custom_widget_, 1);      // sections 2 + 3 — all remaining space
 
+    // NOT shown at startup: the compact strip below is the standing display, and this window is the
+    // drill-down you ask for with its "details \u25B8" button. Geometry is still restored here, so the first
+    // click puts it back exactly where you last left it.
     restore_dashboard_geometry();
-    dashboard_window_->show();
+
+    // ── Compact belief strip — a SEPARATE, small top-level window ──────────────────────────────────
+    strip_window_ = new QWidget;
+    strip_window_->setWindowTitle(QStringLiteral("chair_concept \u2014 beliefs"));
+    auto* strip_layout = new QVBoxLayout(strip_window_);
+    strip_layout->setContentsMargins(0, 0, 0, 0);
+    belief_strip_ = new rc::BeliefStrip(QStringLiteral("chairs"), strip_window_);
+    belief_strip_->set_visible_window(60.f);
+    strip_layout->addWidget(belief_strip_, 1);
+    {
+        auto* bar = new QHBoxLayout;
+        bar->setContentsMargins(4, 0, 4, 3);
+        bar->addStretch(1);
+        auto* details = new QPushButton(QStringLiteral("details \u25B8"), strip_window_);
+        details->setToolTip(QStringLiteral("open the full dashboard: evidence counters, FE/surprise/\u03A3 "
+                                           "time series, and the per-DOF belief inspector"));
+        QFont bf = details->font(); bf.setPointSizeF(bf.pointSizeF() - 1.0); details->setFont(bf);
+        details->setFixedHeight(QFontMetrics(bf).height() + 8);
+        QObject::connect(details, &QPushButton::clicked, strip_window_, [this]()
+        {
+            if (not dashboard_window_) return;
+            dashboard_window_->show();
+            dashboard_window_->setWindowState((dashboard_window_->windowState() & ~Qt::WindowMinimized)
+                                              | Qt::WindowActive);
+            dashboard_window_->raise();
+            dashboard_window_->activateWindow();
+        });
+        bar->addWidget(details, 0);
+        strip_layout->addLayout(bar, 0);
+    }
+    restore_strip_geometry();
+    strip_window_->show();
+}
+
+// One row per chair: the adequacy gap (nats still missing before Σ meets the consumer's σ*), p(exists),
+// the FE surprise and the node's birth stamp. The widget owns the history — this pushes the current
+// instant only, on the same throttled tick as the two panels above.
+void SpecificWorker::refresh_belief_strip()
+{
+    if (not belief_strip_)
+        return;   // headless: nothing was built
+
+    std::vector<rc::BeliefStripRow> rows;
+    rows.reserve(fitter_->instances().size());
+    for (const auto& [id, inst] : fitter_->instances())
+    {
+        rc::BeliefStripRow r;
+        r.node        = inst.node_name;
+        r.surprise    = inst.fe_surprise;
+        r.initialized = inst.ai2_initialized;
+        // exist_logodds is NaN until the existence channel initialises — leave p_exists NaN in that case
+        // (the widget reads NaN as "this agent has no existence belief yet") rather than inventing 0.5.
+        if (std::isfinite(inst.exist_logodds))
+            r.p_exists = 1.0f / (1.0f + std::exp(-inst.exist_logodds));
+
+        // The same REPORTED covariance the inspector and the NBV planner use (its yaw entry carries the
+        // 4-mode orientation entropy), so the strip cannot disagree with either.
+        const auto S = inst.ai2_belief.covariance_reported();
+        r.gap_nats = rc::any_sigma_star(rc::kChairDofs)
+                   ? rc::adequacy_gap_nats(rc::kChairDofs, [&](std::size_t j) { return S(j, j); })
+                   : -1.0f;
+
+        // Fallback channel: ½·ln det Σ via the Cholesky (Σ log L_ii), not log(det()) — a covariance with
+        // centimetre σ has a determinant where a direct determinant is numerical noise.
+        const auto llt = S.llt();
+        if (llt.info() == Eigen::Success)
+            r.logdet_nats = llt.matrixL().toDenseMatrix().diagonal().array().log().sum();
+
+        if (const auto n = G->get_node(inst.node_id); n.has_value())
+            r.birth_ms = G->get_attrib_by_name<timestamp_creation_att>(n.value()).value_or(0);
+
+        rows.push_back(std::move(r));
+    }
+    belief_strip_->update_view(rows);
+}
+
+void SpecificWorker::restore_strip_geometry()
+{
+    if (not strip_window_)
+        return;
+    QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("chair_concept"));
+    const QByteArray geom = settings.value(QStringLiteral("BeliefStripWindow_geometry")).toByteArray();
+    if (not geom.isEmpty())
+        strip_window_->restoreGeometry(geom);
+    else
+        strip_window_->resize(520, 210);   // small ON PURPOSE — it sits in a corner, always open
+}
+
+void SpecificWorker::save_strip_geometry() const
+{
+    if (not strip_window_)
+        return;
+    QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("chair_concept"));
+    settings.setValue(QStringLiteral("BeliefStripWindow_geometry"), strip_window_->saveGeometry());
+    settings.sync();
 }
 
 // ─── Belief inspector ────────────────────────────────────────────────────────
@@ -553,6 +682,7 @@ void SpecificWorker::refresh_evidence_monitor()
 
     evidence_monitor_->update_view(ev_g_);
     refresh_belief_inspector();
+    refresh_belief_strip();   // same tick, same instance pass — the views can never disagree
 }
 
 void SpecificWorker::refresh_belief_inspector()
@@ -623,6 +753,11 @@ void SpecificWorker::compute()
         if (rooms.empty()) return;
         room_node_id_ = rooms.front().id();
     }
+
+    // Controller-owned affordance flags (claim / completion / epistemic_pending). Polled here rather than
+    // pushed by update_node_attr_signal — see the connect block in initialize().
+    poll_affordance_protocol();
+
 
     // Evidence-pipeline per-cycle counters (the *_cum fields persist). Producers below add to these; the
     // snapshot is pushed at the end of the cycle.
@@ -1009,6 +1144,9 @@ void SpecificWorker::run_instance_tracker()
                     it->second.assigned_mask_idx = slice;
             }
             log_tracker_event("BIRTH", new_id, c.x(), c.y(), "");
+            // Shadow-mode birth record (§4.2): a phantom is a birth that dies young from a confident view,
+            // so the birth half captures the place AND the viewpoint that produced it.
+            log_phantom_event("BIRTH", new_id, "", c.x(), c.y(), nullptr, "");
         }
     }
 
@@ -1124,6 +1262,45 @@ void SpecificWorker::refresh_room_geometry()
 // Continuous existence belief: fold one sensor frame of evidence into each instance's log-odds L and remove
 // any whose L crosses the floor. See the ChairInstance::exist_logodds comment for the model. Runs from
 // run_instance_tracker (association already resolved, so assigned_mask_idx is this cycle's assignment).
+// SHADOW-MODE birth/death recorder — CONCEPT_AGENT_LIFECYCLE.md §4.2, theory in MODEL_HISTORY.md §4.
+// RECORDS ONLY; it can never alter a birth or a removal. chair_concept is the agent this matters most in:
+// the "part of a radiator reads as a chair" failure is a CHAIR phenomenon, so this log is what actually tests
+// whether phantom deaths cluster in (world cell × view bearing).
+// The attribution fields decide whether a death was a CONFIDENT disconfirmation (a real phantom) or a weak
+// one (more likely one of our own removal defects). chair has no silhouette channel, so P(detect) comes from
+// ChairFitter::zed_detectability() — the same quantity that gates its vacate evidence.
+void SpecificWorker::log_phantom_event(std::string_view event, std::uint64_t id, std::string_view name,
+                                       float x, float y, const rc::ChairInstance* inst, std::string_view note)
+{
+    if (not phantom_log_.is_open())
+        return;
+    rc::history::PhantomEvent e;
+    e.event = event; e.id = id; e.name = name; e.x = x; e.y = y; e.note = note;
+    // Observer pose → view bearing. The classifier failure is VIEWPOINT-dependent (a radiator only reads as a
+    // chair from certain angles), so the eventual p_FA field is keyed on (world cell × bearing); a place-only
+    // key would suppress a genuine chair placed there from every direction.
+    if (inner_eigen_)
+        if (const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", 0); rtb.has_value())
+        {
+            const auto& Tm = rtb.value();
+            e.robot_x = static_cast<float>(Tm(0, 3));
+            e.robot_y = static_cast<float>(Tm(1, 3));
+            e.robot_yaw = std::atan2(static_cast<float>(Tm(1, 0)), static_cast<float>(Tm(0, 0)));
+            e.view_bearing = std::atan2(e.robot_y - y, e.robot_x - x);   // instance → camera, room frame
+            e.range_m = std::hypot(e.robot_x - x, e.robot_y - y);
+        }
+    if (inst)   // death: carry the state that says whether this was a CONFIDENT kill
+    {
+        e.age_cycles    = inst->processed_cycles;
+        e.p_detect      = fitter_ ? fitter_->zed_detectability(*inst) : 0.0f;
+        e.in_fov_frac   = inst->roi_valid ? 1.0f : 0.0f;
+        e.central_frac  = std::clamp(1.0f - inst->last_centroid_radius, 0.0f, 1.0f);
+        e.fixated       = inst->dbg_fixated ? 1 : 0;
+        e.exist_logodds = std::isnan(inst->exist_logodds) ? 0.0f : inst->exist_logodds;
+    }
+    phantom_log_.write(e);
+}
+
 void SpecificWorker::update_existence_beliefs()
 {
     // Integrate at the SENSOR rate, not the compute rate: only when a new mask frame arrived. Otherwise a fast
@@ -1273,6 +1450,11 @@ void SpecificWorker::update_existence_beliefs()
         {
             log_tracker_event("REMOVE", id, it->second.model.state().cx, it->second.model.state().cy,
                               std::format("logodds {:.2f}", L));
+            // Shadow-mode death record (§4.2), taken BEFORE teardown while the state that justified the kill
+            // is still readable. A low p_detect here means this was OUR removal bug, not a YOLO phantom.
+            log_phantom_event("DEATH", id, it->second.node_name,
+                              it->second.model.state().cx, it->second.model.state().cy, &it->second,
+                              std::format("L {:.2f}", L));
             it->second.affordance.remove();
         }
         fitter_->forget_node(id);
@@ -1567,7 +1749,13 @@ void SpecificWorker::step_epistemic(rc::ChairInstance& inst, DSR::Node& node)
     if (not inst.ai2_initialized)
         return;
     rc::EpistemicProposal prop =
-        epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m);
+        epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m,
+                                   rc::nbv::sensor_from_graph(*G, inner_eigen_.get()),
+                                   rc::nbv::collect_graph_obstacles(*G, inner_eigen_.get(), inst.node_id),
+                                   // The reachable region — kills the through-the-wall faces that the
+                                   // direction-blind gain cannot tell apart. Empty until room_concept publishes,
+                                   // and is_reachable then imposes no constraint (the pre-existing behaviour).
+                                   fitter_->room_polygon());
     if (not prop.valid or not prop.is_finite())
         return;   // degenerate (non-finite) fit — leave the existing affordance node as-is, retry next cycle
 
@@ -1634,34 +1822,34 @@ void SpecificWorker::modify_node_slot(std::uint64_t id, const std::string& type)
     fitter_->ensure_instance(node_opt.value(), room_node_id_);
 }
 
-void SpecificWorker::modify_node_attrs_slot(std::uint64_t id,
-                                             const std::vector<std::string>& att_names)
+// Poll the controller-owned protocol flags once per cycle. This REPLACES the update_node_attr_signal
+// subscription (see the connect block in initialize() for the starvation it caused). Both things it did are
+// pure reads of the CURRENT graph state, so polling gives the same answer — a controller claim or completion
+// simply lands on the next cycle instead of within the emitting DDS callback.
+//
+// Cost is bounded by OUR instance count (typically 1–3), not by the graph's global write rate, which is the
+// whole point: the old path did work proportional to what every other agent was writing.
+void SpecificWorker::poll_affordance_protocol()
 {
-    // Delegate to the affordance state machine for any instance whose affordance
-    // node was modified (controller claim/completion updates active/pending)
+    if (not fitter_)
+        return;   // may be called before the fit core exists — the guard every graph slot here needs
+
     for (auto& [chair_id, inst] : fitter_->instances())
-        if (inst.affordance.node_id() == id)
-            inst.affordance.on_node_modified(id);
-
-    // React to mission-controller clearing epistemic_pending on the chair node itself
-    if (fitter_->instances().count(id))
     {
-        const bool pending_cleared = std::any_of(att_names.begin(), att_names.end(),
-            [](const std::string& s) { return s == "epistemic_pending"; });
+        // Affordance state machine: idle→pending→executing→satisfied, driven by the controller-owned
+        // active/pending flags on the affordance node. on_node_modified() re-reads them itself.
+        if (const auto aid = inst.affordance.node_id(); aid != 0)
+            inst.affordance.on_node_modified(aid);
 
-        if (pending_cleared)
+        // Mission controller clearing epistemic_pending on the object node itself.
+        if (auto node_opt = G->get_node(chair_id); node_opt.has_value())
         {
-            auto node_opt = G->get_node(id);
-            if (node_opt.has_value())
-            {
-                const auto v = G->get_attrib_by_name<epistemic_pending_att>(node_opt.value());
-                if (v.has_value() and not v.value())
-                    fitter_->instances().at(id).epistemic_pending = false;
-            }
+            const auto v = G->get_attrib_by_name<epistemic_pending_att>(node_opt.value());
+            if (v.has_value() and not v.value())
+                inst.epistemic_pending = false;
         }
     }
 }
-
 void SpecificWorker::del_node_slot(std::uint64_t id)
 {
     // Notify affordance in case its own DSR node was deleted externally

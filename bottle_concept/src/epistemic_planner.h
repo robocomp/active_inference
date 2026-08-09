@@ -24,7 +24,8 @@
 #include <Eigen/Dense>
 
 #include "bottle_model.h"
-#include "bottle_belief.h"            // AI2 belief: Σ + predicted_information for the Σ-based NBV
+#include "bottle_belief.h"                           // AI2 belief: Σ + predicted_information for the NBV
+#include "../../common/nbv/viewpoint_score.h"        // rc::nbv — the shared DETECTION-WEIGHTED NBV core
 
 namespace rc {
 
@@ -62,13 +63,30 @@ public:
      * over synthetic hidden-arc points, R = σ_base². ΔH→0 as the belief tightens (belief→knowledge).
      * Returns valid==false only if the camera→bottle ray is degenerate (can't tell which side is hidden).
      */
+    /// The returned gain is DETECTION-WEIGHTED: P(detect at the far-side viewpoint) · ΔH. A hidden-face view
+    /// we could not get a mask from is worth ~0 nats, so it cannot out-bid nav_dist in the controller's EFE —
+    /// which matters most here, because this affordance asks the robot to drive all the way AROUND the bottle.
     EpistemicProposal compute(const BottleBelief& belief,
                               const Eigen::Vector2f& camera_xy,
-                              float sigma_base) const;
+                              float sigma_base,
+                              const rc::nbv::Sensor& sensor_in,
+                              const std::vector<rc::nbv::Obstacle>& obstacles = {}) const;
+
+    // The detector's operating envelope. The stand-off is the argmax of THIS, which is what retires the
+    // d_obs_ constructor constant as the thing that set the viewing distance.
+    void set_detector_envelope(const rc::detect::DetectorEnvelope& e) { det_env_ = e; }
+
+
+    // Footprint radius of the robot: the geometric floor under the stand-off. A physical dimension.
+    void set_robot_radius(float m) { robot_radius_m_ = m; }
 
 private:
     float d_obs_;
     float view_info_;
+    // The envelope is OWNED (config-driven); the camera GEOMETRY arrives per call, because the zed
+    // intrinsics appear only once robot_concept starts publishing frames. See sensor_from_graph().
+    rc::detect::DetectorEnvelope det_env_{};
+    float robot_radius_m_ = 0.30f;   // Shadow
 };
 
 }  // namespace rc

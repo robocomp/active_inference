@@ -1,41 +1,27 @@
 set(ACTIVE_INFERENCE_COMMON_DIR "${CMAKE_CURRENT_LIST_DIR}/../../common")
 
+# Shared ai_common::* libraries (see common/CMakeLists.txt). Placed FIRST, so these targets carry
+# their own explicit flags instead of silently inheriting the ones set further down this file.
+add_subdirectory(${ACTIVE_INFERENCE_COMMON_DIR} ${CMAKE_CURRENT_BINARY_DIR}/ai_common EXCLUDE_FROM_ALL)
+LIST(APPEND LIBS
+  ai_common::presence     # agent presence monitor + coordinator
+  ai_common::perception   # mask_ingestor
+  ai_common::ui           # TimeSeriesPlot (compiled Q_OBJECT)
+  ai_common::ui_headers   # custom_widget.h / belief_inspector.h (header-only)
+  ai_common::core         # header-only beliefs (ai_belief/dof_spec.h, …)
+)
+
 # Sources set
 LIST(APPEND SOURCES
   ../src/specificworker.cpp
   ../src/specificworker_presence.cpp
   ../src/chair_config.cpp
-  ${ACTIVE_INFERENCE_COMMON_DIR}/mask_ingestor/mask_ingestor.cpp
-  ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/timeseries_plot.cpp
   ../src/chair_scene_graph.cpp
   ../src/chair_fitter.cpp
   ../src/chair_model.cpp
   ../src/chair_belief.cpp
   ../src/epistemic_planner.cpp
   ../src/chair_affordance.cpp
-  ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_monitor/agent_presence_monitor.cpp
-  ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_coordinator/agent_presence_coordinator.cpp
-)
-
-# Headers set
-LIST(APPEND HEADERS
-  ../src/specificworker.h
-  ../src/chair_config.h
-  ../src/chair_instance.h
-  ${ACTIVE_INFERENCE_COMMON_DIR}/mask_ingestor/mask_ingestor.h
-  ../src/chair_scene_graph.h
-  ../src/chair_fitter.h
-  ../src/chair_model.h
-  ../src/chair_belief.h
-  ../src/chair_dof.h
-  ../src/epistemic_planner.h
-  ../src/chair_affordance.h
-  ${ACTIVE_INFERENCE_COMMON_DIR}/ai_belief/dof_spec.h
-  ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/timeseries_plot.h
-  ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/custom_widget.h
-  ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/belief_inspector.h
-  ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_monitor/agent_presence_monitor.h
-  ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_coordinator/agent_presence_coordinator.h
 )
 
 # no-char8_t to avoid a problem with ICE Connection lib.

@@ -12,6 +12,7 @@
 #include <QDebug>
 
 #include "body18.h"   // rc::human::KP
+#include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
 
 namespace rc {
 
@@ -74,6 +75,7 @@ void HumanSceneGraph::scaffold_missing_person_nodes(const std::vector<SkeletonBo
             G_->add_or_modify_attrib_local<pos_y_att>(person_node, rpy +  80.f);
         }
 
+        rc::provenance::stamp_creation(*G_, person_node);   // birth stamp: epoch ms + local ISO-8601
         const auto id_opt = G_->insert_node(person_node);
         if (not id_opt.has_value())
         {
