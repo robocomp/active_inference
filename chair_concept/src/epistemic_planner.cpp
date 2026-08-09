@@ -154,7 +154,23 @@ EpistemicProposal EpistemicPlanner::compute(const ChairBelief& belief, float lat
         return {};
     }
     const int   best_idx  = plan.best_face;
-    const float best_gain = plan.face_gains[best_idx];   // DETECTION-WEIGHTED
+    const float best_raw  = plan.face_raw_gains[best_idx];
+    // ★BOUND THE GAIN BY THE ADEQUACY GAP — but only if a consumer has actually stated one.
+    // Information beyond σ* is worthless to the consumer, so an adequate object must STOP attracting;
+    // without this an agent asks to be visited forever and starves every other affordance (measured: the
+    // chair, whose gain never fell because its dominant uncertainty is discrete). The guard matters as
+    // much as the bound: adequacy_gap_nats() returns 0 for a DOF table with no σ* anywhere — an empty sum
+    // — and 0 is exactly the value meaning "adequate", so applying it unguarded would force the gain to
+    // zero and the object would never be selected at all. Ask first. Agents that DECLARE no consumer
+    // demand (SIGMA-STAR: none) therefore stay unbounded, which is coherent: with no demand, "adequate"
+    // is undefined. This activates by itself the moment a σ* is published.
+    float best_gain = plan.face_gains[best_idx];   // DETECTION-WEIGHTED
+    if (rc::any_sigma_star(rc::kChairDofs))
+    {
+        const float adequacy_gap = rc::adequacy_gap_nats(rc::kChairDofs, [&](std::size_t j) { return S(j, j); });
+        const float useful_frac  = (best_raw > 1e-9f) ? std::min(best_raw, adequacy_gap) / best_raw : 0.0f;
+        best_gain *= useful_frac;
+    }
     const auto& face_gain = plan.face_gains;
     if (not std::isfinite(best_gain))
         return {};

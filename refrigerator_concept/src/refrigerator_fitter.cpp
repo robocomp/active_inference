@@ -155,6 +155,12 @@ void RefrigeratorFitter::resolve_front_from_rgb(RefrigeratorInstance& inst, floa
     const auto cue = projection_->detect_front(box, rgb_frame_, rgb_stamp_ms_);
     if (not cue.has_value())
         return;
+    // Where this look came FROM, for the accumulator's novelty budget (see FrontCue::view_bearing_rad).
+    if (const auto M = projection_->room_T_zed_matrix(0); M.has_value())
+    {
+        const float camx = static_cast<float>((*M)(0, 3)), camy = static_cast<float>((*M)(1, 3));
+        const_cast<FrontCue&>(*cue).view_bearing_rad = std::atan2(camy - bs.cy, camx - bs.cx);
+    }
     inst.last_front_conf    = cue->confidence;
     inst.last_front_bearing = cue->bearing_rad;
     // evidence_weight = ego-motion reliability (a moving frame's smeared door face barely votes on the discrete

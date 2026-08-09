@@ -60,6 +60,12 @@ struct FrontCue
 {
     float bearing_rad = 0.0f;   // room-frame yaw of the winning face's OUTWARD normal (direction the door faces)
     float confidence  = 0.0f;   // (max−second)/(max+eps) door-ness margin ∈ [0,1]; high when one face clearly wins
+    // ★Room-frame bearing FROM THE FRIDGE TO THE OBSERVER. Not the same thing as bearing_rad, and the
+    // distinction is the whole point: bearing_rad is a property of the OBJECT (which way the door faces),
+    // while this is where the look came FROM. front_acc_ needs the latter to tell a genuinely new view
+    // from the same view repeated — keying novelty on the cue direction would suppress a fresh viewpoint
+    // that happens to agree. NaN ⇒ unknown ⇒ no novelty weighting (the legacy sum).
+    float view_bearing_rad = std::numeric_limits<float>::quiet_NaN();
 };
 
 // Fitted refrigerator state θ = [cx, cy, H, w, h, yaw] (room frame). See the file header for the field map.
@@ -469,6 +475,13 @@ private:
     // relative to the current mode (front_acc_[0] re-baselined to the max on each adoption). All-zero = undecided.
     static constexpr float kRectAspect  = 0.10f;   // |w−h|/(w+h) above which the footprint is treated rectangular
     std::array<float, 4>   front_acc_ = {0.0f, 0.0f, 0.0f, 0.0f};
+    // Mode-evidence budget already spent per observer-bearing bin, exactly as ChairBelief does for its
+    // 4-way yaw modes. Without it front_acc_ SUMS the same static appearance evidence every frame, so the
+    // door-mode confidence grows with dwell time rather than with information — the defect this fleet keeps
+    // rediscovering (see CONCEPT_AGENT_INVARIANTS.md, mistake I).
+    static constexpr int kFrontViewBins = 24;          // 15° bins around the fridge
+    std::array<float, kFrontViewBins> front_view_spent_{};
+    float front_view_budget_ = 3.0f;                   // same scale as ChairBeliefParams::view_budget
 
     RefrigeratorBeliefState    state_;
     RefrigeratorBeliefParams   params_;

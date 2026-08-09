@@ -645,6 +645,24 @@ bool RefrigeratorBelief::resolve_front(const FrontCue& cue, float evidence_weigh
 
     const auto wrap = [](float a) { return std::remainder(a, 2.0f * static_cast<float>(M_PI)); };
     const Eigen::Vector2f cue_dir(std::cos(cue.bearing_rad), std::sin(cue.bearing_rad));
+
+    // ★NOVELTY: charge the OBSERVER-bearing bin, so a repeated look from the same place cannot keep voting.
+    // The same discipline ChairBelief::flip_acc_ already applies. A cue with no view bearing (NaN) keeps the
+    // legacy behaviour rather than silently changing it.
+    float w_eff = w;
+    if (std::isfinite(cue.view_bearing_rad))
+    {
+        constexpr int B = kFrontViewBins;
+        const float span = 2.0f * static_cast<float>(M_PI) / static_cast<float>(B);
+        const float wrapped = std::atan2(std::sin(cue.view_bearing_rad), std::cos(cue.view_bearing_rad));
+        int bin = static_cast<int>(std::floor((wrapped + static_cast<float>(M_PI)) / span));
+        bin = std::clamp(bin, 0, B - 1);
+        const float budget    = std::max(1e-3f, front_view_budget_);
+        const float remaining = std::max(0.0f, budget - front_view_spent_[bin]);
+        const float novelty   = remaining / (remaining + budget);
+        w_eff = w * novelty;
+        front_view_spent_[bin] += w_eff;   // charge the bin what this frame actually contributed
+    }
     const std::array<bool, 4> allowed = allowed_modes();
 
     // Accumulate evidence for EVERY candidate: the alignment of that mode's door normal (local −Y rotated by the
@@ -660,7 +678,7 @@ bool RefrigeratorBelief::resolve_front(const FrontCue& cue, float evidence_weigh
     {
         const float psi = wrap(state_.yaw + static_cast<float>(k) * kHalfPi);
         const Eigen::Vector2f front_dir(std::sin(psi), -std::cos(psi));
-        front_acc_[k] += w * front_dir.dot(cue_dir);
+        front_acc_[k] += w_eff * front_dir.dot(cue_dir);
     }
 
     // ★Re-baseline on the INCUMBENT, then clamp. The accumulator is a log-odds RATIO against the currently held
