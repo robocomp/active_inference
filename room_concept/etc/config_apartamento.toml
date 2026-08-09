@@ -269,7 +269,23 @@ WeightSmoothingAlpha     = 0.3   # EMA de transición entre perfiles
 OdomNoiseScale  = 1.0   # Sin inflado artificial (anterior 1.5 distorsionaba
                          # el balance boundary/obs/motion en la pérdida RFE)
 CmdNoiseTrans   = 0.20  # Fracción de ruido translacional del comando (m/m)
-CmdNoiseRot     = 0.10  # Fracción de ruido rotacional del comando (rad/rad)
+CmdNoiseRot     = 0.18  # Fracción de ruido rotacional del comando (rad/rad). CALIBRATED 08-09 from
+                        # 20 in-place turns, both directions, 0.27-1.55 rad/s, arbitrated against the
+                        # SDF posterior (anchored by the room geometry): the command channel delivers
+                        # 0.822 +-0.025 of the rotation that actually happens, so its 1-sigma error on
+                        # the increment is 0.178, not the 0.10 assumed here. The encoder delivers
+                        # 1.108 and keeps OdomNoiseRot 0.04 + EncoderRotSlipK 0.05 (0.064 combined).
+                        # This is the asymmetry that was backwards: the speed-proportional inflation
+                        # sat on the ACCURATE channel while the one with a demonstrably
+                        # speed-proportional error was modelled as the more certain of the two.
+                        # rotation_std = rotation_noise_base + CmdNoiseRot*|dtheta| already has the
+                        # right functional form (it grows with the covariate) — only the number was
+                        # wrong, so this is calibration from data, not a tuning knob.
+                        # NOTE this models a systematic ~1.34x command/actual GAIN as if it were
+                        # zero-mean noise. That is the honest thing to do here (the fusion has no bias
+                        # term for the command, and inflating variance only ever says "trust this
+                        # less"), but the real cure is upstream: see the base-driver gain in
+                        # robot_concept. If that is ever fixed, re-measure before lowering this.
 CmdNoiseBase    = 0.05  # Ruido base translacional del comando (m)
 OdomNoiseTrans  = 0.08  # Fracción de ruido translacional de odometría
 OdomNoiseRot    = 0.04  # Fracción de ruido rotacional de odometría

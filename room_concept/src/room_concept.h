@@ -192,7 +192,13 @@ public:
         // ===== Prior covariance model =====
         // Process noise for commanded velocity prior (open-loop, less reliable)
         float cmd_noise_trans = 0.20f;   // Fractional position noise per meter of motion
-        float cmd_noise_rot   = 0.10f;   // Fractional rotation noise per radian of rotation
+        // Fractional rotation noise per radian of COMMANDED rotation. 0.18, not 0.10: measured
+        // 08-09 over 20 in-place turns against the room-anchored SDF posterior, the command channel
+        // delivers 0.822 +-0.025 of the rotation that actually happens (the encoder 1.108). The
+        // command is the channel whose error is proportional to omega, so it is the one that needs a
+        // covariance growing with the rotation increment — the speed-proportional term used to sit on
+        // the encoder instead, which is why the fusion trusted the wrong prior during turns.
+        float cmd_noise_rot   = 0.18f;
         float cmd_noise_base  = 0.05f;   // Base position noise even when stationary (m)
         float stationary_noise_damping = 0.7f;  // Multiplier applied to base noise when near-stationary
 
