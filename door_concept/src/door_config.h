@@ -41,6 +41,16 @@ struct DoorConfig
 
     // ── AI2 belief (mirrors table_concept [TableModel].AI2*): recursive-Laplace full-covariance filter ──
     float ai2_sigma_base_m       = 0.03f;
+    // ── DETECTOR ENVELOPE (common/detectability) — the YOLO inverse model ─────────────────────────
+    // ONE model, two consumers: the epistemic planner puts the stand-off at its argmax, and the removal
+    // channel weights absence by it, so a missing mask from a pose the detector could never fire from
+    // reads as EXPECTED rather than as evidence the object is gone. Defaults are the fleet PRIOR, not a
+    // measurement, so behaviour is unchanged until etc/config.toml sets them. The envelope is genuinely
+    // object-dependent — measured max_fill 1.32 (refrigerator) vs 0.677 (table) — so every agent needs
+    // its own, fitted from its ai2_log with common/detectability/tools/fit_envelope (--label fresh).
+    float detect_min_fill        = 0.10f;
+    float detect_max_fill        = 0.60f;
+    float detect_soft            = 0.06f;
     float ai2_clutter_frac       = 0.10f;
     float ai2_clutter_scale_m    = 0.12f;
     float ai2_clutter_structure_gain = 1.0f;  // density-aware clutter: shrink the clutter prior for seat-coplanar points (closes the escape valve → fixes seat_d collapse + its overconfidence). 0 → flat clutter

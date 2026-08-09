@@ -48,6 +48,9 @@ DoorConfig load_door_config(const ConfigLoader& cfg)
 
     // ── AI2 belief ────────────────────────────────────────────────────────────
     out.ai2_sigma_base_m         = getf("DoorModel.AI2SigmaBaseM",           0.03f);
+    out.detect_min_fill          = getf("DoorModel.DetectMinFill",           0.10f);
+    out.detect_max_fill          = getf("DoorModel.DetectMaxFill",           0.60f);
+    out.detect_soft              = getf("DoorModel.DetectSoft",              0.06f);
     out.ai2_clutter_frac         = getf("DoorModel.AI2ClutterFrac",          0.10f);
     out.ai2_clutter_scale_m      = getf("DoorModel.AI2ClutterScaleM",        0.12f);
     out.ai2_clutter_structure_gain = getf("DoorModel.AI2ClutterStructureGain", 1.0f);

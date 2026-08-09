@@ -481,7 +481,8 @@ void SpecificWorker::initialize()
     // ONE detector envelope: the viewpoint the planner asks for is the argmax of the same model absence
     // should be weighted by. This REPLACES cfg_.min_standoff_m (ChairConcept.MinStandOffM), which was a
     // hand-picked stand-in for the near shoulder of exactly this curve.
-    epistemic_planner_.set_detector_envelope(rc::detect::DetectorEnvelope{});
+    epistemic_planner_.set_detector_envelope(
+        rc::detect::DetectorEnvelope{cfg_.detect_min_fill, cfg_.detect_max_fill, cfg_.detect_soft});
     epistemic_planner_.set_robot_radius(0.30f);   // Shadow's footprint radius
 
     // The camera's REAL geometry, read once (intrinsics and the zed mount are both static). BOTH FoVs: for a

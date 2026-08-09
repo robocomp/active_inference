@@ -76,8 +76,14 @@ audit_agent() {
     if [[ -f "$dof" ]]; then
         total=$(grep -cE '^\s*\{"' "$dof")
         nostar=$(grep -E '^\s*\{"' "$dof" | grep -c -- '-1\.0f')
-        if   [[ "$total" -eq 0 ]];       then mark na
-        elif [[ "$nostar" -eq "$total" ]]; then mark no      # nothing published ⇒ gap unusable
+        if   [[ "$total" -eq 0 ]]; then mark na
+        elif [[ "$nostar" -eq "$total" ]]; then
+            # Nothing published ⇒ the adequacy gap is unusable and the strip falls back to logdet. That is a
+            # DEFECT when it was forgotten and a FACT when no consumer has stated a demand — and the two look
+            # identical in the code. An agent may declare the second with a "SIGMA-STAR: none — <reason>"
+            # line in its dof header; the audit then reports it without failing. An audit that scores a
+            # reviewed decision as a failure is one people learn to ignore.
+            if grep -q "SIGMA-STAR: none" "$dof"; then printf "%-13s" "none(decl)"; else mark no; fi
         else printf "%-13s" "$((total-nostar))/$total"; fi
     else
         mark na
@@ -114,9 +120,12 @@ skipped=()
 for d in *_concept; do
     [[ -d "$d/src" ]] || continue
     # An OBJECT-concept agent is one that owns instances of a class and publishes an affordance for them.
-    # robot/room/residual are concept agents in name but model the robot, the room and the unexplained
-    # remainder — they have no four-face viewpoint plan and no per-object contract, so scoring them against
-    # this pattern would be noise, not drift.
+    # robot/room/residual are concept agents in NAME but model the robot, the room and the unexplained
+    # remainder — not objects IN the room. They have no four-face viewpoint plan and no per-object contract,
+    # so scoring them against this pattern would be noise, not drift. room is excluded by name rather than
+    # by structure: it does own an epistemic_planner (it plans viewpoints to localise itself), which makes
+    # it structurally indistinguishable from an object agent while being conceptually the container.
+    if [[ "$d" == room_concept ]]; then skipped+=("${d%_concept}"); continue; fi
     if [[ -f "$d/src/epistemic_planner.h" ]] || compgen -G "$d/src/*_affordance.cpp" > /dev/null; then
         audit_agent "$d"
     else
@@ -130,7 +139,8 @@ if [[ $QUIET -eq 0 ]]; then
     cat <<'NOTE'
   room_poly / any_usable  the NBV must know the reachable region, and must refuse when no face is usable
   contract                every default_contract_for(key) this agent asks for has a case in the protocol
-  sigma*                  DOFs with a consumer demand / total; 0 of N ⇒ the adequacy gap degrades to logdet
+  sigma*                  DOFs with a consumer demand / total; 0 of N ⇒ the adequacy gap degrades to
+                          logdet. 'none(decl)' = reviewed and deliberately absent (SIGMA-STAR: none)
   envelope                'warn' = hardcoded DetectorEnvelope{} prior instead of config keys
   strip                   'warn' = no compact belief strip
   poll                    protocol flags polled, not pushed by the update_node_attr_signal firehose

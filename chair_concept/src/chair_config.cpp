@@ -48,6 +48,9 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
 
     // ── AI2 belief ────────────────────────────────────────────────────────────
     out.ai2_sigma_base_m         = getf("ChairModel.AI2SigmaBaseM",           0.03f);
+    out.detect_min_fill          = getf("ChairModel.DetectMinFill",           0.10f);
+    out.detect_max_fill          = getf("ChairModel.DetectMaxFill",           0.60f);
+    out.detect_soft              = getf("ChairModel.DetectSoft",              0.06f);
     out.ai2_clutter_frac         = getf("ChairModel.AI2ClutterFrac",          0.10f);
     out.ai2_clutter_scale_m      = getf("ChairModel.AI2ClutterScaleM",        0.12f);
     out.ai2_clutter_structure_gain = getf("ChairModel.AI2ClutterStructureGain", 1.0f);
