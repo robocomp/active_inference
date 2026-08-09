@@ -265,6 +265,52 @@ inline Contract default_contract_for(std::string_view object_type)
             .still  (0.10f, 0.15f)
             .stable(1).timeout_s(25).on_fail(Consume);
     }
+    if (object_type == "cabinet")
+    {
+        // Cabinet: wall-anchored like the refrigerator, and like the door it was asking for a contract that
+        // did not exist — cabinet_affordance.cpp calls default_contract_for("cabinet"), which fell through to
+        // the Contract::reach() below ("navigate to the pose, done on arrival"). Since
+        // ControllerSession::wants_final_facing honours the affordance's target yaw only for Servo/Orient,
+        // the robot arrived at the right stand-off pointing the wrong way and no mask could form.
+        // Bound to the channel cabinet_scene_graph.cpp:172-177 actually publishes — cabinet_roi_* /
+        // cabinet_detection_*, NOT the table_* names the refrigerator reuses. A contract bound to attributes
+        // that do not exist never satisfies its predicate and times out on every attempt.
+        // No .advance(): the NBV already put the stand-off at the detector envelope's argmax.
+        return Contract::servo()
+            .center ("cabinet_roi_offset")
+            .valid  ("cabinet_roi_valid")
+            .until  ("cabinet_detection_alive",      GE, 0.5f)
+            .and_   ("cabinet_detection_confidence", GE, 0.20f)
+            .still  (0.10f, 0.15f)   // a tall run fills the frame → keep ω tight for a clean look
+            .stable(1).timeout_s(25).on_fail(Consume);
+    }
+    if (object_type == "door")
+    {
+        // Door: a leaf is a PLANE, so arriving at the stand-off is only half the manoeuvre — the robot must
+        // also end up FACING it, or the ZED points along the wall and never sees the panel it was sent to
+        // look at. That facing is not a preference: `epistemic_target_yaw_rad` on the affordance node is the
+        // face normal the NBV chose, and the controller honours it at arrival only for Servo/Orient
+        // (ControllerSession::wants_final_facing). This case previously fell through to the Contract::reach()
+        // below — "navigate to the pose, done on arrival" — so a fitted door was driven to the right spot
+        // pointing the wrong way, while a bearing HYPOTHESIS (which takes the Orient branch in
+        // DoorAffordance::write_policy_contract) turned correctly. Same object, opposite behaviour, purely
+        // because one path had a contract and the other did not.
+        //
+        // Feedback channel is the one door_scene_graph.cpp already publishes (door_roi_offset / door_roi_valid
+        // / door_detection_alive / door_detection_confidence), so this binds to existing attributes.
+        //
+        // Deliberately NO .advance(): the NBV already places the stand-off at the argmax of the detector
+        // envelope (common/nbv), so a second hard-coded fill target here would fight it — that is exactly the
+        // retired framing_fill = 0.45 constant. Range is the planner's job; this contract owns orientation
+        // and the completion predicate.
+        return Contract::servo()
+            .center("door_roi_offset")
+            .valid ("door_roi_valid")
+            .until ("door_detection_alive",      GE, 0.5f)
+            .and_  ("door_detection_confidence", GE, 0.20f)
+            .still (0.10f, 0.15f)   // a grazing view smears the leaf most: keep ω tight for a clean look
+            .stable(2).timeout_s(20).on_fail(Consume);
+    }
     return Contract::reach();   // default: navigate to the pose, done on arrival
 }
 

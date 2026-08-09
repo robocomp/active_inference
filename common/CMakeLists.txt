@@ -133,9 +133,12 @@ endfunction()
 #   object_anchor/  affordance_protocol/  graph3d/graph3d_scene.h
 #   agent_state_publisher/{agent_status.h,agent_state_publisher.h}
 #   kinematics/self_projection_capsules.h  self_tuner/self_tuner.h
+#   detectability/detectability.h            P(detect | fill, visible_frac) — the detector's INVERSE model
+#   nbv/viewpoint_score.h                    detection-WEIGHTED next-best-view (pure Eigen; testable headless)
+#   nbv/graph_obstacles.h                    its DSR-side adapter (reads other objects' footprints)
 #
-# Some of these include <dsr/...> (depth_projection, object_anchor_contract, affordance_protocol),
-# so the DSR libs ride along on the INTERFACE. Qt6::Core rides along too: dsr_api.h pulls in
+# Some of these include <dsr/...> (depth_projection, object_anchor_contract, affordance_protocol,
+# nbv/graph_obstacles), so the DSR libs ride along on the INTERFACE. Qt6::Core rides along too: dsr_api.h pulls in
 # dsr_agent_info_api.h, which includes <QDebug> — every DSR consumer needs Qt Core's headers.
 # =====================================================================================
 add_library(ai_common_core INTERFACE)

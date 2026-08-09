@@ -36,6 +36,19 @@ struct DofSpec
                              // disguise (CLAUDE.md: no thresholds).
 };
 
+// Does this agent publish a precision demand AT ALL? Needed because `adequacy_gap_nats` returns 0 for a
+// table with no σ* anywhere — an empty sum — and 0 is the value that MEANS "adequately resolved". A
+// display or a planner that cannot tell those two apart reports a door with no published demand as fully
+// resolved. Ask this first and carry "no demand" as a negative sentinel instead.
+template <std::size_t N>
+constexpr bool any_sigma_star(const std::array<DofSpec, N>& dofs)
+{
+    for (const auto& d : dofs)
+        if (d.sigma_star >= 0.0f)
+            return true;
+    return false;
+}
+
 // Project a DOF table's σ* into the flat array the affordance protocol transports.
 // DOFs with no published demand come through as -1, preserving "no demand" end to end.
 template <std::size_t M, std::size_t N>

@@ -223,6 +223,88 @@ inline float hollow_guarded_delta(const Evidence& ev, bool observed, const Senso
     return saturate((ev.e_occ + ev.e_interior) * llr_occ + (observed ? 0.0f : ev.e_free * llr_free), llr_occ);
 }
 
+// ── THE CLUTTER PRIOR, MEASURED INSTEAD OF ASSUMED ─────────────────────────────────────────────────────────
+//
+// `SensorModel::clutter_prob` is P(a beam returns from this volume | our object is NOT there). Configured as a
+// constant (0.05) it silently asserts that THE ALTERNATIVE TO OUR OBJECT IS FREE SPACE. In a furnished room the
+// alternative is a wall, a cabinet, a chair — and then P(return | ¬object) ≈ P(return | object), the likelihood
+// RATIO is ≈1, and the honest ΔL is ≈0 rather than a full confident hit. Assuming free space is precisely how a
+// phantom box drawn over real structure becomes self-confirming: the structure keeps "proving" it exists.
+//
+// So measure it, per instance per cycle, from the SAME sweep: carve an equal-volume SHELL around the object and
+// take its return rate. A √2 dilation in x and y doubles the footprint, so the shell has exactly the object's own
+// volume — the two rates are directly comparable samples of the same neighbourhood at the same height, gathered
+// by the same beams. No new constant, and it self-calibrates per scene.
+//
+// ★WHY A CONTRAST AND NOT JUST A BIGGER pc (measured on table_concept, 2026-08-06, ~5400 LiDAR cycles each):
+//     real table_1     return rate 1.96%      phantom table_2   return rate 6.56%      model pd asserts 85%
+// Both saturated to the SAME +2.83/cycle, so the channel was not merely uninformative — the phantom scored
+// 3.3× the real table. Against pd=0.85 every observed rate is tiny, so no value of pc fixes the ORDERING; the
+// only statistic that separates them is whether the volume returns MORE THAN ITS SURROUNDINGS. That is what
+// contrast_delta computes, and it is 0 by construction when object and neighbourhood are indistinguishable.
+struct LocalClutter
+{
+    float rate      = 0.0f;   // Beta-shrunk P(return | this neighbourhood, our object absent)
+    float raw_rate  = 0.0f;   // unshrunk shell rate (diagnostic)
+    int   n_reached = 0;      // beams that reached the shell
+    bool  ok        = false;  // false ⇒ no shell sample; `rate` fell back to the configured prior
+};
+
+// Beta-shrunk return rate. The prior mean is the configured clutter_prob and its strength is 1/pc beams — the
+// sample size at which ONE clutter return is expected, i.e. the smallest sample that can say anything about a
+// rate that small. Derived from the model's own number, so this introduces nothing to tune. Few beams ⇒ the
+// estimate stays at the prior; many beams ⇒ the data dominates. Continuous, no minimum-count gate.
+inline float shrunk_rate(float e_occ, int n_reached, float prior_rate)
+{
+    const float r0 = std::clamp(prior_rate, 1e-3f, 1.0f - 1e-3f);
+    const float m0 = 1.0f / r0;                                   // pseudo-beams carrying the prior
+    return (e_occ + r0 * m0) / (static_cast<float>(std::max(0, n_reached)) + m0);
+}
+
+// The object's neighbourhood, from an equal-volume dilated carve. `outer` must be the SAME z-band with the
+// footprint scaled by √2 about the same centre; the shell is outer MINUS inner, so the object's own returns are
+// removed and what remains is the background it sits in.
+inline LocalClutter measure_clutter(const Evidence& inner, const Evidence& outer, const SensorModel& p)
+{
+    LocalClutter lc;
+    const float e = std::max(0.0f, (outer.e_occ + outer.e_interior) - (inner.e_occ + inner.e_interior));
+    const int   n = outer.n_reached - inner.n_reached;
+    lc.n_reached = std::max(0, n);
+    lc.ok        = lc.n_reached > 0;
+    lc.raw_rate  = lc.ok ? e / static_cast<float>(lc.n_reached) : 0.0f;
+    lc.rate      = shrunk_rate(e, lc.n_reached, p.clutter_prob);
+    return lc;
+}
+
+// Occupancy evidence as a CONTRAST against the measured neighbourhood, for a model whose absence half is not
+// trustworthy (a thin plate abstracted as a solid band: see hollow_delta). Per returning beam,
+//
+//     ΔL = log[ P(return | our object is here) / P(return | only what surrounds it is here) ]
+//
+// with BOTH probabilities ESTIMATED from this cycle's beams rather than one asserted and one configured. The
+// numerator is the object volume's own observed rate, not pd: a thin tabletop in a thick band, plus registration
+// error, puts the real rate two orders of magnitude below pd, so asserting pd would compare a measurement to a
+// fiction. Object and neighbourhood alike ⇒ ratio 1 ⇒ ΔL = 0: the channel falls silent exactly where it cannot
+// discriminate, which is the whole of the phantom-on-a-wall case.
+//
+// ⚠ONE-SIDED BY DECLARATION (floored at 0), and this is the deliberate asymmetry: the same measurement that
+// makes the numerator honest — 1.96% observed where the band model predicts 85% — says the band is a poor
+// predictor, and evidence from a misspecified model must not be trusted to DELETE a real object. Removal stays
+// the camera silhouette's job. Unlike the occupancy-only form this replaces, it is not a ratchet: it can no
+// longer pin L at +L_max from structure the object did not cause. Upper clamp = one confident hit's worth,
+// the same cap `saturate` already applies.
+inline float contrast_delta(const Evidence& ev, const LocalClutter& lc, const SensorModel& p)
+{
+    if (ev.n_reached <= 0) return 0.0f;                            // p_vis ≡ 0 ⇒ HOLD
+    const float pd = std::clamp(p.detection_prob, 1e-3f, 1.0f - 1e-3f);
+    const float pc = std::clamp(p.clutter_prob,   1e-3f, 1.0f - 1e-3f);
+    const float llr_cap = std::log(pd / pc);                       // one confident hit, the historic ceiling
+    const float p_box   = shrunk_rate(ev.e_occ + ev.e_interior, ev.n_reached, pc);
+    const float q       = std::max(1e-4f, lc.rate);
+    const float llr     = std::clamp(std::log(p_box / q), 0.0f, llr_cap);
+    return saturate((ev.e_occ + ev.e_interior) * llr, llr);
+}
+
 // ── MODALITY 2: mask silhouette occupancy ──────────────────────────────────────────────────────────────────
 // The agent projects its model silhouette into the camera and counts, over the predicted-DETECTABLE footprint
 // (in-FoV, in-range, UN-occluded by nearer geometry — the agent decides that with its camera API + occluders):
