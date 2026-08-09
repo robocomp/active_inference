@@ -66,16 +66,22 @@ ControlOutput& PlainTracker::compute(ControlOutput& out, const TrackerInput& in,
     // past the end of its own route — measured, route_s pinned at 38.42 for the last ten cycles with
     // cmd_adv at 0.146 — and drifted out of RouteFollower::finished()'s 1 m end-reach check.
     // ── ⚠OPEN, 2026-08-09: THIS TRACKER CANNOT STOP ON A POINT TARGET ────────────────────────────
-    // Reproduce: tools/tracker_sim <short route> --stop-test. On a 2.5 m hop PLAIN drives 1.507 m PAST
-    // the end of its own curve and is still doing 0.234 m/s, where PD stops 0.124 m short having never
-    // passed it (cross-track in that regime: 296 mm rms / 579 mm max, 4.08 m driven of a 2.5 m route).
+    // Reproduce: tools/tracker_sim <short route> --stop-test. On a 2.5 m hop PLAIN NEVER STOPS: it runs
+    // past the end of its own curve until the bench gives up (8 m past, still doing 0.235 m/s, 10.6 m
+    // driven of a 2.5 m route, 564 mm rms cross-track). PD stops 0.124 m short having never passed it.
+    // ★It is not "overshoots by X" — there is no terminal behaviour in this tracker at all. On a MISSION
+    // that is invisible, because RouteFollower::finished() ends the traversal from OUTSIDE; nothing
+    // inside the tracker ever brings the robot to rest on the curve's end.
     // On the robot this is "jumps over the target and moves forward until it hits an obstacle", and it
     // is why point targets are NOT wired to PLAIN — see controller_session.cpp's set_route(nullptr).
-    // ★THE TAPER BELOW IS NOT THE DEFECT. It is starved: `s` saturates ~1.5 m short of length(), so
-    // s_remaining never shrinks, so v_stop never falls. Proven by arming a stop guard inside the braking
-    // distance v^2/(2a) ~ 0.5 m — it NEVER FIRED while the robot was more than a metre beyond the end.
-    // The fix belongs in RouteSpline::project (why the monotone-forward window stops advancing near the
-    // end of a short curve), not here.
+    // ★THE TAPER BELOW IS NOT THE DEFECT. It is starved: s_remaining never shrinks, so v_stop never
+    // falls. Proven by arming a stop guard inside the braking distance v^2/(2a) ~ 0.5 m — it NEVER FIRED
+    // while the robot was metres beyond the end.
+    // ★AND THE PROJECTION WINDOW IS NOT THE DEFECT EITHER — tried and reverted: bounding the forward
+    // search by recent progress (5-cycle history, window = 3x the arc actually covered, so a closed turn
+    // cannot offer a nearer point across the chord). Terminal behaviour did not change AT ALL, and the
+    // tour got worse: rms 41.2 -> 46.6 mm, TV(v)/m 0.581 -> 1.048, TV(w)/m 2.068 -> 3.177, 80 -> 89 s.
+    // Whatever is wrong, it is not the width of the search.
     // ★THREE FIXES TRIED HERE AND ALL REVERTED, each broken by the same fact — A TOUR ENDS WHERE IT
     // BEGAN, so the endpoint sits beside the start:
     //   • bound the taper by the EUCLIDEAN distance to the endpoint -> brakes at the START of a loop.

@@ -250,11 +250,56 @@ double corr(const std::vector<float> &a, const std::vector<float> &b, int lag)
 float g_plant_tau = 0.22f, g_plant_delay = 0.20f, g_plant_gain = 0.89f;   // the ROBOT, for sim2real tests
 float g_headroom = 1.0f;
 bool  g_heading_gate = false;   // FAILED experiment, kept as a negative result; see the A/B below
+bool  g_proj_robust = false; // --proj-robust: progress-following projection (see project_robust)
 bool  g_stop_test = false;   // run to an actual stop instead of breaking 0.15 m early
 float g_proj_window = 2.0f;    // forward arc-length search window for the projection   // fraction of the omega budget the FEEDFORWARD may claim; the rest is
                            // reserved for feedback authority. 1.0 = the naive limit.
 
+// ── PROGRESS-FOLLOWING PROJECTION (--proj-robust) ────────────────────────────────────────────────
+// RouteSpline::project searches [s_hint, s_hint + window] for the nearest sample, with window fixed at
+// 2 m. Two consequences, and the second is the one that matters at the end of a curve:
+//   • In a CLOSED TURN the chord is short, so a point 1-2 m further along can be nearer in straight-line
+//     distance than the true corresponding point. The projection then JUMPS THE CHORD, skipping arc it
+//     never drove.
+//   • A window that wide is also free to sit still: nothing ties the estimate to how far the robot has
+//     actually moved, so `s` can stall while the robot keeps going — which is what starves the stop
+//     taper (s_remaining stops shrinking, sqrt(2*a*s_remaining) never falls, the robot drives past).
+// So: bound the forward search by RECENT PROGRESS instead of a constant. The robot cannot have advanced
+// much more along the curve than it advanced through space, so a few cycles of measured advance is the
+// honest bound, and a candidate beyond it is the chord rather than travel. Keeping the last 5 keeps one
+// noisy cycle from either freezing or unlocking the window.
+struct Projector
+{
+    std::deque<float> hist;          // last N accepted arc lengths
+    float s = 0.f;
+    bool  init = false;
+    static constexpr std::size_t kN = 5;
+
+    float update(const rc::RouteSpline &sp, const Vector2f &p, float fallback_window)
+    {
+        if (not init)
+        {
+            s = sp.project(p, 0.f, sp.length());   // re-acquire: whole curve, once
+            init = true;
+            hist.assign(kN, s);
+            return s;
+        }
+        // Advance over the retained history — the arc the robot demonstrably covered in those cycles.
+        const float advanced = std::max(0.f, s - hist.front());
+        // Allow appreciably more than that (acceleration is real), but not the metres a chord jump needs.
+        // Floored so a stopped robot can still re-acquire a little, and capped by the caller's window so
+        // this can never search WIDER than the code it replaces.
+        const float window = std::min(fallback_window, std::max(0.15f, 3.f * advanced));
+        s = sp.project(p, s, window);
+        hist.push_back(s);
+        while (hist.size() > kN) hist.pop_front();
+        return s;
+    }
+};
+
+
 template <typename Arm>
+
 Result run(const rc::RouteFollower &route, Arm arm, float v_cap, float w_max,
            float a_lat, float a_dec, float W, bool verbose)
 {
@@ -268,7 +313,8 @@ Result run(const rc::RouteFollower &route, Arm arm, float v_cap, float w_max,
     constexpr float kCtrlDt = 0.05f;    // 20 Hz, the data-driven control rate
     constexpr float kSubDt  = 0.005f;   // plant integration
     float s_hint = 0.f, last_v = 0.f, last_w = 0.f;
-    float v_cmd_prev = 0.f;   // --stop-test: "at rest" means the PLANT has stopped AND nothing new was asked
+    float v_cmd_prev = 0.f;
+    Projector projector;   // --stop-test: "at rest" means the PLANT has stopped AND nothing new was asked
     float lx = P.x, ly = P.y; bool have_last = false;
     bool  first = true;
 
@@ -298,6 +344,7 @@ Result run(const rc::RouteFollower &route, Arm arm, float v_cap, float w_max,
             }
             s_hint = any ? bs : sp.project(rp, s_hint, 2.0f);   // all rejected -> fall back
         }
+        else if (g_proj_robust) s_hint = projector.update(sp, {P.x, P.y}, g_proj_window);
         else s_hint = sp.project({P.x, P.y}, s_hint, g_proj_window);
         // ── WHERE THE RUN ENDS ───────────────────────────────────────────────────────────────────
         // ★THE DEFAULT STOPS 0.15 m EARLY, AND THAT IS A BLIND SPOT. This bench was built for MISSION
@@ -320,7 +367,7 @@ Result run(const rc::RouteFollower &route, Arm arm, float v_cap, float w_max,
                 const bool at_rest = std::abs(P.v_real) < 0.02f and std::abs(v_cmd_prev) < 0.02f;
                 if (at_rest and t > 1.0)
                 { R.came_to_rest = true; R.end_dist = d_end; R.end_speed = std::abs(P.v_real); R.t_end = t; break; }
-                if (past > 1.5f)   // sailed past and kept going: no stop is coming
+                if (past > 8.0f or t > 120.0)   // far enough past that no stop is coming
                 { R.end_dist = d_end; R.end_speed = std::abs(P.v_real); R.t_end = t; break; }
             }
             else if (s_hint >= sp.length() - 0.15f) { R.t_end = t; break; }
@@ -431,7 +478,8 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; ++i)
     {
         const std::string a = argv[i];
-        if (a == "--sweep") sweep = true; else if (a == "--stop-test") g_stop_test = true; else path = a;
+        if (a == "--sweep") sweep = true; else if (a == "--stop-test") g_stop_test = true;
+        else if (a == "--proj-robust") g_proj_robust = true; else path = a;
     }
 
     World w;
