@@ -708,6 +708,33 @@ bool ControllerObstacleTracker::has_compelling_absence_evidence(std::uint64_t ti
     return support_points <= 1 && penetrating_points >= required_penetrating_points;
 }
 
+namespace
+{
+// Worst-axis position sigma (m) from an object's RT edge covariance, or 0 when unavailable.
+//
+// LAYOUT: 6x6 row-major SE3 [x,y,z,rx,ry,rz] (see RT_COVARIANCE_BLOCK_SIZE in cortex's dsr_rt_api.cpp
+// and the writers in each concept agent), so var_x = [0] and var_y = [1*6+1] = [7]. ★Yaw would be
+// [5*6+5] = [35], NOT [14] — [14] is var_z.
+//
+// EXACT size 36 only. Concept agents write a single block straight onto the edge, but cortex's RT api
+// keeps a RING of blocks on edges it manages; block 0 of a ring is not the newest, and quietly planning
+// against a stale covariance is worse than not using one at all. A ring needs the head index, which is
+// a separate change.
+float object_position_sigma_from_edge(const std::shared_ptr<DSR::DSRGraph> &graph, const DSR::Node &node)
+{
+    if (graph == nullptr) return 0.f;
+    const auto parent = graph->get_attrib_by_name<parent_att>(node);
+    if (not parent.has_value()) return 0.f;
+    const auto edge = graph->get_edge(parent.value(), node.id(), "RT");
+    if (not edge.has_value()) return 0.f;
+    const auto cov = graph->get_attrib_by_name<rt_covariance_att>(edge.value());
+    if (not cov.has_value()) return 0.f;
+    const auto &c = cov.value().get();
+    if (c.size() != 36) return 0.f;
+    return std::sqrt(std::max(0.f, std::max(c[0], c[7])));
+}
+}   // namespace
+
 void ControllerObstacleTracker::prune_expired_temporary_obstacles(std::uint64_t timestamp_ms)
 {
     Q_UNUSED(timestamp_ms)
@@ -1014,6 +1041,29 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
         {
             report << " invalid_size";
             continue;
+        }
+
+        // ── Grow the footprint by the object's OWN position uncertainty ─────────────────────────
+        // rt_covariance on the object's RT edge is a 6x6 row-major SE3 covariance [x,y,z,rx,ry,rz],
+        // so the position variances are [0] and [1*6+1]=[7]. Concept agents write ONE 36-element
+        // block directly on the edge (see e.g. table_scene_graph.cpp), unlike the robot->room edge,
+        // where cortex's RT api keeps a RING of 36-blocks — hence the exact-size test rather than a
+        // >= : a ring would need the head index to find the newest block, and silently reading block
+        // 0 of a ring is how you end up planning against a stale covariance.
+        //
+        // sigma_pos is the WORSE of the two axes: clearance is a bound, and the direction the object
+        // might have moved is not something the planner gets to choose. k = 0 leaves the footprint at
+        // its mean, which is the previous behaviour.
+        if (params_ != nullptr and params_->object_sigma_inflation_k > 0.f
+            and node.type() != "obstacle")   // same test the `kind` below uses
+        {
+            if (const float sigma = object_position_sigma_from_edge(graph_, node); sigma > 0.f)
+            {
+                const float grow = 2.0f * params_->object_sigma_inflation_k * sigma;   // both sides
+                state.width_m += grow;
+                state.depth_m += grow;
+                report << " sigma_pos=" << sigma << " inflated_by=" << grow;
+            }
         }
 
         auto polygon = ControllerObstacleModel::polygon_from_state(state);

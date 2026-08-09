@@ -841,6 +841,7 @@ void SpecificWorker::load_params()
 	// Rotate in place at the goal to face an affordance's commanded yaw (false ⇒ arrive on position
 	// only, never orient). See ControllerParams::goal_facing_yaw_enabled.
 	load_optional("Controller.GoalFacingYawEnabled", params.goal_facing_yaw_enabled);
+	load_optional_cast<double>("Controller.ObjectSigmaInflationK", params.object_sigma_inflation_k);
 
 	// Affordance servo ("lock-on") executor — HOW only; WHAT/WHEN is per-affordance (contract).
 	load_optional("Controller.LockOnEnabled", params.lockon_enabled);

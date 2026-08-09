@@ -283,6 +283,21 @@ struct ControllerParams
     float goal_clearance_min_ratio = 0.85f;
     float straight_speed_heading_threshold_rad = 0.08f;
     float straight_speed_clearance_margin_m = 0.20f;
+
+    // ── Per-object position uncertainty as CLEARANCE ─────────────────────────────────────────────
+    // Nine concept agents publish an rt_covariance on each object's RT edge — a 6x6 row-major SE3
+    // covariance [x,y,z,rx,ry,rz] — and until now the controller read NONE of them: it consumed only
+    // the robot's own pose covariance, for the speed throttle. So a freshly-born table with 30 cm of
+    // position sigma was planned around with exactly the same clearance as one fixated for minutes.
+    //
+    // The planner should avoid where the object PLAUSIBLY is, not only where its mean says it is, so
+    // each footprint is grown by k*sigma_pos. That is the same move residual_concept already makes
+    // when it publishes (PublishExtentSigmaK = 2.0, "grow published w/d by k*sigma") — this is the
+    // consumer side of the same argument, and k = 2 is ~95%.
+    //
+    // 0 DISABLES it (the previous behaviour, mean footprint only). Deliberately inert by default so
+    // enabling it is a visible one-line config decision.
+    float object_sigma_inflation_k = 0.0f;
     float straight_speed_min_goal_dist_m = 1.5f;
 
     // Honour an affordance's commanded facing yaw at arrival. true = the follower rotates in place at
