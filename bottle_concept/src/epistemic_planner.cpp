@@ -3,6 +3,7 @@
  */
 
 #include "epistemic_planner.h"
+#include <print>
 
 #include <cmath>
 #include <vector>
@@ -44,7 +45,8 @@ EpistemicProposal EpistemicPlanner::compute(const BottleBelief& belief,
                                             const Eigen::Vector2f& camera_xy,
                                             float sigma_base,
                                             const rc::nbv::Sensor& sensor_in,
-                                            const std::vector<rc::nbv::Obstacle>& obstacles) const
+                                            const std::vector<rc::nbv::Obstacle>& obstacles,
+                                            const std::vector<Eigen::Vector2f>& room_polygon) const
 {
     // The camera geometry arrives from the caller (read fresh from the graph each cycle); the
     // detector envelope is ours. Merging here keeps the two concerns in their right owners.
@@ -111,6 +113,22 @@ EpistemicProposal EpistemicPlanner::compute(const BottleBelief& belief,
     cand.yaw      = p.epistemic_target_yaw_rad;
     cand.raw_gain = raw_gain;
     const rc::nbv::Score sc = rc::nbv::score(cand, tgt, sensor, obstacles, robot_radius_m_);
+
+    // ★CAN THE ROBOT BE THERE? score() answers "is this pose inside an obstacle" (stands_inside) and "how
+    // much of the object does it see", but NOT "am I even in the room" — that check lives in plan_faces,
+    // which this single-candidate path deliberately does not use. A bottle stands on a table that may sit
+    // against a wall, so its far-side viewpoint is exactly the one that lands outside the room; and nothing
+    // downstream refuses such a pose, because the controller REPAIRS an unroutable standpoint with
+    // nearest_reachable, measured FROM the robot, which snaps the goal to the floor at the object.
+    // Empty polygon ⇒ rc::nbv::is_reachable imposes no constraint (it refuses to guess), i.e. prior behaviour.
+    if (not rc::nbv::is_reachable(cand.pos, room_polygon, robot_radius_m_))
+    {
+        static int shouted = 0;
+        if (shouted++ < 5)
+            std::print("bottle_concept: [NBV] far-side viewpoint is outside the room — REFUSING "
+                       "(publishing it would be repaired onto the bottle).\n");
+        return EpistemicProposal{};
+    }
     p.epistemic_gain = sc.expected_gain;
 
     p.valid = p.is_finite();

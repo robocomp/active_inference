@@ -79,6 +79,15 @@ struct BottleConfig
     // (bottle_belief.h) — the ONLY fit path. Static (no yaw, single cylinder primitive); a moved bottle is
     // re-acquired via the tracker gate widening on stale predicts.
     float ai2_sigma_base_m         = 0.02f;  // base on-surface obs noise std (m); R = σ²
+    // ── DETECTOR ENVELOPE (common/detectability) — the YOLO inverse model ─────────────────────────
+    // ONE model, two consumers: the planner puts the stand-off at its argmax and the removal channel
+    // weights absence by it. Defaults are the fleet PRIOR, not a measurement, so behaviour is unchanged
+    // until etc/config.toml sets them. Genuinely object-dependent (measured: fridge max_fill 1.32 vs
+    // table 0.677), and a bottle is far smaller than either — fit it from this agent's own ai2_log
+    // with common/detectability/tools/fit_envelope (--label fresh).
+    float detect_min_fill  = 0.10f;
+    float detect_max_fill  = 0.60f;
+    float detect_soft      = 0.06f;
     float ai2_clutter_frac         = 0.10f;  // ε: prior weight of the uniform clutter mixture component
     float ai2_clutter_scale_m      = 0.08f;  // a point further than ~this from the surface is likely clutter
     float ai2_prior_pos_std        = 0.30f;  // broad position prior std (m) on cx,cy,cz

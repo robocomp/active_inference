@@ -25,6 +25,10 @@
  */
 
 #include "specificworker.h"
+#include <QVBoxLayout>
+#include <QFontMetrics>
+#include <QHBoxLayout>
+#include <QPushButton>
 #include "../../common/nbv/graph_obstacles.h"   // rc::nbv::collect_graph_obstacles — shared, DSR-side
 #include <cstdlib>   // std::_Exit for the crash-free terminal shutdown
 #include <thread>    // std::this_thread::sleep_for — let DDS flush before _Exit
@@ -124,6 +128,7 @@ void SpecificWorker::request_shutdown()
     // (mirrors table_concept).
     save_window_settings();
     save_dashboard_geometry();   // the standalone dashboard is not in `windows`, so save it explicitly
+    save_strip_geometry();       // …nor is the compact belief strip
 
     // Sever graph callbacks BEFORE any teardown. On Ctrl+C a del_node delta can be
     // delivered from a DSR/DDS internal thread and invoke del_node_slot (instances_.erase)
@@ -395,7 +400,8 @@ void SpecificWorker::initialize()
     // ONE detector envelope: the far-side viewpoint is the argmax of the same model absence is weighted by,
     // and the published gain is multiplied by P(detect) there — so a hidden-face look the detector could not
     // fire from stops bidding for the drive AROUND the bottle.
-    epistemic_planner_.set_detector_envelope(rc::detect::DetectorEnvelope{});
+    epistemic_planner_.set_detector_envelope(
+        rc::detect::DetectorEnvelope{cfg_.detect_min_fill, cfg_.detect_max_fill, cfg_.detect_soft});
     epistemic_planner_.set_robot_radius(0.30f);   // Shadow's footprint radius
     // ★The camera model is read PER CYCLE at the compute site (rc::nbv::sensor_from_graph),
     // NOT once here: the zed intrinsics are published by robot_concept when frames start
@@ -467,7 +473,38 @@ void SpecificWorker::initialize()
     outer->addWidget(custom_widget_, 1);      // sections 2 + 3 — all remaining space
 
     restore_dashboard_geometry();
-    dashboard_window_->show();
+    // NOT shown at startup: the compact strip below is the standing display and this window is the
+    // drill-down its "details" button reveals. Geometry is still restored, so the first click restores place.
+
+    // ── Compact belief strip — a SEPARATE, small top-level window ──────────────────────────────────
+    strip_window_ = new QWidget;
+    strip_window_->setWindowTitle(QStringLiteral("bottle_concept \u2014 beliefs"));
+    auto* strip_layout = new QVBoxLayout(strip_window_);
+    strip_layout->setContentsMargins(0, 0, 0, 0);
+    belief_strip_ = new rc::BeliefStrip(QStringLiteral("bottles"), strip_window_);
+    belief_strip_->set_visible_window(60.f);
+    strip_layout->addWidget(belief_strip_, 1);
+    {
+        auto* bar = new QHBoxLayout;
+        bar->setContentsMargins(4, 0, 4, 3);
+        bar->addStretch(1);
+        auto* details = new QPushButton(QStringLiteral("details \u25B8"), strip_window_);
+        QFont bf = details->font(); bf.setPointSizeF(bf.pointSizeF() - 1.0); details->setFont(bf);
+        details->setFixedHeight(QFontMetrics(bf).height() + 8);
+        QObject::connect(details, &QPushButton::clicked, strip_window_, [this]()
+        {
+            if (not dashboard_window_) return;
+            dashboard_window_->show();
+            dashboard_window_->setWindowState((dashboard_window_->windowState() & ~Qt::WindowMinimized)
+                                              | Qt::WindowActive);
+            dashboard_window_->raise();
+            dashboard_window_->activateWindow();
+        });
+        bar->addWidget(details, 0);
+        strip_layout->addLayout(bar, 0);
+    }
+    restore_strip_geometry();
+    strip_window_->show();
 }
 
 namespace { constexpr int PLACE_SETTLE_CYCLES = 30; }   // ~settle time after a start-placement move
@@ -505,8 +542,28 @@ void SpecificWorker::log_phantom_event(std::string_view event, std::uint64_t id,
     phantom_log_.write(e);
 }
 
+// Load the room's delimiting polygon (a trusted NOMINAL model authored by room_concept, never fitted).
+// Mirrors refrigerator_concept::refresh_room_geometry. Leaves the polygon empty until room_concept
+// publishes, which is exactly the "impose no constraint" case rc::nbv::is_reachable expects.
+void SpecificWorker::refresh_room_polygon()
+{
+    if (not G or room_node_id_ == 0) return;
+    const auto room = G->get_node(room_node_id_);
+    if (not room.has_value()) return;
+    const auto px = G->get_attrib_by_name<delimiting_polygon_x_att>(room.value());
+    const auto py = G->get_attrib_by_name<delimiting_polygon_y_att>(room.value());
+    if (not px.has_value() or not py.has_value()) return;
+    const auto& xs = px->get(); const auto& ys = py->get();
+    const std::size_t n = std::min(xs.size(), ys.size());
+    if (n < 3) return;                       // degenerate ⇒ leave it empty rather than half-armed
+    std::vector<Eigen::Vector2f> poly; poly.reserve(n);
+    for (std::size_t i = 0; i < n; ++i) poly.emplace_back(xs[i], ys[i]);
+    room_polygon_ = std::move(poly);
+}
+
 void SpecificWorker::compute()
 {
+    refresh_room_polygon();   // NBV reachability needs the room; empty until room_concept publishes
     if (not G or not rt_api_)
         return;
 
@@ -916,6 +973,7 @@ void SpecificWorker::refresh_evidence_monitor()
 
     evidence_monitor_->update_view(ev_g_);
     refresh_belief_inspector();
+    refresh_belief_strip();   // same tick, same instance pass
 }
 
 void SpecificWorker::refresh_belief_inspector()
@@ -1002,7 +1060,8 @@ void SpecificWorker::step_epistemic(rc::BottleInstance& inst)
         return;   // belief not yet seeded (no fresh frame) → no NBV this cycle
     auto prop = epistemic_planner_.compute(inst.ai2_belief, camera_xy, cfg_.ai2_sigma_base_m,
                                            rc::nbv::sensor_from_graph(*G, inner_eigen_.get()),
-                                           rc::nbv::collect_graph_obstacles(*G, inner_eigen_.get(), inst.node_id));
+                                           rc::nbv::collect_graph_obstacles(*G, inner_eigen_.get(), inst.node_id),
+                                           room_polygon_);
     if (not prop.valid or not prop.is_finite())
         return;   // no camera pose / degenerate ray this cycle → leave the existing affordance untouched
 
@@ -1095,4 +1154,50 @@ int SpecificWorker::startup_check()
     std::print("bottle_concept: startup_check()\n");
     QTimer::singleShot(200, QCoreApplication::instance(), SLOT(quit()));
     return 0;
+}
+
+// One row per bottle: p(exists) is unavailable (bottle has no existence channel — the tracker's death_frames
+// is the removal path), so the strip shows the certainty trace and the FE surprise. gap_nats is the -1
+// sentinel because kBottleDofs declares no σ* (see the note there), so the widget falls back to ½·ln det Σ.
+void SpecificWorker::refresh_belief_strip()
+{
+    if (not belief_strip_)
+        return;
+    std::vector<rc::BeliefStripRow> rows;
+    rows.reserve(fitter_->instances().size());
+    for (const auto& [id, inst] : fitter_->instances())
+    {
+        rc::BeliefStripRow r;
+        r.node        = inst.node_name;
+        r.surprise    = inst.fe_surprise;
+        r.initialized = inst.ai2_initialized;
+        const auto S = inst.ai2_belief.covariance();
+        r.gap_nats = rc::any_sigma_star(rc::kBottleDofs)
+                   ? rc::adequacy_gap_nats(rc::kBottleDofs, [&](std::size_t j) { return S(j, j); })
+                   : -1.0f;
+        const auto llt = S.llt();
+        if (llt.info() == Eigen::Success)
+            r.logdet_nats = llt.matrixL().toDenseMatrix().diagonal().array().log().sum();
+        if (const auto n = G->get_node(inst.node_id); n.has_value())
+            r.birth_ms = G->get_attrib_by_name<timestamp_creation_att>(n.value()).value_or(0);
+        rows.push_back(std::move(r));
+    }
+    belief_strip_->update_view(rows);
+}
+
+void SpecificWorker::restore_strip_geometry()
+{
+    if (not strip_window_) return;
+    QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("bottle_concept"));
+    const QByteArray geom = settings.value(QStringLiteral("BeliefStripWindow_geometry")).toByteArray();
+    if (not geom.isEmpty()) strip_window_->restoreGeometry(geom);
+    else                    strip_window_->resize(520, 210);
+}
+
+void SpecificWorker::save_strip_geometry() const
+{
+    if (not strip_window_) return;
+    QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("bottle_concept"));
+    settings.setValue(QStringLiteral("BeliefStripWindow_geometry"), strip_window_->saveGeometry());
+    settings.sync();
 }

@@ -70,7 +70,12 @@ public:
                               const Eigen::Vector2f& camera_xy,
                               float sigma_base,
                               const rc::nbv::Sensor& sensor_in,
-                              const std::vector<rc::nbv::Obstacle>& obstacles = {}) const;
+                              const std::vector<rc::nbv::Obstacle>& obstacles = {},
+                              /// The REACHABLE region. This planner scores ONE candidate of its own geometry rather than going
+                              /// through plan_faces, so it does not inherit that function's is_reachable check — without the
+                              /// polygon a far-side viewpoint outside the room is scored as perfectly good, and the controller
+                              /// then REPAIRS the unroutable standpoint onto the bottle itself.
+                              const std::vector<Eigen::Vector2f>& room_polygon = {}) const;
 
     // The detector's operating envelope. The stand-off is the argmax of THIS, which is what retires the
     // d_obs_ constructor constant as the thing that set the viewing distance.

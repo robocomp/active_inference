@@ -44,13 +44,20 @@ audit_agent() {
     # 1. NBV reachability: the room polygon must reach plan_faces, or rc::nbv::is_reachable imposes no
     #    constraint (it refuses to guess on an empty polygon) and a viewpoint OUTSIDE the room scores the
     #    same as the one inside — the raw information term is direction-blind and cannot break that tie.
-    if grep -rq "plan_faces" "$src" 2>/dev/null; then
+    #    ★Require an actual CALL, not a mention: bottle_concept carries a comment reading "this path does
+    #    NOT go through plan_faces", and a bare grep scored that explanation as use of the function.
+    if grep -rqE "rc::nbv::plan_faces\\(|[^_a-z]plan_faces\\(" "$src" 2>/dev/null; then
         grep -rq "room_polygon" "$src"/epistemic_planner.cpp 2>/dev/null && mark ok || mark no
         # 2. …and it must REFUSE when no face is usable, rather than publishing the raw argmax as a hint:
         #    the controller REPAIRS an unroutable standpoint onto the object instead of rejecting it.
         grep -rq "any_usable" "$src"/epistemic_planner.cpp 2>/dev/null && mark ok || mark no
     else
-        mark na; mark na          # agent uses its own candidate geometry, not the four-face plan
+        # Single-candidate planners (bottle's far-side arc, human's orbit) score their OWN geometry via
+        # rc::nbv::score(), which checks stands_inside but NOT is_reachable — that lives in plan_faces. They
+        # must therefore make the reachability check themselves, and refuse, or a viewpoint outside the room
+        # is published and the controller repairs it onto the object.
+        grep -rq "room_polygon" "$src"/epistemic_planner.cpp 2>/dev/null && mark ok || mark no
+        grep -rq "is_reachable" "$src"/epistemic_planner.cpp 2>/dev/null && mark ok || mark no
     fi
 
     # 3. Affordance contract: every default_contract_for(<key>) this agent asks for must HAVE a case.

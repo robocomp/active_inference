@@ -61,6 +61,9 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     out.lidar_coverage_n0     = getf("BottleModel.LidarCoverageN0",     25.0f);
 
     out.ai2_sigma_base_m         = getf("BottleModel.AI2SigmaBaseM",          0.02f);
+    out.detect_min_fill      = getf("BottleModel.DetectMinFill",  0.10f);
+    out.detect_max_fill      = getf("BottleModel.DetectMaxFill",  0.60f);
+    out.detect_soft          = getf("BottleModel.DetectSoft",     0.06f);
     out.ai2_clutter_frac         = getf("BottleModel.AI2ClutterFrac",         0.10f);
     out.ai2_clutter_scale_m      = getf("BottleModel.AI2ClutterScaleM",       0.08f);
     out.ai2_prior_pos_std        = getf("BottleModel.AI2PriorPosStd",         0.30f);

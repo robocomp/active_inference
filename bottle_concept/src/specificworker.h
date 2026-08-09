@@ -66,7 +66,8 @@
 #include "../../common/phantom_log/phantom_log.h"   // rc::history::PhantomLog (shadow-mode birth/death record)      // rc::BottleFitter (active-inference fit core)
 #include "bottle_lidar_ingestor.h"  // rc::BottleLidarIngestor (lidar3D media plane → room-frame sweep)
 #include "../../common/instance_tracker/instance_tracker.h"   // rc::InstanceTracker (birth/associate/death)
-#include "../../common/dashboard/belief_inspector.h"   // rc::BeliefInspector (full-belief bottom panel)
+#include "../../common/dashboard/belief_inspector.h"
+#include "../../common/dashboard/belief_strip.h"   // rc::BeliefInspector (full-belief bottom panel)
 #include "../../common/dashboard/evidence_monitor.h"   // rc::EvidenceMonitor (counter strip)
 #include "../../common/dashboard/custom_widget.h"      // Custom_widget (dockable dashboard host)
 #include "../../common/dashboard/timeseries_plot.h"    // rc::TimeSeriesPlot
@@ -187,6 +188,13 @@ private:
     // posterior σ and Σ as a correlation heatmap. The bottle publishes no σ*, so the inspector drops the
     // σ*/adequacy columns rather than show invented targets; a cylinder has no discrete modes either.
     rc::BeliefInspector* belief_inspector_ = nullptr;
+    // Compact belief strip: ONE ROW PER INSTANCE, each row a 60 s trace. Separate small top-level window —
+    // the standing display, with the big dashboard as the drill-down. Mirrors chair/table/cabinet/door.
+    QWidget*         strip_window_ = nullptr;
+    rc::BeliefStrip* belief_strip_ = nullptr;
+    void refresh_belief_strip();
+    void restore_strip_geometry();
+    void save_strip_geometry() const;
     void refresh_belief_inspector();
     // Section 1: the evidence-pipeline counter strip (same struct + widget as every other concept agent).
     QWidget*             dashboard_window_ = nullptr;   // combined window: counters over plots + inspector
@@ -205,6 +213,11 @@ private:
     std::unique_ptr<DSR::InnerEigenAPI> inner_eigen_;
     std::unique_ptr<DSR::InnerGaussianAPI> gaussian_api_;   // Part B: source→target chain covariance
     uint64_t                     room_node_id_ = 0;
+    // Room delimiting polygon, from room_concept's `delimiting_polygon_x/y`. Used ONLY for the NBV's
+    // reachability test: a bottle's far-side viewpoint is the one that lands outside the room, and without
+    // this rc::nbv::is_reachable imposes no constraint (it refuses to guess on an empty polygon).
+    std::vector<Eigen::Vector2f> room_polygon_;
+    void refresh_room_polygon();
 
     // Collaborators (constructed in initialize(), after G + the DSR APIs are ready). Declared in
     // dependency order — the fitter holds raw pointers to the three above it, so it is destroyed first.
