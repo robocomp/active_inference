@@ -1060,10 +1060,14 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
         // makes it nonexistent; "I do not know where it is" is an argument to go and LOOK, which is what
         // the epistemic affordances are for, not an argument to refuse to move.
         ControllerObstacleState plan_state = state;   // planning-only; `state` stays the fitted truth
+        // Read sigma ALWAYS, even with the inflation disabled: the canvas draws it as a halo, and the
+        // whole point of that display is to watch sigma grow and shrink while the inflation is off.
+        const float sigma_pos = (node.type() != "obstacle")
+                              ? object_position_sigma_from_edge(graph_, node) : 0.f;
         if (params_ != nullptr and params_->object_sigma_inflation_k > 0.f
-            and node.type() != "obstacle")   // same test the `kind` below uses
+            and node.type() != "obstacle")
         {
-            if (const float sigma = object_position_sigma_from_edge(graph_, node); sigma > 0.f)
+            if (const float sigma = sigma_pos; sigma > 0.f)
             {
                 const float want = 2.0f * params_->object_sigma_inflation_k * sigma;   // both sides
                 const float grow = std::min(want, std::max(0.f, params_->object_sigma_inflation_max_m));
@@ -1127,7 +1131,8 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
             // 0.90 m across is drawn 0.90 m across. Taking the LARGER of the two is what makes it a
             // bound rather than a guess — the two are equal for a true disc and differ only while the
             // fit is still settling, and under-drawing a footprint is the failure that matters.
-            .round_radius_m = round_footprint ? 0.5f * std::max(state.width_m, state.depth_m) : 0.f});
+            .round_radius_m = round_footprint ? 0.5f * std::max(state.width_m, state.depth_m) : 0.f,
+            .sigma_pos_m = sigma_pos});
         obstacles.push_back(std::move(polygon));
     }
 

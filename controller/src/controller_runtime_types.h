@@ -43,6 +43,13 @@ struct ControllerObstacleVisual
     // from changing what the operator is shown.
     bool  round = false;
     float round_radius_m = 0.f;   // max(width, depth) / 2 — the disc spans the same extent as the box
+    // ── HOW WELL IS THIS OBJECT KNOWN? (display only) ─────────────────────────────────────────────
+    // Worst-axis position sigma (m) from the object's own rt_covariance, or 0 when the agent publishes
+    // none. Drawn as a dashed 2-sigma halo around the footprint — INFORMATION, not geometry: the halo is
+    // deliberately NOT what the planner avoids, exactly as `round` above is display-only while the
+    // planner keeps the circumscribing polygon. It is the diagnostic for a belief whose sigma grows
+    // while the robot looks away, which is what peripheral (ricoh) evidence should be bounding.
+    float sigma_pos_m = 0.f;
 };
 
 using ControllerObstacleVisuals = std::vector<ControllerObstacleVisual>;

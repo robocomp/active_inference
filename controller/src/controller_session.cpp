@@ -1270,15 +1270,19 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
             path_controller.set_path_presmoothed(current_plan_->room_path);
         else
             path_controller.set_path(current_plan_->room_path);
-        // ★HAND THE CURVE TO THE TRACKER, or PLAIN cannot drive this target. set_route() had exactly ONE
-        // caller — the mission branch — so `route_spline_` stayed null for every point target and the
-        // PLAIN dispatch fell through to PD on every affordance and every click. Silent until the
-        // fallback got a counter: 901 consecutive cycles on PD with zero recoveries, i.e. the whole run.
-        // driven_curve() already states the precedence (mission route, else point plan); this installs
-        // what it resolves rather than restating the rule. force_reset because the curve is new even
-        // though plan_spline_'s address is not — see set_route().
-        path_controller.set_route(plan_spline_valid_ and plan_spline_.valid() ? &plan_spline_ : nullptr,
-                                  /*force_reset=*/true);
+        // ★DO NOT hand the point-target curve to PLAIN. Tried 2026-08-09 and REVERTED the same day:
+        // set_route() had only ever been called by the mission branch, so `route_spline_` was null for
+        // every point target and PLAIN fell through to PD. Installing the curve does make PLAIN drive
+        // (measured: 80% of cycles) — and PLAIN steers AT a curve with no notion of terminating on it,
+        // so an affordance target stopped being a place to stop and became a place to drive through.
+        // Observed live: the robot passed its target by 0.05-0.42 m and kept going until it hit
+        // something, with the target provably stationary (0.000 m of target motion after the closest
+        // approach) and two of five approaches never even reaching the 0.25 m arrival threshold.
+        // PD terminates at the endpoint; that is why the fallback was load-bearing rather than a
+        // degradation. Making PLAIN drive point targets needs it to decelerate into the curve's END
+        // first — the arrival test alone does not save it, because a tracker that never slows can cross
+        // the whole 0.25 m band inside one 50 ms cycle at speed.
+        path_controller.set_route(nullptr);
         // Arrival is judged at the waypoint we are actually going to, not at the end of the extended
         // path. Without this the mission would skip every waypoint but the last one on the horizon.
         // Affordance targets carry a desired facing yaw (point AT the table); manual

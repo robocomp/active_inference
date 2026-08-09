@@ -530,6 +530,36 @@ void Viewer2D::draw_path(const PathDrawData &data)
                 path_draw_items_.push_back(polygon);
             }
 
+            // ── 2-sigma "known-ness" halo (DISPLAY ONLY) ──────────────────────────────────────────
+            // A dashed ring at 2*sigma_pos around the footprint: how well this object's POSITION is
+            // known, straight from the rt_covariance its concept agent publishes. Nine agents publish
+            // one and nothing used to read any of them.
+            //
+            // ★It is NOT what the planner avoids, and it is drawn so it cannot be mistaken for that:
+            // no fill, dashed, cosmetic pen, under the footprint. Same discipline as the round-table
+            // disc above — display may show what the belief contains; only the polygon is planned
+            // against. (The uncertainty-derived clearance is a separate, currently disabled, setting.)
+            //
+            // WATCH IT GROW: an agent inflates Sigma while it is not measuring, so the halo swells
+            // whenever the robot looks away and should shrink on a fixation. A halo that keeps growing
+            // is the visible form of "peripheral evidence is not bounding this belief".
+            if (obstacle_visual.sigma_pos_m > 0.f
+                and obstacle_visual.kind != ControllerObstacleKind::GridOccupancy)
+            {
+                const qreal r = 2.0 * obstacle_visual.sigma_pos_m;   // 2 sigma ~ 95%
+                QPen halo_pen(palette.pen, 0.0);
+                halo_pen.setCosmetic(true);
+                halo_pen.setStyle(Qt::DashLine);
+                QColor hc = palette.pen; hc.setAlpha(150); halo_pen.setColor(hc);
+                auto *halo = agv_->scene.addEllipse(QRectF(center.x() - r, center.y() - r, 2 * r, 2 * r),
+                                                    halo_pen, Qt::NoBrush);
+                halo->setZValue(17);   // BELOW the footprint (18) — context, not the thing itself
+                halo->setToolTip(QStringLiteral("%1: position sigma %2 m (2σ ring)")
+                                     .arg(QString::fromStdString(obstacle_visual.label))
+                                     .arg(obstacle_visual.sigma_pos_m, 0, 'f', 3));
+                path_draw_items_.push_back(halo);
+            }
+
             // Grid-occupancy hulls read as a filled region only — skip the dense contour dots + centre
             // marker (they are the "small points" that made occupied/free space unreadable).
             if (obstacle_visual.kind == ControllerObstacleKind::GridOccupancy)
