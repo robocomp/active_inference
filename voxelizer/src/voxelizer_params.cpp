@@ -68,6 +68,13 @@ VoxelizerParams load_voxelizer_params(const ConfigLoader& configLoader)
     rc::ConfigLoaderUtils::load_optional(configLoader, "RicohDepth.zdepth_to_range", params.RICOH_DEPTH_ZDEPTH_TO_RANGE);
     rc::ConfigLoaderUtils::load_optional(configLoader, "RicohDepth.lidar_diag", params.RICOH_DEPTH_LIDAR_DIAG);
     rc::ConfigLoaderUtils::load_optional(configLoader, "RicohDepth.sample_stride", params.RICOH_DEPTH_SAMPLE_STRIDE);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "ZedDepth.enabled", params.ZED_ROOM_DEPTH_ENABLED);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "ZedDepth.decimate", params.ZED_ROOM_DEPTH_DECIMATE);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "ZedDepth.yolo_depth_enabled", params.ZED_DEPTH_ENABLED);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "ZedDepth.diff_span_m", params.ZED_DEPTH_DIFF_SPAN_M);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "RicohDepth.info_select", params.RICOH_DEPTH_INFO_SELECT);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RicohDepth.min_gain_nats", params.RICOH_DEPTH_MIN_GAIN_NATS);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RicohDepth.suspect_resid_mult", params.RICOH_DEPTH_SUSPECT_RESID_MULT);
     rc::ConfigLoaderUtils::load_optional(configLoader, "RicohDepth.save_frames", params.RICOH_DEPTH_SAVE_FRAMES);
     rc::ConfigLoaderUtils::load_optional(configLoader, "RicohDepth.frames_dir", params.RICOH_DEPTH_FRAMES_DIR);
     rc::ConfigLoaderUtils::load_optional(configLoader, "RicohDepth.frame_jpeg_quality", params.RICOH_DEPTH_FRAME_QUALITY);

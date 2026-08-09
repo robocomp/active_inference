@@ -22,6 +22,7 @@
 #include <utility>
 
 #include <QtGlobal>
+#include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
 
 GraphPublisher::GraphPublisher(std::shared_ptr<DSR::DSRGraph> graph,
                                const VoxelizerParams& params,
@@ -63,6 +64,7 @@ bool GraphPublisher::ensure_node(const char* name, const char* color, bool& read
     G_->add_or_modify_attrib_local<pos_x_att>(node, 105.849792f);
     G_->add_or_modify_attrib_local<pos_y_att>(node, 291.904266f);
 
+    rc::provenance::stamp_creation(*G_, node);   // birth stamp: epoch ms + local ISO-8601
     const auto id = G_->insert_node(node);
     if (!id.has_value())
     {

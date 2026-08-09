@@ -4,9 +4,11 @@
 #include <QImage>
 #include <QMouseEvent>
 #include <QResizeEvent>
+#include <QStringList>
 #include <QToolTip>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace rc
 {
@@ -62,17 +64,22 @@ void ImagePopupViewer::resizeEvent(QResizeEvent* event)
         setPixmap(last_pixmap_.scaled(size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
 }
 
-void ImagePopupViewer::set_depth_readout(const cv::Mat& metric_log_range, bool active)
+void ImagePopupViewer::set_depth_readout(const cv::Mat& room_log_range,
+                                         const cv::Mat& model_log_range, bool active)
 {
-    depth_active_ = active and not metric_log_range.empty();
+    depth_active_ = active and (not room_log_range.empty() or not model_log_range.empty());
     if (depth_active_)
     {
-        depth_log_range_ = metric_log_range.clone();
+        // clone() on an empty Mat yields an empty Mat, so the "only one field present" case needs
+        // no special casing here — mouseMoveEvent asks each field whether it exists.
+        room_log_range_  = room_log_range.clone();
+        model_log_range_ = model_log_range.clone();
         setMouseTracking(true);    // fire mouseMoveEvent with no button pressed
     }
     else
     {
-        depth_log_range_.release();
+        room_log_range_.release();
+        model_log_range_.release();
         setMouseTracking(false);
         QToolTip::hideText();
     }
@@ -81,7 +88,8 @@ void ImagePopupViewer::set_depth_readout(const cv::Mat& metric_log_range, bool a
 void ImagePopupViewer::mouseMoveEvent(QMouseEvent* event)
 {
     QLabel::mouseMoveEvent(event);
-    if (not depth_active_ or depth_log_range_.empty() or last_pixmap_.isNull())
+    if (not depth_active_ or last_pixmap_.isNull()
+        or (room_log_range_.empty() and model_log_range_.empty()))
     {
         QToolTip::hideText();
         return;
@@ -102,16 +110,40 @@ void ImagePopupViewer::mouseMoveEvent(QMouseEvent* event)
         return;
     }
 
-    const int ix = std::clamp(static_cast<int>(rx * depth_log_range_.cols), 0, depth_log_range_.cols - 1);
-    const int iy = std::clamp(static_cast<int>(ry * depth_log_range_.rows), 0, depth_log_range_.rows - 1);
-    const float lr = depth_log_range_.at<float>(iy, ix);
+    // Each field is sampled through its OWN dimensions, so the two need not share a resolution —
+    // the envelope is ray-cast at panorama size while the model's map may be decimated.
+    const auto sample = [rx, ry](const cv::Mat& f) -> float
+    {
+        if (f.empty())
+            return std::numeric_limits<float>::quiet_NaN();
+        const int ix = std::clamp(static_cast<int>(rx * f.cols), 0, f.cols - 1);
+        const int iy = std::clamp(static_cast<int>(ry * f.rows), 0, f.rows - 1);
+        const float lr = f.at<float>(iy, ix);
+        return std::isfinite(lr) ? std::exp(lr) : std::numeric_limits<float>::quiet_NaN();
+    };
+    const float room  = sample(room_log_range_);
+    const float model = sample(model_log_range_);
 
-    // NaN is not "0 m", it is NO ESTIMATE — outside the elevation band the model was never asked.
-    // Saying so beats printing a number that looks like a measurement.
-    QToolTip::showText(event->globalPosition().toPoint(),
-                       std::isfinite(lr) ? QString("%1 m").arg(std::exp(lr), 0, 'f', 2)
-                                         : QStringLiteral("no depth here"),
-                       this);
+    // NaN is not "0 m", it is NO ESTIMATE — outside the elevation band the model was never asked, and
+    // outside the envelope the ray escapes the room. Saying so beats printing a number that looks
+    // like a measurement. A field that was never HANDED to us is simply not mentioned.
+    QStringList lines;
+    if (not room_log_range_.empty())
+        lines << (std::isfinite(room) ? QString("room   %1 m").arg(room, 0, 'f', 2)
+                                      : QStringLiteral("room   —"));
+    if (not model_log_range_.empty())
+        lines << (std::isfinite(model) ? QString("model  %1 m").arg(model, 0, 'f', 2)
+                                       : QStringLiteral("model  —"));
+    // Sign matches compose_difference (model − reference): + ⇒ the model reads FARTHER than the room
+    // believes, which is the same thing the red channel of the DIFF overlay is showing.
+    if (std::isfinite(room) and std::isfinite(model))
+        lines << QString("Δ      %1%2 m").arg(model - room >= 0.f ? "+" : "")
+                                         .arg(model - room, 0, 'f', 2);
+
+    if (lines.isEmpty())
+        QToolTip::hideText();
+    else
+        QToolTip::showText(event->globalPosition().toPoint(), lines.join('\n'), this);
 }
 
 } // namespace rc

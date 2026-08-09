@@ -43,6 +43,8 @@ LIST(APPEND SOURCES
   ../src/depth_stage.cpp
   ../src/depth_processor.cpp
   ../src/depth_dataset.cpp
+  ../src/depth_enrichment.cpp
+  ../src/room_envelope_depth.cpp
   ../src/yolo_human.cpp
   ../src/yolo_semantic.cpp
   ../src/ricoh_source.cpp
@@ -75,6 +77,9 @@ LIST(APPEND HEADERS
   ../src/graph_object_box.h
   ../src/model_projection_overlay.h
   ../src/ricoh_projection_overlay.h
+  ../src/depth_dataset.h
+  ../src/depth_enrichment.h
+  ../src/room_envelope_depth.h
 )
 
 if(TARGET Qt6::OpenGL AND TARGET Qt6::OpenGLWidgets)

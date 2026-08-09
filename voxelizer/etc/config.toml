@@ -267,6 +267,24 @@ lidar_diag          = true
 # panorama and neighbouring returns on one surface are redundant, so stride 16 loses nothing the fit
 # can use and keeps the dataset ~40x smaller — 635 MB for 406 frames at stride 1.
 sample_stride       = 16
+# ── Epistemic frame admission ─────────────────────────────────────────────────────────────────────
+# Admit a frame by the MUTUAL INFORMATION it carries about the map parameters, not by how far the
+# robot moved. The map is linear in its parameters given the knots, so with L = SUM x*x' the exact
+# gain is 0.5*(logdet(L+dL) - logdet(L)) nats — microseconds for a 16x16 matrix. It saturates on its
+# own: the 300th view of the same wall scores ~0 and is dropped, while a long sightline still scores
+# high because the spline's ends are barely constrained. Pose novelty was only ever a proxy for this.
+# Set false to fall back to the old 10 cm / 5 deg distance rule.
+info_select         = true
+min_gain_nats       = 0.10   # minimum information worth storing a frame for. Raise to keep only
+                             # strongly novel views; 0 admits everything that passes the guard below.
+                             # 0.50 proved too strict on a fresh set — 11 frames in one drive, below
+                             # what the spline needs to be identifiable. 0.10 admits ~4x more.
+# ★Consistency guard. D-optimality CANNOT tell leverage from corruption — a frame with a bad pose,
+# bad registration, or a person walking through has high leverage and scores as maximally informative,
+# so a naive rule would preferentially collect exactly the frames that poison the fit. A frame whose
+# median residual under the current map exceeds this multiple of the map's own anchored residual is
+# dropped unscored: novelty must be earned by data that AGREES, not merely by data that is unusual.
+suspect_resid_mult  = 3.0
 # Save each ADMITTED frame's panorama as <frames_dir>/<stamp_ms>.jpg. The stamp is the panorama's own
 # capture stamp and is also the CSV row's stamp_ms, so the two join with no schema change. Needed only
 # by the OFFLINE enrichment pass (YOLO-sem segments ceiling/floor/wall, then the room envelope from
@@ -281,6 +299,27 @@ frame_jpeg_quality  = 92
 metric_lo_m         = 0.4
 metric_hi_m         = 8.0
 overlay_alpha       = 0.65    # popup blend weight of the depth ramp over the panorama
+
+# ── ROOM BELIEF vs the ZED's measured depth ───────────────────────────────────────────────────────
+# The ZED window's "RoomΔ" button cycles off -> PREDICTED -> DIFF. It ray-casts the room envelope
+# room_concept believes in (floor z=0, ceiling z=room_height, one vertical wall per polygon edge)
+# through every pixel and differences it against the camera's own depth. No neural model is involved:
+# the ZED already MEASURES depth and the room belief already PREDICTS it, so the difference IS the
+# belief's per-pixel residual — the quantity the free energy is built from, drawn as an image.
+#
+# ★Reading it: a well-fitted ROOM goes BLACK. Furniture and people stay bright because the envelope
+# deliberately excludes them — that is the residual working, not an error. The interesting failure is
+# bright STRUCTURE: a whole wall tilting, or the floor shading off with range, means the room model
+# itself is wrong. Red = the belief predicts farther than measured, blue = nearer.
+[ZedDepth]
+enabled     = true
+decimate    = 2      # ray-cast on a 1/N grid and upsample (NEAREST — the envelope has real depth
+                     # discontinuities at corners, and interpolating one invents a surface)
+diff_span_m = 1.0    # |error| in metres that saturates the difference colour
+# The yolo26l-depth model on the ZED frame: NOT needed — the camera measures depth directly. Kept
+# available only as a way to score the monocular model against dense ground truth, which is a
+# different question from validating the room belief.
+yolo_depth_enabled = false
 
 [Ice]
 Warn.Connections = "0"

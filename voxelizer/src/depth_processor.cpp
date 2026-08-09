@@ -386,6 +386,22 @@ DepthMap DepthProcessor::estimate_gnomonic(const cv::Mat& panorama_bgr, const De
     return map;
 }
 
+DepthMap DepthProcessor::estimate_perspective(const cv::Mat& bgr) const
+{
+    DepthMap map;
+    if (not estimator_ or bgr.empty())
+        return map;
+    cv::Mat ld = estimator_->infer_log_depth(bgr);
+    if (ld.empty() or ld.size() != bgr.size())
+        return map;
+    map.log_depth = std::move(ld);
+    map.strip_id  = cv::Mat(bgr.rows, bgr.cols, CV_8UC1, cv::Scalar(0));   // one "view"
+    map.n_strips  = 1;
+    map.band_y0   = 0;
+    map.band_y1   = bgr.rows;
+    return map;
+}
+
 // ─── Raw-equirect path (kept for A/B; see Depth360Config::gnomonic for why it is not the default) ──
 
 DepthMap DepthProcessor::estimate_equirect(const cv::Mat& panorama_bgr, const Depth360Config& cfg) const
@@ -527,6 +543,110 @@ cv::Mat DepthProcessor::compose_depth_canvas(const cv::Mat& base_bgr, const Dept
                 cv::line(canvas, {x, map.band_y0}, {x, map.band_y1 - 1}, cv::Scalar(255, 255, 255), 1);
         }
     return canvas;
+}
+
+bool align_to_measured(const DepthMap& model, const cv::Mat& measured_m,
+                       float min_m, float max_m, DepthAlign& out)
+{
+    out = DepthAlign{};
+    if (model.empty() or measured_m.empty() or model.log_depth.size() != measured_m.size())
+        return false;
+
+    double sx = 0, sy = 0, sxx = 0, sxy = 0;
+    long   n  = 0;
+    for (int y = 0; y < measured_m.rows; ++y)
+    {
+        const float* mrow = model.log_depth.ptr<float>(y);
+        const float* zrow = measured_m.ptr<float>(y);
+        for (int x = 0; x < measured_m.cols; ++x)
+        {
+            const float z = zrow[x];
+            // The ZED reports 0 / non-finite where it has no stereo match; those are ABSENT
+            // measurements, not zero-range ones, and folding them in would drag the fit to nonsense.
+            if (not std::isfinite(mrow[x]) or not std::isfinite(z) or z < min_m or z > max_m)
+                continue;
+            const double xv = mrow[x], yv = std::log(static_cast<double>(z));
+            sx += xv; sy += yv; sxx += xv * xv; sxy += xv * yv;
+            ++n;
+        }
+    }
+    if (n < 256)
+        return false;
+    const double N = static_cast<double>(n);
+    const double cov = sxy / N - (sx / N) * (sy / N);
+    const double vx  = sxx / N - (sx / N) * (sx / N);
+    if (vx <= 1e-12)
+        return false;
+    out.a = static_cast<float>(cov / vx);
+    out.b = static_cast<float>(sy / N - (cov / vx) * (sx / N));
+    out.n = n;
+
+    std::vector<float> rel, absm;
+    rel.reserve(static_cast<std::size_t>(n));
+    absm.reserve(static_cast<std::size_t>(n));
+    long within = 0;
+    for (int y = 0; y < measured_m.rows; ++y)
+    {
+        const float* mrow = model.log_depth.ptr<float>(y);
+        const float* zrow = measured_m.ptr<float>(y);
+        for (int x = 0; x < measured_m.cols; ++x)
+        {
+            const float z = zrow[x];
+            if (not std::isfinite(mrow[x]) or not std::isfinite(z) or z < min_m or z > max_m)
+                continue;
+            const float d = std::exp(out.a * mrow[x] + out.b);
+            rel.push_back(std::abs(d - z) / z);
+            absm.push_back(std::abs(d - z));
+            if (std::max(d / z, z / d) < 1.25f) ++within;
+        }
+    }
+    const auto med = [](std::vector<float>& v)
+    { std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end()); return v[v.size() / 2]; };
+    out.med_abs_rel = med(rel);
+    out.med_abs_m   = med(absm);
+    out.delta125    = static_cast<float>(within) / static_cast<float>(n);
+    return true;
+}
+
+cv::Mat apply_align(const DepthMap& model, const DepthAlign& al)
+{
+    if (model.empty())
+        return {};
+    cv::Mat out(model.log_depth.size(), CV_32FC1,
+                cv::Scalar(std::numeric_limits<float>::quiet_NaN()));
+    for (int y = 0; y < out.rows; ++y)
+    {
+        const float* src = model.log_depth.ptr<float>(y);
+        auto* dst = out.ptr<float>(y);
+        for (int x = 0; x < out.cols; ++x)
+            if (std::isfinite(src[x]))
+                dst[x] = std::exp(al.a * src[x] + al.b);
+    }
+    return out;
+}
+
+cv::Mat compose_difference(const cv::Mat& model_m, const cv::Mat& measured_m, float span_m)
+{
+    if (model_m.empty() or measured_m.empty() or model_m.size() != measured_m.size())
+        return {};
+    const float span = std::max(1e-3f, span_m);
+    cv::Mat out(model_m.size(), CV_8UC3, cv::Scalar(0, 0, 0));
+    for (int y = 0; y < out.rows; ++y)
+    {
+        const float* mm = model_m.ptr<float>(y);
+        const float* zz = measured_m.ptr<float>(y);
+        auto* o = out.ptr<cv::Vec3b>(y);
+        for (int x = 0; x < out.cols; ++x)
+        {
+            if (not std::isfinite(mm[x]) or not std::isfinite(zz[x]) or zz[x] <= 0.f)
+                continue;                                   // stays black: no comparison possible
+            const float d = mm[x] - zz[x];                  // + ⇒ model reads FARTHER than truth
+            const int mag = static_cast<int>(std::lround(std::min(1.f, std::abs(d) / span) * 255.f));
+            if (d > 0.f) o[x] = cv::Vec3b(0, 0, static_cast<unsigned char>(mag));   // red  = too far
+            else         o[x] = cv::Vec3b(static_cast<unsigned char>(mag), 0, 0);   // blue = too near
+        }
+    }
+    return out;
 }
 
 }   // namespace rc::depth

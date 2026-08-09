@@ -98,7 +98,9 @@ void SpecificWorker::setup_custom_viewers()
         connect(models_btn, &QPushButton::toggled, this, [this, models_btn](bool checked)
         {
             ricoh_model_overlay_enabled_ = checked;
-            if (not checked and not ricoh_lidar_overlay_enabled_) ricoh_scene_.valid = false;
+            // Invalidate only when NO consumer is left — RoomΔ reads this same cache (compute()).
+            if (not checked and not ricoh_lidar_overlay_enabled_ and ricoh_room_mode_ == 0)
+                ricoh_scene_.valid = false;
             models_btn->setText(checked ? "Models: ON" : "Models: OFF");
         });
 
@@ -114,7 +116,8 @@ void SpecificWorker::setup_custom_viewers()
         connect(lidar_btn, &QPushButton::toggled, this, [this, lidar_btn](bool checked)
         {
             ricoh_lidar_overlay_enabled_ = checked;
-            if (not checked and not ricoh_model_overlay_enabled_) ricoh_scene_.valid = false;
+            if (not checked and not ricoh_model_overlay_enabled_ and ricoh_room_mode_ == 0)
+                ricoh_scene_.valid = false;
             lidar_btn->setText(checked ? "Lidar: ON" : "Lidar: OFF");
         });
 
@@ -139,10 +142,9 @@ void SpecificWorker::setup_custom_viewers()
             connect(depth_btn, &QPushButton::toggled, this, [this, depth_btn](bool checked)
             {
                 ricoh_depth_overlay_enabled_ = checked;
-                if (ricoh_worker_)
-                    if (auto* s = ricoh_worker_->stage("depth"))
-                        s->set_enabled(checked);   // atomic; read on the worker thread
-                depth_btn->setText(checked ? "Depth: ON" : "Depth: OFF");
+                sync_ricoh_depth_stage();   // stage runs if EITHER overlay or collection wants it
+                depth_btn->setText(checked ? "Depth: ON"
+                                   : (ricoh_depth_collect_enabled_ ? "Depth: (auto)" : "Depth: OFF"));
             });
         }
 
@@ -161,14 +163,17 @@ void SpecificWorker::setup_custom_viewers()
             collect_btn->setStyleSheet(QString(
                 "QPushButton { border: 2px solid %1; border-radius: 4px; padding: 3px 8px; }"
                 "QPushButton:checked { background-color: %1; color: #101010; }").arg("#E8B84B"));
-            connect(collect_btn, &QPushButton::toggled, this, [this, collect_btn](bool checked)
+            connect(collect_btn, &QPushButton::toggled, this, [this, collect_btn, depth_btn](bool checked)
             {
-                ricoh_depth_collect_enabled_ = checked;
-                if (checked)
-                    depth_collect_session_ = 0;
-                else
-                    std::println("[depth-collect] stopped — {} frames added this session", depth_collect_session_);
+                // Arming Collect ENABLES THE DEPTH MODEL by itself — a dataset sample is (what the
+                // model predicted, what the LiDAR measured), so with no depth map there is nothing to
+                // pair and collection would silently do nothing. Show it on the Depth button too, so
+                // the UI cannot report a state the system is not in.
+                arm_depth_collection(checked);
                 collect_btn->setText(checked ? "Collect: REC" : "Collect: OFF");
+                if (depth_btn != nullptr)
+                    depth_btn->setText(ricoh_depth_overlay_enabled_ ? "Depth: ON"
+                                       : (checked ? "Depth: (auto)" : "Depth: OFF"));
             });
 
             rebuild_btn = new QPushButton("Rebuild map", ricoh_panel);
@@ -211,14 +216,106 @@ void SpecificWorker::setup_custom_viewers()
             });
         }
 
+        // ── Offline ENRICHMENT (rc::depth::DatasetEnricher) ─────────────────────────────────────
+        // Same workflow slot as "Rebuild map", but the map is refitted against the ROOM BELIEF as well
+        // as the LiDAR: every saved panorama is re-run through the depth model AND a semantic
+        // segmenter, the room envelope is ray-cast through it, and the ceiling/floor/wall pixels
+        // become synthetic samples where helios never reaches. MINUTES — the pass runs on its own
+        // thread with its own ONNX sessions and this lambda only pumps the event loop, so the window
+        // stays responsive and the button reports frames done.
+        QPushButton* enrich_btn = nullptr;
+        if (params.RICOH_DEPTH_ENABLED and params.SEMANTIC_SEG_ENABLED)
+        {
+            enrich_btn = new QPushButton("Enrich map", ricoh_panel);
+            enrich_btn->setCursor(Qt::PointingHandCursor);
+            enrich_btn->setToolTip(
+                "Add room-belief supervision to the correction map (MINUTES — two networks over every "
+                "saved panorama).\n"
+                "The LiDAR only ever anchors a horizon stripe out to ~10 m, so the ceiling half of the\n"
+                "band has NO samples and the ct*t² term had to be deleted. This re-runs yolo26l-depth +\n"
+                "yolo26l-sem on etc/depth_frames/, ray-casts the room envelope, and emits synthetic\n"
+                "samples on the shell — weighted by the belief's own σ, the ray's incidence angle and\n"
+                "the segmenter's confidence, so a grazing wall or a cluttered floor fades out instead\n"
+                "of being gated.\n"
+                "★It FIRST measures whether re-running the model reproduces the stored field, and\n"
+                "refuses to mix two different fields. Read the console for that number and the A/B.");
+            enrich_btn->setStyleSheet(
+                "QPushButton { border: 2px solid #6FA8DC; border-radius: 4px; padding: 3px 8px; }"
+                "QPushButton:pressed { background-color: #6FA8DC; color: #101010; }");
+            connect(enrich_btn, &QPushButton::clicked, this, [this, enrich_btn, rebuild_btn]
+            {
+                enrich_btn->setEnabled(false);
+                if (rebuild_btn != nullptr)
+                    rebuild_btn->setEnabled(false);
+                const std::string err = run_depth_enrichment([enrich_btn](const std::string& s)
+                { enrich_btn->setText(QString::fromStdString(s)); });
+                if (not err.empty())
+                {
+                    // Same contract as the rebuild: on failure show the ERROR, never depth_fit_map_,
+                    // which still holds the map that was already loaded.
+                    enrich_btn->setText("FAILED: " + QString::fromStdString(err));
+                    enrich_btn->setStyleSheet(
+                        "QPushButton { border: 2px solid #E05252; border-radius: 4px; padding: 3px 8px; }");
+                }
+                else
+                {
+                    enrich_btn->setText(QString("Enriched: err %1% (%2 m) · δ1 %3%%4")
+                                            .arg(100.0 * depth_fit_map_.med_rel,  0, 'f', 0)
+                                            .arg(depth_fit_map_.med_abs_m,        0, 'f', 2)
+                                            .arg(100.0 * depth_fit_map_.delta125, 0, 'f', 0)
+                                            .arg(depth_fit_map_.ct_active ? " · ct ON" : ""));
+                    enrich_btn->setStyleSheet(
+                        "QPushButton { border: 2px solid #6FA8DC; border-radius: 4px; padding: 3px 8px; }"
+                        "QPushButton:pressed { background-color: #6FA8DC; color: #101010; }");
+                }
+                enrich_btn->setEnabled(true);
+                if (rebuild_btn != nullptr)
+                    rebuild_btn->setEnabled(true);
+            });
+        }
+
+        // Monocular model vs the ROOM BELIEF, in equirect. Same idea as the ZED window's RoomΔ, but
+        // here BOTH sides are predictions — see the compose site for how to read it.
+        QPushButton* rroom_btn = nullptr;
+        if (params.RICOH_DEPTH_ENABLED and params.ZED_ROOM_DEPTH_ENABLED)
+        {
+            rroom_btn = new QPushButton("RoomΔ: OFF", ricoh_panel);
+            rroom_btn->setCursor(Qt::PointingHandCursor);
+            rroom_btn->setToolTip("Cycle: off → room-belief predicted range → difference vs the monocular model.\n"
+                                  "NEITHER side is a measurement: this is one prediction against another.\n"
+                                  "Furniture is bright by construction (the model sees it, the envelope does not);\n"
+                                  "what matters is disagreement on the SHELL — a wall or floor lighting up.\n"
+                                  "PREDICTED is pure geometry and needs nothing but the room belief.\n"
+                                  "DIFF additionally needs Depth ON and a fitted+anchored map, since the\n"
+                                  "monocular model has to be metric before it can be subtracted.");
+            rroom_btn->setStyleSheet(
+                "QPushButton { border: 2px solid #C0A0E0; border-radius: 4px; padding: 3px 8px; }"
+                "QPushButton:pressed { background-color: #C0A0E0; color: #101010; }");
+            connect(rroom_btn, &QPushButton::clicked, this, [this, rroom_btn]
+            {
+                ricoh_room_mode_ = (ricoh_room_mode_ + 1) % 3;
+                // Symmetric with the Models/Lidar toggles: stop the per-frame scene copy once the
+                // last consumer of the cache is gone. compute() re-fills it on the next tick.
+                if (ricoh_room_mode_ == 0 and not ricoh_model_overlay_enabled_
+                    and not ricoh_lidar_overlay_enabled_)
+                    ricoh_scene_.valid = false;
+                rroom_btn->setText(ricoh_room_mode_ == 0 ? "RoomΔ: OFF"
+                                   : ricoh_room_mode_ == 1 ? "RoomΔ: PREDICTED" : "RoomΔ: DIFF");
+            });
+        }
+
         controls->addWidget(models_btn);
         controls->addWidget(lidar_btn);
         if (depth_btn != nullptr)
             controls->addWidget(depth_btn);
+        if (rroom_btn != nullptr)
+            controls->addWidget(rroom_btn);
         if (collect_btn != nullptr)
             controls->addWidget(collect_btn);
         if (rebuild_btn != nullptr)
             controls->addWidget(rebuild_btn);
+        if (enrich_btn != nullptr)
+            controls->addWidget(enrich_btn);
         controls->addStretch(1);
 
         ricoh_layout->addLayout(controls);
@@ -241,9 +338,20 @@ void SpecificWorker::setup_custom_viewers()
         panel_layout->setContentsMargins(6, 6, 6, 6);
         panel_layout->setSpacing(6);
 
-        auto* controls_layout = new QHBoxLayout();
+        // Two stacked rows instead of one long row: a single row of 9 buttons was setting the
+        // window's minimum width. Row 1 = perception clouds + fitted geometry, row 2 = occupancy /
+        // belief layers, labels and the popup-window toggles.
+        auto* controls_layout = new QVBoxLayout();
         controls_layout->setContentsMargins(0, 0, 0, 0);
-        controls_layout->setSpacing(8);
+        controls_layout->setSpacing(4);
+
+        auto* controls_row1 = new QHBoxLayout();
+        controls_row1->setContentsMargins(0, 0, 0, 0);
+        controls_row1->setSpacing(8);
+
+        auto* controls_row2 = new QHBoxLayout();
+        controls_row2->setContentsMargins(0, 0, 0, 0);
+        controls_row2->setSpacing(8);
 
         auto* lidar_btn = new QPushButton("Lidar: OFF", voxel_panel);
         lidar_btn->setCheckable(true);
@@ -323,16 +431,23 @@ void SpecificWorker::setup_custom_viewers()
         if (yolo_btn)  accent(yolo_btn,  "#64C8FF");  // yolo: light blue
         if (ricoh_btn) accent(ricoh_btn, "#00D4BB");  // ricoh: teal
 
-        controls_layout->addWidget(lidar_btn);
-        controls_layout->addWidget(models_btn);
-        controls_layout->addWidget(masks_btn);
-        controls_layout->addWidget(residual_btn);
-        controls_layout->addWidget(grid_btn);
-        controls_layout->addWidget(field_btn);
-        controls_layout->addWidget(labels_btn);
-        if (yolo_btn)  controls_layout->addWidget(yolo_btn);
-        if (ricoh_btn) controls_layout->addWidget(ricoh_btn);
-        controls_layout->addStretch(1);
+        // Row 1 — raw/perception geometry: the point clouds and the fitted models drawn from them.
+        controls_row1->addWidget(lidar_btn);
+        controls_row1->addWidget(models_btn);
+        controls_row1->addWidget(masks_btn);
+        controls_row1->addWidget(residual_btn);
+        controls_row1->addStretch(1);
+
+        // Row 2 — derived belief layers, text labels and the popup-window toggles.
+        controls_row2->addWidget(grid_btn);
+        controls_row2->addWidget(field_btn);
+        controls_row2->addWidget(labels_btn);
+        if (yolo_btn)  controls_row2->addWidget(yolo_btn);
+        if (ricoh_btn) controls_row2->addWidget(ricoh_btn);
+        controls_row2->addStretch(1);
+
+        controls_layout->addLayout(controls_row1);
+        controls_layout->addLayout(controls_row2);
 
         voxel_viewer_gl = std::make_unique<rc::VoxelOpenGLViewer>(nullptr);
         voxel_viewer_gl->set_perf_log(params.PERF_LOG);   // per-paint CSV probe off unless perf logging on
@@ -515,6 +630,28 @@ void SpecificWorker::setup_custom_viewers()
                 sam2_btn->setText(checked ? "SAM2: ON" : "SAM2: OFF");
             });
             controls->addWidget(sam2_btn);
+        }
+
+        // Model-depth vs ZED-depth overlay. NOT checkable — it CYCLES off → model → diff, because the
+        // three states are a sequence a person steps through while looking, not a binary. The button
+        // also drives the ZED DepthStage's enable flag, so the model only runs while being looked at.
+        if (params.ZED_ROOM_DEPTH_ENABLED)
+        {
+            auto* zdepth_btn = new QPushButton("Room\u0394: OFF", yolo_panel);
+            zdepth_btn->setCursor(Qt::PointingHandCursor);
+            zdepth_btn->setToolTip("Cycle: off → room-belief predicted depth → difference vs the ZED's measured depth.\n"
+                                   "The room ENVELOPE only (floor/walls/ceiling), so a well-fitted room goes\n"
+                                   "BLACK and furniture stays bright — that is the residual, not an error.\n"
+                                   "Red = belief predicts farther than measured, blue = nearer.\n"
+                                   "Hover to read predicted, measured and their difference at a pixel.");
+            accent(zdepth_btn, "#7ED0C0");
+            connect(zdepth_btn, &QPushButton::clicked, this, [this, zdepth_btn]
+            {
+                zed_depth_mode_ = (zed_depth_mode_ + 1) % 3;   // no model to enable — pure geometry
+                zdepth_btn->setText(zed_depth_mode_ == 0 ? "Room\u0394: OFF"
+                                    : zed_depth_mode_ == 1 ? "Room\u0394: PREDICTED" : "Room\u0394: DIFF");
+            });
+            controls->addWidget(zdepth_btn);
         }
         controls->addStretch(1);
 

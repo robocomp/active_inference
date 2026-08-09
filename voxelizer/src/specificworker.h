@@ -30,6 +30,7 @@
 #include <Eigen/Core>
 
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -37,6 +38,7 @@
 
 #include "depth_processor.h"   // rc::depth::DepthMap (ricoh 360 monocular depth diagnostic)
 #include "depth_dataset.h"     // rc::depth::DepthDataset / DepthFitMap (LiDAR-anchored correction)
+#include "depth_enrichment.h"  // rc::depth::RoomGeometry / DatasetEnricher (offline room-belief pass)
 #include "rgbd_data.h"
 #include "voxelizer_params.h"
 #include "perception_rate_regulator.h"
@@ -207,6 +209,19 @@ class SpecificWorker : public GenericWorker
         // also GATES THE STAGE — the model does no work while the overlay is off. Relative per strip, not
         // metric: see src/depth_processor.h before reading anything geometric off it.
         bool ricoh_depth_overlay_enabled_ = false;
+        // ZED-window depth overlay: 0=off, 1=aligned model depth, 2=difference vs the ZED's own depth.
+        // The ZED MEASURES depth, so it is the one place the model can be scored densely over a whole
+        // frame instead of on the LiDAR's horizon stripe — mode 2 is that comparison made visible.
+        int  zed_depth_mode_ = 0;
+        // Ricoh window: 0=off, 1=room-belief predicted range, 2=difference vs the MONOCULAR model.
+        // ★Unlike the ZED case, NEITHER side here is a measurement — it is one prediction against
+        // another. Bright means they disagree, which furniture guarantees (the model sees a table,
+        // the envelope does not). The useful signal is disagreement on the SHELL itself.
+        int  ricoh_room_mode_ = 0;
+        // Panorama azimuth convention, read once from the ricoh node (see the compose site).
+        bool   ricoh_equirect_read_ = false;
+        double ricoh_az_sign_   = 1.0;
+        double ricoh_az_offset_ = 0.0;
         // ★THE measurement that decides whether yolo26l-depth is seeing this room at all. Per gnomonic
         // view, correlate the model's log-depth against the helios LiDAR range at the SAME panorama
         // pixels (both are ray range from the ricoh optical centre once zdepth_to_range is on, so they
@@ -221,7 +236,8 @@ class SpecificWorker : public GenericWorker
                                                const std::vector<std::uint8_t>& plane_id,
                                                const Mat::RTMat& room_T_ricoh,
                                                const cv::Mat& panorama_bgr,
-                                               std::uint64_t frame_stamp_ms);
+                                               std::uint64_t frame_stamp_ms,
+                                               const rc::depth::RoomGeometry& room_geom);
         std::ofstream ricoh_depth_csv_;
         bool          ricoh_depth_csv_open_attempted_ = false;
 
@@ -238,17 +254,42 @@ class SpecificWorker : public GenericWorker
         // compute() ticks would admit ONE panorama as TWO frames — identical samples attributed to two
         // different poses, and the second .jpg write would clobber the first.
         std::uint64_t         depth_collect_last_stamp_ = 0;
+        // ★The DepthStage must run if EITHER the overlay wants to draw it OR collection needs its
+        // output — they are different needs and neither owns the model. Tying the stage's enable flag
+        // to the overlay toggle alone (to save GPU when nobody is looking) quietly made a DISPLAY
+        // control a precondition for DATA COLLECTION: with Depth off, `rres->depth` is empty, so the
+        // LiDAR correlation and the dataset capture both silently did nothing, with no error and no
+        // log line. Call this from both toggles instead of setting the flag directly.
+        void sync_ricoh_depth_stage();
         // Load the set, drop duplicate poses, refit, save both, and hot-apply. Main thread.
         // Returns an EMPTY string on success, else why it failed. ★It must report failure explicitly:
         // on an early return depth_fit_map_ still holds whatever was loaded at startup, so a button
         // that just prints depth_fit_map_ shows the OLD map's numbers and a failed rebuild is
         // indistinguishable from a successful one. That cost real debugging time.
         [[nodiscard]] std::string rebuild_depth_fit_map();
+        // ── OFFLINE ENRICHMENT (rc::depth::DatasetEnricher) ─────────────────────────────────────
+        // Re-runs yolo26l-depth + yolo26l-sem over every SAVED panorama, ray-casts the room envelope
+        // and adds synthetic ceiling/floor/wall rows where the LiDAR can never reach, then refits.
+        // MINUTES, not a moment: the pass runs on the enricher's OWN thread with its OWN ONNX
+        // sessions, and this method only pumps the Qt event loop while polling it — so the GUI keeps
+        // repainting. `status` is called on the GUI thread with a short progress string.
+        // Returns an EMPTY string on success, else why it failed (same contract as the rebuild).
+        [[nodiscard]] std::string run_depth_enrichment(
+            const std::function<void(const std::string&)>& status);
+        // Path of the per-frame room-geometry sidecar the collector writes (schema (b) of the
+        // enrichment's point 3). Frames collected before it existed fall back to the live graph.
+        static constexpr const char* kDepthRoomsCsv = "etc/ricoh_depth_rooms.csv";
         // Per-frame per-view offsets, re-solved by the correlation pass each compute() tick. The Ricoh
         // popup redraws on the RENDER tick, so it consumes the anchor from the previous compute() —
         // one tick stale on a quantity that moves with the scene, which is immaterial and much cheaper
         // than duplicating the LiDAR reprojection on the render path.
         rc::depth::DepthAnchor depth_anchor_;
+        // Epistemic frame admission — see rc::depth::InfoSelector. Seeded from whatever is already on
+        // disk when Collect is armed, so a session cannot re-collect what the dataset already knows.
+        rc::depth::InfoSelector depth_selector_;
+        long                    depth_collect_rejected_ = 0;   // scored but not informative enough
+        long                    depth_collect_suspect_  = 0;   // rejected as inconsistent (outlier guard)
+        void arm_depth_collection(bool on);
         std::unique_ptr<rc::RicohProjectionOverlay> ricoh_model_overlay_;
         // The ricoh popup renders in on_render_tick (not compute), so cache the last scene the overlay
         // needs. Both run on the Qt main thread → no lock. Updated at the end of each compute() frame.

@@ -159,6 +159,13 @@ public:
     // remap tables; called only from DepthStage::run, i.e. the worker thread, never from main.
     [[nodiscard]] DepthMap estimate_360(const cv::Mat& panorama_bgr, const Depth360Config& cfg);
 
+    // Whole-frame estimate for a PERSPECTIVE image (the ZED). One inference, no strips, no elevation
+    // band — a pinhole frame is what the model was trained on, so none of the 360 machinery applies.
+    // ★No z→range correction here: the ZED's own `depth` is camera Z along the optical axis, so
+    // leaving the model in z-depth keeps the two directly comparable. Converting one and not the
+    // other would inject a cos-off-axis error that looks exactly like model error.
+    [[nodiscard]] DepthMap estimate_perspective(const cv::Mat& bgr) const;
+
     // Blend a per-strip-normalised TURBO ramp over a copy of `base_bgr` (near = warm). `alpha` is the
     // depth layer's weight in [0,1]. const + argument-only: the main thread calls this on a processor
     // the ricoh worker is concurrently running inference on, so it must touch NO member state
@@ -201,5 +208,33 @@ private:
     float maps_fov_ = 0.f;
     bool  maps_zcorr_ = false;
 };
+
+// Best-fit alignment of a model log-depth map against a MEASURED metric depth image, solving
+// log(measured) ≈ a·log_model + b by least squares over the valid pixels. This is the "minimum free
+// energy" alignment: whatever residual survives it is STRUCTURE the model got wrong, not scale it was
+// never given. Returns false if too few valid pixels.
+//
+// Solving BOTH a and b (rather than reusing the fitted map's a) is deliberate for this diagnostic:
+// hundreds of thousands of dense pixels over the full depth range make it far better conditioned than
+// the LiDAR horizon stripe the map is fitted from, and it isolates residual shape from residual scale.
+struct DepthAlign
+{
+    float a = 1.f, b = 0.f;
+    long  n = 0;
+    float med_abs_rel = 0.f;   // median |d−d*|/d* after alignment
+    float med_abs_m   = 0.f;
+    float delta125    = 0.f;
+};
+[[nodiscard]] bool align_to_measured(const DepthMap& model, const cv::Mat& measured_m,
+                                     float min_m, float max_m, DepthAlign& out);
+
+// Corrected model depth in METRES, same size as the map. NaN where the model has no estimate.
+[[nodiscard]] cv::Mat apply_align(const DepthMap& model, const DepthAlign& al);
+
+// Signed difference render: BLACK where the aligned model agrees with the measurement, red where the
+// model reads FARTHER than truth, blue where it reads NEARER. Black-at-zero is the point — a
+// perfectly aligned model shows an all-black frame, so error is visible as light rather than hue.
+[[nodiscard]] cv::Mat compose_difference(const cv::Mat& model_m, const cv::Mat& measured_m,
+                                         float span_m = 1.0f);
 
 }   // namespace rc::depth

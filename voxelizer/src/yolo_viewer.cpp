@@ -5,9 +5,12 @@
 #include <QImage>
 #include <QResizeEvent>
 #include <QMouseEvent>
+#include <QStringList>
 #include <QToolTip>
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
 
 namespace rc
 {
@@ -148,11 +151,35 @@ void YoloViewer::update_semantic(const cv::Mat& labels, bool active)
         semantic_labels_.release();
 }
 
+void YoloViewer::update_depth(const cv::Mat& measured_m, const cv::Mat& model_m, bool active)
+{
+    depth_active_ = active and not measured_m.empty();
+    if (depth_active_)
+    {
+        depth_measured_ = measured_m.clone();
+        depth_model_    = model_m.empty() ? cv::Mat() : model_m.clone();
+        setMouseTracking(true);
+    }
+    else
+    {
+        depth_measured_.release();
+        depth_model_.release();
+        if (not semantic_active_)
+            setMouseTracking(false);
+    }
+}
+
 void YoloViewer::mouseMoveEvent(QMouseEvent* event)
 {
     QLabel::mouseMoveEvent(event);
 
-    if (!semantic_active_ or semantic_labels_.empty() or last_pixmap_.isNull())
+    const bool want_depth = depth_active_ and not depth_measured_.empty();
+    if ((!semantic_active_ or semantic_labels_.empty()) and not want_depth)
+    {
+        QToolTip::hideText();
+        return;
+    }
+    if (last_pixmap_.isNull())
     {
         QToolTip::hideText();
         return;
@@ -173,17 +200,36 @@ void YoloViewer::mouseMoveEvent(QMouseEvent* event)
         return;
     }
 
-    const int ix = std::clamp(static_cast<int>(rx * semantic_labels_.cols), 0, semantic_labels_.cols - 1);
-    const int iy = std::clamp(static_cast<int>(ry * semantic_labels_.rows), 0, semantic_labels_.rows - 1);
-    const int id = semantic_labels_.at<unsigned char>(iy, ix);
+    QStringList lines;
 
-    QString text;
-    if (id >= 0 and id < static_cast<int>(class_names_.size()))
-        text = QString::fromStdString(class_names_[static_cast<std::size_t>(id)]);
-    else
-        text = QStringLiteral("(unlabelled)");   // IGNORE_LABEL (255) / below confidence
+    if (semantic_active_ and not semantic_labels_.empty())
+    {
+        const int ix = std::clamp(static_cast<int>(rx * semantic_labels_.cols), 0, semantic_labels_.cols - 1);
+        const int iy = std::clamp(static_cast<int>(ry * semantic_labels_.rows), 0, semantic_labels_.rows - 1);
+        const int id = semantic_labels_.at<unsigned char>(iy, ix);
+        lines << ((id >= 0 and id < static_cast<int>(class_names_.size()))
+                      ? QString::fromStdString(class_names_[static_cast<std::size_t>(id)])
+                      : QStringLiteral("(unlabelled)"));   // IGNORE_LABEL (255) / below confidence
+    }
 
-    QToolTip::showText(event->globalPosition().toPoint(), text, this);
+    if (want_depth)
+    {
+        const int ix = std::clamp(static_cast<int>(rx * depth_measured_.cols), 0, depth_measured_.cols - 1);
+        const int iy = std::clamp(static_cast<int>(ry * depth_measured_.rows), 0, depth_measured_.rows - 1);
+        const float z = depth_measured_.at<float>(iy, ix);
+        const float m = (not depth_model_.empty()) ? depth_model_.at<float>(iy, ix)
+                                                   : std::numeric_limits<float>::quiet_NaN();
+        // A missing value is stated as missing. The ZED reports 0 where stereo failed and the model
+        // is NaN outside its estimate — printing "0.00 m" for either would read as a measurement.
+        lines << QString("ZED   %1").arg(std::isfinite(z) and z > 0.f
+                                             ? QString("%1 m").arg(z, 0, 'f', 2) : QStringLiteral("—"));
+        lines << QString("model %1").arg(std::isfinite(m)
+                                             ? QString("%1 m").arg(m, 0, 'f', 2) : QStringLiteral("—"));
+        if (std::isfinite(z) and z > 0.f and std::isfinite(m))
+            lines << QString("Δ     %1%2 m").arg(m - z >= 0 ? "+" : "").arg(m - z, 0, 'f', 2);
+    }
+
+    QToolTip::showText(event->globalPosition().toPoint(), lines.join('\n'), this);
 }
 
 } // namespace rc

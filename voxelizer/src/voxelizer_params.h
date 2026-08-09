@@ -214,6 +214,32 @@ struct VoxelizerParams
     // (`<stamp_ms>.jpg`, the same stamp the CSV row carries — no schema change needed to join them).
     // Needed ONLY by the offline enrichment pass: YOLO-sem needs pixels to segment ceiling/floor/wall,
     // and the CSV holds numbers. ~250-400 kB per frame, so a few hundred frames is ~150 MB.
+    // ── Epistemic frame admission (rc::depth::InfoSelector) ───────────────────────────────────────
+    // Admit a frame by the MUTUAL INFORMATION it carries about the map parameters instead of by how
+    // far the robot moved. Saturates by itself: as Λ grows, repeated views of the same geometry score
+    // ~0 nats and are dropped, while an under-constrained view (a long sightline) still scores high.
+    bool        RICOH_DEPTH_INFO_SELECT    = true;    // RicohDepth.info_select
+    // Minimum information a frame must add to be worth storing, in NATS — an information unit, not a
+    // geometric cutoff. Raise it to keep only strongly novel views; 0 admits everything scored.
+    float       RICOH_DEPTH_MIN_GAIN_NATS  = 0.50f;   // RicohDepth.min_gain_nats
+    // Consistency guard. A frame whose median residual under the current map exceeds this multiple of
+    // the map's own anchored residual is treated as SUSPECT and dropped unscored — D-optimality rates
+    // a corrupted frame as maximally informative, so novelty must be earned by data that agrees.
+    float       RICOH_DEPTH_SUSPECT_RESID_MULT = 3.0f; // RicohDepth.suspect_resid_mult
+    // ── ZED depth-model overlay (validation, not navigation) ──────────────────────────────────────
+    // Runs the SAME depth model on the perspective ZED frame so its output can be compared against
+    // the camera's own MEASURED depth. The ZED does not need the model — it measures — but it is the
+    // only dense, full-frame ground truth available, where the LiDAR gives a horizon stripe. Gated by
+    // the ZED window's ZDepth button, so the model runs only while the comparison is on screen.
+    // The ZED window's ZDepth overlay compares the ROOM BELIEF's predicted depth (floor/walls/
+    // ceiling ray-cast) against the camera's MEASURED depth. No neural model: the ZED measures depth
+    // and room_concept predicts it, so the difference is the belief's own per-pixel residual.
+    bool        ZED_ROOM_DEPTH_ENABLED     = true;    // ZedDepth.enabled
+    int         ZED_ROOM_DEPTH_DECIMATE    = 2;       // ZedDepth.decimate — ray-cast on a 1/N grid
+    // ZED yolo-depth stage: NOT needed (the camera measures depth). Kept off; the validation it gave
+    // is superseded by comparing against the room belief instead of against a monocular guess.
+    bool        ZED_DEPTH_ENABLED          = false;   // ZedDepth.yolo_depth_enabled
+    float       ZED_DEPTH_DIFF_SPAN_M      = 1.0f;    // ZedDepth.diff_span_m — |error| that saturates the diff colour
     bool        RICOH_DEPTH_SAVE_FRAMES    = true;    // RicohDepth.save_frames
     std::string RICOH_DEPTH_FRAMES_DIR     = "etc/depth_frames";  // RicohDepth.frames_dir
     int         RICOH_DEPTH_FRAME_QUALITY  = 92;      // RicohDepth.frame_jpeg_quality

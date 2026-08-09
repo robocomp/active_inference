@@ -23,12 +23,14 @@ void DepthStage::run(const PerceptionFrame& in, PerceptionResult& out)
 {
     if (not ready_ or in.rgbd.bgr.empty())
         return;
-    if (not in.is_360)
-        return;   // ZED has measured metric depth already — see the header.
-
     const bool run_now = (counter_++ % static_cast<std::uint64_t>(decimation_) == 0);
     if (run_now)
-        last_map_ = depth_.estimate_360(in.rgbd.bgr, cfg360_);   // panorama is carried BGR
+        // A perspective frame gets ONE whole-frame inference; only the 360 panorama needs slicing.
+        // On the ZED the model's output is not needed for navigation — the camera already measures
+        // depth — but that measurement is exactly what makes the ZED the best place to SCORE the
+        // model: dense, metric, and covering the whole frame rather than a horizon stripe.
+        last_map_ = in.is_360 ? depth_.estimate_360(in.rgbd.bgr, cfg360_)
+                              : depth_.estimate_perspective(in.rgbd.bgr);
 
     if (last_map_.empty())
         return;

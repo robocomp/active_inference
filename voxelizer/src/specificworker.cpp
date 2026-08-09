@@ -40,6 +40,7 @@
 #include "sam2_stage.h"
 #include "bearing_stage.h"
 #include "depth_stage.h"
+#include "room_envelope_depth.h"
 #include "ricoh_source.h"
 #include "zed_source.h"
 #include <dsr/gui/viewers/graph_viewer/graph_viewer.h>
@@ -52,9 +53,14 @@
 #include <cmath>
 #include <limits>
 #include <filesystem>
+#include <map>
 #include <print>
 #include <sstream>
+#include <thread>
 #include <unordered_map>
+
+#include <QCoreApplication>
+#include <QEventLoop>
 
 SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check)
     : GenericWorker(configLoader, tprx)
@@ -261,6 +267,22 @@ void SpecificWorker::initialize()
         // Run when the overlay is on OR when routing refined masks to the fitters (publish_refined).
         sam2_stage->set_enabled(sam2_overlay_enabled_ or params.SAM2_PUBLISH_REFINED);
         zed_stages.push_back(std::move(sam2_stage));
+    }
+
+    // Depth model on the ZED frame — for VALIDATION only (the camera measures depth; the model does
+    // not improve on that). Starts DISABLED and is armed by the ZED window's ZDepth button, so the
+    // extra inference is only paid while the comparison is being looked at.
+    if (params.ZED_DEPTH_ENABLED)
+    {
+        rc::depth::DepthProcessor::Config zdcfg;
+        zdcfg.model_path    = params.RICOH_DEPTH_MODEL_PATH;
+        zdcfg.input_size    = params.RICOH_DEPTH_INPUT_SIZE;
+        zdcfg.use_gpu       = params.RICOH_DEPTH_USE_GPU;
+        zdcfg.use_trt       = params.RICOH_DEPTH_USE_TRT;
+        zdcfg.verbose_debug = verbose_debug_;
+        auto zdepth = std::make_unique<rc::DepthStage>(zdcfg, rc::depth::Depth360Config{}, 1);
+        zdepth->set_enabled(false);
+        zed_stages.push_back(std::move(zdepth));
     }
 
     // Custom drawing windows (Voxel3D GL + YOLO raster), each in its own top-level window — see
@@ -624,61 +646,169 @@ void SpecificWorker::on_render_tick()
                     // Monocular-depth ramp UNDER the seg silhouettes: it is a dense full-band layer, so
                     // drawing it last would bury the detections. Per-strip normalised with the seam
                     // lines drawn — see depth_processor.h for why it must not be read across a seam.
-                    if (ricoh_depth_overlay_enabled_ and rres->depth and not rres->depth->empty())
-                        if (auto* dp = dynamic_cast<rc::DepthStage*>(ricoh_worker_->stage("depth")))
+                    // ★The RoomΔ overlay below is NOT part of this block. The room envelope is a purely
+                    // geometric prediction — it needs the polygon and the ricoh pose, and nothing from
+                    // the monocular model — so nesting it under the Depth toggle (as it was) made the
+                    // button silently inert whenever Depth was OFF or the LiDAR anchor was missing,
+                    // while the ZED window's identical button kept working. Only mode 2 (DIFF) has a
+                    // real dependency on the model, and it states it for itself.
+                    auto* dp = dynamic_cast<rc::DepthStage*>(ricoh_worker_->stage("depth"));
+                    rc::depth::DepthMap shown;
+                    bool have_model = false, corrected = false;
+                    if (ricoh_depth_overlay_enabled_ and dp and rres->depth and not rres->depth->empty())
+                    {
+                        // With a fitted map + this frame's LiDAR anchor, rewrite the raw per-view
+                        // log-depth into METRIC log-range and draw it on one fixed scale. Without
+                        // them, fall through to the per-strip relative ramp — the only honest way
+                        // to render six mutually inconsistent scales.
+                        have_model = true;
+                        corrected = depth_fit_map_.valid and depth_anchor_.any();
+                        shown = *rres->depth;
+                        if (corrected)
                         {
-                            // With a fitted map + this frame's LiDAR anchor, rewrite the raw per-view
-                            // log-depth into METRIC log-range and draw it on one fixed scale. Without
-                            // them, fall through to the per-strip relative ramp — the only honest way
-                            // to render six mutually inconsistent scales.
-                            const bool corrected = depth_fit_map_.valid and depth_anchor_.any();
-                            rc::depth::DepthMap shown = *rres->depth;
-                            if (corrected)
+                            shown.log_depth = rres->depth->log_depth.clone();   // never touch the worker's buffer
+                            const int sw = (shown.n_strips > 0) ? shown.log_depth.cols / shown.n_strips
+                                                                : shown.log_depth.cols;
+                            // ★Offset INTERPOLATED across azimuth, not applied per-view as a step.
+                            // b is fitted per view but the ROOM is continuous, so a piecewise
+                            // constant correction puts a discontinuity at every seam whose size is
+                            // exactly |b_i − b_{i+1}| — measured ~0.10 log ≈ a 10% depth step, which
+                            // is what survives after the big per-view jumps are removed. Treating
+                            // each b as SAMPLED AT ITS VIEW CENTRE and lerping circularly between
+                            // neighbours makes the field continuous by construction while still
+                            // reproducing the fitted value at each centre. This is display
+                            // smoothing over a quantity that is genuinely per-image, so it belongs
+                            // here at compose time and NOT in anything that feeds a belief.
+                            const int nv = std::max(1, shown.n_strips);
+                            for (int y = 0; y < shown.log_depth.rows; ++y)
                             {
-                                shown.log_depth = rres->depth->log_depth.clone();   // never touch the worker's buffer
-                                const int sw = (shown.n_strips > 0) ? shown.log_depth.cols / shown.n_strips
-                                                                    : shown.log_depth.cols;
-                                // ★Offset INTERPOLATED across azimuth, not applied per-view as a step.
-                                // b is fitted per view but the ROOM is continuous, so a piecewise
-                                // constant correction puts a discontinuity at every seam whose size is
-                                // exactly |b_i − b_{i+1}| — measured ~0.10 log ≈ a 10% depth step, which
-                                // is what survives after the big per-view jumps are removed. Treating
-                                // each b as SAMPLED AT ITS VIEW CENTRE and lerping circularly between
-                                // neighbours makes the field continuous by construction while still
-                                // reproducing the fitted value at each centre. This is display
-                                // smoothing over a quantity that is genuinely per-image, so it belongs
-                                // here at compose time and NOT in anything that feeds a belief.
-                                const int nv = std::max(1, shown.n_strips);
-                                for (int y = 0; y < shown.log_depth.rows; ++y)
+                                auto* row = shown.log_depth.ptr<float>(y);
+                                const auto* sid = shown.strip_id.ptr<unsigned char>(y);
+                                const float t = std::clamp((y - 0.5f * shown.log_depth.rows)
+                                                           / (0.5f * shown.log_depth.rows), -1.f, 1.f);
+                                for (int x = 0; x < shown.log_depth.cols; ++x)
                                 {
-                                    auto* row = shown.log_depth.ptr<float>(y);
-                                    const auto* sid = shown.strip_id.ptr<unsigned char>(y);
-                                    const float t = std::clamp((y - 0.5f * shown.log_depth.rows)
-                                                               / (0.5f * shown.log_depth.rows), -1.f, 1.f);
-                                    for (int x = 0; x < shown.log_depth.cols; ++x)
-                                    {
-                                        if (not std::isfinite(row[x]) or sid[x] >= rc::depth::kMaxViews)
-                                            continue;
-                                        const float s = sw > 0 ? std::clamp((x - (sid[x] + 0.5f) * sw)
-                                                                            / (0.5f * sw), -1.f, 1.f) : 0.f;
-                                        // Position in "view units": f = 0 at view 0's centre, 1 at view 1's…
-                                        const float f  = sw > 0 ? (static_cast<float>(x) / sw - 0.5f) : 0.f;
-                                        const int   v0 = static_cast<int>(std::floor(f));
-                                        const float w  = f - static_cast<float>(v0);
-                                        const int   i0 = ((v0 % nv) + nv) % nv;          // wraps the seam
-                                        const int   i1 = (i0 + 1) % nv;
-                                        const float bb = (1.f - w) * depth_anchor_.b[i0] + w * depth_anchor_.b[i1];
-                                        row[x] = depth_fit_map_.apply_with(row[x], bb, s, t);
-                                    }
+                                    if (not std::isfinite(row[x]) or sid[x] >= rc::depth::kMaxViews)
+                                        continue;
+                                    const float s = sw > 0 ? std::clamp((x - (sid[x] + 0.5f) * sw)
+                                                                        / (0.5f * sw), -1.f, 1.f) : 0.f;
+                                    // Position in "view units": f = 0 at view 0's centre, 1 at view 1's…
+                                    const float f  = sw > 0 ? (static_cast<float>(x) / sw - 0.5f) : 0.f;
+                                    const int   v0 = static_cast<int>(std::floor(f));
+                                    const float w  = f - static_cast<float>(v0);
+                                    const int   i0 = ((v0 % nv) + nv) % nv;          // wraps the seam
+                                    const int   i1 = (i0 + 1) % nv;
+                                    const float bb = (1.f - w) * depth_anchor_.b[i0] + w * depth_anchor_.b[i1];
+                                    row[x] = depth_fit_map_.apply_with(row[x], bb, s, t);
                                 }
                             }
-                            pano = dp->compose(pano, shown, params.RICOH_DEPTH_OVERLAY_ALPHA, corrected,
-                                               params.RICOH_DEPTH_METRIC_LO_M, params.RICOH_DEPTH_METRIC_HI_M);
-                            // Hover readout — ONLY when corrected, because only then is the field in
-                            // metres. Uncorrected it is a per-view relative scale and printing "3.4 m"
-                            // off it would be inventing a measurement.
-                            ricoh_viewer_->set_depth_readout(shown.log_depth, corrected);
                         }
+                    }
+
+                    // ── The ROOM BELIEF's own prediction, in the panorama ────────────────────────
+                    // Mode 1 (PREDICTED) is pure geometry: cast the polygon+floor+ceiling envelope
+                    // through every pixel. Mode 2 (DIFF) subtracts the monocular model from it, so
+                    // that one — and only that one — needs Depth ON and a metric (anchored) model.
+                    // ★In mode 2 NEITHER side is a measurement: it is one prediction against another.
+                    // Furniture is bright by construction (the model sees a table, the envelope has no
+                    // furniture), so the reading that matters is disagreement on the SHELL — a wall or
+                    // the floor lighting up means the two models genuinely differ about the room.
+                    bool drew_room = false;
+                    cv::Mat room_log_range;          // metric ln(range); feeds the hover readout
+                    if (ricoh_room_mode_ != 0 and dp and ricoh_scene_.valid)
+                    {
+                        // CameraAPI carries the node's projection model AND its azimuth
+                        // sign/offset, so ray_from_pixel() is correct for whichever model the
+                        // ricoh actually declares — cylindrical here, not equirectangular.
+                        if (not ricoh_camera_api_)
+                            if (const auto rn = G->get_node("ricoh"); rn.has_value())
+                                ricoh_camera_api_ = G->get_camera_api(rn.value());
+                        if (ricoh_camera_api_ and not ricoh_scene_.poly_x.empty())
+                        {
+                            // Sized off the PANORAMA, not off the model's map: with Depth OFF there is
+                            // no map to size against, and the overlay has to land on the frame anyway.
+                            const cv::Mat env = rc::depth::room_envelope_range_equirect(
+                                *ricoh_camera_api_, pano.cols, pano.rows,
+                                ricoh_scene_.room_T_ricoh, ricoh_scene_.poly_x,
+                                ricoh_scene_.poly_y, ricoh_scene_.room_height,
+                                params.ZED_ROOM_DEPTH_DECIMATE);
+                            if (not env.empty() and env.size() == pano.size())
+                            {
+                                // ln(range) of the envelope, built ONCE for BOTH modes: mode 1 draws
+                                // it, mode 2 subtracts the model from it, and either way it is what
+                                // the hover reports as "room". Metric by construction — it is a
+                                // ray-cast through a believed geometry, not a scaled network output.
+                                room_log_range = cv::Mat(env.size(), CV_32FC1,
+                                    cv::Scalar(std::numeric_limits<float>::quiet_NaN()));
+                                for (int y = 0; y < env.rows; ++y)
+                                {
+                                    const float* e = env.ptr<float>(y);
+                                    auto* d = room_log_range.ptr<float>(y);
+                                    for (int x = 0; x < env.cols; ++x)
+                                        if (std::isfinite(e[x]) and e[x] > 0.f) d[x] = std::log(e[x]);
+                                }
+                                if (ricoh_room_mode_ == 2)
+                                {
+                                    if (have_model and corrected and shown.log_depth.size() == env.size())
+                                    {
+                                        cv::Mat model_m(shown.log_depth.size(), CV_32FC1,
+                                                        cv::Scalar(std::numeric_limits<float>::quiet_NaN()));
+                                        for (int y = 0; y < model_m.rows; ++y)
+                                        {
+                                            const float* l = shown.log_depth.ptr<float>(y);
+                                            auto* d = model_m.ptr<float>(y);
+                                            for (int x = 0; x < model_m.cols; ++x)
+                                                if (std::isfinite(l[x])) d[x] = std::exp(l[x]);
+                                        }
+                                        const cv::Mat diff = rc::depth::compose_difference(
+                                            model_m, env, params.ZED_DEPTH_DIFF_SPAN_M);
+                                        if (not diff.empty())
+                                        {
+                                            // ★addWeighted writes IN PLACE, and `pano` is still a shallow
+                                            // handle on the WORKER's frame unless an overlay above cloned
+                                            // it — blending into it would scribble on another thread's
+                                            // buffer (CLAUDE.md: deep-copy every cv::Mat at a boundary).
+                                            if (pano.data == rres->frame.rgbd.bgr.data)
+                                                pano = pano.clone();
+                                            cv::addWeighted(pano, 1.0 - params.RICOH_DEPTH_OVERLAY_ALPHA,
+                                                            diff, params.RICOH_DEPTH_OVERLAY_ALPHA, 0.0, pano);
+                                            drew_room = true;
+                                        }
+                                    }
+                                }
+                                else
+                                {
+                                    rc::depth::DepthMap envmap;
+                                    envmap.log_depth = room_log_range;
+                                    envmap.strip_id = cv::Mat(env.size(), CV_8UC1, cv::Scalar(0));
+                                    envmap.n_strips = 1; envmap.band_y0 = 0; envmap.band_y1 = env.rows;
+                                    pano = dp->compose(pano, envmap, params.RICOH_DEPTH_OVERLAY_ALPHA,
+                                                       true, params.RICOH_DEPTH_METRIC_LO_M,
+                                                       params.RICOH_DEPTH_METRIC_HI_M);
+                                    drew_room = true;
+                                }
+                            }
+                        }
+                    }
+                    if (not drew_room and have_model)
+                        pano = dp->compose(pano, shown, params.RICOH_DEPTH_OVERLAY_ALPHA, corrected,
+                                           params.RICOH_DEPTH_METRIC_LO_M, params.RICOH_DEPTH_METRIC_HI_M);
+
+                    // Hover readout = WHATEVER IS ON SCREEN, in metres, or nothing. The room envelope
+                    // is metric by construction; the monocular field is metric only once anchored
+                    // (uncorrected it is a per-view relative scale, and printing "3.4 m" off it would
+                    // be inventing a measurement). ★Must be reached on EVERY path, including the ones
+                    // that draw no depth at all — it is what CLEARS the readout. Left unreached (as it
+                    // was, being nested under the Depth toggle) the viewer kept its last cloned field
+                    // and went on reporting frozen metres with Depth OFF.
+                    // ★The MODEL side is offered only when ANCHORED. Handing over an uncorrected
+                    // field would print a per-view relative number next to a genuine metre reading
+                    // and invite subtracting one from the other — the Δ line would then be pure
+                    // fiction. Unanchored, the hover shows the room alone and says nothing about
+                    // the model, which is exactly what is known.
+                    const cv::Mat model_readout = (have_model and corrected) ? shown.log_depth : cv::Mat();
+                    ricoh_viewer_->set_depth_readout(room_log_range, model_readout,
+                                                     not room_log_range.empty() or not model_readout.empty());
 
                     if (rres->masks and not rres->masks->empty())
                     {
@@ -797,7 +927,11 @@ void SpecificWorker::compute()
 
     // Cache the scene the Ricoh-360 overlays need (they render in on_render_tick, a different timer).
     // Only when a toggle is on, to avoid per-frame copies otherwise. Same thread → no lock.
-    if (ricoh_model_overlay_enabled_ or ricoh_lidar_overlay_enabled_)
+    // ★RoomΔ is a THIRD consumer of this cache, not just Models/Lidar: it ray-casts poly_x/poly_y/
+    // room_height through room_T_ricoh. Leaving it out of this condition left `valid` false whenever
+    // Models and Lidar were both off, so RoomΔ silently fell through to the plain depth ramp — the
+    // same class of bug as nesting it under the Depth toggle. Every field it reads is gathered here.
+    if (ricoh_model_overlay_enabled_ or ricoh_lidar_overlay_enabled_ or ricoh_room_mode_ != 0)
     {
         ricoh_scene_.boxes        = frame->graph_object_boxes;
         ricoh_scene_.room_T_ricoh = frame->room_T_ricoh;
@@ -867,6 +1001,90 @@ void SpecificWorker::compute()
             if (auto* s2 = dynamic_cast<rc::Sam2Stage*>(zed_worker_ ? zed_worker_->stage("sam2") : nullptr);
                 s2 and s2->refiner())
                 viewer_rgb = s2->refiner()->compose_canvas(viewer_rgb, *zed_res->refined_masks, /*is_bgr=*/true);
+        // ── What the ROOM BELIEF predicts, vs what the ZED MEASURES ──────────────────────────────
+        // Ray-cast the room envelope room_concept believes in (floor z=0, ceiling z=room_height, one
+        // vertical wall per polygon edge) through every pixel, and difference it against the camera's
+        // own depth. This is the belief's per-pixel residual — the quantity the free energy is built
+        // from — rendered as an image. No neural model is involved and none is needed: the ZED already
+        // measures depth, and the room belief already predicts it.
+        //
+        // ★A well-fitted ROOM goes black; furniture and people stay bright, because the envelope
+        // deliberately excludes them. Bright blobs = things the room does not explain (correct and
+        // expected). Bright STRUCTURE — a whole wall tilting, the floor shading off with range — is
+        // the interesting case: that is room-model error, not clutter.
+        if (zed_depth_mode_ != 0 and zed_res->frame.rgbd.width > 0
+            and not zed_res->frame.rgbd.depth.empty() and not frame->room_poly_x.empty())
+        {
+            const cv::Mat measured(zed_res->frame.rgbd.height, zed_res->frame.rgbd.width, CV_32FC1,
+                                   const_cast<float*>(zed_res->frame.rgbd.depth.data()));
+            const cv::Mat predicted = rc::depth::room_envelope_depth(
+                zed_res->frame.rgbd.width, zed_res->frame.rgbd.height,
+                zed_res->frame.rgbd.focal_x, zed_res->frame.rgbd.focal_y,
+                zed_res->frame.room_T_sensor, frame->room_poly_x, frame->room_poly_y,
+                frame->room_height, params.ZED_ROOM_DEPTH_DECIMATE);
+
+            if (not predicted.empty() and predicted.size() == measured.size())
+            {
+                if (zed_depth_mode_ == 2)
+                {
+                    const cv::Mat diff = rc::depth::compose_difference(predicted, measured,
+                                                                       params.ZED_DEPTH_DIFF_SPAN_M);
+                    if (not diff.empty())
+                        cv::addWeighted(viewer_rgb, 1.0 - params.RICOH_DEPTH_OVERLAY_ALPHA,
+                                        diff, params.RICOH_DEPTH_OVERLAY_ALPHA, 0.0, viewer_rgb);
+                }
+                else
+                {
+                    // Mode 1: the prediction itself, on the same fixed metric ramp as everything else.
+                    rc::depth::DepthMap shown;
+                    shown.log_depth = cv::Mat(predicted.size(), CV_32FC1,
+                                              cv::Scalar(std::numeric_limits<float>::quiet_NaN()));
+                    for (int y = 0; y < predicted.rows; ++y)
+                    {
+                        const float* p = predicted.ptr<float>(y);
+                        auto* d = shown.log_depth.ptr<float>(y);
+                        for (int x = 0; x < predicted.cols; ++x)
+                            if (std::isfinite(p[x]) and p[x] > 0.f) d[x] = std::log(p[x]);
+                    }
+                    shown.strip_id = cv::Mat(predicted.size(), CV_8UC1, cv::Scalar(0));
+                    shown.n_strips = 1; shown.band_y0 = 0; shown.band_y1 = predicted.rows;
+                    if (ricoh_worker_)
+                        if (auto* dp = dynamic_cast<rc::DepthStage*>(ricoh_worker_->stage("depth")))
+                            viewer_rgb = dp->compose(viewer_rgb, shown, params.RICOH_DEPTH_OVERLAY_ALPHA,
+                                                     /*metric=*/true, params.RICOH_DEPTH_METRIC_LO_M,
+                                                     params.RICOH_DEPTH_METRIC_HI_M);
+                }
+                if (yolo_viewer_)
+                    yolo_viewer_->update_depth(measured, predicted, true);
+
+                // Score the belief where the envelope is the ONLY thing that should be visible: report
+                // the median |residual| over pixels where the two agree to within a metre, which
+                // excludes furniture without needing to segment it.
+                static int zc = 0;
+                if ((zc++ % 40) == 0)
+                {
+                    std::vector<float> e;
+                    e.reserve(4096);
+                    for (int y = 0; y < predicted.rows; y += 4)
+                        for (int x = 0; x < predicted.cols; x += 4)
+                        {
+                            const float p = predicted.at<float>(y, x), z = measured.at<float>(y, x);
+                            if (std::isfinite(p) and std::isfinite(z) and z > 0.f and std::abs(p - z) < 1.0f)
+                                e.push_back(std::abs(p - z));
+                        }
+                    if (e.size() > 64)
+                    {
+                        std::nth_element(e.begin(), e.begin() + e.size() / 2, e.end());
+                        std::println("[room-depth] envelope vs ZED: median |Δ| = {:.3f} m over {} "
+                                     "surface px (pixels beyond 1 m are furniture, not counted)",
+                                     e[e.size() / 2], e.size());
+                    }
+                }
+            }
+        }
+        else if (yolo_viewer_ and zed_depth_mode_ == 0)
+            yolo_viewer_->update_depth({}, {}, false);
+
         // The "YOLO" toggle in the ZED window gates only the seg-detection overlay (masks/bboxes);
         // the semantic underlay, skeletons and model projections above are independent.
         static const std::vector<SegDetection> kNoDetections;
@@ -903,9 +1121,23 @@ void SpecificWorker::compute()
         if (params.RICOH_DEPTH_ENABLED and params.RICOH_DEPTH_LIDAR_DIAG and ricoh_worker_
             and frame->ricoh_valid and not frame->lidar_points_room.empty())
             if (auto rres = ricoh_worker_->latest_result(); rres and rres->depth and not rres->depth->empty())
+            {
+                // The room belief AS IT WAS WHEN THIS PANORAMA WAS TAKEN. Recorded per admitted frame
+                // in the sidecar, because the dataset's (rx,ry,rtheta) cannot express a polygon, a
+                // ceiling height, or the camera's own z — and the offline enrichment pass needs all
+                // three to ray-cast the envelope. Without it, a rebuild months later has no choice but
+                // to assume the room never changed.
+                rc::depth::RoomGeometry rg;
+                rg.room       = frame->room_name;
+                rg.poly_x     = frame->room_poly_x;
+                rg.poly_y     = frame->room_poly_y;
+                rg.height     = frame->room_height;
+                rg.room_T_cam = frame->room_T_ricoh;
+                rg.cam_z      = static_cast<float>(frame->room_T_ricoh.translation().z());
                 log_ricoh_depth_lidar_correlation(*rres->depth, frame->lidar_points_room,
                                                   frame->lidar_plane_id, frame->room_T_ricoh,
-                                                  rres->frame.rgbd.bgr, rres->frame.stamp);
+                                                  rres->frame.rgbd.bgr, rres->frame.stamp, rg);
+            }
 
         std::vector<BearingDetection> bearing_dets;
         if (params.RICOH_PUBLISH_MASKS and ricoh_worker_)
@@ -1266,7 +1498,8 @@ void SpecificWorker::log_ricoh_depth_lidar_correlation(const rc::depth::DepthMap
                                                        const std::vector<std::uint8_t>& plane_id,
                                                        const Mat::RTMat& room_T_ricoh,
                                                        const cv::Mat& panorama_bgr,
-                                                       std::uint64_t frame_stamp_ms)
+                                                       std::uint64_t frame_stamp_ms,
+                                                       const rc::depth::RoomGeometry& room_geom)
 {
     if (map.empty() or lidar_room.empty())
         return;
@@ -1328,10 +1561,15 @@ void SpecificWorker::log_ricoh_depth_lidar_correlation(const rc::depth::DepthMap
         const double x = m, y = std::log(static_cast<double>(p.range));
         const float s_in_view = strip_w > 0
             ? std::clamp((u - (sid + 0.5f) * strip_w) / (0.5f * strip_w), -1.f, 1.f) : 0.f;
+        // ★t must come along now. It used to be irrelevant (base() ignored it), but once enrichment
+        // gives ct*t^2 support the anchor's b = mean(log_range) − mean(base) is WRONG unless base()
+        // sees the same t the map was fitted with. Same expression as the recorded sample below.
+        const float t_in_pano = std::clamp((v - 0.5f * map.log_depth.rows) / (0.5f * map.log_depth.rows),
+                                           -1.f, 1.f);
         Acc& a = acc[sid];
         ++a.n; a.sx += x; a.sy += y; a.sxx += x * x; a.syy += y * y; a.sxy += x * y;
         if (depth_fit_map_.valid)
-            a.sbase += depth_fit_map_.base(m, s_in_view);
+            a.sbase += depth_fit_map_.base(m, s_in_view, t_in_pano);
 
         // STRIDE the recorded samples. A frame yields ~20k LiDAR hits and they are heavily redundant
         // (neighbouring returns on one surface say the same thing), so keeping all of them cost 635 MB
@@ -1367,11 +1605,62 @@ void SpecificWorker::log_ricoh_depth_lidar_correlation(const rc::depth::DepthMap
         cap.ry = static_cast<float>(t.y());
         cap.rtheta = static_cast<float>(std::atan2(R(1, 0), R(0, 0)));
         const std::uint64_t stamp = cap.stamp_ms;
-        if (depth_dataset_.add_frame(std::move(cap)))     // rejects a pose too close to the last kept
+
+        // ── EPISTEMIC ADMISSION ──────────────────────────────────────────────────────────────────
+        // Score the frame by the information it adds about the map parameters, not by how far the
+        // robot moved. Two guards, in this order:
+        //   1. CONSISTENCY first. D-optimality rates a corrupted frame (bad pose, bad registration,
+        //      someone walking through) as maximally informative, because leverage and corruption
+        //      look identical to it. So a frame must behave like the model expects BEFORE its
+        //      novelty is believed. Skipped when no map exists yet — nothing to be consistent with.
+        //   2. INFORMATION. Admit while the frame adds at least `min_gain_nats`. As Λ grows this
+        //      naturally saturates: the 300th view of the same wall scores ~0 and is dropped, while a
+        //      long sightline still scores high because the spline's ends are barely constrained.
+        bool admit = true;
+        double gain_nats = 0.0;
+        if (params.RICOH_DEPTH_INFO_SELECT and depth_selector_.ready())
+        {
+            const double med = depth_selector_.residual(cap.samples, depth_fit_map_,
+                                                        params.RICOH_DEPTH_N_STRIPS);
+            if (med >= 0.0 and depth_fit_map_.valid
+                and med > params.RICOH_DEPTH_SUSPECT_RESID_MULT * depth_fit_map_.resid_anchored)
+            {
+                admit = false;
+                ++depth_collect_suspect_;
+            }
+            else
+            {
+                gain_nats = depth_selector_.gain(cap.samples, depth_fit_map_, params.RICOH_DEPTH_N_STRIPS);
+                if (gain_nats < params.RICOH_DEPTH_MIN_GAIN_NATS)
+                {
+                    admit = false;
+                    ++depth_collect_rejected_;
+                }
+            }
+        }
+
+        // Pose novelty stays as a cheap PRE-filter only when the information rule is off; with it on,
+        // information decides and the distance test would only veto informative views from a spot the
+        // robot happens to have visited.
+        const float move_gate = params.RICOH_DEPTH_INFO_SELECT ? 0.0f : 0.10f;
+        const float turn_gate = params.RICOH_DEPTH_INFO_SELECT ? 0.0f : 0.087f;
+        if (admit and depth_dataset_.add_frame(std::move(cap), move_gate, turn_gate))
         {
             depth_collect_last_stamp_ = stamp;
             ++depth_collect_session_;
+            if (params.RICOH_DEPTH_INFO_SELECT)
+                depth_selector_.accumulate(depth_dataset_.last_frame_samples(), depth_fit_map_,
+                                           params.RICOH_DEPTH_N_STRIPS);
             depth_dataset_.append_csv("etc/ricoh_depth_dataset.csv");   // survives a crash mid-drive
+
+            // ★Record the ROOM BELIEF this frame was captured under, in its own sidecar. The dataset
+            // row cannot hold it: rows are per-SAMPLE and a polygon is per-FRAME, and repeating it on
+            // every one of ~1200 rows per frame would bloat a 5 MB file for nothing. Written for the
+            // same admitted frames as the .jpg, keyed on the same stamp, so the three join. Whether
+            // the offline pass has to guess the geometry is decided HERE, at collection time.
+            if (not rc::depth::append_room_geometry(kDepthRoomsCsv, stamp, room_geom)
+                and room_geom.valid())
+                std::println(stderr, "[depth-collect] could not write {}", kDepthRoomsCsv);
 
             // Save the panorama for the OFFLINE enrichment pass (YOLO-sem → ceiling/floor/wall
             // segmentation → synthetic samples from the room envelope). Only for ADMITTED frames, so
@@ -1389,10 +1678,12 @@ void SpecificWorker::log_ricoh_depth_lidar_correlation(const rc::depth::DepthMap
             }
 
             if (depth_collect_session_ % 10 == 0)
-                std::println("[depth-collect] {} frames this session, {} samples total{}",
-                             depth_collect_session_, depth_dataset_.sample_count(),
+                std::println("[depth-collect] {} kept ({:.2f} nats last) | {} uninformative, {} suspect"
+                             " | {} samples total{}",
+                             depth_collect_session_, gain_nats, depth_collect_rejected_,
+                             depth_collect_suspect_, depth_dataset_.sample_count(),
                              params.RICOH_DEPTH_SAVE_FRAMES
-                                 ? std::format(" (+ frames in {}/)", params.RICOH_DEPTH_FRAMES_DIR) : "");
+                                 ? std::format(" (+ {}/)", params.RICOH_DEPTH_FRAMES_DIR) : "");
         }
     }
 
@@ -1515,6 +1806,57 @@ void SpecificWorker::log_ricoh_depth_lidar_correlation(const rc::depth::DepthMap
     }
 }
 
+void SpecificWorker::sync_ricoh_depth_stage()
+{
+    // The stage runs if EITHER the overlay wants to draw it OR collection needs its output. See the
+    // declaration for why tying it to the overlay toggle alone was a bug.
+    if (not ricoh_worker_)
+        return;
+    if (auto* s = ricoh_worker_->stage("depth"))
+        s->set_enabled(ricoh_depth_overlay_enabled_ or ricoh_depth_collect_enabled_);
+}
+
+void SpecificWorker::arm_depth_collection(bool on)
+{
+    ricoh_depth_collect_enabled_ = on;
+    sync_ricoh_depth_stage();          // pressing Collect turns the model on by itself
+
+    if (not on)
+    {
+        std::println("[depth-collect] stopped — {} frames added, {} rejected as uninformative, "
+                     "{} rejected as inconsistent", depth_collect_session_,
+                     depth_collect_rejected_, depth_collect_suspect_);
+        return;
+    }
+
+    depth_collect_session_  = 0;
+    depth_collect_rejected_ = 0;
+    depth_collect_suspect_  = 0;
+    if (not params.RICOH_DEPTH_INFO_SELECT)
+        return;
+
+    // ★SEED THE SELECTOR FROM WHAT IS ALREADY ON DISK. Without this the first frames of every session
+    // look informative merely because the selector has forgotten the existing dataset, and the set
+    // would fill with duplicates of what it already contains.
+    rc::depth::DepthDataset prior;
+    depth_selector_.reset(rc::depth::map_n_params(depth_fit_map_, params.RICOH_DEPTH_N_STRIPS));
+    if (prior.load_csv("etc/ricoh_depth_dataset.csv") and prior.frame_count() > 0)
+    {
+        for (std::size_t i = 0; i < prior.frame_count(); ++i)
+            depth_selector_.accumulate(prior.frame_samples(i), depth_fit_map_,
+                                       params.RICOH_DEPTH_N_STRIPS);
+        std::println("[depth-collect] armed — selector seeded from {} existing frames "
+                     "({} samples); log det Λ = {:.1f}",
+                     prior.frame_count(), prior.sample_count(), depth_selector_.logdet());
+    }
+    else
+        std::println("[depth-collect] armed — no existing dataset, starting from the prior");
+    std::println("[depth-collect] admitting frames with gain ≥ {:.2f} nats "
+                 "(consistency guard: median resid ≤ {:.1f}× the map's {:.3f})",
+                 params.RICOH_DEPTH_MIN_GAIN_NATS, params.RICOH_DEPTH_SUSPECT_RESID_MULT,
+                 depth_fit_map_.valid ? depth_fit_map_.resid_anchored : 0.f);
+}
+
 std::string SpecificWorker::rebuild_depth_fit_map()
 {
     // Re-read the WHOLE accumulated set, not just this session — the point of appending across runs
@@ -1536,7 +1878,13 @@ std::string SpecificWorker::rebuild_depth_fit_map()
         return "dataset empty";
     }
     const std::size_t before = all.frame_count();
-    const std::size_t removed = all.dedup();
+    // ★Do NOT dedup a set built by the information selector. Pose novelty was the ADMISSION rule back
+    // when frames were taken on distance; with info_select on, every stored frame already earned its
+    // place by sharpening the parameters, and a second pass keyed on distance actively undoes that —
+    // measured 2026-08-06: it discarded 7 of 11 information-selected frames, 64% of the set, because
+    // the robot had not moved 10 cm between two genuinely informative views. Two admission criteria
+    // that disagree is one too many; the information one is strictly better informed.
+    const std::size_t removed = params.RICOH_DEPTH_INFO_SELECT ? 0 : all.dedup();
     const int n_views = std::max(1, params.RICOH_DEPTH_N_STRIPS);
     std::println("[depth-map] loaded {} frames / {} samples from {}; {} duplicate poses dropped",
                  before, all.sample_count(), path, removed);
@@ -1567,6 +1915,100 @@ std::string SpecificWorker::rebuild_depth_fit_map()
     for (int v = 0; v < m.n_views; ++v)
         bs += std::format(" b{}={:+.3f}", v, m.b[static_cast<std::size_t>(v)]);
     std::println("[depth-map]           {}", bs);
+    return {};
+}
+
+std::string SpecificWorker::run_depth_enrichment(const std::function<void(const std::string&)>& status)
+{
+    // ── Everything that needs the graph happens HERE, on the main thread ─────────────────────────
+    if (G == nullptr)
+        return "no graph";
+    const auto ricoh_node = G->get_node("ricoh");
+    if (not ricoh_node.has_value())
+        return "no 'ricoh' node in the graph — the envelope ray-cast needs its projection model";
+    auto cam = G->get_camera_api(ricoh_node.value());   // OUR OWN instance, never ricoh_camera_api_
+    if (not cam)
+        return "could not build a CameraAPI for the ricoh node";
+
+    rc::depth::EnrichConfig cfg;
+    cfg.dataset_csv  = "etc/ricoh_depth_dataset.csv";
+    cfg.frames_dir   = params.RICOH_DEPTH_FRAMES_DIR;
+    cfg.geometry_csv = kDepthRoomsCsv;
+    cfg.out_dataset  = "etc/ricoh_depth_dataset_enriched.csv";
+    cfg.n_views      = std::max(1, params.RICOH_DEPTH_N_STRIPS);
+    // ★The model config MUST be the one the dataset was collected with. It is not assumed to be —
+    // DatasetEnricher measures it (check_model_parity) and refuses to mix two different fields.
+    cfg.depth_cfg.model_path = params.RICOH_DEPTH_MODEL_PATH;
+    cfg.depth_cfg.input_size = params.RICOH_DEPTH_INPUT_SIZE;
+    cfg.depth_cfg.use_gpu    = params.RICOH_DEPTH_USE_GPU;
+    cfg.depth_cfg.use_trt    = params.RICOH_DEPTH_USE_TRT;
+    cfg.depth360.n_strips           = params.RICOH_DEPTH_N_STRIPS;
+    cfg.depth360.overlap_px         = params.RICOH_DEPTH_OVERLAP_PX;
+    cfg.depth360.band_half_elev_deg = params.RICOH_DEPTH_BAND_HALF_ELEV_DEG;
+    cfg.depth360.gnomonic           = params.RICOH_DEPTH_GNOMONIC;
+    cfg.depth360.gnomonic_fov_deg   = params.RICOH_DEPTH_GNOMONIC_FOV_DEG;
+    cfg.depth360.zdepth_to_range    = params.RICOH_DEPTH_ZDEPTH_TO_RANGE;
+    cfg.sem_cfg.model_path  = params.SEMANTIC_SEG_MODEL_PATH;
+    cfg.sem_cfg.conf_thresh = params.SEMANTIC_SEG_CONF_THRESH;
+    cfg.sem_cfg.input_size  = params.SEMANTIC_SEG_INPUT_SIZE;
+    cfg.sem_cfg.use_gpu     = params.SEMANTIC_SEG_USE_GPU;
+    cfg.sem_cfg.use_trt     = params.SEMANTIC_SEG_USE_TRT;
+
+    rc::depth::DatasetEnricher enricher(std::move(cfg));
+    enricher.bind_camera(std::move(cam));
+
+    // Per-frame geometry recorded at collection time (schema (a)) …
+    std::map<std::uint64_t, rc::depth::RoomGeometry> per_frame;
+    rc::depth::load_room_geometry(kDepthRoomsCsv, per_frame);
+    // … and the fallback for frames older than the sidecar (schema (b)): the room AS THE GRAPH HOLDS
+    // IT NOW. The enricher logs, by name, how many frames this assumption covers.
+    rc::depth::RoomGeometry fb;
+    if (scene_processor)
+        scene_processor->get_room_layout(fb.poly_x, fb.poly_y, fb.height);
+    if (const auto rn = G->get_nodes_by_type("room"); not rn.empty())
+        fb.room = rn.front().name();
+    if (not robot_T_ricoh_ and inner_eigen_api != nullptr and scene_processor)
+    {
+        // ts==0 ⇒ the InnerEigenAPI cache, which is safe only single-threaded per instance. This is
+        // the MAIN thread and the same instance every other ts==0 call in this component uses, which
+        // is exactly the condition CLAUDE.md requires. Never resolved from the enricher's thread.
+        const auto [_room, robot] = scene_processor->get_room_robot_names_for_compute();
+        robot_T_ricoh_ = inner_eigen_api->get_transformation_matrix(robot, "ricoh", 0);
+    }
+    fb.cam_z = ricoh_scene_.valid
+        ? static_cast<float>(ricoh_scene_.room_T_ricoh.translation().z())
+        : (robot_T_ricoh_ ? static_cast<float>(robot_T_ricoh_->translation().z()) : 0.f);
+    enricher.set_geometry(std::move(per_frame), fb);
+
+    // ── Run it OFF the GUI thread, and keep the GUI alive while it does ──────────────────────────
+    if (not enricher.start())
+        return "enrichment already running";
+    while (enricher.running())
+    {
+        const auto p = enricher.progress();
+        if (status)
+            status(p.total > 0
+                       ? std::format("{} {}/{}", rc::depth::DatasetEnricher::phase_name(p.phase),
+                                     p.done, p.total)
+                       : std::string(rc::depth::DatasetEnricher::phase_name(p.phase)));
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+        std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    }
+    const auto rep = enricher.join();
+    if (not rep.ok)
+        return rep.error.empty() ? std::string("enrichment failed") : rep.error;
+
+    // ★Hot-apply and persist ONLY the enriched map, but the LiDAR-only refit travelled back with it so
+    // the A/B is in the log and nobody has to trust that "it got better".
+    depth_fit_map_ = rep.map_enriched;
+    rep.map_enriched.save("etc/ricoh_depth_map.csv");
+    std::println("[depth-enrich] map applied: ct {} (dBIC {:+.1f}), supported range {:.2f}..{:.2f} m, "
+                 "band t {:+.3f}..{:+.3f} — was {:.2f}..{:.2f} m / {:+.3f}..{:+.3f} on LiDAR alone",
+                 rep.map_enriched.ct_active ? "ACTIVE" : "still off", rep.map_enriched.ct_delta_bic,
+                 rep.map_enriched.range_lo, rep.map_enriched.range_hi,
+                 rep.map_enriched.t_lo, rep.map_enriched.t_hi,
+                 rep.map_measured.range_lo, rep.map_measured.range_hi,
+                 rep.map_measured.t_lo, rep.map_measured.t_hi);
     return {};
 }
 
