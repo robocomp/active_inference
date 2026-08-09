@@ -51,6 +51,12 @@ struct TableConfig
     int   shape_eval_period      = 30;
     int   shape_eval_min_points  = 300;
     float shape_evidence_clamp   = 8.0f;
+    // Low-pass rate for the shape log-Bayes-factor. 0 = the legacy SUM (kept for A/B).
+    // >0 makes shape_evidence track the CURRENT evidence with a time constant instead of accumulating,
+    // because the quantity being re-scored is the accumulated voxel-bank cloud — largely the SAME points
+    // each evaluation, so summing measures dwell time, not information. Same lesson as
+    // ring_config.h's evidence_ema_alpha ("static furniture re-observed is not new evidence").
+    float shape_evidence_ema_alpha = 0.0f;
 
     // DIAGNOSTIC one-shot: if non-empty, dump a fitted table's accumulated voxel-bank point cloud (room
     // frame, XYZ per line) to this path ONCE (when the bank exceeds ~200 pts), for the offline

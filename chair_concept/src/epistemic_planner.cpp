@@ -29,6 +29,25 @@ namespace
 
 // AI2 belief-state face sampler: synthetic samples on a vertical face plane (face f, floor → chair
 // top), room frame. Dims come from the fixed template; only the pose (cx,cy,yaw) is a DOF.
+// Room-frame bearing FROM THE CHAIR toward a viewpoint placed off face `face_idx`. This is the quantity
+// ChairBelief bins its mode-evidence budget on (the observer's bearing as seen from the object), so the
+// planner must compute it the same way or the novelty it reads back would be for the wrong bin. Face order
+// is the repo-wide [+x,-x,+y,-y] object-frame convention, rotated into the room by the chair's yaw.
+inline float face_view_azimuth(const ChairBelief& belief, int face_idx)
+{
+    const float yaw = belief.state().yaw;
+    float local = 0.0f;                                   // outward normal of the face, object frame
+    switch (face_idx)
+    {
+        case 0: local = 0.0f;                       break;   // +x
+        case 1: local = static_cast<float>(M_PI);   break;   // -x
+        case 2: local = static_cast<float>(M_PI_2); break;   // +y
+        default: local = -static_cast<float>(M_PI_2);        // -y
+    }
+    const float a = yaw + local;
+    return std::atan2(std::sin(a), std::cos(a));          // wrapped to (-pi, pi]
+}
+
 std::vector<Eigen::Vector3f> sample_face_surface(const ChairBelief& belief, int face_idx)
 {
     constexpr int kTangent = 10, kVert = 6;
@@ -96,7 +115,25 @@ EpistemicProposal EpistemicPlanner::compute(const ChairBelief& belief, float lat
     {
         const float Ri = sigma_base * sigma_base + (lat_rate * standoff) * (lat_rate * standoff);
         const auto  dI = belief.predicted_information(sample_face_surface(belief, i), Ri);
-        return 0.5f * std::log(std::max(1e-9f, (I3 + S * dI).determinant()));
+        const float continuous = 0.5f * std::log(std::max(1e-9f, (I3 + S * dI).determinant()));
+
+        // ★ADD THE DISCRETE TERM. Sigma_ carries only the WITHIN-mode yaw width (~1 deg), so a gain built
+        // from it alone says a chair is nearly resolved while the belief still does not know which of four
+        // ways it faces — the dominant uncertainty, and the one the reported covariance actually shows
+        // (std_yaw_rep ~0.64 rad while std_yaw is 0.049). Resolving the mode is worth mode_entropy() nats.
+        //
+        // But only a look from an UNSPENT bearing can collect it: the accumulator charges each view-azimuth
+        // bin a budget and weights new frames by novelty = remaining/(remaining+budget), so a frame from an
+        // exhausted bearing contributes ~nothing however long the robot stares. Weighting the discrete term
+        // by that SAME novelty is what breaks the loop where the planner kept re-proposing a bearing it had
+        // already spent — a completed visit that resolved nothing, and a chair that was therefore
+        // re-selected forever while every other object starved.
+        //
+        // The bearing this candidate would observe from is the face normal's OUTWARD direction, i.e. the
+        // object-to-viewpoint bearing, which is what the accumulator bins on.
+        const float az = face_view_azimuth(belief, i);
+        const float discrete = belief.mode_entropy() * belief.view_novelty(az);
+        return continuous + discrete;
     };
 
     const rc::nbv::Plan plan = rc::nbv::plan_faces(target, sensor, robot_radius_m_, obstacles, raw_gain_of,

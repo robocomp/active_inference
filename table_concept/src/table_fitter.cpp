@@ -832,7 +832,27 @@ void TableFitter::evaluate_shape(TableInstance& inst)
     const float e_round = round.mean_energy(cloud, round.state(), R);
 
     // Bounded sequential accumulation of the per-evaluation log-Bayes-factor (>0 ⇒ round explains it better).
-    inst.shape_evidence = std::clamp(inst.shape_evidence + (e_square - e_round),
+    // ★NOT A SUM WHEN THE ALPHA IS SET. What is being re-scored is the accumulated voxel-bank cloud —
+    // largely the SAME points at every evaluation — so adding the log-Bayes-factor each time counts one
+    // body of evidence over and over: confidence grows with DWELL TIME rather than with information, the
+    // accumulator pins at the clamp, and recanting then costs as many evaluations as saturating did. Live
+    // symptom: the robot looking straight at a SQUARE table that stays classified round and "does not go
+    // back". Same lesson ring_metaconcept already recorded for its own log-odds ("static furniture
+    // re-observed is not new evidence; summing saturated the clamp on cycle 1"), and the same shape as the
+    // existence channel's frame-correlation fix earlier today.
+    //
+    // With alpha > 0 the statistic tracks the CURRENT evidence on the CURRENT cloud with a time constant of
+    // ~1/alpha evaluations, so a fuller view turns the verdict in bounded time no matter how long the old
+    // one stood. alpha = 0 keeps the legacy sum for an A/B.
+    const float lbf = e_square - e_round;
+    if (cfg_.shape_evidence_ema_alpha > 0.0f)
+    {
+        const float a = std::clamp(cfg_.shape_evidence_ema_alpha, 0.0f, 1.0f);
+        inst.shape_evidence += a * (lbf - inst.shape_evidence);
+    }
+    else
+        inst.shape_evidence += lbf;
+    inst.shape_evidence = std::clamp(inst.shape_evidence,
                                      -cfg_.shape_evidence_clamp, cfg_.shape_evidence_clamp);
     const std::string prev = inst.subtype;
     inst.subtype = inst.shape_evidence > 0.0f ? "round" : "square";

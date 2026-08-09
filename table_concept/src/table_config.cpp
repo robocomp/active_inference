@@ -51,6 +51,7 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.shape_eval_period        = geti("TableConcept.ShapeEvalPeriod",        30);
     out.shape_eval_min_points    = geti("TableConcept.ShapeEvalMinPoints",     300);
     out.shape_evidence_clamp     = getf("TableConcept.ShapeEvidenceClamp",     8.0f);
+    out.shape_evidence_ema_alpha = getf("TableModel.ShapeEvidenceEmaAlpha", 0.0f);
     out.dump_cloud_path          = gets("TableConcept.DumpCloudPath",          "");
 
     // ─── TableModel geometry / mask split ──────────────────────────────────────

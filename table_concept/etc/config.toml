@@ -275,6 +275,19 @@ ExistenceLogoddsMax = 4.0      # clamp |L| so evidence stays finite AND recovera
 # Set to 0 to restore the previous (independent-frames) behaviour.
 ExistenceFrameCorrelation = 0.327
 
+# ── Shape model selection (round vs square): a LOW-PASS, not an accumulator ────────────────────────────
+# ★2026-08-09. evaluate_shape() re-scores the ACCUMULATED voxel-bank cloud every evaluation — largely the
+# same points each time — so summing the log-Bayes-factor measured DWELL TIME rather than information: the
+# statistic pinned at the clamp, and recanting then cost as many evaluations as saturating did. Live
+# symptom: the robot looking straight at a SQUARE table that stayed classified round and would not go back.
+# The same lesson ring_config.h already records for its own log-odds ("static furniture re-observed is not
+# new evidence; summing saturated the clamp on cycle 1"), and the same shape as the existence channel's
+# frame-correlation fix made earlier today.
+# 0.15 ~ a 7-evaluation time constant, so a fuller view turns the verdict in bounded time however long the
+# old one stood. 0 restores the legacy sum for an A/B.
+ShapeEvidenceEmaAlpha = 0.15
+
+
 ExistenceDetectionProb = 0.85  # P(beam through an OCCUPIED footprint returns from it) — sensor hit rate
 ExistenceClutterProb = 0.05    # P(beam through an EMPTY footprint returns anyway) — spurious rate
 ExistenceSensorSigmaM = 0.03   # LiDAR range σ (m) for the soft occupancy/free-space surface split

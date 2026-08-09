@@ -278,6 +278,39 @@ public:
     // gain confidence from a viewpoint it has already exhausted, but the epistemic planner does not know
     // that and can keep proposing the same bearing. max_view_spent() is the worst-case exhaustion.
     const std::array<float, ChairBeliefParams::kViewBins>& view_spent() const { return view_spent_; }
+    // ── What a LOOK FROM A GIVEN BEARING is actually worth, for the epistemic planner ──────────────
+    // The chair's remaining uncertainty is largely DISCRETE — which of four ways it faces — and Sigma_
+    // carries only the within-mode width, so a planner scoring candidates on Sigma alone is blind to it.
+    // These two make the discrete part plannable.
+    //
+    // mode_entropy(): Shannon entropy (nats) of the 4-mode posterior. 0 = resolved, ln4 = 1.386 = no idea.
+    // It is the information a look that FULLY resolved the mode would deliver.
+    float mode_entropy() const
+    {
+        const auto p = mode_posterior();
+        float H = 0.f;
+        for (float pk : p) if (pk > 1e-6f) H -= pk * std::log(pk);
+        return H;
+    }
+
+    // view_novelty(): how much mode evidence a frame from `view_azimuth` can still carry, in [0,1). This
+    // is the SAME quantity the accumulator charges itself (novelty = remaining/(remaining+budget)), so the
+    // planner and the belief cannot disagree about whether a bearing is exhausted. Without it the planner
+    // keeps proposing a bearing whose budget is spent: the robot drives there, frame_w ~ 0, the mode does
+    // not move, the gain stays high, and the same viewpoint is proposed again — a completed visit that
+    // resolves nothing, forever.
+    float view_novelty(float view_azimuth) const
+    {
+        constexpr int B = ChairBeliefParams::kViewBins;
+        const float span = 2.0f * static_cast<float>(M_PI) / static_cast<float>(B);
+        const float wrapped = std::atan2(std::sin(view_azimuth), std::cos(view_azimuth));
+        int bin = static_cast<int>(std::floor((wrapped + static_cast<float>(M_PI)) / span));
+        bin = std::clamp(bin, 0, B - 1);
+        const float budget    = std::max(1e-3f, params_.view_budget);
+        const float remaining = std::max(0.0f, budget - view_spent_[bin]);
+        return remaining / (remaining + budget);
+    }
+
     float max_view_spent() const
     { float m = 0.f; for (float v : view_spent_) m = std::max(m, v); return m; }
     std::array<float, 4> mode_posterior() const;            // p_k over the 4 orientation modes = softmax(−flip_acc_)
