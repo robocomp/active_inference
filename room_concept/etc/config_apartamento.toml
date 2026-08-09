@@ -305,14 +305,30 @@ StationaryMotionThreshold = 0.02  # FIX 1: de 0.001 a 0.02 m. Cuando el robot
 #   MotionLearnMinOmega   — min |ω| (rad/s) for slip-k sample to be used
 #   MotionLearnMinFrames  — warmup: static params used until this many quality
 #                           frames have been accumulated (default 50 ≈ 10 s @ 5 Hz)
-LearnMotionModel            = true    # RESTORED 08-09, the other half of the abandoned 07-16 A/B.
-                                      # It was switched off so the static EncoderRotSlipK=0.25 would be
-                                      # authoritative; that value is gone and the slip term's units are
-                                      # fixed (it multiplies the rotation INCREMENT, not the rate), so
-                                      # the learned slip_k is now a dimensionless fraction inferred from
-                                      # post-optimisation residuals rather than a hand-set constant that
-                                      # silently tracked the update rate. Warmup: static params are used
-                                      # for the first MotionLearnMinFrames quality frames.
+LearnMotionModel            = false   # A/B'd 08-09 and REJECTED — do not turn this on again without
+                                      # first fixing what update_motion_model() measures.
+                                      # It learns slip_k ≈ 0.81 (clamped at 1.0 on 5% of frames), i.e.
+                                      # σ_meas = 0.039 rad against a true increment of 0.036 rad: it
+                                      # declares the encoder's per-update rotation uninformative. The
+                                      # measured-prior weight then collapses to 0.04 during fast turns,
+                                      # the prior falls back onto the ~18%-short command channel, and
+                                      # everything the units fix bought is undone — early exit while
+                                      # rotating 91.6% → 68.5%, over-gate frames 3.6% → 26.7%.
+                                      # ★ 0.814 × dt(42 ms) = 0.034, the same value as the old static
+                                      # 0.05/0.25 in the PRE-fix units: the learner normalises by the
+                                      # same quantity build_motion_covariance multiplies by, so the loop
+                                      # closes in either convention and the units fix is a NO-OP here.
+                                      # The defect is the residual it learns from — r[2] is a
+                                      # post-optimisation window-pair residual carrying the optimiser's
+                                      # own correction and the marginalisation, so attributing all of it
+                                      # to odometry double-counts. Corroboration: every learned
+                                      # parameter came out implausibly large in the same direction
+                                      # (ml_odom_noise_trans 0.538 vs static 0.08; ml_bias_theta
+                                      # 3.66e-02 rad = 2.1°). Decisive: a covariance that makes
+                                      # predictions WORSE when you trust it is mis-estimated.
+                                      # It is also the only one of three runs that LOST THE TRACK — 7
+                                      # recovery episodes in 6.2 min, against 0 in a static-k run that
+                                      # drove twice as much rotation above 1.4 rad/s.
 MotionLearnAlpha            = 0.05    # slip-k and trans-noise EMA rate
 MotionLearnBeta             = 0.02    # bias EMA rate
 MotionLearnMinOmega         = 0.05    # rad/s — min angular speed per slot to update slip-k
