@@ -268,6 +268,11 @@ struct TableConfig
     bool  existence_removal_enabled = false;
     float existence_removal_prob    = 0.12f;  // decision boundary: remove when L < log(p/(1−p))
     float existence_logodds_max     = 4.0f;   // clamp |L| so evidence stays finite AND recoverable
+    // Frame-to-frame correlation of same-sign existence observations. A detector does not fail by
+    // independent coin flip — it fails at a particular framing — so N consecutive misses are worth far
+    // fewer than N observations (rc::exist::ExistenceBelief::set_frame_correlation). MEASURED, not tuned.
+    // 0 = the previous behaviour (every frame independent).
+    float existence_frame_correlation = 0.0f;
     float existence_detection_prob  = 0.85f;  // P(beam through OCCUPIED footprint returns from it)
     float existence_clutter_prob    = 0.05f;  // P(beam through EMPTY footprint returns anyway) — spurious rate
     float existence_sensor_sigma_m  = 0.03f;  // LiDAR range σ (m) for the soft occ/free surface split

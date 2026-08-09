@@ -331,11 +331,49 @@ class ExistenceBelief
 public:
     explicit ExistenceBelief(float L0 = 0.0f, float L_max = 4.0f) : L_(L0), L_max_(L_max) {}
 
+    // ── Frame-to-frame correlation: N consecutive looks are not N independent observations ──────────────
+    //
+    // saturate() above already refuses to let N registration-correlated observations WITHIN a cycle count as
+    // N independent ones. The identical argument applies ACROSS cycles and was not being made: a detector
+    // does not fail by independent coin flip, it fails at a particular framing, so consecutive misses from a
+    // barely-changed viewpoint are the SAME observation repeated.
+    //
+    // MEASURED on table_concept's own log (2026-08-09), restricted to the cycles where absence is actually
+    // charged, because over all frames the correlation is dominated by "not in view" and reads far higher:
+    //     p_detect>0.3   P(miss)=0.021   P(miss | previous miss)=0.610   rho=0.602
+    //     p_detect>0.5   P(miss)=0.010   P(miss | previous miss)=0.333   rho=0.327
+    // A miss is rare on those cycles, but once one happens the next is 20-60x more likely than the base rate.
+    //
+    // N correlated trials carry an EFFECTIVE sample size N_eff(N) = N / (1 + (N-1)·rho), which saturates at
+    // 1/rho however long the run gets. So the k-th consecutive observation of the same sign is worth the
+    // MARGINAL gain w_k = N_eff(k) − N_eff(k−1): the first counts fully, later ones count for less and less.
+    // A run of opposite sign resets the count — that genuinely is new information.
+    //
+    // WHY THIS MATTERS (the bug it fixes): table_1 was removed and reborn three times. Each death was a run of
+    // consecutive no-mask cycles while the robot drove through the detector envelope's shoulder — 7 cycles,
+    // ~0.7 s, taking L from 4.00 to −0.36 and onward to the −4 floor. Each individual charge was arithmetically
+    // right for ONE independent miss; charging seven of them was not. With the measured rho those 7 misses are
+    // worth 1.5–2.4 observations and L lands at +1.9 / +1.4 — absence still charged, object still alive.
+    //
+    // rho DEFAULTS TO 0, which makes w_k ≡ 1 and reproduces the previous behaviour exactly. An agent opts in by
+    // publishing a rho MEASURED from its own log, the same way the detector envelope is fitted rather than
+    // picked. Symmetric by construction: confirmations are just as correlated as misses, and damping only one
+    // side would be a ratchet.
+    void set_frame_correlation(float rho) { rho_ = std::clamp(rho, 0.0f, 0.95f); }
+    float frame_correlation() const { return rho_; }
+    int   run_length() const { return run_k_; }   // consecutive same-sign observations (diagnostic)
+
     // Fold one modality's per-cycle evidence. HOLD (no change) when the instance wasn't probed this cycle.
     void integrate(const Evidence& e)
     {
         if (e.n_reached == 0) return;
-        L_ = std::clamp(L_ + e.log_odds_delta, -L_max_, L_max_);
+        const int sign = (e.log_odds_delta > 0.0f) - (e.log_odds_delta < 0.0f);
+        if (sign != 0)
+        {
+            if (sign == run_sign_) ++run_k_;
+            else { run_sign_ = sign; run_k_ = 1; }
+        }
+        L_ = std::clamp(L_ + e.log_odds_delta * marginal_weight(run_k_), -L_max_, L_max_);
     }
     float logodds()  const { return L_; }
     float p_exists() const { return 1.0f / (1.0f + std::exp(-L_)); }
@@ -349,7 +387,20 @@ public:
     void  set_max(float m){ L_max_ = std::max(1e-3f, m); }
 
 private:
+    // Marginal worth of the k-th consecutive same-sign observation: N_eff(k) − N_eff(k−1), with
+    // N_eff(n) = n / (1 + (n−1)·rho). rho = 0 ⇒ 1 for every k (independent trials, the previous behaviour).
+    float marginal_weight(int k) const
+    {
+        if (rho_ <= 0.0f or k <= 1) return 1.0f;
+        const auto n_eff = [&](int n) { return n <= 0 ? 0.0f
+                                                      : static_cast<float>(n) / (1.0f + (n - 1) * rho_); };
+        return std::max(0.0f, n_eff(k) - n_eff(k - 1));
+    }
+
     float L_, L_max_;
+    float rho_      = 0.0f;   // frame-to-frame correlation of same-sign observations; 0 ⇒ independent
+    int   run_sign_ = 0;      // +1 confirming run, −1 absence run, 0 = none yet
+    int   run_k_    = 0;      // length of the current same-sign run
 };
 
 }  // namespace rc::exist

@@ -71,6 +71,7 @@ void TableExistence::update_and_remove(TableFitter& fitter, TableLidarIngestor* 
     {
         if (not inst.ai2_initialized) continue;
         inst.existence.set_max(cfg_.existence_logodds_max);
+        inst.existence.set_frame_correlation(cfg_.existence_frame_correlation);
         const auto& bs = inst.ai2_belief.state();
         const auto& S  = inst.ai2_belief.covariance();
         const float surf_sigma = std::sqrt(std::max(0.0f, 0.5f * (S(0, 0) + S(1, 1))));   // footprint position σ

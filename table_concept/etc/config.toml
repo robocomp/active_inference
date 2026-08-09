@@ -257,6 +257,24 @@ ExistenceRemovalEnabled = true    # ON (fit calibrated). Optimizer-orthogonal: w
                                   # NEVER falsely removed — it removes only when the camera LOOKS and sees empty.
 ExistenceRemovalProb = 0.12    # remove when L < log(p/(1−p)); lower = more conservative
 ExistenceLogoddsMax = 4.0      # clamp |L| so evidence stays finite AND recoverable
+# ── Frame-to-frame correlation of existence observations ──────────────────────────────────────────────
+# ★MEASURED from this agent's own ai2_log 2026-08-09, restricted to the cycles where absence is actually
+# charged (over ALL frames the statistic is dominated by "not in view" and reads 0.98, which is not the
+# quantity wanted):
+#     p_detect>0.3   P(miss)=0.021   P(miss | previous miss)=0.610   rho=0.602
+#     p_detect>0.5   P(miss)=0.010   P(miss | previous miss)=0.333   rho=0.327   <- used (conservative)
+# A miss on those cycles is rare, but once one happens the next is 20-60x likelier than the base rate:
+# the detector fails at a FRAMING, not by independent coin flip. N correlated trials carry an effective
+# sample size N/(1+(N-1)rho), so a miss run saturates at 1/rho however long it gets.
+#
+# THE BUG THIS FIXES: table_1 was removed and reborn three times (1596 / 1455 / 2793 cycles). Each death
+# was a run of consecutive no-mask cycles while the robot drove through the detector envelope's shoulder
+# — 7 cycles, ~0.7 s, L from 4.00 to -0.36 and on to the -4 floor. Every individual charge was right for
+# ONE independent miss; charging seven of them was not. At rho=0.327 those 7 misses are worth 2.36
+# observations and L lands at +1.42 — absence still charged, the table still alive.
+# Set to 0 to restore the previous (independent-frames) behaviour.
+ExistenceFrameCorrelation = 0.327
+
 ExistenceDetectionProb = 0.85  # P(beam through an OCCUPIED footprint returns from it) — sensor hit rate
 ExistenceClutterProb = 0.05    # P(beam through an EMPTY footprint returns anyway) — spurious rate
 ExistenceSensorSigmaM = 0.03   # LiDAR range σ (m) for the soft occupancy/free-space surface split
