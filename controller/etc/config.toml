@@ -627,7 +627,21 @@ GoalFacingYawEnabled = true
 # 0 restores the previous behaviour (mean footprint only). Objects whose agent publishes no covariance,
 # or whose edge carries a covariance RING rather than a single block, are left at their mean — reading
 # block 0 of a ring would plan against a stale covariance, which is worse than not using one.
-ObjectSigmaInflationK = 2.0
+# ★TURNED OFF 2026-08-09 after a live regression, pending the real fix. Two things went wrong:
+#   1. the inflation was applied to the object's STATE, not just to the polygon handed to the planner, so
+#      the padded footprint became the object's recorded SIZE everywhere downstream and blocked the robot.
+#      Fixed (planning-only copy), and a hard ceiling added below.
+#   2. more fundamentally, sigma GROWS whenever the robot is not looking at an object frontally, so the
+#      margin grows without limit while the robot looks away. Capping that is a band-aid: the belief should
+#      not be growing in the first place, because the RICOH still sees the object. A peripheral bearing is
+#      real evidence — tight ACROSS the ray, loose along it — and folding it in is what should bound sigma.
+#      Until that lands, an uncertainty-derived margin is measuring the absence of a fix, not the world.
+# Set to 2.0 to re-enable once peripheral evidence bounds sigma; watch the sigma_pos= values the tracker
+# now reports per object before trusting it.
+ObjectSigmaInflationK = 0.0
+# Hard ceiling on the growth (m). Robot radius is the natural scale: beyond it, more clearance cannot make
+# a path safer, only impossible.
+ObjectSigmaInflationMaxM = 0.30
 
 
 # Affordance servo ("lock-on") executor — HOW (gains/caps/timing). The WHAT/WHEN (which feedback

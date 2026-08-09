@@ -1043,30 +1043,38 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
             continue;
         }
 
-        // ── Grow the footprint by the object's OWN position uncertainty ─────────────────────────
-        // rt_covariance on the object's RT edge is a 6x6 row-major SE3 covariance [x,y,z,rx,ry,rz],
-        // so the position variances are [0] and [1*6+1]=[7]. Concept agents write ONE 36-element
-        // block directly on the edge (see e.g. table_scene_graph.cpp), unlike the robot->room edge,
-        // where cortex's RT api keeps a RING of 36-blocks — hence the exact-size test rather than a
-        // >= : a ring would need the head index to find the newest block, and silently reading block
-        // 0 of a ring is how you end up planning against a stale covariance.
+        // ── Clearance from the object's OWN position uncertainty — PLANNING COPY ONLY ───────────
+        // ★This must NOT touch `state`. state flows into known_graph_obstacles_ (the recorded geometry),
+        // into the display polygon and into round_radius_m, so inflating it in place makes the padded
+        // footprint the object's SIZE everywhere downstream — which is what blocked the robot when this
+        // was first written: the world model started believing tables were metres across.
         //
-        // sigma_pos is the WORSE of the two axes: clearance is a bound, and the direction the object
-        // might have moved is not something the planner gets to choose. k = 0 leaves the footprint at
-        // its mean, which is the previous behaviour.
+        // rt_covariance is a 6x6 row-major SE3 covariance [x,y,z,rx,ry,rz]; position variances are [0]
+        // and [1*6+1]=[7]. Concept agents write ONE 36-element block directly on the edge, unlike edges
+        // cortex's RT api manages, where it is a RING and block 0 is not the newest — hence the exact
+        // size test rather than a >=.
+        //
+        // ★AND IT MUST BE BOUNDED. A concept agent grows Sigma while it is not measuring the object, by
+        // design, so sigma rises without limit whenever the robot looks away — and an unbounded margin
+        // walls off the room. Past the robot's own radius, more clearance does not make a path safer, it
+        // makes it nonexistent; "I do not know where it is" is an argument to go and LOOK, which is what
+        // the epistemic affordances are for, not an argument to refuse to move.
+        ControllerObstacleState plan_state = state;   // planning-only; `state` stays the fitted truth
         if (params_ != nullptr and params_->object_sigma_inflation_k > 0.f
             and node.type() != "obstacle")   // same test the `kind` below uses
         {
             if (const float sigma = object_position_sigma_from_edge(graph_, node); sigma > 0.f)
             {
-                const float grow = 2.0f * params_->object_sigma_inflation_k * sigma;   // both sides
-                state.width_m += grow;
-                state.depth_m += grow;
-                report << " sigma_pos=" << sigma << " inflated_by=" << grow;
+                const float want = 2.0f * params_->object_sigma_inflation_k * sigma;   // both sides
+                const float grow = std::min(want, std::max(0.f, params_->object_sigma_inflation_max_m));
+                plan_state.width_m += grow;
+                plan_state.depth_m += grow;
+                report << " sigma_pos=" << sigma << " inflated_by=" << grow
+                       << (grow < want ? " (CAPPED)" : "");
             }
         }
 
-        auto polygon = ControllerObstacleModel::polygon_from_state(state);
+        auto polygon = ControllerObstacleModel::polygon_from_state(plan_state);
         report << " center=(" << state.center.x() << "," << state.center.y() << ") yaw=" << state.yaw_rad;
         if (!polygon.empty())
             report << " first_vertex=(" << polygon.front().x() << "," << polygon.front().y() << ")";

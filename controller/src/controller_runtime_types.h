@@ -298,6 +298,11 @@ struct ControllerParams
     // 0 DISABLES it (the previous behaviour, mean footprint only). Deliberately inert by default so
     // enabling it is a visible one-line config decision.
     float object_sigma_inflation_k = 0.0f;
+    // Hard ceiling on that growth, in metres. A concept agent grows Sigma while it is not measuring an
+    // object, so sigma climbs without limit whenever the robot looks away; without a ceiling the margin
+    // eventually walls off the room. Robot radius is the natural scale: beyond it, more clearance cannot
+    // make a path safer, only impossible.
+    float object_sigma_inflation_max_m = 0.30f;
     float straight_speed_min_goal_dist_m = 1.5f;
 
     // Honour an affordance's commanded facing yaw at arrival. true = the follower rotates in place at

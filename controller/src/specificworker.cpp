@@ -842,6 +842,7 @@ void SpecificWorker::load_params()
 	// only, never orient). See ControllerParams::goal_facing_yaw_enabled.
 	load_optional("Controller.GoalFacingYawEnabled", params.goal_facing_yaw_enabled);
 	load_optional_cast<double>("Controller.ObjectSigmaInflationK", params.object_sigma_inflation_k);
+	load_optional_cast<double>("Controller.ObjectSigmaInflationMaxM", params.object_sigma_inflation_max_m);
 
 	// Affordance servo ("lock-on") executor — HOW only; WHAT/WHEN is per-affordance (contract).
 	load_optional("Controller.LockOnEnabled", params.lockon_enabled);
