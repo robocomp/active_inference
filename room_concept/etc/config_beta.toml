@@ -301,7 +301,14 @@ StationaryMotionThreshold = 0.02  # FIX 1: de 0.001 a 0.02 m. Cuando el robot
 #   MotionLearnMinOmega   — min |ω| (rad/s) for slip-k sample to be used
 #   MotionLearnMinFrames  — warmup: static params used until this many quality
 #                           frames have been accumulated (default 50 ≈ 10 s @ 5 Hz)
-LearnMotionModel            = true    # enabled; disable to fall back to static params
+LearnMotionModel            = false   # static params are authoritative -- see below
+# 08-09: A/B'd and REJECTED, do not turn on again without first fixing what update_motion_model
+# measures. It learns slip_k ~= 0.81 (sigma_meas 0.039 rad against a true increment of 0.036), the
+# measured prior collapses to weight 0.04 during fast turns, the prior falls back onto the command
+# channel, and early exit while rotating went 91.6% -> 68.5%. It was also the only configuration of
+# four that LOST THE TRACK (7 recovery episodes in 6.2 min against 0). The defect is the residual it
+# learns from -- a post-optimisation window-pair residual carrying the optimiser's own correction --
+# so it is CODE, not a simulation artefact, and it will fail the same way on the real robot.
 MotionLearnAlpha            = 0.05    # slip-k and trans-noise EMA rate
 MotionLearnBeta             = 0.02    # bias EMA rate
 MotionLearnMinOmega         = 0.05    # rad/s — min angular speed per slot to update slip-k

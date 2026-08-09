@@ -4173,11 +4173,6 @@ namespace rc
         if (prev_ts == 0 || odometry_history.empty() || !last_update_result.ok)
             return prior;
         const auto dt = lidar_timestamp - prev_ts;
-        // prior.delta_pose = integrate_odometry_over_window(..., prev_ts, lidar_timestamp);
-
-        // if (last_lidar_timestamp == 0 || odometry_history.empty() || !last_update_result.ok)
-        //     return prior;
-        // const auto dt = lidar_timestamp - last_lidar_timestamp;
         if (dt <= 0)
             return prior;
         prior.dt = static_cast<float>(dt);
