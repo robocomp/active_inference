@@ -273,6 +273,13 @@ public:
     // diagnostics: it is the quantity the rig prior competes against, so when a prior fails to flip a
     // chair this is the number that says whether it was out-voted or never arrived.
     const std::array<float, 4>& flip_acc() const { return flip_acc_; }
+    // Mode-evidence budget already spent per bearing bin. Exposed for diagnostics because it is the
+    // quantity that explains a COMPLETED visit which resolved nothing: the belief correctly refuses to
+    // gain confidence from a viewpoint it has already exhausted, but the epistemic planner does not know
+    // that and can keep proposing the same bearing. max_view_spent() is the worst-case exhaustion.
+    const std::array<float, ChairBeliefParams::kViewBins>& view_spent() const { return view_spent_; }
+    float max_view_spent() const
+    { float m = 0.f; for (float v : view_spent_) m = std::max(m, v); return m; }
     std::array<float, 4> mode_posterior() const;            // p_k over the 4 orientation modes = softmax(−flip_acc_)
     float yaw_marginal_var() const;                         // Σ(2,2) + Var_k[Δ_k] under the mode posterior (rad²)
     Eigen::Matrix<float, 3, 3> covariance_reported() const; // Σ with the yaw marginal folded into (2,2)
