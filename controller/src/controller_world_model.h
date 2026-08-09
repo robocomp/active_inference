@@ -46,5 +46,9 @@ private:
     rc::AffordanceManager *affordance_manager_ = nullptr;
     std::shared_ptr<DSR::DSRGraph> graph_;
     DSR::InnerEigenAPI *inner_eigen_api_ = nullptr;
+    // Owned RT accessor: read_pose_uncertainty() needs get_edge_RT_covariance(), which is the only thing
+    // that knows how rt_covariance is packed (ring vs single 36-block, head index, timestamp selection).
+    // Hand-indexing the flat attribute is what produced the yaw-read-as-z bug this replaced.
+    std::unique_ptr<DSR::RT_API> rt_api_;
     ControllerGraphState graph_state_;
 };

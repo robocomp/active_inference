@@ -28,6 +28,7 @@ void ControllerWorldModel::set_dependencies(std::shared_ptr<DSR::DSRGraph> graph
 {
     graph_ = std::move(graph);
     inner_eigen_api_ = inner_eigen_api;
+    rt_api_ = graph_ ? graph_->get_rt_api() : nullptr;   // for get_edge_RT_covariance()
 }
 
 bool ControllerWorldModel::refresh_graph_state()
@@ -192,17 +193,30 @@ std::optional<ControllerPoseUncertainty> ControllerWorldModel::read_pose_uncerta
     if (!rt_edge.has_value())
         return std::nullopt;
 
-    auto covariance_att = graph_->get_attrib_by_name<rt_covariance_att>(rt_edge.value());
-    if (!covariance_att.has_value())
+    // ★READ IT THROUGH cortex's OWN ACCESSOR, not by hand-indexing the flat attribute.
+    //
+    // What this replaced was wrong twice over. rt_covariance is a 6x6 ROW-MAJOR SE3 covariance
+    // [x,y,z,rx,ry,rz] (RT_COVARIANCE_BLOCK_SIZE = 36 in cortex's dsr_rt_api.cpp; the concept agents'
+    // writers spell the same order out), so:
+    //   · flat[0] and flat[7] ARE var_x and var_y — those two were right;
+    //   · flat[14] = [2*6+2] is var_Z. Yaw is [5*6+5] = [35]. The rotation throttle was therefore being
+    //     driven by the robot's HEIGHT uncertainty;
+    //   · and the guard `size() < 15` waved through a 36-element block, and a whole RING of them, without
+    //     noticing either. On edges cortex's RT api manages the attribute is a ring of blocks, so block 0
+    //     is not necessarily the newest — the flat read could also be an arbitrarily stale covariance.
+    //
+    // RT_API::get_edge_RT_covariance() already handles all of that: ring vs single block, the head index,
+    // and timestamp selection. Asking it is both correct and the only version that stays correct if the
+    // packing changes.
+    if (rt_api_ == nullptr)
         return std::nullopt;
-
-    const auto &flat_covariance = covariance_att.value().get();
-    if (flat_covariance.size() < 15)
+    const auto cov = rt_api_->get_edge_RT_covariance(rt_edge.value());   // defaults: newest block, Nearest
+    if (not cov.has_value())
         return std::nullopt;
 
     ControllerPoseUncertainty uncertainty;
-    uncertainty.xy_std_m = std::sqrt(std::max(0.f, std::max(flat_covariance[0], flat_covariance[7])));
-    uncertainty.theta_std_rad = std::sqrt(std::max(0.f, flat_covariance[14]));
+    uncertainty.xy_std_m = static_cast<float>(std::sqrt(std::max(0.0, std::max((*cov)(0, 0), (*cov)(1, 1)))));
+    uncertainty.theta_std_rad = static_cast<float>(std::sqrt(std::max(0.0, (*cov)(5, 5))));   // yaw, was (2,2)
     return uncertainty;
 }
 
