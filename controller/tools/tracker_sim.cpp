@@ -220,6 +220,9 @@ struct Result
 {
     // First loss of the route, for locating a divergence instead of only sizing it.
     float s_lost = -1.f, kappa_lost = 0.f, v_lost = 0.f, t_lost = 0.f, s_end = 0.f;
+    // --stop-test only: what the robot did at the END of the curve.
+    float end_dist = -1.f, end_speed = -1.f, max_past = 0.f;
+    bool  came_to_rest = false;
     double rot_effort = 0.0;   // integral |omega| dt — the quantity the L policy constrains
 
     int n = 0;
@@ -247,6 +250,7 @@ double corr(const std::vector<float> &a, const std::vector<float> &b, int lag)
 float g_plant_tau = 0.22f, g_plant_delay = 0.20f, g_plant_gain = 0.89f;   // the ROBOT, for sim2real tests
 float g_headroom = 1.0f;
 bool  g_heading_gate = false;   // FAILED experiment, kept as a negative result; see the A/B below
+bool  g_stop_test = false;   // run to an actual stop instead of breaking 0.15 m early
 float g_proj_window = 2.0f;    // forward arc-length search window for the projection   // fraction of the omega budget the FEEDFORWARD may claim; the rest is
                            // reserved for feedback authority. 1.0 = the naive limit.
 
@@ -264,6 +268,7 @@ Result run(const rc::RouteFollower &route, Arm arm, float v_cap, float w_max,
     constexpr float kCtrlDt = 0.05f;    // 20 Hz, the data-driven control rate
     constexpr float kSubDt  = 0.005f;   // plant integration
     float s_hint = 0.f, last_v = 0.f, last_w = 0.f;
+    float v_cmd_prev = 0.f;   // --stop-test: "at rest" means the PLANT has stopped AND nothing new was asked
     float lx = P.x, ly = P.y; bool have_last = false;
     bool  first = true;
 
@@ -294,7 +299,32 @@ Result run(const rc::RouteFollower &route, Arm arm, float v_cap, float w_max,
             s_hint = any ? bs : sp.project(rp, s_hint, 2.0f);   // all rejected -> fall back
         }
         else s_hint = sp.project({P.x, P.y}, s_hint, g_proj_window);
-        if (s_hint >= sp.length() - 0.15f) { R.t_end = t; break; }
+        // ── WHERE THE RUN ENDS ───────────────────────────────────────────────────────────────────
+        // ★THE DEFAULT STOPS 0.15 m EARLY, AND THAT IS A BLIND SPOT. This bench was built for MISSION
+        // routes, where RouteFollower::finished() accepts arrival within a metre, so "did it come to
+        // rest ON the endpoint" was never a question worth asking and the loop breaks as soon as the
+        // route is essentially covered. The consequence is that the terminal approach — the only regime
+        // that matters for a point target, e.g. an affordance standpoint — has never been simulated at
+        // all. Both a 39 m tour and a 2.5 m hop reported "ended at s = length - 0.16 m", which is this
+        // line, not the tracker.
+        // --stop-test runs the same closed loop to an actual STOP and records what it did there.
+        {
+            const Vector2f endp = sp.position_at(sp.length());
+            const float d_end = (Vector2f(P.x, P.y) - endp).norm();
+            const float psi_e = sp.heading_at(sp.length());
+            // Signed progress along the curve's final heading: positive means BEYOND the endpoint.
+            const float past = std::cos(psi_e) * (P.x - endp.x()) + std::sin(psi_e) * (P.y - endp.y());
+            if (g_stop_test)
+            {
+                R.max_past = std::max(R.max_past, past);
+                const bool at_rest = std::abs(P.v_real) < 0.02f and std::abs(v_cmd_prev) < 0.02f;
+                if (at_rest and t > 1.0)
+                { R.came_to_rest = true; R.end_dist = d_end; R.end_speed = std::abs(P.v_real); R.t_end = t; break; }
+                if (past > 1.5f)   // sailed past and kept going: no stop is coming
+                { R.end_dist = d_end; R.end_speed = std::abs(P.v_real); R.t_end = t; break; }
+            }
+            else if (s_hint >= sp.length() - 0.15f) { R.t_end = t; break; }
+        }
 
         const float v_lim = speed_limit(sp, s_hint, v_cap, a_lat, a_dec, w_max, W, g_headroom);
         float v_cmd = 0.f, w_cmd = 0.f;
@@ -303,6 +333,7 @@ Result run(const rc::RouteFollower &route, Arm arm, float v_cap, float w_max,
         if (not first) { R.tv_v += std::abs(v_cmd - last_v); R.tv_w += std::abs(w_cmd - last_w); }
         R.rot_effort += std::abs(P.w_real) * kCtrlDt;   // REALISED turn, not commanded
         last_v = v_cmd; last_w = w_cmd; first = false;
+        v_cmd_prev = v_cmd;
 
         const Vector2f r = sp.position_at(s_hint);
         const float psi = sp.heading_at(s_hint);
@@ -400,7 +431,7 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; ++i)
     {
         const std::string a = argv[i];
-        if (a == "--sweep") sweep = true; else path = a;
+        if (a == "--sweep") sweep = true; else if (a == "--stop-test") g_stop_test = true; else path = a;
     }
 
     World w;
@@ -761,6 +792,25 @@ int main(int argc, char **argv)
     // PlainTracker, not a parameter, and this bench now LINKS the tracker instead of copying it —
     // sweeping it would mean adding a knob to the robot to serve the bench. Its answer is already
     // recorded in etc/config.toml; re-run it by editing kSteerFloorMps if it is ever reopened.)
+
+    if (g_stop_test)
+    {
+        // ── DOES IT COME TO REST ON THE ENDPOINT? ────────────────────────────────────────────────
+        // The question a POINT target asks and a mission route never does. Reported as the two numbers
+        // that decide it: how far from the endpoint the robot finally stopped, and how far PAST the
+        // endpoint it got on the way — a tracker can satisfy the first by creeping back after
+        // overshooting, and on the robot that is a collision, not an arrival.
+        std::printf("\n  ── TERMINAL APPROACH (run to rest, not to length-0.15) ─────────────────────\n");
+        std::printf("      %-18s %10s %10s %10s %8s\n", "arm", "stopped", "end dist", "max past", "end v");
+        for (auto &[nm, R] : std::initializer_list<std::pair<const char *, Result>>{
+                 {"pd",    run(route, PdArm{}, w.v_max, kWmax, w.a_lat, kADec, kW, true)},
+                 {"plain", run(route, FfArm{}, w.v_max, kWmax, w.a_lat, kADec, kW, true)}})
+            std::printf("      %-18s %10s %8.3f m %8.3f m %6.3f m/s%s\n", nm,
+                        R.came_to_rest ? "yes" : "NO", R.end_dist, R.max_past, R.end_speed,
+                        R.max_past > 0.25f ? "   <- OVERSHOT the endpoint" : "");
+        std::printf("\n  (max past > 0 means it drove BEYOND the end of the curve.)\n");
+        return 0;
+    }
 
     report("pd", run(route, PdArm{}, w.v_max, kWmax, w.a_lat, kADec, kW, true));
     report("plain (FF+Frenet)", run(route, FfArm{}, w.v_max, kWmax, w.a_lat, kADec, kW, true));

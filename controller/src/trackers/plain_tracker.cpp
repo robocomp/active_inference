@@ -65,6 +65,26 @@ ControlOutput& PlainTracker::compute(ControlOutput& out, const TrackerInput& in,
     // under the root is a FLOOR: at zero remaining arc it still commanded 0.15 m/s, so the robot crept
     // past the end of its own route — measured, route_s pinned at 38.42 for the last ten cycles with
     // cmd_adv at 0.146 — and drifted out of RouteFollower::finished()'s 1 m end-reach check.
+    // ── ⚠OPEN, 2026-08-09: THIS TRACKER CANNOT STOP ON A POINT TARGET ────────────────────────────
+    // Reproduce: tools/tracker_sim <short route> --stop-test. On a 2.5 m hop PLAIN drives 1.507 m PAST
+    // the end of its own curve and is still doing 0.234 m/s, where PD stops 0.124 m short having never
+    // passed it (cross-track in that regime: 296 mm rms / 579 mm max, 4.08 m driven of a 2.5 m route).
+    // On the robot this is "jumps over the target and moves forward until it hits an obstacle", and it
+    // is why point targets are NOT wired to PLAIN — see controller_session.cpp's set_route(nullptr).
+    // ★THE TAPER BELOW IS NOT THE DEFECT. It is starved: `s` saturates ~1.5 m short of length(), so
+    // s_remaining never shrinks, so v_stop never falls. Proven by arming a stop guard inside the braking
+    // distance v^2/(2a) ~ 0.5 m — it NEVER FIRED while the robot was more than a metre beyond the end.
+    // The fix belongs in RouteSpline::project (why the monotone-forward window stops advancing near the
+    // end of a short curve), not here.
+    // ★THREE FIXES TRIED HERE AND ALL REVERTED, each broken by the same fact — A TOUR ENDS WHERE IT
+    // BEGAN, so the endpoint sits beside the start:
+    //   • bound the taper by the EUCLIDEAN distance to the endpoint -> brakes at the START of a loop.
+    //     Measured on the 37 m tour: 88 s -> 400 s, TV(w)/m 2.07 -> 16.34.
+    //   • zero the taper once PAST the endpoint's heading plane -> true on cycle one of a loop, same
+    //     crawl.
+    //   • arm that guard only when s_remaining is inside the braking distance -> tour restored exactly,
+    //     but inert in the failing case, because s_remaining is the very thing that is wrong.
+    // Anything attempted next must be measured on BOTH routes (loop and short hop) before it ships.
     const float a_dec = std::max(0.1f, p.cbf_max_decel);
     const float s_remaining = std::max(0.f, sp.length() - s);
     const float v_stop = std::sqrt(2.f * a_dec * s_remaining);
