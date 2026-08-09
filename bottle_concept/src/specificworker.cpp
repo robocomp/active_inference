@@ -1071,6 +1071,7 @@ void SpecificWorker::step_epistemic(rc::BottleInstance& inst)
     inst.last_epistemic_gain = prop.epistemic_gain;   // expose to the dashboard
 
     const auto affordance_node_before = inst.affordance.node_id();
+    inst.dbg_nbv_gain = prop.epistemic_gain;   // the value actually published
     inst.affordance.update(prop);
     if (affordance_node_before == 0 and inst.affordance.node_id() != 0)
         trigger_graph_layout_twopi();

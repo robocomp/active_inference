@@ -967,6 +967,7 @@ void SpecificWorker::step_epistemic(rc::CabinetInstance& inst, DSR::Node& node)
     scene_graph_->write_epistemic_proposal(node, prop);
     // Publish / refresh dedicated affordance node (persists; update_node refreshes target+gain)
     const auto affordance_node_before = inst.affordance.node_id();
+    inst.dbg_nbv_gain = prop.epistemic_gain;   // the value actually published
     inst.affordance.update(prop);
     if (affordance_node_before == 0 and inst.affordance.node_id() != 0)
         trigger_graph_layout_twopi();

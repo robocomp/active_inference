@@ -1040,6 +1040,7 @@ void SpecificWorker::step_epistemic(rc::RefrigeratorInstance& inst, DSR::Node& n
     // only record was stdout, and the affordance node carries the FROZEN pose during an executing claim — so
     // "the target is too close" was unanswerable after the fact from either source.
     inst.dbg_nbv_standoff = prop.chosen_standoff_m;
+    inst.dbg_nbv_gain     = prop.epistemic_gain;
     inst.dbg_nbv_target_x = prop.epistemic_target_x_m;
     inst.dbg_nbv_target_y = prop.epistemic_target_y_m;
     inst.dbg_nbv_pdetect  = prop.chosen_p_detect;

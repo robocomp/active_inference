@@ -319,18 +319,33 @@ void SpecificWorker::build_dashboard()
         bar->setContentsMargins(4, 0, 4, 3);
         bar->addStretch(1);
         auto* details = new QPushButton(QStringLiteral("details ▸"), strip_window_);
-        details->setToolTip(QStringLiteral("open the full dashboard: evidence counters, FE/surprise/Σ "
+        details->setToolTip(QStringLiteral("show / hide the full dashboard: evidence counters, FE/surprise/Σ "
                                            "time series, and the per-DOF belief inspector"));
         QFont bf = details->font(); bf.setPointSizeF(bf.pointSizeF() - 1.0); details->setFont(bf);
         details->setFixedHeight(QFontMetrics(bf).height() + 8);
-        QObject::connect(details, &QPushButton::clicked, strip_window_, [this]()
+        QObject::connect(details, &QPushButton::clicked, strip_window_, [this, details]()
         {
             if (not dashboard_window_) return;
-            dashboard_window_->show();
-            dashboard_window_->setWindowState((dashboard_window_->windowState() & ~Qt::WindowMinimized)
-                                              | Qt::WindowActive);
-            dashboard_window_->raise();
-            dashboard_window_->activateWindow();
+            // TOGGLE: the button the dashboard came out of is the button it goes back into. A drill-down
+            // that can only be OPENED is one that stays open — the 1180x900 window sits on top of
+            // everything and the only way back to a clear screen is to hunt it down in the window list
+            // and minimise it by hand.
+            // ★A MINIMISED window counts as PUT AWAY, not as up: otherwise the first click after
+            // minimising would "hide" an invisible window and it would take two clicks to see it again.
+            const bool up = dashboard_window_->isVisible() and not dashboard_window_->isMinimized();
+            if (up)
+                dashboard_window_->hide();
+            else
+            {
+                dashboard_window_->show();
+                dashboard_window_->setWindowState((dashboard_window_->windowState() & ~Qt::WindowMinimized)
+                                                  | Qt::WindowActive);
+                dashboard_window_->raise();
+                dashboard_window_->activateWindow();
+            }
+            // The label says what the NEXT click does. It can go stale if the window is closed from its
+            // own title bar; the state is re-read above on every click, so the behaviour never is.
+            details->setText(up ? QStringLiteral("details ▸") : QStringLiteral("◂ hide"));
         });
         bar->addWidget(details, 0);
         strip_layout->addLayout(bar, 0);

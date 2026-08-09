@@ -246,6 +246,12 @@ struct RefrigeratorInstance
     float dbg_nbv_target_x = 0.0f;   // room frame
     float dbg_nbv_target_y = 0.0f;
     float dbg_nbv_pdetect  = 0.0f;   // P(detect) at the proposed pose: ~0 here means we are proposing a blind spot
+    // ★The PUBLISHED epistemic_gain — the number the controller's affordance selection actually ranks on
+    // (efe_score = gain − lambda_cost*dist, lambda_cost = 0.2/m, switch_margin = 0.5). Logged because
+    // cross-agent selection was UNAUDITABLE without it: door_concept was the only agent recording its gain,
+    // so "why does the robot never visit a door" could not be answered — a door's 0.2 nats loses to 0.2/m
+    // of travel within two metres, but nobody could compare that against what a table or a fridge offers.
+    float dbg_nbv_gain     = 0.0f;
     float dbg_nbv_vfov     = 0.0f;   // rad; 0 ⇒ the sensor model was incomplete and NO proposal was made
 };
 

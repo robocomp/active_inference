@@ -66,6 +66,11 @@ struct ChairInstance
     float dbg_energy   = 0.0f;
     float fe_baseline  = -1.0f;   // <0 = uninitialised (seed to the first accepted FE)
     float fe_surprise  = 0.0f;
+    // ★The PUBLISHED epistemic_gain — the number the controller's affordance selection ranks on
+    // (efe_score = gain − lambda_cost*dist, lambda_cost = 0.2/m, switch_margin = 0.5). Logged because
+    // cross-agent selection was UNAUDITABLE: door was the only agent recording its gain, so "why does the
+    // robot never visit a door" could not be answered against what a table or a fridge actually offers.
+    float dbg_nbv_gain = 0.0f;
 
     int  last_frame_seen    = -1;     // last_sensing_frame_att value read
     int  matched_frames     = 0;      // frames with fresh sensing data

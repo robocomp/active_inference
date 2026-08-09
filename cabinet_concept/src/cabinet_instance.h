@@ -185,6 +185,11 @@ struct CabinetInstance
     // epistemic priority in the controller's EFE (attend + dwell until FE settles). See active-perception thread.
     float fe_baseline = -1.0f;    // <0 = uninitialised
     float fe_surprise = 0.0f;
+    // ★The PUBLISHED epistemic_gain — the number the controller's affordance selection ranks on
+    // (efe_score = gain − lambda_cost*dist, lambda_cost = 0.2/m, switch_margin = 0.5). Logged because
+    // cross-agent selection was UNAUDITABLE: door was the only agent recording its gain, so "why does the
+    // robot never visit a door" could not be answered against what a table or a fridge actually offers.
+    float dbg_nbv_gain = 0.0f;
     bool  dbg_gated   = false;    // truncation-gated (predict-only, no geometric update) this frame
 
     // Provenance of the mask packet this fit consumed (instrumentation; NO effect on the fit). The CSV showed

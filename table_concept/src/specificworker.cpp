@@ -1031,6 +1031,7 @@ void SpecificWorker::step_epistemic(rc::TableInstance& inst, DSR::Node& node)
     // affordance node carries the FROZEN pose while the controller owns a claim, so neither the graph nor
     // stdout could answer "what is it proposing now?" after the fact.
     inst.dbg_nbv_standoff = prop.chosen_standoff_m;
+    inst.dbg_nbv_gain     = prop.epistemic_gain;
     inst.dbg_nbv_target_x = prop.epistemic_target_x_m;
     inst.dbg_nbv_target_y = prop.epistemic_target_y_m;
     inst.dbg_nbv_pdetect  = prop.chosen_p_detect;

@@ -971,7 +971,7 @@ void CabinetFitter::log_ai2_csv(const CabinetInstance& inst, int npts, float R, 
                  << "dyaw_points,obliquity_cos,wall_gap,wall_lambda,span_obs,span_pts,span_lidar_rays,"
                  << "ex_L,ex_p,ex_locc,ex_lfree,ex_lfree_eff,ex_ln,ex_socc,ex_sfree,ex_sfree_eff,ex_sndet,ex_streak,"
                  << "ex_pdetect,ex_central,ex_verify,ex_wantsverify,"
-                 << "axis_resid,cand_pts,resid_pts\n";   // + Manhattan-yaw residual (rad) & candidate/residual split (merge diag)
+                 << "axis_resid,cand_pts,resid_pts,nbv_gain\n";   // + Manhattan-yaw residual (rad) & candidate/residual split (merge diag)
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
@@ -1001,7 +1001,7 @@ void CabinetFitter::log_ai2_csv(const CabinetInstance& inst, int npts, float R, 
              << inst.existence_remove_streak << ','
              << inst.dbg_ex_pdetect << ',' << inst.dbg_ex_central << ','
              << inst.verify_surprise << ',' << (inst.wants_verification ? 1 : 0) << ','
-             << inst.ai2_belief.last_axis_resid() << ',' << inst.dbg_cand_pts << ',' << inst.dbg_resid_pts << '\n';   // + axis residual (rad) & candidate/residual split (merge diag)
+             << inst.ai2_belief.last_axis_resid() << ',' << inst.dbg_cand_pts << ',' << inst.dbg_resid_pts << inst.dbg_nbv_gain << '\n';   // + axis residual (rad) & candidate/residual split (merge diag)
     ai2_csv_.flush();
 }
 

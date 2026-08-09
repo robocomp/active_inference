@@ -264,6 +264,12 @@ struct TableInstance
     float dbg_nbv_pdetect  = 0.0f;   // P(detect) there
     float dbg_nbv_fill     = 0.0f;   // predicted roi_fill there
     float dbg_nbv_vfov     = 0.0f;   // camera vfov IN FORCE at proposal time; 0 ⇒ model was incomplete
+    // ★The PUBLISHED epistemic_gain — the number the controller's affordance selection actually ranks on
+    // (efe_score = gain − lambda_cost*dist, lambda_cost = 0.2/m, switch_margin = 0.5). Logged because
+    // cross-agent selection was UNAUDITABLE without it: door_concept was the only agent recording its gain,
+    // so "why does the robot never visit a door" could not be answered — a door's 0.2 nats loses to 0.2/m of
+    // travel within two metres, but nobody could compare that against what a table or a fridge offers.
+    float dbg_nbv_gain     = 0.0f;
 
     float roi_fill_h   = 0.0f;   // Δcol / W
     float roi_fill_v   = 0.0f;   // Δrow / H

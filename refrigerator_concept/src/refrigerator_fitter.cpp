@@ -1077,7 +1077,7 @@ void RefrigeratorFitter::log_ai2_csv(const RefrigeratorInstance& inst, int npts,
                  << "roi_fill,roi_fill_h,roi_fill_v,roi_valid,det_alive,frames_since_det,"
                  // What the NBV actually proposed (lags the state columns by one cycle; see the instance).
                  // nbv_vfov=0 ⇒ the sensor model was incomplete and NO proposal was made that cycle.
-                 << "nbv_standoff,nbv_tx,nbv_ty,nbv_pdetect,nbv_vfov\n";
+                 << "nbv_standoff,nbv_tx,nbv_ty,nbv_pdetect,nbv_vfov,nbv_gain\n";
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
@@ -1119,7 +1119,8 @@ void RefrigeratorFitter::log_ai2_csv(const RefrigeratorInstance& inst, int npts,
              << (inst.roi_valid ? 1 : 0) << ',' << (inst.detection_alive ? 1 : 0) << ','
              << inst.frames_since_detection << ','
              << inst.dbg_nbv_standoff << ',' << inst.dbg_nbv_target_x << ',' << inst.dbg_nbv_target_y << ','
-             << inst.dbg_nbv_pdetect << ',' << inst.dbg_nbv_vfov << '\n';
+             << inst.dbg_nbv_pdetect << ',' << inst.dbg_nbv_vfov << ','
+             << inst.dbg_nbv_gain << '\n';
     ai2_csv_.flush();
 }
 
