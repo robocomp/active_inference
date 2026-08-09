@@ -34,6 +34,18 @@ const char *obstacle_kind_tag(ControllerObstacleKind kind)
 
 namespace
 {
+// ── HOW LONG A REFUSED AFFORDANCE STAYS OUT OF CONTENTION ────────────────────────────────────────
+// Only long enough for the selector to pick something ELSE this round. It is NOT the memory of a bad
+// standpoint — that is known_useless_spot(), which is keyed on the POSITION and consulted before the
+// robot drives anywhere, so a re-offered bad pose costs nothing however short this is.
+// ★SMALL ON PURPOSE, and room is why. Suppression is by NODE id, and room_concept publishes every
+// standpoint it will ever propose through ONE `afford_room` node — so a long suppression there does not
+// retire a bad spot, it halts room exploration entirely, including standpoints across the apartment that
+// are perfectly reachable. It was 400 rounds (~20 s at 20 Hz), which in a room-only run leaves the robot
+// with nothing to do at all. A few cycles breaks the immediate selection loop; the position memory does
+// the actual remembering.
+constexpr int kUnreachableRounds = 3;
+
 // Contract-resolution key for an affordance's parent object node. Post graph-schema migration the
 // node type is the generic "object" and the class lives in the object_subtype attribute; prefer it
 // so rc::affordance::default_contract_for() recovers the class-specific default (table/chair/…)
@@ -312,9 +324,6 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     // the very next selection hands the same unreachable affordance straight back.
     if (reject_affordance_id_ != 0)
     {
-        // ~20 s at the 20 Hz control rate. Rounds rather than milliseconds keeps the manager clock-free;
-        // the number only has to outlast the situation that caused the wedge.
-        constexpr int kUnreachableRounds = 400;
         std::println("[controller] ABANDONING '{}' after {} escapes without reaching it — releasing the "
                      "claim so another affordance can win. An affordance the body cannot reach advertises "
                      "gain it cannot deliver; grinding at it serves nothing.",
@@ -410,7 +419,7 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
                              "to reach that spot {}x. Skipping it without driving there.",
                              target->node_name, target->room_pos.x(), target->room_pos.y(), spot->hits);
             }
-            affordance_manager.suppress_target(target->node_id, 400);
+            affordance_manager.suppress_target(target->node_id, kUnreachableRounds);
             current_plan_.reset();
             plan_spline_valid_ = false;
             stop(path_controller, motion_commander);
