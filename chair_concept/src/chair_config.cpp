@@ -80,6 +80,8 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
     out.fixation_max_clutter      = getf("ChairModel.FixationMaxClutter",      0.35f);
     out.fixation_range_m          = getf("ChairModel.FixationRangeM",          0.0f);   // retired as a gate
     out.fixation_centre_frac      = getf("ChairModel.FixationCentreFrac",      0.60f);
+    out.fixation_centre_precision = getb("ChairModel.FixationCentrePrecision", false);
+    out.fixation_periph_floor     = getf("ChairModel.FixationPeriphFloor",     0.05f);
     out.fixation_still_dotd       = getf("ChairModel.FixationStillDotd",       0.05f);
     out.fixation_still_lin_mps    = getf("ChairModel.FixationStillLinMps",     0.05f);
     out.fixation_still_ang_radps  = getf("ChairModel.FixationStillAngRadps",   0.10f);

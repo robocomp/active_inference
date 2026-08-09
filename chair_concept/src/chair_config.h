@@ -132,6 +132,24 @@ struct ChairConfig
     float fixation_max_clutter   = 0.35f;  // max clutter fraction (surface the model cannot explain)
     float fixation_range_m       = 0.0f;   // RETIRED as a gate (0 = off). Kept so an A/B revert is one edit.
     float fixation_centre_frac   = 0.60f;  // CENTRED: max mask-centroid radius (focal-norm) — the "fovea".
+    // ── A/B: is CENTRED a GATE or a PRECISION term? ───────────────────────────────────────────────
+    // false (default) = today: outside the fovea the geometry update is INHIBITED entirely.
+    // true            = opportunistic: an off-fovea object is still observed, at REDUCED precision
+    //                   (R inflated by the existing periphery_penalty), so a fixation completed on one
+    //                   object pays partial evidence to everything else in the frame — the table and the
+    //                   chairs while the robot stands at the fridge. STILL and RESOLVABLE still gate:
+    //                   they are the conditions a peripheral look shares, and CENTRED is the only one
+    //                   that is genuinely target-specific.
+    // ⚠WHY THE GATE EXISTS, and what this A/B is really testing: attenuation ALONE previously lost to
+    // ACCUMULATION — "the graded common-mode terms saturate at a nonzero asymptote, so attenuation loses
+    // over hundreds of frames (chairs still repositioned from 6 m)". The metric belief has no per-viewpoint
+    // novelty budget across frames the way flip_acc_ does, so a peripheral frame repeated hundreds of times
+    // can still walk the pose. Run this ON only with that failure in mind: the thing to watch is a chair
+    // being repositioned from far away, not whether peripheral evidence arrives.
+    bool  fixation_centre_precision = false;
+    // Floor on the peripheral precision factor, so a fully off-axis look is worth LITTLE rather than
+    // NOTHING. 1 = no peripheral attenuation at all; 0 = a fully peripheral frame carries no weight.
+    float fixation_periph_floor = 0.05f;
                                            // 0.60 matches AI2PeriphRef (0.50 ≈ tan 27°, where the codebase's
                                            // own periphery penalty saturates); 0.35 was tighter than that.
     float fixation_still_dotd    = 0.05f;  // STILL: max |motion_dotd| = Z·‖ṡ‖ (m/s) ego-motion mask smear

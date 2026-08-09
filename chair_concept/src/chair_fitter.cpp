@@ -384,8 +384,18 @@ float ChairFitter::run_inference(ChairInstance& inst, const ChairObservation& ob
     // depth_var (0 for a ZED slice, >0 for a ricoh LiDAR-depth slice) enters R in the SAME currency as motion_var:
     // a ricoh point's along-ray depth uncertainty inflates its measurement noise, so it barely moves the belief
     // mean (ZED drives geometry, ricoh only confirms). Mirrors table_concept's R = σ²+motion_var+depth_var+range.
-    const float R = cfg_.ai2_sigma_base_m * cfg_.ai2_sigma_base_m + std::max(0.0f, inst.last_motion_var)
-                    + std::max(0.0f, inst.last_depth_var) + range_lat_var;
+    // ★PRECISION-MODE PERIPHERY: with CENTRED no longer gating, an off-fovea frame must pay for its
+    // position in the field of view somewhere, or a glimpse at the edge would count as much as a stare.
+    // periphery_penalty() is 0 at the fovea and 1 fully peripheral, so 1/(1-p) inflates R smoothly toward
+    // the floor's reciprocal. This is the "attention is precision" claim taken literally rather than as a
+    // switch — and the floor is what keeps a fully peripheral look worth little rather than nothing.
+    const float periph_R_scale =
+        cfg_.fixation_centre_precision
+            ? 1.0f / std::max(std::clamp(cfg_.fixation_periph_floor, 1e-3f, 1.0f),
+                              1.0f - periphery_penalty(inst))
+            : 1.0f;
+    const float R = periph_R_scale * (cfg_.ai2_sigma_base_m * cfg_.ai2_sigma_base_m + std::max(0.0f, inst.last_motion_var)
+                    + std::max(0.0f, inst.last_depth_var) + range_lat_var);
 
     // Obliquity of the view onto the BACKREST (the chair's yaw-carrying surface, a VERTICAL plate whose normal
     // is horizontal, unlike the table's horizontal top). Backrest sits on the −local_y edge ⇒ its room-frame
@@ -713,7 +723,11 @@ bool ChairFitter::fixated(const ChairInstance& inst, int npts) const
     const bool close      = enough_pts and clean;
     // "In the fovea": the mask centroid's off-axis radius. A newborn with no measured centroid yet (0) counts
     // as centred so the quality/stillness conditions decide — it must never be blocked by a missing covariate.
-    const bool centred = cfg_.fixation_centre_frac <= 0.0f
+    // CENTRED. In PRECISION mode this stops gating entirely — an off-fovea object is still observed, just
+    // less precisely (run_inference inflates R by the periphery penalty). That is what lets a fixation
+    // completed on one object pay evidence to everything else in the frame.
+    const bool centred = cfg_.fixation_centre_precision
+                      or cfg_.fixation_centre_frac <= 0.0f
                       or inst.last_centroid_radius <= cfg_.fixation_centre_frac;
     // STILL on all three channels: robot body (lin, ang — the TURN case) and the per-mask ego-motion smear.
     const bool still   = (cfg_.fixation_still_lin_mps   <= 0.0f or ego_lin_mps_   <= cfg_.fixation_still_lin_mps)

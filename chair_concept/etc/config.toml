@@ -119,6 +119,21 @@ FixationMinPts = 150        # RESOLVABLE: min mask points before the frame may t
 FixationMaxClutter = 0.35   # RESOLVABLE: max clutter fraction (surface the model cannot explain)
 FixationRangeM = 0.0        # RETIRED as a gate (0 = off). Kept so an A/B revert to the range cut is one edit
 FixationCentreFrac = 0.60   # CENTRED: max off-axis radius, the "fovea". <=0 disables this one. 0.60 matches
+# ── A/B (2026-08-09): CENTRED as a PRECISION term instead of a gate ────────────────────────────────────
+# OFF = today's behaviour: outside the fovea the geometry update is inhibited entirely.
+# ON  = opportunistic intake: an off-fovea object is still observed, at reduced precision (R inflated by
+#       the existing periphery penalty), so a fixation completed on ONE object pays partial evidence to
+#       everything else in the frame — the table and the chairs while the robot stands at the fridge.
+#       STILL and RESOLVABLE keep gating: those are the conditions a peripheral look genuinely shares,
+#       and CENTRED is the only one that is target-specific.
+# ⚠WHAT THIS IS REALLY TESTING. The hard gate exists because attenuation ALONE lost to ACCUMULATION —
+# the graded common-mode terms saturate at a nonzero asymptote, and chairs were still repositioned from
+# 6 m over hundreds of frames. The metric belief has no per-viewpoint novelty budget the way flip_acc_
+# does, so a peripheral frame repeated hundreds of times can still walk the pose. Watch for a chair being
+# repositioned from far away, not merely for whether peripheral evidence arrives.
+FixationCentrePrecision = false
+FixationPeriphFloor = 0.05   # a fully peripheral look is worth little, not nothing (R scale caps at 1/0.05)
+
                             # AI2PeriphRef (0.50 ~ tan 27 deg) where this codebase's own periphery penalty
                             # saturates; the previous 0.35 was tighter than that and blocked chair_2 at 2.04 m
 FixationStillDotd = 0.05    # STILL: max |motion_dotd| = Z*||sdot|| (m/s), ego-motion mask smear. <=0 disables
