@@ -248,6 +248,18 @@ namespace rc
             << ",t_adam_ms"
             << ",t_cov_ms"
             << ",t_breakdown_ms"
+            // ---- appended for loss/recovery analysis; APPEND ONLY, never insert ----
+            // early_exit_metric was absent and had to be proxied through final_loss, which conflates
+            // two different quantities across the two paths. recovery_bad/cooldown make the trigger's
+            // internal state visible so an episode can be read forwards instead of inferred backwards
+            // from window_size resets. search_active marks the frames a search was live on.
+            //
+            // ORDER FIXED 08-09: this group used to be declared HERE, before slot_poses_*, while both
+            // writers emit it LAST. Every column from slot_poses_pre onward was therefore mislabelled
+            // (slot-pose strings landed in the column called early_exit_metric). Columns 0..73, up to
+            // t_breakdown_ms, were always correct. The header is what moved rather than the writers,
+            // deliberately: the row layout below is what every log already on disk was written with,
+            // so a reader keyed on this corrected header now reads the old files correctly too.
             << ",slot_poses_pre"
             << ",slot_poses_post"
             << ",slot_sdf_mse"
@@ -257,9 +269,34 @@ namespace rc
             << ",ml_slip_k"
             << ",ml_odom_noise_trans"
             << ",ml_bias_x,ml_bias_y,ml_bias_theta"
+            << ",early_exit_metric"
+            << ",recovery_bad,recovery_cooldown,search_active"
             << "\n";
         debug_log_.flush();
         qInfo() << "Debug log writing to" << QString::fromStdString(debug_log_path_);
+
+        // Loss/recovery episode log — one row per search, independent of debug_log_enabled because it
+        // is low-volume (66 rows in a 708k-frame run) and it is the only record of what recovery did.
+        {
+            recovery_log_path_ = debug_log_path_;
+            const auto slash = recovery_log_path_.find_last_of('/');
+            const std::string dir = (slash == std::string::npos) ? std::string()
+                                                                 : recovery_log_path_.substr(0, slash + 1);
+            const std::string stem = (slash == std::string::npos) ? recovery_log_path_
+                                                                  : recovery_log_path_.substr(slash + 1);
+            recovery_log_path_ = dir + "recovery_" + (stem.rfind("log_", 0) == 0 ? stem.substr(4) : stem);
+            recovery_log_.open(recovery_log_path_, std::ios::out | std::ios::trunc);
+            if (recovery_log_.is_open())
+            {
+                recovery_log_ << "ts_ms,trigger,n_lidar,"
+                                 "inc_x,inc_y,inc_theta,inc_loss,good_thr,"
+                                 "stage,best_x,best_y,best_theta,best_loss,"
+                                 "topk_best,topk_worst,ess,cov_xx,cov_yy,cov_tt,"
+                                 "n_evals,jump_m,jump_rad,success,duration_ms,beta,n_points\n";
+                recovery_log_.flush();
+                qInfo() << "Recovery episode log writing to" << QString::fromStdString(recovery_log_path_);
+            }
+        }
     }
 
     std::optional<RoomConcept::UpdateResult> RoomConcept::get_last_result() const
@@ -495,6 +532,7 @@ namespace rc
         bool used_grid_search = false;
         if (!have_saved_pose)
         {
+            search_trigger_ = "seed";
             used_grid_search = grid_search_initial_pose(pts, 0.5f, static_cast<float>(M_PI_4));
             if (!used_grid_search)
                 qWarning() << "RoomConcept bootstrap: grid search failed. Keeping estimator-based initialization.";
@@ -544,6 +582,7 @@ namespace rc
         qWarning() << "[RoomConcept] Seed pose REJECTED: mean|sdf| =" << seed_err << "m exceeds"
                    << params.recovery_loss_threshold << "m — the saved pose does not explain the scan."
                    << "Running grid search...";
+        search_trigger_ = "seed_validation";
         if (!grid_search_initial_pose(pts, 0.5f, static_cast<float>(M_PI_4)))
             qWarning() << "[RoomConcept] Grid search after seed rejection did not reach a good fit;"
                        << "keeping its best candidate. Recovery will retry if it stays bad.";
@@ -596,7 +635,10 @@ namespace rc
                         else if constexpr (std::is_same_v<T, CmdSetPose>)
                             set_robot_pose(arg.x, arg.y, arg.theta);
                         else if constexpr (std::is_same_v<T, CmdGridSearch>)
+                        {
+                            search_trigger_ = "manual";
                             grid_search_initial_pose(arg.lidar_points, arg.grid_res, arg.angle_res);
+                        }
                     }, cmd);
                 }
             }
@@ -886,6 +928,7 @@ namespace rc
                                << "bad frames. avg_sdf_err=" << avg_sdf_err << "m"
                                << "Running grid search...";
                     const auto& pts = lidar_high.first;
+                    search_trigger_ = "recovery";
                     grid_search_initial_pose(pts, 0.5f, static_cast<float>(M_PI_4));
                     window_mgr_.clear(); reset_stride_state();
                     recovery_.on_recovery_done(params.recovery_cooldown_frames);
@@ -913,6 +956,7 @@ namespace rc
                                    << map_trust_low_streak_ << "frames — running grid search...";
                         log_hier_prec_row("reloc", 0.f, 0.f, 0.f, /*reloc_fired=*/true);
                         const auto& pts = lidar_high.first;
+                        search_trigger_ = "map_trust";
                         grid_search_initial_pose(pts, 0.5f, static_cast<float>(M_PI_4));
                         window_mgr_.clear(); reset_stride_state();
                         u_b_init_ = false;   // reseed u_b_ to g(v) on the next boundary update
@@ -1288,12 +1332,47 @@ namespace rc
         return best_phi;
     }
 
+    void RoomConcept::write_search_episode(const SearchEpisode& e)
+    {
+        if (not recovery_log_.is_open())
+            return;
+        recovery_log_ << e.ts_ms << ',' << e.trigger << ',' << e.n_lidar
+                      << ',' << e.incumbent_x << ',' << e.incumbent_y << ',' << e.incumbent_theta
+                      << ',' << e.incumbent_loss << ',' << e.good_thr
+                      << ',' << e.stage
+                      << ',' << e.best_x << ',' << e.best_y << ',' << e.best_theta << ',' << e.best_loss
+                      << ',' << e.topk_best << ',' << e.topk_worst << ',' << e.ess
+                      << ',' << e.cov_xx << ',' << e.cov_yy << ',' << e.cov_tt
+                      << ',' << e.n_evals << ',' << e.jump_m << ',' << e.jump_rad
+                      << ',' << (e.success ? 1 : 0) << ',' << e.duration_ms
+                      << ',' << e.beta << ',' << e.n_points << '\n';
+        recovery_log_.flush();
+    }
+
     bool RoomConcept::grid_search_initial_pose(const std::vector<Eigen::Vector3f>& lidar_points,
                                                   float grid_resolution,
                                                   float /*angle_resolution*/)
     {
         if (model_ == nullptr || lidar_points.empty())
             return false;
+
+        // One row per call, written wherever this returns — see RoomConcept::SearchEpisode for why the
+        // per-frame log was not enough (episodes had to be inferred from window_size resets).
+        SearchEpisode ep;
+        ep.ts_ms = last_update_result.timestamp_ms;
+        ep.n_lidar = static_cast<int>(lidar_points.size());
+        ep.trigger = search_trigger_;   // set by the caller just before invoking the search
+        const auto ep_t0 = std::chrono::steady_clock::now();
+        struct EpisodeWriter
+        {
+            RoomConcept* self; SearchEpisode* e; const std::chrono::steady_clock::time_point* t0;
+            ~EpisodeWriter()
+            {
+                e->duration_ms = std::chrono::duration<float, std::milli>(
+                                     std::chrono::steady_clock::now() - *t0).count();
+                self->write_search_episode(*e);
+            }
+        } ep_writer{this, &ep, &ep_t0};
 
         // Mark the search live for the UI. RAII because this function returns from four places
         // (Stage 0's flip short-circuit, Stage 1's coarse hit, the Stage 2 tail); a manual clear
@@ -1327,6 +1406,7 @@ namespace rc
             model_->robot_theta.data().copy_(
                 torch::tensor({theta}, torch::TensorOptions().device(get_device())));
             torch::NoGradGuard no_grad;
+            ++ep.n_evals;
             return median_abs_sdf(model_->sdf(pts));
         };
 
@@ -1334,7 +1414,81 @@ namespace rc
         // Reassign with new leaf tensors (requires_grad=true) so the next
         // optimizer iteration starts clean — avoids version-counter corruption
         // that .data().copy_() causes when NoGradGuard is not active.
-        auto commit_pose = [&](float x, float y, float theta)
+        // Softmax-weighted moment match over the poses the search actually evaluated.
+        // The loss is median |SDF| in METRES, so the natural temperature is the SDF observation noise:
+        // poses that fit within sensor noise of the winner are genuine rivals and must carry weight;
+        // poses much worse than that are not. Angles are wrapped about the winner before averaging.
+        //
+        // This exists because committing a search result with a FIXED covariance is the search's real
+        // failure mode. In a corridor the along-axis direction is a flat valley of near-equal loss, so
+        // the winner is an arbitrary point drawn from that valley — and it was being published with
+        // sigma = 0.32 m in every direction regardless, i.e. asserted as a confident fix. Measured over
+        // 708k frames: recovery fires in tight BURSTS (11 events inside ~350 frames), which is what
+        // "commit an ambiguous pose as certain, fail again immediately, search again" looks like.
+        // Moment-matching turns the ambiguity into what it actually is — a large variance along the
+        // unresolved direction — which both stops the false confidence and lets consumers back off.
+        auto moment_match = [&](const std::vector<Eigen::Vector4f>& evals, float best_loss,
+                                float ref_theta) -> Eigen::Matrix3f
+        {
+            // TEMPERATURE. The weight must express how DISTINGUISHABLE two candidate poses are, so
+            // the scale is the sampling noise of the statistic being compared — median |SDF| over N
+            // points — NOT the per-point sensor noise. For half-normal residuals of scale sigma the
+            // median's standard error is ~0.79*sigma/sqrt(N); two poses closer than that in loss are
+            // not separated by the evidence, two much further apart are.
+            //
+            // This was sigma_sdf itself (0.15 m), i.e. the per-point noise with the sqrt(N) left out —
+            // about 12x too flat at N=150. Measured consequence over 33 real episodes: ESS p50 563
+            // (hundreds of poses carrying real weight) and a committed sigma_x of 1.27 m / sigma_theta
+            // of 84 deg. Those numbers describe the temperature, not the room.
+            //
+            // NOTE this is an UPPER bound on the indistinguishability scale: every candidate is scored
+            // against the SAME point set, so the comparison is paired and most of the sampling noise
+            // cancels. Erring high leaves the committed covariance conservative — it over-reports
+            // uncertainty rather than under-reporting it, which is the safe direction for a consumer.
+            const float n_eff = std::max(1.f, static_cast<float>(params.grid_search_max_samples));
+            const float beta  = std::max(1e-4f, 0.79f * params.sigma_sdf / std::sqrt(n_eff));
+            ep.beta = beta; ep.n_points = static_cast<int>(n_eff);
+            // Effective sample size of the softmax weights, ESS = (sum w)^2 / sum w^2. ~1 => one pose
+            // explains the scan; large => a flat valley of rivals, so the winner is an arbitrary draw
+            // and "success" is not the same thing as "resolved". Recorded per episode.
+            float w2sum = 0.f;
+            float wsum = 0.f;
+            Eigen::Vector3f mean = Eigen::Vector3f::Zero();
+            for (const auto& e : evals)
+            {
+                const float w = std::exp(-(e[3] - best_loss) / beta);
+                if (not std::isfinite(w) or w < 1e-6f) continue;
+                const float dth = std::remainder(e[2] - ref_theta, 2.f * static_cast<float>(M_PI));
+                mean += w * Eigen::Vector3f(e[0], e[1], dth);
+                wsum += w; w2sum += w * w;
+            }
+            if (wsum < 1e-9f)
+                return Eigen::Matrix3f::Identity() * 0.1f;   // degenerate: fall back to the old constant
+            mean /= wsum;
+            Eigen::Matrix3f cov = Eigen::Matrix3f::Zero();
+            for (const auto& e : evals)
+            {
+                const float w = std::exp(-(e[3] - best_loss) / beta);
+                if (not std::isfinite(w) or w < 1e-6f) continue;
+                const float dth = std::remainder(e[2] - ref_theta, 2.f * static_cast<float>(M_PI));
+                const Eigen::Vector3f d = Eigen::Vector3f(e[0], e[1], dth) - mean;
+                cov += w * d * d.transpose();
+            }
+            cov /= wsum;
+            // Floor the diagonal: a single surviving candidate gives an exactly-zero spread, which is a
+            // statement of infinite confidence from one sample. Use the search's own resolution as the
+            // smallest honest claim.
+            const float pos_floor = 0.05f * 0.05f;
+            const float rot_floor = (2.f * static_cast<float>(M_PI) / 180.f) * (2.f * static_cast<float>(M_PI) / 180.f);
+            cov(0,0) = std::max(cov(0,0), pos_floor);
+            cov(1,1) = std::max(cov(1,1), pos_floor);
+            cov(2,2) = std::max(cov(2,2), rot_floor);
+            ep.ess    = (w2sum > 0.f) ? (wsum * wsum / w2sum) : 1.f;
+            ep.cov_xx = cov(0,0); ep.cov_yy = cov(1,1); ep.cov_tt = cov(2,2);
+            return cov;
+        };
+
+        auto commit_pose_cov = [&](float x, float y, float theta, const Eigen::Matrix3f& cov)
         {
             model_->robot_pos = torch::tensor(
                 {x, y},
@@ -1348,8 +1502,12 @@ namespace rc
             has_smoothed_pose_          = true;
             needs_orientation_search_   = false;
             tracking_step_count_        = 0;
-            current_covariance          = Eigen::Matrix3f::Identity() * 0.1f;
+            current_covariance          = cov;
         };
+        // Legacy entry point: the fixed I*0.1 is retained ONLY for the paths that have no candidate set
+        // to match against, and is documented as a guess rather than a measurement.
+        auto commit_pose = [&](float x, float y, float theta)
+        { commit_pose_cov(x, y, theta, Eigen::Matrix3f::Identity() * 0.1f); };
 
         // ── Room bounds ───────────────────────────────────────────────────────
         float min_x, max_x, min_y, max_y;
@@ -1399,6 +1557,7 @@ namespace rc
         // exactly what a standalone good_thr produced. Keeping it a FRACTION of the trigger makes the
         // relationship un-driftable; grid_search_good_factor only chooses how much margin.
         const float good_thr = params.grid_search_good_factor * params.recovery_loss_threshold;
+        ep.good_thr = good_thr;
 
         // Best pose seen so far, seeded from the pose we were handed (Stage 0 fills it in). Carried
         // through every stage so the final commit is never a REGRESSION — the coarse 1 m grid does not
@@ -1427,12 +1586,14 @@ namespace rc
             const float cth = cur[4];
 
             const float coarse_dth = static_cast<float>(M_PI) / 15.f;   // 12° — 30 evals over 360°
+            std::vector<Eigen::Vector4f> sweep;   // (x, y, theta, loss), for the moment match below
             float best_loss  = std::numeric_limits<float>::infinity();
             float best_theta = cth;
             for (int i = 0; i < 30; ++i)
             {
                 const float theta = cth + static_cast<float>(i) * coarse_dth;
                 const float loss  = eval_loss(pts_coarse, cx, cy, theta);
+                sweep.emplace_back(cx, cy, theta, loss);
                 if (loss < best_loss) { best_loss = loss; best_theta = theta; }
             }
             // Refine the winner at 2° over ±12°, so a flip is recovered to better than the angular
@@ -1442,6 +1603,7 @@ namespace rc
             {
                 const float theta = best_theta + static_cast<float>(i) * fine_dth;
                 const float loss  = eval_loss(pts_fine, cx, cy, theta);
+                sweep.emplace_back(cx, cy, theta, loss);
                 if (loss < best_loss) { best_loss = loss; best_theta = theta; }
             }
 
@@ -1449,6 +1611,8 @@ namespace rc
             // worse than the caller's own estimate.
             incumbent_x = cx; incumbent_y = cy; incumbent_theta = cth;
             incumbent_loss = eval_loss(pts_fine, cx, cy, cth);
+            ep.incumbent_x = cx; ep.incumbent_y = cy; ep.incumbent_theta = cth;
+            ep.incumbent_loss = incumbent_loss;
 
             s0_best_theta = best_theta;
             // Commit only on a real improvement that also clears the bar. Requiring the IMPROVEMENT is
@@ -1456,7 +1620,17 @@ namespace rc
             // must fall through to the translational stages rather than report success unchanged.
             if (best_loss < good_thr and best_loss < incumbent_loss)
             {
-                commit_pose(cx, cy, best_theta);
+                // Only THETA was searched here, so only theta's spread is evidence — a 360° yaw sweep
+                // says nothing about position, so keep the x/y uncertainty we already had rather than
+                // inventing one. In a near-symmetric room this reports a large sigma_theta instead of
+                // silently picking one of two rival basins.
+                Eigen::Matrix3f cov0 = current_covariance;
+                cov0(2, 2) = moment_match(sweep, best_loss, best_theta)(2, 2);
+                cov0(0, 2) = cov0(2, 0) = cov0(1, 2) = cov0(2, 1) = 0.f;
+                ep.stage = 0; ep.best_x = cx; ep.best_y = cy; ep.best_theta = best_theta;
+                ep.best_loss = best_loss; ep.success = true;
+                ep.jump_rad = std::abs(std::remainder(best_theta - cth, 2.f * static_cast<float>(M_PI)));
+                commit_pose_cov(cx, cy, best_theta, cov0);
                 return true;
             }
             if (best_loss < incumbent_loss)
@@ -1491,6 +1665,10 @@ namespace rc
                 }
             if (best_loss < good_thr and best_loss < incumbent_loss)
             {
+                ep.stage = 1; ep.best_x = best_x; ep.best_y = best_y; ep.best_theta = best_theta;
+                ep.best_loss = best_loss; ep.success = true;
+                ep.jump_m = std::hypot(best_x - ep.incumbent_x, best_y - ep.incumbent_y);
+                ep.jump_rad = std::abs(std::remainder(best_theta - ep.incumbent_theta, 2.f * static_cast<float>(M_PI)));
                 commit_pose(best_x, best_y, best_theta);
                 return true;
             }
@@ -1533,9 +1711,15 @@ namespace rc
             // Only stop here if the COARSE grid already clears the bar outright. On a 1 m/90° lattice
             // that is rare by construction, which is the point: the usual path is to fall through to
             // the fine refinement rather than commit a lattice point as if it were a solution.
+            ep.topk_best  = candidates.front().loss;
+            ep.topk_worst = candidates.back().loss;
             if (candidates.front().loss < good_thr)
             {
                 const auto& b = candidates.front();
+                ep.stage = 2; ep.best_x = b.x; ep.best_y = b.y; ep.best_theta = b.theta;
+                ep.best_loss = b.loss; ep.success = true;
+                ep.jump_m = std::hypot(b.x - ep.incumbent_x, b.y - ep.incumbent_y);
+                ep.jump_rad = std::abs(std::remainder(b.theta - ep.incumbent_theta, 2.f * static_cast<float>(M_PI)));
                 commit_pose(b.x, b.y, b.theta);
                 return true;
             }
@@ -1554,6 +1738,7 @@ namespace rc
         float best_y     = candidates.front().y;
         float best_theta = candidates.front().theta;
         float best_loss  = candidates.front().loss;
+        std::vector<Eigen::Vector4f> refined;   // every pose Stage 2 evaluates, for the moment match
         if (incumbent_loss < best_loss)
         {
             best_x = incumbent_x; best_y = incumbent_y;
@@ -1574,6 +1759,7 @@ namespace rc
                     for (float da = -coarse_angle; da <= coarse_angle + 1e-4f; da += fine_angle)
                     {
                         const float loss = eval_loss(pts_fine, rx, ry, cand.theta + da);
+                        refined.emplace_back(rx, ry, cand.theta + da, loss);
                         if (loss < best_loss)
                         {
                             best_loss  = loss;
@@ -1587,7 +1773,15 @@ namespace rc
             }
         }
 
-        commit_pose(best_x, best_y, best_theta);
+        // Commit with the SPREAD of the refined candidate set, not a constant. A decisive winner gives
+        // a tight covariance; a flat valley — the corridor's along-axis direction, or a near-symmetric
+        // room — gives a large one along exactly the unresolved DOF. That is the honest answer, and it
+        // is what stops the caller treating an ambiguous result as a fix and thrashing on it.
+        ep.stage = 3; ep.best_x = best_x; ep.best_y = best_y; ep.best_theta = best_theta;
+        ep.best_loss = best_loss; ep.success = best_loss < good_thr;
+        ep.jump_m = std::hypot(best_x - ep.incumbent_x, best_y - ep.incumbent_y);
+        ep.jump_rad = std::abs(std::remainder(best_theta - ep.incumbent_theta, 2.f * static_cast<float>(M_PI)));
+        commit_pose_cov(best_x, best_y, best_theta, moment_match(refined, best_loss, best_theta));
         return best_loss < good_thr;
     }
 
@@ -2517,6 +2711,17 @@ namespace rc
                        << ',' << learned_odom_bias_.x()
                        << ',' << learned_odom_bias_.y()
                        << ',' << learned_odom_bias_.z();
+            // last_early_exit_metric_, NOT res.early_exit_metric: res only receives it AFTER this
+            // block (the assignment below), so this column logged the value from before the gate ran
+            // — uniformly stale — and could never show the predicted-pose SDF that TRIGGERED this
+            // optimization. That number is the margin by which the prediction missed the early-exit
+            // threshold, i.e. the only direct measure of how close a rotating frame came to skipping
+            // Adam. The early-exit path at the bottom of try_prediction_early_exit was already
+            // correct (it assigns res.early_exit_metric before logging).
+            debug_log_ << ',' << last_early_exit_metric_
+                       << ',' << recovery_.consecutive_bad_frames
+                       << ',' << recovery_.cooldown
+                       << ',' << (grid_search_active_.load(std::memory_order_relaxed) ? 1 : 0);
 
             debug_log_ << '\n';
             debug_log_.flush();
@@ -2828,7 +3033,17 @@ namespace rc
                 << ',' << wall_now_ms
                 << ',' << odometry_prior.dt
                 << ',' << 0           // n_lidar not available here
-                << ',' << 0 << ',' << 0 << ',' << 0 << ',' << 0  // vel/odom
+                // vel_adv_y, vel_rot, odom_adv, odom_rot — these were hardcoded to 0 on this path,
+                // so every early-exit frame looked STATIONARY in the log. Since early exit is ~98%
+                // of frames, any "rate vs angular speed" question asked of this file silently saw
+                // only the frames where the gate had already failed, and the four velocity columns
+                // were unusable for classifying anything. The ingress copies below are the very
+                // values the Adam path reports (record_*_ingress is handed the same normalized
+                // numbers that go into velocity_history / odometry_history), so both paths now agree.
+                << ',' << motion_ingress.command_adv_normalized
+                << ',' << motion_ingress.command_rot_normalized
+                << ',' << motion_ingress.odom_adv_normalized
+                << ',' << motion_ingress.odom_rot_normalized
                 << ',' << motion_ingress.command_source
                 << ',' << motion_ingress.command_adv_raw
                 << ',' << motion_ingress.command_adv_normalized
@@ -2875,6 +3090,13 @@ namespace rc
                 << ',' << (int)window_mgr_.size()
                 << ',' << tracking_step_count_
                 << ',' << 0.f << ',' << 0.f << ',' << 0.f << ',' << 0.f  // loss_boundary/obs/motion/corner
+                << ',' << 0.f   // loss_object  <-- was MISSING: this path emitted 91 fields against
+                                // the Adam path's 92, so every early-exit row was shifted by one from
+                                // loss_init onward and any reader keyed on the header silently
+                                // mis-parsed or dropped them. Since early exit is ~98% of frames, that
+                                // meant per-frame analysis saw ONLY the frames where the prediction had
+                                // already failed the gate — a badly biased sample of exactly the thing
+                                // one wants to measure.
                 << ',' << 0.f   // loss_init
                 << ',' << std::chrono::duration<float, std::milli>(
                                std::chrono::high_resolution_clock::now() - t_update_start_).count()
@@ -2911,6 +3133,10 @@ namespace rc
                        << ',' << learned_odom_bias_.x()
                        << ',' << learned_odom_bias_.y()
                        << ',' << learned_odom_bias_.z();
+            debug_log_ << ',' << res.early_exit_metric
+                       << ',' << recovery_.consecutive_bad_frames
+                       << ',' << recovery_.cooldown
+                       << ',' << (grid_search_active_.load(std::memory_order_relaxed) ? 1 : 0);
             debug_log_ << '\n';
             debug_log_.flush();
         }
@@ -3502,7 +3728,14 @@ namespace rc
             const float ang_speed = std::abs(curr_slot.odometry_delta[2]) / dt_s;
             if (use_for_noise && ang_speed >= params.motion_learn_min_omega)
             {
-                slip_k_sum += std::abs(r[2]) / ang_speed;
+                // Same units fix as the slip term in build_motion_covariance: k is a FRACTION of the
+                // rotation increment, so the residual is normalised by the increment, not by the
+                // rate. The gate stays on angular SPEED (motion_learn_min_omega is a rad/s floor,
+                // which is what it should be — it asks "is the robot turning fast enough for this
+                // sample to be informative"), but what is learned must match what is applied, or the
+                // learned k silently absorbs a factor of dt and stops meaning anything.
+                slip_k_sum += std::abs(r[2]) /
+                              std::max(std::abs(curr_slot.odometry_delta[2]), 1e-3f);
                 ++slip_k_count;
             }
 
@@ -3654,9 +3887,23 @@ namespace rc
                                        : params.encoder_rot_slip_k;
         if (is_measured_odometry && effective_slip_k > 0.f)
         {
-            const float ang_speed = std::abs(effective_delta[2]) /
-                                    std::max(odometry_prior.dt * 0.001f, 0.001f);
-            const float slip_std  = effective_slip_k * ang_speed;
+            // UNITS (fixed 08-09). rotation_std is the std of the rotation INCREMENT over this
+            // window, in rad — see its two other terms, rotation_noise_base (rad) and
+            // odom_noise_rot * |delta_theta| (a fraction of an angle). This term used to be
+            // k * (|delta_theta| / dt), i.e. k * ANGULAR SPEED in rad/s, folded in as if it were
+            // rad. That inflates sigma by 1/dt ~ 16x (variance ~260x) at the 62 ms update interval:
+            // measured 08-09 at omega=1.09 rad/s it claimed sigma = 0.055 rad against a true
+            // increment of 0.068 rad — 81% of the whole rotation as one sigma, for an encoder whose
+            // demonstrated error is ~7%. The measured prior was therefore drowned out at ANY k (the
+            // fusion gave it weight 0.004 at k=0.25 and still only 0.05 at k=0.05), the motion prior
+            // collapsed onto the COMMAND channel, and the command under-reports rotation by 25% — so
+            // the SDF had to push heading further into the turn on 171/171 frames.
+            //
+            // A slip coefficient is a FRACTION of the rotation that slipped, so it multiplies the
+            // increment, not the rate. This is k * omega * dt, written directly as k * |delta_theta|
+            // — dimensionless k, and now invariant to the update rate (the old form made the right k
+            // depend on how fast the localizer happened to be running).
+            const float slip_std = effective_slip_k * std::abs(effective_delta[2]);
             rotation_std = std::sqrt(rotation_std * rotation_std + slip_std * slip_std);
         }
 

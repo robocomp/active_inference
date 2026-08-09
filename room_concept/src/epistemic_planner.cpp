@@ -18,18 +18,77 @@ EpistemicPlanner::EpistemicPlanner(Params p) : params(std::move(p)) {}
 void EpistemicPlanner::set_room_bounds(const Eigen::Vector2f& min_corner,
                                       const Eigen::Vector2f& max_corner)
 {
+    // Same reason as set_room_polygon: this is called every cycle, and only a real change to the
+    // bounds can invalidate the candidate grid or the observability mask.
+    const bool changed = not room_bounds_set_
+                      or (room_min_ - min_corner).squaredNorm() > 1e-8f
+                      or (room_max_ - max_corner).squaredNorm() > 1e-8f;
     room_min_ = min_corner;
     room_max_ = max_corner;
     room_bounds_set_ = true;
-    grid_dirty_ = true;
+    if (changed) { grid_dirty_ = true; mask_dirty_ = true; }
     if (!visit_grid_.initialized)
         visit_grid_.init(room_min_, room_max_, params.ior_cell_size);
 }
 
 void EpistemicPlanner::set_room_polygon(const std::vector<Eigen::Vector2f>& vertices)
 {
+    // Only a genuinely different contour invalidates the caches — this is called every cycle from
+    // the graph, and rebuilding the candidate grid + observability mask on each one is pure waste.
+    if (room_corners_.size() == vertices.size() and
+        std::equal(room_corners_.begin(), room_corners_.end(), vertices.begin(),
+                   [](const Eigen::Vector2f& a, const Eigen::Vector2f& b)
+                   { return (a - b).squaredNorm() < 1e-8f; }))
+        return;
     room_corners_ = vertices;
     grid_dirty_ = true;
+    mask_dirty_ = true;
+}
+
+// ---------------------------------------------------------------------------
+// Observability mask — see the header for why an unmasked grid poisons the route term.
+// ---------------------------------------------------------------------------
+void EpistemicPlanner::refresh_observable_mask()
+{
+    if (!visit_grid_.initialized) return;
+    if (room_corners_.empty())
+    {
+        // No contour yet ⇒ we cannot say what is wall and what is room. Leave the mask empty so
+        // is_observable() passes everything through, exactly as before this existed.
+        visit_grid_.observable.clear();
+        dbg_unobservable_ = 0;
+        mask_dirty_ = false;
+        return;
+    }
+
+    const float wall_margin = std::max(params.target_wall_margin, robot_footprint_radius_);
+    // The robot marks every cell within ior_path_radius of wherever it stands, so a cell is
+    // reachable-by-observation as long as SOME legal standing position (>= wall_margin from every
+    // wall) is within that radius of it. Negative ⇒ every interior cell qualifies.
+    const float min_wall_dist = wall_margin - params.ior_path_radius;
+
+    visit_grid_.observable.assign(visit_grid_.cells.size(), 0);
+    dbg_unobservable_ = 0;
+    for (int i = 0; i < static_cast<int>(visit_grid_.cells.size()); ++i)
+    {
+        const Eigen::Vector2f c = visit_grid_.cell_center(i);
+        bool ok = corner_visibility::point_in_polygon(c, room_corners_);
+        if (ok and min_wall_dist > 0.f)
+        {
+            for (std::size_t k = 0; k < room_corners_.size(); ++k)
+            {
+                const auto& a = room_corners_[k];
+                const auto& b = room_corners_[(k + 1) % room_corners_.size()];
+                const Eigen::Vector2f ab = b - a;
+                const float t = std::clamp((c - a).dot(ab) / ab.squaredNorm(), 0.f, 1.f);
+                if ((c - (a + t * ab)).squaredNorm() < min_wall_dist * min_wall_dist)
+                { ok = false; break; }
+            }
+        }
+        visit_grid_.observable[i] = ok ? 1 : 0;
+        if (!ok) ++dbg_unobservable_;
+    }
+    mask_dirty_ = false;
 }
 
 void EpistemicPlanner::set_robot_state(const Eigen::Affine2f& pose,
@@ -47,6 +106,7 @@ void EpistemicPlanner::set_robot_footprint(float width_m, float length_m)
     {
         robot_footprint_radius_ = footprint_radius;
         grid_dirty_ = true;
+        mask_dirty_ = true;   // it feeds the effective wall margin the mask is built from
     }
 }
 
@@ -103,11 +163,13 @@ std::vector<Eigen::Vector2f> EpistemicPlanner::generate_candidates() const
     const float obstacle_clearance = std::max(params.target_obstacle_clearance, robot_footprint_radius_);
     std::vector<Eigen::Vector2f> candidates;
     candidates.reserve(std::min(static_cast<int>(cached_grid_.size()), params.max_candidates));
+    dbg_grid_ = static_cast<int>(cached_grid_.size());
+    dbg_near_ = 0; dbg_blocked_ = 0;
 
     for (const auto& p : cached_grid_)
     {
         if ((p - robot_pos()).squaredNorm() < min_d2)
-            continue;
+        { ++dbg_near_; continue; }
 
         // Reject candidates that fall inside (or too close to) any object/obstacle footprint.
         // Clearance must match the CONSUMER's near-goal requirement, not merely the robot body — a
@@ -128,12 +190,13 @@ std::vector<Eigen::Vector2f> EpistemicPlanner::generate_candidates() const
                 break;
             }
         }
-        if (blocked) continue;
+        if (blocked) { ++dbg_blocked_; continue; }
 
         candidates.emplace_back(p);
         if (static_cast<int>(candidates.size()) >= params.max_candidates)
             break;
     }
+    dbg_candidates_ = static_cast<int>(candidates.size());
     return candidates;
 }
 
@@ -276,6 +339,11 @@ std::vector<EpistemicPlanner::Target> EpistemicPlanner::evaluate_targets() const
         return {};
     }
 
+    // Keep the observability mask in step with the contour before anything reads the visit grid.
+    // Dirty-flagged, so this is a no-op on all but the cycles where the room geometry changed.
+    if (mask_dirty_)
+        self.refresh_observable_mask();
+
     if (is_angular_dominated())
     {
         Target rot;
@@ -369,20 +437,37 @@ std::vector<EpistemicPlanner::Target> EpistemicPlanner::evaluate_targets() const
 
         // Path staleness: mean staleness of intermediate cells along the straight-line
         // path from robot to target. High = path goes through unexplored territory.
+        //
+        // ONLY OBSERVABLE CELLS ARE SAMPLED. The straight line is a scoring device, not a route, and
+        // in a non-convex apartment it clips wall interiors and pillar bays constantly. Such a cell
+        // can never be marked visited, so it reports the never-visited sentinel age forever — a
+        // permanent ~9-nat reward attached to whichever target pair happens to have one on its
+        // segment, which is exactly how the planner ends up ping-ponging between two spots while
+        // genuinely neglected territory ages. Skip them and average over what is left, rather than
+        // counting them as zero: a skipped sample must not dilute the mean either, or the same
+        // geometry would flip into a permanent PENALTY instead.
         const auto rpos = robot_pos();
         const int n_path = std::max(3, static_cast<int>(t.distance / params.ior_cell_size));
         float path_sum = 0.f;
         float path_neglect_sum = 0.f;
+        int   n_sampled = 0;
         for (int s = 1; s < n_path; ++s)
         {
             const float alpha = static_cast<float>(s) / n_path;
             const Eigen::Vector2f cell = rpos + alpha * (pos - rpos);
+            if (not visit_grid_.is_observable(cell))
+                continue;
             path_sum += visit_grid_.staleness(cell, params.ior_decay_time, now);
             path_neglect_sum += neglect_nats(cell, now);
+            ++n_sampled;
         }
-        const float inv_path = 1.f / static_cast<float>(std::max(1, n_path - 1));
-        const float path_staleness = path_sum * inv_path;                 // ∈ [0,1]
-        const float path_neglect   = path_neglect_sum * inv_path;         // nats
+        // A segment whose whole interior is wall says nothing about the route; fall back to the
+        // destination's own reading so the blend below degrades to "target cell only" instead of
+        // silently scoring it as freshly-swept.
+        const float inv_path = (n_sampled > 0) ? 1.f / static_cast<float>(n_sampled) : 0.f;
+        const float path_staleness = (n_sampled > 0) ? path_sum * inv_path : staleness;          // ∈[0,1]
+        const float path_neglect   = (n_sampled > 0) ? path_neglect_sum * inv_path
+                                                     : neglect_nats(pos, now);                    // nats
 
         // Route staleness: blend of target cell and path cells.
         // w_path_interest=0 → target staleness only (old behaviour)
@@ -488,8 +573,11 @@ std::optional<EpistemicPlanner::Target> EpistemicPlanner::select_target()
         // that. max_fim ≈ 0 with here_fim large is the healthy "room fully visible, nothing to learn
         // by driving" regime — the robot should then be steered purely by the neglect term, which
         // the per-target `neg=` column below shows.
-        std::print("[planner] robot=({:.2f},{:.2f}) here_fim={:.3f} max_marg_fim={:.4f} pub_gain={:.3f} | top:",
-                   rp.x(), rp.y(), dbg_here_fim_, dbg_max_fim_, pub_gain);
+        std::print("[planner] robot=({:.2f},{:.2f}) here_fim={:.3f} max_marg_fim={:.4f} pub_gain={:.3f}"
+                   " | cand={}/{} (near={} blocked={} obst={}) masked_cells={} | top:",
+                   rp.x(), rp.y(), dbg_here_fim_, dbg_max_fim_, pub_gain,
+                   dbg_candidates_, dbg_grid_, dbg_near_, dbg_blocked_,
+                   obstacle_footprints_.size(), dbg_unobservable_);
         const int n = std::min<int>(3, static_cast<int>(targets.size()));
         for (int i = 0; i < n; ++i)
         {

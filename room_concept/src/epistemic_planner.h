@@ -3,6 +3,7 @@
 #include <vector>
 #include <optional>
 #include <chrono>
+#include <cstdint>
 #include <random>
 #include <Eigen/Dense>
 #include "corner_visibility.h"
@@ -284,6 +285,16 @@ private:
     /// fim_prior_precision_floor (a degenerate/lost prior then yields a
     /// large-but-finite ΔH, no ∞/NaN). Shared by evaluate_targets and live_epistemic_gain.
     Eigen::Matrix3f current_prior_precision() const;
+    /// Rebuild VisitGrid::observable from the room polygon. A cell is observable iff the robot can
+    /// bring its IoR receptive field over it, i.e. iff some legal standing position lies within
+    /// ior_path_radius of the cell centre. Written analytically as
+    ///     inside(polygon) and dist_to_walls(centre) >= wall_margin - ior_path_radius
+    /// using quantities the planner already has (no new knob): wall_margin is the same clearance a
+    /// candidate target must hold, and ior_path_radius is the marking radius. With the live config
+    /// (0.55 vs 1.0) the right-hand side is negative, so this reduces to plain "inside the room" —
+    /// but it stays correct if the margin ever exceeds the marking radius. Cheap and dirty-flagged:
+    /// only recomputed when the bounds or the polygon change.
+    void refresh_observable_mask();
     void refresh_ior_overlay();   // lightweight per-cycle rebuild of ior_cells_
 
     // ---- State ----
@@ -294,6 +305,7 @@ private:
     std::vector<Eigen::Vector2f> room_corners_;
     mutable std::vector<Eigen::Vector2f> cached_grid_;
     mutable bool grid_dirty_ = true;
+    mutable bool mask_dirty_ = true;   // observability mask needs a rebuild (bounds/polygon changed)
 
     Eigen::Affine2f robot_pose_ = Eigen::Affine2f::Identity();
     Eigen::Matrix3f robot_cov_ = Eigen::Matrix3f::Identity();
@@ -322,6 +334,24 @@ private:
             float fim_gain = 0.f;   // running-average FIM info gain estimate
         };
         std::vector<Cell> cells;
+        // OBSERVABILITY MASK — 1 = a cell the robot can actually get to, 0 = wall interior, pillar
+        // bay, or anything outside the room contour. Empty ⇒ "not built yet", everything observable.
+        //
+        // This mask is not cosmetic: an unobservable cell can NEVER be marked visited, so its age
+        // stays pinned at kNeverVisitedAge and it advertises log(1+1e6/τ) ≈ 9 nats FOREVER. The route
+        // term averages neglect over the straight line robot→candidate, and that line clips wall
+        // interiors all the time in a non-convex apartment, so any target pair whose connecting
+        // segment happens to cross one carries a permanent, non-decaying bonus and wins every
+        // selection from then on. Measured on the 2026-08-08 apartment run: 23 of 40 selections had
+        // ≥1 such cell on the scored path, worth +0.77 nats — more than any real neglect difference
+        // in the room — and the planner ping-ponged between two cells 2.7 m apart for 150 s at a
+        // time while cells 58 minutes stale went unvisited. Removing those samples drops the
+        // offending scores 0.78 → 0.01 and the arg-max moves to the genuinely neglected territory.
+        //
+        // Short hops are hit hardest, which is why the artefact shows up as a LOCAL oscillation: the
+        // path mean has ~d/cell_size samples, so one 9-nat cell is 1/4 of the mean on a 2.7 m hop but
+        // only 1/12 on a 6 m one.
+        std::vector<std::uint8_t> observable;
         int cols = 0, rows = 0;
         float cell_size = 0.5f;
         Eigen::Vector2f origin{0.f, 0.f};
@@ -336,7 +366,21 @@ private:
             cols = std::max(1, cols);
             rows = std::max(1, rows);
             cells.assign(cols * rows, Cell{});
+            observable.clear();      // rebuilt from the room polygon by refresh_observable_mask()
             initialized = true;
+        }
+
+        bool is_observable(int idx) const
+        {
+            if (observable.empty()) return true;   // mask not built yet ⇒ do not filter anything out
+            return idx >= 0 and idx < static_cast<int>(observable.size()) and observable[idx] != 0;
+        }
+        bool is_observable(const Eigen::Vector2f& pos) const
+        {
+            // to_index CLAMPS, so a query outside the grid lands on a border cell. That is exactly
+            // the case the mask must catch: the border cells of the bbox are wall/exterior, so a path
+            // sample that leaves the room reads as unobservable instead of as 9 nats of free reward.
+            return initialized ? is_observable(to_index(pos)) : true;
         }
 
         int to_index(const Eigen::Vector2f& pos) const
@@ -448,6 +492,15 @@ private:
     // ---- Selection diagnostics (set in evaluate_targets, printed in select_target) ----
     mutable float dbg_max_fim_  = 0.f;   // best MARGINAL pose-info gain across candidates (nats)
     mutable float dbg_here_fim_ = 0.f;   // absolute pose info available from the robot's own cell (nats)
+    // Candidate-set census, refreshed every generate_candidates(). The STARVED diagnostic only fires
+    // when the set is EMPTY, so a set of three — which looks exactly like "the robot loops between two
+    // or three spots" — was completely invisible. Report the size and what removed the rest on every
+    // selection, so a shrinking candidate set is distinguishable from a scoring problem.
+    mutable int dbg_grid_          = 0;   // cells in the static in-room grid
+    mutable int dbg_near_          = 0;   // dropped: closer than min_distance to the robot
+    mutable int dbg_blocked_       = 0;   // dropped: inside an object/obstacle footprint + clearance
+    mutable int dbg_candidates_    = 0;   // what actually survived to be scored
+    mutable int dbg_unobservable_  = 0;   // visit-grid cells masked out as unreachable (wall/exterior)
 };
 
 } // namespace rc

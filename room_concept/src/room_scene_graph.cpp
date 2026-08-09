@@ -20,6 +20,7 @@
 
 #include <QString>
 #include <QtCore/qdebug.h>
+#include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
 
 namespace rc
 {
@@ -469,6 +470,7 @@ void RoomSceneGraph::dsr_create_room_and_reparent(const rc::RoomConcept::UpdateR
     room_node.attrs()[room_height_str.data()] = DSR::Attribute{params_->room_height, 0, 0};
     // TODO: change to add_or_modify_attrib_local once available
 
+    rc::provenance::stamp_creation(*G_, room_node);   // birth stamp: epoch ms + local ISO-8601
     const auto room_id_opt = G_->insert_node(room_node);
     if (!room_id_opt.has_value())
     {
@@ -1151,6 +1153,7 @@ void RoomSceneGraph::dsr_create_wall_nodes()
         G_->add_or_modify_attrib_local<parent_att>(wall_node, dsr_room_id_);
         G_->add_or_modify_attrib_local<level_att>(wall_node, 4);
 
+        rc::provenance::stamp_creation(*G_, wall_node);   // birth stamp: epoch ms + local ISO-8601
         const auto wall_id = G_->insert_node(wall_node);
         if (!wall_id.has_value())
         {
@@ -1180,6 +1183,7 @@ void RoomSceneGraph::dsr_create_wall_nodes()
     else
         qWarning() << "dsr_create_wall_nodes: could not write the floor display mesh";
 
+    rc::provenance::stamp_creation(*G_, floor_node);   // birth stamp: epoch ms + local ISO-8601
     const auto floor_id = G_->insert_node(floor_node);
     if (!floor_id.has_value())
         qWarning() << "dsr_create_wall_nodes: failed to insert floor node";

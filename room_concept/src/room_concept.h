@@ -203,12 +203,20 @@ public:
         float odom_noise_scale = 1.0f;   // Multiplier on all odom noise params (>1 simulates worse odometry)
 
         // ===== Encoder angular slip model =====
-        // At high angular speeds, wheel encoders under-report rotation due to wheel slip.
-        // The rotation covariance for the measured odometry prior is inflated by:
-        //   rot_var_extra = (encoder_rot_slip_k * |vel_rot|)^2
-        // so that the Bayesian fusion trusts the command (cmd_dth) more than the encoder
-        // at high angular speeds.  Set to 0 to disable.
-        float encoder_rot_slip_k = 0.15f;  // rad uncertainty per rad/s of angular speed
+        // Fraction of the rotation increment that slips, so the measured-odometry rotation variance
+        // gains
+        //   rot_var_extra = (encoder_rot_slip_k * |delta_theta|)^2
+        // Was (encoder_rot_slip_k * |vel_rot|)^2 — a rate used as an angle, inflating sigma by 1/dt
+        // (~16x at the 62 ms update interval); see build_motion_covariance for the measurement.
+        //
+        // NOTE the premise above this line was also backwards. It read "encoders under-report
+        // rotation at high angular speed, so make the fusion trust the COMMAND more". Measured
+        // 08-09 over 11 in-place turns against the SDF posterior (anchored by the room geometry):
+        // the encoder reports 1.068 +-0.022 of the true rotation and the command 0.747 +-0.025.
+        // It is the COMMAND that under-reports, by 25%, and it is the channel with the
+        // speed-proportional error — so if either prior deserves an inflation term growing with
+        // |omega| it is that one, not this. Set to 0 to disable.
+        float encoder_rot_slip_k = 0.15f;  // dimensionless: fraction of the rotation that slips
 
         // ===== Online Motion Model Learning =====
         // Continuously adapt noise parameters from post-optimisation residuals.
@@ -917,6 +925,51 @@ private:
        void reset() { consecutive_bad_frames = 0; cooldown = 0; }
    };
    RecoveryManager recovery_;
+
+   // ===== Loss/recovery episode log =====
+   // One row per grid_search_initial_pose() call, written wherever it returns. The per-frame debug log
+   // could only ever show recovery INDIRECTLY — I had to infer episodes from window_size resets and
+   // proxy the early-exit metric through final_loss, which is exactly the kind of inference that has
+   // been wrong twice in this work. This records what the search actually did, so the algorithm can be
+   // improved from measurement instead of from a story about it.
+   //
+   // The load-bearing column is ESS (effective sample size of the softmax weights over the evaluated
+   // poses): ~1 means one pose explains the scan and the fix is decisive; large means a flat valley of
+   // near-equal candidates, i.e. the scan genuinely does not determine the pose and ANY winner drawn
+   // from it is arbitrary. That distinction is invisible in a success/fail bit, and it is the one that
+   // decides whether the answer is "search harder" or "go somewhere the geometry is informative".
+   struct SearchEpisode
+   {
+       std::int64_t ts_ms = 0;
+       const char*  trigger = "unknown";   // recovery | map_trust | seed | manual
+       int          n_lidar = 0;
+       float        incumbent_x = 0.f, incumbent_y = 0.f, incumbent_theta = 0.f;
+       float        incumbent_loss = std::numeric_limits<float>::quiet_NaN();
+       float        good_thr = 0.f;
+       int          stage = -1;            // 0 = yaw sweep, 1 = local lattice, 2 = coarse global, 3 = fine
+       float        best_x = 0.f, best_y = 0.f, best_theta = 0.f;
+       float        best_loss = std::numeric_limits<float>::quiet_NaN();
+       float        topk_best = std::numeric_limits<float>::quiet_NaN();   // Stage-2 candidate spread:
+       float        topk_worst = std::numeric_limits<float>::quiet_NaN();  // how flat is the valley
+       float        ess = std::numeric_limits<float>::quiet_NaN();
+       float        cov_xx = std::numeric_limits<float>::quiet_NaN();
+       float        cov_yy = std::numeric_limits<float>::quiet_NaN();
+       float        cov_tt = std::numeric_limits<float>::quiet_NaN();
+       int          n_evals = 0;
+       float        jump_m = 0.f;          // distance from the incumbent to the committed pose
+       float        jump_rad = 0.f;
+       bool         success = false;
+       float        duration_ms = 0.f;
+       float        beta = std::numeric_limits<float>::quiet_NaN();   // softmax temperature actually used
+       int          n_points = 0;                                     // N behind the median's std error
+   };
+   // Why the next grid search was invoked. Set by the caller immediately before the call; the search
+   // itself has no way to know, and "which trigger fires most and which of them actually resolve" is
+   // the first question the episode log has to answer.
+   const char*   search_trigger_ = "unknown";
+   std::ofstream recovery_log_;
+   std::string   recovery_log_path_;
+   void write_search_episode(const SearchEpisode& e);
 
    // ===== Window Manager (RFE sliding window) =====
    struct WindowManager
