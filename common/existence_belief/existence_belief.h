@@ -367,16 +367,49 @@ public:
     // `p_detect` = P(the detector could have fired | the object is there) at THIS observation, i.e. how
     // unambiguous the conditions were. Pass it whenever the caller has it; the default of 1 means
     // "conditions were ideal", which is the independent case and reproduces the pre-correlation behaviour.
-    void integrate(const Evidence& e, float p_detect = 1.0f)
+    // ─── THE PRIMARY ENTRY POINT: (p_vis, log_ratio) ─────────────────────────────────────────────
+    //
+    // ★AN AGENT MAY CHOOSE ITS EVIDENCE, BUT NOT ITS ARITHMETIC. This class used to be reachable only
+    // through an Evidence built by carve_box() or mask_evidence(), which demand LiDAR beams or
+    // pixel-level silhouette counts. Four agents can produce those; chair cannot (it has no silhouette
+    // projector, only a point-count adequacy proxy) and bottle produces nothing. So chair needed the
+    // ACCUMULATION POLICY, could not reach it without the EVIDENCE CONSTRUCTION, and reimplemented the
+    // policy instead — which is why it silently missed three fixes made here: the occupancy-only floor
+    // (a ratchet), the frame-correlation weighting, and occlusion-as-strength. A coupling that had
+    // nothing to do with chairs cost three bugs.
+    //
+    // So the seam is here. The agent supplies the two numbers the model actually needs:
+    //   p_vis     P(this probe could have resolved the object | it exists) ∈ [0,1]. 0 ⇒ HOLD, exactly.
+    //   log_ratio log[ P(outcome | exists) / P(outcome | ¬exists) ], signed: >0 confirms, <0 refutes.
+    // and everything below — the p_vis weighting, the frame-correlation decorrelation, the clamp and
+    // the removal decision — is owned HERE and cannot drift per agent.
+    //
+    // carve_box()/mask_evidence() remain, as OPTIONAL helpers that produce those two numbers for agents
+    // that happen to have beams or pixels. They are no longer the way in.
+    void integrate(float p_vis, float log_ratio)
     {
-        if (e.n_reached == 0) return;
-        const int sign = (e.log_odds_delta > 0.0f) - (e.log_odds_delta < 0.0f);
+        const float pv = std::clamp(p_vis, 0.0f, 1.0f);
+        if (pv <= 0.0f or log_ratio == 0.0f) return;      // could not have resolved it ⇒ no evidence, no update
+        const float delta = pv * log_ratio;
+        const int sign = (delta > 0.0f) - (delta < 0.0f);
         if (sign != 0)
         {
             if (sign == run_sign_) ++run_k_;
             else { run_sign_ = sign; run_k_ = 1; }
         }
-        L_ = std::clamp(L_ + e.log_odds_delta * marginal_weight(run_k_, p_detect), -L_max_, L_max_);
+        // The correlation weighting reads the CONDITIONS, and p_vis is exactly "how unambiguous was this
+        // look" — the same quantity, so it is passed straight through rather than asked for twice.
+        L_ = std::clamp(L_ + delta * marginal_weight(run_k_, pv), -L_max_, L_max_);
+    }
+
+    // Compatibility overload for the beam/pixel path: an Evidence already carries the product, so the
+    // ratio is recovered by dividing out p_detect and handing both to the primary form.
+    void integrate(const Evidence& e, float p_detect = 1.0f)
+    {
+        if (e.n_reached == 0) return;                     // not probed this cycle ⇒ HOLD
+        const float pv = std::clamp(p_detect, 0.0f, 1.0f);
+        if (pv <= 0.0f) return;
+        integrate(pv, e.log_odds_delta / pv);             // (pv * ratio) reproduces log_odds_delta exactly
     }
     float logodds()  const { return L_; }
     float p_exists() const { return 1.0f / (1.0f + std::exp(-L_)); }

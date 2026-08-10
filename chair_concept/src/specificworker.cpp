@@ -1355,7 +1355,11 @@ void SpecificWorker::update_existence_beliefs()
     for (auto& [id, inst] : fitter_->instances())
     {
         if (std::isnan(inst.exist_logodds))           // seed on first visit (fresh birth OR adopted graph node)
-            inst.exist_logodds = cfg_.exist_birth_logodds;
+        {
+            inst.existence.set_max(cfg_.exist_max_logodds);
+            inst.existence.set(cfg_.exist_birth_logodds);
+            inst.exist_logodds = inst.existence.logodds();
+        }
 
         // ROOM-CONTAINMENT POSE PRIOR (runs BEFORE the frustum gate, so it reaches a chair a localization glitch
         // put OUTSIDE the walls / behind a wall where the sensor can never vacate it): P(chair outside) ≈ 0, so
@@ -1365,8 +1369,11 @@ void SpecificWorker::update_existence_beliefs()
             const auto& ms = inst.model.state();
             if (not fitter_->point_in_room(Eigen::Vector2f(ms.cx, ms.cy), cfg_.exist_room_margin_m))
             {
-                inst.exist_logodds = std::clamp(inst.exist_logodds - cfg_.exist_out_of_room_gain,
-                                                cfg_.exist_remove_logodds - 1.0f, cfg_.exist_max_logodds);
+                // A containment violation is fully resolvable — the polygon is a trusted nominal model —
+                // so p_vis = 1 and the whole ratio applies. Through the shared policy like every other
+                // channel, so it inherits the clamp and the correlation handling.
+                inst.existence.integrate(1.0f, -cfg_.exist_out_of_room_gain);
+                inst.exist_logodds = inst.existence.logodds();
                 if (inst.exist_logodds < cfg_.exist_remove_logodds)
                     to_remove.push_back(id);
                 continue;   // outside the room → no sensor evidence can rescue it; skip the normal channels
@@ -1379,8 +1386,11 @@ void SpecificWorker::update_existence_beliefs()
         if (inst.is_bearing_hypothesis or not inst.roi_valid or not inst.ai2_initialized)
             continue;
 
-        // TWO evidence channels for whether a chair really occupies this in-frustum spot.
-        float llr;
+        // TWO evidence channels for whether a chair really occupies this in-frustum spot. Each sets the
+        // pair the shared policy wants: p_vis (could this look have resolved it?) and the log-ratio.
+        float llr;                 // the p_vis-weighted product, kept for the CSV/diagnostics
+        float p_vis  = 1.0f;       // P(this probe could have resolved the chair | it exists)
+        float ratio  = 0.0f;       // log[ P(outcome|exists) / P(outcome|¬exists) ], unweighted
         const bool won = inst.assigned_mask_idx >= 0 and inst.assigned_mask_idx < static_cast<int>(pkt.slices.size());
         if (won)
         {
@@ -1405,8 +1415,14 @@ void SpecificWorker::update_existence_beliefs()
             // depth/clutter → it may CONFIRM existence (its win already reset frames_since_detection) but must not
             // produce NEGATIVE evidence. Only a ZED win (depth_var==0) may argue a chair down.
             const bool won_zed = sl.has_depth and sl.depth_var == 0.0f;
+            ratio = llr;                               // the unweighted evidence this mask carries
             if (llr < 0.0f)
-                llr = won_zed ? llr * fitter_->frame_reliability(inst) : 0.0f;
+            {
+                // A refuting look is only worth what the frame could resolve — and a ricoh win may never
+                // refute at all (unreliable depth/clutter), which is p_vis = 0, i.e. a HOLD.
+                p_vis = won_zed ? fitter_->frame_reliability(inst) : 0.0f;
+                llr   = ratio * p_vis;
+            }
         }
         else
         {
@@ -1436,11 +1452,19 @@ void SpecificWorker::update_existence_beliefs()
             // is the behaviour the old branch was after. What changes is that a PARTIALLY or SPURIOUSLY
             // occluded phantom keeps vacating, slowly, instead of living for ever.
             const float occ = cfg_.exist_occlusion_check ? fitter_->los_occlusion(inst) : 0.0f;
-            llr = -g * conf * pd * std::clamp(1.0f - occ, 0.0f, 1.0f);
+            // p_vis is precisely "how well could this look have resolved a chair that IS here":
+            // staleness confidence x ZED detectability x how much line of sight is left.
+            p_vis = std::clamp(conf * pd * std::clamp(1.0f - occ, 0.0f, 1.0f), 0.0f, 1.0f);
+            ratio = -g;                                // absence, at full strength, before visibility
+            llr   = ratio * p_vis;
         }
 
-        inst.exist_logodds = std::clamp(inst.exist_logodds + llr,
-                                        cfg_.exist_remove_logodds - 1.0f, cfg_.exist_max_logodds);
+        // ★THROUGH THE SHARED POLICY. `llr` above is already the p_vis-weighted product (each branch
+        // scales by conf / zed_pd / (1-occlusion) / frame_reliability), so p_vis is handed in separately
+        // and the ratio recovered — the class then owns the clamp, the frame-correlation decorrelation
+        // and the removal boundary, identically to refrigerator/table/cabinet/door.
+        inst.existence.integrate(p_vis, ratio);
+        inst.exist_logodds = inst.existence.logodds();
 
         if (inst.exist_logodds < cfg_.exist_remove_logodds)
             to_remove.push_back(id);

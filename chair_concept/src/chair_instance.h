@@ -17,7 +17,8 @@
 
 #include <Eigen/Dense>
 
-#include "chair_model.h"        // ChairModel / ChairState
+#include "chair_model.h"
+#include "../../common/existence_belief/existence_belief.h"   // rc::exist::ExistenceBelief        // ChairModel / ChairState
 #include "chair_belief.h"       // rc::ChairBelief (AI2 recursive-Laplace belief)
 #include "chair_affordance.h"   // ChairAffordance
 #include "../../common/appearance_belief/appearance_belief.h" // per-instance albedo chromaticity (DISPLAY only)
@@ -93,6 +94,16 @@ struct ChairInstance
     // churn), but a spot left unexplained for seconds accrues the full negative. HELD out of frustum / stale /
     // bearing-only / un-initialised. Removed when L < cfg.exist_remove_logodds — evidence-based, NO age
     // immunity; a real chair keeps L pinned at the saturation cap by being explained. NaN = un-seeded.
+    // ★THE SHARED POLICY OWNS THE ARITHMETIC. chair used to keep only this float and hand-roll the
+    // update, which is why it silently missed three fixes made in rc::exist: the occupancy-only floor
+    // (a ratchet), the frame-correlation weighting, and occlusion-as-strength. It could not use the
+    // shared class before because that class was reachable only through carve_box()/mask_evidence(),
+    // which need LiDAR beams or pixel silhouettes — and chair has neither, only a point-count adequacy
+    // proxy. The (p_vis, log_ratio) seam removed that coupling: an agent chooses its EVIDENCE, never
+    // its ARITHMETIC. See CONCEPT_AGENT_INVARIANTS.md.
+    rc::exist::ExistenceBelief existence{0.0f, 4.0f};
+    // Mirror of existence.logodds(), kept because the dashboards, the strip and the CSVs read it. NaN
+    // until the channel is seeded, which is what those readers test for.
     float exist_logodds = std::numeric_limits<float>::quiet_NaN();
     int  processed_cycles   = 0;      // per-chair compute cycles for log throttling
     bool model_stable       = false;
