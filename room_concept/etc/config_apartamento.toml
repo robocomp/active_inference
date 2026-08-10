@@ -183,8 +183,23 @@ SymmetryDebugCsv = true
 # ── Selección de optimizador ──────────────────────────────────────────────────
 # "ADAM"  — Adam adaptativo (default probado, robusto lejos del mínimo)
 # "LBFGS" — L-BFGS con line search Wolfe (convergencia más rápida, ~8-12 evals)
+# "GN"    — Levenberg-Marquardt sobre jacobianos ANALITICOS (room_gn_solver.h)
 # "CAVI"  — reservado para implementación futura
-OptimizerType          = "LBFGS"
+#
+# 2026-08-10: GN pasa a CONDUCIR la pose, tras 4 runs en sombra (~300 frames optimizados):
+# identidad del objetivo 5.3e-06, jacobiano validado (grad_relerr_basin med 5.8e-4, y su cola NO
+# cae en los frames donde las poses discrepan), calidad mejor en 41 / empate 51 / peor en 10, y de
+# los 18 frames con discrepancia >2 mm GN esta MAS CERCA del minimo en 14. Coste: ms_gn 8.87 con
+# instrumentacion (offline 1.3-4.1 ms) contra 66.8 ms de L-BFGS.
+#
+# ⚠ Al poner "GN" el modo sombra se APAGA solo (gn_shadow and optimizer_type != "GN"), asi que
+# etc/gn_shadow.csv deja de crecer y queda con los datos del run anterior. Volver a "LBFGS" lo
+# re-arma sin tocar nada mas — esa es la via de vuelta si algo va mal.
+#
+# ⚠ Camino que la sombra NO pudo probar: compute_posterior_covariance corre DESPUES del optimizador,
+# y hasta ahora siempre sobre las poses de L-BFGS. Vigilar cov_tt en el debug_log (baseline: mediana
+# 5.8e-4, sigma_theta ~1.4 deg; en EE rotando 1.75 deg).
+OptimizerType          = "GN"
 
 # ── Backend Gauss-Newton / Levenberg-Marquardt (room_gn_solver.h) ─────────────
 # Mismo objetivo que compute_rfe_loss, resuelto como un sistema de ecuaciones normales 15x15 con
