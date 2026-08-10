@@ -440,17 +440,27 @@ void SpecificWorker::apply_fridge_filter()
         // and BOTH sensor channels silent (sfree_eff≈0, lfree_eff=0), ex_L still fell a steady −0.65/cycle from
         // +1.41 to the −4 clamp and the fridge was removed. Whatever the shape says, saying it again on a frame
         // that observed nothing is not evidence. Same rule as CREATE, UPDATE and the sensor REMOVE channels.
-        if (inst.matched_frames == inst.plaus_seen_frames and not inst.dbg_gated)
+        // ★THE DEBOUNCE OBEYS THE SAME RULE AS THE DELTA. It used to advance on ANY cycle where the decision
+        // said remove, so once L was below the boundary — however it got there, including from the sensor
+        // channel — this streak ran to RemoveFrames on cycles that measured NOTHING and deleted the fridge.
+        // That also made it the weaker of the two authorities: it would fire before the sensor streak
+        // (which now accumulates p_detect), so fixing that one alone would have changed almost nothing here.
+        // Advancing only on a MEASURED, ungated cycle is the same "saying it again on a frame that observed
+        // nothing is not evidence" rule the comment above states for the delta.
+        const bool measured = (inst.matched_frames == inst.plaus_seen_frames and not inst.dbg_gated);
+        if (measured)
+        {
             inst.existence.set(inst.existence.logodds() + deltas[k]);   // clamped by L_max
 
-        // Removal debounce (dedicated streak, independent of the sensor-existence streak). A freshly-born
-        // instance is given the SAME warmup grace as the belief aging (matched_frames_before_aging) so a young
-        // genuine fridge is never retired before it has accrued its own shape evidence.
-        const bool warm = inst.matched_frames >= cfg_.matched_frames_before_aging;
-        if (warm and inst.existence.should_remove(cfg_.existence_removal_prob))
-            ++inst.plaus_remove_streak;
-        else
-            inst.plaus_remove_streak = 0;
+            // Removal debounce (dedicated streak, independent of the sensor-existence streak). A freshly-born
+            // instance is given the SAME warmup grace as the belief aging (matched_frames_before_aging) so a
+            // young genuine fridge is never retired before it has accrued its own shape evidence.
+            const bool warm = inst.matched_frames >= cfg_.matched_frames_before_aging;
+            if (warm and inst.existence.should_remove(cfg_.existence_removal_prob))
+                ++inst.plaus_remove_streak;
+            else
+                inst.plaus_remove_streak = 0;
+        }
 
         if (cfg_.fridge_filter_log)
             std::print("[fridge-filter] {} plaus_ev={:.2f} llr={:+.2f} ΔL={:+.2f} L={:.2f} p={:.2f} streak={}\n",

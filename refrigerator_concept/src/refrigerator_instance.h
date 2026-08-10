@@ -147,7 +147,7 @@ struct RefrigeratorInstance
     // Removed only when the removal decision holds for existence_remove_frames consecutive cycles (debounce)
     // — deleting furniture warrants SUSTAINED evidence, not a transient hiccup.
     rc::exist::ExistenceBelief existence;
-    int existence_remove_streak = 0;
+    float existence_remove_streak = 0.0f;   // accumulated LOOKS (Sum p_detect), not cycles
 
     // ── "Is this really a fridge?" plausibility filter (model-evidence mis-detection reject) ──────────
     // last_plausibility = this cycle's shape LOG-EVIDENCE RATIO log[p(θ|fridge)/p(θ|other furniture)] (nats,

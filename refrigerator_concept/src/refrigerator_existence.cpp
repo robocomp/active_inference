@@ -70,6 +70,9 @@ void RefrigeratorExistence::update_and_remove(RefrigeratorFitter& fitter, Refrig
     std::vector<std::uint64_t> doomed;
     for (auto& [id, inst] : fitter.instances())
     {
+        // How resolving THIS cycle's look was, in units of one ideal observation (0 => the sensor could not
+        // have seen it from here even if it were present). Drives the removal debounce below.
+        float cycle_p_detect = 0.0f;
         if (not inst.ai2_initialized) continue;
         inst.existence.set_max(cfg_.existence_logodds_max);
         const auto& bs = inst.ai2_belief.state();
@@ -127,6 +130,7 @@ void RefrigeratorExistence::update_and_remove(RefrigeratorFitter& fitter, Refrig
                 // Same model the epistemic planner uses to pick the viewpoint — one envelope, both directions.
                 const float p_detect = rc::detect::p_detect(sil.fill, sil.in_fov_frac(), det_env_)
                                      * sil.central_frac();
+                cycle_p_detect = p_detect;
                 const float verify = raw_free * (1.0f - p_detect);        // un-confident absence → go-verify surprise
 
                 // ★p_detect scales the SATURATED delta, not the raw pixel COUNT — ported from door_concept,
@@ -256,8 +260,16 @@ void RefrigeratorExistence::update_and_remove(RefrigeratorFitter& fitter, Refrig
         // cycles) regardless of the two sensors' rates. A transient hiccup still can't delete a real refrigerator.
         if (integrated)
         {
-            if (inst.existence.should_remove(cfg_.existence_removal_prob)) ++inst.existence_remove_streak;
-            else                                                          inst.existence_remove_streak = 0;
+            // ★DEBOUNCE ON LOOKS, NOT CYCLES. `++` also counted the cycles where p_detect was 0 and the
+            // channel had just, correctly, HELD — so an instance that dipped below the boundary once was
+            // deleted RemoveFrames cycles later regardless of what happened in between. Measured in
+            // door_concept, where 12 of 12 deaths had fixated=0: the `if (integrated)` guard does NOT
+            // prevent this, because a channel that ran and resolved nothing still sets integrated.
+            // Accumulating p_detect makes RemoveFrames a number of IDEAL observations (table/bottle unit).
+            if (inst.existence.should_remove(cfg_.existence_removal_prob))
+                inst.existence_remove_streak += cycle_p_detect;
+            else
+                inst.existence_remove_streak = 0.0f;
 
             if (fitter.should_log(inst))
                 std::print("[{}] [existence] L={:.2f} p={:.2f} | lidar occ={:.1f} free={:.1f} n={} | sil occ={:.0f} free={:.0f} ndet={} | {} streak={}\n",

@@ -115,7 +115,11 @@ struct DoorInstance
     // EVIDENCE cycles — no age immunity, and no removal from a view that could not have resolved the door.
     rc::exist::ExistenceBelief existence{};
     bool existence_seeded = false;            // false until seeded with cfg.exist_birth_logodds on first visit
-    int  existence_remove_streak = 0;         // consecutive evidence cycles whose decision says "remove"
+    // Accumulated LOOKS (Σ p_detect) whose decision says "remove" — NOT a count of cycles. A cycle in which
+    // the door could not have been resolved (p_detect → 0) correctly leaves L untouched, and must leave the
+    // debounce untouched too, or the door is condemned by evidence gathered once and executed later while
+    // the robot looks elsewhere. Float for the same reason table/bottle use one: partial looks partially count.
+    float existence_remove_streak = 0.0f;
     // Silhouette diagnostics (last evidence cycle) — the columns of etc/door_existence_log.csv.
     float dbg_sil_occ = 0.0f, dbg_sil_free = 0.0f, dbg_sil_free_eff = 0.0f;
     int   dbg_sil_ndet = 0, dbg_sil_ntotal = 0, dbg_sil_noccl = 0, dbg_sil_ncells = 0;

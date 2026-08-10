@@ -775,7 +775,7 @@ void SpecificWorker::refresh_belief_inspector()
             c.s.logodds  = inst.existence.logodds();
             c.s.p_exists = inst.existence.p_exists();
         }
-        c.s.remove_streak = inst.existence_remove_streak;
+        c.s.remove_streak = static_cast<int>(inst.existence_remove_streak);
         c.s.age_s       = inst.last_belief_touch.time_since_epoch().count() == 0
                         ? -1.0f
                         : std::chrono::duration<float>(now - inst.last_belief_touch).count();
@@ -1801,8 +1801,10 @@ void SpecificWorker::update_existence_beliefs()
             if (not fitter_->point_in_room(Eigen::Vector2f(ms.ap_cx, ms.ap_cy), cfg_.exist_room_margin_m))
             {
                 inst.existence.set(inst.existence.logodds() - cfg_.exist_out_of_room_gain);
-                if (inst.existence.should_remove(cfg_.exist_removal_prob)) ++inst.existence_remove_streak;
-                else                                                       inst.existence_remove_streak = 0;
+                // A PRIOR is visibility-independent by construction (that is what the branch comment above
+                // argues), so it advances the debounce at FULL weight — unlike the sensor channel below.
+                if (inst.existence.should_remove(cfg_.exist_removal_prob)) inst.existence_remove_streak += 1.0f;
+                else                                                       inst.existence_remove_streak = 0.0f;
                 if (inst.existence_remove_streak >= cfg_.exist_remove_frames)
                     to_remove.push_back(id);
                 continue;   // outside the room → no sensor evidence can rescue it; skip the normal channel
@@ -1823,8 +1825,9 @@ void SpecificWorker::update_existence_beliefs()
             and inst.obs_top_z < cfg_.exist_min_height_m)
         {
             inst.existence.set(inst.existence.logodds() - cfg_.exist_short_gain);
-            if (inst.existence.should_remove(cfg_.exist_removal_prob)) ++inst.existence_remove_streak;
-            else                                                       inst.existence_remove_streak = 0;
+            // Same as the room prior: a categorical fact about what a door IS, so it needs no visibility.
+            if (inst.existence.should_remove(cfg_.exist_removal_prob)) inst.existence_remove_streak += 1.0f;
+            else                                                       inst.existence_remove_streak = 0.0f;
             if (inst.existence_remove_streak >= cfg_.exist_remove_frames)
                 to_remove.push_back(id);
             continue;   // too short to be a door → no amount of silhouette agreement makes it one
@@ -1915,12 +1918,22 @@ void SpecificWorker::update_existence_beliefs()
         // refrigerator_existence.cpp: the old form left a positive push at p_detect -> 0, which is the
         // ratchet that makes a phantom immortal. A probe that could not resolve the object is a HOLD.
         ev.log_odds_delta = p_detect * d_full;
-        inst.existence.integrate(ev);
+        // p_detect is passed EXPLICITLY: log_odds_delta already carries it, but the second argument is also
+        // what the frame-correlation weighting reads (rho_eff = rho*(1-p_detect)). Defaulting it to 1.0 told
+        // the belief every miss was a maximally-unambiguous look, so consecutive correlated misses counted as
+        // independent. Inert while Existence.FrameCorrelation is 0, but wrong the moment it is measured.
+        inst.existence.integrate(ev, p_detect);
 
         // Debounce on consecutive EVIDENCE cycles (not wall-clock), so a transient hiccup cannot delete a real
         // door, and removal always reflects sustained agreement across frames.
-        if (inst.existence.should_remove(cfg_.exist_removal_prob)) ++inst.existence_remove_streak;
-        else                                                       inst.existence_remove_streak = 0;
+        // ★DEBOUNCE ON LOOKS, NOT CYCLES. `++` counted every cycle in which the decision said remove — including
+        // the ones where p_detect was 0 and the channel had just, correctly, HELD. So a door that dipped below
+        // the boundary once was deleted `RemoveFrames` cycles later no matter what happened in between, and the
+        // live record shows exactly that: 12 of 12 door deaths had fixated=0, five at p_detect=0.000, at ranges
+        // of 2.1-6.7 m. Accumulating p_detect makes the debounce measure how much genuine LOOKING has happened,
+        // so RemoveFrames is a number of IDEAL observations - the same unit table and bottle use.
+        if (inst.existence.should_remove(cfg_.exist_removal_prob)) inst.existence_remove_streak += p_detect;
+        else                                                       inst.existence_remove_streak = 0.0f;
         if (inst.existence_remove_streak >= cfg_.exist_remove_frames)
             to_remove.push_back(id);
     }
