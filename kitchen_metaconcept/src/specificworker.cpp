@@ -258,6 +258,15 @@ void SpecificWorker::initialize()
                         << QString::fromStdString(cfg_.fit_csv_path);
     }
 
+    if (not cfg_.outline_csv_path.empty())
+    {
+        if (rc::diag::open_rotating(outline_csv_, cfg_.outline_csv_path,
+                "cycle,tier,run_a,run_b,vertex_x,vertex_y,gap_a,gap_b,end_a_high,end_b_high,cross\n"))
+            outline_csv_.imbue(std::locale::classic());
+        else qWarning() << "kitchen_metaconcept: cannot open outline CSV"
+                        << QString::fromStdString(cfg_.outline_csv_path);
+    }
+
     rc::KitchenBeliefParams bp;
     bp.axis_model_std     = cfg_.axis_model_std_deg / kRad2Deg;
     bp.worktop_model_std  = cfg_.worktop_model_std_m;
@@ -304,6 +313,10 @@ void SpecificWorker::compute()
     step_kitchen_belief(snap);
     log_fit_csv(snap);
 
+    // The continuous-shape view: where the runs SHOULD meet, versus where they actually end.
+    step_outline(snap);
+    log_outline_csv();
+
     if (cfg_.log_period_frames > 0 and (cycle_ % static_cast<std::uint64_t>(cfg_.log_period_frames)) == 0)
     {
         // Report the REJECTIONS alongside the counts: "0 members" only means there is no kitchen if
@@ -338,6 +351,13 @@ void SpecificWorker::compute()
                        kitchen_belief_.state().worktop, kitchen_belief_.state().depth,
                        kitchen_belief_.state().depth_tall, kitchen_belief_.state().depth_upper,
                        F, Fa - F, kitchen_belief_.p_frame(), worst_name, worst);
+            if (not outline_floor_.joints().empty() or not outline_wall_.joints().empty())
+                std::print("[kitchen_metaconcept]   outline: {} floor joints, {} wall joints | "
+                           "worst gap {:+.3f} m ({})\n",
+                           outline_floor_.joints().size(), outline_wall_.joints().size(),
+                           std::abs(outline_floor_.worst_gap()) > std::abs(outline_wall_.worst_gap())
+                               ? outline_floor_.worst_gap() : outline_wall_.worst_gap(),
+                           (outline_floor_.worst_gap() > 0.0f) ? "hole" : "overlap");
 
             // WHO is in the frame this cycle. The aggregate line cannot answer "is the right set of
             // objects participating?", which is the first question asked of any grouping — and a
@@ -466,6 +486,7 @@ std::optional<rc::KitchenMember> SpecificWorker::read_member(const DSR::Node& no
 
     const auto& mat = rtmat->matrix();
     const float z0  = static_cast<float>(mat(2, 3));
+    m.xy  = Eigen::Vector2f(static_cast<float>(mat(0, 3)), static_cast<float>(mat(1, 3)));
     m.yaw = std::atan2(static_cast<float>(mat(1, 0)), static_cast<float>(mat(0, 0)));
 
     // Geometry: cabinet_concept publishes width=along-run L, depth=carcass depth, height=z1−z0, and
@@ -614,7 +635,81 @@ void SpecificWorker::compute_cavity_priors(const MemberSnapshot& s)
     }
 }
 
+// ─── The OUTLINE (step 1: measures joints, corrects nothing) ─────────────────
+
+// Centroid of the room polygon — used ONLY to decide which side of a run its front face is on.
+// Get it wrong for a wall run and the face line lands on the wall side, moving every joint by a full
+// carcass depth, so it is worth taking from the actual polygon rather than assuming a winding.
+std::optional<Eigen::Vector2f> SpecificWorker::room_interior() const
+{
+    if (not G or room_node_id_ == 0) return std::nullopt;
+    const auto room = G->get_node(room_node_id_);
+    if (not room.has_value()) return std::nullopt;
+    const auto px = G->get_attrib_by_name<delimiting_polygon_x_att>(room.value());
+    const auto py = G->get_attrib_by_name<delimiting_polygon_y_att>(room.value());
+    if (not px.has_value() or not py.has_value()) return std::nullopt;
+    const auto& xs = px.value().get();
+    const auto& ys = py.value().get();
+    const std::size_t n = std::min(xs.size(), ys.size());
+    if (n < 3) return std::nullopt;
+    double cx = 0.0, cy = 0.0;
+    for (std::size_t i = 0; i < n; ++i) { cx += xs[i]; cy += ys[i]; }
+    return Eigen::Vector2f(static_cast<float>(cx / n), static_cast<float>(cy / n));
+}
+
+void SpecificWorker::step_outline(const MemberSnapshot& s)
+{
+    const auto interior = room_interior();
+    if (not interior.has_value() or s.members.empty())
+        return;
+
+    // Two chains, because a floor unit and a wall unit are at different heights and joining them
+    // would invent a corner where there is only a cabinet above another cabinet.
+    std::vector<rc::OutlineSeg> floor_segs, wall_segs;
+    for (const auto& m : s.members)
+    {
+        rc::OutlineSeg g;
+        g.name   = m.name;
+        g.centre = m.xy;
+        g.u      = Eigen::Vector2f(std::cos(m.yaw), std::sin(m.yaw));
+        g.n      = Eigen::Vector2f(-g.u.y(), g.u.x());
+        // Point the normal INTO the room, so `centre + d/2·n` is the surface actually seen.
+        if (g.n.dot(*interior - g.centre) < 0.0f) g.n = -g.n;
+        g.length = m.length;
+        g.depth  = m.depth;
+        (m.tier == rc::KitchenTier::Wall ? wall_segs : floor_segs).push_back(g);
+    }
+    outline_floor_.set_segments(std::move(floor_segs));
+    outline_wall_.set_segments(std::move(wall_segs));
+}
+
 // ─── Diagnostics ─────────────────────────────────────────────────────────────
+
+// Per-joint record. A row is a pair of runs that ought to meet, the vertex they should share, and
+// how far each one's end is from it: POSITIVE is a hole, NEGATIVE an overlap.
+void SpecificWorker::log_outline_csv()
+{
+    if (not outline_csv_.is_open())
+        return;
+    // NB: not named `emit` — that is a Qt macro that expands to nothing, so the declaration would
+    // silently collapse to `const auto = ...`.
+    const auto write_tier = [&](const char* tier, const rc::KitchenOutline& o)
+    {
+        for (const auto& j : o.joints())
+        {
+            const auto& a = o.segments()[static_cast<std::size_t>(j.i)];
+            const auto& b = o.segments()[static_cast<std::size_t>(j.j)];
+            outline_csv_ << cycle_ << ',' << tier << ',' << a.name << ',' << b.name << ','
+                         << j.vertex.x() << ',' << j.vertex.y() << ','
+                         << j.gap_i << ',' << j.gap_j << ','
+                         << (j.end_i_high ? 1 : 0) << ',' << (j.end_j_high ? 1 : 0) << ','
+                         << j.cross << '\n';
+        }
+    };
+    write_tier("floor", outline_floor_);
+    write_tier("wall",  outline_wall_);
+    outline_csv_.flush();
+}
 
 void SpecificWorker::log_members_csv(const MemberSnapshot& s)
 {

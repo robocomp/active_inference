@@ -79,6 +79,7 @@ struct KitchenConfig
     int         log_period_frames = 25;
     std::string csv_path;       // per-member snapshot; empty disables
     std::string fit_csv_path;   // frame fit + the down-prior it WOULD publish; empty disables
+    std::string outline_csv_path;   // per-joint gaps/overlaps of the continuous outline; empty disables
 };
 
 // Fill a KitchenConfig from a RoboComp ConfigLoader (all keys optional, defaults above).

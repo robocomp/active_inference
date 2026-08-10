@@ -64,6 +64,9 @@ struct KitchenMember
     // threshold — but they should be replaced by counts once a labelled scene corpus exists.
     float class_logodds = 0.0f;
 
+    // Room-frame footprint centre. The frame latent (axis/worktop/depth) does not need it — the
+    // OUTLINE does: joints are positions, not sizes.
+    Eigen::Vector2f xy{0.0f, 0.0f};
     float yaw = 0.0f;        // room-frame heading of the run (rad)
     float var_yaw = 0.0f;    // its published variance (rad²) — from the peer's own rt_covariance
     bool  pinned = false;    // yaw inherited from the room polygon (⇒ cannot adopt our prior)

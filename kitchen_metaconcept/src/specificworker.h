@@ -64,6 +64,7 @@
 
 #include "kitchen_config.h"   // rc::KitchenConfig + load_kitchen_config
 #include "kitchen_belief.h"   // rc::KitchenBelief — the level-2 rectilinear-frame latent
+#include "kitchen_outline.h"  // rc::KitchenOutline — the kitchen as ONE continuous shape
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 
 class SpecificWorker : public GenericWorker
@@ -129,7 +130,18 @@ private:
     // would otherwise fold into the message we send it.
     void compute_cavity_priors(const MemberSnapshot& s);
 
+    // ── The OUTLINE (step 1: READ-ONLY — measures joints, corrects nothing) ────
+    // The seams between adjacent carcasses are absent from the sensor data, so the split of one
+    // continuous front surface into runs cannot be recovered from below — it must be imposed here.
+    // This builds the chain and reports, per joint, how far each run's end is from the shared vertex.
+    // Positive = a hole, negative = an overlap. Floor units (base + tall) and wall units form
+    // SEPARATE outlines: they are at different heights and must not be joined to each other.
+    void step_outline(const MemberSnapshot& s);
+    // Room-polygon centroid, used only to orient each run's front face INTO the room.
+    std::optional<Eigen::Vector2f> room_interior() const;
+
     // ── Diagnostics ────────────────────────────────────────────────────────────
+    void log_outline_csv();
     void log_members_csv(const MemberSnapshot& s);
     void log_fit_csv(const MemberSnapshot& s);
 
@@ -167,6 +179,10 @@ private:
     rc::KitchenBelief kitchen_belief_;
     // Per-member leave-one-out down-prior — what M3 would publish on each group_member edge.
     std::unordered_map<std::uint64_t, rc::KitchenBelief::MemberPrior> cavity_;
+
+    rc::KitchenOutline outline_floor_;   // base + tall units: the floor-level chain
+    rc::KitchenOutline outline_wall_;     // wall units: the upper chain
+    std::ofstream outline_csv_;           // per-joint record; empty path disables
 
     std::ofstream csv_;       // per-member snapshot (pose + published Σ)
     std::ofstream fit_csv_;   // per-cycle frame fit + the down-prior it WOULD publish

@@ -95,6 +95,9 @@ NodePrefix = "kitchen_"         # owned-node NAME prefix — the stale-sweep / c
 LogPeriodFrames = 25            # per-cycle stdout log throttle for the graph-reader
 CsvPath = "etc/kitchen_members.csv"   # per-member snapshot (pose + published Σ); "" disables
 FitCsvPath = "etc/kitchen_fit.csv"    # frame fit + the down-prior it WOULD publish; "" disables
+# Per-joint record of the continuous outline: where two runs SHOULD meet vs where they end.
+# gap > 0 is a hole, gap < 0 an overlap. READ-ONLY — nothing is corrected from it yet.
+OutlineCsvPath = "etc/kitchen_outline.csv"
 
 # ── Rectilinear-frame belief ────────────────────────────────────────────────────────────────
 # Intrinsic spread of "kitchen units share one axis / worktop / depth". These are TENDENCIES, not
