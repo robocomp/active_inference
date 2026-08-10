@@ -225,6 +225,13 @@ void RoomViewer::update_viewer(const std::optional<rc::RoomConcept::UpdateResult
     else
         viewer_2d_->draw_corners({}, pose_for_draw);
 
+    // Object-anchor overlay (fridge, …): pinned p_o, this frame's z_o, the sight line and the residual
+    // between them. Display-only — a copy taken under the localizer's lock, drawn without holding it.
+    if (room_concept_)
+        viewer_2d_->draw_object_anchors(room_concept_->object_anchors(), pose_for_draw);
+    else
+        viewer_2d_->draw_object_anchors({}, pose_for_draw);
+
     // Feed the same matched corners to the RGB camera overlay (translucent uncertainty circles).
     if (camera_viz_)
         camera_viz_->set_corner_matches(have_loc ? loc_res->corner_matches

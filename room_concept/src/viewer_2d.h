@@ -22,6 +22,7 @@
 #include <memory>
 #include <unordered_map>
 #include "corner_detector.h"
+#include "object_anchor_types.h"
 
 class AbstractGraphicViewer;
 namespace DSR { class DSRGraph; }
@@ -130,6 +131,13 @@ class Viewer2D : public QObject
         void draw_all_trajectories(const std::vector<std::vector<Eigen::Vector3f>>& candidates,
                                    const std::vector<Eigen::Vector3f>& best);
 
+        /// Draw the object-anchor landmarks (fridge, …): the PINNED map anchor p_o, this frame's
+        /// observation z_o carried to world, the sight line robot→z_o, and the innovation covariance
+        /// S = Λ⁻¹ as an oriented 1σ ellipse at the observation. The p_o→z_o gap IS the residual the
+        /// factor is minimising, so it is drawn explicitly rather than left to be inferred.
+        void draw_object_anchors(const std::vector<rc::ObjectAnchorObs>& anchors,
+                                 const Eigen::Affine2f& robot_pose);
+
         /// Draw detected corners: green circles for accepted, yellow for predicted/in-FOV.
         /// Also draws a line from the robot to each detected corner.
         void draw_corners(const std::vector<rc::CornerDetector::CornerMatch>& matches,
@@ -226,6 +234,14 @@ class Viewer2D : public QObject
         // Landmark markers (pinned objects): robot → landmark lines
         std::vector<QGraphicsLineItem*>    landmark_line_items_;
         std::vector<QGraphicsEllipseItem*> landmark_marker_items_;
+
+        // ----- Object anchors (fridge, …) -----
+        std::vector<QGraphicsEllipseItem*> anchor_pin_items_;      // pinned map anchor p_o
+        std::vector<QGraphicsEllipseItem*> anchor_obs_items_;      // this frame's observation z_o
+        std::vector<QGraphicsEllipseItem*> anchor_cov_items_;      // 1σ innovation ellipse at z_o
+        std::vector<QGraphicsLineItem*>    anchor_sight_items_;    // robot → z_o
+        std::vector<QGraphicsLineItem*>    anchor_resid_items_;    // z_o → p_o (the residual)
+        std::vector<QGraphicsTextItem*>    anchor_text_items_;
 
         // Trajectory overlay
         std::vector<QGraphicsLineItem*>   traj_line_items_;

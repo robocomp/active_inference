@@ -857,6 +857,14 @@ public:
 
     /// Hand the latest validated object anchors (gathered on the MAIN thread from the DSR graph)
     /// to the localizer.  Copied into the newest window slot at the next update().  Thread-safe.
+    /// The anchors the localizer is currently using — for DISPLAY only (the 2D canvas overlay).
+    /// Thread-safe; returns a copy, so the caller never holds the lock while drawing.
+    std::vector<ObjectAnchorObs> object_anchors() const
+    {
+        std::scoped_lock lk(object_anchors_mutex_);
+        return latest_object_anchors_;
+    }
+
     void set_object_anchors(std::vector<ObjectAnchorObs> anchors)
     {
         std::scoped_lock lk(object_anchors_mutex_);
@@ -885,7 +893,7 @@ private:
    std::optional<UpdateResult> last_result_;
 
    // Latest object anchors from the graph (set on main thread, consumed by the localizer thread).
-   std::mutex object_anchors_mutex_;
+   mutable std::mutex object_anchors_mutex_;
    std::vector<ObjectAnchorObs> latest_object_anchors_;
    std::function<void()> on_result_ready_;   // fired (localizer thread) after a fresh ok result is stored
 

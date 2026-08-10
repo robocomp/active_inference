@@ -1102,4 +1102,132 @@ void Viewer2D::start_semantic_bbox_overlay(std::shared_ptr<DSR::DSRGraph> graph,
     semantic_bbox_timer_->start(period_ms);
 }
 
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//  Object-anchor overlay (fridge, …)
+//
+//  Four things, because three of them are only meaningful together:
+//    p_o   the PINNED map anchor — fixed the moment the object's map σ dropped below validateSigma
+//          and the localizer was sustained-stable. It never moves again.
+//    z_o   this frame's observation, carried from the robot frame to world by the DISPLAY pose. It
+//          is the raw camera-frame mask centroid, so it moves with the robot's belief, not with p_o.
+//    the sight line robot→z_o, and the residual z_o→p_o. That residual is exactly what the landmark
+//          factor is minimising: if it grows, the anchor is fighting the SDF, which is the failure
+//          a wrong pin produces and the reason to be able to SEE it rather than infer it from a CSV.
+//
+//  The covariance is drawn as an oriented 1σ ellipse of S = Λ⁻¹, not as a scalar. The producer
+//  publishes an ANISOTROPIC R_o whose loose axis lies along the viewing ray, so the ellipse's
+//  elongation and direction are the whole point — a determinant would average that away.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+void Viewer2D::draw_object_anchors(const std::vector<rc::ObjectAnchorObs>& anchors,
+                                    const Eigen::Affine2f& robot_pose)
+{
+    const size_t n = anchors.size();
+
+    auto resize_pool = [&](auto& pool, size_t count, auto make_item)
+    {
+        while (pool.size() < count)
+            pool.push_back(make_item());
+        for (size_t i = 0; i < pool.size(); ++i)
+            pool[i]->setVisible(i < count);
+    };
+
+    // Pinned map anchor p_o — hollow magenta square-ish ring, deliberately unlike the corner markers.
+    resize_pool(anchor_pin_items_, n, [&]() {
+        constexpr float r = 0.22f;
+        auto* item = agv_->scene.addEllipse(-r, -r, 2*r, 2*r,
+            QPen(QColor(255, 0, 200), 0.07), QBrush(Qt::NoBrush));
+        item->setZValue(33);
+        return item;
+    });
+
+    // Observation z_o — solid magenta dot.
+    resize_pool(anchor_obs_items_, n, [&]() {
+        constexpr float r = 0.12f;
+        auto* item = agv_->scene.addEllipse(-r, -r, 2*r, 2*r,
+            QPen(QColor(255, 0, 200), 0.03), QBrush(QColor(255, 0, 200, 190)));
+        item->setZValue(34);
+        return item;
+    });
+
+    // 1σ innovation ellipse at z_o (sized/rotated per anchor below).
+    resize_pool(anchor_cov_items_, n, [&]() {
+        auto* item = agv_->scene.addEllipse(-1, -1, 2, 2,
+            QPen(QColor(255, 0, 200, 160), 0.04), QBrush(QColor(255, 0, 200, 40)));
+        item->setZValue(32);
+        return item;
+    });
+
+    // Sight line robot → z_o.
+    resize_pool(anchor_sight_items_, n, [&]() {
+        auto* item = agv_->scene.addLine(0, 0, 0, 0, QPen(QColor(255, 0, 200, 170), 0.05));
+        item->setZValue(31);
+        return item;
+    });
+
+    // Residual z_o → p_o, dashed: the quantity the factor pulls on.
+    resize_pool(anchor_resid_items_, n, [&]() {
+        QPen pen(QColor(255, 220, 0, 230), 0.06);
+        pen.setStyle(Qt::DashLine);
+        auto* item = agv_->scene.addLine(0, 0, 0, 0, pen);
+        item->setZValue(35);
+        return item;
+    });
+
+    resize_pool(anchor_text_items_, n, [&]() {
+        auto* item = agv_->scene.addText("");
+        item->setZValue(36);
+        item->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+        QFont f = item->font(); f.setPointSizeF(7.0); item->setFont(f);
+        return item;
+    });
+
+    const Eigen::Matrix2f R = robot_pose.linear();
+    const Eigen::Vector2f t = robot_pose.translation();
+
+    for (size_t i = 0; i < n; ++i)
+    {
+        const auto& a = anchors[i];
+        const Eigen::Vector2f p_o = a.pose_world.head<2>();              // pinned, world
+        const Eigen::Vector2f z_w = R * a.obs_robot.head<2>() + t;       // observation → world
+
+        anchor_pin_items_[i]->setPos(p_o.x(), p_o.y());
+        anchor_obs_items_[i]->setPos(z_w.x(), z_w.y());
+        anchor_sight_items_[i]->setLine(t.x(), t.y(), z_w.x(), z_w.y());
+        anchor_resid_items_[i]->setLine(z_w.x(), z_w.y(), p_o.x(), p_o.y());
+
+        // S = Λ⁻¹ on the POSITION block. Λ is built as (Σ_o ⊕ R_o)⁻¹, and for a position-only landmark
+        // its yaw row/col are zero, so only the 2×2 is meaningful. A near-singular Λ (an axis the fit
+        // does not constrain) would invert to an enormous axis — floor the precision instead of letting
+        // the ellipse escape the canvas, the same way draw_corners does.
+        const Eigen::Matrix2f info = a.information.topLeftCorner<2, 2>();
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix2f> es(info);
+        constexpr float kPrecFloor = 1e-3f;
+        const float s0 = std::sqrt(1.f / std::max(es.eigenvalues()(0), kPrecFloor));   // 1σ, metres
+        const float s1 = std::sqrt(1.f / std::max(es.eigenvalues()(1), kPrecFloor));
+        const Eigen::Vector2f v1 = es.eigenvectors().col(1);            // major axis (largest σ)
+        const float ang_deg = static_cast<float>(std::atan2(v1.y(), v1.x()) * 180.0 / M_PI);
+
+        const float a_major = std::clamp(s1, 0.01f, 5.0f);
+        const float a_minor = std::clamp(s0, 0.01f, 5.0f);
+        auto* ell = anchor_cov_items_[i];
+        ell->setRect(-a_major, -a_minor, 2 * a_major, 2 * a_minor);
+        ell->setRotation(ang_deg);
+        ell->setPos(z_w.x(), z_w.y());
+
+        // Label: the residual in mm (what the factor is pulling on) and the 1σ axes in mm. The two σ
+        // are given separately, not as a determinant, because "loose along the ray, tight across it"
+        // is the shape of this measurement and the number that explains a weak pull.
+        const float resid_mm = (z_w - p_o).norm() * 1000.f;
+        anchor_text_items_[i]->setPlainText(
+            QStringLiteral("%1  r=%2mm  σ=%3×%4mm")
+                .arg(QString::fromStdString(a.type))
+                .arg(resid_mm, 0, 'f', 0)
+                .arg(a_major * 1000.f, 0, 'f', 0)
+                .arg(a_minor * 1000.f, 0, 'f', 0));
+        anchor_text_items_[i]->setDefaultTextColor(QColor(255, 120, 220));
+        anchor_text_items_[i]->setPos(0.5f * (z_w.x() + p_o.x()), 0.5f * (z_w.y() + p_o.y()));
+    }
+}
+
 } // namespace rc
