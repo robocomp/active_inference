@@ -119,7 +119,7 @@ audit_agent() {
     #    timeout. Found 2026-08-10 in chair, cabinet and door, all three of which do remove on L as well.
     #    refrigerator/table/bottle disable it (`tp.death_frames = INT_MAX` / behind the existence flag).
     if grep -rqE "exist(ence)?[._]" "$src" 2>/dev/null; then
-        if grep -rqE "tp\\.death_frames\\s*=\\s*(std::numeric_limits<int>::max|cfg_\\.[a-z_]*existence)" "$src" 2>/dev/null
+        if grep -rqE "tp\\.death_frames\\s*=\\s*(std::numeric_limits<int>::max|cfg_\\.[a-z_]*exist)" "$src" 2>/dev/null
         then mark ok
         elif grep -rq "tp\\.death_frames" "$src" 2>/dev/null; then mark wr
         else mark na; fi

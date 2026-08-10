@@ -35,6 +35,7 @@
 #include "../../common/nbv/graph_obstacles.h"   // rc::nbv::collect_graph_obstacles — shared, DSR-side
 #include "door_dof.h"   // rc::kDoorDofs — names/units for the BeliefInspector rows
 
+#include <limits>   // numeric_limits<int>::max — the disabled tracker death counter
 #include <QTimer>
 #include <QSettings>   // persist the standalone dashboard window geometry
 #include <QByteArray>
@@ -931,7 +932,14 @@ void SpecificWorker::run_instance_tracker()
     tp.gate_fallback_m  = cfg_.tracker_gate_fallback_m;
     tp.detection_noise_m = cfg_.tracker_detection_noise_m;
     tp.birth_frames     = cfg_.tracker_birth_frames;
-    tp.death_frames     = cfg_.tracker_death_frames;
+    // ★Invariant 5: removal is a Bayesian decision on the existence log-odds, NEVER a miss counter. An
+    //    armed death counter beside a live existence channel is a SECOND removal authority, and it is the
+    //    one that carries no evidence and leaves no attributable record — a phantom analysis cannot tell a
+    //    reasoned removal from a timeout. Tying it to the existence flag makes the two mutually exclusive
+    //    by construction, and keeps them A/B-able: turn the channel off and the counter comes back exactly.
+    //    door removes on `existence.should_remove(exist_removal_prob)` (Existence.Enabled, default true).
+    tp.death_frames     = cfg_.exist_enabled ? std::numeric_limits<int>::max()
+                                            : cfg_.tracker_death_frames;
     tp.birth_min_sep_m  = cfg_.tracker_birth_min_sep_m;
     tp.nll_cost         = cfg_.tracker_nll_cost;
     tracker_.set_params(tp);

@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>   // numeric_limits<int>::max — the disabled tracker death counter
 #include <cstdint>
 #include <print>
 #include <format>
@@ -304,6 +305,7 @@ void SpecificWorker::run_kitchen_model()
         bp.gn_iters             = cfg_.ai2_gn_iters;
         bp.extent_precision     = cfg_.extent_precision;
         bp.free_space_precision = cfg_.free_space_precision;
+        bp.tier_prior_gain      = cfg_.tier_prior_gain;   // STANDING d/z0/z1 prior — see the param's note
         bp.object_exclusion_precision = cfg_.object_exclusion_precision;   // retract a run's crossing end
         bp.object_exclusion_margin_m  = cfg_.object_exclusion_margin_m;
         kitchen_mgr_.build(walls, tiers, tp, bp, cfg_.ceiling_height_m);
@@ -433,6 +435,11 @@ void SpecificWorker::publish_kitchen_boxes()
             G->add_or_modify_attrib_local<depth_m_att> (node, b.d);
             G->add_or_modify_attrib_local<height_m_att>(node, H);
             G->add_or_modify_attrib_local<object_subtype_att>(node, std::string("cabinet"));  // type-agnostic consumers
+            // SIZE uncertainty alongside the sizes themselves (cortex `object_size_variance`,
+            // registered 2026-08-10). Without it a consumer must treat every producer's dimensions as
+            // equally certain; see the note on that REGISTER_TYPE.
+            G->add_or_modify_attrib_local<object_size_variance_att>(node,
+                std::vector<float>{b.var_width, b.var_depth, b.var_height});
             G->add_or_modify_attrib_local<level_att>   (node, 3);
             G->add_or_modify_attrib_local<parent_att>  (node, room_node_id_);
             G->add_or_modify_attrib_local<pos_x_att>   (node, rpx + 150.f + 40.f * static_cast<float>(slot));
@@ -460,6 +467,8 @@ void SpecificWorker::publish_kitchen_boxes()
                 G->add_or_modify_attrib_local<width_m_att> (n.value(), b.L);
                 G->add_or_modify_attrib_local<depth_m_att> (n.value(), b.d);
                 G->add_or_modify_attrib_local<height_m_att>(n.value(), H);
+                G->add_or_modify_attrib_local<object_size_variance_att>(n.value(),
+                    std::vector<float>{b.var_width, b.var_depth, b.var_height});
                 G->update_node(n.value());
                 rt_api_->insert_or_assign_edge_RT(room_opt.value(), it->second, {b.cx, b.cy, b.z0}, {0.f, 0.f, b.yaw});
                 // After the pose write, so a re-created edge cannot clobber the covariance (same ordering
@@ -613,7 +622,16 @@ void SpecificWorker::run_instance_tracker()
     tp.gate_fallback_m  = cfg_.tracker_gate_fallback_m;
     tp.detection_noise_m = cfg_.tracker_detection_noise_m;
     tp.birth_frames     = cfg_.tracker_birth_frames;
-    tp.death_frames     = cfg_.tracker_death_frames;
+    // ★Invariant 5: removal is a Bayesian decision on the existence log-odds, NEVER a miss counter. An
+    //    armed death counter beside a live existence channel is a SECOND removal authority, and it is the
+    //    one that carries no evidence and leaves no attributable record — a phantom analysis cannot tell a
+    //    reasoned removal from a timeout. Tying it to the existence flag makes the two mutually exclusive
+    //    by construction, and keeps them A/B-able: turn the channel off and the counter comes back exactly.
+    //    cabinet's existence removal is OFF by default (CabinetModel.ExistenceRemovalEnabled=false), so TODAY
+    //    the counter is its ONLY authority and stays armed — this changes nothing until that flag is turned
+    //    on, at which point the counter stands down automatically instead of silently competing.
+    tp.death_frames     = cfg_.existence_removal_enabled ? std::numeric_limits<int>::max()
+                                            : cfg_.tracker_death_frames;
     tp.birth_min_sep_m  = cfg_.tracker_birth_min_sep_m;
     tp.multi_det_per_track = true;   // fuse multiple ZED slices of one cabinet (one belief update per slice)
     tp.z_gate_m         = cfg_.tracker_z_gate_m;   // keep WALL-unit masks (z≈1.7) off BASE tracks (z≈0.35)
