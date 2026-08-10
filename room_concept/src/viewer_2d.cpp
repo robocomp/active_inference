@@ -1208,24 +1208,63 @@ void Viewer2D::draw_object_anchors(const std::vector<rc::ObjectAnchorObs>& ancho
         const Eigen::Vector2f v1 = es.eigenvectors().col(1);            // major axis (largest σ)
         const float ang_deg = static_cast<float>(std::atan2(v1.y(), v1.x()) * 180.0 / M_PI);
 
-        const float a_major = std::clamp(s1, 0.01f, 5.0f);
-        const float a_minor = std::clamp(s0, 0.01f, 5.0f);
+        // ── Drawn size vs REPORTED size ────────────────────────────────────────────────────────
+        // An anchor whose observation has gone stale is muted ON PURPOSE: freshness-as-precision
+        // inflates R_o by (1+age/ageScale)^2, so sigma reaches metres within a second of the object
+        // leaving view and Lambda -> 0. That is the model behaving correctly. Drawing it literally is
+        // not: a 5 m ellipse buries the entire canvas, and silently clamping it makes the LABEL lie
+        // about the number it is displaying.
+        //
+        // So the drawn ellipse is capped and the label always reports the TRUE sigma, flagged when the
+        // drawing saturated. The cap is a DISPLAY cap -- it touches nothing the factor uses.
+        constexpr float kDrawCapM = 1.2f;
+        const bool saturated = (s1 > kDrawCapM);
+        const float a_major = std::clamp(s1, 0.01f, kDrawCapM);
+        const float a_minor = std::clamp(s0, 0.01f, kDrawCapM);
         auto* ell = anchor_cov_items_[i];
         ell->setRect(-a_major, -a_minor, 2 * a_major, 2 * a_minor);
         ell->setRotation(ang_deg);
         ell->setPos(z_w.x(), z_w.y());
 
-        // Label: the residual in mm (what the factor is pulling on) and the 1σ axes in mm. The two σ
-        // are given separately, not as a determinant, because "loose along the ray, tight across it"
-        // is the shape of this measurement and the number that explains a weak pull.
+        // A muted anchor is still SHOWN -- a landmark that vanishes reads as a broken producer -- but it
+        // must not read as a live one either. Same idiom as a retired corner: dim, thin, dashed, no fill.
+        if (saturated)
+        {
+            QPen pen(QColor(150, 110, 150, 90), 0.03f);
+            pen.setStyle(Qt::DashLine);
+            ell->setPen(pen);
+            ell->setBrush(Qt::NoBrush);
+        }
+        else
+        {
+            ell->setPen(QPen(QColor(255, 0, 200, 160), 0.04f));
+            ell->setBrush(QBrush(QColor(255, 0, 200, 40)));
+        }
+        const double dim = saturated ? 0.28 : 1.0;
+        anchor_obs_items_[i]->setOpacity(dim);
+        anchor_sight_items_[i]->setOpacity(dim);
+        // The residual line goes with it: while the anchor is muted, z_o is a PHANTOM (a stale
+        // robot-frame observation paired with the CURRENT robot pose), so the gap it draws is not a
+        // residual anything is pulling on.
+        anchor_resid_items_[i]->setOpacity(saturated ? 0.20 : 1.0);
+
+        // Label: the residual (what the factor pulls on) and the 1sigma axes, given SEPARATELY rather
+        // than as a determinant -- "loose along the ray, tight across it" is the shape of this
+        // measurement and the thing that explains a weak pull. Age is shown because a stale observation
+        // and an uncertain map both produce a big ellipse and are completely different problems.
         const float resid_mm = (z_w - p_o).norm() * 1000.f;
-        anchor_text_items_[i]->setPlainText(
-            QStringLiteral("%1  r=%2mm  σ=%3×%4mm")
+        QString label = QStringLiteral("%1  r=%2mm  σ=%3×%4mm")
                 .arg(QString::fromStdString(a.type))
                 .arg(resid_mm, 0, 'f', 0)
-                .arg(a_major * 1000.f, 0, 'f', 0)
-                .arg(a_minor * 1000.f, 0, 'f', 0));
-        anchor_text_items_[i]->setDefaultTextColor(QColor(255, 120, 220));
+                .arg(s1 * 1000.f, 0, 'f', 0)      // TRUE sigma, not the clamped drawing
+                .arg(s0 * 1000.f, 0, 'f', 0);
+        if (a.obs_age > 0)
+            label += QStringLiteral("  age=%1").arg(a.obs_age);
+        if (saturated)
+            label += QStringLiteral("  MUTED");
+        anchor_text_items_[i]->setPlainText(label);
+        anchor_text_items_[i]->setDefaultTextColor(saturated ? QColor(160, 130, 160)
+                                                             : QColor(255, 120, 220));
         anchor_text_items_[i]->setPos(0.5f * (z_w.x() + p_o.x()), 0.5f * (z_w.y() + p_o.y()));
     }
 }

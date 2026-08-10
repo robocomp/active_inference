@@ -37,6 +37,11 @@ namespace rc
         Eigen::Vector3f obs_robot  = Eigen::Vector3f::Zero();  // robot frame (x, y, yaw)
         Eigen::Matrix3f information = Eigen::Matrix3f::Zero();  // Λ = S^{-1}; yaw row/col zeroed if !has_orientation
         bool            has_orientation = true;
+        // Frames since the producer last actually saw the object (its own counter). The consumer already
+        // uses it to inflate R_o (freshness as precision); it is carried here so a VIEWER can tell a muted
+        // anchor apart from an uncertain one — "stale observation" and "uncertain map" both end up as a
+        // big ellipse but are entirely different problems.
+        int             obs_age = 0;
         float           map_pos_sigma = 0.f;                   // σ of the map pose Σ_o (m) — the "how confident
                                                                // is p_o" signal used to decide when to PIN it
     };
