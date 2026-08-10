@@ -7,6 +7,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <fstream>
+#include <limits>
+#include <locale>
 #include <print>
 #include <span>
 #include <vector>
@@ -117,6 +120,12 @@ void BottleExistence::update_and_remove(BottleFitter& fitter, const Inputs& in,
     const float llr_detect = std::log(pd / pc);
     const float llr_absent = std::log((1.0f - pd) / (1.0f - pc));
 
+    // One tick per CALL, not per instance: incrementing inside the loop would make N bottles log on
+    // ALTERNATE cycles instead of together, so no two rows could be compared at the same instant —
+    // which is precisely what you need when asking why one bottle held and its neighbour did not.
+    static int ex_cycle = 0;
+    const bool log_now = (++ex_cycle % 60 == 0);
+
     std::vector<std::uint64_t> doomed;
     for (auto& [id, inst] : fitter.instances())
     {
@@ -132,6 +141,8 @@ void BottleExistence::update_and_remove(BottleFitter& fitter, const Inputs& in,
         inst.existence.set_frame_correlation(cfg_.existence_frame_correlation);
 
         const auto  t  = target_of(inst);
+        float fill_min_dbg = std::numeric_limits<float>::quiet_NaN();
+        int   dropped_dbg  = 0;   // occluders discarded because the bottle STANDS INSIDE them
         // How resolving THIS cycle's look was, in units of one ideal observation. Drives the debounce below.
         float cycle_p_detect = 0.0f;
 
@@ -144,6 +155,7 @@ void BottleExistence::update_and_remove(BottleFitter& fitter, const Inputs& in,
             for (const auto& o : obstacles)
                 if (not footprint_contains(o, t.cx, t.cy))
                     occluders.push_back(o);
+            dropped_dbg = static_cast<int>(obstacles.size() - occluders.size());
 
             const auto [fill_max, fill_min] = rc::nbv::predicted_fill_axes(t, cam_xy, sensor, cam_yaw);
             const float vis   = rc::nbv::visible_fraction(t, cam_xy, cam_yaw, sensor, occluders);
@@ -154,6 +166,7 @@ void BottleExistence::update_and_remove(BottleFitter& fitter, const Inputs& in,
             const float p_det = rc::nbv::expected_p_detect(fill_max, fill_min, f_sig, vis, sensor.env);
 
             inst.dbg_ex_p_detect = p_det;
+            fill_min_dbg = fill_min;
             inst.dbg_ex_fill     = fill_max;
             inst.dbg_ex_vis      = vis;
             cycle_p_detect       = p_det;
@@ -196,6 +209,37 @@ void BottleExistence::update_and_remove(BottleFitter& fitter, const Inputs& in,
             inst.existence_remove_streak += cycle_p_detect;
         else
             inst.existence_remove_streak = 0.0f;
+
+        // ── per-cycle existence trace ─────────────────────────────────────────────────────────────
+        // ★WITHOUT THIS THE CHANNEL IS UNOBSERVABLE UNTIL IT DELETES SOMETHING, which is exactly backwards
+        // for a channel whose documented failure mode is going SILENTLY INERT (vis = 0 ⇒ p_detect = 0 ⇒ L
+        // never moves ⇒ every bottle immortal, while everything looks healthy). `vis` and `occl_dropped` are
+        // the two columns that catch it: occl_dropped counts the obstacles discarded because the bottle stands
+        // INSIDE them, so occl_dropped = 0 together with vis = 0 means the support table is still eating the
+        // sightline. Locale-pinned on purpose (CLAUDE.md): under es_ES a stream would emit decimal COMMAS into
+        // a comma-separated file, and the reader would silently truncate every value it parsed back.
+        if (log_now)
+        {
+            static std::ofstream ex_csv = []{
+                std::ofstream f("etc/bottle_existence_log.csv", std::ios::trunc);
+                f.imbue(std::locale::classic());
+                f << "cycle,node,L,p_exists,cx,cy,detected,since_det,p_detect,fill_max,fill_min,"
+                     "vis,occl_total,occl_dropped,cam_usable,lidar_occ,lidar_free,lidar_n,remove_streak\n";
+                return f; }();
+            if (ex_csv)
+            {
+                const auto& st = inst.ai2_belief.state();
+                ex_csv << ex_cycle << ',' << inst.node_name << ',' << inst.existence.logodds() << ','
+                       << inst.existence.p_exists() << ',' << st.cx << ',' << st.cy << ','
+                       << (inst.frames_since_detection == 0 ? 1 : 0) << ',' << inst.frames_since_detection << ','
+                       << inst.dbg_ex_p_detect << ',' << inst.dbg_ex_fill << ',' << fill_min_dbg << ','
+                       << inst.dbg_ex_vis << ',' << obstacles.size() << ',' << dropped_dbg << ','
+                       << (camera_usable ? 1 : 0) << ',' << inst.dbg_ex_lidar_occ << ','
+                       << inst.dbg_ex_lidar_free << ',' << inst.dbg_ex_lidar_n << ','
+                       << inst.existence_remove_streak << '\n';
+                ex_csv.flush();
+            }
+        }
 
         if (inst.existence_remove_streak >= static_cast<float>(cfg_.existence_remove_frames))
             doomed.push_back(id);

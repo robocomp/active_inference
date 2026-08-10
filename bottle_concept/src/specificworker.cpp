@@ -1059,8 +1059,16 @@ void SpecificWorker::refresh_belief_inspector()
                         : std::numeric_limits<float>::quiet_NaN();
         c.s.fe_baseline = inst.fe_baseline;
         c.s.fe_surprise = inst.fe_surprise;
-        // The bottle carries no existence log-odds (it relies on the tracker's negative-information death),
-        // so logodds/p_exists stay NaN and the card prints "-" rather than a fabricated probability.
+        // Existence (bottle_existence.cpp). Until 2026-08-10 the bottle genuinely had no log-odds and this
+        // was three lines of comment explaining why the card printed "-"; the channel exists now, so the card
+        // must show it. Reported only once the belief has been seeded — before that L is the prior, and
+        // printing a confident-looking 0.50 for an instance that has never been judged is worse than "-".
+        if (inst.existence_seeded)
+        {
+            c.s.logodds  = inst.existence.logodds();
+            c.s.p_exists = inst.existence.p_exists();
+        }
+        c.s.remove_streak = static_cast<int>(inst.existence_remove_streak);
         c.s.age_s       = inst.last_belief_touch.time_since_epoch().count() == 0
                         ? -1.0f
                         : std::chrono::duration<float>(now - inst.last_belief_touch).count();
