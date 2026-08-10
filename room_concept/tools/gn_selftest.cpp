@@ -177,14 +177,21 @@ int main()
     std::vector<Eigen::Vector3f> at = truth;
     at[2] += Eigen::Vector3f(0.03f, -0.02f, 0.015f);   // off the optimum, where the gradient is informative
 
-    struct Case { const char* name; bool sdf, motion, corner, object, boundary; };
+    // `corrupt` blows the landmark residuals up past the Huber knee. Without it every landmark sits
+    // in the quadratic branch and the SATURATED branch of the robust weight is never tested — which is
+    // exactly how a 2x error there survived the first version of this file and had to be found in a
+    // live shadow log instead.
+    struct Case { const char* name; bool sdf, motion, corner, object, boundary; float corrupt; };
     for (const Case& cs : std::vector<Case>{
-            {"SDF only",            true,  false, false, false, false},
-            {"motion only",         false, true,  false, false, false},
-            {"corner only",         false, false, true,  false, false},
-            {"object anchor only",  false, false, false, true,  false},
-            {"boundary only",       false, false, false, false, true },
-            {"all factors",         true,  true,  true,  true,  true }})
+            {"SDF only",                    true,  false, false, false, false, 0.f},
+            {"motion only",                 false, true,  false, false, false, 0.f},
+            {"corner only",                 false, false, true,  false, false, 0.f},
+            {"corner only, SATURATED",      false, false, true,  false, false, 1.5f},
+            {"object anchor only",          false, false, false, true,  false, 0.f},
+            {"object anchor only, SATURATED", false, false, false, true, false, 1.5f},
+            {"boundary only",               false, false, false, false, true , 0.f},
+            {"all factors",                 true,  true,  true,  true,  true , 0.f},
+            {"all factors, SATURATED",      true,  true,  true,  true,  true , 1.5f}})
     {
         RoomConcept::Params p = params;
         p.enable_corner_tracking = cs.corner;
@@ -195,6 +202,13 @@ int main()
             for (auto& s : w) s.lidar_points = torch::Tensor{};
         if (not cs.motion)
             for (auto& s : w) s.motion_prec_tensor = mat3(Eigen::Matrix3f::Zero());
+        if (cs.corrupt > 0.f)
+            for (auto& s : w)
+            {
+                for (auto& co : s.corner_obs) co.detected_robot.x() += cs.corrupt;
+                s.rebuild_corner_batch(torch::kCPU);
+                for (auto& oa : s.object_anchors) oa.obs_robot.x() += cs.corrupt;
+            }
         RoomConcept::BoundaryPrior b = bp;
         b.valid = cs.boundary;
 

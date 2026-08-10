@@ -257,7 +257,18 @@ namespace rc::gn
                 const Eigen::Vector3f r = residual(x);
                 const float m2 = gain_ * r.dot(lam_ * r);
                 const float m  = std::sqrt(m2 + eps_);
-                const float u  = (m <= huber_) ? 1.0f : huber_ / m;
+                const float u  = (m <= huber_) ? 1.0f : huber_ / m;   // LOSS weight (mirrors torch)
+
+                // IRLS weight for H and b — NOT the same as the loss weight u once the robust kernel
+                // saturates. Writing the loss as L(s) with s = m², its exact gradient is 2ρ'(s)·gain·JᵀΛr:
+                //   m ≤ δ :  L = 0.5·s          → 2ρ' = 1     = u
+                //   m > δ :  L = 0.5·δ·√s       → 2ρ' = 0.5·δ/m = u/2      ← the loss is linear in m there
+                // Using u in the saturated branch doubles this factor's pull, so the assembled b is zero
+                // at a point that is NOT the minimum: LM converges (it accepts on the TRUE loss) but stops
+                // somewhere else than Adam/L-BFGS. Found in the live shadow log (grad_relerr median 0.28,
+                // 49/55 frames), reproduced offline only after gn_selftest learned to corrupt the
+                // observations — consistent landmarks never leave the quadratic branch.
+                const float w_irls = (m <= huber_) ? 1.0f : 0.5f * huber_ / m;
 
                 const float th = x(o_ + 2);
                 const float c = std::cos(th), s = std::sin(th);
@@ -273,7 +284,7 @@ namespace rc::gn
                 if (use_yaw_) J(2, 2) = 1.0f;
 
                 // Effective information: the robust weight and both scalings fold into Λ.
-                const Eigen::Matrix3f W = (scale_ * gain_ * u) * lam_;
+                const Eigen::Matrix3f W = (scale_ * gain_ * w_irls) * lam_;
                 sys.add_H(o_, o_, Eigen::MatrixXf(J.transpose() * W * J));
                 sys.add_b(o_, Eigen::VectorXf(J.transpose() * (W * r)));
                 return scale_ * 0.5f * u * m2;
