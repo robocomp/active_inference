@@ -183,62 +183,60 @@ SymmetryDebugCsv = true
 # ── Selección de optimizador ──────────────────────────────────────────────────
 # "ADAM"  — Adam adaptativo (default probado, robusto lejos del mínimo)
 # "LBFGS" — L-BFGS con line search Wolfe (convergencia más rápida, ~8-12 evals)
-# "GN"    — Levenberg-Marquardt sobre jacobianos ANALITICOS (room_gn_solver.h)
+# "GN"    — Levenberg-Marquardt on ANALYTIC Jacobians (room_gn_solver.h)
 # "CAVI"  — reservado para implementación futura
 #
-# 2026-08-10: GN pasa a CONDUCIR la pose, tras 4 runs en sombra (~300 frames optimizados):
-# identidad del objetivo 5.3e-06, jacobiano validado (grad_relerr_basin med 5.8e-4, y su cola NO
-# cae en los frames donde las poses discrepan), calidad mejor en 41 / empate 51 / peor en 10, y de
-# los 18 frames con discrepancia >2 mm GN esta MAS CERCA del minimo en 14. Coste: ms_gn 8.87 con
-# instrumentacion (offline 1.3-4.1 ms) contra 66.8 ms de L-BFGS.
+# 2026-08-10: GN now DRIVES the pose, after 4 shadow runs (~300 optimized frames):
+# objective identity 5.3e-06; Jacobian validated (grad_relerr_basin median 5.8e-4, and its tail does
+# NOT land on the frames where the poses disagree); quality better on 41 / tied 51 / worse on 10, and
+# of the 18 frames differing by more than 2 mm GN is CLOSER to the minimum on 14. Cost: ms_gn 8.87
+# with instrumentation still running (1.3-4.1 ms offline) against 66.8 ms for L-BFGS.
 #
-# ⚠ Al poner "GN" el modo sombra se APAGA solo (gn_shadow and optimizer_type != "GN"), asi que
-# etc/gn_shadow.csv deja de crecer y queda con los datos del run anterior. Volver a "LBFGS" lo
-# re-arma sin tocar nada mas — esa es la via de vuelta si algo va mal.
+# WARNING: setting "GN" switches shadow mode OFF by itself (gn_shadow and optimizer_type != "GN"), so
+# etc/gn_shadow.csv stops growing and keeps the PREVIOUS run's data. Going back to "LBFGS" re-arms it
+# with nothing else to change -- that is the way back if something goes wrong.
 #
-# ⚠ Camino que la sombra NO pudo probar: compute_posterior_covariance corre DESPUES del optimizador,
-# y hasta ahora siempre sobre las poses de L-BFGS. Vigilar cov_tt en el debug_log (baseline: mediana
-# 5.8e-4, sigma_theta ~1.4 deg; en EE rotando 1.75 deg).
+# WARNING: one path shadow mode could not test -- compute_posterior_covariance runs AFTER the
+# optimizer, and until now always on L-BFGS's poses. Watch cov_tt in the debug log (baseline: median
+# 5.8e-4, sigma_theta ~1.4 deg; 1.75 deg on rotating early-exit frames).
 OptimizerType          = "GN"
 
-# ── Backend Gauss-Newton / Levenberg-Marquardt (room_gn_solver.h) ─────────────
-# Mismo objetivo que compute_rfe_loss, resuelto como un sistema de ecuaciones normales 15x15 con
-# jacobianos ANALITICOS (el gradiente del SDF ya lo devuelve Model::sdf_query_at_pose), en lugar de
-# ~29 pasadas forward+backward de autograd. Medido en el backend actual: t_update mediana 72.7 ms.
+# ── Gauss-Newton / Levenberg-Marquardt backend (room_gn_solver.h) ─────────────
+# Same objective as compute_rfe_loss, solved as a 15x15 normal-equation system with ANALYTIC
+# Jacobians (Model::sdf_query_at_pose already returns the SDF gradient) instead of ~29 autograd
+# forward+backward passes. Measured on the autograd backend: t_update median 72.7 ms.
 #
-# TODO OFF por defecto, en dos niveles independientes:
-#   OptimizerType = "GN"  -> GN conduce la pose (autoridad).
-#   GnShadow = true       -> GN se ejecuta ADEMAS del backend autoritativo, desde el MISMO estado
-#                            inicial, y solo ESCRIBE el CSV. La pose viva no se toca: es una
-#                            comparacion numerica con entradas identicas, no un A/B de conducta.
+# Two independent levels:
+#   OptimizerType = "GN"  -> GN drives the pose (authority).
+#   GnShadow = true       -> GN runs BESIDE the authoritative backend, from the SAME starting state,
+#                            and only WRITES the CSV. The live pose is untouched: a numerical
+#                            comparison on identical inputs, not a behavioural A/B. Automatically
+#                            inert while OptimizerType is "GN" (there is nothing to compare against).
 #
-# Criterio de aceptacion antes de poner OptimizerType = "GN" (leer etc/gn_shadow.csv):
-#   - grad_relerr < 1e-2      (con GnGradCheck = true: el jacobiano analitico coincide con el numerico)
-#   - |dx|,|dy| ~ mm y |dth| ~ 5e-4 rad  (misma solucion que Adam/LBFGS)
-#   - torch_obj_at_gn <= torch_obj_at_auth  (la solucion de GN no es peor EN EL OBJETIVO DE TORCH;
-#                                            comparar con torch_obj_at_auth, NO con loss_auth: Adam
-#                                            reporta la perdida ANTES de su ultimo paso)
-#   - ms_gn << ms_auth                   (la razon de existir de todo esto)
-# GnGradCheck cuesta 30 evaluaciones extra de la perdida por frame optimizado: activarlo para
-# validar, desactivarlo para medir tiempos.
-#
-# ESTADO 2026-08-10: MODO VALIDACION. Shadow + grad-check ACTIVOS (solo escriben CSV, la pose viva
-# NO se toca). OptimizerType sigue en "LBFGS" a proposito: GN no conduce la pose hasta que
-# etc/gn_shadow.csv cumpla los criterios de arriba. El CSV solo crece en frames OPTIMIZADOS
-# (~0.7% del total, 4.7% en movimiento) — con el robot parado sale vacio, hace falta teleoperar.
+# Acceptance criteria that were used before setting OptimizerType = "GN" (read etc/gn_shadow.csv):
+#   - grad_relerr_basin < 1e-2   (needs GnGradCheck = true: analytic Jacobian matches the numeric one.
+#                                 Sampled 5 mm / 2 mrad OFF the converged pose, which is the only band
+#                                 where a RELATIVE check means anything -- at the optimum the true
+#                                 gradient is ~0 so both terms are float noise, and far out the polygon
+#                                 SDF is piecewise and the finite difference is not a fair reference.)
+#   - |dx|,|dy| ~ mm and |dth| ~ 5e-4 rad     (same solution as Adam/L-BFGS)
+#   - torch_obj_at_gn <= torch_obj_at_auth    (GN's answer is no worse ON TORCH'S OBJECTIVE; compare
+#                                              against torch_obj_at_auth, NOT loss_auth -- the latter
+#                                              is reported before the authority's final step)
+#   - ms_gn << ms_auth                        (the whole reason this exists)
 GnShadow      = true
-# OFF desde el run 4: el jacobiano ya esta validado (grad_relerr_basin med 5.8e-4, p90 6.2e-3, y su cola
-# NO cae en los frames donde las poses discrepan: corr con max_dxy = +0.013). Dejarlo activo mete 2x30
-# evaluaciones extra de la perdida por frame optimizado, que (a) inflan ms_gn y (b) alargan el frame, lo
-# que retrasa el siguiente. Este run mide TIEMPO; volver a ponerlo a true solo si se toca el jacobiano.
+# OFF since run 4: the Jacobian is validated (grad_relerr_basin median 5.8e-4, p90 6.2e-3, and its tail
+# does NOT land on the frames where the poses disagree -- correlation with max_dxy is +0.013). Leaving it
+# on costs 2x30 extra loss evaluations per optimized frame, which both inflate ms_gn and lengthen the
+# frame itself, delaying the next one. Turn it back on only if the Jacobians are touched.
 GnGradCheck   = false
 GnShadowCsv   = "etc/gn_shadow.csv"
-GnMaxIters    = 20     # subido de 10: un paso rechazado cuesta ~0.3 ms contra los 63-97 ms del autograd
-GnLambdaInit  = 1e-3   # amortiguamiento de Levenberg, relativo a diag(H)
-GnStepTol     = 1e-5   # ||delta||_inf (m / rad) para dar por convergido
-GnLossRelTol  = 1e-5   # mejora relativa que cuenta como estancada; hacen falta DOS seguidas para parar
-                       # (un solo paso lento NO es convergencia: el damping de Levenberg baja tras cada
-                       #  paso aceptado, asi que el siguiente suele avanzar mucho mas)
+GnMaxIters    = 20     # raised from 10: a rejected step costs ~0.3 ms against 63-97 ms of autograd
+GnLambdaInit  = 1e-3   # Levenberg damping, relative to diag(H)
+GnStepTol     = 1e-5   # ||delta||_inf (m / rad) convergence test
+GnLossRelTol  = 1e-5   # relative improvement counting as stalled; TWO in a row are needed to stop
+                       # (one slow step is not convergence: Levenberg damping drops after every
+                       #  accepted step, so the next one usually advances much further)
 
 # ── Parámetros L-BFGS ─────────────────────────────────────────────────────────
 # Activos solo cuando OptimizerType = "LBFGS"

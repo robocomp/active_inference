@@ -137,32 +137,42 @@ SymmetryDebugCsv = true
 # "CAVI"  — reservado para implementación futura
 OptimizerType          = "LBFGS"
 
-# ── Backend Gauss-Newton / Levenberg-Marquardt (room_gn_solver.h) ─────────────
-# Mismo objetivo que compute_rfe_loss, resuelto como un sistema de ecuaciones normales 15x15 con
-# jacobianos ANALITICOS (el gradiente del SDF ya lo devuelve Model::sdf_query_at_pose), en lugar de
-# ~29 pasadas forward+backward de autograd. Medido en el backend actual: t_update mediana 72.7 ms.
+# ── Gauss-Newton / Levenberg-Marquardt backend (room_gn_solver.h) ─────────────
+# Same objective as compute_rfe_loss, solved as a 15x15 normal-equation system with ANALYTIC
+# Jacobians (Model::sdf_query_at_pose already returns the SDF gradient) instead of ~29 autograd
+# forward+backward passes. Measured on the autograd backend: t_update median 72.7 ms.
 #
-# TODO OFF por defecto, en dos niveles independientes:
-#   OptimizerType = "GN"  -> GN conduce la pose (autoridad).
-#   GnShadow = true       -> GN se ejecuta ADEMAS del backend autoritativo, desde el MISMO estado
-#                            inicial, y solo ESCRIBE el CSV. La pose viva no se toca: es una
-#                            comparacion numerica con entradas identicas, no un A/B de conducta.
+# BOTH OFF by default, at two independent levels:
+#   OptimizerType = "GN"  -> GN drives the pose (authority).
+#   GnShadow = true       -> GN runs BESIDE the authoritative backend, from the SAME starting state,
+#                            and only WRITES the CSV. The live pose is untouched: a numerical
+#                            comparison on identical inputs, not a behavioural A/B. Automatically
+#                            inert while OptimizerType is "GN" (nothing left to compare against).
 #
-# Criterio de aceptacion antes de poner OptimizerType = "GN" (leer etc/gn_shadow.csv):
-#   - grad_relerr < 1e-2      (con GnGradCheck = true: el jacobiano analitico coincide con el numerico)
-#   - |dx|,|dy| ~ mm y |dth| ~ 5e-4 rad  (misma solucion que Adam/LBFGS)
-#   - torch_obj_at_gn <= loss_auth       (la solucion de GN no es peor EN EL OBJETIVO DE TORCH)
-#   - ms_gn << ms_auth                   (la razon de existir de todo esto)
-# GnGradCheck cuesta 30 evaluaciones extra de la perdida por frame optimizado: activarlo para
-# validar, desactivarlo para medir tiempos.
+# Acceptance criteria before setting OptimizerType = "GN" (read etc/gn_shadow.csv):
+#   - grad_relerr_basin < 1e-2   (needs GnGradCheck = true: analytic Jacobian matches the numeric one.
+#                                 Sampled 5 mm / 2 mrad OFF the converged pose, the only band where a
+#                                 RELATIVE check means anything -- at the optimum the true gradient is
+#                                 ~0 so both terms are float noise, and far out the polygon SDF is
+#                                 piecewise and the finite difference is not a fair reference.)
+#   - |dx|,|dy| ~ mm and |dth| ~ 5e-4 rad     (same solution as Adam/L-BFGS)
+#   - torch_obj_at_gn <= torch_obj_at_auth    (GN's answer is no worse ON TORCH'S OBJECTIVE; compare
+#                                              against torch_obj_at_auth, NOT loss_auth -- the latter
+#                                              is reported before the authority's final step)
+#   - ms_gn << ms_auth                        (the whole reason this exists)
+# GnGradCheck costs 2x30 extra loss evaluations per optimized frame: on to validate, off to measure
+# time (it inflates ms_gn AND lengthens the frame, delaying the next one).
+# The CSV only grows on OPTIMIZED frames (~0.7% of all, 4.7% while moving) -- a parked robot writes
+# nothing, the run needs teleop.
 # GnShadow      = false
 # GnGradCheck   = false
 # GnShadowCsv   = "etc/gn_shadow.csv"
-# GnMaxIters    = 10
-# GnLambdaInit  = 1e-3   # amortiguamiento de Levenberg, relativo a diag(H)
-# GnStepTol     = 1e-5   # ||delta||_inf (m / rad) para dar por convergido
-# GnLossRelTol  = 1e-4   # mejora relativa de la perdida para dar por convergido
-
+# GnMaxIters    = 20     # a rejected step costs ~0.3 ms against the 63-97 ms of the autograd backend
+# GnLambdaInit  = 1e-3   # Levenberg damping, relative to diag(H)
+# GnStepTol     = 1e-5   # ||delta||_inf (m / rad) convergence test
+# GnLossRelTol  = 1e-5   # relative improvement counting as stalled; TWO in a row are needed to stop
+#                        # (one slow step is not convergence: Levenberg damping drops after every
+#                        #  accepted step, so the next one usually advances much further)
 # ── Parámetros L-BFGS ─────────────────────────────────────────────────────────
 # Activos solo cuando OptimizerType = "LBFGS"
 # LbfgsLr: paso inicial; el line search strong-Wolfe lo ajusta automáticamente.
