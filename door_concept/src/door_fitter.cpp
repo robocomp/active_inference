@@ -281,7 +281,7 @@ bool DoorFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_id)
     inst.node_id   = node.id();
     inst.node_name = node.name();
     inst.model     = DoorModel(init_state, make_model_params());
-    inst.affordance.init(G_, node.id(), node.name());
+    inst.affordance.init(G_, node.id(), node.name(), "door");
     // Seed the cached geometry from the published box: the belief is not initialised yet, but observe()
     // needs a valid leaf_pose for its candidate/residual split on this very cycle.
     refresh_geometry(inst);

@@ -86,7 +86,7 @@ bool HumanFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_node
         inst.track_id = track_id_from_name(node.name());
     inst.parent_id   = room_node_id;
     inst.parent_name = "room";
-    inst.affordance.init(G_, node.id(), node.name());
+    inst.affordance.init(G_, node.id(), node.name(), "person");
 
     // Estimator references the PER-INSTANCE model (own, online-calibrated bone lengths). Build it AFTER
     // the instance is in the map so it binds the in-map model address (stable under unordered_map).

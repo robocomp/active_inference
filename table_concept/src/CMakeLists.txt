@@ -10,6 +10,7 @@ LIST(APPEND LIBS
   ai_common::ui           # TimeSeriesPlot (compiled Q_OBJECT)
   ai_common::ui_headers   # custom_widget.h / evidence_monitor.h / belief_inspector.h (header-only)
   ai_common::core         # header-only beliefs (ai_belief/dof_spec.h, …)
+  ai_common::affordance   # affordance protocol, producer side
 )
 
 # Sources set
@@ -28,7 +29,6 @@ LIST(APPEND SOURCES
   ../src/table_model.cpp
   ../src/table_belief.cpp
   ../src/epistemic_planner.cpp
-  ../src/table_affordance.cpp
 )
 
 # no-char8_t to avoid a problem with ICE Connection lib.

@@ -90,7 +90,12 @@ public:
 
     /// Create (first call) or refresh (subsequent calls) the affordance node.
     /// No-op if not initialised.
-    void update(const AffordanceTarget& prop);
+    // orient_mode selects the CONTRACT rather than the target: a BEARING-ONLY hypothesis has no depth, so
+    // the robot can only turn to face it (Orient) and let a real detection resolve it, whereas a located
+    // instance is driven to and locked onto (Servo). chair and door had this; their siblings did not, and
+    // taking the union rather than the intersection is the point of extracting — the same reason
+    // hold_offered() came across. Agents with no hypothesis state simply never pass true.
+    void update(const AffordanceTarget& prop, bool orient_mode = false);
 
     // ── NO PROPOSAL THIS CYCLE IS NOT A WITHDRAWAL ────────────────────────────────────────────────
     // Call on any cycle where a proposal could NOT be computed — the belief has not started, the NBV
@@ -134,10 +139,13 @@ private:
 
     uint64_t affordance_node_id_ = 0;
     bool     node_created_       = false;
+    bool     orient_mode_        = false;   // this cycle's request (see update)
+    bool     contract_is_orient_ = false;   // what is actually ON the node, to detect a swap
     State    state_              = State::idle;
 
     void create_node(const AffordanceTarget& prop);
     void update_node(const AffordanceTarget& prop);
+    void write_policy_contract(DSR::Node& node);
     void refresh_edge();
     void reset();
 };

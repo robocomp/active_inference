@@ -33,8 +33,9 @@ void ObjectAffordance::init(std::shared_ptr<DSR::DSRGraph> G,
     object_type_      = std::move(object_type);
 }
 
-void ObjectAffordance::update(const AffordanceTarget& prop)
+void ObjectAffordance::update(const AffordanceTarget& prop, bool orient_mode)
 {
+    orient_mode_ = orient_mode;
     if (not G_) return;
     if (not prop.valid or not prop.is_finite())
     {
@@ -74,6 +75,10 @@ void ObjectAffordance::hold_offered()
     G_->add_or_modify_attrib_local<active_att>           (n, false);
     G_->add_or_modify_attrib_local<epistemic_pending_att>(n, true);
     G_->add_or_modify_attrib_local<epistemic_gain_att>   (n, 0.0f);
+    // Hypothesis→located (or back): swap the Orient↔Servo contract when the mode changed.
+    if (orient_mode_ != contract_is_orient_)
+        write_policy_contract(n);
+
     state_ = State::pending;
     G_->update_node(n);
     refresh_edge();
@@ -205,7 +210,7 @@ void ObjectAffordance::create_node(const AffordanceTarget& prop)
     // Declare the execution contract: how the controller should complete this affordance (Servo
     // lock-on bound to the table's projected-ROI / detection feedback attributes + completion
     // predicate). Uses the shared type-level default; producers can override per node here.
-    rc::affordance::write_contract(*G_, aff_node, rc::affordance::default_contract_for(object_type_));
+    write_policy_contract(aff_node);
     // Object-relative viewpoint constraint (the authoritative epistemic target the controller resolves).
     rc::affordance::write_viewpoint(*G_, aff_node, make_viewpoint(prop));
 
@@ -315,6 +320,27 @@ void ObjectAffordance::update_node(const AffordanceTarget& prop)
     G_->update_node(n);
 
     refresh_edge();
+}
+
+// Orient vs Servo. The completion feedback attributes follow the fleet's `<object>_*` convention
+// (chair_roi_offset, door_detection_alive, …), so the contract is built from object_type_ rather than
+// hard-coded per agent — the two copies this was taken from differed only in that prefix.
+void ObjectAffordance::write_policy_contract(DSR::Node& node)
+{
+    using namespace rc::affordance;
+    if (orient_mode_)
+        // Rotate in place toward the target yaw (the bearing), fine-centre on the object's ROI once it
+        // enters the zed view, and complete when a real DEPTH detection fires — which is exactly the
+        // event that promotes a bearing-only hypothesis into a located instance.
+        write_contract(*G_, node, Contract::orient()
+            .center(object_type_ + "_roi_offset")
+            .valid (object_type_ + "_roi_valid")
+            .until (object_type_ + "_detection_alive",      CompareOp::GE, 0.5f)
+            .and_  (object_type_ + "_detection_confidence", CompareOp::GE, 0.20f)
+            .still(0.0f, 0.15f).stable(2).timeout_s(8).on_fail(OnFail::Consume));
+    else
+        write_contract(*G_, node, default_contract_for(object_type_));
+    contract_is_orient_ = orient_mode_;
 }
 
 void ObjectAffordance::refresh_edge()

@@ -236,7 +236,7 @@ bool TableFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_id)
     inst.node_name = node.name();
 
     inst.model = TableModel(init_state, make_model_params());
-    inst.affordance.init(G_, node.id(), node.name());
+    inst.affordance.init(G_, node.id(), node.name(), "table");
 
     instances_.emplace(node.id(), std::move(inst));
     std::print("table_concept: created instance for node '{}' id={}\n", node.name(), node.id());

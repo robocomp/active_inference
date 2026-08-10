@@ -16,7 +16,7 @@
 #include <optional>
 #include <string>
 
-#include "human_affordance.h"
+#include "../../common/object_affordance/object_affordance.h"   // rc::ObjectAffordance (SHARED)
 #include "vfe_inference.h"        // rc::human::AInfLaplacePoseEstimator / InferenceResult
 #include "../../common/belief_stabilizer/belief_stabilizer.h"   // rc::StabilizerState
 
@@ -55,7 +55,7 @@ struct HumanInstance
     bool pose_init = false;
 
     // Epistemic "reduce-occlusion" affordance for the controller (next-best-view to see hidden joints).
-    HumanAffordance affordance;
+    ObjectAffordance affordance;
     bool  epistemic_pending  = false;
     int   epistemic_cooldown = 0;
     float last_epistemic_gain = 0.0f;

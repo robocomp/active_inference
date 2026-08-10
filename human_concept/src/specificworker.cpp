@@ -381,7 +381,14 @@ void SpecificWorker::step_epistemic(rc::HumanInstance& inst)
     inst.last_epistemic_gain = prop.epistemic_gain;
 
     const auto affordance_node_before = inst.affordance.node_id();
-    inst.affordance.update(prop);
+    // Planner internals stay in EpistemicProposal; the producer takes the shared eleven-field view.
+    rc::AffordanceTarget tgt;
+    tgt.x_m     = prop.epistemic_target_x_m;
+    tgt.y_m     = prop.epistemic_target_y_m;
+    tgt.yaw_rad = prop.epistemic_target_yaw_rad;
+    tgt.gain    = prop.epistemic_gain;
+    tgt.valid   = prop.valid;
+    inst.affordance.update(tgt);
     if (affordance_node_before == 0 and inst.affordance.node_id() != 0)
         trigger_graph_layout_twopi();
     inst.epistemic_pending = true;
@@ -412,7 +419,7 @@ void SpecificWorker::log_epistemic_csv(const rc::HumanInstance& inst, const rc::
     epistemic_csv_ << inst.processed_cycles << ',' << inst.node_name << ','
                    << prop.epistemic_gain << ',' << (inst.epistemic_pending ? 1 : 0) << ','
                    << inst.epistemic_cooldown << ','
-                   << rc::HumanAffordance::state_name(inst.affordance.state()) << ','
+                   << rc::ObjectAffordance::state_name(inst.affordance.state()) << ','
                    << inst.affordance.node_id() << ','
                    << prop.epistemic_target_x_m << ',' << prop.epistemic_target_y_m << ','
                    << prop.epistemic_target_yaw_rad << ','

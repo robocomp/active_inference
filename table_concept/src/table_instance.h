@@ -19,7 +19,7 @@
 
 #include "table_model.h"        // TableModel / TableState
 #include "table_belief.h"       // AI2 full-covariance belief (TABLE.md)
-#include "table_affordance.h"   // TableAffordance
+#include "../../common/object_affordance/object_affordance.h"   // rc::ObjectAffordance (SHARED)
 #include "../../common/existence_belief/existence_belief.h"   // per-instance existence log-odds (removal)
 #include "../../common/appearance_belief/appearance_belief.h" // per-instance albedo chromaticity (DISPLAY only)
 
@@ -145,7 +145,7 @@ struct TableInstance
     // Most recent fresh-frame residual points (model-unexplained), held for the viewer.
     std::vector<Eigen::Vector3f> last_residual_pts;
     // Epistemic action request published to DSR (filled by the epistemic planner).
-    TableAffordance affordance;
+    ObjectAffordance affordance;
 
     // ── Active-perception aids for the controller's local lock-on search ──────────────────────────
     // Detection aliveness: how recently YOLO produced a "table" mask for this instance, and the confidence

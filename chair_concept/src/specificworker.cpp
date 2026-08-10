@@ -1847,7 +1847,14 @@ void SpecificWorker::step_epistemic(rc::ChairInstance& inst, DSR::Node& node)
     // Publish / refresh dedicated affordance node (persists; update_node refreshes target+gain)
     const auto affordance_node_before = inst.affordance.node_id();
     inst.dbg_nbv_gain = prop.epistemic_gain;   // the value actually published
-    inst.affordance.update(prop, orient);
+    // Planner internals stay in EpistemicProposal; the producer takes the shared eleven-field view.
+    rc::AffordanceTarget tgt;
+    tgt.x_m     = prop.epistemic_target_x_m;
+    tgt.y_m     = prop.epistemic_target_y_m;
+    tgt.yaw_rad = prop.epistemic_target_yaw_rad;
+    tgt.gain    = prop.epistemic_gain;
+    tgt.valid   = prop.valid;
+    inst.affordance.update(tgt, orient);
     if (affordance_node_before == 0 and inst.affordance.node_id() != 0)
         trigger_graph_layout_twopi();
     inst.epistemic_pending = true;

@@ -376,7 +376,7 @@ bool RefrigeratorFitter::ensure_instance(const DSR::Node& node, std::uint64_t ro
     inst.node_name = node.name();
 
     inst.model = RefrigeratorModel(init_state, make_model_params());
-    inst.affordance.init(G_, node.id(), node.name());
+    inst.affordance.init(G_, node.id(), node.name(), "refrigerator");
 
     instances_.emplace(node.id(), std::move(inst));
     std::print("refrigerator_concept: created instance for node '{}' id={}\n", node.name(), node.id());

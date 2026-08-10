@@ -20,7 +20,7 @@
 #include "chair_model.h"
 #include "../../common/existence_belief/existence_belief.h"   // rc::exist::ExistenceBelief        // ChairModel / ChairState
 #include "chair_belief.h"       // rc::ChairBelief (AI2 recursive-Laplace belief)
-#include "chair_affordance.h"   // ChairAffordance
+#include "../../common/object_affordance/object_affordance.h"   // rc::ObjectAffordance (SHARED)
 #include "../../common/appearance_belief/appearance_belief.h" // per-instance albedo chromaticity (DISPLAY only)
 
 namespace rc {
@@ -137,7 +137,7 @@ struct ChairInstance
     // Most recent fresh-frame residual points (model-unexplained), held for the viewer.
     std::vector<Eigen::Vector3f> last_residual_pts;
     // Epistemic action request published to DSR (filled by the epistemic planner).
-    ChairAffordance affordance;
+    ObjectAffordance affordance;
 
     // ── Active-perception aids for the controller's local lock-on search ──────────
     // Detection aliveness: how recently YOLO produced a "chair" mask for this instance, and the

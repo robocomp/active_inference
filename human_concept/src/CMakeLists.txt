@@ -22,6 +22,7 @@ LIST(APPEND LIBS
   ai_common::ui           # TimeSeriesPlot (compiled Q_OBJECT)
   ai_common::ui_headers   # custom_widget.h (header-only)
   ai_common::core         # belief_stabilizer.h / affordance_protocol.h (header-only)
+  ai_common::affordance   # affordance protocol, producer side
 )
 
 # Sources set
@@ -33,7 +34,6 @@ LIST(APPEND SOURCES
   ../src/human_scene_graph.cpp
   ../src/human_fitter.cpp
   ../src/epistemic_planner.cpp
-  ../src/human_affordance.cpp
   ../src/prior_store.cpp
   ${HUMAN_CORE_DIR}/human_kinematic_model.cpp
   ${HUMAN_CORE_DIR}/vfe_inference.cpp

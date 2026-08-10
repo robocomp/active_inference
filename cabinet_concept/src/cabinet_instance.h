@@ -19,7 +19,7 @@
 
 #include "cabinet_model.h"        // CabinetModel / CabinetState
 #include "cabinet_belief.h"       // AI2 full-covariance belief (CABINET.md)
-#include "cabinet_affordance.h"   // CabinetAffordance
+#include "../../common/object_affordance/object_affordance.h"   // rc::ObjectAffordance (SHARED)
 #include "../../common/existence_belief/existence_belief.h"   // per-instance existence log-odds (removal)
 
 namespace rc {
@@ -149,7 +149,7 @@ struct CabinetInstance
     // Most recent fresh-frame residual points (model-unexplained), held for the viewer.
     std::vector<Eigen::Vector3f> last_residual_pts;
     // Epistemic action request published to DSR (filled by the epistemic planner).
-    CabinetAffordance affordance;
+    ObjectAffordance affordance;
 
     // ── Active-perception aids for the controller's local lock-on search ──────────────────────────
     // Detection aliveness: how recently YOLO produced a "cabinet" mask for this instance, and the confidence

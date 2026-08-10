@@ -451,7 +451,7 @@ bool CabinetFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_id
     inst.residual_born = has_full_seed;   // gets the footprint-claim slice feed in run_instance_tracker
 
     inst.model = CabinetModel(init_state, make_model_params());
-    inst.affordance.init(G_, node.id(), node.name());
+    inst.affordance.init(G_, node.id(), node.name(), "cabinet");
 
     instances_.emplace(node.id(), std::move(inst));
     std::print("cabinet_concept: created instance for node '{}' id={}\n", node.name(), node.id());

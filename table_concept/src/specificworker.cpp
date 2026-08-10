@@ -1059,7 +1059,19 @@ void SpecificWorker::step_epistemic(rc::TableInstance& inst, DSR::Node& node)
     scene_graph_->write_epistemic_proposal(node, prop);
     // Publish / refresh dedicated affordance node (persists; update_node refreshes target+gain)
     const auto affordance_node_before = inst.affordance.node_id();
-    inst.affordance.update(prop);
+    // Planner internals stay in EpistemicProposal; the producer takes the shared eleven-field view.
+    rc::AffordanceTarget tgt;
+    tgt.x_m     = prop.epistemic_target_x_m;
+    tgt.y_m     = prop.epistemic_target_y_m;
+    tgt.yaw_rad = prop.epistemic_target_yaw_rad;
+    tgt.gain    = prop.epistemic_gain;
+    tgt.valid   = prop.valid;
+    tgt.face_gains.assign(prop.face_gains.begin(), prop.face_gains.end());
+    tgt.sigma_star.assign(prop.sigma_star.begin(), prop.sigma_star.end());
+    tgt.standoff_min_m = prop.standoff_min_m;
+    tgt.standoff_max_m = prop.standoff_max_m;
+    tgt.framing_fill   = prop.framing_fill;
+    inst.affordance.update(tgt);
     if (affordance_node_before == 0 and inst.affordance.node_id() != 0)
         trigger_graph_layout_twopi();
     inst.epistemic_pending = true;
