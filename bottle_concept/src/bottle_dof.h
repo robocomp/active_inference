@@ -71,11 +71,39 @@ namespace rc
 //
 // CONSEQUENCE: any_sigma_star() is false, so the adequacy gap is the -1 sentinel and the inspector and belief
 // strip fall back to ½·ln det Σ, which has no meaningful zero and will not collapse when a fixation lands.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// SET 2026-08-11, deliberately, with the reasoning above intact rather than deleted.
+//
+// The scenario has no arm, so strictly there is no consumer and -1 was correct. It was also USELESS: with
+// no sigma* anywhere the adequacy gap is the -1 sentinel, every display falls back to 1/2*ln det Sigma, and
+// that number is a log-VOLUME — negative (it read -20.9), with no zero, so nothing on screen could ever say
+// "precise enough". A belief you cannot judge is a belief nobody checks.
+//
+// So sigma* is set to the GRIPPER-CLEARANCE number derived above, the demand that WILL apply the moment an
+// arm is in the world (shadow_arm.wbt / arm_base.wbt), taken at the LOOSER 2-sigma reading:
+//
+//     c = 0.0475 - r = 0.0219 m/side   ->   sigma*_xy = c/2 = 0.0129 m   (~95% of grasps clear the fingers)
+//
+// ★c/2 AND NOT c/3, chosen for SATISFIABILITY rather than conservatism. Live sigma_cx has plateaued at
+// 0.0212 m: against c/3 = 0.0086 the gap is 1.80 nats and needs a 2.5x improvement, against c/2 it is 0.99
+// nats and needs 1.6x. A demand that cannot be met bounds the epistemic gain at a positive floor forever
+// (invariant 9) — the object then attracts the robot for all time, which is the "never stops asking" defect
+// open against chair and door. The looser figure is the one that can actually reach zero when the robot
+// closes to the 0.8 m stand-off (RangeNearM 0.6 gives full precision inside 0.6 m), so the affordance can
+// say "done". If it never reaches zero on an approach, THAT is the evidence the plateau is a floor.
+//
+// cz carries the same demand: the finger box is 0.045 m tall, so its vertical capture window is the same
+// order as the lateral clearance, and cz is currently the WORST DOF (sigma 0.0375, 1.23 nats) — the belief
+// is far less sure of the bottle's height than its footprint, which is worth seeing.
+//
+// radius keeps a demand too and currently contributes 0.00 nats (sigma 0.0057, already inside): that is the
+// gap doing its job — a DOF that is good enough stops asking, and only the ones that are not show up.
+// height stays -1: nothing consumes it (the grasp approaches on cz), so inventing one would be noise.
 inline constexpr std::array<DofSpec, BottleBelief::N> kBottleDofs = {{
-    {"cx", "m", -1.0f},
-    {"cy", "m", -1.0f},
-    {"cz", "m", -1.0f},
-    {"r",  "m", -1.0f},
+    {"cx", "m", 0.0129f},
+    {"cy", "m", 0.0129f},
+    {"cz", "m", 0.0129f},
+    {"r",  "m", 0.0129f},
     {"h",  "m", -1.0f},
 }};
 
