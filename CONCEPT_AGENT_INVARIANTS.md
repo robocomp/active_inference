@@ -26,7 +26,7 @@ in bounded time.
 | `ExistenceBelief` — per-cycle absence across correlated frames | **was** summed; now `ρ_eff = ρ·(1−p_detect)` |
 | `TableFitter::evaluate_shape` — log-Bayes-factor over the *accumulated* voxel bank | **was** summed; now low-passed (`ShapeEvidenceEmaAlpha`) |
 | `ChairBelief::flip_acc_` — 4-mode orientation evidence | ✅ correct: weighted by per-bearing `novelty` |
-| `RefrigeratorBelief::front_acc_` — door-facing modes | ❌ **STILL SUMS**: `w = evidence_weight · cue.confidence`, no novelty term |
+| `RefrigeratorBelief::front_acc_` — door-facing modes | ⚠ **corrected 08-11**: a per-observer-bearing budget (24×15° bins, `front_view_budget_` 3.0) WAS added — same discipline as chair. What remains is the FALLBACK: `view_bearing_rad` NaN ⇒ full credit (see below) |
 | `RingBelief` — rig-vs-null log-odds | ✅ correct: `evidence_ema_alpha`, and its comment says why |
 | chair's *planner* — proposed a bearing whose novelty budget was already spent | fixed: gain now carries `mode_entropy · view_novelty` |
 
@@ -114,7 +114,7 @@ An agent is coherent when all of these hold. Each is annotated with what breaks 
 | gain bounded by adequacy (9) | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ |
 | contract case (11) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | σ\* stated or declared (12) | ✅ | ✅ | ✅ | ✅ | decl | decl |
-| accumulators counted once (I) | ❌ `front_acc_` | ✅ | ✅ | ✅ | ✅ | n/a |
+| accumulators counted once (I) | ⚠ fallback | ✅ | ✅ | ✅ | ✅ | ✅ |
 | no occupancy-only floor (II) | ✅ fixed | ✅ fixed | n/a | ⚠ unchecked | ✅ fixed | ✅ |
 | truncation gate reachable (II) | ❌ dead | ❌ dead | ❌ dead | ❌ dead | ❌ dead | n/a |
 | existence channel exists (4) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ 08-10 |
@@ -153,8 +153,18 @@ chair also states its boundary in NATS (`exist_logodds < exist_remove_logodds`) 
 a PROBABILITY (`should_remove(existence_removal_prob)`). Same decision, two vocabularies — the cheap kind of
 divergence to remove while touching that code.
 
+**★UNKNOWN NOVELTY MUST NOT MEAN FULL CREDIT** (refined 2026-08-11). `front_acc_` does carry a novelty
+budget now, but only when the cue knows where the look came FROM; `view_bearing_rad` defaults to NaN and
+the NaN branch keeps the legacy full-weight sum. That is fail-OPEN, and it is the same shape as invariant
+II's "a gate must fail to HOLD": if you cannot tell a new view from a repeated one, the honest charge is
+the one you would make for a repeat, not the one for a discovery. Narrow in practice — the single cue
+producer sets the bearing whenever `room_T_zed_matrix` resolves — but it fails exactly when the pose chain
+is unavailable, i.e. when registration is least trustworthy. Second, related: that matrix is queried at
+**ts = 0** (latest) while the cue carries its own `rgb_stamp_ms_`, so a look taken while moving is filed
+under the wrong bin — the novelty bookkeeping itself is mis-registered. Pin it to the capture stamp.
+
 **Open, in priority order:** the truncation gate is dead fleet-wide (measure area or delete);
-`front_acc_` still sums; chair/door/bottle never stop attracting; the three double authorities above;
+the `front_acc_` NaN fallback above; chair/door/bottle never stop attracting; the three double authorities above;
 cabinet's envelope keys and its occupancy floor are unchecked; cabinet publishes no affordances at all
 under the kitchen model; bottle's detector envelope is the fleet prior and caps `p_detect` at 0.36
 (≈3× slower removal — measured, see `bottle_existence.h`).
