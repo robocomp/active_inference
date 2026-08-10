@@ -530,6 +530,35 @@ StableSdfMseMax = 0.09
 # If flips return, the first thing to check is whether they track the fridge's pin.
 enable   = true
 subtypes = ["refrigerator"]   # classes admitted as landmarks; add "table" back only deliberately
+
+# ── p_o as a PRIVATE VARIABLE instead of a pin (GATED OFF) ────────────────────────────────────
+# The pin freezes p_o at whatever pose was believed when the object's map sigma first went under
+# validateSigma. That breaks the circularity (a p_o re-derived from the robot pose each frame agrees
+# with the robot by construction and carries zero information) but it does so by turning "no
+# information" into "infinitely confident information, possibly wrong, forever" -- which is what the
+# 07-13 delocalizations were traced to.
+#
+# With this on, room instead carries its OWN estimate of the object's position as a 2-DOF variable of
+# the same optimisation as the robot poses and the corners. Born from the producing agent's belief
+# (mean + Sigma_o as the prior) and refined by room's observations alone.
+#
+#   - The prior is spent on the BIRTH frame only. Sigma_o was itself derived through the robot pose,
+#     so re-applying it every frame would keep feeding the same evidence back and shrink both agents'
+#     covariance without new information entering -- the data incest that makes two estimators
+#     confidently agree on the wrong thing.
+#   - Room NEVER writes it back. The producer stays the sole authority for the published pose, so the
+#     gap between the two is a diagnostic (white ring vs magenta ring on the 2D canvas) instead of a
+#     silent merge.
+#   - No line-of-sight gate: a grazing, distant or stale view already arrives with a huge sigma_along
+#     from ray_anisotropic_cov plus the freshness inflation, so it moves the landmark barely. "Good
+#     conditions" is a continuous weight here, not a switch.
+#   - Observability: robot and landmark slide together as a pair under robot-only observations. What
+#     pins the gauge is the SDF against the walls plus the corners; where those constrain the robot the
+#     landmark is determined, and where they do not both inflate -- which is the honest answer.
+#
+# Requires OptimizerType = "GN" (the autograd backends have no landmark variables); the loader refuses
+# it loudly otherwise rather than leaving a flag that reads true while nothing optimises.
+optimizeLandmark = false
 weight   = 1.0     # global scale (keep < walls: objects refine, never outvote geometry)
 huber    = 3.0     # robust cutoff in whitened σ units
 maxSlots = 3       # apply object factors to the newest N window slots

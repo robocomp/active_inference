@@ -301,6 +301,13 @@ public:
         // gn_shadow runs BOTH backends on the SAME starting window state, keeps the authoritative
         // one's answer, and logs the pair to gn_shadow_csv_path. It is a numerical comparison on
         // identical inputs, not a behavioural A/B — the live pose is untouched.
+        // Room optimises each object anchor's position as a PRIVATE variable (birth prior = the
+        // producing agent's own belief) instead of pinning it to a frozen snapshot. Never written back
+        // to the graph: the producer stays the sole authority for the published pose, so the gap
+        // between the two estimates is a diagnostic instead of a silent merge. GN-only — the autograd
+        // backends have no landmark variables. Default off.
+        bool  object_anchor_optimize_landmark = false;
+
         bool  gn_shadow = false;
         // Finite-difference check of the analytic Jacobian, logged as grad_relerr in the shadow CSV.
         // Costs 2·15 extra loss evaluations per optimized frame, so keep it on only for a validation
@@ -857,6 +864,16 @@ public:
 
     /// Hand the latest validated object anchors (gathered on the MAIN thread from the DSR graph)
     /// to the localizer.  Copied into the newest window slot at the next update().  Thread-safe.
+    /// Room's private landmark estimates (node id → room-frame position) — DISPLAY only. Empty unless
+    /// object_anchor_optimize_landmark is on. Thread-safe copy under the anchor lock.
+    std::map<std::uint64_t, Eigen::Vector2f> object_landmarks() const
+    {
+        std::scoped_lock lk(object_anchors_mutex_);
+        std::map<std::uint64_t, Eigen::Vector2f> out;
+        for (const auto& [id, e] : landmark_estimates_) out.emplace(id, e.p);
+        return out;
+    }
+
     /// The anchors the localizer is currently using — for DISPLAY only (the 2D canvas overlay).
     /// Thread-safe; returns a copy, so the caller never holds the lock while drawing.
     std::vector<ObjectAnchorObs> object_anchors() const
@@ -895,6 +912,18 @@ private:
    // Latest object anchors from the graph (set on main thread, consumed by the localizer thread).
    mutable std::mutex object_anchors_mutex_;
    std::vector<ObjectAnchorObs> latest_object_anchors_;
+
+   /// Room's PRIVATE landmark estimates, keyed by graph node id: room-frame position + the precision it
+   /// has accumulated. Persist across frames — that accumulation over diverse viewing azimuths is the
+   /// whole point (a position-only observation gives 2 constraints, so one viewpoint never determines a
+   /// landmark; see ray_anisotropic_cov's bearing-only limit). Born from the producer's belief, then
+   /// refined by room's own observations alone.
+   struct LandmarkEstimate
+   {
+       Eigen::Vector2f p = Eigen::Vector2f::Zero();
+       Eigen::Matrix2f information = Eigen::Matrix2f::Zero();
+   };
+   std::map<std::uint64_t, LandmarkEstimate> landmark_estimates_;
    std::function<void()> on_result_ready_;   // fired (localizer thread) after a fresh ok result is stored
 
    std::mutex cmd_mutex_;

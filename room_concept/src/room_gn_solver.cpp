@@ -237,10 +237,14 @@ namespace rc::gn
         class Se2LandmarkFactor final : public IFactor
         {
         public:
+            /// lm_off < 0 ⇒ the landmark is a CONSTANT at lm_world (pinned/corner case). Otherwise it is a
+            /// 2-DOF variable at that offset and lm_world is only its current estimate; the factor then
+            /// also fills the landmark block and the pose↔landmark cross terms.
             Se2LandmarkFactor(int off, const Eigen::Vector3f& lm_world, const Eigen::Vector3f& obs,
                               const Eigen::Matrix3f& information, bool use_yaw,
-                              float gain, float scale, float huber_delta, float m2_eps)
-                : o_(off), lm_(lm_world), obs_(obs), lam_(information), use_yaw_(use_yaw),
+                              float gain, float scale, float huber_delta, float m2_eps,
+                              int lm_off = -1)
+                : o_(off), lm_off_(lm_off), lm_(lm_world), obs_(obs), lam_(information), use_yaw_(use_yaw),
                   gain_(gain), scale_(scale), huber_(huber_delta), eps_(m2_eps) {}
 
             float evaluate(const State& x) const override
@@ -275,7 +279,7 @@ namespace rc::gn
                 Eigen::Matrix2f Rn;                       // R(-θ)
                 Rn << c, s,
                      -s, c;
-                const Eigen::Vector2f dw = lm_.head<2>() - x.segment<2>(o_);
+                const Eigen::Vector2f dw = lm_xy(x) - x.segment<2>(o_);
                 const Eigen::Vector2f dth = Rn * (Jrot() * dw);
 
                 Eigen::Matrix3f J = Eigen::Matrix3f::Zero();
@@ -287,15 +291,34 @@ namespace rc::gn
                 const Eigen::Matrix3f W = (scale_ * gain_ * w_irls) * lam_;
                 sys.add_H(o_, o_, Eigen::MatrixXf(J.transpose() * W * J));
                 sys.add_b(o_, Eigen::VectorXf(J.transpose() * (W * r)));
+
+                if (lm_off_ >= 0)
+                {
+                    // ∂r_xy/∂p_lm = −Rn (the landmark enters the residual only through dw = p_lm − t,
+                    // with the opposite sign to the robot translation). Yaw channel is unaffected: a
+                    // position-only landmark has no yaw, and even with yaw the landmark's is not a
+                    // variable here.
+                    Eigen::Matrix<float, 3, 2> Jl = Eigen::Matrix<float, 3, 2>::Zero();
+                    Jl.block<2, 2>(0, 0) = -Rn;
+                    sys.add_H(lm_off_, lm_off_, Eigen::MatrixXf(Jl.transpose() * W * Jl));
+                    sys.add_H(o_, lm_off_, Eigen::MatrixXf(J.transpose() * W * Jl));
+                    sys.add_H(lm_off_, o_, Eigen::MatrixXf(Jl.transpose() * W * J));
+                    sys.add_b(lm_off_, Eigen::VectorXf(Jl.transpose() * (W * r)));
+                }
                 return scale_ * 0.5f * u * m2;
             }
 
         private:
+            Eigen::Vector2f lm_xy(const State& x) const
+            {
+                return (lm_off_ >= 0) ? Eigen::Vector2f(x.segment<2>(lm_off_)) : Eigen::Vector2f(lm_.head<2>());
+            }
+
             Eigen::Vector3f residual(const State& x) const
             {
                 const float th = x(o_ + 2);
                 const float c = std::cos(th), s = std::sin(th);
-                const Eigen::Vector2f dw = lm_.head<2>() - x.segment<2>(o_);
+                const Eigen::Vector2f dw = lm_xy(x) - x.segment<2>(o_);
                 Eigen::Vector3f r = Eigen::Vector3f::Zero();
                 r(0) = obs_(0) - ( c * dw.x() + s * dw.y());
                 r(1) = obs_(1) - (-s * dw.x() + c * dw.y());
@@ -303,10 +326,44 @@ namespace rc::gn
                 return r;
             }
             int o_;
+            int lm_off_ = -1;
             Eigen::Vector3f lm_, obs_;
             Eigen::Matrix3f lam_;
             bool use_yaw_;
             float gain_, scale_, huber_, eps_;
+        };
+
+        // =====================================================================================
+        //  Landmark birth prior: 0.5·(p − μ)ᵀ Λ_prior (p − μ), μ/Λ from the producing agent's belief.
+        //  Applied ONLY on the frame the landmark is born. Σ_o was itself derived through the robot
+        //  pose, so re-applying it every frame would keep feeding the same evidence back into the
+        //  estimate and shrink both sides' covariance without any new information entering.
+        // =====================================================================================
+        class LandmarkPriorFactor final : public IFactor
+        {
+        public:
+            LandmarkPriorFactor(int off, const Eigen::Vector2f& mu, const Eigen::Matrix2f& prec)
+                : o_(off), mu_(mu), prec_(prec) {}
+
+            float evaluate(const State& x) const override
+            {
+                const Eigen::Vector2f d = x.segment<2>(o_) - mu_;
+                return 0.5f * d.dot(prec_ * d);
+            }
+
+            float linearize(const State& x, LinearSystem& sys) const override
+            {
+                const Eigen::Vector2f d = x.segment<2>(o_) - mu_;
+                sys.add_H(o_, o_, Eigen::MatrixXf(prec_));
+                const Eigen::Vector2f Ld = prec_ * d;
+                sys.add_b(o_, Eigen::VectorXf(Ld));
+                return 0.5f * d.dot(Ld);
+            }
+
+        private:
+            int o_;
+            Eigen::Vector2f mu_;
+            Eigen::Matrix2f prec_;
         };
 
         State pack(const std::vector<Eigen::Vector3f>& poses)
@@ -392,11 +449,40 @@ namespace rc::gn
             const int start = std::max(0, n - P.object_anchor_max_slots);
             for (int i = start; i < n; ++i)
                 for (const auto& a : W[static_cast<size_t>(i)].object_anchors)
+                {
+                    // Is this anchor's object a landmark we are OPTIMISING? If so the factor gets its
+                    // variable block, and the observation is weighted by R_o⁻¹ ALONE — the map's
+                    // uncertainty now lives in the landmark's own state, so keeping Σ_o folded into the
+                    // measurement weight (as ObjectAnchorObs::information does) would count it twice.
+                    int lm_off = -1;
+                    Eigen::Vector3f lm_pos = a.pose_world;
+                    Eigen::Matrix3f w_info = a.information;
+                    if (in.landmarks != nullptr)
+                        for (size_t k = 0; k < in.landmarks->size(); ++k)
+                            if ((*in.landmarks)[k].id == a.node_id)
+                            {
+                                lm_off = idx.offset(n + static_cast<int>(k));
+                                lm_pos.head<2>() = (*in.landmarks)[k].p;
+                                w_info = a.meas_information;
+                                break;
+                            }
                     fs.push_back(std::make_unique<Se2LandmarkFactor>(
-                        idx.offset(i), a.pose_world, a.obs_robot, a.information,
+                        idx.offset(i), lm_pos, a.obs_robot, w_info,
                         /*use_yaw=*/a.has_orientation,
-                        /*gain=*/1.0f, P.object_anchor.weight, P.object_anchor.huber_delta, 1e-9f));
+                        /*gain=*/1.0f, P.object_anchor.weight, P.object_anchor.huber_delta, 1e-9f,
+                        lm_off));
+                }
         }
+
+        // --- 6. Landmark birth priors (see Landmark::has_prior — birth only, never per-frame).
+        if (in.landmarks != nullptr)
+            for (size_t k = 0; k < in.landmarks->size(); ++k)
+            {
+                const auto& lm = (*in.landmarks)[k];
+                if (not lm.has_prior) continue;
+                fs.push_back(std::make_unique<LandmarkPriorFactor>(
+                    idx.offset(n + static_cast<int>(k)), lm.prior_mean, lm.prior_information));
+            }
 
         return fs;
     }
@@ -448,12 +534,18 @@ namespace rc::gn
 
         VarIndex idx;
         for (size_t i = 0; i < in.window->size(); ++i) idx.add(3);
+        const int n_pose = idx.total();
+        const size_t n_lm = (in.landmarks != nullptr) ? in.landmarks->size() : 0;
+        for (size_t k = 0; k < n_lm; ++k) idx.add(2);       // landmarks are 2-DOF (position-only)
         const int n = idx.total();
 
         const auto fs = build_factors(in, idx);
         if (fs.empty()) return res;
 
-        State x = pack(poses);
+        State x = State::Zero(n);
+        x.head(n_pose) = pack(poses);
+        for (size_t k = 0; k < n_lm; ++k)
+            x.segment<2>(idx.offset(static_cast<int>(in.window->size() + k))) = (*in.landmarks)[k].p;
         float loss = total_loss(fs, x);
         res.loss_init = loss;
         if (not std::isfinite(loss)) return res;
@@ -493,7 +585,8 @@ namespace rc::gn
             }
 
             State x_try = x + step;
-            for (int k = 0; k < idx.count(); ++k) x_try(idx.offset(k) + 2) = wrap_pi(x_try(idx.offset(k) + 2));
+            for (size_t k = 0; k < in.window->size(); ++k)          // yaw wrap: pose blocks only
+                x_try(idx.offset(static_cast<int>(k)) + 2) = wrap_pi(x_try(idx.offset(static_cast<int>(k)) + 2));
             const float loss_try = total_loss(fs, x_try);
 
             // Gain ratio: how much of the reduction the LOCAL MODEL promised did we actually get.
@@ -529,7 +622,37 @@ namespace rc::gn
 
         if (not std::isfinite(loss) or not x.allFinite()) return res;
 
-        unpack(x, poses);
+        for (size_t i = 0; i < poses.size(); ++i)
+            poses[i] = x.segment<3>(idx.offset(static_cast<int>(i)));
+
+        if (n_lm > 0)
+        {
+            // Recover each landmark's marginal precision from the final H so the estimate carries its
+            // own uncertainty forward. The block diagonal of H is the CONDITIONAL precision; the marginal
+            // needs the Schur complement against everything else, which for a handful of variables is
+            // cheap enough to take from the inverse directly.
+            LinearSystem fin(n);
+            for (const auto& f : fs) f->linearize(x, fin);
+            Eigen::MatrixXf cov;
+            const Eigen::LDLT<Eigen::MatrixXf> ldlt(fin.H);
+            const bool invertible = (ldlt.info() == Eigen::Success);
+            if (invertible) cov = ldlt.solve(Eigen::MatrixXf::Identity(n, n));
+
+            for (size_t k = 0; k < n_lm; ++k)
+            {
+                const int o = idx.offset(static_cast<int>(in.window->size() + k));
+                auto& lm = (*in.landmarks)[k];
+                lm.p = x.segment<2>(o);
+                if (invertible and cov.allFinite())
+                {
+                    const Eigen::Matrix2f c = cov.block<2, 2>(o, o);
+                    if (c.allFinite() and c(0, 0) > 0.f and c(1, 1) > 0.f)
+                        lm.information = c.inverse();
+                }
+                lm.has_prior = false;   // the birth prior is spent; never re-applied
+            }
+        }
+
         res.loss = loss;
         res.lambda_final = lambda;
         res.ok = true;

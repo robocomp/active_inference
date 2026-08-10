@@ -1120,7 +1120,8 @@ void Viewer2D::start_semantic_bbox_overlay(std::shared_ptr<DSR::DSRGraph> graph,
 //  elongation and direction are the whole point — a determinant would average that away.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 void Viewer2D::draw_object_anchors(const std::vector<rc::ObjectAnchorObs>& anchors,
-                                    const Eigen::Affine2f& robot_pose)
+                                    const Eigen::Affine2f& robot_pose,
+                                    const std::map<std::uint64_t, Eigen::Vector2f>& landmarks)
 {
     const size_t n = anchors.size();
 
@@ -1182,12 +1183,43 @@ void Viewer2D::draw_object_anchors(const std::vector<rc::ObjectAnchorObs>& ancho
         return item;
     });
 
+    // Room's private landmark estimate — white ring — and a link to the producer's published pose.
+    // Room never writes this back, so the two drift apart freely; that gap is exactly what a private
+    // estimate buys over a merge, and it is worth one more marker to be able to see it.
+    resize_pool(anchor_lm_items_, n, [&]() {
+        constexpr float r = 0.16f;
+        auto* item = agv_->scene.addEllipse(-r, -r, 2*r, 2*r,
+            QPen(QColor(255, 255, 255), 0.05), QBrush(Qt::NoBrush));
+        item->setZValue(37);
+        return item;
+    });
+    resize_pool(anchor_lm_link_items_, n, [&]() {
+        QPen pen(QColor(255, 255, 255, 150), 0.03);
+        pen.setStyle(Qt::DotLine);
+        auto* item = agv_->scene.addLine(0, 0, 0, 0, pen);
+        item->setZValue(36);
+        return item;
+    });
+
     const Eigen::Matrix2f R = robot_pose.linear();
     const Eigen::Vector2f t = robot_pose.translation();
 
     for (size_t i = 0; i < n; ++i)
     {
         const auto& a = anchors[i];
+        if (const auto lit = landmarks.find(a.node_id); lit != landmarks.end())
+        {
+            anchor_lm_items_[i]->setVisible(true);
+            anchor_lm_link_items_[i]->setVisible(true);
+            anchor_lm_items_[i]->setPos(lit->second.x(), lit->second.y());
+            anchor_lm_link_items_[i]->setLine(lit->second.x(), lit->second.y(),
+                                              a.pose_world.x(), a.pose_world.y());
+        }
+        else
+        {
+            anchor_lm_items_[i]->setVisible(false);
+            anchor_lm_link_items_[i]->setVisible(false);
+        }
         const Eigen::Vector2f p_o = a.pose_world.head<2>();              // pinned, world
         const Eigen::Vector2f z_w = R * a.obs_robot.head<2>() + t;       // observation → world
 

@@ -22,6 +22,7 @@
 #include <memory>
 #include <unordered_map>
 #include "corner_detector.h"
+#include <map>
 #include "object_anchor_types.h"
 
 class AbstractGraphicViewer;
@@ -135,8 +136,12 @@ class Viewer2D : public QObject
         /// observation z_o carried to world, the sight line robot→z_o, and the innovation covariance
         /// S = Λ⁻¹ as an oriented 1σ ellipse at the observation. The p_o→z_o gap IS the residual the
         /// factor is minimising, so it is drawn explicitly rather than left to be inferred.
+        /// `landmarks` (node id → room-frame position) is room's PRIVATE estimate when it is optimising
+        /// them. Drawn as a separate marker joined to the producer's published pose, because the whole
+        /// justification for keeping the estimate private is that their disagreement stays visible.
         void draw_object_anchors(const std::vector<rc::ObjectAnchorObs>& anchors,
-                                 const Eigen::Affine2f& robot_pose);
+                                 const Eigen::Affine2f& robot_pose,
+                                 const std::map<std::uint64_t, Eigen::Vector2f>& landmarks = {});
 
         /// Draw detected corners: green circles for accepted, yellow for predicted/in-FOV.
         /// Also draws a line from the robot to each detected corner.
@@ -242,6 +247,8 @@ class Viewer2D : public QObject
         std::vector<QGraphicsLineItem*>    anchor_sight_items_;    // robot → z_o
         std::vector<QGraphicsLineItem*>    anchor_resid_items_;    // z_o → p_o (the residual)
         std::vector<QGraphicsTextItem*>    anchor_text_items_;
+        std::vector<QGraphicsEllipseItem*> anchor_lm_items_;      // room's private landmark estimate
+        std::vector<QGraphicsLineItem*>    anchor_lm_link_items_; // private estimate ↔ published pose
 
         // Trajectory overlay
         std::vector<QGraphicsLineItem*>   traj_line_items_;

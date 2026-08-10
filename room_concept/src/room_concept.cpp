@@ -3,6 +3,7 @@
 #include "room_gn_solver.h"
 #include "room_obs_weights.h"
 #include <algorithm>
+#include <ranges>
 #include <fstream>
 #include <limits>
 #include <locale>
@@ -3412,6 +3413,50 @@ namespace rc
         opts.step_tol     = params.gn_step_tol;
         opts.loss_rel_tol = params.gn_loss_rel_tol;
 
+        // ── Private landmark variables ──────────────────────────────────────────────────────────────
+        // One per distinct object anchor in the window. Born from the producing agent's belief (mean +
+        // Σ_o as the prior), then refined by room's observations alone and NEVER written back to the
+        // graph. The prior is spent on the birth frame: Σ_o came through the robot pose, so re-applying
+        // it every frame would keep feeding the same evidence back and shrink both estimates without
+        // new information (the incest that makes two agents confidently agree on the wrong thing).
+        std::vector<gn::Landmark> landmarks;
+        if (params.object_anchor_optimize_landmark and params.object_anchor.enable)
+        {
+            std::scoped_lock lk(object_anchors_mutex_);
+            for (const auto& slot : window_mgr_.window)
+                for (const auto& a : slot.object_anchors)
+                {
+                    if (std::ranges::any_of(landmarks, [&](const auto& l) { return l.id == a.node_id; }))
+                        continue;
+                    gn::Landmark lm;
+                    lm.id = a.node_id;
+                    auto it = landmark_estimates_.find(a.node_id);
+                    if (it == landmark_estimates_.end())
+                    {
+                        const Eigen::Matrix2f sig = a.map_cov.topLeftCorner<2, 2>();
+                        if (not sig.allFinite() or sig(0, 0) <= 0.f or sig(1, 1) <= 0.f)
+                            continue;                       // no usable birth prior yet
+                        lm.p                 = a.pose_world.head<2>();
+                        lm.prior_mean        = lm.p;
+                        lm.prior_information = sig.inverse();
+                        lm.information       = lm.prior_information;
+                        lm.has_prior         = true;        // birth frame only
+                        qInfo() << "[room][landmark] born" << QString::fromStdString(a.type)
+                                << "#" << static_cast<qulonglong>(a.node_id)
+                                << "at (" << lm.p.x() << "," << lm.p.y() << ") prior σ="
+                                << std::sqrt(std::max(sig(0, 0), sig(1, 1))) * 1000.f << "mm";
+                    }
+                    else
+                    {
+                        lm.p           = it->second.p;
+                        lm.information = it->second.information;
+                        lm.has_prior   = false;
+                    }
+                    landmarks.push_back(lm);
+                }
+            in.landmarks = landmarks.empty() ? nullptr : &landmarks;
+        }
+
         auto poses = read_window_poses();
         const auto r = gn::solve(in, poses, opts);
         if (not r.ok)
@@ -3423,6 +3468,12 @@ namespace rc
         }
 
         write_window_poses(poses);
+        if (in.landmarks != nullptr)
+        {
+            std::scoped_lock lk(object_anchors_mutex_);
+            for (const auto& lm : landmarks)
+                landmark_estimates_[lm.id] = {lm.p, lm.information};
+        }
         last_lbfgs_grad_norm_ = r.grad_norm;
         last_adam_losses_.clear();
         last_adam_losses_.push_back(r.loss_init);

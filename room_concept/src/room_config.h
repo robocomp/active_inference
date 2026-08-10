@@ -180,6 +180,8 @@ struct RoomConfig
     // ── Object anchors (validated modelled objects as SE(2) pose landmarks for localization) ──
     // OFF by default. Precision-weighted by each object's own belief covariance (no threshold).
     bool  OBJECT_ANCHOR_ENABLE      = false;  // ObjectAnchor.enable
+    bool  OBJECT_ANCHOR_OPTIMIZE_LANDMARK = false;  // ObjectAnchor.optimizeLandmark — p_o as a private
+                                              // VARIABLE (birth prior = producer's belief) instead of a pin
     // ObjectAnchor.subtypes — which object CLASSES become landmarks. Default {"table"} keeps the
     // historical behaviour; the classes are deliberately selectable one at a time (see the header of
     // ObjectAnchorSource::Config for why table and refrigerator are not interchangeable).

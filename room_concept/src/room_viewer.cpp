@@ -228,7 +228,8 @@ void RoomViewer::update_viewer(const std::optional<rc::RoomConcept::UpdateResult
     // Object-anchor overlay (fridge, …): pinned p_o, this frame's z_o, the sight line and the residual
     // between them. Display-only — a copy taken under the localizer's lock, drawn without holding it.
     if (room_concept_)
-        viewer_2d_->draw_object_anchors(room_concept_->object_anchors(), pose_for_draw);
+        viewer_2d_->draw_object_anchors(room_concept_->object_anchors(), pose_for_draw,
+                                        room_concept_->object_landmarks());
     else
         viewer_2d_->draw_object_anchors({}, pose_for_draw);
 

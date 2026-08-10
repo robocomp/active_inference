@@ -36,6 +36,14 @@ namespace rc
         Eigen::Vector3f pose_world = Eigen::Vector3f::Zero();  // room frame  (x, y, yaw)
         Eigen::Vector3f obs_robot  = Eigen::Vector3f::Zero();  // robot frame (x, y, yaw)
         Eigen::Matrix3f information = Eigen::Matrix3f::Zero();  // Λ = S^{-1}; yaw row/col zeroed if !has_orientation
+        // ── For the VARIABLE-landmark path (room optimises p_o instead of pinning it) ────────────────
+        // `information` folds Σ_o ⊕ R_o together, which is right only while p_o is a CONSTANT: the map's
+        // uncertainty has to be paid for somewhere. Once p_o is a state variable, its uncertainty lives
+        // in the state and folding Σ_o into the measurement weight double-counts it. So the two are also
+        // published apart: the observation is weighted by R_o⁻¹ alone, and Σ_o becomes the landmark's
+        // BIRTH PRIOR. Both are in the same frames as their combined form (R_o robot, Σ_o room).
+        Eigen::Matrix3f meas_information = Eigen::Matrix3f::Zero();   // R_o^{-1}
+        Eigen::Matrix3f map_cov          = Eigen::Matrix3f::Zero();   // Σ_o (room frame)
         bool            has_orientation = true;
         // Frames since the producer last actually saw the object (its own counter). The consumer already
         // uses it to inflate R_o (freshness as precision); it is carried here so a VIEWER can tell a muted

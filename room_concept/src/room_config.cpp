@@ -6,6 +6,7 @@
 #include "room_config.h"
 
 #include <ConfigLoader/ConfigLoader.h>
+#include <QDebug>
 
 #include "room_concept.h"
 #include "epistemic_controller.h"
@@ -220,6 +221,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     // Object anchors (validated modelled objects as SE(2) pose landmarks). Loaded into BOTH the
     // shared config (read by RoomSceneGraph's graph-side gather) and the localizer params.
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "ObjectAnchor.enable", p.OBJECT_ANCHOR_ENABLE);
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "ObjectAnchor.optimizeLandmark", p.OBJECT_ANCHOR_OPTIMIZE_LANDMARK);
     // Guarded by exists(): ConfigLoader throws on `key = []`, and a silently-empty list would disable
     // every landmark while the enable flag still read true — a confusing way to get nothing.
     if (cl.exists("ObjectAnchor.subtypes"))
@@ -237,6 +239,16 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "ObjectAnchor.freshnessEnable", p.OBJECT_ANCHOR_FRESHNESS_ENABLE);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ObjectAnchor.freshnessAgeScale", p.OBJECT_ANCHOR_FRESHNESS_AGE_SCALE);
     room_concept.params.object_anchor.enable      = p.OBJECT_ANCHOR_ENABLE;
+    // GN-only: the autograd backends have no landmark variables, so silently honouring this under
+    // LBFGS/ADAM would mean the flag reads true while nothing optimises. Refuse loudly instead.
+    room_concept.params.object_anchor_optimize_landmark = p.OBJECT_ANCHOR_OPTIMIZE_LANDMARK;
+    if (p.OBJECT_ANCHOR_OPTIMIZE_LANDMARK and room_concept.params.optimizer_type != "GN")
+    {
+        qWarning() << "[room] ObjectAnchor.optimizeLandmark needs OptimizerType = \"GN\" (have"
+                   << QString::fromStdString(room_concept.params.optimizer_type) << ") — landmark "
+                      "optimisation DISABLED, anchors stay pinned";
+        room_concept.params.object_anchor_optimize_landmark = false;
+    }
     room_concept.params.object_anchor.weight      = p.OBJECT_ANCHOR_WEIGHT;
     room_concept.params.object_anchor.huber_delta = p.OBJECT_ANCHOR_HUBER;
     room_concept.params.object_anchor_max_slots   = p.OBJECT_ANCHOR_MAX_SLOTS;

@@ -970,6 +970,7 @@ void RoomSceneGraph::refresh_object_anchors()
     rc::ObjectAnchorSource::Config cfg;
     cfg.enable             = params_->OBJECT_ANCHOR_ENABLE;
     cfg.subtypes           = params_->OBJECT_ANCHOR_SUBTYPES;
+    cfg.optimize_landmark  = params_->OBJECT_ANCHOR_OPTIMIZE_LANDMARK;
     // A pin is FOREVER (for the life of the process): it snapshots the object's world pose and uses that
     // fixed value as p_o thereafter. Capturing one while the localizer is mid-flip or mid-delocalization
     // bakes the wrong place in, and the anchor then fights the correct pose for the rest of the run.

@@ -131,6 +131,26 @@ namespace rc
                 info.topLeftCorner<2, 2>() = s2.inverse();
             }
             out.information = info;
+
+            // Same pieces, kept separable for the variable-landmark path (see ObjectAnchorObs).
+            out.map_cov = map_cov;
+            {
+                Eigen::Matrix3f minfo = Eigen::Matrix3f::Zero();
+                if (has_yaw)
+                {
+                    Eigen::Matrix3f rm = Eigen::Matrix3f::Zero();
+                    rm.topLeftCorner<2, 2>() = R_pos;
+                    rm(2, 2) = meas_var_yaw;
+                    rm += 1e-8f * Eigen::Matrix3f::Identity();
+                    minfo = rm.inverse();
+                }
+                else
+                {
+                    Eigen::Matrix2f r2 = R_pos + 1e-8f * Eigen::Matrix2f::Identity();
+                    minfo.topLeftCorner<2, 2>() = r2.inverse();
+                }
+                out.meas_information = minfo;
+            }
             out.type    = matched;
             out.node_id = node.id();
             return true;
@@ -167,6 +187,17 @@ namespace rc
                 // agrees with room ⇒ zero information. Instead snapshot the world pose ONCE the map is
                 // confident (σ < validate_sigma) and reuse that FIXED value as p_o thereafter. Now z_o vs
                 // the pinned p_o carries a real residual when the pose drifts.
+                // With the landmark as a VARIABLE there is nothing to pin: room carries its own estimate
+                // and the fridge's belief is its birth prior. The pin exists only to stop a CONSTANT p_o
+                // from being re-derived circularly each frame.
+                if (cfg.optimize_landmark)
+                {
+                    if (obs.map_pos_sigma > cfg.validate_sigma)
+                        continue;          // birth prior not confident enough yet
+                    anchors.push_back(std::move(obs));
+                    continue;
+                }
+
                 auto it = pinned_pose_.find(obs.node_id);
                 if (it == pinned_pose_.end())
                 {

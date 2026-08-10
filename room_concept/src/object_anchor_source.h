@@ -66,6 +66,10 @@ namespace rc
             // mid-flip/mid-delocalization is worse than no anchor — it fights the correct pose forever.
             // Existing pins are always honoured; this only gates fresh captures.
             bool  allow_pin = true;
+            // When true, room treats p_o as a VARIABLE it optimises privately (birth prior = the
+            // producer's own belief) instead of pinning it. Mutually exclusive with the pin. GN-only:
+            // the autograd backends have no landmark variables. Default off.
+            bool  optimize_landmark = false;
             // ── Freshness as precision ──────────────────────────────────────────────────────────────
             // obj_obs_robot PERSISTS in the graph between actual sightings (the producer only rewrites it
             // when a mask is assigned; `table_detection_alive` stays true for ~40 frames). A stale in-front

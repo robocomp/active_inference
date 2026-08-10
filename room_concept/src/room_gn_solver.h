@@ -129,6 +129,29 @@ namespace rc::gn
         float grad_norm = 0.f;        // ‖b‖∞ at the solution — the real convergence witness
     };
 
+    /// A landmark room estimates PRIVATELY: a 2-DOF room-frame position that is a VARIABLE of the same
+    /// optimisation as the robot poses, not a constant.
+    ///
+    /// It is born from the producing agent's own belief (mean + Σ_o) and refined thereafter by room's
+    /// observations alone. The prior is applied at BIRTH only, never re-applied per frame: Σ_o was itself
+    /// derived through the robot pose, so re-injecting it every frame would feed the same evidence back
+    /// in repeatedly and shrink both sides' covariance without new information. Room never writes this
+    /// estimate back to the graph — the producer stays the sole authority for the published pose, and
+    /// the gap between the two is then a DIAGNOSTIC rather than a silent merge.
+    ///
+    /// Observability: robot + landmark from robot-only observations slide together as a pair. What pins
+    /// the gauge is the SDF against the walls (and the corners). Where those constrain the robot the
+    /// landmark is determined; where they do not, both inflate — which is the honest answer.
+    struct Landmark
+    {
+        std::uint64_t   id = 0;
+        Eigen::Vector2f p = Eigen::Vector2f::Zero();          // room-frame estimate (in/out of solve)
+        Eigen::Matrix2f information = Eigen::Matrix2f::Zero();// accumulated precision, carried between frames
+        Eigen::Vector2f prior_mean = Eigen::Vector2f::Zero(); // birth prior (producer's belief)
+        Eigen::Matrix2f prior_information = Eigen::Matrix2f::Zero();
+        bool            has_prior = false;                    // apply the prior factor this solve?
+    };
+
     /// Everything the solver reads. Assembled by the caller because WindowManager is private to
     /// RoomConcept; the solver deliberately owns no torch state of its own.
     struct Input
@@ -139,6 +162,9 @@ namespace rc::gn
         const RoomConcept::BoundaryPrior*         boundary_prior = nullptr;
         float                                     boundary_weight = 1.0f;
         torch::Device                             device = torch::kCPU;
+        // Landmarks to optimise JOINTLY with the poses. Empty ⇒ the classic behaviour, where every
+        // object anchor is a fixed constant taken from ObjectAnchorObs::pose_world.
+        std::vector<Landmark>*                    landmarks = nullptr;
     };
 
     /// Minimise the window RFE. `poses` is in/out: one [x, y, θ] per window slot, same order as the
