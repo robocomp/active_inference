@@ -160,6 +160,10 @@ private:
     std::uint64_t dsr_room_id_  = 0;
     bool          room_node_created_ = false;
     int           stable_frames_     = 0;
+    // Sustained-stability counter for the object-anchor PIN guard. Distinct from stable_frames_, which
+    // only runs BEFORE the room node exists (bootstrap) and is reset by every re-anchor: pinning happens
+    // in the steady state, long after that counter has stopped being maintained.
+    int           anchor_stable_frames_ = 0;
 
     // World-frame positions of pinned-object landmarks (refreshed by refresh_object_anchors()).
     std::vector<Eigen::Vector2f> latest_pinned_landmarks_;

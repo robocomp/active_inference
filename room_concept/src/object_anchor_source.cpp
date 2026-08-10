@@ -171,6 +171,19 @@ namespace rc
                 {
                     if (obs.map_pos_sigma > cfg.validate_sigma)
                         continue;   // not confident yet — don't emit a circular (un-pinned) anchor
+                    if (not cfg.allow_pin)
+                    {
+                        // The OBJECT is confident enough, but the LOCALIZER is not settled — and the pin
+                        // would freeze this frame's room-frame pose forever. Wait. Logged (rate-limited)
+                        // because a gate that never opens looks exactly like a producer that never
+                        // publishes, and that ambiguity costs an afternoon.
+                        static std::uint64_t defer_k = 0;
+                        if ((defer_k++ % 60) == 0)
+                            std::print("[room][anchors] pin DEFERRED for {} #{} (map σ={:.0f}mm, but the "
+                                       "localizer is not sustained-stable yet)\n",
+                                       obs.type, obs.node_id, obs.map_pos_sigma * 1000.f);
+                        continue;
+                    }
                     it = pinned_pose_.emplace(obs.node_id, obs.pose_world).first;
                     std::print("[room][anchors] PINNED {} #{} at world ({:.2f},{:.2f},{:.2f}) (map σ={:.0f}mm)\n",
                                obs.type, obs.node_id, obs.pose_world.x(), obs.pose_world.y(),

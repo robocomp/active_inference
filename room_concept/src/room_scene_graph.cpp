@@ -185,6 +185,10 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
                           && sdf_mse < params_->STABLE_SDF_MSE_MAX
                           && cov_tt  < params_->STABLE_COV_TT_MAX;
 
+    // Steady-state stability, for the object-anchor pin guard. Maintained on EVERY frame — unlike
+    // stable_frames_ below, which stops being updated the moment the room node exists.
+    anchor_stable_frames_ = stable ? anchor_stable_frames_ + 1 : 0;
+
     if (!room_node_created_)
     {
         stable_frames_ = stable ? stable_frames_ + 1 : 0;
@@ -966,6 +970,12 @@ void RoomSceneGraph::refresh_object_anchors()
     rc::ObjectAnchorSource::Config cfg;
     cfg.enable             = params_->OBJECT_ANCHOR_ENABLE;
     cfg.subtypes           = params_->OBJECT_ANCHOR_SUBTYPES;
+    // A pin is FOREVER (for the life of the process): it snapshots the object's world pose and uses that
+    // fixed value as p_o thereafter. Capturing one while the localizer is mid-flip or mid-delocalization
+    // bakes the wrong place in, and the anchor then fights the correct pose for the rest of the run.
+    // So new pins require the localizer to have been settled for STABLE_FRAMES_REQUIRED consecutive
+    // frames. Existing pins are unaffected.
+    cfg.allow_pin          = anchor_stable_frames_ >= params_->STABLE_FRAMES_REQUIRED;
     cfg.meas_sigma_xy      = params_->OBJECT_ANCHOR_MEAS_SIG_XY;
     cfg.meas_sigma_yaw     = params_->OBJECT_ANCHOR_MEAS_SIG_YAW;
     cfg.validate_sigma     = params_->OBJECT_ANCHOR_VALIDATE_SIGMA;
