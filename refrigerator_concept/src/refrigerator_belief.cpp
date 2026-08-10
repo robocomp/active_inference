@@ -647,22 +647,36 @@ bool RefrigeratorBelief::resolve_front(const FrontCue& cue, float evidence_weigh
     const Eigen::Vector2f cue_dir(std::cos(cue.bearing_rad), std::sin(cue.bearing_rad));
 
     // ★NOVELTY: charge the OBSERVER-bearing bin, so a repeated look from the same place cannot keep voting.
-    // The same discipline ChairBelief::flip_acc_ already applies. A cue with no view bearing (NaN) keeps the
-    // legacy behaviour rather than silently changing it.
-    float w_eff = w;
+    // The same discipline ChairBelief::flip_acc_ already applies.
+    //
+    // ★★AND AN UNKNOWN VIEWPOINT FAILS CLOSED. This used to read `if (isfinite(view_bearing)) {...}` with the
+    // NaN case falling through at FULL weight — labelled "keeps the legacy behaviour rather than silently
+    // changing it", which is exactly backwards: it is the one branch where we CANNOT tell a fresh view from
+    // the same view repeated, and it handed out the discovery rate. That is fail-OPEN, the same shape as the
+    // gates invariant II condemns, and it bites precisely when the pose chain is unavailable — i.e. when
+    // registration is least trustworthy.
+    //
+    // With the viewpoint unknown the honest charge is the one we would make for a REPEAT, so we attribute the
+    // look to the bin we have already spent the most on. That also makes the branch self-limiting: successive
+    // unknown-viewpoint cues deplete that same bin, novelty decays toward 0, and a broken pose chain can no
+    // longer feed the accumulator indefinitely. Known and unknown now share one code path — only the choice
+    // of BIN differs, which is the only thing the two cases actually disagree about.
+    constexpr int B = kFrontViewBins;
+    int bin = 0;
     if (std::isfinite(cue.view_bearing_rad))
     {
-        constexpr int B = kFrontViewBins;
         const float span = 2.0f * static_cast<float>(M_PI) / static_cast<float>(B);
         const float wrapped = std::atan2(std::sin(cue.view_bearing_rad), std::cos(cue.view_bearing_rad));
-        int bin = static_cast<int>(std::floor((wrapped + static_cast<float>(M_PI)) / span));
-        bin = std::clamp(bin, 0, B - 1);
-        const float budget    = std::max(1e-3f, front_view_budget_);
-        const float remaining = std::max(0.0f, budget - front_view_spent_[bin]);
-        const float novelty   = remaining / (remaining + budget);
-        w_eff = w * novelty;
-        front_view_spent_[bin] += w_eff;   // charge the bin what this frame actually contributed
+        bin = std::clamp(static_cast<int>(std::floor((wrapped + static_cast<float>(M_PI)) / span)), 0, B - 1);
     }
+    else
+        bin = static_cast<int>(std::distance(front_view_spent_.begin(),
+                               std::max_element(front_view_spent_.begin(), front_view_spent_.end())));
+    const float budget    = std::max(1e-3f, front_view_budget_);
+    const float remaining = std::max(0.0f, budget - front_view_spent_[bin]);
+    const float novelty   = remaining / (remaining + budget);
+    const float w_eff     = w * novelty;
+    front_view_spent_[bin] += w_eff;   // charge the bin what this frame actually contributed
     const std::array<bool, 4> allowed = allowed_modes();
 
     // Accumulate evidence for EVERY candidate: the alignment of that mode's door normal (local −Y rotated by the

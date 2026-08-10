@@ -156,7 +156,12 @@ void RefrigeratorFitter::resolve_front_from_rgb(RefrigeratorInstance& inst, floa
     if (not cue.has_value())
         return;
     // Where this look came FROM, for the accumulator's novelty budget (see FrontCue::view_bearing_rad).
-    if (const auto M = projection_->room_T_zed_matrix(0); M.has_value())
+    // ★PINNED TO THE CAPTURE STAMP, not ts=0. Asking for the LATEST camera pose files a look under wherever
+    // the camera is NOW, so while the robot moves the novelty bookkeeping mis-registers itself: it can credit
+    // an exhausted viewpoint as fresh and charge a genuinely new one as spent. detect_front already pins its
+    // own projection to this same stamp (refrigerator_projection.cpp), so using ts=0 here also meant the cue
+    // and its provenance disagreed about which camera pose produced them.
+    if (const auto M = projection_->room_T_zed_matrix(rgb_stamp_ms_); M.has_value())
     {
         const float camx = static_cast<float>((*M)(0, 3)), camy = static_cast<float>((*M)(1, 3));
         const_cast<FrontCue&>(*cue).view_bearing_rad = std::atan2(camy - bs.cy, camx - bs.cx);
