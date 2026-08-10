@@ -1270,19 +1270,22 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
             path_controller.set_path_presmoothed(current_plan_->room_path);
         else
             path_controller.set_path(current_plan_->room_path);
-        // ★DO NOT hand the point-target curve to PLAIN. Tried 2026-08-09 and REVERTED the same day:
-        // set_route() had only ever been called by the mission branch, so `route_spline_` was null for
-        // every point target and PLAIN fell through to PD. Installing the curve does make PLAIN drive
-        // (measured: 80% of cycles) — and PLAIN steers AT a curve with no notion of terminating on it,
-        // so an affordance target stopped being a place to stop and became a place to drive through.
-        // Observed live: the robot passed its target by 0.05-0.42 m and kept going until it hit
-        // something, with the target provably stationary (0.000 m of target motion after the closest
-        // approach) and two of five approaches never even reaching the 0.25 m arrival threshold.
-        // PD terminates at the endpoint; that is why the fallback was load-bearing rather than a
-        // degradation. Making PLAIN drive point targets needs it to decelerate into the curve's END
-        // first — the arrival test alone does not save it, because a tracker that never slows can cross
-        // the whole 0.25 m band inside one 50 ms cycle at speed.
-        path_controller.set_route(nullptr);
+        // ── HAND THE POINT-TARGET CURVE TO PLAIN ─────────────────────────────────────────────────
+        // set_route() had exactly ONE caller — the mission branch — so `route_spline_` was null for every
+        // affordance and every click, and the PLAIN dispatch fell through to PD. Invisible until the
+        // fallback got a counter: 901 consecutive cycles on PD, zero recoveries, i.e. the whole run.
+        // ★WIRED, REVERTED, AND NOW RE-WIRED — the middle step matters. Wiring it on 2026-08-09 made the
+        // robot drive THROUGH its targets ("jumps over the target and moves forward until it hits an
+        // obstacle"): PLAIN's stop taper had a floor made of the spline's own sampling grid, so it never
+        // reached zero. That is fixed at the taper (see plain_tracker.cpp) and measured on
+        // tracker_sim --stop-test: PLAIN now comes to rest 0.063 m from the endpoint against PD's
+        // 0.124 m, having overshot by 0.056 m, and it tracks 4.7x tighter on this geometry (19 vs 91 mm
+        // rms on a 2.5 m hop). Do not re-wire this without that fix present.
+        // driven_curve() already states the precedence (mission route, else point plan); this installs
+        // what it resolves rather than restating the rule. force_reset because the curve is new even
+        // though plan_spline_'s address is not — see set_route().
+        path_controller.set_route(plan_spline_valid_ and plan_spline_.valid() ? &plan_spline_ : nullptr,
+                                  /*force_reset=*/true);
         // Arrival is judged at the waypoint we are actually going to, not at the end of the extended
         // path. Without this the mission would skip every waypoint but the last one on the horizon.
         // Affordance targets carry a desired facing yaw (point AT the table); manual
