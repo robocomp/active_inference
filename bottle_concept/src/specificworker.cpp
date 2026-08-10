@@ -1212,9 +1212,16 @@ int SpecificWorker::startup_check()
     return 0;
 }
 
-// One row per bottle: p(exists) is unavailable (bottle has no existence channel — the tracker's death_frames
-// is the removal path), so the strip shows the certainty trace and the FE surprise. gap_nats is the -1
-// sentinel because kBottleDofs declares no σ* (see the note there), so the widget falls back to ½·ln det Σ.
+// One row per bottle. gap_nats is the -1 sentinel because kBottleDofs declares no σ* (see the note there),
+// so the widget falls back to ½·ln det Σ — which is why the number reads NEGATIVE and is a log-volume, not a
+// remaining-work figure. p(exists) comes from the shared rc::exist channel (bottle_existence.cpp).
+//
+// ★This comment used to say "p(exists) is unavailable (bottle has no existence channel)" and the field was
+// left NaN. That became false the moment the channel landed, and the strip renders NaN as an EMPTY GREY BAR
+// with a dash — indistinguishable from "this agent has no existence belief". So the one display whose entire
+// job is "is it still there?" showed nothing while L was live, and stayed silent through both the NaN poison
+// and the LiDAR outvoting a live detection. Two widgets, two feeds: fixing the inspector card did not fix
+// this one.
 void SpecificWorker::refresh_belief_strip()
 {
     if (not belief_strip_)
@@ -1227,6 +1234,10 @@ void SpecificWorker::refresh_belief_strip()
         r.node        = inst.node_name;
         r.surprise    = inst.fe_surprise;
         r.initialized = inst.ai2_initialized;
+        // Only once SEEDED: before that L is still the prior, and a confident-looking 0.50 for an instance
+        // that has never been judged is worse than the honest dash.
+        if (inst.existence_seeded)
+            r.p_exists = inst.existence.p_exists();
         const auto S = inst.ai2_belief.covariance();
         r.gap_nats = rc::any_sigma_star(rc::kBottleDofs)
                    ? rc::adequacy_gap_nats(rc::kBottleDofs, [&](std::size_t j) { return S(j, j); })
