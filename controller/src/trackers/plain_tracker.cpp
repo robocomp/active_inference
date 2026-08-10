@@ -65,34 +65,41 @@ ControlOutput& PlainTracker::compute(ControlOutput& out, const TrackerInput& in,
     // under the root is a FLOOR: at zero remaining arc it still commanded 0.15 m/s, so the robot crept
     // past the end of its own route — measured, route_s pinned at 38.42 for the last ten cycles with
     // cmd_adv at 0.146 — and drifted out of RouteFollower::finished()'s 1 m end-reach check.
-    // ── ⚠OPEN, 2026-08-09: THIS TRACKER CANNOT STOP ON A POINT TARGET ────────────────────────────
-    // Reproduce: tools/tracker_sim <short route> --stop-test. On a 2.5 m hop PLAIN NEVER STOPS: it runs
-    // past the end of its own curve until the bench gives up (8 m past, still doing 0.235 m/s, 10.6 m
-    // driven of a 2.5 m route, 564 mm rms cross-track). PD stops 0.124 m short having never passed it.
-    // ★It is not "overshoots by X" — there is no terminal behaviour in this tracker at all. On a MISSION
-    // that is invisible, because RouteFollower::finished() ends the traversal from OUTSIDE; nothing
-    // inside the tracker ever brings the robot to rest on the curve's end.
-    // On the robot this is "jumps over the target and moves forward until it hits an obstacle", and it
-    // is why point targets are NOT wired to PLAIN — see controller_session.cpp's set_route(nullptr).
-    // ★THE TAPER BELOW IS NOT THE DEFECT. It is starved: s_remaining never shrinks, so v_stop never
-    // falls. Proven by arming a stop guard inside the braking distance v^2/(2a) ~ 0.5 m — it NEVER FIRED
-    // while the robot was metres beyond the end.
-    // ★AND THE PROJECTION WINDOW IS NOT THE DEFECT EITHER — tried and reverted: bounding the forward
-    // search by recent progress (5-cycle history, window = 3x the arc actually covered, so a closed turn
-    // cannot offer a nearer point across the chord). Terminal behaviour did not change AT ALL, and the
-    // tour got worse: rms 41.2 -> 46.6 mm, TV(v)/m 0.581 -> 1.048, TV(w)/m 2.068 -> 3.177, 80 -> 89 s.
-    // Whatever is wrong, it is not the width of the search.
-    // ★THREE FIXES TRIED HERE AND ALL REVERTED, each broken by the same fact — A TOUR ENDS WHERE IT
-    // BEGAN, so the endpoint sits beside the start:
-    //   • bound the taper by the EUCLIDEAN distance to the endpoint -> brakes at the START of a loop.
-    //     Measured on the 37 m tour: 88 s -> 400 s, TV(w)/m 2.07 -> 16.34.
-    //   • zero the taper once PAST the endpoint's heading plane -> true on cycle one of a loop, same
-    //     crawl.
-    //   • arm that guard only when s_remaining is inside the braking distance -> tour restored exactly,
-    //     but inert in the failing case, because s_remaining is the very thing that is wrong.
-    // Anything attempted next must be measured on BOTH routes (loop and short hop) before it ships.
+    // ── HOW THE END-OF-CURVE STOP WAS ACTUALLY BROKEN (2026-08-09/10, RESOLVED) ──────────────────
+    // Symptom on the robot: driving a point target, it "jumps over the target and moves forward until it
+    // hits an obstacle". Offline it never stopped at all -- 8 m past the end of a 2.5 m curve, speed
+    // pinned at 0.068 m/s for ever.
+    // ★NEITHER THE PROJECTION NOR THE TAPER WAS WRONG. Both were verified correct by tracing s against
+    // length() cycle by cycle: s reaches the last sample and stays, and v_cmd matches sqrt(2*a*s_rem)
+    // exactly. The defect was the SEAM between them -- see the s_remaining line below.
+    // ★FOUR FIXES WERE TRIED AGAINST THE WRONG CAUSE AND ALL REVERTED. Three were killed by the same
+    // fact, A TOUR ENDS WHERE IT BEGAN, so the endpoint sits beside the start:
+    //   - taper bounded by the EUCLIDEAN distance to the endpoint -> brakes at the START of a loop
+    //     (37 m tour: 88 s -> 400 s, TV(w)/m 2.07 -> 16.34)
+    //   - zero the taper once PAST the endpoint's heading plane -> true on cycle one of a loop, same crawl
+    //   - arm that guard only inside the braking distance v^2/(2a) -> tour restored, inert in the failing
+    //     case, because s_remaining was the thing that was wrong
+    //   - bound the PROJECTION's forward search by recent progress (5-cycle history, 3x the arc actually
+    //     covered, so a closed turn cannot offer a nearer point across the chord): no effect on the
+    //     terminal behaviour whatsoever, and the tour degraded (rms 41.2 -> 46.6 mm, TV(v)/m 0.581 ->
+    //     1.048). Sound idea, wrong target -- the projection was already correct.
+    // ★AND TWO OF THE MEASUREMENTS WERE HARNESS ARTEFACTS, which is why the wrong cause looked solid:
+    //   - tools/tracker_sim sets p.cbf_max_decel = 1e6 to measure STEERING with no end taper. Every
+    //     stop test run before 2026-08-10 was therefore of a tracker with no brake at all.
+    //   - the stop test's own overshoot cutoff saturated, so every failing variant reported an identical
+    //     "1.507 m" and they could not be told apart.
+    // Reproduce the real thing: tools/tracker_sim <short route> --stop-test [--trace].
     const float a_dec = std::max(0.1f, p.cbf_max_decel);
-    const float s_remaining = std::max(0.f, sp.length() - s);
+    // ★s IS A SAMPLE, AND THE LAST SAMPLE IS NOT THE END. project() returns the nearest sample and they
+    // are `spacing` apart, so length() - s has a FLOOR of (length mod spacing) -- 0.002 m on a 2.5 m
+    // curve -- and sqrt(2*a*s_rem) therefore has a floor too: ~0.06 m/s that never decays. The robot
+    // creeps through its own endpoint for ever (measured: 8 m past, v pinned at 0.068 m/s, s_rem pinned
+    // at 0.002). This is the SAME defect the note above records for the old sqrt(0.15^2 + 2*a*d): that
+    // explicit floor was removed, and this implicit one survived in the sampling grid.
+    // The remaining arc is only known to within one spacing, so take the conservative end of that
+    // interval: the taper can then reach zero, and it stops a fraction of a sample early rather than
+    // never. No new constant -- the spacing is the curve's own.
+    const float s_remaining = std::max(0.f, sp.length() - s - sp.spacing());
     const float v_stop = std::sqrt(2.f * a_dec * s_remaining);
     const float v_profile = std::clamp(std::min(p.max_adv, v_stop), 0.f, p.max_adv);
 

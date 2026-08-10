@@ -294,16 +294,13 @@ float RouteSpline::kappa_avg(float s, float window_m) const
     return std::remainder(h1 - h0, 2.f * std::numbers::pi_v<float>) / window_m;
 }
 
-// ⚠OPEN, 2026-08-09 — SUSPECTED HOME OF THE "PLAIN CANNOT STOP" DEFECT.
-// Measured (tools/tracker_sim <short route> --stop-test): on a 2.5 m curve the arc length this returns
-// saturates ~1.5 m short of length() while the robot drives on past the endpoint, so PlainTracker's stop
-// taper — sqrt(2*a*(length - s)) — is fed a remainder that never shrinks and never brakes. Proven by
-// arming a guard inside the braking distance v^2/(2a) ~ 0.5 m: it never fired, with the robot more than
-// a metre beyond the end. See the annotation in plain_tracker.cpp for the three fixes tried in the
-// TRACKER and why each failed (they treated the symptom).
-// Whatever changes here must be measured on BOTH a loop (route_world.txt, which ends where it begins and
-// breaks every endpoint-distance shortcut) and a short hop, and must not move the tour's 41.2 mm rms /
-// 2.068 TV(w)/m / 80 s baseline.
+// ★VERIFIED CORRECT 2026-08-10, after being wrongly suspected. Traced cycle by cycle on a short curve:
+// this advances smoothly to the last sample and stays there; it does not saturate early and it does not
+// jump the chord on the routes tested. The "PLAIN cannot stop" defect was NOT here -- it was that the
+// value returned is a SAMPLE, and the last sample is one `spacing` short of length(), which put a floor
+// under PlainTracker's stop taper. Fixed at the taper, not here. See plain_tracker.cpp.
+// Bounding this search by recent progress instead of the fixed window was also tried, and measurably
+// made the tour worse for no terminal benefit -- do not re-derive it without reading that note first.
 float RouteSpline::project(const Eigen::Vector2f &p, float s_hint, float window_m) const
 {
     if (samples_.size() < 2) return 0.f;

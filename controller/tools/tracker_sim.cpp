@@ -48,6 +48,10 @@ using Eigen::Vector2f;
 namespace
 {
 constexpr float kPi = std::numbers::pi_v<float>;
+// The REAL cbf_max_decel (controller_types.h). The arms below disable the end taper for tracking
+// measurements; --stop-test restores it, because a stop test with no taper cannot ever stop.
+constexpr float kADecReal = 1.0f;
+bool  g_stop_test = false;   // run to an actual stop instead of breaking 0.15 m early
 float wrap(float a) { return std::remainder(a, 2.f * kPi); }
 
 // ── THE IDENTIFIED PLANT ─────────────────────────────────────────────────────────────────────────
@@ -200,7 +204,12 @@ struct FfArm
         p.plain_brake_k = brake_k;
         p.plain_proj_window = 0.f;      // clamped to 0.05 inside; s is re-seeded below anyway
         p.max_adv = v_limit; p.max_rot = w_max;
-        p.cbf_max_decel = 1e6f;         // no end taper: this bench measures the steering law alone
+        // ★THE TAPER IS DISABLED HERE ON PURPOSE — but only for the steering measurements. 1e6 makes
+        // sqrt(2*a*s_rem) unbounded, so v_profile is just max_adv and the robot cruises through the end
+        // of its own curve. That is correct for a TRACKING benchmark and catastrophic for --stop-test,
+        // which asks whether the robot comes to REST: with the taper off it never can, and the result
+        // reads as "PLAIN has no terminal behaviour" when the harness is what removed it.
+        p.cbf_max_decel = g_stop_test ? kADecReal : 1e6f;
 
         rc::TrackerInput in;
         in.robot_pose = Eigen::Affine2f::Identity();
@@ -251,7 +260,7 @@ float g_plant_tau = 0.22f, g_plant_delay = 0.20f, g_plant_gain = 0.89f;   // the
 float g_headroom = 1.0f;
 bool  g_heading_gate = false;   // FAILED experiment, kept as a negative result; see the A/B below
 bool  g_proj_robust = false; // --proj-robust: progress-following projection (see project_robust)
-bool  g_stop_test = false;   // run to an actual stop instead of breaking 0.15 m early
+bool  g_trace = false;      // --trace: dump the terminal approach cycle by cycle
 float g_proj_window = 2.0f;    // forward arc-length search window for the projection   // fraction of the omega budget the FEEDFORWARD may claim; the rest is
                            // reserved for feedback authority. 1.0 = the naive limit.
 
@@ -364,6 +373,11 @@ Result run(const rc::RouteFollower &route, Arm arm, float v_cap, float w_max,
             if (g_stop_test)
             {
                 R.max_past = std::max(R.max_past, past);
+                // ★TRACE: is the projection actually stuck, or is the command ignoring it? Printed for
+                // the approach and the first metres beyond, so the two hypotheses are distinguishable.
+                if (g_trace and past > -1.0f and R.n % 4 == 0)
+                    std::printf("      t=%5.2f  s=%7.3f / %7.3f  s_rem=%6.3f  past=%6.3f  v_cmd=%5.3f  v_real=%5.3f\n",
+                                t, s_hint, sp.length(), sp.length() - s_hint, past, v_cmd_prev, P.v_real);
                 const bool at_rest = std::abs(P.v_real) < 0.02f and std::abs(v_cmd_prev) < 0.02f;
                 if (at_rest and t > 1.0)
                 { R.came_to_rest = true; R.end_dist = d_end; R.end_speed = std::abs(P.v_real); R.t_end = t; break; }
@@ -479,7 +493,8 @@ int main(int argc, char **argv)
     {
         const std::string a = argv[i];
         if (a == "--sweep") sweep = true; else if (a == "--stop-test") g_stop_test = true;
-        else if (a == "--proj-robust") g_proj_robust = true; else path = a;
+        else if (a == "--proj-robust") g_proj_robust = true;
+        else if (a == "--trace") g_trace = true; else path = a;
     }
 
     World w;
