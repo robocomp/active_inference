@@ -117,6 +117,7 @@ struct BottleInstance
     float dbg_ex_lidar_occ  = 0.0f;
     float dbg_ex_lidar_free = 0.0f;
     int   dbg_ex_lidar_n    = 0;
+    float dbg_ex_lidar_pres = 0.0f;   // P(the sweep can resolve an object this small) — see bottle_existence.cpp
     float fe_surprise          = 0.0f;
     // ★The PUBLISHED epistemic_gain — the number the controller's affordance selection ranks on
     // (efe_score = gain − lambda_cost*dist, lambda_cost = 0.2/m, switch_margin = 0.5). Logged because

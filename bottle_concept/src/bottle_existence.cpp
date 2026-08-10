@@ -198,7 +198,32 @@ void BottleExistence::update_and_remove(BottleFitter& fitter, const Inputs& in,
             inst.dbg_ex_lidar_occ  = ev.e_occ;
             inst.dbg_ex_lidar_free = ev.e_free;
             inst.dbg_ex_lidar_n    = ev.n_reached;
-            inst.existence.integrate(ev, 1.0f);
+
+            // ★A SWEEP CANNOT JUDGE THE EXISTENCE OF AN OBJECT IT CANNOT LOCALISE BETTER THAN THAT OBJECT'S
+            // OWN SIZE. carve_box blurs its surface test by sigma_surf = hypot(sensor_sigma, position_sigma).
+            // MEASURED on the live bottle: sigma_surf 0.0369 m against a fitted radius of 0.0250 m — the blur
+            // is 1.5x the whole object. Every beam crossing that 5 cm box then reports "passed through"
+            // whether the bottle is absent or merely 3 cm from where we think, and the two are exactly what
+            // the channel is supposed to distinguish. It answered with confident absence: free 22.4 vs occ
+            // 8.9, L walked +4 -> -4 in 120 cycles, and the removal debounce reached 13.4 of 15 — for a
+            // bottle YOLO was detecting on EVERY ONE of those cycles (detected=1, p_detect ~0.25).
+            //
+            // The honest weight is the same shape as the camera's p_detect, and it costs no new parameter
+            // because both terms already exist in the belief: the share of the beam-placement distribution
+            // that actually lands on the object.
+            //
+            //     p_resolve = r / (r + sigma_surf)
+            //
+            // -> 1 for an object far larger than the registration blur (a fridge: unchanged), -> 0 for one
+            // far smaller (a bottle at arm's length: the sweep holds instead of voting). It is a continuous
+            // covariate ratio, not a size gate: as the fit tightens, sigma_pos falls and the SAME bottle
+            // earns its LiDAR vote back. For the numbers above it reads 0.40, which turns a net -0.28
+            // nats/cycle (deletion in ~120 cycles) into a net +1.4 (the camera's confirmation wins, correctly).
+            const float sigma_surf = std::hypot(cfg_.existence_sensor_sigma_m, t.sigma_pos_m);
+            const float r_eff      = std::max(1e-3f, s.radius);
+            const float p_resolve  = r_eff / (r_eff + sigma_surf);
+            inst.dbg_ex_lidar_pres = p_resolve;
+            inst.existence.integrate(ev, p_resolve);
         }
 
         inst.exist_logodds = inst.existence.logodds();
@@ -228,7 +253,8 @@ void BottleExistence::update_and_remove(BottleFitter& fitter, const Inputs& in,
                 std::ofstream f("etc/bottle_existence_log.csv", std::ios::trunc);
                 f.imbue(std::locale::classic());
                 f << "cycle,node,L,p_exists,cx,cy,detected,since_det,p_detect,fill_max,fill_min,"
-                     "vis,occl_total,occl_dropped,cam_usable,lidar_occ,lidar_free,lidar_n,remove_streak\n";
+                     "vis,occl_total,occl_dropped,cam_usable,lidar_occ,lidar_free,lidar_n,lidar_p_resolve,"
+                     "remove_streak\n";
                 return f; }();
             if (ex_csv)
             {
@@ -240,6 +266,7 @@ void BottleExistence::update_and_remove(BottleFitter& fitter, const Inputs& in,
                        << inst.dbg_ex_vis << ',' << obstacles.size() << ',' << dropped_dbg << ','
                        << (camera_usable ? 1 : 0) << ',' << inst.dbg_ex_lidar_occ << ','
                        << inst.dbg_ex_lidar_free << ',' << inst.dbg_ex_lidar_n << ','
+                       << inst.dbg_ex_lidar_pres << ','
                        << inst.existence_remove_streak << '\n';
                 ex_csv.flush();
             }
