@@ -20,19 +20,26 @@ namespace rc
             return m;
         }
 
-        // ─── Built-in reader: DSR table node (table_concept) → SE(2) pose landmark ─────────────────
-        // table_concept nodes are now generic type()=="object"; this reader is registered under "object"
-        // and gather() calls it for every object node, so it must first accept only tables (class carried
-        // in object_subtype, name prefix table_* unchanged).
-        bool read_table_anchor(const DSR::Node& node, DSR::DSRGraph& G, DSR::InnerGaussianAPI& gauss,
-                               const ObjectAnchorSource::Config& cfg, ObjectAnchorObs& out)
+        // ─── Built-in reader: a furniture node (table_concept, refrigerator_concept, …) → SE(2) landmark ──
+        // Every furniture agent now publishes a generic type()=="object" node carrying its class in
+        // object_subtype (and, by convention, as its name prefix). This reader is registered under
+        // "object" and gather() calls it for EVERY object node, so it first has to filter by class.
+        //
+        // Nothing below this gate was ever table-specific: the map anchor comes from the parent→node
+        // Gaussian, the observation from the shared object_anchor contract, the freshness counter from
+        // an attribute the fridge already writes too. Only the gate was.
+        bool read_object_anchor(const DSR::Node& node, DSR::DSRGraph& G, DSR::InnerGaussianAPI& gauss,
+                                const ObjectAnchorSource::Config& cfg, ObjectAnchorObs& out)
         {
-            // 0. Class gate: only tables become SE(2) landmarks here.
-            bool is_table = std::string_view(node.name()).starts_with("table");
-            if (not is_table)
-                if (const auto s = G.get_attrib_by_name<object_subtype_att>(node); s.has_value())
-                    is_table = (s.value() == "table");
-            if (not is_table)
+            // 0. Class gate: which classes are admitted is config, not code (Config::subtypes).
+            std::string matched;
+            for (const auto& cls : cfg.subtypes)
+            {
+                if (std::string_view(node.name()).starts_with(cls)) { matched = cls; break; }
+                if (const auto s = G.get_attrib_by_name<object_subtype_att>(node);
+                    s.has_value() and s.value() == cls) { matched = cls; break; }
+            }
+            if (matched.empty())
                 return false;
 
             // 1. Map anchor p_o + Σ_o (ROOM frame) via the chain-propagated Gaussian transform.
@@ -123,7 +130,7 @@ namespace rc
                 info.topLeftCorner<2, 2>() = s2.inverse();
             }
             out.information = info;
-            out.type    = "table";
+            out.type    = matched;
             out.node_id = node.id();
             return true;
         }
@@ -131,8 +138,8 @@ namespace rc
 
     ObjectAnchorSource::ObjectAnchorSource()
     {
-        // Furniture nodes are generic type()=="object" now; the reader self-filters to the table class.
-        register_type("object", &read_table_anchor);
+        // Furniture nodes are generic type()=="object" now; the reader self-filters by Config::subtypes.
+        register_type("object", &read_object_anchor);
     }
 
     void ObjectAnchorSource::register_type(const std::string& node_type, Reader reader)

@@ -180,6 +180,10 @@ struct RoomConfig
     // ── Object anchors (validated modelled objects as SE(2) pose landmarks for localization) ──
     // OFF by default. Precision-weighted by each object's own belief covariance (no threshold).
     bool  OBJECT_ANCHOR_ENABLE      = false;  // ObjectAnchor.enable
+    // ObjectAnchor.subtypes — which object CLASSES become landmarks. Default {"table"} keeps the
+    // historical behaviour; the classes are deliberately selectable one at a time (see the header of
+    // ObjectAnchorSource::Config for why table and refrigerator are not interchangeable).
+    std::vector<std::string> OBJECT_ANCHOR_SUBTYPES = {"table"};
     float OBJECT_ANCHOR_WEIGHT      = 1.0f;   // ObjectAnchor.weight  (keep < walls)
     float OBJECT_ANCHOR_HUBER       = 3.0f;   // ObjectAnchor.huber   (whitened σ units)
     int   OBJECT_ANCHOR_MAX_SLOTS   = 3;      // ObjectAnchor.maxSlots

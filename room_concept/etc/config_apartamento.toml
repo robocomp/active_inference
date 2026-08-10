@@ -523,8 +523,13 @@ StableSdfMseMax = 0.09
 
 # ── Object anchors (validated modelled objects as SE(2) pose landmarks in the RFE loss) ──
 [ObjectAnchor]
-enable   = false   # A/B TEST: OFF to check whether the flips/delocalizations persist WITHOUT the anchor
-                   # (anchorSD=85 at good poses implicated a wrong pin as the destabilizer). Re-enable after.
+# 2026-08-10: back ON, but for the REFRIGERATOR only. It was turned off by an A/B checking whether the
+# flips/delocalizations persisted without the anchor -- anchorSD=85 at good poses implicated a wrong PIN
+# as the destabilizer, and that pin was a TABLE's. So this re-opens the landmark path without re-opening
+# the suspect: a fridge is position-only (no mode-ambiguous yaw to pin wrong), large, and static.
+# If flips return, the first thing to check is whether they track the fridge's pin.
+enable   = true
+subtypes = ["refrigerator"]   # classes admitted as landmarks; add "table" back only deliberately
 weight   = 1.0     # global scale (keep < walls: objects refine, never outvote geometry)
 huber    = 3.0     # robust cutoff in whitened σ units
 maxSlots = 3       # apply object factors to the newest N window slots

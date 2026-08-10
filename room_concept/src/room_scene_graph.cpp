@@ -3,6 +3,8 @@
  *    This file is part of RoboComp — see room_scene_graph.h.
  */
 
+#include <algorithm>
+#include <ranges>
 #include "room_scene_graph.h"
 
 #include <array>
@@ -963,6 +965,7 @@ void RoomSceneGraph::refresh_object_anchors()
 
     rc::ObjectAnchorSource::Config cfg;
     cfg.enable             = params_->OBJECT_ANCHOR_ENABLE;
+    cfg.subtypes           = params_->OBJECT_ANCHOR_SUBTYPES;
     cfg.meas_sigma_xy      = params_->OBJECT_ANCHOR_MEAS_SIG_XY;
     cfg.meas_sigma_yaw     = params_->OBJECT_ANCHOR_MEAS_SIG_YAW;
     cfg.validate_sigma     = params_->OBJECT_ANCHOR_VALIDATE_SIGMA;
@@ -979,17 +982,21 @@ void RoomSceneGraph::refresh_object_anchors()
     static std::uint64_t anchor_dbg_k = 0;
     if ((anchor_dbg_k++ % 30) == 0)
     {
-        int n_tables = 0, with_obs = 0;
+        int n_nodes = 0, with_obs = 0;
         for (const auto& n : G_->get_nodes_by_type("object"))
         {
-            if (not node_is_object_class(*G_, n, "table")) continue;
-            ++n_tables;
+            const bool admitted = std::ranges::any_of(cfg.subtypes,
+                [&](const std::string& c) { return node_is_object_class(*G_, n, c); });
+            if (not admitted) continue;
+            ++n_nodes;
             if (const auto o = G_->get_attrib_by_name<obj_obs_robot_att>(n);
                 o.has_value() and o->get().size() >= 2)
                 ++with_obs;
         }
-        std::print("[room][anchors] table_nodes={} with_obj_obs_robot={} anchors_used={}\n",
-                   n_tables, with_obs, anchors.size());
+        std::string cls_list;
+        for (const auto& c : cfg.subtypes) { if (not cls_list.empty()) cls_list += ','; cls_list += c; }
+        std::print("[room][anchors] classes=[{}] nodes={} with_obj_obs_robot={} anchors_used={}\n",
+                   cls_list, n_nodes, with_obs, anchors.size());
         if (not anchors.empty())
         {
             const auto& a = anchors.front();

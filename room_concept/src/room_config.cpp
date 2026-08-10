@@ -220,6 +220,13 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     // Object anchors (validated modelled objects as SE(2) pose landmarks). Loaded into BOTH the
     // shared config (read by RoomSceneGraph's graph-side gather) and the localizer params.
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "ObjectAnchor.enable", p.OBJECT_ANCHOR_ENABLE);
+    // Guarded by exists(): ConfigLoader throws on `key = []`, and a silently-empty list would disable
+    // every landmark while the enable flag still read true — a confusing way to get nothing.
+    if (cl.exists("ObjectAnchor.subtypes"))
+    {
+        auto v = cl.get<std::vector<std::string>>("ObjectAnchor.subtypes");
+        if (not v.empty()) p.OBJECT_ANCHOR_SUBTYPES = std::move(v);
+    }
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ObjectAnchor.weight", p.OBJECT_ANCHOR_WEIGHT);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ObjectAnchor.huber", p.OBJECT_ANCHOR_HUBER);
     rc::ConfigLoaderUtils::load_optional<int>(cl, "ObjectAnchor.maxSlots", p.OBJECT_ANCHOR_MAX_SLOTS);

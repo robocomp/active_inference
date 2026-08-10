@@ -46,6 +46,13 @@ namespace rc
         struct Config
         {
             bool  enable         = false;
+            // Which object CLASSES become landmarks, matched against object_subtype (or the node-name
+            // prefix, which is the same discriminator every furniture agent uses). Default {"table"}
+            // preserves the historical behaviour. This is a list and not a bool because the classes are
+            // not interchangeable: a table's yaw is mode-ambiguous and its map pin was implicated in the
+            // 07-13 delocalizations, while a refrigerator is a position-only, unambiguous landmark. Being
+            // able to admit one without the other is the point.
+            std::vector<std::string> subtypes = {"table"};
             // Fallback per-frame measurement noise R_o used when the producing concept does not
             // publish its own robot-frame covariance (obj_obs_robot_cov) on the node.
             float meas_sigma_xy  = 0.05f;   // metres
@@ -77,7 +84,7 @@ namespace rc
                                           const Config&            cfg,
                                           ObjectAnchorObs&         out)>;
 
-        ObjectAnchorSource();                                   // installs the built-in "table" reader
+        ObjectAnchorSource();                     // installs the built-in furniture reader (see Config::subtypes)
 
         void register_type(const std::string& node_type, Reader reader);
 

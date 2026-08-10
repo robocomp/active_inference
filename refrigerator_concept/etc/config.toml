@@ -383,6 +383,13 @@ VoxelSelectRadiusMarginM = 0.50 # per-refrigerator XY ownership gate margin for 
 VoxelSelectHeightMarginM = 0.25 # extra Z margin above refrigerator height when selecting owned voxels
 DumpCloudPath = "/tmp/round_refrigerator.xyz" # DIAGNOSTIC one-shot: dump a refrigerator's voxel-bank cloud here for tests/compare_models ("" = off)
 RtCovScale = 1.0            # scales the belief Σ → published room→refrigerator RT covariance (calibrate toward NEES≈1)
+# z_o is the RAW camera-frame mask centroid carried to the base frame by the STATIC body<-zed extrinsic,
+# NOT the fitted room-frame pose: it must be independent of the pose the localizer is estimating, or the
+# factor just re-anchors to the last pose and the residual is ~0 at the current estimate. Position-only
+# (a single view's yaw is biased), with an anisotropic R_o whose loose axis lies along the viewing ray.
+# 2026-08-10: this has been true all along, but nothing consumed it -- room_concept's anchor reader only
+# admitted tables. It now admits "refrigerator" (room's ObjectAnchor.subtypes) and the fridge becomes the
+# localizer's first non-corner landmark.
 PublishObjectObs = true     # publish per-frame ROBOT-frame fit z_o (obj_obs_robot) → room's object-anchor factor
 ObjectObsFrame = "body"     # localizer base frame z_o is expressed in (== room's LIDAR_ROBOT_FRAME)
 
