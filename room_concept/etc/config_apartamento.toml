@@ -212,7 +212,11 @@ OptimizerType          = "LBFGS"
 # etc/gn_shadow.csv cumpla los criterios de arriba. El CSV solo crece en frames OPTIMIZADOS
 # (~0.7% del total, 4.7% en movimiento) — con el robot parado sale vacio, hace falta teleoperar.
 GnShadow      = true
-GnGradCheck   = true
+# OFF desde el run 4: el jacobiano ya esta validado (grad_relerr_basin med 5.8e-4, p90 6.2e-3, y su cola
+# NO cae en los frames donde las poses discrepan: corr con max_dxy = +0.013). Dejarlo activo mete 2x30
+# evaluaciones extra de la perdida por frame optimizado, que (a) inflan ms_gn y (b) alargan el frame, lo
+# que retrasa el siguiente. Este run mide TIEMPO; volver a ponerlo a true solo si se toca el jacobiano.
+GnGradCheck   = false
 GnShadowCsv   = "etc/gn_shadow.csv"
 GnMaxIters    = 20     # subido de 10: un paso rechazado cuesta ~0.3 ms contra los 63-97 ms del autograd
 GnLambdaInit  = 1e-3   # amortiguamiento de Levenberg, relativo a diag(H)
