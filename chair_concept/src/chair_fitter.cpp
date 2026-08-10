@@ -586,6 +586,8 @@ void ChairFitter::log_ai2_csv(const ChairInstance& inst, int npts, float R, bool
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
     const auto sd = [&](int i) { return std::sqrt(std::max(0.0f, S(i, i))); };
+    const auto mode_p = inst.ai2_belief.mode_posterior();   // ONE array, kept alive for the read below
+    const float p_mode_max = *std::max_element(mode_p.begin(), mode_p.end());
     ai2_csv_ << inst.processed_cycles << ',' << inst.node_name << ',' << npts << ',' << (gated ? 1 : 0) << ','
              << energy << ',' << inst.fe_baseline << ',' << inst.fe_surprise << ',' << R << ',' << inst.last_motion_var << ',' << inst.last_depth_var << ',' << inst.last_trunc_frac << ',' << inst.last_range << ',' << inst.dbg_obliquity_cos << ',' << inst.last_clutter_frac << ','
              << s.cx << ',' << s.cy << ',' << s.yaw << ','
@@ -600,10 +602,18 @@ void ChairFitter::log_ai2_csv(const ChairInstance& inst, int npts, float R, bool
              << inst.ai2_belief.flip_acc()[1] << ',' << inst.ai2_belief.flip_acc()[2] << ','
              << inst.ai2_belief.flip_acc()[3] << ','
              << (inst.dbg_fixated ? 1 : 0) << ',' << inst.last_centroid_radius << ','
-             << ego_lin_mps_ << ',' << ego_ang_radps_ << ',' << inst.dbg_obliquity_eff << inst.dbg_nbv_gain << inst.ai2_belief.flip_acc()[1] << ',' << inst.ai2_belief.flip_acc()[2] << ','
+             << ego_lin_mps_ << ',' << ego_ang_radps_ << ',' << inst.dbg_obliquity_eff << ','
+             << inst.dbg_nbv_gain << ','
+             << inst.ai2_belief.flip_acc()[1] << ',' << inst.ai2_belief.flip_acc()[2] << ','
              << inst.ai2_belief.flip_acc()[3] << ','
-             << *std::max_element(inst.ai2_belief.mode_posterior().begin(),
-                                  inst.ai2_belief.mode_posterior().end()) << ','
+             // ★BIND THE POSTERIOR. mode_posterior() returns std::array BY VALUE, so calling it twice —
+             // once for begin(), once for end() — hands max_element iterators into two DIFFERENT temporaries.
+             // That is undefined behaviour and it hangs: the search walks memory from one array looking for a
+             // pointer that belongs to another. Live symptom: chair pegged at 100% of a core inside
+             // log_ai2_csv with RSS climbing ~490 MB/min, unkillable by Ctrl-C. Same family as the Eigen
+             // expression-template gotcha in common/nbv — never let an iterator or a reference outlive the
+             // temporary it came from.
+             << p_mode_max << ','
              << inst.ai2_belief.max_view_spent() << '\n';
     ai2_csv_.flush();
 }
