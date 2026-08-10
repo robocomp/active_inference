@@ -88,6 +88,21 @@ struct BottleConfig
     float detect_min_fill  = 0.10f;
     float detect_max_fill  = 0.60f;
     float detect_soft      = 0.06f;
+    // ── EXISTENCE (bottle_existence.h) — the shared rc::exist policy ──────────────────────────────
+    // Bottle was the last object agent with no existence channel: it retired instances on a miss counter
+    // (Tracker.DeathFrames), which invariant 5 forbids. With this ON, removal is a decision on L and the
+    // miss counter is disabled; OFF restores the counter exactly, so the two can be A/B'd.
+    // ★No confirm/absence GAIN knobs: the two log-likelihood ratios are log(pd/pc) and log((1−pd)/(1−pc)),
+    // derived from the same two sensor rates, so the channel cannot drift into a one-way ratchet.
+    bool  existence_enabled           = true;
+    float existence_birth_logodds     = 0.0f;   // a newborn bottle is a 50/50 hypothesis, not a fact
+    float existence_logodds_max       = 4.0f;   // |L| clamp — also the recantation budget (2·L_max nats)
+    float existence_removal_prob      = 0.12f;  // remove below P(exists) = this
+    float existence_frame_correlation = 0.0f;   // ρ: opt-in, MEASURE it from this agent's log before setting
+    float existence_detection_prob    = 0.85f;  // P(detect | exists & observable)
+    float existence_clutter_prob      = 0.05f;  // P(detect | ¬exists) — the false-positive rate
+    float existence_sensor_sigma_m    = 0.03f;  // LiDAR carve surface blur σ (m)
+    int   existence_remove_frames     = 15;     // debounce in IDEAL OBSERVATIONS (Σ p_detect), not cycles
     float ai2_clutter_frac         = 0.10f;  // ε: prior weight of the uniform clutter mixture component
     float ai2_clutter_scale_m      = 0.08f;  // a point further than ~this from the surface is likely clutter
     float ai2_prior_pos_std        = 0.30f;  // broad position prior std (m) on cx,cy,cz

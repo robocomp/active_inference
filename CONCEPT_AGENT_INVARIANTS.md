@@ -115,12 +115,26 @@ An agent is coherent when all of these hold. Each is annotated with what breaks 
 | contract case (11) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | σ\* stated or declared (12) | ✅ | ✅ | ✅ | ✅ | decl | decl |
 | accumulators counted once (I) | ❌ `front_acc_` | ✅ | ✅ | ✅ | ✅ | n/a |
-| no occupancy-only floor (II) | ✅ fixed | ✅ fixed | n/a | ⚠ unchecked | ✅ fixed | n/a |
+| no occupancy-only floor (II) | ✅ fixed | ✅ fixed | n/a | ⚠ unchecked | ✅ fixed | ✅ |
 | truncation gate reachable (II) | ❌ dead | ❌ dead | ❌ dead | ❌ dead | ❌ dead | n/a |
+| existence channel exists (4) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ 08-10 |
+| removal on L, ONE authority (5) | ✅ | ✅ | ⚠ two | ⚠ two | ⚠ two | ✅ |
+
+**⚠ two authorities (found 2026-08-10).** chair, cabinet and door each remove on their existence log-odds
+*and* still run the tracker's `Tracker.DeathFrames = 300` miss counter, so an instance can be retired by
+either — and the counter's removal is the one that carries no evidence and no attributable record. Only
+refrigerator, table and bottle disable it (`tp.death_frames = INT_MAX`). One line each; it is a runtime
+behaviour change, so it is listed rather than done.
+
+chair also states its boundary in NATS (`exist_logodds < exist_remove_logodds`) where everyone else states
+a PROBABILITY (`should_remove(existence_removal_prob)`). Same decision, two vocabularies — the cheap kind of
+divergence to remove while touching that code.
 
 **Open, in priority order:** the truncation gate is dead fleet-wide (measure area or delete);
-`front_acc_` still sums; chair/door/bottle never stop attracting; cabinet's envelope keys and its
-occupancy floor are unchecked; cabinet publishes no affordances at all under the kitchen model.
+`front_acc_` still sums; chair/door/bottle never stop attracting; the three double authorities above;
+cabinet's envelope keys and its occupancy floor are unchecked; cabinet publishes no affordances at all
+under the kitchen model; bottle's detector envelope is the fleet prior and caps `p_detect` at 0.36
+(≈3× slower removal — measured, see `bottle_existence.h`).
 
 ---
 

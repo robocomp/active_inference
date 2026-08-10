@@ -112,6 +112,21 @@ audit_agent() {
     if grep -rE "connect\\(.*update_node_attr_signal" "$src" 2>/dev/null | grep -qv "^\\s*//"; then mark no
     else grep -rq "poll_affordance_protocol" "$src" 2>/dev/null && mark ok || mark na; fi
 
+    # 8. ONE removal authority. Invariant 5: removal is a Bayesian decision on the existence log-odds, never
+    #    a miss counter. An agent that has an existence channel AND still arms the tracker's death counter
+    #    has TWO ways to delete an instance, and the counter's deletion is the one that carries no evidence
+    #    and leaves no attributable record — so a phantom analysis cannot tell a reasoned removal from a
+    #    timeout. Found 2026-08-10 in chair, cabinet and door, all three of which do remove on L as well.
+    #    refrigerator/table/bottle disable it (`tp.death_frames = INT_MAX` / behind the existence flag).
+    if grep -rqE "exist(ence)?[._]" "$src" 2>/dev/null; then
+        if grep -rqE "tp\\.death_frames\\s*=\\s*(std::numeric_limits<int>::max|cfg_\\.[a-z_]*existence)" "$src" 2>/dev/null
+        then mark ok
+        elif grep -rq "tp\\.death_frames" "$src" 2>/dev/null; then mark wr
+        else mark na; fi
+    else
+        mark na
+    fi
+
     echo
 }
 
@@ -119,9 +134,9 @@ audit_agent() {
 echo
 echo "concept-agent alignment audit — $ROOT"
 echo
-printf "  %-22s%-13s%-13s%-13s%-13s%-13s%-13s%-13s\n" \
-       agent room_poly any_usable contract "sigma*" envelope strip poll
-printf "  %s\n" "$(printf '%.0s-' {1..114})"
+printf "  %-22s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s\n" \
+       agent room_poly any_usable contract "sigma*" envelope strip poll removal
+printf "  %s\n" "$(printf '%.0s-' {1..127})"
 
 skipped=()
 for d in *_concept; do
@@ -151,6 +166,7 @@ if [[ $QUIET -eq 0 ]]; then
   envelope                'warn' = hardcoded DetectorEnvelope{} prior instead of config keys
   strip                   'warn' = no compact belief strip
   poll                    protocol flags polled, not pushed by the update_node_attr_signal firehose
+  removal                 ONE removal authority: an existence channel AND an armed miss counter is two
 
 NOTE
 fi

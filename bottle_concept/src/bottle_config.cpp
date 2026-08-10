@@ -64,6 +64,15 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     out.detect_min_fill      = getf("BottleModel.DetectMinFill",  0.10f);
     out.detect_max_fill      = getf("BottleModel.DetectMaxFill",  0.60f);
     out.detect_soft          = getf("BottleModel.DetectSoft",     0.06f);
+    out.existence_enabled           = getb("BottleModel.ExistenceEnabled",           true);
+    out.existence_birth_logodds     = getf("BottleModel.ExistenceBirthLogodds",       0.0f);
+    out.existence_logodds_max       = getf("BottleModel.ExistenceLogoddsMax",         4.0f);
+    out.existence_removal_prob      = getf("BottleModel.ExistenceRemovalProb",        0.12f);
+    out.existence_frame_correlation = getf("BottleModel.ExistenceFrameCorrelation",   0.0f);
+    out.existence_detection_prob    = getf("BottleModel.ExistenceDetectionProb",      0.85f);
+    out.existence_clutter_prob      = getf("BottleModel.ExistenceClutterProb",        0.05f);
+    out.existence_sensor_sigma_m    = getf("BottleModel.ExistenceSensorSigmaM",       0.03f);
+    out.existence_remove_frames     = geti("BottleModel.ExistenceRemoveFrames",       15);
     out.ai2_clutter_frac         = getf("BottleModel.AI2ClutterFrac",         0.10f);
     out.ai2_clutter_scale_m      = getf("BottleModel.AI2ClutterScaleM",       0.08f);
     out.ai2_prior_pos_std        = getf("BottleModel.AI2PriorPosStd",         0.30f);

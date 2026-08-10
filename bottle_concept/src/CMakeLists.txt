@@ -27,6 +27,7 @@ LIST(APPEND SOURCES
   ../src/bottle_scene_graph.cpp
   ../src/bottle_belief.cpp
   ../src/bottle_fitter.cpp
+  ../src/bottle_existence.cpp
   ../src/bottle_lidar_ingestor.cpp
   ../src/epistemic_planner.cpp
   ../src/bottle_affordance.cpp

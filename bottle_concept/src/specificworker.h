@@ -63,6 +63,7 @@
 #include "../../common/mask_ingestor/mask_ingestor.h"  // rc::MaskIngestor (masks reading)
 #include "bottle_scene_graph.h" // rc::BottleSceneGraph (DSR node/RT I/O)
 #include "bottle_fitter.h"
+#include "bottle_existence.h"
 #include "../../common/phantom_log/phantom_log.h"   // rc::history::PhantomLog (shadow-mode birth/death record)      // rc::BottleFitter (active-inference fit core)
 #include "bottle_lidar_ingestor.h"  // rc::BottleLidarIngestor (lidar3D media plane → room-frame sweep)
 #include "../../common/instance_tracker/instance_tracker.h"   // rc::InstanceTracker (birth/associate/death)
@@ -227,6 +228,7 @@ private:
     std::unique_ptr<rc::BottleFitter>     fitter_;       // active-inference fit core (owns the instance map)
     rc::history::PhantomLog                             phantom_log_;   // shadow-mode birth/death record
     std::unique_ptr<rc::BottleLidarIngestor> lidar_ingestor_;  // lidar3D media plane → room-frame sweep (feeds fitter)
+    std::unique_ptr<rc::BottleExistence>  existence_;     // existence log-odds + removal (the shared rc::exist policy)
 
     // Multi-instance birth/associate/death (shared rc::InstanceTracker) — the only instance-lifecycle
     // path. Associates masks to instances (gated 1-to-1), spawns new bottles from unexplained masks,

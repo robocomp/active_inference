@@ -420,6 +420,7 @@ void SpecificWorker::initialize()
     // room frame for the fitter. Dormant (no DDS participant) unless BottleModel.LidarPrecision > 0. Subscriber
     // is brought up lazily on the main thread from compute()::pump(), never here (graph may still be joining).
     lidar_ingestor_ = std::make_unique<rc::BottleLidarIngestor>(G, inner_eigen_.get(), cfg_);
+    existence_      = std::make_unique<rc::BottleExistence>(cfg_);
 
     // ── Live "Bottle Inference" dashboard — its OWN top-level window ───────────────────────────────
     // Extracted from the DSR graph dock (add_custom_widget_to_dock) into a standalone window so it shows
@@ -540,11 +541,14 @@ void SpecificWorker::log_phantom_event(std::string_view event, std::uint64_t id,
         }
     if (inst)
     {
+        // ★These are REAL now. Before the existence channel every bottle death was UNATTRIBUTABLE by
+        // construction (retired on a miss counter, with no p_detect to say whether the miss meant anything),
+        // so the phantom analysis had to discard them. A death now records the geometry that justified it.
         e.age_cycles    = inst->processed_cycles;
-        e.p_detect      = 0.0f;
-        e.central_frac  = 0.0f;
-        e.in_fov_frac   = (0 > 0) ? 1.0f : 0.0f;
-        e.exist_logodds = 0.0f;
+        e.p_detect      = inst->dbg_ex_p_detect;
+        e.central_frac  = inst->dbg_ex_vis;
+        e.in_fov_frac   = inst->dbg_ex_vis;
+        e.exist_logodds = inst->exist_logodds;
     }
     phantom_log_.write(e);
 }
@@ -599,13 +603,17 @@ void SpecificWorker::compute()
     // snapshot is pushed at the end of the cycle.
     ev_g_.births = ev_g_.merges = ev_g_.removals = 0;
 
-    mask_ingestor_->refresh();
+    const bool fresh_masks = mask_ingestor_->refresh();
 
     // Stage this cycle's LiDAR sweep (room frame) for the fitter's range factor. clear-then-set so the factor
     // only contributes on cycles with a genuinely fresh sweep (never re-uses a stale one). No-op when off.
     fitter_->clear_lidar_sweep();
+    bool fresh_sweep = false;
     if (lidar_ingestor_ and lidar_ingestor_->pump())
+    {
         fitter_->set_lidar_sweep(lidar_ingestor_->sweep_room(), lidar_ingestor_->origin_room());
+        fresh_sweep = true;
+    }
 
     run_instance_tracker();   // data-driven birth/associate/death (the only instance-lifecycle path)
 
@@ -617,6 +625,32 @@ void SpecificWorker::compute()
     for (const auto& node : G->get_nodes_by_type("object"))
         if (node.name().starts_with("bottle"))
             process_bottle_node(node);
+
+    // EXISTENCE: integrate both evidence channels and retire the bottles whose volume is demonstrably empty.
+    // Runs AFTER the per-instance fits so it projects this cycle's geometry, and it is the ONLY removal path
+    // for absence (Tracker.DeathFrames is disabled while it is on) — one authority, one decision, on L.
+    if (existence_)
+    {
+        rc::BottleExistence::Inputs in;
+        in.G            = G.get();
+        in.inner_eigen  = inner_eigen_.get();
+        in.fresh_masks  = fresh_masks;
+        in.sweep        = (fresh_sweep and lidar_ingestor_) ? &lidar_ingestor_->sweep_room() : nullptr;
+        in.origin       = lidar_ingestor_ ? lidar_ingestor_->origin_room() : Eigen::Vector3f::Zero();
+        in.room_polygon = &room_polygon_;
+        existence_->update_and_remove(*fitter_, in,
+            [this](std::uint64_t id, rc::BottleInstance& inst)
+            {
+                // Same teardown ORDER as a tracker DEATH: the affordance first (while the instance and its id
+                // still exist), then the C++ instance, then the DSR node — otherwise aff_<bottle> is orphaned.
+                log_phantom_event("DEATH", id, inst.node_name,
+                                  inst.model.state().cx, inst.model.state().cy, &inst, "existence");
+                inst.affordance.remove();
+                fitter_->forget_node(id);
+                G->delete_node(id);
+                ++ev_g_.removals;
+            });
+    }
 
     // Validation drivers (Webots) also teleport the bottle, so they are mutually exclusive with the
     // arm-side start placement — skip them when place_on_start owns the bottle pose.
@@ -756,7 +790,12 @@ void SpecificWorker::run_instance_tracker()
     tp.gate_mahalanobis = cfg_.tracker_gate_mahalanobis;
     tp.gate_fallback_m  = cfg_.tracker_gate_fallback_m;
     tp.birth_frames     = cfg_.tracker_birth_frames;
-    tp.death_frames     = cfg_.tracker_death_frames;
+    // ★Invariant 5: removal is a decision on L, never a miss counter. With the existence channel on, the
+    // tracker's death counter is DISABLED so there is exactly one removal authority — the same thing
+    // table_concept and refrigerator_concept do (`death_frames = INT_MAX`). Turning the channel off in
+    // config restores the counter exactly, which is what makes the two A/B-able.
+    tp.death_frames     = cfg_.existence_enabled ? std::numeric_limits<int>::max()
+                                                 : cfg_.tracker_death_frames;
     tp.birth_min_sep_m  = cfg_.tracker_birth_min_sep_m;
     tp.detection_noise_m = cfg_.tracker_detection_noise_m;
     tp.nll_cost         = cfg_.tracker_nll_cost;

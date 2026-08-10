@@ -21,6 +21,7 @@
 #include "bottle_model.h"
 #include "bottle_belief.h"           // rc::BottleBelief (AI2 recursive-Laplace belief — the fit)
 #include "bottle_affordance.h"
+#include "../../common/existence_belief/existence_belief.h"   // rc::exist::ExistenceBelief (the shared policy)
 
 namespace rc {
 
@@ -96,6 +97,23 @@ struct BottleInstance
     // fe_baseline tracks DOWN fast / UP slow so a sustained rise (the bottle moved) surfaces as fe_surprise.
     float last_clutter_frac    = 0.0f;
     float fe_baseline          = -1.0f;   // <0 = uninitialised (seed to the first explained FE)
+    // ── EXISTENCE (bottle_existence.cpp; the shared rc::exist policy) ─────────────────────────────
+    // L = log P(exists)/P(¬exists). Removal is a decision on THIS, never a miss counter (invariant 5) —
+    // bottle was the last object agent still retiring on tracker_death_frames. Seeded once, at the first
+    // cycle with a belief to project (a bottle with no geometry has nothing to be absent from).
+    rc::exist::ExistenceBelief existence{0.0f, 4.0f};
+    bool  existence_seeded        = false;
+    float existence_remove_streak = 0.0f;   // accumulated LOOKS (Σ p_detect) below the removal boundary
+    float exist_logodds           = 0.0f;   // mirror of existence.logodds() for the dashboard / strip / logs
+    // Last cycle's camera-channel geometry, for the dashboard and the phantom-event record. These are what
+    // make a death ATTRIBUTABLE: "removed at p_detect 0.71, fill 0.28, vis 1.00" is a claim that can be
+    // checked; the old "unsupported for 90 frames" was not.
+    float dbg_ex_p_detect   = 0.0f;
+    float dbg_ex_fill       = 0.0f;
+    float dbg_ex_vis        = 0.0f;
+    float dbg_ex_lidar_occ  = 0.0f;
+    float dbg_ex_lidar_free = 0.0f;
+    int   dbg_ex_lidar_n    = 0;
     float fe_surprise          = 0.0f;
     // ★The PUBLISHED epistemic_gain — the number the controller's affordance selection ranks on
     // (efe_score = gain − lambda_cost*dist, lambda_cost = 0.2/m, switch_margin = 0.5). Logged because
