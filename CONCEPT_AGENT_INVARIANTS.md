@@ -118,13 +118,36 @@ An agent is coherent when all of these hold. Each is annotated with what breaks 
 | no occupancy-only floor (II) | ✅ fixed | ✅ fixed | n/a | ⚠ unchecked | ✅ fixed | ✅ |
 | truncation gate reachable (II) | ❌ dead | ❌ dead | ❌ dead | ❌ dead | ❌ dead | n/a |
 | existence channel exists (4) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ 08-10 |
-| removal on L, ONE authority (5) | ✅ | ✅ | ⚠ two | ⚠ two | ⚠ two | ✅ |
+| removal on L, ONE authority (5) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| debounce counts LOOKS (5) | ✅ 08-10 | ✅ | ❌ none | ✅ 08-10 | ✅ 08-10 | ✅ |
 
-**⚠ two authorities (found 2026-08-10).** chair, cabinet and door each remove on their existence log-odds
-*and* still run the tracker's `Tracker.DeathFrames = 300` miss counter, so an instance can be retired by
-either — and the counter's removal is the one that carries no evidence and no attributable record. Only
-refrigerator, table and bottle disable it (`tp.death_frames = INT_MAX`). One line each; it is a runtime
-behaviour change, so it is listed rather than done.
+**✅ two authorities — FIXED 2026-08-10** (`2f4c4e0`). Each agent's death counter is now tied to its own
+existence flag, so the two are mutually exclusive by construction and still A/B-able. ★cabinet was not the
+case it looked like: its existence removal is OFF by default, so the counter was its ONLY authority and a
+blind `INT_MAX` would have made every cabinet immortal. The structural grep could not see that; reading the
+call site could.
+
+**★ III. A DEBOUNCE MUST COUNT LOOKS, NOT CYCLES** (found 2026-08-10, third member of the family above).
+`if (should_remove(L)) ++streak` advances on every cycle once L is below the boundary — including the ones
+where `p_detect` was 0 and the channel had just, correctly, HELD. The object is then condemned by evidence
+gathered once and executed `RemoveFrames` cycles later, while the robot looks elsewhere. Live proof:
+**all 12 door deaths had `fixated = 0`**, at ranges 2.1–6.7 m, five of them at `p_detect = 0.000`.
+
+Two traps inside it, both of which cost a wrong "fixed" claim if missed:
+- **`if (integrated)` is NOT this guard.** refrigerator and cabinet both claim to count "EVIDENCE cycles,
+  not wall-clock" — but a channel that ran and resolved nothing still sets `integrated`. It answers *did a
+  sensor fire?*, not *could it have seen the object?*
+- **Check for a SECOND, WEAKER streak on the same L.** refrigerator's `plaus_remove_streak` tested the same
+  boundary but advanced unconditionally, so it always fired first; fixing the sensor streak alone would
+  have changed nothing observable.
+
+A PRIOR is exempt and should stay at full weight — door's out-of-room and minimum-height branches are
+categorical facts about where a door can be and what a door IS, not sensor absence. Only the SENSOR channel
+owes a look.
+
+**❌ chair has NO debounce at all** — a single cycle below `exist_remove_logodds` removes. It is the only
+agent without one. Left alone deliberately: it slows removal, and the open chair complaint is a phantom
+that would NOT die.
 
 chair also states its boundary in NATS (`exist_logodds < exist_remove_logodds`) where everyone else states
 a PROBABILITY (`should_remove(existence_removal_prob)`). Same decision, two vocabularies — the cheap kind of
