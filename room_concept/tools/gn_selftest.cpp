@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdio>
 #include <deque>
+#include <chrono>
 #include <random>
 #include <vector>
 
@@ -217,7 +218,10 @@ int main()
 
         rc::gn::Options opts;
         const float loss0 = rc::gn::evaluate(in, poses);
+        const auto t0 = std::chrono::high_resolution_clock::now();
         const auto r = rc::gn::solve(in, poses, opts);
+        const float solve_ms = std::chrono::duration<float, std::milli>(
+            std::chrono::high_resolution_clock::now() - t0).count();
 
         float worst_xy = 0.f, worst_th = 0.f;
         for (size_t i = 0; i < poses.size(); ++i)
@@ -227,9 +231,9 @@ int main()
         }
         char buf[256];
         std::snprintf(buf, sizeof buf,
-                      "start %.2fm/%.3frad -> %.1fmm/%.4frad, loss %.4f->%.4f, %d it (%d rej)",
+                      "start %.2fm/%.3frad -> %.1fmm/%.4frad, loss %.4f->%.4f, %d it (%d rej), %.2f ms",
                       pert.head<2>().norm(), pert.z(), worst_xy * 1000.f, worst_th,
-                      loss0, r.loss, r.iterations, r.rejected);
+                      loss0, r.loss, r.iterations, r.rejected, solve_ms);
         check("converged and improved", r.ok and r.loss < loss0 and worst_xy < 0.05f, buf);
     }
 

@@ -200,17 +200,24 @@ OptimizerType          = "LBFGS"
 # Criterio de aceptacion antes de poner OptimizerType = "GN" (leer etc/gn_shadow.csv):
 #   - grad_relerr < 1e-2      (con GnGradCheck = true: el jacobiano analitico coincide con el numerico)
 #   - |dx|,|dy| ~ mm y |dth| ~ 5e-4 rad  (misma solucion que Adam/LBFGS)
-#   - torch_obj_at_gn <= loss_auth       (la solucion de GN no es peor EN EL OBJETIVO DE TORCH)
+#   - torch_obj_at_gn <= torch_obj_at_auth  (la solucion de GN no es peor EN EL OBJETIVO DE TORCH;
+#                                            comparar con torch_obj_at_auth, NO con loss_auth: Adam
+#                                            reporta la perdida ANTES de su ultimo paso)
 #   - ms_gn << ms_auth                   (la razon de existir de todo esto)
 # GnGradCheck cuesta 30 evaluaciones extra de la perdida por frame optimizado: activarlo para
 # validar, desactivarlo para medir tiempos.
-# GnShadow      = false
-# GnGradCheck   = false
-# GnShadowCsv   = "etc/gn_shadow.csv"
-# GnMaxIters    = 10
-# GnLambdaInit  = 1e-3   # amortiguamiento de Levenberg, relativo a diag(H)
-# GnStepTol     = 1e-5   # ||delta||_inf (m / rad) para dar por convergido
-# GnLossRelTol  = 1e-4   # mejora relativa de la perdida para dar por convergido
+#
+# ESTADO 2026-08-10: MODO VALIDACION. Shadow + grad-check ACTIVOS (solo escriben CSV, la pose viva
+# NO se toca). OptimizerType sigue en "LBFGS" a proposito: GN no conduce la pose hasta que
+# etc/gn_shadow.csv cumpla los criterios de arriba. El CSV solo crece en frames OPTIMIZADOS
+# (~0.7% del total, 4.7% en movimiento) — con el robot parado sale vacio, hace falta teleoperar.
+GnShadow      = true
+GnGradCheck   = true
+GnShadowCsv   = "etc/gn_shadow.csv"
+GnMaxIters    = 10
+GnLambdaInit  = 1e-3   # amortiguamiento de Levenberg, relativo a diag(H)
+GnStepTol     = 1e-5   # ||delta||_inf (m / rad) para dar por convergido
+GnLossRelTol  = 1e-4   # mejora relativa de la perdida para dar por convergido
 
 # ── Parámetros L-BFGS ─────────────────────────────────────────────────────────
 # Activos solo cuando OptimizerType = "LBFGS"
