@@ -77,7 +77,11 @@ void BottleExistence::update_and_remove(BottleFitter& fitter, const Inputs& in,
     Eigen::Vector2f cam_xy = Eigen::Vector2f::Zero();
     float cam_yaw = 0.0f;
     if (in.inner_eigen != nullptr)
-        if (const auto T = in.inner_eigen->get_transformation_matrix("room", "zed", 0); T.has_value())
+        // ★PINNED to the mask's capture stamp (see Inputs::masks_stamp_ms). Reading ts=0 judges a frame by
+        // a pose the robot may have left: while moving, the fill and the visibility would be computed for a
+        // viewpoint that never took the picture, and absence would be charged for a look never made.
+        if (const auto T = in.inner_eigen->get_transformation_matrix("room", "zed", in.masks_stamp_ms);
+            T.has_value())
         {
             const auto& M = T.value();
             cam_xy  = Eigen::Vector2f(static_cast<float>(M(0, 3)), static_cast<float>(M(1, 3)));

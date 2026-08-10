@@ -635,6 +635,7 @@ void SpecificWorker::compute()
         in.G            = G.get();
         in.inner_eigen  = inner_eigen_.get();
         in.fresh_masks  = fresh_masks;
+        in.masks_stamp_ms = mask_ingestor_->packet().timestamp_ms;
         in.sweep        = (fresh_sweep and lidar_ingestor_) ? &lidar_ingestor_->sweep_room() : nullptr;
         in.origin       = lidar_ingestor_ ? lidar_ingestor_->origin_room() : Eigen::Vector3f::Zero();
         in.room_polygon = &room_polygon_;

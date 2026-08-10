@@ -71,6 +71,10 @@ public:
         DSR::DSRGraph*      G           = nullptr;
         DSR::InnerEigenAPI* inner_eigen = nullptr;
         bool fresh_masks = false;                              // a mask frame arrived this cycle (camera clock)
+        // Capture stamp of that mask frame. The camera pose MUST be read at this instant, not at ts=0:
+        // p_detect answers "could THIS frame have resolved the bottle", so a latest-pose read judges the
+        // frame from wherever the robot has since driven. 0 ⇒ no stamp published ⇒ fall back to latest.
+        std::uint64_t masks_stamp_ms = 0;
         const std::vector<Eigen::Vector3f>* sweep = nullptr;   // fresh room-frame sweep, or nullptr (LiDAR clock)
         Eigen::Vector3f origin = Eigen::Vector3f::Zero();      // that sweep's sensor origin, room frame
         const std::vector<Eigen::Vector2f>* room_polygon = nullptr;   // walls occlude too (may be empty/null)

@@ -222,19 +222,27 @@ bool ChairBelief::resolve_orientation(const std::vector<Eigen::Vector3f>& pts, f
         // ⇒ a sustained fixation converges to that viewpoint's full information worth (decisive), staring on
         // past it adds ~nothing (dwell still cannot inflate confidence), and orbiting to a NEW bearing opens
         // a fresh budget (genuinely new evidence still accumulates). Both halves of the rule.
-        float novelty = 1.0f;
+        // ★AN UNKNOWN VIEWPOINT FAILS CLOSED. This was `novelty = 1.0f` with the NaN case falling through at
+        // FULL weight — the one branch where we cannot tell a fresh view from the same view repeated, given
+        // the discovery rate. view_azimuth is NaN until the first extrinsic resolves, i.e. exactly at
+        // startup, when the accumulator is EMPTY and a full-weight vote is at its most decisive. Charge it as
+        // a REPEAT instead: attribute the look to the bin already spent the most, which also makes the branch
+        // self-limiting (successive unknown looks deplete that bin, novelty decays to ~0). Same fix as
+        // RefrigeratorBelief::resolve_front, whose budget was modelled on this one.
+        constexpr int   B    = ChairBeliefParams::kViewBins;
+        const float     span = 2.0f * static_cast<float>(M_PI) / static_cast<float>(B);
+        int bin = 0;
         if (std::isfinite(view_azimuth))
-        {
-            constexpr int   B    = ChairBeliefParams::kViewBins;
-            const float     span = 2.0f * static_cast<float>(M_PI) / static_cast<float>(B);
-            int bin = static_cast<int>(std::floor((wrap(view_azimuth) + static_cast<float>(M_PI)) / span));
-            bin = std::clamp(bin, 0, B - 1);
-            const float budget    = std::max(1e-3f, params_.view_budget);
-            const float remaining = std::max(0.0f, budget - view_spent_[bin]);
-            novelty = remaining / (remaining + budget);
-            view_spent_[bin] += w * obs_w * novelty;   // charge the bin what this frame actually contributed
-            ++view_visits_[bin];                       // retained for diagnostics only
-        }
+            bin = std::clamp(static_cast<int>(std::floor((wrap(view_azimuth) + static_cast<float>(M_PI)) / span)),
+                             0, B - 1);
+        else
+            bin = static_cast<int>(std::distance(view_spent_.begin(),
+                                   std::max_element(view_spent_.begin(), view_spent_.end())));
+        const float budget    = std::max(1e-3f, params_.view_budget);
+        const float remaining = std::max(0.0f, budget - view_spent_[bin]);
+        const float novelty   = remaining / (remaining + budget);
+        view_spent_[bin] += w * obs_w * novelty;   // charge the bin what this frame actually contributed
+        ++view_visits_[bin];                       // retained for diagnostics only
         frame_w = w * obs_w * novelty;
     }
 
