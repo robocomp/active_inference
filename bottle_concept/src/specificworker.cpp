@@ -25,6 +25,7 @@
  */
 
 #include "specificworker.h"
+#include <QSize>
 #include <QVBoxLayout>
 #include <QFontMetrics>
 #include <QHBoxLayout>
@@ -1197,8 +1198,19 @@ void SpecificWorker::restore_strip_geometry()
     if (not strip_window_) return;
     QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("bottle_concept"));
     const QByteArray geom = settings.value(QStringLiteral("BeliefStripWindow_geometry")).toByteArray();
-    if (not geom.isEmpty()) strip_window_->restoreGeometry(geom);
-    else                    strip_window_->resize(520, 210);
+    if (not geom.isEmpty())
+    {
+        strip_window_->restoreGeometry(geom);
+        // ★A restored geometry carries the window STATE too: a strip that was ever maximised comes back
+        // filling the screen, which from the outside looks like the big dashboard opening itself. The strip
+        // is meant to sit in a corner — refuse those states and cap the size, but honour the position.
+        strip_window_->setWindowState(strip_window_->windowState()
+                                      & ~(Qt::WindowMaximized | Qt::WindowFullScreen));
+        const QSize sz = strip_window_->size();
+        strip_window_->resize(std::min(sz.width(), 900), std::min(sz.height(), 420));
+    }
+    else
+        strip_window_->resize(520, 210);
 }
 
 void SpecificWorker::save_strip_geometry() const
