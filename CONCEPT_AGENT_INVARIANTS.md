@@ -163,6 +163,36 @@ is unavailable, i.e. when registration is least trustworthy. Second, related: th
 **ts = 0** (latest) while the cue carries its own `rgb_stamp_ms_`, so a look taken while moving is filed
 under the wrong bin — the novelty bookkeeping itself is mis-registered. Pin it to the capture stamp.
 
+## ⚑ TO REVIEW — raised 2026-08-11 while closing bottle_concept, deliberately not acted on
+
+**1. Attention is allocated by who is most UNCERTAIN, not by who MATTERS.** `piso.wbt` has no arm
+(`DEF shadow Shadow`; Shadow.proto contains no Kinova), so nothing in that scene consumes a bottle's pose —
+yet bottle_concept still publishes an epistemic affordance whose gain competes against door, table and
+refrigerator for the robot's time. That gain is computed purely from its own Σ and never from a demand. In
+AI2 terms expected information gain only has value relative to a PREFERENCE: uncertainty about something
+nobody needs is not surprise worth resolving. An object with no live consumer should bid ~0 and be passive —
+tracked when seen, never asking to be visited.
+
+This is the ROOT of the "never stops asking" symptom logged against chair, door and bottle (invariant 9).
+Those were treated as missing adequacy bounds; the bound is only half of it, because a satisfied bound still
+leaves an object bidding for looks that serve no one. Fleet-wide design change, not an agent edit — every
+`epistemic_planner` would need to know whether any consumer is present, which the affordance protocol can
+already express (`ViewpointConstraint::sigma_star` flows agent→controller; nothing flows the other way).
+
+**2. bottle's σ\* = 0.0129 m is PROVISIONAL and carries a falsifiable test.** Set from the gripper clearance
+at 2σ (`c/2`) rather than 3σ specifically so the gap can reach zero — σ_cx has plateaued at 0.0212 m over
+2400 rows, and against `c/3` the demand would be unmeetable, pinning the epistemic gain at a positive floor
+forever (i.e. manufacturing defect 1 above). The plateau was measured at ~1.8 m with no approach ever made,
+while `RangeNearM` is 0.6. **Read σ_cx at the end of one completed epistemic approach:** reaching ~0.013
+confirms the demand and the affordance gains a "done"; plateauing above proves the 1.8 m figure is a floor,
+and σ\* must then be re-derived from what the sensor can actually deliver rather than from what the gripper
+would like. Either outcome is informative — do not leave it unrun.
+
+**3. `p_resolve = r/(r + σ_surf)` belongs in the shared carve, not in bottle.** A sweep cannot judge the
+existence of an object it localises worse than that object's own size. It reads ≈1 for a fridge or a table,
+which is why it never surfaced until a 5 cm object appeared — but the fleet is heading toward smaller things
+(a mug, a can), and six copies of the omission is how the last four defects propagated.
+
 **Open, in priority order:** the truncation gate is dead fleet-wide (measure area or delete);
 the `front_acc_` NaN fallback above; chair/door/bottle never stop attracting; the three double authorities above;
 cabinet's envelope keys and its occupancy floor are unchecked; cabinet publishes no affordances at all
