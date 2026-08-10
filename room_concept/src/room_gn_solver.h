@@ -105,13 +105,16 @@ namespace rc::gn
 
     struct Options
     {
-        int   max_iters    = 10;
+        // Generous on purpose: a rejected step costs one loss evaluation (~0.3 ms) against the 63-97 ms
+        // the autograd backend spends, so there is no reason to be stingy and every reason not to stop
+        // short of the minimum. Rejections count against this budget too.
+        int   max_iters    = 20;
         float lambda_init  = 1e-3f;   // Levenberg damping, relative to diag(H)
         float lambda_up    = 5.0f;    // on a rejected step
         float lambda_down  = 0.33f;   // on an accepted one
         float lambda_max   = 1e6f;    // give up past this
         float step_tol     = 1e-5f;   // ‖δ‖∞ (m / rad) below which we are done
-        float loss_rel_tol = 1e-4f;   // relative loss improvement below which we are done
+        float loss_rel_tol = 1e-5f;   // relative loss improvement counting as stalled (needs 2 in a row)
     };
 
     struct Result

@@ -459,6 +459,12 @@ namespace rc::gn
         if (not std::isfinite(loss)) return res;
 
         float lambda = opts.lambda_init;
+        // A SINGLE slow step is not convergence. Levenberg's damping shrinks after every accepted step,
+        // so an early step can crawl and the next one leap; stopping on the first small relative
+        // improvement left the solver short of the minimum on 11 of the 12 live shadow frames where it
+        // ended above L-BFGS (grad_norm still 4.6 at the stop, up to 3% worse on the objective, 1.8 cm
+        // of pose). Require the improvement to stall TWICE in a row before believing it.
+        int stagnant = 0;
         for (int it = 0; it < opts.max_iters; ++it)
         {
             LinearSystem sys(n);
@@ -494,7 +500,9 @@ namespace rc::gn
                 res.step_norm = step.lpNorm<Eigen::Infinity>();
                 loss = loss_try;
                 lambda = std::max(lambda * opts.lambda_down, 1e-9f);
-                if (res.step_norm < opts.step_tol or rel < opts.loss_rel_tol) break;
+                if (res.step_norm < opts.step_tol) break;
+                stagnant = (rel < opts.loss_rel_tol) ? stagnant + 1 : 0;
+                if (stagnant >= 2) break;
             }
             else
             {

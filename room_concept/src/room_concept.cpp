@@ -3461,8 +3461,17 @@ namespace rc
 
         // Cross-scoring: each backend's answer measured on BOTH objectives. If the GN objective and
         // compute_rfe_loss ever disagree about which pose is better, these four numbers say so.
+        // Checked at BOTH ends of the solve on purpose. The pre-solve pose can sit far from the minimum,
+        // where the polygon SDF is piecewise (a ±1e-3 probe re-assigns some points to a different wall
+        // segment) and the central difference stops being a fair reference — so a tail there is
+        // ambiguous between "bad Jacobian" and "bad finite difference". At the converged pose the
+        // objective is locally smooth, so grad_relerr_conv is the column that actually indicts the
+        // Jacobian. Only grad_relerr_conv being clean while grad_relerr is not tells us it is the probe.
         const float grad_relerr = params.gn_grad_check
             ? gn::gradient_check(in, poses_before)
+            : std::numeric_limits<float>::quiet_NaN();
+        const float grad_relerr_conv = (params.gn_grad_check and r.ok)
+            ? gn::gradient_check(in, poses_gn)
             : std::numeric_limits<float>::quiet_NaN();
         const float gn_obj_at_authority = gn::evaluate(in, poses_after);
         const float gn_obj_at_gn        = r.ok ? gn::evaluate(in, poses_gn)
@@ -3507,7 +3516,8 @@ namespace rc
                                   "iters_auth,loss_auth,ms_auth,"
                                   "iters_gn,rejected_gn,loss_gn,ms_gn,lambda_gn,grad_norm_gn,step_gn,"
                                   "dx,dy,dth,max_dxy,"
-                                  "torch_obj_at_auth,gn_obj_at_auth,torch_obj_at_gn,gn_obj_at_gn,loss_init_gn,grad_relerr\n";
+                                  "torch_obj_at_auth,gn_obj_at_auth,torch_obj_at_gn,gn_obj_at_gn,loss_init_gn,"
+                                  "grad_relerr,grad_relerr_conv\n";
             }
         }
         if (gn_shadow_csv_.is_open())
@@ -3521,7 +3531,7 @@ namespace rc
                 << ',' << dx << ',' << dy << ',' << dth << ',' << max_dxy
                 << ',' << torch_obj_at_auth << ',' << gn_obj_at_authority
                 << ',' << torch_obj_at_gn << ',' << gn_obj_at_gn
-                << ',' << r.loss_init << ',' << grad_relerr << '\n';
+                << ',' << r.loss_init << ',' << grad_relerr << ',' << grad_relerr_conv << '\n';
             gn_shadow_csv_.flush();
         }
     }

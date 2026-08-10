@@ -214,10 +214,12 @@ OptimizerType          = "LBFGS"
 GnShadow      = true
 GnGradCheck   = true
 GnShadowCsv   = "etc/gn_shadow.csv"
-GnMaxIters    = 10
+GnMaxIters    = 20     # subido de 10: un paso rechazado cuesta ~0.3 ms contra los 63-97 ms del autograd
 GnLambdaInit  = 1e-3   # amortiguamiento de Levenberg, relativo a diag(H)
 GnStepTol     = 1e-5   # ||delta||_inf (m / rad) para dar por convergido
-GnLossRelTol  = 1e-4   # mejora relativa de la perdida para dar por convergido
+GnLossRelTol  = 1e-5   # mejora relativa que cuenta como estancada; hacen falta DOS seguidas para parar
+                       # (un solo paso lento NO es convergencia: el damping de Levenberg baja tras cada
+                       #  paso aceptado, asi que el siguiente suele avanzar mucho mas)
 
 # ── Parámetros L-BFGS ─────────────────────────────────────────────────────────
 # Activos solo cuando OptimizerType = "LBFGS"
