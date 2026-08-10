@@ -1023,7 +1023,7 @@ void CabinetFitter::log_ai2_csv(const CabinetInstance& inst, int npts, float R, 
              << inst.existence_remove_streak << ','
              << inst.dbg_ex_pdetect << ',' << inst.dbg_ex_central << ','
              << inst.verify_surprise << ',' << (inst.wants_verification ? 1 : 0) << ','
-             << inst.ai2_belief.last_axis_resid() << ',' << inst.dbg_cand_pts << ',' << inst.dbg_resid_pts << inst.dbg_nbv_gain << '\n';   // + axis residual (rad) & candidate/residual split (merge diag)
+             << inst.ai2_belief.last_axis_resid() << ',' << inst.dbg_cand_pts << ',' << inst.dbg_resid_pts << ',' << inst.dbg_nbv_gain << '\n';   // + axis residual (rad) & candidate/residual split (merge diag)
     ai2_csv_.flush();
 }
 
