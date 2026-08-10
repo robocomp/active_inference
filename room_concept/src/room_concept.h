@@ -289,8 +289,28 @@ public:
         // ===== Optimizer Selection =====
         // "ADAM"  — adaptive moment estimation (current default)
         // "LBFGS" — limited-memory BFGS with Wolfe line search (faster convergence)
+        // "GN"    — Levenberg-Marquardt on analytic Jacobians (room_gn_solver), no autograd
         // "CAVI"  — coordinate-ascent variational inference (reserved, not yet implemented)
         std::string optimizer_type = "LBFGS";
+
+        // ===== Gauss-Newton / Levenberg-Marquardt backend (room_gn_solver.h) =====
+        // Same objective as compute_rfe_loss, solved as a 15×15 normal-equation system instead of
+        // ~29 torch forward+backward passes. OFF by default in every sense: `optimizer_type` must say
+        // "GN" for it to drive the pose, and gn_shadow must be set for it to run at all otherwise.
+        //
+        // gn_shadow runs BOTH backends on the SAME starting window state, keeps the authoritative
+        // one's answer, and logs the pair to gn_shadow_csv_path. It is a numerical comparison on
+        // identical inputs, not a behavioural A/B — the live pose is untouched.
+        bool  gn_shadow = false;
+        // Finite-difference check of the analytic Jacobian, logged as grad_relerr in the shadow CSV.
+        // Costs 2·15 extra loss evaluations per optimized frame, so keep it on only for a validation
+        // run, not for a timing run — it inflates ms_gn.
+        bool  gn_grad_check = false;
+        std::string gn_shadow_csv_path = "etc/gn_shadow.csv";
+        int   gn_max_iters    = 10;
+        float gn_lambda_init  = 1e-3f;   // Levenberg damping relative to diag(H)
+        float gn_step_tol     = 1e-5f;   // ‖δ‖∞ (m / rad) convergence test
+        float gn_loss_rel_tol = 1e-4f;   // relative loss-improvement convergence test
 
         // ===== Adam Convergence =====
         float convergence_relative_tol = 0.01f;       // Relative loss-change stopping criterion
@@ -1307,6 +1327,29 @@ private:
     /// Run the L-BFGS optimisation loop over the sliding window.
     /// Returns {last_loss, func_evaluations}.
     std::pair<float, int> run_lbfgs_loop(const OdometryPrior& odometry_prior);
+
+    /// Run the Levenberg-Marquardt backend (room_gn_solver) over the sliding window, writing the
+    /// solution back into the slot pose tensors. Returns {last_loss, iterations}. On failure the
+    /// window is left exactly as it was and the loss is NaN.
+    std::pair<float, int> run_gn_loop(const OdometryPrior& odometry_prior);
+
+    /// Run the GN backend on the CURRENT window WITHOUT keeping its answer, and log it beside the
+    /// authoritative backend's. Call after the authority has run; poses_before is the state both
+    /// started from, poses_after the authority's solution (restored on return).
+    void run_gn_shadow(const std::vector<Eigen::Vector3f>& poses_before,
+                       const std::vector<Eigen::Vector3f>& poses_after,
+                       float authority_loss, int authority_iters, float authority_ms,
+                       std::int64_t timestamp_ms);
+
+    /// The boundary-prior precision scale for this frame (hierarchical π=exp(u_b) when enabled, else
+    /// the legacy quality gate). One definition, so every backend minimises the same objective.
+    float boundary_weight_now() const;
+
+    /// Slot poses as plain [x, y, θ], newest last — the exchange format with the GN backend.
+    std::vector<Eigen::Vector3f> read_window_poses() const;
+    void write_window_poses(const std::vector<Eigen::Vector3f>& poses);
+
+    std::ofstream gn_shadow_csv_;
 
     /// Compute posterior covariance via autograd Hessian.
     /// Updates current_covariance and returns {covariance, condition_number}.

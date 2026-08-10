@@ -203,6 +203,16 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.CornerYieldReleaseFactor", room_concept.params.corner_yield_release_factor);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.CornerPrecisionGain", room_concept.params.corner_precision_gain);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.CornerHuberSigma", room_concept.params.corner_huber_sigma);
+    // Gauss-Newton / Levenberg-Marquardt backend (room_gn_solver.h). All OFF by default: GnShadow
+    // only LOGS, and driving the pose with it additionally requires OptimizerType = "GN".
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.GnShadow", room_concept.params.gn_shadow);
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.GnGradCheck", room_concept.params.gn_grad_check);
+    rc::ConfigLoaderUtils::load_optional<std::string>(cl, "RoomConcept.GnShadowCsv", room_concept.params.gn_shadow_csv_path);
+    rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.GnMaxIters", room_concept.params.gn_max_iters);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.GnLambdaInit", room_concept.params.gn_lambda_init);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.GnStepTol", room_concept.params.gn_step_tol);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.GnLossRelTol", room_concept.params.gn_loss_rel_tol);
+
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.CornerEarlyExitCheck", room_concept.params.corner_early_exit_check);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.CornerEarlyExitSigma", room_concept.params.corner_early_exit_sigma);
     rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.CornerEarlyExitMinBad", room_concept.params.corner_early_exit_min_bad);

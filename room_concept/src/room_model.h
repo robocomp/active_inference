@@ -54,6 +54,14 @@ public:
   {
     torch::Tensor sdf;              // [N]
     torch::Tensor closest_normals;  // [N, 2] wall normals in room frame
+    // [N, 2] ∇_p SDF in the room frame, DETACHED (never enters the autograd graph, so the Adam/LBFGS
+    // path pays nothing for it). This is NOT closest_normals: the polygon branch returns an UNSIGNED
+    // distance, whose gradient is the unit vector from the closest point TOWARDS p — the segment
+    // normal has a winding-dependent sign and is wrong for points on the other side, and points whose
+    // closest feature is a vertex have no segment normal at all. Analytic-Jacobian consumers
+    // (room_gn_solver) must use this; the loss itself still uses closest_normals for incidence
+    // weighting, where only |cos| matters.
+    torch::Tensor grad;
   };
 
     // Device for tensor operations (CPU or CUDA)
@@ -111,9 +119,13 @@ public:
                               const torch::Tensor& pose_theta) const;
 
     // Compute SDF and closest-wall normals for points in robot frame using an external pose.
+    // want_grad additionally fills SdfQueryResult::grad. It is opt-in because the loss path (Adam /
+    // L-BFGS / the early-exit check / grid search) never needs it, and grid search evaluates this
+    // thousands of times per call — only the analytic-Jacobian consumer pays for the extra gather.
     SdfQueryResult sdf_query_at_pose(const torch::Tensor& points_robot,
                      const torch::Tensor& pose_xy,
-                     const torch::Tensor& pose_theta) const;
+                     const torch::Tensor& pose_theta,
+                     bool want_grad = false) const;
 
     // Get current state as Eigen vector [width, length, x, y, phi]
     Eigen::Matrix<float, 5, 1> get_state() const;
@@ -126,10 +138,10 @@ private:
 
     // SDF for box room
     SdfQueryResult sdf_box_query(const torch::Tensor& points_robot,
-                   const torch::Tensor& points_room_xy) const;
+                   const torch::Tensor& points_room_xy, bool want_grad) const;
 
     // SDF for polygon room
-    SdfQueryResult sdf_polygon_query(const torch::Tensor& points_room_xy) const;
+    SdfQueryResult sdf_polygon_query(const torch::Tensor& points_room_xy, bool want_grad) const;
 };
 
 } // namespace rc

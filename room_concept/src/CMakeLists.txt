@@ -80,6 +80,7 @@ LIST(APPEND SOURCES
   ../src/viewer_2d.cpp
   ../src/svg_room_loader.cpp
   ../src/room_concept.cpp
+  ../src/room_gn_solver.cpp
   ../src/room_model.cpp
   ../src/pointcloud_center_estimator.cpp
   ../src/epistemic_controller.cpp
@@ -118,3 +119,21 @@ if(ENABLE_ASAN)
   # the libasan DT_NEEDED and LD_PRELOADs it, so ASan inits first while Ice's init order stays normal.
   add_link_options(-fno-omit-frame-pointer -Wl,--no-as-needed -lasan -Wl,--as-needed)
 endif()
+
+# ── gn_selftest ───────────────────────────────────────────────────────────────
+# Offline validation of the Gauss-Newton backend (analytic Jacobians vs finite differences, and
+# recovery of a known pose on a synthetic room). EXCLUDE_FROM_ALL: never built by a plain `make`,
+# so it cannot affect the agent build. Build it with:  make -C build gn_selftest && ./bin/gn_selftest
+add_executable(gn_selftest EXCLUDE_FROM_ALL
+  ../tools/gn_selftest.cpp
+  ../src/room_gn_solver.cpp
+  ../src/room_model.cpp
+  ../src/room_concept.cpp
+  ../src/object_anchor_factor.cpp
+  ../src/corner_detector.cpp
+  ../src/pointcloud_center_estimator.cpp
+  ../src/rerun_logger.cpp
+)
+target_include_directories(gn_selftest PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
+target_link_libraries(gn_selftest ${LIBS})
+set_target_properties(gn_selftest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)

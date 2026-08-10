@@ -149,23 +149,27 @@ torch::Tensor Model::sdf_at_pose(const torch::Tensor& points_robot,
 
 Model::SdfQueryResult Model::sdf_query_at_pose(const torch::Tensor& points_robot,
                                                const torch::Tensor& pose_xy,
-                                               const torch::Tensor& pose_theta) const
+                                               const torch::Tensor& pose_theta,
+                                               bool want_grad) const
 {
     if (!points_robot.defined())
         return {
             torch::zeros({0}, torch::TensorOptions().dtype(torch::kFloat32).device(device_)),
+            torch::zeros({0, 2}, torch::TensorOptions().dtype(torch::kFloat32).device(device_)),
             torch::zeros({0, 2}, torch::TensorOptions().dtype(torch::kFloat32).device(device_))
         };
 
     if (points_robot.dim() != 2 || points_robot.size(1) < 2)
         return {
             torch::zeros({0}, torch::TensorOptions().dtype(torch::kFloat32).device(points_robot.device())),
+            torch::zeros({0, 2}, torch::TensorOptions().dtype(torch::kFloat32).device(points_robot.device())),
             torch::zeros({0, 2}, torch::TensorOptions().dtype(torch::kFloat32).device(points_robot.device()))
         };
 
     if (points_robot.size(0) == 0)
         return {
             torch::zeros({0}, torch::TensorOptions().dtype(torch::kFloat32).device(points_robot.device())),
+            torch::zeros({0, 2}, torch::TensorOptions().dtype(torch::kFloat32).device(points_robot.device())),
             torch::zeros({0, 2}, torch::TensorOptions().dtype(torch::kFloat32).device(points_robot.device()))
         };
 
@@ -200,16 +204,17 @@ Model::SdfQueryResult Model::sdf_query_at_pose(const torch::Tensor& points_robot
 
     if (use_polygon)
     {
-        return sdf_polygon_query(points_room_xy);
+        return sdf_polygon_query(points_room_xy, want_grad);
     }
     else
     {
-        return sdf_box_query(points_robot, points_room_xy);
+        return sdf_box_query(points_robot, points_room_xy, want_grad);
     }
 }
 
 Model::SdfQueryResult Model::sdf_box_query(const torch::Tensor& points_robot,
-                                           const torch::Tensor& points_room_xy) const
+                                           const torch::Tensor& points_room_xy,
+                                           bool want_grad) const
 {
     const auto device = points_room_xy.device();
     const auto pz = points_robot.index({torch::indexing::Slice(), 2}).reshape({-1,1});
@@ -251,10 +256,16 @@ Model::SdfQueryResult Model::sdf_box_query(const torch::Tensor& points_robot,
     normals.index_put_({bottom_mask, 1}, -1.0f);
     normals.index_put_({top_mask, 1}, 1.0f);
 
-    return {outside + inside, normals};
+    // For the box the signed distance's gradient IS the closest face's outward unit normal: exact for
+    // interior points (the branch lidar hits fall in) and for exterior points outside a single face.
+    // It degrades only in the corner wedge outside two faces at once, where the true gradient is the
+    // normalized max(d,0) vector — an approximation the Gauss-Newton step tolerates (LM damping
+    // covers it), and one the polygon branch below does not need.
+    return {outside + inside, normals, want_grad ? normals.detach() : torch::Tensor{}};
 }
 
-Model::SdfQueryResult Model::sdf_polygon_query(const torch::Tensor& points_room_xy) const
+Model::SdfQueryResult Model::sdf_polygon_query(const torch::Tensor& points_room_xy,
+                                               bool want_grad) const
 {
     // Fully vectorized: broadcast [N,1,2] vs [1,S,2] for all segments at once
     // Segment tensors (seg_a_, seg_ab_, seg_ab_sq_) are already on device_ from init
@@ -290,7 +301,21 @@ Model::SdfQueryResult Model::sdf_polygon_query(const torch::Tensor& points_room_
     seg_normals.index_put_({torch::indexing::Slice(), 1}, tangent.index({torch::indexing::Slice(), 0}));
     const auto closest_normals = seg_normals.index_select(0, min_indices);
 
-    return {torch::sqrt(min_dist_sq + 1e-8f), closest_normals};
+    const auto dist = torch::sqrt(min_dist_sq + 1e-8f);
+
+    // ∇SDF for the UNSIGNED polygon distance = (p − closest)/|p − closest|: the unit vector pointing
+    // from the closest boundary point towards p. Built entirely from DETACHED inputs so it never
+    // becomes part of the autograd graph (the Adam/LBFGS path must not pay for it).
+    torch::Tensor grad;
+    if (want_grad)
+    {
+        const auto sel = closest.detach()                          // [N, S, 2]
+            .gather(1, min_indices.view({-1, 1, 1}).expand({-1, 1, 2}))
+            .squeeze(1);                                           // [N, 2]
+        grad = (points_room_xy.detach() - sel) / dist.detach().unsqueeze(1).clamp_min(1e-6f);
+    }
+
+    return {dist, closest_normals, grad};
 }
 
 Eigen::Matrix<float, 5, 1> Model::get_state() const

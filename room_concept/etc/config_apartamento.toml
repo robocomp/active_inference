@@ -186,6 +186,32 @@ SymmetryDebugCsv = true
 # "CAVI"  — reservado para implementación futura
 OptimizerType          = "LBFGS"
 
+# ── Backend Gauss-Newton / Levenberg-Marquardt (room_gn_solver.h) ─────────────
+# Mismo objetivo que compute_rfe_loss, resuelto como un sistema de ecuaciones normales 15x15 con
+# jacobianos ANALITICOS (el gradiente del SDF ya lo devuelve Model::sdf_query_at_pose), en lugar de
+# ~29 pasadas forward+backward de autograd. Medido en el backend actual: t_update mediana 72.7 ms.
+#
+# TODO OFF por defecto, en dos niveles independientes:
+#   OptimizerType = "GN"  -> GN conduce la pose (autoridad).
+#   GnShadow = true       -> GN se ejecuta ADEMAS del backend autoritativo, desde el MISMO estado
+#                            inicial, y solo ESCRIBE el CSV. La pose viva no se toca: es una
+#                            comparacion numerica con entradas identicas, no un A/B de conducta.
+#
+# Criterio de aceptacion antes de poner OptimizerType = "GN" (leer etc/gn_shadow.csv):
+#   - grad_relerr < 1e-2      (con GnGradCheck = true: el jacobiano analitico coincide con el numerico)
+#   - |dx|,|dy| ~ mm y |dth| ~ 5e-4 rad  (misma solucion que Adam/LBFGS)
+#   - torch_obj_at_gn <= loss_auth       (la solucion de GN no es peor EN EL OBJETIVO DE TORCH)
+#   - ms_gn << ms_auth                   (la razon de existir de todo esto)
+# GnGradCheck cuesta 30 evaluaciones extra de la perdida por frame optimizado: activarlo para
+# validar, desactivarlo para medir tiempos.
+# GnShadow      = false
+# GnGradCheck   = false
+# GnShadowCsv   = "etc/gn_shadow.csv"
+# GnMaxIters    = 10
+# GnLambdaInit  = 1e-3   # amortiguamiento de Levenberg, relativo a diag(H)
+# GnStepTol     = 1e-5   # ||delta||_inf (m / rad) para dar por convergido
+# GnLossRelTol  = 1e-4   # mejora relativa de la perdida para dar por convergido
+
 # ── Parámetros L-BFGS ─────────────────────────────────────────────────────────
 # Activos solo cuando OptimizerType = "LBFGS"
 # LbfgsLr: paso inicial; el line search strong-Wolfe lo ajusta automáticamente.

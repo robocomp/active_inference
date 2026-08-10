@@ -1,8 +1,11 @@
 #include "room_concept.h"
 #include "pointcloud_center_estimator.h"
+#include "room_gn_solver.h"
+#include "room_obs_weights.h"
 #include <algorithm>
 #include <fstream>
 #include <limits>
+#include <locale>
 #include <print>
 #include <sstream>
 #include <sys/stat.h>
@@ -13,7 +16,11 @@ namespace rc
     namespace
     {
         constexpr float kObsWeightEps = 1e-6f;
+    }
 
+    // NOTE: these two are declared in room_obs_weights.h (external linkage) rather than living in the
+    // anonymous namespace, so room_gn_solver builds its analytic Jacobian from the SAME weights this
+    // loss uses. Bodies unchanged.
         torch::Tensor build_observation_weights(const Model& model,
                                                 const RoomConcept::Params& params,
                                                 const torch::Tensor& points_robot,
@@ -92,6 +99,8 @@ namespace rc
             return 0.5f * inv_var * (per_point * weights).mean();
         }
 
+    namespace
+    {
         torch::Tensor compute_observation_loss(const Model& model,
                                                const RoomConcept::Params& params,
                                                const torch::Tensor& points_robot,
@@ -2304,12 +2313,23 @@ namespace rc
                 slot_poses_pre_ = s.empty() ? "na" : s;
             }
 
+            // The GN shadow must start from the state the authoritative backend started from, so
+            // snapshot it BEFORE the solve. Free (a handful of float copies) when shadowing is off.
+            const bool gn_shadow_this_frame = params.gn_shadow and params.optimizer_type != "GN";
+            std::vector<Eigen::Vector3f> poses_before;
+            if (gn_shadow_this_frame) poses_before = read_window_poses();
+
             const auto t0 = std::chrono::high_resolution_clock::now();
-            auto [last_loss, iterations] = (params.optimizer_type == "LBFGS")
-                ? run_lbfgs_loop(selected_prior)
-                : run_adam_loop(selected_prior);
+            auto [last_loss, iterations] =
+                  (params.optimizer_type == "GN")    ? run_gn_loop(selected_prior)
+                : (params.optimizer_type == "LBFGS") ? run_lbfgs_loop(selected_prior)
+                                                     : run_adam_loop(selected_prior);
             last_t_adam_ms_ = std::chrono::duration<float, std::milli>(
                 std::chrono::high_resolution_clock::now() - t0).count();
+
+            if (gn_shadow_this_frame)
+                run_gn_shadow(poses_before, read_window_poses(), last_loss, iterations,
+                              last_t_adam_ms_, lidar.second);
             res.final_loss     = last_loss;
             res.iterations_used = iterations;
 
@@ -3333,6 +3353,179 @@ namespace rc
         log_hier_prec_row("ee", r_ee, r_ee, 0.0f, /*reloc_fired=*/false);
     }
 
+    // =========================================================================
+    //  Backend-shared helpers
+    // =========================================================================
+    float RoomConcept::boundary_weight_now() const
+    {
+        if (params.hier_prec_boundary_enabled)
+            return std::exp(u_b_);
+        if (params.rfe_boundary_quality_gate and prev_sdf_mse_ > 1e-6f)
+        {
+            const float sigma2 = params.sigma_sdf * params.sigma_sdf;
+            return std::min(1.0f, sigma2 / prev_sdf_mse_);
+        }
+        return 1.0f;
+    }
+
+    std::vector<Eigen::Vector3f> RoomConcept::read_window_poses() const
+    {
+        std::vector<Eigen::Vector3f> out;
+        out.reserve(window_mgr_.window.size());
+        for (const auto& slot : window_mgr_.window)
+        {
+            const auto cpu = slot.pose.detach().to(torch::kCPU);
+            const auto a = cpu.accessor<float, 1>();
+            out.emplace_back(a[0], a[1], a[2]);
+        }
+        return out;
+    }
+
+    void RoomConcept::write_window_poses(const std::vector<Eigen::Vector3f>& poses)
+    {
+        if (poses.size() != window_mgr_.window.size()) return;
+        torch::NoGradGuard no_grad;
+        for (size_t i = 0; i < poses.size(); ++i)
+            window_mgr_.window[i].pose.data().copy_(
+                torch::tensor({poses[i].x(), poses[i].y(), poses[i].z()},
+                              torch::TensorOptions().dtype(torch::kFloat32).device(get_device())));
+    }
+
+    // =========================================================================
+    //  Levenberg-Marquardt backend (analytic Jacobians — see room_gn_solver.h)
+    // =========================================================================
+    std::pair<float, int> RoomConcept::run_gn_loop(const OdometryPrior& odometry_prior)
+    {
+        // velocity_adaptive_weights is deliberately not applied here: it preconditions Adam's
+        // gradient, and a curvature-correct step does not want a preconditioner. Same minimum.
+        gn::Input in;
+        in.model           = model_.get();
+        in.params          = &params;
+        in.window          = &window_mgr_.window;
+        in.boundary_prior  = &window_mgr_.boundary_prior;
+        in.boundary_weight = boundary_weight_now();
+        in.device          = get_device();
+
+        gn::Options opts;
+        opts.max_iters    = params.gn_max_iters;
+        opts.lambda_init  = params.gn_lambda_init;
+        opts.step_tol     = params.gn_step_tol;
+        opts.loss_rel_tol = params.gn_loss_rel_tol;
+
+        auto poses = read_window_poses();
+        const auto r = gn::solve(in, poses, opts);
+        if (not r.ok)
+        {
+            // Singular system / non-finite loss: fall back rather than hand the caller a NaN pose.
+            // The window is untouched at this point, so Adam starts from the same state GN did.
+            qWarning() << "[gn] solve failed (loss" << r.loss_init << ") — falling back to Adam";
+            return run_adam_loop(odometry_prior);
+        }
+
+        write_window_poses(poses);
+        last_lbfgs_grad_norm_ = r.grad_norm;
+        last_adam_losses_.clear();
+        last_adam_losses_.push_back(r.loss_init);
+        last_adam_losses_.push_back(r.loss);
+        last_loss_init_ = r.loss_init;
+        return {r.loss, r.iterations};
+    }
+
+    void RoomConcept::run_gn_shadow(const std::vector<Eigen::Vector3f>& poses_before,
+                                    const std::vector<Eigen::Vector3f>& poses_after,
+                                    float authority_loss, int authority_iters, float authority_ms,
+                                    std::int64_t timestamp_ms)
+    {
+        if (poses_before.size() != window_mgr_.window.size() or poses_before.empty()) return;
+
+        gn::Input in;
+        in.model           = model_.get();
+        in.params          = &params;
+        in.window          = &window_mgr_.window;
+        in.boundary_prior  = &window_mgr_.boundary_prior;
+        in.boundary_weight = boundary_weight_now();
+        in.device          = get_device();
+
+        gn::Options opts;
+        opts.max_iters    = params.gn_max_iters;
+        opts.lambda_init  = params.gn_lambda_init;
+        opts.step_tol     = params.gn_step_tol;
+        opts.loss_rel_tol = params.gn_loss_rel_tol;
+
+        // Both backends start from the SAME state — that is the whole point of the comparison.
+        auto poses_gn = poses_before;
+        const auto t0 = std::chrono::high_resolution_clock::now();
+        const auto r = gn::solve(in, poses_gn, opts);
+        const float gn_ms = std::chrono::duration<float, std::milli>(
+            std::chrono::high_resolution_clock::now() - t0).count();
+
+        // Cross-scoring: each backend's answer measured on BOTH objectives. If the GN objective and
+        // compute_rfe_loss ever disagree about which pose is better, these four numbers say so.
+        const float grad_relerr = params.gn_grad_check
+            ? gn::gradient_check(in, poses_before)
+            : std::numeric_limits<float>::quiet_NaN();
+        const float gn_obj_at_authority = gn::evaluate(in, poses_after);
+        const float gn_obj_at_gn        = r.ok ? gn::evaluate(in, poses_gn)
+                                               : std::numeric_limits<float>::quiet_NaN();
+        float torch_obj_at_gn = std::numeric_limits<float>::quiet_NaN();
+        if (r.ok)
+        {
+            torch::NoGradGuard no_grad;
+            write_window_poses(poses_gn);
+            torch_obj_at_gn = window_mgr_.compute_rfe_loss(*model_, params, get_device(),
+                                                            in.boundary_weight).item<float>();
+        }
+        write_window_poses(poses_after);   // the authority always keeps the pose
+        // Measured AFTER the restore, at the authority's own poses. loss_auth is NOT a substitute:
+        // Adam reports the loss from before its final step, so only this column is comparable with
+        // gn_obj_at_auth. The pair (torch_obj_at_auth, gn_obj_at_auth) at one set of poses is what
+        // proves the two backends are minimising the same objective.
+        float torch_obj_at_auth = std::numeric_limits<float>::quiet_NaN();
+        {
+            torch::NoGradGuard no_grad;
+            torch_obj_at_auth = window_mgr_.compute_rfe_loss(*model_, params, get_device(),
+                                                              in.boundary_weight).item<float>();
+        }
+
+        const size_t last = poses_after.size() - 1;
+        const float dx  = r.ok ? poses_gn[last].x() - poses_after[last].x() : 0.f;
+        const float dy  = r.ok ? poses_gn[last].y() - poses_after[last].y() : 0.f;
+        const float dth_raw = poses_gn[last].z() - poses_after[last].z();
+        const float dth = r.ok ? std::atan2(std::sin(dth_raw), std::cos(dth_raw)) : 0.f;
+        float max_dxy = 0.f;
+        if (r.ok)
+            for (size_t i = 0; i < poses_after.size(); ++i)
+                max_dxy = std::max(max_dxy, (poses_gn[i].head<2>() - poses_after[i].head<2>()).norm());
+
+        if (not gn_shadow_csv_.is_open())
+        {
+            gn_shadow_csv_.open(params.gn_shadow_csv_path, std::ios::out | std::ios::trunc);
+            if (gn_shadow_csv_.is_open())
+            {
+                gn_shadow_csv_.imbue(std::locale::classic());   // CLAUDE.md: never emit a comma decimal
+                gn_shadow_csv_ << "ts_ms,window_size,ok,"
+                                  "iters_auth,loss_auth,ms_auth,"
+                                  "iters_gn,rejected_gn,loss_gn,ms_gn,lambda_gn,grad_norm_gn,step_gn,"
+                                  "dx,dy,dth,max_dxy,"
+                                  "torch_obj_at_auth,gn_obj_at_auth,torch_obj_at_gn,gn_obj_at_gn,loss_init_gn,grad_relerr\n";
+            }
+        }
+        if (gn_shadow_csv_.is_open())
+        {
+            gn_shadow_csv_ << timestamp_ms
+                << ',' << window_mgr_.size()
+                << ',' << (r.ok ? 1 : 0)
+                << ',' << authority_iters << ',' << authority_loss << ',' << authority_ms
+                << ',' << r.iterations << ',' << r.rejected << ',' << r.loss << ',' << gn_ms
+                << ',' << r.lambda_final << ',' << r.grad_norm << ',' << r.step_norm
+                << ',' << dx << ',' << dy << ',' << dth << ',' << max_dxy
+                << ',' << torch_obj_at_auth << ',' << gn_obj_at_authority
+                << ',' << torch_obj_at_gn << ',' << gn_obj_at_gn
+                << ',' << r.loss_init << ',' << grad_relerr << '\n';
+            gn_shadow_csv_.flush();
+        }
+    }
+
     std::pair<float, int> RoomConcept::run_adam_loop(const OdometryPrior& odometry_prior)
     {
         auto window_params = window_mgr_.collect_params();
@@ -3356,14 +3549,7 @@ namespace rc
         // Boundary precision scale. Legacy: quality gate min(1, σ_sdf²/sdf_mse_prev). Hierarchical
         // (HIERARCHICAL_PRECISION.md): inferred π=exp(u_b_) from the previous frame's boundary residual,
         // predicted top-down by the map_trust hyper-state. Mutually exclusive; hierarchical wins when on.
-        float boundary_weight = 1.0f;
-        if (params.hier_prec_boundary_enabled)
-            boundary_weight = std::exp(u_b_);
-        else if (params.rfe_boundary_quality_gate && prev_sdf_mse_ > 1e-6f)
-        {
-            const float sigma2 = params.sigma_sdf * params.sigma_sdf;
-            boundary_weight = std::min(1.0f, sigma2 / prev_sdf_mse_);
-        }
+        const float boundary_weight = boundary_weight_now();
 
         float last_loss = std::numeric_limits<float>::infinity();
         float prev_loss = std::numeric_limits<float>::infinity();
@@ -3450,14 +3636,7 @@ namespace rc
         // Boundary precision scale. Legacy: quality gate min(1, σ_sdf²/sdf_mse_prev). Hierarchical
         // (HIERARCHICAL_PRECISION.md): inferred π=exp(u_b_) from the previous frame's boundary residual,
         // predicted top-down by the map_trust hyper-state. Mutually exclusive; hierarchical wins when on.
-        float boundary_weight = 1.0f;
-        if (params.hier_prec_boundary_enabled)
-            boundary_weight = std::exp(u_b_);
-        else if (params.rfe_boundary_quality_gate && prev_sdf_mse_ > 1e-6f)
-        {
-            const float sigma2 = params.sigma_sdf * params.sigma_sdf;
-            boundary_weight = std::min(1.0f, sigma2 / prev_sdf_mse_);
-        }
+        const float boundary_weight = boundary_weight_now();
 
         float last_loss = std::numeric_limits<float>::infinity();
         int iter_count = 0;
