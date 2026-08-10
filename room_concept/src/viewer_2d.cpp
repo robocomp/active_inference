@@ -1203,10 +1203,20 @@ void Viewer2D::draw_object_anchors(const std::vector<rc::ObjectAnchorObs>& ancho
         const Eigen::Matrix2f info = a.information.topLeftCorner<2, 2>();
         Eigen::SelfAdjointEigenSolver<Eigen::Matrix2f> es(info);
         constexpr float kPrecFloor = 1e-3f;
-        const float s0 = std::sqrt(1.f / std::max(es.eigenvalues()(0), kPrecFloor));   // 1σ, metres
-        const float s1 = std::sqrt(1.f / std::max(es.eigenvalues()(1), kPrecFloor));
-        const Eigen::Vector2f v1 = es.eigenvectors().col(1);            // major axis (largest σ)
-        const float ang_deg = static_cast<float>(std::atan2(v1.y(), v1.x()) * 180.0 / M_PI);
+        // Eigen returns eigenvalues in ASCENDING order, and these are PRECISIONS: the smallest one is
+        // the largest sigma. s_major therefore comes from eigenvalue(0), not (1).
+        const float s_major = std::sqrt(1.f / std::max(es.eigenvalues()(0), kPrecFloor));   // 1σ, metres
+        const float s_minor = std::sqrt(1.f / std::max(es.eigenvalues()(1), kPrecFloor));
+        // Λ lives in the ROBOT frame -- the residual it weights is r = z_o − R(−θ)(p_o − t), which is a
+        // robot-frame quantity. The canvas is the ROOM frame. So the ellipse has to be carried over:
+        // S_world = R·S_robot·Rᵀ, which leaves the eigenvalues alone and rotates the eigenvectors by R.
+        // Drawing it without that rotation is a yaw-sized error, and at the yaw in fridge_2.png it put
+        // the loose axis across the ray instead of along it -- the exact opposite of what R_o encodes.
+        const Eigen::Vector2f v_robot = es.eigenvectors().col(0);       // eigvals ascending ⇒ col(0) is
+                                                                       // the SMALLEST precision = the
+                                                                       // LARGEST σ = the loose axis
+        const Eigen::Vector2f v_world = R * v_robot;
+        const float ang_deg = static_cast<float>(std::atan2(v_world.y(), v_world.x()) * 180.0 / M_PI);
 
         // ── Drawn size vs REPORTED size ────────────────────────────────────────────────────────
         // An anchor whose observation has gone stale is muted ON PURPOSE: freshness-as-precision
@@ -1218,9 +1228,9 @@ void Viewer2D::draw_object_anchors(const std::vector<rc::ObjectAnchorObs>& ancho
         // So the drawn ellipse is capped and the label always reports the TRUE sigma, flagged when the
         // drawing saturated. The cap is a DISPLAY cap -- it touches nothing the factor uses.
         constexpr float kDrawCapM = 1.2f;
-        const bool saturated = (s1 > kDrawCapM);
-        const float a_major = std::clamp(s1, 0.01f, kDrawCapM);
-        const float a_minor = std::clamp(s0, 0.01f, kDrawCapM);
+        const bool saturated = (s_major > kDrawCapM);
+        const float a_major = std::clamp(s_major, 0.01f, kDrawCapM);
+        const float a_minor = std::clamp(s_minor, 0.01f, kDrawCapM);
         auto* ell = anchor_cov_items_[i];
         ell->setRect(-a_major, -a_minor, 2 * a_major, 2 * a_minor);
         ell->setRotation(ang_deg);
@@ -1256,8 +1266,8 @@ void Viewer2D::draw_object_anchors(const std::vector<rc::ObjectAnchorObs>& ancho
         QString label = QStringLiteral("%1  r=%2mm  σ=%3×%4mm")
                 .arg(QString::fromStdString(a.type))
                 .arg(resid_mm, 0, 'f', 0)
-                .arg(s1 * 1000.f, 0, 'f', 0)      // TRUE sigma, not the clamped drawing
-                .arg(s0 * 1000.f, 0, 'f', 0);
+                .arg(s_major * 1000.f, 0, 'f', 0)   // TRUE sigma, not the clamped drawing
+                .arg(s_minor * 1000.f, 0, 'f', 0);
         if (a.obs_age > 0)
             label += QStringLiteral("  age=%1").arg(a.obs_age);
         if (saturated)
