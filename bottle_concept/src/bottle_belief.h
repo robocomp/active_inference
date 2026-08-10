@@ -56,8 +56,18 @@ struct BottleBeliefParams
     // Temporal transition (predict): rigid + static ⇒ small process noise per frame. SIZE (radius,height) is a
     // CONSTANT physical property, so its process noise is ~0 — once converged it STICKS and can't be re-inflated
     // by a sparse/contaminated frame (the marginal-LiDAR-range radius oscillation). Position keeps process_std_m.
-    float process_std_m      = 0.005f;   // cx,cy,cz per-frame process std (m)
+    float process_std_m      = 0.005f;   // cx,cy,cz per-frame process std (m) — the STATIC component
     float process_std_size_m = 0.001f;   // radius,height per-frame process std (m) — tiny: size doesn't change
+    // ★A BOTTLE DOES NOT MOVE BY ITSELF. Its position is volatile only while something CAPABLE of moving it
+    // is in contact — a hand, a gripper. So the transition model is a two-component MIXTURE over the latent
+    // "is being carried", marginalised by the posterior that a mover is in contact (see mover_belief):
+    //     Q_pos = (1 - p_mover) * process_std_m^2  +  p_mover * process_std_moved_m^2
+    // This is not a gate with an if() in it: p_mover is continuous, so Q slides between the two regimes and
+    // every consumer of Sigma follows automatically — including the instance tracker, which gates
+    // association on squared Mahalanobis against exactly this block, so the association window OPENS when
+    // (and only when) there is a cause for the bottle to have moved. That is the whole mechanism: no second
+    // gate, no threshold, no special case in the tracker.
+    float process_std_moved_m = 0.05f;   // per-frame position std WHILE a mover is in contact (~0.5 m/s @ 10 Hz)
 
     // Per-frame COMMON-MODE error: the error SHARED by all points of one mask (localization + mask
     // boundary + deprojection), which does NOT average out over points. The frame's information SATURATES
@@ -118,6 +128,11 @@ public:
 
     const BottleBeliefState&           state()      const { return state_; }
     const Eigen::Matrix<float, 5, 5>&  covariance() const { return Sigma_; }
+    // Posterior that something able to move this bottle is in contact with it, in [0,1]. Set once per cycle
+    // by the fitter; consumed ONLY by process_noise_diag(). 0 = nothing can have moved it ⇒ the position is
+    // as static as its size.
+    void  set_mover_belief(float p) { mover_p_ = std::clamp(p, 0.0f, 1.0f); }
+    float mover_belief() const      { return mover_p_; }
     const BottleBeliefParams&          params()     const { return params_; }
     void set_state(const BottleBeliefState& s) { state_ = s; }
     void set_params(const BottleBeliefParams& p) { params_ = p; }
@@ -184,6 +199,7 @@ private:
 
     BottleBeliefState          state_;
     BottleBeliefParams         params_;
+    float mover_p_ = 0.0f;   // P(a mover is in contact) — see set_mover_belief
     Eigen::Matrix<float, 5, 5> Sigma_ = Eigen::Matrix<float, 5, 5>::Identity();  // posterior covariance
     Eigen::Matrix<float, 5, 1> prior_mean_ = Eigen::Matrix<float, 5, 1>::Zero();  // transition prior mean
 };

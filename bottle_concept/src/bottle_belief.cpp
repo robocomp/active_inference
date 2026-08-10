@@ -164,7 +164,12 @@ Eigen::Matrix<float, 5, 1> BottleBelief::prior_cov_diag() const
 
 Eigen::Matrix<float, 5, 1> BottleBelief::process_noise_diag() const
 {
-    const float qp = params_.process_std_m      * params_.process_std_m;       // cx,cy,cz (position can move)
+    // Position: marginalise the two-component transition mixture over P(being carried). VARIANCES mix, not
+    // stds — variance is what is additive. p_mover = 0 (nothing can have moved it) reproduces the previous
+    // behaviour exactly, so this is a strict generalisation.
+    const float q_static = params_.process_std_m       * params_.process_std_m;
+    const float q_moved  = params_.process_std_moved_m * params_.process_std_moved_m;
+    const float qp = (1.0f - mover_p_) * q_static + mover_p_ * q_moved;        // cx,cy,cz
     const float qs = params_.process_std_size_m * params_.process_std_size_m;  // radius,height (rigid → sticky)
     return (Eigen::Matrix<float, 5, 1>() << qp, qp, qp, qs, qs).finished();
 }

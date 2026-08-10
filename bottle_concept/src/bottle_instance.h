@@ -96,6 +96,9 @@ struct BottleInstance
     // honest "explains none of its data" signal (replaces the old surface-energy==0 divergence sentinel).
     // fe_baseline tracks DOWN fast / UP slow so a sustained rise (the bottle moved) surfaces as fe_surprise.
     float last_clutter_frac    = 0.0f;
+    // P(a mover is in contact) this cycle — the CAUSE that licenses the position to be volatile. Logged
+    // because a position that suddenly starts moving is only explicable alongside this number.
+    float mover_p              = 0.0f;
     float fe_baseline          = -1.0f;   // <0 = uninitialised (seed to the first explained FE)
     // ── EXISTENCE (bottle_existence.cpp; the shared rc::exist policy) ─────────────────────────────
     // L = log P(exists)/P(¬exists). Removal is a decision on THIS, never a miss counter (invariant 5) —

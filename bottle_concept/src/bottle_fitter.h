@@ -77,6 +77,17 @@ public:
     // The fit: one recursive full-covariance AI2 belief update (bottle_belief.h) on this frame's mask
     // points + silhouette. Writes the result into inst.model so downstream publish/RT code is unchanged.
     float run_inference(BottleInstance& inst, const BottleObservation& observation);
+    // P(something able to move this bottle is in contact with it) in [0,1] — the CAUSE that licenses the
+    // position to be volatile. A bottle does not move by itself: absent a mover its centre is as static as
+    // its size, and any apparent jump is a mis-association, not motion. Read from the `person` nodes
+    // human_concept publishes; the robot's own gripper is the natural second source and ORs in here.
+    //
+    // Continuous by construction, with a PHYSICAL length scale (a human arm's reach) rather than a tuned
+    // radius: p = exp(-0.5*(d/reach)^2), d = horizontal distance from the nearest mover. Nobody in the room
+    // => 0 => Q_pos collapses to its static value and the association gate stays tight. Someone reaching for
+    // it => ~1 => Q_pos opens and the gate widens with it, because the tracker gates on this same Sigma.
+    float mover_belief(const BottleInstance& inst) const;
+
     bool should_log(const BottleInstance& inst) const;
 
     // Robot/camera ego-motion (room frame), from the transform chain — producer-INDEPENDENT. Call once per compute

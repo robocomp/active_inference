@@ -242,6 +242,7 @@ float BottleFitter::run_inference(BottleInstance& inst, const BottleObservation&
         p.prior_pos_std        = cfg_.ai2_prior_pos_std;
         p.prior_size_std       = cfg_.ai2_prior_size_std;
         p.process_std_m        = cfg_.ai2_process_std_m;
+        p.process_std_moved_m  = cfg_.ai2_process_std_moved_m;
         p.process_std_size_m   = cfg_.ai2_process_std_size_m;
         p.common_mode_pos_std  = cfg_.ai2_common_mode_pos_std;
         p.common_mode_size_std = cfg_.ai2_common_mode_size_std;
@@ -254,6 +255,16 @@ float BottleFitter::run_inference(BottleInstance& inst, const BottleObservation&
 
     if (observation.has_fresh_data)
         ingest_observation_voxels(inst, observation);   // keep the viewer's voxel bank fed
+
+    // ★MOTION REQUIRES A CAUSE — set BEFORE any predict path, because every one of them draws Q from here.
+    // A bottle does not move by itself, so its position is volatile only to the degree something able to
+    // move it is in contact. This single number does all the work: Q_pos mixes toward the carried regime,
+    // Sigma_pos grows with it, and the instance tracker — which gates association on squared Mahalanobis
+    // against exactly that block — widens its window in step. The "gate that opens when the robot sees a
+    // human grab it" is therefore not a gate at all; it is the transition model telling the truth, and
+    // association inherits it for free.
+    inst.mover_p = mover_belief(inst);
+    inst.ai2_belief.set_mover_belief(inst.mover_p);
 
     // No fresh mask: a bottle is MOVABLE and can leave the FoV, so — unlike a static table — its POSITION
     // information DECAYS without evidence. Inflate ONLY the position block of Σ each unseen frame (its size
@@ -465,7 +476,7 @@ void BottleFitter::log_ai2_csv(const BottleInstance& inst, int point_count, floa
         ai2_csv_ << "cycle,node,pts,R,energy,fe_baseline,fe_surprise,clutter_frac,frames_converged,sil_rays";   // sil_rays = silhouette edge rays folded
         for (const auto& d : kDof) ai2_csv_ << ",state_" << d.name;
         for (const auto& d : kDof) ai2_csv_ << ",std_"   << d.name;   // posterior std (m) = sqrt(Σ_jj)
-        ai2_csv_ << ",chain_xx,chain_yy,lidar_rays,lidar_raw,lidar_resid_m,frames_diverged,nbv_gain";
+        ai2_csv_ << ",chain_xx,chain_yy,lidar_rays,lidar_raw,lidar_resid_m,frames_diverged,nbv_gain,mover_p";
         ai2_csv_ << '\n';
     }
 
@@ -479,6 +490,10 @@ void BottleFitter::log_ai2_csv(const BottleInstance& inst, int point_count, floa
     ai2_csv_ << ',' << std::max(0.0f, inst.dbg_chain_cov_xx) << ',' << std::max(0.0f, inst.dbg_chain_cov_yy);
     ai2_csv_ << ',' << inst.dbg_lidar_rays << ',' << inst.dbg_lidar_raw << ',' << inst.dbg_lidar_resid_m << ',' << inst.frames_diverged;
     ai2_csv_ << ',' << inst.dbg_nbv_gain;   // the PUBLISHED gain the controller ranks on
+    // ★The CAUSE column. std_cx/std_cy rising with mover_p ~ 0 is not a moving bottle, it is a bug: the
+    // position may only become volatile when something able to move it is in contact. Logged beside the
+    // sigmas precisely so the two can never be read apart.
+    ai2_csv_ << ',' << inst.mover_p;
     ai2_csv_ << '\n';
     ai2_csv_.flush();
 }
@@ -841,6 +856,29 @@ BottleModelParams BottleFitter::make_model_params() const
     p.prior_height       = cfg_.prior_height;
     p.prior_size_std     = cfg_.prior_size_std;
     return p;
+}
+
+
+// See bottle_fitter.h. The cause that licenses position volatility.
+float BottleFitter::mover_belief(const BottleInstance& inst) const
+{
+    if (not cfg_.motion_requires_cause or not G_ or inner_eigen_ == nullptr)
+        return 1.0f;   // feature off => behave exactly as before: the position is always free to move
+
+    const auto& st = inst.ai2_belief.state();
+    const float reach = std::max(0.05f, cfg_.mover_reach_m);
+    float best = 0.0f;
+    for (const auto& person : G_->get_nodes_by_type("person"))
+    {
+        const auto c = inner_eigen_->transform("room", Mat::Vector3d(0.0, 0.0, 0.0), person.name(), 0);
+        if (not c.has_value())
+            continue;   // un-resolvable pose => this mover cannot be reasoned about
+        const float dx = static_cast<float>(c->x()) - st.cx;
+        const float dy = static_cast<float>(c->y()) - st.cy;
+        const float d  = std::hypot(dx, dy);
+        best = std::max(best, std::exp(-0.5f * (d / reach) * (d / reach)));
+    }
+    return std::clamp(best, 0.0f, 1.0f);
 }
 
 }  // namespace rc

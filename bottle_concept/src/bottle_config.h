@@ -108,6 +108,13 @@ struct BottleConfig
     float ai2_prior_pos_std        = 0.30f;  // broad position prior std (m) on cx,cy,cz
     float ai2_prior_size_std       = 0.03f;  // broad size prior std (m) on radius,height
     float ai2_process_std_m        = 0.005f; // predict process-noise std, POSITION (cx,cy,cz) (m/frame)
+    // ★MOTION REQUIRES A CAUSE. A bottle does not move by itself, so its position process noise is a
+    // MIXTURE over "is being carried", weighted by P(a mover is in contact). With no mover in the room the
+    // position is as static as the size, and an apparent jump is read as a MIS-ASSOCIATION rather than
+    // motion. Off (false) reproduces the previous always-volatile behaviour exactly, so the two are A/B-able.
+    bool  motion_requires_cause    = true;
+    float mover_reach_m            = 0.75f;  // human arm's reach — a PHYSICAL length, not a tuned radius
+    float ai2_process_std_moved_m  = 0.05f;  // position std/frame while a mover IS in contact (~0.5 m/s @10Hz)
     float ai2_process_std_size_m   = 0.001f; // predict process-noise std, SIZE (radius,height) — tiny: rigid size sticks
     // Stale-belief aging (measurement-age → covariance). Nominal mask-stream period (s): with >0, an unseen
     // bottle's POSITION Σ inflates by Q·(dt/this) on the agent's clock (predict_stale) so a dead feed reads as

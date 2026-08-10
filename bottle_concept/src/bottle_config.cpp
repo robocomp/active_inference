@@ -78,6 +78,9 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     out.ai2_prior_pos_std        = getf("BottleModel.AI2PriorPosStd",         0.30f);
     out.ai2_prior_size_std       = getf("BottleModel.AI2PriorSizeStd",        0.03f);
     out.ai2_process_std_m        = getf("BottleModel.AI2ProcessStdM",         0.005f);
+    out.motion_requires_cause    = getb("BottleModel.MotionRequiresCause",    true);
+    out.mover_reach_m            = getf("BottleModel.MoverReachM",            0.75f);
+    out.ai2_process_std_moved_m  = getf("BottleModel.AI2ProcessStdMovedM",    0.05f);
     out.ai2_process_std_size_m   = getf("BottleModel.AI2ProcessStdSizeM",     0.001f);
     out.ai2_age_nominal_dt_s     = getf("BottleModel.AI2AgeNominalDtS",       0.0f);
     out.ai2_common_mode_pos_std  = getf("BottleModel.AI2CommonModePosStd",    0.02f);
