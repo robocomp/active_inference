@@ -473,6 +473,12 @@ void SpecificWorker::initialize()
     outer->addWidget(custom_widget_, 1);      // sections 2 + 3 — all remaining space
 
     restore_dashboard_geometry();
+
+    // EXPLICITLY hidden: restoreGeometry() also restores the window STATE, so relying on
+
+    // "we never called show()" is fragile. The drill-down must start down.
+
+    if (dashboard_window_) dashboard_window_->hide();
     // NOT shown at startup: the compact strip below is the standing display and this window is the
     // drill-down its "details" button reveals. Geometry is still restored, so the first click restores place.
 

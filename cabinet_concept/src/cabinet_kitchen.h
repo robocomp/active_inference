@@ -16,6 +16,8 @@
 #include <cmath>
 #include <cstdio>
 #include <memory>
+#include <numbers>
+#include <ranges>
 #include <string>
 #include <vector>
 
@@ -102,6 +104,15 @@ struct KitchenBox   // an active cell's derived room-frame box (for DSR publishi
     int   tier = 0;
     float cx, cy, yaw, L, d, z0, z1;
     float existence;
+    // ── Room-frame pose covariance, mapped from the belief's wall-chart Σ (fill_box_covariance) ──
+    // Published on the room→run RT edge so a CONSUMER — the controller, and above all a level-2
+    // metaconcept whose measurement noise IS each peer's published Σ — can weight a well-observed
+    // run above a barely-glimpsed one without any confidence gate. Before this, the kitchen path
+    // wrote pose with NO covariance while the classic path wrote one, so every kitchen run looked
+    // equally (un)certain.
+    float cov_xx = 0.0f, cov_yy = 0.0f, cov_xy = 0.0f;   // footprint-centre covariance (m²)
+    float var_z   = 0.0f;                                // variance of z0 = the RT translation z (m²)
+    float var_yaw = 0.0f;                                // chart-axis direction variance (rad²)
 };
 
 class KitchenManager
@@ -356,7 +367,8 @@ public:
         {
             integrate_absence(*island_belief_, island_exist_, island_diag_, mp, frame_template);
             if (island_exist_ <= mp.retire_logodds and island_diag_.retire_streak >= mp.retire_frames)
-            { island_belief_.reset(); island_exist_ = 0.0f; island_cov_ema_ = 0.0f; island_diag_ = {}; return; }
+            { island_belief_.reset(); island_exist_ = 0.0f; island_cov_ema_ = 0.0f; island_diag_ = {};
+              island_yaw_var_ = kWallChartYawVar * 100.0f; return; }
         }
         if (pts.size() < 2)                        // no island evidence this frame
         {
@@ -391,13 +403,17 @@ public:
         //  free-space carve retracts a genuinely-empty end. Killing on low coverage removed occluded units.)
         if (island_belief_ and mp.object_exclusion_enabled and not frame_template.scene_objects.empty()
             and run_engulfed(island_belief_->state(), island_belief_->chart(), frame_template.scene_objects, mp))
-        { island_belief_.reset(); island_exist_ = 0.0f; island_cov_ema_ = 0.0f; return; }
+        { island_belief_.reset(); island_exist_ = 0.0f; island_cov_ema_ = 0.0f;
+          island_yaw_var_ = kWallChartYawVar * 100.0f; return; }
         if (island_belief_)
         {
             island_belief_->set_corner_fill(island_anchored_, false);   // anchor the near end to the wall (t0→0)
             CabinetFrame f = frame_template;
             f.points = pts; f.R.assign(pts.size(), bp_.sigma_base_m * bp_.sigma_base_m);
             island_belief_->update(f);
+            // Re-measure how well THIS cycle's points pin the frozen chart's axis. Held across look-away
+            // (it is a property of the chart + the evidence that produced it, not of the current frame).
+            island_yaw_var_ = derived_chart_yaw_var(pts, island_belief_->chart(), bp_.sigma_base_m);
         }
     }
 
@@ -410,12 +426,17 @@ public:
                 KitchenBox b; b.id = c.geom.id; b.wall_seg_id = c.geom.wall_seg_id;
                 b.tier = c.geom.tier; b.existence = c.existence;
                 c.belief->room_box(b.cx, b.cy, b.yaw, b.L, b.d, b.z0, b.z1);
+                fill_box_covariance(*c.belief, kWallChartYawVar, b);   // chart axis = the room polygon's wall
                 out.push_back(b);
             }
         if (island_belief_)                        // the free-standing 4th cabinet (wall_seg_id = -1 ⇒ named _island)
         {
             KitchenBox b; b.id = "island"; b.wall_seg_id = -1; b.tier = 0; b.existence = island_exist_;
             island_belief_->room_box(b.cx, b.cy, b.yaw, b.L, b.d, b.z0, b.z1);
+            // ★The island's axis was derived from its OWN points, so it reports the MEASURED variance —
+            // typically far looser than a wall cell's. A consumer that fits a shared kitchen axis must be
+            // able to see that difference, or it would weight a self-derived axis like a polygon-pinned one.
+            fill_box_covariance(*island_belief_, island_yaw_var_, b);
             out.push_back(b);
         }
         return out;
@@ -430,6 +451,78 @@ public:
     static bool self_test();
 
 private:
+    // ── Chart-axis (yaw) direction variance ──────────────────────────────────────────────────────
+    // A run's yaw is NOT a belief DOF — the wall chart fixes it (see cabinet_wall_run_belief.h). So the
+    // yaw variance we publish is the uncertainty of whoever AUTHORED the chart, and it differs sharply
+    // between the two cases. That difference is the point: it is what lets a consumer tell a
+    // polygon-pinned run from a self-derived one.
+    //
+    // WALL-ANCHORED cells inherit the collinear-merged room-polygon wall direction. `kColinCos = cos(3°)`
+    // in CabinetFitter::rebuild_wall_ids is this codebase's own statement of how much direction spread one
+    // merged "wall" may contain, so 3° is read off the existing model rather than invented.
+    // ⚠FLAGGED (CLAUDE.md "no thresholds"): this is a STAND-IN for a wall-direction covariance that
+    // room_concept does not currently publish. When it does, read it and delete this constant. It is not a
+    // tuning knob — do not adjust it to change downstream behaviour.
+    static constexpr float kWallChartYawStd = 3.0f * std::numbers::pi_v<float> / 180.0f;
+    static constexpr float kWallChartYawVar = kWallChartYawStd * kWallChartYawStd;
+
+    // The ISLAND's chart is derived from its OWN points and then FROZEN at birth, so its axis error is
+    // dominated by BIAS, not scatter: derive_island_chart makes a one-shot discrete choice (snap to a wall
+    // axis / take a wall normal) that no later evidence can revise, because yaw is not a DOF. Reporting only
+    // the precision of a slope estimate would therefore be badly over-confident — it answers "how repeatably
+    // could I measure a tilt?" when the question is "how far is the frozen axis from what the points say?".
+    //
+    // So measure the MISALIGNMENT itself. In chart coords (t along the axis, s across it) the point cloud's
+    // own principal angle relative to the chart axis is the standard
+    //       δ = ½·atan2(2·S_ts, S_tt − S_ss)
+    // which is exactly 0 when the cloud's axes line up with the chart. Add the slope-estimate variance
+    // σ_s²/Σ(t−t̄)² so a short or sparse cloud cannot claim a sharp axis merely by having δ≈0:
+    //       var(axis) = δ² + σ_s²/Σ(tᵢ − t̄)²
+    // Both terms are measured, neither is a gate, and the result is self-diagnosing — a chart that snapped to
+    // the wrong segment advertises its own error instead of hiding it. Units: rad².
+    static float derived_chart_yaw_var(const std::vector<Eigen::Vector3f>& pts, const WallChart& ch, float sigma_s)
+    {
+        constexpr float kNoAxisVar = kWallChartYawVar * 100.0f;   // (30°)²: an axis derived from ~nothing
+        if (pts.size() < 3) return kNoAxisVar;
+        float t, s, tsum = 0.0f, ssum = 0.0f;
+        std::vector<Eigen::Vector2f> ts; ts.reserve(pts.size());
+        for (const auto& p : pts) { ch.to_wall(p, t, s); ts.emplace_back(t, s); tsum += t; ssum += s; }
+        const float inv_n = 1.0f / static_cast<float>(ts.size());
+        const float tbar = tsum * inv_n, sbar = ssum * inv_n;
+        float Stt = 0.0f, Sss = 0.0f, Sts = 0.0f;
+        for (const auto& q : ts)
+        { const float dt = q.x() - tbar, ds = q.y() - sbar;
+          Stt += dt * dt; Sss += ds * ds; Sts += dt * ds; }
+        if (not (Stt > 1e-6f)) return kNoAxisVar;                 // no extent along the axis ⇒ it says nothing
+        // Principal angle of the cloud w.r.t. the chart axis. atan2 handles Stt≈Sss (a round blob) without a
+        // division; such a cloud has no meaningful axis, and the scatter term below is what dominates there.
+        const float delta = 0.5f * std::atan2(2.0f * Sts, Stt - Sss);
+        return std::min(kNoAxisVar, delta * delta + sigma_s * sigma_s / Stt);
+    }
+
+    // Map a run's wall-chart Σ over θ=[t0,t1,d,z0,z1] onto the ROOM-frame pose covariance the RT edge
+    // publishes. The footprint centre is c = A + tc·u + (d/2)·n with tc = (t0+t1)/2, so
+    //     ∂c/∂t0 = ∂c/∂t1 = u/2 ,  ∂c/∂d = n/2
+    // and Σ_xy = M Σ Mᵀ with M = [u/2, u/2, n/2, 0, 0]. Anisotropic BY CONSTRUCTION and correctly rotated
+    // into the room: uncertain ENDS spread the centre ALONG the wall, an uncertain DEPTH spreads it
+    // PERPENDICULAR to it. (The classic path publishes a diagonal-only cov; the chart gives us the real
+    // orientation for free, so a grazing run reports its true error ellipse.)
+    static void fill_box_covariance(const WallRunBelief& b, float yaw_var, KitchenBox& box)
+    {
+        const auto& S  = b.covariance();
+        const auto& ch = b.chart();
+        const float var_tc = 0.25f * (S(0, 0) + 2.0f * S(0, 1) + S(1, 1));   // along-wall centre
+        const float var_hd = 0.25f *  S(2, 2);                               // half-depth
+        const float cov_th = 0.25f * (S(0, 2) + S(1, 2));                    // their cross-term
+        const Eigen::Vector2f& u = ch.u;
+        const Eigen::Vector2f& n = ch.n;
+        box.cov_xx = var_tc * u.x() * u.x() + var_hd * n.x() * n.x() + 2.0f * cov_th * u.x() * n.x();
+        box.cov_yy = var_tc * u.y() * u.y() + var_hd * n.y() * n.y() + 2.0f * cov_th * u.y() * n.y();
+        box.cov_xy = var_tc * u.x() * u.y() + var_hd * n.x() * n.y() + cov_th * (u.x() * n.y() + n.x() * u.y());
+        box.var_z   = std::max(0.0f, S(3, 3));   // the RT edge's translation z IS z0 (publish_kitchen_boxes)
+        box.var_yaw = yaw_var;
+    }
+
     // Absence confidence vs range: beams get sparse with distance, so a far pass-through is weak evidence of
     // removal. Scales the FREE half only (occupancy always counts at full weight). power 0 ⇒ constant 1.
     static float absence_conf(const KitchenManagerParams& mp, float range_m)
@@ -551,6 +644,9 @@ private:
     std::unique_ptr<WallRunBelief> island_belief_;      // null until activated
     WallChart                      island_chart_;       // frozen at birth
     bool                           island_anchored_ = false;   // peninsula: near end pinned to the wall (t0→0)
+    // MEASURED variance of the frozen chart's axis (derived_chart_yaw_var). Seeded pessimistic so a
+    // just-born island never advertises a tight axis before any point has scored it.
+    float                          island_yaw_var_ = kWallChartYawVar * 100.0f;
     float                          island_exist_   = 0.0f;
     float                          island_cov_ema_ = 0.0f;
     KitchenCellDiag                island_diag_;               // per-cycle observability (CSV/dashboard)
@@ -771,6 +867,73 @@ inline bool KitchenManager::self_test()
         born_west(m12);
         for (int it = 0; it < 8; ++it) m12.update({}, mpl, refute);
         check(m12.active_boxes().size() == 1, "removal is debounced (a few refuting cycles cannot delete a run)");
+    }
+
+    // ── (i) PUBLISHED ROOM-FRAME COVARIANCE: the Σ every consumer weights us by ──────────────────
+    // The kitchen path used to publish pose with no covariance at all, so a consumer could not tell a long,
+    // well-observed run from a sliver. These checks pin the three properties that make the published number
+    // meaningful: it is a real PSD covariance, it is ORIENTED by the chart (not diagonal-by-assumption), and
+    // a self-derived island axis reports honestly looser than a polygon-pinned wall run.
+    {
+        KitchenManager m13; m13.build(walls, tiers, tp, bp, 2.6f);
+        std::vector<Eigen::Vector3f> west; push_front(west, walls[0], 0.4f, 2.6f);
+        for (int it = 0; it < 30; ++it) m13.update(west, mp, tmpl);
+        const auto bx = m13.active_boxes();
+        check(bx.size() == 1, "(i) one west run for the covariance checks");
+        if (bx.size() == 1)
+        {
+            const auto& b = bx.front();
+            // PSD: positive variances and a cross-term that respects Cauchy-Schwarz. A consumer inverts this.
+            check(b.cov_xx > 0.0f and b.cov_yy > 0.0f and b.var_z >= 0.0f and b.var_yaw > 0.0f,
+                  "(i) published covariance is positive");
+            check(b.cov_xy * b.cov_xy <= b.cov_xx * b.cov_yy * 1.0001f,
+                  "(i) XY block is PSD (|cov_xy| <= sqrt(vxx*vyy))");
+            // ORIENTATION: the west wall runs along +y, so the ALONG-wall (t0,t1) uncertainty must land on Y
+            // and the DEPTH uncertainty on X. A diagonal-by-assumption write would get this backwards half
+            // the time; the chart mapping cannot.
+            check(b.cov_yy > b.cov_xx,
+                  "(i) a wall run along +y is more uncertain ALONG the wall than across it");
+            // A wall run's yaw comes from the room polygon ⇒ the merge-tolerance variance, exactly.
+            check(std::abs(b.var_yaw - kWallChartYawVar) < 1e-9f,
+                  "(i) a wall-anchored run publishes the polygon's chart-axis variance");
+        }
+        // ISLAND: the axis is derived from its own points and FROZEN, so what must be published is the
+        // chart's MISALIGNMENT. This is the property the whole channel exists for — a chart that snapped to
+        // the wrong segment (live: island births 2°–11° off the 0.3°/89.6° kitchen grid, permanently, because
+        // yaw is not a DOF) has to advertise that error rather than look as certain as a polygon-pinned run.
+        // Build the same run twice: once aligned to the chart the snap will pick, once genuinely rotated.
+        const auto island_axis_var = [&](float tilt_rad) -> float {
+            std::vector<Eigen::Vector3f> isl;
+            const Eigen::Vector2f c(1.20f, 1.10f);                       // clear of every wall ⇒ PCA branch
+            const Eigen::Vector2f dir(std::sin(tilt_rad), std::cos(tilt_rad));   // tilt off +y
+            const Eigen::Vector2f nrm(-dir.y(), dir.x());
+            for (int i = 0; i <= 24; ++i)
+            {
+                const float t = -0.5f + 1.0f * static_cast<float>(i) / 24.0f;    // 1 m long
+                for (int j = 0; j <= 4; ++j)                                     // front face, 0.6 m deep
+                {
+                    const Eigen::Vector2f p = c + t * dir + 0.30f * nrm;
+                    isl.emplace_back(p.x(), p.y(), 0.80f * static_cast<float>(j) / 4.0f);
+                }
+            }
+            KitchenManager m; m.build(walls, tiers, tp, bp, 2.6f);
+            for (int it = 0; it < 30; ++it) m.update_island(isl, mp, tmpl);
+            const auto b = m.active_boxes();
+            const auto it = std::ranges::find_if(b, [](const KitchenBox& x) { return x.wall_seg_id < 0; });
+            return it == b.end() ? -1.0f : it->var_yaw;
+        };
+        const float v_aligned  = island_axis_var(0.0f);
+        const float v_tilted   = island_axis_var(8.0f * std::numbers::pi_v<float> / 180.0f);
+        check(v_aligned >= 0.0f and v_tilted >= 0.0f, "(i) both islands activated for the axis check");
+        // An axis that genuinely matches its points may report tightly — that is honest.
+        check(v_aligned < kWallChartYawVar,
+              "(i) an island whose frozen axis MATCHES its points reports a tight axis");
+        // ★The one that matters: 8° of real misalignment must surface as a much looser published axis, so a
+        // consumer fitting a shared kitchen frame down-weights it instead of trusting a wrong angle.
+        check(v_tilted > 10.0f * v_aligned,
+              "(i) a MISALIGNED frozen island axis publishes a much looser variance (self-diagnosing)");
+        check(v_tilted > kWallChartYawVar,
+              "(i) ...and looser than a polygon-pinned wall run's");
     }
 
     if (ok) std::printf("[kitchen_mgr::self_test] all checks passed\n");

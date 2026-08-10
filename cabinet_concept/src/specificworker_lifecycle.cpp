@@ -406,6 +406,10 @@ void SpecificWorker::publish_kitchen_boxes()
     const float rpx = G->get_attrib_by_name<pos_x_att>(room_opt.value()).value_or(200.f);
     const float rpy = G->get_attrib_by_name<pos_y_att>(room_opt.value()).value_or(200.f);
 
+    // Pin the chain covariance to the CAPTURE stamp, not "now" — the run was fit from this packet's points,
+    // so the localization uncertainty that applies is the one at capture time (CLAUDE.md: real ts ⇒ no cache).
+    const std::uint64_t mask_stamp_ms = mask_ingestor_ ? mask_ingestor_->packet().timestamp_ms : 0;
+
     const auto boxes = kitchen_mgr_.active_boxes();
     std::unordered_set<std::string> live;
     bool any_birth = false;
@@ -438,6 +442,7 @@ void SpecificWorker::publish_kitchen_boxes()
             if (not id_opt.has_value()) { ++slot; continue; }
             kitchen_nodes_[b.id] = id_opt.value();
             rt_api_->insert_or_assign_edge_RT(room_opt.value(), id_opt.value(), {b.cx, b.cy, b.z0}, {0.f, 0.f, b.yaw});
+            write_kitchen_rt_covariance(room_node_id_, id_opt.value(), b, mask_stamp_ms);
             any_birth = true;
             std::print("cabinet_concept: [kitchen] BIRTH '{}' id={} run=({:.2f},{:.2f}) L={:.2f} d={:.2f} z=[{:.2f},{:.2f}]\n",
                        name, id_opt.value(), b.cx, b.cy, b.L, b.d, b.z0, b.z1);
@@ -457,6 +462,9 @@ void SpecificWorker::publish_kitchen_boxes()
                 G->add_or_modify_attrib_local<height_m_att>(n.value(), H);
                 G->update_node(n.value());
                 rt_api_->insert_or_assign_edge_RT(room_opt.value(), it->second, {b.cx, b.cy, b.z0}, {0.f, 0.f, b.yaw});
+                // After the pose write, so a re-created edge cannot clobber the covariance (same ordering
+                // rationale as CabinetSceneGraph::persist_cabinet_belief).
+                write_kitchen_rt_covariance(room_node_id_, it->second, b, mask_stamp_ms);
             }
         }
         ++slot;
@@ -467,11 +475,87 @@ void SpecificWorker::publish_kitchen_boxes()
         {
             G->delete_node(it->second);
             std::print("cabinet_concept: [kitchen] RETIRE cell '{}' (node {})\n", it->first, it->second);
+            kitchen_cov_trace_.erase(it->first);
             it = kitchen_nodes_.erase(it);
         }
         else ++it;
     }
     if (any_birth) trigger_graph_layout_twopi();
+}
+
+// Publish one run's room-frame pose covariance on the room→run RT edge.
+//
+// WHY THIS EXISTS: the classic (per-instance) path has always written rt_covariance
+// (CabinetSceneGraph::write_rt_covariance), but the kitchen path wrote pose ONLY. A consumer that weights
+// peers by their published Σ — the controller, and any level-2 metaconcept, whose entire "no confidence
+// gate" argument rests on the producer's own covariance being there — saw nothing, and had to fall back to
+// treating a 2.2 m well-observed run and a barely-glimpsed sliver as equally certain.
+//
+// The numbers come from KitchenManager::fill_box_covariance, which maps the belief's wall-chart Σ over
+// [t0,t1,d,z0,z1] into the room frame. Two things differ from the classic path, both improvements the
+// chart makes free:
+//   · the XY block is ANISOTROPIC and correctly rotated (along-wall vs depth uncertainty are different
+//     quantities and the chart knows which way each points), not a diagonal;
+//   · the yaw variance states the CHART's provenance — tight for a polygon-pinned wall run, measured and
+//     typically much looser for the self-derived island. That contrast is the useful signal.
+void SpecificWorker::write_kitchen_rt_covariance(std::uint64_t room_id, std::uint64_t node_id,
+                                                 const rc::KitchenBox& box, std::uint64_t stamp_ms)
+{
+    if (not G or room_id == 0 or node_id == 0)
+        return;
+
+    float vxx = box.cov_xx, vyy = box.cov_yy;
+    const float vxy = box.cov_xy;
+    // The run is fit in ROOM but its pose stays conditional on the robot pose (camera→robot→room), so the
+    // localization/chain term belongs in what we publish. Without it the run advertises the belief's
+    // internal precision as if the robot knew exactly where it was standing.
+    if (fitter_)
+    {
+        float cxx = 0.0f, cyy = 0.0f;
+        if (fitter_->chain_cov_at({box.cx, box.cy}, stamp_ms, cxx, cyy))
+        { vxx += cxx; vyy += cyy; }
+    }
+
+    // A cabinet run rests FLAT on the floor: roll/pitch are pinned near 0 by that physical prior — they are
+    // CONFIDENTLY known, not unknown. Same value and reasoning as the classic path (≈1.3° std).
+    constexpr float flat_rp_var = 5e-4f;
+
+    // Self-gate on the trace so a settled run stops rewriting its edge every cycle. Write when the run is
+    // new to us or the uncertainty moved >5 % — matching CabinetSceneGraph::write_rt_covariance.
+    const float trace = vxx + vyy + box.var_z + box.var_yaw;
+    if (const auto prev = kitchen_cov_trace_.find(box.id); prev != kitchen_cov_trace_.end())
+    {
+        const float p = prev->second;
+        if (std::isfinite(p) and p > 0.0f and std::abs(trace - p) <= 0.05f * p)
+            return;
+    }
+
+    auto edge = G->get_edge(room_id, node_id, "RT");
+    if (not edge.has_value())
+        return;
+
+    // 6×6 SE3 covariance, row-major [x,y,z,rx,ry,rz] — the layout every consumer reads (xx at 0, yy at 7,
+    // yaw at 35). The XY cross-term IS filled here: unlike the classic diagonal-only write, the chart gives
+    // us the real error ellipse, and a grazing run's is strongly off-axis.
+    std::vector<float> cov(36, 0.0f);
+    cov[0 * 6 + 0] = vxx;
+    cov[0 * 6 + 1] = vxy;
+    cov[1 * 6 + 0] = vxy;
+    cov[1 * 6 + 1] = vyy;
+    cov[2 * 6 + 2] = std::max(1e-9f, box.var_z);
+    cov[3 * 6 + 3] = flat_rp_var;   // roll  (pinned flat on the floor)
+    cov[4 * 6 + 4] = flat_rp_var;   // pitch (pinned flat on the floor)
+    cov[5 * 6 + 5] = std::max(1e-9f, box.var_yaw);
+
+    G->add_or_modify_attrib_local<rt_covariance_att>(edge.value(), cov);
+    G->insert_or_assign_edge(edge.value());
+    kitchen_cov_trace_[box.id] = trace;
+
+    if (cfg_.verbose_log)
+        std::print("cabinet_concept: [kitchen] RT-cov '{}' σ x={:.1f}cm y={:.1f}cm z={:.1f}cm yaw={:.2f}°\n",
+                   box.id, 100.0f * std::sqrt(std::max(0.0f, vxx)), 100.0f * std::sqrt(std::max(0.0f, vyy)),
+                   100.0f * std::sqrt(std::max(0.0f, box.var_z)),
+                   57.2958f * std::sqrt(std::max(0.0f, box.var_yaw)));
 }
 
 // Per-cycle CSV of the KITCHEN CELLS. In kitchen mode the fitter holds no instances, so ai2_log.csv is never

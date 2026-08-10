@@ -323,6 +323,28 @@ void CabinetFitter::compute_chain_cov(CabinetInstance& inst)
     inst.chain_cov_yy = static_cast<float>(g->covariance(1, 1));
 }
 
+// Instance-free chain covariance at a room-frame point — see the header. Same round-trip as
+// compute_chain_cov; kept as its own function rather than refactoring that one, because the instance
+// version also caches onto the instance and is on the hot per-instance path.
+bool CabinetFitter::chain_cov_at(const Eigen::Vector2f& xy_room, std::uint64_t ts_ms, float& vxx, float& vyy) const
+{
+    if (not chain_cov_enabled_ or not gaussian_ or not inner_eigen_)
+        return false;
+    const Mat::Vector3d centre(xy_room.x(), xy_room.y(), 0.0);
+    const auto c_src = inner_eigen_->transform(chain_src_frame_, centre, "room", ts_ms);
+    if (not c_src.has_value())
+        return false;
+    DSR::GaussianPoint3D gp;
+    gp.mean = c_src.value();
+    gp.covariance = DSR::Cov3d::Zero();
+    const auto g = gaussian_->transform_point("room", gp, chain_src_frame_, ts_ms);
+    if (not g.has_value())
+        return false;
+    vxx = static_cast<float>(g->covariance(0, 0));
+    vyy = static_cast<float>(g->covariance(1, 1));
+    return true;
+}
+
 // ─── Instance lifecycle ───────────────────────────────────────────────────────────────────────────
 
 // Create the instance for a "cabinet_*" node if absent; return true only the first time it is created.

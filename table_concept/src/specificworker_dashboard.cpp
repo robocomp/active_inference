@@ -102,7 +102,17 @@ void SpecificWorker::restore_strip_geometry()
     QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("table_concept"));
     const QByteArray geom = settings.value(QStringLiteral("BeliefStripWindow_geometry")).toByteArray();
     if (not geom.isEmpty())
+    {
         strip_window_->restoreGeometry(geom);
+        // ★A restored geometry carries the window STATE too. If the strip was ever maximised its saved
+        // state brings it back filling the screen — indistinguishable, to the user, from the big dashboard
+        // having opened itself. The strip is meant to sit in a corner, so refuse those states and cap the
+        // size; the position is still honoured.
+        strip_window_->setWindowState(strip_window_->windowState()
+                                      & ~(Qt::WindowMaximized | Qt::WindowFullScreen));
+        const QSize sz = strip_window_->size();
+        strip_window_->resize(std::min(sz.width(), 900), std::min(sz.height(), 420));
+    }
     else
         strip_window_->resize(520, 210);   // small ON PURPOSE — it is meant to sit in a corner, always open
 }
@@ -297,6 +307,9 @@ void SpecificWorker::build_dashboard()
     // ask for with its "details ▸" button. Its geometry is still restored here, so the first click puts
     // it back exactly where you last left it. (Want it up from the start again? add `->show()`.)
     restore_dashboard_geometry();
+    // EXPLICITLY hidden: restoreGeometry() also restores the window STATE, so relying on
+    // "we never called show()" is fragile. The drill-down must start down.
+    if (dashboard_window_) dashboard_window_->hide();
 
     // ── Compact belief strip — a SEPARATE, small top-level window ──────────────────────────────────
     // Deliberately not another panel inside the big window: the point is a display small enough to keep

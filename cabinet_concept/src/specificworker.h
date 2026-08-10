@@ -134,11 +134,19 @@ private:
     // publish derived room-frame boxes. Replaces run_instance_tracker + process_cabinet_node when cfg_.kitchen_model.
     void run_kitchen_model();
     void publish_kitchen_boxes();        // reconcile active cells ↔ DSR cabinet_* box nodes (create/update/delete)
+    // Publish a run's room-frame pose covariance on its room→run RT edge. The kitchen path used to write
+    // pose with NO covariance (the classic path always wrote one), so every kitchen run advertised itself as
+    // equally certain — which silently defeats any consumer that weights by the producer's own Σ.
+    void write_kitchen_rt_covariance(std::uint64_t room_id, std::uint64_t node_id,
+                                     const rc::KitchenBox& box, std::uint64_t stamp_ms);
     void log_kitchen_cells(std::size_t sweep_n);   // per-cycle cell CSV (cfg_.kitchen_cells_csv_path; empty = off)
     void update_kitchen_ego_motion();    // transform-chain camera speed (producer-independent), aligned with chair
     std::vector<rc::SceneObjectBox> read_scene_objects() const;   // OTHER agents' furniture boxes (room frame) to not penetrate
     rc::KitchenManager                        kitchen_mgr_;
     std::unordered_map<std::string, std::uint64_t> kitchen_nodes_;   // cell signature → DSR node id
+    // Last published covariance trace per cell — the RT-cov write self-gates on it, so a settled run does
+    // not rewrite its edge every cycle (same discipline as CabinetSceneGraph::write_rt_covariance).
+    std::unordered_map<std::string, float>         kitchen_cov_trace_;
     // Ego-motion state for the stillness/VOR gate (chair-aligned): camera pose deltas → linear/angular speed.
     Eigen::Vector3f  prev_cam_pos_{0.0f, 0.0f, 0.0f};
     Eigen::Vector3f  prev_cam_fwd_{0.0f, 1.0f, 0.0f};

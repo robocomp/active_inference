@@ -117,6 +117,15 @@ public:
     // per canonical wall id — the geometry the (wall_id, tier) cell table is built on. Empty if no polygon.
     std::vector<rc::KitchenWall> kitchen_walls() const;
 
+    // Localization/chain covariance J·Σ_chain·Jᵀ at an arbitrary ROOM-frame point, pinned to `ts_ms`.
+    // Identical construction to the private compute_chain_cov (room → measurement frame → back with ZERO
+    // input cov, so InnerGaussianAPI returns exactly the chain contribution) but WITHOUT a CabinetInstance:
+    // the kitchen runs are owned by KitchenManager and have no instance, yet their room-frame pose is just
+    // as conditional on the robot pose. Publishing their Σ without this term would advertise a run as more
+    // certain than the localization allows. Returns false (outputs untouched) when the chain source is
+    // disabled or the transform does not resolve.
+    bool chain_cov_at(const Eigen::Vector2f& xy_room, std::uint64_t ts_ms, float& vxx, float& vyy) const;
+
     // Emit a CSV row for an OUT-OF-VIEW instance whose EXISTENCE evidence integrated this cycle (LiDAR/silhouette
     // carve) but which the fitter did NOT fit (no fresh mask) — so the existence log-odds trajectory that drives a
     // removal is captured even across the silent out-of-FoV stretch where no fit row is written. Fit fields are the
