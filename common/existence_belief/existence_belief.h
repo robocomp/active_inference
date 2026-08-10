@@ -388,6 +388,17 @@ public:
     // that happen to have beams or pixels. They are no longer the way in.
     void integrate(float p_vis, float log_ratio)
     {
+        // ★NON-FINITE IS A HOLD, AND IT MUST BE CHECKED FIRST. `pv <= 0.0f` does NOT catch a NaN — every
+        // comparison against NaN is false, so a NaN p_vis walks straight past the guard, makes delta NaN,
+        // and CLAMPS TO NaN: from then on L is NaN forever and no amount of good evidence recovers it,
+        // because clamp(NaN + x) is still NaN. That is the worst failure this class can have — silent,
+        // permanent, and invisible in every display that prints a bar instead of a number. It is also not
+        // hypothetical: a degenerate viewpoint returns fill = +inf, expected_p_detect turned inf/inf into
+        // NaN, and the live bottle sat at L = nan from its first cycle (2026-08-10).
+        //
+        // The rule is the same one this whole file is built on: a probe that could not resolve the object is
+        // not evidence either way. A probe whose resolvability is not even a NUMBER certainly could not.
+        if (not std::isfinite(p_vis) or not std::isfinite(log_ratio)) return;
         const float pv = std::clamp(p_vis, 0.0f, 1.0f);
         if (pv <= 0.0f or log_ratio == 0.0f) return;      // could not have resolved it ⇒ no evidence, no update
         const float delta = pv * log_ratio;
@@ -407,6 +418,7 @@ public:
     void integrate(const Evidence& e, float p_detect = 1.0f)
     {
         if (e.n_reached == 0) return;                     // not probed this cycle ⇒ HOLD
+        if (not std::isfinite(p_detect) or not std::isfinite(e.log_odds_delta)) return;   // see integrate() above
         const float pv = std::clamp(p_detect, 0.0f, 1.0f);
         if (pv <= 0.0f) return;
         integrate(pv, e.log_odds_delta / pv);             // (pv * ratio) reproduces log_odds_delta exactly

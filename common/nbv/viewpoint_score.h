@@ -513,6 +513,16 @@ inline float visible_fraction(const Target& t, const Eigen::Vector2f& from, floa
 inline float expected_p_detect(float fill_max, float fill_min, float fill_sigma, float visible_frac,
                                const rc::detect::DetectorEnvelope& env)
 {
+    // ★A NON-FINITE FILL IS A REAL INPUT, NOT AN ERROR: predicted_fill_axes returns +inf BY DESIGN when the
+    // viewpoint is degenerate (camera essentially on top of the target — a just-born belief that has not yet
+    // separated from the sensor). Physically that object overflows the frame completely, so it is NOT
+    // detectable and the honest answer is 0. Without this the marginalisation below computes
+    // ratio = fill_min/fill_max = inf/inf = NaN and returns NaN — and a NaN p_detect is not a wrong number,
+    // it is a POISON: it flows into ExistenceBelief as p_vis, passes the `pv <= 0` guard (NaN compares
+    // false), and pins L at NaN forever. Measured 2026-08-10 on the live bottle: L = nan from the first
+    // logged cycle, unrecoverable by 50 subsequent good confirmations.
+    if (not std::isfinite(fill_max) or not std::isfinite(fill_min))
+        return 0.0f;
     if (not (fill_sigma > 1e-4f))
         return rc::detect::p_detect(fill_max, fill_min, visible_frac, env);
     const float ratio = (fill_max > 1e-6f) ? std::clamp(fill_min / fill_max, 0.0f, 1.0f) : 1.0f;
