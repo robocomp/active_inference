@@ -20,7 +20,7 @@
 
 #include "bottle_model.h"
 #include "bottle_belief.h"           // rc::BottleBelief (AI2 recursive-Laplace belief — the fit)
-#include "bottle_affordance.h"
+#include "../../common/object_affordance/object_affordance.h"   // rc::ObjectAffordance (SHARED)
 #include "../../common/existence_belief/existence_belief.h"   // rc::exist::ExistenceBelief (the shared policy)
 
 namespace rc {
@@ -41,7 +41,7 @@ struct BottleInstance
     // Epistemic "go see the hidden face" affordance: a DSR node advertising the far-side viewpoint
     // (EpistemicPlanner) for the mission controller. The node persists and refreshes; its ΔH gain
     // governs selection (low nats → the controller won't pick it).
-    BottleAffordance affordance;
+    ObjectAffordance affordance;
     bool epistemic_pending  = false;
     int  epistemic_cooldown = 0;   // post-completion hold (cycles) during which the gain is suppressed
     float last_epistemic_gain = 0.0f;   // most recent published ΔH (nats) — for the dashboard

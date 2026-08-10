@@ -16,6 +16,7 @@ LIST(APPEND LIBS
   ai_common::ui           # TimeSeriesPlot (compiled Q_OBJECT)
   ai_common::ui_headers   # custom_widget.h / belief_inspector.h — header-only, mocced by OUR autogen
   ai_common::core         # header-only beliefs (ai_belief/dof_spec.h, …)
+  ai_common::affordance   # affordance protocol, producer side (was bottle_affordance.{h,cpp})
 )
 
 # Sources set
@@ -30,7 +31,6 @@ LIST(APPEND SOURCES
   ../src/bottle_existence.cpp
   ../src/bottle_lidar_ingestor.cpp
   ../src/epistemic_planner.cpp
-  ../src/bottle_affordance.cpp
   ../src/bottle_model.cpp
 )
 

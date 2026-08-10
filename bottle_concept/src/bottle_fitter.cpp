@@ -836,7 +836,8 @@ bool BottleFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_nod
     if (const auto pn = G_->get_node(inst.parent_id); pn.has_value())
         inst.parent_name = pn.value().name();
 
-    inst.affordance.init(G_, node.id(), node.name());   // epistemic hidden-face affordance for this bottle
+    // "bottle" selects the execution contract (Servo lock-on bound to the bottle detection attrs).
+    inst.affordance.init(G_, node.id(), node.name(), "bottle");
 
     instances_.emplace(node.id(), std::move(inst));
     std::print("bottle_concept: created instance for node '{}' id={}\n", node.name(), node.id());

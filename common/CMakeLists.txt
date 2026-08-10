@@ -294,11 +294,24 @@ target_link_libraries(ai_common_geometry PUBLIC Eigen3::Eigen)
 add_library(ai_common::geometry ALIAS ai_common_geometry)
 
 # =====================================================================================
-# ai_common::affordance — affordance management (controller, room_concept).
-# affordance_manager.cpp uses QDebug and the DSR api, so this is a different dependency cluster
-# from ai_common::geometry above and must stay a separate target.
+# ai_common::affordance — BOTH SIDES of the affordance protocol, on one target because they share
+# one wire format (affordance_protocol.h) and one dependency cluster (QDebug + the DSR api).
+#
+#   affordance_manager.cpp   CONSUMER — the controller and room_concept read/rank/execute offers.
+#   object_affordance.cpp    PRODUCER — one affordance node per object: create/refresh/remove plus
+#                            the idle→offered→executing→satisfied state machine.
+#
+# WHY THE PRODUCER IS HERE. Measured 2026-08-11 across the seven object agents: their
+# *_affordance.{h,cpp} were 85-88% identical after normalising the object name — ~2500 lines saying
+# one thing seven times. And they had already DIVERGED where it counts: bottle was missing
+# hold_offered() entirely, the "Completed is not a neutral affordance state" fix its siblings carry,
+# so a completed bottle affordance kept advertising a stale gain. The duplication never cost typing;
+# it cost a fix that never arrived. That is the argument for extraction, in one example.
 # =====================================================================================
-add_library(ai_common_affordance STATIC affordance_manager/affordance_manager.cpp)
+add_library(ai_common_affordance STATIC
+  affordance_manager/affordance_manager.cpp
+  object_affordance/object_affordance.cpp
+)
 ai_common_defaults(ai_common_affordance)
 target_link_libraries(ai_common_affordance PUBLIC ai_common_core)
 add_library(ai_common::affordance ALIAS ai_common_affordance)

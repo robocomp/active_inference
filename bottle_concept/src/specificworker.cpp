@@ -1127,7 +1127,18 @@ void SpecificWorker::step_epistemic(rc::BottleInstance& inst)
 
     const auto affordance_node_before = inst.affordance.node_id();
     inst.dbg_nbv_gain = prop.epistemic_gain;   // the value actually published
-    inst.affordance.update(prop);
+    // The agent's own EpistemicProposal carries planner internals; the producer needs only the eleven
+    // fields of the shared interface, so the conversion is the whole coupling — see AffordanceTarget.
+    rc::AffordanceTarget tgt;
+    tgt.x_m     = prop.epistemic_target_x_m;
+    tgt.y_m     = prop.epistemic_target_y_m;
+    tgt.yaw_rad = prop.epistemic_target_yaw_rad;
+    tgt.gain    = prop.epistemic_gain;
+    tgt.valid   = prop.valid;
+    // No face enumeration and no σ* band from bottle's single-candidate planner: it proposes ONE
+    // far-side viewpoint rather than scoring four faces, so publishing four zero gains would tell the
+    // controller it had four equally-bad options instead of one considered one.
+    inst.affordance.update(tgt);
     if (affordance_node_before == 0 and inst.affordance.node_id() != 0)
         trigger_graph_layout_twopi();
     inst.epistemic_pending = true;
@@ -1164,7 +1175,7 @@ void SpecificWorker::log_epistemic_csv(const rc::BottleInstance& inst,
     epistemic_csv_ << inst.processed_cycles << ',' << inst.node_name << ','
                    << prop.epistemic_gain << ',' << (inst.epistemic_pending ? 1 : 0) << ','
                    << inst.epistemic_cooldown << ','
-                   << rc::BottleAffordance::state_name(inst.affordance.state()) << ','
+                   << rc::ObjectAffordance::state_name(inst.affordance.state()) << ','
                    << inst.affordance.node_id() << ','
                    << prop.epistemic_target_x_m << ',' << prop.epistemic_target_y_m << ','
                    << prop.epistemic_target_yaw_rad << ','
