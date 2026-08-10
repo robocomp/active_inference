@@ -72,7 +72,9 @@ public:
     // bearing cone covers the chair — another chair instance, or any other detected mask this frame (table /
     // person / …)? Used to SUPPRESS the existence "vacate" negative: a chair hidden behind something must not
     // be removed just because no mask reaches it. Conservative (over-suppress = keep) by design.
-    bool los_occluded(const ChairInstance& inst) const;
+    // Occlusion STRENGTH in [0,1] (0 = clear line of sight, 1 = squarely behind a closer object).
+    // Not a verdict: occlusion is a reason to trust absence less, never a licence to ignore it.
+    float los_occlusion(const ChairInstance& inst) const;
 
     // ── Room-containment pose prior ───────────────────────────────────────────────────────────────
     // The room polygon (room frame) is a trusted NOMINAL model (authored from the SVG layout, never fitted),

@@ -1408,10 +1408,6 @@ void SpecificWorker::update_existence_beliefs()
             if (llr < 0.0f)
                 llr = won_zed ? llr * fitter_->frame_reliability(inst) : 0.0f;
         }
-        else if (cfg_.exist_occlusion_check and fitter_->los_occluded(inst))
-            // WON NOTHING but the line of sight is BLOCKED by a closer object (another chair, the table, a
-            // person …): absence of a mask is EXPECTED, not evidence the chair is gone → HOLD, never vacate.
-            continue;
         else
         {
             // WON NOTHING while in the frustum, UNOCCLUDED, on a ZED-active frame → absence evidence, but weighted
@@ -1429,7 +1425,18 @@ void SpecificWorker::update_existence_beliefs()
             // peripheral chair (low pd) then vacates at ≥ the floor rate, so a glitch-stranded phantom the robot
             // never centres still dies over time; conf gates on staleness so a recently-seen chair is untouched.
             const float pd = std::max(fitter_->zed_detectability(inst), cfg_.exist_zed_clear_los_floor);
-            llr = -g * conf * pd;
+            // ★OCCLUSION SCALES ABSENCE, IT NO LONGER SKIPS THE CYCLE. This used to `continue` on a boolean
+            // los_occluded(), which is a HOLD with no way out: a phantom chair born inside the dining set is
+            // permanently "occluded" by the very furniture it overlaps, so its absence was never charged and
+            // L froze short of the removal floor. Measured live: chair_3 pinned at L = -1.94958 for 300+
+            // cycles with won=0, since_det=1814 and occluded=1 — while zed_pd said 0.53, i.e. the two
+            // visibility models flatly disagreed and the pessimistic one won by being a gate.
+            //
+            // Genuine occlusion still protects a real chair: strength → 1 leaves ~no absence evidence, which
+            // is the behaviour the old branch was after. What changes is that a PARTIALLY or SPURIOUSLY
+            // occluded phantom keeps vacating, slowly, instead of living for ever.
+            const float occ = cfg_.exist_occlusion_check ? fitter_->los_occlusion(inst) : 0.0f;
+            llr = -g * conf * pd * std::clamp(1.0f - occ, 0.0f, 1.0f);
         }
 
         inst.exist_logodds = std::clamp(inst.exist_logodds + llr,
@@ -1449,7 +1456,7 @@ void SpecificWorker::update_existence_beliefs()
                 const bool has_poly = fitter_->has_room_polygon();
                 const bool inroom = (not has_poly)
                                     or fitter_->point_in_room(Eigen::Vector2f(ms.cx, ms.cy), cfg_.exist_room_margin_m);
-                const int occluded = (inst.roi_valid and inst.assigned_mask_idx < 0 and fitter_->los_occluded(inst)) ? 1 : 0;
+                const float occluded = (inst.roi_valid and inst.assigned_mask_idx < 0) ? fitter_->los_occlusion(inst) : 0.0f;
                 const float zed_pd = fitter_->zed_detectability(inst);   // ZED expected-detectability that gates vacate
                 std::print("chair_concept: [existence] {} L={:.2f} pos=({:.2f},{:.2f}) inroom={} roomprior={} roi={} won={} since_det={} occluded={} zed_pd={:.2f}\n",
                            inst.node_name, inst.exist_logodds, ms.cx, ms.cy, inroom ? 1 : 0,
