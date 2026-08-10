@@ -94,6 +94,20 @@ DepthScaleStd = 0.010       # shared per-frame depth scale prior std (fraction) 
 AI2ClutterFrac = 0.10       # ε: prior weight of the uniform clutter mixture component
 AI2ClutterScaleM = 0.12     # a point further than ~this from EVERY surface is explained by clutter
 AI2PriorSizeStd = 0.30      # broad size prior std (m) on w,h,H
+
+# STANDING tier prior on the kitchen runs' tight-prior DOFs (d, z0, z1), re-asserted every update.
+# The shared belief engine applies the physical prior ONCE at birth and then re-anchors to its own
+# running posterior, so a persistent mask bias walks the state arbitrarily far while Σ shrinks —
+# measured live 2026-08-10: two base runs of the same kitchen both born at d=0.600 then settled at
+# 0.436 and 0.906, the latter 7.6σ from a 0.60±0.04 prior and published with σ=3.1 cm.
+# ★★IT DOES NOT CURE THE DRIFT. A/B on a slow walk (small bias per frame, 1500 cycles): 0.949 vs
+# 0.945 out, 0.421 vs 0.423 in — ~1.3%. The engine re-anchors to its own previous estimate every
+# predict and P0=Σ⁻¹ grows unboundedly, so it resists FAST change and is transparent to SLOW change;
+# any fixed-precision prior beside it is out-accumulated. What this DOES buy: a run whose points have
+# all become clutter returns to its physical prior (0.900→0.600) instead of holding a drifted value.
+# ★1.0 = the prior exactly as declared (BaseDepth/BaseZ0/BaseZ1 etc.). NOT a tuning knob: if the
+# result is wrong, the declared σ is wrong and should be fixed there. 0 = old behaviour, A/B only.
+TierPriorGain = 1.0
 AI2ProcessStdM = 0.005      # predict process-noise std, length DOFs (m/frame) — rigid+static ⇒ small
 AI2ProcessStdYaw = 0.01     # predict process-noise std, yaw (rad/frame)
 AI2AgeNominalDtS = 0.1      # stale-belief aging: mask stream nominal period (s, 10 Hz masks). Σ inflates by Q·(dt/this) while the feed is silent (measurement-age→covariance) — completes the frozen-frame fix: a stale capture stamp now AGES the belief instead of freezing it. 0 = freeze on stale (historic).

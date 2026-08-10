@@ -181,7 +181,32 @@ public:
     void accumulate_extra(const WallRunState& s, const CabinetFrame& f,
                           Eigen::Matrix<float, 5, 5>& Id, Eigen::Matrix<float, 5, 1>& bd) const
     { accumulate_extent(s, f, Id, bd); accumulate_freespace(s, f, Id, bd); accumulate_corner_fill(s, Id, bd);
-      accumulate_object_exclusion(s, f, Id, bd); }
+      accumulate_object_exclusion(s, f, Id, bd); accumulate_tier_prior(s, Id, bd); }
+
+    // STANDING tier prior on the three TIGHT-PRIOR DOFs (see this file's header: "WHAT'S TIGHT-PRIOR
+    // (estimated, σ covers the GT spread): d, z0, z1. FREE: t0, t1"). The engine applies that prior
+    // ONCE, at construction, and then re-anchors to the running posterior — so the model declares a
+    // 0.60±0.04 carcass and then lets the state walk to 0.906 unopposed. This asserts it every update.
+    // See CabinetBeliefParams::tier_prior_gain for the live measurement that motivated it.
+    //
+    // t0/t1 deliberately get NOTHING: a run's along-wall extent is genuinely free and is already
+    // shaped by the censored-extent factor and the free-space carve.
+    void accumulate_tier_prior(const WallRunState& s,
+                               Eigen::Matrix<float, 5, 5>& Id, Eigen::Matrix<float, 5, 1>& bd) const
+    {
+        const float g = params_.tier_prior_gain;
+        if (g <= 0.0f) return;
+        const auto push = [&](int idx, float e, float std_dev)
+        {
+            if (not (std_dev > 0.0f)) return;                     // an undeclared σ asserts nothing
+            const float w = g / (std_dev * std_dev);
+            Eigen::Matrix<float, 5, 1> J = Eigen::Matrix<float, 5, 1>::Zero(); J(idx) = 1.0f;
+            Id.noalias() += w * (J * J.transpose()); bd.noalias() += -w * J * e;
+        };
+        push(2, s.d  - tier_.d_mean,  tier_.d_std);
+        push(3, s.z0 - tier_.z0_mean, tier_.z0_std);
+        push(4, s.z1 - tier_.z1_mean, tier_.z1_std);
+    }
 
     // Scene-object non-penetration: a run may not cross another agent's furniture. For each object whose
     // room-frame OBB conflicts with the run in BOTH depth and z, retract the PENETRATING along-wall END onto

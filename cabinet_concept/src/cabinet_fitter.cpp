@@ -10,6 +10,7 @@
  */
 
 #include "cabinet_fitter.h"
+#include "../../common/diag_log/rotating_csv.h"   // keep the previous run instead of wiping it
 #include "cabinet_voxel_bank.h"
 #include "../../common/object_anchor/object_anchor_contract.h"
 #include "../../common/object_anchor/ray_anisotropic_cov.h"
@@ -981,7 +982,7 @@ void CabinetFitter::log_ai2_csv(const CabinetInstance& inst, int npts, float R, 
         return;
     if (not ai2_csv_.is_open())
     {
-        ai2_csv_.open(cfg_.ai2_csv_path, std::ios::out | std::ios::trunc);
+        rc::diag::open_rotating(ai2_csv_, cfg_.ai2_csv_path);
         if (not ai2_csv_.is_open()) { cfg_.ai2_csv_path.clear(); return; }
         // Header MUST match the body row below field-for-field. It had drifted: the state block still
         // named the old 6-DOF layout (cx,cy,H,w,h,yaw) while the body writes the 7-DOF state

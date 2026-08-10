@@ -1,0 +1,9 @@
+Component kitchen_metaconcept
+{
+    Communications
+    {
+    };
+    language Cpp11;
+    options dsr;
+
+};

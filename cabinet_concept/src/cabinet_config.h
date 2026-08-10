@@ -140,6 +140,11 @@ struct CabinetConfig
     // the cloud; shrinking belongs to the free-space channel, never here.
     float extent_precision        = 800.0f;  // 1/m² on the end-containment residuals (0 = OFF)
     // Standard kitchen carcass priors per TIER, selected by model evidence (never a height cut).
+    // Gain on the STANDING tier prior (d, z0, z1) re-asserted every update. 1.0 = the prior exactly
+    // as declared below; 0 = the pre-2026-08-10 one-shot-seed behaviour (A/B only). Not a tuning knob
+    // — see CabinetBeliefParams::tier_prior_gain for why, and for the drift it was added to stop.
+    float tier_prior_gain = 1.0f;
+
     float base_depth_m = 0.60f, base_depth_std = 0.04f;   // base cabinets are ~60 cm deep almost
                                                           // universally → STRONG prior. The back face is
                                                           // never observed, so without this the visible

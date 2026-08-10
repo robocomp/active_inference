@@ -7,6 +7,13 @@ This file is the spec a coding agent follows to emit a new, operational concept 
 Everything except the **belief model** (the SDF + its hooks) and a handful of spec-driven wiring is
 mechanical copy + token-rename. The object spec is the only human input.
 
+> ★ **Read [`CONCEPT_AGENT_LIFECYCLE.md`](CONCEPT_AGENT_LIFECYCLE.md) first.** This file specifies the
+> *structure* a new agent must have (files, classes, DSR wiring); the lifecycle contract specifies the
+> *behaviour* it must obey — CREATE · UPDATE · REMOVE · HISTORY · OWNERSHIP, which shared module owns each
+> stage, and the invariants that are not negotiable. A generated agent is not correct until it has a
+> conforming row in that file's §6 audit table. The contract exists because the same defect class was found
+> and fixed three separate times in three agents that all had the right *structure*.
+
 ---
 
 ## The belief core — shared recursive-Laplace AI2 (the ONLY lineage)
@@ -263,8 +270,11 @@ table is the source of truth). Taken:
 | 7 | table_concept | 12 | self_calibration | 22 | refrigerator_concept |
 | 8 | controller | 13 | human_concept | 23 | ring_metaconcept |
 | 9 | voxelizer | 14 | residual_concept | 15 | door_concept |
+| 16 | scene_graph_viewer | 24 | kitchen_metaconcept | | |
 
-Next free: **16–19, 24+** (15 = door_concept, 2026-07-26). (2026-07: cabinet=21 and refrigerator=21 collided because cabinet was never
+Next free: **17–19, 25+** (15 = door_concept, 2026-07-26; 24 = kitchen_metaconcept, 2026-08-09 — the
+second meta-concept schema, RECTILINEAR. ★16 was already taken by scene_graph_viewer and was MISSING
+from this table — the exact omission that caused both collisions below; added now.) (2026-07: cabinet=21 and refrigerator=21 collided because cabinet was never
 recorded — refrigerator moved to 22. Same cause again 2026-07-26: the ring_metaconcept scaffold shipped
 on 21, colliding with cabinet — moved to 23. A clone keeps its template's id; renumber it FIRST.) A one-line self-check: `grep -rE '^\s*id\s*=' */etc/config.toml`.
 

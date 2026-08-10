@@ -30,6 +30,7 @@
  */
 
 #include "specificworker.h"
+#include "../../common/diag_log/rotating_csv.h"   // keep the previous run instead of wiping it
 #include "../../common/nbv/graph_obstacles.h"   // rc::nbv::collect_graph_obstacles — shared, DSR-side
 #include "cabinet_geometry.h"   // rc::geom pure footprint/uncertainty helpers
 
@@ -596,7 +597,7 @@ void SpecificWorker::log_birth_surprise()
     // latter should be ~0 if residual_concept's concept-subtraction is working — a free sanity check).
     if (not birth_surprise_csv_.is_open())
     {
-        birth_surprise_csv_.open("etc/birth_surprise.csv", std::ios::out | std::ios::trunc);
+        rc::diag::open_rotating(birth_surprise_csv_, "etc/birth_surprise.csv");
         if (birth_surprise_csv_.is_open())
             birth_surprise_csv_ << "cycle,region,cx,cy,cells,mass,ext_x,ext_y,mean_p,mean_var,covered,"
                                 << "n_cabinets,tracker_births,instances\n";
@@ -618,7 +619,7 @@ void SpecificWorker::log_birth_surprise()
     //    cabinet footprint (associate, not birth). This is the signal that would let residual GATE/accelerate birth.
     if (not birth_fusion_csv_.is_open())
     {
-        birth_fusion_csv_.open("etc/birth_fusion.csv", std::ios::out | std::ios::trunc);
+        rc::diag::open_rotating(birth_fusion_csv_, "etc/birth_fusion.csv");
         if (birth_fusion_csv_.is_open())
             birth_fusion_csv_ << "cycle,det,det_x,det_y,mass_r05,mass_r03,near_dist,near_mass,covered,"
                               << "n_cabinets,tracker_births,instances\n";

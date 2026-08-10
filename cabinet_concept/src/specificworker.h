@@ -139,7 +139,9 @@ private:
     // equally certain — which silently defeats any consumer that weights by the producer's own Σ.
     void write_kitchen_rt_covariance(std::uint64_t room_id, std::uint64_t node_id,
                                      const rc::KitchenBox& box, std::uint64_t stamp_ms);
-    void log_kitchen_cells(std::size_t sweep_n);   // per-cycle cell CSV (cfg_.kitchen_cells_csv_path; empty = off)
+    // mask_lidar_dr: median (mask-point range − nearest LiDAR range) in the same direction. Positive
+    // ⇒ the masks de-project BEYOND the surface the LiDAR sees, i.e. points land in mid-air.
+    void log_kitchen_cells(std::size_t sweep_n, float mask_lidar_dr = 0.0f, int mask_lidar_n = 0);   // per-cycle cell CSV (cfg_.kitchen_cells_csv_path; empty = off)
     void update_kitchen_ego_motion();    // transform-chain camera speed (producer-independent), aligned with chair
     std::vector<rc::SceneObjectBox> read_scene_objects() const;   // OTHER agents' furniture boxes (room frame) to not penetrate
     rc::KitchenManager                        kitchen_mgr_;

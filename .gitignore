@@ -35,6 +35,10 @@ __pycache__/
 # never matched <component>/etc/ — `git add <component>/` then silently staged run logs.
 # (.gitignore has no trailing comments: a `#` after the pattern becomes part of it.)
 **/etc/*.csv
+# Rotated previous runs, kept beside the live file by rc::diag::open_rotating
+# (common/diag_log/rotating_csv.h): "<name>.csv.<YYYYmmdd_HHMMSS>". The rule above does NOT
+# cover these — the timestamp comes AFTER the extension, so the name does not end in .csv.
+**/etc/*.csv.*
 *.log
 *.bak
 *.back

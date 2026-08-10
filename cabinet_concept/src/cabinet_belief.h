@@ -210,6 +210,30 @@ struct CabinetBeliefParams
     // sourced from the object's CLAIMED VOLUME instead of a LiDAR through-beam. Retract-only. Must
     // DOMINATE extent_precision so a mislabelled point can't grow a run past a solid object. 0 = OFF.
     float object_exclusion_precision = 0.0f;   // 1/m^2 per penetrating end (retract-only)
+
+    // ── STANDING tier prior (2026-08-10) ────────────────────────────────────────────────────────
+    // The shared recursive-Laplace engine sets `prior_mean = state.vec()` at the end of EVERY predict
+    // and uses `P0 = Sigma.inverse()` — i.e. after the first step the "prior" is the previous
+    // POSTERIOR, and the physical tier prior (WallTierPrior: d, z0, z1) never votes again. It is a
+    // one-shot SEED, not a constraint. A persistent systematic bias in the masks then walks the state
+    // arbitrarily far, one small step per frame, with nothing pulling it home — and because Σ keeps
+    // shrinking on the way, the run gets MORE confident the further it drifts.
+    //
+    // ★MEASURED live 2026-08-10 (kitchen_cells.csv): two base runs of the SAME kitchen were both born
+    // at the prior (d=0.600, z1=0.900) and then diverged in OPPOSITE directions and settled —
+    //   seg 13: d 0.600 → 0.436 (−27%),  z1 0.899 → 0.759 (−14 cm)
+    //   seg 14: d 0.600 → 0.906 (+51%),  z1 0.900 → 0.899 (ok)
+    // d=0.906 is 7.6σ from a 0.60±0.04 prior, published with σ=3.1 cm. Confidently wrong.
+    //
+    // This re-asserts the prior the model ALREADY declares, on every update, for exactly the DOFs
+    // cabinet_wall_run_belief.h documents as tight-prior (d, z0, z1) — never t0/t1, which are free.
+    // It is not a clamp or a gate: it is one more Gaussian factor, so strong evidence still moves the
+    // state, it just has to keep paying for the distance instead of walking it unopposed.
+    //
+    // ★1.0 means "the prior exactly as declared in WallTierPrior". It is NOT a tuning knob — if the
+    // result is wrong, the declared σ is wrong and belongs in the tier prior, not here. 0 disables
+    // (the pre-2026-08-10 behaviour), for A/B only.
+    float tier_prior_gain = 1.0f;
     float object_exclusion_margin_m  = 0.03f;  // flush clearance kept off the object boundary
 
     // ── Tier mode ─────────────────────────────────────────────────────────────────────────────

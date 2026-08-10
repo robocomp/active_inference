@@ -1,0 +1,139 @@
+
+# --- Common Agent Data ---
+[Agent]
+# MUST be unique across the shared graph — a collision is a CRDT actor-id clash → SIGSEGV in BOTH
+# agents. Taken: room=5 robot=6 table=7 controller=8 voxelizer=9 bottle=10 kinova=11 self_calib=12
+# human=13 residual=14 door=15 scene_graph_viewer=16 chair=20 cabinet=21 refrigerator=22
+# ring_metaconcept=23 kitchen_metaconcept=24. Next free: 17-19, 25+.
+# (Record any new id in CONCEPT_AGENT_RECIPE.md §1 — that table, not these comments, is the source
+#  of truth. A clone keeps its template's id, so renumbering is the FIRST edit; skipping it is how
+#  cabinet/refrigerator and then ring/cabinet collided.)
+id = 24
+name = "kitchen_metaconcept"
+
+# --- Single Instance Configuration ---
+configFile = ""
+domain = 0
+tree = false
+graph = false
+2d = false
+3d = false
+
+[Presence]
+# room_concept supplies the room frame the members live under, robot_concept the localization.
+# cabinet_concept produces the member nodes we read — deliberately OPTIONAL, so this agent reaches
+# Operating and reports an honest empty poll when no kitchen is up, rather than blocking on it.
+required_agent_names = ["robot_concept", "room_concept"]
+config_dir = "etc"
+monitor_period_ms = 500
+heartbeat_timeout_ms = 3000
+rejoin_grace_ms = 1500
+stale_grace_ms = 120000
+agent_info_period_ms = 1000
+
+[Owns]
+nodes = ["kitchen_metaconcept 24"]
+
+[Period]
+Compute = 200
+Emergency = 500
+
+[Component.Debug]
+Verbose = false
+
+[KitchenMetaconcept]
+# Schema = rectilinear. The graph-reader polls the generic "object" nodes each cycle and filters by
+# CLASS (object_subtype, else the node NAME prefix) — since the object-type migration there is no
+# "cabinet" DSR node type to poll.
+#
+# ★MILESTONE 2: this agent is READ-ONLY. It fits the frame and writes CSV; it creates no node, no
+# group_member edge, and pushes no prior. Nothing it does can move a cabinet yet.
+# ── CANDIDATE member classes and their membership evidence ──────────────────────────────────
+# Parallel arrays: MemberClasses[i] carries MemberClassLogOdds[i] =
+#     log[ P(class | this is a kitchen unit) / P(class | it is not) ]
+# This is a LIKELIHOOD RATIO, not a set test: an unexpected class is DOWN-weighted, never excluded,
+# so a surprising object that fits the kitchen geometry perfectly can still join.
+#
+# ★AUTHORED priors — elicited, not measured. Legitimate for a prior (unlike a threshold), but they
+# should be replaced by counts from a labelled scene corpus when one exists.
+#
+# ★★A STRONG prior on a class is not free: it also makes a badly-fitting member of that class much
+# more damaging (its clutter floor is log(1−w), which falls from −1.77 nats at +0.2 to −3.91 at +2.5).
+# Only give a class a large value if you are prepared for a poor fit of it to argue hard against the
+# whole frame. This is what pinned the first live run at the −8 clamp.
+#
+# ★PRODUCER STATUS as of 2026-08-10 — only TWO of these currently reach the graph as objects:
+#     cabinet       ✓ cabinet_concept
+#     refrigerator  ✓ refrigerator_concept
+#     counter       ✗ no node — cabinet_concept CONSUMES counter/countertop masks as run evidence
+#     hood          ✗ no node, but voxelizer's ADE20K set already accepts the "hood" label
+#     microwave     ✗ no node, but voxelizer's YOLO set already has "microwave"
+# The strongly diagnostic classes are exactly the missing ones, so this channel is weak TODAY and
+# gets much stronger the moment a producer promotes hood/counter/microwave into graph objects.
+# ★No "island" entry (2026-08-10): the apartment has none. What cabinet_concept names `cabinet_island`
+# is an elongated cabinet attached to a wall by its NARROW side — a peninsula, whose chart axis is the
+# wall normal and therefore already on the same 90° grid. Genuine islands are deferred.
+MemberClasses      = ["cabinet", "refrigerator", "counter", "countertop", "hood", "microwave", "chest of drawers"]
+MemberClassLogOdds = [0.2,        2.0,            2.5,       2.5,          3.0,    1.5,         -0.5]
+# ★TIER per class — the STRONGEST use of the subtype channel, much more than the membership prior
+# above. The class does not just say "kitchen-ish", it says WHICH shared quantities apply:
+#   base — floor to worktop: shares the WORKTOP PLANE and the base depth (~0.60)
+#   tall — floor to ~1.9 (fridge, larder, oven column): NO worktop, own depth (~0.65)
+#   wall — mounted ~1.45..2.1 (upper units, hood): NO worktop, own depth (~0.35)
+#   auto — resolved from geometry (a plain "cabinet" can be any of the three)
+# Getting this wrong is what made the live refrigerator read membership 0.00: floor-standing was
+# taken as "base", so its 1.85 m top was scored against a 0.90 m worktop plane.
+MemberClassTiers   = ["auto",    "tall",         "base",    "base",       "wall", "auto",      "auto"]
+# cabinet          +0.2  bathrooms, bedrooms and hallways have cabinets too — nearly uninformative
+# refrigerator     +2.0  occasionally a garage or utility room
+# counter          +2.5  a worktop run is kitchen-specific in a dwelling
+# hood             +3.0  a range hood essentially only occurs over a hob
+# microwave        +1.5  common in offices and break rooms as well
+# chest of drawers -0.5  more often a bedroom; actively argues AGAINST membership
+NodeSubtype = "kitchen"         # object_subtype for the node this agent will own (M3+)
+NodePrefix = "kitchen_"         # owned-node NAME prefix — the stale-sweep / cleanup key
+LogPeriodFrames = 25            # per-cycle stdout log throttle for the graph-reader
+CsvPath = "etc/kitchen_members.csv"   # per-member snapshot (pose + published Σ); "" disables
+FitCsvPath = "etc/kitchen_fit.csv"    # frame fit + the down-prior it WOULD publish; "" disables
+
+# ── Rectilinear-frame belief ────────────────────────────────────────────────────────────────
+# Intrinsic spread of "kitchen units share one axis / worktop / depth". These are TENDENCIES, not
+# laws — a genuinely skewed unit still belongs to the kitchen. Each is added in quadrature to the
+# geometric propagation and is what BOUNDS how hard the frame can ever push a member (κ = p/var).
+# Widen them if the frame is over-steering; they are model spread, not confidence knobs.
+AxisModelStdDeg = 1.5           # spread of member yaw about the shared axis (live grid: 0.28°/89.0°/89.6°)
+WorktopModelStdM = 0.02         # spread of base-unit worktop heights about one plane
+DepthModelStdM = 0.03           # spread of carcass depths about one nominal
+
+# ── ESTIMATION noise of a member's own size, at 1 m of run length (scaled by 1/length) ───────
+# A DIFFERENT quantity from the model spread above: that is how much real kitchens vary, this is how
+# well cabinet_concept currently KNOWS each value. Live, two runs of the SAME kitchen reported
+# worktops of 0.758 and 0.896 m — 14 cm apart, which a 2 cm model spread calls a 7σ contradiction and
+# which drives every member onto the clutter column and the frame evidence to the -8 clamp.
+# ⚠STAND-IN: cabinet_concept publishes a POSE covariance only, though its belief HAS the real numbers
+# (S(4,4) for z1, S(2,2) for depth). Publishing those needs new cortex attributes; when they exist,
+# DELETE these two keys rather than tuning them.
+WorktopMeasStdM = 0.06
+DepthMeasStdM = 0.05
+
+# Prior mass on "this cabinet belongs to no kitchen frame" — the clutter escape valve that lets a
+# bathroom vanity or a mis-fit run sit out of the fit instead of dragging the axis. Never 0.
+ClutterFrac = 0.20
+# Low-pass rate for the frame-vs-independent-units evidence. NOT an accumulator: static furniture
+# re-observed 500 times is ONE observation. (Summing pinned ring_metaconcept's p at ~1 on cycle 1.)
+EvidenceEmaAlpha = 0.05
+
+# ★EVIDENCE SOURCE for the shared AXIS: wall-anchored runs only (a member whose published yaw σ is at
+# or below the polygon's chart tolerance). Those inherit their yaw from the room polygon, so they can
+# never adopt a prior this agent pushes — which makes the leave-one-out down-date STRUCTURAL rather
+# than bolted on. See SCHEMA_GENERALITY_TODO.md §2.5 for the self-confirmation trap this avoids.
+AxisFromPinnedOnly = true
+# A member's published yaw σ (deg) at or below this is treated as polygon-pinned. Matches the 3°
+# collinear-merge tolerance cabinet_concept publishes for wall-anchored runs.
+PinnedYawStdMaxDeg = 3.5
+
+[Ice]
+Warn.Connections = "0"
+Trace.Network = "0"
+Trace.Protocol = "0"
+MessageSizeMax = "20004800"

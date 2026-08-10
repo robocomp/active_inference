@@ -8,6 +8,7 @@
  */
 
 #include "specificworker.h"
+#include "../../common/diag_log/rotating_csv.h"   // keep the previous run instead of wiping it
 #include "cabinet_geometry.h"        // rc::geom::footprint_overlap_ratio, point_in_footprint
 #include "cabinet_residual_birth.h"  // rc::find_residual_birth (residual-cluster → new-run seed)
 #include "cabinet_lshape_split.h"    // rc::lshape_split (L-corner mask → two arms)
@@ -315,6 +316,7 @@ void SpecificWorker::run_kitchen_model()
 
     const auto& pkt = mask_ingestor_->packet();                    // ZED-depth run masks (base + upper labels)
     std::vector<Eigen::Vector3f> pts, island_pts;                  // wall-run points vs free-standing island points
+    std::vector<std::uint8_t>    pt_labels;                        // 0 = carcass mask, 1 = worktop mask
     double radius_wsum = 0.0, dotd_wsum = 0.0, w_sum = 0.0;         // point-weighted mean off-centring + mask motion
     if (pkt.valid)
         for (const auto& sl : pkt.slices)
@@ -329,8 +331,17 @@ void SpecificWorker::run_kitchen_model()
             radius_wsum += static_cast<double>(sl.centroid_radius)     * wn;
             dotd_wsum   += static_cast<double>(std::abs(sl.motion_dotd)) * wn;
             w_sum       += wn;
+            // Keep WHICH mask each point came from. The run pool deliberately mixes carcass and
+            // worktop labels (a counter is evidence for the run beneath it), but a countertop mask can
+            // also take in the overhang and whatever stands on it — so when a run fits an impossible
+            // depth, the label of the far points is the thing that identifies the culprit.
+            const bool worktop_label = sl.label == "counter" or sl.label == "countertop";
             std::vector<Eigen::Vector3f>& dst = is_island ? island_pts : pts;
-            for (std::size_t k = b; k < e; k += 2) dst.push_back(pkt.support_points[k]);
+            for (std::size_t k = b; k < e; k += 2)
+            {
+                dst.push_back(pkt.support_points[k]);
+                if (not is_island) pt_labels.push_back(worktop_label ? 1 : 0);
+            }
         }
 
     // STILLNESS / VOR gate (be still to UPDATE, else CONFIRM) — ALIGNED with chair_concept. The frame's authority
@@ -384,12 +395,60 @@ void SpecificWorker::run_kitchen_model()
         }
     }
 
+    // ── DO THE MASK POINTS AGREE WITH THE LiDAR? ────────────────────────────────────────────────
+    // Every fit today has been faithful to its points, and the points keep being wrong the same way:
+    // a run built from countertop masks reached 0.91 m off the wall, and the peninsula's box sits
+    // where ~6x more LiDAR beams pass through than stop. Both are what over-reading depth looks like.
+    // This measures it directly: bin the sweep by azimuth, take the NEAREST return per bin (the first
+    // surface along that ray), and compare each mask point's range from the same origin. A positive
+    // median means the masks de-project BEYOND the surface the LiDAR sees — points in mid-air.
+    // One number per cycle; costs a pass over the sweep and the points.
+    float mask_lidar_dr = 0.0f;
+    int   mask_lidar_n  = 0;
+    if (sweep_n > 0 and not pts.empty())
+    {
+        // ★Match HEIGHT as well as bearing. A first version binned by azimuth alone and compared each
+        // mask point against the nearest return in that direction — which is usually the floor a metre
+        // from the robot, not the cabinet. It produced a rock-steady +2.09 m that measured the gap to
+        // the floor, not any depth error. A surface comparison has to be against the surface.
+        constexpr int   kBins  = 720;                      // 0.5 deg in azimuth
+        constexpr float kTwoPi = 2.0f * std::numbers::pi_v<float>;
+        constexpr float kDz    = 0.15f;                    // same-surface height window (m)
+        const Eigen::Vector3f org = tmpl.lidar_freespace.origin;
+        const auto bin_of = [&](const Eigen::Vector3f& v)
+        { return std::clamp(static_cast<int>((std::atan2(v.y(), v.x()) + std::numbers::pi_v<float>)
+                                             / kTwoPi * kBins), 0, kBins - 1); };
+        std::vector<std::vector<std::pair<float, float>>> ret(kBins);   // (range, z) per azimuth bin
+        for (const auto& e : tmpl.lidar_freespace.endpoints)
+        {
+            const Eigen::Vector3f v = e - org;
+            ret[static_cast<std::size_t>(bin_of(v))].emplace_back(v.head<2>().norm(), e.z());
+        }
+        std::vector<float> dr;
+        dr.reserve(pts.size());
+        for (const auto& p : pts)
+        {
+            const Eigen::Vector3f v = p - org;
+            float nearest = -1.0f;
+            for (const auto& [r, z] : ret[static_cast<std::size_t>(bin_of(v))])
+                if (std::abs(z - p.z()) < kDz and (nearest < 0.0f or r < nearest)) nearest = r;
+            if (nearest < 0.0f) continue;                  // nothing at this bearing AND height
+            dr.push_back(v.head<2>().norm() - nearest);
+        }
+        if (not dr.empty())
+        {
+            std::ranges::nth_element(dr, dr.begin() + static_cast<long>(dr.size() / 2));
+            mask_lidar_dr = dr[dr.size() / 2];              // MEDIAN: robust to the tail of stray points
+            mask_lidar_n  = static_cast<int>(dr.size());
+        }
+    }
+
     static int mdbg = 0;
     kitchen_mgr_.set_corner_fill_log(cfg_.verbose_log and (mdbg % 30) == 29);   // corner-fill state dump (verbose only)
-    kitchen_mgr_.update(pts, mp, tmpl);
+    kitchen_mgr_.update(pts, mp, tmpl, &pt_labels);
     kitchen_mgr_.update_island(island_pts, mp, tmpl);              // the free-standing 4th cabinet (peninsula)
     publish_kitchen_boxes();
-    log_kitchen_cells(sweep_n);   // per-cycle cell CSV (the only observability the kitchen model has)
+    log_kitchen_cells(sweep_n, mask_lidar_dr, mask_lidar_n);   // per-cycle cell CSV
 
     if (++mdbg % 30 == 0)                                           // low-rate stillness diagnostic
         std::print("cabinet_concept: [kitchen] ego_lin={:.2f} ego_ang={:.2f} dotd={:.2f} radius={:.2f} periph={:.2f} sweep={} objs={} → pos_var={:.4f}\n",
@@ -423,8 +482,13 @@ void SpecificWorker::publish_kitchen_boxes()
         auto it = kitchen_nodes_.find(b.id);
         if (it == kitchen_nodes_.end())
         {
+            // ★Name it for what it IS. Only the mask label sends a run down the island path; the
+            // geometry decides whether it is free-standing or a PENINSULA (short side against a
+            // wall — which is what the apartment actually has). Calling a wall-attached cabinet an
+            // "island" misdescribes it in the graph and hides which branch of derive_island_chart
+            // fired, so the name now carries the answer.
             const std::string name = (b.wall_seg_id < 0)
-                ? std::string("cabinet_island")
+                ? (b.anchored ? std::string("cabinet_peninsula") : std::string("cabinet_island"))
                 : "cabinet_w" + std::to_string(b.wall_seg_id) + (b.tier == 0 ? "_base" : "_up");
             DSR::Node node = DSR::Node::create<object_node_type>(name);
             // Display asset for the voxelizer 3D viewer (relative to its meshes/ root); the viewer loads &
@@ -573,15 +637,20 @@ void SpecificWorker::write_kitchen_rt_covariance(std::uint64_t room_id, std::uin
 // cycle (existence ≠ 0 / routed points), so an idle 30-cell table costs nothing. Columns: the derived room box,
 // the two birth signals (existence log-odds, coverage EMA), and the LiDAR absence evidence that drives
 // retirement (ex_n = beams that probed it; 0 ⇒ HOLD). Off unless cfg_.kitchen_cells_csv_path is set.
-void SpecificWorker::log_kitchen_cells(std::size_t sweep_n)
+void SpecificWorker::log_kitchen_cells(std::size_t sweep_n, float mask_lidar_dr, int mask_lidar_n)
 {
     if (cfg_.kitchen_cells_csv_path.empty()) return;
     if (not kitchen_cells_csv_.is_open())
     {
-        kitchen_cells_csv_.open(cfg_.kitchen_cells_csv_path, std::ios::out | std::ios::trunc);
-        if (not kitchen_cells_csv_.is_open()) { cfg_.kitchen_cells_csv_path.clear(); return; }
-        kitchen_cells_csv_ << "cycle,cell,wall_seg,tier,active,node_id,existence,cov_ema,n_route,sweep_n,"
-                              "cx,cy,yaw,L,d,z0,z1,fe,ex_n,ex_occ,ex_free,ex_dL,retire_streak\n";
+        // ROTATE, do not truncate: an intermittent fault is usually chased AFTER the restart it
+        // provoked, and truncating loses exactly the run worth reading.
+        if (not rc::diag::open_rotating(kitchen_cells_csv_, cfg_.kitchen_cells_csv_path,
+                "cycle,cell,wall_seg,tier,active,node_id,existence,cov_ema,n_route,sweep_n,"
+                "cx,cy,yaw,L,d,z0,z1,fe,ex_n,ex_occ,ex_free,ex_dL,retire_streak,"
+                "std_d,std_z1,lat_min,lat_mean,lat_max,span,"
+                "n_carcass,latmax_carcass,n_counter,latmax_counter,t0,t1,n_far,far_t_min,far_t_max,"
+                "anchored,attach_seg,wall_gap,mask_lidar_dr,mask_lidar_n\n"))
+        { cfg_.kitchen_cells_csv_path.clear(); return; }
     }
     const long cyc = ++kitchen_cells_cycle_;
     const auto row = [&](const std::string& id, int seg, int tier, bool active, std::uint64_t node_id,
@@ -594,7 +663,24 @@ void SpecificWorker::log_kitchen_cells(std::size_t sweep_n)
                            << node_id << ',' << existence << ',' << cov_ema << ',' << dg.n_route << ',' << sweep_n << ','
                            << cx << ',' << cy << ',' << yaw << ',' << L << ',' << d << ',' << z0 << ',' << z1 << ','
                            << fe << ',' << dg.ex_n << ',' << dg.ex_occ << ',' << dg.ex_free << ',' << dg.ex_dL << ','
-                           << dg.retire_streak << '\n';
+                           << dg.retire_streak << ','
+                           // ── the belief's OWN uncertainty: how fast it locks on ──────────────
+                           // Measured 2026-08-10: a run reaches its final depth by frame ~19 and then
+                           // moves 2 mm in 730 cycles. Without sigma in the log you cannot see whether
+                           // that is the belief becoming certain or the data simply agreeing.
+                           << (b ? std::sqrt(std::max(0.0f, b->covariance()(2, 2))) : 0.0f) << ','
+                           << (b ? std::sqrt(std::max(0.0f, b->covariance()(4, 4))) : 0.0f) << ','
+                           // ── what the routed points actually said (see KitchenCellDiag) ─────
+                           << dg.lat_min << ',' << dg.lat_mean << ',' << dg.lat_max << ',' << dg.span << ','
+                           // which mask label put points where — the far points identify the culprit
+                           << dg.n_carcass << ',' << dg.latmax_carcass << ','
+                           << dg.n_counter << ',' << dg.latmax_counter << ','
+                           // the run's own interval, so far_t_* can be read against it directly
+                           << (b ? b->state().t0 : 0.0f) << ',' << (b ? b->state().t1 : 0.0f) << ','
+                           << dg.n_far << ',' << dg.far_t_min << ',' << dg.far_t_max << ','
+                           // ── island/peninsula chart provenance (island row only) ────────────
+                           << (dg.anchored ? 1 : 0) << ',' << dg.attach_seg << ',' << dg.wall_gap << ','
+                           << mask_lidar_dr << ',' << mask_lidar_n << '\n';
     };
     for (const auto& c : kitchen_mgr_.cells())
     {
@@ -607,7 +693,8 @@ void SpecificWorker::log_kitchen_cells(std::size_t sweep_n)
     {
         const auto it = kitchen_nodes_.find("island");
         row("island", -1, 0, isl != nullptr, it != kitchen_nodes_.end() ? it->second : 0,
-            kitchen_mgr_.island_existence(), 0.0f, kitchen_mgr_.island_diag(), isl, 0.0f);
+            kitchen_mgr_.island_existence(), kitchen_mgr_.island_cov_ema(),
+            kitchen_mgr_.island_diag(), isl, 0.0f);
     }
     kitchen_cells_csv_.flush();
 }

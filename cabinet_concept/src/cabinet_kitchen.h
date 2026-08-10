@@ -81,6 +81,47 @@ struct KitchenCellDiag
     float ex_dL  = 0.0f;                       // the log-odds delta it integrated (0 ⇒ HOLD)
     int   ex_n   = 0;                          // beams that reached the box (0 ⇒ not probed ⇒ HOLD)
     int   retire_streak = 0;                   // consecutive evidence cycles the removal decision has held
+
+    // ── WHAT THE ROUTED POINTS ACTUALLY SAY (added 2026-08-10) ──────────────────────────────────
+    // The count alone cannot tell us whether a wrong depth came from a wrong FIT or from points that
+    // genuinely sit there. These are the distribution of the routed points along the DEPTH axis (the
+    // same coordinate the belief calls `d`), so a row can be read directly:
+    //   d ≈ lat_max and lat_max ≈ 0.9  ⇒ the fit is right and the MASK/ROUTING is wrong
+    //   d ≈ 0.9 but lat_max ≈ 0.6      ⇒ the points are fine and the FIT ran away
+    // Without this the two are indistinguishable in the log, which is why the 90 cm run could not be
+    // diagnosed from the previous one.
+    float lat_min = 0.0f, lat_mean = 0.0f, lat_max = 0.0f;   // off-wall distance of routed points (m)
+    float span    = 0.0f;                                    // along-wall extent of routed points (m)
+
+    // ── WHICH MASK LABEL put points where (added 2026-08-10) ────────────────────────────────────
+    // A run is fed from one pool that mixes `cabinet`/`chest of drawers` with `counter`/`countertop`.
+    // Live, one base run fitted d=0.89 with points reaching 0.92 m off the wall — the fit is faithful,
+    // so the question is purely which label those far points carry. A countertop mask can easily take
+    // in the overhang plus whatever is standing on it; a carcass mask cannot. Splitting the count AND
+    // the reach by label answers that directly instead of by elimination.
+    int   n_carcass = 0, n_counter = 0;          // routed points by label group
+    float latmax_carcass = 0.0f, latmax_counter = 0.0f;   // how far each group reaches (m)
+
+    // ── WHERE ALONG THE RUN the too-deep points sit (added 2026-08-10) ──────────────────────────
+    // A run's depth is ONE number, so a normal 0.6 m run that abuts something bigger at one end has
+    // to swallow the intruder and comes out deep everywhere. `lat_max` cannot tell those apart. This
+    // does: "far" = beyond the tier's own nominal depth (the routing box), and if those points are
+    // CLUSTERED at one along-wall position, a distinct object is being absorbed at that spot; if they
+    // are SPREAD across the run, the wall really does carry something that deep along its length.
+    // ★Live motive: one run's carcass reach sat at 0.903-0.914 across 6744 cycles — pinned at the
+    // router's measured 0.91 m acceptance limit, i.e. a truncation, not an object edge.
+    int   n_far = 0;                              // routed points beyond the tier's nominal depth
+    float far_t_min = 0.0f, far_t_max = 0.0f;     // their along-wall span, same frame as t0/t1
+
+    // ── ISLAND / PENINSULA chart provenance (island row only) ───────────────────────────────────
+    // ★The "island" in this apartment is NOT free-standing: it is a cabinet whose SHORT side is
+    // against a wall. derive_island_chart has a peninsula branch for exactly that (axis = the wall's
+    // inward normal, near end anchored to the wall), and a PCA fallback for a genuinely free unit.
+    // Which one fired decides whether the run lands on the kitchen grid or at an arbitrary angle —
+    // and it was never logged, so we could only infer it from the resulting yaw.
+    int   attach_seg = -1;      // wall segment the peninsula anchored to; -1 = PCA fallback fired
+    float wall_gap   = -1.0f;   // closest approach of its points to that wall (m); -1 = not measured
+    bool  anchored   = false;   // true = peninsula (wall-derived axis), false = free-standing PCA
 };
 
 struct KitchenCellRun
@@ -110,9 +151,21 @@ struct KitchenBox   // an active cell's derived room-frame box (for DSR publishi
     // run above a barely-glimpsed one without any confidence gate. Before this, the kitchen path
     // wrote pose with NO covariance while the classic path wrote one, so every kitchen run looked
     // equally (un)certain.
+    // True when this run's chart axis came from a WALL (the peninsula branch), false for a genuinely
+    // free-standing unit fitted by PCA. ★The apartment's "island" is the former: a cabinet with its
+    // SHORT side against a wall. Only the mask LABEL ("kitchen island", an ADE20K class) sends it
+    // down the island path; its geometry is wall-attached, and the distinction changes both how much
+    // its yaw should be trusted and what the node should honestly be called.
+    bool  anchored = false;
     float cov_xx = 0.0f, cov_yy = 0.0f, cov_xy = 0.0f;   // footprint-centre covariance (m²)
     float var_z   = 0.0f;                                // variance of z0 = the RT translation z (m²)
     float var_yaw = 0.0f;                                // chart-axis direction variance (rad²)
+    // Marginal variances of the three SIZE attributes this run publishes (width_m, depth_m, height_m),
+    // m². The other half of what a consumer needs: rt_covariance says how well we know WHERE the run
+    // is, this says how well we know HOW BIG it is. A level-2 agent fitting a shared worktop plane has
+    // to weight members by exactly this, or it falls back to a proxy like run length — and a long run
+    // can still be badly fitted.
+    float var_width = 0.0f, var_depth = 0.0f, var_height = 0.0f;
 };
 
 class KitchenManager
@@ -145,7 +198,10 @@ public:
     // One cycle: soft-route the points, update existence, activate/retire cells, and fit each active cell.
     // `frame_template` carries the shared per-frame terms (chain cov, ego-motion common-mode, lidar_freespace);
     // its points are IGNORED here (we inject per-cell routed points).
-    void update(const std::vector<Eigen::Vector3f>& pts, const KitchenManagerParams& mp, const CabinetFrame& frame_template)
+    // `labels` (optional, parallel to pts): 0 = carcass mask (cabinet / chest of drawers),
+    // 1 = worktop mask (counter / countertop). Diagnostics only — routing and fitting are unchanged.
+    void update(const std::vector<Eigen::Vector3f>& pts, const KitchenManagerParams& mp,
+                const CabinetFrame& frame_template, const std::vector<std::uint8_t>* labels = nullptr)
     {
         if (cells_.empty()) return;
         const std::size_t K = cells_.size();
@@ -157,8 +213,12 @@ public:
         const float iz2 = 1.0f / std::max(1e-6f, mp.sigma_z   * mp.sigma_z);
         const float baseR = bp_.sigma_base_m * bp_.sigma_base_m;
         std::vector<double> w(K);
-        for (const auto& p : pts)
+        std::vector<int>   lab_n[2];   // [0] carcass, [1] counter — per-cell routed counts
+        std::vector<float> lab_far[2];
+        for (int g = 0; g < 2; ++g) { lab_n[g].assign(K, 0); lab_far[g].assign(K, 0.0f); }
+        for (std::size_t pi = 0; pi < pts.size(); ++pi)
         {
+            const auto& p = pts[pi];
             double sum = mp.clutter, wbest = mp.clutter;
             int kbest = -1;
             for (std::size_t k = 0; k < K; ++k)
@@ -184,6 +244,15 @@ public:
             cell_mass[kbest] += r;
             cpts[kbest].push_back(p);
             cR[kbest].push_back(baseR / static_cast<float>(std::max(0.05, r)));
+            // Attribute this point to its mask label, and record how far out that label reached.
+            {
+                const int g = (labels and pi < labels->size() and (*labels)[pi] == 1) ? 1 : 0;
+                const auto& cg = cells_[static_cast<std::size_t>(kbest)].geom;
+                const float lat = (Eigen::Vector2f(p.x(), p.y()) - cg.a).dot(cg.n);
+                ++lab_n[g][static_cast<std::size_t>(kbest)];
+                float& far = lab_far[g][static_cast<std::size_t>(kbest)];
+                if (lab_n[g][static_cast<std::size_t>(kbest)] == 1 or lat > far) far = lat;
+            }
         }
 
         for (std::size_t k = 0; k < K; ++k)
@@ -199,6 +268,32 @@ public:
               tmn = std::min(tmn, t); tmx = std::max(tmx, t); }
             const float span = (cpts[k].size() >= 2) ? (tmx - tmn) : 0.0f;
             const float cov  = std::clamp(span / mp.coverage_ref_m, 0.0f, 1.0f);
+            // Depth-axis distribution of exactly the points this cell will be fitted to.
+            c.diag.span = span;
+            c.diag.n_carcass = lab_n[0][k];  c.diag.latmax_carcass = lab_far[0][k];
+            c.diag.n_counter = lab_n[1][k];  c.diag.latmax_counter = lab_far[1][k];
+            // Along-wall position of the points that lie beyond a nominal carcass for this tier.
+            c.diag.n_far = 0; c.diag.far_t_min = 0.0f; c.diag.far_t_max = 0.0f;
+            for (const auto& p : cpts[k])
+            {
+                const Eigen::Vector2f q(p.x(), p.y());
+                if ((q - c.geom.a).dot(c.geom.n) <= c.geom.depth) continue;   // within a normal carcass
+                const float tf = (q - c.geom.a).dot(c.geom.u);
+                if (c.diag.n_far == 0) { c.diag.far_t_min = c.diag.far_t_max = tf; }
+                else { c.diag.far_t_min = std::min(c.diag.far_t_min, tf);
+                       c.diag.far_t_max = std::max(c.diag.far_t_max, tf); }
+                ++c.diag.n_far;
+            }
+            c.diag.lat_min = c.diag.lat_mean = c.diag.lat_max = 0.0f;
+            if (not cpts[k].empty())
+            {
+                float lmn = 1e9f, lmx = -1e9f; double lsum = 0.0;
+                for (const auto& p : cpts[k])
+                { const float lat = (Eigen::Vector2f(p.x(), p.y()) - c.geom.a).dot(c.geom.n);
+                  lmn = std::min(lmn, lat); lmx = std::max(lmx, lat); lsum += lat; }
+                c.diag.lat_min = lmn; c.diag.lat_max = lmx;
+                c.diag.lat_mean = static_cast<float>(lsum / static_cast<double>(cpts[k].size()));
+            }
 
             // TWO decoupled signals. (1) PRESENCE (existence log-odds): is there mask mass on this cell at all —
             // a simple present/absent debounce. (2) COVERAGE QUALITY (cov_ema): is that mass an EXTENDED run or a
@@ -378,7 +473,7 @@ public:
         }
         WallChart ch; bool anchored = island_anchored_;
         if (island_belief_) ch = island_chart_;    // frozen chart once born
-        else if (not derive_island_chart(pts, ch, anchored)) return;
+        else if (not derive_island_chart(pts, ch, anchored, &island_diag_.attach_seg, &island_diag_.wall_gap)) return;
 
         float tmn = 1e9f, tmx = -1e9f, smn = 1e9f, smx = -1e9f, t, s;
         for (const auto& p : pts) { ch.to_wall(p, t, s);
@@ -411,6 +506,28 @@ public:
             CabinetFrame f = frame_template;
             f.points = pts; f.R.assign(pts.size(), bp_.sigma_base_m * bp_.sigma_base_m);
             island_belief_->update(f);
+            island_diag_.anchored = island_anchored_;
+            // Depth-axis spread of the island's own points, same reading as a wall cell's.
+            {
+                float t, sv, lmn = 1e9f, lmx = -1e9f, tmn2 = 1e9f, tmx2 = -1e9f; double lsum = 0.0;
+                for (const auto& p : pts) { island_belief_->chart().to_wall(p, t, sv);
+                    lmn = std::min(lmn, sv); lmx = std::max(lmx, sv); lsum += sv;
+                    tmn2 = std::min(tmn2, t); tmx2 = std::max(tmx2, t); }
+                island_diag_.lat_min = lmn; island_diag_.lat_max = lmx;
+                island_diag_.lat_mean = static_cast<float>(lsum / static_cast<double>(pts.size()));
+                island_diag_.span = tmx2 - tmn2;
+                // Same reading for the free-standing run, against the base tier's nominal depth.
+                island_diag_.n_far = 0; island_diag_.far_t_min = 0.0f; island_diag_.far_t_max = 0.0f;
+                for (const auto& p : pts)
+                {
+                    island_belief_->chart().to_wall(p, t, sv);
+                    if (sv <= base_tier_prior_.d_mean) continue;
+                    if (island_diag_.n_far == 0) { island_diag_.far_t_min = island_diag_.far_t_max = t; }
+                    else { island_diag_.far_t_min = std::min(island_diag_.far_t_min, t);
+                           island_diag_.far_t_max = std::max(island_diag_.far_t_max, t); }
+                    ++island_diag_.n_far;
+                }
+            }
             // Re-measure how well THIS cycle's points pin the frozen chart's axis. Held across look-away
             // (it is a property of the chart + the evidence that produced it, not of the current frame).
             island_yaw_var_ = derived_chart_yaw_var(pts, island_belief_->chart(), bp_.sigma_base_m);
@@ -432,11 +549,16 @@ public:
         if (island_belief_)                        // the free-standing 4th cabinet (wall_seg_id = -1 ⇒ named _island)
         {
             KitchenBox b; b.id = "island"; b.wall_seg_id = -1; b.tier = 0; b.existence = island_exist_;
+            b.anchored = island_anchored_;
             island_belief_->room_box(b.cx, b.cy, b.yaw, b.L, b.d, b.z0, b.z1);
-            // ★The island's axis was derived from its OWN points, so it reports the MEASURED variance —
-            // typically far looser than a wall cell's. A consumer that fits a shared kitchen axis must be
-            // able to see that difference, or it would weight a self-derived axis like a polygon-pinned one.
-            fill_box_covariance(*island_belief_, island_yaw_var_, b);
+            // ★If the PENINSULA branch fired, this run's axis is a WALL's inward normal — polygon-derived
+            // exactly like a wall cell's, so it deserves the same trust, and reporting the PCA misalignment
+            // instead would make the metaconcept distrust an axis that is in fact pinned. Take the WORSE of
+            // the two: a peninsula anchored to the WRONG wall still shows its measured disagreement.
+            // A genuinely free-standing unit keeps the measured value alone.
+            fill_box_covariance(*island_belief_,
+                                island_anchored_ ? std::max(kWallChartYawVar, island_yaw_var_)
+                                                 : island_yaw_var_, b);
             out.push_back(b);
         }
         return out;
@@ -447,6 +569,9 @@ public:
     // so the dashboard needs a direct handle to give it a belief card. Null until activated.
     const WallRunBelief* island()          const { return island_belief_.get(); }
     float                island_existence() const { return island_exist_; }
+    // ★Was hard-coded to 0 in the CSV writer, hiding one of the island's own birth gates — awkward
+    // precisely when birth is what is being debugged.
+    float                island_cov_ema()   const { return island_cov_ema_; }
 
     static bool self_test();
 
@@ -521,6 +646,16 @@ private:
         box.cov_xy = var_tc * u.x() * u.y() + var_hd * n.x() * n.y() + cov_th * (u.x() * n.y() + n.x() * u.y());
         box.var_z   = std::max(0.0f, S(3, 3));   // the RT edge's translation z IS z0 (publish_kitchen_boxes)
         box.var_yaw = yaw_var;
+        // SIZE marginals, from the SAME Σ over θ=[t0,t1,d,z0,z1]:
+        //   width  = t1 − t0  ⇒ var = S00 + S11 − 2·S01
+        //   depth  = d        ⇒ var = S22
+        //   height = z1 − z0  ⇒ var = S33 + S44 − 2·S34
+        // The two differences carry their cross-terms explicitly: the ends of a run are strongly
+        // correlated (the whole interval slides together), so dropping S01/S34 would over-state the
+        // extent uncertainty by roughly a factor of two.
+        box.var_width  = std::max(0.0f, S(0, 0) + S(1, 1) - 2.0f * S(0, 1));
+        box.var_depth  = std::max(0.0f, S(2, 2));
+        box.var_height = std::max(0.0f, S(3, 3) + S(4, 4) - 2.0f * S(3, 4));
     }
 
     // Absence confidence vs range: beams get sparse with distance, so a far pass-through is weak evidence of
@@ -567,8 +702,11 @@ private:
     // attached wall's inward normal (into the room), n = the wall direction, origin ON the wall (t=0 at the wall),
     // and the near end is ANCHORED to the wall (anchored=true ⇒ t0→0). Falls back to free-standing PCA if the
     // points are not adjacent to any wall. False if too few / degenerate.
-    bool derive_island_chart(const std::vector<Eigen::Vector3f>& pts, WallChart& ch, bool& anchored) const
+    bool derive_island_chart(const std::vector<Eigen::Vector3f>& pts, WallChart& ch, bool& anchored,
+                             int* out_seg = nullptr, float* out_gap = nullptr) const
     {
+        if (out_seg) *out_seg = -1;
+        if (out_gap) *out_gap = -1.0f;
         if (pts.size() < 8) return false;
         // 1) Attached-peninsula: the wall some point comes within ~25 cm of (inward side, within the wall span).
         int best = -1; float bestd = 0.25f;
@@ -586,6 +724,7 @@ private:
                 mind = std::min(mind, std::abs(s));
             }
             if (mind < bestd) { bestd = mind; best = static_cast<int>(wi); }
+            if (out_gap and (*out_gap < 0.0f or mind < *out_gap)) *out_gap = mind;   // closest wall, pass or fail
         }
         if (best >= 0)                                               // PENINSULA: axis = wall normal, anchored to wall
         {
@@ -599,6 +738,7 @@ private:
             ch.W = std::max(0.4f, tmx) + 0.30f;                      // how far it may reach into the room
             ch.H_room = h_room_;
             anchored = true;
+            if (out_seg) *out_seg = w.seg_id;
             return true;
         }
         // 2) Free-standing fallback: horizontal PCA major axis, snapped to the nearest wall axis.
