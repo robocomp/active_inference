@@ -223,6 +223,27 @@ int main()
     }
 
     // ---- 2. Convergence from a perturbed start ------------------------------------------------
+    // ---- 1b. The check itself degenerates AT the optimum -------------------------------------
+    // Relative error needs a non-degenerate reference. At a converged pose the true gradient is ~0,
+    // so both the analytic b and its finite difference are float noise and their ratio is arbitrary.
+    // This is not a solver property, it is a property of the TEST, and it is why the shadow log's
+    // grad_relerr must be sampled slightly OFF the optimum rather than at it.
+    std::printf("\nWhere the gradient check is valid (same Jacobians, three sample points)\n");
+    for (const auto& [name, off] : std::vector<std::pair<const char*, Eigen::Vector3f>>{
+            {"at the optimum (DEGENERATE by construction)", {0.f, 0.f, 0.f}},
+            {"optimum + 5 mm / 2 mrad (smooth basin)",      {0.005f, 0.005f, 0.002f}},
+            {"optimum + 15 cm / 60 mrad (far)",             {0.15f, 0.15f, 0.06f}}})
+    {
+        std::vector<Eigen::Vector3f> p = truth;
+        for (auto& q : p) q += off;
+        const float err = rc::gn::gradient_check(in, p);
+        char buf[128];
+        std::snprintf(buf, sizeof buf, "rel err = %.3e", err);
+        // Only the middle sample is expected to be a valid verdict on the Jacobian.
+        const bool expect_clean = off.norm() > 1e-6f and off.norm() < 0.1f;
+        check(name, (not expect_clean) or err < 1e-2f, buf);
+    }
+
     std::printf("\nRecovery from a perturbed start (LM, max 10 iterations)\n");
     for (const auto& pert : std::vector<Eigen::Vector3f>{
             {0.02f, 0.02f, 0.01f}, {0.10f, -0.08f, 0.05f}, {0.25f, 0.20f, 0.12f}})

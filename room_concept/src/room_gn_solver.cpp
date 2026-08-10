@@ -465,6 +465,7 @@ namespace rc::gn
         // ended above L-BFGS (grad_norm still 4.6 at the stop, up to 3% worse on the objective, 1.8 cm
         // of pose). Require the improvement to stall TWICE in a row before believing it.
         int stagnant = 0;
+        float nu = 2.0f;   // Nielsen's rejection multiplier, doubling each consecutive rejection
         for (int it = 0; it < opts.max_iters; ++it)
         {
             LinearSystem sys(n);
@@ -476,15 +477,17 @@ namespace rc::gn
             if (res.grad_norm < 1e-9f) break;
 
             // Marquardt damping: scale by the diagonal so x, y and θ are damped in their own units.
+            Eigen::VectorXf diag(n);
+            for (int i = 0; i < n; ++i) diag(i) = std::max(sys.H(i, i), 1e-9f);
             Eigen::MatrixXf A = sys.H;
-            for (int i = 0; i < n; ++i) A(i, i) += lambda * std::max(sys.H(i, i), 1e-9f);
+            for (int i = 0; i < n; ++i) A(i, i) += lambda * diag(i);
 
             const Eigen::LDLT<Eigen::MatrixXf> ldlt(A);
             const Eigen::VectorXf step = ldlt.solve(-sys.b);
             if (ldlt.info() != Eigen::Success or not step.allFinite())
             {
                 ++res.rejected;
-                lambda *= opts.lambda_up;
+                lambda *= nu; nu *= 2.0f;
                 if (lambda > opts.lambda_max) break;
                 continue;
             }
@@ -493,13 +496,25 @@ namespace rc::gn
             for (int k = 0; k < idx.count(); ++k) x_try(idx.offset(k) + 2) = wrap_pi(x_try(idx.offset(k) + 2));
             const float loss_try = total_loss(fs, x_try);
 
+            // Gain ratio: how much of the reduction the LOCAL MODEL promised did we actually get.
+            // predicted = 0.5·δᵀ(λ·D·δ − b), the decrease of the damped quadratic along the step.
+            const float predicted =
+                0.5f * step.dot((lambda * diag.asDiagonal() * step).eval() - sys.b);
+            const float rho = (predicted > 0.f) ? (loss - loss_try) / predicted : -1.f;
+
             if (std::isfinite(loss_try) and loss_try < loss)
             {
                 const float rel = (loss - loss_try) / std::max(std::abs(loss), 1e-12f);
                 x = std::move(x_try);
                 res.step_norm = step.lpNorm<Eigen::Infinity>();
                 loss = loss_try;
-                lambda = std::max(lambda * opts.lambda_down, 1e-9f);
+                // Nielsen's update: shrink λ by how well the model predicted the step, instead of by a
+                // fixed factor. A fixed 0.33 overshoots into a rejection, which multiplies λ back up by
+                // 5 — the thrash that made 57% of all steps rejections in the live shadow log (and, at
+                // r=+0.79 against ms_gn, most of the runtime).
+                const float r3 = 2.0f * std::clamp(rho, 0.f, 1.f) - 1.0f;
+                lambda = std::max(lambda * std::max(1.0f / 3.0f, 1.0f - r3 * r3 * r3), 1e-9f);
+                nu = 2.0f;
                 if (res.step_norm < opts.step_tol) break;
                 stagnant = (rel < opts.loss_rel_tol) ? stagnant + 1 : 0;
                 if (stagnant >= 2) break;
@@ -507,7 +522,7 @@ namespace rc::gn
             else
             {
                 ++res.rejected;
-                lambda *= opts.lambda_up;
+                lambda *= nu; nu *= 2.0f;      // geometric back-off, so a bad region is escaped fast
                 if (lambda > opts.lambda_max) break;
             }
         }

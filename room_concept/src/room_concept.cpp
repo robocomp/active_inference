@@ -3461,18 +3461,28 @@ namespace rc
 
         // Cross-scoring: each backend's answer measured on BOTH objectives. If the GN objective and
         // compute_rfe_loss ever disagree about which pose is better, these four numbers say so.
-        // Checked at BOTH ends of the solve on purpose. The pre-solve pose can sit far from the minimum,
-        // where the polygon SDF is piecewise (a ±1e-3 probe re-assigns some points to a different wall
-        // segment) and the central difference stops being a fair reference — so a tail there is
-        // ambiguous between "bad Jacobian" and "bad finite difference". At the converged pose the
-        // objective is locally smooth, so grad_relerr_conv is the column that actually indicts the
-        // Jacobian. Only grad_relerr_conv being clean while grad_relerr is not tells us it is the probe.
+        // A RELATIVE gradient check is only meaningful in a band, and both obvious sample points miss it:
+        //   at the converged pose  — the true gradient is ~0, so the analytic b and its finite difference
+        //                            are both float noise and their ratio is arbitrary (measured 0.78
+        //                            live, and reproduced in gn_selftest, on Jacobians that are correct);
+        //   at the pre-solve pose  — can be far out, where the polygon SDF is piecewise: a ±1e-3 probe
+        //                            re-assigns points to a different wall segment and the central
+        //                            difference is no longer a fair reference (5.9e-2 in gn_selftest).
+        // The valid probe is just OFF the optimum: a real gradient, still inside the smooth basin.
+        // grad_relerr keeps the pre-solve sample for continuity; grad_relerr_basin is the column that
+        // actually indicts the Jacobian.
+        static constexpr float kProbeXY  = 0.005f;   // 5 mm
+        static constexpr float kProbeYaw = 0.002f;   // 2 mrad
         const float grad_relerr = params.gn_grad_check
             ? gn::gradient_check(in, poses_before)
             : std::numeric_limits<float>::quiet_NaN();
-        const float grad_relerr_conv = (params.gn_grad_check and r.ok)
-            ? gn::gradient_check(in, poses_gn)
-            : std::numeric_limits<float>::quiet_NaN();
+        float grad_relerr_basin = std::numeric_limits<float>::quiet_NaN();
+        if (params.gn_grad_check and r.ok)
+        {
+            auto probe = poses_gn;
+            for (auto& p : probe) p += Eigen::Vector3f(kProbeXY, kProbeXY, kProbeYaw);
+            grad_relerr_basin = gn::gradient_check(in, probe);
+        }
         const float gn_obj_at_authority = gn::evaluate(in, poses_after);
         const float gn_obj_at_gn        = r.ok ? gn::evaluate(in, poses_gn)
                                                : std::numeric_limits<float>::quiet_NaN();
@@ -3517,7 +3527,7 @@ namespace rc
                                   "iters_gn,rejected_gn,loss_gn,ms_gn,lambda_gn,grad_norm_gn,step_gn,"
                                   "dx,dy,dth,max_dxy,"
                                   "torch_obj_at_auth,gn_obj_at_auth,torch_obj_at_gn,gn_obj_at_gn,loss_init_gn,"
-                                  "grad_relerr,grad_relerr_conv\n";
+                                  "grad_relerr,grad_relerr_basin\n";
             }
         }
         if (gn_shadow_csv_.is_open())
@@ -3531,7 +3541,7 @@ namespace rc
                 << ',' << dx << ',' << dy << ',' << dth << ',' << max_dxy
                 << ',' << torch_obj_at_auth << ',' << gn_obj_at_authority
                 << ',' << torch_obj_at_gn << ',' << gn_obj_at_gn
-                << ',' << r.loss_init << ',' << grad_relerr << ',' << grad_relerr_conv << '\n';
+                << ',' << r.loss_init << ',' << grad_relerr << ',' << grad_relerr_basin << '\n';
             gn_shadow_csv_.flush();
         }
     }
