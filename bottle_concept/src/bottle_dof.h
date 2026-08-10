@@ -52,12 +52,22 @@ namespace rc
 // bottle from "honestly declares no target" into the exact "never stops asking" defect already open against
 // chair and door. Honest silence beats a demand nobody can meet.
 //
-// ★THE ONE MEASUREMENT THAT WOULD LICENSE IT: that plateau was recorded at ~1.8 m, and the robot never
-// approached. BottleModel.RangeNearM is 0.6 (full precision inside 0.6 m) and the detector envelope puts the
-// stand-off near 0.8 m, so the plateau may be a RANGE plateau rather than a floor. Read sigma_cx at the end
-// of one completed epistemic approach: if it reaches ~0.007, set sigma* = c/3 here and the affordance gains
-// a "done" for the first time. If it plateaus above, the grasp-success study is genuinely the prerequisite
-// and this comment stays.
+// ★★AND IN THIS SCENARIO THERE IS NO ARM AT ALL, which settles it more firmly than the measurement does.
+// piso.wbt instantiates `DEF shadow Shadow` and Shadow.proto contains no Kinova; the arm lives only in
+// shadow_arm.wbt / arm_base.wbt. So the clearance derivation above is CONDITIONAL ON A CONSUMER THAT IS NOT
+// PRESENT: nothing in this scene grasps, so nothing needs the bottle's centre to any precision whatever.
+// sigma* = none is not a gap awaiting a measurement here — it is the CORRECT answer, and it stays correct
+// until an arm is in the world. When one is (the arm scenes), c/3 is the number, already derived.
+//
+// ★THE UNCOMFORTABLE COROLLARY, worth stating because it is not bottle-specific: if nothing consumes the
+// bottle's pose, why does this agent bid for the robot's ATTENTION? Its epistemic planner publishes an
+// affordance with a gain that competes against door/table/refrigerator for the robot's time, computed purely
+// from its own Sigma — never from a demand. In AI2 terms expected information gain only has value relative
+// to a PREFERENCE; uncertainty about something nobody needs is not surprise worth resolving. So in an
+// arm-less scenario the bottle's gain should be ~0 and it should be a passive object: tracked when seen,
+// never asking to be visited. That is the same "never stops asking" defect logged against chair and door,
+// seen from its root rather than its symptom — the fleet allocates attention by who is most UNCERTAIN
+// instead of who MATTERS.
 //
 // CONSEQUENCE: any_sigma_star() is false, so the adequacy gap is the -1 sentinel and the inspector and belief
 // strip fall back to ½·ln det Σ, which has no meaningful zero and will not collapse when a fixation lands.
