@@ -7,6 +7,8 @@
 
 #include "hood_config.h"
 
+#include "../../common/concept_manifest/concept_manifest.h"   // rc::manifest (SHARED)
+
 #include <algorithm>
 #include <cmath>
 #include <print>
@@ -68,6 +70,36 @@ HoodConfig load_hood_config(const ConfigLoader& cfg)
     out.ai2_prior_footprint_std = getf("HoodModel.AI2PriorFootprintStd", 0.08f);
     out.ai2_prior_height_m      = getf("HoodModel.AI2PriorHeightM",      2.05f);
     out.vertical_extent_m = getf("HoodModel.VerticalExtentM", 0.50f);
+
+    // ── STAGE 2B: the manifest is AUTHORITATIVE for geometry ──────────────────────────────────────
+    // `support` states the vertical anchoring ONCE, as a fact about the object, and the span is derived
+    // from it — instead of four sites (SDF, point-admission band, NBV Target, LiDAR carve) each restating
+    // the same assumption in their own arithmetic, which is how the cloned floor-anchored box survived.
+    // Precedence is deliberate: MANIFEST first (the world fact), config.toml only as an explicit override,
+    // and the agent's own default only if neither speaks — the reverse of the order that let hood run on
+    // the refrigerator's height while two corrected files said otherwise.
+    {
+        const auto g = rc::manifest::load_geometry("../../common/concept_manifest/hood.concept.toml", "hood");
+        if (g.valid)
+        {
+            float z0 = 0.0f, z1 = 0.0f; g.z_span(z0, z1);
+            const float man_extent = z1 - z0;
+            if (not cfg.exists("HoodModel.VerticalExtentM")) out.vertical_extent_m = man_extent;
+            else if (std::abs(out.vertical_extent_m - man_extent) > 1e-3f)
+                std::print("[manifest] hood OVERRIDE VerticalExtentM: config={:.3f} manifest={:.3f} — the "
+                           "config wins, but a world fact is being contradicted; say why in the manifest\n",
+                           out.vertical_extent_m, man_extent);
+            if (not cfg.exists("HoodModel.AI2PriorHeightM")) out.ai2_prior_height_m = z1;
+            else if (std::abs(out.ai2_prior_height_m - z1) > 1e-3f)
+                std::print("[manifest] hood OVERRIDE AI2PriorHeightM: config={:.3f} manifest={:.3f}\n",
+                           out.ai2_prior_height_m, z1);
+            // ★A hood that declares floor_anchored is a WRONG STATEMENT, not a missing one — which is the
+            // whole point of naming the support. Refuse to be quiet about it.
+            if (g.support == rc::manifest::Support::floor_anchored)
+                std::print("[manifest] ★hood declares support=floor_anchored — a hood HANGS. This is the "
+                           "exact inheritance that cost p_detect=0 at every range; fix the manifest.\n");
+        }
+    }
     out.ai2_prior_height_std    = getf("HoodModel.AI2PriorHeightStd",    0.50f);
     out.ai2_depth_unobs_precision = getf("HoodModel.AI2DepthUnobsPrecision", 1500.0f);
     out.ai2_depth_obs_band_m      = getf("HoodModel.AI2DepthObsBandM",       0.10f);

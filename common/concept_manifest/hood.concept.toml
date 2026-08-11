@@ -1,0 +1,101 @@
+# hood.concept.toml — WHAT a hood IS.
+#
+# A range hood: the extractor fixed to the wall above a hob. Third manifest after table and refrigerator,
+# and the first written for an agent that did NOT exist before the manifest did — the other two were
+# reverse-engineered from running code, this one was written while the agent was being built.
+#
+# ★AND THE FIRST THAT IS AUTHORITATIVE, not advisory. [model.geometry] is READ at startup
+# (common/concept_manifest/concept_manifest.h) and the vertical span the whole agent uses is DERIVED from
+# `support` — the SDF, the point-admission band, the NBV Target and the LiDAR carve all take it from here
+# instead of each re-stating the same assumption in its own arithmetic. Everything else below is still
+# step-1 shadow: declared, cross-checked against the live config, generating nothing.
+#
+# Same rule as its siblings: world facts only. Gates, debounces and frame counts are lifecycle and belong
+# to the shared modules.
+
+[concept]
+name       = "hood"
+graph_type = "object"
+subtype    = "hood"
+agent_id   = 17
+label      = "hood"        # ADE20K-150; already in the voxelizer's accepted_labels (etc/config.toml:133)
+
+# ── Geometry — AUTHORITATIVE (read at startup, derives the vertical span) ──────────────────────────────
+#
+# ★`support` IS THE VERTICAL ANCHORING DECISION, stated once. hood_concept was cloned from refrigerator,
+# whose box spans z ∈ [0, H] because a fridge rests on the FLOOR. A hood hangs, with air beneath it. That
+# single wrong inherited fact was invisible — it compiled, the audit was green — and cost:
+#   · p_detect = 0.000 at EVERY range out to 3 m (the box read ~4x too tall, so its vertical fill saturated)
+#   · a stand-off of 6.4 m instead of 3.3 m, which in a kitchen is very likely outside the room polygon,
+#     where rc::nbv::is_reachable refuses and the agent publishes no affordance at all
+#   · and, worst because it is silent: an existence channel that can never charge absence, so the agent
+#     would have accumulated immortal hoods while every display looked healthy.
+# Declaring it makes a clone's wrong inheritance a WRONG STATEMENT rather than a missing one.
+[model.geometry]
+support   = "hangs"        # floor_anchored | leg_supported | hangs | counter_top
+z_top_m   = 2.05           # top of the hood body above the floor
+extent_m  = 0.50           # vertical extent of the body ⇒ span = [z_top − extent, z_top] = [1.55, 2.05]
+from      = "nominal"      # measured | fitted | nominal | inherited
+why       = """
+A domestic extractor over a 0.90 m worktop: the underside must clear the cook's head, which puts it at
+~1.55 m, and the body is ~0.50 m deep vertically. NOMINAL — from the appliance class, not from this
+kitchen. Measure the real one and set from = "measured".
+"""
+
+# ★extent IS A PARAMETER, NOT A DOF, and that is a modelling claim rather than laziness. A hood's underside
+# is a crisp edge against the hob gap — LiDAR strikes it and the mask's lower boundary is clean — while its
+# TOP merges into the wall or leaves the frame entirely at any usable stand-off. Estimating a DOF the data
+# cannot resolve is how the size-oscillation bugs in this lineage started. If a viewpoint ever does resolve
+# the top edge, promoting it to a 7th DOF is a contained change: N is 6 today only because H already meant
+# "top above floor", so re-anchoring touched the bottom and nothing else.
+
+[model]
+shape          = "solid_box"       # an opaque body ⇒ REMOVE uses rc::exist::solid_delta
+support        = "hangs"           # mirrors [model.geometry].support — the geometry block is authoritative
+state          = ["cx", "cy", "H", "w", "h", "yaw"]   # H = top above floor; the span is derived, not stored
+symmetry       = "c2v"             # w ≠ h footprint; the 180° front/back ambiguity is NOT folded
+symmetry_chart = "identity"
+opens          = "none"            # no hinged face ⇒ no clearance prior, no door cue
+shape_variants = []
+
+# ── Priors (step-1 shadow: declared, cross-checked, not yet authoritative) ─────────────────────────────
+[prior.footprint]
+mean_m = 0.90                      # along the wall
+std_m  = 0.30
+from   = "nominal"
+why    = "domestic extractors cluster 0.60-1.20 m wide; broad enough not to fight a real measurement"
+
+[prior.depth]
+mean_m = 0.50                      # out from the wall
+std_m  = 0.15
+from   = "nominal"
+why    = "must cover the hob it serves; shallower than a fridge, and the depth is poorly observed head-on"
+
+[prior.height]
+mean_m = 2.05
+std_m  = 0.30
+from   = "nominal"
+why    = "★the value that WINS at runtime is HoodModel.AI2PriorHeightM in etc/config.toml. It read 1.90 — the fridge's — until 2026-08-11, surviving two corrections that landed on surfaces nobody reads"
+
+[prior.attachment]
+kind = "wall_flush"
+from = "nominal"
+why  = "a hood is fixed to the wall behind the hob, so the same flush/parallel priors the fridge uses apply"
+
+# ── σ* — the consumer's precision demand ───────────────────────────────────────────────────────────────
+# SIGMA-STAR: none — nothing consumes a hood's pose. Nothing grasps it, nothing plans a path through it,
+# and it sits above the robot entirely so it is not even an obstacle. hood_dof.h currently carries the
+# REFRIGERATOR's demands, inherited by rename, which the audit scores as a green 6/6 — a false pass, and
+# invented σ* is the one thing invariant 12 forbids. Either restate a real demand or set them to -1.
+[sigma_star]
+declared = false
+from     = "inherited"
+why      = "cloned from refrigerator_dof.h and never restated; see invariant 12"
+
+# ── Detector envelope ──────────────────────────────────────────────────────────────────────────────────
+[detector.envelope]
+min_fill = 0.10
+max_fill = 0.60
+soft     = 0.06
+from     = "inherited"
+why      = "the FLEET PRIOR, fitted on furniture and never on a hood. Fit from this agent's own ai2_log with common/detectability/tools/fit_envelope before trusting any p_detect it reports"
