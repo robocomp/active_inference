@@ -261,7 +261,8 @@ void SpecificWorker::initialize()
     if (not cfg_.outline_csv_path.empty())
     {
         if (rc::diag::open_rotating(outline_csv_, cfg_.outline_csv_path,
-                "cycle,tier,run_a,run_b,vertex_x,vertex_y,gap_a,gap_b,end_a_high,end_b_high,cross\n"))
+                "cycle,tier,run_a,run_b,vertex_x,vertex_y,gap_a,gap_b,end_a_high,end_b_high,cross,"
+                "kind,passes_a,passes_b,penetration\n"))
             outline_csv_.imbue(std::locale::classic());
         else qWarning() << "kitchen_metaconcept: cannot open outline CSV"
                         << QString::fromStdString(cfg_.outline_csv_path);
@@ -352,12 +353,26 @@ void SpecificWorker::compute()
                        kitchen_belief_.state().depth_tall, kitchen_belief_.state().depth_upper,
                        F, Fa - F, kitchen_belief_.p_frame(), worst_name, worst);
             if (not outline_floor_.joints().empty() or not outline_wall_.joints().empty())
-                std::print("[kitchen_metaconcept]   outline: {} floor joints, {} wall joints | "
-                           "worst gap {:+.3f} m ({})\n",
+            {
+                // Count the kinds: a TEE is normal (a run continuing past a corner), a CROSSING is
+                // impossible geometry, a HOLE is a break in the surface. Reporting one "worst gap"
+                // over all of them buried the real faults under a peninsula doing its job.
+                int n_tee = 0, n_cross = 0, n_hole = 0;
+                for (const auto* o : {&outline_floor_, &outline_wall_})
+                    for (const auto& j : o->joints())
+                        switch (j.kind) { case rc::JointKind::Tee: ++n_tee; break;
+                                          case rc::JointKind::Crossing: ++n_cross; break;
+                                          case rc::JointKind::Hole: ++n_hole; break;
+                                          default: break; }
+                const float gap = std::abs(outline_floor_.worst_gap()) > std::abs(outline_wall_.worst_gap())
+                                      ? outline_floor_.worst_gap() : outline_wall_.worst_gap();
+                const float pen = std::max(outline_floor_.worst_penetration(),
+                                           outline_wall_.worst_penetration());
+                std::print("[kitchen_metaconcept]   outline: {} floor + {} wall joints "
+                           "({} tee, {} crossing, {} hole) | worst gap {:+.3f} m | worst penetration {:.3f} m\n",
                            outline_floor_.joints().size(), outline_wall_.joints().size(),
-                           std::abs(outline_floor_.worst_gap()) > std::abs(outline_wall_.worst_gap())
-                               ? outline_floor_.worst_gap() : outline_wall_.worst_gap(),
-                           (outline_floor_.worst_gap() > 0.0f) ? "hole" : "overlap");
+                           n_tee, n_cross, n_hole, gap, pen);
+            }
 
             // WHO is in the frame this cycle. The aggregate line cannot answer "is the right set of
             // objects participating?", which is the first question asked of any grouping — and a
@@ -703,7 +718,9 @@ void SpecificWorker::log_outline_csv()
                          << j.vertex.x() << ',' << j.vertex.y() << ','
                          << j.gap_i << ',' << j.gap_j << ','
                          << (j.end_i_high ? 1 : 0) << ',' << (j.end_j_high ? 1 : 0) << ','
-                         << j.cross << '\n';
+                         << j.cross << ',' << rc::KitchenOutline::kind_name(j.kind) << ','
+                         << (j.passes_i ? 1 : 0) << ',' << (j.passes_j ? 1 : 0) << ','
+                         << j.penetration() << '\n';
         }
     };
     write_tier("floor", outline_floor_);

@@ -62,7 +62,18 @@ struct OutlineSeg
     float           along(const Eigen::Vector2f& p) const { return (p - centre).dot(u); }
 };
 
-// A joint between two segments: the single point BOTH of their front faces should terminate at.
+// What KIND of meeting this is. Reading a joint without it is how a perfectly good T-junction gets
+// reported as the worst overlap in the kitchen (measured: a peninsula continuing 0.9 m past a corner
+// where the wall run ended within 3 mm).
+enum class JointKind
+{
+    Corner,     // both runs terminate at the vertex — a clean L
+    Tee,        // one terminates, the other passes through and continues. Normal, not a fault.
+    Crossing,   // BOTH pass through ⇒ their bodies interpenetrate. Physically impossible.
+    Hole        // at least one stops short and neither passes through ⇒ a gap in the surface
+};
+
+// A joint between two segments: the single point their front faces meet at.
 struct OutlineJoint
 {
     int   i = -1, j = -1;              // indices into the segment list
@@ -73,8 +84,23 @@ struct OutlineJoint
     bool  end_i_high = false;          // which end of i the joint is at (false = face_a, true = face_b)
     bool  end_j_high = false;
     float cross = 0.0f;                // |sin| between the two axes; ~1 = a clean right angle
+    // A run PASSES THROUGH when the vertex lies deeper inside it than its own carcass depth: it is
+    // not meeting anything there, it is continuing. Scale taken from the object, not tuned.
+    bool  passes_i = false, passes_j = false;
+    JointKind kind = JointKind::Corner;
 
-    float worst_gap() const { return std::abs(gap_i) > std::abs(gap_j) ? gap_i : gap_j; }
+    // The gap that MEANS something: only sides that actually terminate here. A through-run's
+    // "gap" is just how far it continues, and counting it buries the real faults.
+    float worst_gap() const
+    {
+        const float gi = passes_i ? 0.0f : gap_i;
+        const float gj = passes_j ? 0.0f : gap_j;
+        return std::abs(gi) > std::abs(gj) ? gi : gj;
+    }
+    // How deep two bodies interpenetrate, for a Crossing; 0 otherwise. The shallower penetration is
+    // what must be removed to separate them.
+    float penetration() const
+    { return kind == JointKind::Crossing ? std::min(-gap_i, -gap_j) : 0.0f; }
 };
 
 class KitchenOutline
@@ -97,6 +123,17 @@ public:
         for (const auto& j : joints_) if (std::abs(j.worst_gap()) > std::abs(w)) w = j.worst_gap();
         return w;
     }
+    // Deepest interpenetration across all joints — two carcasses cannot share space, so any value
+    // above zero is a geometric impossibility the arrangement must resolve.
+    float worst_penetration() const
+    {
+        float w = 0.0f;
+        for (const auto& j : joints_) w = std::max(w, j.penetration());
+        return w;
+    }
+    static const char* kind_name(JointKind k)
+    { switch (k) { case JointKind::Tee: return "tee"; case JointKind::Crossing: return "crossing";
+                   case JointKind::Hole: return "hole"; default: return "corner"; } }
 
     // Where two front-face lines cross. nullopt when they are parallel (no joint to speak of).
     static std::optional<Eigen::Vector2f> intersect(const OutlineSeg& a, const OutlineSeg& b)
@@ -143,6 +180,12 @@ private:
                 jt.gap_i = di;
                 jt.gap_j = dj;
                 jt.cross = std::abs(segs_[i].u.x() * segs_[j].u.y() - segs_[i].u.y() * segs_[j].u.x());
+                jt.passes_i = (-di) > segs_[i].depth;
+                jt.passes_j = (-dj) > segs_[j].depth;
+                jt.kind = (jt.passes_i and jt.passes_j) ? JointKind::Crossing
+                        : (jt.passes_i or  jt.passes_j) ? JointKind::Tee
+                        : (di > 0.01f or dj > 0.01f)    ? JointKind::Hole
+                                                        : JointKind::Corner;
                 joints_.push_back(jt);
             }
     }
@@ -236,6 +279,44 @@ inline bool kitchen_outline_self_test()
             const float to_wall = 0.22f + 0.60f;
             check(std::abs(j.gap_j - to_wall) > 0.5f,
                   "(e) ...and that is a full carcass depth nearer than the wall itself");
+        }
+    }
+
+    // ── (f) The three situations the LIVE kitchen actually produced ─────────────────────────────
+    // Classifying them is the difference between one meaningless "worst gap" and three usable facts.
+    {
+        // A TEE: the wall run ends at the vertex, the peninsula continues 0.9 m past it. NOT a fault.
+        OutlineSeg w; w.name = "wall_run"; w.u = {1, 0}; w.n = {0, -1};
+        w.depth = 0.60f; w.length = 2.00f;
+        w.centre = Eigen::Vector2f(-0.40f, 2.20f);          // face y=1.90, and it ENDS at x=0.60
+        OutlineSeg p; p.name = "peninsula"; p.u = {0, 1}; p.n = {1, 0};
+        p.depth = 0.60f; p.length = 2.00f;
+        p.centre = Eigen::Vector2f(0.30f, 1.90f);           // face x=0.60; the vertex is 1.0 INSIDE it
+        KitchenOutline o; o.set_segments({w, p});
+        check(o.joints().size() == 1, "(f) tee: one joint");
+        if (o.joints().size() == 1)
+        {
+            const auto& j = o.joints().front();
+            check(j.kind == JointKind::Tee, "(f) ★a run continuing past a corner is a TEE, not an overlap");
+            check(j.passes_j and not j.passes_i, "(f) the peninsula passes through; the wall run terminates");
+            check(std::abs(o.worst_gap()) < 0.05f,
+                  "(f) ★worst_gap IGNORES the through-run — the live line called this a 0.9 m overlap");
+            check(o.worst_penetration() == 0.0f, "(f) a tee is not an interpenetration");
+        }
+    }
+    {
+        // A CROSSING: two perpendicular runs whose bodies genuinely intersect — impossible geometry.
+        OutlineSeg a; a.name = "run_a"; a.u = {1, 0}; a.n = {0, -1};
+        a.depth = 0.60f; a.length = 3.00f; a.centre = Eigen::Vector2f(0.0f, 2.20f);
+        OutlineSeg b; b.name = "run_b"; b.u = {0, 1}; b.n = {1, 0};
+        b.depth = 0.60f; b.length = 3.00f; b.centre = Eigen::Vector2f(0.0f, 1.90f);
+        KitchenOutline o; o.set_segments({a, b});
+        check(o.joints().size() == 1, "(g) crossing: one joint");
+        if (o.joints().size() == 1)
+        {
+            check(o.joints().front().kind == JointKind::Crossing,
+                  "(g) ★two runs each passing through the vertex CROSS — bodies interpenetrate");
+            check(o.worst_penetration() > 0.5f, "(g) and the penetration depth is reported");
         }
     }
 
