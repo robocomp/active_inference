@@ -70,7 +70,15 @@ enum class JointKind
     Corner,     // both runs terminate at the vertex — a clean L
     Tee,        // one terminates, the other passes through and continues. Normal, not a fault.
     Crossing,   // BOTH pass through ⇒ their bodies interpenetrate. Physically impossible.
-    Hole        // at least one stops short and neither passes through ⇒ a gap in the surface
+    Hole,       // at least one stops short and neither passes through ⇒ a gap in the surface
+    // ★COLLINEAR: two near-parallel members sharing a wall line. Detecting joints by intersecting
+    // face lines CANNOT see these — parallel lines do not meet — yet on any single wall EVERYTHING
+    // is parallel: cabinets, fridge, dishwasher, oven. So collinear overlap is probably the most
+    // common violation in a kitchen and the first version of this file missed all of it.
+    // Live case: cabinet_w13_base (3.58 m, yaw 89.01°) running straight through refrigerator_1
+    // (yaw 88.36°) — 0.65° apart, so no intersection anywhere near either of them.
+    Overlap,    // they share the same stretch of wall — one body inside the other
+    Abutting    // collinear and touching end-to-end: the normal way a run continues past an appliance
 };
 
 // A joint between two segments: the single point their front faces meet at.
@@ -97,10 +105,15 @@ struct OutlineJoint
         const float gj = passes_j ? 0.0f : gap_j;
         return std::abs(gi) > std::abs(gj) ? gi : gj;
     }
-    // How deep two bodies interpenetrate, for a Crossing; 0 otherwise. The shallower penetration is
-    // what must be removed to separate them.
+    // How deep two bodies interpenetrate. For a Crossing the shallower side is what must be removed
+    // to separate them; for a collinear Overlap it is the shared stretch of wall (carried in gap_i,
+    // negative by the same sign convention as everywhere else).
     float penetration() const
-    { return kind == JointKind::Crossing ? std::min(-gap_i, -gap_j) : 0.0f; }
+    {
+        if (kind == JointKind::Crossing) return std::min(-gap_i, -gap_j);
+        if (kind == JointKind::Overlap)  return -gap_i;
+        return 0.0f;
+    }
 };
 
 class KitchenOutline
@@ -111,6 +124,11 @@ public:
     // SEARCH radius for pairing, not a tolerance on the answer: the gap it then reports is the
     // measurement. Set it from the scale of the thing being joined (a carcass depth), not by tuning.
     explicit KitchenOutline(float reach_m = 1.20f) : reach_(reach_m) {}
+
+    // |sin| below which two members count as sharing a wall line rather than meeting at an angle.
+    // 2° — a kitchen's runs are installed straight, and the live fridge/cabinet pair sits 0.65°
+    // apart. Well clear of a real corner (90°), so nothing in between is being decided by it.
+    static constexpr float kParallelSin = 0.035f;
 
     void set_segments(std::vector<OutlineSeg> segs) { segs_ = std::move(segs); rebuild(); }
     const std::vector<OutlineSeg>&   segments() const { return segs_; }
@@ -133,7 +151,8 @@ public:
     }
     static const char* kind_name(JointKind k)
     { switch (k) { case JointKind::Tee: return "tee"; case JointKind::Crossing: return "crossing";
-                   case JointKind::Hole: return "hole"; default: return "corner"; } }
+                   case JointKind::Hole: return "hole"; case JointKind::Overlap: return "overlap";
+                   case JointKind::Abutting: return "abutting"; default: return "corner"; } }
 
     // Where two front-face lines cross. nullopt when they are parallel (no joint to speak of).
     static std::optional<Eigen::Vector2f> intersect(const OutlineSeg& a, const OutlineSeg& b)
@@ -151,12 +170,55 @@ public:
     static bool self_test();
 
 private:
+    // Two near-parallel members on the same wall line: project both onto the shared axis and report
+    // how much of it they claim in common. This is the case face-line intersection cannot reach.
+    // Returns false when they are not parallel, or are parallel but on DIFFERENT lines (facing
+    // counters across a galley are parallel and must not be joined — they share no wall).
+    bool collinear_joint(std::size_t i, std::size_t j, OutlineJoint& out) const
+    {
+        const auto& a = segs_[i];
+        const auto& b = segs_[j];
+        const float sin_ab = std::abs(a.u.x() * b.u.y() - a.u.y() * b.u.x());
+        if (sin_ab > kParallelSin)
+            return false;                                   // not parallel — the intersection path handles it
+
+        // Same LINE? Compare the perpendicular offset of b's face from a's face line. Two members of
+        // one wall run differ by at most a carcass depth; anything more is a different wall.
+        const Eigen::Vector2f fa = a.centre + 0.5f * a.depth * a.n;
+        const Eigen::Vector2f fb = b.centre + 0.5f * b.depth * b.n;
+        const float lateral = std::abs((fb - fa).dot(a.n));
+        if (lateral > std::max(a.depth, b.depth))
+            return false;                                   // parallel but not the same surface
+
+        // Overlap of the two intervals along the shared axis.
+        const float ca = 0.0f,                    ha = 0.5f * a.length;
+        const float cb = (b.centre - a.centre).dot(a.u), hb = 0.5f * b.length;
+        const float lo = std::max(ca - ha, cb - hb);
+        const float hi = std::min(ca + ha, cb + hb);
+        const float shared = hi - lo;                       // >0 overlap, <0 a gap between them
+        if (shared < -reach_)
+            return false;                                   // far apart along the wall — unrelated
+
+        out.i = static_cast<int>(i); out.j = static_cast<int>(j);
+        out.vertex = a.centre + (0.5f * (lo + hi)) * a.u + 0.5f * a.depth * a.n;
+        out.cross  = sin_ab;
+        // Sign convention as everywhere else: negative = bodies share space, positive = a hole.
+        out.gap_i = out.gap_j = -shared;
+        out.passes_i = out.passes_j = false;
+        out.kind = (shared > 0.01f) ? JointKind::Overlap
+                 : (shared > -0.01f) ? JointKind::Abutting
+                                     : JointKind::Hole;
+        return true;
+    }
+
     void rebuild()
     {
         joints_.clear();
         for (std::size_t i = 0; i < segs_.size(); ++i)
             for (std::size_t j = i + 1; j < segs_.size(); ++j)
             {
+                OutlineJoint col;
+                if (collinear_joint(i, j, col)) { joints_.push_back(col); continue; }
                 const auto v = intersect(segs_[i], segs_[j]);
                 if (not v.has_value())
                     continue;
@@ -317,6 +379,50 @@ inline bool kitchen_outline_self_test()
             check(o.joints().front().kind == JointKind::Crossing,
                   "(g) ★two runs each passing through the vertex CROSS — bodies interpenetrate");
             check(o.worst_penetration() > 0.5f, "(g) and the penetration depth is reported");
+        }
+    }
+
+    // ── (h) COLLINEAR OVERLAP — the case face-line intersection cannot reach ─────────────────────
+    // Live: a 3.58 m cabinet run at 89.01° with refrigerator_1 at 88.36° INSIDE it. 0.65° apart, so
+    // their face lines meet nowhere near either of them and the first version of this file reported
+    // no joint at all. On a single wall everything is parallel, so this is the common violation.
+    {
+        const auto wall_member = [](const char* nm, float t_centre, float len)
+        {
+            OutlineSeg g; g.name = nm; g.u = {0, 1}; g.n = {1, 0};
+            g.depth = 0.60f; g.length = len;
+            g.centre = Eigen::Vector2f(0.0f, t_centre);          // all on the wall line x=0.30
+            return g;
+        };
+        // A 3.58 m run with a 0.66 m fridge standing inside it.
+        auto run = wall_member("cabinet_run", 1.79f, 3.58f);      // spans y 0.00 .. 3.58
+        auto fri = wall_member("refrigerator", 2.00f, 0.66f);     // spans y 1.67 .. 2.33 — INSIDE
+        fri.u = Eigen::Vector2f(std::sin(0.65f * 3.14159f / 180.0f),
+                                std::cos(0.65f * 3.14159f / 180.0f)).normalized();   // 0.65° off, as live
+        KitchenOutline o; o.set_segments({run, fri});
+        check(o.joints().size() == 1, "(h) a run and an appliance on the same wall form ONE joint");
+        if (o.joints().size() == 1)
+        {
+            const auto& j = o.joints().front();
+            check(j.kind == JointKind::Overlap,
+                  "(h) ★a cabinet run containing a fridge is an OVERLAP — face lines never meet");
+            check(std::abs(o.worst_penetration() - 0.66f) < 0.02f,
+                  "(h) the shared stretch of wall is the fridge's whole width");
+        }
+        // Two members ABUTTING end to end on the same wall: the normal way a run continues.
+        KitchenOutline o2; o2.set_segments({wall_member("left", 0.0f, 2.00f),
+                                            wall_member("right", 2.00f, 2.00f)});
+        check(o2.joints().size() == 1 and o2.joints().front().kind == JointKind::Abutting,
+              "(h) two members meeting end-to-end on one wall are ABUTTING, not overlapping");
+        check(o2.worst_penetration() == 0.0f, "(h) and abutting is not an interpenetration");
+        // Facing counters across a galley: parallel, but NOT the same wall line ⇒ still no joint.
+        {
+            OutlineSeg a = wall_member("north", 1.5f, 3.0f);
+            OutlineSeg b = wall_member("south", 1.5f, 3.0f);
+            b.centre = Eigen::Vector2f(2.40f, 1.5f); b.n = {-1, 0};   // 2.4 m away, facing back
+            KitchenOutline o3; o3.set_segments({a, b});
+            check(o3.joints().empty(),
+                  "(h) parallel counters on OPPOSITE walls share no line and form no joint");
         }
     }
 
