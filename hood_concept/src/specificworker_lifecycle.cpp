@@ -426,6 +426,12 @@ void SpecificWorker::apply_fridge_filter()
     const auto deltas = rc::HoodBelief::singleton_existence_deltas(
         pe, px, cfg_.plaus_to_existence_gain, cfg_.singleton_inhibition, cfg_.plaus_clamp);
 
+    // The SAME policy the sensor debounce uses (rc::exist::RemovalPolicy) — see the note at the debounce below.
+    rc::exist::RemovalPolicy plaus_policy;
+    plaus_policy.logodds_max   = cfg_.existence_logodds_max;
+    plaus_policy.removal_prob  = cfg_.existence_removal_prob;
+    plaus_policy.remove_frames = static_cast<float>(cfg_.existence_remove_frames);
+
     std::vector<std::uint64_t> doomed;
     for (std::size_t k = 0; k < ids.size(); ++k)
     {
@@ -433,6 +439,7 @@ void SpecificWorker::apply_fridge_filter()
         if (it == insts.end()) continue;
         auto& inst = it->second;
         inst.existence.set_max(cfg_.existence_logodds_max);
+        bool plaus_doomed = false;
         // ★Apply the shape/singleton delta ONLY on a cycle that actually measured this instance. I gated the
         // ACCUMULATOR to measured cycles earlier but left the DELTA firing every cycle, so a frozen
         // plaus_evidence kept pushing the existence log-odds at a constant rate with no new evidence — the same
@@ -455,19 +462,24 @@ void SpecificWorker::apply_fridge_filter()
             // Removal debounce (dedicated streak, independent of the sensor-existence streak). A freshly-born
             // instance is given the SAME warmup grace as the belief aging (matched_frames_before_aging) so a
             // young genuine fridge is never retired before it has accrued its own shape evidence.
+            //
+            // ★IT TESTS THE SAME L AS THE SENSOR DEBOUNCE, SO IT MUST USE THE SAME POLICY. existence_belief.h
+            // names this exact hazard: a second, weaker streak on the same belief "fires first and silently
+            // masks any fix applied here". Hand-written, it counted CYCLES against a fixed RemoveFrames while
+            // the sensor path counted LOOKS against a confidence-scaled requirement — so the weaker one
+            // decided. Routed through rc::exist::decide_removal it inherits both rules; a MEASURED, ungated,
+            // warm cycle is a full-worth observation of the shape, which is what the 1.0 says.
             const bool warm = inst.matched_frames >= cfg_.matched_frames_before_aging;
-            if (warm and inst.existence.should_remove(cfg_.existence_removal_prob))
-                ++inst.plaus_remove_streak;
-            else
-                inst.plaus_remove_streak = 0;
+            plaus_doomed = rc::exist::decide_removal(inst.existence, inst.plaus_debounce, plaus_policy,
+                                                     warm ? 1.0f : 0.0f).remove;
         }
 
         if (cfg_.fridge_filter_log)
-            std::print("[fridge-filter] {} plaus_ev={:.2f} llr={:+.2f} ΔL={:+.2f} L={:.2f} p={:.2f} streak={}\n",
+            std::print("[fridge-filter] {} plaus_ev={:.2f} llr={:+.2f} ΔL={:+.2f} L={:.2f} p={:.2f} streak={:.1f}\n",
                        inst.node_name, inst.plaus_evidence, inst.last_plausibility, deltas[k],
-                       inst.existence.logodds(), inst.existence.p_exists(), inst.plaus_remove_streak);
+                       inst.existence.logodds(), inst.existence.p_exists(), inst.plaus_debounce.streak);
 
-        if (inst.plaus_remove_streak >= cfg_.existence_remove_frames)
+        if (plaus_doomed)
             doomed.push_back(ids[k]);
     }
 

@@ -163,7 +163,7 @@ void SpecificWorker::refresh_belief_inspector()
         c.s.age_s         = inst.last_belief_touch.time_since_epoch().count() == 0
                           ? -1.0f
                           : std::chrono::duration<float>(now - inst.last_belief_touch).count();
-        c.s.remove_streak = static_cast<int>(inst.existence_remove_streak);
+        c.s.remove_streak = static_cast<int>(inst.existence_debounce.streak);
         c.s.since_det     = inst.frames_since_detection;
         c.s.initialized   = inst.ai2_initialized;
         cards.push_back(std::move(c));

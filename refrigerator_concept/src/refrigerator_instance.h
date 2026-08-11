@@ -147,21 +147,23 @@ struct RefrigeratorInstance
     // Removed only when the removal decision holds for existence_remove_frames consecutive cycles (debounce)
     // — deleting furniture warrants SUSTAINED evidence, not a transient hiccup.
     rc::exist::ExistenceBelief existence;
-    float existence_remove_streak = 0.0f;   // accumulated LOOKS (Sum p_detect), not cycles
+    // Debounce state, SHARED (rc::exist::RemovalDebounce): the streak in ideal observations plus the
+    // consecutive-starved count that makes a condemned-but-unexecutable instance visible instead of frozen.
+    rc::exist::RemovalDebounce existence_debounce;
 
     // ── "Is this really a fridge?" plausibility filter (model-evidence mis-detection reject) ──────────
     // last_plausibility = this cycle's shape LOG-EVIDENCE RATIO log[p(θ|fridge)/p(θ|other furniture)] (nats,
     // 0 = the two hypotheses are indifferent); plaus_evidence is its bounded sequential-Bayes accumulator
     // (clamped ±PlausClamp): a settled fridge sits strongly positive, a mis-detection (elongated/short) drives it
     // negative → existence decay. One bad frame cannot flip a settled sign; it can still RECANT over many frames.
-    // plaus_remove_streak is the dedicated debounce for the plausibility+singleton removal path (independent of
+    // plaus_debounce is the dedicated debounce for the plausibility+singleton removal path (independent of
     // the sensor-existence streak). plaus_seen_frames pins the accumulator to MEASURED cycles: it stores the
     // matched_frames value already folded in, so a frozen belief (no fresh mask / gated update) contributes
     // NOTHING instead of re-adding the same static shape term until it saturates the clamp — the repetition
     // defect that deleted well-fitted fridges with zero new data. See [[refrigerator-table-geometry-churn]].
     float last_plausibility = 0.0f;
     float plaus_evidence     = 0.0f;
-    int   plaus_remove_streak = 0;
+    rc::exist::RemovalDebounce plaus_debounce;   // same policy as the sensor debounce (see lifecycle)
     int   plaus_seen_frames   = -1;
     // Verification-gated removal (active-inference): a predicted-visible-but-absent observation from a view that
     // CANNOT resolve the refrigerator (far / peripheral / edge-on) does NOT vote removal — it raises this decayed

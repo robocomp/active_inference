@@ -775,7 +775,7 @@ void SpecificWorker::refresh_belief_inspector()
             c.s.logodds  = inst.existence.logodds();
             c.s.p_exists = inst.existence.p_exists();
         }
-        c.s.remove_streak = static_cast<int>(inst.existence_remove_streak);
+        c.s.remove_streak = static_cast<int>(inst.existence_debounce.streak);
         c.s.age_s       = inst.last_belief_touch.time_since_epoch().count() == 0
                         ? -1.0f
                         : std::chrono::duration<float>(now - inst.last_belief_touch).count();
@@ -1777,6 +1777,18 @@ void SpecificWorker::update_existence_beliefs()
     sm.detection_prob = cfg_.exist_detection_prob;
     sm.clutter_prob   = cfg_.exist_clutter_prob;
 
+    // ★ONE removal policy, the SHARED one (rc::exist::RemovalPolicy / decide_removal). door was the last agent
+    // still hand-writing this decision, in THREE places — and two of them counted CYCLES (`+= 1.0f`), the exact
+    // form the shared module was extracted to eliminate. Hand-written copies is how the debounce drifted three
+    // ways before, and it is why the confidence-scaled `required` fix would otherwise have reached five agents
+    // out of six. The two PRIOR channels below keep their full-weight advance — that is a real, argued
+    // difference (a prior is visibility-independent by construction) and it is expressed by passing a
+    // resolvability of 1.0, not by rewriting the policy.
+    rc::exist::RemovalPolicy policy;
+    policy.logodds_max   = cfg_.exist_max_logodds;
+    policy.removal_prob  = cfg_.exist_removal_prob;
+    policy.remove_frames = static_cast<float>(cfg_.exist_remove_frames);
+
     std::vector<std::uint64_t> to_remove;
     for (auto& [id, inst] : fitter_->instances())
     {
@@ -1803,9 +1815,7 @@ void SpecificWorker::update_existence_beliefs()
                 inst.existence.set(inst.existence.logodds() - cfg_.exist_out_of_room_gain);
                 // A PRIOR is visibility-independent by construction (that is what the branch comment above
                 // argues), so it advances the debounce at FULL weight — unlike the sensor channel below.
-                if (inst.existence.should_remove(cfg_.exist_removal_prob)) inst.existence_remove_streak += 1.0f;
-                else                                                       inst.existence_remove_streak = 0.0f;
-                if (inst.existence_remove_streak >= cfg_.exist_remove_frames)
+                if (rc::exist::decide_removal(inst.existence, inst.existence_debounce, policy, 1.0f).remove)
                     to_remove.push_back(id);
                 continue;   // outside the room → no sensor evidence can rescue it; skip the normal channel
             }
@@ -1826,9 +1836,7 @@ void SpecificWorker::update_existence_beliefs()
         {
             inst.existence.set(inst.existence.logodds() - cfg_.exist_short_gain);
             // Same as the room prior: a categorical fact about what a door IS, so it needs no visibility.
-            if (inst.existence.should_remove(cfg_.exist_removal_prob)) inst.existence_remove_streak += 1.0f;
-            else                                                       inst.existence_remove_streak = 0.0f;
-            if (inst.existence_remove_streak >= cfg_.exist_remove_frames)
+            if (rc::exist::decide_removal(inst.existence, inst.existence_debounce, policy, 1.0f).remove)
                 to_remove.push_back(id);
             continue;   // too short to be a door → no amount of silhouette agreement makes it one
         }
@@ -1905,12 +1913,12 @@ void SpecificWorker::update_existence_beliefs()
         // what the live log showed: central_frac ≡ 0 ⇒ p_detect ≡ 0 ⇒ sil_free_eff ≡ 0, so the phantom at
         // (−4.22,−2.16) sat at L = 4.0 with 230 of its 420 silhouette samples unlit, forever. (Same defect
         // family as the table's "p_detect inert" — see the dining-set fix, which is where this form comes
-        // from.) Interpolating between the confirm-only delta and the full delta makes p_detect act
-        // linearly over its whole range, and keeps confirmation (+) untouched.
+        // from.) Scaling the SATURATED delta by p_detect makes it act linearly over its whole range, and keeps
+        // confirmation (+) untouched. (It once interpolated from a confirm-only FLOOR; that floor was removed
+        // — see the note at ev.log_odds_delta below — so the confirm-only delta is no longer computed.)
         const float p_detect = sil.resolvability() * sil.in_fov_frac() * sil.central_frac();
         inst.dbg_sil_pdetect = p_detect; inst.dbg_sil_free_eff = raw_free * p_detect;
 
-        const float d_conf = rc::exist::mask_evidence(e_occ, 0.0f,     sil.n_detectable, sm).log_odds_delta;
         const float d_full = rc::exist::mask_evidence(e_occ, raw_free, sil.n_detectable, sm).log_odds_delta;
         rc::exist::Evidence ev;
         ev.e_occ = e_occ; ev.e_free = raw_free; ev.n_reached = sil.n_detectable;
@@ -1932,10 +1940,15 @@ void SpecificWorker::update_existence_beliefs()
         // live record shows exactly that: 12 of 12 door deaths had fixated=0, five at p_detect=0.000, at ranges
         // of 2.1-6.7 m. Accumulating p_detect makes the debounce measure how much genuine LOOKING has happened,
         // so RemoveFrames is a number of IDEAL observations - the same unit table and bottle use.
-        if (inst.existence.should_remove(cfg_.exist_removal_prob)) inst.existence_remove_streak += p_detect;
-        else                                                       inst.existence_remove_streak = 0.0f;
-        if (inst.existence_remove_streak >= cfg_.exist_remove_frames)
+        // ★And RemoveFrames is what is demanded AT the boundary. Charging the full count of ideal observations
+        // AFTER L has already crossed double-counts the same evidence and is what freezes a condemned door
+        // forever once the robot looks away; the shared policy lets confidence discharge the repetition.
+        const auto verdict = rc::exist::decide_removal(inst.existence, inst.existence_debounce, policy, p_detect);
+        if (verdict.remove)
             to_remove.push_back(id);
+        if (verdict.stalled)
+            std::print("door_concept: {}\n", rc::exist::stall_note(inst.node_name, inst.existence,
+                                                                   inst.existence_debounce, verdict));
     }
 
     // Throttled existence readout so a "why is this phantom still here?" case is diagnosable from the log.
@@ -1959,7 +1972,7 @@ void SpecificWorker::update_existence_beliefs()
                            inst.dbg_sil_ndet, inst.dbg_sil_ntotal, inst.dbg_sil_noccl,
                            inst.dbg_sil_resolv, inst.dbg_sil_central, inst.dbg_sil_pdetect, oblq,
                            inst.dbg_gated ? 1 : 0, inst.dbg_gate_fresh ? 1 : 0,
-                           inst.existence_remove_streak);
+                           inst.existence_debounce.streak);
                 // Minimum-height evidence: obs_top is the support top over UNTRUNCATED views only, so a door
                 // whose top is always clipped by the image border shows conf→0 and is never judged short.
                 std::print("door_concept: [existence] {} obs_top={:.2f} m (conf {:.2f}, trunc {:.2f}) min={:.2f} m\n",
@@ -1983,7 +1996,7 @@ void SpecificWorker::update_existence_beliefs()
                            << ',' << inst.dbg_sil_occ << ',' << inst.dbg_sil_free << ',' << inst.dbg_sil_free_eff
                            << ',' << inst.dbg_sil_ndet << ',' << inst.dbg_sil_ntotal << ',' << inst.dbg_sil_noccl
                            << ',' << inst.dbg_sil_resolv << ',' << inst.dbg_sil_central << ',' << inst.dbg_sil_pdetect
-                           << ',' << oblq << ',' << inst.existence_remove_streak
+                           << ',' << oblq << ',' << inst.existence_debounce.streak
                            << ',' << inst.obs_top_z << ',' << inst.obs_top_conf << ',' << inst.last_trunc_frac
                            // gated=1 with gate_fresh=0 is the stale-verdict trap: the flag is left over from the
                            // last frame that carried a mask, and must NOT suppress absence (see view_untrustworthy).

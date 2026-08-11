@@ -1122,7 +1122,7 @@ void HoodFitter::log_ai2_csv(const HoodInstance& inst, int npts, float R, bool g
              << inst.existence.logodds() << ',' << inst.existence.p_exists() << ','
              << inst.dbg_ex_lidar_occ << ',' << inst.dbg_ex_lidar_free << ',' << inst.dbg_ex_lidar_free_eff << ',' << inst.dbg_ex_lidar_n << ','
              << inst.dbg_ex_sil_occ << ',' << inst.dbg_ex_sil_free << ',' << inst.dbg_ex_sil_free_eff << ',' << inst.dbg_ex_sil_ndet << ','
-             << inst.existence_remove_streak << ','
+             << inst.existence_debounce.streak << ','
              << inst.dbg_ex_pdetect << ',' << inst.dbg_ex_central << ','
              << inst.verify_surprise << ',' << (inst.wants_verification ? 1 : 0) << ','
              << inst.ai2_belief.log_volatility()(3) << ',' << inst.ai2_belief.log_volatility()(5) << ','

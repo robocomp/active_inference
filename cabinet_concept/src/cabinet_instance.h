@@ -163,7 +163,9 @@ struct CabinetInstance
     // Removed only when the removal decision holds for existence_remove_frames consecutive cycles (debounce)
     // — deleting furniture warrants SUSTAINED evidence, not a transient hiccup.
     rc::exist::ExistenceBelief existence;
-    float existence_remove_streak = 0.0f;   // accumulated LOOKS (Sum p_detect), not cycles
+    // Debounce state, SHARED (rc::exist::RemovalDebounce): the streak in ideal observations plus the
+    // consecutive-starved count that makes a condemned-but-unexecutable instance visible instead of frozen.
+    rc::exist::RemovalDebounce existence_debounce;
     // Verification-gated removal (active-inference): a predicted-visible-but-absent observation from a view that
     // CANNOT resolve the cabinet (far / peripheral / edge-on) does NOT vote removal — it raises this decayed
     // go-VERIFY surprise. When it crosses existence_verify_surprise, wants_verification arms the epistemic planner

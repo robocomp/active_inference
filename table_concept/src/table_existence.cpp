@@ -331,17 +331,26 @@ void TableExistence::update_and_remove(TableFitter& fitter, TableLidarIngestor* 
         // looks' worth of sustained absence" — which is exactly the stated test: from a viewpoint where we can
         // infer YOLO should have detected a table, it did not, and enough times over. An unresolvable cycle adds
         // 0 and HOLDS (it is neither evidence to delete nor evidence to forgive); occupancy still resets to 0.
+        // ★DECIDED EVERY CYCLE, NOT ONLY ON AN EVIDENCE CYCLE. The `if (integrated)` guard used to wrap this
+        // call, which is what made a stalled debounce SILENT: on a cycle where no channel ran the streak
+        // neither advanced nor reset, and the same guard suppressed the per-cycle log row, so the frozen state
+        // left no trace. Live: table_2 sat condemned at p=0.055 with streak 1.53/15 and stopped logging 7 300
+        // cycles before the run ended. The arithmetic is unchanged (a non-resolving cycle adds 0, and a belief
+        // above the boundary is already reset) — what changes is that the stall is now observable.
+        const auto verdict = rc::exist::decide_removal(
+                inst.existence, inst.existence_debounce, policy, cycle_p_detect);
+        doomed_now = verdict.remove;
+        if (verdict.stalled)
+            std::print("table_concept: {}\n", rc::exist::stall_note(inst.node_name, inst.existence,
+                                                                    inst.existence_debounce, verdict));
         if (integrated)
         {
-            doomed_now = rc::exist::decide_removal(
-                    inst.existence, inst.existence_remove_streak, policy, cycle_p_detect);
-
             if (fitter.should_log(inst))
-                std::print("[{}] [existence] L={:.2f} p={:.2f} | lidar occ={:.1f} free={:.1f} n={} | sil occ={:.0f} free={:.0f} ndet={} | {} streak={:.1f}\n",
+                std::print("[{}] [existence] L={:.2f} p={:.2f} | lidar occ={:.1f} free={:.1f} n={} | sil occ={:.0f} free={:.0f} ndet={} | {} streak={:.1f}/{:.1f}\n",
                            inst.node_name, inst.existence.logodds(), inst.existence.p_exists(),
                            inst.dbg_ex_lidar_occ, inst.dbg_ex_lidar_free, inst.dbg_ex_lidar_n,
                            inst.dbg_ex_sil_occ, inst.dbg_ex_sil_free, inst.dbg_ex_sil_ndet,
-                           observed ? "obs" : "-", inst.existence_remove_streak);
+                           observed ? "obs" : "-", inst.existence_debounce.streak, verdict.required);
 
             // Persist the existence trajectory across the OUT-OF-FoV stretch that a fit row can't reach: an
             // out-of-view instance is not fit (no fresh mask) so no ai2_log row is written for it — yet this is

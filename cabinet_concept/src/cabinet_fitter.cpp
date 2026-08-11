@@ -1021,7 +1021,7 @@ void CabinetFitter::log_ai2_csv(const CabinetInstance& inst, int npts, float R, 
              << inst.existence.logodds() << ',' << inst.existence.p_exists() << ','
              << inst.dbg_ex_lidar_occ << ',' << inst.dbg_ex_lidar_free << ',' << inst.dbg_ex_lidar_free_eff << ',' << inst.dbg_ex_lidar_n << ','
              << inst.dbg_ex_sil_occ << ',' << inst.dbg_ex_sil_free << ',' << inst.dbg_ex_sil_free_eff << ',' << inst.dbg_ex_sil_ndet << ','
-             << inst.existence_remove_streak << ','
+             << inst.existence_debounce.streak << ','
              << inst.dbg_ex_pdetect << ',' << inst.dbg_ex_central << ','
              << inst.verify_surprise << ',' << (inst.wants_verification ? 1 : 0) << ','
              << inst.ai2_belief.last_axis_resid() << ',' << inst.dbg_cand_pts << ',' << inst.dbg_resid_pts << ',' << inst.dbg_nbv_gain << '\n';   // + axis residual (rad) & candidate/residual split (merge diag)

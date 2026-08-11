@@ -26,7 +26,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <format>
 #include <limits>
+#include <string>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -488,13 +490,81 @@ private:
 //     seen the object?" — three agents carried a comment claiming otherwise.
 //   · check for a SECOND, weaker streak testing the same L (refrigerator's plaus_remove_streak did):
 //     it fires first and silently masks any fix applied here.
+//
+// ─── CONFIDENCE SUBSTITUTES FOR REPETITION (2026-08-11) ──────────────────────────────────────────
+//
+// A FIXED `remove_frames` demanded past the boundary DOUBLE-COUNTS, and the double count is what makes a
+// condemned instance immortal. L already integrates every observation; crossing the boundary is itself the
+// test. Charging a further 15 ideal observations on top asks the SAME question twice, and asks it in a unit
+// the belief cannot even represent: 15 looks is ~10-18 nats of absence evidence against a clamp of
+// `logodds_max` = 4, so the debounce routinely demands more confirmation than the whole dynamic range of the
+// thing it is guarding. The debounce, not the likelihood, then owns the decision — and all the careful
+// evidence work upstream becomes decoration.
+//
+// Live proof (table_concept, 2026-08-11, `etc/ai2_log.csv`): a phantom `table_2` was walked from L = +4.00 to
+// L = -2.85 by THIRTEEN consecutive fully-resolving looks — 640/640 predicted-visible pixels empty,
+// central_frac 1.000, p_detect rising to 0.83, the robot parked and staring. Only the last two of those
+// thirteen landed after the boundary, so the streak read 1.53 of 15. The robot then looked elsewhere and the
+// instance sat at p(exists) = 0.055, CONDEMNED AND UNEXECUTABLE, for the remaining ~7 300 cycles of the run —
+// the eleven strongest looks in its life having contributed exactly nothing to its execution.
+//
+// The rule: `remove_frames` is what is demanded AT the boundary, and it falls to a single resolving look at
+// the clamp. Surplus nats below the boundary are evidence already in hand, so they discharge the debounce
+// pro rata:
+//
+//     required(L) = max(1, remove_frames * (1 - t)),   t = (boundary - L) / (logodds_max + boundary)
+//
+// This keeps the anti-transient guarantee exactly where it was designed to apply — a belief that has merely
+// wobbled a hair under the boundary still owes the full `remove_frames` — while a belief the evidence has
+// driven to the floor needs one good look to confirm and act, not fifteen. The floor of 1 is not a tune: it
+// says removal must never happen on a cycle that could not have resolved the object, which is the same rule
+// as the unit itself.
+//
+// MEASURED, by replaying that trajectory through this header and continuing the last look at its own
+// recorded rate (ΔL = −0.552/cycle at p_detect = 0.761): the old rule needed 18 MORE cycles of uninterrupted
+// staring to execute, the new one needs 2 (L = −3.95, streak 3.05, required 1.00). The robot gave it none —
+// it turned away — which is why the fix alone does not kill this recorded instance, and why the stall report
+// below is the other half of it.
+//
+// ⚠THE COST, stated plainly: a long debounce was latent COVER for upstream defects — a likelihood bug that
+// drove L to the floor used to surface as a 15-look delay, and now surfaces as a removal. That is the right
+// trade (a debounce is not a place to hide a bad likelihood, and the two live cases of exactly that —
+// table's one-sided p_detect at close range, refrigerator's frozen-belief silhouette — were both fixed at
+// the likelihood instead), but the next such bug will present as a deletion rather than as a delay.
 struct RemovalPolicy
 {
     float logodds_max       = 4.0f;    // |L| clamp — also the recantation budget (2*L_max nats)
     float removal_prob      = 0.12f;   // remove below P(exists) = this
     float frame_correlation = 0.0f;    // rho: opt-in, MEASURE it from the agent's own log first
-    float remove_frames     = 15.0f;   // debounce, in IDEAL OBSERVATIONS — see above
+    float remove_frames     = 15.0f;   // debounce AT THE BOUNDARY, in IDEAL OBSERVATIONS — see above
+    int   stall_warn_cycles = 300;     // report a condemned-but-starved instance this often (0 = never)
 };
+
+// The debounce state. It was a bare `float streak` in every agent; `starved` has to live next to it or the
+// frozen case stays invisible — see `stalled` below.
+struct RemovalDebounce
+{
+    float streak  = 0.0f;   // ideal observations (Sum p_detect) of sustained condemnation
+    int   starved = 0;      // consecutive condemned cycles that resolved NOTHING (p_detect == 0)
+};
+
+struct RemovalVerdict
+{
+    bool  remove    = false;   // execute now
+    bool  condemned = false;   // should_remove(L) holds this cycle
+    float required  = 0.0f;    // ideal observations demanded at THIS confidence (see required_observations)
+    bool  stalled   = false;   // condemned, unexecutable, and no resolving look is arriving — REPORT IT
+};
+
+// Ideal observations still demanded of a belief sitting at L. `remove_frames` at the boundary, 1 at the clamp.
+inline float required_observations(float L, const RemovalPolicy& p)
+{
+    const float prob     = std::clamp(p.removal_prob, 1e-3f, 0.5f);
+    const float boundary = std::log(prob / (1.0f - prob));               // < 0: the decision boundary in nats
+    const float span     = std::max(1e-3f, p.logodds_max + boundary);    // boundary -> -logodds_max
+    const float t        = std::clamp((boundary - L) / span, 0.0f, 1.0f);
+    return std::max(1.0f, p.remove_frames * (1.0f - t));
+}
 
 // Configure a belief for this cycle. Call once per instance before integrating any evidence.
 inline void arm(ExistenceBelief& b, const RemovalPolicy& p)
@@ -503,17 +573,50 @@ inline void arm(ExistenceBelief& b, const RemovalPolicy& p)
     b.set_frame_correlation(p.frame_correlation);
 }
 
-// Advance the debounce by what this cycle's look was WORTH and decide. Returns true ⇒ remove.
-// cycle_p_detect is the resolvability of this cycle's look in units of one ideal observation; pass 0
-// when nothing could have been resolved and the streak correctly stands still.
-inline bool decide_removal(const ExistenceBelief& b, float& streak, const RemovalPolicy& p,
-                           float cycle_p_detect)
+// Advance the debounce by what this cycle's look was WORTH and decide.
+//
+// cycle_p_detect is the resolvability of this cycle's look in units of one ideal observation; pass 0 when
+// nothing could have been resolved and the streak correctly stands still.
+//
+// ★CALL THIS EVERY CYCLE, NOT ONLY WHEN A CHANNEL INTEGRATED. Five agents wrapped it in `if (integrated)`,
+// which is what turned a stalled debounce into a SILENT one: on a cycle where no channel ran, the streak
+// neither advanced nor reset, and — because the same guard wrapped the per-cycle existence logging — no row
+// was written either, so the frozen state left no trace at all. `table_2` above logged its last row 7 300
+// cycles before the run ended and simply vanished from the record while remaining on screen. Calling this
+// unconditionally is a no-op on the streak (a non-resolving cycle adds 0; a belief above the boundary is
+// already reset), and it is what lets `starved` see the stall.
+inline RemovalVerdict decide_removal(const ExistenceBelief& b, RemovalDebounce& d, const RemovalPolicy& p,
+                                     float cycle_p_detect)
 {
-    if (b.should_remove(p.removal_prob))
-        streak += std::max(0.0f, cycle_p_detect);
-    else
-        streak = 0.0f;
-    return streak >= p.remove_frames;
+    RemovalVerdict v;
+    v.condemned = b.should_remove(p.removal_prob);
+    if (not v.condemned)
+    {
+        d.streak = 0.0f;
+        d.starved = 0;
+        return v;
+    }
+    // An ideal observation is worth exactly one; a non-finite resolvability could not have resolved anything.
+    const float look = std::isfinite(cycle_p_detect) ? std::clamp(cycle_p_detect, 0.0f, 1.0f) : 0.0f;
+    d.streak  += look;
+    d.starved  = (look > 0.0f) ? 0 : d.starved + 1;
+    v.required = required_observations(b.logodds(), p);
+    v.remove   = d.streak >= v.required;
+    // A frozen debounce must not be silent: condemned-but-unexecutable is not a steady state, it is a REQUEST
+    // for a viewpoint, and it is exactly what the user sees as an immortal phantom. Fires once every
+    // stall_warn_cycles so the log shows it without drowning.
+    v.stalled  = not v.remove and p.stall_warn_cycles > 0 and d.starved > 0
+             and d.starved % p.stall_warn_cycles == 0;
+    return v;
+}
+
+// One line describing a stall, so the six agents cannot each invent their own wording (or forget to print).
+inline std::string stall_note(const std::string& who, const ExistenceBelief& b, const RemovalDebounce& d,
+                              const RemovalVerdict& v)
+{
+    return std::format("[existence] {} CONDEMNED BUT UNEXECUTABLE — L={:.2f} p={:.3f} looks={:.2f}/{:.2f}, "
+                       "no resolving view for {} cycles (needs a look, not a timer)",
+                       who, b.logodds(), b.p_exists(), d.streak, v.required, d.starved);
 }
 
 }  // namespace rc::exist

@@ -181,7 +181,7 @@ void SpecificWorker::refresh_belief_inspector()
                           ? -1.0f
                           : std::chrono::duration<float>(now - inst.last_belief_touch).count();
         // The streak is fractional now (resolving LOOKS, not cycles); the card shows whole looks accrued.
-        c.s.remove_streak = static_cast<int>(inst.existence_remove_streak);
+        c.s.remove_streak = static_cast<int>(inst.existence_debounce.streak);
         c.s.since_det     = inst.frames_since_detection;
         c.s.initialized   = inst.ai2_initialized;
         cards.push_back(std::move(c));

@@ -1069,7 +1069,7 @@ void SpecificWorker::refresh_belief_inspector()
             c.s.logodds  = inst.existence.logodds();
             c.s.p_exists = inst.existence.p_exists();
         }
-        c.s.remove_streak = static_cast<int>(inst.existence_remove_streak);
+        c.s.remove_streak = static_cast<int>(inst.existence_debounce.streak);
         c.s.age_s       = inst.last_belief_touch.time_since_epoch().count() == 0
                         ? -1.0f
                         : std::chrono::duration<float>(now - inst.last_belief_touch).count();

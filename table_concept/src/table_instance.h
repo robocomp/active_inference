@@ -162,7 +162,9 @@ struct TableInstance
     // Removal debounce, in units of ONE FULLY-RESOLVING LOOK (not cycles). A cycle contributes its own p_detect:
     // a confident, centred, close view counts ~1, a view that cannot resolve the table counts ~0. Fractional
     // because a timer would delete a table for the passage of uninformative time — see table_existence.cpp.
-    float existence_remove_streak = 0.0f;
+    // Debounce state, SHARED (rc::exist::RemovalDebounce): the streak in ideal observations plus the
+    // consecutive-starved count that makes a condemned-but-unexecutable instance visible instead of frozen.
+    rc::exist::RemovalDebounce existence_debounce;
     // Verification-gated removal (active-inference): a predicted-visible-but-absent observation from a view that
     // CANNOT resolve the table (far / peripheral / edge-on) does NOT vote removal — it raises this decayed
     // go-VERIFY surprise. When it crosses existence_verify_surprise, wants_verification arms the epistemic planner

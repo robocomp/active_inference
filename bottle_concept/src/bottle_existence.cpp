@@ -241,8 +241,16 @@ void BottleExistence::update_and_remove(BottleFitter& fitter, const Inputs& in,
         // genuine looking has happened, so `existence_remove_frames` is a number of IDEAL observations.
         // The LiDAR carve moves L but does not advance the streak — at 7 cm across, a bottle is at the very
         // edge of what a sweep resolves, and the camera is the modality that has to see it.
-        const bool doomed_now = rc::exist::decide_removal(
-                inst.existence, inst.existence_remove_streak, policy, cycle_p_detect);
+        // ★And `existence_remove_frames` is what is demanded AT the boundary: it falls to a single resolving
+        // look as L approaches the clamp, because the surplus nats ARE evidence already gathered and charging
+        // for them twice is what leaves an instance condemned-but-unexecutable forever. See
+        // rc::exist::required_observations.
+        const auto verdict = rc::exist::decide_removal(
+                inst.existence, inst.existence_debounce, policy, cycle_p_detect);
+        const bool doomed_now = verdict.remove;
+        if (verdict.stalled)
+            std::print("bottle_concept: {}\n", rc::exist::stall_note(inst.node_name, inst.existence,
+                                                                    inst.existence_debounce, verdict));
 
         // ── per-cycle existence trace ─────────────────────────────────────────────────────────────
         // ★WITHOUT THIS THE CHANNEL IS UNOBSERVABLE UNTIL IT DELETES SOMETHING, which is exactly backwards
@@ -259,7 +267,7 @@ void BottleExistence::update_and_remove(BottleFitter& fitter, const Inputs& in,
                 f.imbue(std::locale::classic());
                 f << "cycle,node,L,p_exists,cx,cy,detected,since_det,p_detect,fill_max,fill_min,"
                      "vis,occl_total,occl_dropped,cam_usable,lidar_occ,lidar_free,lidar_n,lidar_p_resolve,"
-                     "remove_streak\n";
+                     "remove_streak,remove_required,starved\n";
                 return f; }();
             if (ex_csv)
             {
@@ -272,7 +280,8 @@ void BottleExistence::update_and_remove(BottleFitter& fitter, const Inputs& in,
                        << (camera_usable ? 1 : 0) << ',' << inst.dbg_ex_lidar_occ << ','
                        << inst.dbg_ex_lidar_free << ',' << inst.dbg_ex_lidar_n << ','
                        << inst.dbg_ex_lidar_pres << ','
-                       << inst.existence_remove_streak << '\n';
+                       << inst.existence_debounce.streak << ',' << verdict.required << ','
+                       << inst.existence_debounce.starved << '\n';
                 ex_csv.flush();
             }
         }

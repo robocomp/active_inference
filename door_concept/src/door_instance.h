@@ -119,7 +119,9 @@ struct DoorInstance
     // the door could not have been resolved (p_detect → 0) correctly leaves L untouched, and must leave the
     // debounce untouched too, or the door is condemned by evidence gathered once and executed later while
     // the robot looks elsewhere. Float for the same reason table/bottle use one: partial looks partially count.
-    float existence_remove_streak = 0.0f;
+    // Debounce state, SHARED (rc::exist::RemovalDebounce): the streak in ideal observations plus the
+    // consecutive-starved count that makes a condemned-but-unexecutable instance visible instead of frozen.
+    rc::exist::RemovalDebounce existence_debounce;
     // Silhouette diagnostics (last evidence cycle) — the columns of etc/door_existence_log.csv.
     float dbg_sil_occ = 0.0f, dbg_sil_free = 0.0f, dbg_sil_free_eff = 0.0f;
     int   dbg_sil_ndet = 0, dbg_sil_ntotal = 0, dbg_sil_noccl = 0, dbg_sil_ncells = 0;

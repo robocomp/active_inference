@@ -135,6 +135,22 @@ audit_agent() {
         mark na
     fi
 
+    # 9. THE REMOVAL DECISION IS THE SHARED ONE. rc::exist::decide_removal owns the boundary, the debounce
+    #    unit (IDEAL OBSERVATIONS, never cycles) and — since 2026-08-11 — the confidence-scaled requirement.
+    #    Every hand-written copy of those six lines has drifted: three ways by 2026-08-10 (door paid with
+    #    twelve deaths at fixated=0), and on 2026-08-11 door STILL had three hand-rolled sites, two of them
+    #    counting cycles, while refrigerator/hood ran a second integer streak on the same L that fired first
+    #    and masked the fix in the shared one.
+    #    ★This probe is what would have caught chair: chair integrates through the shared BELIEF but decides
+    #    with a bare `L < RemoveLogodds` and NO debounce at all — the only agent in the fleet that can delete
+    #    an instance on a single frame. Check 8 above says nothing about it: it only asks whether the
+    #    TRACKER's death counter is armed, and chair's is not.
+    if grep -rqE "exist(ence)?[._]" "$src" 2>/dev/null; then
+        grep -rq "rc::exist::decide_removal" "$src" 2>/dev/null && mark ok || mark wr
+    else
+        mark na
+    fi
+
     echo
 }
 
@@ -142,9 +158,9 @@ audit_agent() {
 echo
 echo "concept-agent alignment audit — $ROOT"
 echo
-printf "  %-22s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s\n" \
-       agent room_poly any_usable contract "sigma*" envelope strip poll removal
-printf "  %s\n" "$(printf '%.0s-' {1..127})"
+printf "  %-22s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s\n" \
+       agent room_poly any_usable contract "sigma*" envelope strip poll removal decision
+printf "  %s\n" "$(printf '%.0s-' {1..140})"
 
 skipped=()
 for d in *_concept; do
@@ -175,6 +191,9 @@ if [[ $QUIET -eq 0 ]]; then
   strip                   'warn' = no compact belief strip
   poll                    protocol flags polled, not pushed by the update_node_attr_signal firehose
   removal                 ONE removal authority: an existence channel AND an armed miss counter is two
+  decision                the removal DECISION goes through rc::exist::decide_removal (shared boundary +
+                          debounce in ideal observations + confidence-scaled requirement). 'warn' = the
+                          agent hand-writes it, which is how the debounce drifted three ways before
 
 NOTE
 fi

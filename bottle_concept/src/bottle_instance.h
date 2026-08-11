@@ -109,7 +109,9 @@ struct BottleInstance
     // cycle with a belief to project (a bottle with no geometry has nothing to be absent from).
     rc::exist::ExistenceBelief existence{0.0f, 4.0f};
     bool  existence_seeded        = false;
-    float existence_remove_streak = 0.0f;   // accumulated LOOKS (Σ p_detect) below the removal boundary
+    // Debounce state, SHARED (rc::exist::RemovalDebounce): the streak in ideal observations plus the
+    // consecutive-starved count that makes a condemned-but-unexecutable instance visible instead of frozen.
+    rc::exist::RemovalDebounce existence_debounce;
     float exist_logodds           = 0.0f;   // mirror of existence.logodds() for the dashboard / strip / logs
     // Last cycle's camera-channel geometry, for the dashboard and the phantom-event record. These are what
     // make a death ATTRIBUTABLE: "removed at p_detect 0.71, fill 0.28, vis 1.00" is a claim that can be
