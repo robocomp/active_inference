@@ -117,6 +117,14 @@ struct HoodBeliefParams
     // cannot let the unobserved depth float; the HEIGHT prior is deliberately BROAD (data-driven). These also
     // split the previously-uniform size entry of prior_cov_diag() into footprint (tight) vs height (broad).
     float prior_footprint_m   = 0.60f;   // mean of the w and h (depth) prior (m)
+    // ★A HOOD IS NOT SQUARE IN PLAN, and one prior for both axes was a refrigerator fact. A fridge is
+    // ~0.60 x 0.60 so a single tight footprint prior is right for it; a hood is ~0.90 ALONG the wall
+    // and ~0.50 OUT from it. Pulling depth to the width's mean pushed the back face h/2 too far
+    // back, which is measured directly as a wall gap: back_centre = c + (h/2)·outward, so every
+    // centimetre of excess depth is half a centimetre of penetration the flush prior must undo —
+    // and it is scaled by exp(−(gap/reach)²), so the further out it starts the weaker the pull.
+    // Defaults to prior_footprint_m so any agent that IS square keeps its previous behaviour.
+    float prior_depth_m = -1.0f;   // <0 ⇒ use prior_footprint_m (square footprint)
     float prior_footprint_std = 0.08f;   // TIGHT → strong footprint prior (m); λ = 1/std² folded into accumulate_extra
     float prior_height_m      = 2.05f;   // mean of H = the hood TOP above the floor (m)
     // Vertical extent of the hood body (m): the box spans [H − this, H]. NOT estimated — see the header

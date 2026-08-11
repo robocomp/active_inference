@@ -67,6 +67,7 @@ HoodConfig load_hood_config(const ConfigLoader& cfg)
     out.ai2_clutter_scale_m  = getf("HoodModel.AI2ClutterScaleM",    0.12f);
     out.ai2_prior_size_std   = getf("HoodModel.AI2PriorSizeStd",     0.30f);
     out.ai2_prior_footprint_m   = getf("HoodModel.AI2PriorFootprintM",   0.60f);
+    out.ai2_prior_depth_m       = getf("HoodModel.AI2PriorDepthM",       0.50f);
     out.ai2_prior_footprint_std = getf("HoodModel.AI2PriorFootprintStd", 0.08f);
     out.ai2_prior_height_m      = getf("HoodModel.AI2PriorHeightM",      2.05f);
     out.vertical_extent_m = getf("HoodModel.VerticalExtentM", 0.50f);

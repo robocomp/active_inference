@@ -73,6 +73,7 @@ struct HoodConfig
     // footprint std is small (strong pull on w,h≡depth so a partial front-only view can't float the depth);
     // the height std is broad (weak/data-driven). Split HoodBeliefParams' prior_footprint_* / prior_height_*.
     float ai2_prior_footprint_m   = 0.60f;   // mean of the w & h(depth) prior (m)
+    float ai2_prior_depth_m = -1.0f;   // depth mean (m); <0 ⇒ same as footprint (square in plan)
     float ai2_prior_footprint_std = 0.08f;   // TIGHT → strong footprint prior (m)
     float ai2_prior_height_m      = 1.90f;   // mean of the H (vertical) static anchor (m) — a standard tall fridge
     // Vertical extent of the hood body (m). The box spans [H − this, H] — a hood HANGS.

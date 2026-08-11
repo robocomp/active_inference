@@ -625,6 +625,7 @@ float HoodFitter::run_inference(HoodInstance& inst, const HoodObservation& obser
         p.clutter_scale_m = cfg_.ai2_clutter_scale_m;
         p.prior_size_std  = cfg_.ai2_prior_size_std;
         p.prior_footprint_m   = cfg_.ai2_prior_footprint_m;
+        p.prior_depth_m       = cfg_.ai2_prior_depth_m;
         p.prior_footprint_std = cfg_.ai2_prior_footprint_std;
         p.prior_height_m      = cfg_.ai2_prior_height_m;
         p.prior_height_std    = cfg_.ai2_prior_height_std;

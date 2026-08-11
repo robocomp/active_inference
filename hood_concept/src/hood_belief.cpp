@@ -433,7 +433,10 @@ void HoodBelief::accumulate_extra(const HoodBeliefState& s, const HoodFrame& f,
         const float lam_w = lam_wd + params_.depth_unobs_precision * (1.0f - two_sided_along(true));
         const float lam_h = lam_wd + params_.depth_unobs_precision * (1.0f - two_sided_along(false));
         Id(3, 3) += lam_w;  bd(3) += lam_w * (params_.prior_footprint_m - s.w);   // w      (index 3)
-        Id(4, 4) += lam_h;  bd(4) += lam_h * (params_.prior_footprint_m - s.h);   // h≡depth(index 4)
+        // Depth gets its OWN mean when the object is not square in plan (see prior_depth_m).
+        const float depth_mean = (params_.prior_depth_m >= 0.0f) ? params_.prior_depth_m
+                                                                 : params_.prior_footprint_m;
+        Id(4, 4) += lam_h;  bd(4) += lam_h * (depth_mean - s.h);                 // h≡depth(index 4)
     }
 
     // (2a) HEIGHT anchor (H, index 2): the box TOP is unconstrained-from-above — points at the real fridge top

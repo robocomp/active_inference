@@ -78,7 +78,10 @@ AI2ClutterScaleM = 0.12     # a point further than ~this from EVERY surface is e
 AI2PriorSizeStd = 0.30      # (legacy; the size prior is now split into footprint vs height below)
 # FOOTPRINT + HEIGHT prior: a standard fridge footprint ≈ 0.60×0.60 (TIGHT std → strong pull on w,h≡depth so a
 # partial front-only view can't float the unobserved depth); HEIGHT varies a lot (BROAD std → data-driven).
-AI2PriorFootprintM = 0.60   # mean of the w & h(depth) prior (m)
+AI2PriorFootprintM = 0.90   # mean of the WIDTH prior (m) — a hood spans ~0.90 along the wall. Was 0.60, the
+                            # refrigerator's near-square footprint, which pulled BOTH axes to one value.
+AI2PriorDepthM = 0.50       # mean of the DEPTH prior (m) — out from the wall. Separate because a hood is not
+                            # square in plan; excess depth is half its excess in wall PENETRATION.
 AI2PriorFootprintStd = 0.08 # TIGHT → strong footprint prior (m); λ = 1/std²
 AI2PriorHeightM = 2.05      # mean of H = the hood TOP above the floor (m). ★This is the value that
                             # WINS: object_priors.toml and hood_belief.h state the same fact and both lose
