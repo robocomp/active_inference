@@ -119,7 +119,25 @@ FeRef = 2.0                 # "healthy fridge fit" FE reference — NEEDS LIVE T
 FeScale = 1.0               # fit_ok = exp(−max(0, FE−FeRef)/FeScale): a poor data fit lowers plausibility
 PlausClamp = 8.0            # ± bound on the plaus_evidence accumulator (bounded memory: one bad frame can't kill a real fridge; can still RECANT)
 PlausHeightPriorGain = 2000.0 # short-height prior precision (1/m²) per (deficit/HeightSoft) below HeightPlausibleMin; nudges H up so a 70 cm cloud fits worse; 0 = OFF
-PlausToExistenceGain = 1.5  # how strongly tanh(plaus_evidence) pushes the existence log-odds per cycle (support/decay)
+PlausToExistenceGain = 0.0  # ★OFF for hood — see below. Was 1.5 (the refrigerator's).
+#
+# ★AN IDENTITY PRIOR MAY NOT VOTE ON A HYPOTHESIS IT DOES NOT MODEL. This gain couples
+# HoodBelief::fridge_log_evidence_ratio() — note the name — into the existence log-odds. That function asks
+# "is this shape a REFRIGERATOR?", and its LLR saturates at about −17 for anything that is not one. A hood
+# (0.90 x 0.50 x 0.50 hanging at 2.05 m) is emphatically not a fridge, so every measured frame drove the
+# accumulator to its negative clamp, L followed, the instance was removed — and the tracker, still seeing a
+# perfectly stable ZED mask, re-birthed it at the same spot. Observed: three BIRTHs at (-4.04, 1.06) with no
+# death recorded, because the lifecycle removal path is not the one that writes phantom events.
+#
+# This is NOT a tuning problem and raising or lowering 1.5 cannot fix it: the term is answering the wrong
+# question. Until hood has its own shape-identity model — what makes a canopy a canopy: wide, shallow, flat,
+# high, wall-backed — the honest gain is ZERO. The silhouette and LiDAR channels still judge existence on
+# EVIDENCE, which is what should decide whether a hood is there.
+#
+# ⚠And it hid inside the scaffold because the parent calls itself by TWO names: my clone renamed
+# "refrigerator" but not "fridge", so ~250 fridge-identifiers survived into hood — most harmless, this one
+# load-bearing. Renaming both is now in the recipe; reading what each one MEANS is the part that cannot be
+# automated.
 SingletonInhibition = 1.0   # mutual-inhibition: a STRONGER fridge subtracts this·P(exists) from a weaker one's existence L (soft, bounded)
 # WALL-FLUSH + WALL-PARALLEL factor (a fridge's back face rests against a room wall; ported from cabinet_concept).
 # Precision = marginal of a {flush, free-standing} mixture keyed on the back-to-wall gap ⇒ decays CONTINUOUSLY to 0

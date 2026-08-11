@@ -261,6 +261,20 @@ are both that.
           · the detector envelope: the clone ships the fleet PRIOR. Declare it as uncalibrated and fit from
             the agent's own ai2_log (common/detectability/tools/fit_envelope).
 
+    6b. ⚠THE PARENT CALLS ITSELF BY MORE THAN ONE NAME. Renaming <obj>/<Obj>/<OBJ> is not enough:
+        refrigerator_concept refers to itself as "fridge" throughout, so a clone that renames only
+        "refrigerator" carries ~250 fridge-identifiers into the new agent. Most are harmless comments. One
+        was not: HoodBelief::fridge_log_evidence_ratio() — an IDENTITY prior asking "is this shape a
+        refrigerator?", coupled into the existence log-odds by PlausToExistenceGain. Its LLR saturates near
+        −17 for anything that is not a fridge, so it drove hood's L down every measured frame, the instance
+        was removed, and the tracker — still holding a perfectly stable ZED mask — re-birthed it at the same
+        spot. Three births, no deaths logged (the lifecycle removal path does not write phantom events).
+        `grep -ric "<parent-nickname>" <new>_concept/src` before trusting a clone.
+
+        ★AND THE RULE THE FIX FOLLOWS: an identity prior may not vote on a hypothesis it does not model.
+        No value of the gain repairs it — the term answers the wrong question — so the honest setting until
+        the new object has its OWN shape model is ZERO, leaving existence to the evidence channels.
+
     7.  WHAT YOU NO LONGER COPY (2026-08-11). Three mechanisms are shared, so a new agent inherits them and
         cannot drift from them: the affordance PRODUCER (common/object_affordance — ~300 lines/agent), the
         removal DECISION (rc::exist::RemovalPolicy / arm / decide_removal), and the RT-COVARIANCE publisher
