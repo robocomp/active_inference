@@ -1,0 +1,17 @@
+# object_priors.toml
+#
+# Prior hood definitions for the hood_concept agent.
+# Each [[hoods]]
+node_name  = "hood_1"
+# ★HOOD GEOMETRY — a range hood over a hob, NOT the refrigerator box these numbers were cloned from.
+# Typical domestic extractor: ~0.90 m wide across the wall, ~0.50 m deep out from it, and its underside
+# sits ~1.55 m off the floor (above a 0.90 m worktop with head clearance). These are NOMINAL and exist to
+# seed the belief, not to constrain it — measure the real one and update.
+width_m    = 0.90         # X in hood frame: along the wall
+depth_m    = 0.50         # Y in hood frame: out from the wall
+height_m   = 2.05         # ★TOP of the hood above the floor (see the note below on anchoring)
+room_x_m   = 3.5          # seed only; active inference refines it
+room_y_m   = 1.2
+yaw_rad    = 0.0
+sigma_pose = 0.30         # looser than the fridge's 0.1: nothing has measured this one yet
+sigma_size = 0.30

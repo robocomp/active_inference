@@ -265,6 +265,27 @@ inline Contract default_contract_for(std::string_view object_type)
             .still  (0.10f, 0.15f)
             .stable(1).timeout_s(25).on_fail(Consume);
     }
+    if (object_type == "hood")
+    {
+        // Hood (ADE20K "hood" — the extractor over a hob). Wall-mounted and HIGH: ~1.5-2 m, well above the
+        // zed's optical centre, so unlike every sibling the VERTICAL framing is what binds and the robot
+        // must stand back far enough to fit it rather than close enough to fill the frame. Bound to the
+        // channel hood_scene_graph publishes (hood_roi_* / hood_detection_*), not the table_* channel the
+        // refrigerator borrows — a hood is not a fridge and must not lock onto a fridge's ROI.
+        //
+        // ★advance() fill is 0.30, not the fridge's 0.45: at 0.45 a 2 m-tall hood would have to be
+        // approached to ~1 m, where it leaves the top of the frame entirely and the mask truncates. Written
+        // as a starting point tied to the geometry, NOT a measurement — recalibrate from the agent's own
+        // ai2_log once it has one (common/detectability/tools/fit_envelope).
+        return Contract::servo()
+            .center ("hood_roi_offset")
+            .advance("hood_roi_fill", 0.30f)
+            .valid  ("hood_roi_valid")
+            .until  ("hood_detection_alive",      GE, 0.5f)
+            .and_   ("hood_detection_confidence", GE, 0.20f)
+            .still  (0.10f, 0.15f)
+            .stable(1).timeout_s(25).on_fail(Consume);
+    }
     if (object_type == "cabinet")
     {
         // Cabinet: wall-anchored like the refrigerator, and like the door it was asking for a contract that

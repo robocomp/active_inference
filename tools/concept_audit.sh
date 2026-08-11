@@ -65,7 +65,15 @@ audit_agent() {
     #    invisible, and since wants_final_facing() honours the target yaw only for Servo/Orient the robot
     #    silently arrives facing the wrong way. This probe is the only thing that makes it visible.
     local keys missing=0
-    keys=$(grep -rhoE 'default_contract_for\("[a-z_]+"\)' "$src" 2>/dev/null \
+    # ★2026-08-11: the producer moved to common/object_affordance, so no agent calls default_contract_for
+    #    directly any more — this probe read `n/a` for ALL EIGHT agents and stopped checking invariant 11
+    #    entirely, silently, the moment the extraction landed. An audit that goes blind is worse than no
+    #    audit, because the green column is read as evidence. The key now comes from the object_type the
+    #    agent passes to ObjectAffordance::init(), which is the same string that reaches the contract.
+    #    (grep the init LINE, then take its last quoted token — the arg list contains node.id(), so a
+    #    [^)]* pattern stops at that inner ')' and matches nothing, which is how the first repair of this
+    #    probe ALSO read n/a everywhere. Verified against a known-good agent before being trusted.)
+    keys=$(grep -rh 'affordance\.init(' "$src" 2>/dev/null \
            | grep -oE '"[a-z_]+"' | tr -d '"' | sort -u)
     if [[ -z "$keys" ]]; then
         mark na

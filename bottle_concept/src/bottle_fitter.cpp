@@ -836,8 +836,12 @@ bool BottleFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_nod
     if (const auto pn = G_->get_node(inst.parent_id); pn.has_value())
         inst.parent_name = pn.value().name();
 
-    // "bottle" selects the execution contract (Servo lock-on bound to the bottle detection attrs).
-    inst.affordance.init(G_, node.id(), node.name(), "bottle");
+    // ★"cylinder", NOT "bottle" — this is the CONTRACT key, and default_contract_for keys bottle's on
+    // the node TYPE it was written against ("bottle_concept's object node type"). Passing "bottle"
+    // fell through to the Contract::reach() fallback, which is valid-LOOKING: the robot would have
+    // navigated to the stand-off, declared arrival, and never locked on — invariant 11 exactly.
+    // Introduced by the affordance extraction and caught by the audit probe once THAT was repaired.
+    inst.affordance.init(G_, node.id(), node.name(), "cylinder");
 
     instances_.emplace(node.id(), std::move(inst));
     std::print("bottle_concept: created instance for node '{}' id={}\n", node.name(), node.id());

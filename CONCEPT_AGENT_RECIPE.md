@@ -195,6 +195,71 @@ lidar (media plane) ──► <Obj>LidarIngestor ──► <Obj>LidarRangeChanne
 
 ---
 
+---
+
+# Scaffolding a new agent — the executable checklist (written while doing `hood_concept`, 2026-08-11)
+
+The sections below describe what an agent IS. This one is the sequence that produces one, in the order the
+failures actually appear. It was derived by doing it, not by imagining it: every ⚠ is a step that bit on the
+first run through.
+
+**Choose the parent by SHAPE, not by size.** bottle is the smallest agent (5 973 lines) and therefore looks
+like the natural template — it is the wrong one for most objects, because it is small by being INCOMPLETE:
+no silhouette projector, and no yaw at all (a cylinder has no front). refrigerator is the parent for anything
+that is a box with a face, mounted against a wall or a counter, seen from across a room. hood and microwave
+are both that.
+
+    1.  CONTRACT CASE FIRST, before any copying.
+        Add `if (object_type == "<obj>")` to common/affordance_protocol/affordance_protocol.h.
+        ⚠The fallback returns a valid-LOOKING Contract::reach(), so a missing case is INVISIBLE: the robot
+        navigates to the stand-off, declares arrival and never locks on. Invariant 11. It has bitten door,
+        cabinet, and — during this very scaffold — bottle (see step 8).
+
+    2.  COPY + RENAME the three token cases: <obj>, <Obj>, <OBJ>. Files AND contents, including
+        src/, etc/*.toml, CMakeLists.txt, Makefile and <obj>_concept.cdsl.
+        ⚠Also copy generated/ (4 files: genericworker.{h,cpp}, main.cpp, CMakeLists.txt) and rename inside
+        them. Forgetting it fails at CONFIGURE time with `add_subdirectory given source "generated"`, not at
+        compile time, so it does not look like a code problem.
+
+    3.  RENUMBER THE AGENT ID as the very first content edit — etc/config.toml `id =`. A clone keeps its
+        template's, and a collision is a CRDT actor clash → SIGSEGV. Record it in the registry table above.
+        (hood took 17.) One-line check: `grep -rE '^\s*id\s*=' */etc/config.toml`.
+
+    4.  BUILD IT UNCHANGED and confirm green before touching any modelling. A clone that compiles is a
+        known-good baseline; a clone that does not compile while you are also changing geometry gives you
+        two problems wearing one error message.
+
+    5.  RUN tools/concept_audit.sh. The new agent should appear and be green on the mechanical columns
+        (room_poly, any_usable, contract, strip, poll, removal) because it inherited them.
+
+    6.  THE OBJECT-SPECIFIC WORK — everything above is mechanical; this is the agent. Measured across the
+        fleet, it is model.cpp / config / belief / fitter, which are only 8–31 % similar between agents for
+        good reason. For hood specifically:
+          · ★VERTICAL ANCHORING. refrigerator's box spans z ∈ [0, H] — FLOOR-anchored, one number fixes both
+            extent and placement. A hood HANGS (underside ~1.55 m, top ~2.05 m) and needs two vertical
+            parameters, with z0 a real DOF. It is a belief-state change: the DOF vector, its Σ, dof_spec,
+            the CSV header and the fitter's Jacobians move together. Flagged in hood_model.h, NOT patched.
+          · σ*: the clone inherits the parent's demands and the audit scores them as a PASS. That is a false
+            green — they were renamed, not restated. Restate a real consumer demand or declare
+            `SIGMA-STAR: none — <reason>`. Invariant 12.
+          · etc/object_priors.toml: replace the parent's geometry with the real object's.
+          · the detector envelope: the clone ships the fleet PRIOR. Declare it as uncalibrated and fit from
+            the agent's own ai2_log (common/detectability/tools/fit_envelope).
+
+    7.  WHAT YOU NO LONGER COPY (2026-08-11). Three mechanisms are shared, so a new agent inherits them and
+        cannot drift from them: the affordance PRODUCER (common/object_affordance — ~300 lines/agent), the
+        removal DECISION (rc::exist::RemovalPolicy / arm / decide_removal), and the RT-COVARIANCE publisher
+        (common/rt_covariance). If you find yourself hand-writing any of those, stop — you are re-creating a
+        divergence that has already cost four fixes that reached some agents and not others.
+
+    8.  ⚠RE-RUN THE AUDIT AFTER ANY EXTRACTION, AND CHECK IT STILL SEES. When the affordance producer moved
+        to common/, the contract probe — which grepped for `default_contract_for(` in the AGENT — went blind
+        and reported `n/a` for all eight agents instead of failing. An audit that stops looking reads exactly
+        like an audit that found nothing. Repairing it immediately exposed a real regression: the extraction
+        had changed bottle's contract key from "cylinder" to "bottle", which has no case, so bottle had been
+        silently on the reach() fallback. The scaffold found that, not the extraction.
+
+
 ## 0. Object spec (the prompt syntax)
 
 Fill this from the human prompt + reference images. It is the complete input to generation.
@@ -270,9 +335,9 @@ table is the source of truth). Taken:
 | 7 | table_concept | 12 | self_calibration | 22 | refrigerator_concept |
 | 8 | controller | 13 | human_concept | 23 | ring_metaconcept |
 | 9 | voxelizer | 14 | residual_concept | 15 | door_concept |
-| 16 | scene_graph_viewer | 24 | kitchen_metaconcept | | |
+| 16 | scene_graph_viewer | 24 | kitchen_metaconcept | 17 | hood_concept |
 
-Next free: **17–19, 25+** (15 = door_concept, 2026-07-26; 24 = kitchen_metaconcept, 2026-08-09 — the
+Next free: **18–19, 25+** (15 = door_concept, 2026-07-26; 24 = kitchen_metaconcept, 2026-08-09 — the
 second meta-concept schema, RECTILINEAR. ★16 was already taken by scene_graph_viewer and was MISSING
 from this table — the exact omission that caused both collisions below; added now.) (2026-07: cabinet=21 and refrigerator=21 collided because cabinet was never
 recorded — refrigerator moved to 22. Same cause again 2026-07-26: the ring_metaconcept scaffold shipped
