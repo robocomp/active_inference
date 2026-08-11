@@ -21,20 +21,43 @@ namespace rc {
 // Select returns from `sweep` (sensor at `origin`) landing on THIS hood into `out`, applying the ray-count and
 // angular-coverage down-weights to `precision_base`. Returns the staged ray count; *cov_ang gets the angular
 // weight. Same selection geometry as the primary helios path — shared by the extra per-device (bpearl) set.
-// Birth-footprint select box (rotation-agnostic radius + floor-referenced z-band). See hood_lidar_range_channel.h.
-HoodLidarRangeChannel::SelectBox HoodLidarRangeChannel::select_box() const
+// Birth-footprint select box (rotation-agnostic radius + the BODY's own z-band). See the header.
+//
+// ★THE Z-BAND IS THE BODY'S, NOT THE FLOOR'S. It was `[−m, BirthHeightM + m]` — the fridge's
+// floor-referenced band, inherited by the clone and never re-derived. For a hood that is [−0.10, 0.85] m
+// against a body at [1.79, 2.29] m: THE TWO DO NOT OVERLAP, so this function selected the floor and the
+// worktop as "returns landing on this hood" and excluded every real hood return before the range factor
+// could see one. Measured live 2026-08-11 (etc/ai2_log.csv, every cycle): 109 returns selected, mean SDF
+// residual 1.33 m, selected z spanning 0.19–0.78 while the fitted H was 2.285 — and coverage still read 1.0
+// (109 rays against LidarCoverageN0 = 60), so the channel reported FULL confidence in points that could not
+// possibly be on the object. The geometric fit was silently mask-only, at obliquity_cos 0.29, which is
+// where the 9°-off yaw (80.9° vs ~90°) and with it the visible tilt and the corner in the wall came from.
+// cfg_.body_z0_m/body_z1_m are derived ONCE from the manifest's declared `support` — see hood_config.cpp.
+//
+// ★THE BAND FOLLOWS THE FITTED TOP, CLAMPED TO THE PRIOR'S OWN CREDIBLE INTERVAL. Anchoring it on the prior
+// alone is not enough: the live fit sat at H = 2.285 against a prior of 2.05, so a prior-anchored
+// [1.45, 2.15] would still have cut off the top 0.135 m of the body — the very surface H is estimated from.
+// Anchoring it on the RAW fitted H is the failure the XY anchor already guards against (a diverging fit
+// drags the selection into empty space and starves LiDAR exactly when it is needed). The prior states how
+// far H may legitimately have moved, so ±2σ_H is the honest bound — a credible interval, not a new gate.
+HoodLidarRangeChannel::SelectBox HoodLidarRangeChannel::select_box(float fitted_z_top_m) const
 {
-    const float m = cfg_.lidar_select_margin_m;
+    const float m     = cfg_.lidar_select_margin_m;
+    const float sigma = std::max(0.0f, cfg_.ai2_prior_height_std);
+    const float z_top = std::isfinite(fitted_z_top_m)
+                      ? std::clamp(fitted_z_top_m, cfg_.body_z1_m - 2.0f * sigma, cfg_.body_z1_m + 2.0f * sigma)
+                      : cfg_.body_z1_m;
+    const float extent = cfg_.body_z1_m - cfg_.body_z0_m;   // the body's own vertical extent (a parameter)
     return { 0.5f * std::sqrt(cfg_.tracker_birth_width_m * cfg_.tracker_birth_width_m
                             + cfg_.tracker_birth_depth_m * cfg_.tracker_birth_depth_m) + m,
-             -m, cfg_.tracker_birth_height_m + m };
+             z_top - extent - m, z_top + m };
 }
 
 int HoodLidarRangeChannel::select_into(const HoodInstance& inst, const Eigen::Vector3f& centroid,
                                         const std::vector<Eigen::Vector3f>& sweep, const Eigen::Vector3f& origin,
                                         float precision_base, rc::ai::LidarRays& out, float* cov_ang) const
 {
-    const auto [rxy, z_lo, z_hi] = select_box();
+    const auto [rxy, z_lo, z_hi] = select_box(inst.ai2_belief.state().H);
     const float rxy2 = rxy * rxy;
     out.endpoints.clear();
     out.endpoints.reserve(256);
@@ -67,11 +90,12 @@ int HoodLidarRangeChannel::select_into(const HoodInstance& inst, const Eigen::Ve
 //
 // The select box is anchored on the FRESH mask-cloud centroid (XY) — not the fitted state, which a diverging
 // fit would drag into empty space, starving LiDAR exactly when it is most needed — and sized from the BIRTH
-// footprint (not the fitted w/h, so a blown-up extent can't explode the region). The vertical band is
-// floor-referenced [−m, birth_H+m] so it deliberately spans the LEGS and the hoodtop RIM: the unbiased,
-// segmentation-independent surfaces that attack the mask-erosion under-size. Final membership is the factor's
-// own sphere-trace hit test (a ray must actually cross the model SDF), so this box is only a work bound +
-// neighbour reject. Its radius/height margins (m = cfg.lidar_select_margin_m) are the SELECT-BOX thresholds.
+// footprint (not the fitted w/h, so a blown-up extent can't explode the region). The vertical band is the
+// BODY's own extent about its fitted top, clamped to the height prior's ±2σ — for a hood that is the canopy
+// in mid-air, and it must never be floor-referenced (the inherited [−m, birth_H+m] selected the floor and
+// saw no hood at all — see select_box()). Final membership is the factor's own sphere-trace hit test (a
+// ray must actually cross the model SDF), so this box is only a work bound + neighbour reject. Its
+// radius/height margins (m = cfg.lidar_select_margin_m) are the SELECT-BOX thresholds.
 void HoodLidarRangeChannel::feed(HoodInstance& inst, HoodFrame& frame) const
 {
     inst.dbg_lidar_rays = 0;
@@ -89,7 +113,7 @@ void HoodLidarRangeChannel::feed(HoodInstance& inst, HoodFrame& frame) const
 
     // Anchor XY on this cycle's fresh mask-cloud centroid (shared by both devices; NOT the fitted state, which a
     // diverging fit would drag into empty space, starving LiDAR exactly when it is most needed). Footprint select
-    // box + z-band are the BIRTH dims (floor-referenced band spans the LEGS + rim) — see select_into().
+    // box is the BIRTH footprint; the z-band is the BODY's declared span, never the floor — see select_box().
     Eigen::Vector3f c = Eigen::Vector3f::Zero();
     for (const auto& p : frame.points) c += p;
     c /= static_cast<float>(frame.points.size());
@@ -106,7 +130,7 @@ void HoodLidarRangeChannel::feed(HoodInstance& inst, HoodFrame& frame) const
 
         // Generous "near?" raw count (1.5× box): is a return anywhere near this hood? (below the birth
         // min-separation so it can't grab a neighbour's returns).
-        const auto [rxy, z_lo, z_hi] = select_box();
+        const auto [rxy, z_lo, z_hi] = select_box(inst.ai2_belief.state().H);
         const float rraw2 = (1.5f * rxy) * (1.5f * rxy);
         int raw = 0;
         for (const auto& p : lidar_sweep_room_)

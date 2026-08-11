@@ -467,11 +467,25 @@ void SpecificWorker::apply_fridge_filter()
             // names this exact hazard: a second, weaker streak on the same belief "fires first and silently
             // masks any fix applied here". Hand-written, it counted CYCLES against a fixed RemoveFrames while
             // the sensor path counted LOOKS against a confidence-scaled requirement — so the weaker one
-            // decided. Routed through rc::exist::decide_removal it inherits both rules; a MEASURED, ungated,
-            // warm cycle is a full-worth observation of the shape, which is what the 1.0 says.
-            const bool warm = inst.matched_frames >= cfg_.matched_frames_before_aging;
+            // decided. Routed through rc::exist::decide_removal it inherits both rules.
+            //
+            // ★★AND A CHANNEL MAY ONLY EXECUTE A REMOVAL IT HAS ARGUED FOR. `deltas[k] < 0` is this channel's
+            // own evidence AGAINST the object this cycle — bad shape, or out-competed by a stronger sibling.
+            // Without that condition the debounce merely watched L, which any OTHER channel may have driven
+            // down, and deleted on a case it never made.
+            //
+            // That is not hypothetical. hood_concept set PlausToExistenceGain = 0.0 on 2026-08-11 because an
+            // identity prior may not vote on a hypothesis it does not model — which correctly zeroed
+            // deltas[k], and left this debounce untouched, because the only guard on the whole path is
+            // FridgeFilterEnabled. So the filter kept its trigger after losing its vote: the LiDAR free-space
+            // carve walked L to the clamp and THIS counter did the killing, 15 cycles later, every time.
+            // Measured over one 1.5 h run: 18 births and 18 deaths, and on every single one the SENSOR
+            // debounce stood at 3.1-5.4 of the 15 it needs — it never fired once. Turning a channel's gain to
+            // zero must silence it completely, and now does.
+            const bool warm   = inst.matched_frames >= cfg_.matched_frames_before_aging;
+            const bool argued = deltas[k] < 0.0f;
             plaus_doomed = rc::exist::decide_removal(inst.existence, inst.plaus_debounce, plaus_policy,
-                                                     warm ? 1.0f : 0.0f).remove;
+                                                     (warm and argued) ? 1.0f : 0.0f).remove;
         }
 
         if (cfg_.fridge_filter_log)

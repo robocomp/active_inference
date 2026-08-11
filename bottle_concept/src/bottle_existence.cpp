@@ -157,6 +157,9 @@ void BottleExistence::update_and_remove(BottleFitter& fitter, const Inputs& in,
         // How resolving THIS cycle's look was, in units of one ideal observation. Drives the debounce below.
         float cycle_p_detect = 0.0f;
 
+        // Is a sensor HOLDING this bottle right now? Read once — both channels need it (see the LiDAR carve).
+        const bool detected = (inst.frames_since_detection == 0);   // a bottle mask reached this instance
+
         // ── CAMERA channel (mask clock) ───────────────────────────────────────────────────────────
         if (camera_usable)
         {
@@ -182,7 +185,6 @@ void BottleExistence::update_and_remove(BottleFitter& fitter, const Inputs& in,
             inst.dbg_ex_vis      = vis;
             cycle_p_detect       = p_det;
 
-            const bool detected = (inst.frames_since_detection == 0);   // a bottle mask reached this instance
             if (detected)
             {
                 // A mask ARRIVED, so this probe demonstrably resolved the object: p_vis = 1, and the evidence
@@ -195,16 +197,36 @@ void BottleExistence::update_and_remove(BottleFitter& fitter, const Inputs& in,
                 inst.existence.integrate(p_det, llr_absent);
         }
 
-        // ── LiDAR channel (sweep clock) — the shared carve, unchanged ─────────────────────────────
+        // ── LiDAR channel (sweep clock) ───────────────────────────────────────────────────────────
         if (in.sweep != nullptr and not in.sweep->empty())
         {
             const auto& s = inst.ai2_belief.state();
-            const rc::exist::Evidence ev = rc::exist::carve_box(
+            rc::exist::Evidence ev = rc::exist::carve_box(
                 in.origin, *in.sweep, s.cx, s.cy, 0.0f, 2.0f * s.radius, 2.0f * s.radius,
                 s.cz - 0.5f * s.height, s.cz + 0.5f * s.height, t.sigma_pos_m, sm);
             inst.dbg_ex_lidar_occ  = ev.e_occ;
             inst.dbg_ex_lidar_free = ev.e_free;
             inst.dbg_ex_lidar_n    = ev.n_reached;
+
+            // ★★A CHANNEL MAY NOT VOTE ABSENCE ON AN OBJECT ANOTHER SENSOR IS HOLDING THIS FRAME.
+            //
+            // The silhouette channels of table and refrigerator have had exactly this rule for months — "if
+            // the object was DETECTED by any sensor this frame it is not gone, so suppress ABSENCE; occupancy
+            // always counts" — and the LiDAR carve of bottle/hood/refrigerator/cabinet never got it. That is
+            // an omission, not a difference: a beam passing near a 7 cm cylinder and a YOLO mask sitting on
+            // that same cylinder are not two opinions to average, they are one resolving observation and one
+            // that could not resolve it. Averaging them is how the weaker sensor wins.
+            //
+            // MEASURED on this agent, 2026-08-11, over a 12-minute run: mean e_free 11.1 against e_occ 4.5 —
+            // 2.5x — and on 72% of the cycles where free exceeded occupancy YOLO was DETECTING the bottle
+            // (detected=1, vis=1, in_fov=1, central=1). 124 births and 124 deaths, each life 8-12 cycles.
+            //
+            // This is not the p_resolve term below doing too little; p_resolve answers "could the sweep have
+            // localised something this small at all" and reads a reasonable 0.30-0.45. It is a separate
+            // question — "did something else already answer this" — and the answer outranks a blurred
+            // pass-through. Occupancy is untouched: a return from inside the volume can only ever confirm.
+            if (detected)
+                ev.e_free = 0.0f;
 
             // ★A SWEEP CANNOT JUDGE THE EXISTENCE OF AN OBJECT IT CANNOT LOCALISE BETTER THAN THAT OBJECT'S
             // OWN SIZE. carve_box blurs its surface test by sigma_surf = hypot(sensor_sigma, position_sigma).

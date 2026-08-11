@@ -300,10 +300,14 @@ void RefrigeratorSceneGraph::write_rt_pose(std::uint64_t room_id, RefrigeratorIn
     const auto& s = inst.model.state();
 
     // Dead-band: suppress RT edge updates below ~5 cm to avoid pos churn from gradient oscillations.
-    constexpr float kMinWriteDistSq = 0.05f * 0.05f;
+    // Dead-band: suppress RT edge updates below ~5 cm of motion AT THE FOOTPRINT CORNER — one statement
+    // covering translation AND rotation, so an object that turns in place republishes its yaw. The centre-only
+    // form was blind to pure rotation: hood_concept sat 9° off its wall while its centre drifted 5 mm, and no
+    // consumer ever saw the corrected heading. See rc::rtcov::rt_pose_moved.
     const float dx = s.cx - inst.last_written_cx;
     const float dy = s.cy - inst.last_written_cy;
-    if (dx*dx + dy*dy < kMinWriteDistSq)
+    if (not rc::rtcov::rt_pose_moved(dx, dy, s.yaw - inst.last_written_yaw,
+                                     0.5f * std::hypot(s.w, s.h)))
         return;
 
     auto room_opt = G_->get_node(room_id);
@@ -321,6 +325,7 @@ void RefrigeratorSceneGraph::write_rt_pose(std::uint64_t room_id, RefrigeratorIn
                                       {0.0f, 0.0f, s.yaw});
     inst.last_written_cx = s.cx;
     inst.last_written_cy = s.cy;
+    inst.last_written_yaw = s.yaw;
 }
 
 // ─── Epistemic proposal ──────────────────────────────────────────────────────────────────────────

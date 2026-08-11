@@ -29,6 +29,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <numbers>
 #include <print>
 #include <string_view>
 #include <vector>
@@ -125,6 +126,29 @@ inline bool publish(DSR::DSRGraph& G, std::uint64_t parent_id, std::uint64_t nod
                100.0f * std::sqrt(std::max(0.0f, v.z)),
                57.2958f * std::sqrt(std::max(0.0f, v.yaw)));
     return true;
+}
+
+// ─── RT pose dead-band: has this object moved enough to be worth republishing? ────────────────────
+//
+// ★A DEAD-BAND ON THE CENTRE IS BLIND TO ROTATION, AND EVERY AGENT HAD ONE. The rule was
+// `dx² + dy² < 5cm²  ⇒  skip`, so an object that ROTATED IN PLACE never republished its yaw: the fit could
+// correct the heading and no consumer — viewer, controller, affordance — would ever see it. Found on
+// hood_concept 2026-08-11, whose yaw sat 9° off the wall (80.9° vs ~90°) while its centre drifted 5 mm.
+//
+// The fix needs no second threshold. What a consumer cares about is how far the OBJECT moved, and the point
+// that moves most under a rotation is the footprint corner, at the half-diagonal r from the centre: its
+// displacement is |Δp| + r·|Δyaw| to first order. So the existing 5 cm keeps its meaning — "no part of this
+// box has moved 5 cm" — and now covers translation and rotation in one statement, in one place.
+//
+// half_diag_m = 0.5·hypot(width, depth). Pass the CURRENT footprint; it is a lever arm, not a state.
+inline bool rt_pose_moved(float dx_m, float dy_m, float dyaw_rad, float half_diag_m,
+                          float min_move_m = 0.05f)
+{
+    // Wrap to (−π, π] so a ±π crossing is not read as a full turn.
+    const float dyaw = std::remainder(dyaw_rad, 2.0f * std::numbers::pi_v<float>);
+    if (not std::isfinite(dx_m) or not std::isfinite(dy_m) or not std::isfinite(dyaw))
+        return true;                       // never let a NaN pin the published pose at a stale value
+    return std::hypot(dx_m, dy_m) + std::max(0.0f, half_diag_m) * std::abs(dyaw) >= min_move_m;
 }
 
 }  // namespace rc::rtcov

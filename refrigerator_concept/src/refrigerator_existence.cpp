@@ -264,6 +264,25 @@ void RefrigeratorExistence::update_and_remove(RefrigeratorFitter& fitter, Refrig
                 // door_concept documented for the mask channel.
                 // (The occupancy-only counterpart — solid_delta on an Evidence with e_free/e_interior
                 //  zeroed — is deliberately NOT computed: interpolating from it is the ratchet above.)
+                // ★★AND A CHANNEL MAY NOT VOTE ABSENCE ON AN OBJECT ANOTHER SENSOR IS HOLDING THIS FRAME.
+                // `admissible` above asks whether OUR REGISTRATION is trustworthy; this asks a different
+                // question — did something else already answer it. The silhouette channel has had this rule
+                // for months ("if the object was DETECTED by any sensor this frame it is not gone, so
+                // suppress ABSENCE; occupancy always counts") and the LiDAR carve never got it, which is an
+                // omission rather than a difference. A through-beam grazing the volume and a YOLO mask
+                // sitting on the object are not two opinions to average: one resolved it, the other did not.
+                //
+                // MEASURED across this family on 2026-08-11: hood voted free > occupancy on 84% of probed
+                // cycles (mean 15.1 occ vs 18.7 free) while the ZED delivered ~1800 mask points every frame
+                // and the silhouette channel's admitted absence summed to EXACTLY ZERO over 50 983 rows —
+                // camera confirming, LiDAR vacating, LiDAR winning, 18 deaths in one 1.5 h run. bottle showed
+                // the same shape (2.5x, YOLO holding it on 72% of them). Occupancy is untouched: a return
+                // from inside the volume can only ever confirm.
+                if (observed)
+                {
+                    ev.e_free = 0.0f;
+                    ev.e_interior = 0.0f;
+                }
                 const float l_full = rc::exist::solid_delta(ev, sm);        // occupancy + absence
                 inst.dbg_ex_lidar_free_eff = (ev.e_free + ev.e_interior) * p_detect_lidar;
                 // Same correction as the silhouette channel above: interpolate from ZERO.

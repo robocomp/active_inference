@@ -63,7 +63,12 @@ std::uint64_t HoodSceneGraph::create_instance_from_detection(const Eigen::Vector
     G_->add_or_modify_attrib_local<mesh_path_att>(hood_node, std::string("hood_concept/meshes/hood.obj"));
     G_->add_or_modify_attrib_local<width_m_att> (hood_node, cfg_.tracker_birth_width_m);
     G_->add_or_modify_attrib_local<depth_m_att> (hood_node, cfg_.tracker_birth_depth_m);
-    G_->add_or_modify_attrib_local<height_m_att>(hood_node, cfg_.tracker_birth_height_m);
+    // ★BIRTH GEOMETRY MUST ALREADY HANG. height_m was Tracker.BirthHeightM (0.75) and the RT z below was
+    // half of it, so between birth and the first model publish every viewer drew a 0.75 m box sitting on the
+    // FLOOR. Not a cosmetic window: this hood was re-born 18 times in one run, so the floor-box was much of
+    // what was on screen. Publish the body's own extent and span from the start — the same two numbers the
+    // fitted publish uses (write_model / write_rt_pose).
+    G_->add_or_modify_attrib_local<height_m_att>(hood_node, cfg_.vertical_extent_m);
     G_->add_or_modify_attrib_local<level_att>   (hood_node, 3);
     G_->add_or_modify_attrib_local<parent_att>  (hood_node, room_node_id);
     {
@@ -78,7 +83,7 @@ std::uint64_t HoodSceneGraph::create_instance_from_detection(const Eigen::Vector
     if (not id_opt.has_value())
         return 0;
 
-    const float z = cfg_.tracker_birth_height_m * 0.5f;
+    const float z = cfg_.body_z0_m;   // underside of the hanging body — same origin convention as write_rt_pose
     rt_api_->insert_or_assign_edge_RT(room_opt.value(), id_opt.value(),
                                       {centroid_room.x(), centroid_room.y(), z}, {0.0f, 0.0f, 0.0f});
 
@@ -309,10 +314,14 @@ void HoodSceneGraph::write_rt_pose(std::uint64_t room_id, HoodInstance& inst)
     const auto& s = inst.model.state();
 
     // Dead-band: suppress RT edge updates below ~5 cm to avoid pos churn from gradient oscillations.
-    constexpr float kMinWriteDistSq = 0.05f * 0.05f;
+    // Dead-band: suppress RT edge updates below ~5 cm of motion AT THE FOOTPRINT CORNER — one statement
+    // covering translation AND rotation, so an object that turns in place republishes its yaw. The centre-only
+    // form was blind to pure rotation: hood_concept sat 9° off its wall while its centre drifted 5 mm, and no
+    // consumer ever saw the corrected heading. See rc::rtcov::rt_pose_moved.
     const float dx = s.cx - inst.last_written_cx;
     const float dy = s.cy - inst.last_written_cy;
-    if (dx*dx + dy*dy < kMinWriteDistSq)
+    if (not rc::rtcov::rt_pose_moved(dx, dy, s.yaw - inst.last_written_yaw,
+                                     0.5f * std::hypot(s.w, s.h)))
         return;
 
     auto room_opt = G_->get_node(room_id);
@@ -333,6 +342,7 @@ void HoodSceneGraph::write_rt_pose(std::uint64_t room_id, HoodInstance& inst)
                                       {0.0f, 0.0f, s.yaw});
     inst.last_written_cx = s.cx;
     inst.last_written_cy = s.cy;
+    inst.last_written_yaw = s.yaw;
 }
 
 // ─── Epistemic proposal ──────────────────────────────────────────────────────────────────────────

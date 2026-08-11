@@ -129,6 +129,8 @@ struct CabinetInstance
 
     // ── write_rt_pose dead-band (suppress tiny pose oscillations) ─────────────────────────────────
     float last_written_cx = std::numeric_limits<float>::max();
+    // Last PUBLISHED yaw — the dead-band is on corner motion, so a pure rotation must republish too.
+    float last_written_yaw = std::numeric_limits<float>::max();
     float last_written_cy = std::numeric_limits<float>::max();
     float last_written_z0 = std::numeric_limits<float>::max();   // tier switches move the run vertically
     // Last GEOMETRY published to the graph (dims + mesh). Gates the per-cycle mesh/dim rewrite so a settled

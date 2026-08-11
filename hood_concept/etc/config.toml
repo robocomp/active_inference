@@ -253,7 +253,8 @@ LidarPrecision = 2500.0          # per-ray range precision (1/m², ≈1/σ²@2cm
 # origin), and feeds the existence leg-occupancy carve from its own origin. Try ~2500 to match helios. 0=OFF (helios only).
 LidarBpearlPrecision = 0.0
 LidarRobustCM = 0.05          # Cauchy scale (m): returns this far off the surface fade out (continuous, no gate)
-LidarSelectMarginM = 0.10     # pre-select returns within (birth half-diagonal + margin) horiz, floor..birth_H vert
+LidarSelectMarginM = 0.10     # pre-select returns within (birth half-diagonal + margin) horiz, BODY SPAN +/- margin vert
+                              # (the body span comes from the manifest's `support`; it is NOT floor-referenced — a hood hangs)
 LidarCoverageN0 = 60.0        # LiDAR ray count for full weight; fewer → proportionally down-weighted (sparse-safe)
 LidarCoverageAngPower = 1.0    # ANGULAR-coverage weight precision×=(1−R)^p (R=mean-resultant of return bearings):
                                # down-weights ONE-SIDED sweeps that over-commit the near-square w↔h mode from a

@@ -49,7 +49,8 @@ private:
     // Birth-footprint select box: rotation-agnostic circumscribed XY radius + floor-referenced z-band (spans the
     // legs + rim). Fixed from the BIRTH dims (never the fitted w/h, so a blown-up extent can't explode the region).
     struct SelectBox { float rxy, z_lo, z_hi; };
-    SelectBox select_box() const;
+    // z-band follows the fitted top, clamped to the height prior's +/-2 sigma. Pass the current fitted H.
+    SelectBox select_box(float fitted_z_top_m) const;
 
     const HoodConfig&             cfg_;
     // Staged LiDAR sweeps for the range factor (room frame). Refreshed each compute() cycle; have flag false

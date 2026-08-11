@@ -72,6 +72,13 @@ void TableExistence::update_and_remove(TableFitter& fitter, TableLidarIngestor* 
     policy.removal_prob      = cfg_.existence_removal_prob;
     policy.frame_correlation = cfg_.existence_frame_correlation;
     policy.remove_frames     = static_cast<float>(cfg_.existence_remove_frames);
+    // ★ON for table, and only for table so far. The confidence-scaled requirement stops the debounce covering
+    // for a bad absence likelihood, so an agent earns it by having that likelihood verified — table's LiDAR is
+    // occupancy-only BY MEASUREMENT (the contrast/identity-blindness work of 2026-08-06), leaving absence to
+    // the silhouette channel alone, and table_2 is the trajectory the 18→2 result was measured on. bottle,
+    // hood, refrigerator and cabinet all still let LiDAR vote absence and stay on the flat rule until their
+    // free-space carves are verified. See rc::exist::RemovalPolicy::confidence_scaled.
+    policy.confidence_scaled = true;
 
 
     std::vector<std::uint64_t> doomed;

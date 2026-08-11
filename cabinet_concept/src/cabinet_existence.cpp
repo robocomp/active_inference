@@ -163,7 +163,14 @@ void CabinetExistence::update_and_remove(CabinetFitter& fitter, CabinetLidarInge
                 // can delete anything — the table's absence channel was refuted on live data, and although
                 // the reason (thin slab vs solid model) does not apply here, that is an argument for
                 // enabling it deliberately rather than assuming it.
-                const bool suppress_free = not cfg_.existence_lidar_absence;
+                // ★★AND SUPPRESSED WHENEVER ANOTHER SENSOR IS HOLDING THE RUN THIS FRAME — the same rule the
+                // silhouette channel applies at `raw_free` above, which the LiDAR carve never got. A
+                // through-beam grazing the volume and a mask sitting on the object are not two opinions to
+                // average: one resolved it, the other did not. Measured on the siblings 2026-08-11: hood's
+                // LiDAR voted free > occupancy on 84% of probed cycles while its camera's admitted absence
+                // summed to exactly zero over 50 983 rows, and bottle's ran 2.5x with YOLO holding the bottle
+                // on 72% of them. Inert here while ExistenceLidarAbsence is off; correct the moment it is on.
+                const bool suppress_free = observed or not cfg_.existence_lidar_absence;
                 inst.dbg_ex_lidar_free_eff = suppress_free ? 0.0f : ev.e_free;
                 ev.log_odds_delta = rc::exist::hollow_guarded_delta(ev, suppress_free, sm);
                 inst.existence.integrate(ev);

@@ -296,11 +296,17 @@ void CabinetSceneGraph::write_rt_pose(std::uint64_t room_id, CabinetInstance& in
     // Dead-band: suppress RT edge updates below ~5 cm to avoid pos churn from gradient oscillations.
     // z0 is included because a TIER switch moves the run vertically by ~1.45 m without touching cx,cy —
     // dead-banding on the horizontal move alone would silently strand the RT edge at the old height.
-    constexpr float kMinWriteDistSq = 0.05f * 0.05f;
+    // Dead-band: suppress RT edge updates below ~5 cm of motion AT THE FOOTPRINT CORNER — one statement
+    // covering translation AND rotation, so an object that turns in place republishes its yaw. The centre-only
+    // form was blind to pure rotation: hood_concept sat 9° off its wall while its centre drifted 5 mm, and no
+    // consumer ever saw the corrected heading. See rc::rtcov::rt_pose_moved.
     const float dx = s.cx - inst.last_written_cx;
     const float dy = s.cy - inst.last_written_cy;
     const float dz = s.z0 - inst.last_written_z0;
-    if (dx*dx + dy*dy + dz*dz < kMinWriteDistSq)
+    // A RUN's lever arm is its far END, so a long run republishes on a small turn — which is right: 1° on a
+    // 3 m run moves the end by 2.6 cm.
+    if (not rc::rtcov::rt_pose_moved(std::hypot(dx, dz), dy, s.yaw - inst.last_written_yaw,
+                                     0.5f * std::hypot(s.L, s.d)))
         return;
 
     auto room_opt = G_->get_node(room_id);
@@ -318,6 +324,7 @@ void CabinetSceneGraph::write_rt_pose(std::uint64_t room_id, CabinetInstance& in
                                       {0.0f, 0.0f, s.yaw});
     inst.last_written_cx = s.cx;
     inst.last_written_cy = s.cy;
+    inst.last_written_yaw = s.yaw;
     inst.last_written_z0 = s.z0;
 }
 

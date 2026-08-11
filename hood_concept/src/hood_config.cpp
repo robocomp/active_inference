@@ -79,6 +79,9 @@ HoodConfig load_hood_config(const ConfigLoader& cfg)
     // Precedence is deliberate: MANIFEST first (the world fact), config.toml only as an explicit override,
     // and the agent's own default only if neither speaks — the reverse of the order that let hood run on
     // the refrigerator's height while two corrected files said otherwise.
+    // Fallback if the manifest cannot be read: a hood HANGS. Stated here as this agent's own claim about
+    // its object, so the span below is still derived from an anchoring rather than assumed to be the floor.
+    auto man_support = rc::manifest::Support::hangs;
     {
         const auto g = rc::manifest::load_geometry("../common/concept_manifest/hood.concept.toml", "hood");
         if (g.valid)
@@ -99,7 +102,31 @@ HoodConfig load_hood_config(const ConfigLoader& cfg)
             if (g.support == rc::manifest::Support::floor_anchored)
                 std::print("[manifest] ★hood declares support=floor_anchored — a hood HANGS. This is the "
                            "exact inheritance that cost p_detect=0 at every range; fix the manifest.\n");
+            man_support = g.support;
         }
+    }
+    // ★THE BODY'S VERTICAL SPAN, RESOLVED ONCE. Derived through the SAME rc::manifest::z_span() the
+    // manifest uses, from the values precedence has just settled — so a config override of the height or
+    // the extent moves the span with it, and no site re-states the anchoring in its own arithmetic.
+    //
+    // This exists because a SIXTH floor-anchored site survived the scaffold pass and was found live on
+    // 2026-08-11: the LiDAR range channel pre-selected returns in z ∈ [−margin, BirthHeightM + margin] —
+    // the fridge's floor-referenced band. For a hood that is [−0.10, 0.85] m against a body at
+    // [1.79, 2.29] m: THE TWO DO NOT OVERLAP. Measured every cycle in etc/ai2_log.csv — 109 returns
+    // selected as "on the hood", mean SDF residual 1.33 m, selected z spanning 0.19–0.78 while H = 2.285.
+    // The floor and the worktop were being fed to the fit as hood surface, every real hood return was
+    // filtered out before the factor could see it, and the channel still reported FULL coverage (109 rays
+    // against LidarCoverageN0 = 60). The geometric fit was mask-only without saying so — which is what left
+    // yaw 9° off the wall (80.9° vs ~90°, std 8.5°) at obliquity_cos 0.29, and with it the visible tilt and
+    // the corner in the wall.
+    {
+        rc::manifest::Geometry span;
+        span.support  = man_support;
+        span.z_top_m  = out.ai2_prior_height_m;
+        span.extent_m = out.vertical_extent_m;
+        span.z_span(out.body_z0_m, out.body_z1_m);
+        std::print("[manifest] hood body span = [{:.2f},{:.2f}] m (support={})\n",
+                   out.body_z0_m, out.body_z1_m, rc::manifest::support_name(man_support));
     }
     out.ai2_prior_height_std    = getf("HoodModel.AI2PriorHeightStd",    0.50f);
     out.ai2_depth_unobs_precision = getf("HoodModel.AI2DepthUnobsPrecision", 1500.0f);

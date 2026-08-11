@@ -538,6 +538,21 @@ struct RemovalPolicy
     float frame_correlation = 0.0f;    // rho: opt-in, MEASURE it from the agent's own log first
     float remove_frames     = 15.0f;   // debounce AT THE BOUNDARY, in IDEAL OBSERVATIONS — see above
     int   stall_warn_cycles = 300;     // report a condemned-but-starved instance this often (0 = never)
+    // ★STAGED OFF BY DEFAULT, AND THAT IS A DELIBERATE ORDERING, NOT A LACK OF CONVICTION. The scaling above
+    // is right, and it is right precisely BECAUSE it stops the debounce covering for a bad likelihood — so an
+    // agent whose absence channel is still wrong now DELETES where it used to merely delay. That is not
+    // theoretical: within 12 minutes of shipping it, bottle_concept died and re-birthed 124 times, and the
+    // logged `required` column showed the old fixed rule would have removed on 0 of those rows and this one
+    // on 4. The defect was bottle's LiDAR free-space carve (11.1 free vs 4.5 occupancy, with YOLO holding the
+    // bottle on 72% of those cycles) — real, and pre-existing, and NOT caused here. But an agent must earn
+    // this by having its absence channels verified first, one at a time.
+    //
+    // Turning it on is evidence-driven, not a guess: `stall_warn_cycles` ships ON regardless, so a frozen
+    // debounce now announces itself with its numbers instead of sitting silent. That report is the exit
+    // condition — it says which agent is freezing and by how much. table_concept has it on already (its
+    // LiDAR is occupancy-only by measurement, its absence is camera-only, and it is the agent the 18→2
+    // result was measured on).
+    bool  confidence_scaled = false;
 };
 
 // The debounce state. It was a bare `float streak` in every agent; `starved` has to live next to it or the
@@ -556,9 +571,12 @@ struct RemovalVerdict
     bool  stalled   = false;   // condemned, unexecutable, and no resolving look is arriving — REPORT IT
 };
 
-// Ideal observations still demanded of a belief sitting at L. `remove_frames` at the boundary, 1 at the clamp.
+// Ideal observations still demanded of a belief sitting at L. `remove_frames` at the boundary, 1 at the clamp
+// — or a flat `remove_frames` everywhere while this agent's absence channels are unverified (see the policy).
 inline float required_observations(float L, const RemovalPolicy& p)
 {
+    if (not p.confidence_scaled)
+        return p.remove_frames;
     const float prob     = std::clamp(p.removal_prob, 1e-3f, 0.5f);
     const float boundary = std::log(prob / (1.0f - prob));               // < 0: the decision boundary in nats
     const float span     = std::max(1e-3f, p.logodds_max + boundary);    // boundary -> -logodds_max

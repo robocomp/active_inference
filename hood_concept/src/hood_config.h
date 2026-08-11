@@ -78,6 +78,11 @@ struct HoodConfig
     float ai2_prior_height_m      = 1.90f;   // mean of the H (vertical) static anchor (m) — a standard tall fridge
     // Vertical extent of the hood body (m). The box spans [H − this, H] — a hood HANGS.
     float vertical_extent_m = 0.50f;
+    // ★The body's vertical span above the FLOOR, derived ONCE in hood_config.cpp from the manifest's
+    // declared `support` (stage 2B) — read it instead of re-deriving the anchoring. Any site that needs a
+    // z-band uses these two numbers; a floor-referenced band is what hid the LiDAR-selects-the-floor defect.
+    float body_z0_m = 1.55f;   // underside
+    float body_z1_m = 2.05f;   // top
     float ai2_prior_height_std    = 0.30f;   // anchor std (m); stops the box top floating above the cloud
     // DEPTH-OBSERVABILITY prior: depth (h) is only identifiable when the cloud spans the depth extent (front AND
     // back face seen). A front-only view is a thin ly-slab; its many points still spuriously drag depth to the
