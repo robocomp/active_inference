@@ -60,7 +60,7 @@
 #include "birth_surprise_probe.h"   // rc::BirthSurpriseProbe (read-only: residual grid → birth surprise)
 #include "epistemic_planner.h"
 #include "../../common/nbv/graph_obstacles.h"   // rc::nbv::collect_graph_obstacles — DSR-side viewpoint obstacles
-#include "refrigerator_affordance.h"
+#include "../../common/object_affordance/object_affordance.h"
 #include "refrigerator_model.h"
 #include "../../common/dashboard/belief_inspector.h"
 #include "../../common/dashboard/belief_strip.h"

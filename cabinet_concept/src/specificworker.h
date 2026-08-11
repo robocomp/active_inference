@@ -58,7 +58,7 @@
 #include "cabinet_existence.h"   // rc::CabinetExistence (evidence-based removal)
 #include "birth_surprise_probe.h"   // rc::BirthSurpriseProbe (read-only: residual grid → birth surprise)
 #include "epistemic_planner.h"
-#include "cabinet_affordance.h"
+#include "../../common/object_affordance/object_affordance.h"
 #include "cabinet_model.h"
 #include "../../common/dashboard/belief_inspector.h"
 #include "../../common/dashboard/belief_strip.h"

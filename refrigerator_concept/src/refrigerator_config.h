@@ -290,6 +290,11 @@ struct RefrigeratorConfig
     // deletes furniture); enable to replace merge-only removal.
     bool  existence_removal_enabled = false;
     float existence_removal_prob    = 0.12f;  // decision boundary: remove when L < log(p/(1−p))
+    // rho: frame-to-frame correlation of MISSES. 0 = independent trials (the historic behaviour and
+    // the default); opt in only with a value MEASURED from this agent's own log. Added 2026-08-11
+    // when the shared rc::exist::RemovalPolicy showed refrigerator and cabinet were the only two
+    // agents without the knob at all — a silent divergence, not a decision.
+    float existence_frame_correlation = 0.0f;
     float existence_logodds_max     = 4.0f;   // clamp |L| so evidence stays finite AND recoverable
     float existence_detection_prob  = 0.85f;  // P(beam through OCCUPIED footprint returns from it)
     float existence_clutter_prob    = 0.05f;  // P(beam through EMPTY footprint returns anyway) — spurious rate

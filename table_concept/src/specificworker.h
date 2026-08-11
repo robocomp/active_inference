@@ -57,7 +57,7 @@
 #include "table_existence.h"   // rc::TableExistence (evidence-based removal)
 #include "birth_surprise_probe.h"   // rc::BirthSurpriseProbe (read-only: residual grid → birth surprise)
 #include "epistemic_planner.h"
-#include "table_affordance.h"
+#include "../../common/object_affordance/object_affordance.h"
 #include "table_model.h"
 #include "../../common/dashboard/belief_inspector.h"
 #include "../../common/dashboard/belief_strip.h"

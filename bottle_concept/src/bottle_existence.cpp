@@ -129,6 +129,14 @@ void BottleExistence::update_and_remove(BottleFitter& fitter, const Inputs& in,
     // which is precisely what you need when asking why one bottle held and its neighbour did not.
     static int ex_cycle = 0;
     const bool log_now = (++ex_cycle % 60 == 0);
+    // ONE removal policy, shared (rc::exist::RemovalPolicy) so the debounce cannot drift again — it had
+    // drifted three ways by 2026-08-10, and door paid for it with twelve deaths at fixated = 0.
+    rc::exist::RemovalPolicy policy;
+    policy.logodds_max       = cfg_.existence_logodds_max;
+    policy.removal_prob      = cfg_.existence_removal_prob;
+    policy.frame_correlation = cfg_.existence_frame_correlation;
+    policy.remove_frames     = static_cast<float>(cfg_.existence_remove_frames);
+
 
     std::vector<std::uint64_t> doomed;
     for (auto& [id, inst] : fitter.instances())
@@ -137,12 +145,11 @@ void BottleExistence::update_and_remove(BottleFitter& fitter, const Inputs& in,
             continue;                 // no belief yet ⇒ no geometry to project, nothing to carve against
         if (not inst.existence_seeded)
         {
-            inst.existence.set_max(cfg_.existence_logodds_max);
+            rc::exist::arm(inst.existence, policy);
             inst.existence.set(cfg_.existence_birth_logodds);
             inst.existence_seeded = true;
         }
-        inst.existence.set_max(cfg_.existence_logodds_max);
-        inst.existence.set_frame_correlation(cfg_.existence_frame_correlation);
+        rc::exist::arm(inst.existence, policy);
 
         const auto  t  = target_of(inst);
         float fill_min_dbg = std::numeric_limits<float>::quiet_NaN();
@@ -234,10 +241,8 @@ void BottleExistence::update_and_remove(BottleFitter& fitter, const Inputs& in,
         // genuine looking has happened, so `existence_remove_frames` is a number of IDEAL observations.
         // The LiDAR carve moves L but does not advance the streak — at 7 cm across, a bottle is at the very
         // edge of what a sweep resolves, and the camera is the modality that has to see it.
-        if (inst.existence.should_remove(cfg_.existence_removal_prob))
-            inst.existence_remove_streak += cycle_p_detect;
-        else
-            inst.existence_remove_streak = 0.0f;
+        const bool doomed_now = rc::exist::decide_removal(
+                inst.existence, inst.existence_remove_streak, policy, cycle_p_detect);
 
         // ── per-cycle existence trace ─────────────────────────────────────────────────────────────
         // ★WITHOUT THIS THE CHANNEL IS UNOBSERVABLE UNTIL IT DELETES SOMETHING, which is exactly backwards
@@ -272,7 +277,7 @@ void BottleExistence::update_and_remove(BottleFitter& fitter, const Inputs& in,
             }
         }
 
-        if (inst.existence_remove_streak >= static_cast<float>(cfg_.existence_remove_frames))
+        if (doomed_now)
             doomed.push_back(id);
     }
 

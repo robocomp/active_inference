@@ -51,7 +51,7 @@
 #include "chair_fitter.h"      // rc::ChairFitter (active-inference core)
 #include "../../common/phantom_log/phantom_log.h"   // rc::history::PhantomLog (shadow-mode birth/death record)
 #include "epistemic_planner.h"
-#include "chair_affordance.h"
+#include "../../common/object_affordance/object_affordance.h"
 #include "chair_model.h"
 #include "../../common/dashboard/belief_inspector.h"
 #include "../../common/dashboard/belief_strip.h"

@@ -142,6 +142,7 @@ CabinetConfig load_cabinet_config(const ConfigLoader& cfg)
     // ─── Existence / removal ───────────────────────────────────────────────────
     out.existence_removal_enabled = getb("CabinetModel.ExistenceRemovalEnabled", false);
     out.existence_removal_prob    = getf("CabinetModel.ExistenceRemovalProb",    0.12f);
+    out.existence_frame_correlation = getf("CabinetModel.ExistenceFrameCorrelation", 0.0f);
     out.existence_logodds_max     = getf("CabinetModel.ExistenceLogoddsMax",     4.0f);
     out.existence_detection_prob  = getf("CabinetModel.ExistenceDetectionProb",  0.85f);
     out.existence_clutter_prob    = getf("CabinetModel.ExistenceClutterProb",    0.05f);

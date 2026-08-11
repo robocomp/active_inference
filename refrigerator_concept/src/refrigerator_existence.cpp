@@ -66,6 +66,14 @@ void RefrigeratorExistence::update_and_remove(RefrigeratorFitter& fitter, Refrig
         if (rr <= 0.0f or cfg_.existence_absence_range_power <= 0.0f) return 1.0f;
         return std::min(1.0f, std::pow(rr / std::max(range_m, 1e-3f), cfg_.existence_absence_range_power));
     };
+    // ONE removal policy, shared (rc::exist::RemovalPolicy) so the debounce cannot drift again — it had
+    // drifted three ways by 2026-08-10, and door paid for it with twelve deaths at fixated = 0.
+    rc::exist::RemovalPolicy policy;
+    policy.logodds_max       = cfg_.existence_logodds_max;
+    policy.removal_prob      = cfg_.existence_removal_prob;
+    policy.frame_correlation = cfg_.existence_frame_correlation;
+    policy.remove_frames     = static_cast<float>(cfg_.existence_remove_frames);
+
 
     std::vector<std::uint64_t> doomed;
     for (auto& [id, inst] : fitter.instances())
@@ -73,8 +81,11 @@ void RefrigeratorExistence::update_and_remove(RefrigeratorFitter& fitter, Refrig
         // How resolving THIS cycle's look was, in units of one ideal observation (0 => the sensor could not
         // have seen it from here even if it were present). Drives the removal debounce below.
         float cycle_p_detect = 0.0f;
+        // Hoisted with it: the debounce advances only on an evidence cycle, but the DECISION is read
+        // outside that block, so the two must not share a scope.
+        bool  doomed_now = false;
         if (not inst.ai2_initialized) continue;
-        inst.existence.set_max(cfg_.existence_logodds_max);
+        rc::exist::arm(inst.existence, policy);
         const auto& bs = inst.ai2_belief.state();
         const auto& S  = inst.ai2_belief.covariance();
         const float surf_sigma = std::sqrt(std::max(0.0f, 0.5f * (S(0, 0) + S(1, 1))));   // footprint position σ
@@ -266,10 +277,8 @@ void RefrigeratorExistence::update_and_remove(RefrigeratorFitter& fitter, Refrig
             // door_concept, where 12 of 12 deaths had fixated=0: the `if (integrated)` guard does NOT
             // prevent this, because a channel that ran and resolved nothing still sets integrated.
             // Accumulating p_detect makes RemoveFrames a number of IDEAL observations (table/bottle unit).
-            if (inst.existence.should_remove(cfg_.existence_removal_prob))
-                inst.existence_remove_streak += cycle_p_detect;
-            else
-                inst.existence_remove_streak = 0.0f;
+            doomed_now = rc::exist::decide_removal(
+                    inst.existence, inst.existence_remove_streak, policy, cycle_p_detect);
 
             if (fitter.should_log(inst))
                 std::print("[{}] [existence] L={:.2f} p={:.2f} | lidar occ={:.1f} free={:.1f} n={} | sil occ={:.0f} free={:.0f} ndet={} | {} streak={}\n",
@@ -285,7 +294,7 @@ void RefrigeratorExistence::update_and_remove(RefrigeratorFitter& fitter, Refrig
             if (not observed)
                 fitter.log_existence_cycle(inst);
         }
-        if (inst.existence_remove_streak >= cfg_.existence_remove_frames)
+        if (doomed_now)
             doomed.push_back(id);
     }
     ev_g.removals     += static_cast<int>(doomed.size());   // EvidenceMonitor counters

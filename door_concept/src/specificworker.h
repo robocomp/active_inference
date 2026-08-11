@@ -52,7 +52,7 @@
 #include "door_bearing_range.h"   // rc::door::ResidualField / range_along_bearing (bearing → range cascade)
 #include "../../common/phantom_log/phantom_log.h"   // rc::history::PhantomLog (shadow-mode birth/death record)      // rc::DoorFitter (active-inference core)
 #include "epistemic_planner.h"
-#include "door_affordance.h"
+#include "../../common/object_affordance/object_affordance.h"
 #include "door_model.h"
 #include "../../common/dashboard/belief_inspector.h"
 #include "../../common/dashboard/belief_strip.h"

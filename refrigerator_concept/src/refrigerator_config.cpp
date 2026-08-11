@@ -198,6 +198,7 @@ RefrigeratorConfig load_refrigerator_config(const ConfigLoader& cfg)
     // ─── Existence / removal ───────────────────────────────────────────────────
     out.existence_removal_enabled = getb("RefrigeratorModel.ExistenceRemovalEnabled", false);
     out.existence_removal_prob    = getf("RefrigeratorModel.ExistenceRemovalProb",    0.12f);
+    out.existence_frame_correlation = getf("RefrigeratorModel.ExistenceFrameCorrelation", 0.0f);
     out.existence_logodds_max     = getf("RefrigeratorModel.ExistenceLogoddsMax",     4.0f);
     out.existence_detection_prob  = getf("RefrigeratorModel.ExistenceDetectionProb",  0.85f);
     out.existence_clutter_prob    = getf("RefrigeratorModel.ExistenceClutterProb",    0.05f);

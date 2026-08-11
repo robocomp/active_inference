@@ -468,4 +468,52 @@ private:
     int   run_k_    = 0;      // length of the current same-sign run
 };
 
+
+// ─── THE REMOVAL DECISION, shared so it cannot diverge again ──────────────────────────────────────
+//
+// Six lines of policy that were written out by hand in four agents and had drifted THREE ways by
+// 2026-08-10: refrigerator, cabinet and door all advanced the debounce with `++streak` — counting
+// CYCLES — while table and bottle accumulated p_detect, counting LOOKS. The consequence was measured on
+// door: all twelve of its recorded deaths had fixated = 0, at ranges of 2.1-6.7 m, five of them at
+// p_detect = 0.000. Once L dipped below the boundary the streak ran on cycles where the channel had
+// just, correctly, HELD — so the object was condemned by evidence gathered once and executed
+// RemoveFrames cycles later, by which time the robot was looking somewhere else entirely.
+//
+// The rule, stated once and now enforced by construction:
+//
+//   · `remove_frames` is a number of IDEAL OBSERVATIONS (Σ p_detect), never a number of cycles. A look
+//     that could not have resolved the object advances nothing, because it learned nothing.
+//   · an `if (integrated)` guard is NOT this rule and does not substitute for it: a channel that RAN
+//     and resolved NOTHING still sets integrated. It answers "did a sensor fire?", not "could it have
+//     seen the object?" — three agents carried a comment claiming otherwise.
+//   · check for a SECOND, weaker streak testing the same L (refrigerator's plaus_remove_streak did):
+//     it fires first and silently masks any fix applied here.
+struct RemovalPolicy
+{
+    float logodds_max       = 4.0f;    // |L| clamp — also the recantation budget (2*L_max nats)
+    float removal_prob      = 0.12f;   // remove below P(exists) = this
+    float frame_correlation = 0.0f;    // rho: opt-in, MEASURE it from the agent's own log first
+    float remove_frames     = 15.0f;   // debounce, in IDEAL OBSERVATIONS — see above
+};
+
+// Configure a belief for this cycle. Call once per instance before integrating any evidence.
+inline void arm(ExistenceBelief& b, const RemovalPolicy& p)
+{
+    b.set_max(p.logodds_max);
+    b.set_frame_correlation(p.frame_correlation);
+}
+
+// Advance the debounce by what this cycle's look was WORTH and decide. Returns true ⇒ remove.
+// cycle_p_detect is the resolvability of this cycle's look in units of one ideal observation; pass 0
+// when nothing could have been resolved and the streak correctly stands still.
+inline bool decide_removal(const ExistenceBelief& b, float& streak, const RemovalPolicy& p,
+                           float cycle_p_detect)
+{
+    if (b.should_remove(p.removal_prob))
+        streak += std::max(0.0f, cycle_p_detect);
+    else
+        streak = 0.0f;
+    return streak >= p.remove_frames;
+}
+
 }  // namespace rc::exist
