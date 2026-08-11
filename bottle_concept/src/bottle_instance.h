@@ -53,6 +53,9 @@ struct BottleInstance
     // chain/localization term J·Σ_chain·Jᵀ and the TOTAL published xx,yy (fit+chain).
     float dbg_chain_cov_xx = -1.0f, dbg_chain_cov_yy = -1.0f;
     float dbg_rtcov_xx     = -1.0f, dbg_rtcov_yy     = -1.0f;
+    // Self-gate state for the shared RT-cov publisher: bottle used to rewrite the edge EVERY cycle,
+    // and an RT edge write is a CRDT delta every peer must merge (see the dot-cloud pathology).
+    float last_pub_cov_trace = -1.0f;
     // LiDAR range-channel diagnostics (set in feed_lidar): returns SELECTED for this instance this frame and
     // their mean |SDF| to the current model surface. A healthy frame = tens of rays at a few-cm residual; a
     // wrong LidarFrameNode (mount double-applied) shows ~0 rays or a large systematic residual.

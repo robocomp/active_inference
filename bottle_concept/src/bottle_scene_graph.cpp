@@ -4,6 +4,8 @@
 
 #include "bottle_scene_graph.h"
 
+#include "../../common/rt_covariance/rt_covariance.h"   // rc::rtcov::publish (SHARED)
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -398,15 +400,24 @@ void BottleSceneGraph::write_rt_pose(BottleInstance& inst)
         inst.dbg_rtcov_xx = cov(0, 0);   // TOTAL published xx,yy = fit (Laplace) + chain
         inst.dbg_rtcov_yy = cov(1, 1);
 
-        std::vector<float> cov_flat(36, 0.0f);
-        for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c)
-                cov_flat[r * 6 + c] = cov(r, c);
-        cov_flat[3 * 6 + 3] = cfg_.yaw_variance;   // rx
-        cov_flat[4 * 6 + 4] = cfg_.yaw_variance;   // ry
-        cov_flat[5 * 6 + 5] = cfg_.yaw_variance;   // rz
-        G_->add_or_modify_attrib_local<rt_covariance_att>(edge.value(), cov_flat);
-        G_->insert_or_assign_edge(edge.value());
+        // Shared publisher (common/rt_covariance). Three things change by adopting it, and each was a
+        // real divergence rather than a stylistic one:
+        //
+        //  1. ROLL/PITCH become the floor prior instead of cfg_.yaw_variance (≈π²). A bottle STANDS on a
+        //     table: it is not free to tip. The old code used one "unobservable" number for all three
+        //     rotational DOF, which is true of YAW — a symmetric cylinder genuinely has no measurable
+        //     heading — but false of roll and pitch, and it told the controller the bottle might be lying
+        //     on its side. Yaw keeps cfg_.yaw_variance, because there the claim is correct.
+        //  2. THE WRITE IS NOW SELF-GATED. bottle rewrote this edge every single cycle; an RT edge write
+        //     is a CRDT delta every peer must merge, and unbounded delta churn is exactly the pathology
+        //     that once left an agent unkillable at 100% CPU compacting its own dot cloud.
+        //  3. The cross-terms SURVIVE. bottle was the only agent publishing the full 3×3, so the shared
+        //     struct carries an optional block rather than forcing everyone down to a diagonal — the
+        //     off-diagonal is what tells a planner the uncertainty is a long ellipse down the sightline
+        //     rather than a circle, and that is bottle's capability to donate, not to lose.
+        const auto v = rc::rtcov::Se3Var::from_translation_block(cov, cfg_.yaw_variance);
+        rc::rtcov::publish(*G_, inst.parent_id, inst.node_id, v, inst.last_pub_cov_trace,
+                           /*force=*/false, inst.node_name);
     }
 
     inst.last_written_cx = s.cx;

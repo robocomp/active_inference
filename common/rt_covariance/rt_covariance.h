@@ -33,6 +33,8 @@
 #include <string_view>
 #include <vector>
 
+#include <Eigen/Dense>
+
 #include <dsr/api/dsr_api.h>
 
 namespace rc::rtcov {
@@ -46,6 +48,28 @@ struct Se3Var
 {
     float x = 0.0f, y = 0.0f, z = 0.0f;
     float roll = kFlatRollPitchVar, pitch = kFlatRollPitchVar, yaw = 0.0f;
+
+    // ★OPTIONAL FULL TRANSLATION BLOCK, cross-terms included. A belief's position covariance is NOT
+    // diagonal: an object seen down a long sightline is far more uncertain ALONG the ray than across it,
+    // and that correlation is precisely what a planner needs in order to inflate in the right direction
+    // instead of inflating a circle. Four agents published the diagonal only and threw the correlation
+    // away; bottle_concept was already publishing the whole 3×3 and would have LOST that had this been
+    // unified downward to the common shape. Union, not intersection — so the block is carried here and
+    // every agent can start supplying one.
+    Eigen::Matrix3f xyz = Eigen::Matrix3f::Zero();
+    bool            has_xyz = false;
+
+    // Build from a full translation covariance (m²). yaw_var is the object's own rotational uncertainty;
+    // roll/pitch default to the floor prior, which is the right claim for anything standing on a surface.
+    static Se3Var from_translation_block(const Eigen::Matrix3f& C, float yaw_var,
+                                         float rp_var = kFlatRollPitchVar)
+    {
+        Se3Var v;
+        v.x = C(0, 0); v.y = C(1, 1); v.z = C(2, 2);
+        v.roll = rp_var; v.pitch = rp_var; v.yaw = yaw_var;
+        v.xyz = C; v.has_xyz = true;
+        return v;
+    }
 
     // The self-gate reads the TRANSLATION+YAW trace only: roll/pitch are a constant prior here, so folding
     // them in would add a fixed offset that dilutes the relative change test below.
@@ -76,9 +100,16 @@ inline bool publish(DSR::DSRGraph& G, std::uint64_t parent_id, std::uint64_t nod
         return false;   // no RT edge yet ⇒ nothing to annotate; the pose write creates it
 
     std::vector<float> cov(kBlockSize, 0.0f);
-    cov[0 * 6 + 0] = v.x;
-    cov[1 * 6 + 1] = v.y;
-    cov[2 * 6 + 2] = v.z;
+    if (v.has_xyz)                       // full translation block, correlations preserved
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                cov[r * 6 + c] = v.xyz(r, c);
+    else                                 // diagonal only (cross-terms unmodelled by this agent)
+    {
+        cov[0 * 6 + 0] = v.x;
+        cov[1 * 6 + 1] = v.y;
+        cov[2 * 6 + 2] = v.z;
+    }
     cov[3 * 6 + 3] = v.roll;
     cov[4 * 6 + 4] = v.pitch;
     cov[5 * 6 + 5] = v.yaw;
