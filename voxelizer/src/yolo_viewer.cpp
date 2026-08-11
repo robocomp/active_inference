@@ -141,6 +141,15 @@ void YoloViewer::resizeEvent(QResizeEvent* event)
         setPixmap(last_pixmap_.scaled(size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
 }
 
+// Hovering only produces mouse-move events while a button is held UNLESS tracking is on, so tracking
+// must follow the OR of every readout — neither may turn it off on the other's behalf. (It was a
+// per-readout decision once: update_depth, reached first each frame, disabled tracking before
+// update_semantic had ever announced itself, and the semantic hover went silent for good.)
+void YoloViewer::sync_mouse_tracking()
+{
+    setMouseTracking(semantic_active_ or depth_active_);
+}
+
 void YoloViewer::update_semantic(const cv::Mat& labels, bool active)
 {
     semantic_active_ = active;
@@ -149,6 +158,7 @@ void YoloViewer::update_semantic(const cv::Mat& labels, bool active)
         semantic_labels_ = labels.clone();
     else
         semantic_labels_.release();
+    sync_mouse_tracking();
 }
 
 void YoloViewer::update_depth(const cv::Mat& measured_m, const cv::Mat& model_m, bool active)
@@ -158,15 +168,13 @@ void YoloViewer::update_depth(const cv::Mat& measured_m, const cv::Mat& model_m,
     {
         depth_measured_ = measured_m.clone();
         depth_model_    = model_m.empty() ? cv::Mat() : model_m.clone();
-        setMouseTracking(true);
     }
     else
     {
         depth_measured_.release();
         depth_model_.release();
-        if (not semantic_active_)
-            setMouseTracking(false);
     }
+    sync_mouse_tracking();
 }
 
 void YoloViewer::mouseMoveEvent(QMouseEvent* event)

@@ -40,6 +40,8 @@ protected:
 private:
     QPixmap render_frame(const cv::Mat& rgb, const std::vector<SegDetection>& detections) const;
     static cv::Vec3b class_color(int class_id);
+    // Mouse tracking = the OR of the readouts that need hover events. Call after changing either flag.
+    void sync_mouse_tracking();
 
     QPixmap last_pixmap_;
 
