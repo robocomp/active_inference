@@ -43,8 +43,11 @@ float HoodBelief::sdf_box(const Eigen::Vector3f& p, const HoodBeliefState& s) co
     const float px = p.x() - s.cx, py = p.y() - s.cy;
     const float lx = px * c - py * sn;
     const float ly = px * sn + py * c;
-    const float half_H = 0.5f * s.H;
-    return box_sdf(std::abs(lx) - 0.5f * s.w, std::abs(ly) - 0.5f * s.h, std::abs(p.z() - half_H) - half_H);
+    // The box HANGS: it spans [H − extent, H], so its vertical centre is H − extent/2 and its half-extent
+    // is extent/2 — not H/2 and H/2, which is the floor-anchored form this was cloned from.
+    const float half_dz = 0.5f * params_.vertical_extent_m;
+    const float z_mid   = s.H - half_dz;
+    return box_sdf(std::abs(lx) - 0.5f * s.w, std::abs(ly) - 0.5f * s.h, std::abs(p.z() - z_mid) - half_dz);
 }
 
 float HoodBelief::sdf_prim(const Eigen::Vector3f& p, const HoodBeliefState& s, int) const
@@ -415,7 +418,9 @@ void HoodBelief::accumulate_extra(const HoodBeliefState& s, const HoodFrame& f,
                 const float along = along_x ? lx : ly;               // the axis being tested
                 const float cross = along_x ? ly : lx;               // must lie within the spanning core
                 if (std::abs(cross) > half_cross + delta) continue;  // drop clutter off the side of this face pair
-                if (q.z() < 0.0f or q.z() > s.H + delta) continue;
+                // Vertical admission band = the hood body, not floor→top: a point under the hood is the HOB
+                // or the worktop, and admitting it would drag the fit down toward the counter.
+                if (q.z() < s.H - params_.vertical_extent_m - delta or q.z() > s.H + delta) continue;
                 // Clearly on one side or the other by a FIXED margin δ (NOT keyed to the current half-extent). A
                 // point straddling the centre counts as NEITHER, so a COLLAPSED slab cannot masquerade as
                 // "both faces seen" and switch the boost off — that circularity re-collapsed the extent.

@@ -8,7 +8,19 @@
  * carrying a FULL 6×6 covariance. Pure Eigen, no torch, no DSR — unit-testable in isolation (self_test()).
  *
  * State θ = [cx, cy, H, w, h, yaw]  (6 DOF ≡ the recipe's [cx,cy,yaw,w,d,h]):
- *   cx,cy = room-frame centre XY   ·   H = full height (box top; box spans floor→H, FLOOR-ANCHORED)
+ *   cx,cy = room-frame centre XY   ·   H = height of the box TOP above the floor
+ *
+ * ★VERTICAL ANCHORING — a hood HANGS, it does not stand. Cloned from refrigerator, whose box spans
+ * z ∈ [0, H] because a fridge rests on the floor, so one number fixed both its extent and its placement.
+ * A range hood's underside sits ~1.55 m up with nothing beneath it, so the box spans z ∈ [H − extent, H].
+ * H keeps its meaning (top above floor) and the ONLY thing that changes is the bottom: 0 → H − extent.
+ *
+ * ★WHY extent IS A PARAMETER AND NOT A 7th DOF. It would be more general to estimate the vertical extent,
+ * and it would also be unidentifiable: a hood's underside is a crisp edge against the hob gap (LiDAR
+ * strikes it, the mask's lower boundary is clean) while its TOP merges into the wall or leaves the frame
+ * entirely at any usable stand-off. Estimating a DOF the data cannot resolve is how the size oscillation
+ * bugs in this lineage started. So extent carries a prior and a stated uncertainty instead — and if a
+ * viewpoint ever does resolve the top edge, promoting it to a DOF is a contained change from here.
  *   w = width (local X)            ·   h = depth (local Y)   ·   yaw = rotation about +Z.
  * The box is asymmetric (w≠h resolves the 90° swap), so there is NO w↔h mode accumulator and NO canonical
  * fold — canonicalize() is a no-op. The honest 180° front/back yaw ambiguity is NOT folded; it is left in
@@ -106,7 +118,10 @@ struct HoodBeliefParams
     // split the previously-uniform size entry of prior_cov_diag() into footprint (tight) vs height (broad).
     float prior_footprint_m   = 0.60f;   // mean of the w and h (depth) prior (m)
     float prior_footprint_std = 0.08f;   // TIGHT → strong footprint prior (m); λ = 1/std² folded into accumulate_extra
-    float prior_height_m      = 1.90f;   // mean of the H (vertical) static anchor (m) — a standard tall fridge
+    float prior_height_m      = 2.05f;   // mean of H = the hood TOP above the floor (m)
+    // Vertical extent of the hood body (m): the box spans [H − this, H]. NOT estimated — see the header
+    // note. σ ≈ 0.12 m across domestic models, which is the honest uncertainty this constant stands in for.
+    float vertical_extent_m   = 0.50f;
     float prior_height_std    = 0.30f;   // anchor std (m); stops the box top floating above the cloud (accumulate_extra 2a)
     // DEPTH-OBSERVABILITY prior (front-only-view depth-collapse fix): depth (h) is identifiable only when the cloud
     // spans the depth extent (front AND back seen). A front-only view is a thin ly-slab whose many points still drag

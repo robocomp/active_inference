@@ -385,6 +385,7 @@ void SpecificWorker::initialize()
     // model the removal channel uses to decide how much a missing mask is worth.
     const rc::detect::DetectorEnvelope det_env{cfg_.detect_min_fill, cfg_.detect_max_fill, cfg_.detect_soft};
     epistemic_planner_.set_detector_envelope(det_env);
+    epistemic_planner_.set_vertical_extent(cfg_.vertical_extent_m);   // a hood HANGS — no floor anchor
     if (existence_) existence_->set_detector_envelope(det_env);
 
     // Stale affordance nodes are swept on entering Operating (presence hook) and on shutdown — see

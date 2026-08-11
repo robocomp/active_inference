@@ -107,9 +107,14 @@ public:
 
     // The detector's operating envelope. The stand-off is the argmax of THIS, so the viewpoint we ask for is
     // the one where the detector is most likely to fire — the same model the removal channel weights absence by.
+    // Vertical extent of the hood body (m) — the box spans [H − this, H]. Owned here because both the
+    // silhouette sampling and the NBV Target need it, and neither may assume a floor anchor.
+    void set_vertical_extent(float m) { extent_m_ = m; }
+
     void set_detector_envelope(const rc::detect::DetectorEnvelope& e) { det_env_ = e; }
 
 private:
+    float extent_m_ = 0.50f;   // see set_vertical_extent
     rc::detect::DetectorEnvelope det_env_{};
 };
 

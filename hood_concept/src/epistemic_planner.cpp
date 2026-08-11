@@ -37,7 +37,8 @@ namespace rc {
 namespace
 {
 // Samples surface points on one vertical face of the 6-DOF HoodBeliefState [cx,cy,H,w,h,yaw], for ΔI.
-std::vector<Eigen::Vector3f> sample_face_surface(const HoodBeliefState& s, int face_idx)
+std::vector<Eigen::Vector3f> sample_face_surface(const HoodBeliefState& s, int face_idx,
+                                                 float extent_m)
 {
     constexpr int kTangent = 10, kVert = 6;
     const float hw = s.w * 0.5f, hh = s.h * 0.5f;
@@ -58,7 +59,9 @@ std::vector<Eigen::Vector3f> sample_face_surface(const HoodBeliefState& s, int f
         const float ry = s.cy + syaw * lx + cyaw * ly;
         for (int k = 0; k < kVert; ++k)
         {
-            const float z = s.H * ((kVert > 1) ? static_cast<float>(k) / (kVert - 1) : 1.0f);
+            // Sample ACROSS THE BODY [H−extent, H], not floor→H: samples under the hood are air.
+            const float frac = (kVert > 1) ? static_cast<float>(k) / (kVert - 1) : 1.0f;
+            const float z = (s.H - extent_m) + frac * extent_m;
             pts.emplace_back(rx, ry, z);
         }
     }
@@ -127,7 +130,11 @@ EpistemicProposal EpistemicPlanner::compute(const HoodBelief& belief, float lat_
     rc::nbv::Target target;
     target.cx = s.cx; target.cy = s.cy; target.yaw = s.yaw;
     target.w  = s.w;  target.h  = s.h;
-    target.z0 = 0.0f; target.z1 = s.H;   // the box stands on the floor; z1 is what binds the vertical framing
+    // ★A HANGING BOX. z0 = 0 would tell the NBV the hood extends to the floor, so its vertical fill would
+    // read ~4x too large and the planner would stand the robot far too FAR back to frame a 2 m object that
+    // is really 0.5 m tall. Both edges are real here, and z0 is the one that binds: the hood sits above the
+    // camera, so it is the UNDERSIDE that leaves the top of the frame first as the robot closes in.
+    target.z0 = s.H - extent_m_; target.z1 = s.H;
     target.sigma_pos_m    = std::sqrt(std::max(0.0f, 0.5f * (S(0, 0) + S(1, 1))));
     target.sigma_extent_m = std::sqrt(std::max(0.0f, 0.5f * (S(3, 3) + S(4, 4))));
 
@@ -140,7 +147,7 @@ EpistemicProposal EpistemicPlanner::compute(const HoodBelief& belief, float lat_
     {
         const float Ri = sigma_base * sigma_base + (lat_rate * standoff) * (lat_rate * standoff);
         const Eigen::Matrix<float, 6, 6> dI =
-            belief.predicted_information(sample_face_surface(s, face_idx), Ri).topLeftCorner<6, 6>();
+            belief.predicted_information(sample_face_surface(s, face_idx, extent_m_), Ri).topLeftCorner<6, 6>();
         const float det = (I6 + S * dI).determinant();
         return std::max(0.0f, 0.5f * std::log(std::max(1e-9f, det)));   // single-view D-optimal info (nats)
     };

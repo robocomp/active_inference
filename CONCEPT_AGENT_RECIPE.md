@@ -235,10 +235,25 @@ are both that.
     6.  THE OBJECT-SPECIFIC WORK — everything above is mechanical; this is the agent. Measured across the
         fleet, it is model.cpp / config / belief / fitter, which are only 8–31 % similar between agents for
         good reason. For hood specifically:
-          · ★VERTICAL ANCHORING. refrigerator's box spans z ∈ [0, H] — FLOOR-anchored, one number fixes both
-            extent and placement. A hood HANGS (underside ~1.55 m, top ~2.05 m) and needs two vertical
-            parameters, with z0 a real DOF. It is a belief-state change: the DOF vector, its Σ, dof_spec,
-            the CSV header and the fitter's Jacobians move together. Flagged in hood_model.h, NOT patched.
+          · ★VERTICAL ANCHORING — DONE 2026-08-11, and cheaper than it looked. refrigerator's box spans
+            z ∈ [0, H] because a fridge rests on the floor. A hood HANGS. The instinct is that this needs a
+            7th DOF (z0 and z1 both estimated) and a full cascade — 53 hard-coded 6s in the belief alone.
+            It does not: H ALREADY means "top above floor", so the only false statement is the BOTTOM being
+            0. Re-anchoring the box to [H − extent, H] is four sites — the SDF, the point-admission band,
+            the NBV Target and the LiDAR carve — plus one parameter. N stays 6.
+            The extent is a PARAMETER, not a DOF, and that is a modelling claim rather than laziness: a
+            hood's underside is a crisp edge against the hob gap (LiDAR strikes it, the mask's lower
+            boundary is clean) while its top merges into the wall or leaves the frame at any usable
+            stand-off. Estimating a DOF the data cannot resolve is how the size-oscillation bugs in this
+            lineage started.
+            ★MEASURE THE CONSEQUENCE, do not assume it. Swept against the shipped envelope, the cloned
+            floor-anchored box reports p_detect = 0.000 at EVERY range out to 3 m and puts its best
+            stand-off at 6.4 m (p = 0.315) — across the room, and in a kitchen very likely outside the room
+            polygon, where the NBV refuses outright. The corrected box peaks at 3.3 m with p = 0.612:
+            roughly DOUBLE the detectability at HALF the distance. And the third consequence is the one
+            that would have been hardest to see — p_detect ≈ 0 at every sane viewing distance means the
+            existence channel can never charge absence, so the agent would have silently accumulated
+            immortal hoods while every display looked healthy.
           · σ*: the clone inherits the parent's demands and the audit scores them as a PASS. That is a false
             green — they were renamed, not restated. Restate a real consumer demand or declare
             `SIGMA-STAR: none — <reason>`. Invariant 12.

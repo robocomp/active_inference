@@ -196,11 +196,11 @@ void HoodExistence::update_and_remove(HoodFitter& fitter, HoodLidarIngestor* lid
         if (sweep)
         {
             rc::exist::Evidence ev = rc::exist::carve_box(origin, *sweep, bs.cx, bs.cy, bs.yaw, bs.w, bs.h,
-                                                          0.0f, bs.H, surf_sigma, sm);
+                                                          bs.H - cfg_.vertical_extent_m, bs.H, surf_sigma, sm);
             if (sweep_bp != nullptr)   // second ray-set, own origin (occlusion-aware first-hit) — occupancy only
             {
                 const rc::exist::Evidence bp = rc::exist::carve_box(origin_bp, *sweep_bp, bs.cx, bs.cy, bs.yaw,
-                                                                    bs.w, bs.h, 0.0f, bs.H, surf_sigma, sm);
+                                                                    bs.w, bs.h, bs.H - cfg_.vertical_extent_m, bs.H, surf_sigma, sm);
                 ev.e_occ += bp.e_occ; ev.n_reached += bp.n_reached;
             }
             inst.dbg_ex_lidar_occ = ev.e_occ; inst.dbg_ex_lidar_free = ev.e_free; inst.dbg_ex_lidar_n = ev.n_reached;
@@ -225,7 +225,7 @@ void HoodExistence::update_and_remove(HoodFitter& fitter, HoodLidarIngestor* lid
                 // ★Applied to e_interior AS WELL as e_free. Only e_free was degraded before, so the interior
                 // term — the one that makes a phantom-over-a-wall die — went in at FULL strength from any
                 // distance. That was a plain bug, not a policy choice.
-                const float lidar_range = (origin - Eigen::Vector3f(bs.cx, bs.cy, 0.5f * bs.H)).norm();
+                const float lidar_range = (origin - Eigen::Vector3f(bs.cx, bs.cy, bs.H - 0.5f * cfg_.vertical_extent_m)).norm();
                 const float coverage = (cfg_.lidar_coverage_n0 > 0.0f)
                                      ? std::min(1.0f, static_cast<float>(ev.n_reached) / cfg_.lidar_coverage_n0)
                                      : 1.0f;
