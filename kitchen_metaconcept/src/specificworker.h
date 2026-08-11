@@ -180,6 +180,23 @@ private:
     // Per-member leave-one-out down-prior — what M3 would publish on each group_member edge.
     std::unordered_map<std::uint64_t, rc::KitchenBelief::MemberPrior> cavity_;
 
+    // ── OUTSTANDING MESSAGES (the EP cavity store) ────────────────────────────
+    // What this frame last told each member, per DOF. The frame is the SINGLE WRITER, so it can do
+    // the whole down-date on the reading side: subtract this from a member's published value before
+    // using it as evidence, and our own message can never circulate back as corroboration.
+    // ★Empty while the agent stays read-only — and it must be in place BEFORE the first push, not
+    // after, or the first thing the loop learns is its own voice.
+    struct SentMessage
+    {
+        std::uint64_t stamp_ms = 0;
+        rc::SentScalar yaw, worktop, depth;
+    };
+    std::unordered_map<std::uint64_t, SentMessage> sent_;
+    // Subtract our outstanding message from a member's published values. Returns false if any DOF's
+    // subtraction was refused (see rc::down_date) — reported, never silently clamped.
+    bool apply_down_date(rc::KitchenMember& m) const;
+    std::size_t down_date_refused_ = 0;   // per-cycle count, surfaced in the log
+
     rc::KitchenOutline outline_floor_;   // base + tall units: the floor-level chain
     rc::KitchenOutline outline_wall_;     // wall units: the upper chain
     std::ofstream outline_csv_;           // per-joint record; empty path disables

@@ -54,6 +54,11 @@ struct OutlineSeg
     Eigen::Vector2f n{0, 1};        // unit normal pointing INTO the room (the front side)
     float           length = 0.0f;
     float           depth  = 0.0f;
+    // ★Are this member's ENDS free to move? A cabinet run's are — level-1 declares t0/t1 free, with
+    // no prior at all. An appliance's are NOT: a fridge's width is the object, not an interval to be
+    // fitted. So when a run and a fridge share wall, the RUN yields and the fridge does not, and that
+    // follows from what each thing is rather than from an arbitration rule.
+    bool            ends_free = true;
 
     // The front face: the segment [a, b] the room actually sees.
     Eigen::Vector2f face_a() const { return centre + 0.5f * depth * n - 0.5f * length * u; }
@@ -179,6 +184,52 @@ public:
         return pa + t * a.u;
     }
 
+    // What each end should be told, to make the shape continuous. Only ends that are free to move
+    // and are not already at their vertex produce one.
+    struct EndCorrection
+    {
+        int   seg = -1;
+        bool  high_end = false;      // which end of that run (false = face_a side)
+        float delta = 0.0f;          // signed move along +u: >0 extend outward, <0 retract
+        Eigen::Vector2f target{0, 0};// where the end should be, room frame
+        JointKind cause = JointKind::Corner;
+        int   other = -1;            // the run it must meet
+    };
+    std::vector<EndCorrection> end_corrections() const
+    {
+        std::vector<EndCorrection> out;
+        const auto push = [&](const OutlineJoint& j, int self, int other, float gap, bool high)
+        {
+            if (self < 0 or not segs_[static_cast<std::size_t>(self)].ends_free) return;
+            if (std::abs(gap) < kJoinTolM) return;                       // already meets: nothing to say
+            const auto& g = segs_[static_cast<std::size_t>(self)];
+            EndCorrection c;
+            c.seg = self; c.other = other; c.high_end = high; c.cause = j.kind;
+            // gap > 0 ⇒ the end stops short and must EXTEND outward; gap < 0 ⇒ it overshoots and must
+            // RETRACT. Either way the end moves outward by `gap` along its own outward direction.
+            c.delta  = gap;
+            const float sign = high ? 1.0f : -1.0f;
+            c.target = g.centre + sign * (0.5f * g.length + gap) * g.u;
+            out.push_back(c);
+        };
+        for (const auto& j : joints_)
+        {
+            // A TEE's through-run is doing the right thing; only the side that should meet is told.
+            if (j.kind == JointKind::Tee)
+            {
+                if (not j.passes_i) push(j, j.i, j.j, j.gap_i, j.end_i_high);
+                if (not j.passes_j) push(j, j.j, j.i, j.gap_j, j.end_j_high);
+                continue;
+            }
+            if (j.kind == JointKind::Abutting or j.kind == JointKind::Corner)
+                continue;                                                 // already continuous
+            // Crossing, Hole and collinear Overlap: every FREE end involved moves to its vertex.
+            push(j, j.i, j.j, j.gap_i, j.end_i_high);
+            push(j, j.j, j.i, j.gap_j, j.end_j_high);
+        }
+        return out;
+    }
+
     static bool self_test();
 
 private:
@@ -217,6 +268,13 @@ private:
         // Sign convention as everywhere else: negative = bodies share space, positive = a hole.
         out.gap_i = out.gap_j = -shared;
         out.passes_i = out.passes_j = false;
+        // ★WHICH end of each run the shared stretch sits at. The first version left these at their
+        // default (false = low end), so a correction for an overlap at a run's HIGH end was aimed at
+        // the opposite end of the run — it would have lengthened the very run it was trying to shorten.
+        const float shared_c = 0.5f * (lo + hi);                  // in a's frame
+        const float sgn      = (a.u.dot(b.u) >= 0.0f) ? 1.0f : -1.0f;
+        out.end_i_high = shared_c > 0.0f;
+        out.end_j_high = (sgn * (shared_c - cb)) > 0.0f;
         out.kind = (shared > 0.01f) ? JointKind::Overlap
                  : (shared > -0.01f) ? JointKind::Abutting
                                      : JointKind::Hole;
@@ -454,6 +512,40 @@ inline bool kitchen_outline_self_test()
             check(o3.joints().empty(),
                   "(h) parallel counters on OPPOSITE walls share no line and form no joint");
         }
+    }
+
+    // ── (i) END CORRECTIONS — what step 2 would actually say ─────────────────────────────────────
+    {
+        // The live overlap: a cabinet run sharing 0.554 m of wall with the fridge. The fridge does
+        // not move (its width is the object); the run retracts by exactly the shared stretch.
+        OutlineSeg run; run.name = "run"; run.u = {0, 1}; run.n = {1, 0};
+        run.depth = 0.60f; run.length = 3.58f; run.centre = Eigen::Vector2f(0.0f, 1.79f);
+        OutlineSeg fri; fri.name = "fridge"; fri.u = {0, 1}; fri.n = {1, 0};
+        // run spans y 0.00 .. 3.58; fridge spans 3.026 .. 3.686 ⇒ they share 0.554, as measured live
+        fri.depth = 0.60f; fri.length = 0.66f; fri.centre = Eigen::Vector2f(0.0f, 3.356f);
+        fri.ends_free = false;                                    // an appliance's extent is the object
+        KitchenOutline o; o.set_segments({run, fri});
+        const auto cs = o.end_corrections();
+        check(cs.size() == 1, "(i) ★only the RUN is corrected — the fridge's width is not an interval");
+        if (cs.size() == 1)
+        {
+            check(cs.front().seg == 0, "(i) and it is the run, not the appliance");
+            check(cs.front().delta < 0.0f, "(i) it RETRACTS (negative), it does not grow");
+            check(std::abs(std::abs(cs.front().delta) - 0.554f) < 0.02f,
+                  "(i) by exactly the stretch of wall the two of them share");
+            check(cs.front().high_end,
+                  "(i) ★and at the END the overlap is actually at — aiming at the other end would "
+                  "have LENGTHENED the run it is trying to shorten");
+        }
+        // A clean corner produces no correction at all — nothing to say when it already meets.
+        OutlineSeg a; a.name = "a"; a.u = {1, 0}; a.n = {0, -1};
+        a.depth = 0.60f; a.length = 2.00f; a.centre = Eigen::Vector2f(1.00f, 0.30f);
+        OutlineSeg b; b.name = "b"; b.u = {0, 1}; b.n = {1, 0};
+        b.depth = 0.60f; b.length = 2.00f; b.centre = Eigen::Vector2f(-0.30f, 1.00f);
+        KitchenOutline o2; o2.set_segments({a, b});
+        check(o2.joints().size() == 1 and o2.joints().front().kind == JointKind::Corner,
+              "(i) the control is a clean corner");
+        check(o2.end_corrections().empty(), "(i) ★a continuous shape is told NOTHING");
     }
 
     if (ok) std::printf("[kitchen_outline::self_test] all checks passed\n");

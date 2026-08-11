@@ -368,6 +368,20 @@ void SpecificWorker::compute()
                                       ? outline_floor_.worst_gap() : outline_wall_.worst_gap();
                 const float pen = std::max(outline_floor_.worst_penetration(),
                                            outline_wall_.worst_penetration());
+                // What step 2 WOULD tell each end, computed with the down-date already in place.
+                // Still read-only: nothing is written to the graph.
+                for (const auto* o : {&outline_floor_, &outline_wall_})
+                    for (const auto& c : o->end_corrections())
+                        std::print("[kitchen_metaconcept]   would move {}'s {} end by {:+.3f} m "
+                                   "to meet {} ({})\n",
+                                   o->segments()[static_cast<std::size_t>(c.seg)].name,
+                                   c.high_end ? "high" : "low", c.delta,
+                                   o->segments()[static_cast<std::size_t>(c.other)].name,
+                                   rc::KitchenOutline::kind_name(c.cause));
+                if (down_date_refused_ > 0)
+                    std::print("[kitchen_metaconcept]   ⚠ {} member(s) refused the message down-date "
+                               "(our outstanding message claimed more information than their posterior)\n",
+                               down_date_refused_);
                 std::print("[kitchen_metaconcept]   outline: {} floor + {} wall joints "
                            "({} corner, {} tee, {} crossing, {} hole, {} OVERLAP, {} abutting) | "
                            "worst gap {:+.3f} m | worst penetration {:.3f} m\n",
@@ -580,6 +594,7 @@ std::optional<rc::KitchenMember> SpecificWorker::read_member(const DSR::Node& no
 SpecificWorker::MemberSnapshot SpecificWorker::poll_members()
 {
     MemberSnapshot s;
+    down_date_refused_ = 0;
     if (not G)
         return s;
 
@@ -597,6 +612,8 @@ SpecificWorker::MemberSnapshot SpecificWorker::poll_members()
         auto m = read_member(node, cls);
         if (not m.has_value()) { ++s.skipped_no_rt; continue; }
         if (not m->has_cov)    ++s.no_cov;
+        // ★Down-date BEFORE the value is used as evidence, not after.
+        if (not apply_down_date(*m)) ++down_date_refused_;
         if (m->pinned)         s.pinned.push_back(*m);
         s.members.push_back(std::move(*m));
     }
@@ -651,6 +668,29 @@ void SpecificWorker::compute_cavity_priors(const MemberSnapshot& s)
     }
 }
 
+// Remove this frame's own outstanding message from a member's published values, so what reaches the
+// fit is only what the member has added since. See rc::down_date and FACTORIZATION_ANCHORS.tex §5.2.
+bool SpecificWorker::apply_down_date(rc::KitchenMember& m) const
+{
+    const auto it = sent_.find(m.id);
+    if (it == sent_.end())
+        return true;                                   // we have told this member nothing
+    bool ok = true;
+    float yaw = m.yaw, yaw_var = m.var_yaw;
+    // Yaw lives on a 90°-periodic circle: do the subtraction on the RESIDUAL about what we sent, then
+    // fold back, so the wrap can never turn a 1° disagreement into an 89° one.
+    if (it->second.yaw.info > 0.0f)
+    {
+        float d = rc::KitchenBelief::axis_delta(yaw, it->second.yaw.mean);
+        ok &= rc::down_date(d, yaw_var, rc::SentScalar{0.0f, it->second.yaw.info});
+        yaw = it->second.yaw.mean + d;
+    }
+    ok &= rc::down_date(m.worktop, m.var_worktop, it->second.worktop);
+    ok &= rc::down_date(m.depth,   m.var_depth,   it->second.depth);
+    m.yaw = yaw; m.var_yaw = yaw_var;
+    return ok;
+}
+
 // ─── The OUTLINE (step 1: measures joints, corrects nothing) ─────────────────
 
 // Centroid of the room polygon — used ONLY to decide which side of a run its front face is on.
@@ -693,6 +733,11 @@ void SpecificWorker::step_outline(const MemberSnapshot& s)
         if (g.n.dot(*interior - g.centre) < 0.0f) g.n = -g.n;
         g.length = m.length;
         g.depth  = m.depth;
+        // A cabinet RUN's ends are free — level-1 declares t0/t1 free with no prior at all. An
+        // appliance's are not: a fridge's width is the object itself. So when the two share wall,
+        // the run yields and the appliance does not, from what each thing IS.
+        g.ends_free = (m.tier != rc::KitchenTier::Tall) and m.cls != "refrigerator"
+                      and m.cls != "microwave" and m.cls != "hood";
         (m.tier == rc::KitchenTier::Wall ? wall_segs : floor_segs).push_back(g);
     }
     outline_floor_.set_segments(std::move(floor_segs));

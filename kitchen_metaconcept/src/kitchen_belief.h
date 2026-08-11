@@ -47,6 +47,46 @@ namespace rc {
 // member; it simply has no worktop, exactly as an upper unit has none.
 enum class KitchenTier { Base, Tall, Wall };
 
+// ── THE MESSAGE DOWN-DATE (expectation-propagation cavity) ──────────────────────────────────────
+// A member's published value already CONTAINS whatever prior we last sent it. Reading that back as
+// evidence circulates our own message: both sides grow more confident with no new observation, and
+// the estimate becomes consistent with itself rather than with the room. FACTORIZATION_ANCHORS.tex
+// §5.1 names this and §5.2 weighs four cures; (b) is the one that fits — "before instance i sends
+// its anchor, divide out the message it sent previously, so what it transmits is only the
+// information it has added since. In natural parameters this is a subtraction."
+//
+// ★It fits this topology unusually well: the frame is the SINGLE WRITER, so it already knows exactly
+// what it injected into each member. The subtraction therefore happens entirely on the READING side —
+// no protocol change, no per-member bookkeeping anywhere else.
+//
+// ★★Leave-one-out over the POPULATION (which this agent already does for the axis) does NOT replace
+// this. That excludes member i from its own prior; it does nothing about member j's value being
+// contaminated by us and then feeding i.
+struct SentScalar
+{
+    float mean = 0.0f;
+    float info = 0.0f;   // 0 ⇒ nothing was sent for this DOF, so there is nothing to subtract
+};
+
+// Remove our own contribution from a published (value, variance), leaving only what the member has
+// added since. Returns false — and leaves the inputs untouched — when the subtraction is not safe.
+inline bool down_date(float& value, float& var, const SentScalar& sent)
+{
+    if (sent.info <= 0.0f)
+        return true;                       // we said nothing; the published value is all theirs
+    const float info_pub = 1.0f / std::max(1e-9f, var);
+    const float info_c   = info_pub - sent.info;
+    // ★PD guard. If our message carried at least as much information as the member's whole posterior,
+    // the subtraction goes negative — the standard EP failure. That means our record is stale or the
+    // member did not fuse the way we assume, and the honest move is to skip rather than to clamp a
+    // nonsense variance into the fit. The caller reports it; a silent clamp would hide a real fault.
+    if (info_c <= 1e-6f * info_pub)
+        return false;
+    value = (info_pub * value - sent.info * sent.mean) / info_c;
+    var   = 1.0f / info_c;
+    return true;
+}
+
 // One kitchen unit, as the graph-reader measured it. This is the meta-concept's MEASUREMENT: not a
 // mask point but a peer concept's published posterior.
 struct KitchenMember

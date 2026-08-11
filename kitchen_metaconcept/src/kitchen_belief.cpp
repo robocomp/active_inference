@@ -579,6 +579,54 @@ bool KitchenBelief::self_test()
               "(h) a member with no published covariance barely moves the axis");
     }
 
+    // ── (k) THE MESSAGE DOWN-DATE ────────────────────────────────────────────────────────────────
+    // Without it, a frame that pushes a value and then reads the result back grows confident on its
+    // own echo. The subtraction must recover exactly the member's own opinion.
+    {
+        // A member whose own estimate is 0.60 ± 0.04, told by us to be 0.90 with the same precision.
+        const float own = 0.60f, own_var = 0.04f * 0.04f;
+        const SentScalar sent{0.90f, 1.0f / (0.04f * 0.04f)};
+        // What it publishes after fusing: the precision-weighted compromise.
+        float pub = 0.5f * (own + sent.mean);
+        float pub_var = 1.0f / (1.0f / own_var + sent.info);
+        check(down_date(pub, pub_var, sent), "(k) the down-date is well posed here");
+        check(std::abs(pub - own) < 1e-3f,
+              "(k) ★subtracting our own message recovers the member's OWN estimate exactly");
+        check(std::abs(std::sqrt(pub_var) - 0.04f) < 1e-3f, "(k) ...and its own precision with it");
+    }
+    {
+        // Nothing sent ⇒ the published value passes through untouched.
+        float v = 0.75f, var = 0.01f;
+        check(down_date(v, var, SentScalar{}) and std::abs(v - 0.75f) < 1e-6f,
+              "(k) with no outstanding message the value is unchanged");
+    }
+    {
+        // ★The PD guard: our message claims MORE information than the member's whole posterior.
+        // Skipping is correct; clamping would push a nonsense variance into the fit.
+        float v = 0.80f, var = 0.05f * 0.05f;
+        check(not down_date(v, var, SentScalar{0.9f, 1.0f / (0.01f * 0.01f)}),
+              "(k) ★an over-strong outstanding message is REFUSED, not clamped");
+        check(std::abs(v - 0.80f) < 1e-6f, "(k) ...and the value is left untouched when refused");
+    }
+    {
+        // Repeated exchange must not manufacture confidence: down-dating each time holds the
+        // member's own precision constant no matter how many rounds are run.
+        const float own = 0.60f, own_var = 0.04f * 0.04f;
+        float mu = 0.90f, info = 1.0f / (0.05f * 0.05f);
+        float last_var = 0.0f;
+        for (int round = 0; round < 20; ++round)
+        {
+            const SentScalar sent{mu, info};
+            float pub = (own / own_var + sent.mean * sent.info) / (1.0f / own_var + sent.info);
+            float pub_var = 1.0f / (1.0f / own_var + sent.info);
+            down_date(pub, pub_var, sent);
+            last_var = pub_var;
+            mu = pub;                       // the frame re-derives its message from the CAVITY value
+        }
+        check(std::abs(std::sqrt(last_var) - 0.04f) < 1e-3f,
+              "(k) ★★20 rounds of exchange leave the member's own precision unchanged (no echo)");
+    }
+
     if (ok) std::printf("[kitchen_belief::self_test] all checks passed\n");
     return ok;
 }
