@@ -80,7 +80,10 @@ AI2PriorSizeStd = 0.30      # (legacy; the size prior is now split into footprin
 # partial front-only view can't float the unobserved depth); HEIGHT varies a lot (BROAD std → data-driven).
 AI2PriorFootprintM = 0.60   # mean of the w & h(depth) prior (m)
 AI2PriorFootprintStd = 0.08 # TIGHT → strong footprint prior (m); λ = 1/std²
-AI2PriorHeightM = 1.90      # mean of the H (vertical) STATIC anchor (m) — a standard tall fridge
+AI2PriorHeightM = 2.05      # mean of H = the hood TOP above the floor (m). ★This is the value that
+                            # WINS: object_priors.toml and hood_belief.h state the same fact and both lose
+                            # to it. It read 1.90 ("a standard tall fridge") until 2026-08-11 — the clone's
+                            # inherited number, surviving two edits that corrected the surfaces nobody reads.
 AI2PriorHeightStd = 0.30    # anchor std (m); λ = 1/std² stops the box TOP floating above the cloud (points on a side face never pull H down). Data still sets the LOWER bound (H ≥ cloud-top)
 # DEPTH-OBSERVABILITY prior (front-only-view depth-collapse fix): depth (h) is identifiable only when the cloud spans
 # the depth extent (front AND back seen). A front-only view is a thin ly-slab; its many points still drag depth to the
