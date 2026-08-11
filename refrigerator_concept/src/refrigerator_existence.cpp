@@ -153,14 +153,16 @@ void RefrigeratorExistence::update_and_remove(RefrigeratorFitter& fitter, Refrig
                 // full strength. The range term was not too weak — it was very nearly INERT over its whole range,
                 // biting only at zero. Interpolating between the confirm-only delta and the full delta makes
                 // p_detect act linearly end to end, and leaves confirmation (+) untouched.
-                const float d_conf = rc::exist::mask_evidence(sil.e_occ, 0.0f,     sil.n_detectable, sm).log_odds_delta;
                 const float d_full = rc::exist::mask_evidence(sil.e_occ, raw_free, sil.n_detectable, sm).log_odds_delta;
                 rc::exist::Evidence ev_sil;
                 ev_sil.e_occ = sil.e_occ; ev_sil.e_free = raw_free; ev_sil.n_reached = sil.n_detectable;
                 // ★INTERPOLATE FROM ZERO, NOT FROM THE OCCUPANCY-ONLY FLOOR. The old form was
                 //     delta = d_conf + p_detect * (d_full - d_conf)
-                // whose comment claimed "p_detect -> 0 => pure HOLD". It does not: it leaves +d_conf, and
-                // d_conf is an OCCUPANCY-ONLY likelihood, which is always positive. That is precisely the
+                // where d_conf was mask_evidence(e_occ, free=0, …) — the CONFIRM-ONLY delta. Its comment
+                // claimed "p_detect -> 0 => pure HOLD"; it does not, because it leaves +d_conf standing, and
+                // an occupancy-only likelihood is always positive. (d_conf is no longer computed at all — it
+                // survived the fix as an unused variable, which is how the compiler kept pointing at the
+                // deleted ratchet long after it stopped firing.) That is precisely the
                 // RATCHET this header warns about — "an occupancy-only channel is not a likelihood ratio,
                 // it can only push L to +L_max, where it sticks forever" — and it is what it did again:
                 // a phantom refrigerator standing INSIDE the dining set collected occupancy from the real
@@ -174,7 +176,11 @@ void RefrigeratorExistence::update_and_remove(RefrigeratorFitter& fitter, Refrig
                 ev_sil.log_odds_delta = p_detect * d_full;
                 inst.dbg_ex_sil_free_eff = raw_free * p_detect;   // diagnostic: absence mass actually admitted
                 inst.dbg_ex_pdetect = p_detect; inst.dbg_ex_central = sil.central_frac();
-                inst.existence.integrate(ev_sil);
+                // p_detect passed EXPLICITLY: log_odds_delta already carries it, but the second argument is
+                // also what the frame-correlation weighting reads (rho_eff = rho*(1-p_detect)). Defaulting it
+                // to 1.0 tells the belief every miss was a maximally unambiguous look, so correlated misses
+                // count as independent. Inert while ExistenceFrameCorrelation is 0; wrong once it is measured.
+                inst.existence.integrate(ev_sil, p_detect);
                 integrated = true;
                 // Route the un-resolvable absence into an epistemic VERIFY pull (decayed accumulator). When it
                 // builds up, the refrigerator is flagged for verification (the epistemic planner drives the robot to a
@@ -256,13 +262,13 @@ void RefrigeratorExistence::update_and_remove(RefrigeratorFitter& fitter, Refrig
                 // counts. solid_delta tanh-saturates too, and with ~900 beams the sum is far past the knee, so
                 // multiplying e_free/e_interior by p_detect barely moved the result — exactly the inertness
                 // door_concept documented for the mask channel.
-                rc::exist::Evidence ev_conf = ev; ev_conf.e_free = 0.0f; ev_conf.e_interior = 0.0f;
-                const float l_conf = rc::exist::solid_delta(ev_conf, sm);   // occupancy only
+                // (The occupancy-only counterpart — solid_delta on an Evidence with e_free/e_interior
+                //  zeroed — is deliberately NOT computed: interpolating from it is the ratchet above.)
                 const float l_full = rc::exist::solid_delta(ev, sm);        // occupancy + absence
                 inst.dbg_ex_lidar_free_eff = (ev.e_free + ev.e_interior) * p_detect_lidar;
                 // Same correction as the silhouette channel above: interpolate from ZERO.
                 ev.log_odds_delta = p_detect_lidar * l_full;
-                inst.existence.integrate(ev);
+                inst.existence.integrate(ev, p_detect_lidar);   // see the note at the silhouette integrate
                 integrated = true;
             }
         }
