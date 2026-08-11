@@ -4,6 +4,8 @@
 
 #include "chair_scene_graph.h"
 
+#include "../../common/rt_covariance/rt_covariance.h"   // rc::rtcov::publish (SHARED)
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -186,7 +188,6 @@ void ChairSceneGraph::write_rt_covariance(std::uint64_t room_id, ChairInstance& 
         return;
 
     const float scale = std::max(1e-6f, cfg_.rt_cov_scale);
-    constexpr float big = 1e3f;   // unobservable / never-seen DOF → large variance
 
     if (not inst.ai2_initialized)
         return;   // belief not seeded yet — nothing calibrated to publish
@@ -205,32 +206,11 @@ void ChairSceneGraph::write_rt_covariance(std::uint64_t room_id, ChairInstance& 
     vx += inst.chain_cov_xx;
     vy += inst.chain_cov_yy;
 
-    // Self-gate on the data-driven trace: write on a geometry republish (force) OR when the
-    // uncertainty moved >5 % since the last publish (covers a frozen pose whose belief keeps
-    // tightening / loosening). Avoids rewriting the edge every cycle once everything has settled.
-    const float trace = vx + vy + vz + vyaw;
-    const float prev  = inst.last_pub_cov_trace;
-    const bool cov_changed = not std::isfinite(prev) or prev <= 0.0f or
-                             std::abs(trace - prev) > 0.05f * prev;
-    if (not force and not cov_changed)
-        return;
-
-    auto edge = G_->get_edge(room_id, inst.node_id, "RT");
-    if (not edge.has_value())
-        return;
-
-    // 6×6 SE3 covariance, row-major [x,y,z,rx,ry,rz]; diagonal only (cross-terms unmodelled).
-    std::vector<float> cov(36, 0.0f);
-    cov[0 * 6 + 0] = vx;     // x   ← cx
-    cov[1 * 6 + 1] = vy;     // y   ← cy
-    cov[2 * 6 + 2] = vz;     // z   ← cz (floor height)
-    cov[3 * 6 + 3] = big;   // roll  (unobservable)
-    cov[4 * 6 + 4] = big;   // pitch (unobservable)
-    cov[5 * 6 + 5] = vyaw;   // yaw ← ψ
-
-    G_->add_or_modify_attrib_local<rt_covariance_att>(edge.value(), cov);
-    G_->insert_or_assign_edge(edge.value());
-    inst.last_pub_cov_trace = trace;
+    // Everything from here — the self-gate, the 6×6 block layout, the edge write, the trace bookkeeping
+    // and the readout — is the SHARED publisher (common/rt_covariance/rt_covariance.h). What stays above is
+    // the only part that is genuinely this object's: the mapping from its own DOF to the six variances.
+    const rc::rtcov::Se3Var v{vx, vy, vz, rc::rtcov::kFlatRollPitchVar, rc::rtcov::kFlatRollPitchVar, vyaw};
+    rc::rtcov::publish(*G_, room_id, inst.node_id, v, inst.last_pub_cov_trace, force, inst.node_name);
 }
 
 std::vector<float> ChairSceneGraph::make_chair_mesh(const ChairState& s)

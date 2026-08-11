@@ -10,6 +10,8 @@
 
 #include "cabinet_scene_graph.h"
 
+#include "../../common/rt_covariance/rt_covariance.h"   // rc::rtcov::publish (SHARED)
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -206,7 +208,6 @@ void CabinetSceneGraph::write_rt_covariance(std::uint64_t room_id, CabinetInstan
     // not unknown. The old 1e3 ("unobservable → huge variance") was backwards: it told the controller the cabinet
     // might be tilted AND it dominated the published-covariance plot scale so the real sub-1 DOF read as ~0.
     // Publish a small flat-cabinet variance instead (≈1.3° std), consistent with the geometry.
-    constexpr float flat_rp_var = 5e-4f;   // roll/pitch: confidently flat on the floor (std ≈ 1.3°)
 
     if (not inst.ai2_initialized)
         return;   // belief not seeded yet — nothing calibrated to publish
@@ -229,41 +230,11 @@ void CabinetSceneGraph::write_rt_covariance(std::uint64_t room_id, CabinetInstan
     vx += inst.chain_cov_xx;
     vy += inst.chain_cov_yy;
 
-    // Self-gate on the data-driven trace: write on a geometry republish (force) OR when the
-    // uncertainty moved >5 % since the last publish (covers a frozen pose whose belief keeps
-    // tightening / loosening). Avoids rewriting the edge every cycle once everything has settled.
-    const float trace = vx + vy + vz + vyaw;
-    const float prev  = inst.last_pub_cov_trace;
-    const bool cov_changed = not std::isfinite(prev) or prev <= 0.0f or
-                             std::abs(trace - prev) > 0.05f * prev;
-    if (not force and not cov_changed)
-        return;
-
-    auto edge = G_->get_edge(room_id, inst.node_id, "RT");
-    if (not edge.has_value())
-        return;
-
-    // 6×6 SE3 covariance, row-major [x,y,z,rx,ry,rz]; diagonal only (cross-terms unmodelled).
-    std::vector<float> cov(36, 0.0f);
-    cov[0 * 6 + 0] = vx;     // x   ← cx
-    cov[1 * 6 + 1] = vy;     // y   ← cy
-    cov[2 * 6 + 2] = vz;     // z   ← cabinet_height (z = H/2 ⇒ var_z = var_H/4)
-    cov[3 * 6 + 3] = flat_rp_var;   // roll  (pinned flat on the floor)
-    cov[4 * 6 + 4] = flat_rp_var;   // pitch (pinned flat on the floor)
-    cov[5 * 6 + 5] = vyaw;   // yaw ← ψ
-
-    G_->add_or_modify_attrib_local<rt_covariance_att>(edge.value(), cov);
-    G_->insert_or_assign_edge(edge.value());
-    inst.last_pub_cov_trace = trace;
-
-    // Verification readout: the controller-visible pose uncertainty published on the RT edge — ~cm
-    // (Σ-mapped). Naturally throttled — the cov write self-gates above (>5 % trace change or republish).
-    if (cfg_.verbose_log)
-    std::print("[{}] RT-cov σ x={:.1f}cm y={:.1f}cm z={:.1f}cm yaw={:.2f}° (src=Σ)\n",
-               inst.node_name,
-               100.0f * std::sqrt(std::max(0.0f, vx)), 100.0f * std::sqrt(std::max(0.0f, vy)),
-               100.0f * std::sqrt(std::max(0.0f, vz)),
-               57.2958f * std::sqrt(std::max(0.0f, vyaw)));
+    // Everything from here — the self-gate, the 6×6 block layout, the edge write, the trace bookkeeping
+    // and the readout — is the SHARED publisher (common/rt_covariance/rt_covariance.h). What stays above is
+    // the only part that is genuinely this object's: the mapping from its own DOF to the six variances.
+    const rc::rtcov::Se3Var v{vx, vy, vz, rc::rtcov::kFlatRollPitchVar, rc::rtcov::kFlatRollPitchVar, vyaw};
+    rc::rtcov::publish(*G_, room_id, inst.node_id, v, inst.last_pub_cov_trace, force, inst.node_name);
 }
 
 // ─── Mesh ────────────────────────────────────────────────────────────────────────────────────────
