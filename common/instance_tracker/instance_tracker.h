@@ -100,6 +100,9 @@ struct DetectionView
     // its own this frame — e.g. a low-confidence or high-range-variance 360-RGB/LiDAR peripheral mask. Such a
     // detection still refines a track it gates to; it just can't birth phantoms. Default true.
     bool            birthable = true;
+    int             support   = 0;        // support-point count of this detection; 0 = not supplied.
+                                          // Lets an agent compare masks WITHIN a frame (same range,
+                                          // so no normalisation) to tell a fragment from an object.
     // Per-frame BIRTH EVIDENCE this detection contributes to its pending candidate's maturation. Default 1.0 ⇒
     // the classic "birth_frames consecutive frames" behaviour (streak += 1 each frame). An agent that has an
     // INDEPENDENT corroborating cue this frame (e.g. table_concept: residual-grid surprise mass under the

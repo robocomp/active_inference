@@ -940,7 +940,45 @@ void SpecificWorker::run_instance_tracker()
             dv.birthable = is_zed or (cfg_.ricoh_birth_enabled
                                       and sl.confidence >= cfg_.ricoh_birth_conf
                                       and sl.depth_var  <= cfg_.ricoh_birth_max_var);
+            dv.support = sl.support_end - sl.support_begin;   // for the fragment test below
             dets.push_back(dv);
+        }
+
+    // ── A FRAGMENT IS NOT AN OBJECT ───────────────────────────────────────────────────────────────
+    // YOLO splits one chair into two masks routinely — a backrest and a seat, when a table occludes the
+    // middle. Each fragment then births its own instance, and NOTHING downstream can undo it: both
+    // instances win a distinct mask every cycle, so the existence channel correctly holds both at L = +4
+    // (it is not a phantom in the evidence sense — it has real, separate support), and the merge cannot
+    // fire because two 0.5 m footprints 0.68 m apart do not overlap AT ALL. Measured live 2026-08-11:
+    // chair_3 carried a median of 156 support points against chair_2's 2485, six per cent of its
+    // neighbour, and sat at L = +4 indefinitely.
+    //
+    // ★THE BIRTH GATE CANNOT CATCH THIS AND NO VALUE OF IT COULD. At the moment of that birth the two
+    // centroids were 0.75 m apart against a 0.70 m separation gate — legal by five centimetres — and they
+    // only settled to 0.68 m afterwards, by which time births are no longer checked. Raising the gate to
+    // 0.8 m would forbid genuinely adjacent dining chairs, which is a worse error.
+    //
+    // The discriminator is SIZE, and it is available for free: both masks arrive in the SAME FRAME at
+    // essentially the same range, so their support counts are directly comparable with no range
+    // normalisation. A detection carrying a small fraction of a much larger same-label mask, close enough
+    // to be part of it, is a piece of that mask.
+    if (cfg_.birth_fragment_frac > 0.0f)
+        for (auto& d : dets)
+        {
+            if (not d.birthable) continue;
+            for (const auto& big : dets)
+            {
+                if (&big == &d or big.support <= 0) continue;
+                if (static_cast<float>(d.support) >= cfg_.birth_fragment_frac * static_cast<float>(big.support))
+                    continue;                                   // comparable size ⇒ its own object
+                if ((d.xy - big.xy).norm() > cfg_.birth_fragment_reach_m) continue;   // too far to be a piece
+                d.birthable = false;
+                std::print("chair_concept: [birth] FRAGMENT suppressed: {} pts at {:.2f} m from a {}-pt mask "
+                           "({:.0f}% of it) — a piece, not a chair\n",
+                           d.support, (d.xy - big.xy).norm(), big.support,
+                           100.0f * static_cast<float>(d.support) / static_cast<float>(big.support));
+                break;
+            }
         }
 
     // DIAGNOSTIC (merged-vs-single mask): one CSV row per "chair" slice per cycle — count, size, centroid,

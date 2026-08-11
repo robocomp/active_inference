@@ -64,6 +64,8 @@ public:
 private:
     void write_chair_mesh(ChairInstance& inst, DSR::Node& node);
 
+    int name_high_water_ = 0;   // highest chair_<N> ever issued; never decreases — see create_instance_from_detection
+
     std::shared_ptr<DSR::DSRGraph> G_;
     DSR::RT_API*          rt_api_ = nullptr;
     const ChairConfig&    cfg_;

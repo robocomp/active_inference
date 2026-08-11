@@ -193,6 +193,12 @@ struct ChairConfig
     int   tracker_death_frames     = 300;     // frames an instance may go unobserved before retirement
     bool  tracker_death_enabled    = false;   // OFF: a chair is persistent furniture — removed only by MERGE
     float tracker_birth_min_sep_m  = 0.70f;   // a birth must be ≥ this (m) from every existing chair (anti-dup)
+    // A birth candidate carrying less than this FRACTION of a nearby, much larger same-label mask is a
+    // FRAGMENT of it, not a new chair (YOLO splits one chair into backrest+seat routinely). Compared
+    // within one frame, so range cancels. reach = one chair-length: a piece lies within that of its
+    // parent. 0 disables. See the note at the call site — the separation gate cannot catch this.
+    float birth_fragment_frac    = 0.25f;
+    float birth_fragment_reach_m = 1.00f;
     float tracker_merge_overlap    = 0.20f;   // merge two instances whose seat footprints overlap ≥ this
                                               // fraction of the smaller, keeping the more-observed. 0 disables.
     bool  tracker_prune_enabled        = true; // stillbirth prune of phantom duplicates born from churn

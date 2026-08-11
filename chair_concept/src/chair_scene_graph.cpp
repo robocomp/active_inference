@@ -35,10 +35,24 @@ std::uint64_t ChairSceneGraph::create_instance_from_detection(const Eigen::Vecto
 
     // Auto-name: one past the highest existing "chair_<N>". Chairs are now generic `object` nodes
     // named "chair_*" (schema migration), so scan get_nodes_by_type("object") + name-prefix filter.
-    int max_n = 0;
+    // ★NAMES ARE NEVER RECYCLED. Taking the max over LIVE nodes means a removal LOWERS the ceiling and the
+    // next birth is handed the dead chair's number — so one name denotes two different objects, in one run.
+    // Measured 2026-08-11: "chair_3" was born at (-2.16,-4.43), removed at L = -3.07, and the freed name was
+    // re-issued to a birth at (-1.61,-2.80). In the CSV that reads as a single chair TELEPORTING 1.8 m, and
+    // it cost three steps of analysis to notice the object had been swapped underneath the label. Any
+    // history keyed on the name — the phantom log, the existence trace, the dashboard series — silently
+    // splices two objects together.
+    //
+    // The high-water mark only ever rises, so a freed number stays retired. (Same defect and same reasoning
+    // as door_concept's identity registry; see [[door-identity-name-recycling]].)
+    // ⚠REMAINING GAP: this is per-RUN. Across a restart the mark is rebuilt from the live graph, so a name
+    // freed before the restart can still be re-issued after it. door_concept persists its registry to
+    // etc/door_identities.csv for exactly that reason; chair does not yet.
+    int max_n = name_high_water_;
     for (const auto& n : G_->get_nodes_by_type("object"))
         if (n.name().rfind("chair_", 0) == 0)
             try { max_n = std::max(max_n, std::stoi(n.name().substr(6))); } catch (...) {}
+    name_high_water_ = max_n + 1;
     const std::string name = "chair_" + std::to_string(max_n + 1);
 
     // Generic `object` node named "chair_*"; class carried in object_subtype ("chair"). Every

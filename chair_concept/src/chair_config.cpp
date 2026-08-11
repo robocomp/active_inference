@@ -110,6 +110,8 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
     out.tracker_death_frames     = geti("Tracker.DeathFrames",      300);
     out.tracker_death_enabled    = getb("Tracker.DeathEnabled",     false);
     out.tracker_birth_min_sep_m  = getf("Tracker.BirthMinSepM",     0.70f);
+    out.birth_fragment_frac    = getf("Tracker.BirthFragmentFrac",   0.25f);
+    out.birth_fragment_reach_m = getf("Tracker.BirthFragmentReachM", 1.00f);
     out.tracker_merge_overlap    = getf("Tracker.MergeOverlap",     0.20f);
     out.tracker_prune_enabled         = getb("Tracker.PruneEnabled",        true);
     out.tracker_prune_maturity_cycles = geti("Tracker.PruneMaturityCycles", 90);
