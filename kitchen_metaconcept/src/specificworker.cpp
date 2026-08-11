@@ -357,21 +357,22 @@ void SpecificWorker::compute()
                 // Count the kinds: a TEE is normal (a run continuing past a corner), a CROSSING is
                 // impossible geometry, a HOLE is a break in the surface. Reporting one "worst gap"
                 // over all of them buried the real faults under a peninsula doing its job.
-                int n_tee = 0, n_cross = 0, n_hole = 0;
+                // ★Count EVERY kind. The first version tallied only tee/crossing/hole, so when the
+                // collinear check found a cabinet sharing 0.55 m of wall with the fridge the summary
+                // line read "2 tee, 0 crossing, 0 hole" and the one real fault was invisible.
+                int n[6] = {0, 0, 0, 0, 0, 0};
                 for (const auto* o : {&outline_floor_, &outline_wall_})
                     for (const auto& j : o->joints())
-                        switch (j.kind) { case rc::JointKind::Tee: ++n_tee; break;
-                                          case rc::JointKind::Crossing: ++n_cross; break;
-                                          case rc::JointKind::Hole: ++n_hole; break;
-                                          default: break; }
+                        ++n[static_cast<int>(j.kind)];
                 const float gap = std::abs(outline_floor_.worst_gap()) > std::abs(outline_wall_.worst_gap())
                                       ? outline_floor_.worst_gap() : outline_wall_.worst_gap();
                 const float pen = std::max(outline_floor_.worst_penetration(),
                                            outline_wall_.worst_penetration());
                 std::print("[kitchen_metaconcept]   outline: {} floor + {} wall joints "
-                           "({} tee, {} crossing, {} hole) | worst gap {:+.3f} m | worst penetration {:.3f} m\n",
+                           "({} corner, {} tee, {} crossing, {} hole, {} OVERLAP, {} abutting) | "
+                           "worst gap {:+.3f} m | worst penetration {:.3f} m\n",
                            outline_floor_.joints().size(), outline_wall_.joints().size(),
-                           n_tee, n_cross, n_hole, gap, pen);
+                           n[0], n[1], n[2], n[3], n[4], n[5], gap, pen);
             }
 
             // WHO is in the frame this cycle. The aggregate line cannot answer "is the right set of

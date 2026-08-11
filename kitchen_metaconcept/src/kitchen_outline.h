@@ -92,8 +92,14 @@ struct OutlineJoint
     bool  end_i_high = false;          // which end of i the joint is at (false = face_a, true = face_b)
     bool  end_j_high = false;
     float cross = 0.0f;                // |sin| between the two axes; ~1 = a clean right angle
-    // A run PASSES THROUGH when the vertex lies deeper inside it than its own carcass depth: it is
-    // not meeting anything there, it is continuing. Scale taken from the object, not tuned.
+    // Each side is one of three things, and the middle one is what the first version got wrong:
+    //   TERMINATES — its end is AT the vertex (|gap| within construction tolerance)
+    //   PASSES     — the vertex is meaningfully inside it; it continues past the joint
+    //   SHORT      — it stops before reaching the vertex
+    // ★"not passing" is NOT the same as "terminating". The first rule asked whether the vertex was
+    // deeper inside than a carcass depth, and live a run 0.507 m inside its neighbour fell just under
+    // that (depth ~0.53) and was reported as a clean TEE. Two runs half a metre into each other are
+    // a crossing however the comparison lands.
     bool  passes_i = false, passes_j = false;
     JointKind kind = JointKind::Corner;
 
@@ -129,6 +135,12 @@ public:
     // 2° — a kitchen's runs are installed straight, and the live fridge/cabinet pair sits 0.65°
     // apart. Well clear of a real corner (90°), so nothing in between is being decided by it.
     static constexpr float kParallelSin = 0.035f;
+
+    // How close an end must be to the vertex to count as MEETING it. Construction tolerance for
+    // fitted furniture — carcasses are installed flush, so a few centimetres is the whole question.
+    // ⚠A genuine number, flagged: "do these two ends meet?" needs some notion of meeting. The raw
+    // gaps are always reported beside the verdict, so a reader can second-guess the classification.
+    static constexpr float kJoinTolM = 0.05f;
 
     void set_segments(std::vector<OutlineSeg> segs) { segs_ = std::move(segs); rebuild(); }
     const std::vector<OutlineSeg>&   segments() const { return segs_; }
@@ -242,11 +254,12 @@ private:
                 jt.gap_i = di;
                 jt.gap_j = dj;
                 jt.cross = std::abs(segs_[i].u.x() * segs_[j].u.y() - segs_[i].u.y() * segs_[j].u.x());
-                jt.passes_i = (-di) > segs_[i].depth;
-                jt.passes_j = (-dj) > segs_[j].depth;
+                jt.passes_i = di < -kJoinTolM;
+                jt.passes_j = dj < -kJoinTolM;
+                const bool short_i = di > kJoinTolM, short_j = dj > kJoinTolM;
                 jt.kind = (jt.passes_i and jt.passes_j) ? JointKind::Crossing
-                        : (jt.passes_i or  jt.passes_j) ? JointKind::Tee
-                        : (di > 0.01f or dj > 0.01f)    ? JointKind::Hole
+                        : (short_i or short_j)          ? JointKind::Hole
+                        : (jt.passes_i or jt.passes_j)  ? JointKind::Tee
                                                         : JointKind::Corner;
                 joints_.push_back(jt);
             }
@@ -380,6 +393,23 @@ inline bool kitchen_outline_self_test()
                   "(g) ★two runs each passing through the vertex CROSS — bodies interpenetrate");
             check(o.worst_penetration() > 0.5f, "(g) and the penetration depth is reported");
         }
+    }
+
+    // ── (g2) BOTH sides well inside ⇒ CROSSING, whatever the carcass depth happens to be ─────────
+    // Live: gaps of −0.507 and −0.699 were reported as a clean TEE because 0.507 fell just under the
+    // run's own depth (~0.53). Two runs half a metre into each other are a crossing either way.
+    {
+        OutlineSeg a; a.name = "a"; a.u = {1, 0}; a.n = {0, -1};
+        a.depth = 0.60f; a.length = 3.00f; a.centre = Eigen::Vector2f(0.0f, 2.20f);
+        OutlineSeg b; b.name = "b"; b.u = {0, 1}; b.n = {1, 0};
+        b.depth = 0.60f; b.length = 3.00f; b.centre = Eigen::Vector2f(0.0f, 1.90f);
+        // Shorten a so the vertex is 0.50 inside it — just UNDER its 0.60 depth.
+        a.length = 2.0f * (0.30f + 0.50f);
+        KitchenOutline o; o.set_segments({a, b});
+        check(o.joints().size() == 1, "(g2) one joint");
+        if (o.joints().size() == 1)
+            check(o.joints().front().kind == JointKind::Crossing,
+                  "(g2) ★0.50 m inside is a CROSSING even though it is less than the 0.60 m depth");
     }
 
     // ── (h) COLLINEAR OVERLAP — the case face-line intersection cannot reach ─────────────────────
