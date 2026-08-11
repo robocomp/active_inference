@@ -887,7 +887,7 @@ void SpecificWorker::load_config(const ConfigLoader& cfg)
     cfg_ = rc::load_hood_config(cfg);
     // Declarative-priors experiment: report whether common/concept_manifest/hood.concept.toml can
     // reproduce the priors this config just produced. Read-only — the manifest is not authoritative yet.
-    rc::verify_hood_manifest(cfg_, "../../common/concept_manifest/hood.concept.toml");
+    rc::verify_hood_manifest(cfg_, "../common/concept_manifest/hood.concept.toml");
 }
 
 

@@ -57,7 +57,7 @@ public:
     void write_epistemic_proposal(DSR::Node& node, const EpistemicProposal& prop);
 
     // Flat triangle list (room frame): top slab + 4 legs.
-    static std::vector<float> make_hood_mesh(const HoodState& s);
+    static std::vector<float> make_hood_mesh(const HoodState& s, float vertical_extent_m);
 
 private:
     void write_hood_mesh(HoodInstance& inst, DSR::Node& node);

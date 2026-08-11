@@ -79,7 +79,7 @@ HoodConfig load_hood_config(const ConfigLoader& cfg)
     // and the agent's own default only if neither speaks — the reverse of the order that let hood run on
     // the refrigerator's height while two corrected files said otherwise.
     {
-        const auto g = rc::manifest::load_geometry("../../common/concept_manifest/hood.concept.toml", "hood");
+        const auto g = rc::manifest::load_geometry("../common/concept_manifest/hood.concept.toml", "hood");
         if (g.valid)
         {
             float z0 = 0.0f, z1 = 0.0f; g.z_span(z0, z1);

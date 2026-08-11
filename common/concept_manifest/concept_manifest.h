@@ -128,7 +128,16 @@ inline Geometry load_geometry(const std::string& path, std::string_view concept_
     try { m.load(path); }
     catch (...)
     {
-        std::print("[manifest] {} NOT LOADED ({}) — geometry falls back to the agent's own defaults\n",
+        // ★NOT a benign note. This is the declarative layer being INERT: the agent silently keeps whatever
+        // its template left behind, which for a clone is the template's geometry — the exact failure the
+        // manifest exists to prevent. It read as harmless for a week: refrigerator's step-1 cross-check
+        // was written 2026-08-03 with a path relative to the SOURCE tree ("../../common/…", correct for
+        // an #include from <agent>/src/) rather than to the agent's CWD ("../common/…", where it actually
+        // runs), so it printed this line and skipped, every start, for a week. Same string, right in one
+        // place and wrong in the other, which is precisely why nobody looked twice.
+        std::print("[manifest] ★★{} MANIFEST NOT LOADED ({}) — THE DECLARATIVE GEOMETRY IS INERT and the\n"
+                   "[manifest]   agent is running on its own defaults, which for a CLONE are its template's.\n"
+                   "[manifest]   The path is relative to the agent's CWD, not to src/.\n",
                    concept_name, path);
         return g;
     }

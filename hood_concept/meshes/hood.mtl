@@ -1,0 +1,8 @@
+# Matt near-black, as in the capture — a stainless/black canopy against a pale wall.
+newmtl hood
+Ka 0.03 0.03 0.03
+Kd 0.10 0.10 0.11
+Ks 0.30 0.30 0.32
+Ns 60
+d 1.0
+illum 2

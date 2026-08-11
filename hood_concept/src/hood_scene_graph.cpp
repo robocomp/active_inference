@@ -56,8 +56,11 @@ std::uint64_t HoodSceneGraph::create_instance_from_detection(const Eigen::Vector
     G_->add_or_modify_attrib_local<object_subtype_att>(hood_node, std::string("hood"));
     // Display asset for the voxelizer 3D viewer (relative to its meshes/ root). The agent owns its
     // appearance; the viewer loads & scales this to the fitted box (see cortex mesh_path contract).
-    G_->add_or_modify_attrib_local<mesh_path_att>(hood_node, std::string("hood_concept/meshes/fridge.obj"));
-    G_->add_or_modify_attrib_local<mesh_texture_path_att>(hood_node, std::string("hood_concept/meshes/fridge_basecolor.jpg"));
+    // ★A HOOD, not a fridge. The clone published hood_concept/meshes/fridge.obj — a path that both names
+    // the wrong object and does not exist (hood_concept had no meshes/ at all), so every viewer fell back
+    // to a plain box. hood.obj is the canopy profile in the fleet's unit convention (x,y in [-0.5,0.5],
+    // z in [0,1]); the viewer scales it to the fitted box, so the shape is the entire content.
+    G_->add_or_modify_attrib_local<mesh_path_att>(hood_node, std::string("hood_concept/meshes/hood.obj"));
     G_->add_or_modify_attrib_local<width_m_att> (hood_node, cfg_.tracker_birth_width_m);
     G_->add_or_modify_attrib_local<depth_m_att> (hood_node, cfg_.tracker_birth_depth_m);
     G_->add_or_modify_attrib_local<height_m_att>(hood_node, cfg_.tracker_birth_height_m);
@@ -129,7 +132,12 @@ void HoodSceneGraph::step_write_model(HoodInstance& inst, DSR::Node& node,
     {
         G_->add_or_modify_attrib_local<width_m_att> (node, s.w);
         G_->add_or_modify_attrib_local<depth_m_att> (node, s.h);
-        G_->add_or_modify_attrib_local<height_m_att>(node, s.hood_height);
+        // ★height_m is the drawn EXTENT, and the node origin is its BASE — consumers draw
+        // [origin.z, origin.z + height_m]. For a floor-anchored fridge those coincide with (0, H); for a
+        // hood they do NOT, and publishing H here drew a 2.05 m slab standing on the floor. This was the
+        // FIFTH site of the floor-anchoring assumption: the other four (SDF, admission band, NBV Target,
+        // LiDAR carve) are internal to inference, and this is the one anybody could actually SEE.
+        G_->add_or_modify_attrib_local<height_m_att>(node, cfg_.vertical_extent_m);
         G_->add_or_modify_attrib_local<model_generation_att>(node, ++inst.model_generation);
         write_hood_mesh(inst, node);   // mesh for the voxelizer 3D viewer
         inst.last_pub_cx = s.cx; inst.last_pub_cy = s.cy;
@@ -244,7 +252,7 @@ void HoodSceneGraph::write_rt_covariance(std::uint64_t room_id, HoodInstance& in
 
 // ─── Mesh ────────────────────────────────────────────────────────────────────────────────────────
 
-std::vector<float> HoodSceneGraph::make_hood_mesh(const HoodState& s)
+std::vector<float> HoodSceneGraph::make_hood_mesh(const HoodState& s, float vertical_extent_m)
 {
     // Flat triangle list (room frame): ONE solid floor-anchored box (12 tri). A hood is a single
     // cuboid — no top slab, no legs.
@@ -277,15 +285,16 @@ std::vector<float> HoodSceneGraph::make_hood_mesh(const HoodState& s)
     };
 
     // Single solid box: centred at (cx, cy, H/2), half extents (w/2, h/2, H/2) — spans floor→H.
-    const float halfH = s.hood_height * 0.5f;
-    push_box(s.cx, s.cy, halfH, s.w * 0.5f, s.h * 0.5f, halfH);
+    // The body hangs: centre at z_top − extent/2, half-extent extent/2 — not (H/2, H/2), which spans floor→H.
+    const float half_dz = 0.5f * vertical_extent_m;
+    push_box(s.cx, s.cy, s.hood_height - half_dz, s.w * 0.5f, s.h * 0.5f, half_dz);
 
     return verts;
 }
 
 void HoodSceneGraph::write_hood_mesh(HoodInstance& inst, DSR::Node& node)
 {
-    const std::vector<float> verts = make_hood_mesh(inst.model.state());
+    const std::vector<float> verts = make_hood_mesh(inst.model.state(), cfg_.vertical_extent_m);
     G_->add_or_modify_attrib_local<mesh_vertices_att>(node, verts);
 }
 
@@ -315,7 +324,10 @@ void HoodSceneGraph::write_rt_pose(std::uint64_t room_id, HoodInstance& inst)
     // lookup + support decision (top = origin.z + height). Publishing z=hood_height/2 put the
     // origin at mid-height → hood_top came out as 1.5·height → bottles failed the support test,
     // parented to the room and floated. Keep the base on the floor so top = 0 + height = height.
-    const float z = 0.0f;
+    // Base of the BODY, not of the room: a hood's underside hangs at z_top − extent. The convention is
+    // unchanged (origin = base, top = origin.z + height_m ⇒ 1.55 + 0.50 = 2.05); only the floor-anchored
+    // assumption that base ≡ 0 is gone.
+    const float z = std::max(0.0f, s.hood_height - cfg_.vertical_extent_m);
     rt_api_->insert_or_assign_edge_RT(room_opt.value(), inst.node_id,
                                       {s.cx, s.cy, z},
                                       {0.0f, 0.0f, s.yaw});

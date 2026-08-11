@@ -886,7 +886,7 @@ void SpecificWorker::load_config(const ConfigLoader& cfg)
     cfg_ = rc::load_refrigerator_config(cfg);
     // Declarative-priors experiment: report whether common/concept_manifest/refrigerator.concept.toml can
     // reproduce the priors this config just produced. Read-only — the manifest is not authoritative yet.
-    rc::verify_refrigerator_manifest(cfg_, "../../common/concept_manifest/refrigerator.concept.toml");
+    rc::verify_refrigerator_manifest(cfg_, "../common/concept_manifest/refrigerator.concept.toml");
 }
 
 
