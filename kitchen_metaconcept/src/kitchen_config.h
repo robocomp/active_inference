@@ -79,6 +79,9 @@ struct KitchenConfig
     int         log_period_frames = 25;
     std::string csv_path;       // per-member snapshot; empty disables
     std::string fit_csv_path;   // frame fit + the down-prior it WOULD publish; empty disables
+    // ★THE SWITCH. False keeps the agent read-only: it fits, measures and logs, and writes nothing.
+    // Everything downstream of this was validated against live data before it was allowed to steer.
+    bool publish = false;
     std::string outline_csv_path;   // per-joint gaps/overlaps of the continuous outline; empty disables
 };
 

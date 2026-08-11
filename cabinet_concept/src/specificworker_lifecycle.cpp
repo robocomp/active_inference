@@ -445,6 +445,9 @@ void SpecificWorker::run_kitchen_model()
 
     static int mdbg = 0;
     kitchen_mgr_.set_corner_fill_log(cfg_.verbose_log and (mdbg % 30) == 29);   // corner-fill state dump (verbose only)
+    // Level-2 first: the arrangement's end targets must be in place BEFORE the fit, or they would
+    // only take effect a cycle late and always chase the data.
+    apply_arrangement_end_priors();
     kitchen_mgr_.update(pts, mp, tmpl, &pt_labels);
     kitchen_mgr_.update_island(island_pts, mp, tmpl);              // the free-standing 4th cabinet (peninsula)
     publish_kitchen_boxes();
@@ -453,6 +456,59 @@ void SpecificWorker::run_kitchen_model()
     if (++mdbg % 30 == 0)                                           // low-rate stillness diagnostic
         std::print("cabinet_concept: [kitchen] ego_lin={:.2f} ego_ang={:.2f} dotd={:.2f} radius={:.2f} periph={:.2f} sweep={} objs={} → pos_var={:.4f}\n",
                    ego_lin_mps_, ego_ang_radps_, mean_dotd, radius, periph, sweep_n, tmpl.scene_objects.size(), tmpl.ego_motion_pos_var);
+}
+
+// Read the arrangement's end prior for every live run. Room-frame targets are projected onto each
+// run's own chart here — the metaconcept deliberately knows nothing about t0/t1, so the projection
+// belongs on this side.
+void SpecificWorker::apply_arrangement_end_priors()
+{
+    kitchen_mgr_.clear_end_priors();          // a silent frame must stop steering, not linger
+    if (not cfg_.arrangement_prior_enabled or not G)
+        return;
+    const auto now = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+
+    for (const auto& [cell_id, node_id] : kitchen_nodes_)
+    {
+        const rc::WallChart* chart = kitchen_mgr_.cell_chart(cell_id);
+        if (not chart) continue;
+        for (const auto& e : G->get_edges_to_id(node_id))
+        {
+            if (e.type() != "group_member") continue;
+            // Staleness: a frame that stopped publishing stops steering. 0 disables the check.
+            if (cfg_.arrangement_stale_ms > 0)
+                if (const auto st = G->get_attrib_by_name<rig_stamp_ms_att>(e); st.has_value())
+                    if (now > st.value() and now - st.value()
+                        > static_cast<std::uint64_t>(cfg_.arrangement_stale_ms))
+                        continue;
+
+            const auto lo_i = G->get_attrib_by_name<rig_end_lo_info_att>(e);
+            const auto hi_i = G->get_attrib_by_name<rig_end_hi_info_att>(e);
+            const auto lo_x = G->get_attrib_by_name<rig_end_lo_x_att>(e);
+            const auto lo_y = G->get_attrib_by_name<rig_end_lo_y_att>(e);
+            const auto hi_x = G->get_attrib_by_name<rig_end_hi_x_att>(e);
+            const auto hi_y = G->get_attrib_by_name<rig_end_hi_y_att>(e);
+            // Project each room-frame target onto this chart's along-wall coordinate.
+            const auto to_t = [&](float x, float y)
+            { return (Eigen::Vector2f(x, y) - chart->A).dot(chart->u); };
+            float t0 = 0.0f, t0_info = 0.0f, t1 = 0.0f, t1_info = 0.0f;
+            if (lo_i and lo_i.value() > 0.0f and lo_x and lo_y)
+            { t0 = to_t(lo_x.value(), lo_y.value());
+              t0_info = std::min(lo_i.value(), cfg_.arrangement_end_info_max); }
+            if (hi_i and hi_i.value() > 0.0f and hi_x and hi_y)
+            { t1 = to_t(hi_x.value(), hi_y.value());
+              t1_info = std::min(hi_i.value(), cfg_.arrangement_end_info_max); }
+            if (t0_info > 0.0f or t1_info > 0.0f)
+            {
+                kitchen_mgr_.set_cell_end_prior(cell_id, t0, t0_info, t1, t1_info);
+                if (cfg_.verbose_log)
+                    std::print("cabinet_concept: [kitchen] '{}' end prior t0={:.2f}({:.0f}) t1={:.2f}({:.0f})\n",
+                               cell_id, t0, t0_info, t1, t1_info);
+            }
+            break;   // one arrangement per run
+        }
+    }
 }
 
 // Reconcile the active cells with their DSR box nodes: create on activation, update size+RT while active,

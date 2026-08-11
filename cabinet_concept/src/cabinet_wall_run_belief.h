@@ -86,6 +86,23 @@ public:
     // of leaving a hole. A hard structural prior, applied one-sided (fill only, never shrink).
     void set_corner_fill(bool low, bool high) { cf_low_ = low; cf_high_ = high; }
 
+    // ── ARRANGEMENT END PRIOR (from a level-2 metaconcept, via a group_member edge) ──────────────
+    // Where this run's two ends should sit for the kitchen to form ONE continuous surface. Targets
+    // arrive as room-frame points and the CALLER projects them onto this chart, so nothing about
+    // t0/t1 leaks into the protocol.
+    //
+    // ★This is the only prior t0/t1 ever get. This file declares them FREE, and they are the one
+    // thing a single run cannot know: where a run should end is decided by where its neighbour
+    // begins, which is a fact about the kitchen and not about this cabinet. The seam between two
+    // adjacent carcasses has no gap, no edge and no depth step, so no amount of looking will find it.
+    //
+    // info = 0 ⇒ inert for that end, which is the normal state for an end that is already where it
+    // should be, or an open end of the kitchen with no neighbour at all.
+    void set_end_prior(float t0_target, float t0_info, float t1_target, float t1_info)
+    { ep_t0_ = t0_target; ep_t0_info_ = std::max(0.0f, t0_info);
+      ep_t1_ = t1_target; ep_t1_info_ = std::max(0.0f, t1_info); }
+    void clear_end_prior() { ep_t0_info_ = ep_t1_info_ = 0.0f; }
+
     // Derived ROOM-frame box for DSR publishing (the chart hides yaw/lateral; expose them here).
     void room_box(float& cx, float& cy, float& yaw, float& L, float& d, float& z0, float& z1) const
     {
@@ -181,7 +198,24 @@ public:
     void accumulate_extra(const WallRunState& s, const CabinetFrame& f,
                           Eigen::Matrix<float, 5, 5>& Id, Eigen::Matrix<float, 5, 1>& bd) const
     { accumulate_extent(s, f, Id, bd); accumulate_freespace(s, f, Id, bd); accumulate_corner_fill(s, Id, bd);
-      accumulate_object_exclusion(s, f, Id, bd); accumulate_tier_prior(s, Id, bd); }
+      accumulate_object_exclusion(s, f, Id, bd); accumulate_tier_prior(s, Id, bd);
+      accumulate_end_prior(s, Id, bd); }
+
+    // The arrangement's end prior as an ordinary Gaussian factor on t0/t1 — same information form as
+    // every other term here, so the engine needs no change and a well-observed end still wins if it
+    // disagrees. Capped by the caller's own precision, never a clamp on the state.
+    void accumulate_end_prior(const WallRunState& s,
+                              Eigen::Matrix<float, 5, 5>& Id, Eigen::Matrix<float, 5, 1>& bd) const
+    {
+        const auto push = [&](int idx, float e, float w)
+        {
+            if (w <= 0.0f) return;
+            Eigen::Matrix<float, 5, 1> J = Eigen::Matrix<float, 5, 1>::Zero(); J(idx) = 1.0f;
+            Id.noalias() += w * (J * J.transpose()); bd.noalias() += -w * J * e;
+        };
+        push(0, s.t0 - ep_t0_, ep_t0_info_);
+        push(1, s.t1 - ep_t1_, ep_t1_info_);
+    }
 
     // STANDING tier prior on the three TIGHT-PRIOR DOFs (see this file's header: "WHAT'S TIGHT-PRIOR
     // (estimated, σ covers the GT spread): d, z0, z1. FREE: t0, t1"). The engine applies that prior
@@ -494,6 +528,10 @@ private:
     Eigen::Matrix<float, 5, 1>  prior_mean_ = Eigen::Matrix<float, 5, 1>::Zero();
     bool                        cf_low_  = false;   // corner-fill: extend t0→0 (set per-cycle by KitchenManager)
     bool                        cf_high_ = false;   // corner-fill: extend t1→W
+    // Arrangement END PRIOR, already projected into THIS chart's t by the worker. info 0 = inert,
+    // which is the resting state: an end that already meets its neighbour is told nothing.
+    float                       ep_t0_ = 0.0f, ep_t0_info_ = 0.0f;
+    float                       ep_t1_ = 0.0f, ep_t1_info_ = 0.0f;
 };
 
 // Chart along +x: world (x,y,z) == wall (t,s,z), so a front face at s=d is at world y=d — makes the tests read.

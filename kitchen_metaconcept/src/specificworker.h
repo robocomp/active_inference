@@ -65,6 +65,7 @@
 #include "kitchen_config.h"   // rc::KitchenConfig + load_kitchen_config
 #include "kitchen_belief.h"   // rc::KitchenBelief — the level-2 rectilinear-frame latent
 #include "kitchen_outline.h"  // rc::KitchenOutline — the kitchen as ONE continuous shape
+#include "kitchen_scene_graph.h"  // rc::KitchenSceneGraph — every DSR write lives there
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 
 class SpecificWorker : public GenericWorker
@@ -137,6 +138,9 @@ private:
     // Positive = a hole, negative = an overlap. Floor units (base + tall) and wall units form
     // SEPARATE outlines: they are at different heights and must not be joined to each other.
     void step_outline(const MemberSnapshot& s);
+    // STEP 2: birth/refresh the kitchen node and push each member's prior — the grid axis from the
+    // cavity fit, and the END targets from the continuous outline. Gated on cfg_.publish.
+    void publish_priors(const MemberSnapshot& s);
     // Room-polygon centroid, used only to orient each run's front face INTO the room.
     std::optional<Eigen::Vector2f> room_interior() const;
 
@@ -197,6 +201,7 @@ private:
     bool apply_down_date(rc::KitchenMember& m) const;
     std::size_t down_date_refused_ = 0;   // per-cycle count, surfaced in the log
 
+    std::unique_ptr<rc::KitchenSceneGraph> scene_graph_;
     rc::KitchenOutline outline_floor_;   // base + tall units: the floor-level chain
     rc::KitchenOutline outline_wall_;     // wall units: the upper chain
     std::ofstream outline_csv_;           // per-joint record; empty path disables

@@ -108,6 +108,17 @@ AI2PriorSizeStd = 0.30      # broad size prior std (m) on w,h,H
 # ★1.0 = the prior exactly as declared (BaseDepth/BaseZ0/BaseZ1 etc.). NOT a tuning knob: if the
 # result is wrong, the declared σ is wrong and should be fixed there. 0 = old behaviour, A/B only.
 TierPriorGain = 1.0
+
+# ── ARRANGEMENT END PRIOR (kitchen_metaconcept, via a group_member edge) ──────────────────────
+# Where this run's ends should sit so the kitchen forms ONE continuous surface. The only prior
+# t0/t1 ever get — they are declared FREE in the belief, and where a run should END is decided by
+# where its neighbour BEGINS, which no single run can observe: the seam between two adjacent
+# carcasses has no gap, no edge and no depth step.
+# false ⇒ the belief is bit-for-bit as before, for a clean A/B.
+ArrangementPrior      = true
+ArrangementEndInfoMax = 400.0   # m^-2 cap ⇒ the frame may never claim better than 5 cm. SAFETY
+                                # bound only: config can weaken the push, never strengthen it.
+ArrangementStaleMs    = 5000    # a frame that stopped publishing stops steering
 AI2ProcessStdM = 0.005      # predict process-noise std, length DOFs (m/frame) — rigid+static ⇒ small
 AI2ProcessStdYaw = 0.01     # predict process-noise std, yaw (rad/frame)
 AI2AgeNominalDtS = 0.1      # stale-belief aging: mask stream nominal period (s, 10 Hz masks). Σ inflates by Q·(dt/this) while the feed is silent (measurement-age→covariance) — completes the frozen-frame fix: a stale capture stamp now AGES the belief instead of freezing it. 0 = freeze on stale (historic).

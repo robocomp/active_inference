@@ -99,6 +99,12 @@ FitCsvPath = "etc/kitchen_fit.csv"    # frame fit + the down-prior it WOULD publ
 # gap > 0 is a hole, gap < 0 an overlap. READ-ONLY — nothing is corrected from it yet.
 OutlineCsvPath = "etc/kitchen_outline.csv"
 
+# ★THE SWITCH between measuring and steering. false = the agent fits, measures and logs and writes
+# NOTHING to the graph; true = it births the kitchen node and pushes each member's prior on a
+# group_member edge. Everything downstream of this was checked against live data before being
+# allowed to steer a cabinet, and the message down-date is in place ahead of the first push.
+Publish = false
+
 # ── Rectilinear-frame belief ────────────────────────────────────────────────────────────────
 # Intrinsic spread of "kitchen units share one axis / worktop / depth". These are TENDENCIES, not
 # laws — a genuinely skewed unit still belongs to the kitchen. Each is added in quadrature to the

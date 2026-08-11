@@ -145,6 +145,14 @@ struct CabinetConfig
     // — see CabinetBeliefParams::tier_prior_gain for why, and for the drift it was added to stop.
     float tier_prior_gain = 1.0f;
 
+    // ── ARRANGEMENT END PRIOR from a level-2 metaconcept (group_member edge) ─────────────────────
+    // The only prior t0/t1 ever receive. Off ⇒ the belief is bit-for-bit as before, so this is a
+    // clean A/B. The cap is a SAFETY bound: config can only ever make the arrangement push WEAKER
+    // than it asked to, never stronger, so a confused frame cannot pin an end it should not.
+    bool  arrangement_prior_enabled = true;
+    float arrangement_end_info_max  = 400.0f;   // m⁻² ⇒ σ ≥ 5 cm; the frame may not claim better
+    int   arrangement_stale_ms      = 5000;     // a frame that stopped publishing stops steering
+
     float base_depth_m = 0.60f, base_depth_std = 0.04f;   // base cabinets are ~60 cm deep almost
                                                           // universally → STRONG prior. The back face is
                                                           // never observed, so without this the visible

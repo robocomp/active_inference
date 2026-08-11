@@ -133,6 +133,10 @@ private:
     // Stage 2: the kitchen-of-runs model. Cells own the WallRunBeliefs; route masks → per-cell fit → existence →
     // publish derived room-frame boxes. Replaces run_instance_tracker + process_cabinet_node when cfg_.kitchen_model.
     void run_kitchen_model();
+    // Read the level-2 END PRIOR off each run's group_member edge and hand it to that run's belief,
+    // projected from room-frame targets onto the run's own chart. Cleared first, so a frame that
+    // goes quiet stops steering rather than leaving its last word in place.
+    void apply_arrangement_end_priors();
     void publish_kitchen_boxes();        // reconcile active cells ↔ DSR cabinet_* box nodes (create/update/delete)
     // Publish a run's room-frame pose covariance on its room→run RT edge. The kitchen path used to write
     // pose with NO covariance (the classic path always wrote one), so every kitchen run advertised itself as

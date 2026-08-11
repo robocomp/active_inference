@@ -14,6 +14,7 @@ LIST(APPEND SOURCES
   ../src/specificworker_presence.cpp
   ../src/kitchen_config.cpp
   ../src/kitchen_belief.cpp
+  ../src/kitchen_scene_graph.cpp
 )
 
 # no-char8_t to avoid a problem with ICE Connection lib.

@@ -125,6 +125,9 @@ CabinetConfig load_cabinet_config(const ConfigLoader& cfg)
     out.coverage_robust_c_m   = getf("CabinetModel.CoverageRobustCM",   0.15f);
     out.free_space_precision  = getf("CabinetModel.FreeSpacePrecision", 0.0f);
     out.tier_prior_gain      = getf("CabinetModel.TierPriorGain",       1.0f);
+    out.arrangement_prior_enabled = getb("CabinetModel.ArrangementPrior",        true);
+    out.arrangement_end_info_max  = getf("CabinetModel.ArrangementEndInfoMax",   400.0f);
+    out.arrangement_stale_ms      = geti("CabinetModel.ArrangementStaleMs",      5000);
     out.object_exclusion_precision = getf("CabinetModel.ObjectExclusionPrecision", 0.0f);
     out.object_exclusion_margin_m  = getf("CabinetModel.ObjectExclusionMarginM",   0.03f);
     out.object_engulf_frac         = getf("CabinetModel.ObjectEngulfFrac",         0.60f);

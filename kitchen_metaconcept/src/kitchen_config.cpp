@@ -82,6 +82,7 @@ KitchenConfig load_kitchen_config(const ConfigLoader& cfg)
     out.csv_path          = gets("KitchenMetaconcept.CsvPath", "");
     out.fit_csv_path      = gets("KitchenMetaconcept.FitCsvPath", "");
     out.outline_csv_path  = gets("KitchenMetaconcept.OutlineCsvPath", "");
+    out.publish           = getb("KitchenMetaconcept.Publish", false);
 
     std::string classes;
     for (const auto& c : out.member_classes) { if (not classes.empty()) classes += ","; classes += c; }

@@ -563,6 +563,30 @@ public:
         }
         return out;
     }
+    // Hand a level-2 END PRIOR to one cell's belief. `t0/t1` are already in that cell's chart — the
+    // worker projects the room-frame targets, since only it reads the graph. info 0 clears that end.
+    void set_cell_end_prior(const std::string& cell_id, float t0, float t0_info, float t1, float t1_info)
+    {
+        for (auto& c : cells_)
+            if (c.geom.id == cell_id and c.belief)
+            { c.belief->set_end_prior(t0, t0_info, t1, t1_info); return; }
+        if (cell_id == "island" and island_belief_)
+            island_belief_->set_end_prior(t0, t0_info, t1, t1_info);
+    }
+    void clear_end_priors()
+    {
+        for (auto& c : cells_) if (c.belief) c.belief->clear_end_prior();
+        if (island_belief_) island_belief_->clear_end_prior();
+    }
+    // The chart a cell is fitted in — the worker needs it to project a room-frame end target onto t.
+    const WallChart* cell_chart(const std::string& cell_id) const
+    {
+        for (const auto& c : cells_)
+            if (c.geom.id == cell_id and c.belief) return &c.belief->chart();
+        if (cell_id == "island" and island_belief_) return &island_belief_->chart();
+        return nullptr;
+    }
+
     const std::vector<KitchenCellRun>& cells() const { return cells_; }
     const KitchenCellDiag& island_diag() const { return island_diag_; }
     // The free-standing island/peninsula run — it has no cell (its chart is derived from its own points),

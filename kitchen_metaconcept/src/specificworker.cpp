@@ -224,6 +224,7 @@ void SpecificWorker::initialize()
     // RT_API resolves the room→member edge pose + covariance out of the edge's timestamp ring buffer
     // (rt_translation/rt_covariance are ring-buffered attrs — reading them raw is wrong).
     rt_api_ = G->get_rt_api();
+    scene_graph_ = std::make_unique<rc::KitchenSceneGraph>(G, rt_api_.get(), cfg_);
 
     // Even at M2 (which owns nothing) sweep the prefix: a FUTURE milestone's node left behind by a
     // crashed run would otherwise linger with no process alive to own it, and the sweep is the only
@@ -317,6 +318,7 @@ void SpecificWorker::compute()
     // The continuous-shape view: where the runs SHOULD meet, versus where they actually end.
     step_outline(snap);
     log_outline_csv();
+    publish_priors(snap);
 
     if (cfg_.log_period_frames > 0 and (cycle_ % static_cast<std::uint64_t>(cfg_.log_period_frames)) == 0)
     {
@@ -742,6 +744,66 @@ void SpecificWorker::step_outline(const MemberSnapshot& s)
     }
     outline_floor_.set_segments(std::move(floor_segs));
     outline_wall_.set_segments(std::move(wall_segs));
+}
+
+// STEP 2: push the priors. The axis comes from the cavity fit, the END targets from the continuous
+// outline. Precision is scaled by p_frame, so a frame that is unsure of itself pushes softly.
+//
+// ★On the echo question for the ENDS. The scalar DOFs (axis, worktop, depth) are down-dated before
+// use, because reading back a value we contributed inflates confidence with no new observation. The
+// end channel does not have that failure mode: we do not accumulate confidence in an end, we measure
+// a RESIDUAL, and its fixed point is the gap being zero — which is the geometrically correct state.
+// Once an end meets its neighbour the correction falls below tolerance and nothing more is sent. The
+// precision, too, comes from the members' own published position covariances rather than from their
+// agreement, so it cannot inflate itself.
+void SpecificWorker::publish_priors(const MemberSnapshot& s)
+{
+    if (not cfg_.publish or not scene_graph_ or s.members.empty() or not kitchen_belief_.seeded())
+        return;
+    if (scene_graph_->ensure_node(kitchen_belief_, room_node_id_) == 0)
+        return;
+
+    // Collect the end corrections by member, from both chains.
+    struct Ends { bool has_lo = false, has_hi = false; Eigen::Vector2f lo{0,0}, hi{0,0}; };
+    std::unordered_map<std::string, Ends> ends;
+    for (const auto* o : {&outline_floor_, &outline_wall_})
+        for (const auto& c : o->end_corrections())
+        {
+            auto& e = ends[o->segments()[static_cast<std::size_t>(c.seg)].name];
+            if (c.high_end) { e.has_hi = true; e.hi = c.target; }
+            else            { e.has_lo = true; e.lo = c.target; }
+        }
+
+    std::unordered_set<std::uint64_t> keep;
+    for (const auto& m : s.members)
+    {
+        // Cavity: the frame refitted WITHOUT this member (see compute_cavity_priors).
+        const auto cv = cavity_.find(m.id);
+        rc::KitchenMemberPrior p;
+        p.member_id = m.id;
+        if (cv != cavity_.end())
+        {
+            p.yaw       = cv->second.yaw;
+            p.yaw_kappa = std::min(cv->second.kappa, 1.0f / (cfg_.axis_model_std_deg / kRad2Deg
+                                                             * cfg_.axis_model_std_deg / kRad2Deg));
+        }
+        if (const auto it = ends.find(m.name); it != ends.end())
+        {
+            // How well the joint is located: the two members' own published position uncertainty is
+            // all we have, and it is the honest scale. Scaled by the frame's existence probability.
+            const float var = std::max(1e-4f, m.var_x + m.var_y);
+            const float info = kitchen_belief_.p_frame() / var;
+            if (it->second.has_lo) { p.end_lo = it->second.lo; p.end_lo_info = info; }
+            if (it->second.has_hi) { p.end_hi = it->second.hi; p.end_hi_info = info; }
+        }
+        scene_graph_->publish_member_prior(p);
+        keep.insert(m.id);
+        // Record what we sent, so the next read can subtract it. The ends are not fitted from, so
+        // only the scalar DOFs need an entry.
+        auto& snt = sent_[m.id];
+        snt.yaw = rc::SentScalar{p.yaw, p.yaw_kappa};
+    }
+    scene_graph_->retain_members(keep);
 }
 
 // ─── Diagnostics ─────────────────────────────────────────────────────────────
