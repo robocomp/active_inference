@@ -1,0 +1,37 @@
+# cabinet.concept.toml — what a CABINET RUN is, as world facts. See chair.concept.toml for the scope rule.
+
+[concept]
+name = "cabinet"
+label = "cabinet"                  # also accepts "chest of drawers"; "counter"/"countertop" behind a flag
+
+[model.geometry]
+support   = "resolved"             # ★PER-INSTANCE — see why
+from      = "nominal"
+why       = """
+★A CABINET RUN HAS TWO SUPPORTS AND CHOOSES PER INSTANCE. A base tier is floor_anchored; a wall tier HANGS at
+roughly [1.40, 2.10] m. It is the same class with two answers, decided from evidence — cabinet_model carries
+z0 and z1 as REAL DOFs precisely because of it, and the LiDAR/voxel bands are derived from those rather than
+from any class constant. Declaring one enum would be a wrong statement; `resolved` declares the dynamism, so
+a clone cannot inherit floor_anchored in silence and no band may be derived from here.
+"""
+
+[prior.carcass]
+depth_m = 0.60                     # front face → back face
+from    = "nominal"
+why     = "the standard domestic carcass depth; the run's LENGTH is free and the depth is what the fit holds"
+
+[prior.attachment]
+wall_flush = true
+from = "nominal"
+why  = """
+A run is fixed to the wall behind it, so the back face is flush and parallel — the same one-sided no-cross
+plus flush priors the fridge uses. An ISLAND is the declared exception and is handled by kitchen_metaconcept,
+which owns the axis; this block is about runs.
+"""
+
+# ── DELIBERATELY ABSENT ────────────────────────────────────────────────────────────────────────────────
+# [detector.envelope]— ⚠cabinet's REMOVAL runs a local one-sided absence_range_conf (monotonic in range, full
+#                      confidence up close) instead of rc::detect::p_detect, while its PLANNER uses the shared
+#                      envelope. The two halves disagree inside one process. Declaring an envelope here would
+#                      describe a model the removal path does not read — fix the consumer, then declare.
+# [sigma_star]       — cabinet_dof.h declares 10 of 12; the two without demands are nuisance DOFs.

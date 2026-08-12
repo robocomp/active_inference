@@ -49,7 +49,15 @@ enum class Support
     leg_supported,    // slab on legs:            z ∈ [z_top − extent, z_top]       (table: the solid band is
                       //                          a lossy abstraction of mostly-empty space — see hollow_delta)
     hangs,            // fixed to a wall, air beneath: z ∈ [z_top − extent, z_top]  (range hood, wall cabinet)
-    counter_top       // stands on a worktop:     z ∈ [z_base, z_base + extent]     (microwave, kettle)
+    counter_top,      // stands on a worktop:     z ∈ [z_base, z_base + extent]     (microwave, kettle)
+    // ★PER-INSTANCE, and saying so is a DECLARATION rather than a dodge. Some classes do not have one
+    // support: a bottle rests on whatever surface is under it (bottle_fitter resolves room vs a table each
+    // cycle), and a cabinet run is floor_anchored as a base tier and hangs as a wall tier — the same class,
+    // two answers, chosen per instance from evidence. Forcing one enum on those would be a WRONG statement,
+    // which the whole point of `support` is to make impossible; omitting the block would leave a clone free
+    // to inherit `floor_anchored` in silence. `resolved` says the class knows its support is dynamic and the
+    // agent owns the span, so z_span() must not be trusted and no derived band may be built from here.
+    resolved
 };
 
 inline Support support_from(std::string_view s)
@@ -58,6 +66,7 @@ inline Support support_from(std::string_view s)
     if (s == "leg_supported")  return Support::leg_supported;
     if (s == "hangs")          return Support::hangs;
     if (s == "counter_top")    return Support::counter_top;
+    if (s == "resolved")       return Support::resolved;
     return Support::unknown;
 }
 
@@ -69,6 +78,7 @@ inline const char* support_name(Support s)
         case Support::leg_supported:  return "leg_supported";
         case Support::hangs:          return "hangs";
         case Support::counter_top:    return "counter_top";
+        case Support::resolved:       return "resolved (per-instance)";
         default:                      return "unknown";
     }
 }
@@ -116,7 +126,9 @@ struct Geometry
             case Support::leg_supported:
             case Support::hangs:          z0 = z_top_m - extent_m;   z1 = z_top_m;             break;
             case Support::counter_top:    z0 = z_base_m;             z1 = z_base_m + extent_m; break;
-            default:                      z0 = 0.0f;                 z1 = z_top_m;             break;
+            // `resolved` and `unknown` have no class-level span. Returning zeros is deliberate: a caller
+            // that builds a band from them gets an empty one rather than a plausible-looking wrong one.
+            default:                      z0 = 0.0f;                 z1 = 0.0f;                break;
         }
         if (z1 < z0) std::swap(z0, z1);
     }
@@ -152,7 +164,10 @@ inline Geometry load_geometry(const std::string& path, std::string_view concept_
     g.z_base_m = getf("model.geometry.z_base_m", 0.0f);
     g.extent_m = getf("model.geometry.extent_m", 0.0f);
     g.from     = from_of(gets("model.geometry.from"));
-    g.valid    = (g.support != Support::unknown) and (g.extent_m > 0.0f or g.support == Support::floor_anchored);
+    // `resolved` is DECLARED but carries no span, so it is not "valid" for span purposes — has_span() is
+    // the question a caller actually has, and it is false for both unknown and resolved.
+    g.valid    = (g.support != Support::unknown) and (g.support != Support::resolved)
+             and (g.extent_m > 0.0f or g.support == Support::floor_anchored);
 
     float z0 = 0.0f, z1 = 0.0f; g.z_span(z0, z1);
     std::print("[manifest] {} geometry: support={} span=[{:.2f},{:.2f}] m  from={}{}\n",
@@ -160,7 +175,10 @@ inline Geometry load_geometry(const std::string& path, std::string_view concept_
                g.from == From::inherited
                    ? "  ★INHERITED — this number arrived by a rename and nobody has chosen it"
                    : "");
-    if (not g.valid)
+    if (g.support == Support::resolved)
+        std::print("[manifest] {} geometry: support is PER-INSTANCE — the agent owns the span; no derived "
+                   "band may be built from the manifest\n", concept_name);
+    else if (not g.valid)
         std::print("[manifest] {} geometry INCOMPLETE — declare model.geometry.support and extent_m\n",
                    concept_name);
     return g;

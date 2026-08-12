@@ -9,6 +9,8 @@
 
 #include <print>
 
+#include "../../common/concept_manifest/concept_manifest.h"   // rc::manifest (SHARED)
+
 #include <genericworker.h>   // ConfigLoader
 
 namespace rc {
@@ -16,6 +18,16 @@ namespace rc {
 CabinetConfig load_cabinet_config(const ConfigLoader& cfg)
 {
     CabinetConfig out;
+
+
+    // The one place this path is written. Relative to the agent's CWD (<agent>/), not to src/ — the same
+    // string was right in one place and wrong in the other for a week, and the manifest was inert the whole time.
+    static constexpr const char* kManifestPath = "../common/concept_manifest/cabinet.concept.toml";
+    // ★★AN INHERITED WORLD FACT IS FATAL — rc::manifest::provenance_ok. `from = "inherited"` means the number
+    // arrived by a rename and nobody chose it for THIS object; hood shipped ten such defects in a week with
+    // several of them declared, in writing, in its manifest. A note stopped nothing, so this stops the agent.
+    if (not rc::manifest::provenance_ok(kManifestPath, "cabinet"))
+        std::exit(EXIT_FAILURE);
 
     // ConfigLoader::get has no default overload; TOML numeric floats are stored as double.
     auto getf = [&](const std::string& k, float def) -> float {

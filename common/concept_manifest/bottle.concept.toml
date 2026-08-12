@@ -1,0 +1,36 @@
+# bottle.concept.toml — what a BOTTLE is, as world facts. See chair.concept.toml for the scope rule.
+
+[concept]
+name = "bottle"
+label = "bottle"
+
+[model.geometry]
+support   = "resolved"             # ★PER-INSTANCE — see why
+extent_m  = 0.20                   # cylinder height (bottle_model.h; PriorHeight = 0.20)
+from      = "measured"
+why       = """
+★A BOTTLE HAS NO CLASS-LEVEL SUPPORT, and saying so is the declaration. BottleFitter::update_support_surface
+decides each cycle which surface this instance rests on — the room floor or a particular table — by a MAP over
+{room, every table_N} with hysteresis, and the cz anchor follows that choice. A single enum here would be a
+WRONG statement (the failure `support` exists to make impossible) and omitting the block would leave a future
+clone free to inherit floor_anchored in silence. `resolved` says the class knows its support is dynamic, the
+agent owns the span, and NO derived band may be built from this manifest.
+The 0.20 m extent is measured: the cyberbotics BeerBottle (Heineken) body used in the sim world.
+"""
+
+[prior.radius]
+mean_m = 0.031
+from   = "measured"
+why    = """
+The cyberbotics BeerBottle body radius — naturally 62 mm across, with no mesh distortion, and well detected by
+YOLO. MEASURED off the sim asset, so it is exact for the simulator and NOMINAL for any real bottle: re-measure
+before trusting it on hardware.
+"""
+
+# ── DELIBERATELY ABSENT ────────────────────────────────────────────────────────────────────────────────
+# [prior.identity]   — a cylinder presents the same silhouette from every bearing, so there is no shape
+#                      log-evidence ratio to state. Absent BECAUSE the model says so, which is different
+#                      from absent because nobody looked.
+# [sigma_star]       — bottle_dof.h declares 4 of 5; the fifth is a nuisance DOF carrying no demand.
+# [detector.envelope]— bottle reads the fleet prior through rc::nbv::sensor_from_graph. Uncalibrated for an
+#                      object this small; a tour would measure it, and only then does it belong here.

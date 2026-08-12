@@ -1,0 +1,43 @@
+# chair.concept.toml — what a CHAIR is, as world facts.
+#
+# SCOPE: world facts only. Gates, debounces and frame counts are LIFECYCLE and belong to the shared modules
+# (common/existence_belief, common/instance_tracker) — if tuning knobs migrate here this becomes
+# etc/config.toml under a new name.
+#
+# ★Every block carries `from`. `inherited` REFUSES TO START the agent (rc::manifest::provenance_ok): a value
+# that arrived by a rename looks decided and is not. A block that is genuinely unsettled is OMITTED rather
+# than given a provenance it has not earned — an absent value gets asked about.
+
+[concept]
+name = "chair"
+label = "chair"                    # the ADE20K/YOLO label this agent claims
+
+[model.geometry]
+support   = "floor_anchored"       # floor_anchored | leg_supported | hangs | counter_top | resolved
+z_top_m   = 0.90                   # seat_h + back_h = 0.45 + 0.45 (chair_model.h)
+extent_m  = 0.90
+from      = "nominal"
+why       = """
+A chair stands on the floor and chair_belief PINS cz there (AI2FloorZ = 0.0, "cz is PINNED here, shared and
+view-independent"), so the span is [0, seat_h + back_h] by construction rather than by fit. NOMINAL — the
+0.45/0.45 split is the template in chair_model.h, from the appliance class and not from these chairs.
+"""
+
+[prior.template]
+seat_h_m = 0.45                    # seat TOP above the floor
+back_h_m = 0.45                    # backrest above the seat top
+from     = "nominal"
+why      = """
+chair's size is a FIXED TEMPLATE, not a fitted DOF — chair_belief's state is pose only (cx, cy, yaw). That is
+a modelling claim: a chair seen from one side gives almost no extent information, and estimating it produced
+the size oscillation this lineage is named for. ⚠seat_h has an open gauge question (see the seat_h memory);
+when it is settled, this becomes `measured`.
+"""
+
+# ── DELIBERATELY ABSENT ────────────────────────────────────────────────────────────────────────────────
+# [prior.identity]   — chair has no shape log-evidence ratio. Stated as absent so it is asked about rather
+#                      than assumed present; the table manifest records the same gap.
+# [detector.envelope]— chair's REMOVAL still uses a local one-sided zed_detectability() rather than
+#                      rc::detect::p_detect, so declaring an envelope here would describe a model the
+#                      removal path does not consult. Fix the consumer first, then declare.
+# [sigma_star]       — chair_dof.h declares 3 of 3; that is a real demand and needs no manifest entry yet.

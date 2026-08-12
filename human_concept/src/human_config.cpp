@@ -5,7 +5,10 @@
 #include "human_config.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <print>
+
+#include "../../common/concept_manifest/concept_manifest.h"   // rc::manifest (SHARED)
 #include <sstream>
 
 #include <genericworker.h>   // ConfigLoader
@@ -30,6 +33,16 @@ std::vector<int> parse_int_list(const std::string& s)
 HumanConfig load_human_config(const ConfigLoader& cfg)
 {
     HumanConfig out;
+
+
+    // The one place this path is written. Relative to the agent's CWD (<agent>/), not to src/ — the same
+    // string was right in one place and wrong in the other for a week, and the manifest was inert the whole time.
+    static constexpr const char* kManifestPath = "../common/concept_manifest/human.concept.toml";
+    // ★★AN INHERITED WORLD FACT IS FATAL — rc::manifest::provenance_ok. `from = "inherited"` means the number
+    // arrived by a rename and nobody chose it for THIS object; hood shipped ten such defects in a week with
+    // several of them declared, in writing, in its manifest. A note stopped nothing, so this stops the agent.
+    if (not rc::manifest::provenance_ok(kManifestPath, "human"))
+        std::exit(EXIT_FAILURE);
 
     auto getf = [&](const std::string& k, float def) -> float {
         return cfg.exists(k) ? static_cast<float>(cfg.get<double>(k)) : def;

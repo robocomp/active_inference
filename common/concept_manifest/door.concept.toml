@@ -1,0 +1,36 @@
+# door.concept.toml — what a DOOR is, as world facts. See chair.concept.toml for the scope rule.
+
+[concept]
+name = "door"
+label = "door"
+
+[model.geometry]
+support   = "floor_anchored"
+z_top_m   = 2.00                   # panel height (door_model.h h = 2.00)
+extent_m  = 2.00
+from      = "nominal"
+why       = """
+A door panel reaches the floor and door_model PINS cz there ("floor base height (panel spans [cz, cz+h]);
+pinned, not fit"), so the span is [0, h]. NOMINAL — 2.00 m is the standard domestic leaf, not a measurement
+of these doors. The APERTURE, not the leaf, is what a planner routes through; that is a separate quantity the
+agent already models (ap_cx/ap_cy) and it is not a vertical fact.
+"""
+
+[prior.panel]
+width_m  = 0.70                    # hinge → free edge
+from     = "nominal"
+why      = "a standard domestic leaf; the fit refines it, and a truncated mask makes the extent a lower bound"
+
+[prior.identity]
+min_height_m = 1.80
+from = "nominal"
+why  = """
+A door is an aperture a person walks through, so a support that CONFIDENTLY tops out below this is not one.
+Used as a categorical prior on an already-alive instance (Existence.MinHeightM), not as a birth gate.
+"""
+
+# ── DELIBERATELY ABSENT ────────────────────────────────────────────────────────────────────────────────
+# [sigma_star]       — door_dof.h carries "SIGMA-STAR: none", a reviewed absence the audit reports as
+#                      none(decl). Nothing consumes a door's pose precision yet.
+# [detector.envelope]— door's removal uses a local resolvability() with no near shoulder rather than
+#                      rc::detect::p_detect. Declaring an envelope would describe a model it does not read.

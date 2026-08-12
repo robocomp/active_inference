@@ -1,0 +1,27 @@
+# human.concept.toml — what a PERSON is, as world facts. See chair.concept.toml for the scope rule.
+#
+# ⚠human_concept is the least-adopted agent in the fleet (6 shared modules against 13-17 for its siblings).
+# This manifest is deliberately SMALL: it declares only what the agent demonstrably models, so the blocks it
+# does NOT declare stay visible as gaps rather than being papered over.
+
+[concept]
+name = "human"
+label = "person"
+
+[model.geometry]
+support   = "floor_anchored"
+z_top_m   = 1.70
+extent_m  = 1.70
+from      = "nominal"
+why       = """
+A person stands on the floor. 1.70 m is the class median and nothing in this agent fits a height — it tracks
+a ground-plane position, so the vertical span is used only for obstacle extent and display. NOMINAL, and it
+should stay nominal: fitting a person's height from a mask is not a problem this agent is trying to solve.
+"""
+
+# ── DELIBERATELY ABSENT, and these are REAL GAPS rather than reviewed absences ─────────────────────────
+# [sigma_star]       — human_concept publishes a hand-written 6x6 RT covariance with roll/pitch/yaw variance
+#                      1.0 rad^2 (sigma ~57 deg) instead of the fleet's 5e-4, and with no self-gate. Until it
+#                      adopts common/rt_covariance there is no honest precision claim to declare.
+# [prior.identity]   — none.
+# [detector.envelope]— hardcoded DetectorEnvelope{} rather than config keys (audit: 'warn').
