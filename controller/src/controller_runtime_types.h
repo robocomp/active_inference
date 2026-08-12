@@ -135,6 +135,20 @@ struct ControllerParams
     // the curvature prior (see RouteOptimizerConfig::safety_bias). 0.5 is exactly the written weights, so
     // it is inert until moved. Live from the UI slider; applies to the next route build or repair.
     float route_safety_bias = 0.5f;
+    // ── dkappa/ds PRIOR (see route_optimizer.h w_jerk) ───────────────────────────────────────────
+    // The robot delivers omega = v*kappa, so omega_dot = v_dot*kappa + v^2*(dkappa/ds): with speed
+    // roughly held, the roughness of the TURN RATE is the curvature RATE. Smoothing it in the geometry
+    // attacks the cause; tuning the tracker's gains fights it through a clamp that saturates (|cmd_rot|
+    // sat on its rail for 53% of cycles on a bad lap) and whose gradient is zero exactly there.
+    // ★0.5, chosen on measurement, not taste. Swept on the 37 m tour with tools/tracker_sim (which now
+    // takes w_jerk=<v> and drives the OPTIMISED route): it is the only setting that improves everything
+    // at once — TV(w)/m 1.341 -> 1.234, TV(v)/m 0.411 -> 0.389, cross-track rms 29.9 -> 29.4 mm, max
+    // 70.4 -> 68.7 mm — while anchor fidelity barely moves (0.070 -> 0.085) and clearance holds
+    // (0.449 -> 0.441). Higher settings keep buying smoothness (TV(w)/m 0.944 at 8) and start paying in
+    // accuracy and in the AUTHORED waypoints: at 8 the anchor energy triples, cross-track max reaches
+    // 86.4 mm and corr(e,kappa) collapses 0.55 -> 0.40 with the lag peak jumping to +1000 ms, i.e. the
+    // error stops being explained by curvature. That is a trade, not a free win.
+    float route_jerk_weight = 0.5f;
     float lambda_continuity = 0.0f;
     float continuity_rot_factor = 1.0f;
     // One row of continuous trajectory statistics per completed run is appended here. Empty disables the file (the console

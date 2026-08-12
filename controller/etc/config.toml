@@ -203,6 +203,27 @@ RouteOptimize = true
 # before that, extra cusps were what made it diverge.
 RouteSafetyBias = 0.75
 
+# ── SMOOTHNESS OF THE TURN, ATTACKED IN THE GEOMETRY ──────────────────────────────────────────────
+# Penalises dkappa/ds (the clothoid criterion) in the route objective. The robot must deliver
+# omega = v*kappa, so omega_dot = v_dot*kappa + v^2*(dkappa/ds): with speed roughly held, the roughness
+# of the TURN RATE is the curvature RATE. This is the cause; the tracker's gains are the symptom, and
+# they fight it through a clamp that saturates (|cmd_rot| sat on its rail for 53% of cycles on a bad lap)
+# where the gradient with respect to any gain is exactly zero.
+# ★0.5 was swept, not guessed — tools/tracker_sim route_world.txt w_jerk=0,0.5,2,8 (it now drives the
+# OPTIMISED route). It is the only setting that improves every measure at once:
+#     w_jerk    TV(w)/m   TV(v)/m   rms      max
+#     0         1.341     0.411     29.9 mm  70.4 mm
+#     0.5       1.234     0.389     29.4 mm  68.7 mm   <- here
+#     2         1.115     0.364     32.1 mm  76.0 mm
+#     8         0.944     0.287     32.4 mm  86.4 mm
+# Higher keeps buying smoothness and starts paying in accuracy and in the AUTHORED waypoints: at 8 the
+# anchor energy triples (0.070 -> 0.221 on route_bench) and corr(e,kappa) collapses 0.55 -> 0.40 with the
+# lag peak at +1000 ms — the error stops being explained by curvature. Raise it for a long smooth tour;
+# do not raise it when hitting the waypoints is the point.
+# ⚠Measured on the 37 m tour with NO obstacles in the bench, so no safety gate: on the robot the gate
+# contributes most of the command roughness, and these TV figures are a floor, not a prediction.
+RouteJerkWeight = 0.5
+
 # ── WHICH CONTROLLER DRIVES ──
 # "mppi"  = samples K rollouts and scores them; does its own obstacle avoidance (g_obs + g_lat are ~99%
 #           of its objective). This drove every lap up to 2026-08-01.

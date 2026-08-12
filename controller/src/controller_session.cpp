@@ -607,6 +607,7 @@ rc::RouteOptimizerConfig ControllerSession::make_route_optimizer_config() const
     opt.clearance_floor = rc::RobotFootprint::shadow().inscribed_radius();
     opt.iterations = 30;
     opt.safety_bias = params_ ? params_->route_safety_bias : 0.5f;
+    opt.w_jerk = params_ ? params_->route_jerk_weight : 0.f;
     return opt;
 }
 
@@ -687,7 +688,7 @@ void ControllerSession::dump_route_world(const Eigen::Vector2f &start,
     f << "opt " << opt.d_target << ' ' << opt.rho << ' ' << opt.sigma_a << ' ' << opt.clearance_floor << ' '
       << opt.w_kappa << ' ' << opt.w_clear << ' ' << opt.w_gauge << ' ' << opt.clear_peak << ' '
       << opt.anchor_huber << ' ' << opt.iterations << ' ' << opt.kappa_peak << ' '
-      << opt.safety_bias << '\n';
+      << opt.safety_bias << ' ' << opt.w_jerk << '\n';
     grid_planner_.write_grid(f);
 }
 

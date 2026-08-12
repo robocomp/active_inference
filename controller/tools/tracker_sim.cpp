@@ -262,6 +262,14 @@ struct Result
     // is exp(-k*(w_cmd/w_max)^2) because the exponent uses the DELIVERED (clamped) rate, which is
     // w_cmd. So "which factor is binding, and where" can be measured without touching the tracker.
     std::vector<float> d_kappa, d_vlim, d_vcmd, d_wcmd;
+    // ── UNSEEN SWEEP (--pivot) ───────────────────────────────────────────────────────────────────
+    // The quantity the collision complaint is actually about: how far the BODY translates while the
+    // route is turning hard. The lidar is blind within ~8 cm of the hull, so every metre travelled
+    // sideways-ish through a corner is a metre of body sweeping through space nothing can see.
+    // Bucketed by how much the route turns over its smoothing window, which is what "sharp" means.
+    double trans_45 = 0, trans_90 = 0, trans_135 = 0;   // metres translated where turn_ahead exceeds
+    double time_45 = 0, time_90 = 0, time_135 = 0;      // seconds spent there
+    float  vmax_90 = 0;                                 // fastest the robot ever moved past 90 deg
 };
 
 double corr(const std::vector<float> &a, const std::vector<float> &b, int lag)
@@ -441,9 +449,20 @@ Result run(const rc::RouteFollower &route, Arm arm, float v_cap, float w_max,
         }
         R.s_end = s_hint;
 
+        // How sharply the route turns over its own smoothing window, at the robot's projection —
+        // exactly the `turn_ahead` the tracker's translation gate uses.
+        const float turn_ahead = std::abs(wrap(sp.heading_at(std::min(s_hint + W, sp.length()))
+                                               - sp.heading_at(s_hint)));
+
         const float x0 = P.x, y0 = P.y;
         for (float u = 0.f; u < kCtrlDt - 1e-6f; u += kSubDt) P.step(v_cmd, w_cmd, kSubDt);
-        R.dist += std::hypot(P.x - x0, P.y - y0);
+        const float step_m = std::hypot(P.x - x0, P.y - y0);
+        constexpr float kD45 = 0.785f, kD90 = 1.571f, kD135 = 2.356f;
+        if (turn_ahead > kD45)  { R.trans_45  += step_m; R.time_45  += kCtrlDt; }
+        if (turn_ahead > kD90)  { R.trans_90  += step_m; R.time_90  += kCtrlDt;
+                                  R.vmax_90 = std::max(R.vmax_90, step_m / kCtrlDt); }
+        if (turn_ahead > kD135) { R.trans_135 += step_m; R.time_135 += kCtrlDt; }
+        R.dist += step_m;
         R.t_end = t;
     }
     if (verbose)
@@ -518,6 +537,15 @@ void brake_diag(const char *tag, const Result &R, float brake_k, float w_max)
     }
 }
 
+// How much body sweep happens inside a hard turn — the collision question, not the tracking one.
+void pivot_report(const char *tag, const Result &R)
+{
+    std::printf("  %-22s >45deg: %5.2f m / %4.1f s | >90deg: %5.2f m / %4.1f s (v_max %.3f) | "
+                ">135deg: %5.2f m / %4.1f s | rms %5.1f mm | %.0f s\n",
+                tag, R.trans_45, R.time_45, R.trans_90, R.time_90, R.vmax_90,
+                R.trans_135, R.time_135, R.n ? std::sqrt(R.e_sq / R.n) * 1000 : 0.0, R.t_end);
+}
+
 struct World
 {
     rc::GridPlanner planner;
@@ -558,7 +586,7 @@ bool load_world(const std::string &path, World &w)
 int main(int argc, char **argv)
 {
     std::string path = "route_world.txt";
-    bool sweep = false, brake_mode = false;
+    bool sweep = false, brake_mode = false, pivot_mode = false;
     for (int i = 1; i < argc; ++i)
     {
         const std::string a = argv[i];
@@ -567,6 +595,7 @@ int main(int argc, char **argv)
         else if (a == "--trace") g_trace = true;
         else if (a == "--optimise" or a == "--optimize") g_optimise = true;
         else if (a == "--brake") brake_mode = true;
+        else if (a == "--pivot") pivot_mode = true;
         else if (a.rfind("w_jerk=", 0) == 0) { g_optimise = true; g_w_jerk = std::stof(a.substr(7)); } else path = a;
     }
 
@@ -608,6 +637,32 @@ int main(int argc, char **argv)
     constexpr float kWmax = 0.8f, kADec = 1.0f, kW = 0.40f;
     std::printf("tracker_sim: %s — route %.1f m, %zu waypoints, v_max %.2f, plant tau 0.22 delay 0.20 gain 0.89\n\n",
                 path.c_str(), route.length(), w.wp_safe.size(), w.v_max);
+
+    if (pivot_mode)
+    {
+        // ── HOW MUCH BODY SWEEP HAPPENS INSIDE A HARD TURN ───────────────────────────────────────
+        // The robot clips furniture in sharp turns, and the lidar cannot see anything within ~8 cm of
+        // its hull, so the number that matters is METRES TRANSLATED WHILE TURNING — not rms, not lap
+        // time. Reported at three sharpness bands so the effect is visible where it is meant to bite
+        // and absent where it is not. Compare against the same binary with the gate removed.
+        g_headroom = 0.70f;
+        std::printf("\n  body sweep inside a turn (route %.1f m, L=0.50, q=%.2f)\n",
+                    route.length(), g_turn_q);
+        for (const float L : {0.50f})
+        {
+            FfArm arm; arm.L = L; arm.brake_k = 0.25f;
+            pivot_report("shipped", run(route, arm, w.v_max, kWmax, w.a_lat, kADec, kW, false));
+        }
+        for (const float q : {0.00f, 0.25f})
+        {
+            g_turn_q = q;
+            FfArm arm; arm.L = 0.50f; arm.brake_k = 0.25f;
+            char tag[40]; std::snprintf(tag, sizeof tag, "q=%.2f", q);
+            pivot_report(tag, run(route, arm, w.v_max, kWmax, w.a_lat, kADec, kW, false));
+        }
+        g_turn_q = 0.25f;
+        return 0;
+    }
 
     if (brake_mode)
     {

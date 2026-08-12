@@ -919,6 +919,7 @@ void SpecificWorker::load_params()
 	load_optional_cast<double>("Controller.BandWindow", params.band_window_m);
 	load_optional("Controller.BandPeriodCycles", params.band_period_cycles);
 	load_optional_cast<double>("Controller.RouteSafetyBias", params.route_safety_bias);
+	load_optional_cast<double>("Controller.RouteJerkWeight", params.route_jerk_weight);
 
 	load_optional_cast<double>("Controller.LambdaContinuity", params.lambda_continuity);
 	load_optional_cast<double>("Controller.ContinuityRotFactor", params.continuity_rot_factor);
