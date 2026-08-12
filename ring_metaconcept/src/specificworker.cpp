@@ -220,6 +220,14 @@ void SpecificWorker::initialize()
         .on_operating_enter = [this]()
         {
             qInfo("[SM] -> Operating: all required peers present");
+            // ★Second stale-sweep, once. The initialize() pass can run BEFORE nodes leaked by a
+            // crashed previous run have finished syncing from the persistent server, so this
+            // post-sync pass is the one that actually reaps them (CLAUDE.md).
+            if (not operating_sweep_done_)
+            {
+                operating_sweep_done_ = true;
+                remove_owned_dining_set_nodes();
+            }
         },
         .on_operating_loop = [this]()
         {
@@ -265,12 +273,20 @@ void SpecificWorker::initialize()
     // Remove any leftover dining_set nodes from a previous (crashed) run — clean slate.
     remove_owned_dining_set_nodes();
 
+    // ★Both streams are imbued with the CLASSIC locale. Qt calls setlocale(LC_ALL, "") at startup and
+    // these machines run LANG=es_ES.UTF-8, where the decimal separator is a COMMA. std::ofstream
+    // formats through the C++ global locale, which is "C" today — but one std::locale::global call
+    // anywhere would silently start writing "0,53" into a comma-separated file. Cheap insurance
+    // (CLAUDE.md, "Parsing numbers from files").
     if (not cfg_.csv_path.empty())
     {
         csv_.open(cfg_.csv_path, std::ios::out | std::ios::trunc);
         if (csv_.is_open())
-            csv_ << "cycle,node,class,x,y,yaw_deg,std_x,std_y,std_yaw_deg,has_cov,"
+        {
+            csv_.imbue(std::locale::classic());
+            csv_ << "cycle,rig,cluster,node,class,x,y,yaw_deg,std_x,std_y,std_yaw_deg,has_cov,"
                     "radius,bearing_deg,facing_resid_deg\n";
+        }
         else
             qWarning() << "ring_metaconcept: cannot open CSV" << QString::fromStdString(cfg_.csv_path);
     }
@@ -278,15 +294,19 @@ void SpecificWorker::initialize()
     {
         ring_csv_.open(cfg_.fit_csv_path, std::ios::out | std::ios::trunc);
         if (ring_csv_.is_open())
-            ring_csv_ << "cycle,n_ring,slots,log_odds,p_ring,cx,cy,radius,yaw_deg,"
-                         "node,member_yaw_deg,prior_yaw_deg,prior_std_deg,correction_deg,"
-                         "cavity_shift_deg\n";
+        {
+            ring_csv_.imbue(std::locale::classic());
+            ring_csv_ << "cycle,rig,rig_node,n_ring,slots,log_odds,p_ring,cx,cy,radius,yaw_deg,"
+                         "anchor,anchor_w,node,member_yaw_deg,prior_yaw_deg,prior_std_deg,"
+                         "correction_deg,cavity_shift_deg\n";
+        }
         else
             qWarning() << "ring_metaconcept: cannot open fit CSV"
                        << QString::fromStdString(cfg_.fit_csv_path);
     }
 
     // Belief parameters from config; the room polygon supplies the null's support (see room_area_m2).
+    // Held as a member and copied into every hypothesis born from now on.
     rc::RingBeliefParams bp;
     bp.sigma_slot_m      = cfg_.sigma_slot_m;
     bp.clutter_frac      = cfg_.clutter_frac;
@@ -295,12 +315,18 @@ void SpecificWorker::initialize()
     bp.facing_model_std    = cfg_.facing_model_std_deg / 57.29578f;
     bp.evidence_ema_alpha  = cfg_.evidence_ema_alpha;
     bp.room_area_m2        = room_area_m2().value_or(cfg_.room_area_m2_fallback);
-    ring_belief_.set_params(bp);
+    belief_params_ = bp;
     std::print("ring_metaconcept: null support = {:.1f} m² ({})\n", bp.room_area_m2,
                room_area_m2().has_value() ? "room polygon" : "config fallback");
 
-    // The belief is pure Eigen — verify it in isolation at startup (recipe §3.10).
+    // ★The partition MIRRORS the arrangement model — there is no partition-only tunable, so the two
+    // can never disagree about what a ring is. A linking distance in RingConfig would be exactly the
+    // magic threshold CLAUDE.md forbids.
+    partition_params_ = {bp.prior_radius_m, bp.prior_radius_std, bp.sigma_slot_m, bp.room_area_m2};
+
+    // Both are pure Eigen — verify them in isolation at startup (recipe §3.10).
     rc::RingBelief::self_test();
+    rc::partition_self_test();
 
     // Resolve room node (the shared frame the members live under).
     const auto rooms = G->get_nodes_by_type("room");
@@ -330,13 +356,14 @@ void SpecificWorker::compute()
     // §6 Delta 1 — graph-reader front end: poll the constituent members on the MAIN thread.
     const auto members = poll_members();
 
-    log_members_csv(members);
+    // WHICH members form a rig, and which anchor centres each — inferred, not assumed. Then match
+    // those clusters onto the hypotheses that already exist BEFORE anything touches the graph.
+    const auto clusters = partition_snapshot(members);
+    associate_and_maintain(clusters);
 
-    // M2 — fit the arrangement latent to this poll. READ-ONLY: no node is birthed, no edge written,
-    // no attribute pushed to any peer. It logs the down-prior it WOULD publish so the premise can be
-    // checked against live data before committing to a cortex reinstall or touching chair_concept.
-    step_ring_belief(members);
-    log_ring_csv(members);
+    log_members_csv(members, clusters);
+    step_ring_beliefs(members, clusters);
+    log_ring_csv(members, clusters);
 
     // Throttled report so the scaffold is observable (later milestones replace this with the
     // ring belief / evidence / down-prior). Prints on stdout (qInfo is RoboComp-filtered).
@@ -348,11 +375,24 @@ void SpecificWorker::compute()
         for (const auto& n : members.unclassified)
             others += (others.empty() ? "" : " ") + n;
 
-        std::print("[ring_metaconcept] members: {}={} {}={} | objects={} (other-class={} [{}], no-RT-pose={}) room_id={}\n",
+        std::print("[ring_metaconcept] members: {}={} {}={} | objects={} (other-class={} [{}], no-RT-pose={}) room_id={} clusters={} rigs={}\n",
                    cfg_.anchor_class, members.anchors.size(),
                    cfg_.ring_class,   members.ring.size(),
                    members.objects_total, members.skipped_class, others,
-                   members.skipped_no_rt, room_node_id_);
+                   members.skipped_no_rt, room_node_id_, clusters.size(), hypotheses_.size());
+
+        // One line per cluster. THIS is what makes the partition visible: which anchor each group of
+        // chairs actually selected, and how much authority that anchor was given.
+        for (std::size_t c = 0; c < clusters.size(); ++c)
+        {
+            const auto& cl = clusters[c];
+            const std::string anchor = cl.anchor_id == 0
+                ? std::string("none")
+                : members.anchors[cl.anchor_index].name;
+            std::print("    cluster#{}: {}={} anchor={} w={:.4g} (lambda={:+.2f})\n",
+                       c, cfg_.ring_class, cl.member_ids.size(), anchor,
+                       cl.anchor_weight, cl.anchor_logodds);
+        }
     }
 
     // Overall compute()-cycle rate heartbeat (throttled inside FPSCounter).
@@ -498,14 +538,18 @@ std::optional<float> SpecificWorker::room_area_m2() const
 // One poll as evidence. Ring members are the "points"; each carries its OWN published variance as R
 // (an uncertain chair contributes weakly, by construction). The anchor is NOT a point — it enters as
 // the centre prior, so a table can never be mistaken for a chair occupying a seat.
-rc::RingFrame SpecificWorker::build_ring_frame(const MemberSnapshot& members) const
+rc::RingFrame SpecificWorker::build_ring_frame(const MemberSnapshot& members, const rc::Cluster& cluster,
+                                               const rc::RingHypothesis& h) const
 {
     rc::RingFrame f;
-    f.points.reserve(members.ring.size());
-    f.R.reserve(members.ring.size());
+    f.points.reserve(cluster.member_index.size());
+    f.R.reserve(cluster.member_index.size());
 
-    for (const auto& m : members.ring)
+    // Only THIS cluster's members. Feeding every chair in the room to every rig is what made two
+    // seating groups collapse into one bad fit.
+    for (const std::size_t mi : cluster.member_index)
     {
+        const auto& m = members.ring[mi];
         f.points.emplace_back(m.xy.x(), m.xy.y(), 0.0f);
         // The engine takes ONE scalar R per point while the peer publishes a 2×2. Use the mean
         // eigenvalue (trace/2) — exact for the isotropic case and a fair summary otherwise. The
@@ -513,19 +557,30 @@ rc::RingFrame SpecificWorker::build_ring_frame(const MemberSnapshot& members) co
         f.R.push_back(std::max(1e-6f, 0.5f * (m.Sigma_xy(0, 0) + m.Sigma_xy(1, 1))));
     }
 
-    if (not members.anchors.empty())
+    if (cluster.anchor_id != 0)
     {
-        const auto& a = members.anchors.front();
+        const auto& a = members.anchors[cluster.anchor_index];
         f.has_anchor  = true;
         f.anchor_xy   = a.xy;
-        // Information = Σ⁻¹ of the anchor's published position covariance.
+
+        // ★The anchor asserts "the ring centre is HERE". That is a TENDENCY, not a law — the same
+        // class of claim as facing_model_std — so the arrangement's own positional slack goes in in
+        // quadrature, and the whole prior is SCALED by the probability that this anchor really is
+        // this cluster's centre. A table the chairs did not select therefore contributes ~nothing,
+        // continuously, with no gate anywhere.
+        //
+        // Before this the raw Σ⁻¹ (≈11 for σ=0.30 m) was applied unconditionally to whichever table
+        // get_nodes_by_type("object") happened to return first. Measured live 2026-08-11: it welded
+        // the centre onto a table 5 m from the chairs and held it there for 3000+ cycles, the radius
+        // saturated against max_radius_m, and the rig was never born.
         Eigen::Matrix2f S = a.Sigma_xy;
-        S(0, 0) = std::max(1e-6f, S(0, 0));
-        S(1, 1) = std::max(1e-6f, S(1, 1));
-        f.anchor_info = S.inverse();
+        const float slack = belief_params_.sigma_slot_m * belief_params_.sigma_slot_m;
+        S(0, 0) = std::max(1e-6f, S(0, 0) + slack);
+        S(1, 1) = std::max(1e-6f, S(1, 1) + slack);
+        f.anchor_info = cluster.anchor_weight * S.inverse();
     }
 
-    f.slot_visibility = compute_slot_visibility(ring_belief_.state(), ring_belief_.slot_count());
+    f.slot_visibility = compute_slot_visibility(h.belief.state(), h.belief.slot_count());
     return f;
 }
 
@@ -578,55 +633,200 @@ std::vector<float> SpecificWorker::compute_slot_visibility(const rc::RingBeliefS
 // GN on a circle has a narrow basin, so seed rather than starting from the prior mean: centre from
 // the anchor (or the member centroid), radius from the mean member distance, phase so that slot 0
 // lands on the first member.
-void SpecificWorker::seed_ring_belief(const MemberSnapshot& members, const rc::RingFrame& frame)
+rc::RingBeliefState SpecificWorker::seed_state_for(const MemberSnapshot& members,
+                                                   const rc::Cluster& cluster,
+                                                   const rc::RingFrame& frame) const
 {
     Eigen::Vector2f centre = Eigen::Vector2f::Zero();
     if (frame.has_anchor)
         centre = frame.anchor_xy;
     else
     {
-        for (const auto& m : members.ring) centre += m.xy;
-        centre /= static_cast<float>(std::max<std::size_t>(1, members.ring.size()));
+        for (const std::size_t mi : cluster.member_index) centre += members.ring[mi].xy;
+        centre /= static_cast<float>(std::max<std::size_t>(1, cluster.member_index.size()));
     }
 
     float radius = 0.0f;
-    for (const auto& m : members.ring) radius += (m.xy - centre).norm();
-    radius /= static_cast<float>(std::max<std::size_t>(1, members.ring.size()));
+    for (const std::size_t mi : cluster.member_index) radius += (members.ring[mi].xy - centre).norm();
+    radius /= static_cast<float>(std::max<std::size_t>(1, cluster.member_index.size()));
 
-    const Eigen::Vector2f d0 = members.ring.front().xy - centre;
+    const Eigen::Vector2f d0 = members.ring[cluster.member_index.front()].xy - centre;
     rc::RingBeliefState s;
     s.cx     = centre.x();
     s.cy     = centre.y();
-    s.radius = std::clamp(radius, ring_belief_.params().min_radius_m, ring_belief_.params().max_radius_m);
+    s.radius = std::clamp(radius, belief_params_.min_radius_m, belief_params_.max_radius_m);
     s.yaw    = std::atan2(d0.y(), d0.x());
-    ring_belief_.set_state(s);
-    ring_seeded_ = true;
-
-    std::print("ring_metaconcept: seeded ring at ({:.2f},{:.2f}) r={:.2f} from {} member(s)\n",
-               s.cx, s.cy, s.radius, members.ring.size());
+    return s;
 }
 
-void SpecificWorker::step_ring_belief(const MemberSnapshot& members)
+// ★A seed is a starting point, not a commitment. resolve_slot_count already refits from both the
+// current state and a closed-form seed and keeps whichever explains the frame better; do the same for
+// the whole state vector. The old one-shot `ring_seeded_` latch meant a seed taken on cycle 30 from
+// the wrong anchor could never be revisited, and it wasn't — the centre was byte-identical 3000
+// cycles later. Here a wrong seed is corrected by evidence instead of surviving forever.
+void SpecificWorker::reseed_if_better(rc::RingHypothesis& h, const rc::RingFrame& frame,
+                                      const MemberSnapshot& members, const rc::Cluster& cluster)
+{
+    const rc::RingBeliefState seed = seed_state_for(members, cluster, frame);
+
+    if (not h.seeded)   // nothing to compare against yet
+    {
+        h.belief.set_state(seed);
+        h.seeded = true;
+        std::print("ring_metaconcept: rig={} seeded at ({:.2f},{:.2f}) r={:.2f} from {} member(s)\n",
+                   h.key, seed.cx, seed.cy, seed.radius, cluster.member_index.size());
+        return;
+    }
+
+    rc::RingBelief trial = h.belief;
+    trial.set_state(seed);
+    trial.update(frame);
+    if (trial.log_evidence(frame, trial.state()) > h.belief.log_evidence(frame, h.belief.state()))
+    {
+        std::print("ring_metaconcept: rig={} RE-SEEDED ({:.2f},{:.2f}) r={:.2f} -> ({:.2f},{:.2f}) r={:.2f}\n",
+                   h.key, h.belief.state().cx, h.belief.state().cy, h.belief.state().radius,
+                   trial.state().cx, trial.state().cy, trial.state().radius);
+        h.belief.set_state(trial.state());
+    }
+}
+
+void SpecificWorker::step_ring_beliefs(const MemberSnapshot& members,
+                                       const std::vector<rc::Cluster>& clusters)
+{
+    for (std::size_t c = 0; c < clusters.size(); ++c)
+    {
+        // associate_and_maintain has already guaranteed one hypothesis per cluster, in order.
+        if (c < hypotheses_.size())
+            step_hypothesis(hypotheses_[c], members, clusters[c]);
+    }
+}
+
+void SpecificWorker::step_hypothesis(rc::RingHypothesis& h, const MemberSnapshot& members,
+                                     const rc::Cluster& cluster)
 {
     // Below two ring members the arrangement is under-determined. This is NOT an evidence gate — it
     // is the point at which the fit has fewer constraints than DOFs, so there is nothing to update.
     // (With 0-1 members the posterior would simply stay at the prior anyway; skipping saves the
     // process noise from random-walking the phase in the meantime.)
-    if (members.ring.size() < 2)
+    if (cluster.member_index.size() < 2)
         return;
 
-    const auto frame = build_ring_frame(members);
-    if (not ring_seeded_)
-        seed_ring_belief(members, frame);
+    const auto frame = build_ring_frame(members, cluster, h);
 
-    ring_belief_.update(frame);
+    // Re-seed on creation, and whenever this hypothesis's IDENTITY changed — a different attached
+    // anchor or a different member set means the basin the belief converged into may no longer be
+    // the right one.
+    reseed_if_better(h, frame, members, cluster);
+
+    h.belief.update(frame);
     // weight = 1.0: the ego-motion reliability term (a poll taken while the robot moves carries
     // smeared member poses) is not wired yet — see the CSV caveat.
-    ring_belief_.resolve_slot_count(frame, 1.0f);
-    ring_belief_.update_log_odds(frame, 1.0f);
+    h.belief.resolve_slot_count(frame, 1.0f);
+    // ★After the slot count, model-compare the radius — GN cannot be trusted with it (see
+    // RingBelief::resolve_radius). Must run BEFORE update_log_odds so the existence evidence is
+    // scored at the state we actually believe, not at the collapsed one.
+    h.belief.resolve_radius(frame);
+    h.belief.update_log_odds(frame, 1.0f);
 
-    compute_cavity_priors(members, frame);
-    publish_rig(members);
+    compute_cavity_priors(h, members, cluster, frame);
+    publish_rig(h, members, cluster);
+}
+
+// ─── Partition + hypothesis lifecycle ────────────────────────────────────────
+
+int SpecificWorker::hypothesis_hold_cycles() const
+{
+    // Derived, not tuned: do NOT churn faster than the evidence can change. The EMA rate is the
+    // model's own statement of how long a revision takes, so retiring a hypothesis sooner than that
+    // discards state the belief has not yet had the chance to revise.
+    return std::max(1, static_cast<int>(std::ceil(1.0f / std::max(1e-3f, cfg_.evidence_ema_alpha))));
+}
+
+std::vector<rc::Cluster> SpecificWorker::partition_snapshot(const MemberSnapshot& members) const
+{
+    const auto to_partition = [](const std::vector<RingMember>& src)
+    {
+        std::vector<rc::PartitionMember> out;
+        out.reserve(src.size());
+        for (const auto& m : src)
+            out.push_back({m.id, m.xy, std::max(1e-6f, 0.5f * (m.Sigma_xy(0, 0) + m.Sigma_xy(1, 1)))});
+        return out;
+    };
+    return rc::partition_members(to_partition(members.ring), to_partition(members.anchors),
+                                 partition_params_);
+}
+
+// Match clusters onto existing hypotheses, then reorder `hypotheses_` so that entry i belongs to
+// cluster i. Nothing here touches the graph except the retirement of a hypothesis that has been
+// missing for the whole hold period.
+void SpecificWorker::associate_and_maintain(const std::vector<rc::Cluster>& clusters)
+{
+    std::vector<std::pair<std::uint64_t, std::vector<std::uint64_t>>> rigs;
+    rigs.reserve(hypotheses_.size());
+    for (const auto& h : hypotheses_)
+        rigs.emplace_back(h.key, h.member_ids);
+
+    const auto assoc = rc::associate_clusters(clusters, rigs);
+
+    // Resolve every key to an INDEX up front, so nothing below ever inspects a moved-from element.
+    const auto index_of = [this](std::uint64_t key) -> std::size_t
+    {
+        for (std::size_t i = 0; i < hypotheses_.size(); ++i)
+            if (hypotheses_[i].key == key)
+                return i;
+        return hypotheses_.size();
+    };
+
+    std::vector<rc::RingHypothesis> next;
+    next.reserve(clusters.size() + assoc.unmatched_rigs.size());
+
+    // ★Entry i of `next` belongs to cluster i — step_ring_beliefs relies on that alignment.
+    for (std::size_t c = 0; c < clusters.size(); ++c)
+    {
+        const auto key = assoc.cluster_to_rig[c];
+        const std::size_t idx = key < 0 ? hypotheses_.size() : index_of(static_cast<std::uint64_t>(key));
+
+        rc::RingHypothesis h;
+        if (idx < hypotheses_.size())
+        {
+            h      = std::move(hypotheses_[idx]);   // keeps its belief state, log-odds EMA and node
+            h.miss = 0;
+        }
+        else
+        {
+            h.key = ++next_rig_key_;
+            h.belief.set_params(belief_params_);
+        }
+        // The membership is simply refreshed. A changed member set or anchor needs no flag: the seed
+        // is re-evaluated against the evidence EVERY cycle (reseed_if_better), so a basin that stops
+        // being the best explanation is left behind on its own.
+        h.member_ids    = clusters[c].member_ids;
+        h.anchor_id     = clusters[c].anchor_id;
+        h.anchor_weight = clusters[c].anchor_weight;
+        next.push_back(std::move(h));
+    }
+
+    // Hypotheses with no cluster this cycle: HOLD them (keeping node, state and log-odds) and only
+    // retire once the hold period elapses. A member that flickers for one cycle must not birth and
+    // kill a rig node — that churn is the ★hazard SCHEMA_GENERALITY_TODO.md §4 Step 1 calls out.
+    const int hold = hypothesis_hold_cycles();
+    for (const auto key : assoc.unmatched_rigs)
+    {
+        const std::size_t idx = index_of(key);
+        if (idx >= hypotheses_.size())
+            continue;
+        rc::RingHypothesis h = std::move(hypotheses_[idx]);
+        if (++h.miss >= hold)
+        {
+            if (scene_graph_)
+                scene_graph_->remove_rig_node(h.key);
+            std::print("ring_metaconcept: rig={} retired after {} cycles without members\n", h.key, h.miss);
+            continue;   // dropped: not carried into `next`
+        }
+        next.push_back(std::move(h));   // held
+    }
+
+    hypotheses_ = std::move(next);
 }
 
 // Birth / refresh the rig node and push each member's CAVITY prior down its group_member edge.
@@ -636,18 +836,19 @@ void SpecificWorker::step_ring_belief(const MemberSnapshot& members)
 // a tuned threshold — it is where the two hypotheses are equally likely. The EMA (see
 // RingBeliefParams::evidence_ema_alpha) is what keeps it from chattering across the boundary: the
 // estimate moves slowly, so a marginal scene drifts rather than flickers.
-void SpecificWorker::publish_rig(const MemberSnapshot& members)
+void SpecificWorker::publish_rig(rc::RingHypothesis& h, const MemberSnapshot& members,
+                                 const rc::Cluster& cluster)
 {
     if (not scene_graph_)
         return;
 
-    if (ring_belief_.log_odds() <= 0.0f)
+    if (h.belief.log_odds() <= 0.0f)
     {
-        scene_graph_->remove_rig_node();   // stopped out-explaining the null → retire it
+        scene_graph_->remove_rig_node(h.key);   // stopped out-explaining the null → retire it
         return;
     }
 
-    if (scene_graph_->ensure_rig_node(ring_belief_, room_node_id_) == 0)
+    if (scene_graph_->ensure_rig_node(h.key, h.belief, room_node_id_) == 0)
         return;
 
     std::unordered_set<std::uint64_t> live;
@@ -658,21 +859,25 @@ void SpecificWorker::publish_rig(const MemberSnapshot& members)
     // object AT the centre (and a round table has no meaningful heading at all). κ = 0 is already the
     // contract's "ignore me", so table_concept needs no change to coexist with this. slot_index = −1
     // marks it as the anchor rather than a seat. Phase 2's rig_shape_round_logodds rides this edge.
-    if (not members.anchors.empty())
+    // ★Only when the chairs actually chose this table (w > 0.5 — "more likely this cluster's centre
+    // than not", the same equal-probability boundary as log_odds > 0). An anchor the partition
+    // attached with a near-zero weight is not a member of the set and must not be edged as one.
+    if (cluster.anchor_id != 0 and cluster.anchor_weight > 0.5f)
     {
         rc::MemberPrior a;
-        a.member_id  = members.anchors.front().id;
+        a.member_id  = cluster.anchor_id;
         a.slot_index = -1;
         a.yaw_prior  = 0.0f;
         a.yaw_kappa  = 0.0f;
-        scene_graph_->publish_member_prior(a);
+        scene_graph_->publish_member_prior(h.key, a);
         live.insert(a.member_id);
     }
 
-    for (const auto& m : members.ring)
+    for (const std::size_t mi : cluster.member_index)
     {
-        const auto it = cavity_.find(m.id);
-        if (it == cavity_.end())
+        const auto& m  = members.ring[mi];
+        const auto  it = h.cavity.find(m.id);
+        if (it == h.cavity.end())
             continue;   // no honest cavity message for this member → send none at all
 
         rc::MemberPrior p;
@@ -683,42 +888,43 @@ void SpecificWorker::publish_rig(const MemberSnapshot& members)
         // that the arrangement hypothesis holds at all. facing_var already carries the intrinsic
         // "chairs face the table" spread, which BOUNDS how hard this can ever pull.
         const float var = std::max(1e-6f, it->second.std_dev * it->second.std_dev);
-        p.yaw_kappa = ring_belief_.p_ring() / var;
+        p.yaw_kappa = h.belief.p_ring() / var;
 
         // Which seat this member sits in (nearest slot) — for the Phase-2 radial prior and so a
         // consumer can tell two members apart when the rig has more seats than occupants.
         int   best_k = -1;
         float best_d = std::numeric_limits<float>::max();
-        for (int k = 0; k < ring_belief_.slot_count(); ++k)
+        for (int k = 0; k < h.belief.slot_count(); ++k)
         {
-            const float d = (ring_belief_.slot_xy(k) - m.xy).norm();
+            const float d = (h.belief.slot_xy(k) - m.xy).norm();
             if (d < best_d) { best_d = d; best_k = k; }
         }
         p.slot_index = best_k;
         if (best_k >= 0)
-            p.slot_xy = ring_belief_.slot_xy(best_k);
+            p.slot_xy = h.belief.slot_xy(best_k);
         // Radial precision stays 0 until Phase 2 — the contract is that 0 means INERT, so a consumer
         // reading these fields today correctly ignores them.
         p.info_xx = 0.0f;
         p.info_yy = 0.0f;
 
-        scene_graph_->publish_member_prior(p);
+        scene_graph_->publish_member_prior(h.key, p);
         live.insert(m.id);
     }
-    scene_graph_->retain_members(live);   // departed chairs: κ→0, then drop the edge
+    scene_graph_->retain_members(h.key, live);   // departed chairs: κ→0, then drop the edge
 }
 
 // Leave-one-out: member i's down-prior is computed from an arrangement refitted WITHOUT i. The fit
 // is position-only, so the self-confirmation being removed is i's own position pulling the centre
 // toward itself — which would then be handed back to i as "face this way". Cheap: N tiny refits from
 // the converged state, and N is the number of chairs.
-void SpecificWorker::compute_cavity_priors(const MemberSnapshot& members, const rc::RingFrame& frame)
+void SpecificWorker::compute_cavity_priors(rc::RingHypothesis& h, const MemberSnapshot& members,
+                                           const rc::Cluster& cluster, const rc::RingFrame& frame)
 {
-    cavity_.clear();
+    h.cavity.clear();
 
-    for (std::size_t i = 0; i < members.ring.size(); ++i)
+    for (std::size_t i = 0; i < cluster.member_index.size(); ++i)
     {
-        const auto& m = members.ring[i];
+        const auto& m = members.ring[cluster.member_index[i]];
 
         // The frame minus this member. The anchor stays: the table is not member i, and it is what
         // keeps the cavity centre well-conditioned when only one other chair remains.
@@ -736,22 +942,22 @@ void SpecificWorker::compute_cavity_priors(const MemberSnapshot& members, const 
         if (cf.points.empty() and not cf.has_anchor)
             continue;
 
-        rc::RingBelief trial = ring_belief_;   // copies state + Σ; refit from the converged point
+        rc::RingBelief trial = h.belief;   // copies state + Σ; refit from the converged point
         trial.update(cf);
 
-        CavityPrior cp;
+        rc::CavityPrior cp;
         cp.yaw     = trial.facing_yaw_for(m.xy);
         cp.std_dev = std::sqrt(trial.facing_var_for(m.xy, m.Sigma_xy));
         // How much the full fit was talking to itself about this member.
-        cp.shift   = wrap_pi(cp.yaw - ring_belief_.facing_yaw_for(m.xy));
-        cavity_[m.id] = cp;
+        cp.shift   = wrap_pi(cp.yaw - h.belief.facing_yaw_for(m.xy));
+        h.cavity[m.id] = cp;
     }
 }
 
 // ─── Diagnostics ─────────────────────────────────────────────────────────────
 
 // Per-member snapshot to CSV — the channel that actually gets read (stdout is for the heartbeat).
-void SpecificWorker::log_members_csv(const MemberSnapshot& members)
+void SpecificWorker::log_members_csv(const MemberSnapshot& members, const std::vector<rc::Cluster>& clusters)
 {
     if (not csv_.is_open() or cfg_.log_period_frames <= 0)
         return;
@@ -760,25 +966,56 @@ void SpecificWorker::log_members_csv(const MemberSnapshot& members)
 
     constexpr float kRad2Deg = 57.29578f;
 
-    // Structural residuals, measured against the ANCHOR (the table) as a provisional centre. These
-    // are what the ring belief will fit — logging them first makes the arrangement legible before any
-    // belief exists: equal `radius` across chairs and a `bearing` spacing near 360/N is a ring, and
-    // `facing_resid` near 0 says the chairs are turned inward.
-    const bool have_anchor = not members.anchors.empty();
-    const Eigen::Vector2f centre = have_anchor ? members.anchors.front().xy : Eigen::Vector2f::Zero();
+    // Which cluster each node belongs to, and that cluster's own centre. ★The structural residuals
+    // below are now measured against the anchor THIS member's cluster selected — measuring every
+    // chair against one arbitrary table is what produced the nonsensical radius=5.6 rows.
+    struct Assign { std::int64_t rig = -1; std::int64_t cluster = -1; bool have_centre = false; Eigen::Vector2f centre; };
+    std::unordered_map<std::uint64_t, Assign> assign;
 
-    const auto row = [&](const RingMember& m, bool structural)
+    for (std::size_t c = 0; c < clusters.size(); ++c)
     {
-        float radius = 0.0f, bearing = 0.0f, facing_resid = 0.0f;
-        if (structural and have_anchor)
+        const auto& cl = clusters[c];
+        Assign a;
+        a.cluster = static_cast<std::int64_t>(c);
+        a.rig     = c < hypotheses_.size() ? static_cast<std::int64_t>(hypotheses_[c].key) : -1;
+        if (cl.anchor_id != 0)
         {
-            const Eigen::Vector2f d = m.xy - centre;
+            a.have_centre = true;
+            a.centre      = members.anchors[cl.anchor_index].xy;
+        }
+        else   // anchorless cluster: the members' own centroid is the only centre we can name
+        {
+            Eigen::Vector2f mean = Eigen::Vector2f::Zero();
+            for (const std::size_t mi : cl.member_index) mean += members.ring[mi].xy;
+            a.have_centre = not cl.member_index.empty();
+            a.centre      = mean / static_cast<float>(std::max<std::size_t>(1, cl.member_index.size()));
+        }
+        for (const std::size_t mi : cl.member_index) assign[members.ring[mi].id] = a;
+        if (cl.anchor_id != 0)
+        {
+            Assign anchor_row = a;
+            anchor_row.have_centre = false;   // the anchor IS the centre; it has no radius of its own
+            assign[cl.anchor_id]   = anchor_row;
+        }
+    }
+
+    const auto row = [&](const RingMember& m)
+    {
+        const auto it = assign.find(m.id);
+        const std::int64_t rig     = it == assign.end() ? -1 : it->second.rig;
+        const std::int64_t cluster = it == assign.end() ? -1 : it->second.cluster;
+
+        float radius = 0.0f, bearing = 0.0f, facing_resid = 0.0f;
+        if (it != assign.end() and it->second.have_centre)
+        {
+            const Eigen::Vector2f d = m.xy - it->second.centre;
             radius       = d.norm();
             bearing      = std::atan2(d.y(), d.x());
             // Inward direction is bearing+π; convert to the member's yaw convention before comparing.
             facing_resid = wrap_pi(m.yaw - (bearing + static_cast<float>(M_PI) + kMemberYawOffset));
         }
-        csv_ << cycle_ << ',' << m.name << ',' << m.cls << ','
+        csv_ << cycle_ << ',' << rig << ',' << cluster << ','
+             << m.name << ',' << m.cls << ','
              << m.xy.x() << ',' << m.xy.y() << ',' << m.yaw * kRad2Deg << ','
              << std::sqrt(std::max(0.0f, m.Sigma_xy(0, 0))) << ','
              << std::sqrt(std::max(0.0f, m.Sigma_xy(1, 1))) << ','
@@ -786,8 +1023,8 @@ void SpecificWorker::log_members_csv(const MemberSnapshot& members)
              << (m.has_cov ? 1 : 0) << ','
              << radius << ',' << bearing * kRad2Deg << ',' << facing_resid * kRad2Deg << '\n';
     };
-    for (const auto& m : members.anchors) row(m, false);
-    for (const auto& m : members.ring)    row(m, true);
+    for (const auto& m : members.anchors) row(m);
+    for (const auto& m : members.ring)    row(m);
     csv_.flush();   // block-buffered to a file otherwise — a killed agent would lose the tail
 }
 
@@ -795,34 +1032,49 @@ void SpecificWorker::log_members_csv(const MemberSnapshot& members)
 // member, next to that member's CURRENT heading. `correction_deg` is what the rig would ask the chair
 // to change; `prior_std_deg` is how strongly it would ask (the down-prior precision is
 // p_ring/facing_var, so a wide σ here means the rig would barely push).
-void SpecificWorker::log_ring_csv(const MemberSnapshot& members)
+void SpecificWorker::log_ring_csv(const MemberSnapshot& members, const std::vector<rc::Cluster>& clusters)
 {
-    if (not ring_csv_.is_open() or cfg_.log_period_frames <= 0 or not ring_seeded_)
+    if (not ring_csv_.is_open() or cfg_.log_period_frames <= 0)
         return;
     if ((cycle_ % static_cast<std::uint64_t>(cfg_.log_period_frames)) != 0)
         return;
 
     constexpr float kRad2Deg = 57.29578f;
-    const auto& s = ring_belief_.state();
 
-    for (const auto& m : members.ring)
+    for (std::size_t c = 0; c < clusters.size() and c < hypotheses_.size(); ++c)
     {
-        // The published prior is the CAVITY one (fitted without this member). Fall back to the full
-        // fit only when no cavity message exists, and say so via cavity_shift = 0.
-        const auto it = cavity_.find(m.id);
-        const float prior_yaw = (it != cavity_.end()) ? it->second.yaw
-                                                      : ring_belief_.facing_yaw_for(m.xy);
-        const float prior_std = (it != cavity_.end()) ? it->second.std_dev
-                                                      : std::sqrt(ring_belief_.facing_var_for(m.xy, m.Sigma_xy));
-        const float shift      = (it != cavity_.end()) ? it->second.shift : 0.0f;
-        const float correction = wrap_pi(prior_yaw - m.yaw);
+        const auto& cl = clusters[c];
+        auto&       h  = hypotheses_[c];
+        if (not h.seeded)
+            continue;
 
-        ring_csv_ << cycle_ << ',' << members.ring.size() << ',' << ring_belief_.slot_count() << ','
-                  << ring_belief_.log_odds() << ',' << ring_belief_.p_ring() << ','
-                  << s.cx << ',' << s.cy << ',' << s.radius << ',' << s.yaw * kRad2Deg << ','
-                  << m.name << ',' << m.yaw * kRad2Deg << ',' << prior_yaw * kRad2Deg << ','
-                  << prior_std * kRad2Deg << ',' << correction * kRad2Deg << ','
-                  << shift * kRad2Deg << '\n';
+        const auto& s = h.belief.state();
+        const std::string anchor_name = cl.anchor_id == 0 ? std::string("-")
+                                                          : members.anchors[cl.anchor_index].name;
+        const std::string rig_node = scene_graph_ ? scene_graph_->rig_node_name(h.key) : std::string("-");
+
+        for (const std::size_t mi : cl.member_index)
+        {
+            const auto& m = members.ring[mi];
+            // The published prior is the CAVITY one (fitted without this member). Fall back to the
+            // full fit only when no cavity message exists, and say so via cavity_shift = 0.
+            const auto it = h.cavity.find(m.id);
+            const float prior_yaw = (it != h.cavity.end()) ? it->second.yaw
+                                                           : h.belief.facing_yaw_for(m.xy);
+            const float prior_std = (it != h.cavity.end()) ? it->second.std_dev
+                                                           : std::sqrt(h.belief.facing_var_for(m.xy, m.Sigma_xy));
+            const float shift      = (it != h.cavity.end()) ? it->second.shift : 0.0f;
+            const float correction = wrap_pi(prior_yaw - m.yaw);
+
+            ring_csv_ << cycle_ << ',' << h.key << ',' << rig_node << ','
+                      << cl.member_index.size() << ',' << h.belief.slot_count() << ','
+                      << h.belief.log_odds() << ',' << h.belief.p_ring() << ','
+                      << s.cx << ',' << s.cy << ',' << s.radius << ',' << s.yaw * kRad2Deg << ','
+                      << anchor_name << ',' << cl.anchor_weight << ','
+                      << m.name << ',' << m.yaw * kRad2Deg << ',' << prior_yaw * kRad2Deg << ','
+                      << prior_std * kRad2Deg << ',' << correction * kRad2Deg << ','
+                      << shift * kRad2Deg << '\n';
+        }
     }
     ring_csv_.flush();
 }

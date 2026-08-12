@@ -41,7 +41,19 @@ RingSceneGraph::RingSceneGraph(std::shared_ptr<DSR::DSRGraph> G, DSR::RT_API* rt
 {
 }
 
-std::uint64_t RingSceneGraph::ensure_rig_node(const RingBelief& belief, std::uint64_t room_id)
+std::uint64_t RingSceneGraph::rig_node_id(RigKey key) const
+{
+    const auto it = rigs_.find(key);
+    return it == rigs_.end() ? 0 : it->second.node_id;
+}
+
+std::string RingSceneGraph::rig_node_name(RigKey key) const
+{
+    const auto it = rigs_.find(key);
+    return (it == rigs_.end() or it->second.node_id == 0) ? std::string("-") : it->second.name;
+}
+
+std::uint64_t RingSceneGraph::ensure_rig_node(RigKey key, const RingBelief& belief, std::uint64_t room_id)
 {
     if (not G_ or room_id == 0)
         return 0;
@@ -50,19 +62,23 @@ std::uint64_t RingSceneGraph::ensure_rig_node(const RingBelief& belief, std::uin
     if (not room_opt.has_value())
         return 0;
 
-    const auto& s = belief.state();
+    const auto& s     = belief.state();
+    RigEntry&   entry = rigs_[key];
 
     // ── Birth ────────────────────────────────────────────────────────────────
-    if (rig_node_id_ == 0)
+    if (entry.node_id == 0)
     {
         // Auto-name one past the highest existing dining_set_<N>, same NAME convention as the
-        // level-1 agents (the class itself stays in object_subtype).
-        int max_n = 0;
+        // level-1 agents (the class itself stays in object_subtype). ★The local high-water mark is
+        // folded in so a second rig born in the same cycle cannot reuse the first one's number
+        // before the CRDT registry has caught up with the first insert_node.
+        int max_n = next_name_index_;
         const auto plen = cfg_.node_prefix.size();
         for (const auto& n : G_->get_nodes_by_type("metaconcept"))
             if (n.name().rfind(cfg_.node_prefix, 0) == 0)
                 try { max_n = std::max(max_n, std::stoi(n.name().substr(plen))); } catch (...) {}
         const std::string name = cfg_.node_prefix + std::to_string(max_n + 1);
+        next_name_index_ = max_n + 1;
 
         // ★Type `metaconcept`, NOT `object`. A rig is a belief about a RELATION among nodes, not a
         // body: it has a footprint (the ring's extent) but nothing occupies it. Every furniture
@@ -87,18 +103,20 @@ std::uint64_t RingSceneGraph::ensure_rig_node(const RingBelief& belief, std::uin
         const auto id_opt = G_->insert_node(node);
         if (not id_opt.has_value())
             return 0;
-        rig_node_id_ = id_opt.value();
-        std::print("ring_metaconcept: BIRTH '{}' id={} at ({:.2f},{:.2f}) r={:.2f} slots={} logodds={:.2f}\n",
-                   name, rig_node_id_, s.cx, s.cy, s.radius, belief.slot_count(), belief.log_odds());
+        entry.node_id = id_opt.value();
+        entry.name    = name;
+        std::print("ring_metaconcept: BIRTH rig={} '{}' id={} at ({:.2f},{:.2f}) r={:.2f} slots={} logodds={:.2f}\n",
+                   key, name, entry.node_id, s.cx, s.cy, s.radius, belief.slot_count(), belief.log_odds());
     }
 
-    auto node_opt = G_->get_node(rig_node_id_);
+    auto node_opt = G_->get_node(entry.node_id);
     if (not node_opt.has_value())   // someone deleted it under us — forget and re-birth next cycle
     {
-        rig_node_id_ = 0;
-        members_.clear();
-        last_published_.clear();
-        last_publish_ms_.clear();
+        // Only THIS rig's state is reset. The other rigs never lost their nodes.
+        entry.node_id = 0;
+        entry.members.clear();
+        entry.last_published.clear();
+        entry.last_publish_ms.clear();
         return 0;
     }
     auto node = node_opt.value();
@@ -110,50 +128,59 @@ std::uint64_t RingSceneGraph::ensure_rig_node(const RingBelief& belief, std::uin
     G_->add_or_modify_attrib_local<rig_logodds_att>(node, belief.log_odds());
 
     // Footprint for the viewer: the ring's extent, flat on the floor.
-    const bool geometry_changed = std::abs(s.radius - last_pub_radius_) > 0.02f
-                               or belief.slot_count() != last_pub_slots_;
+    const bool geometry_changed = std::abs(s.radius - entry.last_pub_radius) > 0.02f
+                               or belief.slot_count() != entry.last_pub_slots;
     if (geometry_changed)
     {
         G_->add_or_modify_attrib_local<width_m_att> (node, 2.0f * s.radius);
         G_->add_or_modify_attrib_local<depth_m_att> (node, 2.0f * s.radius);
         G_->add_or_modify_attrib_local<height_m_att>(node, 0.02f);
-        last_pub_radius_ = s.radius;
-        last_pub_slots_  = belief.slot_count();
+        entry.last_pub_radius = s.radius;
+        entry.last_pub_slots  = belief.slot_count();
     }
     G_->update_node(node);
 
     // Centre + phase as the room→rig RT edge (the rig IS placed in the world, it just has no body).
     if (rt_api_)
-        rt_api_->insert_or_assign_edge_RT(room_opt.value(), rig_node_id_,
+        rt_api_->insert_or_assign_edge_RT(room_opt.value(), entry.node_id,
                                           {s.cx, s.cy, 0.0f}, {0.0f, 0.0f, s.yaw});
-    return rig_node_id_;
+    return entry.node_id;
 }
 
-void RingSceneGraph::remove_rig_node()
+void RingSceneGraph::remove_rig_node(RigKey key)
 {
-    if (not G_ or rig_node_id_ == 0)
+    const auto it = rigs_.find(key);
+    if (not G_ or it == rigs_.end())
         return;
-    const auto id = rig_node_id_;
-    rig_node_id_ = 0;
-    members_.clear();
-    last_published_.clear();
-    last_publish_ms_.clear();
-    last_pub_radius_ = -1.0f;
-    last_pub_slots_  = -1;
-    if (G_->delete_node(id))   // outgoing group_member edges go with the node
-        std::print("ring_metaconcept: removed rig node id={}\n", id);
+    const auto id   = it->second.node_id;
+    const auto name = it->second.name;
+    rigs_.erase(it);   // the entry (and every per-rig gate map with it) goes away wholesale
+    if (id != 0 and G_->delete_node(id))   // outgoing group_member edges go with the node
+        std::print("ring_metaconcept: removed rig={} '{}' node id={}\n", key, name, id);
 }
 
-void RingSceneGraph::publish_member_prior(const MemberPrior& prior)
+void RingSceneGraph::remove_all_rig_nodes()
 {
-    if (not G_ or rig_node_id_ == 0 or prior.member_id == 0)
+    std::vector<RigKey> keys;
+    keys.reserve(rigs_.size());
+    for (const auto& [k, _] : rigs_)
+        keys.push_back(k);
+    for (const auto k : keys)
+        remove_rig_node(k);
+}
+
+void RingSceneGraph::publish_member_prior(RigKey key, const MemberPrior& prior)
+{
+    const auto eit = rigs_.find(key);
+    if (not G_ or eit == rigs_.end() or eit->second.node_id == 0 or prior.member_id == 0)
         return;
+    RigEntry& entry = eit->second;
 
     // Self-gate: an unchanged message is not rewritten. A settled dining set would otherwise
     // republish four edges every cycle for no consumer-visible change. ★But an unchanged message
     // still has to prove it is LIVE — see kHeartbeatMs — so the gate lapses periodically.
     const std::uint64_t t = now_ms();
-    if (const auto it = last_published_.find(prior.member_id); it != last_published_.end())
+    if (const auto it = entry.last_published.find(prior.member_id); it != entry.last_published.end())
     {
         const auto& p = it->second;
         const float dyaw   = std::abs(std::remainder(prior.yaw_prior - p.yaw_prior, 2.0f * static_cast<float>(M_PI)));
@@ -161,19 +188,19 @@ void RingSceneGraph::publish_member_prior(const MemberPrior& prior)
         const bool  same   = dyaw < kYawEpsRad
                          and dkappa < kKappaRelEps * std::max(1e-6f, p.yaw_kappa)
                          and prior.slot_index == p.slot_index;
-        const auto  ht = last_publish_ms_.find(prior.member_id);
-        const bool  fresh_enough = ht != last_publish_ms_.end() and (t - ht->second) < kHeartbeatMs;
+        const auto  ht = entry.last_publish_ms.find(prior.member_id);
+        const bool  fresh_enough = ht != entry.last_publish_ms.end() and (t - ht->second) < kHeartbeatMs;
         if (same and fresh_enough)
             return;
     }
 
     // Reuse the existing edge when present so we modify rather than churn it.
-    auto edge_opt = G_->get_edge(rig_node_id_, prior.member_id, "group_member");
+    auto edge_opt = G_->get_edge(entry.node_id, prior.member_id, "group_member");
     DSR::Edge edge = edge_opt.has_value()
                          ? edge_opt.value()
-                         : DSR::Edge::create<group_member_edge_type>(rig_node_id_, prior.member_id);
+                         : DSR::Edge::create<group_member_edge_type>(entry.node_id, prior.member_id);
 
-    G_->add_or_modify_attrib_local<rig_id_att>        (edge, rig_node_id_);
+    G_->add_or_modify_attrib_local<rig_id_att>        (edge, entry.node_id);
     G_->add_or_modify_attrib_local<rig_stamp_ms_att>  (edge, t);
     G_->add_or_modify_attrib_local<rig_slot_index_att>(edge, prior.slot_index);
     G_->add_or_modify_attrib_local<rig_yaw_prior_att> (edge, prior.yaw_prior);
@@ -184,38 +211,45 @@ void RingSceneGraph::publish_member_prior(const MemberPrior& prior)
     G_->add_or_modify_attrib_local<rig_slot_info_yy_att>(edge, prior.info_yy);
 
     G_->insert_or_assign_edge(edge);
-    members_.insert(prior.member_id);
-    last_published_[prior.member_id]  = prior;
-    last_publish_ms_[prior.member_id] = t;
+    entry.members.insert(prior.member_id);
+    entry.last_published[prior.member_id]  = prior;
+    entry.last_publish_ms[prior.member_id] = t;
 }
 
 // Zero the precision BEFORE deleting: a consumer that reads between our two writes must see an
 // INERT prior, never a stale confident one. κ=0 means "ignore me" in the contract, so this is safe
 // even if the delete is lost.
-void RingSceneGraph::drop_member(std::uint64_t member_id)
+void RingSceneGraph::drop_member(RigKey key, std::uint64_t member_id)
 {
-    if (not G_ or rig_node_id_ == 0)
+    const auto eit = rigs_.find(key);
+    if (not G_ or eit == rigs_.end())
         return;
-    if (auto edge_opt = G_->get_edge(rig_node_id_, member_id, "group_member"); edge_opt.has_value())
-    {
-        auto edge = edge_opt.value();
-        G_->add_or_modify_attrib_local<rig_yaw_kappa_att>(edge, 0.0f);
-        G_->insert_or_assign_edge(edge);
-        G_->delete_edge(rig_node_id_, member_id, "group_member");
-    }
-    members_.erase(member_id);
-    last_published_.erase(member_id);
-    last_publish_ms_.erase(member_id);
+    RigEntry& entry = eit->second;
+
+    if (entry.node_id != 0)
+        if (auto edge_opt = G_->get_edge(entry.node_id, member_id, "group_member"); edge_opt.has_value())
+        {
+            auto edge = edge_opt.value();
+            G_->add_or_modify_attrib_local<rig_yaw_kappa_att>(edge, 0.0f);
+            G_->insert_or_assign_edge(edge);
+            G_->delete_edge(entry.node_id, member_id, "group_member");
+        }
+    entry.members.erase(member_id);
+    entry.last_published.erase(member_id);
+    entry.last_publish_ms.erase(member_id);
 }
 
-void RingSceneGraph::retain_members(const std::unordered_set<std::uint64_t>& keep)
+void RingSceneGraph::retain_members(RigKey key, const std::unordered_set<std::uint64_t>& keep)
 {
+    const auto eit = rigs_.find(key);
+    if (eit == rigs_.end())
+        return;
     std::vector<std::uint64_t> departed;
-    for (const auto id : members_)
+    for (const auto id : eit->second.members)
         if (not keep.contains(id))
             departed.push_back(id);
     for (const auto id : departed)
-        drop_member(id);
+        drop_member(key, id);
 }
 
 }  // namespace rc

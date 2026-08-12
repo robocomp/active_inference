@@ -400,20 +400,7 @@ bool RingBelief::resolve_slot_count(const RingFrame& f, float weight)
     // given N has a closed form — the circular mean of the members' bearings folded into the
     // fundamental domain [0, 2π/N) — so seed it instead of hoping the optimiser finds it.
     const auto phase_seed = [&](const RingBeliefState& s, int n) -> float
-    {
-        const float period = kTwoPi / static_cast<float>(n);
-        double sx = 0.0, sy = 0.0;
-        for (const auto& p : f.points)
-        {
-            const float b   = std::atan2(p.y() - s.cy, p.x() - s.cx);
-            const float phi = wrap_period(b, period) * (kTwoPi / period);   // → full circle
-            sx += std::cos(phi);
-            sy += std::sin(phi);
-        }
-        if (sx == 0.0 and sy == 0.0)
-            return s.yaw;
-        return wrap_period(static_cast<float>(std::atan2(sy, sx)) * (period / kTwoPi), period);
-    };
+    { return phase_seed_for(f, s, n); };
 
     // Score a hypothesis from BOTH the current state and the seeded phase, keeping whichever
     // explains the frame better. Trying both means a converged-and-good current phase is never
@@ -465,6 +452,56 @@ bool RingBelief::resolve_slot_count(const RingFrame& f, float weight)
     return true;
 }
 
+// The optimal phase for a given slot count has a closed form — the circular mean of the members'
+// bearings folded into the fundamental domain — so seed it instead of hoping the optimiser finds it.
+float RingBelief::phase_seed_for(const RingFrame& f, const RingBeliefState& s, int n) const
+{
+    const float period = kTwoPi / static_cast<float>(n);
+    double sx = 0.0, sy = 0.0;
+    for (const auto& p : f.points)
+    {
+        const float b   = std::atan2(p.y() - s.cy, p.x() - s.cx);
+        const float phi = wrap_period(b, period) * (kTwoPi / period);   // → full circle
+        sx += std::cos(phi);
+        sy += std::sin(phi);
+    }
+    if (sx == 0.0 and sy == 0.0)
+        return s.yaw;
+    return wrap_period(static_cast<float>(std::atan2(sy, sx)) * (period / kTwoPi), period);
+}
+
+// See the header for WHY this exists: GN optimises the slot-mixture residual, which overlapping slots
+// inflate, so it drives the radius to min_radius_m even as every residual grows worse in the
+// objective the belief actually reports.
+bool RingBelief::resolve_radius(const RingFrame& f)
+{
+    if (f.points.empty())
+        return false;
+
+    // Closed-form ML radius for "the members lie on the seat ring": their mean distance from the
+    // current centre. Exactly the estimate the birth seed uses, and the radius analogue of
+    // phase_seed_for — a parameter with a closed form should be computed, not searched for.
+    const Eigen::Vector2f c(state_.cx, state_.cy);
+    float r_hat = 0.0f;
+    for (const auto& p : f.points)
+        r_hat += (p.head<2>() - c).norm();
+    r_hat /= static_cast<float>(f.points.size());
+    r_hat = std::clamp(r_hat, params_.min_radius_m, params_.max_radius_m);
+
+    RingBeliefState cand = state_;
+    cand.radius = r_hat;
+    cand.yaw    = phase_seed_for(f, cand, slots_);   // the best phase moves with the radius
+
+    // Strictly-better test on the SAME quantity every other structural decision here uses. It can
+    // therefore never make the fit worse, and if GN ever does produce a better radius it is kept.
+    if (log_evidence(f, cand) > log_evidence(f, state_))
+    {
+        state_ = cand;
+        return true;
+    }
+    return false;
+}
+
 std::array<float, 4> RingBelief::slot_count_posterior() const
 {
     std::array<float, 4> p{};
@@ -484,6 +521,37 @@ bool RingBelief::self_test()
     {
         if (not cond) { std::print("  [RingBelief::self_test] FAIL: {}\n", what); ok = false; }
     };
+
+    // ── ★The radius must not collapse onto min_radius_m (live regression, 2026-08-11) ──
+    // Two chairs 118° apart at r≈0.53 around a table. GN alone drives the radius to the 0.25 clamp
+    // because crowded slots inflate the mixture; resolve_radius has to pull it back to the geometry.
+    {
+        RingBeliefParams p;
+        p.sigma_slot_m = 0.20f; p.clutter_frac = 0.20f; p.occupancy_q = 0.70f; p.room_area_m2 = 40.0f;
+        RingFrame f;
+        f.points.emplace_back(-2.61414f, -3.15099f, 0.0f); f.R.push_back(0.081f);
+        f.points.emplace_back(-1.79735f, -2.75656f, 0.0f); f.R.push_back(0.096f);
+        f.has_anchor  = true;
+        f.anchor_xy   = {-2.30418f, -2.71194f};
+        f.anchor_info = (Eigen::Matrix2f::Identity() * 0.0909f).inverse();
+
+        RingBelief b;
+        b.set_params(p);
+        b.set_slots(3);
+        b.set_state({-2.30418f, -2.71194f, 0.0f, 0.53f});
+        for (int i = 0; i < 60; ++i)
+        {
+            b.update(f);
+            b.resolve_slot_count(f, 1.0f);
+            b.resolve_radius(f);
+            b.update_log_odds(f, 1.0f);
+        }
+        check(b.state().radius > p.min_radius_m + 0.05f,
+              "2-member ring radius collapsed onto min_radius_m");
+        check(b.state().radius > 0.35f and b.state().radius < 0.75f,
+              "2-member ring radius should recover the ~0.53 m seat geometry");
+        check(b.log_odds() > 0.0f, "the live 2-chair dining set must out-explain the null");
+    }
 
     // Ground truth: 4 seats of radius 0.8 around (2, 3), phase 0.3 rad.
     const float gt_cx = 2.0f, gt_cy = 3.0f, gt_r = 0.8f, gt_yaw = 0.3f;

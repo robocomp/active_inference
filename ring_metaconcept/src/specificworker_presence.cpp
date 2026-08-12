@@ -44,7 +44,12 @@ void SpecificWorker::cleanup_owned_nodes()
         return;
     owned_nodes_cleaned_ = true;
 
-    // Remove every dining_set node this agent owns (M3+ births them; nothing to remove yet at M1).
+    // Remove every dining_set node this agent owns — there is now ONE PER CLUSTER, not one globally.
+    // The map-driven pass first, so each removal is logged with its rig key and the per-rig gate maps
+    // are cleared; the prefix sweep then catches anything the map never knew about (a node from a
+    // previous run, or one whose birth we lost track of).
+    if (scene_graph_)
+        scene_graph_->remove_all_rig_nodes();
     remove_owned_dining_set_nodes();
 
     presence_coordinator_.cleanup_owned_nodes();

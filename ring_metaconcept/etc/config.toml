@@ -32,7 +32,11 @@ stale_grace_ms = 120000
 agent_info_period_ms = 1000
 
 [Owns]
-nodes = ["ring_metaconcept 23"]
+# ★"dining_set_*" matches every rig this agent births. There is now ONE PER MEMBER CLUSTER, not one
+# globally, so an explicit list is impossible — the trailing '*' is a prefix wildcard
+# (AgentPresenceMonitor::delete_single_owned_node). Without it a crash left every rig node in the
+# shared graph with no process alive to own it.
+nodes = ["ring_metaconcept 23", "dining_set_*"]
 
 [Period]
 Compute = 100
@@ -54,12 +58,19 @@ CsvPath = "etc/ring_members.csv"   # per-member snapshot (pose + published Σ); 
 FitCsvPath = "etc/ring_fit.csv"    # arrangement fit + the down-prior it WOULD publish; "" disables
 
 # ── Arrangement belief ──────────────────────────────────────────────────────────────────────
+# NOTE: there is deliberately NO clustering/linking-distance key here. Which members form a rig, and
+# which table centres it, are INFERRED (see ring_partition.h) from the parameters below plus the room
+# polygon — a metres-valued knob would be exactly the magic threshold CLAUDE.md forbids.
 SigmaSlotM = 0.20              # seat↔chair slack (NOT sensor noise — that comes from each peer's Σ)
+                               # ★also the anchor-prior model slack: the ring centre need not sit
+                               # exactly on the published table pose.
 ClutterFrac = 0.20             # prior mass on "this member belongs to no rig"
 OccupancyQ = 0.70              # P(a seat of a real rig is occupied)
 MemberYawOffsetDeg = -90.0     # inward direction → MEMBER yaw convention (chair backrest on −y)
 FacingModelStdDeg = 12.0       # intrinsic spread of "a chair faces the table" — BOUNDS the push (κ=p_ring/var)
 EvidenceEmaAlpha = 0.05        # low-pass rate for ring-vs-null (NOT a sum — static scenes aren't new evidence)
+                               # ★also sets the hypothesis HOLD period (ceil(1/alpha) = 20 cycles):
+                               # do not churn a rig faster than its evidence can change.
 
 # ── Slot visibility: an EMPTY seat is only evidence where the robot has actually LOOKED ─────
 SlotVisibilityEnabled = true

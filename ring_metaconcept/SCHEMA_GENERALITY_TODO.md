@@ -53,13 +53,22 @@ Also fully reusable across schemas (this is the *chassis*, and it is the expensi
 
 ## 2. What is HARD-CODED
 
-### 2.1 ★ One rig instance, globally — *this is a bug, not a gap*
+### 2.1 ~~★ One rig instance, globally~~ — **FIXED 2026-08-11**
 
-`RingSceneGraph::rig_node_id_` is a single id (`ring_scene_graph.h:79`), and `SpecificWorker::step_ring_belief`
-fits **one** ring to **all** members of `ring_class` in the room. Two seating groups in one room →
-a single fit spanning both, which the evidence will happily accept because nothing proposes the
-alternative partition. Any apartment with a dining set *and* a coffee table with armchairs triggers
-this the moment both use `table`/`chair` classes.
+> **Resolved.** Step 1 below is implemented: `ring_partition.{h,cpp}` infers the partition, and
+> `SpecificWorker` holds a `std::vector<rc::RingHypothesis>` instead of one belief. See §7.
+>
+> It bit exactly as predicted. On 2026-08-11 `table_concept` legitimately birthed a **second** table
+> 5.14 m from the dining set; `build_ring_frame` took `members.anchors.front()` and got it, the
+> anchor's hard Σ⁻¹ centre prior welded the fit onto that table for 3000+ cycles, the radius
+> saturated against `max_radius_m = 3.0`, `log_odds` sat at −3.2, and so **no rig node was ever
+> born**. The user's report was simply "the rig_metaconcept does not recognise the configuration".
+
+Historical description: `RingSceneGraph::rig_node_id_` was a single id, and
+`SpecificWorker::step_ring_belief` fitted **one** ring to **all** members of `ring_class` in the room.
+Two seating groups in one room → a single fit spanning both, which the evidence will happily accept
+because nothing proposes the alternative partition. Any apartment with a dining set *and* a coffee
+table with armchairs triggers this the moment both use `table`/`chair` classes.
 
 ### 2.2 One anchor class + one ring class
 
@@ -212,3 +221,120 @@ speculatively). Candidates, all reusing the chassis and replacing only the slot 
   "slot" geometry differs — is `slot_visibility` still the right interface, or should the schema
   expose predicted-visible *area* per slot (which is also what the missing free-space term wants —
   see `[[chair-template-world-mismatch]]`)?
+
+---
+
+## 7. What landed on 2026-08-11 (partition), and the defect it uncovered
+
+### 7.1 The partition is now inferred
+
+`ring_partition.{h,cpp}` (new, pure Eigen, `partition_self_test()` runs at startup):
+
+- **Link test between two ring members** is a log-Bayes factor, not a distance cutoff:
+  `log p(d | one rig) − log p(d | independent objects) > 0`, the same "0 nats = equally likely"
+  boundary as `log_odds > 0`. Two members of one rig occupy two *distinct* slots, so their
+  separation is a **chord**, marginalised over `kSlotHypotheses` and over which pair of slots. The
+  null is the uniform-over-the-room separation density `2πd/A` that `null_nll` already uses.
+- **The anchor is attached by likelihood**, greedy 1-to-1 across clusters, scored with a **radius**
+  kernel (the anchor is *at* the centre, not on the rim). The chord/radius asymmetry is load-bearing.
+- **There is no accept/reject on the attachment.** The centre prior became
+  `anchor_info = sigmoid(Λ_attach) · (Σ_anchor + σ_slot²·I)⁻¹`, so a table the chairs did not select
+  is attached with weight ≈ 0 and is *inert*, continuously. Selection and prior strength are the same
+  quantity — which is what makes a mis-attachment structurally unable to weld the fit again.
+- **Anchors never cluster.** They are absent from the union-find, so a table cannot bridge two groups
+  of chairs and a table alone can never create a rig. "There have to be chairs around" is structural.
+- **Cluster→rig association** by member-set overlap (max-overlap, Jaccard tiebreak), with a HOLD of
+  `ceil(1/evidence_ema_alpha)` = 20 cycles before retirement — derived from the EMA, not tuned: do
+  not churn a rig faster than its evidence can change.
+- `ring_seeded_` (one-shot) is gone. `reseed_if_better` re-evaluates the seed against the evidence
+  every cycle, so a wrong seed can no longer survive for the process lifetime.
+
+Measured on the live scene (chairs at `(−2.587,−3.197)` / `(−1.797,−2.757)`, tables at
+`(−2.326,−2.742)` / `(2.083,−0.094)`, A ≈ 40 m²):
+
+| quantity | value |
+|---|---|
+| chair↔chair link Λ | **+1.14** → linked |
+| `table_1` attach Λ | **+3.92** → w = **0.980** |
+| `table_2` attach Λ | **−50.7** → w = **1e-22** (inert, in no cluster) |
+| resulting fit | 1 rig, `log_odds` **+2.75**, `p_ring` **0.94** → the node is born |
+
+Also fixed while here: `[Owns]` never listed the `dining_set_*` nodes (a crash left every rig node
+orphaned in the shared graph), and neither CSV stream was `imbue`d with the classic locale.
+
+### 7.2 ~~★★ the radius estimate is biased low, and collapses outright at N=2~~ — **FIXED 2026-08-11**
+
+> **Resolved** by `RingBelief::resolve_radius`, added the same day. Fix 1 below was taken: after the
+> GN step the radius is model-compared against its closed form (mean member distance from the centre,
+> with the closed-form phase that goes with it) and adopted only when it strictly increases
+> `log_evidence`. It therefore cannot make any fit worse, and it needs no new config key.
+>
+> | configuration | true r | before | after | log-odds |
+> |---|---|---|---|---|
+> | 3 chairs @120° (the live-validated set) | 0.55 | 0.485 | **0.550** | +5.89 → **+6.16** |
+> | 4 chairs @90° | 0.60 | 0.494 | **0.600** | +6.01 → **+6.60** |
+> | 2 chairs @118° (the live set) | 0.53 | **0.250 = clamp** | **0.518** | +2.75 → **+3.10** |
+> | 2 chairs @120° | 0.53 | **0.250 = clamp** | **0.525** | +2.73 → **+3.11** |
+>
+> Centres now land on the anchor (live replay: 1.7 cm from `table_1`). `log_evidence` improves in
+> every configuration, so the validated 3-chair path is strictly better, not merely unbroken. The
+> live regression is `RingBelief::self_test()` case 0.
+>
+> ★The underlying modelling flaw is NOT fixed and is recorded below: the slot mixture still lets
+> crowded slots each contribute a component. `resolve_radius` stops that from steering the state; it
+> does not stop it being wrong. Fix 2 (an exclusive slot assignment inside the likelihood) remains the
+> principled repair, and would make this correction unnecessary.
+
+Original diagnosis follows.
+
+Uncovered only because the fit finally runs on the *right* members. `RingBelief`'s GN drives the
+radius below the evidence optimum, systematically:
+
+| configuration | true r | GN converges to | grid optimum of `log_evidence` |
+|---|---|---|---|
+| 3 chairs @120°, r = 0.55 | 0.55 | 0.485 | — |
+| 4 chairs @90°, r = 0.60 | 0.60 | 0.494 | — |
+| **2 chairs @118° (the live set)** | **0.53** | **0.250 = `min_radius_m`** | **0.570**, centre = table_1 |
+| 2 chairs @ exactly 120° | 0.53 | 0.250 | — |
+
+At N=2 it saturates the *minimum* clamp — the mirror image of the `max_radius_m` saturation that the
+wrong anchor used to produce — and the centre drifts ~0.17 m off the anchor. A joint grid search over
+(cx, cy, yaw, r) puts the true 3-slot optimum at centre `(−2.320,−2.750)` (i.e. table_1) with
+r = 0.570 and `log_ev = −4.258`; GN settles at `log_ev = −4.624`. **GN is landing on a worse point
+than a point it was seeded from.**
+
+**★Root cause, confirmed on LIVE data (cycle 66180, the pre-fix binary — so this is not caused by the
+partition change).** Measured at the live converged centre/phase:
+
+| radius | member→nearest-slot distances | `mixture_nll` | `occupancy_logp` | `log_evidence` |
+|---|---|---|---|---|
+| 0.25 (= clamp, where GN sits) | 0.221 / 0.254 | **0.876** | −2.906 | −4.659 |
+| 0.45 | **0.104 / 0.148** | 0.972 | −2.392 | **−4.335** |
+| 0.53 (the true seat radius) | 0.134 / 0.165 | 1.051 | −2.244 | −4.347 |
+
+Every residual more than HALVES between r = 0.25 and r = 0.45, and `mixture_nll` gets **worse**. The
+reason is slot CROWDING: as the radius shrinks the `slots_` slot centres converge on each other, so a
+single member falls within a slot-σ of several of them at once and `mixture_unnorm` *sums* those
+components. Overlapping slots therefore manufacture likelihood that no physical seat supplies — the
+mixture is treating one explanation as many.
+
+`occupancy_logp` opposes it correctly (−2.906 → −2.150 as r grows) and `log_evidence` consequently
+peaks in the right place (r ≈ 0.50). **But GN steers on the slot-mixture residual alone**, so the term
+that would stop the collapse never enters the state update: the optimiser walks downhill in the very
+objective the belief reports. At N ≥ 3 the same pull is outvoted by more members, which is why it
+shows there only as a mild low bias rather than a collapse.
+
+Candidate fixes, cheapest first:
+1. **Model-compare the radius after the GN step**, exactly as `resolve_slot_count` already refits
+   copies and keeps the best by evidence. Consistent with the existing idiom, no new parameter.
+2. Make the slot mixture EXCLUSIVE in the likelihood itself (one member occupies one seat), rather
+   than correcting for it afterwards in `occupancy_logp`. The principled fix, and a deeper change.
+
+The rig is still born (live `log_odds` +5.22, `p_ring` 0.995), so this degrades geometry rather than
+blocking recognition. What it does corrupt: the published `rig_radius` (0.25 vs 0.53), the viewer
+footprint (2r), the slot positions used for `slot_index` and the Phase-2 radial prior, and it widens
+the down-prior (live `prior_std_deg` ≈ 38–39°, so the rig barely pushes the chairs at all).
+
+Deliberately NOT fixed in the same change: it touches the fit that the 3-chair configuration was
+live-validated on, and it is a different defect from the partition. Do not paper over it by widening
+`min_radius_m` — that is the clamp, not the cause.

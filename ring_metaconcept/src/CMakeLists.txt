@@ -14,6 +14,7 @@ LIST(APPEND SOURCES
   ../src/specificworker_presence.cpp
   ../src/ring_config.cpp
   ../src/ring_belief.cpp
+  ../src/ring_partition.cpp
   ../src/ring_scene_graph.cpp
 )
 

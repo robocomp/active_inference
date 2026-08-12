@@ -253,6 +253,22 @@ public:
     bool  resolve_slot_count(const RingFrame& f, float weight = 1.0f);
     std::array<float, 4> slot_count_posterior() const;
 
+    // ★Model-compare the RADIUS against its closed form, for the same reason resolve_slot_count
+    // model-compares the slot count: Gauss-Newton optimises the slot-mixture residual, and that
+    // residual is NOT the objective the belief reports. As the radius shrinks the slot centres crowd
+    // together, a member falls within a slot-σ of several at once, and mixture_unnorm SUMS those
+    // components — so crowding manufactures likelihood that no physical seat supplies. occupancy_logp
+    // opposes it and log_evidence therefore peaks in the right place, but occupancy never enters the
+    // GN step, so the optimiser walks downhill in log_evidence until it hits min_radius_m.
+    //
+    // Measured live 2026-08-11 on a 2-chair set: GN sat on the 0.25 clamp with member→slot distances
+    // of 0.221/0.254, while r = 0.45 gives 0.104/0.148 — every residual more than halved, and the
+    // mixture still scored it WORSE (nll 0.972 vs 0.876). log_evidence: −4.335 vs −4.659.
+    //
+    // Adopts the closed-form radius (with its own closed-form phase) only when it strictly increases
+    // log_evidence, so this can never make the fit worse. Returns true iff it was adopted.
+    bool  resolve_radius(const RingFrame& f);
+
     static bool self_test();
 
 private:
@@ -260,6 +276,11 @@ private:
     // (which normalises) and mixture_nll() (which sums — that sum IS the marginal likelihood).
     std::array<float, kMaxRingSlots + 1> mixture_unnorm(const Eigen::Vector3f& p,
                                                         const RingBeliefState& s, float R) const;
+
+    // Closed-form optimal phase for an n-slot ring at state `s`: the circular mean of the members'
+    // bearings folded into the fundamental domain [0, 2π/n). Shared by resolve_slot_count (where
+    // each slot count needs its own basin) and resolve_radius (where the best phase depends on r).
+    float phase_seed_for(const RingFrame& f, const RingBeliefState& s, int n) const;
 
     int                        slots_ = 4;
     RingBeliefState            state_;

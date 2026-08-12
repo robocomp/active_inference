@@ -52,6 +52,8 @@
 
 #include "ring_config.h"      // rc::RingConfig + load_ring_config
 #include "ring_belief.h"      // rc::RingBelief — the level-2 arrangement latent
+#include "ring_hypothesis.h"  // rc::RingHypothesis — one arrangement per member cluster
+#include "ring_partition.h"   // rc::partition_members / associate_clusters — WHICH members form a rig
 #include "ring_scene_graph.h" // rc::RingSceneGraph — every DSR write lives there
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 
@@ -120,14 +122,37 @@ private:
     // Returns nullopt when the edge or its pose is missing (the member is not room-parented yet).
     std::optional<RingMember> read_member(const DSR::Node& node, const std::string& cls);
 
-    // ── Arrangement belief (M2, READ-ONLY: fits and logs, writes nothing to the graph) ──
-    // Build one poll's evidence: ring members become "points" carrying their OWN published variance,
-    // the anchor becomes the centre prior consumed by RingBelief::accumulate_extra.
-    rc::RingFrame build_ring_frame(const MemberSnapshot& members) const;
-    // First-time seed. GN on a circle is not forgiving, so start from the anchor-implied centre, the
-    // mean member radius and a phase that puts slot 0 on the first member.
-    void          seed_ring_belief(const MemberSnapshot& members, const rc::RingFrame& frame);
-    void          step_ring_belief(const MemberSnapshot& members);
+    // ── Partition: WHICH members form a rig, and which anchor is its centre ────
+    // Spatial clustering of the ring members, with an anchor attached to each cluster by likelihood.
+    // Until this existed the partition was silently fixed to "everything" and the anchor was
+    // whichever table the graph listed first — see ring_partition.h.
+    std::vector<rc::Cluster> partition_snapshot(const MemberSnapshot& members) const;
+    // Match this cycle's clusters onto the existing hypotheses BEFORE anything touches the graph, so
+    // a member that flickers for one cycle cannot birth-and-kill a rig node.
+    void                     associate_and_maintain(const std::vector<rc::Cluster>& clusters);
+    // How many cycles a hypothesis with no matching cluster is HELD before it is retired. Derived
+    // from the evidence EMA: do not churn faster than the evidence can change.
+    int                      hypothesis_hold_cycles() const;
+
+    // ── Arrangement belief ─────────────────────────────────────────────────────
+    // Build one cluster's evidence: its ring members become "points" carrying their OWN published
+    // variance, and its ATTACHED anchor becomes the centre prior consumed by accumulate_extra —
+    // scaled by the probability that this anchor really is that cluster's centre.
+    rc::RingFrame build_ring_frame(const MemberSnapshot& members, const rc::Cluster& cluster,
+                                   const rc::RingHypothesis& h) const;
+    // The seed state: centre from the attached anchor (else the member centroid), radius from the
+    // mean member distance, phase so that slot 0 lands on the first member.
+    rc::RingBeliefState seed_state_for(const MemberSnapshot& members, const rc::Cluster& cluster,
+                                       const rc::RingFrame& frame) const;
+    // ★A seed is a STARTING POINT, not a commitment. Adopt it only when it explains the frame better
+    // than where the belief already is. The old one-shot `ring_seeded_` latch meant a wrong seed
+    // survived for the process lifetime — which is exactly how the fit stayed welded to the wrong
+    // table for 3000+ cycles.
+    void          reseed_if_better(rc::RingHypothesis& h, const rc::RingFrame& frame,
+                                   const MemberSnapshot& members, const rc::Cluster& cluster);
+    void          step_ring_beliefs(const MemberSnapshot& members, const std::vector<rc::Cluster>& clusters);
+    void          step_hypothesis(rc::RingHypothesis& h, const MemberSnapshot& members,
+                                  const rc::Cluster& cluster);
 
     // ── Cavity / leave-one-out (§6 Delta 3, the one hard requirement) ──────────
     // The message sent DOWN to member i must come from an arrangement fitted WITHOUT member i.
@@ -135,8 +160,9 @@ private:
     // belief is fed its own output and manufactures agreement. In message-passing terms: never send
     // a node the message it sent up. Here the fit is position-only, so what leaks is i's POSITION
     // pulling the centre toward itself; `shift` records how much that was worth.
-    struct CavityPrior { float yaw = 0.0f; float std_dev = 0.0f; float shift = 0.0f; };
-    void          compute_cavity_priors(const MemberSnapshot& members, const rc::RingFrame& frame);
+    // (rc::CavityPrior lives in ring_hypothesis.h — one map per hypothesis, not one globally.)
+    void          compute_cavity_priors(rc::RingHypothesis& h, const MemberSnapshot& members,
+                                        const rc::Cluster& cluster, const rc::RingFrame& frame);
 
     // Per-slot observability ∈ [0,1] from the live room→zed pose. Gates the EMPTY-seat evidence: a
     // seat the robot has never looked at is uninformative, not proof the seat is vacant. Continuous
@@ -146,15 +172,16 @@ private:
     // ── DSR writes (M3) ────────────────────────────────────────────────────────
     // Birth/refresh the dining_set node and push each member's CAVITY prior onto its group_member
     // edge — or retire the rig when the arrangement stops out-explaining the independent-objects null.
-    void          publish_rig(const MemberSnapshot& members);
+    void          publish_rig(rc::RingHypothesis& h, const MemberSnapshot& members,
+                              const rc::Cluster& cluster);
     // Area of the room polygon (shoelace), m². The independent-objects NULL is a uniform over the
     // room, so its density is 1/area — taking that from the actual room instead of a constant is what
     // keeps the ring-vs-null log-Bayes factor from being scaled by an arbitrary number.
     std::optional<float> room_area_m2() const;
 
     // ── Diagnostics ────────────────────────────────────────────────────────────
-    void log_members_csv(const MemberSnapshot& members);
-    void log_ring_csv(const MemberSnapshot& members);
+    void log_members_csv(const MemberSnapshot& members, const std::vector<rc::Cluster>& clusters);
+    void log_ring_csv(const MemberSnapshot& members, const std::vector<rc::Cluster>& clusters);
 
     // ── Presence protocol (copied from the level-1 agents; see CLAUDE.md) ───────
     void waiting_enter();
@@ -191,9 +218,15 @@ private:
     std::unique_ptr<DSR::InnerEigenAPI>  inner_eigen_;
     std::unique_ptr<rc::RingSceneGraph>  scene_graph_;
 
-    rc::RingBelief  ring_belief_;
-    bool            ring_seeded_ = false;
-    std::unordered_map<std::uint64_t, CavityPrior> cavity_;   // per-member leave-one-out down-prior
+    // ★One hypothesis per member cluster. This vector replacing three scalar members IS the fix for
+    // SCHEMA_GENERALITY_TODO.md §2.1 — "one rig instance, globally" was structural, not incidental.
+    std::vector<rc::RingHypothesis> hypotheses_;
+    std::uint64_t        next_rig_key_ = 0;   // monotonic; a key is never reused
+    rc::RingBeliefParams belief_params_;      // built once in initialize(), copied into every new hypothesis
+    rc::PartitionParams  partition_params_;   // mirrored from belief_params_ + the room polygon
+    // The initialize() stale-sweep can run BEFORE leaked nodes finish syncing from the persistent
+    // server, so it is repeated once we are Operating — that pass is what actually reaps them.
+    bool                 operating_sweep_done_ = false;
 
     std::ofstream   csv_;             // per-member snapshot (the diagnostics channel that gets read)
     std::ofstream   ring_csv_;        // per-cycle arrangement fit + the down-prior it WOULD publish
