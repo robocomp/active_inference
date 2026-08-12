@@ -939,7 +939,7 @@ void SpecificWorker::step_convergence(rc::HoodInstance& inst,
     const auto& p = inst.prev_conv_state;
     const float state_delta = inst.has_prev_conv_state
         ? (std::abs(s.cx - p.cx) + std::abs(s.cy - p.cy) + std::abs(s.w - p.w) + std::abs(s.h - p.h) +
-           std::abs(s.hood_height - p.hood_height) + std::abs(s.yaw - p.yaw) + std::abs(s.leg_inset - p.leg_inset))
+           std::abs(s.z_top - p.z_top) + std::abs(s.yaw - p.yaw))
         : std::numeric_limits<float>::max();
     inst.prev_conv_state = s;
     inst.has_prev_conv_state = true;

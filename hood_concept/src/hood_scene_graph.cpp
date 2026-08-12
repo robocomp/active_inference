@@ -129,7 +129,7 @@ void HoodSceneGraph::step_write_model(HoodInstance& inst, DSR::Node& node,
         std::abs(s.cy - inst.last_pub_cy) > kPosEps or
         std::abs(s.w  - inst.last_pub_w)  > kPosEps or
         std::abs(s.h  - inst.last_pub_h)  > kPosEps or
-        std::abs(s.hood_height - inst.last_pub_H) > kPosEps or
+        std::abs(s.z_top - inst.last_pub_H) > kPosEps or
         std::abs(static_cast<float>(std::remainder(s.yaw - inst.last_pub_yaw, 2.0 * M_PI))) > kYawEps;
 
     // Geometry attributes + mesh (gated to kill the viewer jitter once settled).
@@ -147,7 +147,7 @@ void HoodSceneGraph::step_write_model(HoodInstance& inst, DSR::Node& node,
         write_hood_mesh(inst, node);   // mesh for the voxelizer 3D viewer
         inst.last_pub_cx = s.cx; inst.last_pub_cy = s.cy;
         inst.last_pub_w  = s.w;  inst.last_pub_h  = s.h;
-        inst.last_pub_H  = s.hood_height; inst.last_pub_yaw = s.yaw;
+        inst.last_pub_H  = s.z_top; inst.last_pub_yaw = s.yaw;
     }
     G_->add_or_modify_attrib_local<free_energy_att>(node, free_energy);
     // Inferred shape subtype (round/square), chosen by free-energy model evidence in HoodFitter::evaluate_shape.
@@ -289,10 +289,8 @@ std::vector<float> HoodSceneGraph::make_hood_mesh(const HoodState& s, float vert
         push( hw,-hd,-hh); push( hw, hd, hh); push( hw,-hd, hh);
     };
 
-    // Single solid box: centred at (cx, cy, H/2), half extents (w/2, h/2, H/2) — spans floor→H.
-    // The body hangs: centre at z_top − extent/2, half-extent extent/2 — not (H/2, H/2), which spans floor→H.
-    const float half_dz = 0.5f * vertical_extent_m;
-    push_box(s.cx, s.cy, s.hood_height - half_dz, s.w * 0.5f, s.h * 0.5f, half_dz);
+    // The body hangs: centre at zc(), half-extent extent/2 — asked of the state, never rebuilt from a floor.
+    push_box(s.cx, s.cy, s.zc(), s.w * 0.5f, s.h * 0.5f, s.half_extent());
 
     return verts;
 }
@@ -336,7 +334,7 @@ void HoodSceneGraph::write_rt_pose(std::uint64_t room_id, HoodInstance& inst)
     // Base of the BODY, not of the room: a hood's underside hangs at z_top − extent. The convention is
     // unchanged (origin = base, top = origin.z + height_m ⇒ 1.55 + 0.50 = 2.05); only the floor-anchored
     // assumption that base ≡ 0 is gone.
-    const float z = std::max(0.0f, s.hood_height - cfg_.vertical_extent_m);
+    const float z = std::max(0.0f, s.z0());
     rt_api_->insert_or_assign_edge_RT(room_opt.value(), inst.node_id,
                                       {s.cx, s.cy, z},
                                       {0.0f, 0.0f, s.yaw});

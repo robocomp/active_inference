@@ -163,4 +163,33 @@ inline Geometry load_geometry(const std::string& path, std::string_view concept_
     return g;
 }
 
+// ─── BAND COHERENCE: does this z-band actually contain the body? ─────────────────────────────────
+//
+// ★THE CHEAPEST CHECK IN THE FLEET, AND IT WOULD HAVE CAUGHT A WEEK OF WORK. An agent derives several
+// vertical bands — which LiDAR returns to select, which voxels it owns, where to carve free space, where to
+// sample the silhouette — and each was written as its own arithmetic over "the height". When hood_concept was
+// cloned from a floor-anchored parent, those bands kept measuring from the floor while the body hung at
+// [1.55, 2.05] m. The LiDAR selection band came out as [−0.10, 0.85]: **disjoint from the body**, 109 returns
+// per cycle selected off the floor at a mean 1.33 m from the model, every real hood return excluded, and the
+// channel still reporting full coverage. Nothing failed. The audit was green. It took days and a log dig.
+//
+// It is a contradiction between two numbers the agent already holds, available before a single frame arrives.
+// Call this on every derived band at startup. A band that does not intersect the body is never a tuning
+// question — it is a statement that cannot be true — so say so loudly and name the band.
+inline bool band_contains_body(std::string_view who, std::string_view band_name,
+                               float band_lo, float band_hi, const Geometry& g)
+{
+    if (not g.valid) return true;                     // nothing declared to check against
+    float z0 = 0.0f, z1 = 0.0f; g.z_span(z0, z1);
+    const float lo = std::min(band_lo, band_hi), hi = std::max(band_lo, band_hi);
+    const float overlap = std::min(hi, z1) - std::max(lo, z0);
+    const float body    = std::max(1e-3f, z1 - z0);
+    const float frac    = std::max(0.0f, overlap) / body;
+    if (frac >= 0.999f) return true;
+    std::print("[manifest] {}{} band '{}' = [{:.2f},{:.2f}] m covers only {:.0f}% of the declared body "
+               "[{:.2f},{:.2f}] — a band that does not contain the body cannot be measuring it\n",
+               frac <= 0.0f ? "★DISJOINT: " : "", who, band_name, lo, hi, 100.0f * frac, z0, z1);
+    return false;
+}
+
 }  // namespace rc::manifest

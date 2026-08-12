@@ -60,8 +60,8 @@ HoodModel::HoodModel(const HoodState& prior, const HoodModelParams& params)
 float HoodModel::top_split_z(const HoodState& s) const
 {
     // A point is a top-slab observation if it sits no more than (slab thickness + one obs-sigma)
-    // below the belief surface height.
-    return s.hood_height - (TOP_THICKNESS + params_.sigma_obs);
+    // below the body's TOP — z1(), never a height measured from the floor.
+    return s.z1() - (TOP_THICKNESS + params_.sigma_obs);
 }
 
 // ─── SDF ─────────────────────────────────────────────────────────────────────
@@ -70,9 +70,7 @@ float HoodModel::sdf_point_at(const Eigen::Vector3f& p, const HoodState& s) cons
 {
     const float cx = s.cx, cy = s.cy;
     const float w = s.w, h = s.h;
-    const float hood_height = s.hood_height;
-    const float leg_length   = s.leg_length;
-    const float yaw          = s.yaw;
+    const float yaw = s.yaw;
 
     // Transform to hood-local frame
     const float cos_t = std::cos(-yaw);
@@ -82,18 +80,25 @@ float HoodModel::sdf_point_at(const Eigen::Vector3f& p, const HoodState& s) cons
     const float local_x = px * cos_t - py * sin_t;
     const float local_y = px * sin_t + py * cos_t;
     const float local_z = p.z();
-    (void) leg_length;   // no legs on a hood (single solid box); field kept inert for compatibility
 
-    // ── SOLID FLOOR-ANCHORED BOX ─────────────────────────────────────────────
-    // A hood is one free-standing cuboid spanning z∈[0, hood_height]; centre at half-height,
-    // half extents (w/2, h/2, hood_height/2). No top slab, no legs.
-    const float half_w = w * 0.5f;
-    const float half_h = h * 0.5f;
-    const float half_H = hood_height * 0.5f;
+    // ── SOLID HANGING BOX ────────────────────────────────────────────────────
+    // One cuboid spanning z ∈ [z0(), z1()], centred at zc() with half-extent extent/2. No top slab, no legs.
+    //
+    // ★THIS IS THE SDF THAT DECIDES WHICH MASK POINTS ARE THE HOOD (HoodFitter::observe splits on
+    // |sdf| < SdfThresholdForStorage). It spanned z ∈ [0, hood_height] — the floor to the hood's top — so
+    // every wall, backsplash and worktop point in the 2 m column BENEATH the hood that lay within the
+    // threshold of the phantom box's side faces was admitted as hood surface, and the belief was then fit to
+    // them. That is the reported "hood bites the wall" and the yaw sitting 9° off it: the footprint and
+    // centre were being pulled by the wall the box was standing against. The hood's real underside, at
+    // z0(), sat ~0.5 m INSIDE that phantom box, so its own points were classified as residual and thrown
+    // away. Both halves of the split were wrong, in opposite directions.
+    const float half_w  = w * 0.5f;
+    const float half_h  = h * 0.5f;
+    const float half_dz = s.half_extent();
 
     const float dx = std::abs(local_x) - half_w;
     const float dy = std::abs(local_y) - half_h;
-    const float dz = std::abs(local_z - half_H) - half_H;
+    const float dz = std::abs(local_z - s.zc()) - half_dz;
 
     return box_sdf(dx, dy, dz);
 }
@@ -105,14 +110,13 @@ float HoodModel::sdf_point(const Eigen::Vector3f& p) const
 
 void HoodModel::apply_constraints()
 {
-    state_.w            = std::max(state_.w, 0.1f);
-    state_.h            = std::max(state_.h, 0.1f);
-    state_.hood_height = std::max(state_.hood_height, 0.05f + TOP_THICKNESS);
-    const float max_leg = state_.hood_height - TOP_THICKNESS;
-    state_.leg_length   = std::clamp(state_.leg_length, 0.05f, max_leg);
-    // leg_inset is FROZEN (not estimated): legs sit at the OUTER edge of the top, their outer rim
-    // flush with the hood edge (centre at half_w − LEG_RADIUS).
-    state_.leg_inset    = LEG_RADIUS;
+    state_.w      = std::max(state_.w, 0.1f);
+    state_.h      = std::max(state_.h, 0.1f);
+    state_.extent = std::max(state_.extent, 0.05f);
+    // The body hangs, so the only physical bound on its placement is that its UNDERSIDE stays above the
+    // floor — not that its top does. z_top ≥ extent is exactly that statement, and it is the one constraint
+    // the floor-anchored form could not express.
+    state_.z_top  = std::max(state_.z_top, state_.extent);
 }
 
 }  // namespace rc

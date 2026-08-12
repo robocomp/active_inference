@@ -127,6 +127,26 @@ HoodConfig load_hood_config(const ConfigLoader& cfg)
         span.z_span(out.body_z0_m, out.body_z1_m);
         std::print("[manifest] hood body span = [{:.2f},{:.2f}] m (support={})\n",
                    out.body_z0_m, out.body_z1_m, rc::manifest::support_name(man_support));
+
+        // ★EVERY DERIVED BAND IS CHECKED AGAINST THE BODY, HERE, BEFORE A SINGLE FRAME ARRIVES. Each of
+        // these was independently re-derived from "the height" by the code that owns it, and each was
+        // floor-referenced by inheritance. The LiDAR selection band came out DISJOINT from the body and
+        // nothing said so for days. Two numbers, one subtraction — there is no excuse for finding this in a
+        // log. See rc::manifest::band_contains_body.
+        rc::manifest::Geometry decl;
+        decl.support = man_support; decl.z_top_m = out.ai2_prior_height_m;
+        decl.extent_m = out.vertical_extent_m; decl.valid = true;
+        const float m = out.lidar_select_margin_m;
+        bool bands_ok = true;
+        bands_ok &= rc::manifest::band_contains_body("hood ", "lidar_select",
+                        out.body_z0_m - m, out.body_z1_m + m, decl);
+        bands_ok &= rc::manifest::band_contains_body("hood ", "existence_carve",
+                        out.body_z0_m, out.body_z1_m, decl);
+        bands_ok &= rc::manifest::band_contains_body("hood ", "voxel_ownership",
+                        out.body_z0_m - out.voxel_select_height_margin_m,
+                        out.body_z1_m + out.voxel_select_height_margin_m, decl);
+        if (bands_ok)
+            std::print("[manifest] hood ✓ every derived z-band contains the declared body\n");
     }
     out.ai2_prior_height_std    = getf("HoodModel.AI2PriorHeightStd",    0.50f);
     out.ai2_depth_unobs_precision = getf("HoodModel.AI2DepthUnobsPrecision", 1500.0f);

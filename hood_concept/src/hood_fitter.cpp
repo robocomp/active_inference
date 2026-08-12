@@ -151,7 +151,8 @@ void HoodFitter::resolve_front_from_rgb(HoodInstance& inst, float mode_evidence_
     // Project the FRESHLY-UPDATED belief box (not the not-yet-written-back model state) into the RGB.
     const auto& bs = inst.ai2_belief.state();
     HoodState box = inst.model.state();
-    box.cx = bs.cx; box.cy = bs.cy; box.hood_height = bs.H; box.w = bs.w; box.h = bs.h; box.yaw = bs.yaw;
+    box.cx = bs.cx; box.cy = bs.cy; box.z_top = bs.H; box.extent = cfg_.vertical_extent_m;
+    box.w = bs.w; box.h = bs.h; box.yaw = bs.yaw;
     const auto cue = projection_->detect_front(box, rgb_frame_, rgb_stamp_ms_);
     if (not cue.has_value())
         return;
@@ -311,7 +312,11 @@ bool HoodFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_id)
 
     if (auto v = G_->get_attrib_by_name<width_m_att> (node); v.has_value()) init_state.w            = v.value();
     if (auto v = G_->get_attrib_by_name<depth_m_att> (node); v.has_value()) init_state.h            = v.value();
-    if (auto v = G_->get_attrib_by_name<height_m_att>(node); v.has_value()) init_state.hood_height = v.value();
+    // ★height_m is the drawn EXTENT and the RT origin is the body's BASE — that is the publish convention
+    // (see HoodSceneGraph::write_rt_pose). Reading height_m back as the TOP inverted the round-trip: after
+    // the publish was corrected to emit the extent, an ADOPTED node came back with z_top = 0.50 m, i.e. a
+    // collapsed box on the floor. Read the extent as the extent, and recover the top from the RT z below.
+    if (auto v = G_->get_attrib_by_name<height_m_att>(node); v.has_value()) init_state.extent = v.value();
 
     // Read RT pose from room→hood edge
     if (room_node_id_ != 0)
@@ -322,6 +327,9 @@ bool HoodFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_id)
             {
                 const auto& tvec = tr.value().get();
                 if (tvec.size() >= 2) { init_state.cx = tvec[0]; init_state.cy = tvec[1]; }
+                // The RT origin is the body's BASE (z0), so the top is base + extent — the inverse of what
+                // write_rt_pose publishes. A floor-anchored read (z_top = z) would put the body underground.
+                if (tvec.size() >= 3) init_state.z_top = tvec[2] + init_state.extent;
             }
             if (const auto rot = G_->get_attrib_by_name<rt_rotation_euler_xyz_att>(edge.value()); rot.has_value())
             {
@@ -348,8 +356,6 @@ bool HoodFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_id)
         std::print("[{}] NO birth-seed (id={}) → init cx={:.2f} cy={:.2f}\n",
                    node.name(), node.id(), init_state.cx, init_state.cy);
 
-    init_state.leg_length = std::max(0.05f, init_state.hood_height - HoodModel::TOP_THICKNESS);
-
     // Sanitize: a NaN/Inf from a corrupted RT edge would poison the SDF and lock the
     // optimizer; replace any non-finite field with a safe default before it reaches the model.
     {
@@ -364,11 +370,14 @@ bool HoodFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_id)
         fix(init_state.cx, 0.0f, "cx");
         fix(init_state.cy, 0.0f, "cy");
         fix(init_state.yaw, 0.0f, "yaw");
-        fix(init_state.w, 0.60f, "w");                          // standard fridge footprint ≈ 0.60×0.60
-        fix(init_state.h, 0.60f, "h");
-        fix(init_state.hood_height, 1.70f, "hood_height");
-        fix(init_state.leg_inset, HoodModel::LEG_RADIUS, "leg_inset");  // FROZEN at outer edge
-        init_state.leg_length = std::max(0.05f, init_state.hood_height - HoodModel::TOP_THICKNESS);
+        // ★Fall back to THIS object's priors, not the parent's. These were 0.60×0.60×1.70 — a fridge, and a
+        // fourth disagreeing height at that (the config/manifest say 0.90 × 0.50, top 2.05, extent 0.50). A
+        // hood recovering from a corrupt attribute was re-seeded as a small square box on the floor.
+        fix(init_state.w, cfg_.ai2_prior_footprint_m, "w");
+        fix(init_state.h, cfg_.ai2_prior_depth_m > 0.0f ? cfg_.ai2_prior_depth_m
+                                                        : cfg_.ai2_prior_footprint_m, "h");
+        fix(init_state.extent, cfg_.vertical_extent_m, "extent");
+        fix(init_state.z_top, cfg_.ai2_prior_height_m, "z_top");
     }
 
     HoodInstance inst;
@@ -544,7 +553,7 @@ float HoodFitter::run_inference(HoodInstance& inst, const HoodObservation& obser
     if (not inst.ai2_initialized)
     {
         const auto& m = inst.model.state();
-        HoodBeliefState s0{m.cx, m.cy, m.hood_height, m.w, m.h, m.yaw};
+        HoodBeliefState s0{m.cx, m.cy, m.z_top, m.w, m.h, m.yaw};
 
         // The cold-start cloud is THIS FRAME's mask only.
         //
@@ -1002,12 +1011,11 @@ float HoodFitter::run_inference(HoodInstance& inst, const HoodObservation& obser
     }
 
     // Write the belief back into the legacy HoodState so all downstream publish/viewer/RT code is
-    // unchanged. Legs are derived: leg_length = H − TOP_THICKNESS, inset frozen at the outer edge.
+    // unchanged. The vertical span comes from the belief's top plus the declared extent — see HoodState.
     const auto& bs = inst.ai2_belief.state();
     HoodState ms = inst.model.state();
-    ms.cx = bs.cx; ms.cy = bs.cy; ms.hood_height = bs.H; ms.w = bs.w; ms.h = bs.h; ms.yaw = bs.yaw;
-    ms.leg_length = std::max(0.05f, bs.H - HoodModel::TOP_THICKNESS);
-    ms.leg_inset  = HoodModel::LEG_RADIUS;
+    ms.cx = bs.cx; ms.cy = bs.cy; ms.z_top = bs.H; ms.extent = cfg_.vertical_extent_m;
+    ms.w = bs.w; ms.h = bs.h; ms.yaw = bs.yaw;
     inst.model.set_state(ms);
 
     ++inst.matched_frames;

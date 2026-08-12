@@ -176,7 +176,7 @@ void HoodProjection::compute_projected_roi(HoodInstance& inst)
     int in_front = 0;
     for (const int ix : {-1, 1})
         for (const int iy : {-1, 1})
-            for (const float z : {0.0f, s.hood_height})
+            for (const float z : {s.z0(), s.z1()})   // the BODY's span, not floor→top
             {
                 const float lx = static_cast<float>(ix) * hw, ly = static_cast<float>(iy) * hh;
                 const Eigen::Vector4d Pr(s.cx + c * lx - sn * ly, s.cy + sn * lx + c * ly, z, 1.0);
@@ -273,6 +273,9 @@ SilhouetteExistence HoodProjection::compute_silhouette_existence(const HoodInsta
 
     const auto& s = inst.ai2_belief.state();
     const float c = std::cos(s.yaw), sn = std::sin(s.yaw), hw = 0.5f * s.w, hd = 0.5f * s.h;
+    // The body's vertical span: the belief owns the placement (s.H = top), HoodState owns the extent.
+    const float extent_m = inst.model.state().extent;
+    const float z_lo = s.H - extent_m;
 
     // ── LINE OF SIGHT against the room's own walls ────────────────────────────────────────────────────
     // "Predicted visible" was decided by the camera FRUSTUM alone, plus occlusion by whatever OTHER objects YOLO
@@ -363,7 +366,9 @@ SilhouetteExistence HoodProjection::compute_silhouette_existence(const HoodInsta
     constexpr int NU = 16, NV = 20;   // across the face × up the height
     // Sample the side face whose outward normal is ±local-x (normal_along_x) or ±local-y, at sign `sgn`: the
     // face sits at that half-extent, the free lateral coordinate spans the OTHER half-extent, and the vertical
-    // spans the full box height [0, H].
+    // spans the BODY's own span [z0, z1] — NOT [0, H]. Sampling from the floor put 4 of every 5 samples on
+    // the wall, cabinets and worktop beneath the hood, outside the YOLO mask, each voting "predicted-visible
+    // but ABSENT": the existence channel was charging absence for looking at the kitchen under the hood.
     const auto sample_face = [&](bool normal_along_x, float sgn)
     {
         const float half_lat = normal_along_x ? hd : hw;
@@ -373,7 +378,7 @@ SilhouetteExistence HoodProjection::compute_silhouette_existence(const HoodInsta
             const float lx = normal_along_x ? sgn * hw : t;
             const float ly = normal_along_x ? t        : sgn * hd;
             for (int iv = 0; iv < NV; ++iv)
-                classify(lx, ly, s.H * (iv + 0.5f) / NV);
+                classify(lx, ly, z_lo + extent_m * (iv + 0.5f) / NV);
         }
     };
     if (cam_lx >  hw) sample_face(true,  +1.0f);
@@ -427,7 +432,8 @@ std::optional<FrontCue> HoodProjection::detect_front(const HoodState& s, const c
     const float sy = static_cast<float>(rgb.rows) / H;
 
     const float c = std::cos(s.yaw), sn = std::sin(s.yaw);
-    const float hw = 0.5f * s.w, hd = 0.5f * s.h, boxH = s.hood_height;
+    const float hw = 0.5f * s.w, hd = 0.5f * s.h;
+    const float z_lo = s.z0(), z_hi = s.z1();   // the body's span — the warp must not sample the wall below it
 
     // Local→room for a footprint point (lx,ly) at height lz.
     const auto to_room = [&](float lx, float ly, float lz) -> Eigen::Vector3d
@@ -461,15 +467,15 @@ std::optional<FrontCue> HoodProjection::detect_front(const HoodState& s, const c
     {
         // Camera-facing: the outward normal must point toward the camera ⇒ nr·(cam − face_centre) > 0.
         const Eigen::Vector3d nr(c * f.nx - sn * f.ny, sn * f.nx + c * f.ny, 0.0);
-        const Eigen::Vector3d fc = to_room(0.5f * (f.ax + f.bx), 0.5f * (f.ay + f.by), 0.5f * boxH);
+        const Eigen::Vector3d fc = to_room(0.5f * (f.ax + f.bx), 0.5f * (f.ay + f.by), s.zc());
         if (nr.dot(cam_pos_room - fc) <= 0.0)
             continue;                                          // back-facing → not visible
 
         // Project the 4 quad corners: bottom_a, bottom_b, top_b, top_a (consistent winding for the warp).
-        const auto p0 = project(to_room(f.ax, f.ay, 0.0f));
-        const auto p1 = project(to_room(f.bx, f.by, 0.0f));
-        const auto p2 = project(to_room(f.bx, f.by, boxH));
-        const auto p3 = project(to_room(f.ax, f.ay, boxH));
+        const auto p0 = project(to_room(f.ax, f.ay, z_lo));
+        const auto p1 = project(to_room(f.bx, f.by, z_lo));
+        const auto p2 = project(to_room(f.bx, f.by, z_hi));
+        const auto p3 = project(to_room(f.ax, f.ay, z_hi));
         if (not (p0 and p1 and p2 and p3))
             continue;                                          // any corner behind the image plane → skip
         const std::array<cv::Point2f, 4> quad = {*p0, *p1, *p2, *p3};

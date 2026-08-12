@@ -49,8 +49,11 @@ inline bool owned_by_hood(const HoodInstance& inst, const Eigen::Vector3f& point
         return false;
 
     // Height gate to reject floor / distant clutter points in mixed scenes.
-    const float z_min = -0.05f;   // threshold: a little below the room floor (z≈0) to keep grazing returns
-    const float z_max = s.hood_height + cfg.voxel_select_height_margin_m;
+    // ★The BODY's band, not the floor's. This was [−0.05, z_top + margin] — everything from the floor up,
+    // so the hob, the worktop and the backsplash were all admitted into this instance's voxel bank as if
+    // they were hood surface. Same defect class as the LiDAR select box; different file, so it was missed.
+    const float z_min = s.z0() - cfg.voxel_select_height_margin_m;
+    const float z_max = s.z1() + cfg.voxel_select_height_margin_m;
     return point.z() >= z_min and point.z() <= z_max;
 }
 

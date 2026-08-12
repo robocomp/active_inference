@@ -5,7 +5,7 @@
  * this class is only the state holder + the compound SDF (box top + 4 corner legs = min(SDF_top, min_k
  * SDF_leg_k)), used to split a mask's support points into on-surface (candidate) vs off-surface (residual)
  * sets in HoodFitter::observe and to render the mesh in HoodSceneGraph. State θ = [cx, cy, w, h,
- * hood_height, leg_length, yaw, leg_inset]; fixed geometry TOP_THICKNESS = 0.03 m, LEG_RADIUS = 0.025 m.
+ * z_top, extent, yaw]; the body spans z ∈ [z_top − extent, z_top] — see HoodState.
  */
 
 #pragma once
@@ -16,44 +16,53 @@
 
 namespace rc {
 
-// Accepted hood pose + dimensions (room frame); the 8-DOF geometry the model renders and splits against.
+// Accepted hood pose + dimensions (room frame); the geometry the model renders and splits against.
 struct HoodState
 {
     float cx           = 0.0f;   // Room-frame X of hood centre
     float cy           = 0.0f;   // Room-frame Y of hood centre
-    float w            = 0.60f;  // Width  (hood-local X)  — standard fridge footprint ≈ 0.60
-    float h            = 0.60f;  // Depth  (hood-local Y)  — standard fridge footprint ≈ 0.60
+    float w            = 0.90f;  // Width  (hood-local X) — along the wall
+    float h            = 0.50f;  // Depth  (hood-local Y) — out from the wall
     // ═══════════════════════════════════════════════════════════════════════════════════════════════
-    // ★★UNFINISHED: A HOOD DOES NOT STAND ON THE FLOOR. This model was cloned from refrigerator_concept,
-    // whose entire vertical parameterisation assumes a FLOOR-ANCHORED box — the solid spans z ∈ [0, H],
-    // so one number (H) fixes both the extent and the placement, and `leg_length` below is a leftover of
-    // that lineage. A range hood HANGS: its underside sits ~1.55 m up and its top ~2.05 m, so it needs TWO
-    // vertical parameters (z0, z1) or an anchor-plus-extent pair, and z0 is a real DOF the belief must
-    // estimate rather than a constant it inherits from the floor.
+    // ★THE BODY HANGS, AND ITS SPAN IS STATED HERE ONCE — z ∈ [z0(), z1()].
     //
-    // Everything downstream reads this: the carve box (rc::exist::carve_box takes z_min/z_max), the
-    // projected silhouette, the NBV Target's z0/z1, and the RT pose's z. Leaving H as "height from floor"
-    // makes all four quietly describe a fridge-shaped object standing under the hob.
+    // This replaces a single `hood_height` meaning "height from the floor", inherited from
+    // refrigerator_concept where a fridge stands on the floor so ONE number fixes both the extent and the
+    // placement. That conflation is not a naming problem: it is read as a span by every consumer, so a
+    // hanging object silently became a fridge-shaped box standing under the hob. It survived five separate
+    // repairs because each site re-derived the span from `hood_height` in its own arithmetic — the SDF that
+    // splits mask points, the projected silhouette, the ROI, the voxel-ownership band, the front-face warp,
+    // the LiDAR selection and carve, and the RT pose. Eight sites, one fact.
     //
-    // NOT patched here on purpose: it is a BELIEF-STATE change (the DOF vector, its Σ, the dof_spec, the
-    // CSV header and the fitter's Jacobians all move together), which is exactly the "real work" the
-    // scaffold is meant to leave visible instead of hiding under a rename. See CONCEPT_AGENT_RECIPE.md
-    // §"Step 6 — the object-specific work", which lists this as hood's step 6.
+    // So the fact lives HERE and nothing may restate it. Ask for z0()/z1()/zc(); never rebuild them from a
+    // height and a floor. `leg_length`/`leg_inset` are gone with the same lineage (a hood has no legs; the
+    // SDF already `(void)`-cast them).
+    //
+    // ★extent IS A PARAMETER, NOT A DOF — the belief estimates the placement, not the size. See
+    // common/concept_manifest/hood.concept.toml, which argues it: a hood's underside is a crisp edge against
+    // the hob gap, while its top merges into the wall or leaves the frame at any usable stand-off, and
+    // estimating a vertical extent the data cannot resolve is how the size-oscillation bugs in this lineage
+    // started. It is carried in the state (not read from config at each site) so that this struct alone
+    // answers "where is the body", which is the whole point.
     // ═══════════════════════════════════════════════════════════════════════════════════════════════
-    float hood_height = 1.70f;  // Height of hood from floor (varies a lot; broad prior)
-    float leg_length   = 0.72f;  // Length of legs from floor to underside of top
-    float yaw          = 0.0f;   // Rotation around Z axis (room frame)
-    float leg_inset    = 0.025f; // FROZEN at LEG_RADIUS: legs at outer edge (rim flush w/ hood edge)
+    float z_top  = 2.05f;   // TOP of the body above the floor (m) — the estimated vertical placement
+    float extent = 0.50f;   // vertical extent of the body (m) — a parameter, set from cfg.vertical_extent_m
+    float yaw    = 0.0f;    // Rotation around Z axis (room frame)
 
-    // Serialise/deserialise as 8-vector
-    std::array<float, 8> to_array() const
+    float z0() const { return z_top - extent; }          // underside
+    float z1() const { return z_top; }                   // top
+    float zc() const { return z_top - 0.5f * extent; }   // vertical centre
+    float half_extent() const { return 0.5f * extent; }
+
+    // Serialise/deserialise as 7-vector
+    std::array<float, 7> to_array() const
     {
-        return {cx, cy, w, h, hood_height, leg_length, yaw, leg_inset};
+        return {cx, cy, w, h, z_top, extent, yaw};
     }
 
-    static HoodState from_array(const std::array<float, 8>& a)
+    static HoodState from_array(const std::array<float, 7>& a)
     {
-        return {a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]};
+        return {a[0], a[1], a[2], a[3], a[4], a[5], a[6]};
     }
 };
 
@@ -92,7 +101,7 @@ public:
     void set_state(const HoodState& s) { state_ = s; apply_constraints(); }
     void set_prior(const HoodState& p) { prior_ = p; }
 
-    /** Clamp leg_length ≤ hood_height − TOP_THICKNESS, positive dims, leg_inset = LEG_RADIUS. */
+    /** Positive footprint, positive extent, and a body that cannot sink through the floor. */
     void apply_constraints();
 
 private:
