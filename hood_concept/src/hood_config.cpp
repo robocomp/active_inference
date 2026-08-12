@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <print>
 #include <string>
 
@@ -21,6 +22,23 @@ namespace rc {
 HoodConfig load_hood_config(const ConfigLoader& cfg)
 {
     HoodConfig out;
+
+    // The one place this path is written. It is relative to the agent's CWD (<agent>/), not to src/.
+    static constexpr const char* kManifestPath = "../common/concept_manifest/hood.concept.toml";
+    // ★★AN INHERITED WORLD FACT IS FATAL. The manifest has carried `from = measured|fitted|nominal|inherited`
+    // since 2026-08-11, with a note saying "inherited is worse than absent — an absent value gets asked
+    // about, an inherited one gets trusted". A note stopped nothing: hood_concept shipped TEN cloned defects
+    // that week, several of them DECLARED as inherited, in writing, in this very file. The declaration is
+    // now the enforcement — see rc::manifest::provenance_ok. Refusing to start is the whole point: a comment
+    // cannot fail a build, and everything that only warned was fixed around rather than fixed.
+    if (not rc::manifest::provenance_ok(kManifestPath, "hood"))
+        std::exit(EXIT_FAILURE);
+
+    // Loaded ONCE and handed to every resolve() below — the manifest is now read for values, not just
+    // cross-checked. An unreadable manifest leaves `man` empty, so every resolve() falls through to the
+    // config/agent default exactly as before, and load_geometry() prints the loud NOT LOADED banner.
+    ConfigLoader man;
+    try { man.load(kManifestPath); } catch (...) {}
 
     // ConfigLoader::get has no default overload; TOML numeric floats are stored as double.
     auto getf = [&](const std::string& k, float def) -> float {
@@ -66,10 +84,20 @@ HoodConfig load_hood_config(const ConfigLoader& cfg)
     out.ai2_clutter_frac     = getf("HoodModel.AI2ClutterFrac",      0.10f);
     out.ai2_clutter_scale_m  = getf("HoodModel.AI2ClutterScaleM",    0.12f);
     out.ai2_prior_size_std   = getf("HoodModel.AI2PriorSizeStd",     0.30f);
-    out.ai2_prior_footprint_m   = getf("HoodModel.AI2PriorFootprintM",   0.60f);
-    out.ai2_prior_depth_m       = getf("HoodModel.AI2PriorDepthM",       0.50f);
-    out.ai2_prior_footprint_std = getf("HoodModel.AI2PriorFootprintStd", 0.08f);
-    out.ai2_prior_height_m      = getf("HoodModel.AI2PriorHeightM",      2.05f);
+    // ★THE MANIFEST IS AUTHORITATIVE FOR WHAT A HOOD *IS*, not only for how it hangs. Every one of these was
+    // a cloned refrigerator fact that reached runtime and did damage: the footprint mean was 0.60 (a fridge is
+    // square in plan) so a correctly-fitted 0.90x0.50 hood scored 0.027 on its own shape prior; the height was
+    // 1.90 — the fridge's — stated in four places with three values, and the one that WON was the parent's.
+    // rc::manifest::resolve applies one precedence everywhere: MANIFEST (the world fact) → config.toml only as
+    // an explicit override, which PRINTS when it contradicts → the agent default if neither speaks.
+    out.ai2_prior_footprint_m   = rc::manifest::resolve(cfg, "HoodModel.AI2PriorFootprintM",
+                                      man, "prior.footprint.mean_m", 0.60f, "hood footprint mean");
+    out.ai2_prior_depth_m       = rc::manifest::resolve(cfg, "HoodModel.AI2PriorDepthM",
+                                      man, "prior.depth.mean_m", 0.50f, "hood depth mean");
+    out.ai2_prior_footprint_std = rc::manifest::resolve(cfg, "HoodModel.AI2PriorFootprintStd",
+                                      man, "prior.footprint.std_m", 0.08f, "hood footprint std");
+    out.ai2_prior_height_m      = rc::manifest::resolve(cfg, "HoodModel.AI2PriorHeightM",
+                                      man, "prior.height.mean_m", 2.05f, "hood height mean");
     out.vertical_extent_m = getf("HoodModel.VerticalExtentM", 0.50f);
 
     // ── STAGE 2B: the manifest is AUTHORITATIVE for geometry ──────────────────────────────────────
@@ -83,7 +111,7 @@ HoodConfig load_hood_config(const ConfigLoader& cfg)
     // its object, so the span below is still derived from an anchoring rather than assumed to be the floor.
     auto man_support = rc::manifest::Support::hangs;
     {
-        const auto g = rc::manifest::load_geometry("../common/concept_manifest/hood.concept.toml", "hood");
+        const auto g = rc::manifest::load_geometry(kManifestPath, "hood");
         if (g.valid)
         {
             float z0 = 0.0f, z1 = 0.0f; g.z_span(z0, z1);
@@ -158,9 +186,15 @@ HoodConfig load_hood_config(const ConfigLoader& cfg)
     out.ai2_wall_parallel_precision = getf("HoodModel.AI2WallParallelPrecision", 200.0f);
     out.ai2_wall_reach_m            = getf("HoodModel.AI2WallReachM",             0.15f);
     out.ai2_door_clearance_gain     = getf("HoodModel.AI2DoorClearanceGain",       3.0f);
-    out.detect_min_fill             = getf("HoodModel.DetectMinFill",              0.10f);
-    out.detect_max_fill             = getf("HoodModel.DetectMaxFill",              0.60f);
-    out.detect_soft                 = getf("HoodModel.DetectSoft",                 0.06f);
+    // The envelope too — this is the block that carried the REFRIGERATOR's 2296-row approach/retreat tour
+    // (0.0 / 1.32 / 0.26) into hood's config as if it were a measurement of a hood. Declared here, so the
+    // manifest and the runtime cannot say different things again.
+    out.detect_min_fill = rc::manifest::resolve(cfg, "HoodModel.DetectMinFill",
+                              man, "detector.envelope.min_fill", 0.10f, "hood detect min_fill");
+    out.detect_max_fill = rc::manifest::resolve(cfg, "HoodModel.DetectMaxFill",
+                              man, "detector.envelope.max_fill", 0.60f, "hood detect max_fill");
+    out.detect_soft     = rc::manifest::resolve(cfg, "HoodModel.DetectSoft",
+                              man, "detector.envelope.soft", 0.06f, "hood detect soft");
     out.ai2_volatility_infer        = getb("HoodModel.AI2VolatilityInfer",        false);
     out.ai2_volatility_lr           = getf("HoodModel.AI2VolatilityLr",           0.02f);
     out.ai2_volatility_sigma        = getf("HoodModel.AI2VolatilitySigma",        2.0f);

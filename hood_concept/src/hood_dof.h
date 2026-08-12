@@ -17,19 +17,21 @@ namespace rc
 //
 // ★PLACEHOLDER σ* — see the note in table_dof.h: this is the CONSUMER's precision demand, hardcoded
 // until the consuming affordance publishes it.
-// ★★CLONED σ* — these are the REFRIGERATOR's demands, and the audit reads them as a pass (6/6).
-// A hood has no consumer at all yet: nothing grasps it, nothing plans through it, and the values
-// below were inherited by a rename rather than restated from anyone. Per invariant 12 that makes
-// them INVENTED, which is the one thing σ* may never be. Either restate a real demand or set them
-// to -1 with a `SIGMA-STAR: none — <reason>` line, which the audit accepts as a reviewed absence.
-// Left as-is so the scaffold does not silently claim a precision target nobody asked for.
+// SIGMA-STAR: none — NO CONSUMER HAS STATED A DEMAND. Nothing grasps a hood, nothing plans a path
+// through one, and it hangs above the robot so it is not even an obstacle. The values here were the
+// REFRIGERATOR's, inherited by a rename, and the audit read them as a green 6/6 — a FALSE PASS, and
+// an invented σ* is the one thing invariant 12 forbids. -1 says "no demand", which any_sigma_star()
+// reads correctly (the adequacy gap falls back to logdet and the strip says so) and which the audit
+// reports as none(decl) rather than scoring an absence as a pass.
+// ★When a consumer appears — a gripper, a planner, a cleaning routine — restate the demand HERE from
+// what that consumer actually needs, and change [sigma_star] in the manifest to declared = true.
 inline constexpr std::array<DofSpec, HoodBelief::N> kHoodDofs = {{
-    {"cx",  "m",   0.02f},
-    {"cy",  "m",   0.02f},
-    {"H",   "m",   0.02f},
-    {"w",   "m",   0.02f},
-    {"h",   "m",   0.02f},      // 2 cm pos/size
-    {"yaw", "rad", 0.05f},      // ~2.9°
+    {"cx",  "m",   -1.0f},
+    {"cy",  "m",   -1.0f},
+    {"H",   "m",   -1.0f},
+    {"w",   "m",   -1.0f},
+    {"h",   "m",   -1.0f},
+    {"yaw", "rad", -1.0f},
 }};
 
 }  // namespace rc

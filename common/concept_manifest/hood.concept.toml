@@ -89,8 +89,15 @@ why  = "a hood is fixed to the wall behind the hob, so the same flush/parallel p
 # invented σ* is the one thing invariant 12 forbids. Either restate a real demand or set them to -1.
 [sigma_star]
 declared = false
-from     = "inherited"
-why      = "cloned from refrigerator_dof.h and never restated; see invariant 12"
+from     = "nominal"
+why      = """
+NONE, and that is a reviewed decision rather than an omission. No consumer has stated a demand on a hood's
+pose: nothing grasps it, nothing plans a path through it, and it hangs above the robot so it is not even an
+obstacle. hood_dof.h therefore declares -1 for every DOF, which any_sigma_star() reads as "no demand" and the
+audit reports as none(decl) instead of scoring an absence as a pass. It previously carried the REFRIGERATOR's
+demands, inherited by a rename, and the audit scored that a green 6/6 — the false pass this block exists to
+prevent. When a real consumer appears, restate its demand in hood_dof.h and set declared = true here.
+"""
 
 # ── Detector envelope ──────────────────────────────────────────────────────────────────────────────────
 [detector.envelope]

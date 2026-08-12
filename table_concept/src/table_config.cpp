@@ -9,6 +9,8 @@
 
 #include <print>
 
+#include "../../common/concept_manifest/concept_manifest.h"   // rc::manifest (SHARED)
+
 #include <genericworker.h>   // ConfigLoader
 
 namespace rc {
@@ -16,6 +18,17 @@ namespace rc {
 TableConfig load_table_config(const ConfigLoader& cfg)
 {
     TableConfig out;
+
+    // The one place this path is written. It is relative to the agent's CWD (<agent>/), not to src/.
+    static constexpr const char* kManifestPath = "../common/concept_manifest/table.concept.toml";
+    // ★★AN INHERITED WORLD FACT IS FATAL. The manifest has carried `from = measured|fitted|nominal|inherited`
+    // since 2026-08-11, with a note saying "inherited is worse than absent — an absent value gets asked
+    // about, an inherited one gets trusted". A note stopped nothing: hood_concept shipped TEN cloned defects
+    // that week, several of them DECLARED as inherited, in writing, in this very file. The declaration is
+    // now the enforcement — see rc::manifest::provenance_ok. Refusing to start is the whole point: a comment
+    // cannot fail a build, and everything that only warned was fixed around rather than fixed.
+    if (not rc::manifest::provenance_ok(kManifestPath, "table"))
+        std::exit(EXIT_FAILURE);
 
     // ConfigLoader::get has no default overload; TOML numeric floats are stored as double.
     auto getf = [&](const std::string& k, float def) -> float {

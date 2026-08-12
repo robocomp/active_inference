@@ -30,7 +30,10 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
+#include <fstream>
 #include <print>
+#include <vector>
 #include <string>
 #include <string_view>
 
@@ -161,6 +164,124 @@ inline Geometry load_geometry(const std::string& path, std::string_view concept_
         std::print("[manifest] {} geometry INCOMPLETE — declare model.geometry.support and extent_m\n",
                    concept_name);
     return g;
+}
+
+// ─── PROVENANCE: an INHERITED world fact is FATAL ────────────────────────────────────────────────
+//
+// ★★"INHERITED IS WORSE THAN ABSENT — AN ABSENT VALUE GETS ASKED ABOUT, AN INHERITED ONE GETS TRUSTED."
+// That was written as a note when the `from` field was introduced. A note cannot stop anything, and the
+// week that followed proved it: hood_concept was cloned from refrigerator and shipped TEN inherited
+// defects — a height prior stated in four places with three values (the winner being the fridge's), a
+// detector envelope that was a 2296-row measurement OF A DIFFERENT OBJECT, a square-footprint shape prior
+// scoring a correct hood at 0.027, an identity prior voting on a hypothesis it does not model, and a sigma*
+// set the audit scored 6/6 green because the numbers were present. Every one of them was DECLARED as
+// inherited, in writing, in the manifest. Nobody was stopped.
+//
+// So the declaration is now the enforcement. A manifest block whose numbers arrived by a rename is not a
+// manifest, it is a copy, and an agent running on a copy is the exact failure this file exists to prevent.
+// The agent REFUSES TO START and names the block.
+//
+// The escape is not a flag — it is doing the work. Either the value is genuinely a considered class-level
+// prior, in which case say `nominal` and write the `why` that makes it one; or it was measured, in which
+// case say `measured`; or nobody has chosen it for this object, in which case that is what must change.
+// ⚠Relabelling `inherited` to `nominal` to silence this is the one way to defeat it, and it is visible in
+// the diff — the `why` is what makes a nominal honest.
+struct Provenance
+{
+    std::string block;      // the TOML table it was declared in, e.g. "sigma_star"
+    From        from = From::unknown;
+};
+
+// Scan the manifest TEXT for every [block] and the `from` it declares. Textual on purpose: ConfigLoader
+// cannot enumerate keys, and this must find blocks nobody wrote a C++ accessor for — those are exactly the
+// ones that rot. No numbers are parsed here, so it is locale-proof by construction (see CLAUDE.md).
+inline std::vector<Provenance> scan_provenance(const std::string& path)
+{
+    std::vector<Provenance> out;
+    std::ifstream f(path);
+    if (not f) return out;
+    std::string line, block;
+    while (std::getline(f, line))
+    {
+        const auto b = line.find_first_not_of(" \t");
+        if (b == std::string::npos or line[b] == '#') continue;
+        if (line[b] == '[')
+        {
+            const auto e = line.find(']', b);
+            if (e != std::string::npos) { block = line.substr(b + 1, e - b - 1); out.push_back({block, From::unknown}); }
+            continue;
+        }
+        if (block.empty() or line.compare(b, 4, "from") != 0) continue;
+        const auto q1 = line.find('"');
+        const auto q2 = (q1 == std::string::npos) ? std::string::npos : line.find('"', q1 + 1);
+        if (q2 == std::string::npos) continue;
+        out.back().from = from_of(line.substr(q1 + 1, q2 - q1 - 1));
+    }
+    return out;
+}
+
+// THE RULE. Returns true if every declared block has an honest provenance. On an INHERITED block it prints
+// the banner and returns false — the caller must not continue. `blocks_without_from` are reported too but
+// do NOT fail: a block that never claimed a provenance is the "absent" case, which gets asked about.
+inline bool provenance_ok(const std::string& path, std::string_view concept_name)
+{
+    const auto ps = scan_provenance(path);
+    if (ps.empty()) return true;                       // no manifest / unreadable — load_geometry says so
+    std::vector<std::string> inherited, undeclared;
+    for (const auto& p : ps)
+        if (p.from == From::inherited)      inherited.push_back(p.block);
+        else if (p.from == From::unknown)   undeclared.push_back(p.block);
+
+    if (not undeclared.empty())
+    {
+        std::string list;
+        for (const auto& b : undeclared) { if (not list.empty()) list += ", "; list += b; }
+        std::print("[manifest] {} — {} block(s) declare no `from`: {}\n"
+                   "[manifest]   Not fatal (an absent provenance gets asked about), but a value nobody has\n"
+                   "[manifest]   claimed responsibility for is one step from an inherited one.\n",
+                   concept_name, undeclared.size(), list);
+    }
+    if (inherited.empty()) return true;
+
+    std::print("\n"
+               "[manifest] ══════════════════════════════════════════════════════════════════════════════\n"
+               "[manifest] ★★ {} REFUSES TO START: {} world fact(s) are declared INHERITED.\n",
+               concept_name, inherited.size());
+    for (const auto& b : inherited)
+        std::print("[manifest]      [{}]  — arrived by a rename; nobody has chosen it for THIS object\n", b);
+    std::print("[manifest]\n"
+               "[manifest]   An inherited value is worse than a missing one: it looks decided. Every one of\n"
+               "[manifest]   hood_concept's ten cloned defects was declared exactly like this and shipped.\n"
+               "[manifest]   Fix the block in {}:\n"
+               "[manifest]     · measured — you took the measurement. Say what of, and when.\n"
+               "[manifest]     · fitted   — a fit produced it, from this agent's own data.\n"
+               "[manifest]     · nominal  — a considered CLASS-level prior. The `why` is what makes it one.\n"
+               "[manifest]   Or delete the block, and the agent will fall back to its own default LOUDLY.\n"
+               "[manifest] ══════════════════════════════════════════════════════════════════════════════\n\n",
+               path);
+    return false;
+}
+
+// ─── AUTHORITY: manifest first, config only as an explicit override ──────────────────────────────
+//
+// The precedence hood proved out, collapsed into one call so it stops being re-typed per value: MANIFEST
+// (the world fact) → config.toml (an explicit override, which PRINTS when it contradicts) → the agent's own
+// default only if neither speaks. That is the reverse of the order that let hood run on the refrigerator's
+// height while two corrected files said otherwise.
+inline float resolve(const ConfigLoader& cfg, const char* cfg_key,
+                     const ConfigLoader& man, const char* man_key,
+                     float agent_default, std::string_view what)
+{
+    const bool has_man = man.exists(man_key);
+    const bool has_cfg = cfg.exists(cfg_key);
+    const float m = has_man ? static_cast<float>(man.get<double>(man_key)) : 0.0f;
+    const float c = has_cfg ? static_cast<float>(cfg.get<double>(cfg_key)) : 0.0f;
+    if (has_man and has_cfg and std::abs(m - c) > 1e-4f)
+        std::print("[manifest] OVERRIDE {}: manifest={:.4g} config={:.4g} — the config wins, but a world "
+                   "fact is being contradicted; say why in the manifest\n", what, m, c);
+    if (has_cfg) return c;
+    if (has_man) return m;
+    return agent_default;
 }
 
 // ─── BAND COHERENCE: does this z-band actually contain the body? ─────────────────────────────────
