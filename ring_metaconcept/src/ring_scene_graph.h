@@ -107,7 +107,7 @@ private:
     // SAME cycle would both see the same max and collide, and a retired number handed to a different
     // rig silently transplants one arrangement's history onto another (the defect chair_concept fixed
     // in 9aef57a). A name, once used, is never reused for the lifetime of the process.
-    int next_name_index_ = 0;
+    int name_high_water_ = 0;
 };
 
 }  // namespace rc

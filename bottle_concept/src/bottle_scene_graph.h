@@ -100,6 +100,8 @@ private:
     bool                chain_cov_enabled_ = false;
     BottleConfig&        cfg_;
     std::function<void()> relayout_;   // re-run the graph twopi layout after a node is created/removed
+
+    int name_high_water_ = 0;   // highest bottle_<N> ever issued; never decreases — see create_instance_from_detection
 };
 
 }  // namespace rc

@@ -66,6 +66,8 @@ private:
     DSR::RT_API*          rt_api_ = nullptr;
     const HoodConfig&    cfg_;
     std::function<void()> relayout_;
+
+    int name_high_water_ = 0;   // highest hood_<N> ever issued; never decreases — see create_instance_from_detection
 };
 
 }  // namespace rc

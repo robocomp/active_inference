@@ -39,10 +39,19 @@ std::uint64_t ResidualSceneGraph::create_instance_from_detection(const Eigen::Ve
         return 0;
 
     // Auto-name: one past the highest existing "residual_<N>" obstacle node this agent owns.
-    int max_n = 0;
+        // ★NAMES ARE NEVER RECYCLED. Taking the max over LIVE nodes means a removal LOWERS the ceiling and
+    // the next birth is handed the dead object's number — so one name denotes two different objects
+    // within a single run, and any history keyed on the name (phantom logs, existence traces, dashboard
+    // series, a level-2 rig's membership) silently splices them together. It reads as a TELEPORT rather
+    // than an identity swap, which is what makes it expensive to notice. Same defect and fix as
+    // chair_concept 9aef57a / table_concept; door_concept solves it with a persistent registry instead.
+    // ⚠Per-RUN only: across a restart the mark is rebuilt from the live graph, so a name freed before
+    // the restart can still be re-issued after it (door persists etc/door_identities.csv for that).
+    int max_n = name_high_water_;
     for (const auto& n : G_->get_nodes_by_type("obstacle"))
         if (n.name().rfind("residual_", 0) == 0)
             try { max_n = std::max(max_n, std::stoi(n.name().substr(9))); } catch (...) {}
+    name_high_water_ = max_n + 1;
     const std::string name = "residual_" + std::to_string(max_n + 1);
 
     DSR::Node node = DSR::Node::create<obstacle_node_type>(name);

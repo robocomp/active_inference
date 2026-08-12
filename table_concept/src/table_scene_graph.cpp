@@ -44,10 +44,26 @@ std::uint64_t TableSceneGraph::create_instance_from_detection(const Eigen::Vecto
         return 0;
 
     // Auto-name: one past the highest existing "table_<N>".
-    int max_n = 0;
+    // ★NAMES ARE NEVER RECYCLED. Taking the max over LIVE nodes means a removal LOWERS the ceiling and
+    // the next birth is handed the dead table's number — so one name denotes two different objects
+    // within a single run. Any history keyed on the name (the phantom log, the AI2 trace, the
+    // dashboard series) then silently splices two objects together, and it reads as a table
+    // TELEPORTING rather than as an identity swap. Same defect and same fix as chair_concept's
+    // 9aef57a and door_concept's identity registry.
+    //
+    // It also misleads a level-2 CONSUMER: ring_metaconcept keys its rig membership and its
+    // cross-cycle association on member ids and names, so a recycled table_<N> would hand one rig's
+    // anchor history to a different physical table.
+    //
+    // The high-water mark only ever rises, so a freed number stays retired.
+    // ⚠REMAINING GAP: this is per-RUN. Across a restart the mark is rebuilt from the live graph, so a
+    // name freed before the restart can still be re-issued after it — door_concept persists its
+    // registry to etc/door_identities.csv for exactly that reason; table does not yet.
+    int max_n = name_high_water_;
     for (const auto& n : G_->get_nodes_by_type("object"))
         if (n.name().rfind("table_", 0) == 0)
             try { max_n = std::max(max_n, std::stoi(n.name().substr(6))); } catch (...) {}
+    name_high_water_ = max_n + 1;
     const std::string name = "table_" + std::to_string(max_n + 1);
 
     DSR::Node table_node = DSR::Node::create<object_node_type>(name);

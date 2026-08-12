@@ -72,13 +72,13 @@ std::uint64_t RingSceneGraph::ensure_rig_node(RigKey key, const RingBelief& beli
         // level-1 agents (the class itself stays in object_subtype). ★The local high-water mark is
         // folded in so a second rig born in the same cycle cannot reuse the first one's number
         // before the CRDT registry has caught up with the first insert_node.
-        int max_n = next_name_index_;
+        int max_n = name_high_water_;
         const auto plen = cfg_.node_prefix.size();
         for (const auto& n : G_->get_nodes_by_type("metaconcept"))
             if (n.name().rfind(cfg_.node_prefix, 0) == 0)
                 try { max_n = std::max(max_n, std::stoi(n.name().substr(plen))); } catch (...) {}
         const std::string name = cfg_.node_prefix + std::to_string(max_n + 1);
-        next_name_index_ = max_n + 1;
+        name_high_water_ = max_n + 1;
 
         // ★Type `metaconcept`, NOT `object`. A rig is a belief about a RELATION among nodes, not a
         // body: it has a footprint (the ring's extent) but nothing occupies it. Every furniture

@@ -66,6 +66,8 @@ private:
     DSR::RT_API*          rt_api_ = nullptr;
     const TableConfig&    cfg_;
     std::function<void()> relayout_;
+
+    int name_high_water_ = 0;   // highest table_<N> ever issued; never decreases — see create_instance_from_detection
 };
 
 }  // namespace rc

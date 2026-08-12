@@ -74,6 +74,8 @@ private:
     ResidualConfig&     cfg_;
     Eigen::Vector2f     sensor_xy_ = Eigen::Vector2f::Zero();   // sensor origin (room xy), for directional inflation
     std::function<void()> relayout_;
+
+    int name_high_water_ = 0;   // highest residual_<N> ever issued; never decreases — see create_instance_from_detection
 };
 
 }  // namespace rc
