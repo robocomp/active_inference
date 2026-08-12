@@ -80,12 +80,40 @@ float KitchenBelief::membership_prob(const KitchenMember& m) const
 // answer is a proper precision-weighted mean rather than only a direction.
 int KitchenBelief::fit_axis(const std::vector<KitchenMember>& members)
 {
+    // ★A member the frame does not believe in may not vote on the frame's axis.
+    //
+    // This fit used to weight purely by the peer's published 1/var_yaw, with no membership term and
+    // no outlier term of any kind — unlike fit_scalar directly below, which is robust EM with a
+    // median init. So a member the mixture had already expelled to clutter still steered the one DOF
+    // this agent exists to estimate, at full strength. Measured 2026-08-11 (kitchen_members.csv,
+    // cycle 44): `cabinet_w14_base` sat at membership 2.4e-12 — rejected over a 10 cm worktop
+    // disagreement — while `pinned = 1` kept it as one of the four members driving the axis.
+    //
+    // The weight is now precision × responsibility: model averaging rather than a gate, so a marginal
+    // member fades continuously instead of being cut at a cutoff. Same discipline as the rig's p_ring
+    // scaling of its down-prior, and the same principle as
+    // `hood: an identity prior may not vote on a hypothesis it does not model` (5b283f2).
+    //
+    // On the FIRST call there is no frame to judge membership against (`seeded_` is false and
+    // membership_prob returns 0 by contract), so that pass stays unweighted to bootstrap; from then
+    // on the responsibility comes from the previous cycle's converged frame — the same one-step EM
+    // lag fit_scalar uses within a single call.
+    //
+    // No floor is applied to the responsibility on purpose. If EVERY member is rejected the weights
+    // scale uniformly, which leaves the weighted mean unchanged but sends sigma_.axis (= 1/den) up —
+    // the frame then reports an axis it is honestly unsure of, rather than a confident wrong one.
+    const auto weight_of = [this](const KitchenMember& m) -> double
+    {
+        const float  var  = m.var_yaw > 0.0f ? m.var_yaw : KitchenMember::kNoCovVarYaw;
+        const double prec = 1.0 / std::max(1e-9f, var);   // the peer's OWN published precision
+        return seeded_ ? prec * static_cast<double>(membership_prob(m)) : prec;
+    };
+
     double cs = 0.0, sn = 0.0, wsum = 0.0;
     int n = 0;
     for (const auto& m : members)
     {
-        const float var = m.var_yaw > 0.0f ? m.var_yaw : KitchenMember::kNoCovVarYaw;
-        const double w  = 1.0 / std::max(1e-9f, var);   // the peer's OWN published precision
+        const double w = weight_of(m);
         cs += w * std::cos(4.0 * static_cast<double>(m.yaw));
         sn += w * std::sin(4.0 * static_cast<double>(m.yaw));
         wsum += w;
@@ -100,8 +128,7 @@ int KitchenBelief::fit_axis(const std::vector<KitchenMember>& members)
     double num = 0.0, den = 0.0;
     for (const auto& m : members)
     {
-        const float var = m.var_yaw > 0.0f ? m.var_yaw : KitchenMember::kNoCovVarYaw;
-        const double w  = 1.0 / std::max(1e-9f, var);
+        const double w = weight_of(m);
         num += w * static_cast<double>(axis_delta(m.yaw, coarse));
         den += w;
     }
@@ -428,6 +455,33 @@ bool KitchenBelief::self_test()
         const auto p_cavity = full.prior_for(two[0], cav);
         check(std::abs(p_cavity.axis_resid) > std::abs(p_self.axis_resid) + d2r(0.5f),
               "(d) the cavity prior disagrees with member 0 MORE than the self-confirming one does");
+    }
+
+    // ── (g) ★A member the frame has REJECTED may not steer the axis ──────────────────────────────
+    // Regression for the 2026-08-11 live case: fit_axis weighted purely by the peer's published
+    // 1/var_yaw, so a member expelled to clutter still voted on the one DOF this agent exists to
+    // estimate. Here three tidy runs agree on a 90° grid; a fourth publishes a very TIGHT yaw (so the
+    // old precision-only weighting would let it dominate) that is 30° off the grid, and a worktop
+    // 40 cm out so the mixture rejects it outright.
+    {
+        std::vector<KitchenMember> good = {
+            mk(0.20f,  3.0f, 0.90f, 0.60f, 2.0f),
+            mk(89.60f, 3.0f, 0.90f, 0.60f, 2.0f),
+            mk(0.10f,  3.0f, 0.89f, 0.61f, 2.0f),
+        };
+        KitchenBelief b(par);
+        b.update(good, good);                       // seed on the clean set
+        const float axis_clean = b.state().axis;
+
+        auto intruder = mk(30.0f, 0.3f, 1.30f, 0.60f, 2.0f);   // 100x the precision, 40 cm off
+        std::vector<KitchenMember> with = good;
+        with.push_back(intruder);
+        b.update(with, with);
+
+        check(b.membership_prob(intruder) < 0.01f,
+              "(g) the 40 cm-off intruder is rejected by the mixture");
+        check(std::abs(axis_delta(b.state().axis, axis_clean)) < d2r(2.0f),
+              "(g) a REJECTED member must not drag the axis, however tight its published yaw");
     }
 
     // ── (e) The NULL is real: scattered furniture must not be declared a kitchen ──────────────────
