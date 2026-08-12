@@ -169,6 +169,10 @@ private:
     // ── Members ─────────────────────────────────────────────────────────────────
     bool startup_check_flag = false;
     bool owned_nodes_cleaned_ = false;
+    // The initialize() stale-sweep can run BEFORE nodes leaked by a crashed previous run finish
+    // syncing from the persistent server, so it is repeated once on entering Operating — that
+    // post-sync pass is the one that actually reaps them (CLAUDE.md).
+    bool operating_sweep_done_ = false;
     std::atomic<bool> shutting_down_{false};
     AgentPresenceCoordinator presence_coordinator_;
 

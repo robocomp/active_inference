@@ -192,7 +192,18 @@ void SpecificWorker::initialize()
                 qInfo() << "[SM] -> Waiting (missing:" << m.trimmed() << ")";
             }
         },
-        .on_operating_enter = [this]() { qInfo("[SM] -> Operating: all required peers present"); },
+        .on_operating_enter = [this]()
+        {
+            qInfo("[SM] -> Operating: all required peers present");
+            // ★Second stale-sweep, once. The initialize() pass can run BEFORE nodes leaked by a
+            // crashed previous run have finished syncing from the persistent server, so this
+            // post-sync pass is the one that actually reaps them (CLAUDE.md).
+            if (not operating_sweep_done_)
+            {
+                operating_sweep_done_ = true;
+                remove_owned_kitchen_nodes();
+            }
+        },
         .on_operating_loop  = [this]() { compute(); },
         .on_degraded_enter  = [this]()
         {
@@ -758,8 +769,36 @@ void SpecificWorker::step_outline(const MemberSnapshot& s)
 // agreement, so it cannot inflate itself.
 void SpecificWorker::publish_priors(const MemberSnapshot& s)
 {
-    if (not cfg_.publish or not scene_graph_ or s.members.empty() or not kitchen_belief_.seeded())
+    if (not cfg_.publish or not scene_graph_)
+        return;   // read-only mode writes NOTHING to the graph, not even a retirement
+
+    // No evidence this cycle (nothing polled, or the frame never seeded) — we cannot judge, so HOLD:
+    // leave whatever is in the graph alone rather than churning it on a transient empty poll. Same
+    // discipline as ring_metaconcept's per-hypothesis hold.
+    if (s.members.empty() or not kitchen_belief_.seeded())
         return;
+
+    // ★THE EXISTENCE DECISION is the model comparison's own boundary: log_odds > 0 means the frame
+    // explains the members better than the independent-units null, < 0 means it does not. That is not
+    // a tuned threshold — it is where the two hypotheses are equally likely — and the EMA
+    // (evidence_ema_alpha) is what stops it chattering across it.
+    //
+    // Before this the node was born on `seeded_` alone, which is only `n_axis_ > 0` = "at least one
+    // member published a yaw", and was then NEVER retired whatever the evidence said: remove_node()
+    // existed but nothing ever called it. That is the level-2 analogue of the phantom immortality
+    // fixed repeatedly at level 1 — a structure that can be born but cannot die. Mirrors
+    // ring_metaconcept::publish_rig, which retires on exactly this test.
+    //
+    // ⚠Residual gap, deliberately not papered over: if every member disappears we take the HOLD
+    // branch above and log_odds stops being updated, so a frame that loses its whole scene lingers
+    // until the graceful-exit cleanup or the next startup sweep reaps it. ring_metaconcept covers
+    // that with a per-hypothesis miss counter; kitchen has no such counter yet.
+    if (kitchen_belief_.log_odds() <= 0.0f)
+    {
+        scene_graph_->remove_node();
+        return;
+    }
+
     if (scene_graph_->ensure_node(kitchen_belief_, room_node_id_) == 0)
         return;
 

@@ -32,7 +32,12 @@ stale_grace_ms = 120000
 agent_info_period_ms = 1000
 
 [Owns]
-nodes = ["kitchen_metaconcept 24"]
+# ★"kitchen_*" matches the frame node this agent births (NodePrefix + "0"). Without it a crash left
+# that node in the shared graph with no process alive to own it — the trailing '*' is a prefix
+# wildcard (AgentPresenceMonitor::delete_single_owned_node). Harmless while Publish = false, and
+# REQUIRED the moment it is flipped to true. Safe as a wildcard: nothing else in the fleet births a
+# node named kitchen_* (cabinet_concept's kitchen_* symbols are function names, not node names).
+nodes = ["kitchen_metaconcept 24", "kitchen_*"]
 
 [Period]
 Compute = 200
