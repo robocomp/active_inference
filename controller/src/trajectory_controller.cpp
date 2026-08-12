@@ -549,15 +549,32 @@ TrajectoryController::ControlOutput TrajectoryController::compute(
     // and a false arrival stops the robot short of its goal.
     if (endpoint_arrival_)
     {
-        const float step = std::abs(out.dist_to_goal - last_dist_to_goal_);
-        if (std::isfinite(last_dist_to_goal_)) max_goal_step_ = std::max(max_goal_step_, step);
+        // ★THE CAPTURE RADIUS MUST NOT BE INFLATABLE BY A MOVING GOAL. It was the largest observed
+        // change in dist_to_goal, which is wrong: that changes when the GOAL moves too — a replan, a
+        // repaired standpoint, a re-installed route — so one multi-metre target change widened the reach
+        // permanently. A hairpin then satisfies both conditions (distance genuinely grows for several
+        // cycles while the robot turns around) and arrival fired MID-ROUTE. Observed: stopped dead with
+        // cmd_adv 0.000 at d_goal 13.42 m, not stuck, not aligning.
+        // The robot's own DISPLACEMENT cannot be inflated that way, and by the triangle inequality it
+        // bounds any honest change in distance-to-goal. So that is the bound.
+        const Eigen::Vector2f here = robot_pose.translation();
+        if (last_robot_pos_.has_value())
+            max_goal_step_ = std::max(max_goal_step_, (here - *last_robot_pos_).norm());
+        last_robot_pos_ = here;
         if (out.dist_to_goal < closest_to_goal_) { closest_to_goal_ = out.dist_to_goal; receding_cycles_ = 0; }
         else if (out.dist_to_goal > closest_to_goal_ + 0.01f) ++receding_cycles_;
         last_dist_to_goal_ = out.dist_to_goal;
     }
+    // Two conditions, and the second is what makes a false arrival structurally impossible: the robot
+    // must have GOT near the goal, and must STILL be near it. Passing a point means being just past it —
+    // three receding cycles carry the robot at most three steps beyond — so a stop declared metres away
+    // cannot be an arrival whatever the history says. Without this second clause the test rests entirely
+    // on `closest_to_goal_`, which is a memory and can be stale; with it, both clauses are about NOW.
+    const float reach = active_params_.goal_threshold + max_goal_step_;
     const bool passed_by_recession =
         endpoint_arrival_ and receding_cycles_ >= 3
-        and closest_to_goal_ <= active_params_.goal_threshold + max_goal_step_;
+        and closest_to_goal_ <= reach
+        and out.dist_to_goal <= reach + 3.f * max_goal_step_;
 
     // The whole arrival test is skipped when the caller owns arrival itself (a continuous route ends by
     // ARC LENGTH — see set_endpoint_arrival). Skipping it, rather than ignoring its result, matters: this

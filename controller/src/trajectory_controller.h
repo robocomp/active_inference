@@ -279,12 +279,14 @@ private:
     // "recedes" from it immediately, stopping the robot before it has gone anywhere.
     float closest_to_goal_ = std::numeric_limits<float>::infinity();
     float last_dist_to_goal_ = std::numeric_limits<float>::infinity();
+    std::optional<Eigen::Vector2f> last_robot_pos_;   // for the displacement bound, see compute()
     float max_goal_step_ = 0.f;
     int   receding_cycles_ = 0;
     void reset_arrival_watch()
     {
         closest_to_goal_ = std::numeric_limits<float>::infinity();
         last_dist_to_goal_ = std::numeric_limits<float>::infinity();
+        last_robot_pos_.reset();
         max_goal_step_ = 0.f;
         receding_cycles_ = 0;
     }
