@@ -214,6 +214,14 @@ struct ChairConfig
     float exist_birth_logodds      = 1.0f;   // Existence.BirthLogodds — L seeded at birth (a birth already needed birth_frames of evidence)
     float exist_remove_logodds     = -3.0f;  // Existence.RemoveLogodds — remove when L falls below this
     float exist_max_logodds        =  4.0f;  // Existence.MaxLogodds — saturation cap (a real chair can't earn infinite immunity)
+    // ★Existence.RemoveFrames — the DEBOUNCE chair never had, in IDEAL OBSERVATIONS (Sum p_vis), the fleet
+    // unit. chair was the only agent in the fleet that could delete an instance on a SINGLE frame: removal
+    // was a bare `L < RemoveLogodds` with nothing behind it. That is not merely a missing safety margin —
+    // OutOfRoomGain draws 1.5 nats EVERY frame regardless of visibility, so +4 -> -3 is under 5 frames, and
+    // its own comment ("debounces a 1-frame glitch") shows the GAIN was being asked to do a debounce's job.
+    // A localization wobble that puts a real chair outside the room polygon for five frames deleted it.
+    // 15 is the fleet value; the decision now goes through rc::exist::decide_removal like every sibling.
+    int   exist_remove_frames      = 15;     // Existence.RemoveFrames
     float exist_evidence_gain      = 0.15f;  // Existence.EvidenceGain — per-frame |ΔL| scale (occlusion tolerance = span/gain frames)
     float exist_expected_support_c = 2500.f; // Existence.ExpectedSupportC — expected support scale: E[npts]=C/range² (boundary ≈ a handful of pts)
     float exist_adequacy_ref       = 0.25f;  // Existence.AdequacyRef — WON-mask support/expected below this → negative evidence

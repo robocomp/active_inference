@@ -104,6 +104,10 @@ struct ChairInstance
     rc::exist::ExistenceBelief existence{0.0f, 4.0f};
     // Mirror of existence.logodds(), kept because the dashboards, the strip and the CSVs read it. NaN
     // until the channel is seeded, which is what those readers test for.
+    // Removal debounce, SHARED (rc::exist::RemovalDebounce) — chair had none at all and could delete on a
+    // single frame. streak = ideal observations of sustained condemnation; starved = consecutive condemned
+    // cycles that resolved nothing, which is what makes a frozen decision visible instead of silent.
+    rc::exist::RemovalDebounce existence_debounce;
     float exist_logodds = std::numeric_limits<float>::quiet_NaN();
     int  processed_cycles   = 0;      // per-chair compute cycles for log throttling
     bool model_stable       = false;

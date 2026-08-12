@@ -124,6 +124,7 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
     out.rig_prior_stale_ms       = geti("RigPrior.StaleMs",           5000);
     out.exist_birth_logodds      = getf("Existence.BirthLogodds",     1.0f);
     out.exist_remove_logodds     = getf("Existence.RemoveLogodds",   -3.0f);
+    out.exist_remove_frames      = geti("Existence.RemoveFrames",     15);
     out.exist_max_logodds        = getf("Existence.MaxLogodds",       4.0f);
     out.exist_evidence_gain      = getf("Existence.EvidenceGain",     0.15f);
     out.exist_expected_support_c = getf("Existence.ExpectedSupportC", 7000.f);

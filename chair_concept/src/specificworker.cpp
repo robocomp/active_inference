@@ -1423,6 +1423,29 @@ void SpecificWorker::update_existence_beliefs()
     // so a fresh frame ALREADY means "ZED looked this cycle" — including a frame with ZERO ZED detections, which is
     // exactly ZED staring at empty space and finding nothing (the strongest vacate evidence). Do NOT gate on
     // "ZED produced a detection": that would refuse to remove a phantom precisely when ZED confirms it is gone.
+    // ★ONE REMOVAL DECISION, THE SHARED ONE (rc::exist::decide_removal). chair was the last agent deciding
+    // by hand — a bare `L < RemoveLogodds` with NO debounce, the only agent in the fleet able to delete an
+    // instance on a single frame. The boundary is preserved EXACTLY: RemoveLogodds = -3.0 is the same test
+    // as should_remove(p) with p = 1/(1+e^3) = 0.04743, so nothing about WHEN a chair is condemned changes.
+    // What changes is that the decision must now be sustained, in the fleet's unit (IDEAL OBSERVATIONS,
+    // Sum p_vis) rather than cycles, and that a condemned-but-unexecutable instance reports itself.
+    //
+    // ★MEASURED FIRST, on chair's own etc/chair_existence_log.csv, because a debounce chosen blind is how
+    // this family of bugs starts. Two facts decided it:
+    //   · on the cycles the chair was NOT detected, zed_pd (its p_vis) has median 0.000 and p90 0.000 —
+    //     the SENSOR channel is very nearly inert for removal (chair_1/chair_2 sat pinned at L=+4.00 for
+    //     1554 rows each with zed_pd median 0.000). Counting LOOKS therefore holds those chairs rather
+    //     than deleting them, which is correct: a camera that cannot resolve the chair has not seen it go.
+    //   · the ROOM PRIOR is the channel that actually fires, and it is visibility-INDEPENDENT by
+    //     construction, drawing OutOfRoomGain = 1.5 nats every frame — so +4 to -3 is under FIVE frames.
+    //     chair_3 reached L = -2.70 and recovered: it came within 0.30 nats of being deleted by a
+    //     localization wobble. That path is where the debounce has to bite, and it does: a prior passes
+    //     p_vis = 1.0, so RemoveFrames = 15 means 15 frames of sustained "outside the room".
+    rc::exist::RemovalPolicy policy;
+    policy.logodds_max   = cfg_.exist_max_logodds;
+    policy.removal_prob  = 1.0f / (1.0f + std::exp(-cfg_.exist_remove_logodds));   // exact same boundary
+    policy.remove_frames = static_cast<float>(cfg_.exist_remove_frames);
+
     std::vector<std::uint64_t> to_remove;
     for (auto& [id, inst] : fitter_->instances())
     {
@@ -1446,7 +1469,11 @@ void SpecificWorker::update_existence_beliefs()
                 // channel, so it inherits the clamp and the correlation handling.
                 inst.existence.integrate(1.0f, -cfg_.exist_out_of_room_gain);
                 inst.exist_logodds = inst.existence.logodds();
-                if (inst.exist_logodds < cfg_.exist_remove_logodds)
+                // A containment violation is fully resolvable — the polygon is a trusted nominal model — so
+                // this cycle is worth one IDEAL observation and the debounce advances at full weight. Same
+                // treatment as door_concept's two prior channels: the difference from a sensor channel is
+                // argued, and expressed in the shared unit rather than by skipping the shared decision.
+                if (rc::exist::decide_removal(inst.existence, inst.existence_debounce, policy, 1.0f).remove)
                     to_remove.push_back(id);
                 continue;   // outside the room → no sensor evidence can rescue it; skip the normal channels
             }
@@ -1538,8 +1565,15 @@ void SpecificWorker::update_existence_beliefs()
         inst.existence.integrate(p_vis, ratio);
         inst.exist_logodds = inst.existence.logodds();
 
-        if (inst.exist_logodds < cfg_.exist_remove_logodds)
+        // p_vis is EXACTLY what one look was worth (staleness confidence x ZED detectability x remaining
+        // line of sight), which is the debounce's unit — so it is passed straight through. A cycle that
+        // could not have resolved the chair advances nothing and correctly HOLDS.
+        const auto verdict = rc::exist::decide_removal(inst.existence, inst.existence_debounce, policy, p_vis);
+        if (verdict.remove)
             to_remove.push_back(id);
+        if (verdict.stalled)
+            std::print("chair_concept: {}\n", rc::exist::stall_note(inst.node_name, inst.existence,
+                                                                    inst.existence_debounce, verdict));
     }
 
     // Throttled existence readout so a "why is this phantom still here?" case is diagnosable from the log.
