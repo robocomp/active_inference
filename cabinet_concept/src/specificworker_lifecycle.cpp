@@ -842,8 +842,18 @@ void SpecificWorker::run_instance_tracker()
                                     and (sl.label == "counter" or sl.label == "countertop");
             if ((not is_cabinet and not is_counter) or sl.support_end <= sl.support_begin)
                 continue;
-            if (sl.depth_var > 0.0f)   // RICOH is BEARING-ONLY: never births/associates/fits — the tracker sees
-                continue;              // ZED masks only. Ricoh drives the attention path (process_ricoh_bearings).
+            // ★★ONLY THE FRONT RGB-D CAMERA MAY CREATE OR UPDATE AN OBJECT. `has_depth` is NOT that
+            // question: once the producer began depth-filling ricoh masks from reprojected LiDAR it
+            // publishes them as full 3D slices with has_depth = 1, so a 360° detection from BEHIND the
+            // robot passed every guard written as `if (has_depth)`. Reported live on bottle_concept —
+            // moving and cloning with the robot facing away, 3 m off. mask_source says which camera,
+            // unambiguously, and the voxelizer has been publishing it all along. A ricoh slice may
+            // still CONFIRM a live instance (bearing_confirm) or raise a proto-object to go and look
+            // at; it may not move one. See MaskIngestor::MaskSlice::may_fit_geometry.
+            // cabinet alone had this rule, via the depth_var > 0 PROXY — right in effect but indirect, and
+            // it breaks the day a zed mask carries a range variance. Ask the source directly.
+            if (not sl.may_fit_geometry())
+                continue;              // Ricoh drives the attention path (process_ricoh_bearings), not the fit.
             rc::DetectionView dv;
             dv.xy = {sl.centroid.x(), sl.centroid.y()};
             dv.z  = sl.centroid.z();   // slice height → the z_gate keeps WALL masks off BASE tracks

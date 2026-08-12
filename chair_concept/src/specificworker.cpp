@@ -928,7 +928,16 @@ void SpecificWorker::run_instance_tracker()
         for (int i = 0; i < static_cast<int>(pkt.slices.size()); ++i)
         {
             const auto& sl = pkt.slices[i];
-            if (sl.label != "chair" or sl.support_end <= sl.support_begin) continue;
+                // ★★ONLY THE FRONT RGB-D CAMERA MAY CREATE OR UPDATE AN OBJECT. `has_depth` is NOT that
+                // question: once the producer began depth-filling ricoh masks from reprojected LiDAR it
+                // publishes them as full 3D slices with has_depth = 1, so a 360° detection from BEHIND the
+                // robot passed every guard written as `if (has_depth)`. Reported live on bottle_concept —
+                // moving and cloning with the robot facing away, 3 m off. mask_source says which camera,
+                // unambiguously, and the voxelizer has been publishing it all along. A ricoh slice may
+                // still CONFIRM a live instance (bearing_confirm) or raise a proto-object to go and look
+                // at; it may not move one. See MaskIngestor::MaskSlice::may_fit_geometry.
+            if (sl.label != "chair" or sl.support_end <= sl.support_begin
+                or not sl.may_fit_geometry()) continue;
             rc::DetectionView dv;
             dv.xy = Eigen::Vector2f(sl.centroid.x(), sl.centroid.y());
             dv.slice_index = i;

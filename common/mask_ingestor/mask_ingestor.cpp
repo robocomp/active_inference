@@ -101,6 +101,7 @@ bool MaskIngestor::refresh()
     const VecOpt has_depth_opt   = G_->get_attrib_by_name<mask_has_depth_att>(masks_node);
     const VecOpt azimuth_opt     = G_->get_attrib_by_name<mask_azimuth_att>(masks_node);
     const VecOpt depth_var_opt   = G_->get_attrib_by_name<mask_depth_var_att>(masks_node);
+    const VecOpt source_opt      = G_->get_attrib_by_name<mask_source_att>(masks_node);
     const VecOpt color_rgb_opt   = G_->get_attrib_by_name<mask_color_rgb_att>(masks_node);
     const VecOpt color_var_opt   = G_->get_attrib_by_name<mask_color_var_att>(masks_node);
     const VecOpt color_neff_opt  = G_->get_attrib_by_name<mask_color_neff_att>(masks_node);
@@ -127,6 +128,7 @@ bool MaskIngestor::refresh()
     const auto& has_depth_v       = vref(has_depth_opt);
     const auto& azimuth_v         = vref(azimuth_opt);
     const auto& depth_var_v       = vref(depth_var_opt);
+    const auto& source_v          = vref(source_opt);
     const auto& color_rgb_v       = vref(color_rgb_opt);
     const auto& color_var_v       = vref(color_var_opt);
     const auto& color_neff_v      = vref(color_neff_opt);
@@ -233,6 +235,11 @@ bool MaskIngestor::refresh()
                                  ? (has_depth_v[static_cast<std::size_t>(i)] != 0.0f) : true;
         slice.azimuth_room_rad = fetch1(azimuth_v);
         slice.depth_var        = fetch1(depth_var_v);
+        // Sensor SOURCE — unambiguous, unlike has_depth (see MaskSlice::source). Absent ⇒ zed, which is
+        // what a producer predating the field could only have been publishing.
+        slice.source           = (static_cast<std::size_t>(i) < source_v.size()
+                                  and source_v[static_cast<std::size_t>(i)] != 0.0f)
+                                 ? MaskSource::ricoh : MaskSource::zed;
         // Appearance: 3 floats per slice for chroma/var, 1 for n_eff. An absent attr (older producer) or a
         // short array leaves all three at zero, i.e. "no colour information" — the same state a ricoh
         // bearing slice publishes explicitly, so consumers need only one code path.

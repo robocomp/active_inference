@@ -44,6 +44,9 @@ class MaskIngestor
 public:
     // One detected instance: label + pose + [begin,end) ranges into the packet's shared point/pixel arrays,
     // plus the per-mask corruption/range/bearing channels the consumers fold into R and the common-mode.
+    // Which sensor produced a mask. Values match the voxelizer's `mask_source` attribute exactly.
+    enum class MaskSource : int { zed = 0, ricoh = 1 };
+
     struct MaskSlice
     {
         std::string label;
@@ -71,6 +74,25 @@ public:
         // Defaults match the zed contract, so a producer that predates the field reads back has_depth=true.
         bool  has_depth        = true;   // false ⇒ ricoh bearing-only slice
         float azimuth_room_rad = 0.0f;   // room-frame bearing; meaningful only when has_depth==false
+        // ★★WHICH CAMERA SAW IT — AND `has_depth` IS NOT THAT QUESTION. The two were the same question only
+        // while ricoh slices were bearing-only. Once the producer began depth-filling them from reprojected
+        // LiDAR it started publishing them as FULL 3D slices with has_depth = 1 (graph_publisher.cpp: a
+        // lidar-depth ricoh mask pushes has_depth 1.0 and source 1.0), so every consumer that wrote
+        // `if (has_depth)` to mean "from the ZED" silently began accepting 360° detections from behind the
+        // robot. The producer says so in its own comment — "Unlike mask_has_depth this is unambiguous" —
+        // and published `mask_source` for exactly this; the ingestor simply never read it, so no agent
+        // COULD ask. Reported live: a bottle moving and cloning with the robot facing away, 3 m off.
+        //
+        // The rule this restores: AN OBJECT MAY ONLY BE CREATED OR UPDATED FROM THE FRONT RGB-D CAMERA.
+        // A ricoh slice may still CONFIRM a live instance (bearing_confirm, Part C) — that is evidence the
+        // thing is still there, not a licence to move it — and may raise a proto-object to go and look at.
+        // Defaults to zed so a producer predating the field reads back exactly as before.
+        MaskSource source = MaskSource::zed;
+        bool  is_zed()   const { return source == MaskSource::zed; }
+        bool  is_ricoh() const { return source == MaskSource::ricoh; }
+        // The one predicate a fit/birth path should ask. Named for the RULE, not for the sensor, so a third
+        // camera lands here rather than in seven `== zed` comparisons.
+        bool  may_fit_geometry() const { return is_zed() and has_depth; }
         // Depth-uncertainty channel (common/depth_projection). σ_range² (m²) to ADD to R along the mask
         // ray, SAME currency as motion_var — sum them. 0 for dense-depth zed masks; the scored range
         // variance for ricoh masks depth-filled from reprojected lidar (grows as hits get sparse/scattered,

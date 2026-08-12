@@ -828,7 +828,15 @@ void SpecificWorker::run_instance_tracker()
     const auto& pkt = mask_ingestor_->packet();
     if (pkt.valid)
         for (int i = 0; i < static_cast<int>(pkt.slices.size()); ++i)
-            if (pkt.slices[i].label == "bottle" and pkt.slices[i].has_depth)   // skip ricoh bearing-only slices (Part B)
+            // ★★ONLY THE FRONT RGB-D CAMERA MAY CREATE OR UPDATE AN OBJECT. `has_depth` is NOT that
+            // question: once the producer began depth-filling ricoh masks from reprojected LiDAR it
+            // publishes them as full 3D slices with has_depth = 1, so a 360° detection from BEHIND the
+            // robot passed every guard written as `if (has_depth)`. Reported live on bottle_concept —
+            // moving and cloning with the robot facing away, 3 m off. mask_source says which camera,
+            // unambiguously, and the voxelizer has been publishing it all along. A ricoh slice may
+            // still CONFIRM a live instance (bearing_confirm) or raise a proto-object to go and look
+            // at; it may not move one. See MaskIngestor::MaskSlice::may_fit_geometry.
+            if (pkt.slices[i].label == "bottle" and pkt.slices[i].may_fit_geometry())
                 dets.push_back({Eigen::Vector2f(pkt.slices[i].centroid.x(), pkt.slices[i].centroid.y()), i});
 
     // Part C (confirm): a ricoh no-depth "bottle" bearing that lines up (in azimuth from the robot) with a

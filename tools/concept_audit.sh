@@ -135,6 +135,19 @@ audit_agent() {
         mark na
     fi
 
+    # 10. ONLY THE FRONT RGB-D CAMERA MAY CREATE OR UPDATE AN OBJECT. The voxelizer publishes `mask_source`
+    #    (0 = zed, 1 = ricoh) precisely because `mask_has_depth` stopped answering that question: once ricoh
+    #    masks were depth-filled from reprojected LiDAR they ship as full 3D slices with has_depth = 1. Every
+    #    guard written as `if (has_depth)` then silently began accepting 360-degree detections from BEHIND the
+    #    robot. Measured on bottle_concept 2026-08-12: of 130 births, 124 (95%) were at more than 55 degrees
+    #    off the robot heading — median 141 degrees — i.e. outside the ZED cone entirely.
+    #    An agent that builds a DetectionView must gate it on may_fit_geometry().
+    if grep -rq "DetectionView" "$src" 2>/dev/null; then
+        grep -rq "may_fit_geometry" "$src" 2>/dev/null && mark ok || mark no
+    else
+        mark na
+    fi
+
     # 9. THE REMOVAL DECISION IS THE SHARED ONE. rc::exist::decide_removal owns the boundary, the debounce
     #    unit (IDEAL OBSERVATIONS, never cycles) and — since 2026-08-11 — the confidence-scaled requirement.
     #    Every hand-written copy of those six lines has drifted: three ways by 2026-08-10 (door paid with
@@ -158,9 +171,9 @@ audit_agent() {
 echo
 echo "concept-agent alignment audit — $ROOT"
 echo
-printf "  %-22s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s\n" \
-       agent room_poly any_usable contract "sigma*" envelope strip poll removal decision
-printf "  %s\n" "$(printf '%.0s-' {1..140})"
+printf "  %-22s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s\n" \
+       agent room_poly any_usable contract "sigma*" envelope strip poll mask_src removal decision
+printf "  %s\n" "$(printf '%.0s-' {1..153})"
 
 skipped=()
 for d in *_concept; do
@@ -190,6 +203,9 @@ if [[ $QUIET -eq 0 ]]; then
   envelope                'warn' = hardcoded DetectorEnvelope{} prior instead of config keys
   strip                   'warn' = no compact belief strip
   poll                    protocol flags polled, not pushed by the update_node_attr_signal firehose
+  mask_src                only the front RGB-D camera may CREATE or UPDATE an object: a DetectionView must
+                          be gated on may_fit_geometry(). has_depth does NOT answer this — a lidar-depth
+                          ricoh mask has has_depth = 1
   removal                 ONE removal authority: an existence channel AND an armed miss counter is two
   decision                the removal DECISION goes through rc::exist::decide_removal (shared boundary +
                           debounce in ideal observations + confidence-scaled requirement). 'warn' = the
