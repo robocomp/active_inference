@@ -74,6 +74,12 @@ FloorAlpha = 0.35
 # mesh_path. Empty ⇒ fall back to the synthetic two-box robot glyph.
 RobotMeshPath = "robot_concept/meshes/shadow.obj"
 
+# Paper theme: pure-white background for figure capture (journals reject the dark plate). It is not a
+# second palette — the renderer keeps every hue and only compresses lightness, so the class colours
+# stay the ones the palette search separated, and the two themes are the same picture. Press 'B' in
+# the window to toggle it live; this key only sets how the window comes up.
+LightBackground = true
+
 [Period]
 Compute = 100
 Emergency = 500

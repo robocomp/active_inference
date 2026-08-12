@@ -48,6 +48,10 @@ struct ViewerConfig
     // is relative to robot_concept's run dir instead, so it cannot be resolved the way every other
     // agent's mesh_path is — hence naming it here. Empty ⇒ fall back to the synthetic robot glyph.
     std::string robot_mesh_path = "robot_concept/meshes/shadow.obj";
+    // Paper theme: white background, with the whole scene re-inked for it (the renderer compresses
+    // lightness, it does not swap palettes). Exists because journals will not print the dark plate;
+    // 'B' toggles it live, so this key only decides how the window comes up.
+    bool light_background = false;
 
     // ── Window ───────────────────────────────────────────────────────────────────
     // Delay before the window is built, ms. Lets the graph finish syncing from the persistent

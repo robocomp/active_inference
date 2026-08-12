@@ -266,6 +266,7 @@ void SpecificWorker::build_viewer_window()
     bcfg.robot_mesh_path  = cfg_.robot_mesh_path;
 
     viewer_ = new rc::viewers::GLGraph3DViewer();
+    viewer_->set_light_background(cfg_.light_background);
     viewer_->set_pick_callback([this](std::uint64_t id, const std::string& type)
                                { log_picked_node(id, type); });
 
@@ -281,6 +282,11 @@ void SpecificWorker::build_viewer_window()
     window_->setCentralWidget(viewer_);   // reparents: the window owns the viewer from here on
     restore_window_geometry();
     window_->show();
+    // Give the GL widget the keyboard focus explicitly. A QMainWindow does NOT hand focus to its
+    // central widget on show, so until something is clicked the window itself swallows every key
+    // press and EVERY shortcut this view has (O/L/G/T/B/R/Esc) silently does nothing — which reads
+    // exactly like an unimplemented feature.
+    viewer_->setFocus();
 
     // POLLED, not signal-driven, on purpose: SceneBuilder::build() walks the InnerEigenAPI ts==0
     // transform cache, which is unlocked and therefore main-thread-only (CLAUDE.md), and a QTimer

@@ -10,6 +10,11 @@
  *  Lighting is ONE-SIDED with the normal oriented toward the camera (see the fragment shader): an
  *  ambient floor keeps any face from rendering fully black, so small marks stay readable at distance.
  *
+ *  Two THEMES: the default dark surface, and a PAPER theme (white background) for figures — journals
+ *  reject a black plate. The paper theme is not a second palette: it keeps every hue and only
+ *  compresses lightness, so the class colours stay the ones the palette search separated. See
+ *  compress()/solid_ink()/line_ink(). Toggle live with 'B'.
+ *
  *  The scene is in ROOM coordinates, metres, Z-UP. GL is Y-UP, so every position goes through
  *  gl() — that mapping lives here and nowhere else.
  */
@@ -93,12 +98,29 @@ public:
 
 	[[nodiscard]] std::uint64_t selected() const noexcept { return selected_id_; }
 
+	// Paper theme: white background with the whole scene re-inked for it. For screen-grabbing a
+	// figure — a journal will not take the dark plate. Colours are baked into the VBOs, so a change
+	// has to rebuild both buffers.
+	void set_light_background(bool on)
+	{
+		if(light_bg_ == on)
+			return;
+		light_bg_ = on;
+		rebuild_solids();
+		rebuild_lines();
+		upload();
+		update();
+	}
+
+	[[nodiscard]] bool light_background() const noexcept { return light_bg_; }
+
 protected:
 	void initializeGL() override
 	{
 		initializeOpenGLFunctions();
 		glEnable(GL_DEPTH_TEST);
-		glClearColor(0.085f, 0.095f, 0.115f, 1.0f);
+		// Clear colour is set per FRAME in paintGL, not here: the theme can change after the context
+		// is up, and paintGL is the one place guaranteed to be current when it does.
 
 		solid_.addShaderFromSourceCode(QOpenGLShader::Vertex, R"(
 			#version 330 core
@@ -177,6 +199,10 @@ protected:
 
 	void paintGL() override
 	{
+		// PURE white in the paper theme, not an off-white: the figure has to sit on the page with no
+		// visible plate around it.
+		if(light_bg_) glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
+		else          glClearColor(0.085f, 0.095f, 0.115f, 1.0f);
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
 		const float aspect = static_cast<float>(std::max(1, width())) / static_cast<float>(std::max(1, height()));
@@ -316,6 +342,7 @@ protected:
 			case Qt::Key_L:   show_labels_ = not show_labels_;                   break;
 			case Qt::Key_G:   show_strata_ = not show_strata_; rebuild_lines(); upload(); break;
 			case Qt::Key_T:   top_down();                                        break;
+			case Qt::Key_B:   set_light_background(not light_bg_);                break;
 			case Qt::Key_Escape: selected_id_ = 0; rebuild_lines(); upload();    break;
 			default: QOpenGLWidget::keyPressEvent(e);                            return;
 		}
@@ -331,6 +358,50 @@ private:
 	[[nodiscard]] static QVector3D gl(const graph3d::Vec3 &p) noexcept { return {p[0], p[2], -p[1]}; }
 	[[nodiscard]] static QVector3D gl(float x, float y, float z) noexcept { return {x, z, -y}; }
 
+	// ── theme ink ─────────────────────────────────────────────────────────────────────────────
+	// Every colour in this scene was chosen against the DARK surface (#16181D), so the palette leans
+	// light — near-white robot, pale wall interior, pale steel edges, a faint blue-grey grid. Drop
+	// that on white and the lightest slots disappear. Re-inking is a LIGHTNESS move only: hue and
+	// chroma ratios are untouched, so the pairwise separation the palette search bought survives and
+	// the two themes stay recognisably the same picture. It is also enough on its own, because the
+	// shader can only ever DARKEN a colour (shade ≤ 1) — the fully-lit face is the worst case.
+	[[nodiscard]] static float lum(const graph3d::Rgb &c) noexcept
+	{
+		return 0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2];
+	}
+	// SOFT knee, not a clamp. A hard cap flattens everything above it onto one lightness: the wall's
+	// interior face and its top strip (deliberately 0.88× of it, so the slab keeps its form) would
+	// come out identical, and the wall would go back to reading as a fence. Below `knee` nothing
+	// moves; above it the remaining range is squeezed into [knee, top], preserving the ORDER.
+	[[nodiscard]] static graph3d::Rgb compress(const graph3d::Rgb &c, float knee, float top) noexcept
+	{
+		const float y = lum(c);
+		if(y <= knee)
+			return c;
+		const float y2 = knee + (y - knee) * (top - knee) / std::max(1e-4f, 1.0f - knee);
+		const float k  = y2 / std::max(y, 1e-4f);
+		return {c[0] * k, c[1] * k, c[2] * k};
+	}
+	// Solids are large shaded areas and their unlit faces already fall to 0.34× — they can hold a
+	// lighter band than the 1-pixel strokes, which have nothing but their own value to be seen with.
+	[[nodiscard]] graph3d::Rgb solid_ink(const graph3d::Rgb &c) const noexcept
+	{
+		return light_bg_ ? compress(c, 0.25f, 0.55f) : c;
+	}
+	[[nodiscard]] graph3d::Rgb line_ink(const graph3d::Rgb &c) const noexcept
+	{
+		return light_bg_ ? compress(c, 0.15f, 0.40f) : c;
+	}
+	// Overlay text sits on the raw background with no shading to help it, so it gets the tightest
+	// band of the three.
+	[[nodiscard]] QColor text_ink(const graph3d::Rgb &c, int alpha) const
+	{
+		const graph3d::Rgb t = light_bg_ ? compress(c, 0.12f, 0.34f) : graph3d::Rgb{c[0] * 0.92f, c[1] * 0.92f, c[2] * 0.92f};
+		return {static_cast<int>(std::clamp(t[0], 0.f, 1.f) * 255),
+		        static_cast<int>(std::clamp(t[1], 0.f, 1.f) * 255),
+		        static_cast<int>(std::clamp(t[2], 0.f, 1.f) * 255), alpha};
+	}
+
 	// ── solid geometry ────────────────────────────────────────────────────────────────────────
 	// Alpha rides on `emit_alpha_`, a member set once per node in rebuild_solids(), rather than being
 	// threaded through every add_* signature: opacity is a property of the NODE being emitted, never
@@ -340,9 +411,12 @@ private:
 	{
 		QVector3D n = QVector3D::crossProduct(b - a, c - a);
 		if(n.lengthSquared() > 0.0f) n.normalize();
+		// The ONE choke point for solid colour: re-inking here covers every glyph, every loaded mesh
+		// and anything added later, with no add_* helper needing to know a theme exists.
+		const graph3d::Rgb ink = solid_ink(col);
 		for(const QVector3D &v : {a, b, c})
 			solid_verts_.push_back({v.x(), v.y(), v.z(), n.x(), n.y(), n.z(),
-			                        col[0], col[1], col[2], emit_alpha_});
+			                        ink[0], ink[1], ink[2], emit_alpha_});
 	}
 	void add_quad(const QVector3D &a, const QVector3D &b, const QVector3D &c, const QVector3D &d,
 	              const graph3d::Rgb &col)
@@ -660,8 +734,11 @@ private:
 	// ── line geometry ─────────────────────────────────────────────────────────────────────────
 	void push_line(const QVector3D &a, const QVector3D &b, const graph3d::Rgb &c, float alpha)
 	{
-		line_verts_.push_back({a.x(), a.y(), a.z(), c[0], c[1], c[2], alpha});
-		line_verts_.push_back({b.x(), b.y(), b.z(), c[0], c[1], c[2], alpha});
+		// Same idea as add_tri: the single choke point for line colour, so the grid, the room
+		// footprint, every edge kind, the drop lines and the selection ring all re-ink for free.
+		const graph3d::Rgb k = line_ink(c);
+		line_verts_.push_back({a.x(), a.y(), a.z(), k[0], k[1], k[2], alpha});
+		line_verts_.push_back({b.x(), b.y(), b.z(), k[0], k[1], k[2], alpha});
 	}
 
 	void push_dashed(const QVector3D &a, const QVector3D &b, const graph3d::Rgb &c, float alpha)
@@ -729,6 +806,11 @@ private:
 			constexpr graph3d::Rgb kPlane{0.45f, 0.52f, 0.62f};
 			for(std::size_t s = 0; s < scene_.level_z.size(); ++s)
 			{
+				// The ROBOT plane carries no grid. It holds exactly one node, so a plane rectangle
+				// buys no depth cue there — it only adds a second frame under the room's own grid,
+				// which is the one that actually establishes the floor plan.
+				if(static_cast<int>(s) == graph3d::kLevelRobot)
+					continue;
 				const float z = scene_.level_z[s];
 				// The room plane is the frame of reference everything else is read against, so it
 				// gets the strong grid; the rest stay faint.
@@ -931,19 +1013,21 @@ private:
 		const int h = pad * 2 + lh * static_cast<int>(items.size());
 		const int x = width() - w - 12, y = 34;
 
-		painter.fillRect(QRect(x, y, w, h), QColor(18, 20, 26, 190));
-		painter.setPen(QColor(70, 78, 92));
+		painter.fillRect(QRect(x, y, w, h), light_bg_ ? QColor(255, 255, 255, 210) : QColor(18, 20, 26, 190));
+		painter.setPen(light_bg_ ? QColor(160, 166, 176) : QColor(70, 78, 92));
 		painter.drawRect(QRect(x, y, w, h));
 		int row = 0;
 		for(const auto &[name, c] : items)
 		{
-			const QColor col(static_cast<int>(std::clamp(c[0], 0.f, 1.f) * 255),
-			                 static_cast<int>(std::clamp(c[1], 0.f, 1.f) * 255),
-			                 static_cast<int>(std::clamp(c[2], 0.f, 1.f) * 255));
+			// The swatch must match the SOLID it stands for, so it takes the same ink as the glyph.
+			const graph3d::Rgb sc = solid_ink(c);
+			const QColor col(static_cast<int>(std::clamp(sc[0], 0.f, 1.f) * 255),
+			                 static_cast<int>(std::clamp(sc[1], 0.f, 1.f) * 255),
+			                 static_cast<int>(std::clamp(sc[2], 0.f, 1.f) * 255));
 			const int ry = y + pad + row * lh;
 			painter.fillRect(QRect(x + pad, ry + 3, sw, sw), col);
 			// Text wears text ink, never the series colour — the swatch beside it carries identity.
-			painter.setPen(QColor(198, 205, 218));
+			painter.setPen(light_bg_ ? QColor(38, 42, 50) : QColor(198, 205, 218));
 			painter.drawText(QPoint(x + pad + sw + 6, ry + lh - 4), QString::fromStdString(name));
 			++row;
 		}
@@ -972,17 +1056,17 @@ private:
 				if(not n.placed)
 					text += "  ·no-RT";
 				const bool hi = (n.id == selected_id_);
-				painter.setPen(hi ? QColor(255, 240, 150)
-				                  : QColor(static_cast<int>(std::clamp(n.color[0], 0.f, 1.f) * 235),
-				                           static_cast<int>(std::clamp(n.color[1], 0.f, 1.f) * 235),
-				                           static_cast<int>(std::clamp(n.color[2], 0.f, 1.f) * 235),
-				                           n.dimmed ? 130 : 215));
+				// The selection ink is the one colour that cannot simply be compressed: pale yellow
+				// is what makes it shout on the dark plate and what makes it vanish on white, so the
+				// paper theme names its own — dark amber, still the odd one out among the class hues.
+				painter.setPen(hi ? (light_bg_ ? QColor(150, 100, 0) : QColor(255, 240, 150))
+				                  : text_ink(n.color, n.dimmed ? 130 : 215));
 				painter.drawText(QPointF(sp.x() + 8.0, sp.y() - 6.0), text);
 			}
 		}
 
 		// Level name plates, anchored to each plane so the ladder is named, not inferred.
-		painter.setPen(QColor(150, 165, 185, 190));
+		painter.setPen(light_bg_ ? QColor(88, 98, 112, 210) : QColor(150, 165, 185, 190));
 		float minx = 0.0f, miny = 0.0f;
 		bool  any = false;
 		for(const auto &n : scene_.nodes)
@@ -1000,7 +1084,7 @@ private:
 
 		draw_legend(painter);
 
-		painter.setPen(QColor(225, 230, 240));
+		painter.setPen(light_bg_ ? QColor(28, 32, 40) : QColor(225, 230, 240));
 		QString hud = QString("nodes %1   edges %2").arg(scene_.nodes.size()).arg(scene_.edges.size());
 		if(selected_id_ != 0)
 			if(const auto *s = scene_.find(selected_id_); s != nullptr)
@@ -1008,10 +1092,11 @@ private:
 				           .arg(QString::fromStdString(s->name), QString::fromStdString(s->type),
 				                s->subtype.empty() ? QString() : "/" + QString::fromStdString(s->subtype));
 		painter.drawText(QRect(10, 6, width() - 20, 20), Qt::AlignLeft | Qt::AlignTop, hud);
-		painter.setPen(QColor(150, 160, 175));
+		painter.setPen(light_bg_ ? QColor(112, 120, 132) : QColor(150, 160, 175));
 		painter.drawText(QRect(10, height() - 24, width() - 20, 20), Qt::AlignLeft | Qt::AlignTop,
 		                 QStringLiteral("drag=rotate  right/mid=pan  wheel=zoom  click=select  "
-		                                "O=all ownership  L=labels  G=strata  T=top  R=reset  Esc=clear"));
+		                                "O=all ownership  L=labels  G=strata  T=top  B=background  "
+		                                "R=reset  Esc=clear"));
 	}
 
 	void upload()
@@ -1044,6 +1129,7 @@ private:
 	bool          show_all_ownership_ = false;
 	bool          show_labels_        = true;
 	bool          show_strata_        = true;
+	bool          light_bg_           = false;   // paper theme; see set_light_background()
 
 	QVector3D center_{0, 0, 0};
 	float     radius_ = 3.0f;

@@ -35,6 +35,7 @@ ViewerConfig load_viewer_config(const ConfigLoader& cfg)
     out.show_agents      = getb("SceneGraphViewer.ShowAgents", out.show_agents);
     out.floor_alpha      = std::clamp(getf("SceneGraphViewer.FloorAlpha", out.floor_alpha), 0.0f, 1.0f);
     out.robot_mesh_path  = gets("SceneGraphViewer.RobotMeshPath", out.robot_mesh_path);
+    out.light_background = getb("SceneGraphViewer.LightBackground", out.light_background);
     out.window_delay_ms  = geti("SceneGraphViewer.WindowDelayMs", out.window_delay_ms);
     out.remember_geometry = getb("SceneGraphViewer.RememberGeometry", out.remember_geometry);
     out.log_period_frames = geti("SceneGraphViewer.LogPeriodFrames", out.log_period_frames);
