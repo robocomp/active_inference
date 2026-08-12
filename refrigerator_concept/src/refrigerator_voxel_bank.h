@@ -1,98 +1,57 @@
 /*
- * refrigerator_voxel_bank.h — the refrigerator-owned voxel memory (extracted from RefrigeratorFitter).
+ * refrigerator_voxel_bank.h — this agent's ADAPTER onto common/voxel_bank.
  *
- * Header-only free functions in rc::voxel_bank that maintain each instance's persistent point bank: key()
- * (FNV-1a quantised voxel key), owned_by_refrigerator() (XY-radius + height ownership gate), and ingest() (insert
- * this cycle's candidate/residual points, cap-bounded, ownership-gated, de-duplicated by key). Depends only
- * on rc::RefrigeratorInstance and rc::RefrigeratorConfig, so it never pulls in RefrigeratorFitter's nested observation type.
+ * The bank itself (ownership gate, dedup grid, cap, counters, readout) is shared and lives in
+ * common/voxel_bank/voxel_bank.h. What stays here is the only part that is genuinely about a refrigerator: how to
+ * read its EXTENT out of its own state, and which of the two vertical allowances its underside needs.
  */
 
 #pragma once
 
-#include <algorithm>
 #include <cmath>
-#include <cstdint>
-#include <print>
+#include <algorithm>
+#include <utility>
 #include <vector>
 
 #include <Eigen/Dense>
 
-#include "../../common/birth_fragment/birth_fragment.h"   // rc::voxel_key (shared with the birth burst)
-#include "refrigerator_config.h"     // rc::RefrigeratorConfig
-#include "refrigerator_instance.h"   // rc::RefrigeratorInstance
+#include "../../common/voxel_bank/voxel_bank.h"   // rc::voxel_bank:: (SHARED)
+#include "refrigerator_config.h"
+#include "refrigerator_instance.h"
 
 namespace rc::voxel_bank {
 
-// FNV-1a hash of a point quantised to a quantization_m grid — the voxel bank's O(1) dedup key.
-// Defined once in common/birth_fragment so a candidate's PRE-birth burst dedups on exactly the same grid
-// as the bank it is used to seed; two definitions would let a seeded bank double-count its own points.
-inline std::uint64_t key(const Eigen::Vector3f& point, float quantization_m)
-{
-    return rc::voxel_key(point, quantization_m);
-}
-
-// True iff a point belongs to THIS refrigerator's voxel bank (ownership gate rejecting foreign/floor points).
-//
-// Two THRESHOLDS, both physical, keep a neighbouring refrigerator's or the floor's points out of the bank:
-// an XY radius (refrigerator half-diagonal + config margin, floored at 1 m so a tiny model still owns nearby
-// returns) and a vertical band [z_min, refrigerator_height + config margin].
-inline bool owned_by_refrigerator(const RefrigeratorInstance& inst, const Eigen::Vector3f& point, const RefrigeratorConfig& cfg)
+// This refrigerator's extent + the allowances its geometry earns. The ONLY per-object part of the bank.
+inline std::pair<Extent, Params> extent_of(const RefrigeratorInstance& inst, const RefrigeratorConfig& cfg)
 {
     const auto& s = inst.model.state();
-
-    // XY ownership gate: refrigerator-centered radius with a configurable margin.
-    const float half_diag = 0.5f * std::sqrt(s.w * s.w + s.h * s.h);
-    const float gate_radius = std::max(1.0f, half_diag + cfg.voxel_select_radius_margin_m);
-    const float dx = point.x() - s.cx;
-    const float dy = point.y() - s.cy;
-    if (std::hypot(dx, dy) > gate_radius)
-        return false;
-
-    // Height gate to reject floor / distant clutter points in mixed scenes.
-    const float z_min = -0.05f;   // threshold: a little below the room floor (z≈0) to keep grazing returns
-    const float z_max = s.refrigerator_height + cfg.voxel_select_height_margin_m;
-    return point.z() >= z_min and point.z() <= z_max;
+    Extent e;
+    Params prm;
+    prm.radius_margin_m = cfg.voxel_select_radius_margin_m;
+    prm.height_margin_m = cfg.voxel_select_height_margin_m;
+    prm.quantization_m  = cfg.voxel_bank_quantization_m;
+    prm.max_points      = cfg.voxel_bank_max_points;
+    // A fridge is FLOOR-ANCHORED, so the bank spans the whole occupied column [0, H] and its underside is a
+    // HARD bound — the floor — needing only the sensor-noise allowance, not model slack.
+    e.cx = s.cx; e.cy = s.cy;
+    e.half_diag_m = 0.5f * std::sqrt(s.w * s.w + s.h * s.h);
+    e.z0_m = 0.0f;
+    e.z1_m = s.refrigerator_height;
+    prm.below_m = 0.05f;
+    return {e, prm};
 }
 
-// Insert this cycle's candidate + residual points into the instance's voxel bank: ownership-gated,
-// de-duplicated by voxel key, and hard-capped at cfg.voxel_bank_max_points. Logs on the log period.
-inline void ingest(RefrigeratorInstance& inst,
-                   const std::vector<Eigen::Vector3f>& candidate_pts,
-                   const std::vector<Eigen::Vector3f>& residual_pts,
-                   const RefrigeratorConfig& cfg)
+// Ingest this cycle's points, then log on the agent's own period.
+inline void ingest(RefrigeratorInstance& inst, const std::vector<Eigen::Vector3f>& candidate_pts,
+                   const std::vector<Eigen::Vector3f>& residual_pts, const RefrigeratorConfig& cfg)
 {
-    std::size_t inserted = 0;
-    std::size_t rejected_foreign = 0;
-    const auto max_points = static_cast<std::size_t>(std::max(1, cfg.voxel_bank_max_points));
-
-    auto ingest_pts = [&](const std::vector<Eigen::Vector3f>& src)
-    {
-        for (const auto& p : src)
-        {
-            if (inst.voxel_bank_pts.size() >= max_points)
-                break;
-            if (not owned_by_refrigerator(inst, p, cfg))
-            {
-                ++rejected_foreign;
-                continue;
-            }
-            const auto k = key(p, cfg.voxel_bank_quantization_m);
-            if (inst.voxel_bank_keys.insert(k).second)
-            {
-                inst.voxel_bank_pts.push_back(p);
-                ++inserted;
-            }
-        }
-    };
-
-    ingest_pts(candidate_pts);
-    ingest_pts(residual_pts);
-
+    const auto [e, prm] = extent_of(inst, cfg);
+    Bank bank{std::move(inst.voxel_bank_pts), std::move(inst.voxel_bank_keys)};
+    const auto r = rc::voxel_bank::ingest(bank, e, prm, candidate_pts, residual_pts);
+    inst.voxel_bank_pts  = std::move(bank.pts);
+    inst.voxel_bank_keys = std::move(bank.keys);
     const int period = std::max(1, cfg.refrigerator_log_period_frames);
-    const bool do_log = (inst.processed_cycles % period) == 0;
-    if (inserted > 0 and do_log)
-        std::print("[{}] voxel-bank: +{} total={} (cap={}) reject_foreign={}\n",
-                   inst.node_name, inserted, inst.voxel_bank_pts.size(), max_points, rejected_foreign);
+    log_ingest(inst.node_name, inst.voxel_bank_pts.size(), prm, r, (inst.processed_cycles % period) == 0);
 }
 
 }  // namespace rc::voxel_bank

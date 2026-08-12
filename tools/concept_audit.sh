@@ -135,7 +135,22 @@ audit_agent() {
         mark na
     fi
 
-    # 9. THE MANIFEST IS AUTHORITATIVE, AND AN INHERITED WORLD FACT IS FATAL. A concept agent must declare
+    # 9. SHARED-MODULE ADOPTION, as a COUNT rather than one column per module. Extraction is not adoption:
+    #    every shared module in this fleet was written because N agents had drifted, and every one of them
+    #    then reached some agents and not others — decide_removal existed while door hand-wrote it in three
+    #    places and chair never called it; rc::birth::evidence said "every concept agent must use it" while
+    #    four ignored it; voxel_key was defined once in common/ and re-inlined in two agents on a grid that
+    #    only happened to agree. This counts the modules an object-concept agent is expected to use, so a
+    #    new one shows up as a number falling rather than as a column nobody added.
+    local must="existence_belief instance_tracker mask_ingestor rt_covariance object_affordance nbv detectability occlusion phantom_log graph_provenance concept_manifest voxel_bank"
+    local have=0 want=0
+    for m in $must; do
+        want=$((want+1))
+        grep -rq "common/$m/" "$src" 2>/dev/null && have=$((have+1))
+    done
+    if [[ $have -eq $want ]]; then mark ok; else printf "%-13s" "$have/$want"; fi
+
+    # 10. THE MANIFEST IS AUTHORITATIVE, AND AN INHERITED WORLD FACT IS FATAL. A concept agent must declare
     #    what its object IS in common/concept_manifest/<concept>.concept.toml and READ it — not merely
     #    cross-check it, and not carry the values in code where a clone inherits them silently. The gate is
     #    rc::manifest::provenance_ok: a block declaring `from = "inherited"` stops the agent at startup.
@@ -147,7 +162,7 @@ audit_agent() {
         mark wr
     fi
 
-    # 10. BIRTH IS AN OBSERVATION, NOT A CYCLE. common/instance_tracker/birth_evidence.h says "every concept
+    # 11. BIRTH IS AN OBSERVATION, NOT A CYCLE. common/instance_tracker/birth_evidence.h says "every concept
     #    agent must use it": agents feed the tracker on EVERY compute cycle (a candidate with no matching
     #    detection expires), so leaving birth_evidence at its 1.0 default makes birth_frames count COMPUTE
     #    CYCLES. At ~10 Hz compute against a ~9.5 Hz mask stream, "8 frames" is well under a second of one
@@ -160,7 +175,7 @@ audit_agent() {
         mark na
     fi
 
-    # 11. THE ABSENCE GUARD MUST READ A *FRESH* VERDICT. An agent that suppresses silhouette absence on
+    # 12. THE ABSENCE GUARD MUST READ A *FRESH* VERDICT. An agent that suppresses silhouette absence on
     #    `dbg_gated` ("this frame may not move the geometry, so it may not destroy the object either") must
     #    also check dbg_gate_fresh, because run_inference returns EARLY when no mask arrives — so on exactly
     #    the cycles the guard fires, the flag is whatever the last real look left behind. A phantom has no
@@ -174,7 +189,7 @@ audit_agent() {
         mark na
     fi
 
-    # 12. ONLY THE FRONT RGB-D CAMERA MAY CREATE OR UPDATE AN OBJECT. The voxelizer publishes `mask_source`
+    # 13. ONLY THE FRONT RGB-D CAMERA MAY CREATE OR UPDATE AN OBJECT. The voxelizer publishes `mask_source`
     #    (0 = zed, 1 = ricoh) precisely because `mask_has_depth` stopped answering that question: once ricoh
     #    masks were depth-filled from reprojected LiDAR they ship as full 3D slices with has_depth = 1. Every
     #    guard written as `if (has_depth)` then silently began accepting 360-degree detections from BEHIND the
@@ -187,7 +202,7 @@ audit_agent() {
         mark na
     fi
 
-    # 13. THE REMOVAL DECISION IS THE SHARED ONE. rc::exist::decide_removal owns the boundary, the debounce
+    # 14. THE REMOVAL DECISION IS THE SHARED ONE. rc::exist::decide_removal owns the boundary, the debounce
     #    unit (IDEAL OBSERVATIONS, never cycles) and — since 2026-08-11 — the confidence-scaled requirement.
     #    Every hand-written copy of those six lines has drifted: three ways by 2026-08-10 (door paid with
     #    twelve deaths at fixated=0), and on 2026-08-11 door STILL had three hand-rolled sites, two of them
@@ -210,9 +225,9 @@ audit_agent() {
 echo
 echo "concept-agent alignment audit — $ROOT"
 echo
-printf "  %-22s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s\n" \
-       agent room_poly any_usable contract "sigma*" envelope strip poll removal manifest birth absence mask_src decision
-printf "  %s\n" "$(printf '%.0s-' {1..192})"
+printf "  %-22s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s\n" \
+       agent room_poly any_usable contract "sigma*" envelope strip poll removal shared manifest birth absence mask_src decision
+printf "  %s\n" "$(printf '%.0s-' {1..205})"
 
 skipped=()
 for d in *_concept; do
@@ -243,6 +258,8 @@ if [[ $QUIET -eq 0 ]]; then
   strip                   'warn' = no compact belief strip
   poll                    protocol flags polled, not pushed by the update_node_attr_signal firehose
   removal                 ONE removal authority: an existence channel AND an armed miss counter is two
+  shared                  how many of the modules an object-concept agent is expected to use it actually
+                          uses. Extraction is not adoption — every gap this session began as a green matrix
   manifest                the agent declares what its object IS in a manifest AND reads it. An inherited
                           world fact ('from = \"inherited\"') stops the agent at startup — a note could not
   birth                   birth_evidence must come from rc::birth::evidence — an OBSERVATION, admitted by
