@@ -135,6 +135,20 @@ audit_agent() {
         mark na
     fi
 
+    # 9. THE ABSENCE GUARD MUST READ A *FRESH* VERDICT. An agent that suppresses silhouette absence on
+    #    `dbg_gated` ("this frame may not move the geometry, so it may not destroy the object either") must
+    #    also check dbg_gate_fresh, because run_inference returns EARLY when no mask arrives — so on exactly
+    #    the cycles the guard fires, the flag is whatever the last real look left behind. A phantom has no
+    #    mask by definition, so its verdict freezes forever and it can never accrue absence. Measured on
+    #    refrigerator_concept 2026-08-12: phantom refrigerator_2 ran 6578 cycles with 678 predicted-visible
+    #    pixels and none lit, the robot centred on it, and admitted 0.000 absence evidence. Replayed through
+    #    the freshness-aware guard it dies after 399 cycles.
+    if grep -rq "dbg_gated" "$src" 2>/dev/null; then
+        grep -rq "dbg_gate_fresh" "$src" 2>/dev/null && mark ok || mark no
+    else
+        mark na
+    fi
+
     # 10. ONLY THE FRONT RGB-D CAMERA MAY CREATE OR UPDATE AN OBJECT. The voxelizer publishes `mask_source`
     #    (0 = zed, 1 = ricoh) precisely because `mask_has_depth` stopped answering that question: once ricoh
     #    masks were depth-filled from reprojected LiDAR they ship as full 3D slices with has_depth = 1. Every
@@ -148,7 +162,7 @@ audit_agent() {
         mark na
     fi
 
-    # 9. THE REMOVAL DECISION IS THE SHARED ONE. rc::exist::decide_removal owns the boundary, the debounce
+    # 11. THE REMOVAL DECISION IS THE SHARED ONE. rc::exist::decide_removal owns the boundary, the debounce
     #    unit (IDEAL OBSERVATIONS, never cycles) and — since 2026-08-11 — the confidence-scaled requirement.
     #    Every hand-written copy of those six lines has drifted: three ways by 2026-08-10 (door paid with
     #    twelve deaths at fixated=0), and on 2026-08-11 door STILL had three hand-rolled sites, two of them
@@ -171,9 +185,9 @@ audit_agent() {
 echo
 echo "concept-agent alignment audit — $ROOT"
 echo
-printf "  %-22s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s\n" \
-       agent room_poly any_usable contract "sigma*" envelope strip poll mask_src removal decision
-printf "  %s\n" "$(printf '%.0s-' {1..153})"
+printf "  %-22s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s\n" \
+       agent room_poly any_usable contract "sigma*" envelope strip poll removal absence mask_src decision
+printf "  %s\n" "$(printf '%.0s-' {1..166})"
 
 skipped=()
 for d in *_concept; do
@@ -203,10 +217,12 @@ if [[ $QUIET -eq 0 ]]; then
   envelope                'warn' = hardcoded DetectorEnvelope{} prior instead of config keys
   strip                   'warn' = no compact belief strip
   poll                    protocol flags polled, not pushed by the update_node_attr_signal firehose
+  removal                 ONE removal authority: an existence channel AND an armed miss counter is two
+  absence                 an admissibility guard on dbg_gated must also read dbg_gate_fresh — a verdict from
+                          a cycle with no mask is STALE, and a phantom (which never has one) freezes it
   mask_src                only the front RGB-D camera may CREATE or UPDATE an object: a DetectionView must
                           be gated on may_fit_geometry(). has_depth does NOT answer this — a lidar-depth
                           ricoh mask has has_depth = 1
-  removal                 ONE removal authority: an existence channel AND an armed miss counter is two
   decision                the removal DECISION goes through rc::exist::decide_removal (shared boundary +
                           debounce in ideal observations + confidence-scaled requirement). 'warn' = the
                           agent hand-writes it, which is how the debounce drifted three ways before

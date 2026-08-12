@@ -704,6 +704,7 @@ float RefrigeratorFitter::run_inference(RefrigeratorInstance& inst, const Refrig
             inst.ai2_belief.inflate_for_age(dt, cfg_.ai2_age_nominal_dt_s);
         }
         inst.last_belief_touch = now;
+        inst.dbg_gate_fresh = false;   // no mask reached the fit ⇒ the gate verdict below is STALE this cycle
         projection_->compute_projected_roi(inst);
         return inst.dbg_energy;   // HOLD the last free energy — no new mask ≠ FE 0 (the fit is unchanged)
     }
@@ -1036,6 +1037,7 @@ float RefrigeratorFitter::run_inference(RefrigeratorInstance& inst, const Refrig
     inst.dbg_energy    = energy;
     inst.dbg_R         = R;
     inst.dbg_gated     = gated;
+    inst.dbg_gate_fresh = true;   // computed from THIS frame's mask — see refrigerator_instance.h
 
     log_ai2_csv(inst, npts, R, gated, energy);
 

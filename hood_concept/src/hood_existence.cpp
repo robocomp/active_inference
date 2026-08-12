@@ -122,7 +122,23 @@ void HoodExistence::update_and_remove(HoodFitter& fitter, HoodLidarIngestor* lid
                 // ⚠Consequence to watch: a phantom is now only removable from an admissible viewpoint — still,
                 // and reasonably framed. That is what the epistemic planner exists to produce, but it does mean
                 // removal waits for a good look instead of happening while driving past.
-                const float raw_free = (observed or inst.dbg_gated) ? 0.0f : sil.e_free;
+                // ★★A STALE GATE VERDICT IS NOT A VERDICT. `dbg_gated` says "this frame may not move the
+                // geometry", and a frame that may not move the object may not destroy it either — but
+                // run_inference returns EARLY when no fresh mask arrives, so on exactly the cycles this
+                // guard fires the flag was computed from whenever the object was LAST SEEN. A phantom has
+                // no mask by definition, so its verdict freezes at that last look forever.
+                //
+                // Measured live (etc/ai2_log.csv, 2026-08-12): refrigerator_2, a phantom, ran 6578 cycles
+                // with npts = 0 on 95% of them and gated = 1 on 95% of them. Its final row reads
+                // socc = 0, sfree = 678, sndet = 678 — 678 predicted-visible pixels and NOT ONE lit by a
+                // fridge mask — at p_detect 0.50 and central_frac 0.95, i.e. the robot centred on it and
+                // seeing nothing. TOTAL absence evidence admitted over its whole life: 0.000, against
+                // 22774.8 for the real fridge beside it. L sat pinned at the +4 clamp.
+                //
+                // dbg_gate_fresh says whether the verdict means anything. An unjudged view is not an
+                // untrustworthy one: it carries no admissibility objection, so absence stands.
+                const bool view_untrustworthy = inst.dbg_gate_fresh and inst.dbg_gated;
+                const float raw_free = (observed or view_untrustworthy) ? 0.0f : sil.e_free;
                 // P(detect | present, geometry): how confidently the ZED would resolve this hood FROM HERE.
                 // in_fov_frac folds the real FRUSTUM + occlusion; range_conf the angular-size drop; central_frac
                 // whether the robot is actually LOOKING at it (a peripheral hood clipping the wide FoV edge is
@@ -246,7 +262,9 @@ void HoodExistence::update_and_remove(HoodFitter& fitter, HoodLidarIngestor* lid
                 // robot drove 2.3 m → 1.15 m; a stale box at 1 m is metres of ray error and a whole frame of
                 // pixel error. The evidence is about OUR registration, not about the fridge's existence.
                 // Occupancy is unaffected: a return that lands on the box can only ever confirm.
-                const float admissible = inst.dbg_gated ? 0.0f : 1.0f;
+                // Same freshness rule as the silhouette guard above: a verdict from a cycle that had no
+                // mask is stale, and a stale objection must not silence the LiDAR's absence either.
+                const float admissible = (inst.dbg_gate_fresh and inst.dbg_gated) ? 0.0f : 1.0f;
                 const float p_detect_lidar = absence_range_conf(lidar_range) * coverage * admissible;
                 // A hood IS a faithful opaque solid, so it declares itself as one and gets the symmetric
                 // policy: a return at the near face is FOR; a through-beam and — the fix — a return metres deep

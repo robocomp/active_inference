@@ -107,7 +107,15 @@ void CabinetExistence::update_and_remove(CabinetFitter& fitter, CabinetLidarInge
                 // only by the ricoh whose silhouette the ZED-based check can't confirm, must never vote it away.
                 // Occupancy always counts. (The ricoh-projected silhouette, once the producer ships 360 mask
                 // pixels, will let absence be judged in the ricoh view directly instead of relying on this guard.)
-                const float raw_free = observed ? 0.0f : sil.e_free;
+                // ★A FRAME THAT MAY NOT MOVE THE GEOMETRY MAY NOT DESTROY THE OBJECT EITHER — cabinet had
+                // NO admissibility guard here at all, the opposite divergence from its siblings: it would
+                // charge absence from a truncated or motion-gated view, where the projected box is stale
+                // against a live image and any mismatch measures OUR registration rather than the run's
+                // existence. That is the defect the guard was introduced for in refrigerator_concept, which
+                // deleted a healthy fridge in 5 seconds. Read the verdict only when it is FRESH (see
+                // cabinet_instance.h): a view nobody judged carries no objection, so absence stands.
+                const bool view_untrustworthy = inst.dbg_gate_fresh and inst.dbg_gated;
+                const float raw_free = (observed or view_untrustworthy) ? 0.0f : sil.e_free;
                 // P(detect | present, geometry): how confidently the ZED would resolve this cabinet FROM HERE.
                 // in_fov_frac folds the real FRUSTUM + occlusion; range_conf the angular-size drop; central_frac
                 // whether the robot is actually LOOKING at it (a peripheral cabinet clipping the wide FoV edge is

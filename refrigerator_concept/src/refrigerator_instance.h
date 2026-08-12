@@ -189,6 +189,14 @@ struct RefrigeratorInstance
     float fe_baseline = -1.0f;    // <0 = uninitialised
     float fe_surprise = 0.0f;
     bool  dbg_gated   = false;    // truncation-gated (predict-only, no geometric update) this frame
+    // ★★AND WHETHER THAT VERDICT MEANS ANYTHING THIS CYCLE. run_inference returns EARLY when no fresh mask
+    // reaches it, before `gated` is recomputed — so dbg_gated keeps whatever it held on the last cycle that
+    // DID have a mask, indefinitely. A phantom has no mask by definition, so its gate verdict is frozen at
+    // whatever the last real look happened to be; if that look was gated (robot moving, or an off-centre
+    // mask) the existence channel's absence guard reads "this view is untrustworthy" forever and admits
+    // ZERO absence evidence, no matter how long the robot then stares at empty space. Ported from
+    // table_concept, where the same freshness defect was fixed on 2026-08-06.
+    bool  dbg_gate_fresh = false; // the gate verdict above was computed THIS cycle from a real mask
 
     // Provenance of the mask packet this fit consumed (instrumentation; NO effect on the fit). The CSV showed
     // long runs of fits whose GEOMETRY was bit-identical (npts/range pinned) while the belief ratcheted — i.e.
