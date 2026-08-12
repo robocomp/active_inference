@@ -527,7 +527,8 @@ bool RouteSpline::self_test()
 // accumulating their total variation. Everything here is a property of the ROUTE and the IDENTIFIED
 // plant — nothing about a particular run enters.
 RouteIdeal route_ideal(const RouteSpline &sp, float v_cap, float a_lat, float a_dec,
-                       float w_max, float W, float T_lag, float headroom)
+                       float w_max, float W, float T_lag, float headroom, float sharp_q,
+                       float body_radius_m)
 {
     RouteIdeal out;
     if (not sp.valid() or sp.length() < 1e-3f) return out;
@@ -549,7 +550,12 @@ RouteIdeal route_ideal(const RouteSpline &sp, float v_cap, float a_lat, float a_
         const float k_av = std::abs(sp.kappa_avg(s + 0.5f * W, W));
         float v = v_cap;
         if (k_pt > 1e-3f) v = std::min(v, std::sqrt(a_lat / k_pt));
-        if (k_av > 1e-3f) v = std::min(v, headroom * w_max / k_av);
+        // The rotation budget shrinks as the turn radius approaches the body's own — see
+        // ControllerRuntimeParams::sharp_turn_slowdown. Must match route_speed_limit exactly, or the
+        // ideal floor describes a robot driving a different speed law than the one being measured.
+        const float kr = k_av * body_radius_m;
+        const float h_eff = headroom / (1.f + std::max(0.f, sharp_q) * kr * kr);
+        if (k_av > 1e-3f) v = std::min(v, h_eff * w_max / k_av);
         vstar[static_cast<std::size_t>(i)] = std::clamp(v, 0.f, v_cap);
     }
     for (int i = n - 2; i >= 0; --i)   // back-propagate the braking bound

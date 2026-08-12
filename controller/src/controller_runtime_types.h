@@ -149,6 +149,31 @@ struct ControllerParams
     // level the controller then refused to drive at.
     float max_lateral_accel_mps2 = 1.0f;
     float max_rot_speed_rps = 0.8f;
+    // ── HOW MUCH HARDER TO SLOW FOR A TURN AS ITS RADIUS APPROACHES THE ROBOT'S OWN ──────────────
+    // Measured (tools/tracker_sim --brake): from |kappa| = 0.3 1/m upward the ROTATION limit
+    // h*w_max/kappa_avg is the only thing setting the speed — the comfort limit sqrt(a_lat/kappa)
+    // never binds again above that, and the rotational-ACCELERATION limit sqrt(alpha/|dkappa/ds|)
+    // never binds anywhere (it allows 1.4-2.5 m/s where rotation allows 0.11-0.44). So a fixed
+    // headroom is the whole speed law in every turn, and 1/kappa scales a body-radius hairpin exactly
+    // as it scales a gentle bend. This makes the budget itself shrink as the turn tightens:
+    //     h_eff = h / (1 + q * (kappa_avg * R_circumscribed)^2)
+    // The covariate is dimensionless BECAUSE it is measured against the robot: kappa*R = 1 is a turn
+    // whose radius equals the body's own circumscribed circle, which is where driving becomes
+    // pivoting. Not a cutoff — a continuous reweighting of the rotation budget by a physical
+    // covariate, inert on a straight and strongest where the geometry is hardest.
+    // ★q = 0 is EXACTLY the previous law, so a baseline recorded before this stays comparable.
+    // ★Measured on the 30-waypoint tour (L=0.50, headroom 0.70, brake_k 0.25):
+    //     q        0.00   0.10   0.25   0.50   1.00   2.00
+    //     rms mm   30.8   31.1   30.8   30.6   27.4   24.8   <- tracking never degrades
+    //     lap s      93     97    103    112    133    173   <- the whole cost is TIME
+    //     rot/m   0.827  0.827  0.828  0.825  0.821  0.822   <- the L policy's budget is UNTOUCHED
+    //   h_eff/h at q=0.25:  0.97 at r=1 m,  0.80 at r=0.325 m,  0.39 at the route's tightest 0.13 m.
+    // ★CONTRAST WITH PlainTrackerBrakeK, which is the knob that LOOKS like this one. Re-swept on the
+    // shipped (clamped-exponent) law, raising it costs tracking monotonically — rms 30.3 at k=0 to
+    // 47.2 at k=1.0 to 68.6 at k=4.0 — and k=2.0 busts the rot/m budget at 0.947. It brakes on the
+    // turn RATE, which is speed-dependent and therefore self-releasing as it works; this brakes on
+    // CURVATURE, which is a property of the route. Sharpness is geometry, not rate.
+    float sharp_turn_slowdown = 0.25f;
     float pos_gain = 1.2f;
     float rot_gain = 1.5f;
     // ── Fixed-rate velocity output (see controller_motion_commander.h) ──

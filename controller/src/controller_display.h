@@ -61,6 +61,10 @@ public:
     void set_mission_state(const rc::MissionPanel::View &view,
                            const std::vector<Eigen::Vector2f> &waypoints,
                            int current_index);
+    // Adopt the plain tracker's L into the Stick <-> Loose slider. GUI thread, call once after the
+    // config is loaded so the control never shows a value the robot is not using.
+    void set_plain_l(float metres);
+
     // GUI thread. True if a mission is running, so a click can ask before cancelling it.
     bool mission_running() const;
     bool mission_recording() const;
@@ -112,11 +116,12 @@ public:
         std::string state;   // Offered / Executing / Completed / Missing / Invalid
     };
     void update_affordance_efe(const std::vector<AffordanceEfeSample> &samples);
-    // The two quantities the L-adaptation policy uses, live: cross-track rms (the OBJECTIVE it
-    // minimises) and rotational effort per metre (the CONSTRAINT that stops it driving the gains up
-    // until the loop rings). Plus the worst cross-track so far, for context.
-    // Thread-safe; the plot buffers under its own mutex.
-    void update_tracking_error(float rms_m, float max_m, float rot_per_m);
+    // The commanded velocities, for the smoothness trace. Fed from the motion commander's OUTPUT loop
+    // (every command actually emitted, ~40 Hz), not from the GUI tick: smoothness is a property of the
+    // signal the base receives, and sampling it at the redraw rate would alias the jitter worth seeing.
+    // adv in m/s, rot in rad/s. Thread-safe; the plot buffers under its own mutex and the series are
+    // registered on the GUI thread at construction.
+    void update_velocity_trace(float adv_mps, float rot_rps);
     // The camera frame with the YOLO silhouettes on it, for the affordance panel. Composed on the
     // control thread and handed over whole (see controller_camera_masks.h) — the QImage inside is
     // already private to this snapshot, so nothing shares a pixel buffer across the thread boundary.
@@ -188,7 +193,6 @@ private:
     std::unique_ptr<rc::Viewer2D> viewer_2d_;
     bool room_view_fitted_ = false;
     std::unordered_set<std::string> efe_series_known_;   // plot series already registered
-    bool j_series_ready_ = false;                        // running-J series registered once
     std::size_t efe_color_next_ = 0;                     // next palette colour for a new affordance
 
     mutable std::mutex snapshot_mutex_;

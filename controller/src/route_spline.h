@@ -175,7 +175,12 @@ struct RouteIdeal
 
 // v_cap/a_lat/a_dec/w_max/headroom mirror ControllerSession::route_speed_limit; W is the curvature
 // window (plain_W) and T_lag the identified actuator lag.
+// ★sharp_q is NOT optional, deliberately. It is the curvature-dependent rotation budget
+// (ControllerRuntimeParams::sharp_turn_slowdown), and v* is the DENOMINATOR every J_route term is
+// divided by: computing the floor under a speed law the robot is not being driven at would silently
+// rescale every mission metric rather than fail. No default, so a new caller has to supply it.
 RouteIdeal route_ideal(const RouteSpline &sp, float v_cap, float a_lat, float a_dec,
-                       float w_max, float W, float T_lag, float headroom);
+                       float w_max, float W, float T_lag, float headroom, float sharp_q,
+                       float body_radius_m);
 
 }  // namespace rc

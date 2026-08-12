@@ -46,10 +46,11 @@ public:
         // Pause is a HOLD on the current activity; Stop aborts it. Two controls because they are two
         // different intentions, and folding them into one button is what made Stop unresumable.
         std::function<void(bool)>        on_pause;
-        // Route optimiser: speed (0) <-> safety (1). See RouteOptimizerConfig::safety_bias — it trades
-        // PRECISION between the clearance preference and the curvature prior, so it is one number with a
-        // measurable frontier rather than two weights to guess at.
-        std::function<void(float)>       on_safety_bias;
+        // Plain tracker: the closed-loop error-decay length L, in METRES of arc. Small = sticks hard to
+        // the route (the gains are 2/L and 1/L^2), large = loose and smooth. Live, per control cycle.
+        // ★Replaced on_safety_bias, whose value only took effect on the next route BUILD — a live
+        // slider for a non-live quantity. RouteSafetyBias lives in the config file now.
+        std::function<void(float)>       on_plain_l;
     };
 
     // What the panel needs to know each cycle to show the truth. Pushed from the GUI thread in present().
@@ -74,6 +75,12 @@ public:
     QPushButton *drive_button() const { return drive_btn_; }
     // Placed in the toolbar beside Run/Stop by Custom_widget, for the same reason.
     QPushButton *pause_button() const { return pause_btn_; }
+
+    // Show the L the CONTROL side is actually holding. Called once after the config is loaded.
+    // ★The slider it replaced was hard-coded to its midpoint (0.50) while the config said 0.75, so the
+    // panel asserted a value the robot was not using until someone happened to drag it — and then the
+    // drag CHANGED the setting rather than adopting it. A control that lies at rest is worse than none.
+    void set_plain_l(float metres);
 
     void set_missions(const std::vector<std::string> &names, const std::string &selected);
     void rebuild_actions(bool recording, int recorded_points);
@@ -106,8 +113,8 @@ private:
     QPushButton *drive_btn_ = nullptr;
     QPushButton *pause_btn_ = nullptr;
     bool paused_ = false;
-    QSlider     *safety_ = nullptr;
-    QLabel      *safety_label_ = nullptr;
+    QSlider     *plain_l_ = nullptr;
+    QLabel      *plain_l_label_ = nullptr;
 
     bool running_ = false;
     bool recording_ = false;

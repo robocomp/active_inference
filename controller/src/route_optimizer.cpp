@@ -127,7 +127,7 @@ struct Problem
 {
     // Row ranges per term, so a solve can be split into WHICH term is paying. A total tells you nothing
     // about whether a bounded term is being swamped by an unbounded one.
-    int row_bend = 0, row_clear = 0, row_anchor = 0, row_gauge = 0;
+    int row_bend = 0, row_jerk = 0, row_clear = 0, row_anchor = 0, row_gauge = 0;
     // Residual rows and the sparse-by-construction Jacobian, held dense: at ~600 rows x ~180 columns the
     // dense normal equations are ~180^3/3 flops, i.e. microseconds. Banded storage would be faster and
     // considerably easier to get wrong, and this runs once per route build.
@@ -179,10 +179,12 @@ void assemble(const std::vector<Eigen::Vector2f> &ctrl,
     const std::size_t n_quad = n_spans * kQuadPerSpan;
     const std::size_t n_anch = anchor_ctrl.size();
     const std::size_t n_gauge = (M >= 2) ? M - 1 : 0;
+    // dkappa/ds is a THIRD difference, so it needs one more neighbour than bending and two rows (vector).
+    const std::size_t n_jerk = (cfg.w_jerk > 0.f and M >= 4) ? M - 3 : 0;
 
     // The bound is a SCALAR per interior control point; the second difference is a vector, hence two rows.
     const std::size_t n_bend_rows = cfg.curvature_bound ? n_bend : 2 * n_bend;
-    const int rows = static_cast<int>(n_bend_rows + n_quad + 2 * n_anch + n_gauge);
+    const int rows = static_cast<int>(n_bend_rows + 2 * n_jerk + n_quad + 2 * n_anch + n_gauge);
     out.r.setZero(rows);
     out.J.setZero(rows, nvar);
 
@@ -268,6 +270,40 @@ void assemble(const std::vector<Eigen::Vector2f> &ctrl,
         }
     }
     out.row_bend = row - mark; mark = row;
+
+    // ── PRIOR: JERK OF CURVATURE. r = sqrt(w/N)·(rho^2/h^3)·(p[i+2] - 3p[i+1] + 3p[i] - p[i-1]) ──────
+    // For a uniform cubic B-spline the third difference of the control points is proportional to
+    // dkappa/ds, so this is the clothoid criterion expressed in the decision variable directly. It is
+    // LINEAR in P — no alpha/beta as the bending term needs — so the Gauss-Newton block is constant and
+    // exact, and the Jacobian is just the stencil.
+    // WHY IT EARNS ITS PLACE: the robot must deliver omega = v*kappa, hence
+    // omega_dot = v_dot*kappa + v^2*(dkappa/ds). With speed roughly held, the roughness of the TURN RATE
+    // *is* the curvature rate, so this attacks command roughness at its geometric cause instead of
+    // through the tracker's gains — which saturate, and whose gradients are zero exactly there.
+    // DIMENSIONLESS like every other term: rho normalises kappa (rho·kappa is 1 at the tightest turn
+    // holdable at full speed), so rho^2·dkappa/ds is its rate counterpart.
+    // Normalised by sc_t.kappa deliberately: this is the same family as bending (route geometry), and
+    // giving it a separate normaliser would let the two drift apart in scale for no stated reason.
+    if (n_jerk > 0)
+    {
+        const float sc = std::sqrt(sc_t.kappa * (cfg.w_jerk / bias_g) / static_cast<float>(n_jerk))
+                       * cfg.rho * cfg.rho / (cfg.h * cfg.h * cfg.h);
+        for (std::size_t i = 1; i + 2 < M; ++i)
+        {
+            const Eigen::Vector2f d3 = ctrl[i + 2] - 3.f * ctrl[i + 1] + 3.f * ctrl[i] - ctrl[i - 1];
+            const std::array<std::pair<std::size_t, float>, 4> nbr =
+                {{{i - 1, -1.f}, {i, 3.f}, {i + 1, -3.f}, {i + 2, 1.f}}};
+            for (int a = 0; a < 2; ++a)
+            {
+                out.r(row + a) = sc * d3[a];
+                for (const auto &[j, coeff] : nbr)
+                    if (const int vj = var_of(j, lo, hi); vj >= 0)
+                        out.J(row + a, vj + a) += sc * coeff;
+            }
+            row += 2;
+        }
+    }
+    out.row_jerk = row - mark; mark = row;
 
     // ── PREFERENCE: one-sided clearance deficit, sampled along the CURVE (not at the control points —
     //    the curve can cut inside a corner of its own polygon and pass closer than any vertex does).
@@ -450,6 +486,9 @@ RouteOptimizerReport optimize_route(std::vector<Eigen::Vector2f> &ctrl, const Ro
         assemble(ctrl, cfg, anchor_ctrl, lo, hi, TermScales{}, p0, nullptr);
         int o = 0;
         const float e_k = p0.r.segment(o, p0.row_bend).squaredNorm();   o += p0.row_bend;
+        // ★The jerk rows sit BETWEEN bend and clear; skipping them here would make every normaliser
+        // below read the wrong slice of the residual and silently mis-scale the whole objective.
+        o += p0.row_jerk;
         const float e_c = p0.r.segment(o, p0.row_clear).squaredNorm();  o += p0.row_clear;
         const float e_a = p0.r.segment(o, p0.row_anchor).squaredNorm();
         // A term that is already zero needs no scaling — leave it at 1 rather than dividing by an epsilon
@@ -514,6 +553,7 @@ RouteOptimizerReport optimize_route(std::vector<Eigen::Vector2f> &ctrl, const Ro
     {
         int o = 0;
         rep.e_kappa  = pr.r.segment(o, pr.row_bend).squaredNorm();   o += pr.row_bend;
+        rep.e_jerk   = pr.r.segment(o, pr.row_jerk).squaredNorm();   o += pr.row_jerk;
         rep.e_clear  = pr.r.segment(o, pr.row_clear).squaredNorm();  o += pr.row_clear;
         rep.e_anchor = pr.r.segment(o, pr.row_anchor).squaredNorm(); o += pr.row_anchor;
         rep.e_gauge  = pr.r.segment(o, pr.row_gauge).squaredNorm();
@@ -635,7 +675,7 @@ RouteOptimizerReport optimize_route(std::vector<Eigen::Vector2f> &ctrl, const Ro
     if (ran_away or lost_clearance or broke_feasibility or not uvd_ok)
     {
         std::printf("[route-opt] REJECTED and reverted: %s%s%s%s%s (max move %.2f m vs limit %.2f, "
-                    "clearance %.3f -> %.3f m) [kappa %.3f | clear %.3f | anchor %.3f | gauge %.3f]. "
+                    "clearance %.3f -> %.3f m) [kappa %.3f | jerk %.3f | clear %.3f | anchor %.3f | gauge %.3f]. "
                     "The un-optimised route is used.\n",
                     ran_away ? "control points ran away" : "",
                     (ran_away and (lost_clearance or broke_feasibility)) ? " and " : "",
@@ -643,7 +683,7 @@ RouteOptimizerReport optimize_route(std::vector<Eigen::Vector2f> &ctrl, const Ro
                     broke_feasibility ? "the body no longer FITS where it did (exact footprint test)" : "",
                     not uvd_ok ? " the route was deformed ACROSS an obstacle (UVD)" : "",
                     rep.max_move_m, move_limit, rep.min_clearance_before, rep.min_clearance_after,
-                    rep.e_kappa, rep.e_clear, rep.e_anchor, rep.e_gauge);
+                    rep.e_kappa, rep.e_jerk, rep.e_clear, rep.e_anchor, rep.e_gauge);
         std::fflush(stdout);
         ctrl = initial;
         rep.rejected = true;
@@ -656,10 +696,10 @@ RouteOptimizerReport optimize_route(std::vector<Eigen::Vector2f> &ctrl, const Ro
     if (cfg.verbose)
     {
         std::printf("[route-opt] %zu ctrl pts, %d iters: cost %.4f -> %.4f "
-                    "[kappa %.3f | clear %.3f | anchor %.3f | gauge %.3f], "
+                    "[kappa %.3f | jerk %.3f | clear %.3f | anchor %.3f | gauge %.3f], "
                     "clearance %.3f -> %.3f m, max move %.3f m%s\n",
                     M, rep.iterations, rep.cost_before, rep.cost_after,
-                    rep.e_kappa, rep.e_clear, rep.e_anchor, rep.e_gauge,
+                    rep.e_kappa, rep.e_jerk, rep.e_clear, rep.e_anchor, rep.e_gauge,
                     rep.min_clearance_before, rep.min_clearance_after, rep.max_move_m,
                     cfg.freeze_before > 0 ? " (prefix frozen)" : "");
         std::fflush(stdout);
@@ -742,10 +782,11 @@ bool route_optimizer_self_test()
         const std::size_t M = ctrl.size(), lo = 1, hi = M - 2;
         const std::vector<std::size_t> ac = {5, 12};
 
-        auto fd_check = [&](bool bound, const char *what)
+        auto fd_check = [&](bool bound, const char *what, float w_jerk = 0.f)
         {
             RouteOptimizerConfig c2 = cfg;
             c2.curvature_bound = bound;
+            c2.w_jerk = w_jerk;   // >0 puts the third-difference rows under test too
             c2.anchors = {ctrl[5], ctrl[12]};                     // exercise the anchor rows too
             // kappa_peak ON, so the bending block under test is the NON-LINEAR one. With it at 0 the
             // Delta^2 form is the old linear block and the check would pass without touching the new term.
@@ -782,6 +823,11 @@ bool route_optimizer_self_test()
         };
         fd_check(false, "second difference, kappa_peak on");
         fd_check(true,  "curvature upper bound");
+        // The jerk block is LINEAR in P, so its Gauss-Newton Jacobian is exact by construction — which is
+        // precisely why it is worth checking: a stencil typo would still converge to something smooth and
+        // plausible, just not to dkappa/ds. Run with the non-linear bending block ON so the two are
+        // exercised together and a row-offset error between them cannot hide.
+        fd_check(false, "third difference (jerk of curvature)", 1.0f);
     }
 
     // (3) FROZEN PREFIX. On a repair the route ahead may move; the stretch the robot is already on may not.

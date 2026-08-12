@@ -512,6 +512,37 @@ MaxAdvSpeed = 0.7
 # normaliser. Lower = gentler corners and slower laps; it does not affect straight-line speed at all.
 MaxLateralAccel = 1.0
 MaxRotSpeed = 0.8
+# ── HOW MUCH HARDER TO SLOW FOR A REALLY SHARP TURN ──────────────────────────────────────────────
+# MEASURED FIRST, and the measurement is why this key exists rather than a re-tune of an existing one
+# (tools/tracker_sim route_world.txt --brake, 30-waypoint tour):
+#   |kappa| 1/m      n    v_lat    v_rot   v_entry   binding
+#   0.3 - 1.0      313    1.329    1.020     2.039   rot
+#   1.0 - 2.0      117    0.878    0.435     1.372   rot
+#   2.0 - 4.0       52    0.596    0.201     0.967   rot
+#   >= 4.0          24    0.450    0.114     2.494   rot
+# From kappa = 0.3 upward the ROTATION limit h*w_max/kappa_avg is the ONLY thing setting the speed: the
+# comfort limit sqrt(a_lat/kappa) never binds again (so lowering MaxLateralAccel slows the GENTLE bends
+# and leaves the sharp ones untouched — exactly backwards), and the rotational-ACCELERATION limit
+# sqrt(alpha/|dkappa/ds|) never binds anywhere, so it was NOT built.
+# But h is a constant, so v = h*w_max/kappa scales a hairpin the robot can barely fit through by the
+# same 1/kappa as a gentle bend. This makes the budget itself know how sharp the turn is:
+#     h_eff = h / (1 + q * (kappa_avg * R_circumscribed)^2)
+# The covariate is dimensionless BECAUSE it is measured against the ROBOT: kappa*R = 1 is a turn whose
+# radius equals the body's own circumscribed circle (0.325 m), which is where driving becomes pivoting.
+# Not a cutoff — a continuous reweighting by a physical covariate, inert on a straight.
+# ★q = 0 is EXACTLY the previous law, so any baseline recorded before today stays comparable.
+#     q        0.00   0.10   0.25   0.50   1.00   2.00
+#     rms mm   30.8   31.1   30.8   30.6   27.4   24.8   <- tracking never degrades, and improves at 1+
+#     lap s      93     97    103    112    133    173   <- the whole cost is TIME
+#     rot/m   0.827  0.827  0.828  0.825  0.821  0.822   <- the L policy's 0.87 budget is UNTOUCHED
+#   At 0.25 the slowdown is 3% at a 1 m radius, 20% at the body radius, 61% at the route's tightest
+#   (0.13 m). That shape — nothing on ordinary corners, a lot on genuinely sharp ones — is the point.
+# ★DO NOT reach for PlainTrackerBrakeK for this. Re-swept on the shipped (clamped-exponent) law it costs
+# tracking monotonically — rms 30.3 at k=0, 47.2 at k=1.0, 68.6 at k=4.0 — and k=2.0 busts the rot/m
+# budget at 0.947. It brakes on the turn RATE, which is speed-dependent and self-releasing as it works;
+# this brakes on CURVATURE, which is a property of the route. Sharpness is geometry, not rate.
+# ★UNRUN ON THE ROBOT. The bench has no pose error and no ESDF, so it measures the speed law, not a lap.
+SharpTurnSlowdown = 0.25
 PosGain = 1.2
 RotGain = 1.5
 # ★★2026-08-02 MEASURED, was 0.03. The knee sat BELOW the localiser's achievable floor: over lap

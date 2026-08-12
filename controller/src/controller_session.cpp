@@ -987,8 +987,16 @@ float ControllerSession::route_speed_limit(float v_cap, float a_decel) const
         // a systematic UNDER-turn (the robot rides outside the curve, corr(e,kappa) -0.160). Reserving
         // a fraction for feedback moved rms 154 -> 94 mm at 0.70 and corr to ~0. Inert for the PD
         // tracker, which has no feedforward to saturate, so it is applied in ROUTE mode only.
+        // ★SHARPNESS. The budget above is a CONSTANT, so v_rot = h*w_max/kappa scales a hairpin the
+        // robot can barely fit through exactly as it scales a gentle bend. That is the whole speed law
+        // in every turn — measured, the comfort limit stops binding above kappa = 0.3 1/m and the
+        // rotational-acceleration limit never binds at all — so if the robot is to take a REALLY sharp
+        // turn more carefully than a wide one, the budget itself has to know how sharp the turn is.
+        // See ControllerRuntimeParams::sharp_turn_slowdown for the measured sweep; q = 0 is the old law.
+        const float kr = k_avg * rc::RobotFootprint::shadow().circumscribed_radius();
+        const float sharp = 1.f + std::max(0.f, params_->sharp_turn_slowdown) * kr * kr;
         const float rot_budget = std::max(0.05f, params_->max_rot_speed_rps)
-                               * (route_tracker_active_ ? rot_headroom_ : 1.0f);
+                               * (route_tracker_active_ ? rot_headroom_ : 1.0f) / sharp;
         const float v_rot = k_avg > 1e-3f ? rot_budget / k_avg : v_cap;
         v_rot_min = std::min(v_rot_min, v_rot);
         const float v_here = std::min(v_lat, v_rot);
@@ -1159,7 +1167,9 @@ bool ControllerSession::drive_mission_route(const ControllerPlanningStep &step,
     const auto &tp = path_controller.params;
     const rc::RouteIdeal ideal = rc::route_ideal(route_.spline(), v_cap, a_lat, tp.cbf_max_decel,
                                                  w_max, tp.plain_W, tp.plain_T_lag,
-                                                 route_tracker_active_ ? rot_headroom_ : 1.0f);
+                                                 route_tracker_active_ ? rot_headroom_ : 1.0f,
+                                                 params_ ? params_->sharp_turn_slowdown : 0.f,
+                                                 rc::RobotFootprint::shadow().circumscribed_radius());
     mission_.set_route_ideal(ideal.tv_v, ideal.tv_w, ideal.rms_e, ideal.valid);
     std::println("[route] ideal floor: TV(v*)={:.2f} m/s  TV(w*)={:.2f} rad/s  rms(e*)={:.4f} m "
                  "over {:.1f} m ({:.0f}% of the route contributes to TV(w*)){}",

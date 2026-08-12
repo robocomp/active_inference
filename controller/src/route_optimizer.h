@@ -124,6 +124,17 @@ struct RouteOptimizerConfig
     float safety_bias = 0.5f;
 
     float w_kappa   = 1.0f;
+    // ── PRIOR: JERK OF CURVATURE, i.e. dkappa/ds ─────────────────────────────────────────────────
+    // The bending term above penalises kappa; this penalises how fast kappa CHANGES along the route,
+    // which is the clothoid criterion. It exists because the rotation the robot must deliver is
+    // omega = v*kappa, so omega_dot = v_dot*kappa + v^2*(dkappa/ds): with speed roughly held, the
+    // roughness of the TURN RATE is the curvature rate. Smoothing the geometry attacks that at its
+    // cause, whereas tuning the tracker's gains fights it through a saturating clamp — and |cmd_rot|
+    // was measured sitting on its rail for 53% of cycles on a bad lap, where gain gradients are zero.
+    // ★OFF by default (0). It competes with the anchor term for fidelity to the authored waypoints and
+    // with kappa for where the bend is spent, so it must be earned on measurements (tools/tracker_sim
+    // reports TV(w)/m, which is the quantity this is meant to move).
+    float w_jerk    = 0.0f;
     float w_clear   = 1.0f;
     float w_gauge   = 0.05f;
     // Huber knee for the anchor term, in units of sigma_a. Beyond it the pull grows LINEARLY instead of
@@ -214,7 +225,7 @@ struct RouteOptimizerReport
     float min_clearance_after = 0.f;
     // PER-TERM cost at the end. Without this a bad solve is undiagnosable: a big total says nothing about
     // WHICH term won, and a bounded term sitting next to an unbounded one is inert without ever saying so.
-    float e_kappa = 0.f, e_clear = 0.f, e_anchor = 0.f, e_gauge = 0.f;
+    float e_kappa = 0.f, e_clear = 0.f, e_anchor = 0.f, e_gauge = 0.f, e_jerk = 0.f;
 };
 
 // Optimise `ctrl` in place. Endpoints are always pinned (the route must still start at the robot and

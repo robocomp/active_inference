@@ -155,6 +155,7 @@ void TrajectoryController::reset_mppi_state(const std::vector<Eigen::Vector2f>& 
 
 void TrajectoryController::set_path(const std::vector<Eigen::Vector2f>& path_room)
 {
+    reset_arrival_watch();
     reset_mppi_state(path_room);
     wp_index_ = (path_room.size() > 1) ? 1 : 0;
 
@@ -167,6 +168,7 @@ void TrajectoryController::set_path(const std::vector<Eigen::Vector2f>& path_roo
 
 void TrajectoryController::set_path_presmoothed(const std::vector<Eigen::Vector2f>& path_room)
 {
+    reset_arrival_watch();
     // Resets only — the geometry is already smooth and already footprint-checked, so relax_path
     // and smooth_path_spline are not merely unnecessary here, they are harmful (see the header).
     // This used to call set_path() and then overwrite path_room_, which RAN both passes in full
@@ -197,6 +199,7 @@ void TrajectoryController::set_goal_facing_yaw(std::optional<float> yaw_rad)
 
 void TrajectoryController::stop()
 {
+    reset_arrival_watch();
     active_ = false;
     path_room_.clear();
     wp_index_ = 0;
@@ -527,12 +530,42 @@ TrajectoryController::ControlOutput TrajectoryController::compute(
         if (dir.squaredNorm() > 1e-9f)
             passed_arrival = (robot_pose.translation() - *arrival_point_room_).dot(dir.normalized()) > 0.f;
     }
+    // ── PASSED IT WITHOUT EVER BEING INSIDE THE BAND ────────────────────────────────────────────
+    // The proximity test samples dist_to_goal ONCE PER CYCLE, so it can only fire if some cycle lands
+    // inside the band. It usually does — 0.7 m/s over a 50 ms cycle is 35 mm against a 250 mm band — but
+    // the loop's tail is long (the align note below records cycles reaching ~1.5 s), and at 0.7 m/s that
+    // is over a metre of travel in ONE cycle. The robot then steps clean over the band, never samples
+    // inside it, and nothing fires: it drives on with the goal behind it. Rare, and rare in the worst
+    // way, because it depends on a timing hiccup coinciding with the last metre.
+    // Being AT the goal can be missed; PASSING it cannot — the distance starts growing and never stops.
+    // So: remember the closest approach, and if the robot is receding from a goal it genuinely got near,
+    // treat that as arrival. `passed_arrival` above does not cover this: it needs an arrival_point AND an
+    // outgoing direction, which only a waypoint on a longer path has.
+    // ★THE CAPTURE RADIUS IS MEASURED, NOT GUESSED. What could have been jumped is exactly the largest
+    // per-cycle change in distance seen on this approach, so the reach is the band plus that. A tighter
+    // radius would miss precisely the slow-cycle case this exists for; a fixed larger one would fire on
+    // approaches that never came close.
+    // Three consecutive receding cycles, not one: pose jitter alone can grow the distance for a cycle,
+    // and a false arrival stops the robot short of its goal.
+    if (endpoint_arrival_)
+    {
+        const float step = std::abs(out.dist_to_goal - last_dist_to_goal_);
+        if (std::isfinite(last_dist_to_goal_)) max_goal_step_ = std::max(max_goal_step_, step);
+        if (out.dist_to_goal < closest_to_goal_) { closest_to_goal_ = out.dist_to_goal; receding_cycles_ = 0; }
+        else if (out.dist_to_goal > closest_to_goal_ + 0.01f) ++receding_cycles_;
+        last_dist_to_goal_ = out.dist_to_goal;
+    }
+    const bool passed_by_recession =
+        endpoint_arrival_ and receding_cycles_ >= 3
+        and closest_to_goal_ <= active_params_.goal_threshold + max_goal_step_;
+
     // The whole arrival test is skipped when the caller owns arrival itself (a continuous route ends by
     // ARC LENGTH — see set_endpoint_arrival). Skipping it, rather than ignoring its result, matters: this
     // branch also clears active_, so a caller that merely discarded goal_reached would find the follower
     // switched off and the base stopped for good.
     if (endpoint_arrival_
-        and (out.dist_to_goal < active_params_.goal_threshold or passed_arrival or aligning_))
+        and (out.dist_to_goal < active_params_.goal_threshold or passed_arrival or aligning_
+             or passed_by_recession))
     {
         // Position reached. If the target carries a commanded facing yaw, rotate in
         // place to face it before finishing (so e.g. the robot looks AT the table at
@@ -552,6 +585,7 @@ TrajectoryController::ControlOutput TrajectoryController::compute(
                 aligning_ = false;
                 active_ = false;
                 out.goal_reached = true;
+                reset_arrival_watch();
                 mppi_tracker_.forget_executed_command();   // arrived: nothing to be continuous with
                 return out;
             }

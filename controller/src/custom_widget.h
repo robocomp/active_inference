@@ -202,24 +202,32 @@ public:
         main_layout->addWidget(efe_panel, 1);
 
         // ── RUNNING J, directly below the EFE score ──────────────────────────────────────────────
-        // The same quality metric the run is graded on at STOP, accumulated live so a bad stretch is
-        // visible while it happens rather than in a CSV afterwards. Four series, the terms of J, so the
-        // plot says WHICH part is costing: smoothness of speed, of rotation, deviation, or clearance.
+        // ── WHAT THE WHEELS ARE ACTUALLY ASKED TO DO ────────────────────────────────────────────
+        // The commanded advance and rotation, sampled at the OUTPUT rate (every command the motion
+        // commander emits, ~40 Hz) rather than at the GUI rate — smoothness is a property of the signal
+        // the base receives, and sampling it at the redraw rate would alias exactly the jitter worth
+        // seeing. Both live in roughly 0..0.8 (m/s and rad/s), so they share an axis legibly.
+        // ★This replaced the L-adaptation plot (objective cross_rms vs constraint rot_per_m). That pair
+        // was fed from MissionRunner::summary() and therefore read zero unless a MISSION was running —
+        // through every clicked target and every affordance drive, which is most of what the robot does.
         auto *j_panel = new QFrame(this);
         j_panel->setFrameShape(QFrame::StyledPanel);
         j_panel->setFrameShadow(QFrame::Sunken);
         auto *j_layout = new QVBoxLayout(j_panel);
         j_layout->setContentsMargins(4, 2, 4, 2);
         j_layout->setSpacing(2);
-        // ★cross_track_rms, not J. Measured over nine laps: rms repeats to cv 2.3% — through a mission
-        // edit AND a 119 mm waypoint relocation — while every smoothness term swings 23-43% because
-        // they are properties of the ROUTE, which is re-planned against a live grid every run. rms is
-        // the one quantity that measures what the TRACKER does: follow whatever curve it was handed.
-        j_layout->addWidget(new QLabel("L adaptation — objective: cross_rms (m, minimise)   |   "
-                                       "constraint: rot_per_m (rad/m, budget 0.87)", j_panel));
+        j_layout->addWidget(new QLabel("commanded velocity — adv (m/s)  |  rot (rad/s)   "
+                                       "[smoothness: watch for steps and sign flips]", j_panel));
         mission_j_plot = new rc::TimeSeriesPlot(j_panel);
         mission_j_plot->setMinimumHeight(80);
-        mission_j_plot->set_visible_window(120.f);   // a lap is ~95 s, so one window holds a whole lap
+        // ~30 s: long enough to hold a whole approach and its arrival, short enough that individual
+        // command steps are still distinguishable. A 120 s window compressed them into a smear.
+        mission_j_plot->set_visible_window(30.f);
+        // Registered HERE, on the GUI thread at construction, so the output thread only ever calls
+        // add_point() — which is mutex-guarded and documented safe from any thread. Registering lazily
+        // from that thread would be the one unguarded moment.
+        mission_j_plot->add_series("adv", QColor(55, 55, 55), 2.0f);
+        mission_j_plot->add_series("rot", QColor(70, 130, 200), 2.0f);
         j_layout->addWidget(mission_j_plot, 1);
         main_layout->addWidget(j_panel, 1);
     }
@@ -369,7 +377,7 @@ public:
     }
 
     rc::TimeSeriesPlot *affordance_efe_plot = nullptr;
-    rc::TimeSeriesPlot *mission_j_plot = nullptr;   // running J, below the EFE panel
+    rc::TimeSeriesPlot *mission_j_plot = nullptr;   // commanded adv/rot trace, below the EFE panel
     QPushButton *lidar_toggle_btn = nullptr;
     QPushButton *mppi_paths_toggle_btn = nullptr;
 

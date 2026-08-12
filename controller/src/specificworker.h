@@ -153,7 +153,6 @@ private:
 	// resume exactly where it stopped while Stop cannot: Stop clears the first flag AND the route.
 	bool paused_ = false;
 	bool stop_sent_when_halted_ = false;
-	int mission_j_plot_tick_ = 0;   // throttles the running-J plot to 2 Hz; see specificworker.cpp
 	bool compute_debug_logged_ = false;
 	bool owned_nodes_cleaned_ = false;
 	rc::TrajectoryController path_controller_;

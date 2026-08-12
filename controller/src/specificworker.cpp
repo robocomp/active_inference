@@ -213,7 +213,12 @@ void SpecificWorker::initialize()
 	                                 omnirobot_proxy,
 	                                 agent_id,
 	                                 [this](float adv, float side, float rot)
-	                                 { display_.set_command_values(adv, side, rot); });
+	                                 {
+	                                     display_.set_command_values(adv, side, rot);
+	                                     // The smoothness trace, at the rate the base is actually
+	                                     // commanded. adv arrives in mm/s; the plot reads m/s.
+	                                     display_.update_velocity_trace(adv * 1e-3f, rot);
+	                                 });
 	motion_commander_.set_profile_sink(
 	    [this](std::uint64_t t_ms, float adv, float side, float rot, float freshness)
 	    { session_.mission().add_profile_sample(t_ms, adv, side, rot, freshness); });
@@ -362,11 +367,14 @@ void SpecificWorker::initialize()
 			}
 		});
 	};
-	gui.mission.on_safety_bias = [this](float bias)
+	gui.mission.on_plain_l = [this](float L)
 	{
 		// Through the command queue like every other GUI intent: the slider is moved on the Qt thread and
-		// the value is read by the control thread when it next builds or repairs a route.
-		enqueue_command([this, bias]() { params.route_safety_bias = std::clamp(bias, 0.f, 1.f); });
+		// the value is picked up by the control thread on its next cycle. Unlike the route-optimiser dial
+		// this replaced, that IS the next cycle — L is a live feedback gain, not a route property.
+		// ★The floor is the tracker's own (plain_tracker.cpp clamps to 0.05); this one only keeps a
+		// stray value from reaching it, and the run context stamps whatever was in force.
+		enqueue_command([this, L]() { path_controller_.params.plain_L = std::clamp(L, 0.05f, 5.0f); });
 	};
 	gui.mission.on_smooth = [this]()
 	{
@@ -466,6 +474,9 @@ void SpecificWorker::initialize()
 	};
 
 	display_.initialize(obstacle_tracker_.lidar_buffer(), std::move(gui));
+	// The Stick <-> Loose slider must open on the L the tracker is actually running (load_params ran
+	// long before this). Its predecessor opened at a hard-coded midpoint that disagreed with the config.
+	display_.set_plain_l(path_controller_.params.plain_L);
 	session_.mission().set_csv_path(params.mission_csv_path);
 	session_.mission().set_run_dir(params.mission_run_dir);
 	// Keep the per-cycle MPPI diagnostics with the run they describe. Written live to a fixed path and
@@ -567,23 +578,12 @@ void SpecificWorker::compute()
 	}
 
 	// Running J, plotted below the EFE panel. summary() is the SAME accumulator the run is graded on at
-	// STOP, so the live curve and the final number cannot disagree — which is the point: a bad stretch
-	// is visible while it happens instead of in a CSV afterwards, and the four series say WHICH term is
-	// paying for it. ★clear_norm is drawn in red because J was blind to clearance until 2026-08-05: two
-	// 3-lap runs scored 5.212 and 5.191 while min_clearance differed 36-fold.
-	// ⚠THROTTLED, and it must stay that way: on the mission path live_tracking() calls summary(), which
-	// COPIES AND SORTS the clearance vector on every call — ~1900 samples per lap and ~5700 over three.
-	// At the 20 Hz control rate that is a growing O(n log n) inside the loop whose notice latency the
-	// timing work exists to protect. A plot with a 120 s window gains nothing from 20 Hz, so it runs at 2.
-	if (++mission_j_plot_tick_ >= 10)
-	{
-		mission_j_plot_tick_ = 0;
-		// ★NOT mission().summary() directly: that is zero unless a MISSION is running, so the panel
-		// drew three flat zeros through every clicked target and every affordance — the driving L is
-		// actually adapted on. live_tracking() still returns the graded summary while a mission runs.
-		const auto lt = session_.live_tracking();
-		display_.update_tracking_error(lt.cross_rms_m, lt.cross_max_m, lt.rot_per_m);
-	}
+	// ★THE L-ADAPTATION PLOT IS GONE, and with it this 2 Hz throttle. It showed cross_rms against
+	// rot_per_m, both from MissionRunner::summary(), which is zero unless a MISSION is running — so it
+	// drew flat zeros through every clicked target and every affordance drive. The panel now traces the
+	// COMMANDED velocities instead, fed straight from the motion commander's output loop (see
+	// set_dependencies above), which needs no throttle here and no summary() call: that call copied and
+	// sorted the clearance vector on every invocation, which is why this was throttled in the first place.
 
 	// Camera + YOLO masks for the affordance panel. Self-throttled internally (it recomposes at ~6 Hz),
 	// so this call is cheap at the control rate; it is skipped entirely while the panel is closed
@@ -768,6 +768,7 @@ void SpecificWorker::load_params()
 	}
 	load_optional_cast<double>("Controller.MaxAdvSpeed", params.max_adv_speed_mps);
 	load_optional_cast<double>("Controller.MaxLateralAccel", params.max_lateral_accel_mps2);
+	load_optional_cast<double>("Controller.SharpTurnSlowdown", params.sharp_turn_slowdown);
 	load_optional_cast<double>("Controller.MaxRotSpeed", params.max_rot_speed_rps);
 	load_optional_cast<double>("Controller.FootprintSafetyMarginM", params.footprint_safety_margin_m);
 	// Clearance PREFERENCE inside the A* cost (grid_planner.h). Distinct from FootprintSafetyMarginM,

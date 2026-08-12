@@ -330,6 +330,7 @@ bool apply_key(rc::RouteOptimizerConfig &o, float &smoothing, float &spacing, co
     if      (k == "w_kappa")      o.w_kappa = v;
     else if (k == "w_clear")      o.w_clear = v;
     else if (k == "w_gauge")      o.w_gauge = v;
+    else if (k == "w_jerk")       o.w_jerk = v;    // dkappa/ds prior — see route_optimizer.h
     else if (k == "clear_peak")   o.clear_peak = v;
     else if (k == "kappa_peak")   o.kappa_peak = v;
     else if (k == "sigma_a")      o.sigma_a = v;

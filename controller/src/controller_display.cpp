@@ -113,6 +113,11 @@ void ControllerDisplay::initialize(rc::LidarPointBuffer *lidar_buffer, Callbacks
 
 }
 
+void ControllerDisplay::set_plain_l(float metres)
+{
+    if (mission_panel_) mission_panel_->set_plain_l(metres);
+}
+
 void ControllerDisplay::set_mission_list(const std::vector<std::string> &names, const std::string &selected)
 {
     std::lock_guard<std::mutex> lock(snapshot_mutex_);
@@ -232,23 +237,16 @@ void ControllerDisplay::set_goal_distance(std::optional<float> dist_m, std::opti
 // Running cross-track error. This replaced a four-series J plot: J's smoothness terms are properties
 // of the ROUTE (re-planned against a live grid each run, so a 119 mm waypoint repair moved jerk/m by
 // 38%), while rms repeats to cv 2.3% and is what the tracker itself controls.
-void ControllerDisplay::update_tracking_error(float rms_m, float max_m, float rot_per_m)
+void ControllerDisplay::update_velocity_trace(float adv_mps, float rot_rps)
 {
     auto *plot = custom_widget_ ? custom_widget_->mission_j_plot : nullptr;
     if (plot == nullptr) return;
-    if (not j_series_ready_)
-    {
-        // Objective in dark grey, constraint in blue — the two the policy reads. Both happen to live
-        // in 0.1..0.9 (m and rad/m), so they share an axis legibly despite the different units.
-        plot->add_series("cross_rms", QColor(55, 55, 55), 2.4f);     // OBJECTIVE: minimise
-        plot->add_series("rot_per_m", QColor(70, 130, 200), 2.0f);   // CONSTRAINT: keep under budget
-        plot->add_series("cross_max", QColor(190, 120, 120), 1.2f);  // context
-        j_series_ready_ = true;
-    }
+    // Series are registered in Custom_widget's constructor, on the GUI thread; add_point() is
+    // mutex-guarded and documented callable from any thread, which is what lets this be fed straight
+    // from the motion commander's output loop instead of at the redraw rate.
     const auto ok = [](float v) { return std::isfinite(v) ? v : 0.f; };
-    plot->add_point("cross_rms", ok(rms_m));
-    plot->add_point("rot_per_m", ok(rot_per_m));
-    plot->add_point("cross_max", ok(max_m));
+    plot->add_point("adv", ok(adv_mps));
+    plot->add_point("rot", ok(rot_rps));
 }
 
 void ControllerDisplay::update_affordance_efe(const std::vector<AffordanceEfeSample> &samples)

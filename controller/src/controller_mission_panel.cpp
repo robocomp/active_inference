@@ -4,11 +4,20 @@
 
 #include "controller_mission_panel.h"
 
+#include <algorithm>   // std::clamp — set_plain_l; do not rely on Qt pulling it in
+#include <cmath>       // std::lround
+
 namespace rc
 {
 
 // Fewer than this and there is no tour to store; must match MissionRunner::finish_recording().
 constexpr int kMinWaypoints = 2;
+
+// Plain-tracker L slider range, in MILLIMETRES of arc (a QSlider is integer-valued). 0.15 m is inside
+// the region where the loop is expected to ring; 1.50 m is well past visible corner-cutting. Both ends
+// are reachable on purpose — this control exists to find the edge, not to stay inside a known-good band.
+constexpr int kPlainLMinMm = 150;
+constexpr int kPlainLMaxMm = 1500;
 
 MissionPanel::MissionPanel(QWidget *parent, Callbacks callbacks)
     : QWidget(parent), cb_(std::move(callbacks))
@@ -53,40 +62,55 @@ MissionPanel::MissionPanel(QWidget *parent, Callbacks callbacks)
                      [this](const QString &n)
                      { if (cb_.on_select and not n.isEmpty()) cb_.on_select(n.toStdString()); });
 
-    // ── ROUTE CHARACTER: speed <-> safety ──
-    // One dial over the optimiser's loss, not a pair of weights: it moves precision from the curvature
-    // prior to the clearance preference and back (see RouteOptimizerConfig::safety_bias). It is here
-    // rather than in a config file because its effect is a JUDGEMENT — how much lap time a metre of
-    // clearance is worth — and that is the operator's call, made while watching the robot.
-    // ★It applies to the NEXT route build or repair; it does not reshape the curve under the robot.
-    // ★The end labels follow the VALUE, not the reading order of the phrase: safety_bias 0 is
-    // "faster, closer" and 1 is "safer" (RouteOptimizerConfig::safety_bias), so Risk sits at the left
-    // end and Safe at the right. Swapping the two words without also inverting the mapping would
-    // mislabel a clearance control, which is the one kind of label worth being pedantic about.
-    row->addWidget(new QLabel("Risk", frame));
-    safety_ = new QSlider(Qt::Horizontal, frame);
-    safety_->setRange(0, 100);
-    safety_->setValue(50);
-    safety_->setFixedWidth(90);
-    safety_->setToolTip(
-        QStringLiteral("Route optimiser: Risk <-> Safe.\n"
-                       "Risk (left)  — curvature dominates: wider, smoother corners, hugging obstacles\n"
-                       "               to get them, and a higher speed allowed through v = sqrt(a_lat/kappa).\n"
-                       "Safe (right) — clearance dominates: the route climbs onto the medial axis and\n"
-                       "               accepts winding to stay there.\n"
-                       "Measured on the 30-waypoint tour, the full sweep buys +32% p05 clearance for\n"
-                       "+4.4% lap time. Applies to the NEXT route build or repair."));
-    row->addWidget(safety_);
-    row->addWidget(new QLabel("Safe", frame));
-    safety_label_ = new QLabel("0.50", frame);
-    safety_label_->setFixedWidth(30);
-    row->addWidget(safety_label_);
-    QObject::connect(safety_, &QSlider::valueChanged, this,
-                     [this](int v)
+    // ── HOW HARD THE ROBOT STICKS TO THE ROUTE: the plain tracker's L ──
+    // ★REPLACED the Risk <-> Safe route-optimiser dial (2026-08-12). That slider moved
+    // RouteOptimizerConfig::safety_bias, which applies only to the NEXT route BUILD — so moving it
+    // while watching the robot did nothing at all until the next replan, which is the opposite of what
+    // a live slider is for. Its value is a considered, measured one (config RouteSafetyBias = 0.75,
+    // with a clearance/length frontier recorded beside it), and it belongs in the config file where a
+    // measurement can sit next to it. L is the one that is genuinely a live judgement.
+    // L is the closed-loop error-decay LENGTH: an off-route error decays over L metres of arc at any
+    // speed, because the feedback is critically damped in the arc-length domain rather than in time
+    // (plain_tracker.cpp). Both feedback gains follow from it — 2/L on heading, 1/L^2 on cross-track —
+    // so it is the single number that says how hard the robot is pulled back onto the line.
+    // ★The labels follow the VALUE and need no inversion: the slider carries L in millimetres, small L
+    // means large gains means a tighter line, so Stick is the left (low) end and Loose the right (high)
+    // one. The same pedantry the Risk/Safe label carried — a control whose ends are mislabelled is
+    // worse than no control — but here it comes out the easy way round.
+    // ★It acts on the very next control cycle — this is a live gain, not a route property.
+    row->addWidget(new QLabel("Stick", frame));
+    plain_l_ = new QSlider(Qt::Horizontal, frame);
+    // Range in millimetres of arc. The low end is where the loop is expected to ring (below ~0.3 m the
+    // 1/L^2 term dominates and TV(w) climbs sharply); the high end is well past the point where the
+    // robot visibly cuts corners. Both ends are deliberately reachable: this is a control for finding
+    // out, and clamping it to the measured-safe band would make it useless for that.
+    plain_l_->setRange(kPlainLMinMm, kPlainLMaxMm);
+    plain_l_->setValue(500);
+    plain_l_->setFixedWidth(90);
+    plain_l_->setToolTip(
+        QStringLiteral("Plain tracker: how hard the robot sticks to the route (L, metres of arc).\n"
+                       "An off-route error decays over L metres AT ANY SPEED — the feedback is critically\n"
+                       "damped in arc length, so one gain is right at every speed.\n"
+                       "Stick (left, small L)  — 2/L and 1/L^2 grow: tighter line, more rotational effort,\n"
+                       "                         and below ~0.3 m the loop starts to ring.\n"
+                       "Loose (right, large L) — smoother and quieter, with a larger standing offset on\n"
+                       "                         curves; the robot cuts corners.\n"
+                       "Offline (tools/tracker_sim, identified plant): rms 53 mm at 0.25, 31 mm at 0.50,\n"
+                       "45 mm at 0.90, 76 mm at 1.40 — so it has an interior optimum near the shipped 0.50.\n"
+                       "The policy that set it is 'minimise cross-track rms subject to rotational effort\n"
+                       "<= 0.87 rad/m'; watch rot/m in the metrics, not rms alone.\n"
+                       "Takes effect on the NEXT control cycle."));
+    row->addWidget(plain_l_);
+    row->addWidget(new QLabel("Loose", frame));
+    plain_l_label_ = new QLabel("0.50", frame);
+    plain_l_label_->setFixedWidth(30);
+    row->addWidget(plain_l_label_);
+    QObject::connect(plain_l_, &QSlider::valueChanged, this,
+                     [this](int mm)
                      {
-                         const float bias = static_cast<float>(v) / 100.f;
-                         if (safety_label_) safety_label_->setText(QString::asprintf("%.2f", bias));
-                         if (cb_.on_safety_bias) cb_.on_safety_bias(bias);
+                         const float L = static_cast<float>(mm) / 1000.f;
+                         if (plain_l_label_) plain_l_label_->setText(QString::asprintf("%.2f", L));
+                         if (cb_.on_plain_l) cb_.on_plain_l(L);
                      });
 
     // ── Mission actions ──
@@ -197,6 +221,16 @@ MissionPanel::MissionPanel(QWidget *parent, Callbacks callbacks)
                      [this]() { if (cb_.on_pause) cb_.on_pause(not paused_); });
 
     row->addStretch();
+}
+
+void MissionPanel::set_plain_l(float metres)
+{
+    if (plain_l_ == nullptr) return;
+    const int mm = std::clamp(static_cast<int>(std::lround(metres * 1000.f)), kPlainLMinMm, kPlainLMaxMm);
+    // Blocked: this is ADOPTING the control side's value, not asking for a new one. Letting it emit
+    // would round-trip the clamped number back as a command and overwrite a config L outside the range.
+    { const QSignalBlocker block(plain_l_); plain_l_->setValue(mm); }
+    if (plain_l_label_) plain_l_label_->setText(QString::asprintf("%.2f", static_cast<float>(mm) / 1000.f));
 }
 
 void MissionPanel::set_missions(const std::vector<std::string> &names, const std::string &selected)

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vector>
+#include <limits>
 #include <optional>
 #include <string>
 #include <Eigen/Dense>
@@ -271,6 +272,22 @@ private:
     std::optional<Eigen::Vector2f> arrival_point_room_;
     std::optional<Eigen::Vector2f> arrival_outgoing_room_;  // desired room-frame facing dir after arrival
     bool endpoint_arrival_ = true;   // see set_endpoint_arrival — off while a continuous route owns arrival
+    // ── PASSED-THE-GOAL WATCH (see the recession test in compute) ────────────────────────────────
+    // Closest approach on this traversal, the largest per-cycle change in distance seen (which is what
+    // a slow cycle could have jumped), and how many consecutive cycles the robot has been receding.
+    // Reset on every new path/route and on arrival, or the next target inherits a closest of ~0 and
+    // "recedes" from it immediately, stopping the robot before it has gone anywhere.
+    float closest_to_goal_ = std::numeric_limits<float>::infinity();
+    float last_dist_to_goal_ = std::numeric_limits<float>::infinity();
+    float max_goal_step_ = 0.f;
+    int   receding_cycles_ = 0;
+    void reset_arrival_watch()
+    {
+        closest_to_goal_ = std::numeric_limits<float>::infinity();
+        last_dist_to_goal_ = std::numeric_limits<float>::infinity();
+        max_goal_step_ = 0.f;
+        receding_cycles_ = 0;
+    }
     // The robot's real shape — the SAME polygon the global planner collides (common/robot_footprint), so the
     // two layers cannot disagree about what fits. Previously the MPPI used a 0.25 m disc while the planner
     // used the footprint, which meant the planner could route through a 0.46 m gap the MPPI would then refuse.

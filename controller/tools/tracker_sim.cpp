@@ -27,6 +27,7 @@
 
 #include "../src/route_follower.h"
 #include "../src/route_spline.h"
+#include "../src/route_optimizer.h"
 #include "../src/trackers/plain_tracker.h"
 #include "../src/grid_planner.h"
 #include "../../common/robot_footprint/robot_footprint.h"
@@ -102,6 +103,21 @@ struct Plant
 // The curvature limit the session already computes: comfort sqrt(a_lat/kappa) on the point value and
 // kinematic omega_max/kappa on the AVERAGED value, back-propagated so the robot can shed the
 // difference in time. Reuses RouteSpline::kappa_avg, i.e. the production estimator.
+// ── CANDIDATE: A ROTATION BUDGET THAT SHRINKS AS THE TURN TIGHTENS ───────────────────────────────
+// Measured on this route (--brake): from |kappa| = 0.3 upward the ROTATION limit h*w_max/kappa is the
+// only thing setting the speed — comfort never binds again, and the turn-entry (rotational
+// acceleration) limit never binds at all. So "slow down more in a sharp turn" has exactly one place to
+// live, and a FIXED h cannot express it: h*w_max/kappa scales every turn by the same 1/kappa, so a
+// body-radius hairpin is treated as just a scaled-up gentle bend.
+//   h_eff(kappa) = h / (1 + q * (kappa * R_body)^2)
+// The covariate is dimensionless because it is measured against the ROBOT: kappa*R_body = 1 is a turn
+// whose radius equals the body's own circumscribed circle, which is where driving becomes pivoting.
+// ★SHIPPED 2026-08-12 as ControllerRuntimeParams::sharp_turn_slowdown (config SharpTurnSlowdown,
+// 0.25). This mirror must track ControllerSession::route_speed_limit and RouteSpline route_ideal —
+// three copies of one speed law, which is the pre-existing duplication in this bench, not a new one.
+float g_turn_q = 0.25f;
+const float kBodyR = rc::RobotFootprint::shadow().circumscribed_radius();
+
 float speed_limit(const rc::RouteSpline &sp, float s_now, float v_cap,
                   float a_lat, float a_dec, float w_max, float W, float headroom = 1.0f)
 {
@@ -117,7 +133,9 @@ float speed_limit(const rc::RouteSpline &sp, float s_now, float v_cap,
         const float k_av = std::abs(sp.kappa_avg(s_now + ds + 0.5f * W, W));
         if (k_pt < 1e-3f and k_av < 1e-3f) continue;
         const float v_lat = k_pt > 1e-3f ? std::sqrt(a_lat / k_pt) : v_cap;
-        const float v_rot = k_av > 1e-3f ? headroom * w_max / k_av : v_cap;
+        const float kr = k_av * kBodyR;
+        const float h_eff = headroom / (1.f + std::max(0.f, g_turn_q) * kr * kr);
+        const float v_rot = k_av > 1e-3f ? h_eff * w_max / k_av : v_cap;
         v_rot_min = std::min(v_rot_min, v_rot);
         v = std::min(v, std::sqrt(std::min(v_lat, v_rot) * std::min(v_lat, v_rot) + 2.f * a_dec * ds));
     }
@@ -238,6 +256,12 @@ struct Result
     double e_sq = 0, tv_v = 0, tv_w = 0, dist = 0, t_end = 0;
     float e_max = 0;
     std::vector<float> e, kappa;      // for the correlation and its lag
+    // ── BRAKE DIAGNOSTIC (--brake) ───────────────────────────────────────────────────────────────
+    // The plain tracker cuts the profile speed by min(scale, brake), and neither factor is observable
+    // from outside. They are RECOVERABLE here: v_cmd/v_lim IS that product-of-one, and the brake alone
+    // is exp(-k*(w_cmd/w_max)^2) because the exponent uses the DELIVERED (clamped) rate, which is
+    // w_cmd. So "which factor is binding, and where" can be measured without touching the tracker.
+    std::vector<float> d_kappa, d_vlim, d_vcmd, d_wcmd;
 };
 
 double corr(const std::vector<float> &a, const std::vector<float> &b, int lag)
@@ -260,6 +284,8 @@ float g_plant_tau = 0.22f, g_plant_delay = 0.20f, g_plant_gain = 0.89f;   // the
 float g_headroom = 1.0f;
 bool  g_heading_gate = false;   // FAILED experiment, kept as a negative result; see the A/B below
 bool  g_proj_robust = false; // --proj-robust: progress-following projection (see project_robust)
+bool  g_optimise = false;   // --optimise: build the route through the OPTIMISER, not fit-only
+float g_w_jerk = 0.f;       // w_jerk=<v>: the dkappa/ds prior, and it implies --optimise
 bool  g_trace = false;      // --trace: dump the terminal approach cycle by cycle
 float g_proj_window = 2.0f;    // forward arc-length search window for the projection   // fraction of the omega budget the FEEDFORWARD may claim; the rest is
                            // reserved for feedback authority. 1.0 = the naive limit.
@@ -402,6 +428,8 @@ Result run(const rc::RouteFollower &route, Arm arm, float v_cap, float w_max,
         R.e_sq += double(e) * e; R.e_max = std::max(R.e_max, std::abs(e)); ++R.n;
         R.e.push_back(e);
         R.kappa.push_back(sp.kappa_avg(s_hint, W));
+        R.d_kappa.push_back(std::abs(sp.kappa_avg(s_hint, W)));
+        R.d_vlim.push_back(v_lim); R.d_vcmd.push_back(v_cmd); R.d_wcmd.push_back(w_cmd);
         // WHERE does it come apart? An rms figure cannot distinguish "slightly loose everywhere" from
         // "fine until s=X, then gone", and those want completely different fixes.
         if (R.s_lost < 0.f and std::abs(e) > 0.5f)
@@ -454,6 +482,42 @@ void report(const char *tag, const Result &R)
                     R.s_lost, R.t_lost, R.kappa_lost, R.v_lost, R.s_end);
 }
 
+// ── WHICH FACTOR ACTUALLY REFRAINS THE ADVANCE, AND WHERE? ───────────────────────────────────────
+// v_cmd = v_profile * min(scale, brake), and the QUESTION this answers is whether the exponential
+// brake is doing any work in the turns it was written for. Bucketed by |kappa_avg| because "sharp
+// turn" is a statement about curvature, not about a time average over a lap.
+//   ratio  = v_cmd / v_profile               — the whole reduction the tracker applies
+//   brake  = exp(-k * (w_cmd/w_max)^2)       — recoverable exactly (the exponent uses the CLAMPED rate)
+//   binds  = share of cycles where ratio < brake, i.e. the SATURATION ratio is the binding one and the
+//            brake contributes nothing at all
+void brake_diag(const char *tag, const Result &R, float brake_k, float w_max)
+{
+    struct Bucket { float lo, hi; int n = 0; double vlim = 0, vcmd = 0, brake = 0, ratio = 0; int binds = 0; };
+    Bucket b[] = {{0.f, 0.3f}, {0.3f, 1.0f}, {1.0f, 2.0f}, {2.0f, 4.0f}, {4.0f, 1e9f}};
+    for (std::size_t i = 0; i < R.d_kappa.size(); ++i)
+    {
+        const float k = R.d_kappa[i], vl = R.d_vlim[i], vc = R.d_vcmd[i];
+        if (vl < 1e-4f) continue;
+        const float r_om = std::abs(R.d_wcmd[i]) / std::max(0.05f, w_max);
+        const float br = std::exp(-brake_k * r_om * r_om);
+        const float ratio = vc / vl;
+        for (auto &q : b)
+            if (k >= q.lo and k < q.hi)
+            { ++q.n; q.vlim += vl; q.vcmd += vc; q.brake += br; q.ratio += ratio; q.binds += (ratio < br - 1e-3f); break; }
+    }
+    std::printf("\n  %s — where does the advance actually get refrained? (brake_k = %.2f)\n", tag, brake_k);
+    std::printf("    |kappa| 1/m       n   v_profile    v_cmd    brake    ratio   scale binds\n");
+    for (const auto &q : b)
+    {
+        if (q.n == 0) continue;
+        char range[24];
+        if (q.hi > 1e8f) std::snprintf(range, sizeof range, ">= %.1f", q.lo);
+        else             std::snprintf(range, sizeof range, "%.1f - %.1f", q.lo, q.hi);
+        std::printf("    %-12s %6d    %8.3f %8.3f %8.3f %8.3f   %5.1f%%\n", range, q.n,
+                    q.vlim / q.n, q.vcmd / q.n, q.brake / q.n, q.ratio / q.n, 100.0 * q.binds / q.n);
+    }
+}
+
 struct World
 {
     rc::GridPlanner planner;
@@ -461,6 +525,7 @@ struct World
     Vector2f start{0.f, 0.f};
     int laps = 1;
     float spacing = 0.05f, smoothing = 0.40f, v_max = 0.7f, a_lat = 1.0f, standoff = 0.6f;
+    rc::RouteOptimizerConfig opt;   // read from the world file; only USED when --optimise is given
 };
 
 bool load_world(const std::string &path, World &w)
@@ -478,6 +543,11 @@ bool load_world(const std::string &path, World &w)
         else if (key == "start")   ls >> w.start.x() >> w.start.y();
         else if (key == "wp_safe") { Vector2f p; ls >> p.x() >> p.y(); w.wp_safe.push_back(p); }
         else if (key == "fit")     ls >> w.spacing >> w.smoothing >> w.v_max >> w.a_lat >> w.standoff;
+        else if (key == "opt")
+            // Same field order as route_bench, so one snapshot replays identically in both benches.
+            ls >> w.opt.d_target >> w.opt.rho >> w.opt.sigma_a >> w.opt.clearance_floor
+               >> w.opt.w_kappa >> w.opt.w_clear >> w.opt.w_gauge >> w.opt.clear_peak
+               >> w.opt.anchor_huber >> w.opt.iterations >> w.opt.kappa_peak >> w.opt.safety_bias;
     }
     f.clear(); f.seekg(0);
     if (not w.planner.read_grid(f)) { std::printf("no readable grid in %s\n", path.c_str()); return false; }
@@ -488,13 +558,16 @@ bool load_world(const std::string &path, World &w)
 int main(int argc, char **argv)
 {
     std::string path = "route_world.txt";
-    bool sweep = false;
+    bool sweep = false, brake_mode = false;
     for (int i = 1; i < argc; ++i)
     {
         const std::string a = argv[i];
         if (a == "--sweep") sweep = true; else if (a == "--stop-test") g_stop_test = true;
         else if (a == "--proj-robust") g_proj_robust = true;
-        else if (a == "--trace") g_trace = true; else path = a;
+        else if (a == "--trace") g_trace = true;
+        else if (a == "--optimise" or a == "--optimize") g_optimise = true;
+        else if (a == "--brake") brake_mode = true;
+        else if (a.rfind("w_jerk=", 0) == 0) { g_optimise = true; g_w_jerk = std::stof(a.substr(7)); } else path = a;
     }
 
     World w;
@@ -512,12 +585,109 @@ int main(int argc, char **argv)
         return seg;
     };
     auto free_at = [&w](const Vector2f &p, float h) { return w.planner.pose_free(p, h); };
+    // ── OPTIONALLY DRIVE THE OPTIMISED ROUTE ─────────────────────────────────────────────────────
+    // Default OFF: this bench measures the TRACKER, and every published baseline here (tour 41.2 mm rms
+    // / TV(w)/m 2.068 / 80 s) was taken on the fit-only route. Turning the optimiser on changes the
+    // STIMULUS, so a run under it measures the route, not the control law — which is exactly what you
+    // want when asking whether a geometry prior buys smoother COMMANDS, and useless for anything else.
+    if (g_optimise)
+    {
+        rc::RouteOptimizerConfig o = w.opt;
+        o.enabled = true;
+        o.w_jerk = g_w_jerk;
+        o.distance = [&w](const Vector2f &p) { return w.planner.distance_at(p); };
+        o.distance_gradient = [&w](const Vector2f &p) { return w.planner.distance_gradient_at(p); };
+        o.anchors = w.wp_safe;
+        route.set_optimizer(o);
+        std::printf("  [optimiser ON] w_kappa %.2f w_clear %.2f w_jerk %.2f\n",
+                    o.w_kappa, o.w_clear, o.w_jerk);
+    }
     if (not route.build(w.start, w.wp_safe, w.laps, plan, free_at, w.spacing, w.smoothing))
     { std::printf("route build failed\n"); return 1; }
 
     constexpr float kWmax = 0.8f, kADec = 1.0f, kW = 0.40f;
     std::printf("tracker_sim: %s — route %.1f m, %zu waypoints, v_max %.2f, plant tau 0.22 delay 0.20 gain 0.89\n\n",
                 path.c_str(), route.length(), w.wp_safe.size(), w.v_max);
+
+    if (brake_mode)
+    {
+        // ── HOW HARD IS THE ADVANCE REFRAINED IN A SHARP TURN, AND BY WHAT? ──────────────────────
+        // The k=0.25 optimum on record was measured against the UNBOUNDED exponent; the shipped law
+        // clamps it, which caps the brake at exp(-k) and hands the sharp-turn regime to the saturation
+        // ratio instead. So the sweep has to be re-run before any claim about "more braking" is safe.
+        g_headroom = 0.70f;
+        std::printf("\n  brake_k sweep on the SHIPPED law (L=0.50, headroom 0.70)\n");
+        for (const float k : {0.00f, 0.25f, 0.50f, 1.00f, 2.00f, 4.00f})
+        {
+            FfArm arm; arm.L = 0.50f; arm.brake_k = k;
+            char tag[32]; std::snprintf(tag, sizeof tag, "k=%.2f", k);
+            const Result R = run(route, arm, w.v_max, kWmax, w.a_lat, kADec, kW, false);
+            report(tag, R);
+        }
+        {
+            FfArm arm; arm.L = 0.50f; arm.brake_k = 0.25f;
+            brake_diag("SHIPPED k=0.25", run(route, arm, w.v_max, kWmax, w.a_lat, kADec, kW, false), 0.25f, kWmax);
+        }
+        // ── THE CANDIDATE: CURVATURE-DEPENDENT ROTATION BUDGET ───────────────────────────────────
+        // h_eff = h / (1 + q*(kappa*R_body)^2). q = 0 must reproduce the shipped row exactly, which is
+        // what makes the rest of the column readable as an effect rather than as a rebuild difference.
+        std::printf("\n  turn-tightness dial q — h_eff = h/(1 + q*(kappa*R_body)^2), R_body = %.3f m\n", kBodyR);
+        std::printf("    (h_eff/h at a 1 m radius, at the body radius 0.325 m, and at the route's "
+                    "tightest 0.13 m)\n");
+        for (const float q : {0.00f, 0.10f, 0.25f, 0.50f, 1.00f, 2.00f})   // 0.25 is shipped
+        {
+            g_turn_q = q;
+            FfArm arm; arm.L = 0.50f; arm.brake_k = 0.25f;
+            const Result R = run(route, arm, w.v_max, kWmax, w.a_lat, kADec, kW, false);
+            char tag[40];
+            const auto f = [q](float kap) { const float kr = kap * kBodyR; return 1.f / (1.f + q * kr * kr); };
+            std::snprintf(tag, sizeof tag, "q=%.2f", q);
+            report(tag, R);
+            std::printf("      ↳ h_eff/h: %.2f (r=1 m)  %.2f (r=0.325 m)  %.2f (r=0.13 m) | "
+                        "rot/m %.3f | driven %.1f m\n",
+                        f(1.f), f(1.f / kBodyR), f(7.65f),
+                        R.dist > 0.1 ? R.rot_effort / R.dist : 0.0, R.dist);
+        }
+        g_turn_q = 0.25f;   // restore the shipped value for the probes below
+        // ── WHAT THE THREE CANDIDATE LIMITS WOULD ALLOW, ALONG THIS ROUTE ────────────────────────
+        // Two are already in route_speed_limit (comfort sqrt(a_lat/kappa), kinematic h*w_max/kappa_avg).
+        // The third is the one that is MISSING: omega = v*kappa means the robot must SPIN UP into a
+        // bend at d(omega)/dt = v^2*dkappa/ds, and the base's slew limiter caps that at max_rot_accel.
+        // Printing all three side by side says whether a turn-entry limit could bind at all before any
+        // of it is written into the controller.
+        {
+            const rc::RouteSpline &sp = route.spline();
+            std::printf("\n  what each limit would allow (a_lat %.2f, h*w_max %.2f, alpha 4.0 rad/s^2)\n",
+                        w.a_lat, 0.70f * kWmax);
+            std::printf("    |kappa| 1/m       n    |dk/ds|   v_lat    v_rot   v_entry   binding\n");
+            struct B { float lo, hi; int n = 0; double kp = 0, vl = 0, vr = 0, ve = 0; };
+            B b[] = {{0.f, 0.3f}, {0.3f, 1.0f}, {1.0f, 2.0f}, {2.0f, 4.0f}, {4.0f, 1e9f}};
+            for (float s = 0.f; s + kW <= sp.length(); s += 0.05f)
+            {
+                const float k0 = std::abs(sp.kappa_avg(s, kW));
+                // ONE difference of an ALREADY-AVERAGED curvature, not a third difference of samples —
+                // the same reasoning route_speed_limit gives for preferring kappa_avg to curvature_at.
+                const float kp = std::abs(sp.kappa_avg(s + kW, kW) - sp.kappa_avg(s, kW)) / kW;
+                const float vl = k0 > 1e-3f ? std::sqrt(w.a_lat / k0) : w.v_max;
+                const float vr = k0 > 1e-3f ? 0.70f * kWmax / k0 : w.v_max;
+                const float ve = kp > 1e-3f ? std::sqrt(4.0f / kp) : w.v_max;
+                for (auto &q : b)
+                    if (k0 >= q.lo and k0 < q.hi) { ++q.n; q.kp += kp; q.vl += vl; q.vr += vr; q.ve += ve; break; }
+            }
+            for (const auto &q : b)
+            {
+                if (q.n == 0) continue;
+                char range[24];
+                if (q.hi > 1e8f) std::snprintf(range, sizeof range, ">= %.1f", q.lo);
+                else             std::snprintf(range, sizeof range, "%.1f - %.1f", q.lo, q.hi);
+                const double vl = q.vl / q.n, vr = q.vr / q.n, ve = q.ve / q.n;
+                const char *bind = (vr <= vl and vr <= ve) ? "rot" : (vl <= ve ? "lat" : "ENTRY");
+                std::printf("    %-12s %6d %9.2f %8.3f %8.3f %9.3f   %s\n",
+                            range, q.n, q.kp / q.n, vl, vr, ve, bind);
+            }
+        }
+        return 0;
+    }
 
     if (sweep)
     {
