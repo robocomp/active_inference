@@ -792,22 +792,37 @@ Eigen::Matrix<float, 6, 6> HoodBelief::covariance_reported() const
 float HoodBelief::fridge_plausibility(const HoodBeliefState& s, float fe,
                                               const HoodBeliefParams& p)
 {
+    // ★THE PRIOR IS THIS OBJECT'S SHAPE, NOT SQUARENESS. Both terms below were written for a fridge, which
+    // is ~square in plan and stands on the floor, so ONE footprint mean served both axes and "aspect = 0"
+    // meant "plausible". A hood is 0.90 along the wall × 0.50 out from it — expected aspect 0.286, not 0 —
+    // so a CORRECTLY fitted hood scored aspect_ok ≈ 0.027 and was ranked as an implausible object by the
+    // very filter meant to catch implausible objects. Centre the prior on the declared shape and the sign
+    // of the evidence flips back the right way round.
+    const float fp       = p.prior_footprint_m;                                 // width mean (along the wall)
+    const float dp       = p.prior_depth_m > 0.0f ? p.prior_depth_m : fp;       // depth mean (out from it)
+    const float aspect0  = std::abs(fp - dp) / std::max(1e-4f, fp + dp);        // the EXPECTED aspect
     const float sum_wh   = std::max(1e-4f, s.w + s.h);
-    const float aspect   = std::abs(s.w - s.h) / sum_wh;                       // 0 square → 1 elongated
+    const float aspect   = std::abs(s.w - s.h) / sum_wh;
     const float as       = std::max(1e-4f, p.plaus_aspect_scale);
-    const float aspect_ok = std::exp(-(aspect / as) * (aspect / as));
+    const float da       = (aspect - aspect0) / as;
+    const float aspect_ok = std::exp(-da * da);
 
     const float ss       = std::max(1e-4f, p.plaus_size_scale);
-    const float dw       = s.w - p.prior_footprint_m, dh = s.h - p.prior_footprint_m;
-    const float size_ok  = std::exp(-(dw * dw + dh * dh) / (2.0f * ss * ss));   // footprint near 0.60×0.60
+    const float dw       = s.w - fp, dh = s.h - dp;
+    const float size_ok  = std::exp(-(dw * dw + dh * dh) / (2.0f * ss * ss));
 
+    // ★A HANGING BODY'S DISCRIMINATOR IS ITS ELEVATION, NOT ITS EXTENT. `s.H` is the TOP above the floor and
+    // plaus_height_min = 1.20 encodes "a 70 cm FRIDGE is improbable" — a statement about a floor-anchored
+    // object's size. For a hood the same number is a statement about where it is MOUNTED, which is exactly
+    // right and needs no change here: a hood's top is ~2.05 m, a worktop blob's is ~0.9 m.
     const float hsoft    = std::max(1e-4f, p.plaus_height_soft);
-    const float height_ok = 1.0f / (1.0f + std::exp(-(s.H - p.plaus_height_min) / hsoft));  // logistic: tall→1
+    const float height_ok = 1.0f / (1.0f + std::exp(-(s.H - p.plaus_height_min) / hsoft));
 
     // The fit_ok term (absolute mean_energy vs a guessed FeRef) was DROPPED — FE varies strongly with view /
     // point-count, so an absolute reference is unreliable and was REJECTING REAL FRIDGES. The SHAPE factors are
-    // the robust fridge-vs-not discriminators: on the FITTED box the footprint prior pins w,h≈0.60 (aspect_ok /
-    // size_ok ≈1 for a genuine fridge), while an elongated / short mis-detection fails aspect and/or height.
+    // the robust hood-vs-not discriminators: on the FITTED box the footprint prior pins (w,h) near
+    // (0.90, 0.50) — aspect_ok / size_ok ≈ 1 for a genuine hood — while a mis-detection of a different
+    // shape, or one mounted at the wrong height, fails aspect/size and/or height.
     // `fe` stays in the signature (call sites unchanged) but is no longer used.
     (void) fe;
     return std::clamp(aspect_ok * size_ok * height_ok, 0.0f, 1.0f);
@@ -830,16 +845,24 @@ float HoodBelief::fridge_log_evidence_ratio(const HoodBeliefState& s,
 
     // (a) ASPECT. exp(−(a/as)²) is a half-normal with σ = as/√2, whose normaliser is 2/(as·√π); the alternative
     //     is uniform over the unit interval the aspect lives in, so its log-density is 0.
+    // ★Centred on the DECLARED aspect (see fridge_plausibility). With the centre away from 0 this is a full
+    // normal rather than a half-normal, so the normaliser loses its factor of 2; at aspect0 = 0.286 against
+    // σ = as/√2 = 0.106 the truncation at 0 is ~0.3%, well inside the model's own error.
     const float as       = std::max(1e-4f, p.plaus_aspect_scale);
+    const float fp       = p.prior_footprint_m;
+    const float dp       = p.prior_depth_m > 0.0f ? p.prior_depth_m : fp;
+    const float aspect0  = std::abs(fp - dp) / std::max(1e-4f, fp + dp);
     const float sum_wh   = std::max(1e-4f, s.w + s.h);
-    const float aspect   = std::abs(s.w - s.h) / sum_wh;                    // 0 square → 1 elongated
-    const float llr_aspect = std::log(2.0f / (as * kSqrtPi)) - (aspect / as) * (aspect / as);
+    const float aspect   = std::abs(s.w - s.h) / sum_wh;
+    const float da       = (aspect - aspect0) / as;
+    const float norm_a   = (aspect0 > 1e-3f) ? 1.0f : 2.0f;                 // full vs half normal
+    const float llr_aspect = std::log(norm_a / (as * kSqrtPi)) - da * da;
 
     // (b) FOOTPRINT SIZE. Two isotropic 2-D Gaussians about the same mean: the log-ratio of their normalisers
     //     (2·log(σ_alt/σ_fridge)) is the evidence a TIGHT prior earns for a shape that actually sits near it.
     const float ss  = std::max(1e-4f, p.plaus_size_scale);
     const float sa  = std::max(ss,    p.plaus_alt_size_scale);              // the alternative is never tighter
-    const float dw  = s.w - p.prior_footprint_m, dh = s.h - p.prior_footprint_m;
+    const float dw  = s.w - fp, dh = s.h - dp;                              // anisotropic: see above
     const float d2  = dw * dw + dh * dh;
     const float llr_size = 2.0f * std::log(sa / ss) - d2 / (2.0f * ss * ss) + d2 / (2.0f * sa * sa);
 
@@ -853,21 +876,36 @@ float HoodBelief::fridge_log_evidence_ratio(const HoodBeliefState& s,
     return llr_aspect + llr_size + llr_height;
 }
 
-// Birth-candidate plausibility — HEIGHT ONLY. ★A partial mask (e.g. a front-only ZED view) is a VERTICAL
-// face, so its 2-D footprint projects to a thin line → always "elongated"/tiny → aspect & size are MEANINGLESS
-// at birth and would reject a real fridge (observed: hood_dets=1 but births=0). The mask's z-EXTENT is
-// reliable from any viewpoint: a fridge is TALL (~1.5 m+), the mis-detected cabinet is SHORT (~0.7 m). So gate
-// birth on height alone; the footprint (square 0.6×0.6) is settled later by the fit + the footprint prior.
+// Birth-candidate plausibility — VERTICAL PLACEMENT ONLY. ★A partial mask (e.g. a front-only ZED view) is a
+// VERTICAL face, so its 2-D footprint projects to a thin line → always "elongated"/tiny → aspect & size are
+// MEANINGLESS at birth and would reject a real object. The mask's z-range is reliable from any viewpoint, so
+// that is what birth is gated on; the footprint is settled later by the fit + the footprint prior.
+//
+// ★★BUT IT MUST ASK WHERE THE CLOUD IS, NOT HOW TALL IT IS. The inherited test compared the mask's z-EXTENT
+// against plaus_height_min = 1.20 m — "a 70 cm FRIDGE is improbable". For a floor-anchored fridge the extent
+// and the top are the same number, so one test served both meanings; for a hood they are entirely different.
+// A hood's body extent is 0.50 m, giving 1/(1+e^((1.20−0.50)/0.15)) ≈ 0.009 against BirthAdmitPlausibility
+// 0.35 — so every genuine hood candidate was refused at birth and the agent could barely create one at all.
+//
+// The question that generalises across supports is the one the manifest already answers: DOES WHAT I SEE LIE
+// WHERE THIS OBJECT'S BODY IS? Score the fraction of the observed z-range that falls inside the declared span
+// [z_top − extent, z_top]. It needs no new parameter, it is 1 for a clean hood mask and for a partial one, it
+// is 0 for the worktop blob below, and it falls off for a floor-to-ceiling wall strip that merely overlaps.
 // Too few points ⇒ neutral 0.5 (don't punish a sparse first glimpse).
 float HoodBelief::candidate_plausibility(const std::vector<Eigen::Vector3f>& pts,
                                                  const HoodBeliefParams& p)
 {
     if (pts.size() < 12) return 0.5f;
-    float zmin = std::numeric_limits<float>::max(), zmax = -std::numeric_limits<float>::max();
-    for (const auto& q : pts) { zmin = std::min(zmin, q.z()); zmax = std::max(zmax, q.z()); }
-    const float H     = std::max(0.10f, zmax - zmin);                 // rough height = mask z-range
-    const float hsoft = std::max(1e-4f, p.plaus_height_soft);
-    return 1.0f / (1.0f + std::exp(-(H - p.plaus_height_min) / hsoft));   // tall → ~1 (birth), short → ~0
+    // ★Counted over POINTS, not over the min/max range: an extremum is the most outlier-sensitive statistic
+    // there is, so one stray floor return would double the apparent span and halve the score of a perfect
+    // mask. The fraction of the cloud that lies in the body's band answers the same question and degrades
+    // gracefully with contamination.
+    const float z1 = p.prior_height_m;                       // declared top of the body above the floor
+    const float z0 = std::max(0.0f, z1 - p.vertical_extent_m);
+    std::size_t inside = 0;
+    for (const auto& q : pts)
+        if (q.z() >= z0 and q.z() <= z1) ++inside;
+    return std::clamp(static_cast<float>(inside) / static_cast<float>(pts.size()), 0.0f, 1.0f);
 }
 
 // Soft singleton inhibition deltas (see the header). Bounded per-instance existence-logodds increments:
@@ -878,6 +916,15 @@ std::vector<float> HoodBelief::singleton_existence_deltas(const std::vector<floa
 {
     const std::size_t n = plaus_evidence.size();
     std::vector<float> out(n, 0.0f);
+    // ★★GAIN 0 MUST SILENCE THE WHOLE CHANNEL, INCLUDING THE RANKING. `gain` scales the shape term, but the
+    // inhibition term had its OWN scale (SingletonInhibition), so setting PlausToExistenceGain = 0 — the
+    // decision that "an identity prior may not vote on a hypothesis it does not model" — left the inhibition
+    // running. And the ranking it inhibits BY is plaus_evidence, i.e. the accumulated shape log-evidence of
+    // the very model just declared inapplicable: with two hoods alive, the one that looked less like a
+    // REFRIGERATOR got ΔL = −Σ p_exists(j) every measured cycle and was deleted. Ranking by a disabled
+    // model is not a weaker vote, it is the same vote wearing a different coefficient.
+    if (gain <= 0.0f)
+        return out;
     const float cl = std::max(1e-3f, clamp);
     for (std::size_t i = 0; i < n; ++i)
     {

@@ -97,5 +97,11 @@ why      = "cloned from refrigerator_dof.h and never restated; see invariant 12"
 min_fill = 0.10
 max_fill = 0.60
 soft     = 0.06
-from     = "inherited"
-why      = "the FLEET PRIOR, fitted on furniture and never on a hood. Fit from this agent's own ai2_log with common/detectability/tools/fit_envelope before trusting any p_detect it reports"
+from     = "nominal"
+why      = """
+The FLEET PRIOR — a class-level guess, never fitted on a hood. It is now also what the agent actually runs
+on: etc/config.toml used to override it with the REFRIGERATOR's fitted tour (0.0 / 1.32 / 0.26), so this
+block described one envelope while a measurement of a different object drove both consumers. Those keys are
+deliberately absent now, and the manifest and the runtime agree. Fit from this agent's own ai2_log with
+common/detectability/tools/fit_envelope and set from = "measured" before trusting any p_detect it reports.
+"""
