@@ -107,6 +107,12 @@ public slots:
     void del_node_slot(std::uint64_t from);
 
 private:
+    // Last mask frame_id that CONTRIBUTED birth evidence. Agents feed the tracker every compute cycle on
+    // purpose (a candidate with no matching detection expires), but persisting a candidate and accruing
+    // evidence into it are different things — conflating them made birth_frames count COMPUTE CYCLES. See
+    // common/instance_tracker/birth_evidence.h rule 1.
+    long  last_birth_mask_frame_ = -1;
+
     // (BottleObservation moved to bottle_fitter.h; MaskSlice/MasksPacket to mask_ingestor.h)
 
     // ── Presence protocol ──────────────────────────────────────────────────────

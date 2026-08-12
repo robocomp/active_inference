@@ -844,6 +844,21 @@ float DoorFitter::door_view_obliquity(const DoorInstance& inst) const
     return std::clamp(std::abs(r.dot(inst.leaf_pose.ey)), 0.0f, 1.0f);   // ey = the leaf's face normal
 }
 
+bool DoorFitter::frame_admissible(const rc::MaskIngestor::MaskSlice& sl) const
+{
+    if (sl.trunc_frac > cfg_.ai2_trunc_gate_frac)
+        return false;
+    if (not cfg_.ai2_motion_confirm_only)
+        return true;
+    const bool moving = ego_lin_mps_   > cfg_.ai2_still_lin_mps
+                     or ego_ang_radps_ > cfg_.ai2_still_ang_radps
+                     or std::abs(sl.motion_dotd) > cfg_.ai2_still_dotd;
+    if (not moving)
+        return true;
+    return cfg_.ai2_moving_update_center_radius >= 0.0f
+       and sl.centroid_radius <= cfg_.ai2_moving_update_center_radius;
+}
+
 bool DoorFitter::confirm_only(const DoorInstance& inst) const
 {
     if (not cfg_.ai2_motion_confirm_only)

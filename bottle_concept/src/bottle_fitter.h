@@ -103,6 +103,12 @@ public:
     // CONFIRMATION-ONLY (no geometry-mean change) when the robot is MOVING (ego lin/ang OR motion_dotd above the
     // still-level). Gated behind cfg_.ai2_motion_confirm_only. True ⇒ run_inference takes the predict-only branch.
     // A bottle is a yaw-symmetric CYLINDER, so this governs position + size (radius,height) only — there is no yaw.
+    // The SAME admissibility, evaluated on a RAW mask slice that has no instance yet: may this frame move
+    // geometry? Birth is gated on it, so a frame the fit would REFUSE can never create an object.
+    // ★A frame that may not MOVE an existing belief must not CREATE one — see
+    // common/instance_tracker/birth_evidence.h rule 2. Mirrors this agent's own `gated` computation; the
+    // instance-only parts of that gate (anything read off a fitted projection) cannot apply pre-birth.
+    bool  frame_admissible(const rc::MaskIngestor::MaskSlice& sl) const;
     bool  confirm_only(const BottleInstance& inst) const;
 
     // The live instance map (the validation sweep mutates it; del_node prunes it).

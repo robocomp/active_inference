@@ -98,6 +98,12 @@ public:
     // True when this frame must be CONFIRMATION-ONLY (no pose/shape change): robot linear/angular speed above
     // the still-level, OR the mask's own ego-motion corruption (motion_dotd) above its still-level.
     // (A/B FALLBACK path only — the hard gate; used when cfg.ai2_motion_confirm_only is true.)
+    // The SAME admissibility, evaluated on a RAW mask slice that has no instance yet: may this frame move
+    // geometry? Birth is gated on it, so a frame the fit would REFUSE can never create an object.
+    // ★A frame that may not MOVE an existing belief must not CREATE one — see
+    // common/instance_tracker/birth_evidence.h rule 2. Mirrors this agent's own `gated` computation; the
+    // instance-only parts of that gate (anything read off a fitted projection) cannot apply pre-birth.
+    bool  frame_admissible(const rc::MaskIngestor::MaskSlice& sl) const;
     bool  confirm_only(const ChairInstance& inst) const;
     // FIXATION (attention): may this view touch the chair's POSE at all? CLOSE + CENTRED + STILL, all three.
     // Outside a fixation the cycle is predict-only (mean held) — INHIBITION, not attenuation, because the

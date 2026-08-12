@@ -209,6 +209,11 @@ private:
     std::unique_ptr<rc::ChairSceneGraph>               scene_graph_;     // DSR node/RT I/O
     rc::InstanceTracker                                tracker_;         // multi-instance (Tracker.Enabled)
     float exist_support_scale_   = 0.0f;   // existence belief: online-calibrated E[npts·range²] (0 = seed from cfg)
+    // Last mask frame_id that CONTRIBUTED birth evidence. Agents feed the tracker every compute cycle on
+    // purpose (a candidate with no matching detection expires), but persisting a candidate and accruing
+    // evidence into it are different things — conflating them made birth_frames count COMPUTE CYCLES. See
+    // common/instance_tracker/birth_evidence.h rule 1.
+    long  last_birth_mask_frame_ = -1;
     int   exist_last_mask_frame_ = -1;     // last mask frame_id folded into the existence belief (sensor-rate gate)
     rc::BearingHypothesisStager                        bearing_stager_;  // Part C-birth: stages unmatched 360 bearings
     uint64_t                                            room_node_id_ = 0;

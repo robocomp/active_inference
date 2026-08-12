@@ -32,6 +32,7 @@
  */
 
 #include "specificworker.h"
+#include "../../common/instance_tracker/birth_evidence.h"   // rc::birth:: the shared CREATE policy
 #include <limits>   // numeric_limits<int>::max — the disabled tracker death counter
 #include <QFontMetrics>
 #include <QHBoxLayout>
@@ -924,6 +925,19 @@ void SpecificWorker::run_instance_tracker()
     // Detections ← this frame's "chair" mask slices (carry the slice index for the assignment).
     std::vector<rc::DetectionView> dets;
     const auto& pkt = mask_ingestor_->packet();
+
+    // ★BIRTH EVIDENCE — the shared CREATE policy (common/instance_tracker/birth_evidence.h). This agent fed
+    // the tracker `birth_evidence = 1.0` on EVERY compute cycle, so `birth_frames` counted cycles rather than
+    // observations: at ~10 Hz compute against a ~9.5 Hz mask stream one mask frame was counted several times,
+    // and "N frames" became well under a second of a single unchanging view — which is how a YOLO false
+    // positive on a wall panel becomes furniture. Three rules, none of them a threshold: an OBSERVATION not a
+    // cycle; birth admitted by the UPDATE rule (frame_admissible — a frame the fit would refuse may not create
+    // an object); and an admissible observation still worth only its reliability (confidence x range).
+    const bool birth_new_obs = pkt.valid and static_cast<long>(pkt.frame_id) > last_birth_mask_frame_;
+    if (birth_new_obs)
+        last_birth_mask_frame_ = static_cast<long>(pkt.frame_id);
+    const rc::birth::Detectability birth_detect{cfg_.ai2_periph_ref, 2.5f, 2.0f};
+
     if (pkt.valid)
         for (int i = 0; i < static_cast<int>(pkt.slices.size()); ++i)
         {
@@ -950,6 +964,9 @@ void SpecificWorker::run_instance_tracker()
                                       and sl.confidence >= cfg_.ricoh_birth_conf
                                       and sl.depth_var  <= cfg_.ricoh_birth_max_var);
             dv.support = sl.support_end - sl.support_begin;   // for the fragment test below
+            // One admissible, reliable observation — never a cycle. See birth_evidence.h.
+            dv.birth_evidence = rc::birth::evidence({sl.confidence, sl.range}, birth_detect,
+                                                    birth_new_obs, fitter_->frame_admissible(sl));
             dets.push_back(dv);
         }
 

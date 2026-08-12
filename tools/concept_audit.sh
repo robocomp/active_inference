@@ -135,7 +135,20 @@ audit_agent() {
         mark na
     fi
 
-    # 9. THE ABSENCE GUARD MUST READ A *FRESH* VERDICT. An agent that suppresses silhouette absence on
+    # 9. BIRTH IS AN OBSERVATION, NOT A CYCLE. common/instance_tracker/birth_evidence.h says "every concept
+    #    agent must use it": agents feed the tracker on EVERY compute cycle (a candidate with no matching
+    #    detection expires), so leaving birth_evidence at its 1.0 default makes birth_frames count COMPUTE
+    #    CYCLES. At ~10 Hz compute against a ~9.5 Hz mask stream, "8 frames" is well under a second of one
+    #    unchanging view — which is how a YOLO false positive on a wall panel becomes furniture. Found
+    #    2026-08-12 in bottle, chair and door (never set it) and in cabinet (worse: it applied a
+    #    corroboration boost RAW, accruing >1 per stale inadmissible cycle).
+    if grep -rq "DetectionView" "$src" 2>/dev/null; then
+        grep -rq "rc::birth::evidence" "$src" 2>/dev/null && mark ok || mark no
+    else
+        mark na
+    fi
+
+    # 10. THE ABSENCE GUARD MUST READ A *FRESH* VERDICT. An agent that suppresses silhouette absence on
     #    `dbg_gated` ("this frame may not move the geometry, so it may not destroy the object either") must
     #    also check dbg_gate_fresh, because run_inference returns EARLY when no mask arrives — so on exactly
     #    the cycles the guard fires, the flag is whatever the last real look left behind. A phantom has no
@@ -149,7 +162,7 @@ audit_agent() {
         mark na
     fi
 
-    # 10. ONLY THE FRONT RGB-D CAMERA MAY CREATE OR UPDATE AN OBJECT. The voxelizer publishes `mask_source`
+    # 11. ONLY THE FRONT RGB-D CAMERA MAY CREATE OR UPDATE AN OBJECT. The voxelizer publishes `mask_source`
     #    (0 = zed, 1 = ricoh) precisely because `mask_has_depth` stopped answering that question: once ricoh
     #    masks were depth-filled from reprojected LiDAR they ship as full 3D slices with has_depth = 1. Every
     #    guard written as `if (has_depth)` then silently began accepting 360-degree detections from BEHIND the
@@ -162,7 +175,7 @@ audit_agent() {
         mark na
     fi
 
-    # 11. THE REMOVAL DECISION IS THE SHARED ONE. rc::exist::decide_removal owns the boundary, the debounce
+    # 12. THE REMOVAL DECISION IS THE SHARED ONE. rc::exist::decide_removal owns the boundary, the debounce
     #    unit (IDEAL OBSERVATIONS, never cycles) and — since 2026-08-11 — the confidence-scaled requirement.
     #    Every hand-written copy of those six lines has drifted: three ways by 2026-08-10 (door paid with
     #    twelve deaths at fixated=0), and on 2026-08-11 door STILL had three hand-rolled sites, two of them
@@ -185,9 +198,9 @@ audit_agent() {
 echo
 echo "concept-agent alignment audit — $ROOT"
 echo
-printf "  %-22s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s\n" \
-       agent room_poly any_usable contract "sigma*" envelope strip poll removal absence mask_src decision
-printf "  %s\n" "$(printf '%.0s-' {1..166})"
+printf "  %-22s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s\n" \
+       agent room_poly any_usable contract "sigma*" envelope strip poll removal birth absence mask_src decision
+printf "  %s\n" "$(printf '%.0s-' {1..179})"
 
 skipped=()
 for d in *_concept; do
@@ -218,6 +231,8 @@ if [[ $QUIET -eq 0 ]]; then
   strip                   'warn' = no compact belief strip
   poll                    protocol flags polled, not pushed by the update_node_attr_signal firehose
   removal                 ONE removal authority: an existence channel AND an armed miss counter is two
+  birth                   birth_evidence must come from rc::birth::evidence — an OBSERVATION, admitted by
+                          the UPDATE rule, weighted by confidence x range. The 1.0 default counts CYCLES
   absence                 an admissibility guard on dbg_gated must also read dbg_gate_fresh — a verdict from
                           a cycle with no mask is STALE, and a phantom (which never has one) freezes it
   mask_src                only the front RGB-D camera may CREATE or UPDATE an object: a DetectionView must

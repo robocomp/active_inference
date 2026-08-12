@@ -67,6 +67,19 @@ float BottleFitter::motion_magnitude(const BottleInstance& inst) const
 // "Be-still-to-update": true ⇒ this frame may only CONFIRM (predict-only), never move/reshape the geometry mean.
 // Robot linear/angular speed above the still-level, OR the mask's own ego-motion corruption (motion_dotd) above
 // its still-level. A bottle is a yaw-symmetric CYLINDER, so this governs position + size only (no yaw channel).
+bool BottleFitter::frame_admissible(const rc::MaskIngestor::MaskSlice& sl) const
+{
+    // Mirrors confirm_only(): this agent's update gate is MOTION only — a bottle mask carries no truncation
+    // or centring term, so neither is invented here (a birth-only condition the fit does not apply would be
+    // exactly the "second, weaker set of conditions" the shared policy forbids).
+    if (not cfg_.ai2_motion_confirm_only)
+        return true;
+    const bool moving = ego_lin_mps_   > cfg_.ai2_still_lin_mps
+                     or ego_ang_radps_ > cfg_.ai2_still_ang_radps
+                     or std::abs(sl.motion_dotd) > cfg_.ai2_still_dotd;
+    return not moving;
+}
+
 bool BottleFitter::confirm_only(const BottleInstance& inst) const
 {
     if (not cfg_.ai2_motion_confirm_only)

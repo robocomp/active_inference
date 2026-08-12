@@ -79,6 +79,14 @@ public:
     // so all downstream publish/viewer code is unchanged. Returns the update free energy.
     float run_inference(CabinetInstance& inst, const CabinetObservation& observation);
 
+    // The SAME admissibility, on a RAW mask slice that has no instance yet: may this frame move geometry?
+    // Birth is gated on it — a frame the fit would REFUSE can never create an object (birth_evidence.h rule 2).
+    // Mirrors this agent's own gate, which is TRUNCATION only: cabinet's fitter carries no ego-motion terms,
+    // so no motion condition is invented here (a birth-only condition the fit does not apply is exactly the
+    // "second, weaker set of conditions" the shared policy forbids).
+    bool frame_admissible(const rc::MaskIngestor::MaskSlice& sl) const
+    { return sl.trunc_frac <= cfg_.ai2_trunc_gate_frac; }
+
     std::unordered_map<std::uint64_t, CabinetInstance>& instances() { return instances_; }
     void forget_node(std::uint64_t id) { instances_.erase(id); }
     // Part B (chain covariance): enable adding the localization/chain term J·Σ_chain·Jᵀ (measurement

@@ -747,6 +747,22 @@ bool ChairFitter::fixated(const ChairInstance& inst, int npts) const
     return close and centred and still;
 }
 
+bool ChairFitter::frame_admissible(const rc::MaskIngestor::MaskSlice& sl) const
+{
+    if (sl.trunc_frac > cfg_.ai2_trunc_gate_frac)
+        return false;                                   // truncated ⇒ extent is a lower bound ⇒ never births
+    if (not cfg_.ai2_motion_confirm_only)
+        return true;
+    const bool moving = ego_lin_mps_   > cfg_.ai2_still_lin_mps
+                     or ego_ang_radps_ > cfg_.ai2_still_ang_radps
+                     or std::abs(sl.motion_dotd) > cfg_.ai2_still_dotd;
+    if (not moving)
+        return true;                                    // robot still ⇒ admissible
+    // Moving: only a well-CENTRED mask is trusted, exactly as in confirm_only().
+    return cfg_.ai2_moving_update_center_radius >= 0.0f
+       and sl.centroid_radius <= cfg_.ai2_moving_update_center_radius;
+}
+
 bool ChairFitter::confirm_only(const ChairInstance& inst) const
 {
     if (not cfg_.ai2_motion_confirm_only)

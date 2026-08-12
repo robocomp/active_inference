@@ -53,6 +53,7 @@
 #include <QDateTime>   // wall-clock ms for the primary-input stream gate (operating_since_ms_, stall grace)
 
 #include "../../common/bearing_confirm/bearing_confirm.h"   // Part C: RGB-360 bearing → live-instance confirm
+#include "../../common/instance_tracker/birth_evidence.h"   // rc::birth:: the shared CREATE policy
 
 #include <dsr/api/dsr_api.h>
 
@@ -826,6 +827,19 @@ void SpecificWorker::run_instance_tracker()
     // Detections ← this frame's "bottle" mask slices (carry the slice index for the assignment).
     std::vector<rc::DetectionView> dets;
     const auto& pkt = mask_ingestor_->packet();
+
+    // ★BIRTH EVIDENCE — the shared CREATE policy (common/instance_tracker/birth_evidence.h). This agent fed
+    // the tracker `birth_evidence = 1.0` on EVERY compute cycle, so `birth_frames` counted cycles rather than
+    // observations: at ~10 Hz compute against a ~9.5 Hz mask stream one mask frame was counted several times,
+    // and "N frames" became well under a second of a single unchanging view — which is how a YOLO false
+    // positive on a wall panel becomes furniture. Three rules, none of them a threshold: an OBSERVATION not a
+    // cycle; birth admitted by the UPDATE rule (frame_admissible — a frame the fit would refuse may not create
+    // an object); and an admissible observation still worth only its reliability (confidence x range).
+    const bool birth_new_obs = pkt.valid and static_cast<long>(pkt.frame_id) > last_birth_mask_frame_;
+    if (birth_new_obs)
+        last_birth_mask_frame_ = static_cast<long>(pkt.frame_id);
+    const rc::birth::Detectability birth_detect{0.50f, 2.5f, 2.0f};
+
     if (pkt.valid)
         for (int i = 0; i < static_cast<int>(pkt.slices.size()); ++i)
             // ★★ONLY THE FRONT RGB-D CAMERA MAY CREATE OR UPDATE AN OBJECT. `has_depth` is NOT that
@@ -837,7 +851,16 @@ void SpecificWorker::run_instance_tracker()
             // still CONFIRM a live instance (bearing_confirm) or raise a proto-object to go and look
             // at; it may not move one. See MaskIngestor::MaskSlice::may_fit_geometry.
             if (pkt.slices[i].label == "bottle" and pkt.slices[i].may_fit_geometry())
-                dets.push_back({Eigen::Vector2f(pkt.slices[i].centroid.x(), pkt.slices[i].centroid.y()), i});
+            {
+                const auto& sl = pkt.slices[i];
+                rc::DetectionView dv;
+                dv.xy = Eigen::Vector2f(sl.centroid.x(), sl.centroid.y());
+                dv.slice_index = i;
+                // One admissible, reliable observation — never a cycle. See birth_evidence.h.
+                dv.birth_evidence = rc::birth::evidence({sl.confidence, sl.range}, birth_detect,
+                                                        birth_new_obs, fitter_->frame_admissible(sl));
+                dets.push_back(dv);
+            }
 
     // Part C (confirm): a ricoh no-depth "bottle" bearing that lines up (in azimuth from the robot) with a
     // live instance is evidence it is STILL THERE even when the zed missed it → HOLD its death-miss this
