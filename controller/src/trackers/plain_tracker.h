@@ -56,7 +56,11 @@ public:
     //     -> the robot is somewhere in the middle, and the nearest point is right where it stands.
     // Forcing s_hint_ to 0 would satisfy the first and break the second — the tracker would steer at the
     // route's beginning from thirty metres away, which is the same "drives into a wall" failure.
-    void reset() override { s_hint_.reset(); }
+    void reset() override { s_hint_.reset(); pivoting_ = false; }
+
+    // Is the tracker holding the wheels still and turning on the spot? For the overlay and the logs —
+    // a robot that is deliberately stopped and one that is stuck look identical from outside.
+    [[nodiscard]] bool pivoting() const { return pivoting_; }
 
     ControlOutput& compute(ControlOutput& out, const TrackerInput& in, const TrackerParams& p) override;
 
@@ -75,6 +79,12 @@ private:
 
     std::optional<float> s_hint_;
     bool  reacquire_ = true;
+    // STOP-TURN-GO. True while the wheels are held at zero and the robot is spinning to face the exit
+    // of a turn it cannot drive through. Latched, because the two ends of the decision are asked of
+    // different things: entry of the ROUTE ("does this turn reverse me?"), release of the POSE ("am I
+    // facing the way out yet?"). A memoryless test cannot express that, and the two stateless versions
+    // both failed — see the measured deadlocks in plain_tracker.cpp.
+    bool  pivoting_ = false;
 };
 
 }   // namespace rc

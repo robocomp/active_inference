@@ -38,6 +38,7 @@
 #include <cmath>
 #include <cstdio>
 #include <deque>
+#include <memory>
 #include <fstream>
 #include <numbers>
 #include <sstream>
@@ -53,6 +54,12 @@ constexpr float kPi = std::numbers::pi_v<float>;
 // measurements; --stop-test restores it, because a stop test with no taper cannot ever stop.
 constexpr float kADecReal = 1.0f;
 bool  g_stop_test = false;   // run to an actual stop instead of breaking 0.15 m early
+// ★--pivot MUST run with the REAL deceleration. The 1e6 below disables the END taper so steering can be
+// measured without it, and that silently disabled the PIVOT APPROACH BRAKE too — which is a stopping
+// question, not a steering one. Measured with 1e6 the brake is inert and the run reads as "the mode does
+// nothing". Same trap this file already records for --stop-test; it just had a second victim.
+bool  g_real_decel = false;
+bool  g_pivoting = false;   // last cycle's PlainTracker::pivoting(), for the engagement count
 float wrap(float a) { return std::remainder(a, 2.f * kPi); }
 
 // ── THE IDENTIFIED PLANT ─────────────────────────────────────────────────────────────────────────
@@ -203,20 +210,34 @@ struct FfArm
     float g_dc = 1.f / 0.89f;   // identified DC gain, inverted
     float W = 0.40f;            // route's own smoothing scale
     float brake_k = 0.25f;      // shipped
+    // Heap-held so a copy of this arm makes its own on first use (see the note in control()).
+    mutable std::shared_ptr<SimWorld> world_;
+    mutable std::shared_ptr<rc::PlainTracker> tracker_;
 
     // The sim drives s itself (it sweeps the route open-loop), so the tracker's own projection is
     // overridden each step to keep the two benches comparable.
     void control(const rc::RouteSpline &sp, float s, float px, float py, float th,
                  float v_limit, float w_max, float &v_cmd, float &w_cmd) const
     {
-        // ★LOCAL, not a member. A member tracker holds a REFERENCE to a member world, so copying the
-        // arm (the sweeps do: `FfArm a; a.L = x;` then pass it on) leaves the copy's tracker pointing at
-        // the ORIGINAL's world — sp stays null, PlainTracker returns adv = 0, and every sweep row reads
-        // a flawless 0.0 mm because the robot never moved. PlainTracker's only state is s_hint_, which
-        // this bench seeds every call, so a fresh one per step is exactly equivalent and cannot alias.
-        SimWorld world;
-        world.sp = &sp;
-        rc::PlainTracker tracker{world};
+        // ★PERSISTENT, not local — and the aliasing trap that forced the local one is still avoided.
+        // A raw member tracker holds a REFERENCE to a raw member world, so copying the arm (the sweeps
+        // do: `FfArm a; a.L = x;` then pass it on) left the copy's tracker pointing at the ORIGINAL's
+        // world: sp stayed null, PlainTracker returned adv = 0, and every sweep row read a flawless
+        // 0.0 mm because the robot never moved. Heap-allocating both and creating them lazily, AFTER
+        // any copy, fixes that without throwing the state away.
+        // ★AND THE STATE MATTERS NOW. "A fresh one per step is exactly equivalent" was true only while
+        // s_hint_ was the tracker's only state and this bench re-seeded it every call. It stopped being
+        // true the moment the tracker latched anything: with a fresh instance per cycle, PlainTracker::
+        // pivoting_ is false at every entry and the stop-turn-go mode CANNOT ENGAGE — the bench reports
+        // a mode that never ran, which is indistinguishable from a mode that does nothing.
+        if (not tracker_)
+        {
+            world_ = std::make_shared<SimWorld>();
+            world_->sp = &sp;
+            tracker_ = std::make_shared<rc::PlainTracker>(*world_);
+        }
+        world_->sp = &sp;
+        rc::PlainTracker &tracker = *tracker_;
         rc::TrackerParams p;
         p.plain_L = L; p.plain_T_lag = T_lag; p.plain_g_dc = g_dc; p.plain_W = W;
         p.plain_brake_k = brake_k;
@@ -227,7 +248,7 @@ struct FfArm
         // of its own curve. That is correct for a TRACKING benchmark and catastrophic for --stop-test,
         // which asks whether the robot comes to REST: with the taper off it never can, and the result
         // reads as "PLAIN has no terminal behaviour" when the harness is what removed it.
-        p.cbf_max_decel = g_stop_test ? kADecReal : 1e6f;
+        p.cbf_max_decel = (g_stop_test or g_real_decel) ? kADecReal : 1e6f;
 
         rc::TrackerInput in;
         in.robot_pose = Eigen::Affine2f::Identity();
@@ -240,6 +261,7 @@ struct FfArm
         tracker.compute(out, in, p);
         v_cmd = out.adv;
         w_cmd = -out.rot;               // back to CCW-positive, the sim's convention
+        g_pivoting = tracker.pivoting();
     }
 };
 
@@ -270,6 +292,12 @@ struct Result
     double trans_45 = 0, trans_90 = 0, trans_135 = 0;   // metres translated where turn_ahead exceeds
     double time_45 = 0, time_90 = 0, time_135 = 0;      // seconds spent there
     float  vmax_90 = 0;                                 // fastest the robot ever moved past 90 deg
+    // ★COMMANDED vs REALISED past 90 deg. The gate can only zero the COMMAND; the plant carries a
+    // 0.20 s transport delay, a 0.22 s lag and a slew limit, so "still translating" may be the tracker
+    // refusing to stop or the wheels refusing to. Those want completely different fixes.
+    float  vcmd_max_90 = 0;
+    double vcmd_int_90 = 0;
+    int    pivot_cycles = 0, pivot_episodes = 0;
 };
 
 double corr(const std::vector<float> &a, const std::vector<float> &b, int lag)
@@ -359,6 +387,8 @@ Result run(const rc::RouteFollower &route, Arm arm, float v_cap, float w_max,
     float v_cmd_prev = 0.f;
     Projector projector;   // --stop-test: "at rest" means the PLANT has stopped AND nothing new was asked
     float lx = P.x, ly = P.y; bool have_last = false;
+    bool was_pivoting = false;
+    g_pivoting = false;
     bool  first = true;
 
     for (float t = 0.f; t < 400.f; t += kCtrlDt)
@@ -437,6 +467,8 @@ Result run(const rc::RouteFollower &route, Arm arm, float v_cap, float w_max,
         R.e.push_back(e);
         R.kappa.push_back(sp.kappa_avg(s_hint, W));
         R.d_kappa.push_back(std::abs(sp.kappa_avg(s_hint, W)));
+        if (g_pivoting) { ++R.pivot_cycles; if (not was_pivoting) ++R.pivot_episodes; }
+        was_pivoting = g_pivoting;
         R.d_vlim.push_back(v_lim); R.d_vcmd.push_back(v_cmd); R.d_wcmd.push_back(w_cmd);
         // WHERE does it come apart? An rms figure cannot distinguish "slightly loose everywhere" from
         // "fine until s=X, then gone", and those want completely different fixes.
@@ -460,7 +492,9 @@ Result run(const rc::RouteFollower &route, Arm arm, float v_cap, float w_max,
         constexpr float kD45 = 0.785f, kD90 = 1.571f, kD135 = 2.356f;
         if (turn_ahead > kD45)  { R.trans_45  += step_m; R.time_45  += kCtrlDt; }
         if (turn_ahead > kD90)  { R.trans_90  += step_m; R.time_90  += kCtrlDt;
-                                  R.vmax_90 = std::max(R.vmax_90, step_m / kCtrlDt); }
+                                  R.vmax_90 = std::max(R.vmax_90, step_m / kCtrlDt);
+                                  R.vcmd_max_90 = std::max(R.vcmd_max_90, v_cmd);
+                                  R.vcmd_int_90 += double(v_cmd) * kCtrlDt; }
         if (turn_ahead > kD135) { R.trans_135 += step_m; R.time_135 += kCtrlDt; }
         R.dist += step_m;
         R.t_end = t;
@@ -544,6 +578,12 @@ void pivot_report(const char *tag, const Result &R)
                 ">135deg: %5.2f m / %4.1f s | rms %5.1f mm | %.0f s\n",
                 tag, R.trans_45, R.time_45, R.trans_90, R.time_90, R.vmax_90,
                 R.trans_135, R.time_135, R.n ? std::sqrt(R.e_sq / R.n) * 1000 : 0.0, R.t_end);
+    std::printf("  %-22s   past 90deg the COMMAND was: max %.3f m/s, integral %.2f m "
+                "(realised %.2f m -> %.2f m of it is the plant coasting)\n",
+                "", R.vcmd_max_90, R.vcmd_int_90, R.trans_90,
+                std::max(0.0, R.trans_90 - R.vcmd_int_90));
+    std::printf("  %-22s   stop-turn-go engaged %d times, %.1f s held at zero\n",
+                "", R.pivot_episodes, R.pivot_cycles * 0.05);
 }
 
 struct World
@@ -595,7 +635,7 @@ int main(int argc, char **argv)
         else if (a == "--trace") g_trace = true;
         else if (a == "--optimise" or a == "--optimize") g_optimise = true;
         else if (a == "--brake") brake_mode = true;
-        else if (a == "--pivot") pivot_mode = true;
+        else if (a == "--pivot") { pivot_mode = true; g_real_decel = true; }
         else if (a.rfind("w_jerk=", 0) == 0) { g_optimise = true; g_w_jerk = std::stof(a.substr(7)); } else path = a;
     }
 

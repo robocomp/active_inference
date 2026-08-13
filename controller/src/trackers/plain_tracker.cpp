@@ -146,11 +146,124 @@ ControlOutput& PlainTracker::compute(ControlOutput& out, const TrackerInput& in,
     // At k = 0 this reduces to the saturation ratio alone.
     const float r_om = omega_ccw / std::max(0.05f, p.max_rot);
     const float brake = std::exp(-std::max(0.f, p.plain_brake_k) * r_om * r_om);
-    const float v_cmd = std::clamp(v_profile * std::min(scale, brake), 0.f, p.max_adv);
+
+    // ── DO NOT TRANSLATE INTO SPACE YOU ARE NOT FACING ───────────────────────────────────────────
+    // The lidar self-filter discards every return within max(0.40, body_max + 0.08) m of the robot
+    // centre (trajectory_controller.cpp), so against a 0.325 m circumscribed body the robot is BLIND
+    // within about 8 cm of its own hull. Nothing downstream can see furniture that is already inside
+    // that annulus. The one thing that keeps the swept body out of unseen space is therefore a
+    // property of the MOTION, not of any sensor: the robot may advance only into the space it is
+    // pointing at, which is the space it has been looking at on the way in.
+    // Reported from the robot: through a sharp turn it kept translating and clipped the furniture.
+    // The speed profile alone cannot fix that — h_eff*w_max/kappa is a 1/kappa law that gets small
+    // but never reaches zero, and the saturation ratio bottoms out at max_rot/|k_cmd|, which at the
+    // tour's tightest is still ~0.09 m/s. Held for the ~4 s a point turn takes, that is a third of a
+    // metre of unseen sideways sweep.
+    //
+    //   gate = max(0, cos(min(turn_ahead, misalign)))
+    //
+    // turn_ahead — how far the ROUTE turns over its own smoothing window: a property of the path.
+    // misalign   — how far the ROBOT still has to turn to face where the route goes: a property of
+    //              the pose.
+    // ★THE MINIMUM OF THE TWO, and that is the whole design, not a detail:
+    //   • on a STRAIGHT, turn_ahead is 0, so the gate is exactly 1 no matter how badly the robot is
+    //     misaligned. This is what makes cross-track recovery impossible to deadlock — and a gate on
+    //     misalignment ALONE does deadlock, at e_y > ~pi/2*L*2, because the feedback settles the robot
+    //     at e_psi ~ e_y/(2L) off the tangent and cos of that is <= 0. e_y can only be reduced by
+    //     MOVING; the same trap the unbounded brake exponent fell into (see the note above).
+    //   • at a CUSP already aligned, misalign is 0, so the gate is 1 and the robot drives out of the
+    //     turn instead of sitting in it. Only "the route turns hard here AND I am not yet pointing
+    //     that way" stops the wheels, and rotating is what clears it, so it always terminates.
+    // ★THE STEERING MUST BE RETARGETED WITH IT, AND GATING v ALONE DEADLOCKS. Measured, not argued:
+    // with the gate on v only, the bench froze for 385 of 400 s above 90 deg of turn. The reason is
+    // structural and is the whole difficulty here — this law's rotation is PROPORTIONAL TO v
+    // (omega = g_dc*v*kappa), so it cannot turn in place, and the Frenet feedback is written in ARC
+    // LENGTH, which presumes s is advancing. Stop the wheels and the curvature demand settles to zero
+    // a few degrees from where it started, pointing at the tangent AT s while the gate is watching the
+    // tangent AHEAD of s. Nothing then rotates the robot out of its own gate.
+    // So the same gate blends the turn command from tracking toward a plain HEADING controller aimed
+    // at psi_ahead:
+    //     omega = gate*omega_track + (1 - gate)*omega_pivot,  omega_pivot = g_dc*v_floor*(2/L)*misalign
+    // At gate = 1 this is exactly the previous law, untouched. At gate = 0 it is v = 0 with a heading
+    // loop — a true point turn — and it always TERMINATES, because omega_pivot drives misalign down
+    // and that is what re-opens the gate.
+    // ★omega_pivot introduces NO new constant: it is the law's own heading term, g_dc*(2/L) evaluated
+    // at the existing steering floor, retargeted from psi(s) to psi_ahead.
+    const float psi_ahead   = sp.heading_at(std::min(s + p.plain_W, sp.length()));
+    const float turn_ahead  = std::abs(wrap_pi(psi_ahead - psi));
+    const float align_err   = wrap_pi(psi_ahead - theta_fwd);          // SIGNED: which way to spin
+
+    // ── THE ONE BOUNDARY, USED TWICE, AND IT IS DERIVED RATHER THAN TUNED ────────────────────────
+    // A quarter turn is where advancing STOPS MAKING PROGRESS toward where you are going: past 90 deg
+    // the component of forward motion along the outgoing tangent changes sign. That is the same fact
+    // whether it is asked of the route ("does this turn reverse me?") or of the pose ("am I facing the
+    // way out yet?"), so both ends of the decision use it and there is no gain to pick.
+    constexpr float kQuarterTurn = static_cast<float>(M_PI_2);
+    // ENTRY asks the ROUTE and the POSE together; RELEASE asks the POSE alone. That asymmetry IS the
+    // hysteresis — no margin constant is needed, because entry requires |align_err| >= 90 and release
+    // requires < 90, and the pivot itself drives align_err monotonically down through that point.
+    if (not pivoting_ and turn_ahead >= kQuarterTurn and std::abs(align_err) >= kQuarterTurn)
+        pivoting_ = true;
+    else if (pivoting_ and std::abs(align_err) < kQuarterTurn)
+        pivoting_ = false;
+
+    // ── ARRIVE ALREADY STOPPED ───────────────────────────────────────────────────────────────────
+    // MEASURED, and it is why a reactive gate is not enough: with the wheels commanded to zero from the
+    // moment the turn is detected, the robot still swept 0.23 m through the kitchen's hairpin — and
+    // 0.14 m of that was pure plant. The command was already at most 0.018 m/s; the base carries a
+    // 0.20 s transport delay, a 0.22 s lag and a slew limit, so ~0.4 s of motion is in flight at all
+    // times. Deciding to stop AT the corner is deciding half a second too late.
+    // So brake for the pivot the way the end of the route is braked: find the first arc length ahead
+    // where the route reverses, and bound the speed by what can still be shed before reaching it.
+    // ★Scanned over the ROUTE only. A heading-dependent scan would need to guess the robot's future
+    // heading, and the whole point is that the approach is decided before the robot gets there.
+    // ★This CANNOT deadlock, and that is why the zero lives here and not in route_speed_limit: it is a
+    // bound on the approach to a point AHEAD (ds > 0 gives sqrt(2*a*ds) > 0), never a bound at the
+    // robot's own s. A hard zero in the speed profile would pin v = 0 at the apex for ever, because the
+    // profile is a pure route property and pivoting does not change it.
+    float v_pivot_approach = p.max_adv;
+    {
+        const float horizon = p.max_adv * p.max_adv / (2.f * a_dec) + p.plain_W;
+        for (float ds = 0.05f; ds <= horizon; ds += 0.05f)
+        {
+            const float x = s + ds;
+            if (x > sp.length()) break;
+            const float turn_x = std::abs(wrap_pi(sp.heading_at(std::min(x + p.plain_W, sp.length()))
+                                                  - sp.heading_at(x)));
+            if (turn_x < kQuarterTurn) continue;      // drivable: no stop required there
+            // ★THE DEAD TIME IS PART OF THE STOPPING DISTANCE, and leaving it out is what made the
+            // first attempt useless. sqrt(2*a*ds) is the textbook bound and it assumes braking starts
+            // NOW; this base does not begin to slow for T_lag seconds (0.42 s identified), during which
+            // it covers v*T_lag. Solving v*T_lag + v^2/(2a) = ds for v:
+            //     v = -a*T_lag + sqrt((a*T_lag)^2 + 2*a*ds)
+            // At 5 cm out that is 0.106 m/s where the textbook form allowed 0.316 — a factor of three,
+            // and the difference between arriving stopped and arriving at a third of full speed.
+            // No new constant: T_lag is this law's own identified lag, already used by the feedforward.
+            const float at = a_dec * std::max(0.f, p.plain_T_lag);
+            v_pivot_approach = std::min(v_pivot_approach,
+                                        std::max(0.f, -at + std::sqrt(at * at + 2.f * a_dec * ds)));
+            break;                                     // the FIRST one is the binding one
+        }
+    }
+
+    // While pivoting the wheels are held at zero and the turn command becomes a plain HEADING loop on
+    // the outgoing tangent. It introduces no new constant: it is this law's own heading term,
+    // g_dc*(2/L) evaluated at the existing steering floor, retargeted from psi(s) to psi_ahead.
+    // ★omega must NOT be scaled down with v. The rotation is the only thing that clears the condition
+    // holding the robot, and a law whose omega is proportional to v cannot turn on the spot — that is
+    // exactly how the stateless version froze for 385 of 400 s in the bench.
+    const float omega_pivot = std::clamp(p.plain_g_dc * kSteerFloorMps * (2.f / L) * align_err,
+                                         -p.max_rot, p.max_rot);
+    const float omega_blend = pivoting_ ? omega_pivot : omega_ccw;
+
+    const float v_cmd = pivoting_
+                      ? 0.f
+                      : std::clamp(std::min(v_profile * std::min(scale, brake), v_pivot_approach),
+                                   0.f, p.max_adv);
 
     out.adv  = v_cmd;
     out.side = 0.f;
-    out.rot  = -omega_ccw;                        // FRAME conversion (2/2)
+    out.rot  = -omega_blend;                      // FRAME conversion (2/2)
     out.cross_track_m = e_y;
     out.carrot_bearing_rad = e_psi;               // the heading error, not a bearing
     out.carrot_dist_m = v_cmd * p.plain_T_lag;    // the preview distance, for the overlay
