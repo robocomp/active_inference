@@ -993,7 +993,7 @@ void CabinetFitter::log_ai2_csv(const CabinetInstance& inst, int npts, float R, 
         ai2_csv_ << "cycle,node,pkt_fid,pkt_ts,npts,gated,energy,fe_baseline,fe_surprise,R,motion_var,depth_var,motion_dotd,ego_v,ego_w,ego_dt,trunc_frac,range,"
                  << "cx,cy,yaw,L,d,z0,z1,std_cx,std_cy,std_yaw,std_L,std_d,std_z0,std_z1,"
                  << "tier_ev,p_alt,lidar_rays,lidar_raw,lidar_bpearl,lidar_resid_m,lidar_meanz,lidar_topz,lidar_floorz,lidar_cov_ang,"
-                 << "dyaw_points,obliquity_cos,wall_gap,wall_lambda,span_obs,span_pts,span_lidar_rays,"
+                 << "dyaw_points,obliquity_cos,wall_gap,wall_lambda,attach_end,wall_gap_end,span_obs,span_pts,span_lidar_rays,"
                  << "ex_L,ex_p,ex_locc,ex_lfree,ex_lfree_eff,ex_ln,ex_socc,ex_sfree,ex_sfree_eff,ex_sndet,ex_streak,"
                  << "ex_pdetect,ex_central,ex_verify,ex_wantsverify,"
                  << "axis_resid,cand_pts,resid_pts,nbv_gain\n";   // + Manhattan-yaw residual (rad) & candidate/residual split (merge diag)
@@ -1018,6 +1018,10 @@ void CabinetFitter::log_ai2_csv(const CabinetInstance& inst, int npts, float R, 
              << inst.dbg_lidar_cov_ang << ','
              << inst.dbg_dyaw_points << ',' << inst.dbg_obliquity_cos << ','
              << inst.ai2_belief.last_wall_gap()  << ',' << inst.ai2_belief.last_wall_lambda() << ','
+             // ★The attachment MODE and the END face's gap. Without these the peninsula defect was only
+             // visible as a swapped L/d in the metaconcept's member table — the belief could not say
+             // which face it thought was on the wall, which is the whole question.
+             << inst.ai2_belief.last_attach_end() << ',' << inst.ai2_belief.last_wall_gap_end() << ','
              << inst.ai2_belief.last_span_obs()  << ',' << inst.ai2_belief.last_span_pts()    << ','
              << inst.ai2_belief.last_lidar_rays() << ','
              << inst.existence.logodds() << ',' << inst.existence.p_exists() << ','

@@ -123,9 +123,48 @@ void CabinetBelief::apply_constraints(CabinetBeliefState& s) const
 // deterministically by requiring the FRONT normal to point into the room. This is a geometric
 // disambiguation against a known reference (the room polygon centroid), not a threshold — and it is
 // what makes `d` mean "front face → back face" rather than an arbitrary sign.
+// The depth beyond which "this is the carcass depth" stops being credible and the axes are better read as
+// swapped: the tier's own depth prior, plus 3 sigma of it. Not a new constant — the prior already states
+// how deep a carcass is and how sure the kitchen is about it, so the swap test is asked in those terms.
+float CabinetBelief::d_swap_evidence_m() const
+{
+    // The BASE tier's prior, deliberately: canonicalize runs before the tier posterior has settled, so the
+    // test must not assume one, and base (0.60 +/- 0.10 -> 0.90 m) is the more permissive of the two — a
+    // wall unit is 0.35 +/- 0.08. A depth past 0.90 m is not a carcass on either reading.
+    const auto& t = params_.base_tier;
+    return t.d_mean + 3.0f * std::max(1e-3f, t.d_std);
+}
+
 void CabinetBelief::canonicalize(CabinetBeliefState& s) const
 {
     s.yaw = wrap_pi(s.yaw);
+
+    // ★★THE 90-DEGREE AXIS SWAP, and it is a CHART FIX, not an estimate. A run's parameterisation names one
+    // extent the LENGTH (free, along the run) and the other the DEPTH (a tight carcass prior, ~0.60 +/- 0.10).
+    // Nothing in the geometry stops the optimiser settling into the state with those two roles EXCHANGED —
+    // it is the same box, described 90 degrees around — and once there it is entirely self-consistent: the
+    // observed span along the model's "length" axis really is the narrow side, so the extent evidence agrees
+    // with it and it never leaves.
+    //
+    // MEASURED live, `cabinet_peninsula`, 93 cycles dead flat: L = 0.10-0.13 m with d = 1.17-1.28 m. The
+    // depth prior is 0.60 +/- 0.10, so d sat FIVE AND A HALF SIGMA out while L collapsed to a tenth of any
+    // plausible run — and the fit was stable there. What put it in that basin was the wall factor, which had
+    // only one attachment mode and pressed the LONG face onto a wall the unit touches with an END; swapping
+    // the axes was the only way to satisfy it. The mixture in accumulate_wall fixes the cause, but a state
+    // ALREADY in the swapped basin does not escape on its own: the mode posterior reads the current yaw, and
+    // the current yaw is wrong precisely because of the old model.
+    //
+    // d > L with d implausible as a carcass IS the swap, stated in the model's own terms. Exchanging the two
+    // and turning yaw by 90 degrees names the same box correctly, so nothing physical moves — this is the
+    // C2v fold's 90-degree sibling. Covariance follows in swap_extent_cov(), or the uncertainty would end up
+    // attached to the wrong axis.
+    if (s.d > s.L and s.d > d_swap_evidence_m())
+    {
+        std::swap(s.L, s.d);
+        s.yaw = wrap_pi(s.yaw + 0.5f * std::numbers::pi_v<float>);
+        ++dbg_axis_swaps_;
+    }
+
     if (not has_room_interior_) return;
     const Eigen::Vector2f to_room = room_interior_ - s.centre();
     if (to_room.squaredNorm() < 1e-8f) return;
@@ -210,64 +249,104 @@ float CabinetBelief::flush_weight(const CabinetBeliefState& s, const CabinetFram
     return std::exp(-rel * rel);
 }
 
+// Posterior that this run is attached to the wall BY AN END rather than along its length. From the only
+// quantity that answers it without circularity: the angle between the run axis and the wall normal.
+//
+// ★A RUN HAS TWO WAYS TO MEET A WALL AND THE MODEL ONLY HAD ONE. accumulate_wall drove back_centre() —
+// centre − normal·(d/2), the LONG face — onto the wall, and pulled the axis PARALLEL to it. That is a
+// kitchen run against its wall, and it is most of them. A PENINSULA is bolted to the wall by its narrow
+// END: the face that touches is centre ± axis·(L/2) and the axis runs PERPENDICULAR to the wall, away
+// from it. Told to press its long face flat against a wall it only touches with one end, the fit can only
+// comply by swapping which extent plays "depth" — and it did.
+//
+// MEASURED, live 2026-08-13, kitchen_metaconcept/etc/kitchen_members.csv, `cabinet_peninsula` over 93
+// cycles: length 0.10–0.13 m and depth 1.17–1.28 m, dead flat. The carcass DEPTH prior is 0.60 m and the
+// LENGTH is the free axis, so the physical 1.2 m long side was being fitted as depth (2x its prior) and the
+// 0.11 m narrow side as length. yaw stuck at −11.13°, nowhere near a room axis, and kitchen membership
+// ~1e-9 — the metaconcept could see it did not fit and had no way to say why.
+//
+// c = |axis·n| is 0 when the axis is parallel to the wall (attached ALONG) and 1 when perpendicular
+// (attached END-ON), so p_end = c², p_along = 1 − c² is the sin²/cos² split of a mixture. Continuous, no
+// gate, no new parameter, and NOT a switch: an ambiguous run feels both constraints in proportion and the
+// Manhattan yaw prior resolves it as the evidence settles.
+float CabinetBelief::attach_end_posterior(const CabinetBeliefState& s, const CabinetFrame& f) const
+{
+    if (not f.wall.ok) return 0.0f;
+    const float c = std::abs(s.axis().dot(f.wall.n));
+    return std::clamp(c * c, 0.0f, 1.0f);
+}
+
 void CabinetBelief::accumulate_wall(const CabinetBeliefState& s, const CabinetFrame& f,
                                     Eigen::Matrix<float, 7, 7>& Id, Eigen::Matrix<float, 7, 1>& bd) const
 {
-    dbg_wall_gap_ = 0.0f; dbg_wall_lambda_ = 0.0f;
+    dbg_wall_gap_ = 0.0f; dbg_wall_lambda_ = 0.0f; dbg_attach_end_ = 0.0f; dbg_wall_gap_end_ = 0.0f;
     if (not f.wall.ok or params_.wall_precision <= 0.0f) return;
 
-    const auto gap_of = [&](const CabinetBeliefState& st)
-    { return (st.back_centre() - f.wall.p).dot(f.wall.n); };
-    const auto par_of = [&](const CabinetBeliefState& st)
-    { return st.axis().dot(f.wall.n); };            // 0 ⇔ run axis parallel to the wall
+    // The END nearer the wall — the one a peninsula is bolted through.
+    const auto end_centre = [&](const CabinetBeliefState& st)
+    {
+        const float sgn = (st.axis().dot(f.wall.p - st.centre()) >= 0.0f) ? 1.0f : -1.0f;
+        return st.centre() + sgn * st.axis() * (0.5f * st.L);
+    };
+    // The two attachment hypotheses, each with its own contact face and its own orientation residual.
+    const auto gap_along = [&](const CabinetBeliefState& st)
+    { return (st.back_centre() - f.wall.p).dot(f.wall.n); };          // LONG face on the wall
+    const auto gap_end   = [&](const CabinetBeliefState& st)
+    { return (end_centre(st)   - f.wall.p).dot(f.wall.n); };          // END face on the wall
+    const auto par_of    = [&](const CabinetBeliefState& st)
+    { return st.axis().dot(f.wall.n); };                              // 0 ⇔ axis PARALLEL to the wall
+    const auto perp_of   = [&](const CabinetBeliefState& st)
+    { return st.normal().dot(f.wall.n); };                            // 0 ⇔ axis PERPENDICULAR to the wall
 
-    const float gap = gap_of(s);
-    dbg_wall_gap_ = gap;
+    const float p_end   = attach_end_posterior(s, f);
+    const float p_along = 1.0f - p_end;
+    dbg_attach_end_ = p_end;
 
-    // Posterior weight of the "flush against this wall" component (shared definition), and the wall's own
-    // uncertainty. accumulate_extent uses the SAME weight for the wall-segment domain terms.
-    const float wgt = flush_weight(s, f);
-    const float lam_flush = wgt / (1.0f / params_.wall_precision + f.wall.sigma_m * f.wall.sigma_m);
-    dbg_wall_lambda_ = lam_flush;
-    if (not(lam_flush > 1e-6f)) return;
+    const float g_along = gap_along(s), g_end = gap_end(s);
+    dbg_wall_gap_ = g_along; dbg_wall_gap_end_ = g_end;
+
+    // The {flush, free-standing} posterior, per hypothesis: a peninsula's END gap is what decides whether
+    // IT is flush, and its long-face gap is meaningless. reach is the same scale for both.
+    const auto flush_w = [&](float gap)
+    { const float r = gap / std::max(1e-3f, params_.wall_reach_m); return std::exp(-r * r); };
+    const float lam_base = 1.0f / (1.0f / params_.wall_precision + f.wall.sigma_m * f.wall.sigma_m);
+    const float w_along  = p_along * flush_w(g_along);
+    const float w_end    = p_end   * flush_w(g_end);
+    dbg_wall_lambda_ = (w_along + w_end) * lam_base;
+    if (not(dbg_wall_lambda_ > 1e-6f) ) return;
 
     const float eps = params_.fd_eps;
     const Eigen::Matrix<float, 7, 1> v = s.vec();
-    Eigen::Matrix<float, 7, 1> Jg, Jp;
+    Eigen::Matrix<float, 7, 1> Jga, Jge, Jp, Jq;
     for (int k = 0; k < 7; ++k)
     {
         Eigen::Matrix<float, 7, 1> vp = v, vm = v;
         vp(k) += eps; vm(k) -= eps;
         const auto sp = CabinetBeliefState::from_vec(vp), sm = CabinetBeliefState::from_vec(vm);
-        Jg(k) = std::clamp((gap_of(sp) - gap_of(sm)) / (2.0f * eps), -kJClamp, kJClamp);
-        Jp(k) = std::clamp((par_of(sp) - par_of(sm)) / (2.0f * eps), -kJClamp, kJClamp);
+        Jga(k) = std::clamp((gap_along(sp) - gap_along(sm)) / (2.0f * eps), -kJClamp, kJClamp);
+        Jge(k) = std::clamp((gap_end(sp)   - gap_end(sm))   / (2.0f * eps), -kJClamp, kJClamp);
+        Jp (k) = std::clamp((par_of(sp)    - par_of(sm))    / (2.0f * eps), -kJClamp, kJClamp);
+        Jq (k) = std::clamp((perp_of(sp)   - perp_of(sm))   / (2.0f * eps), -kJClamp, kJClamp);
     }
-    Id.noalias() += lam_flush * (Jg * Jg.transpose());
-    bd.noalias() += -lam_flush * Jg * gap;
+    // FLUSH, marginalised over the attachment mode.
+    const float la = w_along * lam_base, le = w_end * lam_base;
+    if (la > 1e-6f) { Id.noalias() += la * (Jga * Jga.transpose()); bd.noalias() += -la * Jga * g_along; }
+    if (le > 1e-6f) { Id.noalias() += le * (Jge * Jge.transpose()); bd.noalias() += -le * Jge * g_end;   }
 
     if (params_.wall_parallel_precision > 0.0f)
     {
-        // ★★AN OBJECT ADJACENT TO A WALL IS ALIGNED TO IT, WHATEVER POSE THE MASKS CAME FROM. The yaw was
-        // decided by a flat constant of 200 against thousands of mask points seen obliquely, and the points
-        // won — hood_concept sat 9 degrees off the wall it is bolted to, drifting. That is not a tuning
-        // problem, it is the wrong quantity in the precision: a single oblique face gives a poor surface
-        // normal, the WALL's direction is known far better, and how much better is not a number anyone
-        // needs to choose. A segment of length L localised to sigma_m has angular uncertainty ~ sigma_m/L,
-        // and the room model already carries both — a 3 m wall known to 2 cm is known to 0.0066 rad, i.e.
-        // lambda ~22800 against the constant's 200. DERIVED, not picked.
-        //
-        // The residual is sin(misalignment), so a precision on it is a precision on the angle. Still scaled
-        // by the flush posterior, which is the point: ADJACENCY is what earns the alignment, and a
-        // free-standing object (a mid-room fridge, a kitchen island) has wgt -> 0 and keeps its data-driven
-        // yaw. Both 180-degree solutions satisfy it, so the front/back resolution is untouched.
+        // ORIENTATION, marginalised the same way. A wall segment of length L localised to sigma_m is known
+        // angularly to ~sigma_m/L — DERIVED from the room model rather than a picked constant (a 3 m wall
+        // known to 2 cm gives lambda ~22800 against the old flat 200). ★And it is applied to the residual
+        // the MODE calls for: an ALONG run wants axis ∥ wall, an END-ON run wants axis ⊥ wall. Applying the
+        // parallel residual to a peninsula at that strength would drive it 90 degrees wrong, hard.
         const float seg_len     = f.wall.has_segment ? (f.wall.b - f.wall.a).norm() : 0.0f;
         const float sigma_theta = (seg_len > 0.1f) ? f.wall.sigma_m / seg_len : 0.0f;
         const float lam_geom    = (sigma_theta > 1e-4f) ? 1.0f / (sigma_theta * sigma_theta)
                                                         : params_.wall_parallel_precision;
-        const float lam_par = wgt * lam_geom;   // same mixture weight
-        const float rp = par_of(s);
-        Id.noalias() += lam_par * (Jp * Jp.transpose());
-        bd.noalias() += -lam_par * Jp * rp;
+        const float lp = w_along * lam_geom, lq = w_end * lam_geom;
+        if (lp > 1e-6f) { Id.noalias() += lp * (Jp * Jp.transpose()); bd.noalias() += -lp * Jp * par_of(s);  }
+        if (lq > 1e-6f) { Id.noalias() += lq * (Jq * Jq.transpose()); bd.noalias() += -lq * Jq * perp_of(s); }
     }
 }
 

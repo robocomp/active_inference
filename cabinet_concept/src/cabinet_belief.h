@@ -366,6 +366,7 @@ public:
     float mixture_unnormalized(const Eigen::Vector3f& p, const CabinetBeliefState& s, float R,
                                std::array<float, 2>& u) const;
     void  apply_constraints(CabinetBeliefState& s) const;
+    float d_swap_evidence_m() const;   // depth past which the axes read as swapped — from the prior
     void  canonicalize(CabinetBeliefState& s) const;   // C2v yaw fold: front normal faces the room
 
     int   gn_iters() const { return params_.gn_iters; }
@@ -383,6 +384,9 @@ public:
                           Eigen::Matrix<float, 7, 7>& Id, Eigen::Matrix<float, 7, 1>& bd) const;
 
     // ── Monitor instrumentation ───────────────────────────────────────────────────────────────
+    int   axis_swaps() const { return dbg_axis_swaps_; }
+    float last_attach_end()   const { return dbg_attach_end_; }
+    float last_wall_gap_end() const { return dbg_wall_gap_end_; }
     float last_wall_gap()     const { return dbg_wall_gap_; }      // back face -> wall signed gap (m)
     float last_wall_lambda()  const { return dbg_wall_lambda_; }   // applied flush precision (1/m^2)
     int   last_lidar_rays()   const { return dbg_lidar_rays_; }
@@ -416,6 +420,9 @@ private:
     // Posterior weight of the "flush against this wall" mixture component: exp(−(gap/reach)²), gap measured
     // from the run's back face. ONE definition shared by accumulate_wall (flush + parallel) and
     // accumulate_extent (wall-segment domain). 0 when no wall this frame ⇒ both terms inert (island).
+    // Posterior that the run is attached to the wall by an END (peninsula) rather than along its
+    // length. See the definition — a mixture weight from the axis/wall angle, not a switch.
+    float attach_end_posterior(const CabinetBeliefState& s, const CabinetFrame& f) const;
     float flush_weight(const CabinetBeliefState& s, const CabinetFrame& f) const;
     void accumulate_axis_alignment(const CabinetBeliefState& s,
                                    Eigen::Matrix<float, 7, 7>& Id, Eigen::Matrix<float, 7, 1>& bd) const;
@@ -433,6 +440,9 @@ private:
     Eigen::Vector2f room_interior_ = Eigen::Vector2f::Zero();
     bool            has_room_interior_ = false;
 
+    mutable int   dbg_axis_swaps_   = 0;      // how many times canonicalize() un-swapped L and d
+    mutable float dbg_attach_end_   = 0.0f;   // posterior of END-ON attachment (a peninsula)
+    mutable float dbg_wall_gap_end_ = 0.0f;   // the END face's signed gap to the wall (m)
     mutable float dbg_wall_gap_    = 0.0f;
     mutable float dbg_wall_lambda_ = 0.0f;
     mutable int   dbg_lidar_rays_  = 0;
