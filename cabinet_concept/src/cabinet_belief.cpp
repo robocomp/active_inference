@@ -247,7 +247,24 @@ void CabinetBelief::accumulate_wall(const CabinetBeliefState& s, const CabinetFr
 
     if (params_.wall_parallel_precision > 0.0f)
     {
-        const float lam_par = wgt * params_.wall_parallel_precision;   // same mixture weight
+        // ★★AN OBJECT ADJACENT TO A WALL IS ALIGNED TO IT, WHATEVER POSE THE MASKS CAME FROM. The yaw was
+        // decided by a flat constant of 200 against thousands of mask points seen obliquely, and the points
+        // won — hood_concept sat 9 degrees off the wall it is bolted to, drifting. That is not a tuning
+        // problem, it is the wrong quantity in the precision: a single oblique face gives a poor surface
+        // normal, the WALL's direction is known far better, and how much better is not a number anyone
+        // needs to choose. A segment of length L localised to sigma_m has angular uncertainty ~ sigma_m/L,
+        // and the room model already carries both — a 3 m wall known to 2 cm is known to 0.0066 rad, i.e.
+        // lambda ~22800 against the constant's 200. DERIVED, not picked.
+        //
+        // The residual is sin(misalignment), so a precision on it is a precision on the angle. Still scaled
+        // by the flush posterior, which is the point: ADJACENCY is what earns the alignment, and a
+        // free-standing object (a mid-room fridge, a kitchen island) has wgt -> 0 and keeps its data-driven
+        // yaw. Both 180-degree solutions satisfy it, so the front/back resolution is untouched.
+        const float seg_len     = f.wall.has_segment ? (f.wall.b - f.wall.a).norm() : 0.0f;
+        const float sigma_theta = (seg_len > 0.1f) ? f.wall.sigma_m / seg_len : 0.0f;
+        const float lam_geom    = (sigma_theta > 1e-4f) ? 1.0f / (sigma_theta * sigma_theta)
+                                                        : params_.wall_parallel_precision;
+        const float lam_par = wgt * lam_geom;   // same mixture weight
         const float rp = par_of(s);
         Id.noalias() += lam_par * (Jp * Jp.transpose());
         bd.noalias() += -lam_par * Jp * rp;

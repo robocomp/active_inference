@@ -356,6 +356,32 @@ float HoodBelief::two_sided_along(const HoodBeliefState& s, const HoodFrame& f, 
             return (tot > 0) ? (2.0f * std::min(nplus, nminus) / static_cast<float>(tot)) : 0.0f;
         }
 
+// The flush weight MARGINALISED over whether the data can discriminate {flush, free-standing} at all.
+//
+// flush_weight() answers "does the back face sit at the wall?" from the gap — a fair question when the depth
+// is observed, and a trap when it is not: a box whose depth was ASSERTED too large has its back pushed past
+// the wall, the weight decays as the square of that error, and the one term that could pull it back switches
+// itself off precisely because it is wrong. Self-reinforcing, and it is what left the hood a quarter of a
+// metre inside the wall.
+//
+// With the depth axis unobserved, "free-standing at some other depth" is not a competing explanation the data
+// supports — it is an unconstrained direction — so the posterior falls back to the CLASS prior:
+//
+//     w = two_sided·exp(−(gap/reach)²)  +  (1 − two_sided)·π_flush
+//
+// ★π_flush IS A PER-CLASS WORLD FACT AND MOST CLASSES DO NOT GET 1.0. A range hood is definitionally bolted
+// to a wall. A REFRIGERATOR is not — its own manifest says "the mixture weight decays to 0 for a genuine
+// mid-room fridge" — and a cabinet RUN is, but an ISLAND is the declared exception, which is precisely what
+// the decaying weight exists to detect. Default 0.0 reproduces the previous behaviour exactly; only a class
+// that is wall-mounted BY DEFINITION may declare otherwise, and it declares it in its manifest.
+float HoodBelief::flush_posterior(const HoodBeliefState& s, const HoodFrame& f) const
+{
+    if (not f.wall.ok) return 0.0f;
+    const float two_sided = two_sided_along(s, f, false);
+    return two_sided * flush_weight(s, f)
+         + (1.0f - two_sided) * std::clamp(params_.wall_flush_prior, 0.0f, 1.0f);
+}
+
 float HoodBelief::flush_weight(const HoodBeliefState& s, const HoodFrame& f) const
 {
     if (not f.wall.ok) return 0.0f;
@@ -394,8 +420,7 @@ void HoodBelief::accumulate_wall(const HoodBeliefState& s, const HoodFrame& f,
     // wall-mounted class that prior is ~1. Marginalising the discrete component honestly:
     //     w = two_sided·exp(−(gap/reach)²)  +  (1 − two_sided)·π_flush
     const float depth_unobs = 1.0f - two_sided_along(s, f, false);
-    const float wgt = (1.0f - depth_unobs) * flush_weight(s, f)
-                    + depth_unobs * std::clamp(params_.wall_flush_prior, 0.0f, 1.0f);
+    const float wgt = flush_posterior(s, f);
     // …and it carries the confidence the footprint prior just handed over (see accumulate_extra): with the
     // depth unobservable the wall is not a soft preference, it is the second equation that determines it.
     const float lam_base = 1.0f / (1.0f / params_.wall_precision + f.wall.sigma_m * f.wall.sigma_m);
@@ -502,10 +527,15 @@ void HoodBelief::accumulate_extra(const HoodBeliefState& s, const HoodFrame& f,
         //
         // Strict generalisation: with no wall staged (f.wall.ok false) this is byte-for-byte the old form,
         // so a genuinely free-standing object keeps the nominal prior that is all it has.
-        const float depth_unobs   = 1.0f - two_sided_along(false);
-        const float wall_resolves = f.wall.ok ? depth_unobs : 0.0f;   // the wall answers it instead
+        // ★THE PRECISION IS CONSERVED, AND IT MOVES ONLY AS FAR AS THE WALL ACTUALLY TAKES IT. Handing it over
+        // whenever a wall merely EXISTS would be a bug for any class whose π_flush is 0: the flush posterior
+        // would be small, so the depth pin would be removed without the wall constraint replacing it and the
+        // depth would float on lam_wd alone. It moves in proportion to the flush posterior — all of it at
+        // w = 1 (a hood), none of it at w = 0 (a mid-room fridge, a kitchen island), continuously between.
+        const float depth_unobs = 1.0f - two_sided_along(false);
+        const float w_flush     = flush_posterior(s, f);              // 0 when no wall is staged
         const float lam_w = lam_wd + params_.depth_unobs_precision * (1.0f - two_sided_along(true));
-        const float lam_h = lam_wd + params_.depth_unobs_precision * (depth_unobs - wall_resolves);
+        const float lam_h = lam_wd + params_.depth_unobs_precision * depth_unobs * (1.0f - w_flush);
         Id(3, 3) += lam_w;  bd(3) += lam_w * (params_.prior_footprint_m - s.w);   // w      (index 3)
         // Depth gets its OWN mean when the object is not square in plan (see prior_depth_m).
         const float depth_mean = (params_.prior_depth_m >= 0.0f) ? params_.prior_depth_m

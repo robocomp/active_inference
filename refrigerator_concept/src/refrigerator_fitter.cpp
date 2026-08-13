@@ -496,6 +496,7 @@ WallRef RefrigeratorFitter::nearest_wall(const Eigen::Vector2f& q) const
     nrm.normalize();
     if (nrm.dot(room_interior_ - best_foot) < 0.0f) nrm = -nrm;   // point INTO the room
     w.ok = true; w.p = best_foot; w.n = nrm; w.sigma_m = 0.02f;
+    w.length_m = ab.norm();   // the segment's length ⇒ how well its DIRECTION is known (see WallRef)
     return w;
 }
 

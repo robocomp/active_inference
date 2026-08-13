@@ -495,6 +495,8 @@ private:
     // and the wall factor so both agree on which axis this viewpoint can resolve.
     float two_sided_along(const HoodBeliefState& s, const HoodFrame& f, bool along_x) const;
     float flush_weight(const HoodBeliefState& s, const HoodFrame& f) const;
+    // flush_weight marginalised over whether the data can discriminate at all — see the definition.
+    float flush_posterior(const HoodBeliefState& s, const HoodFrame& f) const;
 
     // Per-point WALL mixture component (explaining away): its available prior weight this frame, and its
     // un-normalised density at p. Both 0 when no room polygon is known ⇒ the mixture is box+clutter as before.

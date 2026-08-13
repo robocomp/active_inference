@@ -50,6 +50,9 @@ struct WallRef
     Eigen::Vector2f p       = Eigen::Vector2f::Zero();   // any point on the wall line (room frame, m)
     Eigen::Vector2f n       = Eigen::Vector2f::UnitX();  // UNIT normal, pointing INTO the room
     float           sigma_m = 0.02f;                     // wall position uncertainty (m)
+    // ★How long the wall segment is, because that is what says how well its DIRECTION is known: a wall
+    // localised to sigma_m over a length L is known angularly to ~sigma_m/L. 0 ⇒ unknown, constant used.
+    float           length_m = 0.0f;                     // polygon edge length (m)
 };
 
 // Appearance-based FRONT (door) cue: the room-frame direction the DOOR faces + a confidence in [0,1]. Emitted
@@ -151,6 +154,10 @@ struct RefrigeratorBeliefParams
     // factor fades to nothing (depth stays honestly wide). 0 = OFF.
     float wall_precision          = 400.0f;   // 1/m² at zero gap (≈1/σ² with σ≈5 cm)
     float wall_reach_m            = 0.15f;    // gap scale over which the flush hypothesis loses its weight
+    // π_flush: the CLASS prior that this object is wall-mounted, used when the depth axis is unobserved
+    // and the gap cannot discriminate {flush, free-standing}. 0 = no class prior (previous behaviour).
+    // ★A fridge keeps 0: commonly against a wall, not definitionally. Only a hood declares 1.0.
+    float wall_flush_prior        = 0.0f;
     float wall_parallel_precision = 200.0f;   // on (width-axis · wall-normal): back face parallel to the wall — 0 = OFF
     // WALL NO-CROSS (one-sided): resist the back face penetrating PAST the wall into the wall/exterior. Active only
     // when the gap goes negative (crossed) or within wall_no_cross_margin_m; precision GROWS with penetration
@@ -456,6 +463,8 @@ private:
     void accumulate_wall(const RefrigeratorBeliefState& s, const RefrigeratorFrame& f,
                          Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const;
     // Posterior weight of the "flush against this wall" mixture component: exp(−(gap/reach)²). 0 ⇒ inert.
+    float two_sided_along(const RefrigeratorBeliefState& s, const RefrigeratorFrame& f, bool along_x) const;
+    float flush_posterior(const RefrigeratorBeliefState& s, const RefrigeratorFrame& f) const;
     float flush_weight(const RefrigeratorBeliefState& s, const RefrigeratorFrame& f) const;
 
     // Per-point WALL mixture component (explaining away): its available prior weight this frame, and its

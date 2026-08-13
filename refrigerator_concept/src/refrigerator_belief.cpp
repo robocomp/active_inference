@@ -319,6 +319,51 @@ Eigen::Vector2f RefrigeratorBelief::back_centre(const RefrigeratorBeliefState& s
 // Gaussian on the back-face-to-wall gap, the flush component's posterior weight is exp(−(gap/reach)²), so
 // marginalising the discrete {flush, free-standing} component multiplies the factor precision by exactly it —
 // a continuous covariance, not a proximity gate. Fades to ~0 for a genuine mid-room fridge (depth stays wide).
+// Two-sided fraction for one footprint axis: an extent is IDENTIFIABLE only when the cloud spans it.
+// Lifted out of accumulate_extra 2026-08-13 so the WALL factor can ask the same question — asking it twice,
+// in two places, is how the two drift apart.
+float RefrigeratorBelief::two_sided_along(const RefrigeratorBeliefState& s, const RefrigeratorFrame& f, bool along_x) const
+{
+            if (params_.depth_unobs_precision <= 0.0f or f.points.size() <= 8)
+                return 1.0f;                       // feature off / too few points ⇒ claim nothing, add no boost
+            const float c = std::cos(-s.yaw), sn = std::sin(-s.yaw);
+            const float delta = params_.depth_obs_band_m;
+            const float half_cross = 0.5f * (along_x ? s.h : s.w);   // the OTHER axis: the spanning core
+            int nplus = 0, nminus = 0;
+            for (const auto& q : f.points)
+            {
+                const float px = q.x() - s.cx, py = q.y() - s.cy;
+                const float lx = px * c - py * sn, ly = px * sn + py * c;
+                const float along = along_x ? lx : ly;               // the axis being tested
+                const float cross = along_x ? ly : lx;               // must lie within the spanning core
+                if (std::abs(cross) > half_cross + delta) continue;  // drop clutter off the side of this face pair
+                if (q.z() < 0.0f or q.z() > s.H + delta) continue;
+                // Clearly on one side or the other by a FIXED margin δ (NOT keyed to the current half-extent). A
+                // point straddling the centre counts as NEITHER, so a COLLAPSED slab cannot masquerade as
+                // "both faces seen" and switch the boost off — that circularity re-collapsed the extent.
+                if (along >  delta)      ++nplus;
+                else if (along < -delta) ++nminus;
+            }
+            const int tot = nplus + nminus;
+            return (tot > 0) ? (2.0f * std::min(nplus, nminus) / static_cast<float>(tot)) : 0.0f;
+        }
+
+// flush_weight MARGINALISED over whether the data can discriminate {flush, free-standing} at all — see
+// hood_concept, where this was found. With the depth axis unobserved the gap cannot tell them apart, so the
+// posterior falls back to the CLASS prior π_flush.
+//
+// ★A REFRIGERATOR'S π_flush IS 0, DELIBERATELY. Its own manifest says "the mixture weight decays to 0 for a
+// genuine mid-room fridge" — a fridge is COMMONLY against a wall, not DEFINITIONALLY, and asserting
+// otherwise would pin a free-standing one to the nearest wall. Only a class that is wall-mounted by
+// definition (a range hood) declares 1.0. Default 0 ⇒ this is exactly flush_weight() and nothing changes.
+float RefrigeratorBelief::flush_posterior(const RefrigeratorBeliefState& s, const RefrigeratorFrame& f) const
+{
+    if (not f.wall.ok) return 0.0f;
+    const float two_sided = two_sided_along(s, f, false);
+    return two_sided * flush_weight(s, f)
+         + (1.0f - two_sided) * std::clamp(params_.wall_flush_prior, 0.0f, 1.0f);
+}
+
 float RefrigeratorBelief::flush_weight(const RefrigeratorBeliefState& s, const RefrigeratorFrame& f) const
 {
     if (not f.wall.ok) return 0.0f;
@@ -344,8 +389,16 @@ void RefrigeratorBelief::accumulate_wall(const RefrigeratorBeliefState& s, const
     const float gap = gap_of(s);
     dbg_wall_gap_ = gap;
 
-    const float wgt = flush_weight(s, f);
-    const float lam_flush = wgt / (1.0f / params_.wall_precision + f.wall.sigma_m * f.wall.sigma_m);
+    // ★WHEN THE DEPTH CANNOT BE SEEN AND A WALL CAN, THE WALL DETERMINES IT. A front-only view leaves the
+    // centre and the depth jointly unidentifiable — the data fixes only the FRONT face, one equation in two
+    // unknowns — and the response was to pin the depth to its prior at depth_unobs_precision. For a fridge
+    // that prior is a good 0.60 so the harm is small, but the better second equation is already available:
+    // a flush object's BACK FACE IS ON THE WALL and the room model knows where the wall is. Found on
+    // hood_concept, where the pinned depth was a nominal guess and the excess went straight through the wall.
+    const float depth_unobs = 1.0f - two_sided_along(s, f, false);
+    const float wgt = flush_posterior(s, f);
+    const float lam_base = 1.0f / (1.0f / params_.wall_precision + f.wall.sigma_m * f.wall.sigma_m);
+    const float lam_flush = wgt * (lam_base + params_.depth_unobs_precision * depth_unobs);
     dbg_wall_lambda_ = lam_flush;
     if (not(lam_flush > 1e-6f)) return;
 
@@ -366,7 +419,23 @@ void RefrigeratorBelief::accumulate_wall(const RefrigeratorBeliefState& s, const
 
     if (params_.wall_parallel_precision > 0.0f)
     {
-        const float lam_par = wgt * params_.wall_parallel_precision;   // same mixture weight
+        // ★★AN OBJECT ADJACENT TO A WALL IS ALIGNED TO IT, WHATEVER POSE THE MASKS CAME FROM. The yaw was
+        // decided by a flat constant of 200 against thousands of mask points seen obliquely, and the points
+        // won — hood_concept sat 9 degrees off the wall it is bolted to, drifting. That is not a tuning
+        // problem, it is the wrong quantity in the precision: a single oblique face gives a poor surface
+        // normal, the WALL's direction is known far better, and how much better is not a number anyone
+        // needs to choose. A segment of length L localised to sigma_m has angular uncertainty ~ sigma_m/L,
+        // and the room model already carries both — a 3 m wall known to 2 cm is known to 0.0066 rad, i.e.
+        // lambda ~22800 against the constant's 200. DERIVED, not picked.
+        //
+        // The residual is sin(misalignment), so a precision on it is a precision on the angle. Still scaled
+        // by the flush posterior, which is the point: ADJACENCY is what earns the alignment, and a
+        // free-standing object (a mid-room fridge, a kitchen island) has wgt -> 0 and keeps its data-driven
+        // yaw. Both 180-degree solutions satisfy it, so the front/back resolution is untouched.
+        const float sigma_theta = (f.wall.length_m > 0.1f) ? f.wall.sigma_m / f.wall.length_m : 0.0f;
+        const float lam_geom    = (sigma_theta > 1e-4f) ? 1.0f / (sigma_theta * sigma_theta)
+                                                        : params_.wall_parallel_precision;
+        const float lam_par = wgt * lam_geom;   // same mixture weight
         const float rp = par_of(s);
         Id.noalias() += lam_par * (Jp * Jp.transpose());
         bd.noalias() += -lam_par * Jp * rp;
@@ -401,32 +470,16 @@ void RefrigeratorBelief::accumulate_extra(const RefrigeratorBeliefState& s, cons
         // and the fridge filter removed a real fridge for being the wrong shape. Which axis is unobservable is a
         // property of the VIEWPOINT, not of the model's axis labelling. See [[refrigerator-unobserved-axis-prior]].
         const auto two_sided_along = [&](bool along_x) -> float
-        {
-            if (params_.depth_unobs_precision <= 0.0f or f.points.size() <= 8)
-                return 1.0f;                       // feature off / too few points ⇒ claim nothing, add no boost
-            const float c = std::cos(-s.yaw), sn = std::sin(-s.yaw);
-            const float delta = params_.depth_obs_band_m;
-            const float half_cross = 0.5f * (along_x ? s.h : s.w);   // the OTHER axis: the spanning core
-            int nplus = 0, nminus = 0;
-            for (const auto& q : f.points)
-            {
-                const float px = q.x() - s.cx, py = q.y() - s.cy;
-                const float lx = px * c - py * sn, ly = px * sn + py * c;
-                const float along = along_x ? lx : ly;               // the axis being tested
-                const float cross = along_x ? ly : lx;               // must lie within the spanning core
-                if (std::abs(cross) > half_cross + delta) continue;  // drop clutter off the side of this face pair
-                if (q.z() < 0.0f or q.z() > s.H + delta) continue;
-                // Clearly on one side or the other by a FIXED margin δ (NOT keyed to the current half-extent). A
-                // point straddling the centre counts as NEITHER, so a COLLAPSED slab cannot masquerade as
-                // "both faces seen" and switch the boost off — that circularity re-collapsed the extent.
-                if (along >  delta)      ++nplus;
-                else if (along < -delta) ++nminus;
-            }
-            const int tot = nplus + nminus;
-            return (tot > 0) ? (2.0f * std::min(nplus, nminus) / static_cast<float>(tot)) : 0.0f;
-        };
+        { return this->two_sided_along(s, f, along_x); };
+        // ★THE PRECISION IS CONSERVED AND MOVES ONLY AS FAR AS THE WALL TAKES IT (see accumulate_wall).
+        // Handing it over whenever a wall merely EXISTS would be a bug here: a mid-room fridge has a small
+        // flush posterior, so the depth pin would be removed without the wall replacing it and the depth
+        // would float on lam_wd alone. It moves in proportion to that posterior — continuously, and to
+        // nothing at all when the fridge is genuinely free-standing.
+        const float depth_unobs = 1.0f - this->two_sided_along(s, f, false);
+        const float w_flush     = flush_posterior(s, f);              // 0 when no wall is staged
         const float lam_w = lam_wd + params_.depth_unobs_precision * (1.0f - two_sided_along(true));
-        const float lam_h = lam_wd + params_.depth_unobs_precision * (1.0f - two_sided_along(false));
+        const float lam_h = lam_wd + params_.depth_unobs_precision * depth_unobs * (1.0f - w_flush);
         Id(3, 3) += lam_w;  bd(3) += lam_w * (params_.prior_footprint_m - s.w);   // w      (index 3)
         Id(4, 4) += lam_h;  bd(4) += lam_h * (params_.prior_footprint_m - s.h);   // h≡depth(index 4)
     }
