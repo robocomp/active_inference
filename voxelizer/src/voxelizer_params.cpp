@@ -30,7 +30,6 @@ VoxelizerParams load_voxelizer_params(const ConfigLoader& configLoader)
             }
         });
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Yolo.tray_drop_fraction", params.YOLO_TRAY_DROP_FRACTION);
-    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Voxel.z_lift_m", params.VOXEL_Z_LIFT_M);
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Voxel.mask_depth_gate_band_m", params.MASK_DEPTH_GATE_BAND_M);
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Voxel.mask_outlier_radius_m", params.MASK_OUTLIER_RADIUS_M);
     rc::ConfigLoaderUtils::load_optional<int>(configLoader, "Voxel.mask_outlier_min_neighbors", params.MASK_OUTLIER_MIN_NEIGHBORS);

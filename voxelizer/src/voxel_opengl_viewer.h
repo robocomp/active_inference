@@ -75,6 +75,7 @@ public:
                             std::span<const std::string> categories = {},
                             std::span<const std::string> names = {},
                             std::span<const std::string> subtypes = {},
+                            std::span<const std::string> rig_schemas = {},
                             std::span<const std::string> mesh_paths = {},
                             std::span<const std::string> mesh_texture_paths = {},
                             // Per-box inferred albedo chromaticity (common/appearance_belief). A zero vector
@@ -193,6 +194,8 @@ private:
     std::vector<std::string> graph_box_categories_;
     std::vector<std::string> graph_box_names_;   // parallel to graph_box_centers_ → per-instance shade + label
     std::vector<std::string> graph_box_subtypes_;// parallel to graph_box_centers_ → shape subtype ("round"/"square")
+    // parallel → level-2 SHAPE declaration ("ring"/"rectilinear"); "" for non-metaconcepts
+    std::vector<std::string> graph_box_schemas_;
     std::vector<std::string> graph_box_mesh_paths_;    // parallel → concept-published display OBJ (relative)
     std::vector<std::string> graph_box_mesh_tex_;      // parallel → optional base-colour texture (relative)
     std::vector<QVector3D>   graph_box_mesh_color_;    // parallel → inferred albedo chromaticity ((0,0,0) ⇒ none)

@@ -328,7 +328,6 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
 
     const Eigen::Matrix3f room_rotation = room_T_zed.linear().cast<float>();
     const Eigen::Vector3f room_translation = room_T_zed.translation().cast<float>();
-    const float z_lift_m = params_.VOXEL_Z_LIFT_M;
     const float fx = rgbd.focal_x;
     const float fy = rgbd.focal_y;
     const float cx = static_cast<float>(rgbd.width) * 0.5f;
@@ -492,8 +491,7 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
                 const float py = depth;
                 const float pz = (cy - static_cast<float>(row)) * depth / fy;
                 const Eigen::Vector3f point_cam(px, py, pz);
-                Eigen::Vector3f point_room = room_rotation * point_cam + room_translation;
-                point_room.z() += z_lift_m;
+                const Eigen::Vector3f point_room = room_rotation * point_cam + room_translation;
 
                 gated.push_back(point_room);
                 gated_cam.push_back(point_cam);

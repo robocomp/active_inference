@@ -555,8 +555,15 @@ std::optional<GraphObjectBox> SceneProcessor::build_graph_object_box(const DSR::
     // Level-2 arrangements get ONE category regardless of schema (ring/row/grid): the viewer draws
     // them as an abstract outline, so there is nothing per-class to colour. The schema itself is in
     // object_subtype ("dining_set") and the node NAME, which is what the label shows.
+    std::string rig_schema;
     if (node.type() == "metaconcept")
+    {
         category = "metaconcept";
+        // The SHAPE it declares — the viewer draws a ring or a rectangle off THIS, not off the class,
+        // so a new level-2 schema renders correctly without the viewer learning its concept name.
+        if (const auto sch = graph_->get_attrib_by_name<rig_schema_att>(node); sch.has_value())
+            rig_schema = sch.value();
+    }
 
     // Concept-published display mesh + texture (relative asset paths). The viewer loads & renders these,
     // scaled to this box — the agent owns the appearance, the viewer stays type-agnostic.
@@ -598,6 +605,7 @@ std::optional<GraphObjectBox> SceneProcessor::build_graph_object_box(const DSR::
     return GraphObjectBox{min_corner, max_corner, center,
                           Eigen::Vector3f(half_width, half_depth, half_height),
                           yaw, node.name(), std::move(category), std::move(subtype),
+                          std::move(rig_schema),
                           std::move(mesh_path), std::move(mesh_texture_path),
                           mesh_color, has_mesh_color};
 }
@@ -684,6 +692,7 @@ void SceneProcessor::update_viewer_graph_object_boxes(std::span<const GraphObjec
     std::vector<std::string> categories;
     std::vector<std::string> names;
     std::vector<std::string> subtypes;
+    std::vector<std::string> rig_schemas;
     std::vector<std::string> mesh_paths;
     std::vector<std::string> mesh_texture_paths;
     // Per-box albedo tint; a zero vector means "no inferred colour" and the viewer leaves the asset alone.
@@ -694,6 +703,7 @@ void SceneProcessor::update_viewer_graph_object_boxes(std::span<const GraphObjec
     categories.reserve(graph_boxes.size());
     names.reserve(graph_boxes.size());
     subtypes.reserve(graph_boxes.size());
+    rig_schemas.reserve(graph_boxes.size());
     mesh_paths.reserve(graph_boxes.size());
     mesh_texture_paths.reserve(graph_boxes.size());
     mesh_colors.reserve(graph_boxes.size());
@@ -706,6 +716,7 @@ void SceneProcessor::update_viewer_graph_object_boxes(std::span<const GraphObjec
         categories.push_back(box.category);
         names.push_back(box.node_name);
         subtypes.push_back(box.subtype);
+        rig_schemas.push_back(box.rig_schema);
         mesh_paths.push_back(box.mesh_path);
         mesh_texture_paths.push_back(box.mesh_texture_path);
         mesh_colors.emplace_back(box.has_mesh_color ? box.mesh_color.x() : 0.0f,
@@ -713,7 +724,7 @@ void SceneProcessor::update_viewer_graph_object_boxes(std::span<const GraphObjec
                                  box.has_mesh_color ? box.mesh_color.z() : 0.0f);
     }
 
-    voxel_viewer_->update_graph_boxes(centers, half_extents, yaws, categories, names, subtypes,
+    voxel_viewer_->update_graph_boxes(centers, half_extents, yaws, categories, names, subtypes, rig_schemas,
                                       mesh_paths, mesh_texture_paths, mesh_colors);
 }
 

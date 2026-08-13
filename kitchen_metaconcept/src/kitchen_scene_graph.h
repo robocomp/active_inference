@@ -57,7 +57,10 @@ public:
     std::uint64_t node_id() const { return node_id_; }
 
     // Create the kitchen node if absent, else refresh its latent. Returns its id (0 on failure).
-    std::uint64_t ensure_node(const KitchenBelief& belief, std::uint64_t room_id);
+    // `members` supply the FOOTPRINT: the latent has no centre or extent of its own, so the visible
+    // region is the members' own extent measured in the frame's axis. Empty ⇒ latent only, no geometry.
+    std::uint64_t ensure_node(const KitchenBelief& belief, std::uint64_t room_id,
+                              const std::vector<KitchenMember>& members);
     // Remove it — the arrangement stopped explaining the scene, or we are shutting down.
     void          remove_node();
 

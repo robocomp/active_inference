@@ -227,6 +227,7 @@ void VoxelOpenGLViewer::update_graph_boxes(std::span<const QVector3D> centers,
                                            std::span<const std::string> categories,
                                            std::span<const std::string> names,
                                            std::span<const std::string> subtypes,
+                                           std::span<const std::string> rig_schemas,
                                            std::span<const std::string> mesh_paths,
                                            std::span<const std::string> mesh_texture_paths,
                                            std::span<const QVector3D> mesh_colors)
@@ -239,6 +240,7 @@ void VoxelOpenGLViewer::update_graph_boxes(std::span<const QVector3D> centers,
         graph_box_categories_.assign(categories.begin(), categories.end());
         graph_box_names_.assign(names.begin(), names.end());
         graph_box_subtypes_.assign(subtypes.begin(), subtypes.end());
+        graph_box_schemas_.assign(rig_schemas.begin(), rig_schemas.end());
         graph_box_mesh_paths_.assign(mesh_paths.begin(), mesh_paths.end());
         graph_box_mesh_tex_.assign(mesh_texture_paths.begin(), mesh_texture_paths.end());
         graph_box_mesh_color_.assign(mesh_colors.begin(), mesh_colors.end());
@@ -1404,6 +1406,7 @@ void VoxelOpenGLViewer::paintGL()
         std::vector<QVector3D> local_centers, local_half;
         std::vector<float> local_yaws;
         std::vector<std::string> local_cats, local_names, local_subtypes, local_mesh_paths, local_mesh_tex;
+        std::vector<std::string> local_schemas;
         std::vector<QVector3D> local_mesh_color;
         {
             std::scoped_lock lk(graph_boxes_mutex_);
@@ -1413,6 +1416,7 @@ void VoxelOpenGLViewer::paintGL()
             local_cats = graph_box_categories_;
             local_names = graph_box_names_;
             local_subtypes = graph_box_subtypes_;
+            local_schemas  = graph_box_schemas_;
             local_mesh_paths = graph_box_mesh_paths_;
             local_mesh_tex = graph_box_mesh_tex_;
             local_mesh_color = graph_box_mesh_color_;
@@ -1662,7 +1666,14 @@ void VoxelOpenGLViewer::paintGL()
                 // A solid box would misstate both facts; the outline says "these things belong
                 // together" and stops there. Radius = mean footprint half-extent (2r was published
                 // as width and depth alike), drawn at the top of the nominal 2 cm slab.
-                if (cat == "metaconcept")
+                // ★Branch on the SHAPE the metaconcept declares (rig_schema), not on the category:
+                // ring_metaconcept's dining_set is a circle, kitchen_metaconcept's rectilinear frame
+                // is a rectangle. A rectilinear frame falls through to the box branch below, which
+                // draws the yaw-rotated wireframe — with the nominal 2 cm height that reads as a flat
+                // outline on the floor, the rectangular analogue of the ring. Empty schema keeps the
+                // old behaviour so a metaconcept that predates rig_schema still renders.
+                const std::string schema = (i < local_schemas.size()) ? local_schemas[i] : std::string{};
+                if (cat == "metaconcept" and (schema.empty() or schema == "ring"))
                 {
                     const float radius = 0.5f * (he.x() + he.y());
                     const float ring_z  = ctr.z() + he.z();

@@ -800,7 +800,7 @@ void SpecificWorker::publish_priors(const MemberSnapshot& s)
         return;
     }
 
-    if (scene_graph_->ensure_node(kitchen_belief_, room_node_id_) == 0)
+    if (scene_graph_->ensure_node(kitchen_belief_, room_node_id_, s.members) == 0)
         return;
 
     // Collect the end corrections by member, from both chains.

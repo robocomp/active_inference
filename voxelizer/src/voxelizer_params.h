@@ -42,7 +42,9 @@ struct VoxelizerParams
     // bbox. 0 ⇒ drop on ANY intersection (Yolo.tray_drop_fraction).
     float       YOLO_TRAY_DROP_FRACTION = 0.0f;
     std::size_t VOXEL_DECIMATION_FACTOR          = 2;
-    float       VOXEL_Z_LIFT_M                   = 0.0f;
+    // (Voxel.z_lift_m REMOVED) It offset mask points along ROOM z, so it could only ever be applied to the
+    // room-frame array — the camera-frame array the consumers now read could not carry it, and any non-zero
+    // value would have silently desynced the two. It was 0.0 and set in no config, i.e. dead.
     bool        TRANSFORMS_INTERPOLATE_RT        = true;
     // Per-mask FOREGROUND depth gate (Voxel.mask_depth_gate_band_m): anchor on the mask's NEAR surface
     // (low percentile of camera-frame depth) and drop points more than this band (m) behind it. The

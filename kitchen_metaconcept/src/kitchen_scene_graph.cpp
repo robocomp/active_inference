@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <print>
 
 namespace rc {
@@ -37,7 +38,8 @@ KitchenSceneGraph::KitchenSceneGraph(std::shared_ptr<DSR::DSRGraph> G, DSR::RT_A
                                      const KitchenConfig& cfg)
     : G_(std::move(G)), rt_api_(rt_api), cfg_(cfg) {}
 
-std::uint64_t KitchenSceneGraph::ensure_node(const KitchenBelief& belief, std::uint64_t room_id)
+std::uint64_t KitchenSceneGraph::ensure_node(const KitchenBelief& belief, std::uint64_t room_id,
+                                             const std::vector<KitchenMember>& members)
 {
     if (not G_ or room_id == 0)
         return 0;
@@ -70,6 +72,53 @@ std::uint64_t KitchenSceneGraph::ensure_node(const KitchenBelief& belief, std::u
     G_->add_or_modify_attrib_local<rig_schema_att> (node.value(), std::string("rectilinear"));
     G_->add_or_modify_attrib_local<rig_logodds_att>(node.value(), belief.log_odds());
     G_->add_or_modify_attrib_local<rig_yaw_prior_att>(node.value(), s.axis);
+
+    // ── Footprint + world pose, so the frame is VISIBLE ──────────────────────────────────────────
+    // The latent is [axis, worktop, depth] — it carries no centre and no extent, so there is nothing
+    // here to publish directly. The honest footprint is the region the members actually occupy,
+    // expressed in the frame's OWN axis: rotate every member's footprint corner into the axis frame,
+    // take the extremes, and rotate the centre back. That says exactly what the frame claims —
+    // "this area, at this angle, is one kitchen" — and nothing more.
+    //
+    // Height is a nominal 2 cm slab, the same convention ring_metaconcept uses: a metaconcept has a
+    // footprint but NO body, nothing occupies it, and the viewer renders it as a flat outline on the
+    // floor rather than a solid. (voxelizer's scene_processor skips any node with no box dimensions,
+    // which is why this frame was invisible before.)
+    if (not members.empty())
+    {
+        const float ca = std::cos(s.axis), sa = std::sin(s.axis);
+        float u_lo =  std::numeric_limits<float>::max(), u_hi = -std::numeric_limits<float>::max();
+        float v_lo =  std::numeric_limits<float>::max(), v_hi = -std::numeric_limits<float>::max();
+        for (const auto& m : members)
+        {
+            // The member's own footprint corners: +-length/2 along its heading, +-depth/2 across it.
+            const float cm = std::cos(m.yaw), sm = std::sin(m.yaw);
+            for (const float dl : {-0.5f * m.length, 0.5f * m.length})
+                for (const float dd : {-0.5f * m.depth, 0.5f * m.depth})
+                {
+                    const float x = m.xy.x() + dl * cm - dd * sm;
+                    const float y = m.xy.y() + dl * sm + dd * cm;
+                    const float u =  x * ca + y * sa;      // into the AXIS frame
+                    const float v = -x * sa + y * ca;
+                    u_lo = std::min(u_lo, u); u_hi = std::max(u_hi, u);
+                    v_lo = std::min(v_lo, v); v_hi = std::max(v_hi, v);
+                }
+        }
+        const float uc = 0.5f * (u_lo + u_hi), vc = 0.5f * (v_lo + v_hi);
+        G_->add_or_modify_attrib_local<width_m_att> (node.value(), std::max(0.05f, u_hi - u_lo));
+        G_->add_or_modify_attrib_local<depth_m_att> (node.value(), std::max(0.05f, v_hi - v_lo));
+        G_->add_or_modify_attrib_local<height_m_att>(node.value(), 0.02f);
+        G_->update_node(node.value());
+
+        // Centre back in the room frame, with the frame's own axis as its yaw.
+        if (rt_api_)
+            if (auto room = G_->get_node(room_id); room.has_value())   // non-const: the RT API takes Node&
+                rt_api_->insert_or_assign_edge_RT(room.value(), node_id_,
+                                                  {uc * ca - vc * sa, uc * sa + vc * ca, 0.0f},
+                                                  {0.0f, 0.0f, s.axis});
+        return node_id_;
+    }
+
     G_->update_node(node.value());
     return node_id_;
 }

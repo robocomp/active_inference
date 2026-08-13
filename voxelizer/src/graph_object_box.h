@@ -14,6 +14,10 @@ struct GraphObjectBox
     std::string     node_name;                               // DSR node name (empty for non-DSR boxes)
     std::string     category;
     std::string     subtype;                                 // object_subtype ("round"/"square" for tables); "" if unset
+    // Level-2 SHAPE declaration (rig_schema): "ring" | "rectilinear" | "" for non-metaconcepts. The
+    // viewer must branch on the shape a metaconcept DECLARES, not on which concept it happens to be —
+    // ring_metaconcept's dining_set is a circle, kitchen_metaconcept's frame is a rectangle.
+    std::string     rig_schema;
     std::string     mesh_path;                               // display OBJ (relative asset path) published by the concept agent; "" ⇒ box/fitted
     std::string     mesh_texture_path;                       // optional base-colour texture (relative); "" ⇒ flat colour
     // Inferred albedo CHROMATICITY (r,g,b summing to ~1) published by the concept agent as mesh_color_rgb,

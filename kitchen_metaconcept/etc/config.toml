@@ -108,7 +108,7 @@ OutlineCsvPath = "etc/kitchen_outline.csv"
 # NOTHING to the graph; true = it births the kitchen node and pushes each member's prior on a
 # group_member edge. Everything downstream of this was checked against live data before being
 # allowed to steer a cabinet, and the message down-date is in place ahead of the first push.
-Publish = false
+Publish = true
 
 # ── Rectilinear-frame belief ────────────────────────────────────────────────────────────────
 # Intrinsic spread of "kitchen units share one axis / worktop / depth". These are TENDENCIES, not
