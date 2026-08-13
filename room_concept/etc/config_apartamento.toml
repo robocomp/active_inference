@@ -152,7 +152,11 @@ WindowMinTurn          = 0.15   # rad of turn before a new slot is admitted (whi
 #     `stride_cov_accum_ += slot_motion_cov` ("independent increments"). That drops the transport
 #     term — an error in the heading accumulated so far rotates ALL the translation that follows.
 #     Measured in gn_selftest against one continuous integration: chain() is exact to 3.6e-7 where
-#     the additive sum is off by 7.8%. This is a LIVE defect, not a hypothetical one.
+#     the additive sum is off by 7.8%. This is a LIVE defect, not a hypothetical one — but size it
+#     honestly: 7.8% is the selftest trajectory (0.4 rad over 0.5 s). At the stride limits actually
+#     configured above (0.10 m / 0.15 rad) the additive sum is off by only 2.2-3.6%, reaching 8.8% if
+#     an interval ever spans twice the turn limit. So this is a correctness fix worth having, not a
+#     large numerical error at today's settings.
 #  2. The legacy floor DROPS from StationaryMotionThreshold (0.02) to OdomNoiseBase (0.01) the moment
 #     |Δp| clears 0.02 m, so it asserts MORE position uncertainty when barely moving than when moving
 #     fast. The propagated form has no switch.
@@ -165,11 +169,19 @@ WindowMinTurn          = 0.15   # rad of turn before a new slot is admitted (whi
 # cannot drift apart; the Preint* keys are overrides for when they are actually measured. Verified
 # against 40k Monte Carlo at 0.6% relative Frobenius error (make -C build gn_selftest && ./bin/gn_selftest).
 #
-# ⚠ BEFORE FLIPPING THIS, read the measured A/B table in Params::motion_preintegration. Summary: the
-# parked regime is IDENTICAL, and everywhere else the propagated form is 1.3-1.7x LOOSER in position,
-# not tighter. That is the legacy shape being wrong, but it IS a behavioural change and needs a MOVING
-# run to settle — watch early exit while translating, innov_norm and loss_motion, and note that
-# loss_motion is exactly what StationaryMotionThreshold = 0.02 was raised to suppress.
+# ⚠ BEFORE FLIPPING THIS, read the measured A/B table in Params::motion_preintegration. Summary: for
+# the ODOMETRY channel the parked regime is identical and everywhere else the propagated form is
+# 1.3-1.7x LOOSER in position, not tighter. That is the legacy shape being wrong, but it IS a
+# behavioural change and needs a MOVING run to settle — watch early exit while translating, innov_norm
+# and loss_motion, and note that loss_motion is exactly what StationaryMotionThreshold = 0.02 was
+# raised to suppress.
+# ⚠ AND THE PARKED REGIME DOES CHANGE, through the COMMAND channel: legacy's stationary branch gives
+# the command the same 0.02 floor as the encoder (verified live — cmd_cov_xx and meas_cov_xx both read
+# 4e-4), while the derivation gives it CmdNoiseBase 0.05. Parked, that takes the fused cov_xx from
+# 2.00e-4 to 3.45e-4 and the fusion weight on the encoder from 0.50 to 0.86. Kept on purpose (a parked
+# encoder is worth more than a parked open-loop command, and legacy discards that distinction exactly
+# where it is strongest) — but if the A/B must differ in one thing only, set
+# PreintCmdSigmaVLat/PreintCmdSigmaVLong = 0.0894 to restore the legacy parked value.
 # ⚠ The cross terms are nearly invisible at these constants (rho(y,θ) = -0.028) because that 0.02 m
 # per-frame floor = 0.089 m/√s of position random walk for a PARKED robot swamps them. Calibrating
 # sigma_* against the real odometry stream is the load-bearing next step, not a refinement.

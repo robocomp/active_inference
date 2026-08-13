@@ -409,8 +409,9 @@ public:
         //
         // ★ MEASURED side by side at the live constants (StationaryMotionThreshold 0.02, OdomNoiseBase
         // 0.01, RotationNoiseBase 0.01, OdomNoiseTrans 0.08, OdomNoiseRot 0.04, EncoderRotSlipK 0.05),
-        // Legacy / Propagated, sigma in m and rad. STRIDED rows compare against the per-frame legacy
-        // covariance SUMMED over the interval, which is what stride_cov_accum_ actually builds:
+        // Legacy / Propagated, sigma in m and rad, for the MEASURED-ODOMETRY channel. STRIDED rows
+        // compare against the per-frame legacy covariance SUMMED over the interval, which is what
+        // stride_cov_accum_ actually builds:
         //
         //   parked, 50 ms                sigma_xy 0.0200 / 0.0200   sigma_th 0.0100 / 0.0100   <- IDENTICAL
         //   straight 0.5 m/s, 50 ms               0.0120 / 0.0200            0.0100 / 0.0100
@@ -419,9 +420,26 @@ public:
         //   STRIDED arc, 0.5 s (10 fr)            0.0447 / 0.0637            0.0388 / 0.0450
         //   STRIDED straight, 0.5 s               0.0379 / 0.0634            0.0316 / 0.0316
         //
-        // So: the STATIONARY regime — where the robot sits for >99% of logged frames — matches exactly,
-        // and everywhere else the propagated form is broadly 1.3-1.7x LOOSER in position rather than
-        // tighter. Two mechanisms, both of them the legacy shape being wrong rather than the new one:
+        // ⚠⚠ THE COMMAND CHANNEL IS NOT IDENTICAL WHILE PARKED, and the table above does not show it.
+        // compute_motion_covariance()'s stationary branch overrides BOTH channels' bases with
+        // StationaryMotionThreshold, so legacy parked gives the command 0.02 as well — verified live,
+        // cmd_cov_xx and meas_cov_xx both read exactly 4e-4. The derivation below takes
+        // max(StationaryMotionThreshold, CmdNoiseBase) = 0.05, which is 2.5x LOOSER, so parked:
+        //     fused cov_xx  2.00e-4 -> 3.45e-4  (1.7x looser)
+        //     fusion weight on the ODOMETRY channel  0.50 -> 0.86
+        // That is KEPT DELIBERATELY, not left as an oversight: while parked, an encoder reporting zero
+        // is worth far more than an open-loop command reporting zero, and legacy's stationary branch
+        // discards that distinction precisely where it is strongest. Shifting weight onto the encoder is
+        // also the direction cf26167 established. But it IS a change in the regime the robot occupies
+        // >99% of the time, so it belongs in the A/B, and the honest reason it cannot simply be matched
+        // is that legacy's floor is NON-MONOTONIC in speed and in opposite directions per channel
+        // (odometry 0.02 parked -> 0.01 moving, command 0.02 -> 0.05); no single density reproduces both
+        // branches. Set PreintCmdSigmaVLat/Long = 0.0894 to force the legacy parked value if the A/B
+        // needs the two runs to differ in one thing only.
+        //
+        // So: for the ODOMETRY channel the stationary regime matches exactly, and everywhere else the
+        // propagated form is broadly 1.3-1.7x LOOSER in position rather than tighter. Two mechanisms,
+        // both of them the legacy shape being wrong rather than the new one:
         //   • Legacy's floor DROPS discontinuously from 0.02 m to 0.01 m the moment |Δp| exceeds
         //     StationaryMotionThreshold, so it asserts MORE position uncertainty when barely moving
         //     than when moving fast. The propagated form has no switch and that non-monotonicity goes.
