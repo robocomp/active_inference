@@ -181,6 +181,58 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.EncoderRotSlipK", room_concept.params.encoder_rot_slip_k);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.StationaryMotionThreshold", room_concept.params.stationary_motion_threshold);
 
+    // ── Preintegrated motion covariance — see Params::motion_preintegration, se2_preintegration.h ──
+    // The densities are DERIVED from the legacy constants just loaded, not hard-coded, so the two
+    // models cannot silently drift apart: changing EncoderRotSlipK or OdomNoiseBase moves both. That
+    // matters because the whole point of the A/B is that the flag changes the SHAPE of the covariance,
+    // not its magnitude at the operating point — and a stale hard-coded default would quietly turn it
+    // into a re-tuning as well, which is the confound that makes an A/B unreadable.
+    //
+    //   sigma = (legacy per-frame std) / sqrt(dt_ref)   — a per-frame constant becomes a density
+    //   scale = the legacy FRACTIONAL terms, which were always describing a correlated scale error
+    //
+    // dt_ref is the update interval the legacy constants were tuned at (measured median 42-50 ms).
+    // Any explicit Preint* key below overrides the derived value, so a calibrated measurement of the
+    // real odometry stream can replace this translation without touching code.
+    {
+        constexpr float dt_ref = 0.05f;                      // s — the interval the legacy tuning assumed
+        const float inv_sqrt_dt = 1.f / std::sqrt(dt_ref);
+        auto& po = room_concept.params.odom_preint_noise;
+        auto& pc = room_concept.params.cmd_preint_noise;
+        const auto& p0 = room_concept.params;
+
+        // Translation floor: the legacy value actually in force when the robot is barely moving is
+        // StationaryMotionThreshold (0.02 m live — raised from 0.001 to stop loss_motion spiking to
+        // 6000 on a 3.4 cm parked residual), which is the branch the robot is in for >99% of frames.
+        // Take the LOOSER of it and OdomNoiseBase so the derived floor is never tighter than either.
+        const float odom_floor = std::max(p0.stationary_motion_threshold, p0.odom_noise_base);
+        po.sigma_v_lat  = odom_floor * inv_sqrt_dt;
+        po.sigma_v_long = odom_floor * inv_sqrt_dt;
+        po.sigma_omega  = p0.rotation_noise_base * inv_sqrt_dt;
+        po.scale_v      = p0.odom_noise_trans;
+        // OdomNoiseRot and EncoderRotSlipK are BOTH fractions of the rotation increment and the legacy
+        // model combines them in quadrature, so the equivalent single scale sigma is their hypot.
+        po.scale_omega  = std::hypot(p0.odom_noise_rot, p0.encoder_rot_slip_k);
+
+        const float cmd_floor = std::max(p0.stationary_motion_threshold, p0.cmd_noise_base);
+        pc.sigma_v_lat  = cmd_floor * inv_sqrt_dt;
+        pc.sigma_v_long = cmd_floor * inv_sqrt_dt;
+        pc.sigma_omega  = p0.rotation_noise_base * inv_sqrt_dt;
+        pc.scale_v      = p0.cmd_noise_trans;
+        pc.scale_omega  = p0.cmd_noise_rot;
+    }
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.MotionPreintegration", room_concept.params.motion_preintegration);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PreintOdomSigmaVLat",  room_concept.params.odom_preint_noise.sigma_v_lat);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PreintOdomSigmaVLong", room_concept.params.odom_preint_noise.sigma_v_long);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PreintOdomSigmaOmega", room_concept.params.odom_preint_noise.sigma_omega);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PreintOdomScaleV",     room_concept.params.odom_preint_noise.scale_v);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PreintOdomScaleOmega", room_concept.params.odom_preint_noise.scale_omega);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PreintCmdSigmaVLat",   room_concept.params.cmd_preint_noise.sigma_v_lat);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PreintCmdSigmaVLong",  room_concept.params.cmd_preint_noise.sigma_v_long);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PreintCmdSigmaOmega",  room_concept.params.cmd_preint_noise.sigma_omega);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PreintCmdScaleV",      room_concept.params.cmd_preint_noise.scale_v);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PreintCmdScaleOmega",  room_concept.params.cmd_preint_noise.scale_omega);
+
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.LearnMotionModel", room_concept.params.learn_motion_model);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.MotionLearnAlpha", room_concept.params.motion_learn_alpha);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.MotionLearnBeta", room_concept.params.motion_learn_beta);

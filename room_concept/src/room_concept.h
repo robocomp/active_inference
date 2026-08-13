@@ -54,6 +54,7 @@
 #include "rerun_logger.h"
 #include "object_anchor_types.h"
 #include "object_anchor_factor.h"
+#include "se2_preintegration.h"
 
 namespace rc
 {
@@ -387,6 +388,70 @@ public:
         // actually in use is ~2.3e-4 (sigma 15 mm/frame). Do not tune this expecting an effect.
         float default_slot_motion_cov = 0.01f;
 
+        // ===== Preintegrated motion covariance (see se2_preintegration.h) =====
+        // When true, the motion factor's covariance is PROPAGATED through the interval's samples
+        // instead of being asserted by compute_motion_covariance(). The MEAN is unchanged (same
+        // midpoint-θ integration, same arithmetic), so this is a covariance-only change and both
+        // optimizer backends pick it up with no factor edit — MotionFactor and the torch motion term
+        // already consume a full 3×3 precision.
+        //
+        // What it changes, concretely: the covariance gains the θ↔xy and x↔y cross terms that a
+        // heading error rotating the subsequent translation actually produces; dt enters where the
+        // physics puts it, so the constants stop being update-rate dependent; and the strided window
+        // chains intervals with the transport term instead of summing covariances.
+        //
+        // ★ WHERE THESE NUMBERS COME FROM. They are not hard-coded: room_config.cpp DERIVES them from
+        // the legacy constants (StationaryMotionThreshold / OdomNoiseBase / RotationNoiseBase /
+        // OdomNoiseTrans / OdomNoiseRot / EncoderRotSlipK and the Cmd* equivalents) right after those
+        // load, so the two models cannot drift apart and the A/B tests the covariance's SHAPE rather
+        // than a simultaneous re-tuning. The values below are only the fallback for code that builds a
+        // Params without the loader (gn_selftest). An explicit Preint* config key overrides either.
+        //
+        // ★ MEASURED side by side at the live constants (StationaryMotionThreshold 0.02, OdomNoiseBase
+        // 0.01, RotationNoiseBase 0.01, OdomNoiseTrans 0.08, OdomNoiseRot 0.04, EncoderRotSlipK 0.05),
+        // Legacy / Propagated, sigma in m and rad. STRIDED rows compare against the per-frame legacy
+        // covariance SUMMED over the interval, which is what stride_cov_accum_ actually builds:
+        //
+        //   parked, 50 ms                sigma_xy 0.0200 / 0.0200   sigma_th 0.0100 / 0.0100   <- IDENTICAL
+        //   straight 0.5 m/s, 50 ms               0.0120 / 0.0200            0.0100 / 0.0100
+        //   pivot 1.0 rad/s, 50 ms                0.0214 / 0.0200            0.0123 / 0.0105
+        //   arc 0.5 m/s + 1.0 rad/s               0.0142 / 0.0201            0.0123 / 0.0105
+        //   STRIDED arc, 0.5 s (10 fr)            0.0447 / 0.0637            0.0388 / 0.0450
+        //   STRIDED straight, 0.5 s               0.0379 / 0.0634            0.0316 / 0.0316
+        //
+        // So: the STATIONARY regime — where the robot sits for >99% of logged frames — matches exactly,
+        // and everywhere else the propagated form is broadly 1.3-1.7x LOOSER in position rather than
+        // tighter. Two mechanisms, both of them the legacy shape being wrong rather than the new one:
+        //   • Legacy's floor DROPS discontinuously from 0.02 m to 0.01 m the moment |Δp| exceeds
+        //     StationaryMotionThreshold, so it asserts MORE position uncertainty when barely moving
+        //     than when moving fast. The propagated form has no switch and that non-monotonicity goes.
+        //   • Legacy's rotation_position_coupling inflates position by 0.15·|Δθ| even for a pivot in
+        //     place, where a heading error has no translation to rotate. The propagated form gets 0
+        //     there because the geometry says 0 — which is why pivot rows come out tighter.
+        //
+        // ⚠ AND THE HONEST CAVEAT: at these constants the cross terms are nearly invisible
+        // (rho(y,theta) = -0.028 on the strided arc, against -0.19 in the gn_selftest trajectory).
+        // The derived floor is 0.02 m per 50 ms = 0.089 m/√s of position random walk for a PARKED
+        // wheeled robot, which is not a physical number — it is a stabiliser added to stop loss_motion
+        // spiking to 6000 on a 3.4 cm parked pose residual — and it swamps every other term including
+        // the structure this change exists to introduce. So the algebra being right (validated against
+        // Monte Carlo, see gn_selftest) is NOT yet the same as the covariance being right. Calibrating
+        // sigma_* against the real stream is the load-bearing step, not an optional refinement: park
+        // the robot and take the sample variance of the odometry stream, then one constant-velocity leg
+        // for scale_*. Until then these are a faithful translation of the old constants, not a
+        // measurement, and a MOVING A/B (early exit while translating, innov_norm, loss_motion) is the
+        // only thing that settles whether the looser prior helps or hurts.
+        bool motion_preintegration = false;
+        rc::preint::NoiseModel odom_preint_noise{};  // measured-odometry channel
+        // Command channel. Its floor stays deliberately looser than the encoder's (cmd_noise_base
+        // 0.05 m vs odom_noise_base 0.01 m) because an open-loop command really can be wrong while the
+        // robot stands still — the wheels may simply not have obeyed it.
+        rc::preint::NoiseModel cmd_preint_noise{ .sigma_v_lat  = 0.224f,   // cmd_noise_base 0.05 / √0.05
+                                                 .sigma_v_long = 0.224f,
+                                                 .sigma_omega  = 0.0447f,
+                                                 .scale_v      = 0.20f,    // cmd_noise_trans
+                                                 .scale_omega  = 0.18f };  // cmd_noise_rot
+
         // ===== Strided RFE window =====
         // The window holds rfe_window_size poses, but at the lidar rate they are all essentially the
         // SAME pose: measured while moving, the max pairwise separation across the 5 slots is 76 mm
@@ -584,6 +649,12 @@ public:
         VelocityCommand velocity_cmd;    // The actual velocity command
         float dt;                        // Time delta
         float prior_weight = 1.0f;      // How much to trust this prior
+        // Preintegrated summary of the same interval, filled only when Params::motion_preintegration
+        // is on. `covariance_eigen` above is then this interval's covariance(); the Interval itself is
+        // kept because the strided window has to CHAIN intervals (rc::preint::chain), which needs the
+        // scale Jacobians, not just the covariance they contribute to.
+        rc::preint::Interval preint{};
+        bool has_preint = false;
 
         OdometryPrior()
             : delta_pose(Eigen::Vector3f::Zero())
@@ -1105,6 +1176,11 @@ private:
    bool            stride_has_admitted_ = false;
    Eigen::Vector3f stride_delta_accum_  = Eigen::Vector3f::Zero();
    Eigen::Matrix3f stride_cov_accum_    = Eigen::Matrix3f::Zero();
+   // Preintegrated form of the same accumulation (Params::motion_preintegration). Chained with
+   // rc::preint::chain() rather than summed: an error in the heading accumulated so far rotates all
+   // the translation that follows, and `stride_cov_accum_ += ...` drops exactly that term.
+   rc::preint::Interval stride_preint_accum_{};
+   bool preint_announced_ = false;   // one-shot "the propagated covariance is really in force" log
 
    // Running second moment of the innovation, per axis (x, y, theta). See Params::adaptive_cov_enabled.
    Eigen::Vector3f innov_m2_ = Eigen::Vector3f::Zero();
@@ -1122,6 +1198,7 @@ private:
        stride_has_admitted_ = false;
        stride_delta_accum_.setZero();
        stride_cov_accum_.setZero();
+       stride_preint_accum_ = rc::preint::Interval{};
    }
 
    // Prediction-based early exit tracking
@@ -1316,14 +1393,19 @@ private:
     RoomConcept::OdometryPrior compute_odometry_prior(
                     const std::vector<VelocityCommand>& velocity_history,
                     const std::pair<std::vector<Eigen::Vector3f>, std::int64_t> &lidar);
+    /// `preint_out`, when non-null, additionally receives the interval PREINTEGRATED over the same
+    /// samples — covariance and scale Jacobians propagated step by step (se2_preintegration.h). The
+    /// returned mean is computed by the same lines either way, so passing it cannot change the mean.
     Eigen::Vector3f integrate_velocity_over_window(const Eigen::Affine2f &robot_pose,
                                                    const std::vector<VelocityCommand> &velocity_history,
-                                                   const int64_t &t_start_ms, const int64_t &t_end_ms);
+                                                   const int64_t &t_start_ms, const int64_t &t_end_ms,
+                                                   rc::preint::Interval *preint_out = nullptr);
 
     /// Integrate measured odometry (adv, side, rot) over the same time window
     Eigen::Vector3f integrate_odometry_over_window(const Eigen::Affine2f &robot_pose,
                                                    const std::vector<OdometryReading> &odometry_history,
-                                                   const int64_t &t_start_ms, const int64_t &t_end_ms);
+                                                   const int64_t &t_start_ms, const int64_t &t_end_ms,
+                                                   rc::preint::Interval *preint_out = nullptr);
 
     /// Compute odometry prior from measured velocities (encoder/IMU feedback)
     OdometryPrior compute_measured_odometry_prior(

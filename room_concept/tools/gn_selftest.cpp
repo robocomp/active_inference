@@ -272,6 +272,204 @@ int main()
         check("converged and improved", r.ok and r.loss < loss0 and worst_xy < 0.05f, buf);
     }
 
+    // =================================================================================================
+    //  SE(2) PREINTEGRATION (se2_preintegration.h)
+    //
+    //  The covariance is the whole point of that file, and a covariance is the one quantity a
+    //  convergence test cannot check: a wrong Σ still converges, it just converges to a moved minimum
+    //  (the same failure mode the SDF 2x scaling had, which is why this harness exists at all). So the
+    //  reference here is MONTE CARLO — draw the per-step noise the model claims, integrate the nominal
+    //  arithmetic with it, and compare the empirical spread of Δ against the propagated Σ. That
+    //  validates A, B, Q and the midpoint 0.5 factor in one shot, against no analytic re-derivation.
+    // =================================================================================================
+    std::printf("\nSE(2) preintegration\n");
+    {
+        struct Step { float v_lat, v_long, omega, dt; };
+
+        // A turning, translating interval: the regime where the cross terms exist at all. A straight
+        // leg would pass with A = I and prove nothing.
+        const auto make_traj = [](float dt, float total_s)
+        {
+            std::vector<Step> traj;
+            const int n = static_cast<int>(std::lround(total_s / dt));
+            for (int i = 0; i < n; ++i)
+                traj.push_back({0.05f, 0.45f, 0.8f, dt});
+            return traj;
+        };
+
+        // The nominal integration, with optional per-step perturbations. Mirrors Integrator::add()'s
+        // mean lines exactly — deliberately re-written rather than reused, so a bug in the recursion
+        // cannot hide by being present on both sides of the comparison.
+        const auto integrate = [](const std::vector<Step>& traj, float theta0,
+                                  float scale_v, float scale_omega,
+                                  const std::vector<Eigen::Vector3f>* pert)
+        {
+            Eigen::Vector3f d = Eigen::Vector3f::Zero();
+            float th = theta0;
+            for (size_t i = 0; i < traj.size(); ++i)
+            {
+                const auto& s = traj[i];
+                float dx_local = s.v_lat  * (1.f + scale_v) * s.dt;
+                float dy_local = s.v_long * (1.f + scale_v) * s.dt;
+                float dtheta   = s.omega  * (1.f + scale_omega) * s.dt;
+                if (pert != nullptr)
+                {
+                    dx_local += (*pert)[i][0];   // additive on the INCREMENT, which is what Q·dt models
+                    dy_local += (*pert)[i][1];
+                    dtheta   += (*pert)[i][2];
+                }
+                const float tm = th + 0.5f * dtheta;
+                d[0] += dx_local * std::cos(tm) - dy_local * std::sin(tm);
+                d[1] += dx_local * std::sin(tm) + dy_local * std::cos(tm);
+                d[2] += dtheta;
+                th += dtheta;
+            }
+            return d;
+        };
+
+        const float theta0 = 0.6f;
+        const auto traj = make_traj(0.01f, 0.5f);      // 50 samples at 100 Hz over half a second
+
+        // ---- 1. Σ against Monte Carlo -------------------------------------------------------------
+        rc::preint::NoiseModel qn;                     // random part only, so covariance() == cov
+        qn.sigma_v_lat = qn.sigma_v_long = 0.02f;
+        qn.sigma_omega = 0.05f;
+        qn.scale_v = qn.scale_omega = 0.f;
+
+        rc::preint::Integrator ig(theta0);
+        ig.set_noise(qn);
+        for (const auto& s : traj) ig.add(s.v_lat, s.v_long, s.omega, s.dt);
+        const auto iv = ig.result();
+
+        const Eigen::Vector3f mean_nominal = integrate(traj, theta0, 0.f, 0.f, nullptr);
+        check("mean matches the legacy integration",
+              (iv.delta - mean_nominal).norm() < 1e-5f,
+              "d = [" + std::to_string(iv.delta[0]) + ", " + std::to_string(iv.delta[1]) + ", "
+                      + std::to_string(iv.delta[2]) + "]");
+
+        constexpr int kTrials = 40000;
+        Eigen::Matrix3f mc = Eigen::Matrix3f::Zero();
+        Eigen::Vector3f mc_mean = Eigen::Vector3f::Zero();
+        std::vector<Eigen::Vector3f> samples;
+        samples.reserve(kTrials);
+        {
+            std::mt19937 mrng(999);
+            std::normal_distribution<float> g(0.f, 1.f);
+            std::vector<Eigen::Vector3f> pert(traj.size());
+            for (int t = 0; t < kTrials; ++t)
+            {
+                for (size_t i = 0; i < traj.size(); ++i)
+                {
+                    const float sd = std::sqrt(traj[i].dt);
+                    pert[i] = Eigen::Vector3f(qn.sigma_v_lat  * sd * g(mrng),
+                                              qn.sigma_v_long * sd * g(mrng),
+                                              qn.sigma_omega  * sd * g(mrng));
+                }
+                const Eigen::Vector3f d = integrate(traj, theta0, 0.f, 0.f, &pert);
+                samples.push_back(d);
+                mc_mean += d;
+            }
+            mc_mean /= static_cast<float>(kTrials);
+            for (const auto& d : samples)
+            {
+                const Eigen::Vector3f e = d - mc_mean;
+                mc += e * e.transpose();
+            }
+            mc /= static_cast<float>(kTrials - 1);
+        }
+        const float cov_rel = (mc - iv.cov).norm() / std::max(iv.cov.norm(), 1e-12f);
+        {
+            char buf[256];
+            std::snprintf(buf, sizeof buf,
+                          "rel Frobenius %.4f  (sig_x %.4f vs %.4f, sig_th %.4f vs %.4f, rho_yth %+.3f vs %+.3f)",
+                          cov_rel, std::sqrt(iv.cov(0, 0)), std::sqrt(mc(0, 0)),
+                          std::sqrt(iv.cov(2, 2)), std::sqrt(mc(2, 2)),
+                          iv.cov(1, 2) / std::sqrt(iv.cov(1, 1) * iv.cov(2, 2)),
+                          mc(1, 2) / std::sqrt(mc(1, 1) * mc(2, 2)));
+            check("covariance recursion vs 40k Monte Carlo", cov_rel < 0.10f, buf);
+        }
+        // The cross terms are the reason this file exists: assert they are actually PRESENT, or the
+        // test above could be passed by a diagonal that happens to have the right diagonal.
+        {
+            const float rho = std::abs(iv.cov(1, 2)) / std::sqrt(iv.cov(1, 1) * iv.cov(2, 2));
+            char buf[128];
+            std::snprintf(buf, sizeof buf, "|rho(y,theta)| = %.3f — a diagonal model asserts 0", rho);
+            check("covariance is NOT diagonal", rho > 0.05f, buf);
+        }
+
+        // ---- 2. Scale Jacobians against central differences ---------------------------------------
+        {
+            constexpr float eps = 1e-3f;
+            const Eigen::Vector3f fd_omega =
+                (integrate(traj, theta0, 0.f, eps, nullptr) - integrate(traj, theta0, 0.f, -eps, nullptr))
+                / (2.f * eps);
+            const Eigen::Vector3f fd_v =
+                (integrate(traj, theta0, eps, 0.f, nullptr) - integrate(traj, theta0, -eps, 0.f, nullptr))
+                / (2.f * eps);
+            const float e_omega = (fd_omega - iv.g_omega).norm() / std::max(fd_omega.norm(), 1e-9f);
+            const float e_v     = (fd_v     - iv.g_v).norm()     / std::max(fd_v.norm(),     1e-9f);
+            char buf[192];
+            std::snprintf(buf, sizeof buf, "rel err omega %.2e, v %.2e", e_omega, e_v);
+            check("scale Jacobians vs central differences", e_omega < 1e-3f and e_v < 1e-3f, buf);
+        }
+
+        // ---- 3. chain() must equal one continuous integration -------------------------------------
+        // This is the property the legacy `stride_cov_accum_ += cov` does NOT have.
+        {
+            const size_t half = traj.size() / 2;
+            std::vector<Step> a(traj.begin(), traj.begin() + static_cast<long>(half));
+            std::vector<Step> b(traj.begin() + static_cast<long>(half), traj.end());
+
+            rc::preint::Integrator ia(theta0);
+            ia.set_noise(qn);
+            for (const auto& s : a) ia.add(s.v_lat, s.v_long, s.omega, s.dt);
+
+            rc::preint::Integrator ib(ia.heading());     // b starts where a ends
+            ib.set_noise(qn);
+            for (const auto& s : b) ib.add(s.v_lat, s.v_long, s.omega, s.dt);
+
+            const auto chained = rc::preint::chain(ia.result(), ib.result());
+            const float d_err = (chained.delta - iv.delta).norm();
+            const float c_err = (chained.cov - iv.cov).norm() / std::max(iv.cov.norm(), 1e-12f);
+            const float g_err = (chained.g_omega - iv.g_omega).norm() / std::max(iv.g_omega.norm(), 1e-9f);
+
+            // What the legacy additive form would have said, for scale.
+            const Eigen::Matrix3f naive = ia.result().cov + ib.result().cov;
+            const float naive_err = (naive - iv.cov).norm() / std::max(iv.cov.norm(), 1e-12f);
+
+            char buf[224];
+            std::snprintf(buf, sizeof buf,
+                          "delta %.2e, cov %.2e, g %.2e  (naive sum: cov %.2e)",
+                          d_err, c_err, g_err, naive_err);
+            check("chain() == one continuous integration",
+                  d_err < 1e-5f and c_err < 1e-4f and g_err < 1e-4f, buf);
+        }
+
+        // ---- 4. Rate invariance -------------------------------------------------------------------
+        // The same physical interval sampled at 20 Hz and at 100 Hz must give the same covariance.
+        // The legacy form cannot: its constants are added once per FRAME, so five times the frame rate
+        // is five times the asserted noise. This is the 08-09 units defect as a property test.
+        {
+            const auto make_iv = [&](float dt)
+            {
+                const auto tr = make_traj(dt, 0.5f);
+                rc::preint::Integrator g(theta0);
+                g.set_noise(qn);
+                for (const auto& s : tr) g.add(s.v_lat, s.v_long, s.omega, s.dt);
+                return g.result();
+            };
+            const auto slow = make_iv(0.05f);      // 20 Hz
+            const auto fast = make_iv(0.01f);      // 100 Hz
+            const float rel = (slow.cov - fast.cov).norm() / std::max(fast.cov.norm(), 1e-12f);
+            const float gr  = (slow.g_omega - fast.g_omega).norm() / std::max(fast.g_omega.norm(), 1e-9f);
+            char buf[192];
+            std::snprintf(buf, sizeof buf,
+                          "sigma_th 20Hz %.5f vs 100Hz %.5f, cov rel %.4f, g rel %.4f",
+                          std::sqrt(slow.cov(2, 2)), std::sqrt(fast.cov(2, 2)), rel, gr);
+            check("covariance is invariant to sample rate", rel < 0.02f and gr < 0.02f, buf);
+        }
+    }
+
     std::printf("\n%s (%d failure%s)\n\n", failures == 0 ? "ALL PASS" : "FAILURES",
                 failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;

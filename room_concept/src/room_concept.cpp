@@ -2144,6 +2144,13 @@ namespace rc
             stride_delta_accum_ += slot_odom_delta;       // global-frame increments, additive
             stride_cov_accum_   += slot_motion_cov;       // independent increments
 
+            // Preintegrated form of the same accumulation. `+=` on the covariance drops the transport
+            // term — an error in the heading accumulated so far rotates ALL the translation that
+            // follows — and with window_min_turn_rad = 0.15 rad that term is not small. chain() is the
+            // same recursion the per-sample loop uses, applied at frame granularity.
+            if (params.motion_preintegration and selected_prior.has_preint)
+                stride_preint_accum_ = rc::preint::chain(stride_preint_accum_, selected_prior.preint);
+
             if (stride_has_admitted_ and window_mgr_.size() > 1)
             {
                 const float travel = std::hypot(pred_pos.x() - stride_last_admitted_[0],
@@ -2156,6 +2163,10 @@ namespace rc
             // Either way the newest slot spans back to the last admitted one.
             slot_odom_delta = stride_delta_accum_;
             slot_motion_cov = stride_cov_accum_;
+            // covariance() is called exactly HERE, once, on the interval the motion factor will
+            // actually carry — never per frame (see the warning on Interval::covariance()).
+            if (params.motion_preintegration and stride_preint_accum_.samples > 0)
+                slot_motion_cov = stride_preint_accum_.covariance();
         }
 
         WindowSlot new_slot;
@@ -2207,6 +2218,7 @@ namespace rc
                 stride_has_admitted_  = true;
                 stride_delta_accum_.setZero();
                 stride_cov_accum_.setZero();
+                stride_preint_accum_ = rc::preint::Interval{};
             }
         }
         window_mgr_.subsample_old_slots(params.rfe_max_lidar_per_old_slot);
@@ -2883,6 +2895,27 @@ namespace rc
             set_model_prediction(selection.predicted_pos,
                                  selection.predicted_theta,
                                  selection.selected_prior.covariance_eigen.inverse());
+        }
+
+        // Preintegration: the strided window CHAINS intervals, so the selected prior needs one no
+        // matter which branch produced it. Measured/Command carry the real interval through the
+        // wholesale copy above (random covariance and scale Jacobians kept separate, which is what
+        // chain() needs to transport). The Fused branch cannot: fuse_priors() has already combined
+        // both channels' random and correlated parts into one matrix and they are not separable
+        // afterwards, so the whole thing enters as a random part with zero scale Jacobians.
+        // ⚠ Consequence, stated rather than hidden: across a STRIDED interval the fused branch then
+        // treats the scale error of successive frames as independent draws and under-counts it (√M
+        // instead of M). It only bites with window_stride_enabled (off by default), and the real cure
+        // is the scale STATE, which removes the term from the covariance entirely — see the
+        // SCALE-AS-A-STATE note in se2_preintegration.h.
+        if (params.motion_preintegration and not selection.selected_prior.has_preint)
+        {
+            rc::preint::Interval synth;
+            synth.delta   = selection.selected_prior.delta_pose;
+            synth.cov     = selection.selected_prior.covariance_eigen;
+            synth.samples = 1;
+            selection.selected_prior.preint = synth;
+            selection.selected_prior.has_preint = true;
         }
 
         last_selected_prior_ = selection.selected_prior;
@@ -3854,11 +3887,13 @@ namespace rc
         if (!velocity_history.empty())
             prior.velocity_cmd = velocity_history.back();
 
+        rc::preint::Interval interval;
         if (!velocity_history.empty() && last_update_result.ok)
             prior.delta_pose = integrate_velocity_over_window(last_update_result.robot_pose,
                                                               velocity_history,
                                                         last_lidar_timestamp,
-                                                        lidar_timestamp);
+                                                        lidar_timestamp,
+                                                        params.motion_preintegration ? &interval : nullptr);
         else
             // If no history or no valid previous pose, assume STATIONARY (Zero motion)
             // This protects us when sitting still!
@@ -3867,13 +3902,23 @@ namespace rc
         prior.valid = true; // ALWAYS valid now
 
 
-        // Compute covariance
-        Eigen::Matrix3f cov_eigen = compute_motion_covariance(prior);
+        // Compute covariance — propagated over the interval's segments, or the legacy asserted
+        // diagonal. See the same branch in compute_measured_odometry_prior().
+        Eigen::Matrix3f cov_eigen;
+        if (params.motion_preintegration and interval.samples > 0)
+        {
+            prior.preint = interval;
+            prior.has_preint = true;
+            cov_eigen = interval.covariance();
+        }
+        else
+            cov_eigen = compute_motion_covariance(prior);
         prior.covariance_eigen = cov_eigen;
-        prior.covariance = torch::eye(3, torch::TensorOptions().dtype(torch::kFloat32).device(get_device()));
-        prior.covariance[0][0] = cov_eigen(0, 0);
-        prior.covariance[1][1] = cov_eigen(1, 1);
-        prior.covariance[2][2] = cov_eigen(2, 2);
+        prior.covariance = torch::zeros({3, 3},
+                              torch::TensorOptions().dtype(torch::kFloat32).device(get_device()));
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                prior.covariance[r][c] = cov_eigen(r, c);
 
         last_lidar_timestamp = lidar_timestamp;
         return prior;
@@ -4230,11 +4275,16 @@ namespace rc
                 const Eigen::Affine2f& robot_pose,
                 const std::vector<VelocityCommand> &velocity_history,
                 const std::int64_t &t_start_ms,
-                const std::int64_t &t_end_ms)
+                const std::int64_t &t_end_ms,
+                rc::preint::Interval *preint_out)
     {
         Eigen::Vector3f total_delta = Eigen::Vector3f::Zero();
 
         float running_theta = std::atan2(robot_pose.linear()(1,0), robot_pose.linear()(0,0));
+
+        // See the note in integrate_odometry_over_window: observer only, never touches total_delta.
+        rc::preint::Integrator preint(running_theta);
+        preint.set_noise(params.cmd_preint_noise);
 
         // Integrate over all velocity commands in [t_start_ms, t_end_ms] using source/recv epoch-ms.
         for (size_t i = 0; i < velocity_history.size(); ++i) {
@@ -4271,9 +4321,15 @@ namespace rc
             total_delta[1] += dx_local * std::sin(theta_mid) + dy_local * std::cos(theta_mid);
             total_delta[2] += dtheta;
 
+            if (preint_out != nullptr)
+                preint.add(vcmd.adv_x, vcmd.adv_y, vcmd.rot, dt);
+
             // Update running theta for next segment
             running_theta += dtheta;
         }
+
+        if (preint_out != nullptr)
+            *preint_out = preint.result();
 
         return total_delta;
     }
@@ -4363,10 +4419,16 @@ namespace rc
                 const Eigen::Affine2f& robot_pose,
                 const std::vector<OdometryReading> &odometry_history,
                 const int64_t &t_start_ms,
-                const int64_t &t_end_ms)
+                const int64_t &t_end_ms,
+                rc::preint::Interval *preint_out)
     {
         Eigen::Vector3f total_delta = Eigen::Vector3f::Zero();
         float running_theta = std::atan2(robot_pose.linear()(1,0), robot_pose.linear()(0,0));
+
+        // Preintegration runs on the SAME segments, seeded at the SAME heading. It is a pure observer:
+        // it never writes total_delta, so the mean cannot change depending on whether it is asked for.
+        rc::preint::Integrator preint(running_theta);
+        preint.set_noise(params.odom_preint_noise);
 
         // Integrate over all odometry readings in [t_start_ms, t_end_ms] using source/recv epoch-ms.
         for (size_t i = 0; i < odometry_history.size(); ++i)
@@ -4403,8 +4465,14 @@ namespace rc
             total_delta[1] += dx_local * std::sin(theta_mid) + dy_local * std::cos(theta_mid);
             total_delta[2] += dtheta;
 
+            if (preint_out != nullptr)
+                preint.add(odom.side, odom.adv, odom.rot, dt);
+
             running_theta += dtheta;
         }
+
+        if (preint_out != nullptr)
+            *preint_out = preint.result();
 
         return total_delta;
     }
@@ -4450,22 +4518,61 @@ namespace rc
         };
         prior.fresh = has_fresh_measurement();
 
+        rc::preint::Interval interval;
         prior.delta_pose = integrate_odometry_over_window(
             last_update_result.robot_pose,
             odometry_history,
             prev_ts,
-            lidar_timestamp);
+            lidar_timestamp,
+            params.motion_preintegration ? &interval : nullptr);
 
         prior.valid = true;
 
-        // Compute covariance using odometry noise model (tighter than command).
-        // Diagonal 3×3 is sufficient here; the full prior fusion uses the fused covariance.
-        Eigen::Matrix3f cov_eigen = compute_motion_covariance(prior, true);
+        // Covariance for this interval. Either PROPAGATED through the interval's samples
+        // (se2_preintegration.h — full 3×3 with the cross terms a rotating heading actually produces)
+        // or the legacy asserted diagonal. The mean above is identical in both cases.
+        Eigen::Matrix3f cov_eigen;
+        if (params.motion_preintegration and interval.samples > 0)
+        {
+            prior.preint = interval;
+            prior.has_preint = true;
+            cov_eigen = interval.covariance();
+
+            // ── ONE-SHOT PROOF OF LIFE, on the first interval that carries real motion ──────────────
+            // A config key that quietly fails to bind is a recurring failure mode here (HierPrecEeDthetaMin
+            // was dead twice over; mask_trunc_frac was dead code) and a covariance change is invisible in
+            // every outcome metric until it has already shifted the pose. So print both matrices side by
+            // side, once, and let the log say which one is in force rather than the config file implying it.
+            if (not preint_announced_ and interval.delta.head<2>().norm() > 0.005f)
+            {
+                preint_announced_ = true;
+                const Eigen::Matrix3f legacy = compute_motion_covariance(prior, true);
+                qInfo() << "[Preint] MotionPreintegration ACTIVE — motion covariance is PROPAGATED, not asserted.";
+                qInfo().nospace()
+                    << "  interval: " << interval.samples << " samples over "
+                    << interval.duration_s * 1000.f << " ms, |dp|=" << interval.delta.head<2>().norm()
+                    << " m, dth=" << interval.delta[2] << " rad";
+                qInfo().nospace()
+                    << "  sigma_x  " << std::sqrt(cov_eigen(0, 0)) << " (legacy " << std::sqrt(legacy(0, 0))
+                    << ")   sigma_y " << std::sqrt(cov_eigen(1, 1)) << " (legacy " << std::sqrt(legacy(1, 1))
+                    << ")   sigma_th " << std::sqrt(cov_eigen(2, 2)) << " (legacy " << std::sqrt(legacy(2, 2)) << ")";
+                qInfo().nospace()
+                    << "  cross terms the legacy diagonal cannot express: rho(x,y)="
+                    << cov_eigen(0, 1) / std::sqrt(cov_eigen(0, 0) * cov_eigen(1, 1))
+                    << " rho(y,th)=" << cov_eigen(1, 2) / std::sqrt(cov_eigen(1, 1) * cov_eigen(2, 2))
+                    << " rho(x,th)=" << cov_eigen(0, 2) / std::sqrt(cov_eigen(0, 0) * cov_eigen(2, 2));
+            }
+        }
+        else
+            cov_eigen = compute_motion_covariance(prior, true);
         prior.covariance_eigen = cov_eigen;
-        prior.covariance = torch::eye(3, torch::TensorOptions().dtype(torch::kFloat32).device(get_device()));
-        prior.covariance[0][0] = cov_eigen(0, 0);
-        prior.covariance[1][1] = cov_eigen(1, 1);
-        prior.covariance[2][2] = cov_eigen(2, 2);
+        // Full 3×3, not just the diagonal: this tensor feeds the meas_cov_* diagnostic columns, and a
+        // silently truncated copy would make the logged covariance disagree with the one in use.
+        prior.covariance = torch::zeros({3, 3},
+                              torch::TensorOptions().dtype(torch::kFloat32).device(get_device()));
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                prior.covariance[r][c] = cov_eigen(r, c);
 
         return prior;
     }
