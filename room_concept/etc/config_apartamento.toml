@@ -185,8 +185,17 @@ WindowMinTurn          = 0.15   # rad of turn before a new slot is admitted (whi
 # ⚠ The cross terms are nearly invisible at these constants (rho(y,θ) = -0.028) because that 0.02 m
 # per-frame floor = 0.089 m/√s of position random walk for a PARKED robot swamps them. Calibrating
 # sigma_* against the real odometry stream is the load-bearing next step, not a refinement.
-MotionPreintegration   = true   # 2026-08-13: ARMED. Inert until the agent is restarted (read at startup).
-                                # THE WAY BACK IS ONE WORD: set this to false — no rebuild needed.
+MotionPreintegration   = true   # 2026-08-13 LANDED ON. The controlled A/B (same route, spans matched to
+                                # 3 cm) is NULL in every moving band and +0.63 pp early exit while parked
+                                # (the only difference outside its Wilson 95% CI); cov_tt unchanged,
+                                # no boundary ratchet, timing identical. So this is kept on STRUCTURAL
+                                # grounds — dt enters where the physics puts it, chain() is exact where
+                                # the additive sum was 2-4% off, the cross terms exist, and ~8 hand-set
+                                # constants become measurable densities — NOT on measured performance.
+                                # ⚠ It cannot earn its keep until PreintOdomSigma* is calibrated against
+                                # the real odometry stream; today's derived floor swamps the new shape.
+                                # ARM log_2026-08-13_12-05-32.csv / BASE log_2026-08-13_12-12-57.csv.
+                                # THE WAY BACK IS ONE WORD: false — no rebuild needed.
 # PreintOdomSigmaVLat  = 0.0894   # m/√s   — derived from max(StationaryMotionThreshold, OdomNoiseBase)/√0.05
 # PreintOdomSigmaVLong = 0.0894
 # PreintOdomSigmaOmega = 0.0447   # rad/√s — derived from RotationNoiseBase/√0.05
