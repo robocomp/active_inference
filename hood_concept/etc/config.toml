@@ -352,8 +352,32 @@ ExistenceLogoddsMax = 4.0      # clamp |L| so evidence stays finite AND recovera
 # nats/cycle, reaching the −4 clamp in 13 cycles. It was never removed — the debounce counts LOOKS, and with
 # p_detect 0 the streak stayed at 0.00 — so the symptom was a real hood sitting at p=0.02, condemned and
 # unexecutable, which is exactly the state the stall report exists to name.
-ExistenceDetectionProb = 0.355 # P(beam through an OCCUPIED footprint returns from it) — MEASURED, see above
+ExistenceDetectionProb = 0.55  # P(beam through an OCCUPIED footprint returns from it) — MEASURED, see above
+#
+# ★RE-MEASURED 2026-08-13 on the CURRENT run and CORRECTED UP from 0.355. The first measurement was taken on
+# a previous run whose pose mix happened to be unfavourable. On this run, 29165 camera-present cycles:
+#     camera HAS a mask   6705 cycles   return rate 0.534
+#     no mask this cycle 22460 cycles   return rate 0.604
+# ⚠AND THAT IS THE REAL LESSON: it is NOT A CONSTANT. At the descent geometry the local rate is 0.10; facing
+# the hood it is ~0.6. A single number is a known approximation here, and the honest fix is the LiDAR's own
+# resolvability model — the counterpart of the camera's p_detect, which folds range, framing and centrality.
+# Until that exists, 0.55 is the pooled measurement rather than a value tuned on one pose. What actually
+# BOUNDS the damage is the frame correlation below, not this number.
 ExistenceClutterProb = 0.05    # P(beam through an EMPTY footprint returns anyway) — spurious rate
+
+# ★★MEASURED 0.477 on this agent's own ai2_log (lag-1 autocorrelation of the LiDAR's admitted absence), and
+# UNSET until now — which meant every repeat counted as an INDEPENDENT observation.
+#
+# THIS is what let a real hood reach the clamp. Correcting the per-beam likelihood (0.85 -> 0.55) slowed the
+# descent from ~0.5 to 0.115 nats/cycle exactly as predicted, and slowing a descent that never STOPS only
+# changes when it arrives: 13 cycles became ~70. A robot parked with the hood out of the camera's reach sees
+# the SAME LiDAR geometry every cycle, and 70 copies of one observation are not 70 observations.
+#
+# n_eff saturates at ~1/rho_eff = 2.3 looks' worth instead of growing without bound — about 0.26 nats total
+# rather than the 8 it takes to cross the belief. And rho_eff = rho*(1 - p_detect) means a CONFIDENT camera
+# look is undamped, so a hood that really is gone is still removed by going and looking at it. That is the
+# whole design: repetition is not independence, and this is the REMOVE-side instance of it.
+ExistenceFrameCorrelation = 0.477   # rho: frame-to-frame correlation of same-sign observations
 ExistenceSensorSigmaM = 0.03   # LiDAR range σ (m) for the soft occupancy/free-space surface split
 ExistenceRemoveFrames = 15     # debounce: require the removal decision for this many CONSECUTIVE cycles before
                                # deleting (a transient association/fit hiccup can't delete a real hood)
