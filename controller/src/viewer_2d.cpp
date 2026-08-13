@@ -546,11 +546,21 @@ void Viewer2D::draw_path(const PathDrawData &data)
             if (obstacle_visual.sigma_pos_m > 0.f
                 and obstacle_visual.kind != ControllerObstacleKind::GridOccupancy)
             {
+                // ★ITS OWN COLOUR, NOT THE OBJECT'S. The ring used to take palette.pen, so on a model
+                // object it came out the same green as the footprint it surrounds — two different
+                // quantities (where the object IS, how well that is KNOWN) in one colour, which is
+                // exactly the confusion the "not what the planner avoids" note above is trying to
+                // prevent. One dedicated magenta for every kind instead: uncertainty reads as a layer
+                // rather than as a property of whichever agent happened to publish the object.
+                // ★Hue picked to be unused in this scene — the greens (34,139,58), oranges
+                // (194,103,25), crimsons (150,20,40), blues (0,145,199 / 56,114,219) and the teal
+                // (22,160,133) are all taken, and the one purple (142,68,173) is the mission-recording
+                // waypoint, far enough round the wheel and only present while recording.
                 const qreal r = 2.0 * obstacle_visual.sigma_pos_m;   // 2 sigma ~ 95%
-                QPen halo_pen(palette.pen, 0.0);
+                QColor hc(224, 64, 191); hc.setAlpha(150);
+                QPen halo_pen(hc, 0.0);
                 halo_pen.setCosmetic(true);
                 halo_pen.setStyle(Qt::DashLine);
-                QColor hc = palette.pen; hc.setAlpha(150); halo_pen.setColor(hc);
                 auto *halo = agv_->scene.addEllipse(QRectF(center.x() - r, center.y() - r, 2 * r, 2 * r),
                                                     halo_pen, Qt::NoBrush);
                 halo->setZValue(17);   // BELOW the footprint (18) — context, not the thing itself

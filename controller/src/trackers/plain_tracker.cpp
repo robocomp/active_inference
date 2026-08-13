@@ -49,9 +49,15 @@ ControlOutput& PlainTracker::compute(ControlOutput& out, const TrackerInput& in,
     // and stale arc length pointed the tracker at the route's END POINT after a restart (route_s pinned
     // at 0.20 m, robot driving into a wall). Re-acquiring searches the whole route once and adopts the
     // nearest point: the route start after a stop, the robot's own position after a repair.
+    // ★RE-ACQUISITION IS ALSO PATH INITIATION. The one moment "the robot is starting a path" is well
+    // defined is the moment the projection is re-acquired: reset() fires on a mission start, on a route
+    // repair and on a curve change, and on nothing else. That is where the start-alignment below is
+    // armed, so it needs no notion of its own for "new path".
+    const bool reacquiring = not s_hint_.has_value();
     s_hint_ = s_hint_ ? sp.project(pos, *s_hint_, std::max(0.05f, p.plain_proj_window))
                       : sp.project(pos, 0.f, sp.length());
     const float s = *s_hint_;
+    if (reacquiring) start_align_ = true;
 
     const Eigen::Vector2f r = sp.position_at(s);
     const float psi = sp.heading_at(s);
@@ -123,8 +129,27 @@ ControlOutput& PlainTracker::compute(ControlOutput& out, const TrackerInput& in,
     // kappa = omega/v is unchanged, so a saturated turn becomes a slower turn of the SAME shape rather
     // than a wider one. Clipping omega alone silently changes the arc, which is the failure above.
     // ★No new parameter: max_rot and g_dc already exist, and this is omega = v*kappa read backwards.
+    // ── THE STEERING FLOOR MUST DIE WITH THE ROUTE, OR THE ROBOT TURNS WHERE IT ARRIVES ──────────
+    // Reported from the robot: "it advances OK but upon arriving it turns some 45 degrees, and it was
+    // not commanded to". Confirmed in mppi_diag.csv — position frozen to the centimetre at (0.51,-1.25)
+    // while cmd_rot sat on the -0.800 cap and the heading swept 1.612 -> 1.953 rad, still going.
+    // ★THE SPEED TAPERS TO ZERO AND THE ROTATION AUTHORITY DOES NOT. v_profile = sqrt(2*a*s_remaining)
+    // reaches zero at the endpoint, but the feedback is evaluated at max(v_profile, kSteerFloorMps), a
+    // CONSTANT — so at the endpoint omega = g_dc*0.15*k_fb, which is not zero whenever any cross-track
+    // is left. The robot cannot reduce e_y without translating, so it converts it into the only thing it
+    // still has authority over: it spins, settling where k_fb = 0, i.e. e_psi = -e_y/(2L). At L = 0.50
+    // that is a radian of turn per metre of leftover cross-track — 45 deg is 0.8 m of e_y.
+    // ★The floor is right in what it was for and wrong about WHEN. It exists so a crawling robot can
+    // still steer; a robot in the taper is crawling AND still going somewhere, and a robot at the
+    // endpoint is crawling and has ARRIVED. The arc that remains is exactly what separates those two,
+    // so the floor is weighted by it — over the length the feedback is designed to converge in, which is
+    // the law's own L. Inert wherever more than L of route is left (everything but the last 0.5 m);
+    // zero exactly where the route is. Continuous, and no new constant.
+    // ★Deliberately NOT applied to k_fb itself: at speed the feedback should keep its full gain: it is
+    // the artificial floor, not the feedback, that has no justification once there is nowhere left to go.
+    const float steer_floor = kSteerFloorMps * std::clamp(s_remaining / L, 0.f, 1.f);
     const float omega_want = p.plain_g_dc * (v_profile * k_ff
-                                             + std::max(v_profile, kSteerFloorMps) * k_fb);
+                                             + std::max(v_profile, steer_floor) * k_fb);
     const float omega_ccw = std::clamp(omega_want, -p.max_rot, p.max_rot);
     const float scale = std::abs(omega_want) > 1e-6f
                       ? std::abs(omega_ccw) / std::abs(omega_want) : 1.f;
@@ -199,13 +224,75 @@ ControlOutput& PlainTracker::compute(ControlOutput& out, const TrackerInput& in,
     // whether it is asked of the route ("does this turn reverse me?") or of the pose ("am I facing the
     // way out yet?"), so both ends of the decision use it and there is no gain to pick.
     constexpr float kQuarterTurn = static_cast<float>(M_PI_2);
-    // ENTRY asks the ROUTE and the POSE together; RELEASE asks the POSE alone. That asymmetry IS the
-    // hysteresis — no margin constant is needed, because entry requires |align_err| >= 90 and release
-    // requires < 90, and the pivot itself drives align_err monotonically down through that point.
-    if (not pivoting_ and turn_ahead >= kQuarterTurn and std::abs(align_err) >= kQuarterTurn)
+    // ENTRY asks the ROUTE and the POSE together. Release does NOT ask the same boundary back — see the
+    // measured limit cycle below.
+    //
+    // ── "ALIGNED" IS A BOUND ON THE EXCURSION, AND IT IS DERIVED, NOT PICKED ─────────────────────
+    // A heading loop is asymptotic, so a release needs a bound, and the honest one is what the RESIDUAL
+    // BUYS. Released onto the path with heading error e_psi, the critically damped Frenet feedback gives
+    // e_y(s) = e_psi*s*exp(-s/L), peaking at s = L:  e_y_max = e_psi*L/e. Require that peak to stay
+    // inside the resolution at which the route is even KNOWN — one sample spacing — and invert:
+    //     |align_err| <= e*spacing/L
+    // 0.27 rad at the shipped L = 0.50 and RouteSpacing = 0.05. No new constant: one is the law's, one
+    // is the curve's. ★The excursion is written out rather than folded away so it can be RE-DERIVED: if
+    // this tracker is ever handed the corridor width the planner actually certified, that width — not
+    // the sample spacing — is what the peak should be measured against.
+    const float align_tol = 2.71828183f * sp.spacing() / L;
+
+    // ── FACE THE PATH BEFORE DRIVING IT ──────────────────────────────────────────────────────────
+    // ★AT PATH INITIATION MISALIGNMENT ALONE IS THE CRITERION, and that is NOT the deadlock the
+    // stateless gate fell into. min(turn_ahead, misalign) exists because e_y can only be reduced by
+    // MOVING, so a gate on misalignment alone freezes a robot that is off-route on a straight. That
+    // premise is FALSE at the start of a path: the route is planned FROM the robot, so there is no
+    // cross-track to work off — only heading — and rotating reduces the whole of the error. Which is
+    // why this asks the POSE only, and the mid-route latch below still asks the ROUTE as well.
+    // ★WHY IT MUST NOT ARC ON. Every avoidance guarantee this tracker leans on is a property of the
+    // PATH: the planner's footprint predicate certified those samples, the band deforms those samples,
+    // repair splices those samples. An arc flown onto the path from a misaligned start is off the
+    // certified curve by exactly however much it bulges, and NOTHING has ever looked at that space.
+    // ★Armed once per acquisition and it cannot re-arm within a traversal, so it can never invent a
+    // mid-route stop.
+    // ★IT AIMS AT THE TANGENT AT THE PROJECTION, psi(s) — NOT at psi_ahead, which is the mid-route
+    // pivot's target. They are different questions and the bench caught the difference: tracker_sim
+    // starts the robot exactly ON the route and exactly TANGENT to it (P.th = heading_at(0)), which is
+    // a correctly-started robot with nothing to align, yet aiming this at psi(s+W) made it pivot off
+    // the tangent on any curving start — chasing a chord 0.40 m ahead instead of the direction the
+    // route actually leaves in. rms 40.4 -> 47.4 mm on route_world.txt. Against psi(s) the same start
+    // gives align error 0, the state releases on cycle one, and the bench is bit-for-bit unchanged.
+    // ★And nothing is skipped: with the robot facing psi(s), the arc length whose heading it matches IS
+    // s, so the adopt below is a no-op here. A start pivot must not spend route the robot never drove.
+    const float start_err = wrap_pi(psi - theta_fwd);      // SIGNED: which way to spin, to the TANGENT
+    // ── AND NO TURN-IN-PLACE ONCE THERE IS NO ROUTE LEFT TO TURN ONTO ────────────────────────────
+    // A pivot is a decision to stop and face where the robot is about to DRIVE. Past the end of the
+    // curve there is no "about to drive": psi_ahead is clamped to heading_at(length), so the robot would
+    // hold the wheels at zero and spin to face the final tangent — a second, independent way of turning
+    // where it arrives, and the same complaint from the robot's point of view. Requiring the window the
+    // pivot looks through to still fit on the curve says exactly that, in the pivot's own terms and with
+    // no new constant.
+    const bool route_ahead = s + p.plain_W < sp.length();
+    bool released_now = false;
+    const bool start_align_active = start_align_;
+    if (start_align_)
+    {
+        if (std::abs(start_err) <= align_tol or not route_ahead)
+        { start_align_ = false; released_now = true; }
+    }
+    else if (not pivoting_ and route_ahead
+             and turn_ahead >= kQuarterTurn and std::abs(align_err) >= kQuarterTurn)
         pivoting_ = true;
+    else if (pivoting_ and not route_ahead)
+    { pivoting_ = false; released_now = true; }
+    // ★THE MID-ROUTE RELEASE STAYS AT THE QUARTER TURN — the boundary above, untouched. It was the
+    // release that LOOKED guilty of the chatter and it is not: what made the pair oscillate is that
+    // release handed the robot to a law aiming somewhere else. Fix that (the adopt below) and the
+    // quarter turn is sound again, which is worth more than a tighter number — moving it to align_tol
+    // was measured on route_world.txt and costs rms 40.4 -> 47.4 mm for nothing.
     else if (pivoting_ and std::abs(align_err) < kQuarterTurn)
-        pivoting_ = false;
+    { pivoting_ = false; released_now = true; }
+    // One heading loop, two targets: the tangent the robot is starting from, or the tangent it must
+    // leave a turn on. Captured before the flag is cleared so the release cycle still commands the
+    // error it was regulating.
+    const float pivot_err = start_align_active ? start_err : align_err;
 
     // ── ARRIVE ALREADY STOPPED ───────────────────────────────────────────────────────────────────
     // MEASURED, and it is why a reactive gate is not enough: with the wheels commanded to zero from the
@@ -252,14 +339,55 @@ ControlOutput& PlainTracker::compute(ControlOutput& out, const TrackerInput& in,
     // ★omega must NOT be scaled down with v. The rotation is the only thing that clears the condition
     // holding the robot, and a law whose omega is proportional to v cannot turn on the spot — that is
     // exactly how the stateless version froze for 385 of 400 s in the bench.
-    const float omega_pivot = std::clamp(p.plain_g_dc * kSteerFloorMps * (2.f / L) * align_err,
+    const float omega_pivot = std::clamp(p.plain_g_dc * kSteerFloorMps * (2.f / L) * pivot_err,
                                          -p.max_rot, p.max_rot);
-    const float omega_blend = pivoting_ ? omega_pivot : omega_ccw;
+    // The release cycle still commands the pivot. The command below is built from the arc length this
+    // cycle projected, and the release is about to move it, so driving on the old one for one cycle
+    // would issue exactly the wrong turn — small, 50 ms, but it is the only cycle that could.
+    const bool holding = start_align_ or pivoting_ or released_now;
+    const float omega_blend = holding ? omega_pivot : omega_ccw;
 
-    const float v_cmd = pivoting_
+    const float v_cmd = holding
                       ? 0.f
                       : std::clamp(std::min(v_profile * std::min(scale, brake), v_pivot_approach),
                                    0.f, p.max_adv);
+    holding_ = holding;
+
+    // ── A PIVOT MUST CARRY THE ARC LENGTH WITH IT, OR THE FEEDBACK UNDOES IT NEXT CYCLE ──────────
+    // MEASURED 2026-08-13 (mppi_diag.csv, 4900 cycles / 246 s): the robot sat at s = 0.000 — the very
+    // start of its path — with cmd_rot alternating -0.800 / +0.800 every 8 cycles (0.40 s) and its
+    // heading oscillating inside a 0.15 rad band. It never turned at all. The base's identified lag is
+    // 0.42 s on top of 0.20 s of transport, so every command was reversed before the wheels had
+    // finished obeying it; meanwhile v sat at the saturation floor, 0.047 m/s, and the robot crept
+    // 0.7 m FORWARD while facing 135 deg away from where its path went.
+    // ★THE TWO AUTHORITIES AIMED AT DIFFERENT HEADINGS. The pivot drives theta -> psi(s+W); the Frenet
+    // feedback drives theta -> psi(s), through -(2/L)*e_psi. Where the route turns hard those differ by
+    // the whole turn — 135 deg over 0.40 m at that route's start — so the two command OPPOSITE
+    // rotations, and the latch handed control between them across the one boundary where they disagree
+    // most.
+    // ★AND THE HYSTERESIS WAS NOT THERE. "Entry asks the route AND the pose, release asks the pose
+    // alone" is an asymmetry only while turn_ahead is free to fall below 90 deg. It is NOT, in exactly
+    // the case the pivot exists for: with turn_ahead >= 90 held, entry reduces to |align_err| >= 90,
+    // which is the negation of the release test, and the pair chatters on the boundary.
+    // ★So a pivot ENDS BY ADOPTING THE ARC LENGTH IT TURNED TO FACE. The robot turned through that
+    // corner in place instead of driving it, so that arc is spent: psi(s) then agrees with the heading
+    // the pivot achieved, e_psi is ~0 at release, and the feedback CONTINUES the pivot instead of
+    // spending the next cycle undoing it. Bounded by the same window W the pivot aimed at, so it can
+    // never skip more route than the turn it was looking at, and the projection is monotone-forward so
+    // the adopted value cannot be walked back.
+    if (released_now)
+    {
+        float best = s;
+        float best_err = std::abs(wrap_pi(psi - theta_fwd));
+        for (float ds = sp.spacing(); ds <= p.plain_W; ds += sp.spacing())
+        {
+            const float x = std::min(s + ds, sp.length());
+            const float err = std::abs(wrap_pi(sp.heading_at(x) - theta_fwd));
+            if (err < best_err) { best_err = err; best = x; }
+            if (x >= sp.length()) break;
+        }
+        s_hint_ = best;
+    }
 
     out.adv  = v_cmd;
     out.side = 0.f;

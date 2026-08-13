@@ -298,6 +298,15 @@ struct Result
     float  vcmd_max_90 = 0;
     double vcmd_int_90 = 0;
     int    pivot_cycles = 0, pivot_episodes = 0;
+    // ── TURN-ON-ARRIVAL ──────────────────────────────────────────────────────────────────────────
+    // Heading swept over the LAST HALF METRE OF ARC, and the translation covered in the same stretch.
+    // The complaint this exists to measure is "it advances OK but upon arriving it turns ~45 deg", and
+    // nothing here reported rotation at the endpoint at all — every terminal number was longitudinal
+    // (end dist, max past, end v). ★The pair is what makes it readable: heading swept with the robot
+    // still MOVING is the route's own final bend, and heading swept with the robot STOPPED is the turn
+    // nobody asked for. One without the other cannot tell those apart.
+    double turn_last_half_m = 0;   // rad, |dtheta| accumulated
+    double trans_last_half_m = 0;  // m, distance covered over the same cycles
 };
 
 double corr(const std::vector<float> &a, const std::vector<float> &b, int lag)
@@ -323,6 +332,15 @@ bool  g_proj_robust = false; // --proj-robust: progress-following projection (se
 bool  g_optimise = false;   // --optimise: build the route through the OPTIMISER, not fit-only
 float g_w_jerk = 0.f;       // w_jerk=<v>: the dkappa/ds prior, and it implies --optimise
 bool  g_trace = false;      // --trace: dump the terminal approach cycle by cycle
+// start_yaw=<rad>: START THE ROBOT FACING SOMEWHERE ELSE, which this bench could never do.
+// ★THE GAP THIS FILLS. Every run here places the robot exactly on the route AND exactly tangent to it
+// (P.th = heading_at(0)), so PlainTracker's path-initiation behaviour has never been simulated once —
+// the one regime where the robot must turn before it may translate. The robot found it instead: on
+// 2026-08-13 it sat at s = 0.000 for 246 s, 135 deg off its own path, alternating cmd_rot -0.8/+0.8
+// every 0.40 s against a base whose lag is 0.42 s, and never turned at all.
+// A real start is misaligned far more often than not — a click target behind the robot, a replan after
+// a stop, an affordance standpoint approached from the wrong side.
+float g_start_yaw = 0.f;
 float g_proj_window = 2.0f;    // forward arc-length search window for the projection   // fraction of the omega budget the FEEDFORWARD may claim; the rest is
                            // reserved for feedback authority. 1.0 = the naive limit.
 
@@ -379,7 +397,7 @@ Result run(const rc::RouteFollower &route, Arm arm, float v_cap, float w_max,
     Plant P;
     P.tau = g_plant_tau; P.delay_s = g_plant_delay; P.dc_gain = g_plant_gain;
     const Vector2f p0 = sp.position_at(0.f);
-    P.x = p0.x(); P.y = p0.y(); P.th = sp.heading_at(0.f);
+    P.x = p0.x(); P.y = p0.y(); P.th = wrap(sp.heading_at(0.f) + g_start_yaw);
 
     constexpr float kCtrlDt = 0.05f;    // 20 Hz, the data-driven control rate
     constexpr float kSubDt  = 0.005f;   // plant integration
@@ -442,7 +460,20 @@ Result run(const rc::RouteFollower &route, Arm arm, float v_cap, float w_max,
                 if (g_trace and past > -1.0f and R.n % 4 == 0)
                     std::printf("      t=%5.2f  s=%7.3f / %7.3f  s_rem=%6.3f  past=%6.3f  v_cmd=%5.3f  v_real=%5.3f\n",
                                 t, s_hint, sp.length(), sp.length() - s_hint, past, v_cmd_prev, P.v_real);
-                const bool at_rest = std::abs(P.v_real) < 0.02f and std::abs(v_cmd_prev) < 0.02f;
+                // ★"AT REST" IS NOT "ARRIVED", AND THIS TEST CONFLATED THEM — every --stop-test run on
+                // both routes reported "ran 20 cycles, 0.0 m, 1.0 s" with pd and plain giving IDENTICAL
+                // end distances, which is the signature of neither arm ever moving. Two ways in:
+                //   • the robot has not STARTED yet. t > 1.0 was meant to cover that, but a route whose
+                //     first metre is tight (route_world's start reaches kappa 7.7 1/m) is still under
+                //     0.02 m/s at one second, so the run ended before it began.
+                //   • the tracker is deliberately HOLDING the wheels at zero — the stop-turn-go pivot.
+                //     A robot turning in place to face its path is the opposite of one that has arrived,
+                //     and reading it as arrival is how a terminal test reports success on a robot that
+                //     never left. ★This one appeared the moment the pivot shipped and would have
+                //     silently voided every stop test from then on.
+                // Require that it actually drove somewhere, and that nothing is holding it.
+                const bool at_rest = std::abs(P.v_real) < 0.02f and std::abs(v_cmd_prev) < 0.02f
+                                     and not g_pivoting and R.dist > 0.05;
                 if (at_rest and t > 1.0)
                 { R.came_to_rest = true; R.end_dist = d_end; R.end_speed = std::abs(P.v_real); R.t_end = t; break; }
                 if (past > 8.0f or t > 120.0)   // far enough past that no stop is coming
@@ -469,6 +500,13 @@ Result run(const rc::RouteFollower &route, Arm arm, float v_cap, float w_max,
         R.d_kappa.push_back(std::abs(sp.kappa_avg(s_hint, W)));
         if (g_pivoting) { ++R.pivot_cycles; if (not was_pivoting) ++R.pivot_episodes; }
         was_pivoting = g_pivoting;
+        // Turn-on-arrival: accumulate over the final half metre of ARC (a reporting window on the route,
+        // not a decision the tracker makes), from the PLANT's realised motion, not the command.
+        if (s_hint > sp.length() - 0.5f)
+        {
+            R.turn_last_half_m  += std::abs(P.w_real) * kCtrlDt;
+            R.trans_last_half_m += std::abs(P.v_real) * kCtrlDt;
+        }
         R.d_vlim.push_back(v_lim); R.d_vcmd.push_back(v_cmd); R.d_wcmd.push_back(w_cmd);
         // WHERE does it come apart? An rms figure cannot distinguish "slightly loose everywhere" from
         // "fine until s=X, then gone", and those want completely different fixes.
@@ -529,6 +567,8 @@ void report(const char *tag, const Result &R)
                 " | TV(v)/m %.3f | TV(w)/m %.3f | %.0f s\n",
                 tag, rms * 1000, R.e_max * 1000, corr(R.e, R.kappa, 0), best, best_lag * 50,
                 R.dist > 0.1 ? R.tv_v / R.dist : 0.0, R.dist > 0.1 ? R.tv_w / R.dist : 0.0, R.t_end);
+    std::printf("      ↳ arrival: turned %.1f deg over the last 0.5 m of arc while translating %.3f m\n",
+                R.turn_last_half_m * 180.0 / M_PI, R.trans_last_half_m);
     if (R.s_lost >= 0.f)
         std::printf("      ↳ LOST THE ROUTE at s=%.1f m (t=%.0f s): |e_y| passed 0.5 m where "
                     "kappa_avg=%.2f 1/m and the speed profile allowed %.3f m/s; ended at s=%.1f\n",
@@ -636,7 +676,15 @@ int main(int argc, char **argv)
         else if (a == "--optimise" or a == "--optimize") g_optimise = true;
         else if (a == "--brake") brake_mode = true;
         else if (a == "--pivot") { pivot_mode = true; g_real_decel = true; }
-        else if (a.rfind("w_jerk=", 0) == 0) { g_optimise = true; g_w_jerk = std::stof(a.substr(7)); } else path = a;
+        // --real-decel: run the ORDINARY drive with the true deceleration instead of the 1e6 that
+        // disables the end taper. ★Without it the terminal regime cannot be measured at all: v_profile
+        // stays at max_adv to the last sample, so the steering floor never binds and "does it turn where
+        // it arrives" reads as a flat no on a tracker that does. The published tracking baselines are
+        // all taper-off and stay that way — this is a separate question asked with a separate flag.
+        else if (a == "--real-decel") g_real_decel = true;
+        else if (a.rfind("w_jerk=", 0) == 0) { g_optimise = true; g_w_jerk = std::stof(a.substr(7)); }
+        else if (a.rfind("start_yaw=", 0) == 0) g_start_yaw = std::stof(a.substr(10));
+        else path = a;
     }
 
     World w;
@@ -1129,13 +1177,20 @@ int main(int argc, char **argv)
         // endpoint it got on the way — a tracker can satisfy the first by creeping back after
         // overshooting, and on the robot that is a collision, not an arrival.
         std::printf("\n  ── TERMINAL APPROACH (run to rest, not to length-0.15) ─────────────────────\n");
-        std::printf("      %-18s %10s %10s %10s %8s\n", "arm", "stopped", "end dist", "max past", "end v");
+        std::printf("      %-18s %10s %10s %10s %8s %10s %9s\n", "arm", "stopped", "end dist",
+                    "max past", "end v", "turn@end", "moved");
         for (auto &[nm, R] : std::initializer_list<std::pair<const char *, Result>>{
                  {"pd",    run(route, PdArm{}, w.v_max, kWmax, w.a_lat, kADec, kW, true)},
                  {"plain", run(route, FfArm{}, w.v_max, kWmax, w.a_lat, kADec, kW, true)}})
-            std::printf("      %-18s %10s %8.3f m %8.3f m %6.3f m/s%s\n", nm,
+            std::printf("      %-18s %10s %8.3f m %8.3f m %6.3f m/s %7.1f deg %7.3f m%s\n", nm,
                         R.came_to_rest ? "yes" : "NO", R.end_dist, R.max_past, R.end_speed,
-                        R.max_past > 0.25f ? "   <- OVERSHOT the endpoint" : "");
+                        R.turn_last_half_m * 180.0 / M_PI, R.trans_last_half_m,
+                        R.max_past > 0.25f ? "   <- OVERSHOT" : "");
+        // turn@end / moved are the pair from Result: heading swept over the last half metre of arc, and
+        // the distance covered in the same stretch. A large turn with a large `moved` is the route's own
+        // final bend; a large turn with `moved` near zero is the robot turning where it arrived.
+        std::printf("\n  (turn@end with `moved` ~ 0 is a turn NOBODY ASKED FOR — the speed taper reached\n"
+                    "   zero while the rotation authority did not.)\n");
         std::printf("\n  (max past > 0 means it drove BEYOND the end of the curve.)\n");
         return 0;
     }

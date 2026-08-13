@@ -56,11 +56,13 @@ public:
     //     -> the robot is somewhere in the middle, and the nearest point is right where it stands.
     // Forcing s_hint_ to 0 would satisfy the first and break the second — the tracker would steer at the
     // route's beginning from thirty metres away, which is the same "drives into a wall" failure.
-    void reset() override { s_hint_.reset(); pivoting_ = false; }
+    void reset() override { s_hint_.reset(); pivoting_ = false; start_align_ = true; holding_ = false; }
 
     // Is the tracker holding the wheels still and turning on the spot? For the overlay and the logs —
     // a robot that is deliberately stopped and one that is stuck look identical from outside.
-    [[nodiscard]] bool pivoting() const { return pivoting_; }
+    // ★Reports BOTH turn-in-place states — the start alignment and the mid-route pivot. The question
+    // the overlay is asking is "are the wheels deliberately at zero", and both answer it yes.
+    [[nodiscard]] bool pivoting() const { return holding_; }
 
     ControlOutput& compute(ControlOutput& out, const TrackerInput& in, const TrackerParams& p) override;
 
@@ -85,6 +87,18 @@ private:
     // facing the way out yet?"). A memoryless test cannot express that, and the two stateless versions
     // both failed — see the measured deadlocks in plain_tracker.cpp.
     bool  pivoting_ = false;
+    // TURN AND ONLY THEN GO, AT THE START OF A PATH. Armed on every re-acquisition of the projection —
+    // a mission start, a route repair, a new curve — and disarmed for the rest of that traversal the
+    // moment the robot faces where the route leaves.
+    // ★Distinct from pivoting_ because the two ask DIFFERENT QUESTIONS. The mid-route latch asks the
+    // route ("does this turn reverse me?") before it will stop the wheels, because a robot that is
+    // merely off-route on a straight must MOVE to get back on. At initiation there is nothing to move
+    // back onto — the route is planned from the robot — so misalignment alone is the whole test, and
+    // asking turn_ahead there is what let the robot arc onto a path it was facing 135 deg away from.
+    bool  start_align_ = true;
+    // Either turn-in-place state, as of the last cycle. For pivoting() — the overlay wants "are the
+    // wheels deliberately at zero", not "which of the two reasons".
+    bool  holding_ = false;
 };
 
 }   // namespace rc
