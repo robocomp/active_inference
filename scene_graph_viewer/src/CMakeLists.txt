@@ -2,30 +2,24 @@ set(ACTIVE_INFERENCE_COMMON_DIR "${CMAKE_CURRENT_LIST_DIR}/../../common")
 
 find_package(Qt6 COMPONENTS OpenGL OpenGLWidgets QUIET)
 
+# Shared ai_common::* libraries (see common/CMakeLists.txt).
+# NOTE ai_common::status_overlay is deliberately NOT linked here: it is the one target that pulls
+# dsr_gui, whose AbstractGraphicViewer collides with this component's local one. ai_common::graph3d
+# depends on dsr_api/dsr_core only, which is exactly what the scene builder needs.
+add_subdirectory(${ACTIVE_INFERENCE_COMMON_DIR} ${CMAKE_CURRENT_BINARY_DIR}/ai_common EXCLUDE_FROM_ALL)
+LIST(APPEND LIBS
+  ai_common::presence     # agent presence monitor + coordinator
+  ai_common::graph3d      # graph3d_scene_builder (stratified 3D graph view)
+  ai_common::obj          # obj_loader for the display meshes
+  ai_common::ui_headers   # viewers/gl_graph3d_viewer.h — header-only, mocced by OUR autogen
+  ai_common::core         # graph3d/graph3d_scene.h (header-only)
+)
+
 # Sources set
 LIST(APPEND SOURCES
   ../src/specificworker.cpp
   ../src/specificworker_presence.cpp
   ../src/viewer_config.cpp
-  # Stratified 3D graph view: z = abstraction stratum, x/y = true metric pose. The builder depends
-  # on dsr_api ONLY (never dsr_gui — their AbstractGraphicViewer collides with the component-local
-  # one), so it stays includable from anywhere; the renderer is header-only in common/viewers.
-  ${ACTIVE_INFERENCE_COMMON_DIR}/graph3d/graph3d_scene_builder.cpp
-  # Display meshes named by the nodes' mesh_path attr, loaded by gl_graph3d_viewer.h.
-  ${ACTIVE_INFERENCE_COMMON_DIR}/obj/obj_loader.cpp
-  ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_monitor/agent_presence_monitor.cpp
-  ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_coordinator/agent_presence_coordinator.cpp
-)
-
-# Headers set
-LIST(APPEND HEADERS
-  ../src/specificworker.h
-  ../src/viewer_config.h
-  ${ACTIVE_INFERENCE_COMMON_DIR}/graph3d/graph3d_scene.h
-  ${ACTIVE_INFERENCE_COMMON_DIR}/graph3d/graph3d_scene_builder.h
-  ${ACTIVE_INFERENCE_COMMON_DIR}/viewers/gl_graph3d_viewer.h
-  ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_monitor/agent_presence_monitor.h
-  ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_coordinator/agent_presence_coordinator.h
 )
 
 # no-char8_t to avoid a problem with ICE Connection lib.

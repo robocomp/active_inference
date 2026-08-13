@@ -17,6 +17,28 @@ namespace rc
     namespace
     {
         constexpr float kObsWeightEps = 1e-6f;
+
+        /// Conversion between the two absolute-residual estimators this class used to mix.
+        /// For a half-normal residual of scale sigma, E|x| = sqrt(2/pi)*sigma = 0.798*sigma while
+        /// median|x| = 0.674*sigma. Until 2026-08-13 UpdateResult::sdf_mse was a MEAN on the
+        /// early-exit path and a MEDIAN on the optimized path; it is now a median everywhere, so a
+        /// threshold that was calibrated against the old mean must be multiplied by this factor to
+        /// keep its meaning. Applied once to each affected config value (see config_apartamento.toml)
+        /// and once in boundary_weight_now().
+        /// ⚠ PROVISIONAL. 0.845 is the ratio for a HALF-NORMAL residual, and this residual is not
+        /// half-normal: roughly two thirds of the floor is systematic map mismatch (furniture,
+        /// doorway gaps, wall thickness the polygon omits) rather than zero-mean noise. A systematic
+        /// component drives the mean and the median TOWARDS each other — for a pure offset the ratio
+        /// is 1 — so 0.845 is expected to OVER-correct, leaving the rescaled thresholds slightly too
+        /// tight. Do not reason about the shape of the distribution; measure the ratio:
+        ///
+        ///     python3 tools/measure_sdf_ratio.py tmp/sdf_localizer/log_<newest>.csv
+        ///
+        /// On an early-exit frame the log now carries both statistics of the SAME residuals at the
+        /// SAME pose (sdf_mse = median, early_exit_metric = mean), so their ratio IS this constant.
+        /// The tool prints the measured value and re-derives all six thresholds from their original
+        /// mean-calibrated numbers. Replace the value here and in config_apartamento.toml together.
+        constexpr float kMedianOverMeanAbs = 0.674f / 0.798f;   // = 0.845, pending measurement
     }
 
     // NOTE: these two are declared in room_obs_weights.h (external linkage) rather than living in the
@@ -930,7 +952,14 @@ namespace rc
                 // that — the metric is only compared against a threshold well above normal turn
                 // transients, and RecoveryConsecutiveCount (10) requires it to persist. If turns start
                 // triggering, that count is the dial, not the threshold.
-                const float avg_sdf_err = std::max(res.sdf_mse, res.early_exit_metric);
+                // Both arguments are MEDIAN |SDF| (2026-08-13). Watching the worse of the post-fit
+                // residual and the prediction error is deliberate and is kept; what changed is that
+                // the second one is now res.pred_sdf_median rather than res.early_exit_metric, which
+                // is a MEAN. RecoveryLossThreshold is a median bar — it is the same constant that
+                // gates compute_seed_error, which returns a median — so feeding it a mean made
+                // recovery fire on a signal running some 15-20% high, i.e. earlier than the
+                // threshold says. Comparing like with like restores the documented meaning.
+                const float avg_sdf_err = std::max(res.sdf_mse, res.pred_sdf_median);
                 if (recovery_.check(avg_sdf_err, res.iterations_used,
                                     params.recovery_loss_threshold, params.recovery_consecutive_count))
                 {
@@ -2763,6 +2792,7 @@ namespace rc
         // Adam path: expose the predicted-pose SDF that triggered this optimization (NaN if the
         // early-exit gate never evaluated it this frame — e.g. warmup / no odometry).
         res.early_exit_metric = last_early_exit_metric_;
+        res.pred_sdf_median   = last_pred_sdf_median_;
         return res;
     }
 
@@ -2941,6 +2971,7 @@ namespace rc
         // Fresh each frame: NaN unless we actually reach the SDF evaluation below. This lets update()
         // report NaN (⇒ not plotted) for frames where the gate never ran, rather than a stale value.
         last_early_exit_metric_ = std::numeric_limits<float>::quiet_NaN();
+        last_pred_sdf_median_   = std::numeric_limits<float>::quiet_NaN();
 
         if (!params.prediction_early_exit ||
             !last_update_result.ok ||
@@ -2957,6 +2988,8 @@ namespace rc
         // Record the decision variable whether or not we early-exit — on an Adam frame this is the
         // value that TRIGGERED optimization (it exceeded the trust threshold). update() reads it back.
         last_early_exit_metric_ = mean_sdf_pred;
+        // Same points, same pose, median instead of mean — see last_pred_sdf_median_.
+        last_pred_sdf_median_ = torch::median(torch::abs(sdf_pred)).item<float>();
 
         // Widen the SDF trust threshold when the robot is rotating.
         // A theta error ε at room scale R produces SDF displacement ~R*ε.
@@ -3025,7 +3058,16 @@ namespace rc
         UpdateResult res;
         res.ok = true;
         res.final_loss = mean_sdf_pred;
-        res.sdf_mse = mean_sdf_pred;
+        // sdf_mse is a MEDIAN absolute residual on every path (2026-08-13). It used to be set to
+        // mean_sdf_pred here while the optimized path (compute_sdf_median_abs) set a median, so the
+        // same field carried two different estimators of the same sigma — a ~15% step depending only
+        // on which branch produced the frame, and >98% of frames come through this one. Consumers
+        // (DSR.StableSdfMseMax, SymmetryGoodFitMse, EpistemicController.Sdf{Safe,Danger}, the two
+        // Boundary*QualityThresholds and boundary_weight_now) were recalibrated by kMedianOverMeanAbs
+        // when this changed. The mean is still what the early-exit GATE tests, and it is reported
+        // unchanged as early_exit_metric below — that field's name says what it holds.
+        res.sdf_mse = torch::median(torch::abs(sdf_pred)).item<float>();
+        res.pred_sdf_median = res.sdf_mse;   // on this path they are the same quantity
         res.early_exit_metric = mean_sdf_pred;   // the value that PASSED the threshold (optimizer skipped)
         res.iterations_used = 0;
         {
@@ -3396,8 +3438,14 @@ namespace rc
             return std::exp(u_b_);
         if (params.rfe_boundary_quality_gate and prev_sdf_mse_ > 1e-6f)
         {
+            // prev_sdf_mse_ became a MEDIAN absolute residual on 2026-08-13 (it was a mean on the
+            // early-exit path, which is >98% of frames). A median of a half-normal is 0.674*sigma
+            // against the mean's 0.798*sigma, so the denominator shrank by kMedianOverMeanAbs and
+            // this weight would otherwise have risen by 1/0.845 = 1.18 across the board. The factor
+            // restores the calibration; it is applied here rather than to sigma_sdf because
+            // sigma_sdf also sets the early-exit gate, which still tests the mean and must not move.
             const float sigma2 = params.sigma_sdf * params.sigma_sdf;
-            return std::min(1.0f, sigma2 / prev_sdf_mse_);
+            return std::min(1.0f, kMedianOverMeanAbs * sigma2 / prev_sdf_mse_);
         }
         return 1.0f;
     }

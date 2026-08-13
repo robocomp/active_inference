@@ -634,6 +634,8 @@ public:
         // boost). NaN when the early-exit gate wasn't evaluated this frame (warmup / no odometry /
         // prior not ok / manual-reset settle). See try_prediction_early_exit().
         float early_exit_metric = std::numeric_limits<float>::quiet_NaN();
+        /// Median |SDF| at the predicted pose — the median-valued twin of early_exit_metric.
+        float pred_sdf_median = std::numeric_limits<float>::quiet_NaN();
         Eigen::Matrix<float,5,1> state = Eigen::Matrix<float,5,1>::Zero();
         Eigen::Affine2f robot_pose = Eigen::Affine2f::Identity();
         Eigen::Matrix3f covariance = Eigen::Matrix3f::Identity();
@@ -1226,6 +1228,11 @@ private:
    // (the early-exit decision variable). NaN when the gate's pre-conditions weren't met. Consumed
    // by update() to expose it on the Adam path too (the value that TRIGGERED optimization).
    float last_early_exit_metric_ = std::numeric_limits<float>::quiet_NaN();
+   /// Median |SDF| at the SAME predicted pose and points as last_early_exit_metric_ (which is
+   /// the mean). Kept so that recovery can compare like with like: its threshold is calibrated
+   /// on medians (see RecoveryLossThreshold and compute_seed_error), and the mean runs ~15-20%
+   /// higher. Logging both also makes the median/mean ratio measurable from any run.
+   float last_pred_sdf_median_  = std::numeric_limits<float>::quiet_NaN();
 
    // Velocity-adaptive gradient weights [x, y, theta]
    Eigen::Vector3f current_velocity_weights_ = Eigen::Vector3f::Ones();

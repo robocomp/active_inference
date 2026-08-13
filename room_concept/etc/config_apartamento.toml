@@ -237,7 +237,7 @@ SymmetryFlipEvidenceThresh = 0.04
 # mean SDF (mse ≈ 0.10), so the streak stayed 0 and a minutes-stable pose had ZERO flip protection and
 # flipped on a transient 0.184 evidence spike. Raised to 0.12 (> chronic mse) so a STABLE pose builds
 # the streak → the threshold climbs toward ~0.44 → transient near-symmetric flips are rejected.
-SymmetryGoodFitMse = 0.12
+SymmetryGoodFitMse = 0.101  # (x0.845 on 2026-08-13: sdf_mse became a MEDIAN abs residual, was a MEAN on the early-exit path; was 0.12)
 # Companion knobs (header defaults shown) — raise the first two / lower the leak to
 # harden further:
 #   SymmetryFlipMinImprovement = 0.005  # per-check loss advantage to count as evidence
@@ -342,8 +342,8 @@ BoundaryQualityGate    = true  # Suprime prior de frontera si frame anterior fue
 # (desplazamiento forzado, obstáculo persistente).
 # B: si sdf_mse_final del slot > HessianQualityThreshold → Hessiana solo cinemática.
 # C: si sdf_mse_final del slot > MuQualityThreshold → mu no se actualiza.
-BoundaryHessianQualityThreshold = 0.06   # m — umbral para incluir H_obs en Hessiana (LEGACY path)
-BoundaryMuQualityThreshold      = 0.10   # m — umbral para actualizar mu del prior (LEGACY path)
+BoundaryHessianQualityThreshold = 0.051  # m — umbral para incluir H_obs en Hessiana (LEGACY path)  # (x0.845 on 2026-08-13: sdf_mse became a MEDIAN abs residual, was a MEAN on the early-exit path; was 0.06)
+BoundaryMuQualityThreshold      = 0.084  # m — umbral para actualizar mu del prior (LEGACY path)  # (x0.845 on 2026-08-13: sdf_mse became a MEDIAN abs residual, was a MEAN on the early-exit path; was 0.10)
 EigenvalueClampBoundaryMax      = 500.0  # techo autovalores precisión (evita over-confidence)
 # FEJ + Schur marginalization boundary prior (replaces the legacy rough prior + its hard quality
 # gates above). ON = exact Schur complement of the dropped slot folded into a First-Estimates-
@@ -585,7 +585,7 @@ HierPrecBoundaryEnabled = true
 # This apartment fits chronically at ~0.079 mean|SDF| on early-exit frames (5th–95th pct 0.075–0.083),
 # so the 0.06 header default was UNREACHABLE on the very (iters==0) frames the gate requires → the room
 # never uploaded (0/2213 frames stable, longest streak 0). Raised above the 95th pct with margin.
-StableSdfMseMax = 0.09
+StableSdfMseMax = 0.076  # (x0.845 on 2026-08-13: sdf_mse became a MEDIAN abs residual, was a MEAN on the early-exit path; was 0.09)
 # StableCovTtMax (0.001) and StableFramesRequired (30) left at header defaults — both already pass 100%.
 
 # ── Object anchors (validated modelled objects as SE(2) pose landmarks in the RFE loss) ──
@@ -681,8 +681,8 @@ WallFilterMargin   = 0.30   # lidar points within this margin of wall are ignore
 BandwidthCoupling  = 0.3    # reduces max adv speed when rotating: eff_v = max_v × (1 - k×|ω|/ω_max)
 
 # ---- Reactive speed governor ----
-SdfSafe            = 0.06   # SDF-MSE below this → full speed
-SdfDanger          = 0.10   # SDF-MSE at/above this → minimum speed
+SdfSafe            = 0.051  # median|SDF| below this → full speed  # (x0.845 on 2026-08-13: sdf_mse became a MEDIAN abs residual, was a MEAN on the early-exit path; was 0.06)
+SdfDanger          = 0.084  # median|SDF| at/above this → minimum speed  # (x0.845 on 2026-08-13: sdf_mse became a MEDIAN abs residual, was a MEAN on the early-exit path; was 0.10)
 GovernorAlphaMin   = 0.4    # minimum speed fraction when localization is poor
 
 # ---- FIM scoring ----
