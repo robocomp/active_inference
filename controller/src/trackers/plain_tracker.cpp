@@ -110,7 +110,29 @@ ControlOutput& PlainTracker::compute(ControlOutput& out, const TrackerInput& in,
     const float v_profile = std::clamp(std::min(p.max_adv, v_stop), 0.f, p.max_adv);
 
     // kappa_avg is CENTRED, so this preview is the one and only lookahead in the law.
-    const float k_ff = sp.kappa_avg(s + v_profile * p.plain_T_lag, p.plain_W);
+    // ── THE PREVIEW MUST NOT LOOK PAST THE END OF THE CURVE ──────────────────────────────────────
+    // ★ROOT CAUSE of "upon arriving it turns a bit, and it was not commanded to" (measured on the robot
+    // 2026-08-13). kappa_avg(x, W) is a CENTRED difference — it reads heading_at(x ± W/2) — and
+    // heading_at returns a FLAT 0 rad for any argument past the curve: position_at clamps both of its
+    // probes to samples_.back(), the difference vector collapses, and the guarded fallback is 0.f.
+    // ★That zero is not a sentinel. 0 rad is an ordinary heading (due +x), so there is no way for a
+    // caller to tell "off the end" from "the route points east" — and this one could not.
+    // The feedforward previews v*T_lag = 0.29 m at full speed, which runs off the end of a curve the
+    // robot is about to finish, so kappa_avg differenced a real heading against that zero:
+    //     k_ff = remainder(0 - 1.15, 2pi) / 0.40 = -2.87 1/m
+    // on a stretch whose real curvature is about 1 1/m. omega saturated and the robot turned TOWARD
+    // HEADING ZERO through its last 0.15 m — heading 1.1502 -> 0.8671 with e_y pinned at 0.011 m and
+    // e_psi at 0.021, so the FEEDBACK was asking for nothing whatsoever.
+    // ★FIXED HERE, NOT IN heading_at, AND THAT WAS MEASURED TOO. Clamping inside heading_at is the
+    // tempting one-liner and it is a much larger change than it looks: the bogus curvature was also
+    // feeding route_speed_limit, where it acted as an accidental END-OF-ROUTE BRAKE. Removing it made
+    // the robot arrive too fast — the tour went 23 s -> 94 s, driven 9.7 -> 36.5 m, and the stop test
+    // overshot the endpoint by 4.079 m instead of 0.303. Exactly the "broken bound holding the system
+    // together by accident" this file's header records for lap 5. That brake deserves to exist on
+    // purpose or not at all, and either way it is not this fix.
+    // A centred window needs W/2 of curve on BOTH sides, so that — not length() — is the bound.
+    const float k_ff = sp.kappa_avg(std::min(s + v_profile * p.plain_T_lag,
+                                             sp.length() - 0.5f * p.plain_W), p.plain_W);
     const float L = std::max(0.05f, p.plain_L);
     const float k_fb = -(2.f / L) * e_psi - (1.f / (L * L)) * e_y;
 
