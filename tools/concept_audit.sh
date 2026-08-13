@@ -142,7 +142,7 @@ audit_agent() {
     #    four ignored it; voxel_key was defined once in common/ and re-inlined in two agents on a grid that
     #    only happened to agree. This counts the modules an object-concept agent is expected to use, so a
     #    new one shows up as a number falling rather than as a column nobody added.
-    local must="existence_belief instance_tracker mask_ingestor rt_covariance object_affordance nbv detectability occlusion phantom_log graph_provenance concept_manifest voxel_bank"
+    local must="existence_belief instance_tracker mask_ingestor rt_covariance object_affordance nbv detectability occlusion phantom_log graph_provenance concept_manifest voxel_bank footprint"
     local have=0 want=0
     for m in $must; do
         want=$((want+1))

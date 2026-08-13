@@ -32,6 +32,8 @@
  */
 
 #include "specificworker.h"
+
+#include "../../common/footprint/footprint.h"   // rc::geom:: Footprint / overlap_ratio (SHARED)
 #include "../../common/instance_tracker/birth_evidence.h"   // rc::birth:: the shared CREATE policy
 #include "../../common/nbv/graph_obstacles.h"   // rc::nbv::collect_graph_obstacles — shared, DSR-side
 #include "door_dof.h"   // rc::kDoorDofs — names/units for the BeliefInspector rows
@@ -86,66 +88,20 @@ float belief_uncertainty(const rc::DoorInstance& inst)
 // The APERTURE, not the leaf: duplicates of one physical door are duplicates of one HOLE, and two
 // hypotheses that disagree about phi would stop overlapping as leaves while still being the same door.
 // Corners CCW (local order (-,-),(+,-),(+,+),(-,+)). Mirrors table_concept.
-std::array<Eigen::Vector2f, 4> footprint_corners(const rc::DoorState& s)
-{
-    const float c = std::cos(s.ap_yaw), sn = std::sin(s.ap_yaw);
-    const Eigen::Vector2f ex(c, sn), ey(-sn, c), ctr(s.ap_cx, s.ap_cy);
-    const float hw = 0.5f * s.w, hh = 0.5f * s.thickness;
-    return { ctr - hw * ex - hh * ey, ctr + hw * ex - hh * ey,
-             ctr + hw * ex + hh * ey, ctr - hw * ex + hh * ey };
-}
+// ─── Footprint geometry: the plane maths is SHARED (common/footprint) ────────────────────────────
+// These were FIVE BYTE-IDENTICAL copies across the fleet (100.0% pairwise, character for character), and
+// they answer "are these two instances the same physical object?" for merge_overlapping_instances — a
+// lifecycle decision with exactly the profile decide_removal had before it drifted three ways. Only the
+// per-object part stays: how a DOOR names its two footprint extents.
+// ★A DOOR'S FOOTPRINT IS ITS APERTURE, NOT ITS LEAF — (ap_cx, ap_cy, ap_yaw) with the panel width across
+// and the panel THICKNESS as the second extent. Two doors are the same door when their apertures coincide;
+// a swung leaf moves while the aperture does not, so merging on the leaf would split one door in two every
+// time it opened. That is a genuine per-object mapping and it is exactly what this adapter is for.
+static rc::geom::Footprint footprint_of(const rc::DoorState& s)
+{ return { s.ap_cx, s.ap_cy, s.w, s.thickness, s.ap_yaw }; }
 
-float poly_area(const std::vector<Eigen::Vector2f>& p)
-{
-    if (p.size() < 3) return 0.0f;
-    float a = 0.0f;
-    for (std::size_t i = 0, n = p.size(); i < n; ++i)
-    {
-        const auto& u = p[i]; const auto& v = p[(i + 1) % n];
-        a += u.x() * v.y() - v.x() * u.y();
-    }
-    return 0.5f * std::abs(a);
-}
-
-// Sutherland–Hodgman: clip the subject polygon against the convex CCW clip rectangle.
-std::vector<Eigen::Vector2f> clip_poly(std::vector<Eigen::Vector2f> subj,
-                                       const std::array<Eigen::Vector2f, 4>& clip)
-{
-    for (int e = 0; e < 4 and not subj.empty(); ++e)
-    {
-        const Eigen::Vector2f a = clip[e], b = clip[(e + 1) % 4], d1 = b - a;
-        const auto inside = [&](const Eigen::Vector2f& p)
-        { return d1.x() * (p.y() - a.y()) - d1.y() * (p.x() - a.x()) >= 0.0f; };
-        std::vector<Eigen::Vector2f> out;
-        for (std::size_t i = 0, n = subj.size(); i < n; ++i)
-        {
-            const Eigen::Vector2f cur = subj[i], prv = subj[(i + n - 1) % n];
-            const bool ci = inside(cur), pi = inside(prv);
-            const auto isect = [&]() -> Eigen::Vector2f
-            {
-                const Eigen::Vector2f d2 = cur - prv;
-                const float den = d2.x() * d1.y() - d2.y() * d1.x();
-                const float t = std::abs(den) < 1e-12f ? 0.0f
-                    : ((a.x() - prv.x()) * d1.y() - (a.y() - prv.y()) * d1.x()) / den;
-                return prv + t * d2;
-            };
-            if (ci) { if (not pi) out.push_back(isect()); out.push_back(cur); }
-            else if (pi) out.push_back(isect());
-        }
-        subj.swap(out);
-    }
-    return subj;
-}
-
-// Overlap area as a fraction of the SMALLER footprint (1.0 = one seat fully inside the other).
 float footprint_overlap_ratio(const rc::DoorState& a, const rc::DoorState& b)
-{
-    const auto ca = footprint_corners(a), cb = footprint_corners(b);
-    const auto inter = clip_poly(std::vector<Eigen::Vector2f>(ca.begin(), ca.end()), cb);
-    const float ai = poly_area(inter);
-    const float amin = std::min(poly_area({ca.begin(), ca.end()}), poly_area({cb.begin(), cb.end()}));
-    return amin > 1e-6f ? ai / amin : 0.0f;
-}
+{ return rc::geom::overlap_ratio(footprint_of(a), footprint_of(b)); }
 
 // Tracker lifecycle event log (etc/door_events.csv) — makes birth/merge/prune/suppress visible so the
 // "create then remove" churn can be diagnosed from a file, not stdout. seq gives ordering.

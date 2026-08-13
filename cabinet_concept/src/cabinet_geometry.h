@@ -17,6 +17,8 @@
 
 #include <Eigen/Dense>
 
+#include "../../common/footprint/footprint.h"   // rc::geom:: Footprint / overlap_ratio (SHARED)
+
 #include "cabinet_instance.h"   // rc::CabinetInstance (belief covariance)
 #include "cabinet_model.h"      // rc::CabinetState
 
@@ -37,60 +39,14 @@ inline float belief_uncertainty(const rc::CabinetInstance& inst)
 // Two cabinets cannot share physical space. The footprint is the oriented rectangle (cx,cy,w,h,yaw) in the room
 // plane; these helpers compute the overlap area between two footprints so the merge operator can collapse
 // duplicate instances. Corners are returned CCW (local order (-,-),(+,-),(+,+),(-,+)).
-inline std::array<Eigen::Vector2f, 4> footprint_corners(const rc::CabinetState& s)
-{
-    const float c = std::cos(s.yaw), sn = std::sin(s.yaw);
-    const Eigen::Vector2f ex(c, sn), ey(-sn, c), ctr(s.cx, s.cy);
-    const float hw = 0.5f * s.L, hh = 0.5f * s.d;
-    return { ctr - hw * ex - hh * ey, ctr + hw * ex - hh * ey,
-             ctr + hw * ex + hh * ey, ctr - hw * ex + hh * ey };
-}
+// ─── Footprint geometry: the plane maths is SHARED (common/footprint) ────────────────────────────
+//
+// corners / poly_area / clip_poly / overlap_ratio were FIVE BYTE-IDENTICAL copies across the fleet — 100.0%
+// pairwise, character for character. What stays here is the only per-object part: a RUN names its two
+// footprint extents (L, d) where a box names them (w, h).
+inline rc::geom::Footprint footprint_of(const rc::CabinetState& s)
+{ return { s.cx, s.cy, s.L, s.d, s.yaw }; }
 
-inline float poly_area(const std::vector<Eigen::Vector2f>& p)
-{
-    if (p.size() < 3) return 0.0f;
-    float a = 0.0f;
-    for (std::size_t i = 0, n = p.size(); i < n; ++i)
-    {
-        const auto& u = p[i]; const auto& v = p[(i + 1) % n];
-        a += u.x() * v.y() - v.x() * u.y();
-    }
-    return 0.5f * std::abs(a);
-}
-
-// Sutherland–Hodgman: clip the subject polygon against the convex CCW clip rectangle.
-inline std::vector<Eigen::Vector2f> clip_poly(std::vector<Eigen::Vector2f> subj,
-                                              const std::array<Eigen::Vector2f, 4>& clip)
-{
-    for (int e = 0; e < 4 and not subj.empty(); ++e)
-    {
-        const Eigen::Vector2f a = clip[e], b = clip[(e + 1) % 4], d1 = b - a;
-        const auto inside = [&](const Eigen::Vector2f& p)
-        { return d1.x() * (p.y() - a.y()) - d1.y() * (p.x() - a.x()) >= 0.0f; };
-        std::vector<Eigen::Vector2f> out;
-        for (std::size_t i = 0, n = subj.size(); i < n; ++i)
-        {
-            const Eigen::Vector2f cur = subj[i], prv = subj[(i + n - 1) % n];
-            const bool ci = inside(cur), pi = inside(prv);
-            const auto isect = [&]() -> Eigen::Vector2f
-            {
-                const Eigen::Vector2f d2 = cur - prv;
-                const float den = d2.x() * d1.y() - d2.y() * d1.x();
-                const float t = std::abs(den) < 1e-12f ? 0.0f
-                    : ((a.x() - prv.x()) * d1.y() - (a.y() - prv.y()) * d1.x()) / den;
-                return prv + t * d2;
-            };
-            if (ci) { if (not pi) out.push_back(isect()); out.push_back(cur); }
-            else if (pi) out.push_back(isect());
-        }
-        subj.swap(out);
-    }
-    return subj;
-}
-
-// Is the room-frame point p inside the run's oriented footprint, expanded by `margin` on every side?
-// Used to (a) exclude residual points that already sit on/near a believed run, and (b) let a
-// residual-born run claim the shared mask slice's points that fall on ITS arm.
 inline bool point_in_footprint(const rc::CabinetState& s, const Eigen::Vector2f& p, float margin = 0.0f)
 {
     const float c = std::cos(s.yaw), sn = std::sin(s.yaw);
@@ -102,13 +58,7 @@ inline bool point_in_footprint(const rc::CabinetState& s, const Eigen::Vector2f&
 
 // Overlap area as a fraction of the SMALLER footprint (1.0 = one cabinet fully inside the other).
 inline float footprint_overlap_ratio(const rc::CabinetState& a, const rc::CabinetState& b)
-{
-    const auto ca = footprint_corners(a), cb = footprint_corners(b);
-    const auto inter = clip_poly(std::vector<Eigen::Vector2f>(ca.begin(), ca.end()), cb);
-    const float ai = poly_area(inter);
-    const float amin = std::min(poly_area({ca.begin(), ca.end()}), poly_area({cb.begin(), cb.end()}));
-    return amin > 1e-6f ? ai / amin : 0.0f;
-}
+{ return rc::geom::overlap_ratio(footprint_of(a), footprint_of(b)); }
 
 // ─── Run-specific operators ──────────────────────────────────────────────────────────────────────
 //
