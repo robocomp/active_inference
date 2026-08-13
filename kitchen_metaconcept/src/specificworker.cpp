@@ -282,6 +282,7 @@ void SpecificWorker::initialize()
 
     rc::KitchenBeliefParams bp;
     bp.axis_model_std     = cfg_.axis_model_std_deg / kRad2Deg;
+    bp.axis_common_mode_std = cfg_.axis_common_mode_std_deg / kRad2Deg;
     bp.worktop_model_std  = cfg_.worktop_model_std_m;
     bp.depth_model_std    = cfg_.depth_model_std_m;
     bp.clutter_frac       = cfg_.clutter_frac;

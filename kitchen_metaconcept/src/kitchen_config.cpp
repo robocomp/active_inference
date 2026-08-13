@@ -68,6 +68,7 @@ KitchenConfig load_kitchen_config(const ConfigLoader& cfg)
     out.node_prefix  = gets("KitchenMetaconcept.NodePrefix",  "kitchen_");
 
     out.axis_model_std_deg  = getf("KitchenMetaconcept.AxisModelStdDeg",  1.5f);
+    out.axis_common_mode_std_deg = getf("KitchenMetaconcept.AxisCommonModeStdDeg", 0.5f);
     out.worktop_model_std_m = getf("KitchenMetaconcept.WorktopModelStdM", 0.02f);
     out.depth_model_std_m   = getf("KitchenMetaconcept.DepthModelStdM",   0.03f);
     out.worktop_meas_std_m  = getf("KitchenMetaconcept.WorktopMeasStdM",  0.06f);

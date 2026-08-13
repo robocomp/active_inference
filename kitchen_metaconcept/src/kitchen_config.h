@@ -51,6 +51,9 @@ struct KitchenConfig
     // allows. Added in quadrature to the geometric propagation, and it is what BOUNDS the down-prior
     // precision. NOT confidence knobs.
     float axis_model_std_deg  = 1.5f;
+    // ★Shared (room-polygon) orientation error — a FLOOR on the fused axis σ, not a model spread.
+    // See KitchenBeliefParams::axis_common_mode_std. 0 restores the old over-confident behaviour.
+    float axis_common_mode_std_deg = 0.5f;
     float worktop_model_std_m = 0.02f;
     float depth_model_std_m   = 0.03f;
 

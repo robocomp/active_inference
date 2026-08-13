@@ -116,6 +116,15 @@ Publish = false
 # geometric propagation and is what BOUNDS how hard the frame can ever push a member (κ = p/var).
 # Widen them if the frame is over-steering; they are model spread, not confidence knobs.
 AxisModelStdDeg = 1.5           # spread of member yaw about the shared axis (live grid: 0.28°/89.0°/89.6°)
+# ★COMMON-MODE on the axis: the room polygon's own orientation error, SHARED by every member because
+# every member's yaw is expressed in the room frame. It does not average away by counting members, so
+# it enters as a FLOOR on the fused axis variance rather than as another independent reading.
+# Without it the fusion reported a grid MORE certain than its own best single reading of it
+# (live 2026-08-13: fused 0.6139 deg vs hood_1's own 0.6917 deg, while the fitted axis wandered
+# across 1.96 deg over the run). ★AUTHORED pending a measurement — the honest source is a
+# wall-direction covariance from room_concept, which does not exist yet (the same gap that leaves
+# cabinet_concept publishing a constant 3 deg). Set to 0 to restore the old behaviour exactly.
+AxisCommonModeStdDeg = 0.5
 WorktopModelStdM = 0.02         # spread of base-unit worktop heights about one plane
 DepthModelStdM = 0.03           # spread of carcass depths about one nominal
 

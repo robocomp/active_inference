@@ -133,8 +133,15 @@ int KitchenBelief::fit_axis(const std::vector<KitchenMember>& members)
         den += w;
     }
     state_.axis  = fold_axis(coarse + static_cast<float>(num / den));
-    sigma_.axis  = static_cast<float>(1.0 / den);   // variance of the MEAN; the model spread is added
-    return n;                                        // in prior_for, where a member is PREDICTED
+    // Variance of the MEAN, plus the COMMON-MODE floor. The first term shrinks with member count as
+    // independent evidence should; the second does not, because the room polygon's own orientation
+    // error is shared by every member and cannot be averaged out by re-reading it (see
+    // KitchenBeliefParams::axis_common_mode_std). Without the second term the fusion reported a grid
+    // more certain than its own best single reading of it. The model spread is still added separately
+    // in prior_for, where a member is PREDICTED rather than estimated.
+    sigma_.axis  = static_cast<float>(1.0 / den)
+                 + params_.axis_common_mode_std * params_.axis_common_mode_std;
+    return n;
 }
 
 // Robust precision-weighted fusion of one shared scalar (see the header for why it is robust).
@@ -225,9 +232,23 @@ bool KitchenBelief::update(const std::vector<KitchenMember>& members,
     const float dp_model_var = params_.depth_model_std   * params_.depth_model_std;
     for (const auto& m : members)
     {
+        // ★Same rule as fit_axis: a member the frame does not believe in may not steer a shared
+        // scalar either. fit_scalar IS robust, but its EM responsibilities are computed from the
+        // scalar's OWN residuals, so it never sees the frame's verdict on the member as a whole —
+        // which left worktop and depth with exactly the hole 916afaa closed on the axis.
+        //
+        // Measured live 2026-08-13 (cycle 358): the base tier holds two members, `cabinet_w14_base`
+        // (depth 0.892, membership 3.4e-12) and `cabinet_w13_base` (depth 0.513, membership 0.9999).
+        // The fitted base depth came out 0.894 — it followed the member the frame had already
+        // expelled to clutter, and a 0.89 m deep base carcass is not a kitchen unit. With Publish on,
+        // the frame would then have pushed that 0.89 DOWN onto the plausible member.
+        //
+        // Bootstrap exactly as fit_axis does: with no frame yet there is nothing to judge membership
+        // against, so the first pass is unweighted.
+        const float r = seeded_ ? membership_prob(m) : 1.0f;
         if (m.has_worktop())                              // only BASE units share a WORKTOP plane
-        { wt.push_back(m.worktop); wt_w.push_back(1.0f / std::max(1e-9f, m.var_worktop + wt_model_var)); }
-        const float dw = 1.0f / std::max(1e-9f, m.var_depth + dp_model_var);
+        { wt.push_back(m.worktop); wt_w.push_back(r / std::max(1e-9f, m.var_worktop + wt_model_var)); }
+        const float dw = r / std::max(1e-9f, m.var_depth + dp_model_var);
         switch (m.tier)                                   // depth is shared WITHIN a tier, not across
         {
             case KitchenTier::Tall: dpt.push_back(m.depth); dpt_w.push_back(dw); break;
@@ -482,6 +503,58 @@ bool KitchenBelief::self_test()
               "(g) the 40 cm-off intruder is rejected by the mixture");
         check(std::abs(axis_delta(b.state().axis, axis_clean)) < d2r(2.0f),
               "(g) a REJECTED member must not drag the axis, however tight its published yaw");
+    }
+
+    // ── (h) ★A member the frame has REJECTED may not set a shared SCALAR either ───────────────────
+    // fit_scalar IS robust, but its EM responsibilities come from that scalar's OWN residuals, so it
+    // never learns the frame's verdict on the member as a whole. The hole is a member rejected on one
+    // DOF whose OTHER DOFs are only mildly off: EM keeps it (its depth looks unremarkable) and it
+    // votes on depth anyway. Here three runs agree on the grid at depth ~0.603; a fourth sits 30 deg
+    // off the grid — membership 0 — but only 0.09 m out on depth. Without the membership weight the
+    // rejected member drags the shared depth to 0.6202; with it the answer stays at 0.6033.
+    {
+        std::vector<KitchenMember> good = {
+            mk(0.20f,  3.0f, 0.90f, 0.60f, 2.0f),
+            mk(89.60f, 3.0f, 0.90f, 0.61f, 2.0f),
+            mk(0.10f,  3.0f, 0.90f, 0.60f, 2.0f),
+        };
+        KitchenBelief b(par);
+        b.update(good, good);                      // seed on the clean set
+
+        auto intruder = mk(30.0f, 3.0f, 0.90f, 0.70f, 2.0f);   // off-grid yaw, unremarkable depth
+        std::vector<KitchenMember> with = good;
+        with.push_back(intruder);
+        for (int i = 0; i < 20; ++i) b.update(with, with);
+
+        check(b.membership_prob(intruder) < 0.01f, "(h) the 30 deg off-grid member is rejected");
+        check(std::abs(b.state().depth - 0.6033f) < 0.008f,
+              "(h) a member rejected on YAW must not vote on DEPTH (EM alone cannot see that)");
+    }
+
+    // ── (i) ★The fused axis may not be MORE certain than its best single reading ──────────────────
+    // Every member's yaw is in the room frame and inherits the room polygon's shared orientation
+    // error, which does not average away by counting members. Measured live 2026-08-13: the fused
+    // axis reported 0.6139 deg while its best member published 0.6917 deg. The common-mode term is a
+    // floor on the fused variance; with it at 0 the old over-confident behaviour returns exactly.
+    {
+        const std::vector<KitchenMember> tidy = {
+            mk(0.20f,  1.0f, 0.90f, 0.60f, 2.0f),
+            mk(89.60f, 1.0f, 0.90f, 0.60f, 2.0f),
+            mk(0.10f,  1.0f, 0.89f, 0.61f, 2.0f),
+        };
+        KitchenBelief b(par);
+        b.update(tidy, tidy);
+        check(b.sigma().axis >= par.axis_common_mode_std * par.axis_common_mode_std - 1e-9f,
+              "(i) the fused axis variance is floored by the common-mode term");
+
+        KitchenBeliefParams no_cm = par;
+        no_cm.axis_common_mode_std = 0.0f;
+        KitchenBelief b0(no_cm);
+        b0.update(tidy, tidy);
+        check(b0.sigma().axis < b.sigma().axis,
+              "(i) removing the common-mode term makes the fusion strictly more confident");
+        check(std::sqrt(b0.sigma().axis) < d2r(1.0f),
+              "(i) without it, three 1-deg members fuse to BETTER than 1 deg — the defect");
     }
 
     // ── (e) The NULL is real: scattered furniture must not be declared a kitchen ──────────────────

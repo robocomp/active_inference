@@ -147,6 +147,29 @@ struct KitchenBeliefParams
     float worktop_model_std = 0.02f;
     float depth_model_std   = 0.03f;
 
+    // ── ★COMMON MODE on the axis ────────────────────────────────────────────────────────────────
+    // Every member's yaw is expressed in the ROOM frame, so every one of them inherits the room
+    // polygon's own orientation error. That error is SHARED: rotate the polygon slightly and all the
+    // members rotate together. It therefore does NOT average away by counting members — but a
+    // precision-weighted mean assumes independence and averages it away anyway.
+    //
+    // The symptom is unmistakable once looked for. Measured live 2026-08-13: the fused axis reported
+    // σ = 0.6139° while its own best-informed member (`hood_1`) published σ = 0.6917° — the fusion
+    // came out MORE certain than its best single reading of the wall. Over the same run the fitted
+    // axis itself wandered across 1.96° (87.59 .. 89.56) while claiming 0.61°, i.e. its own temporal
+    // spread was 3x its stated precision, and the members sat 0.2 .. 1.5° off the grid they define.
+    //
+    // Same rule, same reason as ring_metaconcept's common_mode_* (ring_belief.h: "a localisation
+    // wobble displaces them together and must not be averaged away by counting members"). Being
+    // fully correlated, it adds to the variance of the MEAN and is not divided by the member count,
+    // so it acts as a FLOOR: the frame can never claim to know the grid better than this.
+    //
+    // ★AUTHORED, pending a measurement — anchored on the run above, not on taste. The honest source
+    // is a wall-direction covariance published by room_concept, which does not exist yet; the same
+    // gap is why cabinet_concept still publishes a constant 3° stand-in. Replace this the day that
+    // lands. Setting it to 0 restores the old (over-confident) behaviour exactly.
+    float axis_common_mode_std = 0.5f * std::numbers::pi_v<float> / 180.0f;
+
     float clutter_frac       = 0.20f;   // prior mass on "this member belongs to no frame"
     float evidence_ema_alpha = 0.05f;   // low-pass on frame-vs-null (NOT an accumulator)
     float logodds_clamp      = 8.0f;    // ±nats, so the frame can always recant
