@@ -505,6 +505,7 @@ WallRef HoodFitter::nearest_wall(const Eigen::Vector2f& q) const
     nrm.normalize();
     if (nrm.dot(room_interior_ - best_foot) < 0.0f) nrm = -nrm;   // point INTO the room
     w.ok = true; w.p = best_foot; w.n = nrm; w.sigma_m = 0.02f;
+    w.length_m = ab.norm();   // the segment's length ⇒ how well its DIRECTION is known (see WallRef)
     return w;
 }
 
@@ -1085,6 +1086,7 @@ void HoodFitter::log_ai2_csv(const HoodInstance& inst, int npts, float R, bool g
                  // that this asymmetric-box model does not use. They logged 0 for every row of every run, so the
                  // ONE thing that can resolve yaw on a square footprint was completely uninstrumented.
                  << "std_yaw_within,front_mode,front_conf,cue_conf,cue_bearing,wall_resp,wall_gap,wall_lambda,"
+                 "wall_par_lambda,wall_misalign_deg,"
                  << "lidar_rays,lidar_raw,lidar_bpearl,lidar_resid_m,lidar_meanz,lidar_topz,lidar_floorz,lidar_cov_ang,"
                  << "dyaw_points,dyaw_moment,dyaw_flip,obliquity_cos,completeness,moment_aniso,moment_r_yaw,"
                  << "mom_major,mom_minor,mom_phi,mom_pts,"   // RAW footprint statistic (basin diagnosis)   // rogue-mask diag
@@ -1136,6 +1138,8 @@ void HoodFitter::log_ai2_csv(const HoodInstance& inst, int npts, float R, bool g
              // lambda ≈ 0 would mean the flush prior never fired. The two have nothing in common as fixes.
              << inst.ai2_belief.last_wall_gap() << ','
              << inst.ai2_belief.last_wall_lambda() << ','
+             << inst.ai2_belief.last_wall_par_lambda() << ','
+             << 57.2958f * inst.ai2_belief.last_wall_misalign() << ','   // degrees off the wall
              << inst.dbg_lidar_rays << ',' << inst.dbg_lidar_raw << ',' << inst.dbg_lidar_bpearl_rays << ',' << inst.dbg_lidar_resid_m << ','
              << inst.dbg_lidar_meanz_m << ',' << inst.dbg_lidar_topz_m << ',' << inst.dbg_lidar_floorz_m << ','
              << inst.dbg_lidar_cov_ang << ','

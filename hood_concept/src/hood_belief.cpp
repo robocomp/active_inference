@@ -371,6 +371,7 @@ void HoodBelief::accumulate_wall(const HoodBeliefState& s, const HoodFrame& f,
                                          Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const
 {
     dbg_wall_gap_ = 0.0f; dbg_wall_lambda_ = 0.0f;
+    dbg_wall_par_lambda_ = 0.0f; dbg_wall_misalign_ = 0.0f;
     if (not f.wall.ok or params_.wall_precision <= 0.0f) return;
 
     const auto gap_of = [&](const HoodBeliefState& st)
@@ -419,7 +420,31 @@ void HoodBelief::accumulate_wall(const HoodBeliefState& s, const HoodFrame& f,
 
     if (params_.wall_parallel_precision > 0.0f)
     {
-        const float lam_par = wgt * params_.wall_parallel_precision;   // same mixture weight
+        // ★★AN OBJECT ADJACENT TO A WALL IS ALIGNED TO THAT WALL, EVEN WHEN THE MASKS COME FROM A SKEWED
+        // POSE. The yaw was being fought over by ~2600 mask points seen at 70° obliquity against a FLAT
+        // constant of 200, and the points won: the hood sat 9° off the wall it is bolted to (81° vs ~90°),
+        // drifting, with std_yaw 0.148 rad. That is not a tuning problem — it is the wrong quantity in the
+        // precision. A single oblique face gives a poor surface normal; the WALL's direction is known far
+        // better than that, and how much better is not a number anyone needs to choose.
+        //
+        // A wall segment of length L localised to sigma_m has angular uncertainty ~ sigma_m / L. The room
+        // model already carries both: a 3 m wall known to 2 cm is known to ~0.0067 rad, i.e. lambda ~22000
+        // — two orders above the constant it replaces, and DERIVED from the geometry rather than picked.
+        // The residual par_of = (cos yaw, sin yaw)·n is sin(misalignment), so at small angles a precision
+        // on it is a precision on the angle and the units line up.
+        //
+        // It is still scaled by the flush posterior `wgt`, which is the whole point: ADJACENCY is what
+        // earns the alignment. A genuinely free-standing object has wgt → 0 and keeps its data-driven yaw.
+        // Both symmetric solutions (yaw and yaw+180°) satisfy this term, so it does not fight the
+        // front/back resolution — that stays with the appearance cue.
+        const float sigma_theta = (f.wall.length_m > 0.1f) ? f.wall.sigma_m / f.wall.length_m : 0.0f;
+        const float lam_geom    = (sigma_theta > 1e-4f) ? 1.0f / (sigma_theta * sigma_theta)
+                                                        : params_.wall_parallel_precision;
+        const float lam_par = wgt * lam_geom;   // same mixture weight
+        dbg_wall_par_lambda_ = lam_par;
+        // Signed misalignment in RADIANS, the number the reported symptom is actually about:
+        // asin of the residual, so 9° off the wall reads 0.157 and not a dimensionless 0.156.
+        dbg_wall_misalign_ = std::asin(std::clamp(par_of(s), -1.0f, 1.0f));
         const float rp = par_of(s);
         Id.noalias() += lam_par * (Jp * Jp.transpose());
         bd.noalias() += -lam_par * Jp * rp;

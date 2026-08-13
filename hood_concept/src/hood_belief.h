@@ -62,6 +62,11 @@ struct WallRef
     Eigen::Vector2f p       = Eigen::Vector2f::Zero();   // any point on the wall line (room frame, m)
     Eigen::Vector2f n       = Eigen::Vector2f::UnitX();  // UNIT normal, pointing INTO the room
     float           sigma_m = 0.02f;                     // wall position uncertainty (m)
+    // ★HOW LONG THE WALL SEGMENT IS, because that is what says how well its DIRECTION is known. A wall
+    // localised to sigma_m over a segment of length L has an angular uncertainty of about sigma_m / L —
+    // a 3 m wall known to 2 cm is known to ~0.007 rad (0.4°), which is far better than any single oblique
+    // view of a mask can determine an object's yaw. 0 ⇒ unknown, and the configured constant is used.
+    float           length_m = 0.0f;                     // polygon edge length (m)
 };
 
 // Appearance-based FRONT (door) cue: the room-frame direction the DOOR faces + a confidence in [0,1]. Emitted
@@ -301,7 +306,9 @@ public:
 
     // Monitor instrumentation for the wall factor.
     float last_wall_gap()    const { return dbg_wall_gap_; }     // back face → wall signed gap (m)
-    float last_wall_lambda() const { return dbg_wall_lambda_; }  // applied flush precision (1/m²)
+    float last_wall_lambda() const { return dbg_wall_lambda_; }
+    float last_wall_par_lambda() const { return dbg_wall_par_lambda_; }  // applied parallel precision
+    float last_wall_misalign()  const { return dbg_wall_misalign_; }     // yaw − wall yaw (rad, signed)  // applied flush precision (1/m²)
     float last_wall_resp()   const { return dbg_wall_resp_; }    // mean per-point WALL responsibility (0..1):
                                                                  // →1 ⇒ the cloud is a wall, not a fridge
     // Stage the wall the per-point mixture explains with, WITHOUT running an update. Only self_test needs this
@@ -540,6 +547,8 @@ public:
 private:
     mutable float   dbg_wall_gap_    = 0.0f;
     mutable float   dbg_wall_lambda_ = 0.0f;
+    mutable float   dbg_wall_par_lambda_ = 0.0f;
+    mutable float   dbg_wall_misalign_   = 0.0f;
     mutable float   dbg_wall_resp_   = 0.0f;   // mean wall responsibility over the last scored cloud
 };
 
