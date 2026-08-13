@@ -185,7 +185,8 @@ WindowMinTurn          = 0.15   # rad of turn before a new slot is admitted (whi
 # ⚠ The cross terms are nearly invisible at these constants (rho(y,θ) = -0.028) because that 0.02 m
 # per-frame floor = 0.089 m/√s of position random walk for a PARKED robot swamps them. Calibrating
 # sigma_* against the real odometry stream is the load-bearing next step, not a refinement.
-MotionPreintegration   = false
+MotionPreintegration   = true   # 2026-08-13: ARMED. Inert until the agent is restarted (read at startup).
+                                # THE WAY BACK IS ONE WORD: set this to false — no rebuild needed.
 # PreintOdomSigmaVLat  = 0.0894   # m/√s   — derived from max(StationaryMotionThreshold, OdomNoiseBase)/√0.05
 # PreintOdomSigmaVLong = 0.0894
 # PreintOdomSigmaOmega = 0.0447   # rad/√s — derived from RotationNoiseBase/√0.05
