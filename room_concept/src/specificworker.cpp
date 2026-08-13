@@ -868,10 +868,64 @@ void SpecificWorker::modify_node_attrs_slot(std::uint64_t id, const std::vector<
                                 return value + dist(gen);
                             };
 
+                            // ── SYNTHETIC ERROR INJECTION, for calibrator recovery tests ─────────────
+                            // MEASURED 08-13 over 24434 parked frames: this simulator's odometry has
+                            // sigma_v = 3.9e-7 m/sqrt(s) and sigma_omega = 2.2e-8 rad/sqrt(s) — five to
+                            // six orders below the values the motion prior is configured with, because
+                            // webots-bridge publishes the supervisor's GROUND-TRUTH velocity and there is
+                            // no encoder in this loop at all. So nothing here can be CALIBRATED; what can
+                            // be done is to inject a KNOWN error and check the calibrator recovers it.
+                            //
+                            // OdometryNoiseFactor above cannot serve: it is multiplicative AND returns
+                            // early on value == 0, so it injects nothing while parked (no floor) and it
+                            // redraws every sample (no constant scale). Two separate mechanisms are
+                            // needed because the model separates them, and they scale differently with
+                            // the interval — random as sqrt(T), a scale as T:
+                            //
+                            //  * DENSITY noise reproduces Q: to make the INCREMENT variance sigma^2*dt,
+                            //    the velocity perturbation must have std sigma/sqrt(dt). Injecting a
+                            //    fixed velocity std instead would make the accumulated error grow like T
+                            //    rather than sqrt(T) and would silently be a bias, not noise.
+                            //  * SCALE is drawn ONCE per process, not per sample, because that is what a
+                            //    wheel-radius or wheelbase error IS. Redrawing it per sample makes it
+                            //    just more white noise.
+                            //
+                            // ⚠ The scale is drawn once from N(0, sigma_scale^2) and PRINTED at first
+                            // use: that realised value is the ground truth a recovery test scores
+                            // against, so it has to be recoverable from the log, not just from the seed.
+                            const float dt_inj = (last_robot_current_speed_timestamp_ > 0)
+                                ? std::max(1e-3f, static_cast<float>(source_ts - last_robot_current_speed_timestamp_) * 1e-3f)
+                                : 0.05f;
+                            const float inv_sqrt_dt_inj = 1.f / std::sqrt(dt_inj);
+                            static bool  scale_drawn = false;
+                            static float inj_scale_v = 0.f, inj_scale_w = 0.f;
+                            if (not scale_drawn)
+                            {
+                                scale_drawn = true;
+                                if (params.ODOM_INJECT_SCALE_V > 0.f)
+                                    inj_scale_v = std::normal_distribution<float>(0.f, params.ODOM_INJECT_SCALE_V)(gen);
+                                if (params.ODOM_INJECT_SCALE_OMEGA > 0.f)
+                                    inj_scale_w = std::normal_distribution<float>(0.f, params.ODOM_INJECT_SCALE_OMEGA)(gen);
+                                if (params.ODOM_INJECT_SIGMA_V > 0.f or params.ODOM_INJECT_SIGMA_OMEGA > 0.f
+                                    or inj_scale_v != 0.f or inj_scale_w != 0.f)
+                                    qInfo().nospace()
+                                        << "[OdomInject] GROUND TRUTH for this run — sigma_v="
+                                        << params.ODOM_INJECT_SIGMA_V << " m/sqrt(s)  sigma_omega="
+                                        << params.ODOM_INJECT_SIGMA_OMEGA << " rad/sqrt(s)  s_v="
+                                        << inj_scale_v << "  s_omega=" << inj_scale_w
+                                        << "  (scales DRAWN ONCE; score the calibrator against these)";
+                            }
+                            auto inject = [&](float value, float sigma_density, float scale) -> float {
+                                float v = value * (1.f + scale);
+                                if (sigma_density > 0.f)
+                                    v += std::normal_distribution<float>(0.f, sigma_density * inv_sqrt_dt_inj)(gen);
+                                return v;
+                            };
+
                             rc::OdometryReading odom;
-                            odom.adv = add_noise(adv_value.value());
-                            odom.side = add_noise(side_value.value());
-                            odom.rot = add_noise(rot_value.value());
+                            odom.adv  = inject(add_noise(adv_value.value()),  params.ODOM_INJECT_SIGMA_V,     inj_scale_v);
+                            odom.side = inject(add_noise(side_value.value()), params.ODOM_INJECT_SIGMA_V,     inj_scale_v);
+                            odom.rot  = inject(add_noise(rot_value.value()),  params.ODOM_INJECT_SIGMA_OMEGA, inj_scale_w);
                             odom.source_ts_ms = static_cast<std::int64_t>(source_ts);
                             odom.recv_ts_ms = static_cast<std::int64_t>(
                                 std::chrono::duration_cast<std::chrono::milliseconds>(

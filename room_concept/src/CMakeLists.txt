@@ -137,3 +137,14 @@ add_executable(gn_selftest EXCLUDE_FROM_ALL
 target_include_directories(gn_selftest PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
 target_link_libraries(gn_selftest ${LIBS})
 set_target_properties(gn_selftest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
+
+# ── motion_calib ──────────────────────────────────────────────────────────────
+# Calibrates the preintegrated motion model's noise DENSITIES and SCALE errors from a logged run, by
+# the same weighted least squares that maximises the evidence for those parameters. Standalone on
+# purpose — it links nothing from the agent (no torch, no DSR), so it stays a seconds-long build and
+# can be pointed at any archived log. EXCLUDE_FROM_ALL.
+#   make -C build motion_calib && ../bin/motion_calib --selftest
+#   make -C build motion_calib && ../bin/motion_calib tmp/sdf_localizer/<log>.csv
+add_executable(motion_calib EXCLUDE_FROM_ALL ../tools/motion_calib.cpp)
+target_include_directories(motion_calib PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
+set_target_properties(motion_calib PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)

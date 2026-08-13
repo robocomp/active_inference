@@ -72,6 +72,18 @@ struct RoomConfig
     bool        RECENTER_ROOM_POLYGON = true;   // config: RoomConcept.RecenterRoomPolygon
     float       ODOMETRY_NOISE_FACTOR = 0.0f;
 
+    // ---- Synthetic odometry error injection (calibrator recovery tests only) ----
+    // This simulator's odometry IS ground truth (webots-bridge publishes the supervisor's velocity),
+    // measured at sigma_v = 3.9e-7 m/sqrt(s) over 24434 parked frames — five orders below what the
+    // motion prior is configured with. So the densities cannot be calibrated here; instead a KNOWN
+    // error is injected and the calibrator is scored on recovering it. All zero = inert.
+    // ⚠ MUST be zero for any run whose numbers are meant to describe the estimator rather than the
+    // calibrator. See tools/motion_calib.cpp.
+    float       ODOM_INJECT_SIGMA_V     = 0.0f;  // m/sqrt(s)   — additive DENSITY (a floor; acts when parked)
+    float       ODOM_INJECT_SIGMA_OMEGA = 0.0f;  // rad/sqrt(s) — additive DENSITY
+    float       ODOM_INJECT_SCALE_V     = 0.0f;  // std of a multiplicative scale DRAWN ONCE per process
+    float       ODOM_INJECT_SCALE_OMEGA = 0.0f;  // std of a multiplicative scale DRAWN ONCE per process
+
     // DSR stabilization: this many consecutive "stable" frames before creating the
     // room node and re-parenting the robot under it.
     int   STABLE_FRAMES_REQUIRED = 30;
