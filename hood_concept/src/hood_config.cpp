@@ -317,7 +317,10 @@ HoodConfig load_hood_config(const ConfigLoader& cfg)
     out.existence_removal_prob    = getf("HoodModel.ExistenceRemovalProb",    0.12f);
     out.existence_frame_correlation = getf("HoodModel.ExistenceFrameCorrelation", 0.0f);
     out.existence_logodds_max     = getf("HoodModel.ExistenceLogoddsMax",     4.0f);
-    out.existence_detection_prob  = getf("HoodModel.ExistenceDetectionProb",  0.85f);
+    // Through the manifest like every other world fact: this is a measured sensor rate for THIS object, and
+    // the 0.85 default is the refrigerator's. See [sensing.lidar] in hood.concept.toml.
+    out.existence_detection_prob  = rc::manifest::resolve(cfg, "HoodModel.ExistenceDetectionProb",
+                                        man, "sensing.lidar.detection_prob", 0.85f, "hood lidar P(return|present)");
     out.existence_clutter_prob    = getf("HoodModel.ExistenceClutterProb",    0.05f);
     out.existence_sensor_sigma_m  = getf("HoodModel.ExistenceSensorSigmaM",   0.03f);
     out.existence_remove_frames   = geti("HoodModel.ExistenceRemoveFrames",   15);

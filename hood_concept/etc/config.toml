@@ -337,7 +337,22 @@ ExistenceRemovalEnabled = true    # ON (fit calibrated). Optimizer-orthogonal: w
                                   # NEVER falsely removed — it removes only when the camera LOOKS and sees empty.
 ExistenceRemovalProb = 0.12    # remove when L < log(p/(1−p)); lower = more conservative
 ExistenceLogoddsMax = 4.0      # clamp |L| so evidence stays finite AND recoverable
-ExistenceDetectionProb = 0.85  # P(beam through an OCCUPIED footprint returns from it) — sensor hit rate
+# ★MEASURED 2026-08-13 on this agent's own ai2_log, 1131 cycles in which the CAMERA independently confirmed
+# the hood was present (npts>0) AND beams reached the volume: pooled occupancy 12403 against 22565
+# pass-throughs ⇒ P(return | hood present) = 0.355. It was 0.85 — the REFRIGERATOR's, inherited by the clone.
+#
+# This is not a threshold and it is not tuning: detection_prob is defined in existence_belief.h as a PHYSICAL
+# SENSOR RATE, and 0.85 was a claim about how a big solid floor-standing box reflects a sweep. A hood is a
+# thin canopy 2 m up, grazed by a handful of near-horizontal rings, and it genuinely returns about a third of
+# the beams that cross it. Assuming 0.85 made every pass-through score log(0.15/0.95) = −1.85 nats instead of
+# log(0.645/0.95) = −0.39 — absence over-charged 4.8x on EVERY beam that misses.
+#
+# That is what walked p(exists) to 0.018 whenever the robot turned away: the camera correctly contributes
+# nothing out of FoV (sndet→0, p_detect 0), and the 360-degree sweep then charges phantom absence at ~0.5
+# nats/cycle, reaching the −4 clamp in 13 cycles. It was never removed — the debounce counts LOOKS, and with
+# p_detect 0 the streak stayed at 0.00 — so the symptom was a real hood sitting at p=0.02, condemned and
+# unexecutable, which is exactly the state the stall report exists to name.
+ExistenceDetectionProb = 0.355 # P(beam through an OCCUPIED footprint returns from it) — MEASURED, see above
 ExistenceClutterProb = 0.05    # P(beam through an EMPTY footprint returns anyway) — spurious rate
 ExistenceSensorSigmaM = 0.03   # LiDAR range σ (m) for the soft occupancy/free-space surface split
 ExistenceRemoveFrames = 15     # debounce: require the removal decision for this many CONSECUTIVE cycles before

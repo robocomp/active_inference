@@ -117,3 +117,17 @@ block described one envelope while a measurement of a different object drove bot
 deliberately absent now, and the manifest and the runtime agree. Fit from this agent's own ai2_log with
 common/detectability/tools/fit_envelope and set from = "measured" before trusting any p_detect it reports.
 """
+
+# ── LiDAR sensing rates ────────────────────────────────────────────────────────────────────────────────
+[sensing.lidar]
+detection_prob = 0.355             # P(a beam crossing the hood returns from it)
+from = "measured"
+why  = """
+MEASURED 2026-08-13 from this agent's own etc/ai2_log.csv: 1131 cycles in which the CAMERA independently
+confirmed the hood was present (npts > 0) and beams reached the volume, pooling 12403 occupancy against 22565
+pass-throughs. It read 0.85 — the REFRIGERATOR's — inherited by the clone, and that is a claim about how a
+big solid floor-standing box reflects a sweep. A hood is a thin canopy 2 m up, grazed by a handful of
+near-horizontal rings. Assuming 0.85 over-charged every pass-through by 4.8x and walked a real, correctly
+fitted hood to p(exists) = 0.018 whenever the robot turned away.
+★Re-measure if the LiDAR mounting or the hood changes: this is a rate for THIS object on THIS sensor.
+"""
