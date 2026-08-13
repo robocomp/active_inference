@@ -130,6 +130,7 @@ struct HoodConfig
     // active when gap = (back_centre − wall.p)·(inward normal) goes negative (crossed) or within WallNoCrossMarginM,
     // with a precision that GROWS with how far past — leaving flush (gap≈0) untouched. STRONG (a wall is a hard
     // physical boundary), continuous/soft (no clamp). wall.ok==false ⇒ inert. 0 = OFF.
+    float ai2_wall_flush_prior = 1.0f;   // AI2WallFlushPrior — π_flush; a hood is definitionally wall-mounted
     float ai2_wall_no_cross_precision = 2000.0f;  // 1/m² per m of penetration past the wall (>> the flush precision)
     float ai2_wall_no_cross_margin_m  = 0.0f;     // interior offset (m) inside which the constraint activates
     float ai2_process_std_m   = 0.005f;  // predict process-noise std, length DOFs (m/frame)

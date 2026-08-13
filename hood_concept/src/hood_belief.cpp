@@ -322,6 +322,40 @@ Eigen::Vector2f HoodBelief::back_centre(const HoodBeliefState& s) const
 // Gaussian on the back-face-to-wall gap, the flush component's posterior weight is exp(−(gap/reach)²), so
 // marginalising the discrete {flush, free-standing} component multiplies the factor precision by exactly it —
 // a continuous covariance, not a proximity gate. Fades to ~0 for a genuine mid-room fridge (depth stays wide).
+// An extent is IDENTIFIABLE only when the cloud spans it — points on BOTH opposing faces, which is what
+// separates the extent from the centre. Returns the two-sided fraction ∈ [0,1] for one footprint axis.
+//
+// ★Lifted out of accumulate_extra 2026-08-13 so the WALL factor can ask it too. Which axis is unobservable
+// is a property of the VIEWPOINT, and the wall term needs the same answer the footprint prior uses — asking
+// it twice, in two places, is how the two would drift apart.
+float HoodBelief::two_sided_along(const HoodBeliefState& s, const HoodFrame& f, bool along_x) const
+{
+            if (params_.depth_unobs_precision <= 0.0f or f.points.size() <= 8)
+                return 1.0f;                       // feature off / too few points ⇒ claim nothing, add no boost
+            const float c = std::cos(-s.yaw), sn = std::sin(-s.yaw);
+            const float delta = params_.depth_obs_band_m;
+            const float half_cross = 0.5f * (along_x ? s.h : s.w);   // the OTHER axis: the spanning core
+            int nplus = 0, nminus = 0;
+            for (const auto& q : f.points)
+            {
+                const float px = q.x() - s.cx, py = q.y() - s.cy;
+                const float lx = px * c - py * sn, ly = px * sn + py * c;
+                const float along = along_x ? lx : ly;               // the axis being tested
+                const float cross = along_x ? ly : lx;               // must lie within the spanning core
+                if (std::abs(cross) > half_cross + delta) continue;  // drop clutter off the side of this face pair
+                // Vertical admission band = the hood body, not floor→top: a point under the hood is the HOB
+                // or the worktop, and admitting it would drag the fit down toward the counter.
+                if (q.z() < s.H - params_.vertical_extent_m - delta or q.z() > s.H + delta) continue;
+                // Clearly on one side or the other by a FIXED margin δ (NOT keyed to the current half-extent). A
+                // point straddling the centre counts as NEITHER, so a COLLAPSED slab cannot masquerade as
+                // "both faces seen" and switch the boost off — that circularity re-collapsed the extent.
+                if (along >  delta)      ++nplus;
+                else if (along < -delta) ++nminus;
+            }
+            const int tot = nplus + nminus;
+            return (tot > 0) ? (2.0f * std::min(nplus, nminus) / static_cast<float>(tot)) : 0.0f;
+        }
+
 float HoodBelief::flush_weight(const HoodBeliefState& s, const HoodFrame& f) const
 {
     if (not f.wall.ok) return 0.0f;
@@ -347,8 +381,24 @@ void HoodBelief::accumulate_wall(const HoodBeliefState& s, const HoodFrame& f,
     const float gap = gap_of(s);
     dbg_wall_gap_ = gap;
 
-    const float wgt = flush_weight(s, f);
-    const float lam_flush = wgt / (1.0f / params_.wall_precision + f.wall.sigma_m * f.wall.sigma_m);
+    // ★THE FLUSH WEIGHT IS A POSTERIOR OVER {flush, free-standing}, AND IT MUST BE CONDITIONED ON WHETHER THE
+    // DATA CAN TELL THEM APART. exp(−(gap/reach)²) asks "does the back face sit at the wall?" — a fair question
+    // when the depth is observed, and a trap when it is not: a box whose depth was ASSERTED too large has its
+    // back pushed past the wall, the weight decays as the square of that error, and the one term that could
+    // pull it back switches itself off precisely because it is wrong. Self-reinforcing, and it is what left
+    // the hood a quarter of a metre inside the wall.
+    //
+    // With the depth axis unobserved, "free-standing at some other depth" is not a competing explanation the
+    // data supports — it is an unconstrained direction. So the posterior falls back to the PRIOR, and for a
+    // wall-mounted class that prior is ~1. Marginalising the discrete component honestly:
+    //     w = two_sided·exp(−(gap/reach)²)  +  (1 − two_sided)·π_flush
+    const float depth_unobs = 1.0f - two_sided_along(s, f, false);
+    const float wgt = (1.0f - depth_unobs) * flush_weight(s, f)
+                    + depth_unobs * std::clamp(params_.wall_flush_prior, 0.0f, 1.0f);
+    // …and it carries the confidence the footprint prior just handed over (see accumulate_extra): with the
+    // depth unobservable the wall is not a soft preference, it is the second equation that determines it.
+    const float lam_base = 1.0f / (1.0f / params_.wall_precision + f.wall.sigma_m * f.wall.sigma_m);
+    const float lam_flush = wgt * (lam_base + params_.depth_unobs_precision * depth_unobs);
     dbg_wall_lambda_ = lam_flush;
     if (not(lam_flush > 1e-6f)) return;
 
@@ -404,34 +454,33 @@ void HoodBelief::accumulate_extra(const HoodBeliefState& s, const HoodFrame& f,
         // and the fridge filter removed a real fridge for being the wrong shape. Which axis is unobservable is a
         // property of the VIEWPOINT, not of the model's axis labelling. See [[hood-unobserved-axis-prior]].
         const auto two_sided_along = [&](bool along_x) -> float
-        {
-            if (params_.depth_unobs_precision <= 0.0f or f.points.size() <= 8)
-                return 1.0f;                       // feature off / too few points ⇒ claim nothing, add no boost
-            const float c = std::cos(-s.yaw), sn = std::sin(-s.yaw);
-            const float delta = params_.depth_obs_band_m;
-            const float half_cross = 0.5f * (along_x ? s.h : s.w);   // the OTHER axis: the spanning core
-            int nplus = 0, nminus = 0;
-            for (const auto& q : f.points)
-            {
-                const float px = q.x() - s.cx, py = q.y() - s.cy;
-                const float lx = px * c - py * sn, ly = px * sn + py * c;
-                const float along = along_x ? lx : ly;               // the axis being tested
-                const float cross = along_x ? ly : lx;               // must lie within the spanning core
-                if (std::abs(cross) > half_cross + delta) continue;  // drop clutter off the side of this face pair
-                // Vertical admission band = the hood body, not floor→top: a point under the hood is the HOB
-                // or the worktop, and admitting it would drag the fit down toward the counter.
-                if (q.z() < s.H - params_.vertical_extent_m - delta or q.z() > s.H + delta) continue;
-                // Clearly on one side or the other by a FIXED margin δ (NOT keyed to the current half-extent). A
-                // point straddling the centre counts as NEITHER, so a COLLAPSED slab cannot masquerade as
-                // "both faces seen" and switch the boost off — that circularity re-collapsed the extent.
-                if (along >  delta)      ++nplus;
-                else if (along < -delta) ++nminus;
-            }
-            const int tot = nplus + nminus;
-            return (tot > 0) ? (2.0f * std::min(nplus, nminus) / static_cast<float>(tot)) : 0.0f;
-        };
+        { return this->two_sided_along(s, f, along_x); };
+        // ★★WHEN THE DEPTH IS UNOBSERVABLE AND A WALL IS KNOWN, THE WALL DETERMINES IT — NOT A GUESS.
+        //
+        // A front-only view leaves the centre and the depth jointly unidentifiable along the depth axis: the
+        // data fixes only the FRONT FACE (c − h/2·outward), one equation in two unknowns. The response here
+        // was to pin h to `prior_depth_m` with depth_unobs_precision, and for a fridge — square in plan, a
+        // well-known 0.60 — that is a reasonable second equation. For a hood it is a NOMINAL class guess that
+        // has never been measured, and the excess goes somewhere: straight through the wall.
+        //
+        // But a second equation is already available and is far better than a guess. A wall-mounted object's
+        // BACK FACE IS ON THE WALL, and the room model knows where the wall is. front (observed) + back
+        // (known) ⇒ the depth follows, determinate. So when the depth axis is unobserved AND a wall is
+        // staged, this precision is handed to the FLUSH factor (accumulate_wall) instead of to the nominal
+        // mean — the same total confidence, applied to the constraint that carries information.
+        //
+        // MEASURED, hood_concept 2026-08-13: h pinned at 0.485 with std_h 0.036 while the declared prior std
+        // is 0.30 — the depth was not being estimated at all, it was being asserted at 20000 precision. The
+        // wall no-cross term that should have stopped the penetration applies λ = 2000·0.24 = 480 and was
+        // losing to it about 40 : 1. Reported symptom: the box past the wall by half its own depth, which is
+        // exactly the centre-to-back-face offset.
+        //
+        // Strict generalisation: with no wall staged (f.wall.ok false) this is byte-for-byte the old form,
+        // so a genuinely free-standing object keeps the nominal prior that is all it has.
+        const float depth_unobs   = 1.0f - two_sided_along(false);
+        const float wall_resolves = f.wall.ok ? depth_unobs : 0.0f;   // the wall answers it instead
         const float lam_w = lam_wd + params_.depth_unobs_precision * (1.0f - two_sided_along(true));
-        const float lam_h = lam_wd + params_.depth_unobs_precision * (1.0f - two_sided_along(false));
+        const float lam_h = lam_wd + params_.depth_unobs_precision * (depth_unobs - wall_resolves);
         Id(3, 3) += lam_w;  bd(3) += lam_w * (params_.prior_footprint_m - s.w);   // w      (index 3)
         // Depth gets its OWN mean when the object is not square in plan (see prior_depth_m).
         const float depth_mean = (params_.prior_depth_m >= 0.0f) ? params_.prior_depth_m

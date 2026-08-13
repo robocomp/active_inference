@@ -81,6 +81,11 @@ why    = "★the value that WINS at runtime is HoodModel.AI2PriorHeightM in etc/
 kind = "wall_flush"
 from = "nominal"
 why  = "a hood is fixed to the wall behind the hob, so the same flush/parallel priors the fridge uses apply"
+flush_prior = 1.0                  # pi_flush: the class prior that a hood is mounted flush on a wall.
+                                   # ★Used when the DEPTH axis is unobserved (a front-only view), where the
+                                   # back-face gap cannot discriminate flush from free-standing: the posterior
+                                   # then falls back to this prior, and the wall — not a nominal depth guess —
+                                   # supplies the second equation that determines the depth.
 
 # ── σ* — the consumer's precision demand ───────────────────────────────────────────────────────────────
 # SIGMA-STAR: none — nothing consumes a hood's pose. Nothing grasps it, nothing plans a path through it,

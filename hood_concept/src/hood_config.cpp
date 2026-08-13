@@ -200,6 +200,8 @@ HoodConfig load_hood_config(const ConfigLoader& cfg)
     out.ai2_volatility_sigma        = getf("HoodModel.AI2VolatilitySigma",        2.0f);
     out.ai2_wall_explain_frac       = getf("HoodModel.AI2WallExplainFrac",        0.25f);
     out.ai2_wall_explain_sigma_m    = getf("HoodModel.AI2WallExplainSigmaM",      0.05f);
+    out.ai2_wall_flush_prior        = rc::manifest::resolve(cfg, "HoodModel.AI2WallFlushPrior",
+                                          man, "prior.attachment.flush_prior", 1.0f, "hood flush prior");
     out.ai2_wall_no_cross_precision = getf("HoodModel.WallNoCrossPrecision",     2000.0f);
     out.ai2_wall_no_cross_margin_m  = getf("HoodModel.WallNoCrossMarginM",       0.0f);
     out.ai2_process_std_m    = getf("HoodModel.AI2ProcessStdM",      0.005f);

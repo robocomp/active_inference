@@ -645,6 +645,7 @@ float HoodFitter::run_inference(HoodInstance& inst, const HoodObservation& obser
         p.wall_precision          = cfg_.ai2_wall_precision;
         p.wall_parallel_precision = cfg_.ai2_wall_parallel_precision;
         p.wall_reach_m            = cfg_.ai2_wall_reach_m;
+        p.wall_flush_prior        = cfg_.ai2_wall_flush_prior;
         p.wall_no_cross_precision = cfg_.ai2_wall_no_cross_precision;
         p.wall_no_cross_margin_m  = cfg_.ai2_wall_no_cross_margin_m;
         // The wall may only explain away mask points to the extent the room itself is trusted: with no room
@@ -1083,7 +1084,7 @@ void HoodFitter::log_ai2_csv(const HoodInstance& inst, int npts, float R, bool g
                  // mode_posterior() — hardcoded `return 0.0f` stubs left from table_concept's w↔h mode machinery
                  // that this asymmetric-box model does not use. They logged 0 for every row of every run, so the
                  // ONE thing that can resolve yaw on a square footprint was completely uninstrumented.
-                 << "std_yaw_within,front_mode,front_conf,cue_conf,cue_bearing,wall_resp,"
+                 << "std_yaw_within,front_mode,front_conf,cue_conf,cue_bearing,wall_resp,wall_gap,wall_lambda,"
                  << "lidar_rays,lidar_raw,lidar_bpearl,lidar_resid_m,lidar_meanz,lidar_topz,lidar_floorz,lidar_cov_ang,"
                  << "dyaw_points,dyaw_moment,dyaw_flip,obliquity_cos,completeness,moment_aniso,moment_r_yaw,"
                  << "mom_major,mom_minor,mom_phi,mom_pts,"   // RAW footprint statistic (basin diagnosis)   // rogue-mask diag
@@ -1121,6 +1122,20 @@ void HoodFitter::log_ai2_csv(const HoodInstance& inst, int npts, float R, bool g
              << inst.ai2_belief.front_mode() << ',' << inst.ai2_belief.front_confidence() << ','
              << inst.last_front_conf << ',' << inst.last_front_bearing << ','
              << inst.ai2_belief.last_wall_resp() << ','   // mean per-point WALL responsibility (→1 ⇒ it IS a wall)
+             // ★THE TWO NUMBERS THAT DECIDE THE "BITES THE WALL" QUESTION, and the code has been computing
+             // and discarding them all along. wall_resp is the per-point MIXTURE responsibility — it says the
+             // belief knows a wall is there, and says nothing about where the BOX ended up. The geometry is:
+             //   wall_gap    = (back_centre − wall.p)·(inward normal): >0 the back face is inside the room,
+             //                 0 flush, <0 the back face has CROSSED the wall.
+             //   wall_lambda = the flush factor's APPLIED precision. 0 means the prior is inert this cycle
+             //                 (no wall staged, or the flush weight has decayed to nothing) — in which case
+             //                 nothing is holding the back face and the gap is merely where the points fell.
+             // Reported symptom is a bite of ~HALF THE DEPTH (0.24 m of 0.485), and half-depth is exactly the
+             // offset between the box CENTRE and its back face — so gap ≈ 0 with the box still overlapping the
+             // wall would mean the drawn/published geometry is offset by half a depth, while gap ≈ −0.24 with
+             // lambda ≈ 0 would mean the flush prior never fired. The two have nothing in common as fixes.
+             << inst.ai2_belief.last_wall_gap() << ','
+             << inst.ai2_belief.last_wall_lambda() << ','
              << inst.dbg_lidar_rays << ',' << inst.dbg_lidar_raw << ',' << inst.dbg_lidar_bpearl_rays << ',' << inst.dbg_lidar_resid_m << ','
              << inst.dbg_lidar_meanz_m << ',' << inst.dbg_lidar_topz_m << ',' << inst.dbg_lidar_floorz_m << ','
              << inst.dbg_lidar_cov_ang << ','

@@ -178,6 +178,11 @@ struct HoodBeliefParams
     // WALL NO-CROSS (one-sided): resist the back face penetrating PAST the wall into the wall/exterior. Active only
     // when the gap goes negative (crossed) or within wall_no_cross_margin_m; precision GROWS with penetration
     // (λ = wall_no_cross_precision · how-far-past), leaving flush (gap≈0) untouched. Strong; continuous, no clamp.
+    // π_flush: the CLASS prior that this object is mounted flush against a wall, used when the depth axis is
+    // unobserved and the gap therefore cannot discriminate {flush, free-standing} — see flush_weight. 0 = no
+    // class prior, which reproduces the previous behaviour exactly. A range hood is definitionally wall-
+    // mounted (its manifest declares [prior.attachment]), so hood sets 1.0.
+    float wall_flush_prior        = 0.0f;
     float wall_no_cross_precision = 2000.0f;  // 1/m² per m of penetration past the wall (>> wall_precision). 0 = OFF
     float wall_no_cross_margin_m  = 0.0f;     // interior margin (m) inside which the no-cross term activates
     // ── WALL as a COMPETING EXPLANATION (per-point mixture component) ────────────────────────────────────
@@ -479,6 +484,9 @@ private:
     void accumulate_wall(const HoodBeliefState& s, const HoodFrame& f,
                          Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const;
     // Posterior weight of the "flush against this wall" mixture component: exp(−(gap/reach)²). 0 ⇒ inert.
+    // Two-sided fraction for one footprint axis — see the definition. Shared by the footprint prior
+    // and the wall factor so both agree on which axis this viewpoint can resolve.
+    float two_sided_along(const HoodBeliefState& s, const HoodFrame& f, bool along_x) const;
     float flush_weight(const HoodBeliefState& s, const HoodFrame& f) const;
 
     // Per-point WALL mixture component (explaining away): its available prior weight this frame, and its
