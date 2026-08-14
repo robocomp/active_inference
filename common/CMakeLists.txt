@@ -208,7 +208,7 @@ add_library(ai_common::media ALIAS ai_common_media)
 # nothing AND pulled dsr_gui into their link line, which is what forced scene_graph_viewer to
 # document "ai_common::ui deliberately NOT linked".
 # =====================================================================================
-add_library(ai_common_ui STATIC dashboard/timeseries_plot.cpp)
+add_library(ai_common_ui STATIC dashboard/timeseries_plot.cpp dashboard/series_pruner.cpp)
 ai_common_defaults(ai_common_ui)
 set_target_properties(ai_common_ui PROPERTIES AUTOMOC ON)
 target_link_libraries(ai_common_ui PUBLIC ai_common_core Qt6::Gui Qt6::Widgets)

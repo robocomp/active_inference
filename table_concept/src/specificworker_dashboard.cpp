@@ -8,6 +8,9 @@
  */
 
 #include "specificworker.h"
+
+#include "../../common/dashboard/window_geometry.h"   // rc::dashboard:: (SHARED)
+#include "../../common/dashboard/series_pruner.h"     // rc::dashboard:: (SHARED)
 #include "table_geometry.h"   // rc::geom::belief_uncertainty
 #include "table_dof.h"        // rc::kTableDofs — names/units/σ* for the BeliefInspector rows
 
@@ -95,35 +98,18 @@ void SpecificWorker::refresh_belief_strip()
     belief_strip_->update_view(rows);
 }
 
+// Geometry persistence is SHARED (common/dashboard/window_geometry.h). The strip passes a max size: a
+// restored geometry carries the window STATE, so a strip that was ever maximised comes back filling the
+// screen — indistinguishable, to the user, from the big dashboard having opened itself.
 void SpecificWorker::restore_strip_geometry()
 {
-    if (not strip_window_)
-        return;
-    QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("table_concept"));
-    const QByteArray geom = settings.value(QStringLiteral("BeliefStripWindow_geometry")).toByteArray();
-    if (not geom.isEmpty())
-    {
-        strip_window_->restoreGeometry(geom);
-        // ★A restored geometry carries the window STATE too. If the strip was ever maximised its saved
-        // state brings it back filling the screen — indistinguishable, to the user, from the big dashboard
-        // having opened itself. The strip is meant to sit in a corner, so refuse those states and cap the
-        // size; the position is still honoured.
-        strip_window_->setWindowState(strip_window_->windowState()
-                                      & ~(Qt::WindowMaximized | Qt::WindowFullScreen));
-        const QSize sz = strip_window_->size();
-        strip_window_->resize(std::min(sz.width(), 900), std::min(sz.height(), 420));
-    }
-    else
-        strip_window_->resize(520, 210);   // small ON PURPOSE — it is meant to sit in a corner, always open
+    rc::dashboard::restore_window_geometry(strip_window_, QStringLiteral("table_concept"), QStringLiteral("BeliefStripWindow"),
+                                           QSize(520, 210), QSize(900, 420));
 }
 
 void SpecificWorker::save_strip_geometry() const
 {
-    if (not strip_window_)
-        return;
-    QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("table_concept"));
-    settings.setValue(QStringLiteral("BeliefStripWindow_geometry"), strip_window_->saveGeometry());
-    settings.sync();
+    rc::dashboard::save_window_geometry(strip_window_, QStringLiteral("table_concept"), QStringLiteral("BeliefStripWindow"));
 }
 
 // ─── Belief inspector ────────────────────────────────────────────────────────────────────────────
@@ -191,49 +177,31 @@ void SpecificWorker::refresh_belief_inspector()
 
 // ─── Dashboard construction + geometry ────────────────────────────────────────────────────────────
 
-// Persist/restore the standalone dashboard window's geometry. The generated save_window_settings()
-// only covers the QMainWindow(s) in `windows`; our extracted top-level widget is separate, so we
-// carry its own QSettings entry (mirrors room_concept's RoomViewer).
+
+// No max size here: the full dashboard is one the user may legitimately maximise, so its saved state is
+// honoured as-is. That asymmetry is the whole reason max_restored is a parameter and not a constant.
 void SpecificWorker::restore_dashboard_geometry()
 {
-    if (not dashboard_window_)
-        return;
-    QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("table_concept"));
-    const QByteArray geom = settings.value(QStringLiteral("DashboardWindow_geometry")).toByteArray();
-    if (not geom.isEmpty())
-        dashboard_window_->restoreGeometry(geom);
-    else
-        dashboard_window_->resize(1180, 900);
+    rc::dashboard::restore_window_geometry(dashboard_window_, QStringLiteral("table_concept"), QStringLiteral("DashboardWindow"),
+                                           QSize(1180, 900));
 }
 
 void SpecificWorker::save_dashboard_geometry() const
 {
-    if (not dashboard_window_)
-        return;
-    QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("table_concept"));
-    settings.setValue(QStringLiteral("DashboardWindow_geometry"), dashboard_window_->saveGeometry());
-    settings.sync();
+    rc::dashboard::save_window_geometry(dashboard_window_, QStringLiteral("table_concept"), QStringLiteral("DashboardWindow"));
 }
 
-// Remove timeseries series for tables no longer present in the graph, so a removed table's lines don't persist
-// (and a table reborn under the same name gets fresh series via the idempotent add_series in the feed). Runs
-// every compute cycle; cheap (a set diff over the few live instances).
+
+// Remove the timeseries of instances no longer in the graph, so a removed one's lines don't persist (and one
+// reborn under the same name gets fresh series via the idempotent add_series in the feed). SHARED — the
+// agent supplies only the live names and its own remembered set.
 void SpecificWorker::prune_dead_series()
 {
-    if (not ts_plot_) return;
-    std::unordered_set<std::string> live;
-    for (const auto& [id, inst] : fitter_->instances()) live.insert(inst.node_name);
-    for (auto it = ts_known_tables_.begin(); it != ts_known_tables_.end();)
-    {
-        if (live.contains(*it)) { ++it; continue; }
-        const std::string& n = *it;
-        ts_plot_->remove_series(n + "_fe");   ts_plot_->remove_series(n + "_base");
-        if (ts_surprise_plot_) ts_surprise_plot_->remove_series(n + "_surprise");
-        if (ts_cov_plot_)      ts_cov_plot_->remove_series(n + "_cov");
-        if (ts_res_plot_)      ts_res_plot_->remove_series(n + "_res");
-        it = ts_known_tables_.erase(it);
-    }
-    for (const auto& [id, inst] : fitter_->instances()) ts_known_tables_.insert(inst.node_name);
+    std::vector<std::string> live;
+    live.reserve(fitter_->instances().size());
+    for (const auto& [id, inst] : fitter_->instances()) live.push_back(inst.node_name);
+    rc::dashboard::prune_dead_series({ts_plot_, ts_surprise_plot_, ts_cov_plot_, ts_res_plot_},
+                                     live, ts_known_tables_);
 }
 // Build ONE combined top-level window — the belief timeseries dashboard + the evidence monitor stacked in a
 // vertical splitter — on the main thread from initialize(). cfg_.show_dashboard=false builds NOTHING (headless):
