@@ -9,6 +9,8 @@
 
 #include "refrigerator_lidar_range_channel.h"
 
+#include "../../common/lidar_select/lidar_select.h"   // rc::lidar_select:: (SHARED)
+
 #include <algorithm>
 #include <cmath>
 #include <utility>
@@ -34,33 +36,14 @@ int RefrigeratorLidarRangeChannel::select_into(const RefrigeratorInstance& inst,
                                         const std::vector<Eigen::Vector3f>& sweep, const Eigen::Vector3f& origin,
                                         float precision_base, rc::ai::LidarRays& out, float* cov_ang) const
 {
+    // The selection loop and the two down-weights are SHARED (common/lidar_select) — they were byte-identical
+    // between refrigerator and table and 98% across all four. What stays per-object is select_box(): WHERE
+    // THIS BODY IS. That is the half that produced the live defects, so it is the half kept in sight.
     const auto [rxy, z_lo, z_hi] = select_box();
-    const float rxy2 = rxy * rxy;
-    out.endpoints.clear();
-    out.endpoints.reserve(256);
-    double bear_c = 0.0, bear_s = 0.0;
-    for (const auto& p : sweep)
-    {
-        const float dx = p.x() - centroid.x(), dy = p.y() - centroid.y();
-        const float dh2 = dx * dx + dy * dy;
-        if (dh2 > rxy2 or p.z() < z_lo or p.z() > z_hi) continue;
-        out.endpoints.push_back(p);
-        const float phi = std::atan2(dy, dx);
-        bear_c += std::cos(phi); bear_s += std::sin(phi);
-    }
-    const int n = static_cast<int>(out.endpoints.size());
-    float ca = 1.0f;
-    if (n > 0)
-    {
-        const float coverage = std::min(1.0f, static_cast<float>(n) / std::max(1.0f, cfg_.lidar_coverage_n0));
-        const float R        = static_cast<float>(std::hypot(bear_c, bear_s) / n);
-        ca = std::pow(std::max(0.0f, 1.0f - R), cfg_.lidar_coverage_ang_power);
-        out.origin     = origin;
-        out.precision  = precision_base * coverage * ca;
-        out.robust_c_m = cfg_.lidar_robust_c_m;
-    }
-    if (cov_ang) *cov_ang = ca;
-    return n;
+    const rc::lidar_select::Box box{rxy, z_lo, z_hi};
+    const rc::lidar_select::Weights w{cfg_.lidar_coverage_n0, cfg_.lidar_coverage_ang_power, cfg_.lidar_robust_c_m};
+    return rc::lidar_select::select_into(sweep, origin, {centroid.x(), centroid.y()}, box,
+                                         precision_base, w, out, cov_ang);
 }
 
 // Select this cycle's returns landing on THIS refrigerator and stage them on frame.lidar (range factor / VACATE).
@@ -106,33 +89,21 @@ void RefrigeratorLidarRangeChannel::feed(RefrigeratorInstance& inst, Refrigerato
 
         // Generous "near?" raw count (1.5× box): is a return anywhere near this refrigerator? (below the birth
         // min-separation so it can't grab a neighbour's returns).
-        const auto [rxy, z_lo, z_hi] = select_box();
-        const float rraw2 = (1.5f * rxy) * (1.5f * rxy);
-        int raw = 0;
-        for (const auto& p : lidar_sweep_room_)
-        {
-            const float dx = p.x() - c.x(), dy = p.y() - c.y();
-            if (dx * dx + dy * dy <= rraw2 and p.z() >= z_lo and p.z() <= z_hi) ++raw;
-        }
-        inst.dbg_lidar_raw = raw;
+        const auto [rxy2_, zlo_, zhi_] = select_box();
+        inst.dbg_lidar_raw = rc::lidar_select::raw_count(lidar_sweep_room_, {c.x(), c.y()},
+                                                         {rxy2_, zlo_, zhi_});
 
         if (n > 0)
         {
-            double resid_sum = 0.0;
-            for (const auto& p : frame.lidar.endpoints) resid_sum += std::abs(inst.ai2_belief.sdf_compound(p, s));
-            inst.dbg_lidar_resid_m = static_cast<float>(resid_sum / n);
-            // z-calibration probe: mean z of ALL selected returns + the highest/lowest 20% (≈ observed refrigeratortop /
-            // floor). A persistent dbg_lidar_topz_m vs fitted H gap ⇒ a lidar3D→room z-offset, not a fit error.
-            std::vector<float> zs; zs.reserve(frame.lidar.endpoints.size());
-            double zsum = 0.0;
-            for (const auto& p : frame.lidar.endpoints) { zs.push_back(p.z()); zsum += p.z(); }
-            std::sort(zs.begin(), zs.end());
-            const std::size_t k = std::max<std::size_t>(1, zs.size() / 5);
-            double topsum = 0.0; for (std::size_t i = zs.size() - k; i < zs.size(); ++i) topsum += zs[i];
-            double botsum = 0.0; for (std::size_t i = 0; i < k; ++i) botsum += zs[i];
-            inst.dbg_lidar_meanz_m  = static_cast<float>(zsum / zs.size());
-            inst.dbg_lidar_topz_m   = static_cast<float>(topsum / k);
-            inst.dbg_lidar_floorz_m = static_cast<float>(botsum / k);
+            // Residual + z-calibration probe, SHARED. `sdf` is the agent's own surface, which is why it is a
+            // callback: a box with legs uses the compound SDF, a cabinet run a plain box.
+            rc::lidar_select::Diag d;
+            rc::lidar_select::probe(frame.lidar, [&](const Eigen::Vector3f& p)
+                                    { return inst.ai2_belief.sdf_compound(p, s); }, d);
+            inst.dbg_lidar_resid_m  = d.resid_m;
+            inst.dbg_lidar_meanz_m  = d.meanz;
+            inst.dbg_lidar_topz_m   = d.topz;
+            inst.dbg_lidar_floorz_m = d.floorz;
         }
     }
 
