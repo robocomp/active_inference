@@ -184,8 +184,14 @@ void SpecificWorker::run_instance_tracker()
                 // robot passed every guard written as `if (has_depth)`. Reported live on bottle_concept —
                 // moving and cloning with the robot facing away, 3 m off. mask_source says which camera,
                 // unambiguously, and the voxelizer has been publishing it all along. A ricoh slice may
-                // still CONFIRM a live instance (bearing_confirm) or raise a proto-object to go and look
-                // at; it may not move one. See MaskIngestor::MaskSlice::may_fit_geometry.
+                // still CONFIRM a live instance or raise a proto-object to go and look
+                // at; it may not move one. ★THE MECHANISM HERE IS THIS AGENT'S OWN
+                // process_ricoh_bearings, NOT common/bearing_confirm — that module is used by
+                // bottle/chair/door, which consume BEARING-ONLY slices (has_depth=false, azimuth).
+                // This agent instead consumes ricoh slices that carry 3D points from the LiDAR
+                // depth-fill. Both are the same channel; naming the wrong one sent an audit
+                // looking for a bearing_confirm call that was never going to be here.
+                // See MaskIngestor::MaskSlice::may_fit_geometry.
             if (sl.label != "hood" or sl.support_end <= sl.support_begin or not sl.may_fit_geometry())
                 continue;
             if (sl.depth_var > 0.0f)   // RICOH is BEARING-ONLY: never births/associates/fits — the tracker sees
