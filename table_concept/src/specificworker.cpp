@@ -312,6 +312,15 @@ void SpecificWorker::initialize()
     rt_api_ = G->get_rt_api();
     inner_eigen_ = G->get_inner_eigen_api();
     mask_ingestor_ = std::make_unique<rc::MaskIngestor>(G);
+    // A/B ONLY (Masks.legacy_room_frame): read the producer's pre-flip ROOM-frame array instead of
+    // transforming the camera-frame one here. Announce it — a silent A/B knob is how a benchmark ends up
+    // measuring the wrong build. Normal operation is false; see table_config.h.
+    if (cfg_.masks_legacy_room_frame)
+    {
+        mask_ingestor_->set_legacy_room_frame(true);
+        std::println("[table_concept] Masks.legacy_room_frame=true — A/B baseline: reading the voxelizer's "
+                     "ROOM-frame mask array, NOT transforming camera points here");
+    }
     scene_graph_ = std::make_unique<rc::TableSceneGraph>(
         G, rt_api_.get(), cfg_, [this] { trigger_graph_layout_twopi(); });
 

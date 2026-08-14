@@ -52,6 +52,19 @@ Verbose = false
 [Media]
 MasksStallTimeoutMs = 3000   # 0 = disable the stall gate
 
+# ── A/B ONLY — mask frame contract ────────────────────────────────────────────────────────────────
+# The voxelizer publishes mask support points in CAMERA frame; common/mask_ingestor transforms them to
+# the room at the capture stamp (with the pose forward-extrapolated over the RT lag). Set this true to
+# read the producer's LEGACY room-frame array verbatim instead — the pre-flip behaviour — so both paths
+# can be measured against the SAME producer while both arrays still exist.
+#   true  -> baseline (old behaviour)      false -> normal operation (transform done here)
+# Compare the two traces with:  g++ -std=c++23 -O2 -o /tmp/ai2_ab ../common/tools/ai2_ab.cpp
+# ★It has to be a MOVING comparison: at stillness the extrapolation term is identically zero, so the
+#  two paths are algebraically identical and agreement proves nothing.
+# ★Delete this knob once the producer stops publishing the room array (Phase 2) — it is scaffolding.
+[Masks]
+legacy_room_frame = false
+
 # ── AI2 belief (TABLE.md): full-covariance recursive filter; legs derived, soft mixture ──
 # This is the ONLY fit path (the legacy SDF-gradient/Fisher/queue/silhouette fit has been removed).
 [TableModel]

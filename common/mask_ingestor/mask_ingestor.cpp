@@ -2,9 +2,10 @@
  * common/mask_ingestor/mask_ingestor.cpp  —  shared YOLO "masks" DSR node reader (implementation)
  *
  * SHARED across the concept agents: parses the voxelizer-written "masks" node into a MasksPacket (slices +
- * support points + raw silhouette pixels + the per-mask corruption/range/bearing channels), optionally
- * re-frames the support points src→target (pinned to the capture stamp, recomputing centroids/bboxes there),
- * and serves the nearest slice of a requested label. Frame-agnostic; the caller chooses room vs camera frame.
+ * support points + raw silhouette pixels + the per-mask corruption/range/bearing channels), re-frames the
+ * support points src→target (pinned to the capture stamp, recomputing centroids/bboxes there), and serves
+ * the nearest slice of a requested label. The producer publishes CAMERA-frame points; the room transform
+ * lives here, so raw perception never depends on localization. See the FRAME CONTRACT in the header.
  */
 
 #include <optional>
@@ -12,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <print>
 #include <sstream>
@@ -19,15 +21,34 @@
 
 #include <QDateTime>   // wall-clock ms source for the producer-liveness probes (kept out of the header)
 
+#include "../media_transport/rt_extrapolate.h"   // efference-copy forward-extrapolation over the RT lag
+
 namespace rc {
 
 // ─── Construction / configuration ────────────────────────────────────────────────────────────────
 
 MaskIngestor::MaskIngestor(std::shared_ptr<DSR::DSRGraph> graph)
     : G_(std::move(graph))
-{}
+{
+    // Own the transform by default (see FRAME CONTRACT): the producer publishes camera-frame points and
+    // this class converts them to the room at the capture stamp. get_inner_eigen_api() hands back a FRESH
+    // instance per call, so this one is never shared with the consumer's own — which is what keeps the
+    // ts==0 cache per-instance. We only ever query it with ts!=0 anyway, so no cache is touched.
+    if (G_)
+        owned_inner_eigen_ = G_->get_inner_eigen_api();
+    inner_eigen_       = owned_inner_eigen_.get();
+    transform_enabled_ = (inner_eigen_ != nullptr);
+    // A/B escape hatch: force the legacy room-frame array so the two paths can be diffed on the same
+    // producer. They must agree to float precision — same matrix, same timestamp, one process later.
+    if (const char* v = std::getenv("MASK_INGESTOR_LEGACY_ROOM"); v != nullptr and v[0] == '1')
+    {
+        force_legacy_room_ = true;
+        std::println("[MaskIngestor] MASK_INGESTOR_LEGACY_ROOM=1 — reading producer ROOM-frame points as-is");
+    }
+}
 
-// Opt in (Part B) to reading camera-frame support points and transforming them src→target per capture stamp.
+// Override the default zed→room transform. A null inner_eigen or an empty frame name reverts to the
+// legacy path (read the producer's ROOM-frame array verbatim).
 void MaskIngestor::enable_frame_transform(DSR::InnerEigenAPI* inner_eigen,
                                           std::string source_frame, std::string target_frame)
 {
@@ -35,6 +56,79 @@ void MaskIngestor::enable_frame_transform(DSR::InnerEigenAPI* inner_eigen,
     src_frame_         = std::move(source_frame);
     tgt_frame_         = std::move(target_frame);
     transform_enabled_ = (inner_eigen_ != nullptr) and not src_frame_.empty() and not tgt_frame_.empty();
+}
+
+void MaskIngestor::set_frames(std::string source_frame, std::string target_frame)
+{
+    src_frame_         = std::move(source_frame);
+    tgt_frame_         = std::move(target_frame);
+    transform_enabled_ = (inner_eigen_ != nullptr) and not src_frame_.empty() and not tgt_frame_.empty();
+}
+
+void MaskIngestor::set_pose_extrapolation(bool enabled, float max_dt_s)
+{
+    pose_extrapolate_     = enabled;
+    pose_extrap_max_dt_s_ = max_dt_s;
+}
+
+// ─── Transform resolution ─────────────────────────────────────────────────────────────────────────
+
+// ★THE RT LAG IS WHY THIS IS NOT ONE get_transformation_matrix CALL.
+// DSR's InterpolatedRT CLAMPS a query at the newest RT block — it never extrapolates velocity — so a mask
+// whose capture stamp is AHEAD of room_concept's latest published pose (~90 ms of localization pipeline
+// lag, measured) resolves against a STALE robot pose. The voxelizer used to correct for this internally
+// (room_T_zed_extrapolated + forward_extrapolate_room_T_robot) before baking the transform into the
+// points; moving the transform here without that correction would have silently reintroduced the lag
+// exactly when it matters — while the robot is MOVING — and the regression would have looked like a
+// tracker/association problem, not a frame problem. So the chain is split and the same efference-copy
+// prediction is applied here, reusing the shared helper the LiDAR consumers already use.
+//   tgt←src  =  extrapolate(tgt←robot @ stamp)  ·  robot←src @ 0 (static camera mount, never changes)
+std::optional<Eigen::Matrix4d> MaskIngestor::resolve_transform(std::uint64_t stamp) const
+{
+    if (inner_eigen_ == nullptr)
+        return std::nullopt;
+
+    const auto to_m4 = [](const Mat::RTMat& t)
+    {
+        Eigen::Matrix4d m = Eigen::Matrix4d::Identity();
+        const auto& s = t.matrix();          // element-wise: dodges the Eigen-alignment ABI trap
+        for (int r = 0; r < 4; ++r) for (int c = 0; c < 4; ++c) m(r, c) = s(r, c);
+        return m;
+    };
+
+    // Direct lookup: correct whenever the chain can't be split (no robot node, src not under the robot),
+    // and the only path when extrapolation is off. Still capture-stamp pinned.
+    const auto direct = [&]() -> std::optional<Eigen::Matrix4d>
+    {
+        const auto T = inner_eigen_->get_transformation_matrix(tgt_frame_, src_frame_, stamp);
+        return T.has_value() ? std::optional{to_m4(T.value())} : std::nullopt;
+    };
+
+    if (not pose_extrapolate_ or stamp == 0 or not G_)
+        return direct();
+
+    if (robot_name_.empty())
+        if (const auto robots = G_->get_nodes_by_type("robot"); not robots.empty())
+            robot_name_ = robots.front().name();
+    if (robot_name_.empty() or robot_name_ == src_frame_)
+        return direct();
+
+    // tgt←robot at the capture stamp (CLAMPED by DSR when the mask outruns the RT), then predicted forward.
+    const auto base = inner_eigen_->get_transformation_matrix(tgt_frame_, robot_name_, stamp);
+    if (not base.has_value())
+        return direct();
+    Mat::RTMat tgt_T_robot = base.value();
+    rc::media::extrapolate_room_T_robot(G_, tgt_frame_, robot_name_, stamp, pose_extrap_max_dt_s_,
+                                        base.value(), tgt_T_robot);
+
+    // robot←src is the RIGID camera mount: it carries only its bootstrap timestamp, so a stamp-pinned
+    // query FAILS on it — ask for "latest" (ts==0). Safe on the ts==0 cache because this instance is the
+    // ingestor's own and every consumer refreshes on its main thread.
+    const auto robot_T_src = inner_eigen_->get_transformation_matrix(robot_name_, src_frame_, 0);
+    if (not robot_T_src.has_value())
+        return direct();
+
+    return to_m4(tgt_T_robot * robot_T_src.value());
 }
 
 // ─── Ingest one masks frame ──────────────────────────────────────────────────────────────────────
@@ -133,10 +227,22 @@ bool MaskIngestor::refresh()
     const auto& color_var_v       = vref(color_var_opt);
     const auto& color_neff_v      = vref(color_neff_opt);
 
-    // Part B: with frame-transform enabled, source the camera-frame support array and transform it to
-    // the target frame below; otherwise use the legacy room-frame array as-is.
+    // Frame selection. The camera array is the contract (see header); the room array is only a fallback
+    // for an OLD producer that still publishes it, or the explicit A/B escape hatch. Note the camera path
+    // is chosen on the ARRAY being present, not on which agent this is — so a producer that drops the room
+    // array needs no consumer change, and one that predates the camera array keeps working.
     const VecOpt points_cam_opt = G_->get_attrib_by_name<mask_support_points_cam_att>(masks_node);
-    const bool use_cam = transform_enabled_ and points_cam_opt and not points_cam_opt->get().empty();
+    const bool have_cam = points_cam_opt and not points_cam_opt->get().empty();
+    const bool use_cam  = transform_enabled_ and have_cam and not force_legacy_room_;
+    if (not use_cam and support_flat.empty() and have_cam)
+    {
+        // Camera points are all we have and we cannot re-frame them: the room array is empty and the
+        // transform is off/unavailable. Handing back camera coordinates that every consumer will treat as
+        // room coordinates is the corruption this class exists to prevent — refuse the frame instead.
+        ++dropped_no_transform_;
+        masks_packet_ = {};
+        return false;
+    }
     const auto& source_flat = use_cam ? points_cam_opt->get() : support_flat;
 
     const std::size_t support_count = source_flat.size() / 3;
@@ -161,17 +267,28 @@ bool MaskIngestor::refresh()
         for (int k = 0; k < 6; ++k) packet.cam_twist[k] = cam_twist_opt->get()[k];
     packet.frame_dt_s = frame_dt_opt ? frame_dt_opt.value() : 0.0f;
 
-    // src→tgt transform (Part B): one matrix for the whole frame, pinned to the capture stamp. Built
-    // element-wise to dodge the Eigen-alignment ABI trap. Identity fallback if the chain isn't ready
-    // (points stay in source frame this cycle — better than dropping the frame).
+    // src→tgt transform: one matrix for the whole frame, pinned to the CAPTURE stamp (ts!=0 ⇒ correct
+    // pinning AND no InnerEigenAPI cache). Built element-wise to dodge the Eigen-alignment ABI trap.
+    //
+    // ★NO IDENTITY FALLBACK. The old code fell back to identity when the chain was not resolvable, which
+    // silently handed camera-frame points to a consumer that would fit them as room coordinates — the same
+    // defect the producer had. An unresolvable chain means the robot is not localized at this stamp, and
+    // the honest answer is "no observation this cycle", not "an observation at the origin".
     Eigen::Matrix4d T_tgt_src = Eigen::Matrix4d::Identity();
     if (use_cam)
-        if (const auto Topt = inner_eigen_->get_transformation_matrix(tgt_frame_, src_frame_, packet.timestamp_ms);
-            Topt.has_value())
+    {
+        const auto Topt = resolve_transform(packet.timestamp_ms);
+        if (not Topt.has_value())
         {
-            const auto& s = Topt.value().matrix();
-            for (int r = 0; r < 4; ++r) for (int c = 0; c < 4; ++c) T_tgt_src(r, c) = s(r, c);
+            if (++dropped_no_transform_ % 100 == 1)
+                std::println("[MaskIngestor] {}<-{} unresolvable at ts={} — frame {} dropped ({} total)",
+                             tgt_frame_, src_frame_, packet.timestamp_ms, frame_id, dropped_no_transform_);
+            masks_packet_ = {};
+            last_masks_frame_seen_ = frame_id;   // consumed: do not re-attempt this same frame every cycle
+            return false;
         }
+        T_tgt_src = Topt.value();
+    }
 
     packet.support_points.reserve(support_count);
     for (std::size_t i = 0; i < support_count; ++i)
@@ -185,10 +302,15 @@ bool MaskIngestor::refresh()
             packet.support_points.emplace_back(source_flat[i*3], source_flat[i*3+1], source_flat[i*3+2]);
     }
 
-    // RAW camera-frame support points (untransformed), when the producer dual-published them — 1-to-1
-    // with support_points' indexing. Pose-independent; consumed by object-anchor z_o. Loaded regardless
-    // of use_cam (which only governs the room/target-frame support_points path above).
-    if (points_cam_opt and points_cam_opt->get().size() == source_flat.size() and not use_cam)
+    // RAW camera-frame support points (untransformed), 1-to-1 with support_points' indexing.
+    // Pose-independent; this is what the object-anchor z_o path reads (table/hood/refrigerator/cabinet
+    // build inst.obs_robot from it via the static body←zed mount).
+    //
+    // ★POPULATED ON BOTH PATHS. It used to be filled only when use_cam==false, i.e. only for consumers
+    // that did NOT re-frame — so making the camera path the default would have silently emptied the array
+    // and killed every object anchor with no compile error and no log. On the camera path it is simply the
+    // untransformed source, so this is a copy, not a second computation.
+    if (have_cam and points_cam_opt->get().size() == source_flat.size())
     {
         const auto& cam_flat = points_cam_opt->get();
         packet.support_points_cam.reserve(support_count);

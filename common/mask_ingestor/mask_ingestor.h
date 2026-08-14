@@ -11,15 +11,26 @@
  * packet(). Plain class (no Q_OBJECT) constructed by SpecificWorker once G is ready.
  *
  * FRAME CONTRACT (this class IS the single agreement point with the voxelizer producer):
- *   The producer dual-publishes mask support points, 1-to-1:
- *     - "mask_support_points"      → ROOM frame  (default path here)
- *     - "mask_support_points_cam"  → ZED/camera frame
- *   Frame is chosen PER CONSUMER, here, not at the producer:
- *     - default            → read room-frame points as-is  (table_concept, chair_concept)
- *     - enable_frame_transform(...) → read the _cam points, transform src→target via inner_eigen
- *       pinned to the capture stamp, and RECOMPUTE per-slice centroids/bboxes in the target frame
- *       (bottle_concept). No *_cam centroid/bbox attribute exists or is needed for this reason.
- *   Both producer arrays must keep existing; switching everyone to one frame is NOT a producer change.
+ *   The producer publishes mask support points in the ZED/CAMERA frame — the raw deprojection, before
+ *   any pose is applied ("mask_support_points_cam"). THE ROOM TRANSFORM HAPPENS HERE, not at the
+ *   producer: this class reads the camera points and transforms them zed→"room" via inner_eigen,
+ *   pinned to the CAPTURE stamp, recomputing per-slice centroids/bboxes in the target frame. No *_cam
+ *   centroid/bbox attribute exists or is needed for that reason.
+ *
+ *   ★WHY THE CONSUMER PAYS FOR THE TRANSFORM, NOT THE PRODUCER. Baking room_T_zed at the producer made
+ *   a RAW-PERCEPTION component depend on a LOCALIZATION component: the voxelizer could not run at all
+ *   without room_concept, it grew a forward pose-extrapolator purely to beat the room→robot RT lag, and
+ *   when the RT chain failed to resolve it published camera-frame points LABELLED as room frame (an
+ *   identity fallback with no attribute to distinguish it). It also hid the localization uncertainty:
+ *   the room transform is a measurement channel WITH a covariance, and only whoever applies it can add
+ *   the J·Σ_chain·Jᵀ term (door/table/chair/cabinet already do, via InnerGaussianAPI). Skeletons were
+ *   already published camera-frame for exactly this reason ("so a consumer can servo robot-relative
+ *   without paying localization noise"); masks were the last holdout.
+ *
+ *   Legacy: "mask_support_points" (ROOM frame) is still read when the producer publishes it and the
+ *   camera array is absent, so an OLD voxelizer keeps working. Set MASK_INGESTOR_LEGACY_ROOM=1 in the
+ *   environment to force that path for an A/B against the transform done here — the two must agree to
+ *   float precision, since it is the same matrix at the same timestamp, one process later.
  */
 
 #pragma once
@@ -131,15 +142,35 @@ public:
         float                frame_dt_s = 0.0f;
     };
 
+    // Constructs its OWN InnerEigenAPI (a fresh instance per call by design) so every consumer gets the
+    // zed→room transform without wiring one in. Safe: the lookup is pinned to the capture stamp (ts!=0),
+    // which bypasses InnerEigenAPI's unlocked ts==0 cache entirely (CLAUDE.md, DSR thread-safety).
     explicit MaskIngestor(std::shared_ptr<DSR::DSRGraph> graph);
 
-    // Opt-in (Part B): transform support points from the producer's SOURCE frame into the consumer's
-    // TARGET frame via inner_eigen, pinned to the mask capture stamp. When enabled, points are read
-    // from "mask_support_points_cam" (camera/source frame, dual-published by the voxelizer) and
-    // transformed src→tgt; per-slice centroids/bboxes are recomputed in the target frame. When NOT
-    // enabled (default), points come room-frame from "mask_support_points" (legacy — table/chair).
+    // Override the default zed→room transform (e.g. a consumer that fits in a different frame). Passing
+    // a null inner_eigen or an empty frame name reverts to reading the legacy ROOM-frame array as-is.
     void enable_frame_transform(DSR::InnerEigenAPI* inner_eigen,
                                 std::string source_frame, std::string target_frame);
+
+    // Frames the transform resolves; defaults "zed" → "room".
+    void set_frames(std::string source_frame, std::string target_frame);
+
+    // A/B control: read the producer's legacy ROOM-frame array verbatim instead of transforming the
+    // camera-frame one here. Exists ONLY so the two paths can be compared on the same producer while
+    // both arrays still exist; it becomes a no-op once the producer stops publishing the room array
+    // (Phase 2). Also settable via MASK_INGESTOR_LEGACY_ROOM=1, which this overrides.
+    void set_legacy_room_frame(bool on) { force_legacy_room_ = on; }
+
+    // Forward-extrapolate the target←robot pose from the newest RT block to the mask capture stamp before
+    // composing the transform (default ON, horizon 0.2 s — the producer's settings, ported verbatim).
+    // See resolve_transform() for why this is not optional in practice.
+    void set_pose_extrapolation(bool enabled, float max_dt_s = 0.2f);
+
+    // Frames whose zed→room lookup failed (chain not resolvable at the capture stamp). These are DROPPED,
+    // never passed through with an identity transform — identity would yield camera-frame points labelled
+    // room, which is the exact defect this class was moved here to remove. A consumer skipping a cycle is
+    // correct; a consumer fitting a corrupt cycle is not.
+    [[nodiscard]] std::uint64_t dropped_no_transform() const noexcept { return dropped_no_transform_; }
 
     // Re-read the "masks" node. Returns true only when a NEW frame was ingested.
     bool refresh();
@@ -171,16 +202,29 @@ public:
     std::vector<Eigen::Vector3f> read_pts_attrib(const DSR::Node& node, const std::string& att_name) const;
 
 private:
+    // tgt←src at the mask capture stamp, reproducing the chain the voxelizer used to apply internally:
+    // tgt←robot pinned to the stamp and forward-extrapolated over the RT lag, composed with the STATIC
+    // robot←src camera mount. nullopt when the chain is not resolvable — callers must DROP the frame,
+    // never substitute identity. Falls back to a direct tgt←src lookup when the chain cannot be split.
+    [[nodiscard]] std::optional<Eigen::Matrix4d> resolve_transform(std::uint64_t stamp) const;
+
     std::shared_ptr<DSR::DSRGraph> G_;
     MasksPacket                    masks_packet_;
     int                            last_masks_frame_seen_ = -1;
     std::int64_t                   last_fresh_wall_ms_    = 0;   // wall-clock ms of the last NEW-frame ingest (0 = never)
 
-    // Opt-in source→target frame transform (see enable_frame_transform).
+    // src→tgt frame transform (see the FRAME CONTRACT above). `inner_eigen_` points either at
+    // `owned_inner_eigen_` (the default) or at an instance handed in by enable_frame_transform.
+    std::unique_ptr<DSR::InnerEigenAPI> owned_inner_eigen_;
     DSR::InnerEigenAPI* inner_eigen_       = nullptr;
-    std::string         src_frame_;
-    std::string         tgt_frame_;
+    std::string         src_frame_         = "zed";
+    std::string         tgt_frame_         = "room";
     bool                transform_enabled_ = false;
+    bool                force_legacy_room_ = false;   // MASK_INGESTOR_LEGACY_ROOM=1 (A/B escape hatch)
+    bool                pose_extrapolate_  = true;    // beat the room→robot RT lag (producer default)
+    float               pose_extrap_max_dt_s_ = 0.2f; // extrapolation horizon clamp (producer default)
+    mutable std::string robot_name_;                  // memoized get_nodes_by_type("robot").front().name()
+    std::uint64_t       dropped_no_transform_ = 0;
 };
 
 }  // namespace rc

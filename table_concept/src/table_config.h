@@ -44,6 +44,15 @@ struct TableConfig
     // legitimately empty scene (still-advancing counter) never trips it. 0 = disable the gate.
     int   masks_stall_timeout_ms       = 3000;
 
+    // ── A/B ONLY: read the voxelizer's legacy ROOM-frame mask array (Masks.legacy_room_frame) ─────────
+    // The producer publishes support points in CAMERA frame and MaskIngestor transforms them to the room
+    // at the capture stamp (see the FRAME CONTRACT in common/mask_ingestor). true ⇒ read the producer's
+    // room-frame array verbatim instead, i.e. the pre-flip behaviour, so the two paths can be compared on
+    // the SAME producer while both arrays still exist. Compare with common/tools/ai2_ab.cpp.
+    // ★Leave FALSE for normal operation, and expect this to become a no-op once the producer drops the
+    // room array (Phase 2) — at which point the whole knob should be deleted, not left lying around.
+    bool  masks_legacy_room_frame      = false;
+
     // Show the combined GUI window (belief timeseries dashboard + evidence monitor in one splitter).
     // false ⇒ no GUI windows are built at all (headless); the compute feed no-ops on the null widgets.
     bool  show_dashboard         = true;

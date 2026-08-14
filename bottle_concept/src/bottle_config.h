@@ -174,10 +174,12 @@ struct BottleConfig
     bool  bearing_confirm_enabled  = false;   // Bearing.ConfirmEnabled
     float bearing_confirm_gate_rad = 0.17f;   // Bearing.ConfirmGateRad — 1-D angular gate (~10°)
     // ── Part B: masks in camera frame + chain covariance ───────────────────────────────────────────
-    // The voxelizer dual-publishes support points in CAMERA frame (mask_support_points_cam). When
-    // enabled, MaskIngestor transforms them to the fit frame via inner_eigen pinned to the capture
-    // stamp, and the published RT-edge covariance gains the localization term J·Σ_chain·Jᵀ from
-    // InnerGaussianAPI (the chain source→target uncertainty). false → legacy room-frame masks.
+    // The voxelizer publishes support points in CAMERA frame (mask_support_points_cam); MaskIngestor
+    // transforms them to the fit frame via inner_eigen pinned to the capture stamp. That is now the
+    // DEFAULT for every agent (see the FRAME CONTRACT in common/mask_ingestor), so this flag no longer
+    // SELECTS the frame — it only governs whether the published RT-edge covariance gains the
+    // localization term J·Σ_chain·Jᵀ from InnerGaussianAPI (the chain source→target uncertainty).
+    // To force the legacy room-frame array for an A/B, set MASK_INGESTOR_LEGACY_ROOM=1 in the environment.
     bool        masks_use_camera_frame = true;
     std::string masks_source_frame     = "zed";    // producer frame of mask_support_points_cam
     std::string masks_target_frame     = "room";   // bottle's fit frame

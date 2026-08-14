@@ -61,6 +61,7 @@ TableConfig load_table_config(const ConfigLoader& cfg)
 
     // ─── Primary-input (masks) stream gate — lifecycle liveness ────────────────
     out.masks_stall_timeout_ms   = geti("Media.MasksStallTimeoutMs",           3000);
+    out.masks_legacy_room_frame  = getb("Masks.legacy_room_frame",             false);
     out.show_dashboard           = getb("TableConcept.ShowDashboard",          true);
     out.shape_eval_period        = geti("TableConcept.ShapeEvalPeriod",        30);
     out.shape_eval_min_points    = geti("TableConcept.ShapeEvalMinPoints",     300);
