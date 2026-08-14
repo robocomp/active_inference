@@ -392,7 +392,7 @@ void SpecificWorker::setup_custom_viewers()
         // debugging session: the `rgb` counter is ticked on take_result(), i.e. the worker's OUTPUT, so
         // it reads throughput while the camera may be delivering far faster. A readout that showed only
         // one of them would invite exactly that misreading again.
-        rates_label_ = new QLabel("masks/s   ZED —   Ricoh —   LiDAR —", voxel_panel);
+        rates_label_ = new QLabel("masks/s  processed / feed\nZED     — / —\nRicoh   — / —\nLiDAR   — / —", voxel_panel);
         rates_label_->setStyleSheet("QLabel { font-family: monospace; padding: 2px 6px; color: #C8C8C8; }");
         rates_label_->setToolTip("Rate at which each channel PRODUCES masks.\n"
                                  "ZED shows processed (feed): processed is the worker's output rate,\n"
@@ -413,9 +413,16 @@ void SpecificWorker::setup_custom_viewers()
             const double ricoh = stream_mon_.rate_hz("rgb360");
             const double lidar = stream_mon_.rate_hz("lidar");
             const auto fmt = [](double hz) { return hz > 0.0 ? QString::number(hz, 'f', 1) : QString("—"); };
-            rates_label_->setText(QString("masks/s   ZED %1/%2   Ricoh %3/%4   LiDAR %5/%6   (processed/feed)")
-                                      .arg(fmt(zed), fmt(feed), fmt(ricoh), fmt(stream_mon_.feed_hz("rgb360")),
-                                           fmt(lidar), fmt(stream_mon_.feed_hz("lidar"))));
+            // One channel PER LINE. Three rates side by side on one row read as a sentence; stacked with
+            // the units in the header they read as a table, which is what they are — and the eye can
+            // compare the processed/feed pairs down the column instead of hunting along a line.
+            const auto row = [&fmt](const char* name, double proc, double feed_)
+            { return QString("%1 %2 / %3").arg(QString(name).leftJustified(7),
+                                               fmt(proc).rightJustified(5), fmt(feed_).rightJustified(5)); };
+            rates_label_->setText(QString("masks/s  processed / feed\n%1\n%2\n%3")
+                                      .arg(row("ZED",   zed,   feed),
+                                           row("Ricoh", ricoh, stream_mon_.feed_hz("rgb360")),
+                                           row("LiDAR", lidar, stream_mon_.feed_hz("lidar"))));
         });
         rates_timer_->start(1000);
 
