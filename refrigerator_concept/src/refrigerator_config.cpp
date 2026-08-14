@@ -225,6 +225,11 @@ RefrigeratorConfig load_refrigerator_config(const ConfigLoader& cfg)
     out.existence_verify_gain         = getf("RefrigeratorModel.ExistenceVerifyGain",       5.0f);
 
     std::print("refrigerator_concept: configuration loaded.\n");
+    // Peripheral (ricoh) existence confirmation — see refrigerator_config.h. OFF by default.
+    out.ricoh_confirm_enabled        = getb("RefrigeratorConcept.RicohConfirmEnabled",        out.ricoh_confirm_enabled);
+    out.ricoh_confirm_detection_prob = getf("RefrigeratorConcept.RicohConfirmDetectionProb", out.ricoh_confirm_detection_prob);
+    out.ricoh_confirm_clutter_prob   = getf("RefrigeratorConcept.RicohConfirmClutterProb",   out.ricoh_confirm_clutter_prob);
+
     return out;
 }
 

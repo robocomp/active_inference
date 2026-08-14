@@ -414,6 +414,28 @@ struct RefrigeratorConfig
     // range roughness when deciding whether an unassigned ricoh bearing already matches a known refrigerator.
     float ricoh_attention_angle_margin_rad = 0.05f;  // extra angular tolerance on the refrigerator's angular half-size
     float ricoh_attention_range_band_m     = 1.0f;   // extra range band (ricoh range is rough/indicative)
+
+    // ── PERIPHERAL (ricoh-360) EXISTENCE CONFIRMATION — CONFIRM-ONLY, never absence ────────────────
+    // A depth-filled ricoh slice that MATCHES a live instance is evidence the object is still there,
+    // and until now it was DISCARDED: process_ricoh_bearings set `assigned = true` and moved on, so the
+    // whole peripheral channel only ever surfaced UNassigned detections as attention targets. A 360°
+    // camera seeing a known object is real persistence evidence; throwing it away is not conservative,
+    // it just means the object is kept alive solely by the front camera it may not be facing.
+    // ★CONFIRM-ONLY IS THE INVARIANT, not a simplification. e_free is always 0 here: a ricoh MISS must
+    // never charge absence, because the 360 detector's p_detect for a given object at a given range is
+    // uncharacterised, and absence weighted by an unknown p_detect is exactly the ratchet that has bitten
+    // this fleet repeatedly (phantom-stale-gate-verdict, lidar-absence-outvotes-camera). Positive-only
+    // evidence cannot delete anything; the worst it can do is keep a real object alive longer.
+    // ★OFF BY DEFAULT. It moves the existence channel, so it ships dark and gets turned on per agent
+    // after an A/B on that agent's own log.
+    bool  ricoh_confirm_enabled        = false;   // RefrigeratorConcept.RicohConfirmEnabled
+    // Detector rates for the RICOH, deliberately NOT the ZED's: a 360 panorama at a fraction of the
+    // angular resolution has both a lower hit rate and a higher false-positive rate. Conservative
+    // defaults — a confirmation is worth clearly less than a foveal one (log(0.6/0.15) = 1.39 nats vs
+    // the ZED's log(0.85/0.05) = 2.83). Fit them from the agent's own log before trusting them.
+    float ricoh_confirm_detection_prob = 0.60f;   // RefrigeratorConcept.RicohConfirmDetectionProb
+    float ricoh_confirm_clutter_prob   = 0.15f;   // RefrigeratorConcept.RicohConfirmClutterProb
+
 };
 
 // Fill a RefrigeratorConfig from a RoboComp ConfigLoader (all keys optional, defaults above).

@@ -9,6 +9,8 @@
 
 #include <limits>
 #include "specificworker.h"
+
+#include "../../common/existence_belief/existence_belief.h"   // rc::exist — peripheral CONFIRM-ONLY
 #include "refrigerator_geometry.h"   // rc::geom::footprint_overlap_ratio
 #include "../../common/instance_tracker/birth_evidence.h"   // rc::birth — the SHARED CREATE policy
 
@@ -573,12 +575,13 @@ void SpecificWorker::process_ricoh_bearings()
         const float rng = std::sqrt((mx - bx) * (mx - bx) + (my - by) * (my - by));// rough range (biased, indicative)
 
         bool assigned = false;
+        std::uint64_t assigned_id = 0;   // which instance this peripheral detection confirmed
         for (const auto& [id, inst] : fitter_->instances())
         {
             const auto& s = inst.model.state();
             const float dx = s.cx - bx, dy = s.cy - by;
             const float dist = std::sqrt(dx * dx + dy * dy);
-            if (dist < 1e-3f) { assigned = true; break; }
+            if (dist < 1e-3f) { assigned = true; assigned_id = id; break; }
             const float tb   = std::atan2(dy, dx);                                  // bearing to the refrigerator
             const float rad  = 0.5f * std::sqrt(s.w * s.w + s.h * s.h);             // circumscribed footprint radius
             const float tol  = std::atan2(rad, dist) + cfg_.ricoh_attention_angle_margin_rad;  // TIGHT: angular half-size
@@ -586,7 +589,32 @@ void SpecificWorker::process_ricoh_bearings()
             // Assign only if the detection matches this refrigerator in BOTH direction AND (rough) range — so a new,
             // unconfirmed refrigerator hiding along the SAME bearing as a known one (different range) stays UNASSIGNED
             // and still raises attention, instead of collapsing onto the known refrigerator (bearing-only would miss it).
-            if (std::abs(wrap(br - tb)) < tol and std::abs(rng - dist) < band) { assigned = true; break; }
+            if (std::abs(wrap(br - tb)) < tol and std::abs(rng - dist) < band)
+                { assigned = true; assigned_id = id; break; }
+        }
+        // ★A MATCH IS EVIDENCE, NOT A NO-OP. This branch used to just fall through: an assigned
+        // detection was computed and discarded, so the peripheral channel could only ever raise NEW
+        // things and never support the ones it recognised. A 360 camera seeing a known instance is
+        // persistence evidence, and the front camera may not even be pointing at it.
+        // CONFIRM-ONLY by construction: e_free is hard 0, so this channel can only ever push L UP. A
+        // ricoh miss charges nothing, because the 360 detector's p_detect for a given object at a given
+        // range is uncharacterised and absence weighted by an unknown p_detect is the ratchet that has
+        // bitten this fleet before. Positive-only evidence cannot delete anything.
+        // The detection's own confidence scales e_occ, so a marginal peripheral hit is worth less than a
+        // confident one; p_detect is passed to integrate() so the shared correlation weighting applies
+        // (consecutive looks from a barely-changed viewpoint are the SAME observation repeated).
+        if (assigned and cfg_.ricoh_confirm_enabled and assigned_id != 0)
+        {
+            auto& insts = fitter_->instances();
+            if (const auto it = insts.find(assigned_id); it != insts.end())
+            {
+                rc::exist::SensorModel sm;
+                sm.detection_prob = cfg_.ricoh_confirm_detection_prob;
+                sm.clutter_prob   = cfg_.ricoh_confirm_clutter_prob;
+                const float e_occ = std::clamp(sl.confidence, 0.0f, 1.0f);
+                const auto  ev    = rc::exist::mask_evidence(e_occ, /*e_free=*/0.0f, /*n_detectable=*/1, sm);
+                it->second.existence.integrate(ev, sm.detection_prob);
+            }
         }
         if (not assigned)
             ricoh_attention_targets_.push_back({br, rng, sl.confidence, {mx, my}});

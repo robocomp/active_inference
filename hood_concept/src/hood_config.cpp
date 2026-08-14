@@ -331,6 +331,11 @@ HoodConfig load_hood_config(const ConfigLoader& cfg)
     out.existence_verify_gain         = getf("HoodModel.ExistenceVerifyGain",       5.0f);
 
     std::print("hood_concept: configuration loaded.\n");
+    // Peripheral (ricoh) existence confirmation — see hood_config.h. OFF by default.
+    out.ricoh_confirm_enabled        = getb("HoodConcept.RicohConfirmEnabled",        out.ricoh_confirm_enabled);
+    out.ricoh_confirm_detection_prob = getf("HoodConcept.RicohConfirmDetectionProb", out.ricoh_confirm_detection_prob);
+    out.ricoh_confirm_clutter_prob   = getf("HoodConcept.RicohConfirmClutterProb",   out.ricoh_confirm_clutter_prob);
+
     return out;
 }
 

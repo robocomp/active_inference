@@ -186,6 +186,11 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.existence_absence_envelope    = getb("TableModel.ExistenceAbsenceEnvelope", true);
 
     std::print("table_concept: configuration loaded.\n");
+    // Peripheral (ricoh) existence confirmation — see table_config.h. OFF by default.
+    out.ricoh_confirm_enabled        = getb("TableConcept.RicohConfirmEnabled",        out.ricoh_confirm_enabled);
+    out.ricoh_confirm_detection_prob = getf("TableConcept.RicohConfirmDetectionProb", out.ricoh_confirm_detection_prob);
+    out.ricoh_confirm_clutter_prob   = getf("TableConcept.RicohConfirmClutterProb",   out.ricoh_confirm_clutter_prob);
+
     return out;
 }
 

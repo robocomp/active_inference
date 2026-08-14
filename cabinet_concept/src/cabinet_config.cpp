@@ -190,6 +190,11 @@ CabinetConfig load_cabinet_config(const ConfigLoader& cfg)
     out.existence_lidar_absence       = getb("CabinetModel.ExistenceLidarAbsence", false);
 
     std::print("cabinet_concept: configuration loaded.\n");
+    // Peripheral (ricoh) existence confirmation — see cabinet_config.h. OFF by default.
+    out.ricoh_confirm_enabled        = getb("CabinetConcept.RicohConfirmEnabled",        out.ricoh_confirm_enabled);
+    out.ricoh_confirm_detection_prob = getf("CabinetConcept.RicohConfirmDetectionProb", out.ricoh_confirm_detection_prob);
+    out.ricoh_confirm_clutter_prob   = getf("CabinetConcept.RicohConfirmClutterProb",   out.ricoh_confirm_clutter_prob);
+
     return out;
 }
 
