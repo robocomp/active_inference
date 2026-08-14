@@ -59,6 +59,8 @@ namespace rc { class YoloViewer; }
 namespace rc { class ImagePopupViewer; }
 namespace rc { class PerceptionWorker; }
 
+class QLabel;   // 1 Hz mask-rate readout on the Voxel3D panel (defined in <QLabel>, only the .cpp needs it)
+
 class SpecificWorker : public GenericWorker
 {
     Q_OBJECT
@@ -184,6 +186,10 @@ class SpecificWorker : public GenericWorker
         // at a fluid cadence, independent of the ~7-10 Hz perception/camera pipeline, so robot motion
         // is smooth. Started in Operating, stopped in Degraded (graph access stays within Operating).
         std::unique_ptr<QTimer> render_timer_;
+        // 1 Hz mask-throughput readout on the Voxel3D panel. Separate from render_timer_ (50 ms) so the
+        // numbers are readable — a rate that repaints 20x/s cannot be read, and these are meant to be READ.
+        std::unique_ptr<QTimer> rates_timer_;
+        QLabel*                 rates_label_ = nullptr;   // owned by the panel (Qt parent), not by us
         void on_render_tick();
 
         // Standalone top-level viewer windows (NOT hosted by the DSR graph viewer — that node-link

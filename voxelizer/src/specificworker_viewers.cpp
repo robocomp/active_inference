@@ -16,6 +16,7 @@
 #include <cmath>
 #include <print>
 
+#include <QLabel>
 #include <QPushButton>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -385,7 +386,37 @@ void SpecificWorker::setup_custom_viewers()
         controls_layout->addLayout(controls_row2);
 
         panel_layout->addLayout(controls_layout);
+        // ── 1 Hz MASK-THROUGHPUT READOUT ───────────────────────────────────────────────────────────
+        // Per-channel rate at which MASKS are actually produced. Deliberately shows PROCESSED next to
+        // FEED for the ZED, because the two are not the same number and confusing them cost a whole
+        // debugging session: the `rgb` counter is ticked on take_result(), i.e. the worker's OUTPUT, so
+        // it reads throughput while the camera may be delivering far faster. A readout that showed only
+        // one of them would invite exactly that misreading again.
+        rates_label_ = new QLabel("masks/s   ZED —   Ricoh —   LiDAR —", voxel_panel);
+        rates_label_->setStyleSheet("QLabel { font-family: monospace; padding: 2px 6px; color: #C8C8C8; }");
+        rates_label_->setToolTip("Rate at which each channel PRODUCES masks.\n"
+                                 "ZED shows processed (feed): processed is the worker's output rate,\n"
+                                 "feed is how fast the camera is delivering. processed < feed means\n"
+                                 "frames are being skipped, not lost.");
+        panel_layout->addWidget(rates_label_);
         panel_layout->addStretch(1);
+
+        // 1 Hz, not the 50 ms render tick: these are meant to be READ, and a number that repaints 20
+        // times a second cannot be.
+        rates_timer_ = std::make_unique<QTimer>(this);
+        connect(rates_timer_.get(), &QTimer::timeout, this, [this]
+        {
+            if (rates_label_ == nullptr)
+                return;
+            const double zed   = stream_mon_.rate_hz("rgb");
+            const double feed  = rate_reg_.feed_hz();
+            const double ricoh = stream_mon_.rate_hz("rgb360");
+            const double lidar = stream_mon_.rate_hz("lidar");
+            const auto fmt = [](double hz) { return hz > 0.0 ? QString::number(hz, 'f', 1) : QString("—"); };
+            rates_label_->setText(QString("masks/s   ZED %1 (feed %2)   Ricoh %3   LiDAR %4")
+                                      .arg(fmt(zed), fmt(feed), fmt(ricoh), fmt(lidar)));
+        });
+        rates_timer_->start(1000);
 
         if (yolo_btn)
             connect(yolo_btn, &QPushButton::toggled, this, [this, yolo_btn](bool checked)
