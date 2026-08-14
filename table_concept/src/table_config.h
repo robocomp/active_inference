@@ -28,6 +28,10 @@ struct TableConfig
     float obs_distance                 = 1.8f;    // d_obs for the epistemic planner
     int   epistemic_cooldown_cycles    = 200;     // min cycles withdrawn after satisfaction
     int   table_log_period_frames      = 30;      // per-cycle log throttle
+    // Publish the accumulated bank onto the DSR node. OFF: audited 2026-08-14, nothing in the whole
+    // components tree reads *_voxel_bank_pts. The bank itself is still built — evaluate_shape and
+    // DumpCloudPath read it locally — this is only the graph traffic.
+    bool  publish_voxel_bank           = false;
     int   voxel_bank_max_points        = 4000;    // cap on the table-owned voxel memory bank
     float voxel_bank_quantization_m    = 0.02f;   // voxel-bank dedup grid (m)
     float voxel_select_radius_margin_m = 0.50f;   // XY margin (m) around the model for voxel-bank selection
