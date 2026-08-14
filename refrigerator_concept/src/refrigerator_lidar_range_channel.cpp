@@ -4,7 +4,7 @@
  * Implements feed(): select this cycle's staged sweep returns that land on ONE refrigerator and stage them on the
  * frame's LiDAR channel for the first-hit range factor / free-space VACATE term, with the z-calibration probe
  * and the two continuous informativeness down-weights (ray-count + angular coverage) on the precision. Holds
- * the RefrigeratorConfig by reference; the sweep is staged/cleared per cycle by RefrigeratorFitter (from RefrigeratorLidarIngestor).
+ * the RefrigeratorConfig by reference; the sweep is staged/cleared per cycle by RefrigeratorFitter (from ConceptLidarIngestor).
  */
 
 #include "refrigerator_lidar_range_channel.h"

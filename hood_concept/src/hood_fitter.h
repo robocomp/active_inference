@@ -152,7 +152,7 @@ public:
 
     // YOLO-independent LiDAR range channel: stage this cycle's sweep (room frame) + sensor origin for the
     // range factor. clear_lidar_sweep() each cycle first so a stale sweep never leaks into a frame with no
-    // fresh LiDAR. Set/cleared from the compute() main thread by SpecificWorker (fed by HoodLidarIngestor).
+    // fresh LiDAR. Set/cleared from the compute() main thread by SpecificWorker (fed by ConceptLidarIngestor).
     void set_lidar_sweep(const std::vector<Eigen::Vector3f>& sweep_room, const Eigen::Vector3f& origin_room)
     { lidar_channel_.set_sweep(sweep_room, origin_room); }
     void set_lidar_sweep_bpearl(const std::vector<Eigen::Vector3f>& sweep_room, const Eigen::Vector3f& origin_room)

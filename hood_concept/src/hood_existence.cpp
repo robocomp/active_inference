@@ -13,7 +13,7 @@
 #include <vector>
 
 #include "hood_fitter.h"                                       // rc::HoodFitter (instances, silhouette)
-#include "hood_lidar_ingestor.h"                              // rc::HoodLidarIngestor (per-plane sweeps)
+#include "../../common/lidar_ingestor/concept_lidar_ingestor.h"                              // rc::ConceptLidarIngestor (per-plane sweeps)
 #include "hood_model.h"                                       // HoodModel::TOP_THICKNESS / LEG_RADIUS
 #include "../../common/existence_belief/existence_belief.h"    // rc::exist:: carve_box / mask_evidence / …
 #include "../../common/detectability/detectability.h"          // rc::detect — the detector INVERSE model
@@ -25,7 +25,7 @@ namespace rc {
 
 // Carve the LiDAR sweep(s) + silhouette against every hood footprint, integrate the per-instance existence
 // log-odds, and remove the hoods whose volume is demonstrably empty (debounced). See hood_existence.h.
-void HoodExistence::update_and_remove(HoodFitter& fitter, HoodLidarIngestor* lidar,
+void HoodExistence::update_and_remove(HoodFitter& fitter, ConceptLidarIngestor* lidar,
                                        bool fresh_masks, bool fresh_sweep, EvidenceGlobals& ev_g,
                                        const std::function<void(std::uint64_t, const HoodInstance&)>& on_remove)
 {

@@ -21,7 +21,6 @@ LIST(APPEND SOURCES
   ../src/specificworker_dashboard.cpp
   ../src/cabinet_config.cpp
   ../src/cabinet_scene_graph.cpp
-  ../src/cabinet_lidar_ingestor.cpp
   ../src/cabinet_existence.cpp
   ../src/cabinet_fitter.cpp
   ../src/cabinet_projection.cpp

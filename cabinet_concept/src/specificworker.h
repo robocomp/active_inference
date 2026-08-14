@@ -49,14 +49,14 @@
 #include "cabinet_config.h"      // rc::CabinetConfig + load_cabinet_config
 #include "cabinet_instance.h"    // rc::CabinetInstance
 #include "../../common/mask_ingestor/mask_ingestor.h"     // rc::MaskIngestor (perception)
-#include "cabinet_lidar_ingestor.h"                          // rc::CabinetLidarIngestor (YOLO-independent LiDAR)
+#include "../../common/lidar_ingestor/concept_lidar_ingestor.h"                          // rc::ConceptLidarIngestor (YOLO-independent LiDAR)
 #include "../../common/instance_tracker/instance_tracker.h"   // rc::InstanceTracker (birth/associate/death)
 #include "cabinet_scene_graph.h" // rc::CabinetSceneGraph (DSR node/RT I/O)
 #include "cabinet_fitter.h"
 #include "../../common/phantom_log/phantom_log.h"   // rc::history::PhantomLog (shadow-mode birth/death record)      // rc::CabinetFitter (active-inference core)
 #include "cabinet_kitchen.h"     // rc::KitchenManager (Stage 2 kitchen-of-runs model)
 #include "cabinet_existence.h"   // rc::CabinetExistence (evidence-based removal)
-#include "birth_surprise_probe.h"   // rc::BirthSurpriseProbe (read-only: residual grid → birth surprise)
+#include "../../common/birth_surprise/birth_surprise_probe.h"   // rc::BirthSurpriseProbe (SHARED, read-only: residual grid → birth surprise)
 #include "epistemic_planner.h"
 #include "../../common/object_affordance/object_affordance.h"
 #include "cabinet_model.h"
@@ -300,7 +300,7 @@ private:
     std::unique_ptr<DSR::InnerEigenAPI>                 inner_eigen_;      // for room↔body↔zed extrinsic (silhouette)
     std::unique_ptr<DSR::InnerGaussianAPI>              gaussian_api_;     // Part B: chain covariance propagation
     std::unique_ptr<rc::MaskIngestor>                   mask_ingestor_;    // perception (masks-only)
-    std::unique_ptr<rc::CabinetLidarIngestor>             lidar_ingestor_;   // YOLO-independent LiDAR range channel
+    std::unique_ptr<rc::ConceptLidarIngestor>             lidar_ingestor_;   // YOLO-independent LiDAR range channel
     std::unique_ptr<rc::CabinetSceneGraph>                scene_graph_;      // DSR node/RT I/O
     uint64_t                                            room_node_id_ = 0;
 

@@ -65,7 +65,7 @@
 #include "bottle_fitter.h"
 #include "bottle_existence.h"
 #include "../../common/phantom_log/phantom_log.h"   // rc::history::PhantomLog (shadow-mode birth/death record)      // rc::BottleFitter (active-inference fit core)
-#include "bottle_lidar_ingestor.h"  // rc::BottleLidarIngestor (lidar3D media plane → room-frame sweep)
+#include "../../common/lidar_ingestor/concept_lidar_ingestor.h"  // rc::ConceptLidarIngestor (lidar3D media plane → room-frame sweep)
 #include "../../common/instance_tracker/instance_tracker.h"   // rc::InstanceTracker (birth/associate/death)
 #include "../../common/dashboard/belief_inspector.h"
 #include "../../common/dashboard/belief_strip.h"   // rc::BeliefInspector (full-belief bottom panel)
@@ -233,7 +233,7 @@ private:
     std::unique_ptr<rc::BottleEvaluator>  evaluator_;    // Webots-GT / sweep / eval CSV (no-op unless flagged)
     std::unique_ptr<rc::BottleFitter>     fitter_;       // active-inference fit core (owns the instance map)
     rc::history::PhantomLog                             phantom_log_;   // shadow-mode birth/death record
-    std::unique_ptr<rc::BottleLidarIngestor> lidar_ingestor_;  // lidar3D media plane → room-frame sweep (feeds fitter)
+    std::unique_ptr<rc::ConceptLidarIngestor> lidar_ingestor_;  // lidar3D media plane → room-frame sweep (feeds fitter)
     std::unique_ptr<rc::BottleExistence>  existence_;     // existence log-odds + removal (the shared rc::exist policy)
 
     // Multi-instance birth/associate/death (shared rc::InstanceTracker) — the only instance-lifecycle

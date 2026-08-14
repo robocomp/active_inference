@@ -13,7 +13,7 @@
 #include <vector>
 
 #include "cabinet_fitter.h"                                       // rc::CabinetFitter (instances, silhouette)
-#include "cabinet_lidar_ingestor.h"                              // rc::CabinetLidarIngestor (per-plane sweeps)
+#include "../../common/lidar_ingestor/concept_lidar_ingestor.h"                              // rc::ConceptLidarIngestor (per-plane sweeps)
 #include "cabinet_model.h"                                       // CabinetModel::TOP_THICKNESS / LEG_RADIUS
 #include "../../common/existence_belief/existence_belief.h"    // rc::exist:: carve_box / mask_evidence / …
 #include "../../common/dashboard/evidence_monitor.h"           // rc::EvidenceGlobals
@@ -24,7 +24,7 @@ namespace rc {
 
 // Carve the LiDAR sweep(s) + silhouette against every cabinet footprint, integrate the per-instance existence
 // log-odds, and remove the cabinets whose volume is demonstrably empty (debounced). See cabinet_existence.h.
-void CabinetExistence::update_and_remove(CabinetFitter& fitter, CabinetLidarIngestor* lidar,
+void CabinetExistence::update_and_remove(CabinetFitter& fitter, ConceptLidarIngestor* lidar,
                                        bool fresh_masks, bool fresh_sweep, EvidenceGlobals& ev_g,
                                        const std::function<void(std::uint64_t, const CabinetInstance&)>& on_remove)
 {

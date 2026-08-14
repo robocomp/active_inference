@@ -26,7 +26,7 @@ namespace rc {
 
 class CabinetFitter;
 struct CabinetInstance;   // one tracked cabinet (referenced by the on_remove sink below)             // owns the instances (+ silhouette existence)
-class CabinetLidarIngestor;      // stages the per-plane room-frame sweeps
+class ConceptLidarIngestor;      // stages the per-plane room-frame sweeps
 struct EvidenceGlobals;        // dashboard/evidence_monitor.h — removal counters
 
 class CabinetExistence
@@ -38,7 +38,7 @@ public:
     // Integrate each existence channel on its own sensor clock (silhouette on a fresh mask frame, LiDAR carve
     // on a fresh sweep) and delete the demonstrably-empty cabinets. Removed ids are forgotten in the fitter and
     // deleted from the graph; removal counters are accrued into ev_g. No-op when no channel has fresh evidence.
-    void update_and_remove(CabinetFitter& fitter, CabinetLidarIngestor* lidar,
+    void update_and_remove(CabinetFitter& fitter, ConceptLidarIngestor* lidar,
                            bool fresh_masks, bool fresh_sweep, EvidenceGlobals& ev_g,
                            // on_remove (optional) fires for each doomed instance BEFORE teardown, so the caller can
                            // record the death while the existence state that justified it is still readable. Shadow-mode

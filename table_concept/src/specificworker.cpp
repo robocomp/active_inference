@@ -371,7 +371,8 @@ void SpecificWorker::initialize()
     // YOLO-independent LiDAR range channel: lidar3D media-plane consumer that stages each cycle's sweep in the
     // room frame for the fitter's range factor. Dormant (no DDS participant) unless TableModel.LidarPrecision
     // > 0. Subscriber is brought up lazily on the compute/main thread once the lidar3D node + descriptor exist.
-    lidar_ingestor_ = std::make_unique<rc::TableLidarIngestor>(G, inner_eigen_.get(), cfg_);
+    lidar_ingestor_ = std::make_unique<rc::ConceptLidarIngestor>(G, inner_eigen_.get(),
+        [this] { return rc::LidarGates{cfg_.lidar_precision, cfg_.free_space_precision, cfg_.lidar_bpearl_precision}; });
 
     // Build rc::EpistemicPlanner (info-gain scoring only; stand-off distance is the sole parameter).
     epistemic_planner_ = rc::EpistemicPlanner(cfg_.obs_distance);
@@ -628,7 +629,7 @@ void SpecificWorker::log_birth_surprise()
     const auto cands = rc::BirthSurpriseProbe::scan(gf, tables);
     const long cyc = ++birth_surprise_cycle_;   // advances only on cycles where the grid field was actually read
     int n_birth = 0;                       // uncovered high-surprise regions = birth candidates
-    for (const auto& c : cands) if (not c.covered_by_table) ++n_birth;
+    for (const auto& c : cands) if (not c.covered_by_concept) ++n_birth;
 
     // CSV: one row per region per cycle (covered flag distinguishes birth candidates from explained mass; the
     // latter should be ~0 if residual_concept's concept-subtraction is working — a free sanity check).
@@ -651,7 +652,7 @@ void SpecificWorker::log_birth_surprise()
         for (const auto& c : cands)
             birth_surprise_csv_ << cyc << ',' << r++ << ',' << c.cx << ',' << c.cy << ',' << c.cells << ','
                                 << c.mass << ',' << c.ext_x << ',' << c.ext_y << ',' << c.mean_p << ',' << c.mean_var
-                                << ',' << (c.covered_by_table ? 1 : 0) << ',' << tables.size() << ','
+                                << ',' << (c.covered_by_concept ? 1 : 0) << ',' << tables.size() << ','
                                 << ev_g_.births << ',' << fitter_->instances().size() << '\n';
         birth_surprise_csv_.flush();
     }
@@ -707,7 +708,7 @@ void SpecificWorker::log_birth_surprise()
     if (n_birth > 0 and (ev_g_.births > 0 or (birth_surprise_log_ctr_++ % 20) == 0))
     {
         const rc::BirthCandidate* top = nullptr;   // strongest UNcovered region
-        for (const auto& c : cands) if (not c.covered_by_table) { top = &c; break; }   // cands sorted by mass
+        for (const auto& c : cands) if (not c.covered_by_concept) { top = &c; break; }   // cands sorted by mass
         if (top)
             std::print("[birth-surprise] uncovered={} tables={} tracker_births={} | top: ({:.2f},{:.2f}) "
                        "mass={:.1f} cells={} ext={:.2f}x{:.2f} mean_p={:.2f} var={:.3f}\n",

@@ -49,13 +49,13 @@
 #include "table_config.h"      // rc::TableConfig + load_table_config
 #include "table_instance.h"    // rc::TableInstance
 #include "../../common/mask_ingestor/mask_ingestor.h"     // rc::MaskIngestor (perception)
-#include "table_lidar_ingestor.h"                          // rc::TableLidarIngestor (YOLO-independent LiDAR)
+#include "../../common/lidar_ingestor/concept_lidar_ingestor.h"                          // rc::ConceptLidarIngestor (YOLO-independent LiDAR)
 #include "../../common/instance_tracker/instance_tracker.h"   // rc::InstanceTracker (birth/associate/death)
 #include "table_scene_graph.h" // rc::TableSceneGraph (DSR node/RT I/O)
 #include "table_fitter.h"      // rc::TableFitter (active-inference core)
 #include "../../common/phantom_log/phantom_log.h"   // rc::history::PhantomLog (shadow-mode birth/death record)
 #include "table_existence.h"   // rc::TableExistence (evidence-based removal)
-#include "birth_surprise_probe.h"   // rc::BirthSurpriseProbe (read-only: residual grid → birth surprise)
+#include "../../common/birth_surprise/birth_surprise_probe.h"   // rc::BirthSurpriseProbe (SHARED, read-only: residual grid → birth surprise)
 #include "epistemic_planner.h"
 #include "../../common/object_affordance/object_affordance.h"
 #include "table_model.h"
@@ -256,7 +256,7 @@ private:
     std::unique_ptr<DSR::InnerEigenAPI>                 inner_eigen_;      // for room↔body↔zed extrinsic (silhouette)
     std::unique_ptr<DSR::InnerGaussianAPI>              gaussian_api_;     // Part B: chain covariance propagation
     std::unique_ptr<rc::MaskIngestor>                   mask_ingestor_;    // perception (masks-only)
-    std::unique_ptr<rc::TableLidarIngestor>             lidar_ingestor_;   // YOLO-independent LiDAR range channel
+    std::unique_ptr<rc::ConceptLidarIngestor>             lidar_ingestor_;   // YOLO-independent LiDAR range channel
     std::unique_ptr<rc::TableSceneGraph>                scene_graph_;      // DSR node/RT I/O
     uint64_t                                            room_node_id_ = 0;
 

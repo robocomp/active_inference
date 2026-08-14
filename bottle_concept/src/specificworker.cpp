@@ -420,7 +420,11 @@ void SpecificWorker::initialize()
     // YOLO-independent LiDAR range channel: lidar3D media-plane consumer that stages each cycle's sweep in the
     // room frame for the fitter. Dormant (no DDS participant) unless BottleModel.LidarPrecision > 0. Subscriber
     // is brought up lazily on the main thread from compute()::pump(), never here (graph may still be joining).
-    lidar_ingestor_ = std::make_unique<rc::BottleLidarIngestor>(G, inner_eigen_.get(), cfg_);
+    lidar_ingestor_ = std::make_unique<rc::ConceptLidarIngestor>(G, inner_eigen_.get(),
+        // Bottle declares only the helios range gate: its belief has no free-space carve and no bpearl
+        // factor, so those two planes stay dormant rather than staging points nothing would read. The
+        // capability is in the shared ingestor the day BottleBelief grows either factor.
+        [this] { return rc::LidarGates{cfg_.lidar_precision, 0.0f, 0.0f}; });
     existence_      = std::make_unique<rc::BottleExistence>(cfg_);
 
     // ── Live "Bottle Inference" dashboard — its OWN top-level window ───────────────────────────────

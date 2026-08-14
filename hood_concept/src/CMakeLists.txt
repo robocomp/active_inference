@@ -21,7 +21,6 @@ LIST(APPEND SOURCES
   ../src/specificworker_dashboard.cpp
   ../src/hood_config.cpp
   ../src/hood_scene_graph.cpp
-  ../src/hood_lidar_ingestor.cpp
   ../src/hood_existence.cpp
   ../src/hood_fitter.cpp
   ../src/hood_projection.cpp

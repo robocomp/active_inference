@@ -13,7 +13,7 @@
 #include <vector>
 
 #include "table_fitter.h"                                       // rc::TableFitter (instances, silhouette)
-#include "table_lidar_ingestor.h"                              // rc::TableLidarIngestor (per-plane sweeps)
+#include "../../common/lidar_ingestor/concept_lidar_ingestor.h"                              // rc::ConceptLidarIngestor (per-plane sweeps)
 #include "table_model.h"                                       // TableModel::TOP_THICKNESS / LEG_RADIUS
 #include "../../common/existence_belief/existence_belief.h"    // rc::exist:: carve_box / mask_evidence / …
 #include "../../common/dashboard/evidence_monitor.h"           // rc::EvidenceGlobals
@@ -24,7 +24,7 @@ namespace rc {
 
 // Carve the LiDAR sweep(s) + silhouette against every table footprint, integrate the per-instance existence
 // log-odds, and remove the tables whose volume is demonstrably empty (debounced). See table_existence.h.
-void TableExistence::update_and_remove(TableFitter& fitter, TableLidarIngestor* lidar,
+void TableExistence::update_and_remove(TableFitter& fitter, ConceptLidarIngestor* lidar,
                                        bool fresh_masks, bool fresh_sweep, EvidenceGlobals& ev_g,
                                        const std::function<void(std::uint64_t, const TableInstance&)>& on_remove)
 {

@@ -1,13 +1,13 @@
 /*
  * hood_rgb_ingestor.h  —  ZED RGB media-plane consumer for appearance-based FRONT (door) detection
  *
- * Sibling of hood_lidar_ingestor.h (the sanctioned in-agent media-plane pattern). Brings up the shared
+ * Sibling of common/lidar_ingestor/concept_lidar_ingestor.h (the sanctioned media-plane consumer pattern). Brings up the shared
  * zero-copy ImageFrame subscriber on the "zed"/"rgb" stream (same descriptor-driven factory every agent uses)
  * and, each compute() cycle, decodes the newest frame into a DEEP-COPIED BGR cv::Mat + its capture stamp — the
  * pixels HoodProjection::detect_front scores for door-ness. The fitted 3D box (not YOLO's 2D mask) is what
  * gets projected, so this keeps working when the robot is too close for YOLO to detect the fridge.
  *
- * Crash-safety (mirrors HoodLidarIngestor / room_concept::CameraVisualizer):
+ * Crash-safety (mirrors ConceptLidarIngestor / room_concept::CameraVisualizer):
  *  - The subscriber is created LAZILY in pump() (called from the Operating compute/main thread), never in a ctor
  *    or a free-running thread, and only once the "zed" node + media descriptor exist AND the feature is enabled
  *    (cfg.front_detect_enabled). Discovery is self-throttled to ~1 Hz.

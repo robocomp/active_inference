@@ -178,11 +178,17 @@ add_library(ai_common::presence ALIAS ai_common_presence)
 #
 # The generated IDL headers include each other flat (#include "image_frameCdrAux.hpp"), which is
 # why media_transport/ and media_transport/generated/idl/ are PUBLIC include dirs.
+#
+# lidar_ingestor/concept_lidar_ingestor.cpp lives here rather than on its own target because it IS a
+# media-plane consumer: it owns two LidarPlaneReaders and nothing else. It was five near-identical
+# per-agent copies (bottle/cabinet/hood/refrigerator/table), four of them byte-identical once the
+# object noun was normalised.
 # =====================================================================================
 include(${CMAKE_CURRENT_SOURCE_DIR}/media_transport/idl_sources.cmake)
 add_library(ai_common_media STATIC
   media_transport/media_transport.cpp
   media_transport/lidar_plane_reader.cpp
+  lidar_ingestor/concept_lidar_ingestor.cpp
   ${AI_COMMON_IDL_SOURCES}
 )
 ai_common_defaults(ai_common_media)

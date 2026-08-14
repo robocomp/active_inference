@@ -215,7 +215,7 @@ struct HoodConfig
     // Second, sensor-independent evidence channel: lidar3D returns landing on the hood (legs + rim) pin the
     // extent and centre in METRIC range, ALONG the viewing ray — an error mechanism uncorrelated with the
     // YOLO segmentation, so it attacks the mask-erosion under-size the mask cannot self-correct. Consumes
-    // the lidar3D media plane via HoodLidarIngestor; dormant (no DDS participant) while precision == 0.
+    // the lidar3D media plane via ConceptLidarIngestor; dormant (no DDS participant) while precision == 0.
     float lidar_precision       = 0.0f;   // per-ray range precision (1/m², ≈1/σ_range²); 0 = OFF
     // Low "bpearl" LiDAR as a SEPARATE per-device ray-set (own origin, occlusion-aware first-hit; sees the legs
     // the high helios grazes over). Summed into the SAME GN as helios — NOT merged (merging loses the origin the

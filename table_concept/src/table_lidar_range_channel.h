@@ -3,7 +3,7 @@
  *
  * Owns the staged per-cycle sweep (room frame + sensor origin) and selects the returns landing on ONE table,
  * staging them on the frame's LiDAR channel for the first-hit range factor / free-space VACATE term:
- * set_sweep (stage this cycle's sweep + origin, from TableFitter fed by TableLidarIngestor), clear (drop the
+ * set_sweep (stage this cycle's sweep + origin, from TableFitter fed by ConceptLidarIngestor), clear (drop the
  * staged sweep, called each cycle before set_sweep so a stale sweep never leaks), and feed (select this
  * table's returns and populate frame.lidar). Holds the TableConfig by reference. Plain class (no Q_OBJECT).
  */

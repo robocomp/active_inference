@@ -21,7 +21,6 @@ LIST(APPEND SOURCES
   ../src/specificworker_dashboard.cpp
   ../src/table_config.cpp
   ../src/table_scene_graph.cpp
-  ../src/table_lidar_ingestor.cpp
   ../src/table_existence.cpp
   ../src/table_fitter.cpp
   ../src/table_projection.cpp

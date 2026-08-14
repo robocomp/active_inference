@@ -13,7 +13,7 @@
 #include <vector>
 
 #include "refrigerator_fitter.h"                                       // rc::RefrigeratorFitter (instances, silhouette)
-#include "refrigerator_lidar_ingestor.h"                              // rc::RefrigeratorLidarIngestor (per-plane sweeps)
+#include "../../common/lidar_ingestor/concept_lidar_ingestor.h"                              // rc::ConceptLidarIngestor (per-plane sweeps)
 #include "refrigerator_model.h"                                       // RefrigeratorModel::TOP_THICKNESS / LEG_RADIUS
 #include "../../common/existence_belief/existence_belief.h"    // rc::exist:: carve_box / mask_evidence / …
 #include "../../common/detectability/detectability.h"          // rc::detect — the detector INVERSE model
@@ -25,7 +25,7 @@ namespace rc {
 
 // Carve the LiDAR sweep(s) + silhouette against every refrigerator footprint, integrate the per-instance existence
 // log-odds, and remove the refrigerators whose volume is demonstrably empty (debounced). See refrigerator_existence.h.
-void RefrigeratorExistence::update_and_remove(RefrigeratorFitter& fitter, RefrigeratorLidarIngestor* lidar,
+void RefrigeratorExistence::update_and_remove(RefrigeratorFitter& fitter, ConceptLidarIngestor* lidar,
                                        bool fresh_masks, bool fresh_sweep, EvidenceGlobals& ev_g,
                                        const std::function<void(std::uint64_t, const RefrigeratorInstance&)>& on_remove)
 {

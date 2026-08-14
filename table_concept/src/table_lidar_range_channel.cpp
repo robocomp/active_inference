@@ -4,7 +4,7 @@
  * Implements feed(): select this cycle's staged sweep returns that land on ONE table and stage them on the
  * frame's LiDAR channel for the first-hit range factor / free-space VACATE term, with the z-calibration probe
  * and the two continuous informativeness down-weights (ray-count + angular coverage) on the precision. Holds
- * the TableConfig by reference; the sweep is staged/cleared per cycle by TableFitter (from TableLidarIngestor).
+ * the TableConfig by reference; the sweep is staged/cleared per cycle by TableFitter (from ConceptLidarIngestor).
  */
 
 #include "table_lidar_range_channel.h"

@@ -49,7 +49,7 @@
 #include "refrigerator_config.h"      // rc::RefrigeratorConfig + load_refrigerator_config
 #include "refrigerator_instance.h"    // rc::RefrigeratorInstance
 #include "../../common/mask_ingestor/mask_ingestor.h"     // rc::MaskIngestor (perception)
-#include "refrigerator_lidar_ingestor.h"                          // rc::RefrigeratorLidarIngestor (YOLO-independent LiDAR)
+#include "../../common/lidar_ingestor/concept_lidar_ingestor.h"                          // rc::ConceptLidarIngestor (YOLO-independent LiDAR)
 #include "refrigerator_rgb_ingestor.h"                            // rc::RefrigeratorRgbIngestor (ZED RGB for door detection)
 #include "../../common/instance_tracker/instance_tracker.h"   // rc::InstanceTracker (birth/associate/death)
 #include "../../common/birth_fragment/birth_fragment.h"       // rc::BirthFragment — the probation burst
@@ -57,7 +57,7 @@
 #include "refrigerator_fitter.h"
 #include "../../common/phantom_log/phantom_log.h"   // rc::history::PhantomLog (shadow-mode birth/death record)      // rc::RefrigeratorFitter (active-inference core)
 #include "refrigerator_existence.h"   // rc::RefrigeratorExistence (evidence-based removal)
-#include "birth_surprise_probe.h"   // rc::BirthSurpriseProbe (read-only: residual grid → birth surprise)
+#include "../../common/birth_surprise/birth_surprise_probe.h"   // rc::BirthSurpriseProbe (SHARED, read-only: residual grid → birth surprise)
 #include "epistemic_planner.h"
 #include "../../common/nbv/graph_obstacles.h"   // rc::nbv::collect_graph_obstacles — DSR-side viewpoint obstacles
 #include "../../common/object_affordance/object_affordance.h"
@@ -265,7 +265,7 @@ private:
     std::unique_ptr<DSR::InnerEigenAPI>                 inner_eigen_;      // for room↔body↔zed extrinsic (silhouette)
     std::unique_ptr<DSR::InnerGaussianAPI>              gaussian_api_;     // Part B: chain covariance propagation
     std::unique_ptr<rc::MaskIngestor>                   mask_ingestor_;    // perception (masks-only)
-    std::unique_ptr<rc::RefrigeratorLidarIngestor>             lidar_ingestor_;   // YOLO-independent LiDAR range channel
+    std::unique_ptr<rc::ConceptLidarIngestor>             lidar_ingestor_;   // YOLO-independent LiDAR range channel
     std::unique_ptr<rc::RefrigeratorRgbIngestor>              rgb_ingestor_;     // ZED RGB media plane for door detection
     std::unique_ptr<rc::RefrigeratorSceneGraph>                scene_graph_;      // DSR node/RT I/O
     uint64_t                                            room_node_id_ = 0;

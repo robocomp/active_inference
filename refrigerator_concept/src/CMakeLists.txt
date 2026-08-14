@@ -21,7 +21,6 @@ LIST(APPEND SOURCES
   ../src/specificworker_dashboard.cpp
   ../src/refrigerator_config.cpp
   ../src/refrigerator_scene_graph.cpp
-  ../src/refrigerator_lidar_ingestor.cpp
   ../src/refrigerator_existence.cpp
   ../src/refrigerator_fitter.cpp
   ../src/refrigerator_projection.cpp

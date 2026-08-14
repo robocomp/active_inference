@@ -27,7 +27,7 @@ namespace rc {
 
 class TableFitter;             // owns the instances (+ silhouette existence)
 struct TableInstance;          // one tracked table (referenced by the on_remove sink below)
-class TableLidarIngestor;      // stages the per-plane room-frame sweeps
+class ConceptLidarIngestor;      // stages the per-plane room-frame sweeps
 struct EvidenceGlobals;        // dashboard/evidence_monitor.h — removal counters
 
 class TableExistence
@@ -43,7 +43,7 @@ public:
     // can record the death while the existence-channel state that justified it is still readable. Used for the
     // shadow-mode phantom log (CONCEPT_AGENT_LIFECYCLE.md §4.2) — RECORDING ONLY, it must never influence the
     // removal decision, which is why it is a sink and not a veto.
-    void update_and_remove(TableFitter& fitter, TableLidarIngestor* lidar,
+    void update_and_remove(TableFitter& fitter, ConceptLidarIngestor* lidar,
                            bool fresh_masks, bool fresh_sweep, EvidenceGlobals& ev_g,
                            const std::function<void(std::uint64_t, const TableInstance&)>& on_remove = {});
 

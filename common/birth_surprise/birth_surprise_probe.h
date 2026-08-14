@@ -1,20 +1,25 @@
-#ifndef HOOD_BIRTH_SURPRISE_PROBE_H
-#define HOOD_BIRTH_SURPRISE_PROBE_H
+#ifndef AI_COMMON_BIRTH_SURPRISE_PROBE_H
+#define AI_COMMON_BIRTH_SURPRISE_PROBE_H
 
 /*
- * birth_surprise_probe.h — read-only, EXPERIMENTAL (off by default).
+ * common/birth_surprise/birth_surprise_probe.h — read-only, EXPERIMENTAL (off by default). SHARED.
  *
  * Reinterpret residual_concept's `grid` node (under room) as a BIRTH-SURPRISE field. Its grid_occupancy_prob is
  * P(occupied ∧ ¬explained-by-any-concept) — the accumulated, concept-subtracted, multi-sensor evidence the
  * current generative model does NOT account for. A coherent, confidently-unexplained region NOT already covered
- * by a believed hood is a candidate for a NEW hood: a concept condensing out of the residual field (birth =
- * model expansion when instantiating a component lowers total free energy).
+ * by a believed instance of THIS agent's concept is a candidate for a NEW one: a concept condensing out of the
+ * residual field (birth = model expansion when instantiating a component lowers total free energy).
  *
  * This module ONLY reads + clusters + scores. It never births and never writes the graph. Purpose: watch the
- * surprise ramp on a real hood's region and confirm it flags births cleanly (and rejects phantoms) BEFORE
+ * surprise ramp on a real object's region and confirm it flags births cleanly (and rejects phantoms) BEFORE
  * letting it gate/replace the tracker's frames-counter. Pure math (no DSR) → unit-testable. The removal half is
- * NOT here: the grid subtracts explained cells, so it cannot see a modelled hood's absence — removal stays the
- * per-instance existence-surprise job. See [[hood-birth-surprise-probe]].
+ * NOT here: the grid subtracts explained cells, so it cannot see a modelled object's absence — removal stays the
+ * per-instance existence-surprise job.
+ *
+ * SHARED because it was four byte-identical copies (cabinet/hood/refrigerator/table, 181 lines each) that
+ * differed ONLY in the object noun spelled into the comments, the include guard and one struct member. Nothing
+ * in it is object-specific: the caller supplies its own believed footprints and reads back a
+ * concept-agnostic `covered_by_concept`.
  */
 
 #include <algorithm>
@@ -37,7 +42,7 @@ struct GridField
     float cell_cy(int y) const { return ymin + (static_cast<float>(y) + 0.5f) * cell; }
 };
 
-// A believed hood's footprint (room frame) — used to mark residual regions an existing concept already explains.
+// A believed instance's footprint (room frame) — used to mark residual regions an existing concept already explains.
 struct FootprintBox { float cx, cy, w, h, yaw; };
 
 // One clustered region of confidently-unexplained occupancy = one birth candidate.
@@ -48,24 +53,24 @@ struct BirthCandidate
     int   cells = 0;                   // # cells over the P threshold
     float mass = 0.f;                  // Σ P over the region — the accumulated SURPRISE MASS (the score)
     float mean_p = 0.f, mean_var = 0.f;
-    bool  covered_by_hood = false;    // centroid inside a believed hood footprint (+margin) ⇒ NOT a birth
+    bool  covered_by_concept = false;  // centroid inside a believed footprint (+margin) ⇒ NOT a birth
 };
 
 struct BirthProbeParams
 {
     float p_threshold    = 0.5f;   // a cell counts as confidently-unexplained-occupied above this P
-    float cover_margin_m = 0.30f;  // grow each hood footprint by this before the "already explained" test
-    int   min_cells      = 4;      // ignore specks (sensor noise); a real hood footprint spans many cells
+    float cover_margin_m = 0.30f;  // grow each believed footprint by this before the "already explained" test
+    int   min_cells      = 4;      // ignore specks (sensor noise); a real object footprint spans many cells
 };
 
 class BirthSurpriseProbe
 {
 public:
     // Cluster the field's confidently-unexplained cells (4-connectivity flood fill), score each region by surprise
-    // MASS, flag whether a believed hood already covers it, and return them sorted by mass (strongest first).
+    // MASS, flag whether a believed instance already covers it, and return them sorted by mass (strongest first).
     // Pure function of its inputs — no DSR, no state.
     static std::vector<BirthCandidate> scan(const GridField& g,
-                                            const std::vector<FootprintBox>& hoods,
+                                            const std::vector<FootprintBox>& believed,
                                             const BirthProbeParams& p = {})
     {
         std::vector<BirthCandidate> out;
@@ -105,7 +110,7 @@ public:
             c.ext_y    = maxy - miny + g.cell;
             c.mean_p   = static_cast<float>(sp / cells);
             c.mean_var = static_cast<float>(sv / cells);
-            c.covered_by_hood = covered(c.cx, c.cy, hoods, p.cover_margin_m);
+            c.covered_by_concept = covered(c.cx, c.cy, believed, p.cover_margin_m);
             out.push_back(c);
         }
         std::sort(out.begin(), out.end(), [](const BirthCandidate& a, const BirthCandidate& b)
@@ -115,7 +120,7 @@ public:
 
     // Detection-conditioned readout: the accumulated surprise MASS (Σ P over confidently-unexplained cells) within
     // radius_m of a room-frame point — i.e. how much unexplained occupancy sits under a YOLO detection. This is the
-    // FUSION signal: a real hood detection should land on high residual mass; a flicker/phantom detection on ~0.
+    // FUSION signal: a real detection should land on high residual mass; a flicker/phantom detection on ~0.
     static float residual_mass_near(const GridField& g, float x, float y, float radius_m, float p_threshold = 0.5f)
     {
         if (not g.valid() or radius_m <= 0.f) return 0.f;
@@ -135,8 +140,8 @@ public:
         return static_cast<float>(m);
     }
 
-    // Self-test: two blobs (one already under a hood, one free); scan must find both, mark exactly one covered,
-    // reject a sub-min_cells speck, and rank the free blob's mass correctly.
+    // Self-test: two blobs (one already under a believed instance, one free); scan must find both, mark exactly one
+    // covered, reject a sub-min_cells speck, and rank the free blob's mass correctly.
     static bool self_test()
     {
         GridField g;
@@ -146,12 +151,12 @@ public:
         for (int y = 5; y < 12; ++y) for (int x = 5; x < 12; ++x) set(x, y, 0.9f);   // blob A (room ~0.5..1.2)
         for (int y = 25; y < 35; ++y) for (int x = 25; x < 35; ++x) set(x, y, 0.8f); // blob B (bigger, ~2.5..3.5)
         set(20, 20, 0.95f);                                                          // speck (1 cell → dropped)
-        std::vector<FootprintBox> hoods{ {0.85f, 0.85f, 0.9f, 0.9f, 0.0f} };        // covers blob A
-        const auto c = scan(g, hoods, {});
+        std::vector<FootprintBox> believed{ {0.85f, 0.85f, 0.9f, 0.9f, 0.0f} };      // covers blob A
+        const auto c = scan(g, believed, {});
         bool ok = c.size() == 2;                          // two real regions, speck dropped
         ok = ok and c[0].mass > c[1].mass;                // sorted by mass; B (bigger) first
-        ok = ok and not c[0].covered_by_hood;            // blob B is free
-        ok = ok and c[1].covered_by_hood;                // blob A sits under the hood
+        ok = ok and not c[0].covered_by_concept;          // blob B is free
+        ok = ok and c[1].covered_by_concept;              // blob A sits under a believed instance
         // residual_mass_near: high under blob B's centre (~room 3.0,3.0), ~0 in an empty corner (~room 0.2,3.5)
         const float m_on  = residual_mass_near(g, 3.0f, 3.0f, 0.5f);
         const float m_off = residual_mass_near(g, 0.2f, 3.5f, 0.5f);
@@ -162,13 +167,13 @@ public:
     }
 
 private:
-    static bool covered(float x, float y, const std::vector<FootprintBox>& hoods, float margin)
+    static bool covered(float x, float y, const std::vector<FootprintBox>& believed, float margin)
     {
-        for (const auto& t : hoods)
+        for (const auto& t : believed)
         {
             const float c = std::cos(t.yaw), s = std::sin(t.yaw);
             const float dx = x - t.cx, dy = y - t.cy;
-            const float lx =  c * dx + s * dy;   // world → hood-local (rotate by −yaw)
+            const float lx =  c * dx + s * dy;   // world → object-local (rotate by −yaw)
             const float ly = -s * dx + c * dy;
             if (std::abs(lx) <= 0.5f * t.w + margin and std::abs(ly) <= 0.5f * t.h + margin) return true;
         }
@@ -177,4 +182,4 @@ private:
 };
 
 }  // namespace rc
-#endif  // HOOD_BIRTH_SURPRISE_PROBE_H
+#endif  // AI_COMMON_BIRTH_SURPRISE_PROBE_H

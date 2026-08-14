@@ -1,23 +1,23 @@
 /*
- *    table_lidar_ingestor.cpp  —  see table_lidar_ingestor.h (port of bottle_lidar_ingestor.cpp)
+ *    common/lidar_ingestor/concept_lidar_ingestor.cpp  —  see concept_lidar_ingestor.h
  */
 
-#include "table_lidar_ingestor.h"
+#include "concept_lidar_ingestor.h"
 
 #include <utility>
 #include <vector>
 
-#include "../../common/media_transport/lidar_plane_reader.h"
+#include "../media_transport/lidar_plane_reader.h"
 
 namespace rc
 {
 
-TableLidarIngestor::TableLidarIngestor(std::shared_ptr<DSR::DSRGraph> graph, DSR::InnerEigenAPI* inner_eigen,
-                                       const TableConfig& cfg)
-    : G_(std::move(graph)), inner_eigen_(inner_eigen), cfg_(&cfg)
+ConceptLidarIngestor::ConceptLidarIngestor(std::shared_ptr<DSR::DSRGraph> graph, DSR::InnerEigenAPI* inner_eigen,
+                                           std::function<LidarGates()> gates)
+    : G_(std::move(graph)), inner_eigen_(inner_eigen), gates_(std::move(gates))
 {
-    // Subscribers come up lazily inside reader_->poll() once each node + descriptor exists AND the
-    // feature is enabled (cfg.lidar_precision > 0); nothing touches DDS here.
+    // Subscribers come up lazily inside reader_->poll() once each node + descriptor exists AND the feature is
+    // enabled (the gate > 0); nothing touches DDS here.
     reader_ = std::make_unique<rc::media::LidarPlaneReader>(
         G_, inner_eigen_, std::vector<std::string>{"helios"}, "lidar3D", "lidar");
     // Low bpearl plane as a SEPARATE reader. Empty fused fallback so it NEVER reads the merged "lidar3D" cloud
@@ -27,22 +27,25 @@ TableLidarIngestor::TableLidarIngestor(std::shared_ptr<DSR::DSRGraph> graph, DSR
         G_, inner_eigen_, std::vector<std::string>{"bpearl"}, /*fused_fallback=*/"", "lidar");
 }
 
-TableLidarIngestor::~TableLidarIngestor()
+ConceptLidarIngestor::~ConceptLidarIngestor()
 {
     reader_.reset();
+    reader_bpearl_.reset();
 }
 
-bool TableLidarIngestor::pump()
+bool ConceptLidarIngestor::pump()
 {
     helios_fresh_ = false;
     bpearl_fresh_ = false;
 
+    const LidarGates g = gates_ ? gates_() : LidarGates{};
+
     // Newest "helios" (or fallback "lidar3D") sweep, transformed into the ROOM frame at its capture stamp
-    // (interpolate=true — a rotating robot's room<-robot pose differs from the latest pose). enabled follows
-    // the feature switch so the reader stays dormant while both LiDAR features are off.
+    // (interpolate=true — a rotating robot's room<-robot pose differs from the latest pose). enabled follows the
+    // feature switches so the reader stays dormant while BOTH helios-side features are off.
     if (reader_)
     {
-        const bool en = cfg_->lidar_precision > 0.0f or cfg_->free_space_precision > 0.0f;
+        const bool en = g.helios_precision > 0.0f or g.free_space_precision > 0.0f;
         if (const auto sweep = reader_->poll("room", /*interpolate=*/true, /*enabled=*/en);
             sweep.has_value() and not sweep->points.empty())
         {
@@ -54,7 +57,8 @@ bool TableLidarIngestor::pump()
     // Low bpearl plane — its OWN capture stamp, its OWN origin. Only pumped while its feature is on.
     if (reader_bpearl_)
     {
-        if (const auto bp = reader_bpearl_->poll("room", /*interpolate=*/true, /*enabled=*/cfg_->lidar_bpearl_precision > 0.0f);
+        if (const auto bp = reader_bpearl_->poll("room", /*interpolate=*/true,
+                                                 /*enabled=*/g.bpearl_precision > 0.0f);
             bp.has_value() and not bp->points.empty())
         {
             sweep_bpearl_room_  = std::move(bp->points);
