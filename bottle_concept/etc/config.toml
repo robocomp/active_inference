@@ -125,10 +125,10 @@ KStable = 30
 DivergedRetireFrames = 20          # retire an instance after N consecutive no-data (belief energy==0) fits; 0=off
 MaxStepM = 0.5                     # reject a frame whose net centre move exceeds this (m) — a corrupted cloud can teleport the fit, a bottle can't; 0=off
 LogPeriodFrames = 30
-VoxelBankMaxPoints = 4000
-VoxelBankQuantizationM = 0.01      # dedup grid (m) for the voxel-bank hash
-VoxelSelectRadiusMarginM = 0.04    # XY ownership gate margin around the bottle
-VoxelSelectHeightMarginM = 0.10    # extra Z margin above/below the cylinder span
+SupportBankMaxPoints = 4000
+SupportBankQuantizationM = 0.01      # dedup grid (m) for the support-bank hash
+SupportSelectRadiusMarginM = 0.04    # XY ownership gate margin around the bottle
+SupportSelectHeightMarginM = 0.10    # extra Z margin above/below the cylinder span
 YawVariance = 9.87                 # ≈π² — yaw is unobservable for a symmetric cylinder
 
 [BottleModel]
@@ -138,7 +138,7 @@ YawVariance = 9.87                 # ≈π² — yaw is unobservable for a symme
 PriorRadius = 0.031       # cyberbotics BeerBottle (Heineken) body radius — naturally 62mm (no mesh distortion), well-detected by YOLO. height ~0.20 body.
 PriorHeight = 0.20
 PriorSizeStd = 0.03
-SdfThresholdForStorage = 0.03   # admit points within 3 cm of the surface into the voxel bank
+SdfThresholdForStorage = 0.03   # admit points within 3 cm of the surface into the support bank
 MaskPrecision = 500.0     # RGB-mask occluding-contour silhouette likelihood weight (0=off); pins the depth-degenerate radius the symmetric-cylinder SDF cannot.
 AI2SigmaBaseM = 0.02          # base on-surface obs noise std (m); R = σ²
 AI2ClutterFrac = 0.10         # ε: uniform clutter mixture weight

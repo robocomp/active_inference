@@ -92,17 +92,17 @@ bool BottleFitter::confirm_only(const BottleInstance& inst) const
 void BottleFitter::update_support_surface(BottleInstance& inst)
 {
     // Decide the surface the bottle rests on (room vs a table) BEFORE ingest/fit, so the surface
-    // filter (is_voxel_owned_by_bottle) and the post-fit cz anchor both have it. MAP over {room,
-    // every table_N} using the OBSERVED base (low-percentile z of the owned voxel bank — NOT the
+    // filter (is_point_owned_by_bottle) and the post-fit cz anchor both have it. MAP over {room,
+    // every table_N} using the OBSERVED base (low-percentile z of the owned support bank — NOT the
     // anchored cz, which would be circular) + an oriented footprint + vertical-support test. A
     // re-parent is committed only after support_commit_cycles of agreement (hysteresis).
     const auto& s0 = inst.model.state();
     float base_z;
-    if (not inst.voxel_bank_pts.empty())
+    if (not inst.support_bank_pts.empty())
     {
         std::vector<float> zs;
-        zs.reserve(inst.voxel_bank_pts.size());
-        for (const auto& p : inst.voxel_bank_pts) zs.push_back(p.z());
+        zs.reserve(inst.support_bank_pts.size());
+        for (const auto& p : inst.support_bank_pts) zs.push_back(p.z());
         const std::size_t k = zs.size() / 10;          // 10th percentile → robust base, rejects outliers
         std::nth_element(zs.begin(), zs.begin() + k, zs.end());
         base_z = zs[k];
@@ -267,7 +267,7 @@ float BottleFitter::run_inference(BottleInstance& inst, const BottleObservation&
     }
 
     if (observation.has_fresh_data)
-        ingest_observation_voxels(inst, observation);   // keep the viewer's voxel bank fed
+        ingest_observation_support(inst, observation);   // keep the viewer's support bank fed
 
     // ★MOTION REQUIRES A CAUSE — set BEFORE any predict path, because every one of them draws Q from here.
     // A bottle does not move by itself, so its position is volatile only to the degree something able to
@@ -707,27 +707,27 @@ void BottleFitter::update_expected_visible(BottleInstance& inst)
     inst.expected_visible = (col >= 0.0 and col <= W and row >= 0.0 and row <= H);
 }
 
-void BottleFitter::ingest_observation_voxels(BottleInstance& inst, const BottleObservation& observation)
+void BottleFitter::ingest_observation_support(BottleInstance& inst, const BottleObservation& observation)
 {
     std::size_t inserted = 0;
     std::size_t rejected_foreign = 0;
-    const auto max_points = static_cast<std::size_t>(std::max(1, cfg_.voxel_bank_max_points));
+    const auto max_points = static_cast<std::size_t>(std::max(1, cfg_.support_bank_max_points));
 
     auto ingest = [&](const std::vector<Eigen::Vector3f>& src)
     {
         for (const auto& p : src)
         {
-            if (inst.voxel_bank_pts.size() >= max_points)
+            if (inst.support_bank_pts.size() >= max_points)
                 break;
-            if (not is_voxel_owned_by_bottle(inst, p))
+            if (not is_point_owned_by_bottle(inst, p))
             {
                 ++rejected_foreign;
                 continue;
             }
-            const auto key = voxel_key(p, cfg_.voxel_bank_quantization_m);
-            if (inst.voxel_bank_keys.insert(key).second)
+            const auto key = cell_key(p, cfg_.support_bank_quantization_m);
+            if (inst.support_bank_keys.insert(key).second)
             {
-                inst.voxel_bank_pts.push_back(p);
+                inst.support_bank_pts.push_back(p);
                 ++inserted;
             }
         }
@@ -737,11 +737,11 @@ void BottleFitter::ingest_observation_voxels(BottleInstance& inst, const BottleO
     ingest(observation.residual_pts);
 
     if (inserted > 0 and should_log(inst))
-        std::print("[{}] voxel-bank: +{} total={} (cap={}) reject_foreign={}\n",
-                   inst.node_name, inserted, inst.voxel_bank_pts.size(), max_points, rejected_foreign);
+        std::print("[{}] support-bank: +{} total={} (cap={}) reject_foreign={}\n",
+                   inst.node_name, inserted, inst.support_bank_pts.size(), max_points, rejected_foreign);
 }
 
-bool BottleFitter::is_voxel_owned_by_bottle(const BottleInstance& inst, const Eigen::Vector3f& point) const
+bool BottleFitter::is_point_owned_by_bottle(const BottleInstance& inst, const Eigen::Vector3f& point) const
 {
     const auto& s = inst.model.state();
 
@@ -750,15 +750,15 @@ bool BottleFitter::is_voxel_owned_by_bottle(const BottleInstance& inst, const Ei
     // admitted → support a larger radius → widen the gate next frame → "invent" radius from edge-pixel
     // depth noise (the pose-3/6 inflation). A fixed gate caps how far depth alone can grow the bottle;
     // the mask silhouette owns the actual radius.
-    const float gate_radius = cfg_.prior_radius + cfg_.voxel_select_radius_margin_m;
+    const float gate_radius = cfg_.prior_radius + cfg_.support_select_radius_margin_m;
     const float dx = point.x() - s.cx;
     const float dy = point.y() - s.cy;
     if (std::hypot(dx, dy) > gate_radius)
         return false;
 
     // Height gate around the cylinder span.
-    float z_min = s.cz - s.height * 0.5f - cfg_.voxel_select_height_margin_m;
-    const float z_max = s.cz + s.height * 0.5f + cfg_.voxel_select_height_margin_m;
+    float z_min = s.cz - s.height * 0.5f - cfg_.support_select_height_margin_m;
+    const float z_max = s.cz + s.height * 0.5f + cfg_.support_select_height_margin_m;
     // Surface filter: when standing on a table, reject points at/below the table top (+1 cm slack to
     // keep the base ring). These are table-surface deprojections the mask depth-gate let in; they drag
     // the depth/centroid and inflate the lateral spread.
@@ -767,7 +767,7 @@ bool BottleFitter::is_voxel_owned_by_bottle(const BottleInstance& inst, const Ei
     return point.z() >= z_min and point.z() <= z_max;
 }
 
-std::uint64_t BottleFitter::voxel_key(const Eigen::Vector3f& point, float quantization_m)
+std::uint64_t BottleFitter::cell_key(const Eigen::Vector3f& point, float quantization_m)
 {
     const float q = std::max(1e-4f, quantization_m);
     const int ix = static_cast<int>(std::floor(point.x() / q));
@@ -819,7 +819,7 @@ bool BottleFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_nod
 
     // No checkpoints: the model ALWAYS cold-starts at the fresh masks-detected pose (init_state, set
     // above) and the cold-start centroid snap. Persisted fits reloaded as a stale, drifted start that
-    // could deadlock the fit past the voxel-ownership gate (cand=0, "model won't move") — removed.
+    // could deadlock the fit past the point-ownership gate (cand=0, "model won't move") — removed.
 
     // Sanitize non-finite fields so a bad detection can't poison the SDF.
     const auto fix = [&](float& v, float fallback)

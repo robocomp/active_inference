@@ -270,7 +270,7 @@ void SpecificWorker::run_instance_tracker()
         for (int d = 0; d < static_cast<int>(dets.size()); ++d)
             if (res.cand_of_det[d] != 0)
                 birth_frag_.accumulate(res.cand_of_det[d], slice_cloud(pkt, dets[d].slice_index),
-                                       pkt.timestamp_ms, cfg_.birth_frag_voxel_m,
+                                       pkt.timestamp_ms, cfg_.birth_frag_cell_m,
                                        static_cast<std::size_t>(std::max(1, cfg_.birth_frag_max_pts)));
     birth_frag_.expire(res.expired_candidates);   // unconditional: frees bursts even if banking is disabled
 

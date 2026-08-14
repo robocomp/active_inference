@@ -14,7 +14,7 @@
  * affordance advertises the next-best-view so the controller can clear occluded joints.
  *
  * Structurally a focused clone of bottle_concept: presence protocol, RT machinery, dashboard and the
- * canonical ensure_instance → observe → run_inference → persist loop are kept; the SDF/mask/voxel
+ * canonical ensure_instance → observe → run_inference → persist loop are kept; the SDF/mask/support-bank
  * pipeline, the evaluator and the Webots/Ice proxies are dropped (this agent links no Ice interfaces).
  */
 

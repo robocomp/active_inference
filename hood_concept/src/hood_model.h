@@ -31,7 +31,7 @@ struct HoodState
     // placement. That conflation is not a naming problem: it is read as a span by every consumer, so a
     // hanging object silently became a fridge-shaped box standing under the hob. It survived five separate
     // repairs because each site re-derived the span from `hood_height` in its own arithmetic — the SDF that
-    // splits mask points, the projected silhouette, the ROI, the voxel-ownership band, the front-face warp,
+    // splits mask points, the projected silhouette, the ROI, the point-ownership band, the front-face warp,
     // the LiDAR selection and carve, and the RT pose. Eight sites, one fact.
     //
     // So the fact lives HERE and nothing may restate it. Ask for z0()/z1()/zc(); never rebuild them from a

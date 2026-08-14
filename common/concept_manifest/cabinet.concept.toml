@@ -10,7 +10,7 @@ from      = "nominal"
 why       = """
 ★A CABINET RUN HAS TWO SUPPORTS AND CHOOSES PER INSTANCE. A base tier is floor_anchored; a wall tier HANGS at
 roughly [1.40, 2.10] m. It is the same class with two answers, decided from evidence — cabinet_model carries
-z0 and z1 as REAL DOFs precisely because of it, and the LiDAR/voxel bands are derived from those rather than
+z0 and z1 as REAL DOFs precisely because of it, and the LiDAR/support bands are derived from those rather than
 from any class constant. Declaring one enum would be a wrong statement; `resolved` declares the dynamism, so
 a clone cannot inherit floor_anchored in silence and no band may be derived from here.
 """

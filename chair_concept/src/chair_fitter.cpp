@@ -353,7 +353,7 @@ float ChairFitter::run_inference(ChairInstance& inst, const ChairObservation& ob
 
     if (observation.has_fresh_data)
     {
-        ingest_observation_voxels(inst, observation);
+        ingest_observation_support(inst, observation);
         // The glance paid off: a real depth mask arrived → this is no longer a bearing-only hypothesis. The
         // belief update below collapses the broad along-ray Σ to the observed position; the affordance
         // switches from Orient to the normal one next cycle.
@@ -954,9 +954,9 @@ void ChairFitter::compute_projected_roi(ChairInstance& inst)
     inst.roi_valid    = sane;
 }
 
-// ─── Voxel bank (chair-owned historical memory) ──────────────────────────────
+// ─── Support bank (chair-owned historical memory) ──────────────────────────────
 
-std::uint64_t ChairFitter::voxel_key(const Eigen::Vector3f& point, float quantization_m)
+std::uint64_t ChairFitter::cell_key(const Eigen::Vector3f& point, float quantization_m)
 {
     const float q = std::max(1e-4f, quantization_m);
     const int ix = static_cast<int>(std::floor(point.x() / q));
@@ -971,27 +971,27 @@ std::uint64_t ChairFitter::voxel_key(const Eigen::Vector3f& point, float quantiz
     return h;
 }
 
-void ChairFitter::ingest_observation_voxels(ChairInstance& inst, const ChairObservation& observation)
+void ChairFitter::ingest_observation_support(ChairInstance& inst, const ChairObservation& observation)
 {
     std::size_t inserted = 0;
     std::size_t rejected_foreign = 0;
-    const auto max_points = static_cast<std::size_t>(std::max(1, cfg_.voxel_bank_max_points));
+    const auto max_points = static_cast<std::size_t>(std::max(1, cfg_.support_bank_max_points));
 
     auto ingest = [&](const std::vector<Eigen::Vector3f>& src)
     {
         for (const auto& p : src)
         {
-            if (inst.voxel_bank_pts.size() >= max_points)
+            if (inst.support_bank_pts.size() >= max_points)
                 break;
-            if (not is_voxel_owned_by_chair(inst, p))
+            if (not is_point_owned_by_chair(inst, p))
             {
                 ++rejected_foreign;
                 continue;
             }
-            const auto key = voxel_key(p, cfg_.voxel_bank_quantization_m);
-            if (inst.voxel_bank_keys.insert(key).second)
+            const auto key = cell_key(p, cfg_.support_bank_quantization_m);
+            if (inst.support_bank_keys.insert(key).second)
             {
-                inst.voxel_bank_pts.push_back(p);
+                inst.support_bank_pts.push_back(p);
                 ++inserted;
             }
         }
@@ -1001,17 +1001,17 @@ void ChairFitter::ingest_observation_voxels(ChairInstance& inst, const ChairObse
     ingest(observation.residual_pts);
 
     if (inserted > 0 && should_log(inst))
-        std::print("[{}] voxel-bank: +{} total={} (cap={}) reject_foreign={}\n",
-                   inst.node_name, inserted, inst.voxel_bank_pts.size(), max_points, rejected_foreign);
+        std::print("[{}] support-bank: +{} total={} (cap={}) reject_foreign={}\n",
+                   inst.node_name, inserted, inst.support_bank_pts.size(), max_points, rejected_foreign);
 }
 
-bool ChairFitter::is_voxel_owned_by_chair(const ChairInstance& inst, const Eigen::Vector3f& point) const
+bool ChairFitter::is_point_owned_by_chair(const ChairInstance& inst, const Eigen::Vector3f& point) const
 {
     const auto& s = inst.model.state();
 
     // XY ownership gate: chair-centered radius with a configurable margin.
     const float half_diag = 0.5f * std::sqrt(s.seat_w * s.seat_w + s.seat_d * s.seat_d);
-    const float gate_radius = std::max(1.0f, half_diag + cfg_.voxel_select_radius_margin_m);
+    const float gate_radius = std::max(1.0f, half_diag + cfg_.support_select_radius_margin_m);
     const float dx = point.x() - s.cx;
     const float dy = point.y() - s.cy;
     if (std::hypot(dx, dy) > gate_radius)
@@ -1019,7 +1019,7 @@ bool ChairFitter::is_voxel_owned_by_chair(const ChairInstance& inst, const Eigen
 
     // Height gate to reject floor / distant clutter points in mixed scenes.
     const float z_min = -0.05f;
-    const float z_max = s.cz + s.seat_h + s.back_h + cfg_.voxel_select_height_margin_m;
+    const float z_max = s.cz + s.seat_h + s.back_h + cfg_.support_select_height_margin_m;
     return point.z() >= z_min && point.z() <= z_max;
 }
 

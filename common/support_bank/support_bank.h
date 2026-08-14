@@ -1,16 +1,16 @@
 /*
- * voxel_bank.h — the per-instance accumulated point bank: ownership gate · dedup · cap. SHARED, header-only.
+ * support_bank.h — the per-instance accumulated point bank: ownership gate · dedup · cap. SHARED, header-only.
  *
  * Extracted 2026-08-12 from four byte-similar copies (cabinet · hood · refrigerator · table), measured at
  * 75.5% identical lines with the object's name normalised away — the highest duplication in the fleet.
  *
  * ★WHAT THE COPIES HAD ALREADY DRIFTED ON, which is the argument for extracting rather than tidying:
  *
- *   1. THE DEDUP KEY EXISTED THREE TIMES. refrigerator called the shared rc::voxel_key; table and cabinet
+ *   1. THE DEDUP KEY EXISTED THREE TIMES. refrigerator called the shared rc::cell_key; table and cabinet
  *      each inlined their own FNV-1a. They agree today, and nothing whatsoever would have said so if they
  *      stopped: two definitions quantise onto two grids, and a bank seeded from a pre-birth burst then
  *      double-counts its own points against a bank that keyed them differently. That is the exact hazard
- *      common/birth_fragment's voxel_key was written to close, closed for one agent out of four.
+ *      common/birth_fragment's cell_key was written to close, closed for one agent out of four.
  *   2. THE VERTICAL BAND WAS FLOOR-REFERENCED IN THREE OF THEM. `z_min = -0.05` with `z_max = height +
  *      margin` is a floor-anchored statement; hood_concept HANGS, and its band admitted the hob, the
  *      worktop and the backsplash into the instance's own bank as if they were hood surface. Same defect
@@ -44,9 +44,9 @@
 
 #include <Eigen/Dense>
 
-#include "../birth_fragment/birth_fragment.h"   // rc::voxel_key — ONE grid, shared with the pre-birth burst
+#include "../birth_fragment/birth_fragment.h"   // rc::cell_key — ONE grid, shared with the pre-birth burst
 
-namespace rc::voxel_bank
+namespace rc::support_bank
 {
 
 // Where the object is, in the only two terms the bank needs. Built by the agent from its own state.
@@ -86,7 +86,7 @@ struct Bank
 // The dedup key. ONE definition, shared with the pre-birth burst so a seeded bank cannot double-count.
 inline std::uint64_t key(const Eigen::Vector3f& p, float quantization_m)
 {
-    return rc::voxel_key(p, quantization_m);
+    return rc::cell_key(p, quantization_m);
 }
 
 // Does this point belong to THIS instance's bank? An XY radius (half-diagonal + margin, floored at 1 m so a
@@ -104,7 +104,7 @@ inline bool owns(const Extent& e, const Eigen::Vector3f& p, const Params& prm)
 
 struct IngestReport { std::size_t inserted = 0, rejected_foreign = 0, capped = 0; };
 
-// Insert this cycle's points into the bank: ownership-gated, de-duplicated by voxel key, hard-capped.
+// Insert this cycle's points into the bank: ownership-gated, de-duplicated by cell key, hard-capped.
 // The caller decides what to log and when — a shared module must not own an agent's log cadence.
 inline IngestReport ingest(Bank& bank, const Extent& e, const Params& prm,
                            const std::vector<Eigen::Vector3f>& candidate_pts,
@@ -135,8 +135,8 @@ inline void log_ingest(std::string_view node_name, std::size_t total, const Para
                        const IngestReport& r, bool do_log)
 {
     if (r.inserted > 0 and do_log)
-        std::print("[{}] voxel-bank: +{} total={} (cap={}) reject_foreign={}\n",
+        std::print("[{}] support-bank: +{} total={} (cap={}) reject_foreign={}\n",
                    node_name, r.inserted, total, prm.max_points, r.rejected_foreign);
 }
 
-}  // namespace rc::voxel_bank
+}  // namespace rc::support_bank

@@ -97,7 +97,7 @@ public slots:
     void del_node_slot(std::uint64_t from);
 
 private:
-    // The fit (observe/infer/belief/voxel-bank) lives in rc::DoorFitter; perception in
+    // The fit (observe/infer/belief/support-bank) lives in rc::DoorFitter; perception in
     // rc::MaskIngestor; DSR I/O in rc::DoorSceneGraph. The worker keeps orchestration + the
     // post-fit epistemic/affordance/Qt-diagnostics steps.
     using DoorObservation = rc::DoorFitter::DoorObservation;

@@ -33,10 +33,10 @@ struct BottleConfig
     float max_step_m       = 0.5f;   // reject a frame whose net centre move exceeds this (m); a bottle can't teleport — a corrupted cloud can. 0 = off
     float write_threshold  = 1e-3f;
     int   log_period_frames = 30;
-    int   voxel_bank_max_points     = 4000;
-    float voxel_bank_quantization_m = 0.01f;
-    float voxel_select_radius_margin_m = 0.10f;
-    float voxel_select_height_margin_m = 0.10f;
+    int   support_bank_max_points     = 4000;
+    float support_bank_quantization_m = 0.01f;
+    float support_select_radius_margin_m = 0.10f;
+    float support_select_height_margin_m = 0.10f;
 
     // ── Primary-input stream gate (readiness + staleness) — LIFECYCLE, not a belief knob ──────────────
     // Demote Operating→Degraded→Waiting when the voxelizer's `masks` node stops advancing its mask_frame_id
@@ -228,7 +228,7 @@ struct BottleConfig
     float move_xmin = 0.0f, move_xmax = 0.0f, move_ymin = 0.0f, move_ymax = 0.0f;   // world bounds (m)
 
     // Static-restart validation
-    // Validate the fit at independent static positions, restarting the agent per pose (fresh voxel
+    // Validate the fit at independent static positions, restarting the agent per pose (fresh support-point
     // bank). One run = move the bottle to grid pose BOTTLE_TEST_POSE (env), fit from scratch, log.
     bool  static_pose_test  = false;   // Eval.StaticPoseTest
     int   static_pose_index = 0;       // grid index for THIS run (env BOTTLE_TEST_POSE)

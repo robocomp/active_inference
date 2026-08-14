@@ -2,7 +2,7 @@
  * hood_instance.h  —  per-hood runtime state owned by the fitter (mirrors bottle_concept/bottle_instance.h).
  *
  * Bundles the geometry/state container, the AI2 full-covariance belief, convergence bookkeeping, the
- * per-frame sensor/diagnostics snapshots, the hood-owned voxel memory bank, the existence log-odds, and
+ * per-frame sensor/diagnostics snapshots, the hood-owned support-point memory bank, the existence log-odds, and
  * the epistemic affordance request — everything HoodFitter carries per tracked hood.
  */
 
@@ -120,15 +120,15 @@ struct HoodInstance
     // edge covariance on a meaningful uncertainty change (not only on a pose move).
     float last_pub_cov_trace = std::numeric_limits<float>::quiet_NaN();
 
-    // ── Hood-owned voxel memory bank (room frame), independent of per-frame uploads ──────────────
-    std::vector<Eigen::Vector3f> voxel_bank_pts;
-    std::unordered_set<std::uint64_t> voxel_bank_keys;
-    bool cloud_dumped = false;   // one-shot guard for the diagnostic voxel-bank dump (cfg_.dump_cloud_path)
+    // ── Hood-owned support-point memory bank (room frame), independent of per-frame uploads ──────────────
+    std::vector<Eigen::Vector3f> support_bank_pts;
+    std::unordered_set<std::uint64_t> support_bank_keys;
+    bool cloud_dumped = false;   // one-shot guard for the diagnostic support-bank dump (cfg_.dump_cloud_path)
 
     // ── Shape model-selection (round vs square), set by HoodFitter::evaluate_shape ──────────────
     // Published as the node's object_subtype string (the voxelizer renders the matching mesh). Chosen by
     // free-energy / model evidence, NOT a threshold: shape_evidence is a bounded accumulated log-Bayes-
-    // factor (round − square) over periodic voxel-bank comparisons; subtype flips at the zero boundary.
+    // factor (round − square) over periodic support-bank comparisons; subtype flips at the zero boundary.
     std::string subtype        = "hood";   // CLASS discriminator (object_subtype); constant for this agent
     float       shape_evidence = 0.0f;       // >0 ⇒ round better explains the accumulated cloud
     int         shape_eval_ctr = 0;          // cycles since the last periodic shape evaluation

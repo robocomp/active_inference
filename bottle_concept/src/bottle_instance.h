@@ -142,9 +142,9 @@ struct BottleInstance
     float last_pub_cx     = std::numeric_limits<float>::max();
     float last_pub_cy     = std::numeric_limits<float>::max();
     float last_pub_cz     = std::numeric_limits<float>::max();
-    // Bottle-owned voxel memory bank (room frame), independent of per-frame uploads.
-    std::vector<Eigen::Vector3f>      voxel_bank_pts;
-    std::unordered_set<std::uint64_t> voxel_bank_keys;
+    // Bottle-owned support-point memory bank (room frame), independent of per-frame uploads.
+    std::vector<Eigen::Vector3f>      support_bank_pts;
+    std::unordered_set<std::uint64_t> support_bank_keys;
     // Table-top z (room frame) the bottle stands on, when a "table" node is found under it; NaN
     // otherwise (bottle then "hangs from the room", no z anchor / no surface filter). Refreshed
     // each cycle. Anchors cz = table_top_z + height/2 and floors point ingestion at the surface.

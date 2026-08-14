@@ -167,7 +167,7 @@ void SpecificWorker::initialize()
     rc::RefrigeratorFitter::self_test();
     // Appearance door-ness metric self-check (OpenCV; a vertical-lined patch must out-score a plain one).
     rc::RefrigeratorProjection::self_test();
-    // Birth-burst store self-check (voxel dedup, cap, expiry, take-erases, local-consistency δ).
+    // Birth-burst store self-check (cell dedup, cap, expiry, take-erases, local-consistency δ).
     rc::BirthFragment::self_test();
  
     // Ignore payload attributes in local graph updates to avoid unnecessary copying and processing of potentially large data

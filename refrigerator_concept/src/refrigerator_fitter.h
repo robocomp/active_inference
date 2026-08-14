@@ -3,9 +3,9 @@
  *
  * Owns the per-refrigerator instance map and runs the AI2 full-covariance belief update for each "refrigerator_*" node:
  * instance lifecycle (ensure_instance + the RefrigeratorModel factory), observation (split the selected mask's
- * support points into on-surface vs off-surface sets), inference (voxel-bank ingest + one recursive RefrigeratorBelief
+ * support points into on-surface vs off-surface sets), inference (support-bank ingest + one recursive RefrigeratorBelief
  * update with the mask-motion channel as the observation precision R / bias gate, written back into inst.model),
- * and the refrigerator-owned voxel memory (ownership gate + FNV voxel keys). Collaborates with MaskIngestor (masks),
+ * and the refrigerator-owned support-point memory (ownership gate + FNV cell keys). Collaborates with MaskIngestor (masks),
  * RefrigeratorSceneGraph (robot covariance), RefrigeratorProjection (camera projection), and RefrigeratorLidarRangeChannel;
  * SpecificWorker keeps the orchestration (process_refrigerator_node), the DSR write-back, and the post-fit
  * epistemic / affordance / Qt-diagnostics steps. Plain class (no Q_OBJECT).
@@ -177,7 +177,7 @@ private:
     // it from the measurement frame back to room with ZERO input cov; stored on the instance for the
     // RT-cov write. No-op unless set_chain_cov_source enabled it.
     void compute_chain_cov(RefrigeratorInstance& inst);
-    // Periodic round-vs-square shape model-selection on the accumulated voxel bank → inst.subtype
+    // Periodic round-vs-square shape model-selection on the accumulated support bank → inst.subtype
     // (bounded log-Bayes-factor, no threshold). Runs every cfg_.shape_eval_period cycles.
     void evaluate_shape(RefrigeratorInstance& inst);
 

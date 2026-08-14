@@ -289,7 +289,7 @@ ExistenceLogoddsMax = 4.0      # clamp |L| so evidence stays finite AND recovera
 ExistenceFrameCorrelation = 0.327
 
 # ── Shape model selection (round vs square): a LOW-PASS, not an accumulator ────────────────────────────
-# ★2026-08-09. evaluate_shape() re-scores the ACCUMULATED voxel-bank cloud every evaluation — largely the
+# ★2026-08-09. evaluate_shape() re-scores the ACCUMULATED support-bank cloud every evaluation — largely the
 # same points each time — so summing the log-Bayes-factor measured DWELL TIME rather than information: the
 # statistic pinned at the clamp, and recanting then cost as many evaluations as saturating did. Live
 # symptom: the robot looking straight at a SQUARE table that stayed classified round and would not go back.
@@ -380,7 +380,7 @@ ExistenceLegOccupancy = true
 # test was untunable and invisible — the same "no config key at all" pattern that hid the fridge's
 # door-clearance prior for a week. Stated here at the values that were already in force.
 #
-# The decision is made on points THIS AGENT accumulated from its own masks' 3D support (the voxel bank),
+# The decision is made on points THIS AGENT accumulated from its own masks' 3D support (the support bank),
 # not on anything the voxelizer publishes back: one view of a table is a partial arc, and round-vs-square
 # only separates once the accumulated cloud spans enough of the rim. Every ShapeEvalPeriod cycles the ROUND
 # hypothesis is re-fitted to that cloud and scored against the SQUARE one at the same R, and the subtype
@@ -400,11 +400,11 @@ TableLogPeriodFrames = 30   # per-cycle log throttle (cosmetic; no effect on the
 ShowDashboard = true        # false = no GUI (belief dashboard + evidence monitor combined into one window)
 ObsDistance = 1.8           # comfortable maximum stand-off from the target face for epistemic poses
 EpistemicCooldownCycles = 200 # min cycles a satisfied table stays withdrawn (anti-chatter)
-VoxelBankMaxPoints = 4000   # max number of table-owned voxels kept in memory
-VoxelBankQuantizationM = 0.02 # dedup grid (m) for voxel-bank hashing
-VoxelSelectRadiusMarginM = 0.50 # per-table XY ownership gate margin for mixed proto-tables
-VoxelSelectHeightMarginM = 0.25 # extra Z margin above table height when selecting owned voxels
-DumpCloudPath = "/tmp/round_table.xyz" # DIAGNOSTIC one-shot: dump a table's voxel-bank cloud here for tests/compare_models ("" = off)
+SupportBankMaxPoints = 4000   # max number of table-owned support points kept in memory
+SupportBankQuantizationM = 0.02 # dedup grid (m) for support-bank hashing
+SupportSelectRadiusMarginM = 0.50 # per-table XY ownership gate margin for mixed proto-tables
+SupportSelectHeightMarginM = 0.25 # extra Z margin above table height when selecting owned points
+DumpCloudPath = "/tmp/round_table.xyz" # DIAGNOSTIC one-shot: dump a table's support-bank cloud here for tests/compare_models ("" = off)
 RtCovScale = 1.0            # scales the belief Σ → published room→table RT covariance (calibrate toward NEES≈1)
 PublishObjectObs = true     # publish per-frame ROBOT-frame fit z_o (obj_obs_robot) → room's object-anchor factor
 ObjectObsFrame = "body"     # localizer base frame z_o is expressed in (== room's LIDAR_ROBOT_FRAME)

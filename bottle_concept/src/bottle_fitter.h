@@ -6,10 +6,10 @@
  *   - instance lifecycle (ensure_instance),
  *   - observation: split the selected mask's support points into on-surface candidates vs
  *     residuals against the current SDF (observe),
- *   - inference: voxel-bank ingest + cold-start seed (with camera-ward de-projection)
+ *   - inference: support-bank ingest + cold-start seed (with camera-ward de-projection)
  *     + recursive-Laplace belief update (common/ai_belief) + the occluding-contour silhouette
  *     factor (accumulate_extra) folded into the free-energy step,
- *   - the bottle-owned voxel memory (ownership gate + FNV voxel keys).
+ *   - the bottle-owned support-point memory (ownership gate + FNV cell keys).
  *
  * Pure belief engine (mirrors TableFitter): exposes ensure_instance → observe → run_inference and
  * does NOT write DSR. READS via MaskIngestor (masks) and BottleSceneGraph (table lookups / support
@@ -128,10 +128,10 @@ private:
     // silhouette precision so a weak mask can't over-tighten radius. 1.0 when cfg_.mask_conf_weight is off.
     float mask_confidence_weight(float confidence) const;
 
-    // Voxel bank (bottle-owned historical memory).
-    void ingest_observation_voxels(BottleInstance& inst, const BottleObservation& observation);
-    bool is_voxel_owned_by_bottle(const BottleInstance& inst, const Eigen::Vector3f& point) const;
-    static std::uint64_t voxel_key(const Eigen::Vector3f& point, float quantization_m);
+    // Support bank (bottle-owned historical memory).
+    void ingest_observation_support(BottleInstance& inst, const BottleObservation& observation);
+    bool is_point_owned_by_bottle(const BottleInstance& inst, const Eigen::Vector3f& point) const;
+    static std::uint64_t cell_key(const Eigen::Vector3f& point, float quantization_m);
 
     // Append one AI2 belief row (state + Σ diag std) to cfg_.ai2_csv_path. No-op if the path is empty.
     void log_ai2_csv(const BottleInstance& inst, int point_count, float R, float energy);

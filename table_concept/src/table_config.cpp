@@ -53,11 +53,10 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.obs_distance             = getf("TableConcept.ObsDistance",            1.8f);
     out.epistemic_cooldown_cycles= geti("TableConcept.EpistemicCooldownCycles", 200);
     out.table_log_period_frames  = geti("TableConcept.TableLogPeriodFrames",   30);
-    out.voxel_bank_max_points    = geti("TableConcept.VoxelBankMaxPoints",     4000);
-    out.publish_voxel_bank        = getb("TableConcept.PublishVoxelBank",       false);
-    out.voxel_bank_quantization_m= getf("TableConcept.VoxelBankQuantizationM", 0.02f);
-    out.voxel_select_radius_margin_m = getf("TableConcept.VoxelSelectRadiusMarginM", 0.50f);
-    out.voxel_select_height_margin_m = getf("TableConcept.VoxelSelectHeightMarginM", 0.25f);
+    out.support_bank_max_points    = geti("TableConcept.SupportBankMaxPoints",     4000);
+    out.support_bank_quantization_m= getf("TableConcept.SupportBankQuantizationM", 0.02f);
+    out.support_select_radius_margin_m = getf("TableConcept.SupportSelectRadiusMarginM", 0.50f);
+    out.support_select_height_margin_m = getf("TableConcept.SupportSelectHeightMarginM", 0.25f);
 
     // ─── Primary-input (masks) stream gate — lifecycle liveness ────────────────
     out.masks_stall_timeout_ms   = geti("Media.MasksStallTimeoutMs",           3000);

@@ -49,11 +49,10 @@ DoorConfig load_door_config(const ConfigLoader& cfg)
     out.epistemic_cooldown_cycles= geti("DoorConcept.EpistemicCooldownCycles", 200);
     out.door_log_period_frames  = geti("DoorConcept.DoorLogPeriodFrames",   30);
     out.masks_stall_timeout_ms   = geti("Media.MasksStallTimeoutMs",           3000);
-    out.voxel_bank_max_points    = geti("DoorConcept.VoxelBankMaxPoints",     4000);
-    out.publish_voxel_bank        = getb("DoorConcept.PublishVoxelBank",       false);
-    out.voxel_bank_quantization_m= getf("DoorConcept.VoxelBankQuantizationM", 0.02f);
-    out.voxel_select_radius_margin_m = getf("DoorConcept.VoxelSelectRadiusMarginM", 0.50f);
-    out.voxel_select_height_margin_m = getf("DoorConcept.VoxelSelectHeightMarginM", 0.25f);
+    out.support_bank_max_points    = geti("DoorConcept.SupportBankMaxPoints",     4000);
+    out.support_bank_quantization_m= getf("DoorConcept.SupportBankQuantizationM", 0.02f);
+    out.support_select_radius_margin_m = getf("DoorConcept.SupportSelectRadiusMarginM", 0.50f);
+    out.support_select_height_margin_m = getf("DoorConcept.SupportSelectHeightMarginM", 0.25f);
 
     // DoorModel geometry / mask split
     out.sigma_obs          = getf("DoorModel.SigmaObs",          0.05f);

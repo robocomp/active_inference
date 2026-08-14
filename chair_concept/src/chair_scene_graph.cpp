@@ -141,25 +141,17 @@ void ChairSceneGraph::step_write_model(ChairInstance& inst, DSR::Node& node,
     }
     G_->add_or_modify_attrib_local<free_energy_att>(node, free_energy);
 
-    // ★PUBLISH GATED OFF BY DEFAULT — NOTHING READS IT. Audited 2026-08-14 across the whole components
-    // tree (66558 files, no string-form reads, no pydsr consumers): of 292 attributes the fleet writes, 161
-    // have no reader outside the agent that writes them, and *_voxel_bank_pts is the largest of them by far
-    // — up to VoxelBankMaxPoints (4000) points x 3 floats, per object, per publish, into a CRDT graph, for
-    // nobody. That is the same shape as the unbounded dot cloud that pinned an agent at 100% CPU.
+    // The accumulated support bank is NOT published. It never was voxels: the points are the 3-D support of
+    // a segmentation mask, split by this model's own SDF into on- and off-surface. The graph export was up to
+    // SupportBankMaxPoints (4000) points x 3 floats, per object, per publish, into a CRDT graph that nothing
+    // read — the same shape as the unbounded dot cloud that pinned an agent at 100% CPU. Gated off 2026-08-14,
+    // and the *_voxel_bank_pts attribute registrations were removed from cortex on 2026-08-14, so the gate,
+    // the knob and the attribute are all gone rather than lying dormant.
     //
-    // The BANK ITSELF STAYS: evaluate_shape() fits the round hypothesis to inst.voxel_bank_pts for the
-    // round-vs-square model selection, and DumpCloudPath exports it for the offline harness. Both are local
-    // reads. It is only the graph traffic that had no consumer.
-    //
-    // Set ChairConcept.PublishVoxelBank = true to restore it when a viewer actually wants the cloud.
-    // Export full chair-owned voxel memory (room frame) as XYZ triples.
-    if (cfg_.publish_voxel_bank)
-    {
-        std::vector<float> bank_flat;
-        bank_flat.reserve(inst.voxel_bank_pts.size() * 3);
-        for (const auto& p : inst.voxel_bank_pts) { bank_flat.push_back(p.x()); bank_flat.push_back(p.y()); bank_flat.push_back(p.z()); }
-        G_->add_or_modify_attrib_local<chair_voxel_bank_pts_att>(node, bank_flat);
-    }
+    // THE BANK ITSELF STAYS and is load-bearing: evaluate_shape() fits the round hypothesis to
+    // inst.support_bank_pts for the round-vs-square model selection, and DumpCloudPath exports it for the
+    // offline harness. Both are local reads. It was only ever the graph traffic that had no consumer.
+
 
     // Latest residual points (model-unexplained) for the voxelizer's residual layer — it reads
     // residual_pts_att but nothing was writing it, so that layer was always empty.

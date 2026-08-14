@@ -106,7 +106,7 @@ void BottleEvaluator::step_move_experiment(std::unordered_map<std::uint64_t, Bot
         catch (const std::exception& e) { std::print("bottle_concept: [move-exp] setObjectPose failed ({})\n", e.what()); }
     };
 
-    // Re-seed countdown: a few cycles after each teleport (so the mask + voxels have refreshed at the new
+    // Re-seed countdown: a few cycles after each teleport (so the mask + support points have refreshed at the new
     // pose), force a fresh cold-start so the fit re-snaps to the new position instead of being stranded
     // near the previous pose by the model-centred ownership gate. Makes each grid pose per-pose-honest.
     constexpr int MOVE_RESEED_DELAY = 8;

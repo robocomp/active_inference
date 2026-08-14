@@ -305,7 +305,7 @@ inline float resolve(const ConfigLoader& cfg, const char* cfg_key,
 // ─── BAND COHERENCE: does this z-band actually contain the body? ─────────────────────────────────
 //
 // ★THE CHEAPEST CHECK IN THE FLEET, AND IT WOULD HAVE CAUGHT A WEEK OF WORK. An agent derives several
-// vertical bands — which LiDAR returns to select, which voxels it owns, where to carve free space, where to
+// vertical bands — which LiDAR returns to select, which support points it owns, where to carve free space, where to
 // sample the silhouette — and each was written as its own arithmetic over "the height". When hood_concept was
 // cloned from a floor-anchored parent, those bands kept measuring from the floor while the body hung at
 // [1.55, 2.05] m. The LiDAR selection band came out as [−0.10, 0.85]: **disjoint from the body**, 109 returns

@@ -280,10 +280,10 @@ ExistenceLegOccupancy = true
 [CabinetConcept]
 ObsDistance = 1.8           # comfortable maximum stand-off from the target face for epistemic poses
 EpistemicCooldownCycles = 200 # min cycles a satisfied cabinet stays withdrawn (anti-chatter)
-VoxelBankMaxPoints = 4000   # max number of cabinet-owned voxels kept in memory
-VoxelBankQuantizationM = 0.02 # dedup grid (m) for voxel-bank hashing
-VoxelSelectRadiusMarginM = 0.50 # per-cabinet XY ownership gate margin for mixed proto-cabinets
-VoxelSelectHeightMarginM = 0.25 # extra Z margin above cabinet height when selecting owned voxels
+SupportBankMaxPoints = 4000   # max number of cabinet-owned support points kept in memory
+SupportBankQuantizationM = 0.02 # dedup grid (m) for support-bank hashing
+SupportSelectRadiusMarginM = 0.50 # per-cabinet XY ownership gate margin for mixed proto-cabinets
+SupportSelectHeightMarginM = 0.25 # extra Z margin above cabinet height when selecting owned points
 RtCovScale = 1.0            # scales the belief Σ → published room→cabinet RT covariance (calibrate toward NEES≈1)
 PublishObjectObs = true     # publish per-frame ROBOT-frame fit z_o (obj_obs_robot) → room's object-anchor factor
 ObjectObsFrame = "body"     # localizer base frame z_o is expressed in (== room's LIDAR_ROBOT_FRAME)

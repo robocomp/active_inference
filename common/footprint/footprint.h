@@ -16,7 +16,7 @@
  * that depends on which rectangle is smaller. It is not an object-concept agent so it is out of scope here,
  * but it is the proof that this function does drift when left copied.
  *
- * THE SEAM, the same one voxel_bank uses: the agent hands over its footprint as five numbers. Each object
+ * THE SEAM, the same one support_bank uses: the agent hands over its footprint as five numbers. Each object
  * names its extents differently — a box has (w, h), a run has (L, d), a bottle has a radius — and that
  * mapping is the only per-object part. Everything after it is plane geometry.
  *

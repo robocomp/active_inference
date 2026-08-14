@@ -3,7 +3,7 @@
  *
  * DSR node/RT I/O layer for chair_concept (mirrors bottle_concept/bottle_scene_graph.h):
  * births "chair_N" nodes from tracker detections, writes the fitted model back (geometry
- * attrs + mesh + RFE/voxel-bank export + room→chair RT edge), reads the robot localisation
+ * attrs + mesh + RFE/support-bank export + room→chair RT edge), reads the robot localisation
  * covariance, and writes the epistemic action proposal.
  *
  * Plain class (no Q_OBJECT) constructed by SpecificWorker once G + the DSR APIs are ready.
@@ -43,7 +43,7 @@ public:
     std::uint64_t create_instance_from_detection(const Eigen::Vector3f& centroid_room,
                                                  std::uint64_t room_node_id);
 
-    // Publish the instance's fitted model to its DSR node (geometry + FE + mesh + RFE/voxel-bank) and
+    // Publish the instance's fitted model to its DSR node (geometry + FE + mesh + RFE/support-bank) and
     // the room→chair RT edge. persist_* resolves the node by id first; both no-op if the node is gone.
     bool persist_chair_belief(ChairInstance& inst, std::uint64_t node_id, std::uint64_t room_id, float free_energy);
     void step_write_model(ChairInstance& inst, DSR::Node& node, std::uint64_t room_id, float free_energy);

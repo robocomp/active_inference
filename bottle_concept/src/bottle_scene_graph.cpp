@@ -278,14 +278,11 @@ void BottleSceneGraph::step_write_model(BottleInstance& inst, DSR::Node& node, f
     G_->add_or_modify_attrib_local<model_generation_att>(node, ++inst.model_generation);
     G_->add_or_modify_attrib_local<mesh_vertices_att>(node, make_cylinder_mesh(s));
 
-    // Export the bottle-owned voxel memory bank (remembered evidence) as XYZ triples.
-    {
-        const auto& qpts = inst.voxel_bank_pts;
-        std::vector<float> qflat;
-        qflat.reserve(qpts.size() * 3);
-        for (const auto& p : qpts) { qflat.push_back(p.x()); qflat.push_back(p.y()); qflat.push_back(p.z()); }
-        G_->add_or_modify_attrib_local<rfe_pts_att>(node, qflat);
-    }
+    // The accumulated support bank is NOT published — see the sibling agents. Bottle's write went into
+    // rfe_pts_att and was NOT EVEN GATED: up to 4000 points x 3 floats every publish, into a CRDT graph,
+    // for an attribute with no reader anywhere in the tree. The 2026-08-14 gate reached five agents and
+    // missed this one because it was spelled with a different attribute name.
+
 
     G_->update_node(node);
 

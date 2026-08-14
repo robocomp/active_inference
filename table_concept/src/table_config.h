@@ -28,14 +28,10 @@ struct TableConfig
     float obs_distance                 = 1.8f;    // d_obs for the epistemic planner
     int   epistemic_cooldown_cycles    = 200;     // min cycles withdrawn after satisfaction
     int   table_log_period_frames      = 30;      // per-cycle log throttle
-    // Publish the accumulated bank onto the DSR node. OFF: audited 2026-08-14, nothing in the whole
-    // components tree reads *_voxel_bank_pts. The bank itself is still built — evaluate_shape and
-    // DumpCloudPath read it locally — this is only the graph traffic.
-    bool  publish_voxel_bank           = false;
-    int   voxel_bank_max_points        = 4000;    // cap on the table-owned voxel memory bank
-    float voxel_bank_quantization_m    = 0.02f;   // voxel-bank dedup grid (m)
-    float voxel_select_radius_margin_m = 0.50f;   // XY margin (m) around the model for voxel-bank selection
-    float voxel_select_height_margin_m = 0.25f;   // Z margin (m) around the model for voxel-bank selection
+    int   support_bank_max_points        = 4000;    // cap on the table-owned support-point memory bank
+    float support_bank_quantization_m    = 0.02f;   // support-bank dedup grid (m)
+    float support_select_radius_margin_m = 0.50f;   // XY margin (m) around the model for support-bank selection
+    float support_select_height_margin_m = 0.25f;   // Z margin (m) around the model for support-bank selection
 
     // ── Primary-input stream gate (readiness + staleness) — LIFECYCLE, not a belief knob ──────────────
     // Demote Operating→Degraded→Waiting when the voxelizer's `masks` node stops advancing its mask_frame_id
@@ -58,7 +54,7 @@ struct TableConfig
     bool  show_dashboard         = true;
 
     // ── Shape model-selection (round vs square) — free-energy evidence, no threshold ──────────────────
-    // Every shape_eval_period cycles (once the voxel bank has ≥ shape_eval_min_points) fit a ROUND model to
+    // Every shape_eval_period cycles (once the support bank has ≥ shape_eval_min_points) fit a ROUND model to
     // the accumulated cloud and accumulate a bounded log-Bayes-factor (round − square) → inst.subtype. The
     // accumulator is clamped to ±shape_evidence_clamp so a converged run can still RECANT if evidence turns.
     int   shape_eval_period      = 30;
@@ -66,12 +62,12 @@ struct TableConfig
     float shape_evidence_clamp   = 8.0f;
     // Low-pass rate for the shape log-Bayes-factor. 0 = the legacy SUM (kept for A/B).
     // >0 makes shape_evidence track the CURRENT evidence with a time constant instead of accumulating,
-    // because the quantity being re-scored is the accumulated voxel-bank cloud — largely the SAME points
+    // because the quantity being re-scored is the accumulated support-bank cloud — largely the SAME points
     // each evaluation, so summing measures dwell time, not information. Same lesson as
     // ring_config.h's evidence_ema_alpha ("static furniture re-observed is not new evidence").
     float shape_evidence_ema_alpha = 0.0f;
 
-    // DIAGNOSTIC one-shot: if non-empty, dump a fitted table's accumulated voxel-bank point cloud (room
+    // DIAGNOSTIC one-shot: if non-empty, dump a fitted table's accumulated support-bank point cloud (room
     // frame, XYZ per line) to this path ONCE (when the bank exceeds ~200 pts), for the offline
     // square-vs-round model-comparison harness (tests/compare_models). "" = off. Not a runtime knob.
     std::string dump_cloud_path        = "";

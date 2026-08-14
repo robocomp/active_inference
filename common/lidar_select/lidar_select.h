@@ -2,7 +2,7 @@
  * lidar_select.h — which LiDAR returns belong to THIS instance, and what one look was worth. SHARED.
  *
  * Extracted 2026-08-14 from four copies (cabinet · hood · refrigerator · table) measured at 85.6% pairwise
- * identical lines with the object's name normalised away — the highest family in the fleet after voxel_bank
+ * identical lines with the object's name normalised away — the highest family in the fleet after support_bank
  * was taken. refrigerator and table were BYTE-IDENTICAL: the normalised diff between them is empty.
  *
  * ★THIS FILE HAS ALREADY PRODUCED TWO LIVE DEFECTS, both in the part that is NOT shared:

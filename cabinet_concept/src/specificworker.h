@@ -107,7 +107,7 @@ private:
     // common/instance_tracker/birth_evidence.h rule 1.
     long  last_birth_mask_frame_ = -1;
 
-    // The fit (observe/infer/belief/voxel-bank) lives in rc::CabinetFitter; perception in
+    // The fit (observe/infer/belief/support-bank) lives in rc::CabinetFitter; perception in
     // rc::MaskIngestor; DSR I/O in rc::CabinetSceneGraph. The worker keeps orchestration + the
     // post-fit epistemic/affordance/Qt-diagnostics steps.
     using CabinetObservation = rc::CabinetFitter::CabinetObservation;

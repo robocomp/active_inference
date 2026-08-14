@@ -5,9 +5,9 @@
  * per-chair instance map and runs the AI2 full-covariance belief update for each "chair_*" node:
  *   - instance lifecycle (ensure_instance + the ChairModel factory),
  *   - observation: split the selected mask's support points into on-surface vs off-surface sets,
- *   - inference: voxel-bank ingest + one recursive belief update (ChairBelief) with the mask-motion
+ *   - inference: support-bank ingest + one recursive belief update (ChairBelief) with the mask-motion
  *     channel as the observation precision R / bias gate, written back into inst.model,
- *   - the chair-owned voxel memory (ownership gate + FNV voxel keys).
+ *   - the chair-owned support-point memory (ownership gate + FNV cell keys).
  *
  * Collaborates with MaskIngestor (masks) and ChairSceneGraph. SpecificWorker keeps the orchestration
  * (process_chair_node), the DSR write-back call, and the post-fit epistemic / affordance / Qt steps.
@@ -149,9 +149,9 @@ private:
     // input cov), stored on the instance for the RT-cov write. No-op unless set_chain_cov_source enabled.
     void compute_chain_cov(ChairInstance& inst);
 
-    void ingest_observation_voxels(ChairInstance& inst, const ChairObservation& observation);
-    bool is_voxel_owned_by_chair(const ChairInstance& inst, const Eigen::Vector3f& point) const;
-    static std::uint64_t voxel_key(const Eigen::Vector3f& point, float quantization_m);
+    void ingest_observation_support(ChairInstance& inst, const ChairObservation& observation);
+    bool is_point_owned_by_chair(const ChairInstance& inst, const Eigen::Vector3f& point) const;
+    static std::uint64_t cell_key(const Eigen::Vector3f& point, float quantization_m);
 
     ChairModelParams  make_model_params() const;
 

@@ -28,14 +28,10 @@ struct HoodConfig
                                                   // sample inside it counts toward central_frac → p_detect → removal
     int   epistemic_cooldown_cycles    = 200;     // min cycles withdrawn after satisfaction
     int   hood_log_period_frames      = 30;      // per-cycle log throttle
-    // Publish the accumulated bank onto the DSR node. OFF: audited 2026-08-14, nothing in the whole
-    // components tree reads *_voxel_bank_pts. The bank itself is still built — evaluate_shape and
-    // DumpCloudPath read it locally — this is only the graph traffic.
-    bool  publish_voxel_bank           = false;
-    int   voxel_bank_max_points        = 4000;    // cap on the hood-owned voxel memory bank
-    float voxel_bank_quantization_m    = 0.02f;   // voxel-bank dedup grid (m)
-    float voxel_select_radius_margin_m = 0.50f;   // XY margin (m) around the model for voxel-bank selection
-    float voxel_select_height_margin_m = 0.25f;   // Z margin (m) around the model for voxel-bank selection
+    int   support_bank_max_points        = 4000;    // cap on the hood-owned support-point memory bank
+    float support_bank_quantization_m    = 0.02f;   // support-bank dedup grid (m)
+    float support_select_radius_margin_m = 0.50f;   // XY margin (m) around the model for support-bank selection
+    float support_select_height_margin_m = 0.25f;   // Z margin (m) around the model for support-bank selection
 
     // ── Primary-input stream gate (readiness + staleness) — LIFECYCLE, not a belief knob ──────────────
     // Demote Operating→Degraded→Waiting when the voxelizer's `masks` node stops advancing its mask_frame_id
@@ -49,14 +45,14 @@ struct HoodConfig
     bool  show_dashboard         = true;
 
     // ── Shape model-selection (round vs square) — free-energy evidence, no threshold ──────────────────
-    // Every shape_eval_period cycles (once the voxel bank has ≥ shape_eval_min_points) fit a ROUND model to
+    // Every shape_eval_period cycles (once the support bank has ≥ shape_eval_min_points) fit a ROUND model to
     // the accumulated cloud and accumulate a bounded log-Bayes-factor (round − square) → inst.subtype. The
     // accumulator is clamped to ±shape_evidence_clamp so a converged run can still RECANT if evidence turns.
     int   shape_eval_period      = 30;
     int   shape_eval_min_points  = 300;
     float shape_evidence_clamp   = 8.0f;
 
-    // DIAGNOSTIC one-shot: if non-empty, dump a fitted hood's accumulated voxel-bank point cloud (room
+    // DIAGNOSTIC one-shot: if non-empty, dump a fitted hood's accumulated support-bank point cloud (room
     // frame, XYZ per line) to this path ONCE (when the bank exceeds ~200 pts), for the offline
     // square-vs-round model-comparison harness (tests/compare_models). "" = off. Not a runtime knob.
     std::string dump_cloud_path        = "";
@@ -405,7 +401,7 @@ struct HoodConfig
     // 0.75 m sits below plaus_height_min=1.20 and far from ai2_prior_height_m=1.90, so every real fridge
     // was born implausible and had to climb out), and the right to REFUSE a birth before it reaches DSR.
     bool  birth_frag_enabled  = true;
-    float birth_frag_voxel_m  = 0.03f;    // dedup grid for the burst (finer than the bank: a burst is short)
+    float birth_frag_cell_m  = 0.03f;    // dedup grid for the burst (finer than the bank: a burst is short)
     int   birth_frag_max_pts  = 20000;    // hard cap per candidate; a lingering blob cannot grow without bound
     // LOCAL CONSISTENCY δ (ms), the Khronos fragment criterion: observations may only be fused as one view of
     // one object if they are close enough in time that neither localization error nor scene change matters.

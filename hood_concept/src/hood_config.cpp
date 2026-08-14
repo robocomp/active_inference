@@ -62,11 +62,10 @@ HoodConfig load_hood_config(const ConfigLoader& cfg)
     out.central_region_frac      = getf("HoodConcept.CentralRegionFrac",     0.25f);
     out.epistemic_cooldown_cycles= geti("HoodConcept.EpistemicCooldownCycles", 200);
     out.hood_log_period_frames  = geti("HoodConcept.HoodLogPeriodFrames",   30);
-    out.voxel_bank_max_points    = geti("HoodConcept.VoxelBankMaxPoints",     4000);
-    out.publish_voxel_bank        = getb("HoodConcept.PublishVoxelBank",       false);
-    out.voxel_bank_quantization_m= getf("HoodConcept.VoxelBankQuantizationM", 0.02f);
-    out.voxel_select_radius_margin_m = getf("HoodConcept.VoxelSelectRadiusMarginM", 0.50f);
-    out.voxel_select_height_margin_m = getf("HoodConcept.VoxelSelectHeightMarginM", 0.25f);
+    out.support_bank_max_points    = geti("HoodConcept.SupportBankMaxPoints",     4000);
+    out.support_bank_quantization_m= getf("HoodConcept.SupportBankQuantizationM", 0.02f);
+    out.support_select_radius_margin_m = getf("HoodConcept.SupportSelectRadiusMarginM", 0.50f);
+    out.support_select_height_margin_m = getf("HoodConcept.SupportSelectHeightMarginM", 0.25f);
 
     // ─── Primary-input (masks) stream gate — lifecycle liveness ────────────────
     out.masks_stall_timeout_ms   = geti("Media.MasksStallTimeoutMs",           3000);
@@ -171,9 +170,9 @@ HoodConfig load_hood_config(const ConfigLoader& cfg)
                         out.body_z0_m - m, out.body_z1_m + m, decl);
         bands_ok &= rc::manifest::band_contains_body("hood ", "existence_carve",
                         out.body_z0_m, out.body_z1_m, decl);
-        bands_ok &= rc::manifest::band_contains_body("hood ", "voxel_ownership",
-                        out.body_z0_m - out.voxel_select_height_margin_m,
-                        out.body_z1_m + out.voxel_select_height_margin_m, decl);
+        bands_ok &= rc::manifest::band_contains_body("hood ", "point_ownership",
+                        out.body_z0_m - out.support_select_height_margin_m,
+                        out.body_z1_m + out.support_select_height_margin_m, decl);
         if (bands_ok)
             std::print("[manifest] hood ✓ every derived z-band contains the declared body\n");
     }
@@ -275,7 +274,7 @@ HoodConfig load_hood_config(const ConfigLoader& cfg)
     out.tracker_birth_height_m   = getf("Tracker.BirthHeightM",     0.75f);
     // Birth fragment: keep the probation burst and admit the birth on it (see hood_config.h).
     out.birth_frag_enabled       = getb("Tracker.BirthFragment",          true);
-    out.birth_frag_voxel_m       = getf("Tracker.BirthFragmentVoxelM",    0.03f);
+    out.birth_frag_cell_m       = getf("Tracker.BirthFragmentVoxelM",    0.03f);
     out.birth_frag_max_pts       = geti("Tracker.BirthFragmentMaxPts",    20000);
     out.birth_frag_delta_ms      = static_cast<std::uint64_t>(
                                        std::max(0, geti("Tracker.BirthFragmentDeltaMs", 4000)));

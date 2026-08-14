@@ -3,14 +3,14 @@
  *
  * Implements the per-"table_*" instance lifecycle and the AI2 full-covariance belief update: ensure_instance
  * (birth-seed + RT/prior warm-start + NaN sanitize), observe_slice (mask-cloud → candidate/residual SDF split
- * + per-slice R inputs), and run_inference (lazy footprint-moment birth, voxel-bank ingest, one TableBelief
+ * + per-slice R inputs), and run_inference (lazy footprint-moment birth, support-bank ingest, one TableBelief
  * update with range/motion covariance, the step-bound divergence net, FE-surprise attention, orientation-mode
  * resolution, and write-back into the legacy TableState). Collaborates with MaskIngestor, TableSceneGraph,
- * TableProjection, TableLidarRangeChannel, and the header-only voxel bank; SpecificWorker owns orchestration.
+ * TableProjection, TableLidarRangeChannel, and the header-only support bank; SpecificWorker owns orchestration.
  */
 
 #include "table_fitter.h"
-#include "table_voxel_bank.h"
+#include "table_support_bank.h"
 #include "round_table_belief.h"   // round hypothesis for the shape model-selection (evaluate_shape)
 #include "../../common/object_anchor/object_anchor_contract.h"
 #include "../../common/object_anchor/ray_anisotropic_cov.h"
@@ -352,7 +352,7 @@ bool TableFitter::frame_admissible(const MaskIngestor::MaskSlice& sl) const
 
 // One recursive full-covariance belief update (or age-only step) for this instance; returns the free energy.
 //
-// Lazy first-frame init (snap centre/height to the cloud, footprint-moment birth of w/h/yaw), voxel-bank
+// Lazy first-frame init (snap centre/height to the cloud, footprint-moment birth of w/h/yaw), support-bank
 // ingest, then the range/motion covariance and the TableBelief update guarded by a step-bound divergence net,
 // FE-surprise attention baseline, and orientation-mode resolution. On a stale frame it ages the belief
 // (Σ grows on the agent's clock) instead of freezing. Result is written back into the legacy TableState.
@@ -441,7 +441,7 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
 
     if (observation.has_fresh_data)
     {
-        rc::voxel_bank::ingest(inst, observation.candidate_pts, observation.residual_pts, cfg_);
+        rc::support_bank::ingest(inst, observation.candidate_pts, observation.residual_pts, cfg_);
         // ★NOT for a viewer — nothing ever read the published attribute. The bank is how this agent
         // gathers 3D points from its own masks over many frames so evaluate_shape() can DISCRIMINATE
         // SHAPES (round vs square) from an accumulated cloud rather than one frame's partial view.
@@ -809,7 +809,7 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
 
 // Round-vs-square shape hypothesis test by free energy / model evidence (CONCEPT_AGENT_RECIPE.md §6, the
 // "evidence over hypotheses, not a threshold" pattern; validated offline in tests/compare_models). Every
-// cfg_.shape_eval_period cycles, once the ownership-gated voxel bank has enough points, fit a ROUND model
+// cfg_.shape_eval_period cycles, once the ownership-gated support bank has enough points, fit a ROUND model
 // (disc top + 4 ring legs — MATCHED primitive cardinality with the square's top+4legs, so the mixture-prior
 // baseline cancels and only disc-vs-box TOP shape is measured) to the SAME accumulated cloud with the SAME R,
 // and accumulate a BOUNDED sequential log-Bayes-factor (E_square − E_round). subtype flips at the zero
@@ -819,7 +819,7 @@ void TableFitter::evaluate_shape(TableInstance& inst)
     if (cfg_.shape_eval_period <= 0) return;                              // gate disabled
     if (++inst.shape_eval_ctr < cfg_.shape_eval_period) return;
     inst.shape_eval_ctr = 0;
-    const auto& cloud = inst.voxel_bank_pts;
+    const auto& cloud = inst.support_bank_pts;
     if (static_cast<int>(cloud.size()) < cfg_.shape_eval_min_points) return;
 
     const float R = cfg_.ai2_sigma_base_m * cfg_.ai2_sigma_base_m;        // SAME R as the square → normaliser cancels
@@ -835,7 +835,7 @@ void TableFitter::evaluate_shape(TableInstance& inst)
     const float e_round = round.mean_energy(cloud, round.state(), R);
 
     // Bounded sequential accumulation of the per-evaluation log-Bayes-factor (>0 ⇒ round explains it better).
-    // ★NOT A SUM WHEN THE ALPHA IS SET. What is being re-scored is the accumulated voxel-bank cloud —
+    // ★NOT A SUM WHEN THE ALPHA IS SET. What is being re-scored is the accumulated support-bank cloud —
     // largely the SAME points at every evaluation — so adding the log-Bayes-factor each time counts one
     // body of evidence over and over: confidence grows with DWELL TIME rather than with information, the
     // accumulator pins at the clamp, and recanting then costs as many evaluations as saturating did. Live
@@ -891,7 +891,7 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
                  //
                  // ⚠THESE NAMES AND THE VALUES BELOW ARE TWO LISTS THAT MUST AGREE BY POSITION, and on the
                  // first run they did not: the values were emitted two fields early, so bank_pts (an int
-                 // capped at VoxelBankMaxPoints) was being read under e_square. The field COUNTS matched
+                 // capped at SupportBankMaxPoints) was being read under e_square. The field COUNTS matched
                  // exactly — 94 and 94 — so no count check could have caught it. What caught it was 4000
                  // appearing where a free energy belongs. Same failure as the audit matrix whose column
                  // labels drifted out of order while every value read "ok": a mislabelled instrument is
@@ -942,7 +942,7 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
              << inst.ai2_belief.dbg_moment_aniso() << ',' << inst.ai2_belief.dbg_moment_r_yaw() << ','   // rogue-mask diag
              << (inst.subtype == "round" ? 1 : 0) << ',' << inst.shape_evidence << ','
              << inst.dbg_shape_lbf << ',' << inst.dbg_e_square << ',' << inst.dbg_e_round << ','
-             << inst.dbg_shape_pts << ',' << inst.voxel_bank_pts.size() << ','
+             << inst.dbg_shape_pts << ',' << inst.support_bank_pts.size() << ','
              << inst.ai2_belief.dbg_moment_ext_major() << ',' << inst.ai2_belief.dbg_moment_ext_minor() << ','
              << inst.ai2_belief.dbg_moment_phi() << ',' << inst.ai2_belief.dbg_moment_pts() << ','
              << inst.existence.logodds() << ',' << inst.existence.p_exists() << ','

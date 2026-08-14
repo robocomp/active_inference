@@ -60,7 +60,7 @@ struct SampleQueueParams
 
 struct SamplePoint
 {
-    Eigen::Vector3f position;       // Observed voxel centroid, room frame
+    Eigen::Vector3f position;       // Observed mask-support centroid, room frame
     Eigen::Matrix2f capture_cov;    // Robot XY covariance at capture time
     float           rfe = 0.0f;     // Remembered Free Energy
     Eigen::Vector3f local_position = Eigen::Vector3f::Zero();

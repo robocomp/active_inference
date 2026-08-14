@@ -3,15 +3,15 @@
  *
  * Implements the per-"cabinet_*" instance lifecycle and the AI2 full-covariance belief update: ensure_instance
  * (birth-seed + RT/prior warm-start + NaN sanitize), observe_slice (mask-cloud → candidate/residual SDF split
- * + per-slice R inputs), and run_inference (lazy footprint-moment birth, voxel-bank ingest, one CabinetBelief
+ * + per-slice R inputs), and run_inference (lazy footprint-moment birth, support-bank ingest, one CabinetBelief
  * update with range/motion covariance, the step-bound divergence net, FE-surprise attention, orientation-mode
  * resolution, and write-back into the legacy CabinetState). Collaborates with MaskIngestor, CabinetSceneGraph,
- * CabinetProjection, CabinetLidarRangeChannel, and the header-only voxel bank; SpecificWorker owns orchestration.
+ * CabinetProjection, CabinetLidarRangeChannel, and the header-only support bank; SpecificWorker owns orchestration.
  */
 
 #include "cabinet_fitter.h"
 #include "../../common/diag_log/rotating_csv.h"   // keep the previous run instead of wiping it
-#include "cabinet_voxel_bank.h"
+#include "cabinet_support_bank.h"
 #include "../../common/object_anchor/object_anchor_contract.h"
 #include "../../common/object_anchor/ray_anisotropic_cov.h"
 
@@ -553,7 +553,7 @@ bool CabinetFitter::should_log(const CabinetInstance& inst) const
 
 // One recursive full-covariance belief update (or age-only step) for this instance; returns the free energy.
 //
-// Lazy first-frame init (snap centre/height to the cloud, footprint-moment birth of w/h/yaw), voxel-bank
+// Lazy first-frame init (snap centre/height to the cloud, footprint-moment birth of w/h/yaw), support-bank
 // ingest, then the range/motion covariance and the CabinetBelief update guarded by a step-bound divergence net,
 // FE-surprise attention baseline, and orientation-mode resolution. On a stale frame it ages the belief
 // (Σ grows on the agent's clock) instead of freezing. Result is written back into the legacy CabinetState.
@@ -662,7 +662,7 @@ float CabinetFitter::run_inference(CabinetInstance& inst, const CabinetObservati
 
     if (observation.has_fresh_data)
     {
-        rc::voxel_bank::ingest(inst, observation.candidate_pts, observation.residual_pts, cfg_);
+        rc::support_bank::ingest(inst, observation.candidate_pts, observation.residual_pts, cfg_);
         // ★NOT for a viewer — nothing ever read the published attribute. The bank is how this agent
         // gathers 3D points from its own masks over many frames so evaluate_shape() can DISCRIMINATE
         // SHAPES (round vs square) from an accumulated cloud rather than one frame's partial view.

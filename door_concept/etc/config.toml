@@ -109,10 +109,10 @@ ObsDistance = 1.8           # comfortable maximum stand-off from the target face
 MinStandOffM = 2.0          # min stand-off floor for epistemic viewpoints (YOLO misses doors seen too close)
 EpistemicCooldownCycles = 200 # min cycles a satisfied door stays withdrawn (anti-chatter)
 DoorLogPeriodFrames = 30   # per-door log throttle
-VoxelBankMaxPoints = 4000   # max number of door-owned voxels kept in memory
-VoxelBankQuantizationM = 0.02 # dedup grid (m) for voxel-bank hashing
-VoxelSelectRadiusMarginM = 0.50 # per-door XY ownership gate margin for mixed proto-doors
-VoxelSelectHeightMarginM = 0.25 # extra Z margin above door height when selecting owned voxels
+SupportBankMaxPoints = 4000   # max number of door-owned support points kept in memory
+SupportBankQuantizationM = 0.02 # dedup grid (m) for support-bank hashing
+SupportSelectRadiusMarginM = 0.50 # per-door XY ownership gate margin for mixed proto-doors
+SupportSelectHeightMarginM = 0.25 # extra Z margin above door height when selecting owned points
 RtCovUpload = true          # upload the door pose covariance (rt_covariance_att, 6×6 SE3) onto the room→door RT edge from the belief Σ
 RtCovScale = 1.0            # var = RtCovScale · Σ_ii; calibrate toward NEES≈1
 RtCovAddChain = true        # Part B: add the localization/chain cov J·Σ_chain·Jᵀ to the published RT cov

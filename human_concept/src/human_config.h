@@ -3,7 +3,7 @@
  *
  * Plain-data configuration for the human_concept agent + a loader that fills it
  * from a RoboComp ConfigLoader. Mirrors bottle_config.h, but the tunables are the
- * active-inference pose-estimator knobs (the SDF/mask/voxel knobs do not apply —
+ * active-inference pose-estimator knobs (the SDF/mask/support-bank knobs do not apply —
  * human_concept fits a kinematic model to BODY_18 keypoints, see cpp/core).
  */
 

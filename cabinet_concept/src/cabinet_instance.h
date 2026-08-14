@@ -2,7 +2,7 @@
  * cabinet_instance.h  —  per-cabinet runtime state owned by the fitter (mirrors bottle_concept/bottle_instance.h).
  *
  * Bundles the geometry/state container, the AI2 full-covariance belief, convergence bookkeeping, the
- * per-frame sensor/diagnostics snapshots, the cabinet-owned voxel memory bank, the existence log-odds, and
+ * per-frame sensor/diagnostics snapshots, the cabinet-owned support-point memory bank, the existence log-odds, and
  * the epistemic affordance request — everything CabinetFitter carries per tracked cabinet.
  */
 
@@ -145,9 +145,9 @@ struct CabinetInstance
     // edge covariance on a meaningful uncertainty change (not only on a pose move).
     float last_pub_cov_trace = std::numeric_limits<float>::quiet_NaN();
 
-    // ── Cabinet-owned voxel memory bank (room frame), independent of per-frame uploads ──────────────
-    std::vector<Eigen::Vector3f> voxel_bank_pts;
-    std::unordered_set<std::uint64_t> voxel_bank_keys;
+    // ── Cabinet-owned support-point memory bank (room frame), independent of per-frame uploads ──────────────
+    std::vector<Eigen::Vector3f> support_bank_pts;
+    std::unordered_set<std::uint64_t> support_bank_keys;
     // Most recent fresh-frame residual points (model-unexplained), held for the viewer.
     std::vector<Eigen::Vector3f> last_residual_pts;
     // Epistemic action request published to DSR (filled by the epistemic planner).

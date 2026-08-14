@@ -30,7 +30,7 @@
  * and its burst must not be treated as a single object's surface.
  *
  * Points are stored in whatever frame the caller banks them in — for a room-frame agent that is directly
- * fusable across frames with no transform chaining. Dedup is by quantised voxel key, so re-observing the
+ * fusable across frames with no transform chaining. Dedup is by quantised cell key, so re-observing the
  * same surface from a similar viewpoint costs nothing and a burst stays bounded regardless of frame rate.
  *
  * Pure: Eigen only, no DSR, no mask type, no agent config — unit-testable in isolation.
@@ -53,9 +53,9 @@
 namespace rc {
 
 // FNV-1a hash of a point quantised to a `quantization_m` grid — O(1) dedup key for accumulated clouds.
-// Shared with the per-instance voxel banks so a burst handed to a fitter dedups identically to the bank
-// it seeds (rc::voxel_bank::key delegates here).
-inline std::uint64_t voxel_key(const Eigen::Vector3f& point, float quantization_m)
+// Shared with the per-instance support banks so a burst handed to a fitter dedups identically to the bank
+// it seeds (rc::support_bank::key delegates here).
+inline std::uint64_t cell_key(const Eigen::Vector3f& point, float quantization_m)
 {
     const float q = std::max(1e-4f, quantization_m);
     const int ix = static_cast<int>(std::floor(point.x() / q));
@@ -74,7 +74,7 @@ inline std::uint64_t voxel_key(const Eigen::Vector3f& point, float quantization_
 struct Burst
 {
     std::vector<Eigen::Vector3f>      pts;              // de-duplicated union of every observation's cloud
-    std::unordered_set<std::uint64_t> keys;             // voxel keys present in `pts`
+    std::unordered_set<std::uint64_t> keys;             // cell keys present in `pts`
     int                               n_obs   = 0;      // observations banked (frames that contributed)
     std::uint64_t                     t_first = 0;      // capture stamp of the first (ms)
     std::uint64_t                     t_last  = 0;      // capture stamp of the last (ms)
@@ -89,11 +89,11 @@ struct Burst
 class BirthFragment
 {
 public:
-    // Bank one observation's cloud against a maturing candidate. De-duplicated by voxel key and hard-capped
+    // Bank one observation's cloud against a maturing candidate. De-duplicated by cell key and hard-capped
     // at max_pts, so a candidate that lingers cannot grow without bound. Stamps are the mask packet's
     // capture time (NOT the compute cycle) so span_ms() measures the observations, not our scheduling.
     void accumulate(std::uint64_t cand_id, std::span<const Eigen::Vector3f> pts,
-                    std::uint64_t stamp_ms, float voxel_m, std::size_t max_pts)
+                    std::uint64_t stamp_ms, float cell_m, std::size_t max_pts)
     {
         if (cand_id == 0) return;
 
@@ -107,7 +107,7 @@ public:
         {
             if (not p.allFinite()) continue;            // a NaN would poison every fit seeded from this burst
             if (b.pts.size() >= cap) { b.capped = true; break; }
-            if (b.keys.insert(voxel_key(p, voxel_m)).second)
+            if (b.keys.insert(cell_key(p, cell_m)).second)
                 b.pts.push_back(p);
         }
     }
@@ -162,7 +162,7 @@ inline bool BirthFragment::self_test()
         f.accumulate(7, cloud, 1100, 0.05f, 1000);
         const auto b = f.take(7);
         check(b.has_value(), "dedup: burst present");
-        check(b and b->pts.size() == 2, "dedup: 0.00/0.01 share a 5 cm voxel, 1.00 is separate");
+        check(b and b->pts.size() == 2, "dedup: 0.00/0.01 share a 5 cm cell, 1.00 is separate");
         check(b and b->n_obs == 2, "dedup: both observations counted");
         check(b and b->span_ms() == 100, "dedup: span spans first→last stamp");
         check(f.size() == 0, "take() erases the entry");

@@ -3,7 +3,7 @@
  *
  * Per-door runtime state owned by the fitter (mirrors bottle_concept/bottle_instance.h):
  * the geometry/state container + the AI2 full-covariance belief, convergence bookkeeping, the
- * door-owned voxel memory bank, and the epistemic affordance request.
+ * door-owned support-point memory bank, and the epistemic affordance request.
  */
 
 #pragma once
@@ -180,9 +180,9 @@ struct DoorInstance
     // refreshes its edge covariance on a meaningful uncertainty change (not only on a pose move).
     float last_pub_cov_trace = std::numeric_limits<float>::quiet_NaN();
 
-    // Door-owned voxel memory bank (room frame), independent of per-frame uploads.
-    std::vector<Eigen::Vector3f> voxel_bank_pts;
-    std::unordered_set<std::uint64_t> voxel_bank_keys;
+    // Door-owned support-point memory bank (room frame), independent of per-frame uploads.
+    std::vector<Eigen::Vector3f> support_bank_pts;
+    std::unordered_set<std::uint64_t> support_bank_keys;
     // Most recent fresh-frame residual points (model-unexplained), held for the viewer.
     std::vector<Eigen::Vector3f> last_residual_pts;
     // Epistemic action request published to DSR (filled by the epistemic planner).

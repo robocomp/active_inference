@@ -4,7 +4,7 @@
  * Per-person runtime state shared by the human_concept collaborators (HumanFitter
  * fits it, HumanSceneGraph publishes it). One HumanInstance per "person_N" DSR node.
  * Mirrors bottle_instance.h, but the belief is the kinematic-model Laplace estimator
- * (cpp/core) rather than an SDF fit, so there is no voxel bank / sample queue.
+ * (cpp/core) rather than an SDF fit, so there is no support bank / sample queue.
  */
 
 #pragma once

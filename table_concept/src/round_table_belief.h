@@ -4,7 +4,7 @@
  * A minimal `Model`-concept struct wired onto the SAME shared rc::ai recursive-Laplace engine as
  * TableBelief (common/ai_belief/recursive_laplace.h). Used two ways: the offline A/B harness
  * (tests/compare_models) and the LIVE per-instance shape model-selection (TableFitter::evaluate_shape,
- * which fits it to the accumulated voxel bank and compares free energy vs the square). Header-only.
+ * which fits it to the accumulated support bank and compares free energy vs the square). Header-only.
  *
  * State θ = [cx, cy, H, radius]  (N=4). A round table is rotationally symmetric → NO yaw, NO w/h, NO
  * canonical fold, NO orientation-mode machinery (that whole class of TableBelief code is structurally

@@ -3,7 +3,7 @@
  *
  * DSR node/RT I/O layer for door_concept (mirrors bottle_concept/bottle_scene_graph.h):
  * births "door_N" nodes from tracker detections, writes the fitted model back (geometry
- * attrs + mesh + RFE/voxel-bank export + room→door RT edge), reads the robot localisation
+ * attrs + mesh + RFE/support-bank export + room→door RT edge), reads the robot localisation
  * covariance, and writes the epistemic action proposal.
  *
  * Plain class (no Q_OBJECT) constructed by SpecificWorker once G + the DSR APIs are ready.
@@ -56,7 +56,7 @@ public:
                                                  std::string_view preferred_name = {},
                                                  std::span<const std::string> reserved_names = {});
 
-    // Publish the instance's fitted model to its DSR node (geometry + FE + mesh + RFE/voxel-bank) and
+    // Publish the instance's fitted model to its DSR node (geometry + FE + mesh + RFE/support-bank) and
     // the room→door RT edge. persist_* resolves the node by id first; both no-op if the node is gone.
     bool persist_door_belief(DoorInstance& inst, std::uint64_t node_id, std::uint64_t room_id, float free_energy);
     void step_write_model(DoorInstance& inst, DSR::Node& node, std::uint64_t room_id, float free_energy);

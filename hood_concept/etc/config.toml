@@ -437,11 +437,11 @@ ShowDashboard = true        # false = no GUI (belief dashboard + evidence monito
 # detector envelope over BOTH image axes (DetectMinFill/DetectMaxFill below, via common/nbv), so a comfort
 # distance here could only have fought the sensor model. Tune the envelope instead — that is the real knob.
 EpistemicCooldownCycles = 200 # min cycles a satisfied hood stays withdrawn (anti-chatter)
-VoxelBankMaxPoints = 4000   # max number of hood-owned voxels kept in memory
-VoxelBankQuantizationM = 0.02 # dedup grid (m) for voxel-bank hashing
-VoxelSelectRadiusMarginM = 0.50 # per-hood XY ownership gate margin for mixed proto-hoods
-VoxelSelectHeightMarginM = 0.25 # extra Z margin above hood height when selecting owned voxels
-DumpCloudPath = "/tmp/round_hood.xyz" # DIAGNOSTIC one-shot: dump a hood's voxel-bank cloud here for tests/compare_models ("" = off)
+SupportBankMaxPoints = 4000   # max number of hood-owned support points kept in memory
+SupportBankQuantizationM = 0.02 # dedup grid (m) for support-bank hashing
+SupportSelectRadiusMarginM = 0.50 # per-hood XY ownership gate margin for mixed proto-hoods
+SupportSelectHeightMarginM = 0.25 # extra Z margin above hood height when selecting owned points
+DumpCloudPath = "/tmp/round_hood.xyz" # DIAGNOSTIC one-shot: dump a hood's support-bank cloud here for tests/compare_models ("" = off)
 RtCovScale = 1.0            # scales the belief Σ → published room→hood RT covariance (calibrate toward NEES≈1)
 # z_o is the RAW camera-frame mask centroid carried to the base frame by the STATIC body<-zed extrinsic,
 # NOT the fitted room-frame pose: it must be independent of the pose the localizer is estimating, or the

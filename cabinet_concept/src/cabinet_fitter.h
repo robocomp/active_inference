@@ -3,9 +3,9 @@
  *
  * Owns the per-cabinet instance map and runs the AI2 full-covariance belief update for each "cabinet_*" node:
  * instance lifecycle (ensure_instance + the CabinetModel factory), observation (split the selected mask's
- * support points into on-surface vs off-surface sets), inference (voxel-bank ingest + one recursive CabinetBelief
+ * support points into on-surface vs off-surface sets), inference (support-bank ingest + one recursive CabinetBelief
  * update with the mask-motion channel as the observation precision R / bias gate, written back into inst.model),
- * and the cabinet-owned voxel memory (ownership gate + FNV voxel keys). Collaborates with MaskIngestor (masks),
+ * and the cabinet-owned support-point memory (ownership gate + FNV cell keys). Collaborates with MaskIngestor (masks),
  * CabinetSceneGraph (robot covariance), CabinetProjection (camera projection), and CabinetLidarRangeChannel;
  * SpecificWorker keeps the orchestration (process_cabinet_node), the DSR write-back, and the post-fit
  * epistemic / affordance / Qt-diagnostics steps. Plain class (no Q_OBJECT).

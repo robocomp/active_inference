@@ -52,11 +52,10 @@ CabinetConfig load_cabinet_config(const ConfigLoader& cfg)
     out.epistemic_cooldown_cycles= geti("CabinetConcept.EpistemicCooldownCycles", 200);
     out.cabinet_log_period_frames  = geti("CabinetConcept.CabinetLogPeriodFrames",   30);
     out.verbose_log                = getb("CabinetConcept.VerboseLog",              false);
-    out.voxel_bank_max_points    = geti("CabinetConcept.VoxelBankMaxPoints",     4000);
-    out.publish_voxel_bank        = getb("CabinetConcept.PublishVoxelBank",       false);
-    out.voxel_bank_quantization_m= getf("CabinetConcept.VoxelBankQuantizationM", 0.02f);
-    out.voxel_select_radius_margin_m = getf("CabinetConcept.VoxelSelectRadiusMarginM", 0.50f);
-    out.voxel_select_height_margin_m = getf("CabinetConcept.VoxelSelectHeightMarginM", 0.25f);
+    out.support_bank_max_points    = geti("CabinetConcept.SupportBankMaxPoints",     4000);
+    out.support_bank_quantization_m= getf("CabinetConcept.SupportBankQuantizationM", 0.02f);
+    out.support_select_radius_margin_m = getf("CabinetConcept.SupportSelectRadiusMarginM", 0.50f);
+    out.support_select_height_margin_m = getf("CabinetConcept.SupportSelectHeightMarginM", 0.25f);
 
     // ─── CabinetModel geometry / mask split ──────────────────────────────────────
     out.sigma_obs          = getf("CabinetModel.SigmaObs",          0.05f);

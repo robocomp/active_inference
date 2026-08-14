@@ -37,14 +37,10 @@ struct ChairConfig
     // Primary-input (masks) stream gate: no NEW masks frame for this many ms while Operating ⇒ demote
     // out of Operating rather than integrate stale evidence. 0 disables the gate. Mirrors table_concept.
     int   masks_stall_timeout_ms  = 3000;
-    // Publish the accumulated bank onto the DSR node. OFF: audited 2026-08-14, nothing in the whole
-    // components tree reads *_voxel_bank_pts. The bank itself is still built — evaluate_shape and
-    // DumpCloudPath read it locally — this is only the graph traffic.
-    bool  publish_voxel_bank           = false;
-    int   voxel_bank_max_points = 4000;
-    float voxel_bank_quantization_m = 0.02f;
-    float voxel_select_radius_margin_m = 0.50f;
-    float voxel_select_height_margin_m = 0.25f;
+    int   support_bank_max_points = 4000;
+    float support_bank_quantization_m = 0.02f;
+    float support_select_radius_margin_m = 0.50f;
+    float support_select_height_margin_m = 0.25f;
 
     // ChairModel geometry / mask split: on-surface membership for the candidate/residual split in
     // ChairFitter::observe (a mask point within sdf_threshold_for_storage of the compound SDF is a candidate).

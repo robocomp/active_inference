@@ -27,7 +27,7 @@ namespace rc {
 // It carries BOTH halves of the aperture/leaf split (see door_geometry.h), because different consumers
 // legitimately need different ones:
 //   · cx, cy, yaw  → the LEAF, wherever it currently is. Used by the display mesh, the projected ROI, the
-//                    tracker's association centre and the voxel-ownership gate — all of which want the
+//                    tracker's association centre and the point-ownership gate — all of which want the
 //                    thing the sensor actually sees.
 //   · ap_*         → the APERTURE, the static hole in the wall. Used by the DSR RT edge, resolve_wall,
 //                    the merge footprint, ghost identity and the room-containment prior — all of which

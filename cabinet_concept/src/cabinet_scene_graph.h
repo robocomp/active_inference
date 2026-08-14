@@ -2,7 +2,7 @@
  * cabinet_scene_graph.h — DSR node/RT I/O layer for cabinet_concept (mirrors bottle_concept/bottle_scene_graph.h).
  *
  * Births "cabinet_N" nodes from tracker detections and writes the fitted model back: geometry attrs + mesh +
- * residual/voxel-bank export + free energy + the room→cabinet RT pose, plus the 6×6 pose covariance (mapped from
+ * residual/support-bank export + free energy + the room→cabinet RT pose, plus the 6×6 pose covariance (mapped from
  * the belief Σ, with a flat roll/pitch prior) and the epistemic action proposal. Plain class (no Q_OBJECT),
  * constructed by SpecificWorker once G + the DSR APIs are ready; the graph relayout is injected as a callback
  * to stay decoupled from the GUI (graph_viewers).
@@ -41,7 +41,7 @@ public:
     std::uint64_t create_instance_from_detection(const Eigen::Vector3f& centroid_room,
                                                  std::uint64_t room_node_id);
 
-    // Publish the instance's fitted model to its DSR node (geometry + FE + mesh + RFE/voxel-bank) and
+    // Publish the instance's fitted model to its DSR node (geometry + FE + mesh + RFE/support-bank) and
     // the room→cabinet RT edge. persist_* resolves the node by id first; both no-op if the node is gone.
     bool persist_cabinet_belief(CabinetInstance& inst, std::uint64_t node_id, std::uint64_t room_id, float free_energy);
     void step_write_model(CabinetInstance& inst, DSR::Node& node, std::uint64_t room_id, float free_energy);

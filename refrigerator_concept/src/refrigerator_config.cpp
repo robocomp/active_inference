@@ -56,11 +56,10 @@ RefrigeratorConfig load_refrigerator_config(const ConfigLoader& cfg)
     out.central_region_frac      = getf("RefrigeratorConcept.CentralRegionFrac",     0.25f);
     out.epistemic_cooldown_cycles= geti("RefrigeratorConcept.EpistemicCooldownCycles", 200);
     out.refrigerator_log_period_frames  = geti("RefrigeratorConcept.RefrigeratorLogPeriodFrames",   30);
-    out.voxel_bank_max_points    = geti("RefrigeratorConcept.VoxelBankMaxPoints",     4000);
-    out.publish_voxel_bank        = getb("RefrigeratorConcept.PublishVoxelBank",       false);
-    out.voxel_bank_quantization_m= getf("RefrigeratorConcept.VoxelBankQuantizationM", 0.02f);
-    out.voxel_select_radius_margin_m = getf("RefrigeratorConcept.VoxelSelectRadiusMarginM", 0.50f);
-    out.voxel_select_height_margin_m = getf("RefrigeratorConcept.VoxelSelectHeightMarginM", 0.25f);
+    out.support_bank_max_points    = geti("RefrigeratorConcept.SupportBankMaxPoints",     4000);
+    out.support_bank_quantization_m= getf("RefrigeratorConcept.SupportBankQuantizationM", 0.02f);
+    out.support_select_radius_margin_m = getf("RefrigeratorConcept.SupportSelectRadiusMarginM", 0.50f);
+    out.support_select_height_margin_m = getf("RefrigeratorConcept.SupportSelectHeightMarginM", 0.25f);
 
     // ─── Primary-input (masks) stream gate — lifecycle liveness ────────────────
     out.masks_stall_timeout_ms   = geti("Media.MasksStallTimeoutMs",           3000);
@@ -172,7 +171,7 @@ RefrigeratorConfig load_refrigerator_config(const ConfigLoader& cfg)
     out.tracker_birth_height_m   = getf("Tracker.BirthHeightM",     0.75f);
     // Birth fragment: keep the probation burst and admit the birth on it (see refrigerator_config.h).
     out.birth_frag_enabled       = getb("Tracker.BirthFragment",          true);
-    out.birth_frag_voxel_m       = getf("Tracker.BirthFragmentVoxelM",    0.03f);
+    out.birth_frag_cell_m       = getf("Tracker.BirthFragmentVoxelM",    0.03f);
     out.birth_frag_max_pts       = geti("Tracker.BirthFragmentMaxPts",    20000);
     out.birth_frag_delta_ms      = static_cast<std::uint64_t>(
                                        std::max(0, geti("Tracker.BirthFragmentDeltaMs", 4000)));

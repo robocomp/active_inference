@@ -50,10 +50,10 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     out.max_step_m        = getf("BottleConcept.MaxStepM",        0.5f);
     out.write_threshold   = getf("BottleConcept.WriteThreshold",  1e-3f);
     out.log_period_frames = geti("BottleConcept.LogPeriodFrames", 30);
-    out.voxel_bank_max_points        = geti("BottleConcept.VoxelBankMaxPoints",        4000);
-    out.voxel_bank_quantization_m    = getf("BottleConcept.VoxelBankQuantizationM",    0.01f);
-    out.voxel_select_radius_margin_m = getf("BottleConcept.VoxelSelectRadiusMarginM",  0.10f);
-    out.voxel_select_height_margin_m = getf("BottleConcept.VoxelSelectHeightMarginM",  0.10f);
+    out.support_bank_max_points        = geti("BottleConcept.SupportBankMaxPoints",        4000);
+    out.support_bank_quantization_m    = getf("BottleConcept.SupportBankQuantizationM",    0.01f);
+    out.support_select_radius_margin_m = getf("BottleConcept.SupportSelectRadiusMarginM",  0.10f);
+    out.support_select_height_margin_m = getf("BottleConcept.SupportSelectHeightMarginM",  0.10f);
     out.masks_stall_timeout_ms       = geti("Media.MasksStallTimeoutMs",           3000);
 
     out.prior_radius       = getf("BottleModel.PriorRadius",       0.035f);

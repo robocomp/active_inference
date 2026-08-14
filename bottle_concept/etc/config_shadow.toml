@@ -115,10 +115,10 @@ PlaceBottleWorldY  = -0.575   # m, Webots world (+Y right). reach 0.648 m from a
 [BottleConcept]
 KStable = 30
 LogPeriodFrames = 30
-VoxelBankMaxPoints = 4000
-VoxelBankQuantizationM = 0.01      # dedup grid (m) for the voxel-bank hash
-VoxelSelectRadiusMarginM = 0.04    # XY ownership gate margin around the bottle
-VoxelSelectHeightMarginM = 0.10    # extra Z margin above/below the cylinder span
+SupportBankMaxPoints = 4000
+SupportBankQuantizationM = 0.01      # dedup grid (m) for the support-bank hash
+SupportSelectRadiusMarginM = 0.04    # XY ownership gate margin around the bottle
+SupportSelectHeightMarginM = 0.10    # extra Z margin above/below the cylinder span
 YawVariance = 9.87                 # ≈π² — yaw is unobservable for a symmetric cylinder
 
 [BottleModel]
