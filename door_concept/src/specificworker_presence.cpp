@@ -1,5 +1,7 @@
 #include "specificworker.h"
 
+#include "../../common/owned_nodes/owned_nodes.h"   // rc::owned:: (SHARED ownership sweep)
+
 #include <cstdint>
 #include <print>
 
@@ -75,26 +77,20 @@ bool SpecificWorker::masks_stream_live() const
     return age >= 0 and age < timeout;
 }
 
+// Delete this agent's instance nodes: the SHARED ownership sweep (common/owned_nodes) over the types
+// this agent declares. Both the startup stale-sweep (recover from a crashed previous run) and the
+// shutdown path go through it, so the two can never disagree. Main-thread only (graph access).
 void SpecificWorker::remove_owned_door_nodes()
 {
     if (not G)
         return;
-
-    // Door instances are generic `object` nodes named "door_*" (schema migration). Deleting the
-    // node also drops its room→door RT edge, so no separate edge cleanup is needed. Startup
-    // stale-sweep (mirrors bottle). ALSO sweep the pre-migration `door`-typed nodes so a leaked
-    // old-type node from a previous build gets reaped during the transition.
-    std::vector<std::uint64_t> to_delete;
-    for (const auto& node : G->get_nodes_by_type("object"))
-        if (node.name().starts_with("door"))
-            to_delete.push_back(node.id());
-    for (const auto& node : G->get_nodes_by_type("door"))
-        if (node.name().starts_with("door"))
-            to_delete.push_back(node.id());
-
-    for (const auto id : to_delete)
-        if (G->delete_node(id))
-            std::print("door_concept: removed door node id={}\n", id);
+    static const rc::owned::Spec kOwned{
+        .agent = "door_concept",
+        .name_prefix = "door",
+        .node_types = {"object", "door"},
+        .legacy_parent_types = {"door"},
+    };
+    rc::owned::remove_instance_nodes(*G, kOwned);
 }
 
 void SpecificWorker::cleanup_owned_nodes()
@@ -152,30 +148,21 @@ void SpecificWorker::cleanup_owned_nodes()
     presence_coordinator_.cleanup_owned_nodes();
 }
 
-// Remove every "affordance" node whose parent object is a door — i.e. this agent's affordances,
-// including stale ones left by a crashed previous run (whatever their possibly-renamed node name).
-// Keyed on the stable parent TYPE, not the affordance node name. Main-thread only (graph access).
+
+// Remove every "affordance" node this agent owns, including stale ones left by a crashed previous run.
+// SHARED (common/owned_nodes): the deterministic "aff_door*" name test — orphan-safe, it still
+// fires after the parent node is gone — OR the parent lookup. Main-thread only (graph access).
 void SpecificWorker::remove_stale_affordance_nodes()
 {
     if (not G)
         return;
-    for (const auto& aff : G->get_nodes_by_type("affordance"))
-    {
-        const auto pid = G->get_attrib_by_name<parent_att>(aff);
-        if (not pid.has_value())
-            continue;
-        const auto parent = G->get_node(pid.value());
-        // Door parents are generic `object` nodes named "door_*" (schema migration); accept the
-        // pre-migration `door` type too so a transition-era affordance still gets reaped.
-        if (parent.has_value() and
-            ((parent->type() == "object" and parent->name().starts_with("door")) or
-             parent->type() == "door"))
-        {
-            qInfo() << "[door_concept] removing affordance node"
-                    << QString::fromStdString(aff.name()) << "id" << aff.id() << "(parent door)";
-            G->delete_node(aff.id());
-        }
-    }
+    static const rc::owned::Spec kOwned{
+        .agent = "door_concept",
+        .name_prefix = "door",
+        .node_types = {"object", "door"},
+        .legacy_parent_types = {"door"},
+    };
+    rc::owned::remove_stale_affordances(*G, kOwned);
 }
 
 void SpecificWorker::on_optional_peer_lost(const std::string &name, std::uint32_t /*id*/)

@@ -10,6 +10,8 @@
 
 #include "specificworker.h"
 
+#include "../../common/owned_nodes/owned_nodes.h"   // rc::owned:: (SHARED ownership sweep)
+
 #include <cstdint>
 #include <print>
 
@@ -87,26 +89,21 @@ bool SpecificWorker::masks_stream_live() const
     return age >= 0 and age < timeout;
 }
 
-// ─── Owned-node cleanup (startup stale-sweep + shutdown) ─────────────────────────────────────────
 
+// Delete this agent's instance nodes: the SHARED ownership sweep (common/owned_nodes) over the types
+// this agent declares. Both the startup stale-sweep (recover from a crashed previous run) and the
+// shutdown path go through it, so the two can never disagree. Main-thread only (graph access).
 void SpecificWorker::remove_owned_table_nodes()
 {
     if (not G)
         return;
-
-    // Table instances are DSR `object` nodes (object_subtype="table"/"round"/"square") named "table_*".
-    // Deleting the node also drops its room→table RT edge, so no separate edge cleanup is needed.
-    // Startup stale-sweep (mirrors bottle). Sweep the new "object" type AND — for the schema TRANSITION —
-    // the legacy "table" type, to reap pre-migration nodes still persisted under the old type.
-    std::vector<std::uint64_t> to_delete;
-    for (const auto& type : {"object", "table"})
-        for (const auto& node : G->get_nodes_by_type(type))
-            if (node.name().starts_with("table"))
-                to_delete.push_back(node.id());
-
-    for (const auto id : to_delete)
-        if (G->delete_node(id))
-            std::print("table_concept: removed table node id={}\n", id);
+    static const rc::owned::Spec kOwned{
+        .agent = "table_concept",
+        .name_prefix = "table",
+        .node_types = {"object", "table"},
+        .legacy_parent_types = {"table"},
+    };
+    rc::owned::remove_instance_nodes(*G, kOwned);
 }
 
 void SpecificWorker::cleanup_owned_nodes()
@@ -159,37 +156,21 @@ void SpecificWorker::cleanup_owned_nodes()
     presence_coordinator_.cleanup_owned_nodes();
 }
 
-// Remove every "affordance" node whose parent object is a table — i.e. this agent's affordances,
-// including stale ones left by a crashed previous run (whatever their possibly-renamed node name).
-// Keyed on the stable parent TYPE, not the affordance node name. Main-thread only (graph access).
+
+// Remove every "affordance" node this agent owns, including stale ones left by a crashed previous run.
+// SHARED (common/owned_nodes): the deterministic "aff_table*" name test — orphan-safe, it still
+// fires after the parent node is gone — OR the parent lookup. Main-thread only (graph access).
 void SpecificWorker::remove_stale_affordance_nodes()
 {
     if (not G)
         return;
-    for (const auto& aff : G->get_nodes_by_type("affordance"))
-    {
-        // Ours if EITHER (a) the name matches our deterministic "aff_table*" scheme — orphan-safe,
-        // catches affordances whose parent table node was already deleted (retirement / crashed run) —
-        // OR (b) it still hangs from a live table (backstop for a DSR collision-renamed node).
-        bool ours = aff.name().starts_with("aff_table");
-        const char* why = "name";
-        if (not ours)
-            if (const auto pid = G->get_attrib_by_name<parent_att>(aff); pid.has_value())
-                if (const auto parent = G->get_node(pid.value());
-                    parent.has_value() and
-                    ((parent->type() == "object" and parent->name().starts_with("table")) or
-                     parent->type() == "table"))   // legacy pre-migration parent type
-                {
-                    ours = true;
-                    why = "parent table";
-                }
-        if (ours)
-        {
-            qInfo() << "[table_concept] removing affordance node"
-                    << QString::fromStdString(aff.name()) << "id" << aff.id() << "(" << why << ")";
-            G->delete_node(aff.id());
-        }
-    }
+    static const rc::owned::Spec kOwned{
+        .agent = "table_concept",
+        .name_prefix = "table",
+        .node_types = {"object", "table"},
+        .legacy_parent_types = {"table"},
+    };
+    rc::owned::remove_stale_affordances(*G, kOwned);
 }
 
 // ─── Optional-peer hooks ─────────────────────────────────────────────────────────────────────────

@@ -1,5 +1,7 @@
 #include "specificworker.h"
 
+#include "../../common/owned_nodes/owned_nodes.h"   // rc::owned:: (SHARED ownership sweep)
+
 #include <cstdint>
 #include <print>
 
@@ -77,26 +79,21 @@ bool SpecificWorker::masks_stream_live() const
     return age >= 0 and age < timeout;
 }
 
-// ─── Owned-node teardown ───────────────────────────────────────────────────────
 
+// Delete this agent's instance nodes: the SHARED ownership sweep (common/owned_nodes) over the types
+// this agent declares. Both the startup stale-sweep (recover from a crashed previous run) and the
+// shutdown path go through it, so the two can never disagree. Main-thread only (graph access).
 void SpecificWorker::remove_owned_bottle_nodes()
 {
     if (not G)
         return;
-
-    // Bottle instances are DSR `object` nodes named "bottle_*". Deleting the node
-    // also drops its room→bottle RT edge, so no separate edge cleanup is needed.
-    // Sweep the new "object" type AND the legacy "cylinder" type (transition reap of nodes
-    // leaked by a pre-migration run) — both filtered to "bottle*".
-    std::vector<std::uint64_t> to_delete;
-    for (const char* ty : {"object", "cylinder"})
-        for (const auto& node : G->get_nodes_by_type(ty))
-            if (node.name().starts_with("bottle"))
-                to_delete.push_back(node.id());
-
-    for (const auto id : to_delete)
-        if (G->delete_node(id))
-            std::print("bottle_concept: removed bottle node id={}\n", id);
+    static const rc::owned::Spec kOwned{
+        .agent = "bottle_concept",
+        .name_prefix = "bottle",
+        .node_types = {"object", "cylinder"},
+        .legacy_parent_types = {"cylinder"},
+    };
+    rc::owned::remove_instance_nodes(*G, kOwned);
 }
 
 void SpecificWorker::cleanup_owned_nodes()
@@ -116,37 +113,21 @@ void SpecificWorker::cleanup_owned_nodes()
     presence_coordinator_.cleanup_owned_nodes();
 }
 
-// Remove every "affordance" node whose parent object is a bottle cylinder — i.e. this agent's
-// affordances, including stale ones left by a crashed previous run (whatever their renamed name).
-// Keyed on the stable parent TYPE, not the affordance node name. Main-thread only (graph access).
+
+// Remove every "affordance" node this agent owns, including stale ones left by a crashed previous run.
+// SHARED (common/owned_nodes): the deterministic "aff_bottle*" name test — orphan-safe, it still
+// fires after the parent node is gone — OR the parent lookup. Main-thread only (graph access).
 void SpecificWorker::remove_stale_affordance_nodes()
 {
     if (not G)
         return;
-    for (const auto& aff : G->get_nodes_by_type("affordance"))
-    {
-        // Ours if EITHER (a) the name matches our deterministic "aff_<bottle_*>" scheme — orphan-safe,
-        // catches affordances whose parent cylinder was already deleted (tracker DEATH / crashed run) —
-        // OR (b) it still hangs from a live cylinder (backstop for a DSR collision-renamed node).
-        bool ours = aff.name().starts_with("aff_bottle");
-        const char* why = "name";
-        if (not ours)
-            if (const auto pid = G->get_attrib_by_name<parent_att>(aff); pid.has_value())
-                if (const auto parent = G->get_node(pid.value());
-                    parent.has_value() and
-                    (parent->type() == "cylinder" or
-                     (parent->type() == "object" and parent->name().starts_with("bottle"))))
-                {
-                    ours = true;
-                    why = "parent bottle";
-                }
-        if (ours)
-        {
-            qInfo() << "[bottle_concept] removing affordance node"
-                    << QString::fromStdString(aff.name()) << "id" << aff.id() << "(" << why << ")";
-            G->delete_node(aff.id());
-        }
-    }
+    static const rc::owned::Spec kOwned{
+        .agent = "bottle_concept",
+        .name_prefix = "bottle",
+        .node_types = {"object", "cylinder"},
+        .legacy_parent_types = {"cylinder"},
+    };
+    rc::owned::remove_stale_affordances(*G, kOwned);
 }
 
 // ─── Optional-peer notifications ───────────────────────────────────────────────

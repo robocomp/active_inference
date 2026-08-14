@@ -1,5 +1,7 @@
 #include "specificworker.h"
 
+#include "../../common/owned_nodes/owned_nodes.h"   // rc::owned:: (SHARED ownership sweep)
+
 #include <print>
 #include <vector>
 
@@ -12,22 +14,21 @@ void SpecificWorker::operating_loop()  { presence_coordinator_.operating_loop();
 void SpecificWorker::degraded_enter()  { presence_coordinator_.degraded_enter(); }
 void SpecificWorker::degraded_loop()   { presence_coordinator_.degraded_loop(); }
 
-// ─── Owned-node teardown ───────────────────────────────────────────────────────
 
+// Delete this agent's instance nodes: the SHARED ownership sweep (common/owned_nodes) over the types
+// this agent declares. Both the startup stale-sweep (recover from a crashed previous run) and the
+// shutdown path go through it, so the two can never disagree. Main-thread only (graph access).
 void SpecificWorker::remove_owned_person_nodes()
 {
     if (not G)
         return;
-    // Person instances are DSR `person` nodes named "person_*". Deleting the node also drops its
-    // room→person RT edge, so no separate edge cleanup is needed.
-    std::vector<std::uint64_t> to_delete;
-    for (const auto& node : G->get_nodes_by_type("person"))
-        if (node.name().starts_with("person"))
-            to_delete.push_back(node.id());
-
-    for (const auto id : to_delete)
-        if (G->delete_node(id))
-            std::print("human_concept: removed person node id={}\n", id);
+    static const rc::owned::Spec kOwned{
+        .agent = "human_concept",
+        .name_prefix = "person",
+        .node_types = {"person"},
+        .legacy_parent_types = {"person"},
+    };
+    rc::owned::remove_instance_nodes(*G, kOwned);
 }
 
 void SpecificWorker::cleanup_owned_nodes()
@@ -40,25 +41,21 @@ void SpecificWorker::cleanup_owned_nodes()
     presence_coordinator_.cleanup_owned_nodes();
 }
 
-// Remove every "affordance" node whose parent object is a person — i.e. this agent's affordances,
-// including stale ones left by a crashed previous run. Keyed on the stable parent TYPE.
+
+// Remove every "affordance" node this agent owns, including stale ones left by a crashed previous run.
+// SHARED (common/owned_nodes): the deterministic "aff_person*" name test — orphan-safe, it still
+// fires after the parent node is gone — OR the parent lookup. Main-thread only (graph access).
 void SpecificWorker::remove_stale_affordance_nodes()
 {
     if (not G)
         return;
-    for (const auto& aff : G->get_nodes_by_type("affordance"))
-    {
-        const auto pid = G->get_attrib_by_name<parent_att>(aff);
-        if (not pid.has_value())
-            continue;
-        const auto parent = G->get_node(pid.value());
-        if (parent.has_value() and parent->type() == "person")
-        {
-            qInfo() << "[human_concept] removing affordance node"
-                    << QString::fromStdString(aff.name()) << "id" << aff.id() << "(parent person)";
-            G->delete_node(aff.id());
-        }
-    }
+    static const rc::owned::Spec kOwned{
+        .agent = "human_concept",
+        .name_prefix = "person",
+        .node_types = {"person"},
+        .legacy_parent_types = {"person"},
+    };
+    rc::owned::remove_stale_affordances(*G, kOwned);
 }
 
 // ─── Optional-peer notifications ───────────────────────────────────────────────

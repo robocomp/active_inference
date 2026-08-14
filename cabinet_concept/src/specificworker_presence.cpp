@@ -10,6 +10,8 @@
 
 #include "specificworker.h"
 
+#include "../../common/owned_nodes/owned_nodes.h"   // rc::owned:: (SHARED ownership sweep)
+
 #include <cstdint>
 #include <print>
 
@@ -87,27 +89,21 @@ bool SpecificWorker::masks_stream_live() const
     return age >= 0 and age < timeout;
 }
 
-// ─── Owned-node cleanup (startup stale-sweep + shutdown) ─────────────────────────────────────────
 
+// Delete this agent's instance nodes: the SHARED ownership sweep (common/owned_nodes) over the types
+// this agent declares. Both the startup stale-sweep (recover from a crashed previous run) and the
+// shutdown path go through it, so the two can never disagree. Main-thread only (graph access).
 void SpecificWorker::remove_owned_cabinet_nodes()
 {
     if (not G)
         return;
-
-    // Cabinet instances are DSR `object` nodes named "cabinet_*". Deleting the node also drops its
-    // room→cabinet RT edge, so no separate edge cleanup is needed. Startup stale-sweep (mirrors bottle).
-    // Also sweep the legacy `box` type so a pre-migration crashed/SIGKILLed run's leaked nodes get reaped.
-    std::vector<std::uint64_t> to_delete;
-    for (const auto& node : G->get_nodes_by_type("object"))
-        if (node.name().starts_with("cabinet"))
-            to_delete.push_back(node.id());
-    for (const auto& node : G->get_nodes_by_type("box"))
-        if (node.name().starts_with("cabinet"))
-            to_delete.push_back(node.id());
-
-    for (const auto id : to_delete)
-        if (G->delete_node(id))
-            std::print("cabinet_concept: removed cabinet node id={}\n", id);
+    static const rc::owned::Spec kOwned{
+        .agent = "cabinet_concept",
+        .name_prefix = "cabinet",
+        .node_types = {"object", "box"},
+        .legacy_parent_types = {},
+    };
+    rc::owned::remove_instance_nodes(*G, kOwned);
 }
 
 void SpecificWorker::cleanup_owned_nodes()
@@ -168,39 +164,21 @@ void SpecificWorker::cleanup_owned_nodes()
     presence_coordinator_.cleanup_owned_nodes();
 }
 
-// Remove every "affordance" node whose parent object is a cabinet — i.e. this agent's affordances,
-// including stale ones left by a crashed previous run (whatever their possibly-renamed node name).
-// Keyed on the stable parent TYPE, not the affordance node name. Main-thread only (graph access).
+
+// Remove every "affordance" node this agent owns, including stale ones left by a crashed previous run.
+// SHARED (common/owned_nodes): the deterministic "aff_cabinet*" name test — orphan-safe, it still
+// fires after the parent node is gone — OR the parent lookup. Main-thread only (graph access).
 void SpecificWorker::remove_stale_affordance_nodes()
 {
     if (not G)
         return;
-    for (const auto& aff : G->get_nodes_by_type("affordance"))
-    {
-        // Ours if EITHER (a) the name matches our deterministic "aff_cabinet*" scheme — orphan-safe,
-        // catches affordances whose parent cabinet node was already deleted (retirement / crashed run) —
-        // OR (b) it still hangs from a live cabinet (backstop for a DSR collision-renamed node).
-        bool ours = aff.name().starts_with("aff_cabinet");
-        const char* why = "name";
-        if (not ours)
-            if (const auto pid = G->get_attrib_by_name<parent_att>(aff); pid.has_value())
-                if (const auto parent = G->get_node(pid.value());
-                    // A cabinet run is an `object` node named "cabinet_*" (cortex has no `cabinet` type;
-                    // class in the `object_subtype` attr), so the parent-type backstop must match
-                    // object+name, NOT type()=="cabinet" (which never matched).
-                    parent.has_value() and parent->type() == "object"
-                    and parent->name().starts_with("cabinet"))
-                {
-                    ours = true;
-                    why = "parent cabinet";
-                }
-        if (ours)
-        {
-            qInfo() << "[cabinet_concept] removing affordance node"
-                    << QString::fromStdString(aff.name()) << "id" << aff.id() << "(" << why << ")";
-            G->delete_node(aff.id());
-        }
-    }
+    static const rc::owned::Spec kOwned{
+        .agent = "cabinet_concept",
+        .name_prefix = "cabinet",
+        .node_types = {"object", "box"},
+        .legacy_parent_types = {},
+    };
+    rc::owned::remove_stale_affordances(*G, kOwned);
 }
 
 // ─── Optional-peer hooks ─────────────────────────────────────────────────────────────────────────

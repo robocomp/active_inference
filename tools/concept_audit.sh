@@ -142,7 +142,11 @@ audit_agent() {
     #    four ignored it; voxel_key was defined once in common/ and re-inlined in two agents on a grid that
     #    only happened to agree. This counts the modules an object-concept agent is expected to use, so a
     #    new one shows up as a number falling rather than as a column nobody added.
-    local must="existence_belief instance_tracker mask_ingestor rt_covariance object_affordance nbv detectability occlusion phantom_log graph_provenance concept_manifest voxel_bank footprint lidar_select"
+    #    owned_nodes is UNIVERSAL — every agent owns instance + affordance nodes and must reap both on the
+    #    startup stale-sweep and on shutdown, so it belongs on this list. birth_surprise and lidar_ingestor
+    #    do NOT: they are legitimately used by a SUBSET (4 and 5 agents), and a universal list is only
+    #    honest for a universal obligation.
+    local must="existence_belief instance_tracker mask_ingestor rt_covariance object_affordance nbv detectability occlusion phantom_log graph_provenance concept_manifest voxel_bank footprint lidar_select owned_nodes"
     local have=0 want=0
     for m in $must; do
         want=$((want+1))
