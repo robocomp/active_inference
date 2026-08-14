@@ -279,7 +279,7 @@ void BottleSceneGraph::step_write_model(BottleInstance& inst, DSR::Node& node, f
     G_->add_or_modify_attrib_local<mesh_vertices_att>(node, make_cylinder_mesh(s));
 
     // The accumulated support bank is NOT published — see the sibling agents. Bottle's write went into
-    // rfe_pts_att and was NOT EVEN GATED: up to 4000 points x 3 floats every publish, into a CRDT graph,
+    // rfe_pts_att (registration since removed from cortex) and was NOT EVEN GATED: up to 4000 points x 3 floats every publish, into a CRDT graph,
     // for an attribute with no reader anywhere in the tree. The 2026-08-14 gate reached five agents and
     // missed this one because it was spelled with a different attribute name.
 
