@@ -50,6 +50,7 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
     out.chair_log_period_frames  = geti("ChairConcept.ChairLogPeriodFrames",   30);
     out.masks_stall_timeout_ms   = geti("Media.MasksStallTimeoutMs",           3000);
     out.voxel_bank_max_points    = geti("ChairConcept.VoxelBankMaxPoints",     4000);
+    out.publish_voxel_bank        = getb("ChairConcept.PublishVoxelBank",       false);
     out.voxel_bank_quantization_m= getf("ChairConcept.VoxelBankQuantizationM", 0.02f);
     out.voxel_select_radius_margin_m = getf("ChairConcept.VoxelSelectRadiusMarginM", 0.50f);
     out.voxel_select_height_margin_m = getf("ChairConcept.VoxelSelectHeightMarginM", 0.25f);
