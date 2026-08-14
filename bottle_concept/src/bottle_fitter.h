@@ -130,8 +130,6 @@ private:
 
     // Support bank (bottle-owned historical memory).
     void ingest_observation_support(BottleInstance& inst, const BottleObservation& observation);
-    bool is_point_owned_by_bottle(const BottleInstance& inst, const Eigen::Vector3f& point) const;
-    static std::uint64_t cell_key(const Eigen::Vector3f& point, float quantization_m);
 
     // Append one AI2 belief row (state + Σ diag std) to cfg_.ai2_csv_path. No-op if the path is empty.
     void log_ai2_csv(const BottleInstance& inst, int point_count, float R, float energy);

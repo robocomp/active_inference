@@ -3,6 +3,7 @@
  */
 
 #include "bottle_fitter.h"
+#include "bottle_support_bank.h"   // rc::support_bank:: adapter (SHARED bank)
 #include "bottle_dof.h"         // kBottleDofs: the AI2 CSV column names
 
 #include <algorithm>
@@ -707,81 +708,12 @@ void BottleFitter::update_expected_visible(BottleInstance& inst)
     inst.expected_visible = (col >= 0.0 and col <= W and row >= 0.0 and row <= H);
 }
 
+// Delegates to the SHARED bank (common/support_bank via bottle_support_bank.h). This agent's own answer
+// is the EXTENT + the two vertical allowances, and nothing else — see bottle_support_bank.h::extent_of.
 void BottleFitter::ingest_observation_support(BottleInstance& inst, const BottleObservation& observation)
 {
-    std::size_t inserted = 0;
-    std::size_t rejected_foreign = 0;
-    const auto max_points = static_cast<std::size_t>(std::max(1, cfg_.support_bank_max_points));
-
-    auto ingest = [&](const std::vector<Eigen::Vector3f>& src)
-    {
-        for (const auto& p : src)
-        {
-            if (inst.support_bank_pts.size() >= max_points)
-                break;
-            if (not is_point_owned_by_bottle(inst, p))
-            {
-                ++rejected_foreign;
-                continue;
-            }
-            const auto key = cell_key(p, cfg_.support_bank_quantization_m);
-            if (inst.support_bank_keys.insert(key).second)
-            {
-                inst.support_bank_pts.push_back(p);
-                ++inserted;
-            }
-        }
-    };
-
-    ingest(observation.candidate_pts);
-    ingest(observation.residual_pts);
-
-    if (inserted > 0 and should_log(inst))
-        std::print("[{}] support-bank: +{} total={} (cap={}) reject_foreign={}\n",
-                   inst.node_name, inserted, inst.support_bank_pts.size(), max_points, rejected_foreign);
+    rc::support_bank::ingest(inst, observation.candidate_pts, observation.residual_pts, cfg_);
 }
-
-bool BottleFitter::is_point_owned_by_bottle(const BottleInstance& inst, const Eigen::Vector3f& point) const
-{
-    const auto& s = inst.model.state();
-
-    // XY ownership gate: centred on the live pose, but sized by the FIXED prior radius — NOT the live
-    // estimate. Gating on s.radius is a feedback loop: depth points just outside the cylinder get
-    // admitted → support a larger radius → widen the gate next frame → "invent" radius from edge-pixel
-    // depth noise (the pose-3/6 inflation). A fixed gate caps how far depth alone can grow the bottle;
-    // the mask silhouette owns the actual radius.
-    const float gate_radius = cfg_.prior_radius + cfg_.support_select_radius_margin_m;
-    const float dx = point.x() - s.cx;
-    const float dy = point.y() - s.cy;
-    if (std::hypot(dx, dy) > gate_radius)
-        return false;
-
-    // Height gate around the cylinder span.
-    float z_min = s.cz - s.height * 0.5f - cfg_.support_select_height_margin_m;
-    const float z_max = s.cz + s.height * 0.5f + cfg_.support_select_height_margin_m;
-    // Surface filter: when standing on a table, reject points at/below the table top (+1 cm slack to
-    // keep the base ring). These are table-surface deprojections the mask depth-gate let in; they drag
-    // the depth/centroid and inflate the lateral spread.
-    if (std::isfinite(inst.table_top_z))
-        z_min = std::max(z_min, inst.table_top_z + 0.01f);
-    return point.z() >= z_min and point.z() <= z_max;
-}
-
-std::uint64_t BottleFitter::cell_key(const Eigen::Vector3f& point, float quantization_m)
-{
-    const float q = std::max(1e-4f, quantization_m);
-    const int ix = static_cast<int>(std::floor(point.x() / q));
-    const int iy = static_cast<int>(std::floor(point.y() / q));
-    const int iz = static_cast<int>(std::floor(point.z() / q));
-
-    std::uint64_t h = 1469598103934665603ULL;  // FNV-1a offset basis
-    auto mix = [&](std::uint64_t v) { h ^= v; h *= 1099511628211ULL; };
-    mix(static_cast<std::uint64_t>(ix));
-    mix(static_cast<std::uint64_t>(iy));
-    mix(static_cast<std::uint64_t>(iz));
-    return h;
-}
-
 bool BottleFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_node_id)
 {
     room_node_id_ = room_node_id;   // latch every cycle (the support decision + parent default read it)

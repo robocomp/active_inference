@@ -146,12 +146,21 @@ audit_agent() {
     #    startup stale-sweep and on shutdown, so it belongs on this list. birth_surprise and lidar_ingestor
     #    do NOT: they are legitimately used by a SUBSET (4 and 5 agents), and a universal list is only
     #    honest for a universal obligation.
-    local must="existence_belief instance_tracker mask_ingestor rt_covariance object_affordance nbv detectability occlusion phantom_log graph_provenance concept_manifest support_bank footprint lidar_select owned_nodes"
+    local must="existence_belief instance_tracker mask_ingestor rt_covariance object_affordance nbv detectability occlusion phantom_log graph_provenance concept_manifest support_bank footprint owned_nodes"
+    # ★lidar_select is CONDITIONAL, not universal, and getting that wrong is its own defect: chair and door
+    #   consume NO LiDAR at all, so demanding it of them made two cells red for an obligation that does not
+    #   exist. An audit that scores the inapplicable as a failure is one people learn to skip — the same
+    #   reason the sigma* probe honours a declared "SIGMA-STAR: none". Charge it only to agents that stage
+    #   a sweep, which is exactly the set that has returns to select from.
     local have=0 want=0
     for m in $must; do
         want=$((want+1))
         grep -rq "common/$m/" "$src" 2>/dev/null && have=$((have+1))
     done
+    if grep -rq "set_lidar_sweep\|lidar_sweep_room" "$src" 2>/dev/null; then
+        want=$((want+1))
+        grep -rq "common/lidar_select/" "$src" 2>/dev/null && have=$((have+1))
+    fi
     if [[ $have -eq $want ]]; then mark ok; else printf "%-13s" "$have/$want"; fi
 
     # 10. THE MANIFEST IS AUTHORITATIVE, AND AN INHERITED WORLD FACT IS FATAL. A concept agent must declare

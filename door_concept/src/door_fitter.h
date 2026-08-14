@@ -188,8 +188,6 @@ private:
     void compute_chain_cov(DoorInstance& inst);
 
     void ingest_observation_support(DoorInstance& inst, const DoorObservation& observation);
-    bool is_point_owned_by_door(const DoorInstance& inst, const Eigen::Vector3f& point) const;
-    static std::uint64_t cell_key(const Eigen::Vector3f& point, float quantization_m);
 
     DoorModelParams  make_model_params() const;
 

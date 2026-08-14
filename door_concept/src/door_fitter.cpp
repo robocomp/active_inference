@@ -3,6 +3,7 @@
  */
 
 #include "door_fitter.h"
+#include "door_support_bank.h"   // rc::support_bank:: adapter (SHARED bank)
 
 #include <algorithm>
 #include <chrono>
@@ -973,75 +974,12 @@ void DoorFitter::compute_projected_roi(DoorInstance& inst)
     inst.roi_valid    = sane;
 }
 
-// ─── Support bank (door-owned historical memory) ──────────────────────────────
-
-std::uint64_t DoorFitter::cell_key(const Eigen::Vector3f& point, float quantization_m)
-{
-    const float q = std::max(1e-4f, quantization_m);
-    const int ix = static_cast<int>(std::floor(point.x() / q));
-    const int iy = static_cast<int>(std::floor(point.y() / q));
-    const int iz = static_cast<int>(std::floor(point.z() / q));
-
-    std::uint64_t h = 1469598103934665603ULL;  // FNV-1a offset basis
-    auto mix = [&](std::uint64_t v) { h ^= v; h *= 1099511628211ULL; };
-    mix(static_cast<std::uint64_t>(ix));
-    mix(static_cast<std::uint64_t>(iy));
-    mix(static_cast<std::uint64_t>(iz));
-    return h;
-}
-
+// Delegates to the SHARED bank (common/support_bank via door_support_bank.h). This agent's own answer
+// is the EXTENT + the two vertical allowances, and nothing else — see door_support_bank.h::extent_of.
 void DoorFitter::ingest_observation_support(DoorInstance& inst, const DoorObservation& observation)
 {
-    std::size_t inserted = 0;
-    std::size_t rejected_foreign = 0;
-    const auto max_points = static_cast<std::size_t>(std::max(1, cfg_.support_bank_max_points));
-
-    auto ingest = [&](const std::vector<Eigen::Vector3f>& src)
-    {
-        for (const auto& p : src)
-        {
-            if (inst.support_bank_pts.size() >= max_points)
-                break;
-            if (not is_point_owned_by_door(inst, p))
-            {
-                ++rejected_foreign;
-                continue;
-            }
-            const auto key = cell_key(p, cfg_.support_bank_quantization_m);
-            if (inst.support_bank_keys.insert(key).second)
-            {
-                inst.support_bank_pts.push_back(p);
-                ++inserted;
-            }
-        }
-    };
-
-    ingest(observation.candidate_pts);
-    ingest(observation.residual_pts);
-
-    if (inserted > 0 && should_log(inst))
-        std::print("[{}] support-bank: +{} total={} (cap={}) reject_foreign={}\n",
-                   inst.node_name, inserted, inst.support_bank_pts.size(), max_points, rejected_foreign);
+    rc::support_bank::ingest(inst, observation.candidate_pts, observation.residual_pts, cfg_);
 }
-
-bool DoorFitter::is_point_owned_by_door(const DoorInstance& inst, const Eigen::Vector3f& point) const
-{
-    const auto& s = inst.model.state();
-
-    // XY ownership gate: door-centered radius with a configurable margin.
-    const float half_diag = 0.5f * std::sqrt(s.w * s.w + s.thickness * s.thickness);
-    const float gate_radius = std::max(1.0f, half_diag + cfg_.support_select_radius_margin_m);
-    const float dx = point.x() - s.cx;
-    const float dy = point.y() - s.cy;
-    if (std::hypot(dx, dy) > gate_radius)
-        return false;
-
-    // Height gate to reject floor / distant clutter points in mixed scenes.
-    const float z_min = -0.05f;
-    const float z_max = s.cz + s.h + cfg_.support_select_height_margin_m;
-    return point.z() >= z_min && point.z() <= z_max;
-}
-
 // ─── Factory helpers ─────────────────────────────────────────────────────────
 
 DoorModelParams DoorFitter::make_model_params() const

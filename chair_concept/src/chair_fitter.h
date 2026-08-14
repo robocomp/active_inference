@@ -150,8 +150,6 @@ private:
     void compute_chain_cov(ChairInstance& inst);
 
     void ingest_observation_support(ChairInstance& inst, const ChairObservation& observation);
-    bool is_point_owned_by_chair(const ChairInstance& inst, const Eigen::Vector3f& point) const;
-    static std::uint64_t cell_key(const Eigen::Vector3f& point, float quantization_m);
 
     ChairModelParams  make_model_params() const;
 

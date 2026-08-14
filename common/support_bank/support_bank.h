@@ -74,6 +74,14 @@ struct Params
     float below_m         = 0.05f;   // slack BELOW z0 — sensor noise at a hard bound, model slack otherwise
     float quantization_m  = 0.02f;   // dedup grid
     int   max_points      = 4000;    // hard cap on the bank
+    // ★A FLOOR UNDER THE XY GATE, and it is a PARAMETER because it is not universal. The four founding
+    // agents (table/cabinet/hood/refrigerator) all wrote max(1.0f, half_diag + margin): a newborn or
+    // momentarily-collapsed model still has to own the returns around it, and for furniture 1 m is
+    // comfortably inside the birth min-separation. For a BOTTLE it is 2x too wide — its gate is
+    // prior_radius + margin ~ 0.54 m, and widening it defeats the feedback-loop guard bottle documents
+    // (gate on the FITTED radius and edge-pixel depth noise inflates the radius, which widens the gate,
+    // which admits more noise). An agent that means "no floor" passes 0.
+    float min_radius_m    = 1.0f;
 };
 
 // The bank itself. Two members, because that is all four agents carried.
@@ -96,7 +104,7 @@ inline std::uint64_t key(const Eigen::Vector3f& p, float quantization_m)
 // floor-anchored claim; for a hanging object it admits the entire column beneath it.
 inline bool owns(const Extent& e, const Eigen::Vector3f& p, const Params& prm)
 {
-    const float gate_radius = std::max(1.0f, e.half_diag_m + prm.radius_margin_m);
+    const float gate_radius = std::max(prm.min_radius_m, e.half_diag_m + prm.radius_margin_m);
     if (std::hypot(p.x() - e.cx, p.y() - e.cy) > gate_radius)
         return false;
     return p.z() >= e.z0_m - prm.below_m and p.z() <= e.z1_m + prm.height_margin_m;
