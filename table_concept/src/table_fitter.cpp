@@ -888,6 +888,15 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
                  // ★The SHAPE decision and what produced it. It previously reached the outside world only
                  // through mesh_path (round_table.obj vs table.obj), so a discrimination that was failing
                  // could be seen ONLY by looking at the rendered mesh.
+                 //
+                 // ⚠THESE NAMES AND THE VALUES BELOW ARE TWO LISTS THAT MUST AGREE BY POSITION, and on the
+                 // first run they did not: the values were emitted two fields early, so bank_pts (an int
+                 // capped at VoxelBankMaxPoints) was being read under e_square. The field COUNTS matched
+                 // exactly — 94 and 94 — so no count check could have caught it. What caught it was 4000
+                 // appearing where a free energy belongs. Same failure as the audit matrix whose column
+                 // labels drifted out of order while every value read "ok": a mislabelled instrument is
+                 // worse than none, because it is believed. If this file is touched again, the durable fix
+                 // is to emit the header FROM the value list rather than maintaining two.
                  "shape_round,shape_evidence,shape_lbf,e_square,e_round,shape_pts,bank_pts,"
                  << "mom_major,mom_minor,mom_phi,mom_pts,"   // RAW footprint statistic (basin diagnosis)   // rogue-mask diag
                  << "ex_L,ex_p,ex_locc,ex_lfree,ex_lfree_eff,ex_ln,ex_socc,ex_sfree,ex_sfree_eff,ex_sndet,ex_streak,"
@@ -930,10 +939,10 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
              << inst.dbg_lidar_cov_ang << ','
              << inst.dbg_dyaw_points << ',' << inst.dbg_dyaw_moment << ',' << inst.dbg_dyaw_flip << ','
              << inst.dbg_obliquity_cos << ',' << inst.dbg_completeness << ','
+             << inst.ai2_belief.dbg_moment_aniso() << ',' << inst.ai2_belief.dbg_moment_r_yaw() << ','   // rogue-mask diag
              << (inst.subtype == "round" ? 1 : 0) << ',' << inst.shape_evidence << ','
              << inst.dbg_shape_lbf << ',' << inst.dbg_e_square << ',' << inst.dbg_e_round << ','
              << inst.dbg_shape_pts << ',' << inst.voxel_bank_pts.size() << ','
-             << inst.ai2_belief.dbg_moment_aniso() << ',' << inst.ai2_belief.dbg_moment_r_yaw() << ','   // rogue-mask diag
              << inst.ai2_belief.dbg_moment_ext_major() << ',' << inst.ai2_belief.dbg_moment_ext_minor() << ','
              << inst.ai2_belief.dbg_moment_phi() << ',' << inst.ai2_belief.dbg_moment_pts() << ','
              << inst.existence.logodds() << ',' << inst.existence.p_exists() << ','
