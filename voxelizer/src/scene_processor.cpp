@@ -868,13 +868,28 @@ void SceneProcessor::update_viewer_mask_points()
     if (const auto masks_node = graph_->get_node("masks"); masks_node.has_value())
     {
         // TYPE-ATTRIBUTED reads (CLAUDE.md), compile-checked against dsr_attr_name.h.
-        const auto pts_opt    = graph_->get_attrib_by_name<mask_support_points_att>(masks_node.value());
+        const auto pts_opt    = graph_->get_attrib_by_name<mask_support_points_cam_att>(masks_node.value());
+        const auto mts_opt    = graph_->get_attrib_by_name<mask_timestamp_ms_att>(masks_node.value());
         const auto off_opt    = graph_->get_attrib_by_name<mask_support_offsets_att>(masks_node.value());
         const auto labels_opt = graph_->get_attrib_by_name<mask_labels_att>(masks_node.value());
         const auto ids_opt    = graph_->get_attrib_by_name<mask_label_ids_att>(masks_node.value());  // class_id per mask; semantic masks use 1000+ade_id
         const auto src_opt    = graph_->get_attrib_by_name<mask_source_att>(masks_node.value());     // optional (older producers omit it → treated as zed/bright)
-        if (pts_opt and off_opt and labels_opt)
+        // The producer publishes these in the ZED/CAMERA frame now, so the VIEWER pays for the room
+        // transform — pinned to the mask capture stamp, not "latest", or the cloud lags the robot pose
+        // and shimmers under motion. No transform ⇒ draw nothing, rather than dump camera-frame points
+        // into a room-frame scene (they would appear glued to the origin).
+        std::optional<Mat::RTMat> room_T_zed;
+        if (inner_eigen_api_ != nullptr and pts_opt and not pts_opt->get().empty())
         {
+            std::string room_name, robot_name;
+            { std::scoped_lock lk(node_names_mutex_); room_name = room_node_name_; robot_name = robot_node_name_; }
+            const std::uint64_t mts = mts_opt ? mts_opt.value() : 0;
+            room_T_zed = room_T_zed_extrapolated(inner_eigen_api_, room_name, robot_name, mts);
+        }
+        if (pts_opt and off_opt and labels_opt and room_T_zed.has_value())
+        {
+            const Eigen::Matrix3f Rz = room_T_zed->linear().cast<float>();
+            const Eigen::Vector3f tz = room_T_zed->translation().cast<float>();
             const auto& flat    = pts_opt->get();
             const auto& offsets = off_opt->get();
             const std::vector<float> empty_src;
@@ -898,7 +913,9 @@ void SceneProcessor::update_viewer_mask_points()
                 const float src = (m < sources.size()) ? sources[m] : 0.0f;   // default zed (bright)
                 for (std::size_t i = begin; i < end and (i * 3 + 2) < flat.size(); ++i)
                 {
-                    mask_points.emplace_back(flat[i * 3], flat[i * 3 + 1], flat[i * 3 + 2]);
+                    const Eigen::Vector3f pr =
+                        Rz * Eigen::Vector3f(flat[i * 3], flat[i * 3 + 1], flat[i * 3 + 2]) + tz;
+                    mask_points.emplace_back(pr.x(), pr.y(), pr.z());
                     mask_categories.push_back(labels[m]);
                     mask_sources.push_back(src);
                 }

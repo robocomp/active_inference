@@ -164,8 +164,11 @@ bool MaskIngestor::refresh()
     const VecOpt bbox_max_opt  = G_->get_attrib_by_name<mask_bbox_max_xyz_att>(masks_node);
     const auto labels_opt      = G_->get_attrib_by_name<mask_labels_att>(masks_node);   // ref_wrapper<const string>
 
+    // points_opt / centroids / bboxes are NO LONGER REQUIRED. The producer publishes camera-frame points
+    // only, and this class recomputes centroids/bboxes in the target frame after transforming; a producer
+    // that still emits the legacy room-frame arrays simply has them available as a fallback below.
     if (not frame_opt or not count_opt or not labels_opt or not label_ids_opt or not confs_opt
-        or not offsets_opt or not points_opt or not centroids_opt or not bbox_min_opt or not bbox_max_opt)
+        or not offsets_opt)
     {
         masks_packet_ = {};
         return false;
@@ -207,10 +210,12 @@ bool MaskIngestor::refresh()
     const auto& label_ids = label_ids_opt.value().get();
     const auto& confidences = confs_opt.value().get();
     const auto& offsets = offsets_opt.value().get();
-    const auto& support_flat = points_opt.value().get();
-    const auto& centroids_flat = centroids_opt.value().get();
-    const auto& bbox_min_flat = bbox_min_opt.value().get();
-    const auto& bbox_max_flat = bbox_max_opt.value().get();
+    // vref(), not .value() — these four are optional now (a current producer publishes none of them), and
+    // .value() on an absent attribute is a bad_optional_access throw, not a graceful miss.
+    const auto& support_flat   = vref(points_opt);
+    const auto& centroids_flat = vref(centroids_opt);
+    const auto& bbox_min_flat  = vref(bbox_min_opt);
+    const auto& bbox_max_flat  = vref(bbox_max_opt);
     const auto& pixels_flat  = vref(pixels_opt);
     const auto& pixel_offsets = vref(pixel_offs_opt);
     const auto& motion_var_v      = vref(motion_var_opt);

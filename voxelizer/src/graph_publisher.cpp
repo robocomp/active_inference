@@ -42,7 +42,10 @@ bool GraphPublisher::ensure_node(const char* name, const char* color, bool& read
 {
     if (ready)
         return true;
-    if (G_->get_nodes_by_type("room").empty() or G_->get_nodes_by_type("robot").empty())
+    // NO ROOM GATE. These nodes are parented under `zed` and now carry camera-frame payloads, so a room
+    // is irrelevant to creating them — gating on one is what stopped YOLO running at all without
+    // localization. `robot` is still required: it roots the RT chain the `zed` node hangs from.
+    if (G_->get_nodes_by_type("robot").empty())
         return false;
     if (G_->get_node(name).has_value())
     {
@@ -245,13 +248,18 @@ MaskColorSummary mask_color_summary(const cv::Mat& bgr, const cv::Mat& mask_bin,
 
 // FRAME CONTRACT — the 'masks' node is a SHARED contract read by every concept agent through ONE
 // component, common/mask_ingestor. Mask support points are DUAL-PUBLISHED, 1-to-1:
-//   * mask_support_points      → ROOM frame  (consumed by table_concept, chair_concept — default path)
-//   * mask_support_points_cam  → ZED/camera frame (consumed by bottle_concept via MaskIngestor's
-//                                enable_frame_transform: zed→target, capture-stamp pinned + chain cov)
-// Centroids/bboxes are published ROOM-frame only; the ingestor RECOMPUTES them in the target frame
-// when a consumer opts into the camera path, so no *_cam centroid/bbox is needed.
-// DO NOT drop either array: removing _cam breaks bottle_concept; removing the room arrays breaks
-// table/chair. Frame choice is per-consumer at the ingestor, never a producer-side switch.
+//   * mask_support_points_cam  → ZED/CAMERA frame. THE ONLY 3-D array published. Raw deprojection,
+//                                before any pose is applied. Centroids/bboxes accompany it in the SAME
+//                                frame; common/mask_ingestor recomputes both in the consumer's target
+//                                frame after transforming, so no room-frame variant is needed.
+//
+// ★THIS PRODUCER NO LONGER APPLIES room_T_zed TO MASKS. It used to, and that made a RAW-PERCEPTION
+// component depend on a LOCALIZATION one: room_concept was a required peer, and when the RT chain
+// failed to resolve, room_T_sensor defaulted to Identity and masks went out in camera coordinates
+// LABELLED as room frame — undetectably. It also HID the localization covariance, which only the
+// component that applies the transform can account for (J·Sigma_chain·J^T). The transform now lives in
+// common/mask_ingestor, capture-stamp pinned and forward-extrapolated over the RT lag.
+// The legacy room-frame "mask_support_points" array is GONE — do not reintroduce it.
 //
 // EGO-MOTION CORRUPTION ANNOTATION (MaskMotion.enabled, default on; common/motion_corruption):
 // while the camera moves, a mask is corrupted in a way the consumer can't reconstruct without the
@@ -295,7 +303,6 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
         G_->add_or_modify_attrib_local<mask_label_ids_att>(masks_node, std::vector<float>{});
         G_->add_or_modify_attrib_local<mask_confidences_att>(masks_node, std::vector<float>{});
         G_->add_or_modify_attrib_local<mask_support_offsets_att>(masks_node, std::vector<float>{0.0f});
-        G_->add_or_modify_attrib_local<mask_support_points_att>(masks_node, std::vector<float>{});
         G_->add_or_modify_attrib_local<mask_support_points_cam_att>(masks_node, std::vector<float>{});
         G_->add_or_modify_attrib_local<mask_centroids_xyz_att>(masks_node, std::vector<float>{});
         G_->add_or_modify_attrib_local<mask_bbox_min_xyz_att>(masks_node, std::vector<float>{});
@@ -406,7 +413,6 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
     std::vector<float> label_ids;
     std::vector<float> confidences;
     std::vector<float> support_offsets;
-    std::vector<float> support_points;
     // Dual-publish: the SAME support points in CAMERA (zed) frame (raw deprojected, no room transform),
     // 1-to-1 with support_points/support_offsets. Lets a consumer transform through the probabilistic
     // chain (zed→…→target) itself — pinned to the capture stamp + carrying localization covariance —
@@ -463,10 +469,8 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
         // Pass 1: gather ALL masked room points with valid depth. No depth/range gate — every
         // masked pixel that deprojects is kept (radius outlier removal below still trims the
         // sparse silhouette-edge tail).
-        std::vector<Eigen::Vector3f> gated;
-        std::vector<Eigen::Vector3f> gated_cam;   // same points in camera (zed) frame, parallel to gated
+        std::vector<Eigen::Vector3f> gated;   // CAMERA (zed) frame — the only frame this path knows
         gated.reserve(static_cast<std::size_t>(det.bbox.area() / std::max<int>(1, static_cast<int>(mask_stride * mask_stride))));
-        gated_cam.reserve(gated.capacity());
         std::vector<float> det_pixels;   // raw 2D foreground (col,row), depth-independent
 
         for (int row = min_y; row < max_y; row += static_cast<int>(mask_stride))
@@ -490,11 +494,7 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
                 const float px = (static_cast<float>(col) - cx) * depth / fx;
                 const float py = depth;
                 const float pz = (cy - static_cast<float>(row)) * depth / fy;
-                const Eigen::Vector3f point_cam(px, py, pz);
-                const Eigen::Vector3f point_room = room_rotation * point_cam + room_translation;
-
-                gated.push_back(point_room);
-                gated_cam.push_back(point_cam);
+                gated.emplace_back(px, py, pz);
             }
         }
 
@@ -508,8 +508,10 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
         // discard — used to scan the ENTIRE point set before concluding it has too few
         // neighbours (worst-case O(n²) on the very points it removes); the grid only visits the
         // 3x3x3 neighbouring cells, so cost tracks local density instead of total point count.
-        std::vector<Eigen::Vector3f> mask_points_room;
-        std::vector<Eigen::Vector3f> mask_points_cam;   // parallel to mask_points_room (same survivors)
+        // Survivors of the outlier + foreground gates, CAMERA frame. Both gates are rigid-transform
+        // invariant — the outlier test is a distance, the foreground test is camera depth — so running
+        // them here rather than on room-transformed copies selects exactly the same points.
+        std::vector<Eigen::Vector3f> mask_points;
         if (params_.MASK_OUTLIER_MIN_NEIGHBORS > 0 and params_.MASK_OUTLIER_RADIUS_M > 0.0f
             and gated.size() > static_cast<std::size_t>(params_.MASK_OUTLIER_MIN_NEIGHBORS))
         {
@@ -539,8 +541,7 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
             for (std::size_t i = 0; i < gated.size(); ++i)
                 grid[cell_of(gated[i])].push_back(i);
 
-            mask_points_room.reserve(gated.size());
-            mask_points_cam.reserve(gated.size());
+            mask_points.reserve(gated.size());
             for (std::size_t i = 0; i < gated.size(); ++i)
             {
                 const auto base = cell_of(gated[i]);
@@ -561,19 +562,13 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
                             }
                         }
                 if (neighbours >= min_neighbours)
-                {
-                    mask_points_room.push_back(gated[i]);
-                    mask_points_cam.push_back(gated_cam[i]);
-                }
+                    mask_points.push_back(gated[i]);
             }
         }
         else
-        {
-            mask_points_room = std::move(gated);
-            mask_points_cam = std::move(gated_cam);
-        }
+            mask_points = std::move(gated);
 
-        if (mask_points_room.empty())
+        if (mask_points.empty())
             continue;
 
         // FOREGROUND depth gate — kills the WALL-BEHIND points that bleed into the slice when the robot
@@ -587,43 +582,38 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
         // model-conditioned association: let the concept fitter accept/reject points by its own surface
         // hypothesis (SAM2 already tightens the edge upstream). REMOVE this whole block once that is tested
         // live — do NOT keep growing the number.
-        if (params_.MASK_DEPTH_GATE_BAND_M > 0.0f and mask_points_cam.size() >= 8)
+        if (params_.MASK_DEPTH_GATE_BAND_M > 0.0f and mask_points.size() >= 8)
         {
             std::vector<float> depths;
-            depths.reserve(mask_points_cam.size());
-            for (const auto& pc : mask_points_cam) depths.push_back(pc.y());   // zed camera y = depth along axis
-            const std::size_t knear = depths.size() / 10;                       // ~10th-pct = near surface
+            depths.reserve(mask_points.size());
+            for (const auto& pc : mask_points) depths.push_back(pc.y());   // zed camera y = depth along axis
+            const std::size_t knear = depths.size() / 10;                   // ~10th-pct = near surface
             std::nth_element(depths.begin(), depths.begin() + knear, depths.end());
             const float d_max = depths[knear] + params_.MASK_DEPTH_GATE_BAND_M;
-            std::vector<Eigen::Vector3f> fg_room, fg_cam;
-            fg_room.reserve(mask_points_room.size());
-            fg_cam.reserve(mask_points_cam.size());
-            for (std::size_t i = 0; i < mask_points_room.size(); ++i)
-                if (mask_points_cam[i].y() <= d_max)
-                {
-                    fg_room.push_back(mask_points_room[i]);
-                    fg_cam.push_back(mask_points_cam[i]);
-                }
-            if (const std::size_t dropped = mask_points_room.size() - fg_room.size(); dropped > 0)
+            std::vector<Eigen::Vector3f> fg;
+            fg.reserve(mask_points.size());
+            for (const auto& p : mask_points)
+                if (p.y() <= d_max)
+                    fg.push_back(p);
+            if (const std::size_t dropped = mask_points.size() - fg.size(); dropped > 0)
             {
                 fg_gate_dropped += dropped;
-                fg_gate_in      += mask_points_room.size();
+                fg_gate_in      += mask_points.size();
                 ++fg_gate_masks;
             }
-            mask_points_room = std::move(fg_room);
-            mask_points_cam  = std::move(fg_cam);
-            if (mask_points_room.empty())
+            mask_points = std::move(fg);
+            if (mask_points.empty())
                 continue;
         }
 
         Eigen::Vector3f min_pt = Eigen::Vector3f::Constant(std::numeric_limits<float>::max());
         Eigen::Vector3f max_pt = Eigen::Vector3f::Constant(std::numeric_limits<float>::lowest());
         Eigen::Vector3f sum_pt = Eigen::Vector3f::Zero();
-        for (const auto& point_room : mask_points_room)
+        for (const auto& p : mask_points)
         {
-            sum_pt += point_room;
-            min_pt = min_pt.cwiseMin(point_room);
-            max_pt = max_pt.cwiseMax(point_room);
+            sum_pt += p;
+            min_pt = min_pt.cwiseMin(p);
+            max_pt = max_pt.cwiseMax(p);
         }
 
         if (!labels_joined.str().empty())
@@ -648,11 +638,11 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
             color_var.insert(color_var.end(), {cs.var.x(), cs.var.y(), cs.var.z()});
             color_neff.push_back(cs.n_eff);
         }
-        support_offsets.push_back(static_cast<float>(support_offsets.back() + static_cast<float>(mask_points_room.size())));
+        support_offsets.push_back(static_cast<float>(support_offsets.back() + static_cast<float>(mask_points.size())));
         mask_pixels_xy.insert(mask_pixels_xy.end(), det_pixels.begin(), det_pixels.end());
         mask_pixel_offsets.push_back(static_cast<float>(mask_pixel_offsets.back() + static_cast<float>(det_pixels.size() / 2)));
 
-        const Eigen::Vector3f centroid = sum_pt / static_cast<float>(mask_points_room.size());
+        const Eigen::Vector3f centroid = sum_pt / static_cast<float>(mask_points.size());
         centroids_xyz.push_back(centroid.x());
         centroids_xyz.push_back(centroid.y());
         centroids_xyz.push_back(centroid.z());
@@ -664,13 +654,7 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
         bbox_max_xyz.push_back(max_pt.y());
         bbox_max_xyz.push_back(max_pt.z());
 
-        for (const auto& point : mask_points_room)
-        {
-            support_points.push_back(point.x());
-            support_points.push_back(point.y());
-            support_points.push_back(point.z());
-        }
-        for (const auto& point : mask_points_cam)
+        for (const auto& point : mask_points)
         {
             support_points_cam.push_back(point.x());
             support_points_cam.push_back(point.y());
@@ -695,9 +679,9 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
             const float tau = (n_px > 0) ? static_cast<float>(on_border) / static_cast<float>(n_px) : 0.0f;
             // Mean optical-axis depth from the camera-frame survivors (.y() is depth in the zed frame).
             float sum_depth = 0.0f;
-            for (const auto& p : mask_points_cam)
+            for (const auto& p : mask_points)
                 sum_depth += p.y();
-            const float Z = mask_points_cam.empty() ? 0.0f : sum_depth / static_cast<float>(mask_points_cam.size());
+            const float Z = mask_points.empty() ? 0.0f : sum_depth / static_cast<float>(mask_points.size());
             const float col_c = (n_px > 0) ? sum_col / static_cast<float>(n_px) : cx;
             const float row_c = (n_px > 0) ? sum_row / static_cast<float>(n_px) : cy;
             const float xn = (col_c - cx) / fx;
@@ -718,7 +702,7 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
                             << tau << ',' << corr.dot_d << ',' << corr.bias_m << ',' << corr.var_m << '\n';
         }
 
-        total_support_points += mask_points_room.size();
+        total_support_points += mask_points.size();
     }
 
     // Foreground-gate telemetry (throttled ≈1s): far wall-behind points removed this frame + masks affected.
@@ -766,21 +750,23 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
 
         if (b.has_lidar_depth and not b.support_room.empty())
         {
-            // FULL 3D slice from the reprojected lidar: room + zed support points (so both consumer
-            // paths work), real centroid/bbox, and range_var as the depth uncertainty to add to R.
+            // FULL 3D slice from the reprojected lidar. The hits arrive room-framed (they are built on the
+            // main thread from the lidar cloud), so they are converted to ZED here — the published frame —
+            // and the centroid/bbox are accumulated in that same frame, never in the room.
             has_depth_flags.push_back(1.0f);
             depth_var.push_back(b.range_var);
             support_offsets.push_back(static_cast<float>(support_offsets.back() + static_cast<float>(b.support_room.size())));
-            Eigen::Vector3f mn = Eigen::Vector3f::Constant(std::numeric_limits<float>::max());
-            Eigen::Vector3f mx = Eigen::Vector3f::Constant(std::numeric_limits<float>::lowest());
+            Eigen::Vector3f mn  = Eigen::Vector3f::Constant(std::numeric_limits<float>::max());
+            Eigen::Vector3f mx  = Eigen::Vector3f::Constant(std::numeric_limits<float>::lowest());
+            Eigen::Vector3f sum = Eigen::Vector3f::Zero();
             for (const auto& pr : b.support_room)
             {
-                support_points.push_back(pr.x());     support_points.push_back(pr.y());     support_points.push_back(pr.z());
                 const Eigen::Vector3f pz = room_to_zed(pr);
                 support_points_cam.push_back(pz.x()); support_points_cam.push_back(pz.y()); support_points_cam.push_back(pz.z());
-                mn = mn.cwiseMin(pr); mx = mx.cwiseMax(pr);
+                mn = mn.cwiseMin(pz); mx = mx.cwiseMax(pz); sum += pz;
             }
-            centroids_xyz.insert(centroids_xyz.end(), {b.centroid_room.x(), b.centroid_room.y(), b.centroid_room.z()});
+            const Eigen::Vector3f c_zed = sum / static_cast<float>(b.support_room.size());
+            centroids_xyz.insert(centroids_xyz.end(), {c_zed.x(), c_zed.y(), c_zed.z()});
             bbox_min_xyz.insert(bbox_min_xyz.end(),   {mn.x(), mn.y(), mn.z()});
             bbox_max_xyz.insert(bbox_max_xyz.end(),   {mx.x(), mx.y(), mx.z()});
             if (params_.MASK_MOTION_ENABLED)
@@ -818,7 +804,6 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
     G_->add_or_modify_attrib_local<mask_label_ids_att>(masks_node, label_ids);
     G_->add_or_modify_attrib_local<mask_confidences_att>(masks_node, confidences);
     G_->add_or_modify_attrib_local<mask_support_offsets_att>(masks_node, support_offsets);
-    G_->add_or_modify_attrib_local<mask_support_points_att>(masks_node, support_points);
     G_->add_or_modify_attrib_local<mask_support_points_cam_att>(masks_node, support_points_cam);
     G_->add_or_modify_attrib_local<mask_centroids_xyz_att>(masks_node, centroids_xyz);
     G_->add_or_modify_attrib_local<mask_bbox_min_xyz_att>(masks_node, bbox_min_xyz);
