@@ -307,7 +307,10 @@ void SpecificWorker::initialize()
         rc::PerceptionWorker::Config wcfg;
         wcfg.name             = "zed";
         wcfg.perf_log         = params.PERF_LOG;
-        wcfg.target_period_ms = 15;   // pull a bit faster than the ~24Hz feed; ZedSource dedups when nothing new
+        // Poll granularity for the pull loop, NOT a rate limit — a cycle that finds a frame runs at its
+        // own cost and never sleeps. At 15 ms this WAS the limiter once SAM2 came off: 25.3 ms of work
+        // against a 25 ms camera still gave a 49 ms loop, because a near-miss cost a full 15 ms sleep.
+        wcfg.target_period_ms = params.ZED_THREAD_PERIOD_MS;
         if (!zed_worker_->start(std::move(zed_stages), wcfg, [zed_src]() { return (*zed_src)(); }))
         {
             std::println("[Zed] perception worker failed to start (model load?) — disabling");

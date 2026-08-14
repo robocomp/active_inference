@@ -84,6 +84,18 @@ tray_mask_polygon = [
     1280, 720,  0, 720
 ]
 
+# ── ZED worker pull pacing ────────────────────────────────────────────────────────────────────────
+# How often the ZED perception worker asks its source for a frame when the last ask came up empty.
+# A POLL GRANULARITY, not a rate limit: a cycle that FINDS a frame runs at its own cost and never
+# sleeps, so lowering this cannot make perception run faster than the models allow.
+# ★4 ms (was a hardcoded 15) — at 15 this was the BINDING CONSTRAINT once SAM2 came off. Measured
+# (468 frames, etc/viewer_perf_zed_worker.csv): real work 25.3 ms against a 25 ms camera period, yet
+# the loop ran 49.1 ms and processed exactly 1 frame in 1.96. The worker finished just as the next
+# frame was landing, asked a moment too early, missed, and slept a full 15 ms — a frame lost to poll
+# granularity, not to compute. Raise it if the idle null-fetch poll (now 250 Hz vs 66) ever shows up
+# as CPU; the null path is cheap (a media drain that finds nothing) but it is not free.
+zed_thread_period_ms = 4
+
 [HumanPose]
 # Second YOLO-pose model on the same RGB frame → BODY_18 3D skeletons on the 'skeleton' DSR node
 # (camera frame, metres) consumed by human_concept. Default OFF — set enabled=true once the ONNX

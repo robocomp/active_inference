@@ -170,6 +170,20 @@ struct VoxelizerParams
     // RGBD_360 panorama (Image360Frame plane), display-only in the Ricoh popup.
     std::string MEDIA_RICOH_TOPIC = "rc/ricoh/rgb";
 
+    // ── ZED worker pull pacing (Yolo.zed_thread_period_ms) ────────────────────────────────────────
+    // How often the ZED PerceptionWorker asks its source for a frame when the last ask came up empty.
+    // This is a POLL GRANULARITY, not a rate limit: a cycle that finds a frame runs at its own cost and
+    // never sleeps, so lowering this cannot make perception run faster than the models allow.
+    //
+    // ★IT WAS 15 ms AND THAT WAS THE BINDING CONSTRAINT once SAM2 came off. Measured (468 frames,
+    // etc/viewer_perf_zed_worker.csv): real work 25.3 ms against a camera period of 25 ms, yet the loop
+    // ran 49.1 ms — processing exactly 1 frame in 1.96. The worker finished just as the next frame was
+    // landing, asked a moment too early, missed, and then slept 15 ms — losing a whole frame to poll
+    // granularity, not to compute. The loop-period histogram showed the two modes (32-39 and 40-47 ms).
+    // 4 ms shrinks that miss window to ~4 ms. The cost is a more frequent idle poll (250 Hz vs 66 Hz) on
+    // the cheap null-fetch path; raise it again if that ever shows up as idle CPU.
+    int         ZED_THREAD_PERIOD_MS       = 4;       // Yolo.zed_thread_period_ms
+
     // Ricoh 360 peripheral detection: OWN YOLO model/session (rc::RicohYoloWorker), run over the
     // panorama split into RICOH_YOLO_N_STRIPS vertical strips (see YoloProcessor::detect_segmentation_360)
     // on a DEDICATED thread — decoupled from compute()'s budget, paced to RICOH_YOLO_THREAD_PERIOD_MS
