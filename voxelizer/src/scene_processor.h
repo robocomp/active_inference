@@ -21,7 +21,6 @@
 
 namespace rc
 {
-    class VoxelOpenGLViewer;
 }
 
 class SceneProcessor
@@ -35,7 +34,6 @@ public:
     std::shared_ptr<DSR::DSRGraph> graph() const { return graph_; }
 
     void configure(DSR::InnerEigenAPI* inner_eigen_api,
-                   rc::VoxelOpenGLViewer* voxel_viewer,
                    bool transforms_interpolate_rt,
                    bool verbose_debug,
                    bool mask_pose_extrapolate,
@@ -102,34 +100,12 @@ public:
 
     void check_input_stream_startup_status();
     void mark_room_rt_ready();
-    void update_room_polygon_periodic();
-    void update_viewer_robot_pose(const Mat::RTMat& room_T_robot);
-    // Reads the LATEST robot pose (RT ts=0) and pushes it to the viewer, decoupled from the
-    // per-frame camera timestamp. Cheap; called from the render timer so the robot redraws at the
-    // render cadence instead of the perception-frame rate. No-op until room/robot/inner-eigen exist.
-    void refresh_viewer_robot_pose_latest();
-    // Push an ALREADY room-transformed LiDAR cloud to the viewer — the SAME sweep compute() drained and
-    // posed. Avoids a second get_lidar3D() drain + independent re-interpolation (which desynced the viewer
-    // from what was processed and re-projected the cloud under a slightly different room<-robot pose each
-    // cycle → shimmer). Empty ⇒ keep the last cloud (never blank it).
-    void update_viewer_lidar_points(std::span<const Eigen::Vector3f> lidar_points_room,
-                                    std::span<const std::uint8_t> plane_id = {});
     std::vector<GraphObjectBox> get_graph_object_boxes(const std::string& room_name,
                                                        std::uint64_t timestamp_ms) const;
     // Room floor polygon (room frame, metres) + ceiling height, gathered on the MAIN thread so the
     // ZED projection overlay never re-reads the graph itself (its per-frame inner_eigen tree-walks
     // raced DDS-thread node inserts during residual churn → heap corruption). false if no room yet.
     bool get_room_layout(std::vector<float>& polygon_x, std::vector<float>& polygon_y, float& room_height) const;
-    void update_viewer_graph_object_boxes(std::span<const GraphObjectBox> graph_boxes);
-    void update_viewer_object_meshes();
-    // Read human_concept's 'person' nodes (mesh_vertices_att = fitted BODY_18, room frame) and feed
-    // them to the GL viewer as 3D skeletons.
-    void update_viewer_person_skeletons();
-    void update_viewer_table_rfe_points();
-    // Feed the YOLO mask support points (room frame) from the "masks" node to the 3D viewer.
-    void update_viewer_mask_points();
-    // Feed residual_concept's occupancy-grid cells (room frame) from the `grid` node to the 3D viewer.
-    void update_viewer_grid();
 
 private:
     struct RoomPolygonData
@@ -144,11 +120,9 @@ private:
     std::optional<GraphObjectBox> build_graph_object_box(const DSR::Node& node,
                                                          const std::string& room_name,
                                                          std::uint64_t timestamp_ms) const;
-    void update_room_polygon_in_viewers();
 
     std::shared_ptr<DSR::DSRGraph> graph_;
     DSR::InnerEigenAPI* inner_eigen_api_ = nullptr;
-    rc::VoxelOpenGLViewer* voxel_viewer_ = nullptr;
     bool transforms_interpolate_rt_ = true;
     bool verbose_debug_ = false;
     bool mask_pose_extrapolate_ = true;       // extrapolate robot pose to capture stamp via RT-edge velocity

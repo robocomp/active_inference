@@ -1,0 +1,10 @@
+
+Component viewer3d
+{
+    Communications
+    {
+    };
+    language Cpp11;
+    options dsr;
+
+};

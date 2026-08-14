@@ -29,7 +29,6 @@
 #ifdef emit
 #undef emit
 #endif
-#include "voxel_opengl_viewer.h"
 #include "yolo_viewer.h"
 #include "image_popup_viewer.h"
 #include "perception_worker.h"
@@ -292,7 +291,7 @@ void SpecificWorker::initialize()
     // --- Scene processor (DSR-only: no proxies) ---
     inner_eigen_api = G->get_inner_eigen_api();
     scene_processor = std::make_unique<SceneProcessor>(G);
-    scene_processor->configure(inner_eigen_api.get(), voxel_viewer_gl.get(),
+    scene_processor->configure(inner_eigen_api.get(),
                                params.TRANSFORMS_INTERPOLATE_RT, verbose_debug_,
                                params.MASK_POSE_EXTRAPOLATE, params.MASK_POSE_EXTRAP_MAX_DT_S);
     scene_processor->init_media_plane(static_cast<std::uint32_t>(params.MEDIA_DOMAIN_ID),
@@ -432,7 +431,9 @@ void SpecificWorker::initialize()
     // Decoupled render timer: only worth running when the 3D viewer exists. 50 ms (20 Hz) matches the
     // viewer's repaint throttle, giving a stable 20 Hz refresh without re-running perception faster.
     // Created stopped; started in Operating (so graph reads happen only after the join completes).
-    if (voxel_viewer_gl)
+    // Was gated on the 3-D GL widget existing; that widget now lives in the `viewer3d` agent, but this
+    // timer also drives the ricoh popup, the ZED window and the publish-hold watchdog — so it is
+    // unconditional. Gating it on a widget that moved out would have silently stopped all three.
     {
         render_timer_ = std::make_unique<QTimer>(this);
         render_timer_->setInterval(50);
@@ -612,7 +613,6 @@ void SpecificWorker::on_render_tick()
     const auto perf_t0 = std::chrono::steady_clock::now();
     auto perf_ms = [](auto a, auto b){ return std::chrono::duration<double, std::milli>(b - a).count(); };
 
-    scene_processor->refresh_viewer_robot_pose_latest();
 
     // Ricoh 360 popup: refresh the window when visible. When the 360-YOLO worker is running it OWNS
     // polling (its own thread, see ricoh_yolo_worker.h) — just read its thread-safe snapshot here, no
@@ -841,10 +841,6 @@ void SpecificWorker::on_render_tick()
         ricoh_ms = perf_ms(perf_ricoh0, std::chrono::steady_clock::now());
     }
 
-    // Feed the input-stream rates to the 3D viewer HUD (Render / RGB / RGB360).
-    if (voxel_viewer_gl)
-        voxel_viewer_gl->set_stream_fps(static_cast<float>(stream_mon_.rate_hz("rgb")),
-                                        static_cast<float>(stream_mon_.rate_hz("rgb360")));
 
     // Input-stream health: report rates every 5 s and flag stalls. Runs here (GUI tick,
     // independent of the perception frame path) so a FULLY stalled RGB stream — which
@@ -1446,15 +1442,6 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
         }
     }
 
-    scene_processor->update_viewer_robot_pose(room_T_robot.value());
-    scene_processor->update_viewer_lidar_points(lidar_points_room, lidar_plane_id);   // reuse drained+posed sweep + plane tags
-    scene_processor->update_viewer_graph_object_boxes(graph_object_boxes);
-    scene_processor->update_viewer_object_meshes();
-    scene_processor->update_viewer_person_skeletons();
-    scene_processor->update_viewer_table_rfe_points();
-    scene_processor->update_viewer_mask_points();
-    scene_processor->update_viewer_grid();   // residual_concept occupancy-grid display (`grid` node under room)
-    scene_processor->update_room_polygon_periodic();
 
     // Gather the room floor polygon + ceiling height HERE (main thread) so the projection overlay
     // never traverses the graph itself — its per-frame reads raced DDS-thread residual inserts.

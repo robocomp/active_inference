@@ -24,7 +24,6 @@
 #include <QSettings>
 #include <QByteArray>
 
-#include "voxel_opengl_viewer.h"
 #include "yolo_viewer.h"
 #include "image_popup_viewer.h"
 #include "scene_processor.h"
@@ -353,44 +352,6 @@ void SpecificWorker::setup_custom_viewers()
         controls_row2->setContentsMargins(0, 0, 0, 0);
         controls_row2->setSpacing(8);
 
-        auto* lidar_btn = new QPushButton("Lidar: OFF", voxel_panel);
-        lidar_btn->setCheckable(true);
-        lidar_btn->setCursor(Qt::PointingHandCursor);
-
-        // Fitted models (table mesh + bottle cylinder + graph boxes) — default ON.
-        auto* models_btn = new QPushButton("Models: ON", voxel_panel);
-        models_btn->setCheckable(true);
-        models_btn->setChecked(true);
-        models_btn->setCursor(Qt::PointingHandCursor);
-
-        auto* masks_btn = new QPushButton("Masks: OFF", voxel_panel);
-        masks_btn->setCheckable(true);
-        masks_btn->setCursor(Qt::PointingHandCursor);
-
-        // table_concept residual debug cloud — toggle, default OFF.
-        auto* residual_btn = new QPushButton("Residual: OFF", voxel_panel);
-        residual_btn->setCheckable(true);
-        residual_btn->setChecked(false);
-        residual_btn->setCursor(Qt::PointingHandCursor);
-
-        // Occupancy-grid display (residual_concept's rebuilt safety layer) — ON by default.
-        auto* grid_btn = new QPushButton("Grid: ON", voxel_panel);
-        grid_btn->setCheckable(true);
-        grid_btn->setChecked(true);
-        grid_btn->setCursor(Qt::PointingHandCursor);
-
-        // Beta belief-field heatmap (hue=P risk, brightness=confidence) — ON by default.
-        auto* field_btn = new QPushButton("Field: ON", voxel_panel);
-        field_btn->setCheckable(true);
-        field_btn->setChecked(true);
-        field_btn->setCursor(Qt::PointingHandCursor);
-
-        // Node-name text labels drawn in the 3D view (debug reference) — ON by default.
-        auto* labels_btn = new QPushButton("Labels: ON", voxel_panel);
-        labels_btn->setCheckable(true);
-        labels_btn->setChecked(true);
-        labels_btn->setCursor(Qt::PointingHandCursor);
-
         // ZED popup toggle — opens the ZED RGB window (YOLO seg overlay lives inside it). Created here;
         // the window itself is built (hidden) in the SHOW_YOLO_VIEWER block below, so the lambda
         // resolves yolo_window_ at click time.
@@ -411,37 +372,11 @@ void SpecificWorker::setup_custom_viewers()
             ricoh_btn->setCursor(Qt::PointingHandCursor);
         }
 
-        // Tint each point toggle with the colour of the points it shows in the viewer:
-        // a coloured outline always (so the association is visible) filled when ON.
-        // Voxels are multi-category (no single colour) and Fuse/Clear are actions, so
-        // they keep the default style.
-        auto accent = [](QPushButton* b, const char* hex)
-        {
-            b->setStyleSheet(QString(
-                "QPushButton { border: 2px solid %1; border-radius: 4px; padding: 3px 8px; }"
-                "QPushButton:checked { background-color: %1; color: #101010; }").arg(hex));
-        };
-        accent(lidar_btn,     "#8C9EC7");  // lidar: slate blue-gray
-        accent(models_btn,    "#FFC864");  // models: table-mesh amber
-        accent(masks_btn,     "#EBEBF2");  // mask: white
-        accent(residual_btn,  "#2633CC");  // residual: dark blue
-        accent(grid_btn,      "#CC8C0D");  // occupancy grid: amber
-        accent(field_btn,     "#D64550");  // belief field: risk red
-        accent(labels_btn,    "#DDDDDD");  // node-name labels: light grey
-        if (yolo_btn)  accent(yolo_btn,  "#64C8FF");  // yolo: light blue
-        if (ricoh_btn) accent(ricoh_btn, "#00D4BB");  // ricoh: teal
-
-        // Row 1 — raw/perception geometry: the point clouds and the fitted models drawn from them.
-        controls_row1->addWidget(lidar_btn);
-        controls_row1->addWidget(models_btn);
-        controls_row1->addWidget(masks_btn);
-        controls_row1->addWidget(residual_btn);
-        controls_row1->addStretch(1);
-
-        // Row 2 — derived belief layers, text labels and the popup-window toggles.
-        controls_row2->addWidget(grid_btn);
-        controls_row2->addWidget(field_btn);
-        controls_row2->addWidget(labels_btn);
+        // ★THE 3-D LAYER TOGGLES MOVED OUT WITH THE VIEW. Lidar/Models/Masks/Residual/Grid/Field/Labels
+        // drove the GL widget that now lives in the `viewer3d` agent; they are its buttons, not the
+        // voxelizer's. What stays here is what acts on THIS agent: the two camera windows below, whose
+        // toggles also gate real work (a hidden ricoh popup stops decoding).
+        // Row 2 — the camera-window toggles.
         if (yolo_btn)  controls_row2->addWidget(yolo_btn);
         if (ricoh_btn) controls_row2->addWidget(ricoh_btn);
         controls_row2->addStretch(1);
@@ -449,63 +384,8 @@ void SpecificWorker::setup_custom_viewers()
         controls_layout->addLayout(controls_row1);
         controls_layout->addLayout(controls_row2);
 
-        voxel_viewer_gl = std::make_unique<rc::VoxelOpenGLViewer>(nullptr);
-        voxel_viewer_gl->set_perf_log(params.PERF_LOG);   // per-paint CSV probe off unless perf logging on
-        voxel_viewer_gl->load_robot_mesh("meshes/shadow.obj");
-        // Furniture display meshes are no longer hardcoded here: each concept agent publishes mesh_path /
-        // mesh_texture_path on its node, and the viewer loads them on demand (cached) — see update_graph_boxes.
-
         panel_layout->addLayout(controls_layout);
-        panel_layout->addWidget(voxel_viewer_gl.get(), 1);
-
-        connect(lidar_btn, &QPushButton::toggled, this, [this, lidar_btn](bool checked)
-        {
-            if (voxel_viewer_gl)
-                voxel_viewer_gl->set_show_lidar(checked);
-            lidar_btn->setText(checked ? "Lidar: ON" : "Lidar: OFF");
-        });
-
-        connect(models_btn, &QPushButton::toggled, this, [this, models_btn](bool checked)
-        {
-            if (voxel_viewer_gl)
-                voxel_viewer_gl->set_show_models(checked);
-            models_btn->setText(checked ? "Models: ON" : "Models: OFF");
-        });
-
-        connect(masks_btn, &QPushButton::toggled, this, [this, masks_btn](bool checked)
-        {
-            if (voxel_viewer_gl)
-                voxel_viewer_gl->set_show_masks(checked);
-            masks_btn->setText(checked ? "Masks: ON" : "Masks: OFF");
-        });
-
-        connect(residual_btn, &QPushButton::toggled, this, [this, residual_btn](bool checked)
-        {
-            if (voxel_viewer_gl)
-                voxel_viewer_gl->set_show_residual(checked);
-            residual_btn->setText(checked ? "Residual: ON" : "Residual: OFF");
-        });
-
-        connect(grid_btn, &QPushButton::toggled, this, [this, grid_btn](bool checked)
-        {
-            if (voxel_viewer_gl)
-                voxel_viewer_gl->set_show_grid(checked);
-            grid_btn->setText(checked ? "Grid: ON" : "Grid: OFF");
-        });
-
-        connect(field_btn, &QPushButton::toggled, this, [this, field_btn](bool checked)
-        {
-            if (voxel_viewer_gl)
-                voxel_viewer_gl->set_show_field(checked);
-            field_btn->setText(checked ? "Field: ON" : "Field: OFF");
-        });
-
-        connect(labels_btn, &QPushButton::toggled, this, [this, labels_btn](bool checked)
-        {
-            if (voxel_viewer_gl)
-                voxel_viewer_gl->set_show_labels(checked);
-            labels_btn->setText(checked ? "Labels: ON" : "Labels: OFF");
-        });
+        panel_layout->addStretch(1);
 
         if (yolo_btn)
             connect(yolo_btn, &QPushButton::toggled, this, [this, yolo_btn](bool checked)

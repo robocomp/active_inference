@@ -55,7 +55,6 @@ struct SegDetection;
 namespace rc::human_pose { class YoloHumanProcessor; }
 namespace rc::semantic { class YoloSemanticProcessor; }
 
-namespace rc { class VoxelOpenGLViewer; }
 namespace rc { class YoloViewer; }
 namespace rc { class ImagePopupViewer; }
 namespace rc { class PerceptionWorker; }
@@ -174,7 +173,6 @@ class SpecificWorker : public GenericWorker
         std::unique_ptr<rc::PerceptionWorker> zed_worker_;   // ZED inference thread: [seg, pose, semantic] stages
         std::unique_ptr<SceneProcessor>    scene_processor;
         std::unique_ptr<GraphPublisher>    graph_publisher_;   // all DSR semantic_grid exports
-        std::unique_ptr<rc::VoxelOpenGLViewer> voxel_viewer_gl;
         std::unique_ptr<rc::YoloViewer>        yolo_viewer_;
         std::unique_ptr<rc::ImagePopupViewer>  ricoh_viewer_;   // RGBD_360 panorama popup
         // Ricoh 360 peripheral YOLO, on its own thread (own model/session) — see ricoh_yolo_worker.h.

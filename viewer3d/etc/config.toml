@@ -1,0 +1,83 @@
+# viewer3d — the METRIC 3D scene view, as its own agent.
+#
+# The LiDAR cloud, the YOLO mask cloud, the residual occupancy grid, the room polygon, the concept
+# agents' boxes and display meshes, and human_concept's skeletons — drawn together in the room frame.
+# Pure observer: it infers nothing and writes nothing to the graph beyond its own presence node.
+#
+# ★WHY IT IS NOT IN THE VOXELIZER. Nothing it draws is the voxelizer's; it was a perception component
+# carrying ~2.8 k lines of renderer for other agents' products. Worse, the room dependency this view
+# genuinely needs was gating the whole agent — YOLO included — behind localization. Split out, the
+# view survives a voxelizer restart and the voxelizer stops needing a room to run.
+#
+# The two CAMERA windows (ZED raster + ricoh panorama) deliberately STAYED in the voxelizer: they read
+# in-memory PerceptionWorker bundles and ONNX-owning stage objects, and their buttons are pipeline
+# controls (semantic/SAM2 stage toggles, depth-dataset collection), not display.
+
+# --- Common Agent Data ---
+[Agent]
+# MUST be unique across the shared graph — a collision is a CRDT actor-id clash → SIGSEGV in BOTH
+# agents. Taken: room=5 robot=6 table=7 controller=8 voxelizer=9 bottle=10 kinova=11 self_calib=12
+# human=13 residual=14 door=15 scene_graph_viewer=16 hood=17 chair=20 cabinet=21 refrigerator=22
+# ring=23 kitchen=24. Next free: 19, 25+.
+id = 18
+name = "viewer3d"
+
+# --- Single Instance Configuration ---
+configFile = ""
+domain = 0
+# No cortex DSRViewer at all: with tree/graph/2d all false, setupViewer() returns nullptr and
+# GenericWorker creates no QMainWindow. This agent builds its OWN top-level window for the 3D view.
+# That is deliberate — a heavy QOpenGLWidget sharing the GraphViewer's backing store is a
+# stack-address free in paintAndFlush when a peer joins (see dsr_gui.h). It is also why this widget
+# was already in its own window while it lived inside the voxelizer.
+tree  = false
+graph = false
+2d    = false
+3d    = false
+
+# ── Agent-presence protocol ───────────────────────────────────────────────────────────────────
+[Presence]
+# required_agent_names is OMITTED ON PURPOSE — a viewer must render whatever exists and must never
+# tear itself down because a peer is absent. That is the whole point of splitting it out: it survives
+# everyone else's restarts, and it must come up with no room, no voxelizer and no concept agents.
+# ★Write it as an absent key, NOT as `required_agent_names = []`: the RoboComp ConfigLoader throws
+# `std::runtime_error: Empty arrays are not supported.` on an empty TOML array and the process aborts
+# before main(). The presence monitor guards the key with exists() and defaults to an empty list.
+config_dir = "etc"
+monitor_period_ms = 500
+heartbeat_timeout_ms = 25000
+rejoin_grace_ms = 8000
+stale_grace_ms = 120000
+agent_info_period_ms = 1000
+
+[Owns]
+# Only its own presence node — this agent births nothing in the scene.
+nodes = ["viewer3d 18"]
+
+# ── The view ──────────────────────────────────────────────────────────────────────────────────
+[Viewer3D]
+RefreshMs = 100            # full feed refresh period (10 Hz) — the LiDAR sweep rate is the driver
+WindowDelayMs = 1500       # let the graph sync before the first frame, so the camera doesn't snap
+RememberGeometry = true    # persist window position/size across runs (QSettings)
+LogPeriodFrames = 50       # throttle for the liveness line; 0 disables
+
+# The robot's display mesh. Named here because the robot node's own `path` attr ("meshes/shadow.obj")
+# is relative to robot_concept's run dir, not to the components root. Empty ⇒ synthetic glyph.
+RobotMeshPath = "robot_concept/meshes/shadow.obj"
+
+# LiDAR media-plane topic. The DOMAIN and QoS come from the descriptor robot_concept authors on the
+# sensor node, never from here (CLAUDE.md, media plane) — this only names the stream.
+LidarTopic = "rc/lidar3d/points"
+
+[Period]
+Compute = 100
+Emergency = 500
+
+[Component.Debug]
+Verbose = false
+
+[Ice]
+Warn.Connections = "0"
+Trace.Network = "0"
+Trace.Protocol = "0"
+MessageSizeMax = "20004800"

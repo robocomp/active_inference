@@ -81,14 +81,9 @@ LIST(APPEND HEADERS
   ../src/depth_enrichment.h
   ../src/room_envelope_depth.h
 )
-
-if(TARGET Qt6::OpenGL AND TARGET Qt6::OpenGLWidgets)
-  LIST(APPEND SOURCES ../src/voxel_opengl_viewer.cpp ../src/obj_loader.cpp)
-  LIST(APPEND HEADERS ../src/voxel_opengl_viewer.h ../src/obj_loader.h)
-  LIST(APPEND LIBS Qt6::OpenGL Qt6::OpenGLWidgets)
-else()
-  message(WARNING "Qt OpenGL targets not found; building without voxel_opengl_viewer")
-endif()
+# The 3-D GL view (voxel_opengl_viewer + obj_loader) MOVED OUT to the `viewer3d` agent — it drew other
+# agents' products and its room dependency was gating this whole component behind localization. What
+# remains here are the two CAMERA windows (ZED raster + ricoh panorama), raster QLabels needing no GL.
 
 LIST(APPEND SOURCES ../src/yolo_viewer.cpp)
 LIST(APPEND HEADERS ../src/yolo_viewer.h)
