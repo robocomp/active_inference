@@ -697,7 +697,10 @@ float HoodFitter::run_inference(HoodInstance& inst, const HoodObservation& obser
 
     if (observation.has_fresh_data)
     {
-        rc::voxel_bank::ingest(inst, observation.candidate_pts, observation.residual_pts, cfg_);   // keep the viewer's voxel bank fed
+        rc::voxel_bank::ingest(inst, observation.candidate_pts, observation.residual_pts, cfg_);
+        // ★NOT for a viewer — nothing ever read the published attribute. The bank is how this agent
+        // gathers 3D points from its own masks over many frames so evaluate_shape() can DISCRIMINATE
+        // SHAPES (round vs square) from an accumulated cloud rather than one frame's partial view.
         inst.last_residual_pts = observation.residual_pts;   // model-unexplained points for the viewer layer
     }
 

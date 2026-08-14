@@ -63,6 +63,7 @@ HoodConfig load_hood_config(const ConfigLoader& cfg)
     out.epistemic_cooldown_cycles= geti("HoodConcept.EpistemicCooldownCycles", 200);
     out.hood_log_period_frames  = geti("HoodConcept.HoodLogPeriodFrames",   30);
     out.voxel_bank_max_points    = geti("HoodConcept.VoxelBankMaxPoints",     4000);
+    out.publish_voxel_bank        = getb("HoodConcept.PublishVoxelBank",       false);
     out.voxel_bank_quantization_m= getf("HoodConcept.VoxelBankQuantizationM", 0.02f);
     out.voxel_select_radius_margin_m = getf("HoodConcept.VoxelSelectRadiusMarginM", 0.50f);
     out.voxel_select_height_margin_m = getf("HoodConcept.VoxelSelectHeightMarginM", 0.25f);
