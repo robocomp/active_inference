@@ -138,9 +138,22 @@ mask_score_default = 0.5        # confidence assigned when the model produces no
 
 [Sam2]
 # SAM2.1 mask REFINEMENT: sharpen the mask of an already-located YOLO object. Runs a two-model ONNX
-# pipeline (encoder once/frame, decoder per object) prompted by each detection's bbox. Viewer overlay
-# only for now (magenta) — toggle "SAM2" appears in the ZED window. Default OFF (heavy 1024² encoder).
-enabled = true
+# pipeline (encoder once/frame, decoder per object) prompted by each detection's bbox. Toggle "SAM2"
+# appears in the ZED window (display only — it cannot gate the stage while publish_refined is true).
+#
+# ★OFF 2026-08-14 — IT WAS HALF THE FRAME. Measured per-stage on the zed worker (417 frames, 7
+# detections, etc/viewer_perf_zed_worker.csv): SAM2 49.9 ms of a 95.3 ms loop = 52.3%, more than THREE
+# TIMES the other four models combined (seg 8.2, semantic_masks 6.7, semantic 4.7, pose 4.2), and it
+# scales per object at ~7.1 ms each. That is why `rgb` read ~10-12 Hz against a camera delivering at
+# ~31 Hz — throughput, not dropped frames.
+# ★enabled=false is the RIGHT switch, not decimation: specificworker.cpp gates the whole stage on it
+# (`if (params.SAM2_ENABLED)`), so nothing is constructed — no ONNX session, no 1024² TRT engine.
+# ★WHAT THIS COSTS. publish_refined below is now INERT (refined_fresh never becomes true), so the masks
+# reaching the concept fitters are RAW YOLO again. SAM2 was measured at -79% far-tail depth bleed, so
+# bottle/table/chair/cabinet lose that. Set back to true to restore it; decimation=2 is NOT the middle
+# ground it looks like — only non-decimated cycles substitute, so the fitters would see mask quality
+# ALTERNATING frame to frame, which is plausibly worse for them than uniformly raw masks.
+enabled = false
 encoder_path = "models/sam2/sam2.1_hiera_tiny.encoder.onnx"
 decoder_path = "models/sam2/sam2.1_hiera_tiny.decoder.onnx"
 use_gpu = true
