@@ -41,7 +41,6 @@
 #include "depth_enrichment.h"  // rc::depth::RoomGeometry / DatasetEnricher (offline room-belief pass)
 #include "rgbd_data.h"
 #include "voxelizer_params.h"
-#include "perception_rate_regulator.h"
 #include "stream_rate_monitor.h"
 #include "model_projection_overlay.h"   // rc::ModelProjectionOverlay + GraphObjectBox (SceneFrame value member)
 #include "ricoh_projection_overlay.h"   // rc::RicohProjectionOverlay (360 panorama counterpart)
@@ -150,9 +149,18 @@ class SpecificWorker : public GenericWorker
         std::string pending_exit_reason_{};
         std::string pending_exit_detail_{};
 
-        // Homeostatic perception-rate regulator: adapts pose decimation to hold compute() near
-        // params.TARGET_HZ (voxel-free; fed compute cost + frame stamp). Actuator = pose only.
-        rc::PerceptionRateRegulator rate_reg_;
+        // ★THE HOMEOSTATIC RATE REGULATOR WAS REMOVED (2026-08-15), not disabled. It adapted human-pose
+        // decimation to hold compute() near a target rate, and it had been inert since the perception
+        // pipeline moved onto a worker thread: its pose_decimation() was read ONLY by its own log lines
+        // (nothing applied it to PoseStage, which takes a fixed HUMAN_POSE_DECIMATION at construction),
+        // and it was fed compute_ms from the MAIN thread, which no longer contains any inference — the
+        // yolo_ms/pose_ms it printed were hardcoded 0.0 a few lines away. So it measured the wrong clock
+        // and drove an actuator that was not connected, while printing a healthy-looking number.
+        // It could not have helped here anyway: measured per-stage, pose is 4.2 ms of a 24 ms frame, so
+        // its only actuator was 4% of the cost. The real limiters were SAM2 (52%) and a 15 ms poll
+        // granularity, neither of which it could see. Its one sound output — the SOURCE cadence, derived
+        // from frame stamps rather than from the mis-measured cost — now lives in StreamRateMonitor as
+        // feed_hz(name), which gives it for every channel instead of just the ZED.
 
         // Input-stream rate telemetry + stall detection (RGB, lidar). No control — see
         // the presence/emergency handling for the react-to-producer-stall path.

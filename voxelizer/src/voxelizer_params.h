@@ -292,8 +292,6 @@ struct VoxelizerParams
     bool        SHOW_YOLO_VIEWER  = true; // Voxel.show_yolo_viewer
     bool        SHOW_RICOH_VIEWER = true; // Voxel.show_ricoh_viewer — creates the button+popup (hidden until toggled)
     bool        PERF_LOG          = false; // Voxel.perf_log — per-frame compute/yolo/pose timing → etc/viewer_perf.csv
-    float       TARGET_HZ         = 20.0f;  // target compute rate for the perception-rate regulator (+ warn floor)
-    int         POSE_DECIM_MAX    = 4;       // RateRegulator.pose_decim_max — regulator won't skip pose more than this
     // Input-stream publish-hold watchdog: if the RGB feed goes stale (producer stall), stop publishing
     // perception (better nothing than stale masks). Debounced with hysteresis.
     float       HOLD_ENTER_S      = 1.5f;    // StreamWatchdog.hold_enter_s — RGB stale this long → enter hold

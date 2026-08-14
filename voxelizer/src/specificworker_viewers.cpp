@@ -409,12 +409,13 @@ void SpecificWorker::setup_custom_viewers()
             if (rates_label_ == nullptr)
                 return;
             const double zed   = stream_mon_.rate_hz("rgb");
-            const double feed  = rate_reg_.feed_hz();
+            const double feed  = stream_mon_.feed_hz("rgb");
             const double ricoh = stream_mon_.rate_hz("rgb360");
             const double lidar = stream_mon_.rate_hz("lidar");
             const auto fmt = [](double hz) { return hz > 0.0 ? QString::number(hz, 'f', 1) : QString("—"); };
-            rates_label_->setText(QString("masks/s   ZED %1 (feed %2)   Ricoh %3   LiDAR %4")
-                                      .arg(fmt(zed), fmt(feed), fmt(ricoh), fmt(lidar)));
+            rates_label_->setText(QString("masks/s   ZED %1/%2   Ricoh %3/%4   LiDAR %5/%6   (processed/feed)")
+                                      .arg(fmt(zed), fmt(feed), fmt(ricoh), fmt(stream_mon_.feed_hz("rgb360")),
+                                           fmt(lidar), fmt(stream_mon_.feed_hz("lidar"))));
         });
         rates_timer_->start(1000);
 

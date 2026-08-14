@@ -204,17 +204,11 @@ mask_depth_gate_band_m = 3.0   # ZED mask FOREGROUND gate: keep points within th
                                # REMOVED once the model-conditioned association (fitter rejects bleed by its own
                                # surface hypothesis) is tested live. Don't re-tune — the fix is to delete it. 0 disables.
 
-# Homeostatic perception-rate regulator: holds compute() near target_hz by adapting pose
-# decimation (AIMD + hysteresis). Actuator = pose only (YOLO-seg is the core product). Reacts to
-# compute cost + input-feed rate: if the feed itself is below target it holds (decimation can't help).
-
-[RateRegulator]
-target_hz      = 20.0  # desired compute rate; below this (minus deadband) the regulator raises pose decimation
-pose_decim_max = 4     # never skip pose more than this; floor = HumanPose.decimation
-
-# Publish-hold watchdog: if the RGB producer stalls (feed goes stale while the peer is still
-# alive — presence can't see this), stop publishing perception rather than emit stale masks.
-# Debounced with hysteresis to avoid flapping on brief blips.
+# [RateRegulator] REMOVED 2026-08-15. It adapted pose decimation to hold a target rate and had been
+# inert since perception moved to a worker thread — its decimation drove nothing, and it was fed a
+# compute cost from a thread that no longer runs inference. It could not have helped regardless: pose
+# is 4.2 ms of a 24 ms frame, while the real limiters were SAM2 (52%) and poll granularity.
+# The per-channel SOURCE cadence it used to expose is now on the Voxel3D panel as processed/feed.
 
 [StreamWatchdog]
 hold_enter_s = 1.5    # RGB stale this long → HOLD publishing

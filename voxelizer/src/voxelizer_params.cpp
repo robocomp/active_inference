@@ -143,8 +143,6 @@ VoxelizerParams load_voxelizer_params(const ConfigLoader& configLoader)
     rc::ConfigLoaderUtils::load_optional(configLoader, "Voxel.show_yolo_viewer", params.SHOW_YOLO_VIEWER);
     rc::ConfigLoaderUtils::load_optional(configLoader, "Voxel.show_ricoh_viewer", params.SHOW_RICOH_VIEWER);
     rc::ConfigLoaderUtils::load_optional(configLoader, "Voxel.perf_log", params.PERF_LOG);
-    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RateRegulator.target_hz", params.TARGET_HZ);
-    rc::ConfigLoaderUtils::load_optional(configLoader, "RateRegulator.pose_decim_max", params.POSE_DECIM_MAX);
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "StreamWatchdog.hold_enter_s", params.HOLD_ENTER_S);
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "StreamWatchdog.recover_s", params.HOLD_RECOVER_S);
 

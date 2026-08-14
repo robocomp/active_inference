@@ -414,15 +414,6 @@ void SpecificWorker::initialize()
     }
 
     // Perception-rate regulator: floor = the user-configured pose decimation, ceiling =
-    // RateRegulator.pose_decim_max; target = TARGET_HZ. Holds compute() near target by
-    // raising pose decimation only when compute-bound AND the input feed can supply it.
-    {
-        rc::RateRegulatorConfig rc_cfg;
-        rc_cfg.target_hz      = params.TARGET_HZ;
-        rc_cfg.pose_decim_min = std::max(1, params.HUMAN_POSE_DECIMATION);
-        rc_cfg.pose_decim_max = std::max(rc_cfg.pose_decim_min, params.POSE_DECIM_MAX);
-        rate_reg_.configure(rc_cfg);
-    }
 
     // All DSR semantic_grid exports (masks). Relayout is injected so the publisher stays
     // decoupled from the GUI (graph_viewers).
@@ -1271,34 +1262,8 @@ void SpecificWorker::compute()
 
     const double compute_ms = perf_ms(perf_t0, std::chrono::steady_clock::now());
 
-    // Homeostatic regulator: feed it this cycle's cost + frame stamp; it adapts pose decimation
-    // and exposes processed/feed Hz. Log on decimation changes, and warn (throttled) only when
-    // WE are the limiter (compute-bound) — if the feed itself is slow, decimation can't help.
-    rate_reg_.update(compute_ms, zed_res->frame.stamp);
-    if (rate_reg_.changed())
-        qInfo().noquote() << QString::asprintf(
-            "[rate] pose decimation → %d | compute %.1f Hz, feed %.1f Hz, cycle %.1fms (yolo %.1f, pose %.1f)",
-            rate_reg_.pose_decimation(), rate_reg_.processed_hz(), rate_reg_.feed_hz(),
-            rate_reg_.compute_ms(), yolo_ms, pose_ms);
-    else if (rate_reg_.below_target())
-    {
-        using namespace std::chrono;
-        static steady_clock::time_point last_warn_tp{};
-        const auto now_tp = steady_clock::now();
-        if (duration_cast<seconds>(now_tp - last_warn_tp).count() >= 5)
-        {
-            last_warn_tp = now_tp;
-            if (rate_reg_.feed_limited())
-                qInfo().noquote() << QString::asprintf(
-                    "[rate] %.1f Hz < target %.0f Hz but INPUT feed is only %.1f Hz — feed-limited, not compute; holding",
-                    rate_reg_.processed_hz(), static_cast<double>(params.TARGET_HZ), rate_reg_.feed_hz());
-            else if (rate_reg_.at_pose_cap())
-                qWarning().noquote() << QString::asprintf(
-                    "[rate] %.1f Hz < target %.0f Hz, pose decim at cap (%d), cycle %.1fms (yolo %.1f) "
-                    "— drop to a lighter seg model / lower input res", rate_reg_.processed_hz(),
-                    static_cast<double>(params.TARGET_HZ), rate_reg_.pose_decimation(), rate_reg_.compute_ms(), yolo_ms);
-        }
-    }
+    // (The homeostatic rate regulator lived here and was REMOVED — see specificworker.h for why.
+    //  Its one sound output, the source cadence, is now StreamRateMonitor::feed_hz(name).)
 
     // [perf] one row per real (fresh-frame) cycle: total + the model-inference breakdown.
     if (params.PERF_LOG)

@@ -30,6 +30,22 @@ public:
             {
                 const double hz = 1000.0 / dt;
                 s.hz = s.hz > 0.0 ? 0.9 * s.hz + 0.1 * hz : hz;
+                // SOURCE CADENCE from the SMALLEST stamp gap in a rolling window. Two consecutive
+                // processed frames are sometimes adjacent in the source stream and sometimes N apart,
+                // so the MEAN gap measures our throughput while the MINIMUM measures how fast the
+                // producer is actually delivering. Keeping both is the whole point: processed < feed
+                // means frames are being SKIPPED, not lost, and reading the mean as the source rate is
+                // exactly the mistake that made a 32 ms SAM2 stage look like a dropped-frame bug.
+                // The window resets so a producer that genuinely slows down is not pinned by one old
+                // fast gap; 3 s is long enough to see several frames at any rate we care about.
+                if (s.min_gap_ms <= 0.0 || dt < s.min_gap_ms)
+                    s.min_gap_ms = dt;
+                if (std::chrono::duration<double>(now - s.win_start).count() > 3.0)
+                {
+                    s.feed_hz   = s.min_gap_ms > 0.0 ? 1000.0 / s.min_gap_ms : 0.0;
+                    s.min_gap_ms = 0.0;
+                    s.win_start  = now;
+                }
             }
         }
         if (stamp_ms != s.last_stamp) { s.last_stamp = stamp_ms; s.last_new = now; }
@@ -40,6 +56,15 @@ public:
     {
         auto it = streams_.find(name);
         return it == streams_.end() ? -1.0 : it->second.hz;
+    }
+
+    // SOURCE cadence (Hz) of `name` — how fast the producer delivers, from the smallest stamp gap
+    // seen in the last window. Compare against rate_hz(): rate_hz is what WE processed, feed_hz is what
+    // was OFFERED. -1 if never seen, 0 until the first window closes.
+    [[nodiscard]] double feed_hz(const std::string& name) const
+    {
+        auto it = streams_.find(name);
+        return it == streams_.end() ? -1.0 : it->second.feed_hz;
     }
 
     // Wall seconds since the last NEW stamp on `name`; -1 if the stream was never seen.
@@ -80,6 +105,9 @@ private:
     struct Stat
     {
         double        hz = 0.0;
+        double        feed_hz = 0.0;     // 1000/min-gap over the last window (source cadence)
+        double        min_gap_ms = 0.0;  // smallest stamp gap in the current window
+        std::chrono::steady_clock::time_point win_start{};
         std::uint64_t last_stamp = 0;
         std::chrono::steady_clock::time_point last_new{};
     };
