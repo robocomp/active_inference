@@ -25,6 +25,11 @@
 
 #include "specificworker.h"
 
+#include <QHBoxLayout>
+#include <QPushButton>
+#include <QVBoxLayout>
+#include <QWidget>
+
 #include "voxel_opengl_viewer.h"
 #include "scene_feed.h"
 
@@ -273,7 +278,7 @@ void SpecificWorker::build_viewer_window()
                                 .arg(QString::fromStdString(agent_name))
                                 .arg(agent_id));
     window_->resize(1200, 900);
-    window_->setCentralWidget(viewer_);   // reparents: the window owns the viewer from here on
+    window_->setCentralWidget(build_layer_panel());   // reparents: the window owns panel + viewer
     restore_window_geometry();
     window_->show();
     // A QMainWindow does NOT hand focus to its central widget on show, so until something is clicked
@@ -299,6 +304,80 @@ void SpecificWorker::build_viewer_window()
     refresh_scene();
 
     qInfo() << "[viewer3d] metric 3D scene view up at" << 1000 / std::max(1, cfg_.refresh_ms) << "Hz";
+}
+
+
+// ★THE LAYER TOGGLES CAME ACROSS WITH THE VIEW. They drove this GL widget, so they belong to this agent,
+// not to the voxelizer they used to sit in. Same labels, same default states and the same accent colours
+// as before the split — each button is tinted with the colour of the thing it shows, so the association
+// between a toggle and its geometry survives the move.
+QWidget* SpecificWorker::build_layer_panel()
+{
+    auto* panel  = new QWidget(nullptr);
+    auto* layout = new QVBoxLayout(panel);
+    layout->setContentsMargins(4, 4, 4, 4);
+    layout->setSpacing(4);
+
+    auto* row1 = new QHBoxLayout();
+    auto* row2 = new QHBoxLayout();
+
+    const auto mk = [&](const char* text, bool on, const char* hex) -> QPushButton*
+    {
+        auto* b = new QPushButton(QString::fromUtf8(text), panel);
+        b->setCheckable(true);
+        b->setChecked(on);
+        b->setCursor(Qt::PointingHandCursor);
+        b->setStyleSheet(QString(
+            "QPushButton { border: 2px solid %1; border-radius: 4px; padding: 3px 8px; }"
+            "QPushButton:checked { background-color: %1; color: #101010; }").arg(hex));
+        return b;
+    };
+
+    auto* lidar_btn    = mk("Lidar: OFF",    false, "#8C9EC7");   // lidar: slate blue-gray
+    auto* models_btn   = mk("Models: ON",    true,  "#FFC864");   // models: table-mesh amber
+    auto* masks_btn    = mk("Masks: OFF",    false, "#EBEBF2");   // mask: white
+    auto* residual_btn = mk("Residual: OFF", false, "#2633CC");   // residual: dark blue
+    auto* grid_btn     = mk("Grid: ON",      true,  "#CC8C0D");   // occupancy grid: amber
+    auto* field_btn    = mk("Field: ON",     true,  "#D64550");   // belief field: risk red
+    auto* labels_btn   = mk("Labels: ON",    true,  "#DDDDDD");   // node-name labels: light grey
+
+    // Row 1 — raw/perception geometry: the point clouds and the fitted models drawn from them.
+    row1->addWidget(lidar_btn);
+    row1->addWidget(models_btn);
+    row1->addWidget(masks_btn);
+    row1->addWidget(residual_btn);
+    row1->addStretch(1);
+    // Row 2 — derived belief layers and the text labels.
+    row2->addWidget(grid_btn);
+    row2->addWidget(field_btn);
+    row2->addWidget(labels_btn);
+    row2->addStretch(1);
+
+    // Push each button's INITIAL state into the viewer. Without this the widget's own defaults and the
+    // buttons' captions can disagree from the first frame — a toggle that reads ON over a hidden layer,
+    // which is the kind of thing that gets chased as a missing-data bug.
+    const auto wire = [this](QPushButton* b, void (rc::VoxelOpenGLViewer::*setter)(bool), const char* label)
+    {
+        (viewer_->*setter)(b->isChecked());
+        connect(b, &QPushButton::toggled, this, [b, setter, label, this](bool checked)
+        {
+            if (viewer_)
+                (viewer_->*setter)(checked);
+            b->setText(QString("%1: %2").arg(QString::fromUtf8(label), checked ? "ON" : "OFF"));
+        });
+    };
+    wire(lidar_btn,    &rc::VoxelOpenGLViewer::set_show_lidar,    "Lidar");
+    wire(models_btn,   &rc::VoxelOpenGLViewer::set_show_models,   "Models");
+    wire(masks_btn,    &rc::VoxelOpenGLViewer::set_show_masks,    "Masks");
+    wire(residual_btn, &rc::VoxelOpenGLViewer::set_show_residual, "Residual");
+    wire(grid_btn,     &rc::VoxelOpenGLViewer::set_show_grid,     "Grid");
+    wire(field_btn,    &rc::VoxelOpenGLViewer::set_show_field,    "Field");
+    wire(labels_btn,   &rc::VoxelOpenGLViewer::set_show_labels,   "Labels");
+
+    layout->addLayout(row1);
+    layout->addLayout(row2);
+    layout->addWidget(viewer_, 1);   // reparents the GL widget into the panel
+    return panel;
 }
 
 void SpecificWorker::refresh_scene()

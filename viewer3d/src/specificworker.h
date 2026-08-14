@@ -60,6 +60,8 @@
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 
 class QMainWindow;
+class QWidget;
+class QPushButton;
 class QTimer;
 
 // Forward-declared on purpose: voxel_opengl_viewer.h drags in the whole Qt OpenGL widget stack,
@@ -86,6 +88,8 @@ private:
     // Build the top-level window and start the refresh timer. Deferred by
     // cfg_.window_delay_ms so the first frame shows the synced graph, not a near-empty one.
     void build_viewer_window();
+    // Layer-toggle bar + the GL widget, as one central widget. Returns a panel the window takes ownership of.
+    QWidget* build_layer_panel();
     // One full refresh: DSR graph + LiDAR plane → the metric 3D view. MAIN THREAD ONLY.
     void refresh_scene();
     // Pick handler. The 3D view is an inspection tool, so a click answers "what is this?" in the

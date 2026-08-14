@@ -162,8 +162,14 @@ refine_labels = ["table", "chair", "monitor", "tv", "bottle", "cabinet"]   # whi
 show_voxel_viewer = true
 show_yolo_viewer  = true
 show_ricoh_viewer = true   # creates the Ricoh360 button+popup (popup hidden until toggled)
-perf_log = false   # per-frame compute/yolo/pose timing -> etc/viewer_perf.csv (diagnostic; flushes CSVs every
+perf_log = true    # per-frame compute/yolo/pose timing -> etc/viewer_perf.csv (diagnostic; flushes CSVs every
                    # frame — leave OFF in production, flip true only to capture a timing trace)
+                   # ★ON 2026-08-14 to measure the ZED worker: `rgb` reads ~11.6 Hz against a ~25 Hz plane, and
+                   # that counter is ticked on take_result() (the worker's OUTPUT), not on arrival — so it is
+                   # throughput, not loss. The chain runs FOUR ONNX models per frame, all at decimation=1
+                   # (yolo-seg + pose + semantic + SAM2's two sessions). etc/viewer_perf_zed_worker.csv gives
+                   # the per-frame `stages_ms` that says WHICH one dominates; decide decimation from that, not
+                   # from model count. TURN THIS BACK OFF once the trace is captured — it flushes every frame.
 mask_depth_gate_band_m = 3.0   # ZED mask FOREGROUND gate: keep points within this depth band (m) of the mask's
                                # near surface; farther points = wall-behind bleed (RGB↔depth skew while moving) → dropped.
                                # ⚠ HARD THRESHOLD, TEMPORARY. At 1.5 it silently amputated the far half-metre of any
