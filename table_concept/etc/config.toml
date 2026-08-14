@@ -361,6 +361,19 @@ ExistenceVerifyGain     = 5.0     # epistemic gain (nats) a wants_verification t
 ExistenceLegOccupancy = true
 
 [TableConcept]
+
+# ── ROUND vs RECTANGULAR, by model evidence ────────────────────────────────────────────────────────────
+# ★These keys did not exist: all four agents with an evaluate_shape ran on the COMPILED defaults, so the
+# test was untunable and invisible — the same "no config key at all" pattern that hid the fridge's
+# door-clearance prior for a week. Stated here at the values that were already in force.
+#
+# The decision is made on points THIS AGENT accumulated from its own masks' 3D support (the voxel bank),
+# not on anything the voxelizer publishes back: one view of a table is a partial arc, and round-vs-square
+# only separates once the accumulated cloud spans enough of the rim. Every ShapeEvalPeriod cycles the ROUND
+# hypothesis is re-fitted to that cloud and scored against the SQUARE one at the same R, and the subtype
+# flips at the zero boundary of a bounded accumulated log-Bayes-factor — evidence, not a threshold.
+ShapeEvalPeriod = 30       # cycles between evaluations
+ShapeEvalMinPoints = 300   # accumulated points before the test can run at all
 # Convergence / cadence + a couple of tuned constants promoted here from hardcoded values (defaults unchanged).
 # StateEps / KStable / DetectionAliveMaxFrames were read by getters with the keys ABSENT from config (silent
 # defaults) — now exposed; a NEW concept agent must expose its own. MatchedFramesBeforeAging / CentralRegionFrac

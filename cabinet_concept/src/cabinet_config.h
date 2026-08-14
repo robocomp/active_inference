@@ -32,6 +32,10 @@ struct CabinetConfig
     int   cabinet_log_period_frames      = 30;      // per-cycle log throttle
     bool  verbose_log                    = false;   // false = quiet terminal (only births/merges/removals);
                                                     // true = per-cycle diagnostics (dashboard/tracker/split/…)
+    // Publish the accumulated bank onto the DSR node. OFF: audited 2026-08-14, nothing in the whole
+    // components tree reads *_voxel_bank_pts. The bank itself is still built — evaluate_shape and
+    // DumpCloudPath read it locally — this is only the graph traffic.
+    bool  publish_voxel_bank           = false;
     int   voxel_bank_max_points        = 4000;    // cap on the cabinet-owned voxel memory bank
     float voxel_bank_quantization_m    = 0.02f;   // voxel-bank dedup grid (m)
     float voxel_select_radius_margin_m = 0.50f;   // XY margin (m) around the model for voxel-bank selection

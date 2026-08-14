@@ -131,7 +131,7 @@ struct RefrigeratorInstance
     // factor (round − square) over periodic voxel-bank comparisons; subtype flips at the zero boundary.
     std::string subtype        = "refrigerator";   // CLASS discriminator (object_subtype); constant for this agent
     float       shape_evidence = 0.0f;       // >0 ⇒ round better explains the accumulated cloud
-    int         shape_eval_ctr = 0;          // cycles since the last periodic shape evaluation
+    int         shape_eval_ctr = 0;
     // Most recent fresh-frame residual points (model-unexplained), held for the viewer.
     std::vector<Eigen::Vector3f> last_residual_pts;
     // Epistemic action request published to DSR (filled by the epistemic planner).

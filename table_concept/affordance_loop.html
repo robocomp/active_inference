@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Affordance producer↔consumer loop</title>
+<style>
+:root{
+  --paper:#f5f6f8; --panel:#ffffff; --ink:#14181f; --muted:#5b6473; --faint:#8a93a2;
+  --line:#ccd2db; --line-soft:#e2e6ec;
+  --prod:#0d7d74; --prod-soft:#e3f2f0; --prod-ink:#0a5f58;
+  --cons:#b4530f; --cons-soft:#f7ebe1; --cons-ink:#8c400b;
+  --node:#3d4a63; --node-soft:#eceef4; --node-ink:#2c374d;
+  --plan:#7a8290; --shadow:0 1px 2px rgba(20,24,31,.06),0 8px 24px rgba(20,24,31,.05);
+  --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --paper:#0c0f14; --panel:#141922; --ink:#e7ebf1; --muted:#98a2b2; --faint:#6b7484;
+    --line:#2a323f; --line-soft:#20272f;
+    --prod:#35cabd; --prod-soft:#12312e; --prod-ink:#7fe4da;
+    --cons:#f0a24a; --cons-soft:#38260f; --cons-ink:#f7c186;
+    --node:#9fb0d0; --node-soft:#1a2130; --node-ink:#c5d1e8;
+    --plan:#7c8698; --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px rgba(0,0,0,.35);
+  }
+}
+:root[data-theme="light"]{
+  --paper:#f5f6f8; --panel:#ffffff; --ink:#14181f; --muted:#5b6473; --faint:#8a93a2;
+  --line:#ccd2db; --line-soft:#e2e6ec;
+  --prod:#0d7d74; --prod-soft:#e3f2f0; --prod-ink:#0a5f58;
+  --cons:#b4530f; --cons-soft:#f7ebe1; --cons-ink:#8c400b;
+  --node:#3d4a63; --node-soft:#eceef4; --node-ink:#2c374d; --plan:#7a8290;
+}
+:root[data-theme="dark"]{
+  --paper:#0c0f14; --panel:#141922; --ink:#e7ebf1; --muted:#98a2b2; --faint:#6b7484;
+  --line:#2a323f; --line-soft:#20272f;
+  --prod:#35cabd; --prod-soft:#12312e; --prod-ink:#7fe4da;
+  --cons:#f0a24a; --cons-soft:#38260f; --cons-ink:#f7c186;
+  --node:#9fb0d0; --node-soft:#1a2130; --node-ink:#c5d1e8; --plan:#7c8698;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);
+  line-height:1.5;-webkit-font-smoothing:antialiased;}
+.wrap{max-width:1160px;margin:0 auto;padding:40px 28px 56px;}
+.eyebrow{font-size:11.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);
+  font-weight:600;margin:0 0 10px;}
+h1{font-size:26px;line-height:1.18;letter-spacing:-.015em;margin:0 0 8px;text-wrap:balance;font-weight:650;}
+.lede{margin:0;max-width:66ch;color:var(--muted);font-size:15px;}
+.lede code{font-family:var(--mono);font-size:.88em;color:var(--ink);background:var(--line-soft);
+  padding:.05em .35em;border-radius:4px;}
+
+.scroll{overflow-x:auto;margin:34px -4px 0;padding:4px;}
+.fig{min-width:940px;}
+
+/* lane headers */
+.heads{display:grid;grid-template-columns:1fr 96px 1.32fr 96px 1fr;align-items:end;gap:0;margin-bottom:10px;}
+.head{display:flex;flex-direction:column;gap:3px;}
+.head .who{font-size:11px;letter-spacing:.14em;text-transform:uppercase;font-weight:700;}
+.head .what{font-size:12.5px;color:var(--muted);font-family:var(--mono);}
+.head.prod .who{color:var(--prod-ink);}
+.head.cons .who{color:var(--cons-ink);}
+.head.node .who{color:var(--node-ink);text-align:center;}
+.head.node{align-items:center;}
+.head.node .what{text-align:center;}
+.gutlabel{}
+
+/* main row */
+.row{display:grid;grid-template-columns:1fr 96px 1.32fr 96px 1fr;align-items:stretch;gap:0;}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);
+  padding:14px 14px 15px;display:flex;flex-direction:column;gap:9px;}
+.laneprod{border-top:3px solid var(--prod);}
+.lanecons{border-top:3px solid var(--cons);}
+.stage{display:flex;flex-direction:column;gap:2px;}
+.stage .t{font-size:13.5px;font-weight:640;letter-spacing:-.01em;}
+.stage .d{font-size:12px;color:var(--muted);}
+.stage .d code,.eq{font-family:var(--mono);font-size:11.5px;color:var(--ink);}
+.eq{background:var(--line-soft);border-radius:5px;padding:3px 6px;display:inline-block;margin-top:2px;}
+.flowdown{align-self:center;color:var(--faint);font-size:15px;line-height:1;margin:-2px 0;}
+.tag{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;font-weight:600;letter-spacing:.04em;
+  text-transform:uppercase;padding:2px 7px;border-radius:20px;width:max-content;}
+.tag.b{background:var(--plan);color:#fff;opacity:.9;}
+.plan{border:1px dashed var(--plan)!important;background:transparent;}
+.plan .t{color:var(--plan);}
+
+/* the affordance node (center) */
+.node{background:var(--node-soft);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);
+  padding:12px;display:flex;flex-direction:column;gap:9px;}
+.nodetitle{display:flex;align-items:baseline;justify-content:space-between;gap:8px;flex-wrap:wrap;}
+.nodetitle .nm{font-family:var(--mono);font-size:13px;font-weight:650;color:var(--node-ink);}
+.nodetitle .ty{font-size:11px;color:var(--muted);}
+.grp{background:var(--panel);border:1px solid var(--line-soft);border-radius:9px;padding:9px 10px 10px;
+  border-left:3px solid var(--line);}
+.grp.prodw{border-left-color:var(--prod);}
+.grp.consw{border-left-color:var(--cons);}
+.grp.mix{border-left-color:var(--node);}
+.grp.hi{background:linear-gradient(0deg,var(--prod-soft),var(--prod-soft));border:1px solid var(--prod);
+  border-left:3px solid var(--prod);}
+.grp .gh{display:flex;align-items:center;gap:7px;margin-bottom:6px;}
+.grp .gh .lbl{font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;font-weight:700;color:var(--muted);}
+.grp.hi .gh .lbl{color:var(--prod-ink);}
+.dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto;}
+.dot.p{background:var(--prod);} .dot.c{background:var(--cons);} .dot.m{background:var(--node);}
+.attrs{font-family:var(--mono);font-size:11px;line-height:1.65;color:var(--ink);margin:0;
+  display:flex;flex-direction:column;gap:1px;word-break:break-word;}
+.attrs .k{color:var(--node-ink);}
+.attrs .v{color:var(--muted);}
+.attrs .cw{color:var(--cons-ink);font-weight:600;}
+.badge{font-family:var(--sans);font-size:9.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;
+  padding:1px 6px;border-radius:10px;margin-left:4px;vertical-align:middle;}
+.badge.new{background:var(--prod);color:#fff;}
+.edge{font-size:11px;color:var(--muted);text-align:center;font-family:var(--mono);
+  border-top:1px dashed var(--line);padding-top:7px;}
+.edge b{color:var(--node-ink);font-weight:600;}
+
+/* gutters with flow rails */
+.gut{display:flex;flex-direction:column;justify-content:center;gap:16px;padding:0 6px;}
+.rail{display:flex;flex-direction:column;align-items:center;gap:3px;text-align:center;}
+.rail .arrow{width:100%;height:2px;position:relative;border-radius:2px;}
+.rail .arrow::after{content:"";position:absolute;top:50%;width:0;height:0;
+  border-top:5px solid transparent;border-bottom:5px solid transparent;transform:translateY(-50%);}
+.rail.to-r .arrow::after{right:-1px;border-left:8px solid currentColor;}
+.rail.to-l .arrow::after{left:-1px;border-right:8px solid currentColor;}
+.rail .cap{font-size:10px;letter-spacing:.06em;text-transform:uppercase;font-weight:700;line-height:1.15;}
+.rail .sub{font-family:var(--mono);font-size:9.5px;color:var(--muted);line-height:1.3;}
+.rail.write{color:var(--prod);} .rail.read{color:var(--cons);}
+.rail.flag{color:var(--node);}
+.rail .arrow{background:currentColor;}
+.rail.dash .arrow{background:repeating-linear-gradient(90deg,currentColor 0 6px,transparent 6px 11px);}
+
+/* handshake ribbon */
+.hs{margin-top:26px;background:var(--panel);border:1px solid var(--line);border-radius:12px;
+  box-shadow:var(--shadow);padding:15px 16px 16px;}
+.hs h2,.fb h2{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin:0 0 12px;font-weight:700;}
+.states{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.state{flex:1 1 150px;min-width:150px;border:1px solid var(--line);border-radius:10px;padding:9px 11px;background:var(--paper);}
+.state .sn{font-size:12.5px;font-weight:680;margin-bottom:2px;}
+.state .fl{font-family:var(--mono);font-size:10.5px;color:var(--muted);}
+.state .own{font-size:10px;color:var(--faint);margin-top:3px;}
+.state.off{border-color:var(--prod);} .state.off .sn{color:var(--prod-ink);}
+.state.exe{border-color:var(--cons);} .state.exe .sn{color:var(--cons-ink);}
+.state.done{border-color:var(--node);} .state.done .sn{color:var(--node-ink);}
+.state.bad{border-style:dashed;border-color:var(--faint);opacity:.85;}
+.state.bad .sn{color:var(--faint);}
+.chev{color:var(--faint);font-size:17px;flex:0 0 auto;}
+
+/* feedback strip */
+.fb{margin-top:16px;background:var(--panel);border:1px solid var(--line);border-radius:12px;
+  box-shadow:var(--shadow);padding:15px 16px 16px;}
+.fbrow{display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
+.fbbox{border:1px solid var(--line);border-radius:10px;padding:9px 12px;background:var(--paper);flex:1 1 200px;}
+.fbbox .bt{font-size:12px;font-weight:650;margin-bottom:2px;}
+.fbbox.node .bt{font-family:var(--mono);color:var(--node-ink);}
+.fbbox .bd{font-size:11.5px;color:var(--muted);}
+.fbbox .bd code{font-family:var(--mono);font-size:10.5px;}
+.fbarrow{display:flex;flex-direction:column;align-items:center;gap:2px;color:var(--faint);flex:0 0 auto;}
+.fbarrow .l{font-size:9.5px;text-transform:uppercase;letter-spacing:.06em;font-weight:700;}
+
+/* legend + caption */
+.legend{display:flex;gap:18px;flex-wrap:wrap;margin-top:22px;padding-top:16px;border-top:1px solid var(--line-soft);}
+.leg{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--muted);}
+.swatch{width:22px;height:0;border-top-width:3px;border-top-style:solid;border-radius:2px;}
+.swatch.p{border-top-color:var(--prod);} .swatch.c{border-top-color:var(--cons);}
+.swatch.f{border-top-color:var(--node);border-top-style:dashed;}
+.swatch.b{border-top-color:var(--plan);border-top-style:dashed;}
+.cap{margin-top:20px;font-size:12.5px;color:var(--muted);max-width:92ch;line-height:1.6;}
+.cap b{color:var(--ink);font-weight:640;}
+.cap code{font-family:var(--mono);font-size:.9em;color:var(--ink);}
+@media (max-width:560px){ .wrap{padding:28px 16px 40px} h1{font-size:22px} }
+@media print{
+  :root{--paper:#fff;--panel:#fff;--shadow:none;}
+  body{color:#111}.scroll{overflow:visible}.fig{min-width:0}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <p class="eyebrow">DSR affordance protocol · active-inference perception ↔ action</p>
+  <h1>Producer ↔ consumer loop through the affordance node</h1>
+  <p class="lede">A concept agent (<b>producer</b>) writes an epistemic affordance onto a shared DSR
+    graph node; the <b>controller</b> (<b>consumer</b>) reads, claims, and executes it. The node is a
+    blackboard: the whole protocol rides on two booleans, <code>active</code> and
+    <code>epistemic_pending</code>. Object-relative viewpoint fields (<code>aff_view_*</code>) let the
+    producer say <i>what view it needs</i> in the object's frame while the controller owns feasibility.</p>
+
+  <div class="scroll">
+  <div class="fig">
+
+    <div class="heads">
+      <div class="head prod"><span class="who">Producer</span><span class="what">table_concept</span></div>
+      <div class="gutlabel"></div>
+      <div class="head node"><span class="who">Shared DSR graph</span><span class="what">DDS-replicated</span></div>
+      <div class="gutlabel"></div>
+      <div class="head cons"><span class="who">Consumer</span><span class="what">controller</span></div>
+    </div>
+
+    <div class="row">
+      <!-- PRODUCER lane -->
+      <div class="card laneprod">
+        <div class="stage"><span class="t">TableBelief</span>
+          <span class="d">full-covariance posterior</span>
+          <span class="eq">Σ , θ=[cx,cy,H,w,h,yaw]</span></div>
+        <div class="flowdown">▼</div>
+        <div class="stage"><span class="t">EpistemicPlanner::compute</span>
+          <span class="d">score the 4 vertical faces; bound each by the adequacy gap to Σ*</span>
+          <span class="eq">gainᵢ = ½ ln det(I + Σ·ΔIᵢ)</span></div>
+        <div class="flowdown">▼</div>
+        <div class="stage"><span class="t">TableAffordance</span>
+          <span class="d">create / refresh the node; keep the parent feedback attrs fresh</span></div>
+      </div>
+
+      <!-- gutter: producer <-> node -->
+      <div class="gut">
+        <div class="rail write to-r">
+          <span class="cap">write</span>
+          <div class="arrow"></div>
+          <span class="sub">epistemic_* · aff_view_* · aff_*</span>
+        </div>
+        <div class="rail flag to-l dash">
+          <span class="sub">reads flags → FSM</span>
+          <div class="arrow"></div>
+          <span class="cap" style="color:var(--muted)">handshake</span>
+        </div>
+      </div>
+
+      <!-- CENTER: affordance node -->
+      <div class="node">
+        <div class="nodetitle">
+          <span class="nm">aff_table_2</span>
+          <span class="ty">type: affordance · level 4</span>
+        </div>
+
+        <div class="grp mix">
+          <div class="gh"><span class="dot m"></span><span class="lbl">Identity / protocol</span></div>
+          <div class="attrs">
+            <span><span class="k">parent</span> <span class="v">= table_2</span></span>
+            <span><span class="cw">active</span> <span class="v">← consumer (claim / release)</span></span>
+            <span><span class="k">epistemic_pending</span> <span class="v">← producer offers / consumer done</span></span>
+          </div>
+        </div>
+
+        <div class="grp prodw">
+          <div class="gh"><span class="dot p"></span><span class="lbl">Epistemic hint · legacy, non-authoritative</span></div>
+          <div class="attrs">
+            <span><span class="k">epistemic_target_x / y / yaw</span></span>
+            <span><span class="k">epistemic_gain</span> <span class="v">(nats)</span></span>
+          </div>
+        </div>
+
+        <div class="grp hi">
+          <div class="gh"><span class="dot p"></span><span class="lbl">Object-relative viewpoint</span><span class="badge new">Part A</span></div>
+          <div class="attrs">
+            <span><span class="k">aff_view_object_relative</span> <span class="v">= 1</span></span>
+            <span><span class="k">aff_view_faces</span> <span class="v">= +x|-x|+y|-y</span></span>
+            <span><span class="k">aff_view_face_gains</span> <span class="v">= [.42,.31,.05,.05]</span></span>
+            <span><span class="k">aff_view_standoff_min/max</span> <span class="v">= 1.15 / 1.80</span></span>
+            <span><span class="k">aff_view_framing_fill</span> <span class="v">= 0.45</span></span>
+            <span><span class="k">aff_view_sigma_star</span> <span class="v">= Σ* [.02…,.05]</span></span>
+          </div>
+        </div>
+
+        <div class="grp prodw">
+          <div class="gh"><span class="dot p"></span><span class="lbl">Execution contract</span></div>
+          <div class="attrs">
+            <span><span class="k">aff_policy</span> <span class="v">= servo</span></span>
+            <span><span class="k">aff_goal_attrs | ops | values</span></span>
+            <span><span class="k">aff_stable_n · timeout_ms · on_fail</span></span>
+            <span><span class="k">aff_max_vel · aff_max_omega</span> <span class="v">(stillness)</span></span>
+          </div>
+        </div>
+
+        <div class="edge">table_2 &nbsp;──<b>has_intention</b>──▶&nbsp; aff_table_2</div>
+      </div>
+
+      <!-- gutter: node <-> consumer -->
+      <div class="gut">
+        <div class="rail read to-l">
+          <span class="cap">read</span>
+          <div class="arrow"></div>
+          <span class="sub">select · read_viewpoint · read_contract</span>
+        </div>
+        <div class="rail flag to-r dash">
+          <span class="cap" style="color:var(--muted)">write flags</span>
+          <div class="arrow"></div>
+          <span class="sub">active=claim · pending=done</span>
+        </div>
+      </div>
+
+      <!-- CONSUMER lane -->
+      <div class="card lanecons">
+        <div class="stage"><span class="t">AffordanceManager::select_target</span>
+          <span class="d">rank all affordances by expected free energy; commit with hysteresis</span>
+          <span class="eq">argmin G = λ·nav_dist − epistemic_gain</span></div>
+        <div class="flowdown">▼</div>
+        <div class="stage"><span class="t">claim</span>
+          <span class="d">write <code>active=1</code>; read the contract + viewpoint constraint</span></div>
+        <div class="flowdown">▼</div>
+        <div class="stage plan"><span class="tag b">Part B · planned</span>
+          <span class="t">resolve viewpoint → pose</span>
+          <span class="d">faces × stand-offs vs occupancy + reachability → collision-free base pose</span></div>
+        <div class="flowdown">▼</div>
+        <div class="stage"><span class="t">execute · Reach / Servo / Orient</span>
+          <span class="d">drive base; null err_vec, reach fill; check goal clauses × stable_n</span></div>
+        <div class="flowdown">▼</div>
+        <div class="stage"><span class="t">mark_reached</span>
+          <span class="d">write <code>active=0, pending=0</code> — closes the loop</span></div>
+      </div>
+    </div>
+
+    <!-- handshake state machine -->
+    <div class="hs">
+      <h2>Handshake — the (active, pending) flag pair</h2>
+      <div class="states">
+        <div class="state off"><div class="sn">Offered</div><div class="fl">active=0 · pending=1</div>
+          <div class="own">producer offers → consumer scores it</div></div>
+        <span class="chev">→</span>
+        <div class="state exe"><div class="sn">Executing</div><div class="fl">active=1 · pending=1</div>
+          <div class="own">consumer claimed; producer decays gain as Σ shrinks</div></div>
+        <span class="chev">→</span>
+        <div class="state done"><div class="sn">Completed</div><div class="fl">active=0 · pending=0</div>
+          <div class="own">consumer done → producer FSM: satisfied</div></div>
+        <span class="chev">⋯</span>
+        <div class="state bad"><div class="sn">Aborted</div><div class="fl">active=1 · pending=0</div>
+          <div class="own">illegal combination — guarded</div></div>
+      </div>
+    </div>
+
+    <!-- servo feedback loop -->
+    <div class="fb">
+      <h2>Servo feedback loop — via the parent object node</h2>
+      <div class="fbrow">
+        <div class="fbbox"><div class="bt" style="color:var(--prod-ink)">Producer</div>
+          <div class="bd">refreshes projected ROI + detection from the live belief, every cycle</div></div>
+        <div class="fbarrow"><span class="l">writes</span><span>▶</span></div>
+        <div class="fbbox node"><div class="bt">table_2</div>
+          <div class="bd"><code>table_roi_offset · table_roi_fill · table_roi_valid · table_detection_alive/confidence</code></div></div>
+        <div class="fbarrow"><span class="l">reads</span><span>▶</span></div>
+        <div class="fbbox"><div class="bt" style="color:var(--cons-ink)">Consumer</div>
+          <div class="bd">lock-on: null offset (yaw/side), drive fill→framing target, confirm detection</div></div>
+      </div>
+    </div>
+
+    <div class="legend">
+      <span class="leg"><span class="swatch p"></span>producer writes</span>
+      <span class="leg"><span class="swatch c"></span>consumer writes</span>
+      <span class="leg"><span class="swatch f"></span>handshake flags (bidirectional)</span>
+      <span class="leg"><span class="swatch b"></span>Part B — planned, not yet built</span>
+    </div>
+
+  </div>
+  </div>
+
+  <p class="cap"><b>Figure 1.</b> Affordance as a shared-graph contract between an active-inference
+    perception agent and a controller. The producer's next-best-view planner scores candidate faces by
+    the D-optimal expected entropy reduction on its belief covariance, bounded by the adequacy gap to a
+    consumer-declared precision <code>Σ*</code>, and publishes an <b>object-relative</b> viewpoint
+    constraint (ranked faces + per-face gain in nats + stand-off band + framing + <code>Σ*</code>) rather
+    than a world pose. The controller selects among all competing affordances by expected free energy
+    <code>G = λ·nav_dist − epistemic_gain</code>, claims one through the <code>active</code>/<code>pending</code>
+    handshake, resolves the constraint into a collision-free reachable pose (Part B), and executes it via a
+    servo feedback loop bound to the parent object node. As evidence accumulates, the belief covariance
+    contracts, the adequacy gap and thus <code>epistemic_gain</code> fall to zero, and the affordance
+    self-extinguishes — a threshold-free "done" set by the consumer's precision demand.</p>
+</div>
+</body>
+</html>

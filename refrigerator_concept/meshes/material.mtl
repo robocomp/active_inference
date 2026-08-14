@@ -1,0 +1,3 @@
+newmtl Fridge
+Kd 0.90 0.91 0.94
+map_Kd fridge_basecolor.jpg

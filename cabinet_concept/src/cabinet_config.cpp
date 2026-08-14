@@ -53,6 +53,7 @@ CabinetConfig load_cabinet_config(const ConfigLoader& cfg)
     out.cabinet_log_period_frames  = geti("CabinetConcept.CabinetLogPeriodFrames",   30);
     out.verbose_log                = getb("CabinetConcept.VerboseLog",              false);
     out.voxel_bank_max_points    = geti("CabinetConcept.VoxelBankMaxPoints",     4000);
+    out.publish_voxel_bank        = getb("CabinetConcept.PublishVoxelBank",       false);
     out.voxel_bank_quantization_m= getf("CabinetConcept.VoxelBankQuantizationM", 0.02f);
     out.voxel_select_radius_margin_m = getf("CabinetConcept.VoxelSelectRadiusMarginM", 0.50f);
     out.voxel_select_height_margin_m = getf("CabinetConcept.VoxelSelectHeightMarginM", 0.25f);

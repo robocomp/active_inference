@@ -157,7 +157,19 @@ void CabinetSceneGraph::step_write_model(CabinetInstance& inst, DSR::Node& node,
     }
     G_->add_or_modify_attrib_local<free_energy_att>(node, free_energy);
 
+    // ★PUBLISH GATED OFF BY DEFAULT — NOTHING READS IT. Audited 2026-08-14 across the whole components
+    // tree (66558 files, no string-form reads, no pydsr consumers): of 292 attributes the fleet writes, 161
+    // have no reader outside the agent that writes them, and *_voxel_bank_pts is the largest of them by far
+    // — up to VoxelBankMaxPoints (4000) points x 3 floats, per object, per publish, into a CRDT graph, for
+    // nobody. That is the same shape as the unbounded dot cloud that pinned an agent at 100% CPU.
+    //
+    // The BANK ITSELF STAYS: evaluate_shape() fits the round hypothesis to inst.voxel_bank_pts for the
+    // round-vs-square model selection, and DumpCloudPath exports it for the offline harness. Both are local
+    // reads. It is only the graph traffic that had no consumer.
+    //
+    // Set CabinetConcept.PublishVoxelBank = true to restore it when a viewer actually wants the cloud.
     // Export full cabinet-owned voxel memory (room frame) as XYZ triples.
+    if (cfg_.publish_voxel_bank)
     {
         std::vector<float> bank_flat;
         bank_flat.reserve(inst.voxel_bank_pts.size() * 3);

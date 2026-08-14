@@ -143,7 +143,16 @@ struct TableInstance
     // factor (round − square) over periodic voxel-bank comparisons; subtype flips at the zero boundary.
     std::string subtype        = "square";   // "square" | "round" (free-form for future sub-subtypes)
     float       shape_evidence = 0.0f;       // >0 ⇒ round better explains the accumulated cloud
-    int         shape_eval_ctr = 0;          // cycles since the last periodic shape evaluation
+    int         shape_eval_ctr = 0;
+    // ★THE SHAPE DECISION HAD NO INSTRUMENT. subtype only ever reached the outside world through mesh_path
+    // (round_table.obj vs table.obj), so a discrimination that was failing could be seen ONLY by looking at
+    // the rendered mesh. These are the last evaluation's inputs and outputs, held between evaluations (the
+    // test runs every ShapeEvalPeriod cycles) so every log row can report the current verdict and what
+    // produced it. -1 = never evaluated, which is different from "evaluated and found square".
+    float       dbg_shape_lbf   = 0.0f;    // this evaluation's log-Bayes-factor, e_square - e_round
+    float       dbg_e_square    = -1.0f;   // free energy of the SQUARE hypothesis on the accumulated cloud
+    float       dbg_e_round     = -1.0f;   // ...and of the ROUND one, same cloud, same R
+    int         dbg_shape_pts   = 0;       // points in the bank at that evaluation (the decision's evidence)          // cycles since the last periodic shape evaluation
     // Most recent fresh-frame residual points (model-unexplained), held for the viewer.
     std::vector<Eigen::Vector3f> last_residual_pts;
     // Epistemic action request published to DSR (filled by the epistemic planner).

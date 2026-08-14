@@ -848,6 +848,8 @@ void TableFitter::evaluate_shape(TableInstance& inst)
     // ~1/alpha evaluations, so a fuller view turns the verdict in bounded time no matter how long the old
     // one stood. alpha = 0 keeps the legacy sum for an A/B.
     const float lbf = e_square - e_round;
+    inst.dbg_shape_lbf = lbf; inst.dbg_e_square = e_square; inst.dbg_e_round = e_round;
+    inst.dbg_shape_pts = static_cast<int>(cloud.size());
     if (cfg_.shape_evidence_ema_alpha > 0.0f)
     {
         const float a = std::clamp(cfg_.shape_evidence_ema_alpha, 0.0f, 1.0f);
@@ -883,6 +885,10 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
                  << "cx,cy,H,w,h,yaw,std_cx,std_cy,std_H,std_w,std_h,std_yaw,"
                  << "std_yaw_within,flip_ev,p_alt,lidar_rays,lidar_raw,lidar_bpearl,lidar_resid_m,lidar_meanz,lidar_topz,lidar_floorz,lidar_cov_ang,"
                  << "dyaw_points,dyaw_moment,dyaw_flip,obliquity_cos,completeness,moment_aniso,moment_r_yaw,"
+                 // ★The SHAPE decision and what produced it. It previously reached the outside world only
+                 // through mesh_path (round_table.obj vs table.obj), so a discrimination that was failing
+                 // could be seen ONLY by looking at the rendered mesh.
+                 "shape_round,shape_evidence,shape_lbf,e_square,e_round,shape_pts,bank_pts,"
                  << "mom_major,mom_minor,mom_phi,mom_pts,"   // RAW footprint statistic (basin diagnosis)   // rogue-mask diag
                  << "ex_L,ex_p,ex_locc,ex_lfree,ex_lfree_eff,ex_ln,ex_socc,ex_sfree,ex_sfree_eff,ex_sndet,ex_streak,"
                  << "ex_pdetect,ex_central,ex_verify,ex_wantsverify,"   // existence-removal + verification-gate diag
@@ -924,6 +930,9 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
              << inst.dbg_lidar_cov_ang << ','
              << inst.dbg_dyaw_points << ',' << inst.dbg_dyaw_moment << ',' << inst.dbg_dyaw_flip << ','
              << inst.dbg_obliquity_cos << ',' << inst.dbg_completeness << ','
+             << (inst.subtype == "round" ? 1 : 0) << ',' << inst.shape_evidence << ','
+             << inst.dbg_shape_lbf << ',' << inst.dbg_e_square << ',' << inst.dbg_e_round << ','
+             << inst.dbg_shape_pts << ',' << inst.voxel_bank_pts.size() << ','
              << inst.ai2_belief.dbg_moment_aniso() << ',' << inst.ai2_belief.dbg_moment_r_yaw() << ','   // rogue-mask diag
              << inst.ai2_belief.dbg_moment_ext_major() << ',' << inst.ai2_belief.dbg_moment_ext_minor() << ','
              << inst.ai2_belief.dbg_moment_phi() << ',' << inst.ai2_belief.dbg_moment_pts() << ','
