@@ -9,6 +9,7 @@
 #pragma once
 
 #include <chrono>
+#include "../../common/exclusion/exclusion.h"        // rc::exclusion::Seniority (SHARED)
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -174,6 +175,11 @@ struct TableInstance
     // a confident, centred, close view counts ~1, a view that cannot resolve the table counts ~0. Fractional
     // because a timer would delete a table for the passage of uninformative time — see table_existence.cpp.
     // Debounce state, SHARED (rc::exist::RemovalDebounce): the streak in ideal observations plus the
+
+    // SHARED mutual exclusion (common/exclusion): was another concept's object already standing
+    // here when this instance was BORN? Resolved once, at creation. A junior instance stops
+    // counting its senior's returns as evidence that IT exists. See exclusion.h.
+    rc::exclusion::Seniority exclusion;
     // consecutive-starved count that makes a condemned-but-unexecutable instance visible instead of frozen.
     rc::exist::RemovalDebounce existence_debounce;
     // Verification-gated removal (active-inference): a predicted-visible-but-absent observation from a view that

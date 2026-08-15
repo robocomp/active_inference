@@ -9,6 +9,7 @@
 #pragma once
 
 #include <chrono>
+#include "../../common/exclusion/exclusion.h"        // rc::exclusion::Seniority (SHARED)
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -120,6 +121,11 @@ struct DoorInstance
     // debounce untouched too, or the door is condemned by evidence gathered once and executed later while
     // the robot looks elsewhere. Float for the same reason table/bottle use one: partial looks partially count.
     // Debounce state, SHARED (rc::exist::RemovalDebounce): the streak in ideal observations plus the
+
+    // SHARED mutual exclusion (common/exclusion): was another concept's object already standing
+    // here when this instance was BORN? Resolved once, at creation. A junior instance stops
+    // counting its senior's returns as evidence that IT exists. See exclusion.h.
+    rc::exclusion::Seniority exclusion;
     // consecutive-starved count that makes a condemned-but-unexecutable instance visible instead of frozen.
     rc::exist::RemovalDebounce existence_debounce;
     // Silhouette diagnostics (last evidence cycle) — the columns of etc/door_existence_log.csv.

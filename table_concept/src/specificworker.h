@@ -32,6 +32,7 @@
 #define SPECIFICWORKER_H
 
 #include <atomic>
+#include "../../common/exclusion/exclusion.h"   // rc::exclusion::Claim (SHARED)
 #include <limits>
 #include <memory>
 #include <optional>
@@ -72,6 +73,11 @@ class SpecificWorker : public GenericWorker
 {
 Q_OBJECT
 public:
+
+    // Other concepts' standing claims on room space (SHARED, common/exclusion). Refreshed ONCE
+    // per compute() cycle — one graph walk feeding both the birth filter and the existence
+    // occupancy discount, so the two can never disagree about who is where.
+    std::vector<rc::exclusion::Claim> foreign_claims_;
     SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check);
     ~SpecificWorker();
     bool is_shutting_down() const noexcept { return shutting_down_.load(); }

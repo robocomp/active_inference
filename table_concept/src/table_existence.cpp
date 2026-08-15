@@ -260,6 +260,17 @@ void TableExistence::update_and_remove(TableFitter& fitter, ConceptLidarIngestor
                     }
                 }
             }
+            // ★MUTUAL EXCLUSION (SHARED, common/exclusion). Returns from a volume a SENIOR object already
+            // explains are not evidence that THIS object exists. Without it a refrigerator created on top of
+            // door_3 was confirmed by the DOOR's returns on 100% of 4122 cycles (occ 316 vs free 13), which
+            // re-pinned L at its +4 clamp and made removal structurally impossible. Continuous: scaled by how
+            // much of us the senior covers, so an object that merely ABUTS one is untouched.
+            if (claims_)
+            {
+                const auto& bs0 = inst.ai2_belief.state();
+                const float w_excl = inst.exclusion.occupancy_weight({bs0.cx, bs0.cy, bs0.w, bs0.h, bs0.yaw}, *claims_);
+                if (w_excl < 1.0f) ev.e_occ *= w_excl;
+            }
             inst.dbg_ex_lidar_occ = ev.e_occ; inst.dbg_ex_lidar_free = ev.e_free; inst.dbg_ex_lidar_n = ev.n_reached;
             if (ev.n_reached > 0)                                                    // 0 ⇒ not probed ⇒ HOLD
             {

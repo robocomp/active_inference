@@ -17,6 +17,8 @@
 #include "../../common/detectability/detectability.h"   // rc::detect::DetectorEnvelope
 
 #include <cstdint>
+#include "../../common/exclusion/exclusion.h"   // rc::exclusion:: (SHARED)
+#include <vector>
 #include <functional>
 #include <memory>
 
@@ -34,6 +36,11 @@ struct EvidenceGlobals;        // dashboard/evidence_monitor.h — removal count
 class HoodExistence
 {
 public:
+    // The other concepts' standing claims on room space, refreshed by the caller once per cycle
+    // (one graph walk shared with the birth path). SHARED: a JUNIOR instance's occupancy is
+    // discounted by how much of it a SENIOR object already explains — common/exclusion.
+    void set_foreign_claims(const std::vector<rc::exclusion::Claim>* c) { claims_ = c; }
+
     // The detector's operating envelope (min/max projected fill). Set once from config; shared with the
     // epistemic planner so the viewpoint we ASK for and the absence we BELIEVE use the same model.
     void set_detector_envelope(const rc::detect::DetectorEnvelope& e) { det_env_ = e; }
@@ -52,6 +59,7 @@ public:
                            const std::function<void(std::uint64_t, const HoodInstance&)>& on_remove = {});
 
 private:
+    const std::vector<rc::exclusion::Claim>* claims_ = nullptr;
     rc::detect::DetectorEnvelope det_env_{};
 
     std::shared_ptr<DSR::DSRGraph> G_;

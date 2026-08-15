@@ -15,6 +15,8 @@
 #pragma once
 
 #include <cstdint>
+#include "../../common/exclusion/exclusion.h"   // rc::exclusion:: (SHARED)
+#include <vector>
 #include <functional>
 #include <memory>
 
@@ -33,6 +35,11 @@ struct EvidenceGlobals;        // dashboard/evidence_monitor.h — removal count
 class TableExistence
 {
 public:
+    // The other concepts' standing claims on room space, refreshed by the caller once per cycle
+    // (one graph walk shared with the birth path). SHARED: a JUNIOR instance's occupancy is
+    // discounted by how much of it a SENIOR object already explains — common/exclusion.
+    void set_foreign_claims(const std::vector<rc::exclusion::Claim>* c) { claims_ = c; }
+
     TableExistence(std::shared_ptr<DSR::DSRGraph> graph, const TableConfig& cfg)
         : G_(std::move(graph)), cfg_(cfg) {}
 
@@ -53,6 +60,7 @@ public:
     void set_detector_envelope(const rc::detect::DetectorEnvelope& e) { det_env_ = e; }
 
 private:
+    const std::vector<rc::exclusion::Claim>* claims_ = nullptr;
     std::shared_ptr<DSR::DSRGraph> G_;
     const TableConfig&             cfg_;
     rc::detect::DetectorEnvelope   det_env_{};

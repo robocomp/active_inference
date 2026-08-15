@@ -8,6 +8,8 @@
  */
 
 #include <limits>
+#include "../../common/exclusion/exclusion.h"   // rc::exclusion:: (SHARED)
+#include "../../common/exclusion/exclusion.h"   // rc::exclusion — the SHARED no-two-objects rule
 #include "specificworker.h"
 
 #include "../../common/existence_belief/existence_belief.h"   // rc::exist — peripheral CONFIRM-ONLY
@@ -199,6 +201,23 @@ void SpecificWorker::run_instance_tracker()
             const bool admissible = fitter_->frame_admissible(sl);
             const rc::birth::MaskQuality mq{sl.confidence, sl.range};
             dv.birth_evidence *= rc::birth::evidence(mq, birth_detectability, new_observation, admissible);
+
+            // ★MUTUAL EXCLUSION — no two objects occupy the same space (SHARED, common/exclusion).
+            // A continuous support multiplied into the birth evidence exactly like the others above, so a
+            // candidate condensing onto ANOTHER CONCEPT's object never accrues enough to mature: it is not
+            // vetoed, it is unsupported. Every agent already refused to fit two of its OWN instances to one
+            // object; none ever asked what a different concept had claimed, which is how a refrigerator was
+            // created on top of door_3 (16 cm apart, same width, same yaw) and then could not die.
+            if (not foreign_claims_.empty())
+            {
+                const rc::exclusion::Claim* who = nullptr;
+                const float unclaimed = rc::exclusion::p_unclaimed(
+                    {dv.xy.x(), dv.xy.y(), cfg_.tracker_birth_width_m, cfg_.tracker_birth_depth_m, 0.0f}, foreign_claims_, &who);
+                dv.birth_evidence *= unclaimed;
+                if (unclaimed < 0.99f)
+                    std::print("[table] birth cand CLAIMED by '{}' ({:.0f}%): birth_ev x{:.2f}\n",
+                               who ? who->node : "?", 100.0f * (1.0f - unclaimed), unclaimed);
+            }
             dets.push_back(dv);
         }
 
@@ -257,6 +276,14 @@ void SpecificWorker::run_instance_tracker()
         if (new_id != 0)
         {
             fitter_->note_birth(new_id, Eigen::Vector2f(c.x(), c.y()));
+            // ★SENIORITY IS OBSERVED AT BIRTH, not inferred later (common/exclusion). Birth is the only
+            // moment at which "who was here first" is actually seen: resolving it on a later cycle would
+            // have a real object, standing legitimately beside a real neighbour, wake up after a RESTART,
+            // find the neighbour present, and declare ITSELF the junior. Anything not created this run
+            // stays senior by default — the rule can fail to catch a collision, never invent one.
+            if (auto it = fitter_->instances().find(new_id); it != fitter_->instances().end())
+                it->second.exclusion.resolve_at_birth({c.x(), c.y(), cfg_.tracker_birth_width_m, cfg_.tracker_birth_depth_m, 0.0f},
+                                                      foreign_claims_);
             // Shadow-mode record (§4.2): a phantom is a birth that dies young from a confident view, so the
             // birth half is where the place + viewpoint that produced it is captured.
             log_phantom_event("BIRTH", new_id, "", c.x(), c.y(), nullptr, "");

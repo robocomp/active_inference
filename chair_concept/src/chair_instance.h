@@ -9,6 +9,7 @@
 #pragma once
 
 #include <chrono>
+#include "../../common/exclusion/exclusion.h"        // rc::exclusion::Seniority (SHARED)
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -105,6 +106,11 @@ struct ChairInstance
     // Mirror of existence.logodds(), kept because the dashboards, the strip and the CSVs read it. NaN
     // until the channel is seeded, which is what those readers test for.
     // Removal debounce, SHARED (rc::exist::RemovalDebounce) — chair had none at all and could delete on a
+
+    // SHARED mutual exclusion (common/exclusion): was another concept's object already standing
+    // here when this instance was BORN? Resolved once, at creation. A junior instance stops
+    // counting its senior's returns as evidence that IT exists. See exclusion.h.
+    rc::exclusion::Seniority exclusion;
     // single frame. streak = ideal observations of sustained condemnation; starved = consecutive condemned
     // cycles that resolved nothing, which is what makes a frozen decision visible instead of silent.
     rc::exist::RemovalDebounce existence_debounce;

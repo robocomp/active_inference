@@ -252,6 +252,18 @@ void BottleExistence::update_and_remove(BottleFitter& fitter, const Inputs& in,
             const float r_eff      = std::max(1e-3f, s.radius);
             const float p_resolve  = r_eff / (r_eff + sigma_surf);
             inst.dbg_ex_lidar_pres = p_resolve;
+            // ★MUTUAL EXCLUSION (SHARED, common/exclusion). Returns coming from a volume a SENIOR object
+            // already explains are not evidence that THIS object exists. Without it a refrigerator created
+            // on top of door_3 was confirmed by the DOOR's returns on 100% of 4122 cycles (occ 316 vs free
+            // 13), which re-pinned L at its +4 clamp and made removal structurally impossible. Continuous:
+            // scaled by how much of us the senior covers, so an object that merely ABUTS one is untouched.
+            if (claims_)
+            {
+                const auto& bs0 = inst.ai2_belief.state();
+                const float w_excl = inst.exclusion.occupancy_weight({bs0.cx, bs0.cy, 2.0f * bs0.radius, 2.0f * bs0.radius, 0.0f}, *claims_);
+                if (w_excl < 1.0f)
+                    ev.e_occ *= w_excl;
+            }
             inst.existence.integrate(ev, p_resolve);
         }
 

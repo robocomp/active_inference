@@ -53,6 +53,7 @@
 #include <dsr/api/dsr_inner_eigen_api.h>
 
 #include "bottle_config.h"
+#include "../../common/exclusion/exclusion.h"   // rc::exclusion:: (SHARED)
 #include "bottle_instance.h"
 
 namespace rc {
@@ -62,6 +63,11 @@ class BottleFitter;
 class BottleExistence
 {
 public:
+    // The other concepts' standing claims on room space, refreshed by the caller once per cycle
+    // (one graph walk shared with the birth path). SHARED policy: a JUNIOR instance's occupancy is
+    // discounted by how much of it a SENIOR object already explains — common/exclusion.
+    void set_foreign_claims(const std::vector<rc::exclusion::Claim>* c) { claims_ = c; }
+
     explicit BottleExistence(BottleConfig& cfg) : cfg_(cfg) {}
 
     // Everything the two channels need, gathered by the worker (which owns the graph handles and the
@@ -87,6 +93,7 @@ public:
                            const std::function<void(std::uint64_t, BottleInstance&)>& on_remove);
 
 private:
+    const std::vector<rc::exclusion::Claim>* claims_ = nullptr;
     BottleConfig& cfg_;
 };
 
