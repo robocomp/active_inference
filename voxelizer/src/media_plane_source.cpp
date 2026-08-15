@@ -71,6 +71,7 @@ void MediaPlaneSource::drain_media_plane() const
     {
         rx_rgb += media_rgb_sub_->poll([this](const rc::media::ImageFrame& f, std::int64_t)
         {
+            rx_rgb_total_.fetch_add(1, std::memory_order_relaxed);   // EXACT source rate (see header)
             const int w = static_cast<int>(f.width());
             const int h = static_cast<int>(f.height());
             if (w <= 0 || h <= 0)
@@ -175,6 +176,7 @@ void MediaPlaneSource::poll_ricoh(bool force)
     media_ricoh_sub_->poll([this, wanted](const rc::media::Image360Frame& f, std::int64_t)
     {
         ricoh_last_stamp_ms_.store(f.stamp_ms(), std::memory_order_relaxed);   // cheap — feeds the RGB360 rate HUD
+        rx_ricoh_total_.fetch_add(1, std::memory_order_relaxed);                // EXACT source rate (see header)
         if (!wanted)                       // window hidden: drain + discard, no decode/clone cost
             return;
         const int w = static_cast<int>(f.width());
@@ -240,6 +242,16 @@ std::optional<LidarData> MediaPlaneSource::get_lidar3D(const std::string& robot_
         if (auto sweep = lidar_reader_->poll(robot_name, /*interpolate=*/false);
             sweep.has_value() && !sweep->points.empty())
         {
+            // Count a PRIMARY-PLANE arrival, not a merged sweep — see rx_lidar_plane0_total_ in the header.
+            if (not sweep->plane_stamp_ms.empty())
+            {
+                const auto p0 = static_cast<std::uint64_t>(std::max<std::int64_t>(0, sweep->plane_stamp_ms[0]));
+                if (p0 != 0 and p0 != lidar_plane0_last_stamp_.load(std::memory_order_relaxed))
+                {
+                    lidar_plane0_last_stamp_.store(p0, std::memory_order_relaxed);
+                    rx_lidar_plane0_total_.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
             LidarData ld;
             ld.xs.reserve(sweep->points.size());
             ld.ys.reserve(sweep->points.size());

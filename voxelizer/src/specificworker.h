@@ -198,6 +198,11 @@ class SpecificWorker : public GenericWorker
         // numbers are readable — a rate that repaints 20x/s cannot be read, and these are meant to be READ.
         std::unique_ptr<QTimer> rates_timer_;
         QLabel*                 rates_label_ = nullptr;   // owned by the panel (Qt parent), not by us
+        // EXACT feed rates: previous arrival counts + the wall instant they were read, differentiated
+        // once per readout tick. Counting beats inferring the cadence from processed-frame stamps.
+        std::uint64_t feed_rgb_prev_ = 0, feed_ricoh_prev_ = 0, feed_lidar_prev_ = 0;
+        double        feed_rgb_hz_ = 0.0, feed_ricoh_hz_ = 0.0, feed_lidar_hz_ = 0.0;
+        std::chrono::steady_clock::time_point feed_last_tp_{};
         void on_render_tick();
 
         // Standalone top-level viewer windows (NOT hosted by the DSR graph viewer — that node-link

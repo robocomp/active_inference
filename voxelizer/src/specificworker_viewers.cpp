@@ -414,13 +414,35 @@ void SpecificWorker::setup_custom_viewers()
             if (rates_label_ == nullptr)
                 return;
             const double zed   = stream_mon_.rate_hz("rgb");
-            const double feed  = stream_mon_.feed_hz("rgb");
             const double ricoh = stream_mon_.rate_hz("rgb360");
             const double lidar = stream_mon_.rate_hz("lidar");
+            // ★FEED IS COUNTED, NOT INFERRED. Arrivals at the SUBSCRIBER over the elapsed wall interval —
+            // every sample the producer sent, including the ones perception skipped. The previous estimate
+            // read the stamps of frames we chose to PROCESS and tried to recover the producer's cadence
+            // from their gaps; that can only ever be a bound, and it read ABOVE the source (38.5 Hz for a
+            // 26.4 Hz camera), which is impossible. A count over wall time cannot do that.
+            const auto   now_tp = std::chrono::steady_clock::now();
+            const double dt_s   = feed_last_tp_.time_since_epoch().count() == 0
+                                ? 0.0 : std::chrono::duration<double>(now_tp - feed_last_tp_).count();
+            const std::uint64_t c_rgb   = scene_processor ? scene_processor->rx_rgb_total()   : 0;
+            const std::uint64_t c_ricoh = scene_processor ? scene_processor->rx_ricoh_total() : 0;
+            const std::uint64_t c_lidar = scene_processor ? scene_processor->rx_lidar_total() : 0;
+            if (dt_s > 0.2)
+            {
+                feed_rgb_hz_   = static_cast<double>(c_rgb   - feed_rgb_prev_)   / dt_s;
+                feed_ricoh_hz_ = static_cast<double>(c_ricoh - feed_ricoh_prev_) / dt_s;
+                feed_lidar_hz_ = static_cast<double>(c_lidar - feed_lidar_prev_) / dt_s;
+            }
+            if (dt_s > 0.2 or feed_last_tp_.time_since_epoch().count() == 0)
+            {
+                feed_rgb_prev_ = c_rgb; feed_ricoh_prev_ = c_ricoh; feed_lidar_prev_ = c_lidar;
+                feed_last_tp_  = now_tp;
+            }
+            const double feed = feed_rgb_hz_;
             const auto fmt = [](double hz) { return hz > 0.0 ? QString::number(hz, 'f', 1) : QString("—"); };
-            // One channel PER LINE. Three rates side by side on one row read as a sentence; stacked with
-            // the units in the header they read as a table, which is what they are — and the eye can
-            // compare the processed/feed pairs down the column instead of hunting along a line.
+            // One channel PER LINE. Three rates side by side read as a sentence; stacked with the units
+            // in the header they read as a table, and the eye can compare the processed/feed pairs down
+            // the column instead of hunting along a line.
             const auto row = [&fmt](const char* name, double proc, double feed_)
             { return QString("%1 %2 / %3").arg(QString(name).leftJustified(7),
                                                fmt(proc).rightJustified(5), fmt(feed_).rightJustified(5)); };

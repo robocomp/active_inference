@@ -77,6 +77,21 @@ private:
 
     // ZED rgb+depth: timestamp-aligned (rgb frame F always meets depth frame F, no "latest of each" skew).
     ZedFrameAligner zed_buf_{8};
+    // ── EXACT ARRIVAL COUNTERS ─────────────────────────────────────────────────────────────────────
+    // Monotonic count of samples the SUBSCRIBER received, including the ones perception skips. This is
+    // the source rate measured rather than inferred: the previous estimate read the stamps of frames we
+    // chose to PROCESS and tried to recover the producer's cadence from their gaps, which can only ever
+    // be a bound and was reading ABOVE the source. A delivery count divided by wall time cannot.
+    // Written on the drain thread, read on the GUI thread ⇒ atomic, relaxed (a counter, not a fence).
+    mutable std::atomic<std::uint64_t> rx_rgb_total_{0};
+    mutable std::atomic<std::uint64_t> rx_ricoh_total_{0};
+    // LiDAR counts arrivals of the PRIMARY PLANE, not merged sweeps. helios and bpearl each run at 20 Hz
+    // and the merged sweep takes the MAX of their capture stamps, so its stamp advances whenever EITHER
+    // plane is fresh — the union of two unsynchronised 20 Hz streams, which lands anywhere in 20-40 Hz
+    // and is why the display read ~30 for a 20 Hz sensor. Counting one plane's fresh stamps gives 20.
+    mutable std::atomic<std::uint64_t> rx_lidar_plane0_total_{0};
+    mutable std::atomic<std::uint64_t> lidar_plane0_last_stamp_{0};
+
     mutable std::atomic<std::uint64_t> latest_rgb_stamp_{0};    // newest rgb stamp seen (rate telemetry / validity)
     mutable std::atomic<std::uint64_t> latest_depth_stamp_{0};  // newest depth stamp seen
     mutable std::atomic<std::uint64_t> last_frame_ts_{0};       // stamp of the last assembled RGBD (get_frame_timestamp_ms)
@@ -94,6 +109,12 @@ private:
     std::unique_ptr<rc::media::Image360Subscriber> media_ricoh_sub_;
     mutable std::mutex media_ricoh_mutex_;
     MediaRgbCache      media_ricoh_;
+public:
+    // Exact source rates: arrivals since process start. Caller differentiates against wall time.
+    [[nodiscard]] std::uint64_t rx_rgb_total()   const { return rx_rgb_total_.load(std::memory_order_relaxed); }
+    [[nodiscard]] std::uint64_t rx_ricoh_total() const { return rx_ricoh_total_.load(std::memory_order_relaxed); }
+    [[nodiscard]] std::uint64_t rx_lidar_total() const { return rx_lidar_plane0_total_.load(std::memory_order_relaxed); }
+private:
     std::atomic<bool>  ricoh_wanted_{false};
     std::atomic<std::uint64_t> ricoh_last_stamp_ms_{0};
 };

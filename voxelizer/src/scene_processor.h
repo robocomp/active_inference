@@ -68,6 +68,11 @@ public:
     // Latest ricoh source stamp (ms); recorded on every poll (even when not decoding) for rate telemetry.
     // Atomic — safe to read from any thread regardless of who last called poll_ricoh().
     std::uint64_t ricoh_last_stamp_ms() const { return media_ ? media_->ricoh_last_stamp_ms() : 0; }
+    // EXACT source rates: monotonic subscriber arrival counts, including frames perception skips.
+    // Differentiate against wall time to get Hz. See MediaPlaneSource's counter block.
+    std::uint64_t rx_rgb_total()   const { return media_ ? media_->rx_rgb_total()   : 0; }
+    std::uint64_t rx_ricoh_total() const { return media_ ? media_->rx_ricoh_total() : 0; }
+    std::uint64_t rx_lidar_total() const { return media_ ? media_->rx_lidar_total() : 0; }
 
     std::pair<std::string, std::string> get_room_robot_names_for_compute();
     bool ensure_room_and_robot_ready(FPSCounter& compute_fps,
