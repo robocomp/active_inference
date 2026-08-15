@@ -38,9 +38,11 @@
 #include <QSettings>
 #include <QTimer>
 
+#include <algorithm>  // std::max — clamps the FPSCounter window
 #include <chrono>
 #include <cmath>
 #include <cstdlib>    // std::_Exit — crash-free terminal shutdown
+#include <format>
 #include <iostream>   // std::cout/cerr flush
 #include <print>
 #include <thread>     // brief DDS flush before _Exit
@@ -314,7 +316,7 @@ void SpecificWorker::build_viewer_window()
 QWidget* SpecificWorker::build_layer_panel()
 {
     auto* panel  = new QWidget(nullptr);
-    auto* layout = new QHBoxLayout(panel);   // side pane on the LEFT, the GL view takes the rest
+    auto* layout = new QHBoxLayout(panel);   // GL view takes the width it can, side pane on the RIGHT
     layout->setContentsMargins(4, 4, 4, 4);
     layout->setSpacing(6);
 
@@ -379,8 +381,8 @@ QWidget* SpecificWorker::build_layer_panel()
     wire(field_btn,    &rc::VoxelOpenGLViewer::set_show_field,    "Field");
     wire(labels_btn,   &rc::VoxelOpenGLViewer::set_show_labels,   "Labels");
 
-    layout->addWidget(pane, 0);
     layout->addWidget(viewer_, 1);   // reparents the GL widget into the panel
+    layout->addWidget(pane, 0);      // toggles sit to the RIGHT of the canvas
     return panel;
 }
 
@@ -421,12 +423,26 @@ void SpecificWorker::compute()
 {
     // The scene rebuild runs on its own timer (see build_viewer_window), so the GRAFCET loop has
     // no per-cycle work. It stays as the liveness channel: a throttled line proving the agent is
-    // stepping and reporting how big the scene it is drawing actually is — zero nodes with the
+    // stepping, what it is drawing, and what that costs in CPU and memory — zero nodes with the
     // window up would otherwise look identical to a healthy empty room.
     ++cycle_;
-    if (cfg_.log_period_frames > 0 and cycle_ % static_cast<std::uint64_t>(cfg_.log_period_frames) == 0)
-        std::print("viewer3d: cycle {} — window {} · lidar plane {}\n",
-                   cycle_, window_ ? "up" : "not built", lidar_ready_ ? "up" : "waiting");
+    if (cfg_.log_period_frames <= 0)
+        return;
+
+    // FPSCounter owns BOTH the throttle and the sampling, so it must be called on EVERY cycle (it
+    // counts them) and the line must come out of print() alone: get_cpu_use() is a delta since its own
+    // last call, so reading it directly here would eat the interval and halve the next reported figure.
+    // The percentage is process-wide over all threads (times(2) sums them), so >100% is a real reading
+    // on this multithreaded agent — GL redraw and the scene rebuild are separate costs.
+    //
+    // Its window is in MILLISECONDS while our knob is in FRAMES, hence the conversion. The 1000 ms
+    // floor is NOT taste: print() computes fps as `cont/(msPeriod/1000)` in INTEGER arithmetic, so any
+    // window under a second divides by zero and takes the agent down with SIGFPE.
+    const auto window_ms = static_cast<unsigned int>(
+        std::max(1000, cfg_.log_period_frames * std::max(1, getPeriod("Compute"))));
+    fps_counter_.print(std::format("[viewer3d] cycle {} · window {} · lidar plane {}",
+                                   cycle_, window_ ? "up" : "not built", lidar_ready_ ? "up" : "waiting"),
+                       window_ms);
 }
 
 void SpecificWorker::emergency()

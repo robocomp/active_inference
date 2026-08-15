@@ -55,6 +55,7 @@
 #include <string>
 
 #include <genericworker.h>
+#include <fps/fps.h>
 
 #include "viewer_config.h"
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
@@ -135,6 +136,11 @@ private:
     QTimer*                       refresh_timer_ = nullptr;
 
     std::uint64_t cycle_ = 0;
+    // Liveness + COST of the view. A 3D viewer is the one agent on the graph that can quietly burn a
+    // core (GL redraw + a full scene rebuild every refresh), so the throttled line reports process CPU
+    // and RSS alongside the cycle rate. FPSCounter::get_cpu_use() is a DELTA since its own previous
+    // call, so it must only ever be read through print() — see compute().
+    FPSCounter fps_counter_;
 
 signals:
     void presenceReady();
