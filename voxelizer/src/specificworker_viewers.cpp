@@ -393,7 +393,12 @@ void SpecificWorker::setup_custom_viewers()
         // it reads throughput while the camera may be delivering far faster. A readout that showed only
         // one of them would invite exactly that misreading again.
         rates_label_ = new QLabel("masks/s  processed / feed\nZED     — / —\nRicoh   — / —\nLiDAR   — / —", voxel_panel);
-        rates_label_->setStyleSheet("QLabel { font-family: monospace; padding: 2px 6px; color: #C8C8C8; }");
+        // BOLD, and the colour comes from the PALETTE rather than a fixed grey. The hardcoded #C8C8C8
+        // read as shaded/disabled — a mid grey fights whatever the panel background actually is, and
+        // Qt renders disabled text in exactly that range, so live numbers looked switched off.
+        // palette(text) tracks the theme, so it stays legible on a light or a dark panel.
+        rates_label_->setStyleSheet("QLabel { font-family: monospace; font-weight: bold; "
+                                    "padding: 2px 6px; color: palette(text); }");
         rates_label_->setToolTip("Rate at which each channel PRODUCES masks.\n"
                                  "ZED shows processed (feed): processed is the worker's output rate,\n"
                                  "feed is how fast the camera is delivering. processed < feed means\n"
