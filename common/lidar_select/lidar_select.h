@@ -103,11 +103,16 @@ inline int select_into(const std::vector<Eigen::Vector3f>& sweep, const Eigen::V
     return n;
 }
 
-// A generous "is anything near this object at all?" count at 1.5x the box — a diagnostic, deliberately
-// wider than the selection so an empty selection can be told apart from an empty neighbourhood.
-inline int raw_count(const std::vector<Eigen::Vector3f>& sweep, const Eigen::Vector2f& c, const Box& box)
+// A generous "is anything near this object at all?" count — a diagnostic, deliberately wider than the
+// selection so an empty selection can be told apart from an empty neighbourhood.
+//
+// `scale` widens the XY radius only; the caller widens the z band by passing a taller Box, because how far
+// to look vertically is an object question (bottle looks 2x its own half-height, furniture reuses its band).
+// It must stay under the birth min-separation or the count grabs a neighbour's returns.
+inline int raw_count(const std::vector<Eigen::Vector3f>& sweep, const Eigen::Vector2f& c, const Box& box,
+                     float scale = 1.5f)
 {
-    const float r2 = (1.5f * box.radius_xy) * (1.5f * box.radius_xy);
+    const float r2 = (scale * box.radius_xy) * (scale * box.radius_xy);
     int raw = 0;
     for (const auto& p : sweep)
     {

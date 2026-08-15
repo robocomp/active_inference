@@ -25,6 +25,7 @@
  */
 
 #include "specificworker.h"
+#include "../../common/footprint/footprint.h"   // rc::geom:: (SHARED)
 #include <QSize>
 #include <QVBoxLayout>
 #include <QFontMetrics>
@@ -693,26 +694,7 @@ void SpecificWorker::compute()
 // Canonical per-node orchestration (mirrors table_concept::process_table_node): the fitter runs the
 // pure belief (ensure_instance → observe → run_inference, no DSR writes); the worker owns the DSR
 // write-back (scene_graph_->step_write_model) and the eval log.
-namespace {
-// Two bottles cannot share physical space. Footprint = the circle (cx,cy,radius) in the room plane;
-// overlap area as a fraction of the SMALLER circle (1.0 = one circle fully inside the other) lets the
-// merge operator collapse two instances fitted to the same bottle.
-float circle_overlap_ratio(const rc::BottleState& A, const rc::BottleState& B)
-{
-    const float ra = std::max(A.radius, 1e-4f), rb = std::max(B.radius, 1e-4f);
-    const float d  = std::hypot(A.cx - B.cx, A.cy - B.cy);
-    if (d >= ra + rb)           return 0.0f;          // disjoint
-    if (d <= std::abs(ra - rb)) return 1.0f;          // smaller fully inside the larger
-    const float d1 = (d * d + ra * ra - rb * rb) / (2.0f * d);   // a-centre → radical line
-    const float d2 = d - d1;
-    const float seg_a = ra * ra * std::acos(std::clamp(d1 / ra, -1.0f, 1.0f))
-                        - d1 * std::sqrt(std::max(0.0f, ra * ra - d1 * d1));
-    const float seg_b = rb * rb * std::acos(std::clamp(d2 / rb, -1.0f, 1.0f))
-                        - d2 * std::sqrt(std::max(0.0f, rb * rb - d2 * d2));
-    const float amin  = std::numbers::pi_v<float> * std::min(ra, rb) * std::min(ra, rb);
-    return amin > 1e-9f ? std::clamp((seg_a + seg_b) / amin, 0.0f, 1.0f) : 0.0f;
-}
-}  // namespace
+
 
 // Collapse instances whose circle footprints overlap (same physical bottle fitted twice): keep the one
 // with more integrated fresh evidence, retire the other (affordance + node). Runs before tracking so a
@@ -739,7 +721,13 @@ void SpecificWorker::merge_overlapping_instances()
             const auto ia = insts.find(ids[i]), ib = insts.find(ids[j]);
             if (ia == insts.end() or ib == insts.end()) continue;
 
-            const float ratio = circle_overlap_ratio(ia->second.model.state(), ib->second.model.state());
+            const auto& sa = ia->second.model.state();
+            const auto& sb = ib->second.model.state();
+            // Two bottles cannot share physical space. SHARED exact two-circle lens: a cylinder's
+            // footprint is a CIRCLE, and its bounding square would overestimate the area by 4/pi and
+            // make the answer depend on a yaw a cylinder does not have.
+            const float ratio = rc::geom::overlap_ratio(rc::geom::Circle{sa.cx, sa.cy, sa.radius},
+                                                        rc::geom::Circle{sb.cx, sb.cy, sb.radius});
             if (ratio < cfg_.tracker_merge_overlap) continue;
 
             const bool keep_i = ia->second.matched_frames >= ib->second.matched_frames;

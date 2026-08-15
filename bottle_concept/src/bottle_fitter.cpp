@@ -4,6 +4,7 @@
 
 #include "bottle_fitter.h"
 #include "bottle_support_bank.h"   // rc::support_bank:: adapter (SHARED bank)
+#include "../../common/lidar_select/lidar_select.h"   // rc::lidar_select:: (SHARED)
 #include "bottle_dof.h"         // kBottleDofs: the AI2 CSV column names
 
 #include <algorithm>
@@ -550,6 +551,9 @@ float BottleFitter::range_precision_scale(const BottleInstance& inst) const
     return std::pow(std::max(1.0f, range / cfg_.range_near_m), cfg_.range_precision_power);
 }
 
+// Stage this cycle's LiDAR returns landing on THIS bottle. The selection loop, the informativeness
+// down-weights, the "near?" raw count and the residual probe are SHARED (common/lidar_select); what stays
+// here is this agent's answer to WHERE ITS BODY IS and WHAT ITS SURFACE IS.
 void BottleFitter::feed_lidar(BottleInstance& inst, BottleFrame& frame, float range_scale) const
 {
     inst.dbg_lidar_rays = 0;
@@ -560,8 +564,8 @@ void BottleFitter::feed_lidar(BottleInstance& inst, BottleFrame& frame, float ra
         return;
 
     // ANCHOR the selection on THIS CYCLE'S FRESH mask-cloud centroid, NOT the model estimate. A model-anchored
-    // box FOLLOWS a diverging fit into empty space → 0 rays exactly when LiDAR is most needed (observed live
-    // 2026-07-03: centre ran to −91 m, rays→0, no brake). Anchored on the observation, LiDAR keeps selecting
+    // box FOLLOWS a diverging fit into empty space -> 0 rays exactly when LiDAR is most needed (observed live
+    // 2026-07-03: centre ran to -91 m, rays->0, no brake). Anchored on the observation, LiDAR keeps selecting
     // the returns at the object's REAL location and can pull a runaway back. Box size is the PHYSICAL bottle
     // footprint (prior radius/height + margin), not the fitted radius, so a blown-up radius can't explode the
     // region either. (Echoes the CV-filter lesson: gate on the fresh obs, not the dragged fit.)
@@ -570,43 +574,40 @@ void BottleFitter::feed_lidar(BottleInstance& inst, BottleFrame& frame, float ra
     c /= static_cast<float>(frame.points.size());
 
     const auto& s = inst.ai2_belief.state();
-    const float rxy = cfg_.prior_radius + cfg_.lidar_select_margin_m;          // fixed footprint, NOT fitted r
+
+    // ★THE BAND IS CENTROID-REFERENCED, not floor-referenced and not model-referenced. A bottle stands on a
+    // table at an unknown height, so the floor tells us nothing about where its body is — the same question
+    // whose floor-referenced answer made hood select the worktop (see lidar_select.h).
+    const float rxy = cfg_.prior_radius + cfg_.lidar_select_margin_m;      // fixed footprint, NOT fitted r
     const float hz  = 0.5f * cfg_.prior_height + cfg_.lidar_select_margin_m;
-    const float rxy2 = rxy * rxy;
-    // Generous diagnostic box (1.6× horizontal, 2× vertical): counts returns NEAR the bottle that the tight
-    // box may miss. Kept below the inter-bottle spacing so it can't grab a neighbour's returns.
-    const float rraw2 = (1.6f * rxy) * (1.6f * rxy);
-    const float hraw  = 2.0f * hz;
-    int raw = 0;
+    const rc::lidar_select::Box box{rxy, c.z() - hz, c.z() + hz};
 
-    frame.lidar.endpoints.clear();
-    frame.lidar.endpoints.reserve(64);
-    double resid_sum = 0.0;
-    for (const auto& p : lidar_sweep_room_)
-    {
-        const float dx = p.x() - c.x(), dy = p.y() - c.y();
-        const float dh2 = dx * dx + dy * dy;
-        if (dh2 <= rraw2 and std::abs(p.z() - c.z()) <= hraw) ++raw;   // generous — "is a return anywhere near?"
-        if (dh2 > rxy2) continue;
-        if (std::abs(p.z() - c.z()) > hz) continue;
-        frame.lidar.endpoints.push_back(p);
-        resid_sum += std::abs(inst.ai2_belief.sdf_cylinder(p, s));   // |dist to CURRENT model surface| (diag)
-    }
-    inst.dbg_lidar_raw = raw;
-    // Frame-sanity diagnostic (drives the smoke-test): #returns landing on this bottle + how far they sit
-    // from the current surface. Few rays / large residual ⇒ wrong LidarFrameNode (mount double-applied).
-    inst.dbg_lidar_rays = static_cast<int>(frame.lidar.endpoints.size());
+    // ★ANGULAR COVERAGE IS OFF FOR THIS AGENT (power 0 => weight 1), which is what its hand-written version
+    // did by simply not having the term. Kept as an explicit 0 rather than silently inheriting the shared
+    // default: a bottle is small enough that returns almost always arrive from one bearing, so the weight
+    // would multiply an already-sparse precision by ~0 and mute LiDAR entirely. Turning it on is a modelling
+    // decision, not a port.
+    const rc::lidar_select::Weights w{cfg_.lidar_coverage_n0, /*coverage_ang_power=*/0.0f, cfg_.lidar_robust_c_m};
+
+    // The range fade divides the BASE precision, so it commutes with the shared down-weights.
+    const float base = cfg_.lidar_precision / std::max(1.0f, range_scale);
+    inst.dbg_lidar_rays = rc::lidar_select::select_into(lidar_sweep_room_, lidar_origin_room_,
+                                                        {c.x(), c.y()}, box, base, w, frame.lidar);
+
+    // Generous diagnostic count: 1.6x horizontally and 2x vertically about the same centroid. Below the
+    // inter-bottle spacing so it cannot grab a neighbour's returns.
+    inst.dbg_lidar_raw = rc::lidar_select::raw_count(lidar_sweep_room_, {c.x(), c.y()},
+                                                     {rxy, c.z() - 2.0f * hz, c.z() + 2.0f * hz}, 1.6f);
+
+    // Frame-sanity diagnostic (drives the smoke-test): how far the selected returns sit from the current
+    // surface. Few rays / large residual => wrong LidarFrameNode (mount double-applied).
     if (inst.dbg_lidar_rays > 0)
-        inst.dbg_lidar_resid_m = static_cast<float>(resid_sum / inst.dbg_lidar_rays);
-    if (frame.lidar.endpoints.empty())
-        return;
-
-    // Precision = base, DOWN-WEIGHTED by sparse coverage (few noisy returns must not swing radius; bottle_2
-    // finding) and by the range fade (far → low precision → object left untouched). rays/N0 capped at 1.
-    const float coverage = std::min(1.0f, static_cast<float>(inst.dbg_lidar_rays) / std::max(1.0f, cfg_.lidar_coverage_n0));
-    frame.lidar.origin     = lidar_origin_room_;
-    frame.lidar.precision  = cfg_.lidar_precision * coverage / std::max(1.0f, range_scale);
-    frame.lidar.robust_c_m = cfg_.lidar_robust_c_m;
+    {
+        rc::lidar_select::Diag d;
+        rc::lidar_select::probe(frame.lidar, [&](const Eigen::Vector3f& p)
+                                { return inst.ai2_belief.sdf_cylinder(p, s); }, d);
+        inst.dbg_lidar_resid_m = d.resid_m;
+    }
 }
 
 void BottleFitter::feed_silhouette(BottleInstance& inst)

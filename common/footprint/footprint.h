@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <numbers>
 #include <cstddef>
 #include <vector>
 
@@ -108,6 +109,34 @@ inline float overlap_ratio(const Footprint& a, const Footprint& b)
     const float ai = poly_area(inter);
     const float amin = std::min(poly_area({ca.begin(), ca.end()}), poly_area({cb.begin(), cb.end()}));
     return amin > 1e-6f ? ai / amin : 0.0f;
+}
+
+// A CIRCULAR footprint in the room plane. Not every concept is a rectangle: a bottle is a cylinder, and
+// approximating it by its bounding square answers a different question — a square overestimates the area by
+// 4/pi and, worse, makes the overlap depend on a yaw a cylinder does not have.
+struct Circle
+{
+    float cx = 0.0f, cy = 0.0f;
+    float r  = 0.0f;
+};
+
+// Overlap area as a fraction of the SMALLER circle (1.0 = one fully inside the other) — the same number
+// overlap_ratio(Footprint, Footprint) reports, for the same purpose (collapsing two instances fitted to one
+// physical object). EXACT: the classic two-circle lens, not a sampled or bounding-box estimate.
+inline float overlap_ratio(const Circle& a, const Circle& b)
+{
+    const float ra = std::max(a.r, 1e-4f), rb = std::max(b.r, 1e-4f);
+    const float d  = std::hypot(a.cx - b.cx, a.cy - b.cy);
+    if (d >= ra + rb)           return 0.0f;   // disjoint
+    if (d <= std::abs(ra - rb)) return 1.0f;   // smaller fully inside the larger
+    const float d1 = (d * d + ra * ra - rb * rb) / (2.0f * d);   // a-centre → radical line
+    const float d2 = d - d1;
+    const float seg_a = ra * ra * std::acos(std::clamp(d1 / ra, -1.0f, 1.0f))
+                        - d1 * std::sqrt(std::max(0.0f, ra * ra - d1 * d1));
+    const float seg_b = rb * rb * std::acos(std::clamp(d2 / rb, -1.0f, 1.0f))
+                        - d2 * std::sqrt(std::max(0.0f, rb * rb - d2 * d2));
+    const float amin  = std::numbers::pi_v<float> * std::min(ra, rb) * std::min(ra, rb);
+    return amin > 1e-9f ? std::clamp((seg_a + seg_b) / amin, 0.0f, 1.0f) : 0.0f;
 }
 
 }  // namespace rc::geom

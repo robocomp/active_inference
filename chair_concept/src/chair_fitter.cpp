@@ -3,7 +3,8 @@
  */
 
 #include "chair_fitter.h"
-#include "chair_support_bank.h"   // rc::support_bank:: adapter (SHARED bank)
+#include "chair_support_bank.h"
+#include "../../common/occlusion/occlusion.h"   // rc::occlusion:: (SHARED LoS occlusion)   // rc::support_bank:: adapter (SHARED bank)
 
 #include <algorithm>
 #include <chrono>
@@ -831,27 +832,12 @@ float ChairFitter::los_occlusion(const ChairInstance& inst) const
     dc /= rc;
 
     const float margin = std::max(0.0f, cfg_.exist_occlusion_margin_m);   // occluder must be at least this closer
-    // An object at range rs subtending a half-extent `half` covers a bearing cone of half-angle atan(half/rs).
-    // The chair is occluded if a CLOSER object's cone contains the chair's bearing.
-    // How MUCH of the chair's bearing does this occluder cover, in [0,1]? A verdict was the wrong shape:
-    // occlusion is a reason to trust absence LESS, not a licence to ignore it forever. Returning a strength
-    // lets the caller scale the absence evidence instead of skipping the cycle (CONCEPT_AGENT_INVARIANTS,
-    // mistake II: a gate must fail to HOLD, but it must not hold unconditionally and for ever).
+    // The cone geometry is SHARED (common/occlusion). It returns a STRENGTH in [0,1], not a verdict, because
+    // occlusion is a reason to trust absence LESS, never a licence to ignore it forever (CONCEPT_AGENT_
+    // INVARIANTS, mistake II: a gate must fail to HOLD, but must not hold unconditionally and for ever).
+    // This agent's hand-written version is where that shape came from; it now lives in common/ for everyone.
     const auto blocks = [&](const Eigen::Vector3f& Cs, float half, float rs) -> float
-    {
-        if (not std::isfinite(rs) or rs >= rc - margin)   // not meaningfully closer → cannot occlude
-            return 0.0f;
-        Eigen::Vector3f ds = Cs - O;
-        const float n = ds.norm();
-        if (n < 1e-3f)
-            return 0.0f;
-        ds /= n;
-        const float ang      = std::acos(std::clamp(dc.dot(ds), -1.0f, 1.0f));   // camera-bearing offset chair↔occluder
-        const float occ_half = std::atan2(std::max(0.05f, half), std::max(0.2f, rs));
-        // Deep inside the cone ⇒ 1; at its edge ⇒ 0. Linear in the bearing offset: the honest statement is
-        // "how much of my line of sight does this thing take", and nothing here justifies a sharper shape.
-        return std::clamp(1.0f - ang / std::max(1e-4f, occ_half), 0.0f, 1.0f);
-    };
+    { return rc::occlusion::cone_occlusion(O, dc, rc, Cs, half, rs, margin); };
 
     float worst = 0.0f;   // strongest occlusion any candidate provides
     // (a) other chair instances (always known, even when undetected this frame).
@@ -877,10 +863,8 @@ float ChairFitter::los_occlusion(const ChairInstance& inst) const
                 // table — so a phantom chair in a dining set was permanently "occluded" by the furniture
                 // it was born among, held its absence forever, and froze at L = -1.95 (measured, 300+
                 // cycles, while the robot stared at it and zed_pd said 0.53).
-                const Eigen::Vector2f ext = (sl.bbox_max - sl.bbox_min).head<2>();
-                const Eigen::Vector2f ray = (sl.centroid - O).head<2>().normalized();
-                const Eigen::Vector2f perp(-ray.y(), ray.x());
-                const float half = 0.5f * (std::abs(ext.x() * perp.x()) + std::abs(ext.y() * perp.y()));
+                const float half = rc::occlusion::across_ray_half_extent(O, sl.centroid,
+                                                                          sl.bbox_min, sl.bbox_max);
                 const float rs   = (sl.range > 0.0f) ? sl.range : (sl.centroid - O).norm();
                 worst = std::max(worst, blocks(sl.centroid, half, rs));
             }
