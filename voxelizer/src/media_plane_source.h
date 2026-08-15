@@ -11,6 +11,7 @@
 #include <opencv2/core.hpp>
 
 #include <atomic>
+#include <thread>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -63,7 +64,19 @@ public:
     std::uint64_t ricoh_last_stamp_ms() const { return ricoh_last_stamp_ms_.load(std::memory_order_relaxed); }
 
 private:
-    void drain_media_plane() const;   // polls RGB+depth subscribers, refreshes the caches
+    void drain_media_plane() const;   // drains RGB+depth subscribers into the aligner
+
+    // ── EVENT-DRIVEN INGEST ───────────────────────────────────────────────────────────────────────
+    // Start/stop the thread that BLOCKS on the media plane and drains it the moment data lands.
+    // ★WHY A THREAD AND NOT THE CONSUMER'S LOOP. The drain used to run inline inside
+    // get_rgbd_frame_from_dsr(), so the rate at which frames were COLLECTED was the rate at which the
+    // perception worker asked for them. That coupling is what made poll granularity cost real frames:
+    // at a 15 ms ask against a 25 ms camera it lost roughly half of them, and at 4 ms about 9%. A
+    // frame that arrives is now always taken, whatever the consumer is doing.
+    // It blocks in wait_and_poll rather than using a DDS listener ON PURPOSE: the callback then runs on
+    // THIS thread, not on a FastDDS reader thread, which is the hazard CLAUDE.md opens with.
+    void start_ingest();
+    void stop_ingest();
 
     std::shared_ptr<DSR::DSRGraph> graph_;
 
@@ -118,6 +131,8 @@ public:
     [[nodiscard]] std::uint64_t rx_ricoh_total() const { return rx_ricoh_total_.load(std::memory_order_relaxed); }
     [[nodiscard]] std::uint64_t rx_lidar_total() const { return rx_lidar_plane0_total_.load(std::memory_order_relaxed); }
 private:
+    std::jthread       ingest_thread_;
+    std::atomic<bool>  ingest_stop_{false};
     std::atomic<bool>  ricoh_wanted_{false};
     std::atomic<std::uint64_t> ricoh_last_stamp_ms_{0};
 };

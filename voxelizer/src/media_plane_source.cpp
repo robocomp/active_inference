@@ -19,7 +19,11 @@ MediaPlaneSource::MediaPlaneSource(std::shared_ptr<DSR::DSRGraph> graph)
 {
 }
 
-MediaPlaneSource::~MediaPlaneSource() = default;   // here: rc::media::* subscriber types are complete
+MediaPlaneSource::~MediaPlaneSource()
+{
+    // Join BEFORE the subscribers are destroyed: the ingest thread is blocked inside one of them.
+    stop_ingest();
+}
 
 bool MediaPlaneSource::init_media_plane(std::uint32_t domain_id,
                                       const std::string& rgb_topic,
@@ -56,7 +60,27 @@ bool MediaPlaneSource::init_media_plane(std::uint32_t domain_id,
     std::print("[voxelizer] media plane ready rgb domain={} '{}' | depth domain={} '{}' data_sharing={}\n",
                rgb_cfg.domain_id, rgb_cfg.topic_name, depth_cfg.domain_id, depth_cfg.topic_name,
                media_rgb_sub_->data_sharing_active() && media_depth_sub_->data_sharing_active());
+    start_ingest();   // from here on, frames are collected on arrival, not when perception asks
     return true;
+}
+
+void MediaPlaneSource::start_ingest()
+{
+    if (ingest_thread_.joinable())
+        return;
+    ingest_stop_.store(false, std::memory_order_relaxed);
+    ingest_thread_ = std::jthread([this]
+    {
+        while (not ingest_stop_.load(std::memory_order_relaxed))
+            drain_media_plane();   // blocks up to 50 ms inside wait_and_poll, so this is not a spin
+    });
+}
+
+void MediaPlaneSource::stop_ingest()
+{
+    ingest_stop_.store(true, std::memory_order_relaxed);
+    if (ingest_thread_.joinable())
+        ingest_thread_.join();     // bounded by the wait_and_poll timeout
 }
 
 void MediaPlaneSource::drain_media_plane() const
@@ -69,7 +93,10 @@ void MediaPlaneSource::drain_media_plane() const
 
     if (media_rgb_sub_)
     {
-        rx_rgb += media_rgb_sub_->poll([this](const rc::media::ImageFrame& f, std::int64_t)
+        // BLOCK here (bounded) instead of polling: this is the wake-up. RGB is the primary stream, and
+        // depth is swept non-blocking straight after because the two are published per grab and land
+        // together — so one wait serves both and neither can starve the other.
+        rx_rgb += media_rgb_sub_->wait_and_poll([this](const rc::media::ImageFrame& f, std::int64_t)
         {
             rx_rgb_total_.fetch_add(1, std::memory_order_relaxed);   // EXACT source rate (see header)
             const int w = static_cast<int>(f.width());
@@ -91,7 +118,7 @@ void MediaPlaneSource::drain_media_plane() const
                 zed_buf_.put_rgb(std::move(rgb), st);   // keyed by the grab stamp
                 latest_rgb_stamp_.store(st, std::memory_order_relaxed);
             }
-        });
+        }, /*timeout_ms=*/50);
     }
 
     if (media_depth_sub_)
@@ -339,7 +366,9 @@ std::optional<RGBDData> MediaPlaneSource::get_rgbd_frame_from_dsr() const
 {
     // Pixels arrive over the zero-copy media plane. RGB and depth are two streams sharing the per-grab
     // acquisition stamp; read the time-ALIGNED pair so the mask always meets its own frame's depth.
-    drain_media_plane();
+    // NO DRAIN HERE ANY MORE — the ingest thread does it the moment data lands (see start_ingest).
+    // This call is now a pure READ of the aligner, so how fast perception asks no longer decides how
+    // many frames get collected.
 
     // Reference stamp = the newest rgb ACTUALLY committed to the buffer (put is async, so the just-put
     // frame may not be visible yet — take what's landed), then read the depth aligned to it.
