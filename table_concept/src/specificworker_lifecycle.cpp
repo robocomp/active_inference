@@ -12,6 +12,8 @@
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion — the SHARED no-two-objects rule
 #include "specificworker.h"
 
+#include "../../common/peripheral_channel/peripheral_channel.h"   // THE shared ricoh path
+
 #include "../../common/existence_belief/existence_belief.h"   // rc::exist — peripheral CONFIRM-ONLY
 #include "table_geometry.h"   // rc::geom::footprint_overlap_ratio
 #include "../../common/instance_tracker/birth_evidence.h"   // rc::birth — the SHARED CREATE policy
@@ -308,96 +310,54 @@ void SpecificWorker::run_instance_tracker()
 // consuming the target (turn the ZED to the bearing) is step 4.
 void SpecificWorker::process_ricoh_bearings()
 {
+    // Peripheral (ricoh-360) channel. The 94-line copy that used to live here — in four agents, with
+    // three different behaviours across the seven — is now common/peripheral_channel. See that header
+    // for why: same sensor, same question, three answers, and a comment in each copy naming a module
+    // none of them called.
     ricoh_attention_targets_.clear();
-    if (not inner_eigen_)   // ricoh peripheral attention is always on (validated live); it never fits — ZED's job
-        return;
-    const auto& pkt = mask_ingestor_->packet();
-    if (not pkt.valid)
+    if (not inner_eigen_ or not mask_ingestor_)
         return;
     const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", 0);   // robot pose in room
     if (not rtb.has_value())
         return;
-    const auto& Tm = rtb.value();
-    const float bx = static_cast<float>(Tm(0, 3)), by = static_cast<float>(Tm(1, 3));   // body XY in room
-    const auto wrap = [](float a) { return std::remainder(a, 2.0f * static_cast<float>(M_PI)); };
+    const Eigen::Vector2f robot_xy{static_cast<float>(rtb.value()(0, 3)),
+                                  static_cast<float>(rtb.value()(1, 3))};
 
-    for (const auto& sl : pkt.slices)
+    const auto dets = rc::peripheral::gather(mask_ingestor_->packet(), "table", robot_xy,
+                                             cfg_.ricoh_attention_conf);
+    std::vector<rc::peripheral::TrackRef> tracks;
+    tracks.reserve(fitter_->instances().size());
+    for (const auto& [id, inst] : fitter_->instances())
     {
-        if (sl.label != "table" or sl.depth_var <= 0.0f)          // ricoh (depth-carrying 360) detections only
-            continue;
-        if (sl.confidence < cfg_.ricoh_attention_conf)            // only reasonably confident peripheral blobs
-            continue;
+        const auto& st = inst.model.state();
+        tracks.push_back({id, {st.cx, st.cy}, 0.5f * std::sqrt(st.w * st.w + st.h * st.h)});
+    }
 
-        // Robust position from the mask's 3D points: component-wise MEDIAN (resists the see-through/outlier tail
-        // that biases the centroid). Foreground-gated upstream, so the median sits near the tabletop surface.
-        // Falls back to the centroid if too few points. Used for the ATTENTION target's bearing + rough range
-        // ONLY — never the fit (a partial-view range is biased, so it decides WHERE TO LOOK / WHICH table, not
-        // where the table IS; the ZED measures that). Bearing is reliable; range is indicative.
-        float mx = sl.centroid.x(), my = sl.centroid.y();
-        const std::size_t b = std::min(sl.support_begin, pkt.support_points.size());
-        const std::size_t e = std::min(sl.support_end,   pkt.support_points.size());
-        if (e > b + 8)
-        {
-            std::vector<float> xs, ys; xs.reserve(e - b); ys.reserve(e - b);
-            for (std::size_t i = b; i < e; ++i) { xs.push_back(pkt.support_points[i].x()); ys.push_back(pkt.support_points[i].y()); }
-            const std::size_t k = xs.size() / 2;
-            std::nth_element(xs.begin(), xs.begin() + k, xs.end()); mx = xs[k];
-            std::nth_element(ys.begin(), ys.begin() + k, ys.end()); my = ys[k];
-        }
-        const float br  = std::atan2(my - by, mx - bx);                            // bearing to the robust point
-        const float rng = std::sqrt((mx - bx) * (mx - bx) + (my - by) * (my - by));// rough range (biased, indicative)
+    rc::peripheral::Params pp;
+    pp.angular_margin_rad = cfg_.ricoh_attention_angle_margin_rad;
+    pp.range_band_m       = cfg_.ricoh_attention_range_band_m;
+    const auto res = rc::peripheral::associate(tracks, dets, robot_xy, pp);
 
-        bool assigned = false;
-        std::uint64_t assigned_id = 0;   // which instance this peripheral detection confirmed
-        for (const auto& [id, inst] : fitter_->instances())
-        {
-            const auto& s = inst.model.state();
-            const float dx = s.cx - bx, dy = s.cy - by;
-            const float dist = std::sqrt(dx * dx + dy * dy);
-            if (dist < 1e-3f) { assigned = true; assigned_id = id; break; }
-            const float tb   = std::atan2(dy, dx);                                  // bearing to the table
-            const float rad  = 0.5f * std::sqrt(s.w * s.w + s.h * s.h);             // circumscribed footprint radius
-            const float tol  = std::atan2(rad, dist) + cfg_.ricoh_attention_angle_margin_rad;  // TIGHT: angular half-size
-            const float band = rad + cfg_.ricoh_attention_range_band_m;              // GENEROUS: ricoh range is rough
-            // Assign only if the detection matches this table in BOTH direction AND (rough) range — so a new,
-            // unconfirmed table hiding along the SAME bearing as a known one (different range) stays UNASSIGNED
-            // and still raises attention, instead of collapsing onto the known table (bearing-only would miss it).
-            if (std::abs(wrap(br - tb)) < tol and std::abs(rng - dist) < band)
-                { assigned = true; assigned_id = id; break; }
-        }
-        // ★A MATCH IS EVIDENCE, NOT A NO-OP. This branch used to just fall through: an assigned
-        // detection was computed and discarded, so the peripheral channel could only ever raise NEW
-        // things and never support the ones it recognised. A 360 camera seeing a known instance is
-        // persistence evidence, and the front camera may not even be pointing at it.
-        // CONFIRM-ONLY by construction: e_free is hard 0, so this channel can only ever push L UP. A
-        // ricoh miss charges nothing, because the 360 detector's p_detect for a given object at a given
-        // range is uncharacterised and absence weighted by an unknown p_detect is the ratchet that has
-        // bitten this fleet before. Positive-only evidence cannot delete anything.
-        // The detection's own confidence scales e_occ, so a marginal peripheral hit is worth less than a
-        // confident one; p_detect is passed to integrate() so the shared correlation weighting applies
-        // (consecutive looks from a barely-changed viewpoint are the SAME observation repeated).
-        if (assigned and cfg_.ricoh_confirm_enabled and assigned_id != 0)
+    // A MATCH IS EVIDENCE, not a no-op: confirm-only, e_free hard 0, so this channel can only push L up.
+    // A ricoh miss charges nothing — the 360 detector's p_detect at a given range is uncharacterised, and
+    // absence weighted by an unknown p_detect is the ratchet that has bitten this fleet before.
+    if (cfg_.ricoh_confirm_enabled)
+        for (const auto& cf : res.confirms)
         {
             auto& insts = fitter_->instances();
-            if (const auto it = insts.find(assigned_id); it != insts.end())
+            if (const auto it = insts.find(cf.track_id); it != insts.end())
             {
                 rc::exist::SensorModel sm;
                 sm.detection_prob = cfg_.ricoh_confirm_detection_prob;
                 sm.clutter_prob   = cfg_.ricoh_confirm_clutter_prob;
-                const float e_occ = std::clamp(sl.confidence, 0.0f, 1.0f);
-                const auto  ev    = rc::exist::mask_evidence(e_occ, /*e_free=*/0.0f, /*n_detectable=*/1, sm);
+                const auto ev = rc::exist::mask_evidence(std::clamp(cf.confidence, 0.0f, 1.0f),
+                                                         /*e_free=*/0.0f, /*n_detectable=*/1, sm);
                 it->second.existence.integrate(ev, sm.detection_prob);
             }
         }
-        if (not assigned)
-            ricoh_attention_targets_.push_back({br, rng, sl.confidence, {mx, my}});
-    }
 
+    for (const auto& at : res.attention)
+        ricoh_attention_targets_.push_back({at.azimuth_rad, at.range_m, at.confidence, {at.xy.x(), at.xy.y()}});
     ev_g_.ricoh_attention = static_cast<int>(ricoh_attention_targets_.size());
-    static int rb_dbg = 0;
-    if (not ricoh_attention_targets_.empty() and (rb_dbg++ % 10 == 0))
-        for (const auto& t : ricoh_attention_targets_)
-            std::print("[ricoh-attention] UNASSIGNED table bearing={:+.0f}° range≈{:.1f}m conf={:.2f} → seek ZED view\n",
-                       t.bearing_rad * 180.0f / static_cast<float>(M_PI), t.range_m, t.confidence);
 }
 
