@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -18,6 +20,7 @@ namespace rc
 // is a single tick() call at the source.
 class StreamRateMonitor
 {
+    static constexpr std::size_t kGapWin = 32;   // recent stamp gaps kept per stream for the quantile
 public:
     void tick(const std::string& name, std::uint64_t stamp_ms)
     {
@@ -28,23 +31,29 @@ public:
             const double dt = static_cast<double>(stamp_ms - s.last_stamp);
             if (dt > 0.0 && dt < 5000.0)
             {
-                const double hz = 1000.0 / dt;
-                s.hz = s.hz > 0.0 ? 0.9 * s.hz + 0.1 * hz : hz;
-                // SOURCE CADENCE from the SMALLEST stamp gap in a rolling window. Two consecutive
-                // processed frames are sometimes adjacent in the source stream and sometimes N apart,
-                // so the MEAN gap measures our throughput while the MINIMUM measures how fast the
-                // producer is actually delivering. Keeping both is the whole point: processed < feed
-                // means frames are being SKIPPED, not lost, and reading the mean as the source rate is
-                // exactly the mistake that made a 32 ms SAM2 stage look like a dropped-frame bug.
-                // The window resets so a producer that genuinely slows down is not pinned by one old
-                // fast gap; 3 s is long enough to see several frames at any rate we care about.
-                if (s.min_gap_ms <= 0.0 || dt < s.min_gap_ms)
-                    s.min_gap_ms = dt;
-                if (std::chrono::duration<double>(now - s.win_start).count() > 3.0)
+                // ★AVERAGE THE PERIOD, THEN INVERT — never average the rate. An EMA over 1/dt is biased
+                // HIGH by Jensen's inequality (E[1/dt] > 1/E[dt]), and the bias grows with jitter, so the
+                // reported rate could exceed the source rate — which is impossible and was visible: 29.1 Hz
+                // shown for a ZED delivering 26.4. Averaging dt and inverting once has no such bias.
+                s.dt_ema = s.dt_ema > 0.0 ? 0.9 * s.dt_ema + 0.1 * dt : dt;
+                s.hz     = s.dt_ema > 0.0 ? 1000.0 / s.dt_ema : 0.0;
+
+                // SOURCE CADENCE. We only see the stamps of frames we chose to PROCESS, so gaps are
+                // k*T for integer k and the smallest ones are our best evidence of T itself.
+                // ★NOT the strict minimum. min over a window is an extreme-value statistic: one jittered
+                // stamp sets it for the whole window, and the more samples the lower it drifts — that is
+                // what reported 38.5 Hz for both a 26.4 Hz camera and a 31.3 Hz one (both had a single
+                // 26 ms gap). A low QUANTILE of the recent gaps needs the short gap to RECUR before it
+                // counts, so a lone outlier cannot move it.
+                s.gaps[s.gap_i % kGapWin] = dt;
+                ++s.gap_i;
+                const std::size_t n = std::min<std::size_t>(s.gap_i, kGapWin);
+                if (n >= 8)
                 {
-                    s.feed_hz   = s.min_gap_ms > 0.0 ? 1000.0 / s.min_gap_ms : 0.0;
-                    s.min_gap_ms = 0.0;
-                    s.win_start  = now;
+                    std::array<double, kGapWin> tmp = s.gaps;
+                    const std::size_t k = n / 5;                       // 20th percentile
+                    std::nth_element(tmp.begin(), tmp.begin() + k, tmp.begin() + n);
+                    s.feed_hz = tmp[k] > 0.0 ? 1000.0 / tmp[k] : 0.0;
                 }
             }
         }
@@ -58,9 +67,12 @@ public:
         return it == streams_.end() ? -1.0 : it->second.hz;
     }
 
-    // SOURCE cadence (Hz) of `name` — how fast the producer delivers, from the smallest stamp gap
-    // seen in the last window. Compare against rate_hz(): rate_hz is what WE processed, feed_hz is what
-    // was OFFERED. -1 if never seen, 0 until the first window closes.
+    // SOURCE cadence (Hz) of `name`, from a low quantile of the recent stamp gaps. Compare against
+    // rate_hz(): rate_hz is what WE processed, feed_hz is the fastest cadence the source RELIABLY shows.
+    // ★It is a LOWER BOUND on the true source rate, and deliberately so: if we never process two
+    // consecutive source frames, the smallest gap we can observe is already a multiple of the true
+    // period, so feed_hz reads low. It must never read HIGH — a rate above the source is impossible and
+    // is the bug this replaced. -1 if never seen, 0 until enough gaps have accumulated.
     [[nodiscard]] double feed_hz(const std::string& name) const
     {
         auto it = streams_.find(name);
@@ -105,9 +117,10 @@ private:
     struct Stat
     {
         double        hz = 0.0;
-        double        feed_hz = 0.0;     // 1000/min-gap over the last window (source cadence)
-        double        min_gap_ms = 0.0;  // smallest stamp gap in the current window
-        std::chrono::steady_clock::time_point win_start{};
+        double        dt_ema = 0.0;      // EMA of the stamp PERIOD (ms) — hz is 1000/this, never an EMA of rates
+        double        feed_hz = 0.0;     // 1000 / 20th-percentile gap: the fastest cadence we RELIABLY see
+        std::array<double, kGapWin> gaps{};
+        std::size_t   gap_i = 0;
         std::uint64_t last_stamp = 0;
         std::chrono::steady_clock::time_point last_new{};
     };
