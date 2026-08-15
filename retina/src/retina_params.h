@@ -192,6 +192,9 @@ struct RetinaParams
     bool        RICOH_YOLO_ENABLED         = false;   // Ricoh.yolo_enabled
     int         RICOH_YOLO_THREAD_PERIOD_MS= 50;      // Ricoh.yolo_thread_period_ms — target worker-thread cycle (~20 Hz)
     int         RICOH_YOLO_N_STRIPS        = 3;       // Ricoh.yolo_n_strips
+    // Strips segmented PER FRAME (Ricoh.yolo_strips_per_frame). 0 or >= n_strips = all, the original
+    // behaviour. 1 = round-robin: a third of the cost, full 360 coverage every 3 frames.
+    int         RICOH_YOLO_STRIPS_PER_FRAME = 0;
     int         RICOH_YOLO_STRIP_OVERLAP_PX= 80;      // Ricoh.yolo_strip_overlap_px
     float       RICOH_YOLO_MERGE_IOU       = 0.5f;    // Ricoh.yolo_merge_iou — cross-strip dedup threshold
     // Publish the ricoh 360 detections into the shared "masks" node as NO-DEPTH bearing slices (Part B,

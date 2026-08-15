@@ -158,6 +158,10 @@ std::vector<SegDetection> YoloProcessor::detect_segmentation_360(const cv::Mat& 
 
     for (int s = 0; s < cfg.n_strips; ++s)
     {
+        // Selective pass: skip strips this frame is not looking at. Empty list = look at all of them.
+        if (not cfg.strips.empty()
+            and std::find(cfg.strips.begin(), cfg.strips.end(), s) == cfg.strips.end())
+            continue;
         const int local_x0 = s * strip_w;
         if (local_x0 + strip_px > padded.cols)
             continue;   // width not exactly divisible by n_strips — last sliver dropped, not sliced short

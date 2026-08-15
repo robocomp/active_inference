@@ -361,7 +361,14 @@ void SpecificWorker::initialize()
         cfg360.merge_iou  = params.RICOH_YOLO_MERGE_IOU;
 
         std::vector<std::unique_ptr<rc::Stage>> ricoh_stages;
-        ricoh_stages.push_back(std::make_unique<rc::SegStage>(ricoh_yolo_cfg, cfg360));
+        {
+            auto seg360 = std::make_unique<rc::SegStage>(ricoh_yolo_cfg, cfg360);
+            // Selective pass over the panorama. The 360 seg is this component's single largest GPU
+            // block (32 ms measured, 52% of the ricoh worker) and most of what it re-describes each
+            // frame has not changed. Round-robin keeps every direction on a guaranteed revisit period.
+            seg360->set_strips_per_frame(params.RICOH_YOLO_STRIPS_PER_FRAME);
+            ricoh_stages.push_back(std::move(seg360));
+        }
         if (params.RICOH_PUBLISH_MASKS)
             ricoh_stages.push_back(std::make_unique<rc::BearingStage>(G));   // runs after seg (reads masks)
         // Monocular depth on the same panorama, own strip geometry ([RicohDepth]). Independent of seg —

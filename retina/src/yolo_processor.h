@@ -16,6 +16,12 @@ struct Detection360Config
     int   n_strips   = 3;
     int   overlap_px = 80;    // circular-padded margin so a seam-straddling object survives whole
     float merge_iou  = 0.5f;  // cross-strip box IoU above which two strips' boxes are the same object
+    // SELECTIVE PASS: run only these strip indices this frame. EMPTY = all of them (the original
+    // behaviour, and what every non-scheduled caller gets). The panorama is a 360° field of view of
+    // which the robot can act on very little at a time, so segmenting all of it every frame spends the
+    // component's single largest GPU block — 32 ms measured, 52% of the ricoh worker — re-describing
+    // mostly-unchanged scenery. Whoever schedules decides WHICH; this only makes "some" expressible.
+    std::vector<int> strips;
 };
 
 class YoloProcessor

@@ -46,6 +46,7 @@ RetinaParams load_retina_params(const ConfigLoader& configLoader)
     rc::ConfigLoaderUtils::load_optional(configLoader, "Ricoh.yolo_enabled", params.RICOH_YOLO_ENABLED);
     rc::ConfigLoaderUtils::load_optional(configLoader, "Ricoh.yolo_thread_period_ms", params.RICOH_YOLO_THREAD_PERIOD_MS);
     rc::ConfigLoaderUtils::load_optional(configLoader, "Ricoh.yolo_n_strips", params.RICOH_YOLO_N_STRIPS);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Ricoh.yolo_strips_per_frame", params.RICOH_YOLO_STRIPS_PER_FRAME);
     rc::ConfigLoaderUtils::load_optional(configLoader, "Ricoh.yolo_strip_overlap_px", params.RICOH_YOLO_STRIP_OVERLAP_PX);
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Ricoh.yolo_merge_iou", params.RICOH_YOLO_MERGE_IOU);
     rc::ConfigLoaderUtils::load_optional(configLoader, "Ricoh.publish_masks", params.RICOH_PUBLISH_MASKS);

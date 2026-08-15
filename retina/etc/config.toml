@@ -235,6 +235,15 @@ recover_s    = 1.0    # sustained freshness required before resuming
 yolo_enabled          = true
 yolo_thread_period_ms = 50    # target worker-thread cycle (~20 Hz); 3-strip inference is the floor (~20ms)
 yolo_n_strips         = 3
+# Strips SEGMENTED PER FRAME. 0 = all three (original behaviour); 1 = round-robin one strip per frame.
+# ★The 360 seg is the largest single GPU block in this component — 32.0 ms of a 53 ms ricoh cycle,
+# measured per-stage — and it spends it re-segmenting a 360° field of view that mostly has not changed.
+# At 1, cost drops ~3x and every direction is still revisited every 3 frames (~160 ms at 18.8 Hz).
+# ★A FIXED ROTATION, not "look where the objects are": a greedy policy starves the empty strips, and a
+# NEW object appearing in a starved direction is exactly what a peripheral channel is for. It also
+# matters for the confirmation consumers — bottle/chair/door confirm STATIC objects through this
+# channel, so a strip that stops being visited stops confirming what stands in it.
+yolo_strips_per_frame = 1
 yolo_strip_overlap_px = 200   # circular-pad margin so a seam-straddling object survives whole. 80→200 so a
                               # chair on the wraparound seam (directly behind the robot) stays whole in one
                               # strip. Clamped to strip_w/2=320; each strip → 1040px (1.6× squash, was 1.25×).
