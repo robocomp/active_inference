@@ -200,6 +200,12 @@ class SpecificWorker : public GenericWorker
         QLabel*                 rates_label_ = nullptr;   // owned by the panel (Qt parent), not by us
         // EXACT feed rates: previous arrival counts + the wall instant they were read, differentiated
         // once per readout tick. Counting beats inferring the cadence from processed-frame stamps.
+        // ★ITS OWN FPSCounter, NOT the compute one. get_cpu_use() reports the CPU consumed since ITS
+        // OWN previous call and mutates that baseline as a side effect, so two callers sharing an
+        // instance each measure half the interval and BOTH silently report about half the real load.
+        // A dedicated instance read only by the 1 Hz readout measures exactly the last second.
+        // get_mem_use() is stateless (/proc/self/status) and would have been safe either way.
+        FPSCounter    ui_cost_;
         std::uint64_t feed_rgb_prev_ = 0, feed_ricoh_prev_ = 0, feed_lidar_prev_ = 0;
         double        feed_rgb_hz_ = 0.0, feed_ricoh_hz_ = 0.0, feed_lidar_hz_ = 0.0;
         std::chrono::steady_clock::time_point feed_last_tp_{};

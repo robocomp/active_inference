@@ -392,7 +392,7 @@ void SpecificWorker::setup_custom_viewers()
         // debugging session: the `rgb` counter is ticked on take_result(), i.e. the worker's OUTPUT, so
         // it reads throughput while the camera may be delivering far faster. A readout that showed only
         // one of them would invite exactly that misreading again.
-        rates_label_ = new QLabel("masks/s  processed / feed\nZED     — / —\nRicoh   — / —\nLiDAR   — / —", voxel_panel);
+        rates_label_ = new QLabel("masks/s  processed / feed\nZED     — / —\nRicoh   — / —\nLiDAR   — / —\ncpu —   mem —", voxel_panel);
         // BOLD, and the colour comes from the PALETTE rather than a fixed grey. The hardcoded #C8C8C8
         // read as shaded/disabled — a mid grey fights whatever the panel background actually is, and
         // Qt renders disabled text in exactly that range, so live numbers looked switched off.
@@ -451,10 +451,19 @@ void SpecificWorker::setup_custom_viewers()
             const auto row = [&fmt](const char* name, double proc, double feed_)
             { return QString("%1 %2 / %3").arg(QString(name).leftJustified(7),
                                                fmt(proc).rightJustified(5), fmt(feed_).rightJustified(5)); };
-            rates_label_->setText(QString("masks/s  processed / feed\n%1\n%2\n%3")
+            // Cost line. This agent runs three ONNX models on a GPU the robot does not have as much of,
+            // so what it COSTS belongs next to what it delivers — a rate is only good news if you can
+            // see the price. cpu is percent of ONE core (it can exceed 100 with the worker threads);
+            // mem is RSS in MB.
+            const float cpu_pct = ui_cost_.get_cpu_use();
+            const int   mem_mb  = ui_cost_.get_mem_use();
+            rates_label_->setText(QString("masks/s  processed / feed\n%1\n%2\n%3\n%4")
                                       .arg(row("ZED",   zed,   feed),
                                            row("Ricoh", ricoh, feed_ricoh_hz_),
-                                           row("LiDAR", lidar, feed_lidar_hz_)));
+                                           row("LiDAR", lidar, feed_lidar_hz_),
+                                           QString("cpu %1%   mem %2 MB")
+                                               .arg(cpu_pct >= 0.0f ? QString::number(cpu_pct, 'f', 0) : QString("—"))
+                                               .arg(mem_mb  >= 0    ? QString::number(mem_mb)          : QString("—"))));
         });
         rates_timer_->start(1000);
 
