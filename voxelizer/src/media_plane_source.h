@@ -85,10 +85,12 @@ private:
     // Written on the drain thread, read on the GUI thread ⇒ atomic, relaxed (a counter, not a fence).
     mutable std::atomic<std::uint64_t> rx_rgb_total_{0};
     mutable std::atomic<std::uint64_t> rx_ricoh_total_{0};
-    // LiDAR counts arrivals of the PRIMARY PLANE, not merged sweeps. helios and bpearl each run at 20 Hz
-    // and the merged sweep takes the MAX of their capture stamps, so its stamp advances whenever EITHER
-    // plane is fresh — the union of two unsynchronised 20 Hz streams, which lands anywhere in 20-40 Hz
-    // and is why the display read ~30 for a 20 Hz sensor. Counting one plane's fresh stamps gives 20.
+    // LiDAR counts MEDIA-PLANE UPDATES: one per merged sweep carrying a stamp not seen before.
+    // ★IT IS EXPECTED TO EXCEED 20 Hz AND THAT IS NOT AN ERROR. helios and bpearl each run at 20 Hz, and
+    // LidarPlaneReader sets the merged stamp to the MAX of the contributing planes' capture stamps, so it
+    // advances whenever EITHER plane is fresh — the union of two unsynchronised 20 Hz streams, i.e. up to
+    // 40 Hz. "Feed" means the same thing on every row: how often this consumer is OFFERED new data. It is
+    // deliberately NOT a single sensor's frame rate, which for a two-plane merge is not a single number.
     mutable std::atomic<std::uint64_t> rx_lidar_plane0_total_{0};
     mutable std::atomic<std::uint64_t> lidar_plane0_last_stamp_{0};
 

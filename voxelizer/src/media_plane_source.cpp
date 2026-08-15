@@ -242,15 +242,14 @@ std::optional<LidarData> MediaPlaneSource::get_lidar3D(const std::string& robot_
         if (auto sweep = lidar_reader_->poll(robot_name, /*interpolate=*/false);
             sweep.has_value() && !sweep->points.empty())
         {
-            // Count a PRIMARY-PLANE arrival, not a merged sweep — see rx_lidar_plane0_total_ in the header.
-            if (not sweep->plane_stamp_ms.empty())
+            // Count a MEDIA-PLANE UPDATE: one increment per sweep carrying a stamp we have not seen.
+            // That is the rate at which this consumer is offered a new cloud, which is what the readout
+            // means by "feed" for every other channel too.
+            if (const auto st = static_cast<std::uint64_t>(std::max<std::int64_t>(0, sweep->stamp_ms));
+                st != 0 and st != lidar_plane0_last_stamp_.load(std::memory_order_relaxed))
             {
-                const auto p0 = static_cast<std::uint64_t>(std::max<std::int64_t>(0, sweep->plane_stamp_ms[0]));
-                if (p0 != 0 and p0 != lidar_plane0_last_stamp_.load(std::memory_order_relaxed))
-                {
-                    lidar_plane0_last_stamp_.store(p0, std::memory_order_relaxed);
-                    rx_lidar_plane0_total_.fetch_add(1, std::memory_order_relaxed);
-                }
+                lidar_plane0_last_stamp_.store(st, std::memory_order_relaxed);
+                rx_lidar_plane0_total_.fetch_add(1, std::memory_order_relaxed);
             }
             LidarData ld;
             ld.xs.reserve(sweep->points.size());
