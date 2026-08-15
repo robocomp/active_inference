@@ -198,8 +198,12 @@ refine_labels = ["table", "chair", "monitor", "tv", "bottle", "cabinet"]   # whi
 show_voxel_viewer = true
 show_yolo_viewer  = true
 show_ricoh_viewer = true   # creates the Ricoh360 button+popup (popup hidden until toggled)
-perf_log = false   # per-frame compute/yolo/pose timing -> etc/viewer_perf.csv (diagnostic; flushes CSVs every
+perf_log = true    # per-frame compute/yolo/pose timing -> etc/viewer_perf.csv (diagnostic; flushes CSVs every
                    # frame — leave OFF in production, flip true only to capture a timing trace)
+                   # ★ON again 2026-08-15 to verify the round-robin panorama pass: Ricoh.yolo_strips_per_frame
+                   # went 3 -> 1, so etc/viewer_perf_ricoh_worker.csv should show seg_ms ~11 ms instead of
+                   # ~32. That number is also the budget the ADE20K strip pass has to fit inside, so it
+                   # decides the next step as much as it confirms this one. OFF again once captured.
                    # ★OFF again 2026-08-14 after the measurement below was captured.
                    # ★Was ON 2026-08-14 to measure the ZED worker: `rgb` reads ~11.6 Hz against a ~25 Hz plane, and
                    # that counter is ticked on take_result() (the worker's OUTPUT), not on arrival — so it is
