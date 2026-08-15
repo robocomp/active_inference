@@ -266,8 +266,7 @@ private:
     // evidence into it are different things — conflating them made birth_frames count COMPUTE CYCLES. See
     // common/instance_tracker/birth_evidence.h rule 1.
     long  last_birth_mask_frame_ = -1;
-    int   exist_last_mask_frame_ = -1;     // last mask frame_id folded into the existence belief (sensor-rate gate)
-    rc::BearingHypothesisStager                        bearing_stager_;  // Part C-birth: stages unmatched 360 bearings
+    int   exist_last_mask_frame_ = -1;    // (rc::BearingHypothesisStager removed with bearing-birth — see common/peripheral_channel)
     uint64_t                                            room_node_id_ = 0;
     FPSCounter                                          fps_counter_;     // overall compute()-cycle rate
 

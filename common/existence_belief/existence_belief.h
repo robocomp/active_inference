@@ -560,7 +560,11 @@ struct RemovalPolicy
 struct RemovalDebounce
 {
     float streak  = 0.0f;   // ideal observations (Sum p_detect) of sustained condemnation
-    int   starved = 0;      // consecutive condemned cycles that resolved NOTHING (p_detect == 0)
+    // ★CONSECUTIVE CYCLES THAT RESOLVED NOTHING (p_detect == 0) — counted whether or not the belief is
+    // condemned. It used to advance only inside the condemned branch, which made the WORSE pathology
+    // invisible: a belief pinned HIGH that nothing can test is not a steady state either, and it is exactly
+    // what a user sees as an immortal phantom. See `unfalsifiable` below.
+    int   starved = 0;
 };
 
 struct RemovalVerdict
@@ -569,6 +573,14 @@ struct RemovalVerdict
     bool  condemned = false;   // should_remove(L) holds this cycle
     float required  = 0.0f;    // ideal observations demanded at THIS confidence (see required_observations)
     bool  stalled   = false;   // condemned, unexecutable, and no resolving look is arriving — REPORT IT
+    // ★NOT condemned, and nothing has RESOLVED it for `starved` cycles. The mirror image of `stalled`, and
+    // the one that was structurally unreportable: `stalled` is computed after the not-condemned early
+    // return, so a belief held at the +4 clamp by evidence nobody can contradict produced no warning at all.
+    // MEASURED 2026-08-15: a phantom refrigerator created on top of door_3 was confirmed by the DOOR's
+    // returns on 100% of 4122 cycles, sat at p(exists)=0.982 with streak 0 on all 9714 rows, and said
+    // NOTHING in the log for an hour. Both fields are REPORTS, not decisions — nothing branches on them.
+    bool  unfalsifiable = false;
+    int   starved   = 0;       // consecutive cycles that resolved nothing, for whichever report fires
 };
 
 // Ideal observations still demanded of a belief sitting at L. `remove_frames` at the boundary, 1 at the clamp
@@ -608,16 +620,25 @@ inline RemovalVerdict decide_removal(const ExistenceBelief& b, RemovalDebounce& 
 {
     RemovalVerdict v;
     v.condemned = b.should_remove(p.removal_prob);
+
+    // An ideal observation is worth exactly one; a non-finite resolvability could not have resolved anything.
+    // ★STARVATION IS COUNTED FIRST, AND UNCONDITIONALLY. It used to live inside the condemned branch, so a
+    // belief that was never condemned reset it to zero every cycle and the "nothing can test this" state had
+    // no counter at all — which is why an immortal phantom could sit silent for an hour.
+    const float look = std::isfinite(cycle_p_detect) ? std::clamp(cycle_p_detect, 0.0f, 1.0f) : 0.0f;
+    d.starved = (look > 0.0f) ? 0 : d.starved + 1;
+    v.starved = d.starved;
+
     if (not v.condemned)
     {
-        d.streak = 0.0f;
-        d.starved = 0;
+        d.streak = 0.0f;   // a belief above the boundary has no removal streak; that part is unchanged
+        // The mirror of `stalled`, on the same cadence: confident, and nothing has resolved it in a long
+        // time. A REPORT only — no branch anywhere reads it, so this cannot change what any agent does.
+        v.unfalsifiable = p.stall_warn_cycles > 0 and d.starved > 0
+                      and d.starved % p.stall_warn_cycles == 0;
         return v;
     }
-    // An ideal observation is worth exactly one; a non-finite resolvability could not have resolved anything.
-    const float look = std::isfinite(cycle_p_detect) ? std::clamp(cycle_p_detect, 0.0f, 1.0f) : 0.0f;
-    d.streak  += look;
-    d.starved  = (look > 0.0f) ? 0 : d.starved + 1;
+    d.streak += look;
     v.required = required_observations(b.logodds(), p);
     v.remove   = d.streak >= v.required;
     // A frozen debounce must not be silent: condemned-but-unexecutable is not a steady state, it is a REQUEST
@@ -626,6 +647,18 @@ inline RemovalVerdict decide_removal(const ExistenceBelief& b, RemovalDebounce& 
     v.stalled  = not v.remove and p.stall_warn_cycles > 0 and d.starved > 0
              and d.starved % p.stall_warn_cycles == 0;
     return v;
+}
+
+// One line describing a belief nothing can test: high confidence, no resolving observation for a long time.
+// Deliberately worded as a QUESTION about the evidence rather than a verdict about the object — an object
+// legitimately out of view for a while lands here too, and the honest statement is the same in both cases:
+// this belief is currently being held by something no observation has challenged.
+inline std::string unfalsifiable_note(const std::string& who, const ExistenceBelief& b,
+                                      const RemovalVerdict& v)
+{
+    return std::format("[existence] {} UNFALSIFIED — L={:.2f} p={:.3f}, nothing has resolved it for {} "
+                       "cycles (confident on evidence no look has tested)", who, b.logodds(), b.p_exists(),
+                       v.starved);
 }
 
 // One line describing a stall, so the six agents cannot each invent their own wording (or forget to print).

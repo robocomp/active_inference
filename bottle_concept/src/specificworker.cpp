@@ -25,6 +25,8 @@
  */
 
 #include "specificworker.h"
+
+#include "../../common/peripheral_channel/peripheral_channel.h"   // THE shared ricoh path
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion — the SHARED no-two-objects rule
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion:: (SHARED)
 #include "../../common/footprint/footprint.h"   // rc::geom:: (SHARED)
@@ -884,25 +886,32 @@ void SpecificWorker::run_instance_tracker()
     // cycle (set expected_visible=false, exactly like being out of the zed frustum). No fit, no birth.
     if (cfg_.bearing_confirm_enabled and pkt.valid and not tracks.empty())
     {
-        std::vector<rc::BearingDetectionView> bearings;
-        for (int i = 0; i < static_cast<int>(pkt.slices.size()); ++i)
-            if (pkt.slices[i].label == "bottle" and not pkt.slices[i].has_depth)
-                bearings.push_back({pkt.slices[i].azimuth_room_rad, i});
+        // Association is common/peripheral_channel now — one path for all seven agents. gather()
+        // takes BOTH slice kinds (bearing-only and LiDAR-depth-filled): which arrives depends on where
+        // the LiDAR swept, not on anything this agent decided, so it must not change behaviour. What
+        // stays local is the ACTION on a confirm, which for bottle is holding the death-miss.
+        Eigen::Vector2f robot_xy(0.f, 0.f);
+        if (const auto p = inner_eigen_->transform("room", Eigen::Vector3d::Zero(), "zed"); p.has_value())
+            robot_xy = {static_cast<float>(p->x()), static_cast<float>(p->y())};
 
-        if (not bearings.empty())
+        const auto dets_p = rc::peripheral::gather(pkt, "bottle", robot_xy);
+        if (not dets_p.empty())
         {
-            // Robot room-frame XY (≈ the zed origin in room, matching how the bearing was produced).
-            Eigen::Vector2f robot_xy(0.f, 0.f);
-            if (const auto p = inner_eigen_->transform("room", Eigen::Vector3d::Zero(), "zed"); p.has_value())
-                robot_xy = {static_cast<float>(p->x()), static_cast<float>(p->y())};
+            std::vector<rc::peripheral::TrackRef> trefs;
+            trefs.reserve(tracks.size());
+            for (std::size_t ti = 0; ti < tracks.size(); ++ti)
+                trefs.push_back({tracks[ti].id, tracks[ti].xy, cfg_.prior_radius});
 
-            for (const auto& c : rc::confirm_tracks_by_bearing(tracks, bearings, robot_xy,
-                                                               cfg_.bearing_confirm_gate_rad))
-            {
-                tracks[c.track_index].expected_visible = false;   // hold the death-miss (peripheral glance)
-                std::print("[bearing] confirm bottle id={} slice={} innov={:.1f}deg (holds death-miss)\n",
-                           c.track_id, c.slice_index, c.innovation_rad * 180.0f / std::numbers::pi_v<float>);
-            }
+            rc::peripheral::Params pp;
+            pp.angular_margin_rad = cfg_.bearing_confirm_gate_rad;
+            for (const auto& c : rc::peripheral::associate(trefs, dets_p, robot_xy, pp).confirms)
+                for (std::size_t ti = 0; ti < tracks.size(); ++ti)
+                    if (tracks[ti].id == c.track_id)
+                    {
+                        tracks[ti].expected_visible = false;   // hold the death-miss (peripheral glance)
+                        std::print("[bearing] confirm bottle id={} slice={} innov={:.1f}deg (holds death-miss)\n",
+                                   c.track_id, c.slice_index, c.innovation_rad * 180.0f / std::numbers::pi_v<float>);
+                    }
         }
     }
 

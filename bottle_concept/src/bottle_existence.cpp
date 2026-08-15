@@ -286,6 +286,15 @@ void BottleExistence::update_and_remove(BottleFitter& fitter, const Inputs& in,
             std::print("bottle_concept: {}\n", rc::exist::stall_note(inst.node_name, inst.existence,
                                                                     inst.existence_debounce, verdict));
 
+        // ★AND THE MIRROR CASE, structurally unreportable until 2026-08-15: NOT condemned, and nothing
+        // has resolved it for a long time. `stalled` is computed AFTER decide_removal's not-condemned
+        // early return, so a belief pinned at the +4 clamp by evidence no look can contradict said
+        // NOTHING — a phantom refrigerator held there by a DOOR's returns sat silent for an hour with
+        // streak 0 on all 9714 rows. A REPORT only; nothing branches on it.
+        if (verdict.unfalsifiable)
+            std::print("bottle_concept: {}\n",
+                       rc::exist::unfalsifiable_note(inst.node_name, inst.existence, verdict));
+
         // ── per-cycle existence trace ─────────────────────────────────────────────────────────────
         // ★WITHOUT THIS THE CHANNEL IS UNOBSERVABLE UNTIL IT DELETES SOMETHING, which is exactly backwards
         // for a channel whose documented failure mode is going SILENTLY INERT (vis = 0 ⇒ p_detect = 0 ⇒ L

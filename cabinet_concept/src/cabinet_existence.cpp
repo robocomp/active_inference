@@ -219,6 +219,15 @@ void CabinetExistence::update_and_remove(CabinetFitter& fitter, ConceptLidarInge
             std::print("cabinet_concept: {}\n", rc::exist::stall_note(inst.node_name, inst.existence,
                                                                      inst.existence_debounce, verdict));
 
+        // ★AND THE MIRROR CASE, structurally unreportable until 2026-08-15: NOT condemned, and nothing
+        // has resolved it for a long time. `stalled` is computed AFTER decide_removal's not-condemned
+        // early return, so a belief pinned at the +4 clamp by evidence no look can contradict said
+        // NOTHING — a phantom refrigerator held there by a DOOR's returns sat silent for an hour with
+        // streak 0 on all 9714 rows. A REPORT only; nothing branches on it.
+        if (verdict.unfalsifiable)
+            std::print("cabinet_concept: {}\n",
+                       rc::exist::unfalsifiable_note(inst.node_name, inst.existence, verdict));
+
         // The per-cycle READOUT still belongs to an evidence cycle: a cycle in which nothing was measured has
         // nothing new to report about the evidence, only about the decision (printed above when it stalls).
         if (integrated)

@@ -1224,62 +1224,12 @@ void SpecificWorker::run_instance_tracker()
         }
     }
 
-    // ── Part C-birth: NEW-object hypotheses from unmatched 360 bearings ──────────────────────────────
-    // A peripheral "chair" bearing (a no-depth 360 slice) that lines up with no live chair and PERSISTS
-    // births a broad-Σ hypothesis: mean placed on the ray at a nominal range, Σ huge along the ray (range
-    // unknown) and tight across it (bearing known). The hypothesis authors an Orient affordance (rotate to
-    // look); a depth mask then collapses Σ, or it dies unobserved. Default OFF (Bearing.BirthEnabled).
-    if (cfg_.bearing_birth_enabled and pkt.valid)
-    {
-        std::vector<rc::BearingDetectionView> bearings;
-        for (int i = 0; i < static_cast<int>(pkt.slices.size()); ++i)
-            if (pkt.slices[i].label == "chair" and not pkt.slices[i].has_depth)
-                bearings.push_back({pkt.slices[i].azimuth_room_rad, i});
-
-        if (not bearings.empty())
-        {
-            Eigen::Vector2f robot_xy(0.f, 0.f);
-            if (const auto p = inner_eigen_->transform("room", Eigen::Vector3d::Zero(), "zed"); p.has_value())
-                robot_xy = {static_cast<float>(p->x()), static_cast<float>(p->y())};
-
-            // A bearing that lines up with a live chair is "explained" (confirmation, not new); the rest go
-            // to the gap-tolerant stager, and a persistent unmatched bearing promotes to a hypothesis birth.
-            const auto confirmed = rc::confirm_tracks_by_bearing(tracks, bearings, robot_xy, cfg_.bearing_confirm_gate_rad);
-            std::vector<char> matched(bearings.size(), 0);
-            for (const auto& cf : confirmed)
-                for (int b = 0; b < static_cast<int>(bearings.size()); ++b)
-                    if (bearings[b].slice_index == cf.slice_index) matched[b] = 1;
-            std::vector<float> unmatched;
-            for (int b = 0; b < static_cast<int>(bearings.size()); ++b)
-                if (not matched[b]) unmatched.push_back(bearings[b].azimuth_room_rad);
-
-            bearing_stager_.set_params(cfg_.bearing_birth_frames, cfg_.bearing_match_rad, cfg_.bearing_max_miss);
-            for (const float az : bearing_stager_.update(unmatched))
-            {
-                // Anti-dup: skip if a live chair already sits near the nominal point on this ray.
-                const Eigen::Vector2f p_nom = robot_xy + cfg_.bearing_nominal_range_m * Eigen::Vector2f(std::cos(az), std::sin(az));
-                bool near_existing = false;
-                for (const auto& t : tracks)
-                    if ((t.xy - p_nom).norm() < cfg_.tracker_birth_min_sep_m) { near_existing = true; break; }
-                if (near_existing) continue;
-
-                const Eigen::Vector3f c_room(p_nom.x(), p_nom.y(), cfg_.ai2_floor_z);
-                const auto new_id = scene_graph_->create_instance_from_detection(c_room, room_node_id_);
-                if (new_id == 0) continue;
-                if (const auto nopt = G->get_node(new_id); nopt.has_value())
-                {
-                    fitter_->ensure_instance(nopt.value(), room_node_id_);
-                    if (auto it = fitter_->instances().find(new_id); it != fitter_->instances().end())
-                        fitter_->seed_bearing_hypothesis(it->second, robot_xy, az, cfg_.bearing_nominal_range_m,
-                                                         cfg_.bearing_along_std_m, cfg_.bearing_across_std_m,
-                                                         cfg_.bearing_yaw_std_rad);
-                }
-                std::print("chair_concept: [bearing] BIRTH hypothesis id={} az={:.0f}deg (nominal {:.1f}m on ray)\n",
-                           new_id, az * 180.0f / 3.14159265f, cfg_.bearing_nominal_range_m);
-                log_tracker_event("BEARING_BIRTH", new_id, p_nom.x(), p_nom.y(), "");
-            }
-        }
-    }
+    // ★THE SECOND BEARING-BIRTH BLOCK, ALSO REMOVED. This one staged a no-depth bearing into a
+    // "hypothesis" instance — an elongated Sigma along the unknown range, authoring an Orient affordance
+    // so a later depth mask could collapse it. Better motivated than the nominal-range version, and
+    // still a birth from the sensor that cannot measure range, in two agents out of seven. The
+    // proto-object / saccadic path is the same idea done once, for everyone, without creating a graph
+    // node first: raise a candidate, go and look, THEN birth with a real range.
 }
 
 // Load the room's delimiting polygon (a trusted NOMINAL model authored by room_concept, never fitted) into the
@@ -1547,6 +1497,15 @@ void SpecificWorker::update_existence_beliefs()
         if (verdict.stalled)
             std::print("chair_concept: {}\n", rc::exist::stall_note(inst.node_name, inst.existence,
                                                                     inst.existence_debounce, verdict));
+
+        // ★AND THE MIRROR CASE, structurally unreportable until 2026-08-15: NOT condemned, and nothing
+        // has resolved it for a long time. `stalled` is computed AFTER decide_removal's not-condemned
+        // early return, so a belief pinned at the +4 clamp by evidence no look can contradict said
+        // NOTHING — a phantom refrigerator held there by a DOOR's returns sat silent for an hour with
+        // streak 0 on all 9714 rows. A REPORT only; nothing branches on it.
+        if (verdict.unfalsifiable)
+            std::print("chair_concept: {}\n",
+                       rc::exist::unfalsifiable_note(inst.node_name, inst.existence, verdict));
     }
 
     // Throttled existence readout so a "why is this phantom still here?" case is diagnosable from the log.

@@ -1312,142 +1312,12 @@ void SpecificWorker::run_instance_tracker()
         }
     }
 
-    // ── Part C-birth: NEW-object hypotheses from unmatched 360 bearings ──────────────────────────────
-    // A peripheral "door" bearing (a no-depth 360 slice) that lines up with no live door and PERSISTS
-    // births a broad-Σ hypothesis: mean placed on the ray at a nominal range, Σ huge along the ray (range
-    // unknown) and tight across it (bearing known). The hypothesis authors an Orient affordance (rotate to
-    // look); a depth mask then collapses Σ, or it dies unobserved. Default OFF (Bearing.BirthEnabled).
-    if (cfg_.bearing_birth_enabled and pkt.valid)
-    {
-        std::vector<rc::BearingDetectionView> bearings;
-        for (int i = 0; i < static_cast<int>(pkt.slices.size()); ++i)
-            if (pkt.slices[i].label == "door" and not pkt.slices[i].has_depth)
-                bearings.push_back({pkt.slices[i].azimuth_room_rad, i});
-
-        if (not bearings.empty())
-        {
-            Eigen::Vector2f robot_xy(0.f, 0.f);
-            if (const auto p = inner_eigen_->transform("room", Eigen::Vector3d::Zero(), "zed"); p.has_value())
-                robot_xy = {static_cast<float>(p->x()), static_cast<float>(p->y())};
-
-            // A bearing that lines up with a live door is "explained" (confirmation, not new); the rest go
-            // to the gap-tolerant stager, and a persistent unmatched bearing promotes to a hypothesis birth.
-            const auto confirmed = rc::confirm_tracks_by_bearing(tracks, bearings, robot_xy, cfg_.bearing_confirm_gate_rad);
-            std::vector<char> matched(bearings.size(), 0);
-            for (const auto& cf : confirmed)
-                for (int b = 0; b < static_cast<int>(bearings.size()); ++b)
-                    if (bearings[b].slice_index == cf.slice_index) matched[b] = 1;
-            std::vector<float> unmatched;
-            for (int b = 0; b < static_cast<int>(bearings.size()); ++b)
-                if (not matched[b]) unmatched.push_back(bearings[b].azimuth_room_rad);
-
-            bearing_stager_.set_params(cfg_.bearing_birth_frames, cfg_.bearing_match_rad, cfg_.bearing_max_miss);
-            read_residual_field();   // one snapshot for every bearing promoted this cycle
-            for (const float az : bearing_stager_.update(unmatched))
-            {
-                // ── RANGE CASCADE (door_bearing_range.h) ────────────────────────────────────────────────
-                // Ask the best available rung for a range along this bearing. Today that is the residual
-                // field; when dense ricoh depth lands it goes in AHEAD of this call and the rest is unchanged.
-                // Whatever answers returns the same (range, σ), and σ — not the source — is what propagates.
-                const auto br = rc::door::range_along_bearing(residual_field_, robot_xy, az);
-                const float range_m  = br ? br->range_m : cfg_.bearing_nominal_range_m;
-                // No rung answered ⇒ keep the configured along-ray std, i.e. "range unknown", and the
-                // hypothesis stays a glance. A resolved range carries its OWN σ, so the constant is not used.
-                const float along_sd = br ? br->sigma_m  : cfg_.bearing_along_std_m;
-
-                const Eigen::Vector2f p_nom = robot_xy + range_m * Eigen::Vector2f(std::cos(az), std::sin(az));
-
-                // ── ASSOCIATE BEFORE BIRTHING, IN BEARING SPACE ────────────────────────────────────────
-                // An unchecked proto STAYS in the graph, so the next sighting of the same object must fuse
-                // with it, not birth a twin. Testing the new ray against the proto's placed POINT is exactly
-                // wrong here: a bearing-only proto's range is a guess, so the same door seen from a new angle
-                // lands metres away and a point test births a duplicate (measured: a proto guessed at 1.2 m
-                // whose truth is 3.0 m fails the 0.8 m separation test outright). The invariant that survives
-                // across observations is the BEARING, so the gate lives there.
-                //
-                // And the association is also the FIX: two bearings from two places triangulate, with the
-                // robot's own travel as the baseline. So re-sighting an unchecked proto while driving past it
-                // is what finally gives it a range — no detour, no glance.
-                bool fused = false;
-                for (auto& [oid, other] : fitter_->instances())
-                {
-                    if (not other.is_bearing_hypothesis) continue;   // fitted doors are handled by the tracker
-                    // Room-frame position lives on the DoorState (the belief is parameterised in the wall
-                    // frame: s/w/h). The APERTURE centre is the right anchor — it is rigid in the wall, so it
-                    // does not move when the leaf swings, which is exactly the invariant an association needs.
-                    const auto& os = other.model.state();
-                    const Eigen::Vector2f oxy(os.ap_cx, os.ap_cy);
-                    const float osig = std::max(0.10f, other.hypothesis_range_sigma);
-                    if (not rc::door::bearing_consistent(robot_xy, az, oxy, osig)) continue;
-
-                    if (const auto fix = rc::door::triangulate_bearings(other.hypothesis_obs_from,
-                                                                        other.hypothesis_azimuth,
-                                                                        robot_xy, az))
-                    {
-                        // Only accept a fix that is BETTER than what the proto already had — a re-sighting
-                        // from nearly the same place has almost no baseline and would widen it.
-                        if (not other.hypothesis_range_known or fix->sigma_m < other.hypothesis_range_sigma)
-                        {
-                            const float r = (fix->xy - robot_xy).norm();
-                            fitter_->seed_bearing_hypothesis(other, robot_xy, az, r, fix->sigma_m,
-                                                             cfg_.bearing_across_std_m, cfg_.bearing_yaw_std_rad);
-                            other.hypothesis_range_known = true;
-                            other.hypothesis_range_sigma = fix->sigma_m;
-                            other.hypothesis_obs_from    = robot_xy;   // newest observation becomes the anchor
-                            other.hypothesis_azimuth     = az;
-                            ++other.hypothesis_fixes;
-                            std::print("door_concept: [bearing] FUSE id={} -> ({:.2f},{:.2f}) sigma={:.2f}m "
-                                       "parallax={:.0f}deg fixes={}\n", oid, fix->xy.x(), fix->xy.y(),
-                                       fix->sigma_m, fix->parallax_rad * 180.0f / 3.14159265f,
-                                       other.hypothesis_fixes);
-                        }
-                    }
-                    fused = true;   // consistent with an existing proto ⇒ never birth, fix or not
-                    break;
-                }
-                if (fused) continue;
-
-                // Anti-dup against FITTED doors keeps the point test: those have a real, measured position,
-                // so proximity is a meaningful question for them in a way it is not for a guessed range.
-                bool near_existing = false;
-                for (const auto& t : tracks)
-                    if ((t.xy - p_nom).norm() < cfg_.tracker_birth_min_sep_m) { near_existing = true; break; }
-                if (near_existing) continue;
-
-                const Eigen::Vector3f c_room(p_nom.x(), p_nom.y(), cfg_.ai2_floor_z);
-                const auto reserved = reserved_names();
-                // A proto-object standing where we already know a door is, IS that door — take its name so a
-                // glance that confirms it does not also invent a new identity. The guessed range is coarse, so
-                // this only fires when the cascade already put it on top of a remembered aperture.
-                const DoorIdentity* idn = match_identity(p_nom);
-                const auto new_id = scene_graph_->create_instance_from_detection(
-                        c_room, room_node_id_, idn != nullptr ? std::string_view(idn->name) : std::string_view{}, reserved);
-                if (new_id == 0) continue;
-                if (const auto nopt = G->get_node(new_id); nopt.has_value())
-                {
-                    fitter_->ensure_instance(nopt.value(), room_node_id_);
-                    if (auto it = fitter_->instances().find(new_id); it != fitter_->instances().end())
-                    {
-                        fitter_->seed_bearing_hypothesis(it->second, robot_xy, az, range_m,
-                                                         along_sd, cfg_.bearing_across_std_m,
-                                                         cfg_.bearing_yaw_std_rad);
-                        // A resolved range is what upgrades the affordance from "glance" to "go and check":
-                        // step_epistemic reads these to choose Orient vs Servo.
-                        it->second.hypothesis_range_known = br.has_value();
-                        it->second.hypothesis_range_sigma = along_sd;
-                        // Anchor the birth observation so a later sighting can triangulate against it.
-                        it->second.hypothesis_obs_from    = robot_xy;
-                        it->second.hypothesis_fixes       = 0;
-                    }
-                }
-                std::print("door_concept: [bearing] BIRTH hypothesis id={} az={:.0f}deg range={:.2f}m "
-                           "sigma={:.2f}m source={}\n",
-                           new_id, az * 180.0f / 3.14159265f, range_m, along_sd,
-                           br ? "residual-grid" : "nominal(no range ⇒ glance only)");
-                log_tracker_event("BEARING_BIRTH", new_id, p_nom.x(), p_nom.y(), "");
-            }
-        }
-    }
+    // ★THE SECOND BEARING-BIRTH BLOCK, ALSO REMOVED. This one staged a no-depth bearing into a
+    // "hypothesis" instance — an elongated Sigma along the unknown range, authoring an Orient affordance
+    // so a later depth mask could collapse it. Better motivated than the nominal-range version, and
+    // still a birth from the sensor that cannot measure range, in two agents out of seven. The
+    // proto-object / saccadic path is the same idea done once, for everyone, without creating a graph
+    // node first: raise a candidate, go and look, THEN birth with a real range.
 }
 
 // Snapshot residual_concept's published residual field. Mirrors table_concept::read_residual_field — same
@@ -1963,6 +1833,15 @@ void SpecificWorker::update_existence_beliefs()
         if (verdict.stalled)
             std::print("door_concept: {}\n", rc::exist::stall_note(inst.node_name, inst.existence,
                                                                    inst.existence_debounce, verdict));
+
+        // ★AND THE MIRROR CASE, structurally unreportable until 2026-08-15: NOT condemned, and nothing
+        // has resolved it for a long time. `stalled` is computed AFTER decide_removal's not-condemned
+        // early return, so a belief pinned at the +4 clamp by evidence no look can contradict said
+        // NOTHING — a phantom refrigerator held there by a DOOR's returns sat silent for an hour with
+        // streak 0 on all 9714 rows. A REPORT only; nothing branches on it.
+        if (verdict.unfalsifiable)
+            std::print("door_concept: {}\n",
+                       rc::exist::unfalsifiable_note(inst.node_name, inst.existence, verdict));
     }
 
     // Throttled existence readout so a "why is this phantom still here?" case is diagnosable from the log.
