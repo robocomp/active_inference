@@ -115,7 +115,7 @@ private:
     };
     MemberSnapshot poll_members();
     // Class of a generic "object" node: object_subtype when it names a known class, else the
-    // NAME prefix. Mirrors voxelizer/src/scene_processor.cpp's object_class_of — for a table
+    // NAME prefix. Mirrors retina/src/scene_processor.cpp's object_class_of — for a table
     // object_subtype may instead carry the SHAPE (round/square), so the prefix is the fallback.
     std::string object_class_of(const DSR::Node& node) const;
     // Read one member's room-frame pose + published covariance off the room→member RT edge.

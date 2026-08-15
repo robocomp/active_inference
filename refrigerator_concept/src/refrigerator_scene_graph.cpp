@@ -63,7 +63,7 @@ std::uint64_t RefrigeratorSceneGraph::create_instance_from_detection(const Eigen
 
     DSR::Node refrigerator_node = DSR::Node::create<object_node_type>(name);
     G_->add_or_modify_attrib_local<object_subtype_att>(refrigerator_node, std::string("refrigerator"));
-    // Display asset for the voxelizer 3D viewer (relative to its meshes/ root). The agent owns its
+    // Display asset for the retina 3D viewer (relative to its meshes/ root). The agent owns its
     // appearance; the viewer loads & scales this to the fitted box (see cortex mesh_path contract).
     G_->add_or_modify_attrib_local<mesh_path_att>(refrigerator_node, std::string("refrigerator_concept/meshes/fridge.obj"));
     G_->add_or_modify_attrib_local<mesh_texture_path_att>(refrigerator_node, std::string("refrigerator_concept/meshes/fridge_basecolor.jpg"));
@@ -112,14 +112,14 @@ bool RefrigeratorSceneGraph::persist_refrigerator_belief(RefrigeratorInstance& i
 
 // Write the full fitted model onto the node + RT edge: geometry attrs + mesh (gated on a real geometry move),
 // free energy, support-bank + residual point exports, the active-perception ROI/detection channel, then the RT
-// pose and pose covariance. The mesh gate freezes the voxelizer render once settled to stop viewer jitter.
+// pose and pose covariance. The mesh gate freezes the retina render once settled to stop viewer jitter.
 void RefrigeratorSceneGraph::step_write_model(RefrigeratorInstance& inst, DSR::Node& node,
                                        std::uint64_t room_id, float free_energy)
 {
     const auto& s = inst.model.state();
 
     // Publish gate: only (re)write the geometry + mesh when the fitted dims/pose moved beyond a few
-    // mm / mrad since the last publish. The voxelizer renders the MESH attribute (not the coarsely
+    // mm / mrad since the last publish. The retina renders the MESH attribute (not the coarsely
     // dead-banded RT pose), rebuilt here every cycle from the raw fit — so writing it from the
     // sub-cm oscillating state each frame makes the viewer refrigerator JITTER even though room→refrigerator is
     // static. Freezing the mesh once settled removes the jitter. Mirrors bottle_concept's pub gate.
@@ -140,14 +140,14 @@ void RefrigeratorSceneGraph::step_write_model(RefrigeratorInstance& inst, DSR::N
         G_->add_or_modify_attrib_local<depth_m_att> (node, s.h);
         G_->add_or_modify_attrib_local<height_m_att>(node, s.refrigerator_height);
         G_->add_or_modify_attrib_local<model_generation_att>(node, ++inst.model_generation);
-        write_refrigerator_mesh(inst, node);   // mesh for the voxelizer 3D viewer
+        write_refrigerator_mesh(inst, node);   // mesh for the retina 3D viewer
         inst.last_pub_cx = s.cx; inst.last_pub_cy = s.cy;
         inst.last_pub_w  = s.w;  inst.last_pub_h  = s.h;
         inst.last_pub_H  = s.refrigerator_height; inst.last_pub_yaw = s.yaw;
     }
     G_->add_or_modify_attrib_local<free_energy_att>(node, free_energy);
     // Inferred shape subtype (round/square), chosen by free-energy model evidence in RefrigeratorFitter::evaluate_shape.
-    // The voxelizer reads this to render the matching mesh (disc vs box).
+    // The retina reads this to render the matching mesh (disc vs box).
     G_->add_or_modify_attrib_local<object_subtype_att>(node, inst.subtype);
 
     // The accumulated support bank is NOT published. It never was voxels: the points are the 3-D support of
@@ -176,7 +176,7 @@ void RefrigeratorSceneGraph::step_write_model(RefrigeratorInstance& inst, DSR::N
         }
     }
 
-    // Latest residual points (model-unexplained) for the voxelizer's residual layer — it reads
+    // Latest residual points (model-unexplained) for the retina's residual layer — it reads
     // residual_pts_att but nothing was writing it, so that layer was always empty.
     {
         std::vector<float> res_flat;
@@ -328,7 +328,7 @@ void RefrigeratorSceneGraph::write_rt_pose(std::uint64_t room_id, RefrigeratorIn
         return;
 
     // Refrigerator node origin = BASE on the floor (z=0), NOT the mid-height. Every consumer assumes a
-    // base origin: the voxelizer box (z∈[origin, origin+height]), and bottle_concept's refrigerator-top
+    // base origin: the retina box (z∈[origin, origin+height]), and bottle_concept's refrigerator-top
     // lookup + support decision (top = origin.z + height). Publishing z=refrigerator_height/2 put the
     // origin at mid-height → refrigerator_top came out as 1.5·height → bottles failed the support test,
     // parented to the room and floated. Keep the base on the floor so top = 0 + height = height.

@@ -56,7 +56,7 @@ struct TableInstance
     float last_depth_var       = 0.0f;
 
     // ── Appearance (DISPLAY ONLY) ─────────────────────────────────────────────────────────────────
-    // 3-DOF Gaussian over the table's albedo CHROMATICITY, fed by the voxelizer's per-mask colour summary
+    // 3-DOF Gaussian over the table's albedo CHROMATICITY, fed by the retina's per-mask colour summary
     // and consumed only by table_scene_graph, which publishes its MAP as `mesh_color_rgb` for the 3D
     // viewer's mesh tint. Nothing in the AI2 belief, the association gate, or the existence log-odds reads
     // it — a channel built from tens of thousands of correlated mask pixels is kept out of the fit on
@@ -122,7 +122,7 @@ struct TableInstance
     float last_written_yaw = std::numeric_limits<float>::max();
     float last_written_cy = std::numeric_limits<float>::max();
     // Last GEOMETRY published to the graph (dims + mesh). Gates the per-cycle mesh/dim rewrite so a settled
-    // table stops jittering the voxelizer mesh. Mirrors bottle_concept's last_pub_* publish gate.
+    // table stops jittering the retina mesh. Mirrors bottle_concept's last_pub_* publish gate.
     float last_pub_cx  = std::numeric_limits<float>::max();
     float last_pub_cy  = std::numeric_limits<float>::max();
     float last_pub_w   = std::numeric_limits<float>::max();
@@ -139,7 +139,7 @@ struct TableInstance
     bool cloud_dumped = false;   // one-shot guard for the diagnostic support-bank dump (cfg_.dump_cloud_path)
 
     // ── Shape model-selection (round vs square), set by TableFitter::evaluate_shape ──────────────
-    // Published as the node's object_subtype string (the voxelizer renders the matching mesh). Chosen by
+    // Published as the node's object_subtype string (the retina renders the matching mesh). Chosen by
     // free-energy / model evidence, NOT a threshold: shape_evidence is a bounded accumulated log-Bayes-
     // factor (round − square) over periodic support-bank comparisons; subtype flips at the zero boundary.
     std::string subtype        = "square";   // "square" | "round" (free-form for future sub-subtypes)

@@ -375,7 +375,7 @@ void SpecificWorker::setup_custom_viewers()
 
         // ★THE 3-D LAYER TOGGLES MOVED OUT WITH THE VIEW. Lidar/Models/Masks/Residual/Grid/Field/Labels
         // drove the GL widget that now lives in the `viewer3d` agent; they are its buttons, not the
-        // voxelizer's. What stays here is what acts on THIS agent: the two camera windows below, whose
+        // retina's. What stays here is what acts on THIS agent: the two camera windows below, whose
         // toggles also gate real work (a hidden ricoh popup stops decoding).
         // Row 2 — the camera-window toggles.
         if (yolo_btn)  controls_row2->addWidget(yolo_btn);

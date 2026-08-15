@@ -109,7 +109,7 @@ struct ResidualConfig
     ResidualClusterer::DepthInfraParams zed_infra;
 
     // RGB-SEMANTIC floor down-weighting: a second, uncorrelated cue against ZED floor phantoms. The dense YOLO-sem
-    // label map (voxelizer `semantic` node under `zed`) is sampled per ZED grid-point; a floor-class label at a
+    // label map (retina `semantic` node under `zed`) is sampled per ZED grid-point; a floor-class label at a
     // NEAR-floor return down-weights its occupancy HIT (height-gated + freshness-decayed, never discards). Flag OFF.
     SemanticFloorParams semantic_floor;
 

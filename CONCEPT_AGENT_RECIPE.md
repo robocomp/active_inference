@@ -119,7 +119,7 @@ dashboard. So the §1 contract below holds; only the model hooks are authored.
   per-frame **common-mode** (`frame.chain_cov_*`), NOT per-point `R` — per-point `R` lets N points average the
   shared error away, while the Woodbury common-mode caps the frame's authority to move the **mean**, so a moving
   frame confirms the object but can't reshape/reposition/rotate a converged one; geometric updates concentrate
-  at stillness. Add `(gain·|motion_dotd|)²` (motion_dotd = Z·‖ṡ‖ m/s, from the voxelizer) to the common-mode of
+  at stillness. Add `(gain·|motion_dotd|)²` (motion_dotd = Z·‖ṡ‖ m/s, from the retina) to the common-mode of
   each fitted geometric channel — position always; **size** (w,h / radius,height) — the anti-RESHAPE lever, the
   worst offender on rotation; **yaw** (agents with a yaw DOF) — the anti-ROTATE lever. Continuous (0 at
   stillness), no gate; one gain per channel (0 disables). Reference: `table_fitter.cpp` (`motion_cm_*_gain`),
@@ -363,7 +363,7 @@ table is the source of truth). Taken:
 | 6 | robot_concept | 11 | kinova_controller | 21 | cabinet_concept |
 | 7 | table_concept | 12 | self_calibration | 22 | refrigerator_concept |
 | 8 | controller | 13 | human_concept | 23 | ring_metaconcept |
-| 9 | voxelizer | 14 | residual_concept | 15 | door_concept |
+| 9 | retina | 14 | residual_concept | 15 | door_concept |
 | 16 | scene_graph_viewer | 24 | kitchen_metaconcept | 17 | hood_concept |
 
 Next free: **18–19, 25+** (15 = door_concept, 2026-07-26; 24 = kitchen_metaconcept, 2026-08-09 — the
@@ -379,7 +379,7 @@ and writes its **class** into the **`object_subtype`** string attribute (`add_or
 finer distinctions live in their own channel (e.g. table round/square is carried by the shape-selected `mesh_path`,
 `round_table.obj` vs `table.obj`, NOT in `object_subtype`).
 Rationale: `type()` is the FIRST-level discriminator after the root hierarchy; everything below branches on the
-subtype string — so a cross-cutting consumer (controller, room, voxelizer, residual) does ONE
+subtype string — so a cross-cutting consumer (controller, room, retina, residual) does ONE
 `get_nodes_by_type("object")` and reasons over all furniture, reading `object_subtype` for the specifics. Do NOT
 mint a per-class cortex node type (`table_node_type`, `cylinder_node_type`, …). Consequences a copy MUST honour:
 its own compute-loop query, stale-sweep, and affordance parent-backstop all key on `type()=="object"` **filtered by
@@ -387,10 +387,10 @@ the `<obj>_` NAME prefix** (many `object`s share the graph), NOT on a class-spec
 
 ### ★ Display mesh (required): publish `mesh_path` + `mesh_texture_path` per instance
 Every concept agent MUST publish, on each instance node, a `mesh_path_att` (a **bare** OBJ/DAE filename resolved
-under `voxelizer/meshes/`, e.g. `"table.obj"`) and a `mesh_texture_path_att` base-colour image, so the voxelizer
+under `retina/meshes/`, e.g. `"table.obj"`) and a `mesh_texture_path_att` base-colour image, so the retina
 renders the real solid+textured mesh (it scales the asset to the fitted box; asset must be **pre-normalised and
 pre-oriented** — orientation baked in, see the `mesh_path` contract in `graph_object_box.h`). A real asset file must
-exist in `voxelizer/meshes/`. Empty `mesh_path` ⇒ the viewer falls back to the fitted box. table/cabinet/refrigerator
+exist in `retina/meshes/`. Empty `mesh_path` ⇒ the viewer falls back to the fitted box. table/cabinet/refrigerator
 ship assets (`table.obj`/`round_table.obj`, `cabinet.obj`, `fridge.obj`); **chair and bottle currently publish only a
 procedural `mesh_vertices` and need an OBJ asset added**.
 
@@ -702,8 +702,8 @@ cortex, then switch to `<foo_att>`. Don't add new `runtime_checked_*` sites.
 - [ ] All graph-attribute access is typed `<foo_att>` (zero `runtime_checked_*`).
 - [ ] Node created as type **`object`** with `object_subtype="<obj>"`; the agent's own query / stale-sweep /
       affordance-backstop key on `type()=="object"` + the `<obj>_` name prefix (NOT a per-class type).
-- [ ] Publishes `mesh_path` (bare OBJ/DAE filename in `voxelizer/meshes/`) + `mesh_texture_path` per instance;
-      the asset exists and is pre-normalised/oriented; the voxelizer draws it scaled to the fitted box.
+- [ ] Publishes `mesh_path` (bare OBJ/DAE filename in `retina/meshes/`) + `mesh_texture_path` per instance;
+      the asset exists and is pre-normalised/oriented; the retina draws it scaled to the fitted box.
 - [ ] Per-cycle **`FPSCounter fps_counter_.print("[<obj>_concept Compute]")`** on the last line of `compute()`
       → `std::cout` shows `Period/Fps/cpu%/mem` once/s. (`ev_g_.compute_hz` dashboard EMA is a complement, not a
       substitute.)

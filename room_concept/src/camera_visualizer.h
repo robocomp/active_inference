@@ -165,7 +165,7 @@ class CameraVisualizer : public QDialog
                                                             std::uint64_t rt_timestamp) const;
 
         // Oriented 3D box of a DSR object/table/cylinder node, with its 8 corners already
-        // transformed to the ROOM frame (same 8-corner convention as the voxelizer's
+        // transformed to the ROOM frame (same 8-corner convention as the retina's
         // GraphObjectBox: 0-3 = bottom face CCW, 4-7 = top face CCW). Drawn on top of the
         // room-layout overlay so every modelled object is projected onto the live image.
         struct ObjectBox

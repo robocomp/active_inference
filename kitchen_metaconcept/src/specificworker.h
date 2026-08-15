@@ -105,7 +105,7 @@ private:
     };
     MemberSnapshot poll_members();
     // Class of a generic "object" node: object_subtype when it names a known class, else the NAME
-    // prefix. Mirrors ring_metaconcept::object_class_of / voxelizer's object_class_of.
+    // prefix. Mirrors ring_metaconcept::object_class_of / retina's object_class_of.
     std::string object_class_of(const DSR::Node& node) const;
     // Class-evidence lookup: log[P(class | kitchen unit) / P(class | not)]; 0 for an unknown class.
     float class_logodds_of(const std::string& cls) const;

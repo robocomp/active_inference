@@ -25,7 +25,7 @@
 #include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
 
 GraphPublisher::GraphPublisher(std::shared_ptr<DSR::DSRGraph> graph,
-                               const VoxelizerParams& params,
+                               const RetinaParams& params,
                                std::function<void()> relayout)
     : G_(std::move(graph)), params_(params), relayout_(std::move(relayout))
 {}

@@ -54,10 +54,10 @@ bool MediaPlaneSource::init_media_plane(std::uint32_t domain_id,
     const bool depth_ok = media_depth_sub_->init(depth_cfg);
     if (!rgb_ok || !depth_ok)
     {
-        std::print(stderr, "[voxelizer] media plane subscriber init FAILED (rgb={}, depth={})\n", rgb_ok, depth_ok);
+        std::print(stderr, "[retina] media plane subscriber init FAILED (rgb={}, depth={})\n", rgb_ok, depth_ok);
         return false;
     }
-    std::print("[voxelizer] media plane ready rgb domain={} '{}' | depth domain={} '{}' data_sharing={}\n",
+    std::print("[retina] media plane ready rgb domain={} '{}' | depth domain={} '{}' data_sharing={}\n",
                rgb_cfg.domain_id, rgb_cfg.topic_name, depth_cfg.domain_id, depth_cfg.topic_name,
                media_rgb_sub_->data_sharing_active() && media_depth_sub_->data_sharing_active());
     start_ingest();   // from here on, frames are collected on arrival, not when perception asks
@@ -185,12 +185,12 @@ bool MediaPlaneSource::init_ricoh_media_plane(std::uint32_t domain_id, const std
         media_ricoh_sub_ = std::make_unique<rc::media::Image360Subscriber>();
         if (!media_ricoh_sub_->init(cfg))
         {
-            std::print(stderr, "[voxelizer] ricoh media subscriber init FAILED (domain={}, '{}')\n",
+            std::print(stderr, "[retina] ricoh media subscriber init FAILED (domain={}, '{}')\n",
                        domain_id, topic);
             media_ricoh_sub_.reset();
             return false;
         }
-        std::print("[voxelizer] ricoh media plane ready (fallback) domain={} '{}'\n", domain_id, topic);
+        std::print("[retina] ricoh media plane ready (fallback) domain={} '{}'\n", domain_id, topic);
     }
     return true;
 }
@@ -238,7 +238,7 @@ bool MediaPlaneSource::init_lidar_media_plane(DSR::InnerEigenAPI* inner_eigen, s
     lidar_use_media_ = use_media;
     if (!use_media)
     {
-        std::print("[voxelizer] lidar media plane DISABLED (Voxel.lidar_use_media=false) — no LiDAR source\n");
+        std::print("[retina] lidar media plane DISABLED (Voxel.lidar_use_media=false) — no LiDAR source\n");
         return false;
     }
 
@@ -249,7 +249,7 @@ bool MediaPlaneSource::init_lidar_media_plane(DSR::InnerEigenAPI* inner_eigen, s
     // SceneProcessor, whose configure() ran first) backs the device->robot RT transform.
     lidar_reader_ = std::make_unique<rc::media::LidarPlaneReader>(
         graph_, inner_eigen, std::vector<std::string>{"helios", "bpearl"}, "lidar3D", "lidar");
-    std::print("[voxelizer] lidar media plane ready (shared reader: helios+bpearl → robot, lidar3D fallback)\n");
+    std::print("[retina] lidar media plane ready (shared reader: helios+bpearl → robot, lidar3D fallback)\n");
     return true;
 }
 
@@ -301,7 +301,7 @@ std::optional<LidarData> MediaPlaneSource::get_lidar3D(const std::string& robot_
                 if (not np_logged and any_live)
                 {
                     np_logged = true;
-                    std::print("[voxelizer] lidar merge: {} plane(s) live -> feed counts a COMPLETE refresh of all {}\n",
+                    std::print("[retina] lidar merge: {} plane(s) live -> feed counts a COMPLETE refresh of all {}\n",
                                np, np);
                 }
                 if (any_live and all_advanced)

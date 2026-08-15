@@ -127,11 +127,11 @@ void SpecificWorker::request_shutdown()
 
 void SpecificWorker::initialize()
 {
-    qInfo() << "initialize voxelizer worker";
+    qInfo() << "initialize retina worker";
     GenericWorker::initialize();
 
     // --- Configuration ---
-    params = load_voxelizer_params(configLoader);
+    params = load_retina_params(configLoader);
     verbose_debug_ = params.VERBOSE_DEBUG;
 
     // Cap OpenCV's implicit thread pool. The per-cycle preprocessing (resize/split/convertTo of the

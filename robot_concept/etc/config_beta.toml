@@ -66,7 +66,7 @@ Emergency = 500
 # ──────────────────────────────────────────────────────────────────────────────
 
 [Presence]
-optional_agent_names = ["room_concept", "table_concept", "controller", "voxelizer", "bottle_concept"]
+optional_agent_names = ["room_concept", "table_concept", "controller", "retina", "bottle_concept"]
 config_dir = "etc"
 monitor_period_ms = 500
 heartbeat_timeout_ms = 15000  # match controller/room_concept; 3s was hypersensitive to graph-publish stalls
@@ -97,9 +97,9 @@ dsr_rgb_fps   = -1
 dsr_depth_fps = -1
 
 # Zero-copy RGBD media plane. Kept on a DEDICATED DDS domain (NOT the DSR
-# Agent.domain = 0) so media participant churn (e.g. a voxelizer restart) can
+# Agent.domain = 0) so media participant churn (e.g. a retina restart) can
 # never perturb the cortex/DSR discovery + graph-resync path. Must MATCH across
-# robot_concept (producer), voxelizer and room_concept (consumers).
+# robot_concept (producer), retina and room_concept (consumers).
 [Media]
 domain_id   = 7
 rgb_topic   = "rc/zed/rgb"
@@ -141,7 +141,7 @@ lidar_source = "dds"
 
 [Lidar]
 # Legacy DSR-graph lidar upload. <0 DISABLES it (default): lidar is published on the zero-copy
-# media plane (rc/lidar3d/points) and consumed there by room_concept + voxelizer. Set >=0 to
+# media plane (rc/lidar3d/points) and consumed there by room_concept + retina. Set >=0 to
 # re-enable the graph laser_* write at that fps (0 = unthrottled) for any consumer still reading the
 # graph — currently controller_obstacle_tracker. NOTE: 0 (unthrottled) floods the shared DSR/FastDDS
 # writer with the full cloud every scan, blocking G->update_node and starving the agent heartbeat

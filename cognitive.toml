@@ -3,8 +3,8 @@
 # desired world open (e.g. hallway_and_beta_noe.wbt: 28 chairs, 26 tables, 6 bottles).
 #
 # Launch order follows the DSR dependency graph (required_agent_names):
-#   robot_concept (bootstraps the graph from shadow.json) -> room_concept -> voxelizer
-#   -> table_concept / chair_concept -> bottle_concept (needs voxelizer) -> controller (last).
+#   robot_concept (bootstraps the graph from shadow.json) -> room_concept -> retina
+#   -> table_concept / chair_concept -> bottle_concept (needs retina) -> controller (last).
 # The per-agent required_agent_names gate keeps them correct even if they come up nearly together.
 
 [[components]]
@@ -18,9 +18,9 @@ cwd  = "~/robocomp/components/active_inference/room_concept"
 cmd  = "bin/room_concept etc/config_beta.toml"          # noe world: swap to etc/config_noe.toml if the room layout differs
 
 [[components]]
-name = "voxelizer"
-cwd  = "~/robocomp/components/active_inference/voxelizer"
-cmd  = "bin/voxelizer etc/config.toml"             # YOLO26l-seg -> mask_* attributes (table/chair/bottle) onto the DSR graph
+name = "retina"
+cwd  = "~/robocomp/components/active_inference/retina"
+cmd  = "bin/retina etc/config.toml"             # YOLO26l-seg -> mask_* attributes (table/chair/bottle) onto the DSR graph
 
 [[components]]
 name = "table_concept"

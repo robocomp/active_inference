@@ -104,7 +104,7 @@ std::optional<SceneBuilder::Classified> SceneBuilder::classify(const std::string
 	    or type == "camera")
 		return std::nullopt;
 	// Field/blob nodes are DATA PRODUCTS hung on the tree as a carrier, not things the room
-	// contains: the voxelizer's `semantic_grid` lives under `zed`, and residual_concept's `grid`
+	// contains: the retina's `semantic_grid` lives under `zed`, and residual_concept's `grid`
 	// ("residual") is an occupancy field. Neither has a footprint, so both drew as an anonymous
 	// sphere on the instances plane.
 	if (type == "semantic_grid" or type == "grid")
@@ -117,7 +117,7 @@ std::optional<SceneBuilder::Classified> SceneBuilder::classify(const std::string
 	if (type == "affordance" or name.starts_with("aff_"))
 		return Classified{Kind::Affordance, Glyph::Diamond};
 	// A concept OVER concepts carries its own DSR type — that is precisely what keeps it OUT of every
-	// consumer's get_nodes_by_type("object") sweep (the voxelizer would draw its footprint as a solid,
+	// consumer's get_nodes_by_type("object") sweep (the retina would draw its footprint as a solid,
 	// residual_concept would carve it) while this view, the one place a rig belongs, draws it. The
 	// subtype/name arm below is the legacy path for nodes born before the retype; ring_metaconcept
 	// still writes object_subtype="dining_set" (ring_config.h) as the CLASS.
@@ -292,7 +292,7 @@ Scene SceneBuilder::build()
 		node.cls     = class_of(n.type(), subtype, n.name());
 		node.kind    = kind;
 		node.glyph   = glyph;
-		// The agent owns its own appearance (same contract the voxelizer consumes); the viewer stays
+		// The agent owns its own appearance (same contract the retina consumes); the viewer stays
 		// type-agnostic and falls back to the synthetic glyph when no mesh is published.
 		node.mesh_path = g_->get_attrib_by_name<mesh_path_att>(n).value_or("");
 		// The robot predates that contract: shadow.json puts its mesh in `path`, relative to

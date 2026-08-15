@@ -1,7 +1,7 @@
 
 # --- Common Agent Data ---
 [Agent]
-id = 21 # unique across the shared graph (room=5 robot=6 table=7 ctrl=8 voxelizer=9 bottle=10
+id = 21 # unique across the shared graph (room=5 robot=6 table=7 ctrl=8 retina=9 bottle=10
         # kinova=11 self_calib=12 human=13 residual=14 door=15 scene_graph_viewer=16 chair=20
         # refrigerator=22 ring_metaconcept=23). A collision = CRDT actor clash → SIGSEGV.
 name = "cabinet_concept"

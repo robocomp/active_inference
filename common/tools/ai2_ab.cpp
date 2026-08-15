@@ -3,7 +3,7 @@
  *
  * Built for the mask FRAME-CONTRACT flip (masks moved to camera frame; the room transform now lives in
  * common/mask_ingestor), where the question is: does the transform done at the CONSUMER reproduce the
- * one the voxelizer used to bake into the points? But nothing here is specific to that change — it is a
+ * one the retina used to bake into the points? But nothing here is specific to that change — it is a
  * generic "did these two runs converge to the same geometry, and was one steadier than the other?".
  *
  * ★LOCALE (CLAUDE.md). These machines run LANG=es_ES.UTF-8, where the decimal separator is a COMMA.

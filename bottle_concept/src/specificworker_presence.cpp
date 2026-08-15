@@ -41,7 +41,7 @@ void SpecificWorker::degraded_loop()
 
 // ─── Primary-input (masks) stream gate ───────────────────────────────────────────────────────────
 // Mirrors table_concept/specificworker_presence.cpp (masks_stream_ready / masks_stream_stalled /
-// masks_stream_live), keyed on bottle's PRIMARY input (the voxelizer `masks` node).
+// masks_stream_live), keyed on bottle's PRIMARY input (the retina `masks` node).
 
 // Admission probe: the masks producer is reachable (node present + carrying a frame id). Usable from Waiting.
 bool SpecificWorker::masks_stream_ready(std::string *detail) const

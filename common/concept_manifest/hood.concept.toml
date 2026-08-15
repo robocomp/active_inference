@@ -18,7 +18,7 @@ name       = "hood"
 graph_type = "object"
 subtype    = "hood"
 agent_id   = 17
-label      = "hood"        # ADE20K-150; already in the voxelizer's accepted_labels (etc/config.toml:133)
+label      = "hood"        # ADE20K-150; already in the retina's accepted_labels (etc/config.toml:133)
 
 # ── Geometry — AUTHORITATIVE (read at startup, derives the vertical span) ──────────────────────────────
 #

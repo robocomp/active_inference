@@ -694,7 +694,7 @@ float CabinetFitter::run_inference(CabinetInstance& inst, const CabinetObservati
     // Static range weighting (motion-free). Even at zero camera motion, deprojection noise grows with
     // distance AND a far mask subtends a tiny angle, so pose — orientation most of all — becomes
     // unobservable: a 7 m view should confirm existence but never rotate a converged cabinet. The
-    // motion×distance term is already in last_motion_var (the voxelizer interaction matrix carries 1/Z),
+    // motion×distance term is already in last_motion_var (the retina interaction matrix carries 1/Z),
     // but that vanishes when still; this is the missing static part. Pure continuous covariance growth (no
     // gate): the per-frame information CAP (common-mode) rises with range, so the frame's yaw gain against a
     // converged prior shrinks smoothly toward zero. mask_range = mean camera→mask depth Z, from the producer.

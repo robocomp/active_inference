@@ -110,7 +110,7 @@ bool ControllerCameraMasks::ensure_intrinsics()
     const auto node = graph_->get_node(camera_node_);
     if (not node.has_value())
         return false;
-    // The DEPTH intrinsics, not the rgb ones — matching the voxelizer, which computes mask pixels on
+    // The DEPTH intrinsics, not the rgb ones — matching the retina, which computes mask pixels on
     // the RGBD frame these describe. Using a different pair would put the projected box in a slightly
     // different image from the silhouettes it is meant to be compared against, which is the one error
     // this overlay must not make.
@@ -152,7 +152,7 @@ bool ControllerCameraMasks::draw_target_pose(QPainter &p, const std::string &obj
     // ★THIS IS WHY THE MARKER LANDED IN THE WRONG PLACE. Asking for zed←object in ONE call pins the
     // WHOLE chain to the capture stamp, and that chain contains the rigid robot→zed camera mount,
     // which carries only its bootstrap timestamp — a per-frame Nearest query against it is answered
-    // from a single ancient entry, or not at all. The voxelizer composes room_T_zed the same way and
+    // from a single ancient entry, or not at all. The retina composes room_T_zed the same way and
     // says so in as many words (SceneProcessor::room_T_zed_extrapolated / get_room_zed_transform);
     // this overlay has to agree with the producer whose mask pixels it is drawing on, or the model and
     // the measurement are quoted in two different frames and comparing them is meaningless.
@@ -198,7 +198,7 @@ bool ControllerCameraMasks::draw_target_pose(QPainter &p, const std::string &obj
     constexpr double kNearY = 0.05;   // 5 cm: nearer than this the projection diverges
     const double cx = 0.5 * canvas.width(), cy = 0.5 * canvas.height();
     // zed frame: x right, y DEPTH, z up (CLAUDE.md / ROBOT_GEOMETRY.md). Exactly the inverse of the
-    // voxelizer's unprojection, so a point it turned into a mask pixel lands back on that pixel.
+    // retina's unprojection, so a point it turned into a mask pixel lands back on that pixel.
     // Takes a point ALREADY IN CAMERA COORDINATES: the two marks live in different frames and each
     // brings its own transform, so the projection itself must not assume either one.
     const auto project = [&](const Eigen::Vector3d &c, QPointF &out) -> bool
@@ -250,7 +250,7 @@ bool ControllerCameraMasks::draw_target_pose(QPainter &p, const std::string &obj
 
     // ── 1. THE OBJECT'S BELIEF: A STICK AND ITS AXES, ON THE OBJECT'S VERTICAL ────────────────────
     // ★THIS IS WHY THE BOX AND THE CIRCLE DREW NOTHING. A furniture node's RT origin sits at the FLOOR
-    // (the base-origin convention — see the z_lo note in the voxelizer's build_graph_object_box), the
+    // (the base-origin convention — see the z_lo note in the retina's build_graph_object_box), the
     // zed is mounted about 1.5 m up, and row = cy − fy·z/y. For an object 1 m away that puts the origin
     // roughly fy·1.5 pixels BELOW the image — comfortably off the bottom of a 720-row frame. Every
     // marker anchored at the origin was being drawn correctly, off-screen.
@@ -626,7 +626,7 @@ bool ControllerCameraMasks::pump(const std::string &target_object,
 
     QString stream_note;
     if (v.camera_live and not v.masks_live)
-        stream_note = age < 0 ? QStringLiteral("no masks frame yet — is the voxelizer running?")
+        stream_note = age < 0 ? QStringLiteral("no masks frame yet — is the retina running?")
                               : QStringLiteral("masks STALE (%1 ms) — producer stopped").arg(age);
     // BOTH, when both apply. The stream note used to overwrite the projection note outright, so a
     // stalled producer hid the reason the target box was missing — two independent faults, one slot.

@@ -6,7 +6,7 @@
  *  to gl_point_cloud_viewer.h: same camera machinery and XYZ axes, but a per-vertex-colour shader so
  *  joints are tinted by body region and bones drawn distinctly. Skeletons are pushed in via
  *  set_skeletons(); the widget is source-agnostic (robot_concept feeds it from the DSR 'skeleton'
- *  node's attributes). Bone topology + joint palette match the voxelizer's in-process skeleton draw.
+ *  node's attributes). Bone topology + joint palette match the retina's in-process skeleton draw.
  *
  *  Frame: the caller passes keypoints in the ZED camera frame (x-right, y-depth, z-up); this viewer
  *  maps them to OpenGL Y-up as (x, z, y) for display. NaN keypoints (missing depth) are skipped, and
@@ -315,7 +315,7 @@ private:
 		user_interacted_ = false;
 	}
 
-	// BODY_18 bone topology (ZED/OpenPose) — matches the voxelizer's in-process skeleton draw.
+	// BODY_18 bone topology (ZED/OpenPose) — matches the retina's in-process skeleton draw.
 	static constexpr int EDGES[17][2] = {
 		{1,0}, {0,14}, {14,16}, {0,15}, {15,17},
 		{1,2}, {2,3}, {3,4}, {1,5}, {5,6}, {6,7},
@@ -323,7 +323,7 @@ private:
 	};
 	static constexpr float BONE_RGB[3] = {0.10f, 0.95f, 0.95f};   // cyan
 	// Per-joint colour by body region (head=yellow, neck=white, shoulders=green, elbows=orange,
-	// wrists=red, hips=magenta, knees=blue, ankles=purple) — matches the voxelizer viewer.
+	// wrists=red, hips=magenta, knees=blue, ankles=purple) — matches the retina viewer.
 	static constexpr float JOINT_RGB[K][3] = {
 		{1.00f, 0.85f, 0.10f}, {1.00f, 1.00f, 1.00f}, {0.20f, 0.90f, 0.20f}, {1.00f, 0.55f, 0.00f},
 		{1.00f, 0.15f, 0.15f}, {0.20f, 0.90f, 0.20f}, {1.00f, 0.55f, 0.00f}, {1.00f, 0.15f, 0.15f},

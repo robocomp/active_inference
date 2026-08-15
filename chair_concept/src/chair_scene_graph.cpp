@@ -58,7 +58,7 @@ std::uint64_t ChairSceneGraph::create_instance_from_detection(const Eigen::Vecto
     // Generic `object` node named "chair_*"; class carried in object_subtype ("chair"). Every
     // get_nodes_by_type("object") MUST therefore be paired with a starts_with("chair") filter.
     DSR::Node chair_node = DSR::Node::create<object_node_type>(name);
-    // Display asset for the voxelizer 3D viewer (relative to its meshes/ root); the viewer loads & scales it
+    // Display asset for the retina 3D viewer (relative to its meshes/ root); the viewer loads & scales it
     // to the fitted box (cortex mesh_path contract — the agent owns its appearance). Empty/missing asset
     // falls back to the fitted box.
     G_->add_or_modify_attrib_local<mesh_path_att>(chair_node, std::string("chair_concept/meshes/chair.obj"));
@@ -111,7 +111,7 @@ void ChairSceneGraph::step_write_model(ChairInstance& inst, DSR::Node& node,
     const auto& s = inst.model.state();
 
     // Publish gate: only (re)write the geometry + mesh when the fitted dims/pose moved beyond a few
-    // mm / mrad since the last publish. The voxelizer renders the MESH attribute (not the coarsely
+    // mm / mrad since the last publish. The retina renders the MESH attribute (not the coarsely
     // dead-banded RT pose), rebuilt here every cycle from the raw fit — so writing it from the
     // sub-cm oscillating state each frame makes the viewer chair JITTER even though room→chair is
     // static. Freezing the mesh once settled removes the jitter. Mirrors bottle_concept's pub gate.
@@ -134,7 +134,7 @@ void ChairSceneGraph::step_write_model(ChairInstance& inst, DSR::Node& node,
         G_->add_or_modify_attrib_local<depth_m_att> (node, s.seat_d);
         G_->add_or_modify_attrib_local<height_m_att>(node, s.seat_h + s.back_h);
         G_->add_or_modify_attrib_local<model_generation_att>(node, ++inst.model_generation);
-        write_chair_mesh(inst, node);   // mesh for the voxelizer 3D viewer
+        write_chair_mesh(inst, node);   // mesh for the retina 3D viewer
         inst.last_pub_cx = s.cx; inst.last_pub_cy = s.cy;
         inst.last_pub_w  = s.seat_w;  inst.last_pub_h  = s.seat_d;
         inst.last_pub_H  = s.seat_h + s.back_h; inst.last_pub_yaw = s.yaw;
@@ -153,7 +153,7 @@ void ChairSceneGraph::step_write_model(ChairInstance& inst, DSR::Node& node,
     // offline harness. Both are local reads. It was only ever the graph traffic that had no consumer.
 
 
-    // Latest residual points (model-unexplained) for the voxelizer's residual layer — it reads
+    // Latest residual points (model-unexplained) for the retina's residual layer — it reads
     // residual_pts_att but nothing was writing it, so that layer was always empty.
     {
         std::vector<float> res_flat;
@@ -320,7 +320,7 @@ void ChairSceneGraph::write_rt_pose(std::uint64_t room_id, ChairInstance& inst)
         return;
 
     // Chair node origin = BASE on the floor (z=0), NOT the mid-height. Every consumer assumes a
-    // base origin: the voxelizer box (z∈[origin, origin+height]), and bottle_concept's chair-top
+    // base origin: the retina box (z∈[origin, origin+height]), and bottle_concept's chair-top
     // lookup + support decision (top = origin.z + height). Publishing z=chair_height/2 put the
     // origin at mid-height → chair_top came out as 1.5·height → bottles failed the support test,
     // parented to the room and floated. Keep the base on the floor so top = 0 + height = height.

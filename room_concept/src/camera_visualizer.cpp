@@ -70,7 +70,7 @@ Mat::Vector3d transform_room_point(const RoomToCameraBasis& basis, const Mat::Ve
 // RT feed stalls or a stamp is bogus, so the overlay can never run away from the image.
 constexpr double kMaxPredictHorizonS = 0.25;
 
-// Overlay colour per object category (mirrors the voxelizer's 3D-viewer palette intent:
+// Overlay colour per object category (mirrors the retina's 3D-viewer palette intent:
 // tables warm/orange, bottles cyan, generic objects green).
 QColor color_for_category(const std::string& category)
 {
@@ -166,7 +166,7 @@ void CameraVisualizer::start_media_plane()
     // Spin up the always-on ingest thread. With a RELIABLE reader, samples that are never
     // take()'d stay pinned in the producer's preallocated SHM pool; once it fills, the
     // producer's loan_sample() fails and it silently stops publishing, freezing every other
-    // consumer (e.g. the voxelizer). The thread drains continuously regardless of dialog
+    // consumer (e.g. the retina). The thread drains continuously regardless of dialog
     // visibility (rendering is still gated by isVisible() in update_frame()). It also owns
     // the lazy subscriber discovery, so DDS entity bring-up happens off the GUI thread —
     // serialized against the LiDAR ingest thread by media_transport's entity mutex.
@@ -479,7 +479,7 @@ std::vector<CameraVisualizer::ObjectBox> CameraVisualizer::get_dsr_object_boxes(
     if (!graph_ || !inner_eigen_api_)
         return boxes;
 
-    // Same node family the voxelizer draws in its 3D viewer: generic type()=="object" nodes (concept
+    // Same node family the retina draws in its 3D viewer: generic type()=="object" nodes (concept
     // agents publish tables/chairs/bottles/… as objects, class in object_subtype). Each carries
     // width/depth/height + a room←node RT edge; colour/label are derived per-node from object_subtype.
     const auto build_for = [&](const std::string& node_type)
@@ -511,7 +511,7 @@ std::vector<CameraVisualizer::ObjectBox> CameraVisualizer::get_dsr_object_boxes(
             const auto name_is = [&](std::string_view p) { return std::string_view(node.name()).starts_with(p); };
 
             // Floor-standing furniture (tables, chairs, fridges) anchors its node origin at the base → box
-            // extends upward [0, h]; free objects are center-anchored → [-h/2, h/2]. Matches the voxelizer.
+            // extends upward [0, h]; free objects are center-anchored → [-h/2, h/2]. Matches the retina.
             const bool stands_on_floor = subtype == "table" || subtype == "chair" || subtype == "refrigerator"
                                          || name_is("table") || name_is("chair") || name_is("refrigerator");
             const float z_lo = stands_on_floor ? 0.f     : -hh;

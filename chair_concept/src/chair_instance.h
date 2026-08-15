@@ -130,7 +130,7 @@ struct ChairInstance
     float last_written_cx   = std::numeric_limits<float>::max();
     float last_written_cy   = std::numeric_limits<float>::max();
     // Last GEOMETRY published to the graph (dims + mesh). Gates the per-cycle mesh/dim rewrite so a
-    // settled chair stops jittering the voxelizer mesh. Mirrors bottle_concept's last_pub_* publish gate.
+    // settled chair stops jittering the retina mesh. Mirrors bottle_concept's last_pub_* publish gate.
     float last_pub_cx  = std::numeric_limits<float>::max();
     float last_pub_cy  = std::numeric_limits<float>::max();
     float last_pub_w   = std::numeric_limits<float>::max();
@@ -174,7 +174,7 @@ struct ChairInstance
     float rig_prior_yaw  = 0.0f;    // rad, member convention
 
     // ── Appearance (DISPLAY ONLY) ─────────────────────────────────────────────────────────────────
-    // 3-DOF Gaussian over this chair's albedo CHROMATICITY, fed by the voxelizer's per-mask colour
+    // 3-DOF Gaussian over this chair's albedo CHROMATICITY, fed by the retina's per-mask colour
     // summary and consumed only by chair_scene_graph, which publishes its MAP as `mesh_color_rgb` for
     // the 3D viewer's mesh tint. Nothing in the AI2 belief, the association gate, the existence
     // log-odds or the yaw-mode test reads it — a channel built from tens of thousands of correlated

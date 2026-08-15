@@ -240,7 +240,7 @@ void SpecificWorker::initialize()
         // Required peers being up is necessary but NOT sufficient: without the LiDAR media plane the
         // localizer has no evidence and can never stabilize, so advancing to Operating would just look
         // like a silent hang. Hold in Waiting until the stream is advertised; on_waiting_loop re-checks
-        // every tick and advances the moment it appears (same shape as the voxelizer's room gate).
+        // every tick and advances the moment it appears (same shape as the retina's room gate).
         // Declines SILENTLY when the stream is missing — this fires on every presence event, so
         // logging here would spam. on_waiting_loop owns the (throttled) "why are we still waiting" line.
         .request_presence_ready = [this]()

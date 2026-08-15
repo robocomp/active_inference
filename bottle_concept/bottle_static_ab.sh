@@ -11,7 +11,7 @@
 # Prediction: with conf≈0.85 → w≈0.72 (Ref=0.95 in config.toml), the weighted run carries ~28% less
 # observation precision, so   σ_on / σ_off ≈ 1/sqrt(w) ≈ 1.18×   (a ~18% wider belief).
 #
-# Needs the full stack up (robot/room/voxelizer + Webots + bridges) and the convergence fix so the fit
+# Needs the full stack up (robot/room/retina + Webots + bridges) and the convergence fix so the fit
 # latches (frames_converged → K_stable). Mirrors bottle_static_test.sh conventions.
 #
 #   ./bottle_static_ab.sh [run_secs]      (default 25s/condition; fit settles in ~10-12s, +margin for K_stable=30)

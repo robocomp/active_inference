@@ -9,7 +9,7 @@
  * This helper predicts the pose FORWARD from the newest RT block to the scan stamp using the body-frame
  * velocity room_concept already writes on the robot->room RT edge (rt_translation_velocity=[adv,side,0],
  * rt_rotation_euler_xyz_velocity=[0,0,rot]) — the SAME efference-copy trick the controller overlay and the
- * voxelizer mask deprojection use. Consumer-side only; no producer change.
+ * retina mask deprojection use. Consumer-side only; no producer change.
  */
 
 #pragma once

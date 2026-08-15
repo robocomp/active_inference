@@ -45,10 +45,10 @@ Emergency = 500
 Verbose = false
 
 # ── Primary-input (masks) stream gate — LIFECYCLE liveness, not a belief knob ──────────────────────────
-# Demote Operating→Degraded→Waiting when the voxelizer's `masks` node stops advancing its mask_frame_id for
+# Demote Operating→Degraded→Waiting when the retina's `masks` node stops advancing its mask_frame_id for
 # this long (producer dead/stalled) — don't integrate stale evidence; re-admit automatically when it returns
 # (peers stay intact, so the agent never shuts down). Orthogonal to AI2AgeNominalDtS (belief-axis Σ-aging).
-# MUST exceed the voxelizer HOLD_ENTER_S so a legitimately empty scene (counter still advancing) never trips.
+# MUST exceed the retina HOLD_ENTER_S so a legitimately empty scene (counter still advancing) never trips.
 [Media]
 MasksStallTimeoutMs = 3000   # 0 = disable the stall gate
 

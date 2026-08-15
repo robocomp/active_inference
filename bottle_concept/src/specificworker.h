@@ -20,7 +20,7 @@
 /**
  * bottle_concept — Active Inference agent for bottle instance detection.
  *
- * Reads YOLO masks (the "masks" DSR node written by the voxelizer), selects the
+ * Reads YOLO masks (the "masks" DSR node written by the retina), selects the
  * slices labelled "bottle", and fits a vertical-cylinder generative model
  * (5-param state + cylinder SDF) by free-energy minimisation. The fitted pose
  * AND its Laplace-curvature covariance (P_bottle) are written on the room→bottle

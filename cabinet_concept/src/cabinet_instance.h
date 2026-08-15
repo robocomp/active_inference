@@ -135,7 +135,7 @@ struct CabinetInstance
     float last_written_cy = std::numeric_limits<float>::max();
     float last_written_z0 = std::numeric_limits<float>::max();   // tier switches move the run vertically
     // Last GEOMETRY published to the graph (dims + mesh). Gates the per-cycle mesh/dim rewrite so a settled
-    // cabinet stops jittering the voxelizer mesh. Mirrors bottle_concept's last_pub_* publish gate.
+    // cabinet stops jittering the retina mesh. Mirrors bottle_concept's last_pub_* publish gate.
     float last_pub_cx  = std::numeric_limits<float>::max();
     float last_pub_cy  = std::numeric_limits<float>::max();
     float last_pub_w   = std::numeric_limits<float>::max();

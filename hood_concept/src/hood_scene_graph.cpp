@@ -63,7 +63,7 @@ std::uint64_t HoodSceneGraph::create_instance_from_detection(const Eigen::Vector
 
     DSR::Node hood_node = DSR::Node::create<object_node_type>(name);
     G_->add_or_modify_attrib_local<object_subtype_att>(hood_node, std::string("hood"));
-    // Display asset for the voxelizer 3D viewer (relative to its meshes/ root). The agent owns its
+    // Display asset for the retina 3D viewer (relative to its meshes/ root). The agent owns its
     // appearance; the viewer loads & scales this to the fitted box (see cortex mesh_path contract).
     // ★A HOOD, not a fridge. The clone published hood_concept/meshes/fridge.obj — a path that both names
     // the wrong object and does not exist (hood_concept had no meshes/ at all), so every viewer fell back
@@ -120,14 +120,14 @@ bool HoodSceneGraph::persist_hood_belief(HoodInstance& inst, std::uint64_t node_
 
 // Write the full fitted model onto the node + RT edge: geometry attrs + mesh (gated on a real geometry move),
 // free energy, support-bank + residual point exports, the active-perception ROI/detection channel, then the RT
-// pose and pose covariance. The mesh gate freezes the voxelizer render once settled to stop viewer jitter.
+// pose and pose covariance. The mesh gate freezes the retina render once settled to stop viewer jitter.
 void HoodSceneGraph::step_write_model(HoodInstance& inst, DSR::Node& node,
                                        std::uint64_t room_id, float free_energy)
 {
     const auto& s = inst.model.state();
 
     // Publish gate: only (re)write the geometry + mesh when the fitted dims/pose moved beyond a few
-    // mm / mrad since the last publish. The voxelizer renders the MESH attribute (not the coarsely
+    // mm / mrad since the last publish. The retina renders the MESH attribute (not the coarsely
     // dead-banded RT pose), rebuilt here every cycle from the raw fit — so writing it from the
     // sub-cm oscillating state each frame makes the viewer hood JITTER even though room→hood is
     // static. Freezing the mesh once settled removes the jitter. Mirrors bottle_concept's pub gate.
@@ -153,14 +153,14 @@ void HoodSceneGraph::step_write_model(HoodInstance& inst, DSR::Node& node,
         // LiDAR carve) are internal to inference, and this is the one anybody could actually SEE.
         G_->add_or_modify_attrib_local<height_m_att>(node, cfg_.vertical_extent_m);
         G_->add_or_modify_attrib_local<model_generation_att>(node, ++inst.model_generation);
-        write_hood_mesh(inst, node);   // mesh for the voxelizer 3D viewer
+        write_hood_mesh(inst, node);   // mesh for the retina 3D viewer
         inst.last_pub_cx = s.cx; inst.last_pub_cy = s.cy;
         inst.last_pub_w  = s.w;  inst.last_pub_h  = s.h;
         inst.last_pub_H  = s.z_top; inst.last_pub_yaw = s.yaw;
     }
     G_->add_or_modify_attrib_local<free_energy_att>(node, free_energy);
     // Inferred shape subtype (round/square), chosen by free-energy model evidence in HoodFitter::evaluate_shape.
-    // The voxelizer reads this to render the matching mesh (disc vs box).
+    // The retina reads this to render the matching mesh (disc vs box).
     G_->add_or_modify_attrib_local<object_subtype_att>(node, inst.subtype);
 
     // The accumulated support bank is NOT published. It never was voxels: the points are the 3-D support of
@@ -189,7 +189,7 @@ void HoodSceneGraph::step_write_model(HoodInstance& inst, DSR::Node& node,
         }
     }
 
-    // Latest residual points (model-unexplained) for the voxelizer's residual layer — it reads
+    // Latest residual points (model-unexplained) for the retina's residual layer — it reads
     // residual_pts_att but nothing was writing it, so that layer was always empty.
     {
         std::vector<float> res_flat;
@@ -340,7 +340,7 @@ void HoodSceneGraph::write_rt_pose(std::uint64_t room_id, HoodInstance& inst)
         return;
 
     // Hood node origin = BASE on the floor (z=0), NOT the mid-height. Every consumer assumes a
-    // base origin: the voxelizer box (z∈[origin, origin+height]), and bottle_concept's hood-top
+    // base origin: the retina box (z∈[origin, origin+height]), and bottle_concept's hood-top
     // lookup + support decision (top = origin.z + height). Publishing z=hood_height/2 put the
     // origin at mid-height → hood_top came out as 1.5·height → bottles failed the support test,
     // parented to the room and floated. Keep the base on the floor so top = 0 + height = height.

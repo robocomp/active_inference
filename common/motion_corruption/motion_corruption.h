@@ -6,7 +6,7 @@
  * the consumer cannot reconstruct without the capture-time ego-motion, exposure and timing.
  * This file is the SINGLE place that owns that math (mirrors the YOLO-score→covariance map):
  *
- *   producer (voxelizer) — has exposure, accurate capture stamp, camera twist at capture, and the
+ *   producer (retina) — has exposure, accurate capture stamp, camera twist at capture, and the
  *                          raw image-plane mask geometry → computes the corruption DECOMPOSITION.
  *   common/ (here)       — the interaction-matrix → (dot_d, bias, variance) math, stateless/pure.
  *   consumer (concept)   — decides gate-vs-downweight (per-concept b_max), per-DOF split, and folds
@@ -19,7 +19,7 @@
  * and a timing OFFSET (biased → the consumer should gate on it). See EFE/perception notes.
  *
  * Convention: the interaction matrix is in the STANDARD optical frame (x right, y DOWN, z FORWARD along
- * the optical axis). The voxelizer's zed frame is (x right, y forward/depth, z up); convert the twist
+ * the optical axis). The retina's zed frame is (x right, y forward/depth, z up); convert the twist
  * with vcam_to_optical() before calling mask_corruption().
  */
 
@@ -72,7 +72,7 @@ inline Twist body_twist_from_poses(const Eigen::Matrix3f& R_prev, const Eigen::V
     return tw;
 }
 
-// Map a twist from the voxelizer zed frame (x right, y forward/depth, z up) into the standard optical
+// Map a twist from the retina zed frame (x right, y forward/depth, z up) into the standard optical
 // frame (x right, y down, z forward): x_o=x, y_o=-z, z_o=y. Same map applies to linear and angular.
 inline Twist vcam_to_optical(const Twist& t)
 {

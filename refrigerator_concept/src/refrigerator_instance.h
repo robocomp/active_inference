@@ -110,7 +110,7 @@ struct RefrigeratorInstance
     float last_written_yaw = std::numeric_limits<float>::max();
     float last_written_cy = std::numeric_limits<float>::max();
     // Last GEOMETRY published to the graph (dims + mesh). Gates the per-cycle mesh/dim rewrite so a settled
-    // refrigerator stops jittering the voxelizer mesh. Mirrors bottle_concept's last_pub_* publish gate.
+    // refrigerator stops jittering the retina mesh. Mirrors bottle_concept's last_pub_* publish gate.
     float last_pub_cx  = std::numeric_limits<float>::max();
     float last_pub_cy  = std::numeric_limits<float>::max();
     float last_pub_w   = std::numeric_limits<float>::max();
@@ -127,7 +127,7 @@ struct RefrigeratorInstance
     bool cloud_dumped = false;   // one-shot guard for the diagnostic support-bank dump (cfg_.dump_cloud_path)
 
     // ── Shape model-selection (round vs square), set by RefrigeratorFitter::evaluate_shape ──────────────
-    // Published as the node's object_subtype string (the voxelizer renders the matching mesh). Chosen by
+    // Published as the node's object_subtype string (the retina renders the matching mesh). Chosen by
     // free-energy / model evidence, NOT a threshold: shape_evidence is a bounded accumulated log-Bayes-
     // factor (round − square) over periodic support-bank comparisons; subtype flips at the zero boundary.
     std::string subtype        = "refrigerator";   // CLASS discriminator (object_subtype); constant for this agent

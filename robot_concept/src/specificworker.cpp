@@ -931,7 +931,7 @@ void SpecificWorker::read_rgbd_thread()
 				const auto &img = frame.image;
 				// Tag the TRUE channel order: the Webots-shadow bridge (our live CameraRGBDSimple source)
 				// delivers RGB-ordered bytes, so publish them as FORMAT_RGB8. Consumers with an RGB8 path
-				// (voxelizer RGB2BGR, the room/robot viewers no-swap) then get correct colours without the
+				// (retina RGB2BGR, the room/robot viewers no-swap) then get correct colours without the
 				// per-consumer BGR8 workaround. If a real ZED emitting true BGR is ever bridged here, tag
 				// FORMAT_BGR8 for that source instead (drive it from config rather than hard-coding).
 				media_.publish_image("rgb", {
@@ -1222,7 +1222,7 @@ void SpecificWorker::wire_agent_status_overlay()
 	// Display-only horizon, INTENTIONALLY decoupled from Presence.heartbeat_timeout_ms. That one is
 	// deliberately long (15-25 s across the fleet) because acting on a short silence — declaring a
 	// required peer lost and shutting down — proved hypersensitive to graph-publish stalls and to the
-	// voxelizer's restart window. Greying a node early costs nothing and is undone the moment the
+	// retina's restart window. Greying a node early costs nothing and is undone the moment the
 	// heartbeat resumes, so the display gets its own, much shorter knob.
 	const int stale_after_ms = configLoader.exists("Presence.stale_display_ms")
 	                         ? configLoader.get<int>("Presence.stale_display_ms")
@@ -1290,8 +1290,8 @@ void SpecificWorker::open_stream_viewer(std::uint64_t node_id, const std::string
 	else if (node_name == "semantic")
 	{
 		// Dense ADE20K-150 label map lives as attributes on the node (semantic_labels/width/height),
-		// published low-freq by the voxelizer → colourise + hover-readout from G, no media plane.
-		// NB: the voxelizer's semantic/skeleton/masks nodes all share type "semantic_grid", so these
+		// published low-freq by the retina → colourise + hover-readout from G, no media plane.
+		// NB: the retina's semantic/skeleton/masks nodes all share type "semantic_grid", so these
 		// branch on node NAME, not type.
 		viewer = new rc::viewers::SemanticGridViewer(G, node_id, "semantic — ADE20K label map (graph)");
 	}
@@ -1304,7 +1304,7 @@ void SpecificWorker::open_stream_viewer(std::uint64_t node_id, const std::string
 	else if (node_name == "residual")   // node renamed "grid"→"residual" (type stays "grid")
 	{
 		// residual_concept's Beta occupancy belief field (grid_occupancy_prob/var + meta) + occupied/
-		// border cell layers → 3D risk-column field, mirroring the voxelizer residual display.
+		// border cell layers → 3D risk-column field, mirroring the retina residual display.
 		viewer = new rc::viewers::GridNodeViewer(G, node_id, "residual — belief field (graph)");
 	}
 
@@ -1437,7 +1437,7 @@ void SpecificWorker::read_ricoh_thread()
 
 			// Publish the RGB panorama on the wide Image360Frame plane. The Camera360RGB source is
 			// webots-derived and delivers RGB-ordered bytes (same as the ZED path above), so tag the
-			// TRUE order IMG360_FORMAT_RGB8. Consumers' RGB8 path (voxelizer RGB2BGR) then yields correct
+			// TRUE order IMG360_FORMAT_RGB8. Consumers' RGB8 path (retina RGB2BGR) then yields correct
 			// colours without the BGR8 workaround. Tag BGR8 only for a source that emits genuine BGR.
 			if (media_.image360_ready())
 			{
@@ -1531,6 +1531,27 @@ void SpecificWorker::read_imu_thread()
 			last_imu_stamp_ms = stamp_ms;
 		}
 
+		// --- DSR: mirror the sample into the graph, on arrival, off the timer ---
+		// The media plane is a one-way DDS stream; an agent that needs the IMU to propagate a pose
+		// between slower optimized estimates reads it from the graph instead. Both clocks and the
+		// simulated flag go with it: the gyro is rad per SIMULATION second when it comes from a
+		// simulator, so whoever integrates it must integrate over imu_sim_time_stamp, and reading the
+		// flag off the sample beats every consumer carrying its own SIM/REAL config switch.
+		if (auto imu_node = G->get_node(robot_name); imu_node.has_value())
+		{
+			const std::vector<float> acc {data.acc.XAcc,  data.acc.YAcc,  data.acc.ZAcc};
+			const std::vector<float> gyr {data.gyro.XGyr, data.gyro.YGyr, data.gyro.ZGyr};
+			const std::vector<float> rpy {data.rot.Roll,  data.rot.Pitch, data.rot.Yaw};
+			G->add_or_modify_attrib_local<imu_accelerometer_att>(imu_node.value(), acc);
+			G->add_or_modify_attrib_local<imu_gyroscope_att>(imu_node.value(), gyr);
+			G->add_or_modify_attrib_local<imu_angular_euler_xyz_pose_att>(imu_node.value(), rpy);
+			G->add_or_modify_attrib_local<imu_time_stamp_att>(imu_node.value(), stamp_ms);
+			G->add_or_modify_attrib_local<imu_sim_time_stamp_att>(imu_node.value(),
+				static_cast<std::uint64_t>(data.gyro.simTimestamp));
+			G->add_or_modify_attrib_local<imu_simulated_att>(imu_node.value(), data.gyro.simulated);
+			rc::safe_update_node(*G, std::move(imu_node.value()));
+		}
+
 		// --- Media plane: publish the IMU sample (tiny fixed payload), stamped per-frame ---
 		if (media_.imu_ready())
 		{
@@ -1568,6 +1589,14 @@ void SpecificWorker::FullPoseEstimationPub_newFullPose(RoboCompFullPoseEstimatio
 		G->add_or_modify_attrib_local<robot_current_side_speed_att>(pose_node.value(), pose.side);
 		G->add_or_modify_attrib_local<robot_current_angular_speed_att>(pose_node.value(), pose.rot);
 		G->add_or_modify_attrib_local<robot_current_speed_timestamp_att>(pose_node.value(), static_cast<unsigned long>(pose.timestamp));
+		// Carry the producer's simulation clock through as well. The velocities above are per
+		// SIMULATION second when they come from a simulator, so a consumer integrating them -- a
+		// high-rate propagation between optimized poses, say -- has to integrate over this clock, not
+		// over the wall stamp, or it over-counts by however far the sim is running behind real time.
+		// The wall stamp stays authoritative for latency and staleness. Passing the flag rather than a
+		// config setting means each consumer reads the answer off the sample itself.
+		G->add_or_modify_attrib_local<robot_current_speed_sim_timestamp_att>(pose_node.value(), static_cast<unsigned long>(pose.simTimestamp));
+		G->add_or_modify_attrib_local<robot_current_speed_simulated_att>(pose_node.value(), pose.simulated);
 		// pose_node is not read after this; move it so update_node forwards
 		// the rvalue into the engine (no deep blob copy under the graph mutex).
 		rc::safe_update_node(*G, std::move(pose_node.value()));

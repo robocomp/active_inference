@@ -51,7 +51,7 @@ void SpecificWorker::degraded_loop()
 
 // ─── Primary-input (masks) stream gate ───────────────────────────────────────────────────────────
 // Mirrors room_concept/specificworker_presence.cpp:14-41 (lidar_stream_ready / lidar_stream_stalled),
-// keyed on hood's PRIMARY input (the voxelizer `masks` node) instead of a LiDAR media plane.
+// keyed on hood's PRIMARY input (the retina `masks` node) instead of a LiDAR media plane.
 
 // Admission probe: the masks producer is reachable (node present + carrying a frame id). Usable from Waiting.
 bool SpecificWorker::masks_stream_ready(std::string *detail) const

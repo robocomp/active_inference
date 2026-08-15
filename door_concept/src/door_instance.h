@@ -175,7 +175,7 @@ struct DoorInstance
     float last_written_cx   = std::numeric_limits<float>::max();
     float last_written_cy   = std::numeric_limits<float>::max();
     // Last GEOMETRY published to the graph (dims + mesh). Gates the per-cycle mesh/dim rewrite so a
-    // settled door stops jittering the voxelizer mesh. Mirrors bottle_concept's last_pub_* publish gate.
+    // settled door stops jittering the retina mesh. Mirrors bottle_concept's last_pub_* publish gate.
     float last_pub_cx  = std::numeric_limits<float>::max();
     float last_pub_cy  = std::numeric_limits<float>::max();
     float last_pub_w   = std::numeric_limits<float>::max();

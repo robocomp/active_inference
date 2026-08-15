@@ -18,11 +18,11 @@
  */
 
 
-/** \mainpage RoboComp::voxelizer
+/** \mainpage RoboComp::retina
  *
  * \section intro_sec Introduction
  *
- * The voxelizer component...
+ * The retina component...
  *
  * \section interface_sec Interface
  *
@@ -34,7 +34,7 @@
  * ...
  *
  * \subsection install2_ssec Compile and install
- * cd voxelizer
+ * cd retina
  * <br>
  * cmake . && make
  * <br>
@@ -52,7 +52,7 @@
  *
  * \subsection execution_ssec Execution
  *
- * Just: "${PATH_TO_BINARY}/voxelizer --Ice.Config=${PATH_TO_CONFIG_FILE}"
+ * Just: "${PATH_TO_BINARY}/retina --Ice.Config=${PATH_TO_CONFIG_FILE}"
  *
  * \subsection running_ssec Once running
  *
@@ -81,15 +81,15 @@
 
 #define USE_QTGUI
 
-#define PROGRAM_NAME    "voxelizer"
-#define SERVER_FULL_NAME   "RoboComp voxelizer::voxelizer"
+#define PROGRAM_NAME    "retina"
+#define SERVER_FULL_NAME   "RoboComp retina::retina"
 
 
 
-class voxelizer : public Ice::Application
+class retina : public Ice::Application
 {
 public:
-	voxelizer (QString configFile, QString prfx, bool startup_check) { 
+	retina (QString configFile, QString prfx, bool startup_check) { 
 		this->configFile = configFile.toStdString();
 		this->prefix = prfx.toStdString();
 		this->startup_check_flag=startup_check; 
@@ -110,7 +110,7 @@ public:
 	virtual int run(int, char*[]);
 };
 
-Ice::InitializationData voxelizer::getInitializationDataIce(){
+Ice::InitializationData retina::getInitializationDataIce(){
         Ice::InitializationData initData;
         initData.properties = Ice::createProperties();
         initData.properties->setProperty("Ice.Warn.Connections", this->configLoader.get<std::string>("Ice.Warn.Connections"));
@@ -120,14 +120,14 @@ Ice::InitializationData voxelizer::getInitializationDataIce(){
 		return initData;
 }
 
-void voxelizer::initialize()
+void retina::initialize()
 {
     this->configLoader.load(this->configFile);
 	this->configLoader.printConfig();
 	std::cout<<std::endl;
 }
 
-int voxelizer::run(int argc, char* argv[])
+int retina::run(int argc, char* argv[])
 {
 #ifdef USE_QTGUI
 	QApplication a(argc, argv);  // GUI application
@@ -234,7 +234,7 @@ int main(int argc, char* argv[])
 		}
 
 	}
-	voxelizer app(configFile, prefix, startup_check_flag);
+	retina app(configFile, prefix, startup_check_flag);
 
 	return app.main(argc, argv, app.getInitializationDataIce());
 }

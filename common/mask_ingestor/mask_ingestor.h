@@ -2,7 +2,7 @@
  * common/mask_ingestor/mask_ingestor.h
  *
  * Shared perception input layer for the concept agents (bottle/table/chair/…): reads the YOLO
- * "masks" DSR node (written by the voxelizer), parses it into per-instance mask slices + support
+ * "masks" DSR node (written by the retina), parses it into per-instance mask slices + support
  * points + raw 2D silhouette pixels, and serves the nearest slice of a requested label to a query
  * centroid. Object-AGNOSTIC: the caller passes the query point + label, so this is a single shared
  * file (no <Obj>Instance dependency). Also reads the per-node candidate/residual point attributes.
@@ -10,7 +10,7 @@
  * Owns the parsed MasksPacket (and the last-seen frame guard); consumers read it read-only via
  * packet(). Plain class (no Q_OBJECT) constructed by SpecificWorker once G is ready.
  *
- * FRAME CONTRACT (this class IS the single agreement point with the voxelizer producer):
+ * FRAME CONTRACT (this class IS the single agreement point with the retina producer):
  *   The producer publishes mask support points in the ZED/CAMERA frame — the raw deprojection, before
  *   any pose is applied ("mask_support_points_cam"). THE ROOM TRANSFORM HAPPENS HERE, not at the
  *   producer: this class reads the camera points and transforms them zed→"room" via inner_eigen,
@@ -18,7 +18,7 @@
  *   centroid/bbox attribute exists or is needed for that reason.
  *
  *   ★WHY THE CONSUMER PAYS FOR THE TRANSFORM, NOT THE PRODUCER. Baking room_T_zed at the producer made
- *   a RAW-PERCEPTION component depend on a LOCALIZATION component: the voxelizer could not run at all
+ *   a RAW-PERCEPTION component depend on a LOCALIZATION component: the retina could not run at all
  *   without room_concept, it grew a forward pose-extrapolator purely to beat the room→robot RT lag, and
  *   when the RT chain failed to resolve it published camera-frame points LABELLED as room frame (an
  *   identity fallback with no attribute to distinguish it). It also hid the localization uncertainty:
@@ -28,7 +28,7 @@
  *   without paying localization noise"); masks were the last holdout.
  *
  *   Legacy: "mask_support_points" (ROOM frame) is still read when the producer publishes it and the
- *   camera array is absent, so an OLD voxelizer keeps working. Set MASK_INGESTOR_LEGACY_ROOM=1 in the
+ *   camera array is absent, so an OLD retina keeps working. Set MASK_INGESTOR_LEGACY_ROOM=1 in the
  *   environment to force that path for an A/B against the transform done here — the two must agree to
  *   float precision, since it is the same matrix at the same timestamp, one process later.
  */
@@ -55,7 +55,7 @@ class MaskIngestor
 public:
     // One detected instance: label + pose + [begin,end) ranges into the packet's shared point/pixel arrays,
     // plus the per-mask corruption/range/bearing channels the consumers fold into R and the common-mode.
-    // Which sensor produced a mask. Values match the voxelizer's `mask_source` attribute exactly.
+    // Which sensor produced a mask. Values match the retina's `mask_source` attribute exactly.
     enum class MaskSource : int { zed = 0, ricoh = 1 };
 
     struct MaskSlice
@@ -71,7 +71,7 @@ public:
         std::size_t pixel_begin = 0;   // raw 2D mask pixel range (into MasksPacket::mask_pixels)
         std::size_t pixel_end = 0;
         // Ego-motion capture-corruption channel (see ../MASK_MOTION_CORRUPTION.md). Per-mask, written by
-        // the voxelizer producer; 0 when the producer predates the feature (backward-compatible).
+        // the retina producer; 0 when the producer predates the feature (backward-compatible).
         float motion_var      = 0.0f;  // variance to ADD to R (m²): exposure blur + timing jitter, ×peripheral
         float motion_bias     = 0.0f;  // systematic displacement from a known timing offset (m) → GATE if large
         float motion_dotd     = 0.0f;  // metric position-corruption speed Z·‖ṡ‖ (m/s), diagnostic
@@ -109,7 +109,7 @@ public:
         // variance for ricoh masks depth-filled from reprojected lidar (grows as hits get sparse/scattered,
         // → the mask degrades back toward bearing-only). 0 when the producer predates the field.
         float depth_var        = 0.0f;
-        // Appearance channel (voxelizer MaskColor.*, consumed by common/appearance_belief for the agent's
+        // Appearance channel (retina MaskColor.*, consumed by common/appearance_belief for the agent's
         // DISPLAY-mesh tint — no geometric fit reads it). color_chroma is the slice's median CHROMATICITY
         // (R,G,B)/(R+G+B), which is invariant to the per-frame illumination gain by construction; the
         // renderer applies its own shading, so raw RGB would be double-shaded. color_var is the scatter
@@ -202,7 +202,7 @@ public:
     std::vector<Eigen::Vector3f> read_pts_attrib(const DSR::Node& node, const std::string& att_name) const;
 
 private:
-    // tgt←src at the mask capture stamp, reproducing the chain the voxelizer used to apply internally:
+    // tgt←src at the mask capture stamp, reproducing the chain the retina used to apply internally:
     // tgt←robot pinned to the stamp and forward-extrapolated over the RT lag, composed with the STATIC
     // robot←src camera mount. nullopt when the chain is not resolvable — callers must DROP the frame,
     // never substitute identity. Falls back to a direct tgt←src lookup when the chain cannot be split.

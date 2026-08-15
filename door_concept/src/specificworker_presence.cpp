@@ -38,7 +38,7 @@ void SpecificWorker::degraded_loop()
 }
 
 // ─── Primary-input (masks) stream gate ───────────────────────────────────────────────────────────
-// Mirrors table_concept/specificworker_presence.cpp, keyed on door's PRIMARY input (the voxelizer
+// Mirrors table_concept/specificworker_presence.cpp, keyed on door's PRIMARY input (the retina
 // `masks` node) instead of a LiDAR media plane.
 
 // Admission probe: the masks producer is reachable (node present + carrying a frame id). Usable from Waiting.

@@ -4,8 +4,8 @@
  *  SemanticMapViewer — a pure (non-Q_OBJECT) QLabel that renders a dense ADE20K-150
  *  per-pixel class-id map as a colour image and reports the class name under the cursor.
  *
- *  This is the renderer half of robot_concept's "View data" viewer for the voxelizer's
- *  'semantic' (type semantic_grid) node. It mirrors what the voxelizer's YoloViewer shows
+ *  This is the renderer half of robot_concept's "View data" viewer for the retina's
+ *  'semantic' (type semantic_grid) node. It mirrors what the retina's YoloViewer shows
  *  in-process: the SAME canonical ADE20K SceneParse150 colormap for the colour image and
  *  the SAME class-name table for the hover readout, so the graph viewer and the producer
  *  window agree pixel-for-pixel. It is self-contained (no OpenCV, no cortex) so it can live
@@ -35,7 +35,7 @@ namespace rc::viewers
 
 // Canonical ADE20K (MIT SceneParse150 / mmsegmentation) colormap: one DISTINCT colour per
 // class id, in [R,G,B] order. Indexed by class id (0=wall … 149=flag). Copied verbatim from
-// the voxelizer's compose_semantic_canvas so the two views match.
+// the retina's compose_semantic_canvas so the two views match.
 inline const std::array<std::array<std::uint8_t, 3>, 150> &ade20k_palette()
 {
 	static const std::array<std::array<std::uint8_t, 3>, 150> palette = {{
@@ -69,7 +69,7 @@ inline const std::array<std::array<std::uint8_t, 3>, 150> &ade20k_palette()
 }
 
 // ADE20K SceneParse150 label set in model class-id order (0 = wall … 149 = flag). Copied
-// verbatim from the voxelizer's YoloSemanticSegmenter::default_class_names().
+// verbatim from the retina's YoloSemanticSegmenter::default_class_names().
 inline const std::vector<std::string> &ade20k_class_names()
 {
 	static const std::vector<std::string> names = {

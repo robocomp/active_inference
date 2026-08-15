@@ -5,13 +5,13 @@ Webots2Robocomp = "webots2robocomp:tcp -h localhost -p 15010"
 
 # --- Common Agent Data ---
 [Agent]
-id = 11 # MUST be unique across the shared graph: room=5 robot=6 voxelizer=9 bottle=10. id=9 collided with the voxelizer → CRDT actor-id clash → voxelizer SIGSEGV when the controller joined.
+id = 11 # MUST be unique across the shared graph: room=5 robot=6 retina=9 bottle=10. id=9 collided with the retina → CRDT actor-id clash → retina SIGSEGV when the controller joined.
 name = "kinova_controller"
 
 # --- Single Instance Configuration ---
 # Use this if you only have one graph.
 configFile = ""  # Option-A: JOIN the shared graph bootstrapped by robot_concept (robot_concept/shadow.json holds Shadow/body/room/table/kinova_arm_r). Empty ⇒ no local bootstrap. (kinova2.json was the old standalone world for bottle_from_graph=false)
-domain = 0 # Option-A: MUST match the perception agents (room/robot_concept, voxelizer, bottle_concept all on 0) to share the DSR graph. Was 1 for isolated standalone runs.
+domain = 0 # Option-A: MUST match the perception agents (room/robot_concept, retina, bottle_concept all on 0) to share the DSR graph. Was 1 for isolated standalone runs.
 tree = false
 graph = true
 2d = false

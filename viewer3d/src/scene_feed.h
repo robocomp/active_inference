@@ -2,10 +2,10 @@
 
 /*
  * scene_feed.h — reads the shared DSR graph (+ the LiDAR media plane) and pushes what it finds into
- * the 3-D metric view. Split out of voxelizer/src/scene_processor.cpp, whose viewer-feeding half this
+ * the 3-D metric view. Split out of retina/src/scene_processor.cpp, whose viewer-feeding half this
  * is, verbatim in behaviour.
  *
- * ★WHY THIS IS NOT IN THE VOXELIZER ANY MORE. Nothing it draws is the voxelizer's: the room polygon is
+ * ★WHY THIS IS NOT IN THE RETINA ANY MORE. Nothing it draws is the retina's: the room polygon is
  * room_concept's, the object boxes and display meshes belong to the concept agents, the skeletons to
  * human_concept, the occupancy grid to residual_concept, the LiDAR to the media plane. The single
  * exception is the YOLO mask cloud, and that arrives through the graph like everything else. A
@@ -14,7 +14,7 @@
  * agent, YOLO included, gated behind localization.
  *
  * FRAME. Everything is drawn in the ROOM frame; the GL widget applies its own room→GL axis swap. The
- * mask cloud is the one input that arrives in CAMERA frame (the voxelizer publishes the raw
+ * mask cloud is the one input that arrives in CAMERA frame (the retina publishes the raw
  * deprojection now), so this class transforms it, pinned to the mask capture stamp — not to "latest",
  * or the cloud lags the robot pose and shimmers under motion.
  *
@@ -77,7 +77,7 @@ private:
     std::vector<GraphObjectBox> get_graph_object_boxes(const std::string& room_name,
                                                        std::uint64_t timestamp_ms) const;
     // Forward-extrapolate room←robot over the RT lag, then compose the static robot←zed mount. Same
-    // correction the voxelizer applies to its own transforms; without it the mask cloud is drawn
+    // correction the retina applies to its own transforms; without it the mask cloud is drawn
     // against a pose ~90 ms stale, which reads as shimmer under rotation.
     void forward_extrapolate_room_T_robot(Mat::RTMat& room_T_robot, const std::string& room_name,
                                           const std::string& robot_name, std::uint64_t timestamp_ms) const;

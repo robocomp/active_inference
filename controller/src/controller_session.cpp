@@ -2747,7 +2747,7 @@ ControllerSession::TrackingLive ControllerSession::live_tracking() const
 
 // The perception producer's monotonic frame counter, so the servo can wait for looks taken AFTER the
 // base stopped instead of guessing the pipeline's latency with a fixed dwell. -1 when unavailable, and
-// the servo then falls back to that dwell — the controller must not need the voxelizer to run.
+// the servo then falls back to that dwell — the controller must not need the retina to run.
 // A COUNTER, not a timestamp, on purpose: mask_timestamp_ms is the camera's clock and this is the
 // controller's, and nothing in the fleet guarantees the two agree. A counter needs no such agreement.
 // mask_frame_id advances on every published camera frame even when the scene is empty, so "2 new

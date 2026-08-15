@@ -1,12 +1,12 @@
 /*
- * voxelizer_params.cpp — load_voxelizer_params (config → VoxelizerParams).
+ * retina_params.cpp — load_retina_params (config → RetinaParams).
  */
 
-#include "voxelizer_params.h"
+#include "retina_params.h"
 
-VoxelizerParams load_voxelizer_params(const ConfigLoader& configLoader)
+RetinaParams load_retina_params(const ConfigLoader& configLoader)
 {
-    VoxelizerParams params;
+    RetinaParams params;
 
     rc::ConfigLoaderUtils::load_optional(configLoader, "Yolo.model_path", params.YOLO_MODEL_PATH);
     rc::ConfigLoaderUtils::load_optional(configLoader, "Yolo.accepted_labels", params.YOLO_ACCEPTED_LABELS);
@@ -83,7 +83,7 @@ VoxelizerParams load_voxelizer_params(const ConfigLoader& configLoader)
     rc::ConfigLoaderUtils::load_optional(configLoader, "RicohDepth.decimation", params.RICOH_DEPTH_DECIMATION);
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RicohDepth.overlay_alpha", params.RICOH_DEPTH_OVERLAY_ALPHA);
     // Ricoh azimuth calibration is no longer a config knob — it lives in the graph (ricoh node's
-    // cam_equirect_azimuth_sign/offset), applied by CameraAPI. See voxelizer_params.h.
+    // cam_equirect_azimuth_sign/offset), applied by CameraAPI. See retina_params.h.
 
     // Ego-motion mask-corruption annotation (default ON — pure producer-side metadata).
     rc::ConfigLoaderUtils::load_optional(configLoader, "MaskMotion.enabled", params.MASK_MOTION_ENABLED);

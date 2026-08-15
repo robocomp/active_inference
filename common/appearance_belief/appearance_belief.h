@@ -2,9 +2,9 @@
  * appearance_belief.h  —  shared per-instance APPEARANCE (albedo chromaticity) belief
  *
  * SHARED, header-only across the concept agents (table/chair/refrigerator/cabinet/…): one 3-DOF Gaussian
- * per instance over the object's chromaticity, fed by the voxelizer's per-mask colour summary
- * (MaskColor.*, see voxelizer/src/graph_publisher.cpp) and read only by the DISPLAY path — the agent
- * publishes its MAP as `mesh_color_rgb` and the voxelizer's 3D viewer tints the instance's mesh with it.
+ * per instance over the object's chromaticity, fed by the retina's per-mask colour summary
+ * (MaskColor.*, see retina/src/graph_publisher.cpp) and read only by the DISPLAY path — the agent
+ * publishes its MAP as `mesh_color_rgb` and the retina's 3D viewer tints the instance's mesh with it.
  *
  * SCOPE — DISPLAY ONLY. Nothing here feeds any geometric fit, association gate, or existence belief. That
  * is a deliberate containment decision, not an oversight: a colour channel derived from tens of thousands

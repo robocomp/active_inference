@@ -4,7 +4,7 @@
  * Part C (confirm half) of the RGB-360 peripheral-detection pipeline — see
  * active_inference/RICOH_360_PERIPHERAL_DETECTION.md.
  *
- * A ricoh 360 detection is a BEARING only (no depth): the voxelizer publishes it into the shared "masks"
+ * A ricoh 360 detection is a BEARING only (no depth): the retina publishes it into the shared "masks"
  * node as a no-depth slice tagged with a room-frame azimuth (Part B). This header matches those bearings
  * to the agent's LIVE instances by predicted azimuth from the robot position — the peripheral-vision "it's
  * still there" signal. It does NOT fit anything (there is nothing 3D to fit) and it does NOT birth anything

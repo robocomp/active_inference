@@ -702,7 +702,7 @@ ObjectSigmaInflationMaxM = 0.30
 # inert for them); the table affordance is policy=Servo and uses this loop.
 LockOnEnabled = true
 # ★SLOWED 2026-08-07. The search moves in order to CHANGE THE VIEW, but every centimetre of that
-# motion costs mask quality — the voxelizer's own ego-motion channel (mask_motion_var/motion_dotd)
+# motion costs mask quality — the retina's own ego-motion channel (mask_motion_var/motion_dotd)
 # grows with base speed, so a brisk sweep degrades the evidence it is sweeping to collect. Symptom:
 # a mask plainly visible to the eye that the loop never captured. Speeds halved, and the still window
 # more than doubled while each nudge got shorter — the loop now spends most of its time LOOKING.

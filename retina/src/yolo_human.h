@@ -3,9 +3,9 @@
 /*
  * yolo_human.h
  *
- * Human-pose branch of the voxelizer perception stack. Runs a YOLO-pose ONNX model
+ * Human-pose branch of the retina perception stack. Runs a YOLO-pose ONNX model
  * (e.g. yolo26m-pose) on the same RGB frame the seg detector consumes, and returns
- * per-person 2D keypoints (COCO-17) + per-joint confidence. The voxelizer deprojects
+ * per-person 2D keypoints (COCO-17) + per-joint confidence. The retina deprojects
  * these to CAMERA-frame 3D (graph_publisher) and publishes them on a dedicated
  * 'skeleton' DSR node consumed by human_concept — NOT the 'masks' node (a pose is an
  * ordered keypoint set with per-joint confidence, semantically unlike a silhouette).

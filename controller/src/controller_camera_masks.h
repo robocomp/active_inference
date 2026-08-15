@@ -165,7 +165,7 @@ private:
     // therefore draws yesterday's silhouettes on today's pixels, and every centimetre the robot moved
     // in between shows up as the masks sliding off their objects — the drift.
     // Both sides carry the SAME stamp: the media ImageFrame's stamp_ms and the producer's
-    // mask_timestamp_ms are the same camera capture clock, because the voxelizer copies it straight
+    // mask_timestamp_ms are the same camera capture clock, because the retina copies it straight
     // through. So keep a few hundred ms of frames and pair the masks with the one they were computed
     // from. Bounded by age AND count: this is a debug view, not a recorder.
     std::deque<std::pair<std::uint64_t, QImage>> camera_ring_;

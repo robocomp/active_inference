@@ -41,7 +41,7 @@ std::vector<Eigen::Vector3f> backproject_box_region(const DepthImage& depth, con
     const Eigen::Matrix4f cam_T_room = room_T_cam.inverse();
 
     // 1) Project the 8 box corners into the image to get the pixel bounding box. The DSR "zed" frame in this
-    //    codebase is x-right, y-DEPTH (optical axis), z-up (matches voxelizer/graph_publisher + bottle_fitter):
+    //    codebase is x-right, y-DEPTH (optical axis), z-up (matches retina/graph_publisher + bottle_fitter):
     //    u = fx·x/y + cx,  v = cy − fy·z/y,  in front ⇔ y > min_depth.
     const float c = std::cos(box.yaw), s = std::sin(box.yaw), hw = 0.5f * box.w, hd = 0.5f * box.d;
     float umin = 1e9f, umax = -1e9f, vmin = 1e9f, vmax = -1e9f;

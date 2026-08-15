@@ -601,7 +601,7 @@ std::optional<std::filesystem::path> resolve_asset_path(const std::string& rel)
         return std::nullopt;
     namespace fs = std::filesystem;
     // A COMPONENT-relative path ("chair_concept/meshes/chair.obj") is hosted with the producing agent, under
-    // the active_inference components root = the parent of the voxelizer's run dir. Try that (and cwd) first,
+    // the active_inference components root = the parent of the retina's run dir. Try that (and cwd) first,
     // then a BARE name against the viewer's own meshes/ library, then the generic robot-mesh search.
     for (const fs::path& root : { fs::current_path().parent_path(), fs::current_path() })
         if (fs::path cand = root / rel; fs::exists(cand))

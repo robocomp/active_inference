@@ -1101,7 +1101,7 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
             // contract: object_subtype carries the CLASS ("table") for every table, and table_concept
             // publishes its inferred SHAPE by choosing round_table.obj over table.obj (free-energy
             // model evidence — see TableFitter::evaluate_shape). Sniffing the path is what the
-            // voxelizer's 3D viewer already does; if that contract ever grows a real attribute this is
+            // retina's 3D viewer already does; if that contract ever grows a real attribute this is
             // the one line that has to follow it.
             if (subtype == "table")
                 if (const auto mesh = graph_->get_attrib_by_name<mesh_path_att>(node); mesh.has_value())

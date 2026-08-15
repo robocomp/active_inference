@@ -115,7 +115,7 @@ std::optional<SceneFeed::RoomPolygonData> SceneFeed::get_room_polygon_from_graph
     if (!graph_)
         return std::nullopt;
 
-    // No mutex: unlike the voxelizer's SceneProcessor this class is main-thread only (the refresh is
+    // No mutex: unlike the retina's SceneProcessor this class is main-thread only (the refresh is
     // a QTimer), so the memoized names need no guard.
     std::string room_name_snapshot = room_node_name_;
 
@@ -724,7 +724,7 @@ bool SceneFeed::init_lidar(const std::string& /*topic*/)
 {
     // Topic/domain are NOT ours to choose — they come from the media descriptor robot_concept authors
     // on each sensor node (CLAUDE.md, media plane). We only name the PLANES, in preference order, the
-    // same pair the voxelizer and the concept agents read.
+    // same pair the retina and the concept agents read.
     if (g_lidar_reader)
         return g_lidar_reader->any_live();
     if (not graph_ or inner_eigen_api_ == nullptr)
@@ -737,7 +737,7 @@ bool SceneFeed::init_lidar(const std::string& /*topic*/)
 void SceneFeed::poll_lidar()
 {
     // The cloud arrives in the LIDAR's own frame; the reader poses it into the room at the SCAN stamp
-    // (interpolated), which is the same thing the voxelizer did. Empty ⇒ keep the last cloud rather
+    // (interpolated), which is the same thing the retina did. Empty ⇒ keep the last cloud rather
     // than blanking the view for one dropped sweep.
     if (not g_lidar_reader)
         return;
@@ -758,7 +758,7 @@ void SceneFeed::refresh()
     const auto [room_name, robot_name] = room_robot_names();
 
     // The room polygon barely changes and rebuilding it walks every wall; 1 tick in 50 is what the
-    // voxelizer used and it is invisible at 5 Hz.
+    // retina used and it is invisible at 5 Hz.
     if (polygon_tick_++ % 50 == 0)
         update_room_polygon_in_viewers();
 

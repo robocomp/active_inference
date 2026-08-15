@@ -63,7 +63,7 @@ def _media_stats():
     """Merge every media_transport StreamStats dump (one file per component/stream, written by
     MediaSubscriber::combined_stats()/write_media_stats_json -- see media_transport.h) into
     {label: {frames,drops,sample_lost,fps,latency_ms}}. Labels already encode component + role +
-    stream (e.g. "voxelizer:zed:rgb" vs "robot_concept:ingest:zed_camera:rgb") so an ingest-side
+    stream (e.g. "retina:zed:rgb" vs "robot_concept:ingest:zed_camera:rgb") so an ingest-side
     and a final-consumer view of the same physical stream never collide here."""
     out = {}
     for path in glob.glob(_MEDIA_STATS_GLOB):

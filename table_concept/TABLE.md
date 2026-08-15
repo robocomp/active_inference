@@ -352,7 +352,7 @@ covariance (`rt_cov_add_chain`) so across-frame accumulation cannot advertise `c
 localization actually supports — the conservative, safe direction for the controller's uncertainty
 governor.
 
-**Ego-motion downweight**: the interaction-matrix mask-motion variance `L(xₙ,yₙ,Z)` (voxelizer
+**Ego-motion downweight**: the interaction-matrix mask-motion variance `L(xₙ,yₙ,Z)` (retina
 producer) enters per-point `R`; the moment channel adds `(motion_gain·motion_dotd)²` to
 `moment_extra_var`, and the orientation accumulator is scaled by `evidence_weight` — so a
 going-away/rotation frame cannot reshape or flip the established fit.

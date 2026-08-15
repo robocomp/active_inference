@@ -1,6 +1,6 @@
 #pragma once
 
-// Zero-copy DDS media-plane ingest for the voxelizer: ZED RGB+depth, the shared multi-plane LiDAR
+// Zero-copy DDS media-plane ingest for the retina: ZED RGB+depth, the shared multi-plane LiDAR
 // reader, and the Ricoh-360 panorama. Split out of SceneProcessor so all DDS subscriber/cache/thread
 // state lives in one place; SceneProcessor holds one of these and forwards to it. Subscribers are
 // created from the producer's per-node media descriptors in the graph (never from config).

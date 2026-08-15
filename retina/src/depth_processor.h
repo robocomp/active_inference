@@ -3,7 +3,7 @@
 /*
  * depth_processor.h
  *
- * Monocular DEPTH branch of the voxelizer perception stack (yolo26l-depth, task=depth, head=Depth).
+ * Monocular DEPTH branch of the retina perception stack (yolo26l-depth, task=depth, head=Depth).
  * Input [1,3,768,768] f32, output [1,1,768,768] f32 = the NATURAL LOG of depth, so metres = exp(v).
  *
  * ★READ THIS BEFORE USING THE NUMBERS FOR GEOMETRY. The model is scale-and-shift invariant per

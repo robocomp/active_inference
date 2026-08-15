@@ -229,7 +229,7 @@ ChairFitter::ChairObservation ChairFitter::observe(ChairInstance& inst, const DS
             inst.last_centroid_radius = slice.centroid_radius;   // image-centredness (moving-update exception)
             inst.last_depth_var   = slice.depth_var;             // 0=ZED, >0=ricoh LiDAR-depth → downweights the fit (added to R)
             // Appearance (DISPLAY ONLY — deliberately NOT folded into the observation, so no fit can
-            // ever see it). Sidecar belief whose only consumer is the mesh tint sent to the voxelizer.
+            // ever see it). Sidecar belief whose only consumer is the mesh tint sent to the retina.
             // color_neff==0 (every ricoh slice) is a no-op inside update(), so this is safe to call
             // unconditionally on whatever slice won.
             inst.appearance.update(slice.color_chroma, slice.color_var, slice.color_neff);

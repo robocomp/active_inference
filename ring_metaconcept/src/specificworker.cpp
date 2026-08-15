@@ -404,7 +404,7 @@ void SpecificWorker::compute()
 // Class of a generic "object" node. Every concept agent now publishes type()=="object" with the
 // class in object_subtype (name prefixes table_*/chair_* unchanged). For a TABLE, object_subtype
 // carries the SHAPE (round/square) instead of a class, so accept the attribute only when it names
-// a class we know and otherwise fall through to the name prefix. Mirrors the voxelizer's
+// a class we know and otherwise fall through to the name prefix. Mirrors the retina's
 // scene_processor.cpp object_class_of so both agents classify a node identically.
 std::string SpecificWorker::object_class_of(const DSR::Node& node) const
 {

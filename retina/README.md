@@ -1,8 +1,8 @@
-# voxelizer
+# retina
 A brief introduction to the component. Describe its purpose, functionality, and any specific features here.
-# voxelizer
+# retina
 
-`voxelizer` consumes RGBD and lidar data, segments semantic objects with YOLO, voxelizes them in room coordinates, and publishes the resulting scene to DSR and the local OpenGL viewer.
+`retina` consumes RGBD and lidar data, segments semantic objects with YOLO, voxelizes them in room coordinates, and publishes the resulting scene to DSR and the local OpenGL viewer.
 
 ## Quick Start
 
@@ -121,7 +121,7 @@ EP only — version-independent, identical masks, just no FP16/TensorRT speedup.
 stack can't be reconciled.
 
 ## Configuration parameters
-Like any other component, voxelizer requires a configuration file to start. In etc/config or etc/config.toml, you can find an example of the configuration file.
+Like any other component, retina requires a configuration file to start. In etc/config or etc/config.toml, you can find an example of the configuration file.
 
 For normal use, copy one of them and edit the copy:
 
@@ -130,7 +130,7 @@ cp etc/config.toml etc/local_config.toml
 ```
 
 ```bash
-cd <voxelizer's path> 
+cd <retina's path> 
 cp etc/config etc/yourConfig
 ```
 
@@ -138,11 +138,11 @@ After editing the new config file we can run the component:
 
 ```bash
 cmake -B build && make -C build -j12 # Compile the component
-bin/voxelizer etc/yourConfig # Execute the component
+bin/retina etc/yourConfig # Execute the component
 ```
 cmake -S . -B build -DONNXRUNTIME_ROOT=/opt/onnxruntime
 cmake --build build -j$(nproc)
-bin/voxelizer --Ice.Config=etc/local_config.toml
+bin/retina --Ice.Config=etc/local_config.toml
 # Developer Notes
 
 If you use the RoboComp helper in your shell environment, `cbuild` also works for rebuilding the component.
@@ -164,7 +164,7 @@ Typical startup signals to check:
 - `[YOLO] effective flags: use_gpu=true use_trt=true`
 - `[YoloSegDetector] TensorRT EP registered ...`
 - `[YoloSegDetector] CUDA EP registered`
-This section explains how to work with the generated code of voxelizer, including what can be modified and how to use key features.
+This section explains how to work with the generated code of retina, including what can be modified and how to use key features.
 ## Editable Files
 You can freely edit the following files:
 - etc/* – Configuration files

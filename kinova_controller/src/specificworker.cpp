@@ -237,7 +237,7 @@ void SpecificWorker::initialize()
 
 // Publish the rolling (stamp_ms, q) ring onto the kinova_arm_r node so the
 // self_calibration agent can nearest-match q to an image stamp_ms. Flattened to
-// float vectors (the voxelizer-proven runtime-attr path); stamps are float OFFSETS
+// float vectors (the retina-proven runtime-attr path); stamps are float OFFSETS
 // from a uint64 base so ms precision survives float32. The graph write is throttled
 // to ~20 Hz to bound the update_node signal cascade on the arm node's subscribers
 // (escape hatch if it still churns: a dedicated (stamp,q) DDS stream — see memory).

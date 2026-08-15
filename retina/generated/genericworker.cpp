@@ -18,7 +18,7 @@
  */
 #include "genericworker.h"
 #include <QLoggingCategory>
-Q_LOGGING_CATEGORY(logUi, "voxelizer.ui")
+Q_LOGGING_CATEGORY(logUi, "retina.ui")
 /**
 * \brief Default constructor
 */

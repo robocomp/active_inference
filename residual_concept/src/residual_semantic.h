@@ -6,7 +6,7 @@
  * depth error lifts a floor point just above the nav band → a phantom obstacle. Appearance fails
  * DIFFERENTLY from geometry, so fusing an RGB semantic label sharpens the floor/obstacle decision.
  *
- * Source = the voxelizer's dense YOLO-sem label map (ADE20K SceneParse150), published on the DSR
+ * Source = the retina's dense YOLO-sem label map (ADE20K SceneParse150), published on the DSR
  * `semantic` node under `zed`, pixel-aligned at the ZED image resolution. Because depth and the
  * label map are the SAME camera, a room-frame ZED point reprojects EXACTLY back to its own pixel
  * (reproject-through-current-pose recovers the original u,v — no parallax, no feature match), so we

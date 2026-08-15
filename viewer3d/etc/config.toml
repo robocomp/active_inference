@@ -4,19 +4,19 @@
 # agents' boxes and display meshes, and human_concept's skeletons — drawn together in the room frame.
 # Pure observer: it infers nothing and writes nothing to the graph beyond its own presence node.
 #
-# ★WHY IT IS NOT IN THE VOXELIZER. Nothing it draws is the voxelizer's; it was a perception component
+# ★WHY IT IS NOT IN THE RETINA. Nothing it draws is the retina's; it was a perception component
 # carrying ~2.8 k lines of renderer for other agents' products. Worse, the room dependency this view
 # genuinely needs was gating the whole agent — YOLO included — behind localization. Split out, the
-# view survives a voxelizer restart and the voxelizer stops needing a room to run.
+# view survives a retina restart and the retina stops needing a room to run.
 #
-# The two CAMERA windows (ZED raster + ricoh panorama) deliberately STAYED in the voxelizer: they read
+# The two CAMERA windows (ZED raster + ricoh panorama) deliberately STAYED in the retina: they read
 # in-memory PerceptionWorker bundles and ONNX-owning stage objects, and their buttons are pipeline
 # controls (semantic/SAM2 stage toggles, depth-dataset collection), not display.
 
 # --- Common Agent Data ---
 [Agent]
 # MUST be unique across the shared graph — a collision is a CRDT actor-id clash → SIGSEGV in BOTH
-# agents. Taken: room=5 robot=6 table=7 controller=8 voxelizer=9 bottle=10 kinova=11 self_calib=12
+# agents. Taken: room=5 robot=6 table=7 controller=8 retina=9 bottle=10 kinova=11 self_calib=12
 # human=13 residual=14 door=15 scene_graph_viewer=16 hood=17 chair=20 cabinet=21 refrigerator=22
 # ring=23 kitchen=24. Next free: 19, 25+.
 id = 18
@@ -29,7 +29,7 @@ domain = 0
 # GenericWorker creates no QMainWindow. This agent builds its OWN top-level window for the 3D view.
 # That is deliberate — a heavy QOpenGLWidget sharing the GraphViewer's backing store is a
 # stack-address free in paintAndFlush when a peer joins (see dsr_gui.h). It is also why this widget
-# was already in its own window while it lived inside the voxelizer.
+# was already in its own window while it lived inside the retina.
 tree  = false
 graph = false
 2d    = false
@@ -39,7 +39,7 @@ graph = false
 [Presence]
 # required_agent_names is OMITTED ON PURPOSE — a viewer must render whatever exists and must never
 # tear itself down because a peer is absent. That is the whole point of splitting it out: it survives
-# everyone else's restarts, and it must come up with no room, no voxelizer and no concept agents.
+# everyone else's restarts, and it must come up with no room, no retina and no concept agents.
 # ★Write it as an absent key, NOT as `required_agent_names = []`: the RoboComp ConfigLoader throws
 # `std::runtime_error: Empty arrays are not supported.` on an empty TOML array and the process aborts
 # before main(). The presence monitor guards the key with exists() and defaults to an empty list.
@@ -64,7 +64,7 @@ LogPeriodFrames = 50       # throttle for the liveness line; 0 disables
 # The robot's display mesh. Named here because the robot node's own `path` attr ("meshes/shadow.obj")
 # is relative to robot_concept's run dir, not to the components root — so pointing at a sibling
 # component's copy only resolved when the viewer happened to be launched from that root. This agent now
-# carries its OWN copy (viewer3d/meshes/shadow.obj, byte-identical to robot_concept's and voxelizer's),
+# carries its OWN copy (viewer3d/meshes/shadow.obj, byte-identical to robot_concept's and retina's),
 # which resolves both from the component dir and from bin/. Empty ⇒ synthetic glyph.
 RobotMeshPath = "meshes/shadow.obj"
 

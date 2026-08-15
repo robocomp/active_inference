@@ -100,7 +100,7 @@ private:
 	[[nodiscard]] static Rgb identity_color(std::uint32_t agent_id) noexcept;
 
 	// The canonical class of an object node — "table", "chair", "wall", … — which is what its colour
-	// encodes. Mirrors the convention already used by voxelizer/src/scene_processor.cpp
+	// encodes. Mirrors the convention already used by retina/src/scene_processor.cpp
 	// (`object_class_of`) and ring_metaconcept: object_subtype wins ONLY when it names a known
 	// class, because for tables it historically carried the SHAPE ("round"/"square"); otherwise the
 	// node-name prefix decides, and the DSR type is the last resort.

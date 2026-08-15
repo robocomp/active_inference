@@ -1,7 +1,7 @@
 /*
  * graph_publisher.h
  *
- * The voxelizer's DSR "semantic_grid" export:
+ * The retina's DSR "semantic_grid" export:
  *   - "masks" — the live product, deprojected YOLO masks (room frame) consumed by
  *               the concept agents. Published every cycle.
  *
@@ -22,7 +22,7 @@
 #include <dsr/api/dsr_eigen_defs.h>
 
 #include "rgbd_data.h"
-#include "voxelizer_params.h"
+#include "retina_params.h"
 
 struct SegDetection;
 namespace rc::human_pose { struct PoseDetection; }
@@ -50,7 +50,7 @@ class GraphPublisher
 {
 public:
     GraphPublisher(std::shared_ptr<DSR::DSRGraph> graph,
-                   const VoxelizerParams& params,
+                   const RetinaParams& params,
                    std::function<void()> relayout);
 
     // Publish masks for this cycle. frame_ts_ms = capture stamp of the rgbd/depth frame; published on
@@ -90,7 +90,7 @@ private:
                           std::uint64_t frame_ts_ms);
 
     std::shared_ptr<DSR::DSRGraph> G_;
-    const VoxelizerParams&         params_;
+    const RetinaParams&         params_;
     std::function<void()>          relayout_;
 
     // Previous zed pose + capture stamp, kept to finite-difference the camera twist for the per-mask

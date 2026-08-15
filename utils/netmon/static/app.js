@@ -292,7 +292,7 @@ function renderTable(stNodes) {
 
 // Per-stream fps/drops/sample_lost/latency from media_transport's StreamStats (see
 // write_media_stats_json in media_transport.h). Labels already encode component + role +
-// stream (e.g. "voxelizer:zed:rgb" vs "robot_concept:ingest:zed_camera:rgb"), so an
+// stream (e.g. "retina:zed:rgb" vs "robot_concept:ingest:zed_camera:rgb"), so an
 // ingest-side row and a final-consumer row for the same physical stream sit side by side
 // here instead of overwriting each other -- that's what pinpoints WHERE fps drop.
 function renderMediaTable(media) {

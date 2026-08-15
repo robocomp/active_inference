@@ -1,7 +1,7 @@
 /*
  * common/mask_ingestor/mask_ingestor.cpp  —  shared YOLO "masks" DSR node reader (implementation)
  *
- * SHARED across the concept agents: parses the voxelizer-written "masks" node into a MasksPacket (slices +
+ * SHARED across the concept agents: parses the retina-written "masks" node into a MasksPacket (slices +
  * support points + raw silhouette pixels + the per-mask corruption/range/bearing channels), re-frames the
  * support points src→target (pinned to the capture stamp, recomputing centroids/bboxes there), and serves
  * the nearest slice of a requested label. The producer publishes CAMERA-frame points; the room transform
@@ -76,7 +76,7 @@ void MaskIngestor::set_pose_extrapolation(bool enabled, float max_dt_s)
 // ★THE RT LAG IS WHY THIS IS NOT ONE get_transformation_matrix CALL.
 // DSR's InterpolatedRT CLAMPS a query at the newest RT block — it never extrapolates velocity — so a mask
 // whose capture stamp is AHEAD of room_concept's latest published pose (~90 ms of localization pipeline
-// lag, measured) resolves against a STALE robot pose. The voxelizer used to correct for this internally
+// lag, measured) resolves against a STALE robot pose. The retina used to correct for this internally
 // (room_T_zed_extrapolated + forward_extrapolate_room_T_robot) before baking the transform into the
 // points; moving the transform here without that correction would have silently reintroduced the lag
 // exactly when it matters — while the robot is MOVING — and the regression would have looked like a
@@ -178,7 +178,7 @@ bool MaskIngestor::refresh()
     if (frame_id == last_masks_frame_seen_)
         return false;                          // same frame republished (producer frozen) — not a new ingest
     if (frame_id < last_masks_frame_seen_)
-        // mask_frame_id is a per-PROCESS publish counter; a backward jump means the producer (voxelizer)
+        // mask_frame_id is a per-PROCESS publish counter; a backward jump means the producer (retina)
         // RESTARTED and reset it. Adopt the new stream (fall through to ingest) — otherwise refresh() would
         // reject every frame until the fresh counter climbs past the stale pre-restart value, silently
         // starving ALL mask consumers after a producer restart.
@@ -434,7 +434,7 @@ bool MaskIngestor::stream_ready(std::string* detail) const
 {
     if (not G_) { if (detail) *detail = "no DSR graph"; return false; }
     const auto n = G_->get_node("masks");
-    if (not n.has_value()) { if (detail) *detail = "no 'masks' node (voxelizer not up?)"; return false; }
+    if (not n.has_value()) { if (detail) *detail = "no 'masks' node (retina not up?)"; return false; }
     if (not G_->get_attrib_by_name<mask_frame_id_att>(n.value()).has_value())
     { if (detail) *detail = "'masks' node has no mask_frame_id"; return false; }
     if (detail) *detail = "masks";

@@ -371,12 +371,12 @@ void SceneProcessor::check_input_stream_startup_status()
     if (graph_)
     {
         if (!media_->rgb_valid())
-            std::print(stderr, "[voxelizer] No RGB frame on the media plane yet. Waiting for robot_concept producer...\n");
+            std::print(stderr, "[retina] No RGB frame on the media plane yet. Waiting for robot_concept producer...\n");
         if (!media_->depth_valid())
-            std::print(stderr, "[voxelizer] No depth frame on the media plane yet. Waiting for robot_concept producer...\n");
+            std::print(stderr, "[retina] No depth frame on the media plane yet. Waiting for robot_concept producer...\n");
 
         if (auto zed = graph_->get_node("zed"); !zed.has_value())
-            std::print(stderr, "[voxelizer] DSR 'zed' node not found. Waiting...\n");
+            std::print(stderr, "[retina] DSR 'zed' node not found. Waiting...\n");
     }
 }
 

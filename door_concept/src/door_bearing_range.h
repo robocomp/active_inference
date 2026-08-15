@@ -2,7 +2,7 @@
  * door_bearing_range.h — turn a peripheral BEARING into a RANGE, so a 360 detection can become
  * "GO THERE and CHECK" instead of only "glance that way".
  *
- * THE GAP THIS FILLS. voxelizer already publishes ricoh detections into the `masks` node. A slice with
+ * THE GAP THIS FILLS. retina already publishes ricoh detections into the `masks` node. A slice with
  * lidar depth (mask_has_depth = 1) carries a real range + range_var and flows down the normal fit path —
  * nothing to do. A slice WITHOUT depth carries only `azimuth_room_rad`, and door_concept's Part C-birth
  * places its hypothesis at a CONSTANT `Bearing.NominalRangeM` along that ray. A constant range is not a

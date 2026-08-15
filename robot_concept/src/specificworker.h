@@ -120,7 +120,7 @@ private:
 		// Zero-copy SHM data-sharing QoS (Media.data_sharing). Default OFF = churn-safe
 		// (one memcpy/frame over the SHM transport). Set true ONLY on a static, non-churning
 		// topology to test true zero-copy loans — see rc::media::PublisherConfig::data_sharing.
-		// Advertised in the descriptor so consumers (voxelizer/room_concept) adopt it.
+		// Advertised in the descriptor so consumers (retina/room_concept) adopt it.
 		bool        MEDIA_DATA_SHARING = false;
 		int         MEDIA_DOMAIN_ID   = 0;
 		std::string MEDIA_RGB_TOPIC   = "rc/zed/rgb";

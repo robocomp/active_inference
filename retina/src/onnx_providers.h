@@ -3,7 +3,7 @@
 /*
  * onnx_providers.h
  *
- * Shared ONNX Runtime GPU execution-provider setup for the voxelizer's detectors
+ * Shared ONNX Runtime GPU execution-provider setup for the retina's detectors
  * (YoloSegDetector, YoloPoseDetector, …). Encapsulates the TensorRT availability
  * probing + EP registration so each detector doesn't re-hand-roll it (and so the
  * crash-avoidance probing — see the "TensorRT version lock" notes — lives in ONE place).

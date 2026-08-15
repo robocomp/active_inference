@@ -94,13 +94,13 @@ private:
     float support_z_for(float cx, float cy, float z_min) const;
 
     // PHASE-1 REBUILD: publish the residual occupancy as a `grid` node under room (cell centres + cell size)
-    // for the voxelizer 3-D display. Throttled; the node is created once and its cell attribute is updated.
+    // for the retina 3-D display. Throttled; the node is created once and its cell attribute is updated.
     void  publish_grid_display(const rc::OccupancyGrid::CellExplained& explained,
                                const std::vector<rc::OccComponent>& comps);
     // Integrate the dense ZED depth FoV into the occupancy grid as a SECOND sensor (fills LiDAR-grazed
     // tabletops, stabilises the costmap). Camera ray origin → z-aware carve stays correct. Gated by grid_zed_enabled.
     void  integrate_zed_into_grid();
-    // Refresh semantic_map_ from the DSR `semantic` node (voxelizer's dense YOLO-sem label map under `zed`), but
+    // Refresh semantic_map_ from the DSR `semantic` node (retina's dense YOLO-sem label map under `zed`), but
     // only re-copy the large blob when its frame_id changed. Returns true if a valid map is cached. Gated by the
     // Semantic.DownweightFloor flag (no-op / false when off). Main-thread graph read.
     bool  refresh_semantic_map();

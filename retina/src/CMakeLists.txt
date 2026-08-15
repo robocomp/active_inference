@@ -5,8 +5,8 @@ find_package(Qt6 COMPONENTS OpenGL OpenGLWidgets QUIET)
 # Sanitizer switches are declared HERE, before add_subdirectory(), so the ai_common targets are
 # instrumented too — behind a library boundary they no longer pick this up from the directory-scope
 # add_compile_options further down. (The if() blocks with the full rationale stay at the bottom.)
-option(ENABLE_ASAN "Build voxelizer with AddressSanitizer" OFF)
-option(ENABLE_TSAN "Build voxelizer with ThreadSanitizer" OFF)
+option(ENABLE_ASAN "Build retina with AddressSanitizer" OFF)
+option(ENABLE_TSAN "Build retina with ThreadSanitizer" OFF)
 
 # Shared ai_common::* libraries (see common/CMakeLists.txt). Placed FIRST, so these targets carry
 # their own explicit flags instead of silently inheriting the ones set further down this file.
@@ -24,7 +24,7 @@ LIST(APPEND SOURCES
   ../src/specificworker.cpp
   ../src/specificworker_presence.cpp
   ../src/specificworker_viewers.cpp
-  ../src/voxelizer_params.cpp
+  ../src/retina_params.cpp
   ../src/graph_publisher.cpp
   ../src/scene_processor.cpp
   ../src/media_plane_source.cpp
@@ -56,7 +56,7 @@ LIST(APPEND SOURCES
 # Headers set
 LIST(APPEND HEADERS
   ../src/specificworker.h
-  ../src/voxelizer_params.h
+  ../src/retina_params.h
   ../src/graph_publisher.h
   ../src/scene_processor.h
   ../src/media_plane_source.h
@@ -154,12 +154,12 @@ add_definitions(-g -O3 -fmax-errors=1 -fno-char8_t)
 
 # AddressSanitizer (opt-in, separate build dir):
 #   cmake -B build-asan -DENABLE_ASAN=ON && cmake --build build-asan -j
-# Instruments voxelizer's code AND intercepts global malloc/free, so it catches the bad
+# Instruments retina's code AND intercepts global malloc/free, so it catches the bad
 # free()/use-after-free that crashes paintAndFlush even when it happens inside the
 # (non-instrumented) libdsr_gui — no need to ASan-build/install the shared lib.
 # (option() is declared at the top of this file so ai_common sees it before add_subdirectory().)
 if(ENABLE_ASAN)
-  message(STATUS "AddressSanitizer ENABLED for voxelizer (-O1, frame pointers; preload-libasan link model)")
+  message(STATUS "AddressSanitizer ENABLED for retina (-O1, frame pointers; preload-libasan link model)")
   add_compile_options(-fsanitize=address -fno-omit-frame-pointer -O1)
   # Do NOT put -fsanitize=address on the LINK line. It makes libasan the first DT_NEEDED and the
   # first static initializer, which trips an Ice/IceStorm static-init-order SEGV in FactoryTable
@@ -167,7 +167,7 @@ if(ENABLE_ASAN)
   # (Ice-safe) and leave the __asan_* symbols that the instrumented .o reference UNDEFINED in the
   # executable; they are resolved at runtime by LD_PRELOAD=libasan (run_asan.sh), which also makes
   # ASan initialise and install its malloc/free interceptors first. Net result: full redzone
-  # checking of voxelizer's OWN code (so we catch the corrupting WRITE, not just the later free)
+  # checking of retina's OWN code (so we catch the corrupting WRITE, not just the later free)
   # AND a binary that actually boots.
   # Link libasan DIRECTLY (not via the -fsanitize driver). The driver injects an __asan_init
   # entry into .preinit_array, which runs BEFORE any shared-library init -> ASan is active during
@@ -185,7 +185,7 @@ endif()
 #   cmake -B build-tsan -DENABLE_TSAN=ON && cmake --build build-tsan -j
 # (option() is declared at the top of this file so ai_common sees it before add_subdirectory().)
 if(ENABLE_TSAN)
-  message(STATUS "ThreadSanitizer ENABLED for voxelizer (frame pointers; -ltsan-direct link)")
+  message(STATUS "ThreadSanitizer ENABLED for retina (frame pointers; -ltsan-direct link)")
   add_compile_options(-fsanitize=thread -fno-omit-frame-pointer -O1)
   add_link_options(-fno-omit-frame-pointer -Wl,--no-as-needed -ltsan -Wl,--as-needed)
 endif()

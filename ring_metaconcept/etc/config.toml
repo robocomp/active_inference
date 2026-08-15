@@ -2,7 +2,7 @@
 # --- Common Agent Data ---
 [Agent]
 # MUST be unique across the shared graph — a collision is a CRDT actor-id clash → SIGSEGV in BOTH
-# agents. Taken: room=5 robot=6 table=7 controller=8 voxelizer=9 bottle=10 kinova=11 self_calib=12
+# agents. Taken: room=5 robot=6 table=7 controller=8 retina=9 bottle=10 kinova=11 self_calib=12
 # human=13 residual=14 door=15 scene_graph_viewer=16 chair=20 cabinet=21 refrigerator=22
 # ring_metaconcept=23. Next free: 17-19, 24+.
 # (Was 21, which collided with cabinet_concept — cabinet was never entered in the registry.)

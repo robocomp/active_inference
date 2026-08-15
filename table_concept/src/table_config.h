@@ -34,13 +34,13 @@ struct TableConfig
     float support_select_height_margin_m = 0.25f;   // Z margin (m) around the model for support-bank selection
 
     // ── Primary-input stream gate (readiness + staleness) — LIFECYCLE, not a belief knob ──────────────
-    // Demote Operating→Degraded→Waiting when the voxelizer's `masks` node stops advancing its mask_frame_id
+    // Demote Operating→Degraded→Waiting when the retina's `masks` node stops advancing its mask_frame_id
     // for this long (producer dead/stalled) — don't integrate stale evidence; re-admit when it returns.
-    // Orthogonal to ai2_age_nominal_dt_s (belief-axis Σ-aging). MUST exceed the voxelizer HOLD_ENTER_S so a
+    // Orthogonal to ai2_age_nominal_dt_s (belief-axis Σ-aging). MUST exceed the retina HOLD_ENTER_S so a
     // legitimately empty scene (still-advancing counter) never trips it. 0 = disable the gate.
     int   masks_stall_timeout_ms       = 3000;
 
-    // ── A/B ONLY: read the voxelizer's legacy ROOM-frame mask array (Masks.legacy_room_frame) ─────────
+    // ── A/B ONLY: read the retina's legacy ROOM-frame mask array (Masks.legacy_room_frame) ─────────
     // The producer publishes support points in CAMERA frame and MaskIngestor transforms them to the room
     // at the capture stamp (see the FRAME CONTRACT in common/mask_ingestor). true ⇒ read the producer's
     // room-frame array verbatim instead, i.e. the pre-flip behaviour, so the two paths can be compared on
@@ -119,7 +119,7 @@ struct TableConfig
     // STATIC range weighting (motion-free): the common-mode error grows with view distance, so a far, vague
     // mask cannot resolve pose — orientation least of all (a far view confirms existence, can't rotate the
     // table). Continuous, no gate. lat feeds R + position common-mode (m per m of range); yaw feeds the yaw
-    // common-mode (rad per m), the binding term. Set 0 to disable. Range Z comes from the voxelizer (mask_range).
+    // common-mode (rad per m), the binding term. Set 0 to disable. Range Z comes from the retina (mask_range).
     float ai2_range_noise_lat_per_m  = 0.02f;  // lateral deprojection std growth (m per m of range)
     float ai2_range_noise_yaw_per_m  = 0.03f;  // yaw common-mode std growth (rad per m of range)
     float ai2_range_noise_size_per_m = 0.08f;  // SIZE (w,h,H) common-mode std growth (m per m of range): a distant
@@ -175,7 +175,7 @@ struct TableConfig
     float fixation_centre_frac = 0.60f;  // CENTRED: max |roi offset| (normalised, 0=centred, 1=image edge) —
                                          // the "fovea". <=0 disables just this condition.
     float fixation_still_dotd  = 0.05f;  // STILL: max |motion_dotd| = Z·‖ṡ‖ (m/s), the ego-motion mask smear
-                                         // from the voxelizer. <=0 disables just this condition.
+                                         // from the retina. <=0 disables just this condition.
     int   ai2_gn_iters        = 4;       // Gauss-Newton iterations per frame
     std::string ai2_csv_path  = "";      // if non-empty, append per-cycle belief (state + Σ diag + mask R) to CSV
     // Anisotropic per-point R (PRECISION_AS_INFORMATION.md Stage 1). Replaces the scalar per-point variance with

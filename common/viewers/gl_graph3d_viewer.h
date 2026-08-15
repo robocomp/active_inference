@@ -525,7 +525,7 @@ private:
 	// ── agent-published display meshes ────────────────────────────────────────────────────────
 	// A component-relative path ("chair_concept/meshes/chair.obj") is hosted with the PRODUCING
 	// agent, under the components root = the parent of this agent's run dir. Same order the
-	// voxelizer uses, so both viewers find the same file.
+	// retina uses, so both viewers find the same file.
 	[[nodiscard]] static std::optional<std::filesystem::path> resolve_mesh(const std::string &rel)
 	{
 		namespace fs = std::filesystem;

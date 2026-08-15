@@ -337,7 +337,7 @@ void SpecificWorker::initialize()
     // through a QSocketNotifier serviced by this SAME event loop. The agent then can only be killed with -9,
     // which cannot be caught, so every node it owns LEAKS into the shared graph.
     // Measured 2026-08-07 on table_concept (identical subscription): main thread pegged at 100% of a core,
-    // ai2_log.csv frozen, Ctrl-C inert, following a voxelizer restart. residual_concept did the same on 08-06
+    // ai2_log.csv frozen, Ctrl-C inert, following a retina restart. residual_concept did the same on 08-06
     // under the same trigger. CLAUDE.md already states the rule this violated: if you don't need a signal,
     // don't connect it at all (bottle_concept connects none).
     // The two things the slot did are now POLLED once per cycle in poll_affordance_protocol() — a controller

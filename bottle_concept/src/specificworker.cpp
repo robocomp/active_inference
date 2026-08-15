@@ -160,7 +160,7 @@ void SpecificWorker::terminal_shutdown()
     request_shutdown();
 
     // 2) Cleanly remove THIS agent's DDS participant and entities from the shared graph. This is the
-    //    crucial step that a bare _Exit skips: without it, peers (voxelizer) keep seeing our
+    //    crucial step that a bare _Exit skips: without it, peers (retina) keep seeing our
     //    half-deleted 'bottle_*' node (node present, room->bottle RT edge gone) and SEGV walking the
     //    RT tree, and a fast restart hits "agent id 10 already connected". DSRGraph::reset() runs
     //    remove_participant_and_entities() (the clean "Publisher unmatched" path) WITHOUT touching
@@ -600,7 +600,7 @@ void SpecificWorker::compute()
     }
 
     // One-shot: place the bottle on its arm-side spot BEFORE any fit, then let the scene settle so
-    // the voxelizer captures it there before the tracker births the node — a node created from a
+    // the retina captures it there before the tracker births the node — a node created from a
     // pre-move camera frame would lock the XY ownership gate at the old pose.
     if (cfg_.place_on_start and not evaluator_->place_done())
     {
@@ -847,7 +847,7 @@ void SpecificWorker::run_instance_tracker()
             // publishes them as full 3D slices with has_depth = 1, so a 360° detection from BEHIND the
             // robot passed every guard written as `if (has_depth)`. Reported live on bottle_concept —
             // moving and cloning with the robot facing away, 3 m off. mask_source says which camera,
-            // unambiguously, and the voxelizer has been publishing it all along. A ricoh slice may
+            // unambiguously, and the retina has been publishing it all along. A ricoh slice may
             // still CONFIRM a live instance (bearing_confirm) or raise a proto-object to go and look
             // at; it may not move one. See MaskIngestor::MaskSlice::may_fit_geometry.
             if (pkt.slices[i].label == "bottle" and pkt.slices[i].may_fit_geometry())

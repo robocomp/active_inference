@@ -63,7 +63,7 @@ std::uint64_t CabinetSceneGraph::create_instance_from_detection(const Eigen::Vec
     // pattern the ecosystem uses. Every get_nodes_by_type("object") MUST therefore be paired with a
     // starts_with("cabinet") filter.
     DSR::Node cabinet_node = DSR::Node::create<object_node_type>(name);
-    // Display asset for the voxelizer 3D viewer (relative to its meshes/ root); the viewer loads & scales it
+    // Display asset for the retina 3D viewer (relative to its meshes/ root); the viewer loads & scales it
     // to the fitted run box (cortex mesh_path contract — the agent owns its appearance).
     G_->add_or_modify_attrib_local<mesh_path_att>(cabinet_node, std::string("cabinet_concept/meshes/cabinet.obj"));
     G_->add_or_modify_attrib_local<mesh_texture_path_att>(cabinet_node, std::string("cabinet_concept/meshes/cabinet_basecolor.jpg"));
@@ -118,14 +118,14 @@ bool CabinetSceneGraph::persist_cabinet_belief(CabinetInstance& inst, std::uint6
 
 // Write the full fitted model onto the node + RT edge: geometry attrs + mesh (gated on a real geometry move),
 // free energy, support-bank + residual point exports, the active-perception ROI/detection channel, then the RT
-// pose and pose covariance. The mesh gate freezes the voxelizer render once settled to stop viewer jitter.
+// pose and pose covariance. The mesh gate freezes the retina render once settled to stop viewer jitter.
 void CabinetSceneGraph::step_write_model(CabinetInstance& inst, DSR::Node& node,
                                        std::uint64_t room_id, float free_energy)
 {
     const auto& s = inst.model.state();
 
     // Publish gate: only (re)write the geometry + mesh when the fitted dims/pose moved beyond a few
-    // mm / mrad since the last publish. The voxelizer renders the MESH attribute (not the coarsely
+    // mm / mrad since the last publish. The retina renders the MESH attribute (not the coarsely
     // dead-banded RT pose), rebuilt here every cycle from the raw fit — so writing it from the
     // sub-cm oscillating state each frame makes the viewer cabinet JITTER even though room→cabinet is
     // static. Freezing the mesh once settled removes the jitter. Mirrors bottle_concept's pub gate.
@@ -150,7 +150,7 @@ void CabinetSceneGraph::step_write_model(CabinetInstance& inst, DSR::Node& node,
         G_->add_or_modify_attrib_local<depth_m_att> (node, s.d);
         G_->add_or_modify_attrib_local<height_m_att>(node, s.height());
         G_->add_or_modify_attrib_local<model_generation_att>(node, ++inst.model_generation);
-        write_cabinet_mesh(inst, node);   // mesh for the voxelizer 3D viewer
+        write_cabinet_mesh(inst, node);   // mesh for the retina 3D viewer
         inst.last_pub_cx = s.cx; inst.last_pub_cy = s.cy;
         inst.last_pub_w  = s.L;  inst.last_pub_h  = s.d;
         inst.last_pub_H  = s.z1; inst.last_pub_yaw = s.yaw;
@@ -169,7 +169,7 @@ void CabinetSceneGraph::step_write_model(CabinetInstance& inst, DSR::Node& node,
     // offline harness. Both are local reads. It was only ever the graph traffic that had no consumer.
 
 
-    // Latest residual points (model-unexplained) for the voxelizer's residual layer — it reads
+    // Latest residual points (model-unexplained) for the retina's residual layer — it reads
     // residual_pts_att but nothing was writing it, so that layer was always empty.
     {
         std::vector<float> res_flat;
@@ -328,7 +328,7 @@ void CabinetSceneGraph::write_rt_pose(std::uint64_t room_id, CabinetInstance& in
 
     // Node origin = the carcass BASE, i.e. z0 — NOT the floor and NOT the mid-height. Every consumer
     // assumes a base origin and reconstructs the box as z ∈ [origin.z, origin.z + height]
-    // (residual_concept's explaining-away does exactly `centre.z = RT.z + h/2`, and the voxelizer box
+    // (residual_concept's explaining-away does exactly `centre.z = RT.z + h/2`, and the retina box
     // the same). For a BASE run z0 = 0 so this is the familiar floor origin; for a WALL run z0 ≈ 1.45,
     // and hardcoding 0 here — as the table does, correctly, since its legs reach the floor — would put
     // a 0.65 m phantom box on the floor under every wall unit and leave the real one unmodelled.

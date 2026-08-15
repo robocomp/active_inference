@@ -2,7 +2,7 @@
 # --- Common Agent Data ---
 [Agent]
 id = 9
-name = "voxelizer"
+name = "retina"
 
 # --- Single Instance Configuration ---
 # Use this if you only have one graph.
@@ -50,8 +50,19 @@ stale_grace_ms       = 120000
 agent_info_period_ms = 1000
 
 [Owns]
-#nodes    = []   # voxelizer produces no owned graph node ("voxels" was vestigial — never created).
-                # Its real products (masks/skeleton, type semantic_grid) are cleaned by type on shutdown.
+# ★OWN THE SELF NODE. cortex creates an `agent`-type node literally named "<Agent.name> <Agent.id>"
+# (dsr_agent_info_api.cpp) on the first heartbeat. This agent used to declare NO [Owns] at all, so it
+# never deleted that node on shutdown and relied entirely on a surviving PEER noticing the DDS
+# participant drop and deleting it by id. Every other agent lists itself here, and door_concept's
+# config documents the exact failure that leaves behind — the agent's own node leaking into the
+# persistent graph on a graceful shutdown. Fixed while renaming, because the rename is precisely the
+# moment a leftover node under the OLD name becomes a DUPLICATE carrying the same agent id, which is
+# worse than a stale one: the presence monitor keys peers by id, so the two overwrite each other
+# every scan and the peer flaps Ready/Stale forever.
+nodes    = ["retina 9"]
+# The perception products (masks / skeleton / semantic, type semantic_grid) are deliberately NOT
+# listed: they are swept by TYPE in graph_publisher::cleanup_semantic_grid_nodes(), and their names
+# are fixed product names unrelated to this agent's name.
 
 
 [Component.Debug]
@@ -128,7 +139,7 @@ publish_node = true        # RE-ENABLED 2026-07-25: the crash was NOT this blob 
                             # libdsr_api.so (07-24 20:29) + this binary is built against it. Original note kept below for history:
                             # ROOT CAUSE FOUND 2026-07-21 via gdb hw-watchpoint: Publishing the ~900KB dense label blob via
                             # update_node every ~0.5s triggers a heap-corruption SIGSEGV within ~2-5 min (bisection-
-                            # confirmed; in ~SemanticMap while destroying the drained bundle). voxelizer's
+                            # confirmed; in ~SemanticMap while destroying the drained bundle). retina's
                             # publish_semantic() is memory-safe (attr stored BY VALUE — common_types.h:26); the fault
                             # is in the DSR/DDS large-blob propagation (known DSR heap data race, now reliably
                             # triggered). TRADE-OFF: residual_concept loses its 'semantic' node input while this is
@@ -235,7 +246,7 @@ mask_depth_helios_only = true # use helios (co-located with the ricoh) only for 
 mask_fg_band_m        = 0.60  # foreground depth band (m): keep lidar hits within this of the NEAREST silhouette
                               # surface; farther returns are occluded floor-behind / under-object floor → dropped
 azimuth_tune_deg      = 0.0   # tune in DEGREES: extra yaw on room_T_ricoh over the graph cam_equirect_offset.
-                              # Dial the last few degrees vs the Lidar overlay (restart voxelizer only), then bake the
+                              # Dial the last few degrees vs the Lidar overlay (restart retina only), then bake the
                               # total into the ricoh node's cam_equirect_azimuth_offset in shadow.json and reset to 0.
                               # ~0.0175 rad per degree; +tune shifts the projected room one way, − the other.
 # Ricoh azimuth calibration (mirror sign + seam zero) now lives in the GRAPH as the ricoh node's

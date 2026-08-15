@@ -1,7 +1,7 @@
 /*
- * voxelizer_params.h
+ * retina_params.h
  *
- * Configuration struct for the voxelizer agent + a loader that fills it from a
+ * Configuration struct for the retina agent + a loader that fills it from a
  * RoboComp ConfigLoader (all keys optional, with the defaults below). Mirrors the
  * agent_config pattern used by the concept agents: keeps config parsing out of
  * SpecificWorker::initialize().
@@ -16,7 +16,7 @@
 #include <opencv2/core/types.hpp>
 #include <ConfigLoader/ConfigLoader.h>
 
-struct VoxelizerParams
+struct RetinaParams
 {
     std::string YOLO_MODEL_PATH         = "yolo26l-seg.onnx";
     std::vector<std::string> YOLO_ACCEPTED_LABELS;
@@ -280,7 +280,7 @@ struct VoxelizerParams
     // on top of the graph's cam_equirect_* intrinsics. Affects BOTH the projection overlay and the
     // detection→bearing path (one transform). Dial out the last few degrees of residual against the
     // RGB360 Lidar overlay (e.g. 2 or -3), then bake the total into the ricoh node's
-    // cam_equirect_azimuth_offset in shadow.json and set this to 0. Restart voxelizer only to change it.
+    // cam_equirect_azimuth_offset in shadow.json and set this to 0. Restart retina only to change it.
     float       RICOH_AZIMUTH_TUNE_DEG     = 0.0f;    // Ricoh.azimuth_tune_deg (DEGREES, not radians)
     // NOTE: the panorama azimuth calibration (mirror sign + seam zero) now lives in the GRAPH as the
     // ricoh node's cam_equirect_azimuth_sign / cam_equirect_azimuth_offset intrinsics, applied by the
@@ -300,5 +300,5 @@ struct VoxelizerParams
     bool        VERBOSE_DEBUG = false;
 };
 
-// Fill a VoxelizerParams from the RoboComp ConfigLoader (every key optional).
-VoxelizerParams load_voxelizer_params(const ConfigLoader& configLoader);
+// Fill a RetinaParams from the RoboComp ConfigLoader (every key optional).
+RetinaParams load_retina_params(const ConfigLoader& configLoader);

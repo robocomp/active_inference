@@ -118,7 +118,7 @@ std::uint64_t DoorSceneGraph::create_instance_from_detection(const Eigen::Vector
     // Generic `object` node named "door_*"; class carried in object_subtype ("door"). Every
     // get_nodes_by_type("object") MUST therefore be paired with a starts_with("door") filter.
     DSR::Node door_node = DSR::Node::create<object_node_type>(name);
-    // Display asset for the voxelizer 3D viewer (relative to its meshes/ root); the viewer loads & scales it
+    // Display asset for the retina 3D viewer (relative to its meshes/ root); the viewer loads & scales it
     // to the fitted box (cortex mesh_path contract — the agent owns its appearance). Empty/missing asset
     // falls back to the fitted box.
     G_->add_or_modify_attrib_local<mesh_path_att>(door_node, std::string("door_concept/meshes/door.obj"));
@@ -187,7 +187,7 @@ void DoorSceneGraph::step_write_model(DoorInstance& inst, DSR::Node& node,
     const auto& s = inst.model.state();
 
     // Publish gate: only (re)write the geometry + mesh when the fitted dims/pose moved beyond a few
-    // mm / mrad since the last publish. The voxelizer renders the MESH attribute (not the coarsely
+    // mm / mrad since the last publish. The retina renders the MESH attribute (not the coarsely
     // dead-banded RT pose), rebuilt here every cycle from the raw fit — so writing it from the
     // sub-cm oscillating state each frame makes the viewer door JITTER even though room→door is
     // static. Freezing the mesh once settled removes the jitter. Mirrors bottle_concept's pub gate.
@@ -210,7 +210,7 @@ void DoorSceneGraph::step_write_model(DoorInstance& inst, DSR::Node& node,
         G_->add_or_modify_attrib_local<depth_m_att> (node, s.thickness);
         G_->add_or_modify_attrib_local<height_m_att>(node, s.h);
         G_->add_or_modify_attrib_local<model_generation_att>(node, ++inst.model_generation);
-        write_door_mesh(inst, node);   // mesh for the voxelizer 3D viewer
+        write_door_mesh(inst, node);   // mesh for the retina 3D viewer
         inst.last_pub_cx = s.cx; inst.last_pub_cy = s.cy;
         inst.last_pub_w  = s.w;  inst.last_pub_h  = s.thickness;
         inst.last_pub_H  = s.h;  inst.last_pub_yaw = s.yaw;
@@ -229,7 +229,7 @@ void DoorSceneGraph::step_write_model(DoorInstance& inst, DSR::Node& node,
     // offline harness. Both are local reads. It was only ever the graph traffic that had no consumer.
 
 
-    // Latest residual points (model-unexplained) for the voxelizer's residual layer — it reads
+    // Latest residual points (model-unexplained) for the retina's residual layer — it reads
     // residual_pts_att but nothing was writing it, so that layer was always empty.
     {
         std::vector<float> res_flat;
@@ -312,7 +312,7 @@ std::vector<float> DoorSceneGraph::make_door_mesh(const DoorState& s)
     //
     // The leaf, not the aperture: this is the one DSR channel in which an open door is representable, since
     // the RT edge and width_m/depth_m/height_m all describe the static aperture by design. (No consumer
-    // reads it for doors today — voxelizer/src/scene_processor.cpp:727 draws only table/chair/cabinet
+    // reads it for doors today — retina/src/scene_processor.cpp:727 draws only table/chair/cabinet
     // carcasses and suppresses any node publishing a mesh_path — so this is free to follow the leaf now and
     // is where M2/M3 rendering will hook in.)
     std::vector<float> verts;
@@ -390,7 +390,7 @@ void DoorSceneGraph::write_rt_pose(std::uint64_t room_id, DoorInstance& inst)
         return;
 
     // Door node origin = BASE on the floor (z=0 in room). In the wall frame that base sits z0 below the wall
-    // origin (which is at half room height). Every consumer assumes a base origin: the voxelizer box
+    // origin (which is at half room height). Every consumer assumes a base origin: the retina box
     // (z∈[origin, origin+height]) and bottle_concept's door-top support test (top = origin.z + height).
     float lx = ap_cx, ly = ap_cy, lz = 0.0f, lyaw = ap_yaw;   // room-frame fallback
     std::optional<DSR::Node> parent_node;

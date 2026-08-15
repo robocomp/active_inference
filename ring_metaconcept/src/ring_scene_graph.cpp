@@ -82,7 +82,7 @@ std::uint64_t RingSceneGraph::ensure_rig_node(RigKey key, const RingBelief& beli
 
         // ★Type `metaconcept`, NOT `object`. A rig is a belief about a RELATION among nodes, not a
         // body: it has a footprint (the ring's extent) but nothing occupies it. Every furniture
-        // consumer in the fleet gathers with get_nodes_by_type("object") — the voxelizer's three
+        // consumer in the fleet gathers with get_nodes_by_type("object") — the retina's three
         // draw passes, residual_concept's carve, the level-1 association scans — so publishing it
         // as an `object` made a 2r×2r phantom box that got drawn, carved and associated against.
         // The dedicated type is what excludes it everywhere at once; graph3d's SceneBuilder keys

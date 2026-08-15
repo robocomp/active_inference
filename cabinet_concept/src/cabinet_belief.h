@@ -139,7 +139,7 @@ struct CabinetBeliefParams
     CabinetTierPrior wall_tier{0.35f, 0.08f, 1.45f, 0.15f, 2.10f, 0.20f};
 
     // ── Observation model ─────────────────────────────────────────────────────────────────────
-    // NOTE the value: `cabinet` masks are NOT SAM2-refined (voxelizer [Sam2] refine_labels omits
+    // NOTE the value: `cabinet` masks are NOT SAM2-refined (retina [Sam2] refine_labels omits
     // them), so they are raw semantic connected components with coarse boundaries. sigma_base_m is
     // correspondingly larger than the table's 0.03. This is an honest noise statement about a
     // coarser detector, not a fudge — tighten it if `cabinet` is added to refine_labels.

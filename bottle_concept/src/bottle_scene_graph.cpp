@@ -189,7 +189,7 @@ std::uint64_t BottleSceneGraph::create_instance_from_detection(const Eigen::Vect
     G_->add_or_modify_attrib_local<depth_m_att> (bottle_node, 2.0f * cfg_.prior_radius);
     G_->add_or_modify_attrib_local<height_m_att>(bottle_node, cfg_.prior_height);
     G_->add_or_modify_attrib_local<object_subtype_att>(bottle_node, std::string("bottle"));  // type-agnostic consumers
-    // Display mesh (loaded by the voxelizer viewer, scaled to the fitted box; asset supplied later). Path is
+    // Display mesh (loaded by the retina viewer, scaled to the fitted box; asset supplied later). Path is
     // relative to the components dir, `<concept>/meshes/<name>` — same convention as chair/table/cabinet/fridge
     // (a missing asset falls back to the fitted box). Was a bare "bottle.obj" that could never resolve.
     G_->add_or_modify_attrib_local<mesh_path_att>        (bottle_node, std::string("bottle_concept/meshes/bottle.obj"));

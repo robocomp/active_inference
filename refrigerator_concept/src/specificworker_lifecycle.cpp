@@ -186,7 +186,7 @@ void SpecificWorker::run_instance_tracker()
                 // publishes them as full 3D slices with has_depth = 1, so a 360° detection from BEHIND the
                 // robot passed every guard written as `if (has_depth)`. Reported live on bottle_concept —
                 // moving and cloning with the robot facing away, 3 m off. mask_source says which camera,
-                // unambiguously, and the voxelizer has been publishing it all along. A ricoh slice may
+                // unambiguously, and the retina has been publishing it all along. A ricoh slice may
                 // still CONFIRM a live instance or raise a proto-object to go and look
                 // at; it may not move one. ★THE MECHANISM HERE IS THIS AGENT'S OWN
                 // process_ricoh_bearings, NOT common/bearing_confirm — that module is used by

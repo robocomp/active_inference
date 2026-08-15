@@ -56,7 +56,7 @@ private:
     bool loop_ = true;
 };
 
-// Live DSR backend: reads the voxelizer's 'skeleton' node (BODY_18 keypoints in the CAMERA frame,
+// Live DSR backend: reads the retina's 'skeleton' node (BODY_18 keypoints in the CAMERA frame,
 // metres) and returns one SkeletonBody per detected person. Keypoints are transformed CAMERA→world
 // (room) via the live camera RT so the existing room-frame fitter places people correctly; the
 // on-wire data stays localization-clean, leaving the interaction-time re-parent (person→robot for
@@ -79,7 +79,7 @@ private:
     int last_frame_id_ = -1;
 };
 
-// Factory from config. kind = "replay" (CSV) | "dsr"/"live" (voxelizer 'skeleton' node). The DSR
+// Factory from config. kind = "replay" (CSV) | "dsr"/"live" (retina 'skeleton' node). The DSR
 // backend needs the graph + inner-eigen API; if absent it falls back to replay.
 std::unique_ptr<SkeletonSource> make_skeleton_source(const std::string& kind,
                                                      const std::string& replay_path,

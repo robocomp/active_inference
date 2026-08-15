@@ -132,7 +132,7 @@ private:
 	std::string loaded_path_;
 };
 
-// Colourises the voxelizer's 'semantic' (type semantic_grid) node: a dense ADE20K-150 per-pixel
+// Colourises the retina's 'semantic' (type semantic_grid) node: a dense ADE20K-150 per-pixel
 // class-id map stored as node attributes (semantic_labels row-major bytes + semantic_width/height).
 // Refreshed whenever the node is (re)published — low frequency, ~2 Hz. Hover shows the class name.
 class SemanticGridViewer : public SemanticMapViewer
@@ -172,7 +172,7 @@ private:
 	std::uint64_t id_;
 };
 
-// 3D view of the voxelizer's 'skeleton' node: BODY_18 human poses published low-freq as raw
+// 3D view of the retina's 'skeleton' node: BODY_18 human poses published low-freq as raw
 // attributes (skeleton_count + skeleton_kp_xyz, count*18*3 floats in the ZED camera frame, NaN =
 // missing). Read via the low-level attrs() map + Attribute::float_vec()/dec() — the same path the
 // human_concept consumer uses (these attributes are runtime-typed, not type-attributed). Refreshed
@@ -233,7 +233,7 @@ private:
 
 // 3D view of residual_concept's 'grid' node: the Beta occupancy belief field (dense grid_occupancy_prob
 // + grid_occupancy_var indexed by grid_field_meta=[xmin,ymin,cell,w,h]) drawn as elevated risk columns,
-// plus the discrete grid_occupied_cells / grid_border_cells floor layers. Mirrors the voxelizer's
+// plus the discrete grid_occupied_cells / grid_border_cells floor layers. Mirrors the retina's
 // in-process residual-field display. Refreshed whenever the node is (re)published (~2 Hz).
 class GridNodeViewer : public GLGridFieldViewer
 {
@@ -297,7 +297,7 @@ private:
 	}
 
 	// Load + recentre the robot mesh once (xy-centre, z-min → base on the floor), mirroring the
-	// voxelizer viewer. Empty on failure; retried never (the file is static).
+	// retina viewer. Empty on failure; retried never (the file is static).
 	void load_robot_mesh_once()
 	{
 		if(robot_loaded_)
@@ -321,7 +321,7 @@ private:
 	}
 
 	// Robot mesh expressed in the ROOM frame via the room←robot SE(2) pose (x, y, yaw), same as the
-	// voxelizer draw. Empty if the mesh or the transform isn't available.
+	// retina draw. Empty if the mesh or the transform isn't available.
 	std::vector<QVector3D> robot_room_triangles()   // main thread
 	{
 		load_robot_mesh_once();

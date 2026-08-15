@@ -8,7 +8,7 @@
  *
  *  Output is frame-agnostic: positions/normals are in a right-handed ROOM frame (X=room x, Y=room y,
  *  Z=height up) and colours run blue→orange→red with height. Each consumer maps to its own axis
- *  convention and lights/bakes shading as it likes, so the standalone lit viewer and the voxelizer's
+ *  convention and lights/bakes shading as it likes, so the standalone lit viewer and the retina's
  *  unlit scene render the SAME geometry from one code path.
  */
 #ifndef RC_COMMON_GRID_SURFACE_BUILDER_H

@@ -112,14 +112,14 @@ bool TableSceneGraph::persist_table_belief(TableInstance& inst, std::uint64_t no
 
 // Write the full fitted model onto the node + RT edge: geometry attrs + mesh (gated on a real geometry move),
 // free energy, support-bank + residual point exports, the active-perception ROI/detection channel, then the RT
-// pose and pose covariance. The mesh gate freezes the voxelizer render once settled to stop viewer jitter.
+// pose and pose covariance. The mesh gate freezes the retina render once settled to stop viewer jitter.
 void TableSceneGraph::step_write_model(TableInstance& inst, DSR::Node& node,
                                        std::uint64_t room_id, float free_energy)
 {
     const auto& s = inst.model.state();
 
     // Publish gate: only (re)write the geometry + mesh when the fitted dims/pose moved beyond a few
-    // mm / mrad since the last publish. The voxelizer renders the MESH attribute (not the coarsely
+    // mm / mrad since the last publish. The retina renders the MESH attribute (not the coarsely
     // dead-banded RT pose), rebuilt here every cycle from the raw fit — so writing it from the
     // sub-cm oscillating state each frame makes the viewer table JITTER even though room→table is
     // static. Freezing the mesh once settled removes the jitter. Mirrors bottle_concept's pub gate.
@@ -140,18 +140,18 @@ void TableSceneGraph::step_write_model(TableInstance& inst, DSR::Node& node,
         G_->add_or_modify_attrib_local<depth_m_att> (node, s.h);
         G_->add_or_modify_attrib_local<height_m_att>(node, s.table_height);
         G_->add_or_modify_attrib_local<model_generation_att>(node, ++inst.model_generation);
-        write_table_mesh(inst, node);   // mesh for the voxelizer 3D viewer
+        write_table_mesh(inst, node);   // mesh for the retina 3D viewer
         inst.last_pub_cx = s.cx; inst.last_pub_cy = s.cy;
         inst.last_pub_w  = s.w;  inst.last_pub_h  = s.h;
         inst.last_pub_H  = s.table_height; inst.last_pub_yaw = s.yaw;
     }
     G_->add_or_modify_attrib_local<free_energy_att>(node, free_energy);
     // Inferred shape subtype (round/square), chosen by free-energy model evidence in TableFitter::evaluate_shape.
-    // The voxelizer reads this to render the matching mesh (disc vs box).
+    // The retina reads this to render the matching mesh (disc vs box).
     G_->add_or_modify_attrib_local<object_subtype_att>(node, std::string("table"));  // CLASS (uniform convention); the round/square SHAPE lives in mesh_path (round_table.obj vs table.obj)
     // Publish the display mesh matching the inferred shape (agent picks the variant from its own belief; the
     // viewer just loads it, cached by path, and scales to the fitted box). Flips with the subtype. Paths are
-    // relative to the voxelizer's meshes/ asset root — see the cortex mesh_path contract.
+    // relative to the retina's meshes/ asset root — see the cortex mesh_path contract.
     G_->add_or_modify_attrib_local<mesh_path_att>(node,
         inst.subtype == "round" ? std::string("table_concept/meshes/round_table.obj")
                                 : std::string("table_concept/meshes/table.obj"));
@@ -196,7 +196,7 @@ void TableSceneGraph::step_write_model(TableInstance& inst, DSR::Node& node,
         }
     }
 
-    // Latest residual points (model-unexplained) for the voxelizer's residual layer — it reads
+    // Latest residual points (model-unexplained) for the retina's residual layer — it reads
     // residual_pts_att but nothing was writing it, so that layer was always empty.
     {
         std::vector<float> res_flat;
@@ -361,7 +361,7 @@ void TableSceneGraph::write_rt_pose(std::uint64_t room_id, TableInstance& inst)
         return;
 
     // Table node origin = BASE on the floor (z=0), NOT the mid-height. Every consumer assumes a
-    // base origin: the voxelizer box (z∈[origin, origin+height]), and bottle_concept's table-top
+    // base origin: the retina box (z∈[origin, origin+height]), and bottle_concept's table-top
     // lookup + support decision (top = origin.z + height). Publishing z=table_height/2 put the
     // origin at mid-height → table_top came out as 1.5·height → bottles failed the support test,
     // parented to the room and floated. Keep the base on the floor so top = 0 + height = height.

@@ -248,7 +248,7 @@ void SpecificWorker::update_kitchen_ego_motion()
     prev_cam_pos_ = pos; prev_cam_fwd_ = fwd; prev_cam_tp_ = now; have_prev_cam_ = true;
 }
 
-// Read OTHER agents' furniture from the shared graph as room-frame OBBs (mirrors voxelizer build_graph_object_box):
+// Read OTHER agents' furniture from the shared graph as room-frame OBBs (mirrors retina build_graph_object_box):
 // type "object", SKIP our own cabinet_* runs, need width/depth/height + a room->object RT transform. A min-footprint
 // guard drops small clutter (bottles/cups). ts==0 transform on the main thread ⇒ cache-safe. Empty if the feature
 // is off / graph unavailable. Consumed by the exclusion factor + engulfment retirement.
@@ -551,7 +551,7 @@ void SpecificWorker::publish_kitchen_boxes()
                 ? (b.anchored ? std::string("cabinet_peninsula") : std::string("cabinet_island"))
                 : "cabinet_w" + std::to_string(b.wall_seg_id) + (b.tier == 0 ? "_base" : "_up");
             DSR::Node node = DSR::Node::create<object_node_type>(name);
-            // Display asset for the voxelizer 3D viewer (relative to its meshes/ root); the viewer loads &
+            // Display asset for the retina 3D viewer (relative to its meshes/ root); the viewer loads &
             // scales it to the fitted run box (cortex mesh_path contract — the agent owns its appearance).
             G->add_or_modify_attrib_local<mesh_path_att>(node, std::string("cabinet_concept/meshes/cabinet.obj"));
             G->add_or_modify_attrib_local<mesh_texture_path_att>(node, std::string("cabinet_concept/meshes/cabinet_basecolor.jpg"));
@@ -864,7 +864,7 @@ void SpecificWorker::run_instance_tracker()
             // publishes them as full 3D slices with has_depth = 1, so a 360° detection from BEHIND the
             // robot passed every guard written as `if (has_depth)`. Reported live on bottle_concept —
             // moving and cloning with the robot facing away, 3 m off. mask_source says which camera,
-            // unambiguously, and the voxelizer has been publishing it all along. A ricoh slice may
+            // unambiguously, and the retina has been publishing it all along. A ricoh slice may
             // still CONFIRM a live instance or raise a proto-object to go and look
                 // at; it may not move one. ★THE MECHANISM HERE IS THIS AGENT'S OWN
                 // process_ricoh_bearings, NOT common/bearing_confirm — that module is used by

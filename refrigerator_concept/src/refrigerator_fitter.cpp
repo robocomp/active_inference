@@ -718,7 +718,7 @@ float RefrigeratorFitter::run_inference(RefrigeratorInstance& inst, const Refrig
     // Static range weighting (motion-free). Even at zero camera motion, deprojection noise grows with
     // distance AND a far mask subtends a tiny angle, so pose — orientation most of all — becomes
     // unobservable: a 7 m view should confirm existence but never rotate a converged refrigerator. The
-    // motion×distance term is already in last_motion_var (the voxelizer interaction matrix carries 1/Z),
+    // motion×distance term is already in last_motion_var (the retina interaction matrix carries 1/Z),
     // but that vanishes when still; this is the missing static part. Pure continuous covariance growth (no
     // gate): the per-frame information CAP (common-mode) rises with range, so the frame's yaw gain against a
     // converged prior shrinks smoothly toward zero. mask_range = mean camera→mask depth Z, from the producer.
@@ -739,7 +739,7 @@ float RefrigeratorFitter::run_inference(RefrigeratorInstance& inst, const Refrig
     // collapse it). Route it into the per-frame COMMON-MODE instead: the engine's Woodbury marginalisation
     // then caps the frame's authority to move the GEOMETRY MEAN (size/pose/yaw), so geometric updates
     // concentrate at stillness while a moving frame contributes CONFIRMATION only (existence/association don't
-    // read this). motion_dotd = Z·‖ṡ‖ (m/s) from the voxelizer. CONTINUOUS, no gate: at dotd→0 the term
+    // read this). motion_dotd = Z·‖ṡ‖ (m/s) from the retina. CONTINUOUS, no gate: at dotd→0 the term
     // vanishes (a still frame updates fully); the gains are ~effective-lag (s), 0 disables a channel.
     // Use the ROBUST combined motion signal (motion_magnitude = max(|motion_dotd|, ego_lin + lever·ego_ang)),
     // scaled by the off-axis periphery penalty — the SAME signal the discrete confirm_only gate reads, so the

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Stress-test bottle_concept start/stop robustness against the shutdown/teardown crashes.
 # Launches the agent, lets it reach operation, SIGTERMs it, and checks for a clean exit.
-# Repeats N times. Requires the rest of the stack (Webots + bridges + robot/room/voxelizer) up.
+# Repeats N times. Requires the rest of the stack (Webots + bridges + robot/room/retina) up.
 #
 #   ./bottle_test.sh [cycles]      (default 20)
 set -u

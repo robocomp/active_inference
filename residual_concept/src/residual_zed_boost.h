@@ -19,7 +19,7 @@ namespace rc
 {
 
 // A ZED depth frame: per-pixel depth in METRES, row-major. NOTE the DSR "zed" frame in THIS codebase is
-// x-right, y-DEPTH(optical axis), z-up (see voxelizer/graph_publisher.cpp) — NOT the standard optical
+// x-right, y-DEPTH(optical axis), z-up (see retina/graph_publisher.cpp) — NOT the standard optical
 // z-forward. The projection below follows that convention.
 struct DepthImage
 {

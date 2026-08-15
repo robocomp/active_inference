@@ -786,7 +786,7 @@ void SpecificWorker::compute()
     //    "explained" if any known-model explainer accounts for its representative point → walls + specialists
     //    drop out (floor/ceiling already excluded by the nav band), leaving object-only components. Evidence is
     //    never deleted, only masked at read-out — a specialist mis-fit cannot erase a real obstacle. Also
-    //    publishes the residual cells on a `grid` node under room for the voxelizer 3-D display. ──
+    //    publishes the residual cells on a `grid` node under room for the retina 3-D display. ──
     if (grid_ready_)
     {
         // p_explained(cell) = max( hard infrastructure (0/1),  soft objects  Φ(−sdf2D/σ_xy) ). The object term
@@ -1082,7 +1082,7 @@ void SpecificWorker::integrate_zed_into_grid()
 
 bool SpecificWorker::refresh_semantic_map()
 {
-    // Read the voxelizer's `semantic` node (dense YOLO-sem label map under `zed`). The blob is large and published
+    // Read the retina's `semantic` node (dense YOLO-sem label map under `zed`). The blob is large and published
     // at ~2 Hz, so re-copy it only when the frame_id advanced; otherwise reuse the cache. Main-thread graph read.
     const auto node = G->get_node("semantic");
     if (not node.has_value()) return semantic_map_.valid();   // node not up yet → keep whatever we had (or invalid)
@@ -1404,7 +1404,7 @@ void SpecificWorker::publish_grid_display(const rc::OccupancyGrid::CellExplained
 
     // Residual cell centres (occupied ∧ ¬explained), published as the REGISTERED `residual_pts` attribute
     // (flat x,y,z triples, room frame; z = a small display height). runtime_checked rejects unregistered
-    // names, so we reuse residual_pts (a vector<float>) rather than a bespoke grid attr. Voxelizer reads it
+    // names, so we reuse residual_pts (a vector<float>) rather than a bespoke grid attr. Retina reads it
     // off the `grid` node and draws a cell per point.
     auto gn = gopt.value();
     const auto to_xyz = [](const std::vector<float>& xy) {

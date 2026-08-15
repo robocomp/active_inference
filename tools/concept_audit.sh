@@ -202,7 +202,7 @@ audit_agent() {
         mark na
     fi
 
-    # 13. ONLY THE FRONT RGB-D CAMERA MAY CREATE OR UPDATE AN OBJECT. The voxelizer publishes `mask_source`
+    # 13. ONLY THE FRONT RGB-D CAMERA MAY CREATE OR UPDATE AN OBJECT. The retina publishes `mask_source`
     #    (0 = zed, 1 = ricoh) precisely because `mask_has_depth` stopped answering that question: once ricoh
     #    masks were depth-filled from reprojected LiDAR they ship as full 3D slices with has_depth = 1. Every
     #    guard written as `if (has_depth)` then silently began accepting 360-degree detections from BEHIND the

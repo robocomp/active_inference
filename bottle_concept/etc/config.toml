@@ -14,7 +14,7 @@ name = "bottle_concept"
 configFile = ""
 domain = 0
 tree =false
-graph = false   # headless perception agent: the shared DSR node-link viewer crashes in paintAndFlush under participant churn (QRegion::~QRegion). Same fix as voxelizer.
+graph = false   # headless perception agent: the shared DSR node-link viewer crashes in paintAndFlush under participant churn (QRegion::~QRegion). Same fix as retina.
 2d = false
 3d = false
 
@@ -43,10 +43,10 @@ MessageSizeMax = "20004800"
 
 # ── Agent-presence protocol ───────────────────────────────────────────────────
 [Presence]
-required_agent_names = ["robot_concept", "room_concept", "voxelizer"]
+required_agent_names = ["robot_concept", "room_concept", "retina"]
 config_dir = "etc"
 monitor_period_ms = 500
-heartbeat_timeout_ms = 25000   # was 3000 — ride through the voxelizer's churn-crash auto-restart (latent Eigen-align SIGBUS) instead of self-shutting-down before it rejoins
+heartbeat_timeout_ms = 25000   # was 3000 — ride through the retina's churn-crash auto-restart (latent Eigen-align SIGBUS) instead of self-shutting-down before it rejoins
 rejoin_grace_ms = 8000         # was 1500
 stale_grace_ms = 120000
 agent_info_period_ms = 1000
@@ -112,10 +112,10 @@ PlaceBottleWorldX  = 0.438    # m, Webots world (+X front) — EXPERIMENT INITIA
 PlaceBottleWorldY  = -0.575   # m, Webots world (+Y right). reach 0.648 m from arm base. (Verify perception:
                               # -0.45 was rejected by YOLO tray-mask earlier; confirm conf>0 at this spot.)
 
-# Demote Operating→Degraded→Waiting when the voxelizer's `masks` node stops advancing its mask_frame_id for
+# Demote Operating→Degraded→Waiting when the retina's `masks` node stops advancing its mask_frame_id for
 # this long (producer dead/stalled) — don't integrate stale evidence; re-admit automatically when it returns
 # (peers stay intact, so the agent never shuts down). Orthogonal to AI2AgeNominalDtS (belief-axis Σ-aging).
-# MUST exceed the voxelizer HOLD_ENTER_S so a legitimately empty scene (counter still advancing) never trips.
+# MUST exceed the retina HOLD_ENTER_S so a legitimately empty scene (counter still advancing) never trips.
 [Media]
 MasksStallTimeoutMs = 3000   # 0 = disable the stall gate
 

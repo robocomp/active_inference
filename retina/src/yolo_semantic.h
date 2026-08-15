@@ -3,7 +3,7 @@
 /*
  * yolo_semantic.h
  *
- * Semantic-segmentation branch of the voxelizer perception stack. Runs a YOLO
+ * Semantic-segmentation branch of the retina perception stack. Runs a YOLO
  * semantic-segmentation ONNX model (e.g. yolo26l-sem) on the same RGB frame the
  * instance-seg detector consumes and returns a DENSE per-pixel class-label map at
  * the original image resolution — one integer class id per pixel.

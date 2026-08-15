@@ -405,7 +405,7 @@ void SpecificWorker::initialize()
     // through a QSocketNotifier serviced by this SAME event loop. The agent can then only be killed with -9,
     // which cannot be caught, so every node it owns LEAKS into the shared graph.
     // Measured 2026-08-07 on table_concept (identical subscription): main thread pegged at 100% of a core,
-    // ai2_log.csv frozen, Ctrl-C inert, right after a voxelizer restart. CLAUDE.md already states the rule
+    // ai2_log.csv frozen, Ctrl-C inert, right after a retina restart. CLAUDE.md already states the rule
     // this violated: if you don't need a signal, don't connect it at all (bottle_concept connects none).
     // The two things the slot did are now POLLED once per cycle in poll_affordance_protocol().
     connect(G.get(), &DSR::DSRGraph::update_node_signal,
@@ -895,7 +895,7 @@ void SpecificWorker::run_instance_tracker()
                 // publishes them as full 3D slices with has_depth = 1, so a 360° detection from BEHIND the
                 // robot passed every guard written as `if (has_depth)`. Reported live on bottle_concept —
                 // moving and cloning with the robot facing away, 3 m off. mask_source says which camera,
-                // unambiguously, and the voxelizer has been publishing it all along. A ricoh slice may
+                // unambiguously, and the retina has been publishing it all along. A ricoh slice may
                 // still CONFIRM a live instance (bearing_confirm) or raise a proto-object to go and look
                 // at; it may not move one. See MaskIngestor::MaskSlice::may_fit_geometry.
             if (sl.label != "chair" or sl.support_end <= sl.support_begin

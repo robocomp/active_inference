@@ -282,7 +282,7 @@ TableFitter::TableObservation TableFitter::observe_slice(TableInstance& inst, in
     inst.last_range           = slice.range;
     inst.last_depth_var       = slice.depth_var;   // mask depth uncertainty → R (ricoh lidar-depth masks)
     // Appearance (DISPLAY ONLY — deliberately NOT part of `observation`, so no fit can ever see it). This
-    // is a sidecar belief on the instance whose only consumer is the mesh tint published to the voxelizer.
+    // is a sidecar belief on the instance whose only consumer is the mesh tint published to the retina.
     inst.appearance.update(slice.color_chroma, slice.color_var, slice.color_neff);
 
     const std::size_t begin = std::min(slice.support_begin, masks_packet.support_points.size());
@@ -473,7 +473,7 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
     // Static range weighting (motion-free). Even at zero camera motion, deprojection noise grows with
     // distance AND a far mask subtends a tiny angle, so pose — orientation most of all — becomes
     // unobservable: a 7 m view should confirm existence but never rotate a converged table. The
-    // motion×distance term is already in last_motion_var (the voxelizer interaction matrix carries 1/Z),
+    // motion×distance term is already in last_motion_var (the retina interaction matrix carries 1/Z),
     // but that vanishes when still; this is the missing static part. Pure continuous covariance growth (no
     // gate): the per-frame information CAP (common-mode) rises with range, so the frame's yaw gain against a
     // converged prior shrinks smoothly toward zero. mask_range = mean camera→mask depth Z, from the producer.
@@ -506,7 +506,7 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
     // collapse it). Route it into the per-frame COMMON-MODE instead: the engine's Woodbury marginalisation
     // then caps the frame's authority to move the GEOMETRY MEAN (size/pose/yaw), so geometric updates
     // concentrate at stillness while a moving frame contributes CONFIRMATION only (existence/association don't
-    // read this). motion_dotd = Z·‖ṡ‖ (m/s) from the voxelizer. CONTINUOUS, no gate: at dotd→0 the term
+    // read this). motion_dotd = Z·‖ṡ‖ (m/s) from the retina. CONTINUOUS, no gate: at dotd→0 the term
     // vanishes (a still frame updates fully); the gains are ~effective-lag (s), 0 disables a channel.
     const float mot_dotd    = std::abs(inst.last_motion_dotd);
     const float mot_pos_var = std::pow(cfg_.motion_cm_pos_gain  * mot_dotd, 2.0f);   // m²  (cx,cy)
@@ -524,7 +524,7 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
     // do this: the engine saturates a frame's information at Σc⁻¹, a NONZERO asymptote, so a bad frame is
     // attenuated but still moves the mean — and accumulation over hundreds of frames beats attenuation.
     // A fixation is judged from the PREDICTED projection (roi_* is last cycle's, recomputed below at the same
-    // pre-update belief) + the voxelizer's ego-motion smear. Each condition is independently disable-able.
+    // pre-update belief) + the retina's ego-motion smear. Each condition is independently disable-able.
     // roi_valid==false (no projection yet, e.g. a newborn's first cycle) cannot judge centring → do not let it
     // block; the range and stillness conditions still apply.
     const float roi_off      = std::hypot(inst.roi_offset_x, inst.roi_offset_y);

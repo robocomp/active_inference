@@ -82,7 +82,7 @@ std::uint64_t KitchenSceneGraph::ensure_node(const KitchenBelief& belief, std::u
     //
     // Height is a nominal 2 cm slab, the same convention ring_metaconcept uses: a metaconcept has a
     // footprint but NO body, nothing occupies it, and the viewer renders it as a flat outline on the
-    // floor rather than a solid. (voxelizer's scene_processor skips any node with no box dimensions,
+    // floor rather than a solid. (retina's scene_processor skips any node with no box dimensions,
     // which is why this frame was invisible before.)
     if (not members.empty())
     {

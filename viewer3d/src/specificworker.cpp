@@ -274,7 +274,7 @@ void SpecificWorker::build_viewer_window()
     // Agent.graph/2d/tree are all false). Beyond the independence that motivated the split, it keeps
     // this heavy QOpenGLWidget off the GraphViewer's shared backing store — see the warning on
     // DSRViewer::add_custom_widget_in_own_window in dsr_gui.h. That hazard is exactly why this widget
-    // was already in its own window inside the voxelizer.
+    // was already in its own window inside the retina.
     window_ = std::make_unique<QMainWindow>();
     window_->setWindowTitle(QString("%1-%2 | metric 3D scene")
                                 .arg(QString::fromStdString(agent_name))
@@ -310,7 +310,7 @@ void SpecificWorker::build_viewer_window()
 
 
 // ★THE LAYER TOGGLES CAME ACROSS WITH THE VIEW. They drove this GL widget, so they belong to this agent,
-// not to the voxelizer they used to sit in. Same labels, same default states and the same accent colours
+// not to the retina they used to sit in. Same labels, same default states and the same accent colours
 // as before the split — each button is tinted with the colour of the thing it shows, so the association
 // between a toggle and its geometry survives the move.
 QWidget* SpecificWorker::build_layer_panel()

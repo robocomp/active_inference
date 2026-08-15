@@ -1,7 +1,7 @@
 
 # --- Common Agent Data ---
 [Agent]
-id = 20 # unique across the shared graph: room=5 robot=6 table=7 controller=8 voxelizer=9 bottle=10 kinova=11 self_calib=12
+id = 20 # unique across the shared graph: room=5 robot=6 table=7 controller=8 retina=9 bottle=10 kinova=11 self_calib=12
 name = "chair_concept"
 
 # --- Single Instance Configuration ---

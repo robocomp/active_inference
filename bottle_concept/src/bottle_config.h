@@ -39,9 +39,9 @@ struct BottleConfig
     float support_select_height_margin_m = 0.10f;
 
     // ── Primary-input stream gate (readiness + staleness) — LIFECYCLE, not a belief knob ──────────────
-    // Demote Operating→Degraded→Waiting when the voxelizer's `masks` node stops advancing its mask_frame_id
+    // Demote Operating→Degraded→Waiting when the retina's `masks` node stops advancing its mask_frame_id
     // for this long (producer dead/stalled) — don't integrate stale evidence; re-admit when it returns.
-    // Orthogonal to ai2_age_nominal_dt_s (belief-axis Σ-aging). MUST exceed the voxelizer HOLD_ENTER_S so a
+    // Orthogonal to ai2_age_nominal_dt_s (belief-axis Σ-aging). MUST exceed the retina HOLD_ENTER_S so a
     // legitimately empty scene (still-advancing counter) never trips it. 0 = disable the gate.
     int   masks_stall_timeout_ms       = 3000;
 
@@ -174,7 +174,7 @@ struct BottleConfig
     bool  bearing_confirm_enabled  = false;   // Bearing.ConfirmEnabled
     float bearing_confirm_gate_rad = 0.17f;   // Bearing.ConfirmGateRad — 1-D angular gate (~10°)
     // ── Part B: masks in camera frame + chain covariance ───────────────────────────────────────────
-    // The voxelizer publishes support points in CAMERA frame (mask_support_points_cam); MaskIngestor
+    // The retina publishes support points in CAMERA frame (mask_support_points_cam); MaskIngestor
     // transforms them to the fit frame via inner_eigen pinned to the capture stamp. That is now the
     // DEFAULT for every agent (see the FRAME CONTRACT in common/mask_ingestor), so this flag no longer
     // SELECTS the frame — it only governs whether the published RT-edge covariance gains the

@@ -92,7 +92,7 @@ private:
 	// A rolling (stamp_ms, q) ring published on the kinova_arm_r node so the
 	// calibrator can nearest-match q to an image stamp_ms (the t↔q lookup). DSR has
 	// no nested-vector attr type, so it is flattened to FLOAT vectors + a uint64
-	// base (the voxelizer-proven path): stamps go as float OFFSETS from base_ms so
+	// base (the retina-proven path): stamps go as float OFFSETS from base_ms so
 	// ms precision survives float32 (raw epoch-ms ~1.78e12 would not). Opt-in
 	// (Controller.publish_joint_buffer) and throttled to bound churn on the arm node.
 	void publish_joint_buffer(std::uint64_t stamp_ms,

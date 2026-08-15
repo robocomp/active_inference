@@ -5,7 +5,7 @@ Webots2Robocomp = "webots2robocomp:tcp -h localhost -p 10006"
 
 # --- Common Agent Data ---
 [Agent]
-id = 14  # MUST be unique across the shared graph: room=5 robot=6 table=7 controller=8 voxelizer=9 bottle=10 kinova=11 self_calib=12 human=13 door=15 scene_graph_viewer=16 chair=20 cabinet=21 refrigerator=22 ring_metaconcept=23. A collision = CRDT actor-id clash → SIGSEGV.
+id = 14  # MUST be unique across the shared graph: room=5 robot=6 table=7 controller=8 retina=9 bottle=10 kinova=11 self_calib=12 human=13 door=15 scene_graph_viewer=16 chair=20 cabinet=21 refrigerator=22 ring_metaconcept=23. A collision = CRDT actor-id clash → SIGSEGV.
 name = "residual_concept"
 
 configFile = ""
@@ -30,7 +30,7 @@ MessageSizeMax = "20004800"
 
 # ── Agent-presence protocol ───────────────────────────────────────────────────
 [Presence]
-required_agent_names = ["robot_concept", "room_concept"]   # robot_concept = lidar3D + robot node; room_concept = room node + floor/wall specialists. NO voxelizer (residual uses LiDAR, not YOLO masks).
+required_agent_names = ["robot_concept", "room_concept"]   # robot_concept = lidar3D + robot node; room_concept = room node + floor/wall specialists. NO retina (residual uses LiDAR, not YOLO masks).
 config_dir = "etc"
 monitor_period_ms = 500
 heartbeat_timeout_ms = 25000
@@ -258,7 +258,7 @@ MaxDepthM = 5.0   # ZED depth degrades with range² — ignore beyond this
 MaxPoints = 1500  # cap per instance (bounds the GN fit)
 
 # ── RGB-SEMANTIC floor down-weighting (2nd, uncorrelated cue vs ZED floor phantoms) ──
-# The voxelizer's dense YOLO-sem label map (ADE20K-150) on the `semantic` node under `zed` is sampled per surviving
+# The retina's dense YOLO-sem label map (ADE20K-150) on the `semantic` node under `zed` is sampled per surviving
 # ZED grid-point (reproject → exact pixel). A FLOOR-class label at a NEAR-floor return down-weights its occupancy
 # HIT, so a phantom floor obstacle needs more evidence to latch. SAFE BY CONSTRUCTION: down-weight only (never
 # discard), HEIGHT-GATED (a clearly-elevated obstacle keeps full weight regardless of label), and FRESHNESS-decayed

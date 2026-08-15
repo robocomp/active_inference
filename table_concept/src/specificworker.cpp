@@ -319,7 +319,7 @@ void SpecificWorker::initialize()
     if (cfg_.masks_legacy_room_frame)
     {
         mask_ingestor_->set_legacy_room_frame(true);
-        std::println("[table_concept] Masks.legacy_room_frame=true — A/B baseline: reading the voxelizer's "
+        std::println("[table_concept] Masks.legacy_room_frame=true — A/B baseline: reading the retina's "
                      "ROOM-frame mask array, NOT transforming camera points here");
     }
     scene_graph_ = std::make_unique<rc::TableSceneGraph>(
@@ -336,7 +336,7 @@ void SpecificWorker::initialize()
     // through a QSocketNotifier serviced by this SAME event loop. The agent can then only be killed with -9,
     // which cannot be caught, so every node it owns LEAKS into the shared graph.
     // Measured on THIS agent 2026-08-07: main thread pegged at 100% of a core (301 jiffies/3 s), ai2_log.csv
-    // frozen, Ctrl-C inert, right after a voxelizer restart. residual_concept did the same on 08-06 under the
+    // frozen, Ctrl-C inert, right after a retina restart. residual_concept did the same on 08-06 under the
     // same trigger. CLAUDE.md already states the rule this violated: if you don't need a signal, don't connect
     // it at all (bottle_concept connects none).
     // The two things the slot did are now POLLED once per cycle in poll_affordance_protocol() — a controller

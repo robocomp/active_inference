@@ -40,7 +40,7 @@
 #include "depth_dataset.h"     // rc::depth::DepthDataset / DepthFitMap (LiDAR-anchored correction)
 #include "depth_enrichment.h"  // rc::depth::RoomGeometry / DatasetEnricher (offline room-belief pass)
 #include "rgbd_data.h"
-#include "voxelizer_params.h"
+#include "retina_params.h"
 #include "stream_rate_monitor.h"
 #include "model_projection_overlay.h"   // rc::ModelProjectionOverlay + GraphObjectBox (SceneFrame value member)
 #include "ricoh_projection_overlay.h"   // rc::RicohProjectionOverlay (360 panorama counterpart)
@@ -105,7 +105,7 @@ class SpecificWorker : public GenericWorker
                           const std::string& reason, const std::string& detail);
 
     private:
-        VoxelizerParams params;   // loaded via load_voxelizer_params() in initialize()
+        RetinaParams params;   // loaded via load_retina_params() in initialize()
 
         struct SceneFrame   // scene CONTEXT gathered on the main thread (RGBD/seg live in the ZED worker now)
         {

@@ -85,7 +85,7 @@ void AgentPresenceMonitor::start()
     // update_node_attr_signal / del_node_signal. Those DSR Qt signals carry std::string /
     // std::vector<std::string> payloads that, under QueuedConnection, are marshaled across the
     // emitter thread (DDS reader / heartbeat) and the receiver thread — a TSan-confirmed heap-
-    // corruption race that crashed heavy-heap peers (voxelizer) on participant churn. Presence is
+    // corruption race that crashed heavy-heap peers (retina) on participant churn. Presence is
     // inherently a polling problem anyway (you cannot receive a signal for a heartbeat that
     // STOPPED), so the 500 ms timer below already does a full scan; the slots were only a sub-period
     // latency optimization. Departed-node detection (formerly the del_node slot) is folded into

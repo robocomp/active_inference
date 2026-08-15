@@ -67,7 +67,7 @@ its floor is all grazing, so it reads 130–170 mm depending only on where the r
   from the type-`"robot"` node (`RoomConfig.LIDAR_ROBOT_FRAME` empty ⇒ auto-derive), so "the frame we
   fit in" == "the node we write the edge onto" — no base offset in the published pose.
 - **`body` is the de-facto base frame every OTHER agent hardcodes** (`get_transformation_matrix(
-  "room","body")` in table/bottle/chair/voxelizer/self_cal). `Shadow → body` is a **pure +3.25 cm z**
+  "room","body")` in table/bottle/chair/retina/self_cal). `Shadow → body` is a **pure +3.25 cm z**
   translation (no x/y/yaw), so `Shadow` and `body` are **identical in the plane (x, y, yaw)** and
   differ only in z. Any SE(2)/planar quantity is the same in either; only true-3D height cares.
 - **`root` is the world datum at the floor** (z=0). `Shadow` sits at the floor; `body` at +3.25 cm —
@@ -171,7 +171,7 @@ either is "the robot" without saying which question you are asking.
 | file | what it is | size | extent (m) |
 |---|---|---|---|
 | `webots-shadow/protos/meshes/shadow.stl` | the Webots **BODY** solid — what the simulator renders as the body. **Byte-identical (md5) to the driver's copy** `lidar3d_dds/robots/Shadow/shadow.stl` | 18 809 tri | x ±0.2386, y ±0.2300, z 0.0034…1.3089 |
-| `robot_concept/meshes/shadow.obj` | the **DISPLAY** mesh (viewers, voxelizer, graph3d). Fuller, but still body-only | 47 530 faces / 141 364 v | x ±0.2420, y −0.2306…+0.2471, z **−0.0500**…1.3671 |
+| `robot_concept/meshes/shadow.obj` | the **DISPLAY** mesh (viewers, retina, graph3d). Fuller, but still body-only | 47 530 faces / 141 364 v | x ±0.2420, y −0.2306…+0.2471, z **−0.0500**…1.3671 |
 | `.../meshes/shadow.dae` | referenced by the proto alongside the STL | — | — |
 
 ★The OBJ is authored with **z-min at −0.050 m** (it hangs below the floor plane) and the project's own

@@ -42,10 +42,10 @@ MessageSizeMax = "20004800"
 
 # ── Agent-presence protocol ───────────────────────────────────────────────────
 [Presence]
-required_agent_names = ["robot_concept", "room_concept", "voxelizer"]
+required_agent_names = ["robot_concept", "room_concept", "retina"]
 config_dir = "etc"
 monitor_period_ms = 500
-heartbeat_timeout_ms = 25000   # was 3000 — ride through the voxelizer's churn-crash auto-restart (latent Eigen-align SIGBUS) instead of self-shutting-down before it rejoins
+heartbeat_timeout_ms = 25000   # was 3000 — ride through the retina's churn-crash auto-restart (latent Eigen-align SIGBUS) instead of self-shutting-down before it rejoins
 rejoin_grace_ms = 8000         # was 1500
 stale_grace_ms = 120000
 agent_info_period_ms = 1000

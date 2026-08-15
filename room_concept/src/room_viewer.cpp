@@ -73,7 +73,7 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
 {
     // Own top-level window (parent == nullptr), NOT docked into the DSR graph viewer. This
     // decouples the layout GUI from Agent.graph, so the agent runs with graph=false (no
-    // DSRViewer created at all). Mirrors voxelizer's independent custom drawing windows.
+    // DSRViewer created at all). Mirrors retina's independent custom drawing windows.
     custom_widget_ = new Custom_widget();
     custom_widget_->setWindowTitle(QStringLiteral("room_concept — layout"));
     restore_window_geometry();

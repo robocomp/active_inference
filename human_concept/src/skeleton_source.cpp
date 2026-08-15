@@ -94,7 +94,7 @@ std::vector<SkeletonBody> ReplaySkeletonSource::poll()
     return { rows_[cursor_++] };
 }
 
-// ── DSR backend: voxelizer 'skeleton' node → BODY_18 bodies (CAMERA→world transformed) ──────────
+// ── DSR backend: retina 'skeleton' node → BODY_18 bodies (CAMERA→world transformed) ──────────
 
 DsrSkeletonSource::DsrSkeletonSource(std::shared_ptr<DSR::DSRGraph> graph,
                                      DSR::InnerEigenAPI* inner_eigen,

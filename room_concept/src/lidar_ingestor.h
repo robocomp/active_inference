@@ -16,7 +16,7 @@
 // compute cycle from the compute thread: it fills the HighLidarBuffer the localizer reads and wakes
 // the localizer (RoomConcept::notify_new_lidar). No dedicated ingest thread and no DSR-graph path —
 // a single-caller non-blocking poll() is the one thread-safe procedure every agent uses to read the
-// media infrastructure (mirrors the voxelizer's SceneProcessor::get_lidar3D()). The earlier
+// media infrastructure (mirrors the retina's SceneProcessor::get_lidar3D()). The earlier
 // CV/signal/watchdog ingest-thread scaffolding was crash-hunting for what turned out to be the Eigen
 // alignment ABI bug (now fixed), so it is gone.
 

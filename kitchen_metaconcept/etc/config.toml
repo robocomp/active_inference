@@ -2,7 +2,7 @@
 # --- Common Agent Data ---
 [Agent]
 # MUST be unique across the shared graph — a collision is a CRDT actor-id clash → SIGSEGV in BOTH
-# agents. Taken: room=5 robot=6 table=7 controller=8 voxelizer=9 bottle=10 kinova=11 self_calib=12
+# agents. Taken: room=5 robot=6 table=7 controller=8 retina=9 bottle=10 kinova=11 self_calib=12
 # human=13 residual=14 door=15 scene_graph_viewer=16 chair=20 cabinet=21 refrigerator=22
 # ring_metaconcept=23 kitchen_metaconcept=24. Next free: 17-19, 25+.
 # (Record any new id in CONCEPT_AGENT_RECIPE.md §1 — that table, not these comments, is the source
@@ -71,8 +71,8 @@ Verbose = false
 #     cabinet       ✓ cabinet_concept
 #     refrigerator  ✓ refrigerator_concept
 #     counter       ✗ no node — cabinet_concept CONSUMES counter/countertop masks as run evidence
-#     hood          ✗ no node, but voxelizer's ADE20K set already accepts the "hood" label
-#     microwave     ✗ no node, but voxelizer's YOLO set already has "microwave"
+#     hood          ✗ no node, but retina's ADE20K set already accepts the "hood" label
+#     microwave     ✗ no node, but retina's YOLO set already has "microwave"
 # The strongly diagnostic classes are exactly the missing ones, so this channel is weak TODAY and
 # gets much stronger the moment a producer promotes hood/counter/microwave into graph objects.
 # ★No "island" entry (2026-08-10): the apartment has none. What cabinet_concept names `cabinet_island`
