@@ -93,7 +93,7 @@ private:
     // MINIMUM plane stamp instead gives one increment per FULL refresh — 20 Hz for two 20 Hz planes,
     // independent of their relative phase, which is the rate at which genuinely new complete data arrives.
     mutable std::atomic<std::uint64_t> rx_lidar_plane0_total_{0};
-    mutable std::atomic<std::uint64_t> lidar_plane0_last_stamp_{0};
+    mutable std::vector<std::uint64_t> lidar_last_counted_;   // per-plane stamps at the last counted update
 
     mutable std::atomic<std::uint64_t> latest_rgb_stamp_{0};    // newest rgb stamp seen (rate telemetry / validity)
     mutable std::atomic<std::uint64_t> latest_depth_stamp_{0};  // newest depth stamp seen

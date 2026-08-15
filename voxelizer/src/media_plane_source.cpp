@@ -242,22 +242,48 @@ std::optional<LidarData> MediaPlaneSource::get_lidar3D(const std::string& robot_
         if (auto sweep = lidar_reader_->poll(robot_name, /*interpolate=*/false);
             sweep.has_value() && !sweep->points.empty())
         {
-            // Count a COMPLETE media-plane update: the INTERSECTION, not the union. A merged sweep whose
-            // stamp advanced because ONE plane refreshed still carries the other plane's CACHED points —
-            // it is not a new observation of the whole field of view, and counting it inflates the rate
-            // toward the sum of the planes (~40 for two at 20 Hz). Tracking the MINIMUM plane stamp counts
-            // exactly one update per full refresh: the min can only advance once the laggard plane has
-            // produced a new sample, which means every plane has. Two 20 Hz planes ⇒ 20 Hz, whatever their
-            // relative phase. Zeros are skipped so a plane that is not live cannot pin the minimum at 0
-            // and stall the counter forever.
-            std::uint64_t complete_ts = 0;
-            for (const auto ps : sweep->plane_stamp_ms)
-                if (const auto v = static_cast<std::uint64_t>(std::max<std::int64_t>(0, ps)); v != 0)
-                    complete_ts = (complete_ts == 0) ? v : std::min(complete_ts, v);
-            if (complete_ts != 0 and complete_ts != lidar_plane0_last_stamp_.load(std::memory_order_relaxed))
+            // Count a COMPLETE media-plane update: the INTERSECTION of the contributing planes.
+            // A sweep whose merged stamp advanced because ONE plane refreshed still carries the other
+            // plane's CACHED points, so it is not a new observation of the whole field of view.
+            //
+            // ★AND NEITHER max NOR min GETS THIS RIGHT — both track the UNION. With helios at 0,50,100
+            // and bpearl at 25,75,125, max goes 25,50,75,100 and min goes 0,25,50,75: both advance every
+            // 25 ms, i.e. at 40 Hz for two 20 Hz planes, differing only in phase. The intersection is not
+            // an extremum of the current stamps at all — it is a question about HISTORY: has every plane
+            // produced a new sample since the last time we counted one? So the per-plane stamps AT THE
+            // LAST COUNT are what must be remembered. On the example that yields a count at 80 and 130 —
+            // once per 50 ms, 20 Hz, independent of phase, which is the rate of genuinely new full clouds.
+            // Touched only here (single consumer thread); the exported total stays atomic for the GUI.
             {
-                lidar_plane0_last_stamp_.store(complete_ts, std::memory_order_relaxed);
-                rx_lidar_plane0_total_.fetch_add(1, std::memory_order_relaxed);
+                const std::size_t np = sweep->plane_stamp_ms.size();
+                if (lidar_last_counted_.size() != np)
+                    lidar_last_counted_.assign(np, 0);
+                bool all_advanced = true, any_live = false;
+                for (std::size_t i = 0; i < np; ++i)
+                {
+                    const auto v = static_cast<std::uint64_t>(std::max<std::int64_t>(0, sweep->plane_stamp_ms[i]));
+                    if (v == 0) continue;               // plane not live — cannot hold the count hostage
+                    any_live = true;
+                    if (v == lidar_last_counted_[i]) { all_advanced = false; break; }
+                }
+                // One-shot: say how many planes the reader is actually merging. If this prints 1 the reader
+                // fell back to the FUSED lidar3D topic and there is no per-plane structure to intersect —
+                // the rate then reflects whatever that single stream publishes, and a 20 Hz reading would
+                // have to come from the producer side, not from here.
+                static bool np_logged = false;
+                if (not np_logged and any_live)
+                {
+                    np_logged = true;
+                    std::print("[voxelizer] lidar merge: {} plane(s) live -> feed counts a COMPLETE refresh of all {}\n",
+                               np, np);
+                }
+                if (any_live and all_advanced)
+                {
+                    for (std::size_t i = 0; i < np; ++i)
+                        lidar_last_counted_[i] =
+                            static_cast<std::uint64_t>(std::max<std::int64_t>(0, sweep->plane_stamp_ms[i]));
+                    rx_lidar_plane0_total_.fetch_add(1, std::memory_order_relaxed);
+                }
             }
             LidarData ld;
             ld.xs.reserve(sweep->points.size());
