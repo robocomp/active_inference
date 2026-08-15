@@ -478,7 +478,10 @@ void SpecificWorker::setup_custom_viewers()
             });
 
         // Standalone top-level window (voxel_panel was created parentless → it IS a top-level window).
-        voxel_panel->setWindowTitle("Voxel3D");
+        // "Voxel3D" outlived both the voxels and the 3-D view: the GL widget moved to the viewer3d
+        // agent, so this window is now the agent's control + status panel (camera toggles and the
+        // mask-rate readout). Named for the agent it belongs to.
+        voxel_panel->setWindowTitle("Retina");
         voxel3d_window_ = voxel_panel;
         // Restore the last geometry; otherwise open at ~half the default window size.
         if (not restore_external_window_geometry(voxel3d_window_, "Voxel3DWindow"))
