@@ -32,6 +32,8 @@
  */
 
 #include "specificworker.h"
+
+#include "../../common/peripheral_channel/peripheral_channel.h"   // THE shared ricoh path
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion — the SHARED no-two-objects rule
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion:: (SHARED)
 
@@ -1312,12 +1314,39 @@ void SpecificWorker::run_instance_tracker()
         }
     }
 
-    // ★THE SECOND BEARING-BIRTH BLOCK, ALSO REMOVED. This one staged a no-depth bearing into a
-    // "hypothesis" instance — an elongated Sigma along the unknown range, authoring an Orient affordance
-    // so a later depth mask could collapse it. Better motivated than the nominal-range version, and
-    // still a birth from the sensor that cannot measure range, in two agents out of seven. The
-    // proto-object / saccadic path is the same idea done once, for everyone, without creating a graph
-    // node first: raise a candidate, go and look, THEN birth with a real range.
+    // ── Peripheral (ricoh-360) channel — common/peripheral_channel, the one path for all seven ──────
+    // ★BOTH BEARING-BIRTH BLOCKS REMOVED (2026-08-15). This agent had two: one staging an unmatched
+    // bearing into an instance at a nominal range, and one staging it as a "hypothesis" with Sigma
+    // elongated along the unknown range, authoring an Orient affordance so a later depth mask could
+    // collapse it. The second was better motivated and still a birth from the sensor that cannot
+    // measure range, in two agents out of seven. The proto-object / saccadic path is that idea done
+    // once for everyone WITHOUT creating a graph node first: raise a candidate, go and look, then
+    // birth with a real range. What survives here is confirmation, which is all a peripheral glance
+    // is entitled to.
+    // No enable flag: confirmation is what a peripheral glance is FOR, and the other five agents
+    // never had one. Guarded on having something to confirm against.
+    if (not tracks.empty() and mask_ingestor_)
+    {
+        const auto& pkt_p = mask_ingestor_->packet();
+        Eigen::Vector2f robot_xy(0.f, 0.f);
+        if (const auto rp = inner_eigen_->transform("room", Eigen::Vector3d::Zero(), "zed"); rp.has_value())
+            robot_xy = {static_cast<float>(rp->x()), static_cast<float>(rp->y())};
+
+        const auto dets_p = rc::peripheral::gather(pkt_p, "door", robot_xy);
+        if (not dets_p.empty())
+        {
+            std::vector<rc::peripheral::TrackRef> trefs;
+            trefs.reserve(tracks.size());
+            for (const auto& t : tracks)
+                trefs.push_back({t.id, t.xy, 0.50f});
+            rc::peripheral::Params pp;
+            pp.angular_margin_rad = cfg_.bearing_confirm_gate_rad;
+            for (const auto& c : rc::peripheral::associate(trefs, dets_p, robot_xy, pp).confirms)
+                for (auto& t : tracks)
+                    if (t.id == c.track_id)
+                        t.expected_visible = false;   // hold the death-miss (peripheral glance)
+        }
+    }
 }
 
 // Snapshot residual_concept's published residual field. Mirrors table_concept::read_residual_field — same
