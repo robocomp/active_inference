@@ -438,6 +438,11 @@ void SpecificWorker::setup_custom_viewers()
                 feed_rgb_prev_ = c_rgb; feed_ricoh_prev_ = c_ricoh; feed_lidar_prev_ = c_lidar;
                 feed_last_tp_  = now_tp;
             }
+            // Publish the counted source rates to the monitor so the 5 s [streams] log line reports the
+            // STREAM's rate rather than the rate of whichever timer happens to sample it.
+            stream_mon_.set_source_hz("rgb",    feed_rgb_hz_);
+            stream_mon_.set_source_hz("rgb360", feed_ricoh_hz_);
+            stream_mon_.set_source_hz("lidar",  feed_lidar_hz_);
             const double feed = feed_rgb_hz_;
             const auto fmt = [](double hz) { return hz > 0.0 ? QString::number(hz, 'f', 1) : QString("—"); };
             // One channel PER LINE. Three rates side by side read as a sentence; stacked with the units

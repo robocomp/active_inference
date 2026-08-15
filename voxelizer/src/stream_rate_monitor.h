@@ -88,6 +88,14 @@ public:
         return std::chrono::duration<double>(std::chrono::steady_clock::now() - it->second.last_new).count();
     }
 
+    // Externally measured SOURCE rate (Hz) for `name` — arrivals counted at the subscriber. Optional:
+    // when set (>0) the report prints THIS instead of the tick-derived rate.
+    // ★WHY THE REPORT NEEDS IT. This line is "input-stream health", but s.hz is derived from tick(), and
+    // a tick is only as fast as whatever samples it. rgb360 is ticked from the 50 ms render timer, so its
+    // reported rate was CAPPED AT 20 Hz and read 19.4 for a camera streaming at 31 — the display was
+    // measuring its own clock, not the stream. A counted arrival rate has no such ceiling.
+    void set_source_hz(const std::string& name, double hz) { streams_[name].source_hz = hz; }
+
     struct Report { std::string summary; bool any_stall = false; };
 
     // Returns a report at most every `report_s`; flags streams idle for > `stall_s`.
@@ -107,7 +115,10 @@ public:
             if (stalled) r.any_stall = true;
             char buf[64];
             if (stalled) std::snprintf(buf, sizeof buf, "%s STALLED(%.1fs) | ", name.c_str(), idle);
-            else         std::snprintf(buf, sizeof buf, "%s %.1f Hz | ", name.c_str(), s.hz);
+            // Prefer the counted source rate; fall back to the tick-derived one when nobody supplied it
+            // (e.g. the readout panel that measures it is disabled).
+            else         std::snprintf(buf, sizeof buf, "%s %.1f Hz | ", name.c_str(),
+                                       s.source_hz > 0.0 ? s.source_hz : s.hz);
             r.summary += buf;
         }
         return r;
@@ -117,6 +128,7 @@ private:
     struct Stat
     {
         double        hz = 0.0;
+        double        source_hz = 0.0;   // counted at the subscriber; 0 = not supplied, use hz
         double        dt_ema = 0.0;      // EMA of the stamp PERIOD (ms) — hz is 1000/this, never an EMA of rates
         double        feed_hz = 0.0;     // 1000 / 20th-percentile gap: the fastest cadence we RELIABLY see
         std::array<double, kGapWin> gaps{};
