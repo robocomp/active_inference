@@ -42,7 +42,14 @@ MessageSizeMax = "20004800"
 
 # ── Agent-presence protocol ───────────────────────────────────────────────────
 [Presence]
-required_agent_names = ["robot_concept", "room_concept", "retina"]
+# ★retina REMOVED from required 2026-08-15. It was the only agent that hard-required the mask
+# producer, so a producer that was down or renamed kept bottle_concept in Waiting forever — presence
+# name resolution is exact-match and one-shot, so an unresolved name pins required_ready false with no
+# recovery. The protection it was providing is already covered, and covered better, by the primary-input
+# stream gate below (Media.MasksStallTimeoutMs): that keys on mask_frame_id actually ADVANCING rather
+# than on an agent being present, so it also catches a producer that is alive but stalled — which the
+# presence entry never could. Put it back only if something needs the producer at STARTUP specifically.
+required_agent_names = ["robot_concept", "room_concept"]
 config_dir = "etc"
 monitor_period_ms = 500
 heartbeat_timeout_ms = 25000   # was 3000 — ride through the retina's churn-crash auto-restart (latent Eigen-align SIGBUS) instead of self-shutting-down before it rejoins
