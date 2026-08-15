@@ -10,7 +10,7 @@
  *
  * Pure belief engine (mirrors BottleFitter): ensure_instance → observe → run_inference, NO DSR writes (the
  * worker owns write-back via ResidualSceneGraph). Much simpler than bottle: no camera/mask/silhouette,
- * no lidar-ray factor, no voxel bank, no support surface. Plain class (no Q_OBJECT).
+ * no lidar-ray factor, no support bank, no support surface. Plain class (no Q_OBJECT).
  */
 
 #pragma once

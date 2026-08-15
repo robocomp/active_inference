@@ -62,8 +62,11 @@ RememberGeometry = true    # persist window position/size across runs (QSettings
 LogPeriodFrames = 50       # throttle for the liveness line; 0 disables
 
 # The robot's display mesh. Named here because the robot node's own `path` attr ("meshes/shadow.obj")
-# is relative to robot_concept's run dir, not to the components root. Empty ⇒ synthetic glyph.
-RobotMeshPath = "robot_concept/meshes/shadow.obj"
+# is relative to robot_concept's run dir, not to the components root — so pointing at a sibling
+# component's copy only resolved when the viewer happened to be launched from that root. This agent now
+# carries its OWN copy (viewer3d/meshes/shadow.obj, byte-identical to robot_concept's and voxelizer's),
+# which resolves both from the component dir and from bin/. Empty ⇒ synthetic glyph.
+RobotMeshPath = "meshes/shadow.obj"
 
 # LiDAR media-plane topic. The DOMAIN and QoS come from the descriptor robot_concept authors on the
 # sensor node, never from here (CLAUDE.md, media plane) — this only names the stream.

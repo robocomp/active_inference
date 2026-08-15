@@ -314,21 +314,26 @@ void SpecificWorker::build_viewer_window()
 QWidget* SpecificWorker::build_layer_panel()
 {
     auto* panel  = new QWidget(nullptr);
-    auto* layout = new QVBoxLayout(panel);
+    auto* layout = new QHBoxLayout(panel);   // side pane on the LEFT, the GL view takes the rest
     layout->setContentsMargins(4, 4, 4, 4);
-    layout->setSpacing(4);
+    layout->setSpacing(6);
 
-    auto* row1 = new QHBoxLayout();
-    auto* row2 = new QHBoxLayout();
+    // The pane is its own widget so it can carry a fixed width: buttons stacked in a column would
+    // otherwise stretch to the widest caption and shift every time a label flips ON/OFF.
+    auto* pane      = new QWidget(panel);
+    auto* pane_col  = new QVBoxLayout(pane);
+    pane_col->setContentsMargins(0, 0, 0, 0);
+    pane_col->setSpacing(4);
+    pane->setFixedWidth(140);
 
     const auto mk = [&](const char* text, bool on, const char* hex) -> QPushButton*
     {
-        auto* b = new QPushButton(QString::fromUtf8(text), panel);
+        auto* b = new QPushButton(QString::fromUtf8(text), pane);
         b->setCheckable(true);
         b->setChecked(on);
         b->setCursor(Qt::PointingHandCursor);
         b->setStyleSheet(QString(
-            "QPushButton { border: 2px solid %1; border-radius: 4px; padding: 3px 8px; }"
+            "QPushButton { border: 2px solid %1; border-radius: 4px; padding: 4px 8px; text-align: left; }"
             "QPushButton:checked { background-color: %1; color: #101010; }").arg(hex));
         return b;
     };
@@ -341,17 +346,17 @@ QWidget* SpecificWorker::build_layer_panel()
     auto* field_btn    = mk("Field: ON",     true,  "#D64550");   // belief field: risk red
     auto* labels_btn   = mk("Labels: ON",    true,  "#DDDDDD");   // node-name labels: light grey
 
-    // Row 1 — raw/perception geometry: the point clouds and the fitted models drawn from them.
-    row1->addWidget(lidar_btn);
-    row1->addWidget(models_btn);
-    row1->addWidget(masks_btn);
-    row1->addWidget(residual_btn);
-    row1->addStretch(1);
-    // Row 2 — derived belief layers and the text labels.
-    row2->addWidget(grid_btn);
-    row2->addWidget(field_btn);
-    row2->addWidget(labels_btn);
-    row2->addStretch(1);
+    // Group 1 — raw/perception geometry: the point clouds and the fitted models drawn from them.
+    pane_col->addWidget(lidar_btn);
+    pane_col->addWidget(models_btn);
+    pane_col->addWidget(masks_btn);
+    pane_col->addWidget(residual_btn);
+    pane_col->addSpacing(10);   // the only thing separating the two groups now that rows are gone
+    // Group 2 — derived belief layers and the text labels.
+    pane_col->addWidget(grid_btn);
+    pane_col->addWidget(field_btn);
+    pane_col->addWidget(labels_btn);
+    pane_col->addStretch(1);    // buttons stay at the TOP of the pane, not spread down its height
 
     // Push each button's INITIAL state into the viewer. Without this the widget's own defaults and the
     // buttons' captions can disagree from the first frame — a toggle that reads ON over a hidden layer,
@@ -374,8 +379,7 @@ QWidget* SpecificWorker::build_layer_panel()
     wire(field_btn,    &rc::VoxelOpenGLViewer::set_show_field,    "Field");
     wire(labels_btn,   &rc::VoxelOpenGLViewer::set_show_labels,   "Labels");
 
-    layout->addLayout(row1);
-    layout->addLayout(row2);
+    layout->addWidget(pane, 0);
     layout->addWidget(viewer_, 1);   // reparents the GL widget into the panel
     return panel;
 }

@@ -3,7 +3,7 @@
  *
  * Per-obstacle runtime state shared by the residual_concept collaborators (ResidualFitter fits it,
  * ResidualSceneGraph publishes it). One ResidualInstance per "residual_N" obstacle node in the DSR graph.
- * Much slimmer than BottleInstance: no camera/mask/silhouette, no voxel bank, no support-surface, no
+ * Much slimmer than BottleInstance: no camera/mask/silhouette, no support bank, no support-surface, no
  * affordance/epistemic — a residual is fit from a LiDAR cluster and published as a footprint box + hull.
  */
 
