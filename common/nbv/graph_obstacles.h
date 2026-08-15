@@ -22,6 +22,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <cstdio>
 #include <vector>
 
@@ -39,10 +40,22 @@ namespace rc::nbv
 // size is one we cannot reason about geometrically, and inventing a size for it would fabricate occlusion.
 // ts==0 on get_transformation_matrix ⇒ MAIN-THREAD ONLY (the InnerEigenAPI ts==0 cache is unlocked; see
 // CLAUDE.md). Every current caller is on the compute/main thread.
-inline std::vector<Obstacle> collect_graph_obstacles(DSR::DSRGraph& G, DSR::InnerEigenAPI* inner_eigen,
-                                                     std::uint64_t self_id)
+// The same footprints WITH the identity of the node they came from. Obstacle stays pure geometry (it is the
+// input to the standalone-testable viewpoint scorer), so identity rides alongside rather than inside it.
+// rc::exclusion needs it: "somebody else already claims this space" is not a useful thing to log without
+// saying WHO, and a claim has to be recognisable across cycles.
+struct IdentifiedObstacle
 {
-    std::vector<Obstacle> obs;
+    Obstacle      fp{};
+    std::string   name;
+    std::uint64_t id = 0;
+};
+
+inline std::vector<IdentifiedObstacle> collect_graph_obstacles_identified(DSR::DSRGraph& G,
+                                                                          DSR::InnerEigenAPI* inner_eigen,
+                                                                          std::uint64_t self_id)
+{
+    std::vector<IdentifiedObstacle> obs;
     if (inner_eigen == nullptr)
         return obs;
     for (const char* type : {"object", "box"})
@@ -60,10 +73,22 @@ inline std::vector<Obstacle> collect_graph_obstacles(DSR::DSRGraph& G, DSR::Inne
             if (not tr.has_value())   // ALWAYS check: a missing node/edge in the RT chain returns nullopt
                 continue;
             const auto& M = tr.value();
-            obs.push_back({static_cast<float>(M(0, 3)), static_cast<float>(M(1, 3)),
-                           w.value(), d.value(),
-                           std::atan2(static_cast<float>(M(1, 0)), static_cast<float>(M(0, 0)))});
+            obs.push_back({{static_cast<float>(M(0, 3)), static_cast<float>(M(1, 3)),
+                            w.value(), d.value(),
+                            std::atan2(static_cast<float>(M(1, 0)), static_cast<float>(M(0, 0)))},
+                           n.name(), n.id()});
         }
+    return obs;
+}
+
+// The geometry-only view every existing caller uses. ONE walk of the graph, two projections of it — adding a
+// second loop here is exactly the duplication this file was written to end.
+inline std::vector<Obstacle> collect_graph_obstacles(DSR::DSRGraph& G, DSR::InnerEigenAPI* inner_eigen,
+                                                    std::uint64_t self_id)
+{
+    std::vector<Obstacle> obs;
+    for (const auto& o : collect_graph_obstacles_identified(G, inner_eigen, self_id))
+        obs.push_back(o.fp);
     return obs;
 }
 

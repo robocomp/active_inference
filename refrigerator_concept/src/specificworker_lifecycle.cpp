@@ -13,6 +13,7 @@
 #include "../../common/existence_belief/existence_belief.h"   // rc::exist — peripheral CONFIRM-ONLY
 #include "refrigerator_geometry.h"   // rc::geom::footprint_overlap_ratio
 #include "../../common/instance_tracker/birth_evidence.h"   // rc::birth — the SHARED CREATE policy
+#include "../../common/exclusion/exclusion.h"               // rc::exclusion — the SHARED no-two-objects rule
 
 #include <algorithm>
 #include <cmath>
@@ -236,6 +237,25 @@ void SpecificWorker::run_instance_tracker()
             // known. Fixes fridges being born OUTSIDE the layout. See [[refrigerator-room-envelope-birth]].
             const float support = fitter_->interior_support(dv.xy);
             dv.birth_evidence *= support;
+
+            // ★MUTUAL EXCLUSION — no two objects occupy the same space (SHARED, common/exclusion). The room
+            // envelope above asks "could a fridge stand here at all"; this asks "is somebody else ALREADY
+            // standing here". Both are continuous supports multiplied into the birth evidence, so a candidate
+            // condensing onto another concept's object simply never accrues enough to mature — it is not
+            // vetoed, it is unsupported. This is the defect that produced refrigerator_2 on top of door_3
+            // (16 cm apart, same width, same yaw): every agent refused to fit two of its OWN instances to one
+            // object and none of them ever asked what a DIFFERENT concept had claimed.
+            if (not foreign_claims_.empty())
+            {
+                const rc::geom::Footprint cand{dv.xy.x(), dv.xy.y(),
+                                               cfg_.tracker_birth_width_m, cfg_.tracker_birth_depth_m, 0.0f};
+                const rc::exclusion::Claim* who = nullptr;
+                const float unclaimed = rc::exclusion::p_unclaimed(cand, foreign_claims_, &who);
+                dv.birth_evidence *= unclaimed;
+                if (unclaimed < 0.99f)
+                    std::print("[fridge-filter] birth cand slice={} CLAIMED by '{}' ({:.0f}%): birth_ev x{:.2f} -> {:.3f}\n",
+                               i, who ? who->node : "?", 100.0f * (1.0f - unclaimed), unclaimed, dv.birth_evidence);
+            }
             if (support < 0.99f and cfg_.fridge_filter_log)
                 std::print("[fridge-filter] birth cand slice={} OUTSIDE/at layout edge: interior_support={:.3f} → birth_ev={:.3f}\n",
                            i, support, dv.birth_evidence);
@@ -371,6 +391,14 @@ void SpecificWorker::run_instance_tracker()
         if (new_id != 0)
         {
             fitter_->note_birth(new_id, Eigen::Vector2f(c.x(), c.y()));
+            // ★SENIORITY IS OBSERVED AT BIRTH, not inferred later (common/exclusion). Birth is the only moment
+            // at which "who was here first" is actually seen; resolving it on some later cycle would have a
+            // real fridge, standing legitimately beside a real cabinet, wake up after a RESTART, find the
+            // cabinet already present, and declare ITSELF the junior. An instance we did not create this run
+            // stays senior by default — the rule can fail to catch a collision, never invent one.
+            if (auto it = fitter_->instances().find(new_id); it != fitter_->instances().end())
+                it->second.exclusion.resolve_at_birth({c.x(), c.y(), cfg_.tracker_birth_width_m,
+                                                       cfg_.tracker_birth_depth_m, 0.0f}, foreign_claims_);
             // Shadow-mode birth record (CONCEPT_AGENT_LIFECYCLE.md §4.2): captures the place AND the
             // viewpoint that produced it, so a phantom that dies young is attributable to both.
             log_phantom_event("BIRTH", new_id, "", c.x(), c.y(), nullptr, "");

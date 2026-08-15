@@ -56,7 +56,8 @@
 #include "refrigerator_scene_graph.h" // rc::RefrigeratorSceneGraph (DSR node/RT I/O)
 #include "refrigerator_fitter.h"
 #include "../../common/phantom_log/phantom_log.h"   // rc::history::PhantomLog (shadow-mode birth/death record)      // rc::RefrigeratorFitter (active-inference core)
-#include "refrigerator_existence.h"   // rc::RefrigeratorExistence (evidence-based removal)
+#include "refrigerator_existence.h"
+#include "../../common/exclusion/exclusion.h"   // rc::exclusion::Claim (SHARED)   // rc::RefrigeratorExistence (evidence-based removal)
 #include "../../common/birth_surprise/birth_surprise_probe.h"   // rc::BirthSurpriseProbe (SHARED, read-only: residual grid → birth surprise)
 #include "epistemic_planner.h"
 #include "../../common/nbv/graph_obstacles.h"   // rc::nbv::collect_graph_obstacles — DSR-side viewpoint obstacles
@@ -266,6 +267,11 @@ private:
     std::unique_ptr<DSR::InnerGaussianAPI>              gaussian_api_;     // Part B: chain covariance propagation
     std::unique_ptr<rc::MaskIngestor>                   mask_ingestor_;    // perception (masks-only)
     std::unique_ptr<rc::ConceptLidarIngestor>             lidar_ingestor_;   // YOLO-independent LiDAR range channel
+
+    // Other concepts' standing claims on room space (SHARED, common/exclusion). Refreshed ONCE per compute()
+    // cycle — one graph walk feeding both the birth filter and the existence occupancy discount, so the two
+    // can never disagree about who is where.
+    std::vector<rc::exclusion::Claim> foreign_claims_;
     std::unique_ptr<rc::RefrigeratorRgbIngestor>              rgb_ingestor_;     // ZED RGB media plane for door detection
     std::unique_ptr<rc::RefrigeratorSceneGraph>                scene_graph_;      // DSR node/RT I/O
     uint64_t                                            room_node_id_ = 0;

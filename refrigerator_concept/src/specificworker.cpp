@@ -497,6 +497,13 @@ void SpecificWorker::compute()
     // never consumes a stale sweep; pump() is main-thread (reads the graph) + dormant while the feature is off.
     fitter_->clear_lidar_sweep();
     bool fresh_sweep = false;
+    // ★ONE graph walk per cycle for the SHARED mutual-exclusion rule: who else claims room space right now.
+    // Feeds BOTH the birth filter (an unmatured candidate on somebody else's object accrues no evidence) and
+    // the existence occupancy discount (a junior instance stops counting its senior's returns). Main thread —
+    // collect_graph_obstacles uses a ts==0 transform (CLAUDE.md).
+    foreign_claims_ = rc::exclusion::foreign_claims(*G, inner_eigen_.get(), "refrigerator");
+    if (existence_) existence_->set_foreign_claims(&foreign_claims_);
+
     if (lidar_ingestor_)
     {
         lidar_ingestor_->pump();   // pumps BOTH planes (helios primary; bpearl if LidarBpearlPrecision>0)

@@ -15,9 +15,11 @@
 #pragma once
 
 #include "../../common/detectability/detectability.h"   // rc::detect::DetectorEnvelope
+#include "../../common/exclusion/exclusion.h"           // rc::exclusion:: (SHARED no-two-objects rule)
 
 #include <cstdint>
 #include <functional>
+#include <vector>
 #include <memory>
 
 #include <dsr/api/dsr_api.h>
@@ -38,6 +40,11 @@ public:
     // epistemic planner so the viewpoint we ASK for and the absence we BELIEVE use the same model.
     void set_detector_envelope(const rc::detect::DetectorEnvelope& e) { det_env_ = e; }
 
+    // The other concepts' standing claims on room space, refreshed by the caller once per cycle (one graph
+    // walk shared with the birth path). SHARED policy: a junior instance's occupancy is discounted by how
+    // much of it a SENIOR object already explains — see common/exclusion/exclusion.h.
+    void set_foreign_claims(const std::vector<rc::exclusion::Claim>* c) { claims_ = c; }
+
     RefrigeratorExistence(std::shared_ptr<DSR::DSRGraph> graph, const RefrigeratorConfig& cfg)
         : G_(std::move(graph)), cfg_(cfg) {}
 
@@ -53,6 +60,7 @@ public:
 
 private:
     rc::detect::DetectorEnvelope det_env_{};
+    const std::vector<rc::exclusion::Claim>* claims_ = nullptr;
 
     std::shared_ptr<DSR::DSRGraph> G_;
     const RefrigeratorConfig&             cfg_;

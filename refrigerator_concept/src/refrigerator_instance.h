@@ -20,7 +20,8 @@
 #include "refrigerator_model.h"        // RefrigeratorModel / RefrigeratorState
 #include "refrigerator_belief.h"       // AI2 full-covariance belief (REFRIGERATOR.md)
 #include "../../common/object_affordance/object_affordance.h"   // rc::ObjectAffordance (SHARED)
-#include "../../common/existence_belief/existence_belief.h"   // per-instance existence log-odds (removal)
+#include "../../common/existence_belief/existence_belief.h"
+#include "../../common/exclusion/exclusion.h"        // rc::exclusion::Seniority (SHARED)   // per-instance existence log-odds (removal)
 
 namespace rc {
 
@@ -152,6 +153,11 @@ struct RefrigeratorInstance
     // Debounce state, SHARED (rc::exist::RemovalDebounce): the streak in ideal observations plus the
     // consecutive-starved count that makes a condemned-but-unexecutable instance visible instead of frozen.
     rc::exist::RemovalDebounce existence_debounce;
+
+    // SHARED mutual exclusion (common/exclusion): was another concept's object already standing here when this
+    // instance appeared? Resolved once, on the first cycle it is evaluated; a junior instance stops counting
+    // its senior's returns as evidence that IT exists. See exclusion.h for the measured door/fridge collision.
+    rc::exclusion::Seniority exclusion;
 
     // ── "Is this really a fridge?" plausibility filter (model-evidence mis-detection reject) ──────────
     // last_plausibility = this cycle's shape LOG-EVIDENCE RATIO log[p(θ|fridge)/p(θ|other furniture)] (nats,
