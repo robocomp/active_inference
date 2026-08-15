@@ -448,8 +448,8 @@ void SpecificWorker::setup_custom_viewers()
                                                fmt(proc).rightJustified(5), fmt(feed_).rightJustified(5)); };
             rates_label_->setText(QString("masks/s  processed / feed\n%1\n%2\n%3")
                                       .arg(row("ZED",   zed,   feed),
-                                           row("Ricoh", ricoh, stream_mon_.feed_hz("rgb360")),
-                                           row("LiDAR", lidar, stream_mon_.feed_hz("lidar"))));
+                                           row("Ricoh", ricoh, feed_ricoh_hz_),
+                                           row("LiDAR", lidar, feed_lidar_hz_)));
         });
         rates_timer_->start(1000);
 
