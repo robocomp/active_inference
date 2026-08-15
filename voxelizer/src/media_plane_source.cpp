@@ -242,13 +242,21 @@ std::optional<LidarData> MediaPlaneSource::get_lidar3D(const std::string& robot_
         if (auto sweep = lidar_reader_->poll(robot_name, /*interpolate=*/false);
             sweep.has_value() && !sweep->points.empty())
         {
-            // Count a MEDIA-PLANE UPDATE: one increment per sweep carrying a stamp we have not seen.
-            // That is the rate at which this consumer is offered a new cloud, which is what the readout
-            // means by "feed" for every other channel too.
-            if (const auto st = static_cast<std::uint64_t>(std::max<std::int64_t>(0, sweep->stamp_ms));
-                st != 0 and st != lidar_plane0_last_stamp_.load(std::memory_order_relaxed))
+            // Count a COMPLETE media-plane update: the INTERSECTION, not the union. A merged sweep whose
+            // stamp advanced because ONE plane refreshed still carries the other plane's CACHED points —
+            // it is not a new observation of the whole field of view, and counting it inflates the rate
+            // toward the sum of the planes (~40 for two at 20 Hz). Tracking the MINIMUM plane stamp counts
+            // exactly one update per full refresh: the min can only advance once the laggard plane has
+            // produced a new sample, which means every plane has. Two 20 Hz planes ⇒ 20 Hz, whatever their
+            // relative phase. Zeros are skipped so a plane that is not live cannot pin the minimum at 0
+            // and stall the counter forever.
+            std::uint64_t complete_ts = 0;
+            for (const auto ps : sweep->plane_stamp_ms)
+                if (const auto v = static_cast<std::uint64_t>(std::max<std::int64_t>(0, ps)); v != 0)
+                    complete_ts = (complete_ts == 0) ? v : std::min(complete_ts, v);
+            if (complete_ts != 0 and complete_ts != lidar_plane0_last_stamp_.load(std::memory_order_relaxed))
             {
-                lidar_plane0_last_stamp_.store(st, std::memory_order_relaxed);
+                lidar_plane0_last_stamp_.store(complete_ts, std::memory_order_relaxed);
                 rx_lidar_plane0_total_.fetch_add(1, std::memory_order_relaxed);
             }
             LidarData ld;
