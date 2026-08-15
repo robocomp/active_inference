@@ -39,6 +39,7 @@
 #include "depth_processor.h"   // rc::depth::DepthMap (ricoh 360 monocular depth diagnostic)
 #include "depth_dataset.h"     // rc::depth::DepthDataset / DepthFitMap (LiDAR-anchored correction)
 #include "depth_enrichment.h"  // rc::depth::RoomGeometry / DatasetEnricher (offline room-belief pass)
+#include "strip_schedule.h"  // which panorama strips this frame looks at (shared by the 360 stages)
 #include "rgbd_data.h"
 #include "retina_params.h"
 #include "stream_rate_monitor.h"
@@ -180,6 +181,9 @@ class SpecificWorker : public GenericWorker
 
         std::shared_ptr<DSR::InnerEigenAPI> inner_eigen_api;
 
+        // Which panorama strips the current ricoh frame is looking at. Shared so seg and the
+        // semantic pass cannot drift onto different 60-degree windows. See strip_schedule.h.
+        std::shared_ptr<rc::StripSchedule>    ricoh_strips_;
         std::unique_ptr<rc::PerceptionWorker> zed_worker_;   // ZED inference thread: [seg, pose, semantic] stages
         std::unique_ptr<SceneProcessor>    scene_processor;
         std::unique_ptr<GraphPublisher>    graph_publisher_;   // all DSR semantic_grid exports

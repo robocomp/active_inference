@@ -4,7 +4,10 @@
 // Handles both the ZED frame (detect_segmentation) and the ricoh 360 panorama (detect_segmentation_360,
 // 3-strip) based on PerceptionFrame::is_360.
 
+#include <memory>
+
 #include "perception_stage.h"
+#include "strip_schedule.h"
 
 namespace rc
 {
@@ -25,7 +28,10 @@ public:
 
     // How many strips of the panorama to segment per frame. <=0 or >= n_strips = all (original
     // behaviour). 1 = pure round-robin: a third of the cost, full 360 coverage every n_strips frames.
-    void set_strips_per_frame(int n) { strips_per_frame_ = n; }
+    // `sched` is SHARED with the other panorama stages: seg runs first and ADVANCES it, everyone else
+    // READS it, so the semantic labels always describe the same 60 degrees as the instance masks.
+    void set_strips_per_frame(int n, std::shared_ptr<StripSchedule> sched)
+    { strips_per_frame_ = n; sched_ = std::move(sched); }
 
 private:
     YoloProcessor      yolo_;
@@ -39,8 +45,8 @@ private:
     // bottle/chair/door use this channel to confirm STATIC objects, so a strip that stops being
     // visited stops confirming what is in it. Opportunistic weighting can be layered on top later,
     // but only with an age term that keeps this guarantee.
-    int strips_per_frame_ = 0;   // 0 = all
-    int next_strip_       = 0;
+    int                            strips_per_frame_ = 0;   // 0 = all
+    std::shared_ptr<StripSchedule> sched_;                   // shared; seg advances it, others read
 };
 
 } // namespace rc
