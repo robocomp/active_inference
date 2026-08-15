@@ -51,6 +51,7 @@ CabinetConfig load_cabinet_config(const ConfigLoader& cfg)
     out.obs_distance             = getf("CabinetConcept.ObsDistance",            1.8f);
     out.epistemic_cooldown_cycles= geti("CabinetConcept.EpistemicCooldownCycles", 200);
     out.cabinet_log_period_frames  = geti("CabinetConcept.CabinetLogPeriodFrames",   30);
+    out.show_dashboard            = getb("CabinetConcept.ShowDashboard",       true);
     out.verbose_log                = getb("CabinetConcept.VerboseLog",              false);
     out.support_bank_max_points    = geti("CabinetConcept.SupportBankMaxPoints",     4000);
     out.support_bank_quantization_m= getf("CabinetConcept.SupportBankQuantizationM", 0.02f);

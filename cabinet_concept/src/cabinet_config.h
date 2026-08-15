@@ -30,6 +30,12 @@ struct CabinetConfig
     float obs_distance                 = 1.8f;    // d_obs for the epistemic planner
     int   epistemic_cooldown_cycles    = 200;     // min cycles withdrawn after satisfaction
     int   cabinet_log_period_frames      = 30;      // per-cycle log throttle
+    // Show the GUI (belief strip + the dashboard behind its "details" button).
+    // false => no GUI windows are built at all (headless); the compute feed no-ops on the null widgets.
+    // ★ADDED 2026-08-15: cabinet was the only one of the four dashboard agents with NO headless mode — it
+    // built windows unconditionally while its siblings honoured this key. Found by extracting the builder.
+    bool  show_dashboard                 = true;
+
     bool  verbose_log                    = false;   // false = quiet terminal (only births/merges/removals);
     int   support_bank_max_points        = 4000;    // cap on the cabinet-owned support-point memory bank
     float support_bank_quantization_m    = 0.02f;   // support-bank dedup grid (m)
