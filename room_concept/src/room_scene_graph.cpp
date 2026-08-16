@@ -345,10 +345,30 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose,
         cov_se2 = J * cov_se2 * J.transpose();
     }
 
+    // ── SE(2) -> SE3 SLOTS, AND THE MAPPING IS THE WHOLE POINT ───────────────────────────────────
+    // rt_covariance is a 6x6 ROW-MAJOR **SE3** covariance ordered [x, y, z, rx, ry, rz]
+    // (RT_COVARIANCE_BLOCK_SIZE = 36 in cortex's dsr_rt_api.cpp). This used to write the SE(2) 3x3
+    // into the top-left 3x3, i.e. treat the block as a PADDED 3x3 — which puts the heading variance
+    // at (2,2), the slot that means var_Z, and leaves yaw at (5,5) permanently ZERO.
+    //
+    // ★ MEASURED CONSEQUENCE, 2026-08-16. The controller reads yaw from (5,5) — its own comment
+    // records fixing that from (2,2) precisely because "the rotation throttle was being driven by the
+    // robot's HEIGHT uncertainty". So it now reads a slot this agent never wrote: over two complete
+    // tours, 20817 moving samples, `pose_theta_std_rad` in the controller's profile.csv is
+    // IDENTICALLY 0.0000 — median, p75, p90, p95 and max alike. Its rotation throttle has been inert,
+    // and anything else consuming yaw uncertainty from this edge has been reading a zero.
+    // ★ Note how it arose: the consumer was corrected to cortex's convention and the producer was not,
+    // so a one-sided fix turned an accidentally-consistent pair into a silently-broken one. Before it,
+    // both used (2,2) and the wrong slot cancelled out.
+    //
+    // Index map: SE(2) (x, y, theta) -> SE3 (x, y, yaw) = rows/cols 0, 1, 5. Cross terms come along,
+    // so the xy<->theta correlation the preintegrated motion model produces survives the transport
+    // instead of being dropped on the floor.
+    static constexpr int se3_of_se2[3] = {0, 1, 5};
     std::vector<float> cov_flat(36, 0.f);
     for (int r = 0; r < 3; ++r)
         for (int c = 0; c < 3; ++c)
-            cov_flat[r * 6 + c] = cov_se2(r, c);
+            cov_flat[se3_of_se2[r] * 6 + se3_of_se2[c]] = cov_se2(r, c);
 
     // ── Body-frame twist, written BEFORE the RT block ───────────────────────
     // Consumers read velocity DIRECTLY from here instead of differentiating the pose (which is what
@@ -384,12 +404,18 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose,
             edge.value(), std::vector<float>{last_adv_, last_side_, 0.f});
         G_->add_or_modify_attrib_local<rt_rotation_euler_xyz_velocity_att>(
             edge.value(), std::vector<float>{0.f, 0.f, last_rot_});
-        std::vector<float> vel_cov(36, 0.f);   // 6×6 row-major; SE2 diag at [0],[7],[14] (matches pose cov)
+        // 6×6 row-major SE3 [x,y,z,rx,ry,rz], same convention as the pose covariance above — the
+        // velocity twist beside it is already written that way (rt_rotation_euler_xyz_velocity puts
+        // yaw rate in the THIRD slot of an xyz triple, i.e. rz). The yaw-rate variance therefore
+        // belongs at (5,5) = [35], not at [14] = var_Z. The old comment claimed it matched the pose
+        // covariance and it did — both were wrong in the same way, which is exactly what made the
+        // pair look self-consistent.
+        std::vector<float> vel_cov(36, 0.f);
         if (params_)
         {
-            vel_cov[0]  = params_->ROBOT_VEL_COV_ADV;
-            vel_cov[7]  = params_->ROBOT_VEL_COV_SIDE;
-            vel_cov[14] = params_->ROBOT_VEL_COV_ROT;
+            vel_cov[0]  = params_->ROBOT_VEL_COV_ADV;    // (0,0) var_x
+            vel_cov[7]  = params_->ROBOT_VEL_COV_SIDE;   // (1,1) var_y
+            vel_cov[35] = params_->ROBOT_VEL_COV_ROT;    // (5,5) var_yaw — was [14] = var_Z
         }
         G_->add_or_modify_attrib_local<rt_se2_covariance_velocity_att>(edge.value(), vel_cov);
         G_->insert_or_assign_edge(edge.value());
