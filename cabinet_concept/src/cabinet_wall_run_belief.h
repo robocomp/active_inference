@@ -81,10 +81,31 @@ public:
     void set_state(const WallRunState& s) { state_ = s; }
     const WallChart& chart() const { return chart_; }
 
-    // Corner-fill flags (set by KitchenManager each cycle): extend this run's low (t0→0) and/or high (t1→W)
-    // end to the wall endpoint = the shared room corner, so an L of two perpendicular runs MEETS there instead
-    // of leaving a hole. A hard structural prior, applied one-sided (fill only, never shrink).
-    void set_corner_fill(bool low, bool high) { cf_low_ = low; cf_high_ = high; }
+    // Corner-fill (set by KitchenManager each cycle): drive this run's low and/or high end to where the
+    // inside corner actually closes, so an L of two perpendicular runs MEETS there instead of leaving a hole.
+    //
+    // ★THE TARGET IS NOT ALWAYS THE VERTEX (2026-08-16). It used to be 0 / W for BOTH runs of an L, and that
+    // is geometrically impossible: run A extended to the vertex already fills the first d_A metres of wall B,
+    // so run B extended to that same vertex occupies d_A x d_B of the SAME space. Measured on the live pair —
+    // cabinet_w13_base (d=0.511) and cabinet_w14_base (d=0.741) overlapped 0.370 m2 against the 0.379 m2 that
+    // product predicts. A real L kitchen has ONE corner unit and the other run butts into its side, so the
+    // manager hands each end the target it should actually reach: the vertex for the run that owns the
+    // corner, the owner's front face for its neighbour.
+    //
+    // ★AND `two_sided` IS WHAT MAKES THE FIX ACT ON A RUN THAT IS ALREADY WRONG. The fill was grow-only,
+    // which was right while the target was the wall end — a run cannot extend past the room — but the
+    // neighbour's front face is a target a run CAN be sitting past, and today's pair is sitting past it. A
+    // grow-only prior would simply go quiet and leave the overlap standing for as long as the corner stays
+    // unobserved. So the owner's end keeps the grow-only vertex prior, and the loser's end gets a two-sided
+    // one: crossing your neighbour's face buys no likelihood, which is the same sentence common/exclusion
+    // makes between concepts, said here between two cells of one concept.
+    struct CornerFill
+    {
+        bool  on        = false;
+        float target    = 0.0f;   // where this end should sit, in chart t
+        bool  two_sided = false;  // false ⇒ grow only (the vertex); true ⇒ hold AT the target (a neighbour)
+    };
+    void set_corner_fill(const CornerFill& low, const CornerFill& high) { cf_lo_ = low; cf_hi_ = high; }
 
     // ── ARRANGEMENT END PRIOR (from a level-2 metaconcept, via a group_member edge) ──────────────
     // Where this run's two ends should sit for the kitchen to form ONE continuous surface. Targets
@@ -291,24 +312,36 @@ public:
         }
     }
 
-    // Corner-fill: a HARD prior pulling a flagged end to the wall endpoint (the shared room corner), so two
-    // perpendicular runs meeting there fill the inside corner instead of leaving a hole. One-sided (grow only):
-    // cf_high pushes t1 UP to W, cf_low pulls t0 DOWN to 0; never shrinks a run that already spans past.
+    // Corner-fill: a HARD prior driving a flagged end to its corner TARGET, so two perpendicular runs meeting
+    // at a room corner close the inside corner instead of leaving a hole.
+    //
+    // ★THE TARGET IS THE FIX FOR THE DOUBLE-CLAIMED CORNER. Both targets used to be the shared VERTEX, which
+    // makes the two runs of an L interpenetrate by exactly (d_i x d_j) — 0.370 m2 measured against 0.379 m2
+    // predicted on the live pair. The manager now gives the vertex to the run whose evidence reaches nearest
+    // it and stops the other at that run's front face, so the corner is filled ONCE. That is the same Occam
+    // statement common/exclusion makes between concepts, applied where it has to be applied between cells of
+    // one concept: foreign_claims() drops same-prefix nodes by design, so the shared rule can never see this.
+    //
+    // Sidedness follows what the target MEANS. The vertex is the room's own limit, so that prior stays
+    // grow-only — nothing should ever push a run back off a wall end it legitimately reached. A neighbour's
+    // front face is not a limit but a POSITION, and a run can already be sitting past it (today's pair is),
+    // so that prior is two-sided or it would go quiet exactly where it is needed.
     void accumulate_corner_fill(const WallRunState& s,
                                 Eigen::Matrix<float, 5, 5>& Id, Eigen::Matrix<float, 5, 1>& bd) const
     {
         constexpr float lam = 40.0f;   // strong: the corner is empty of mask points, so nothing opposes the fill
-        if (cf_high_)
+        const auto push = [&](int idx, float e)
+        { Eigen::Matrix<float, 5, 1> J = Eigen::Matrix<float, 5, 1>::Zero(); J(idx) = 1.0f;
+          Id.noalias() += lam * (J * J.transpose()); bd.noalias() += -lam * J * e; };
+        if (cf_hi_.on)
         {
-            const float e = s.t1 - chart_.W;                 // <0 ⇒ t1 short of the wall end ⇒ push UP to W
-            if (e < 0.0f) { Eigen::Matrix<float, 5, 1> J = Eigen::Matrix<float, 5, 1>::Zero(); J(1) = 1.0f;
-                            Id.noalias() += lam * (J * J.transpose()); bd.noalias() += -lam * J * e; }
+            const float e = s.t1 - std::min(cf_hi_.target, chart_.W);   // <0 ⇒ t1 short of the target
+            if (e < 0.0f or cf_hi_.two_sided) push(1, e);
         }
-        if (cf_low_)
+        if (cf_lo_.on)
         {
-            const float e = s.t0;                            // >0 ⇒ t0 short of the wall start ⇒ pull DOWN to 0
-            if (e > 0.0f) { Eigen::Matrix<float, 5, 1> J = Eigen::Matrix<float, 5, 1>::Zero(); J(0) = 1.0f;
-                            Id.noalias() += lam * (J * J.transpose()); bd.noalias() += -lam * J * e; }
+            const float e = s.t0 - std::max(cf_lo_.target, 0.0f);       // >0 ⇒ t0 short of the target
+            if (e > 0.0f or cf_lo_.two_sided) push(0, e);
         }
     }
 
@@ -526,8 +559,8 @@ private:
     WallTierPrior               tier_;
     Eigen::Matrix<float, 5, 5>  Sigma_      = Eigen::Matrix<float, 5, 5>::Identity();
     Eigen::Matrix<float, 5, 1>  prior_mean_ = Eigen::Matrix<float, 5, 1>::Zero();
-    bool                        cf_low_  = false;   // corner-fill: extend t0→0 (set per-cycle by KitchenManager)
-    bool                        cf_high_ = false;   // corner-fill: extend t1→W
+    CornerFill                  cf_lo_{};           // corner-fill for t0 (set per-cycle by KitchenManager)
+    CornerFill                  cf_hi_{};           // corner-fill for t1
     // Arrangement END PRIOR, already projected into THIS chart's t by the worker. info 0 = inert,
     // which is the resting state: an end that already meets its neighbour is told nothing.
     float                       ep_t0_ = 0.0f, ep_t0_info_ = 0.0f;

@@ -24,6 +24,7 @@
 #include <Eigen/Core>
 #include <Eigen/Eigenvalues>
 
+#include "../../common/footprint/footprint.h"   // rc::geom::Footprint / overlap_ratio (self_test invariant)
 #include "cabinet_kitchen_cells.h"     // KitchenWall, KitchenTier, KitchenRouting, signature
 #include "cabinet_wall_run_belief.h"   // WallRunBelief, WallChart, WallTierPrior
 #include "cabinet_belief.h"            // CabinetBeliefParams, CabinetFrame
@@ -401,12 +402,36 @@ public:
         return false;
     }
 
-    // Set per-cell corner-fill flags. Two active same-tier cells on DIFFERENT walls that share a polygon vertex V
-    // (walls meet there) form an L; if BOTH runs already reach near V, extend each run's corner-side end to V.
+    // Set per-cell corner-fill flags AND targets. Two active same-tier cells on DIFFERENT walls that share a
+    // polygon vertex V (walls meet there) form an L; if BOTH runs already reach near V, close the inside corner.
+    //
+    // ★ONLY ONE OF THEM MAY REACH V (fixed 2026-08-16). Filling both to the vertex is not "closing the
+    // corner", it is claiming the corner TWICE: run i extended to V already occupies the first d_i metres of
+    // wall j, so run j extended to that same V interpenetrates it by exactly d_i x d_j. Measured live:
+    // cabinet_w13_base (d=0.511) and cabinet_w14_base (d=0.741) overlapped 0.370 m2 against 0.379 m2
+    // predicted by that product — the 2% is the two depths drifting between logs. A real L kitchen has ONE
+    // corner unit and the other run butts into its side.
+    //
+    // WHO OWNS IT IS READ OFF THE EVIDENCE rather than chosen: the run whose end already sits nearer V (the
+    // smaller gap) is the one with support at the corner, so it takes the vertex and its neighbour stops at
+    // its front face — V offset by the owner's depth, along the neighbour's own axis. Ties go to the DEEPER
+    // run (a deeper carcass is the one whose side face the shallower can butt into), then to the lower cell
+    // index, so the answer is deterministic and cannot oscillate from cycle to cycle.
+    //
+    // ⚠THIS CANNOT BE DELEGATED TO common/exclusion. foreign_claims() drops every node sharing the agent's
+    // own prefix by design — cabinet-vs-cabinet is the cell partition's business, not another concept's — so
+    // the shared no-two-objects rule is structurally blind to exactly this pair, however it is wired.
     void route_corner_fill(const KitchenManagerParams& mp)
     {
         const std::size_t K = cells_.size();
         std::vector<char> fl(K, 0), fh(K, 0);   // fill-low / fill-high, accumulated (a run can corner on both ends)
+        // Where each flagged end should reach. Starts at the vertex (0 / W); a run that LOSES a corner has its
+        // target pulled back to the winner's front face. A run cornering at both ends keeps the tighter target.
+        // `sl`/`sh` mark an end whose target is a NEIGHBOUR rather than the room, which makes the prior
+        // two-sided — that is what retracts a run already sitting inside its neighbour, as today's pair is.
+        std::vector<float> tl(K, 0.0f), th(K, 0.0f);
+        std::vector<char>  sl(K, 0), sh(K, 0);
+        for (std::size_t k = 0; k < K; ++k) th[k] = cells_[k].geom.W;
         const auto endpt = [](const KitchenCell& g, bool high)
         { return high ? Eigen::Vector2f(g.a + g.W * g.u) : g.a; };
         for (std::size_t i = 0; i < K; ++i)
@@ -427,11 +452,25 @@ public:
                     if (gap_i > mp.corner_capture_m or gap_j > mp.corner_capture_m) continue;      // not an L here
                     (hi ? fh[i] : fl[i]) = 1;
                     (hj ? fh[j] : fl[j]) = 1;
+                    // The corner is ONE volume. It goes to the run with support nearest V; the other stops a
+                    // depth short of the vertex, which is where the winner's carcass side actually stands.
+                    const bool i_owns = (gap_i != gap_j) ? (gap_i < gap_j)
+                                      : (si.d  != sj.d)  ? (si.d  > sj.d)
+                                                         : true;          // i < j ⇒ deterministic
+                    const std::size_t lose    = i_owns ? j  : i;
+                    const int         lose_hi = i_owns ? hj : hi;
+                    const float       setback = i_owns ? si.d : sj.d;     // the winner's depth = its side face
+                    if (lose_hi)
+                    { th[lose] = std::min(th[lose], cells_[lose].geom.W - setback); sh[lose] = 1; }
+                    else
+                    { tl[lose] = std::max(tl[lose], setback);                       sl[lose] = 1; }
                 }
             }
         }
         for (std::size_t k = 0; k < K; ++k)
-            if (cells_[k].active()) cells_[k].belief->set_corner_fill(fl[k] != 0, fh[k] != 0);
+            if (cells_[k].active())
+                cells_[k].belief->set_corner_fill({fl[k] != 0, tl[k], sl[k] != 0},
+                                                  {fh[k] != 0, th[k], sh[k] != 0});
 
         if (corner_fill_log_)   // opt-in diagnostic (agent only): per active cell, wall/interval/fill flags
         {
@@ -440,9 +479,13 @@ public:
                 {
                     const auto& g = cells_[k].geom; const auto& s = cells_[k].belief->state();
                     const Eigen::Vector2f bb = g.a + g.W * g.u;
-                    std::printf("[kitchen] cell %-12s wall=%d a=(%.2f,%.2f) b=(%.2f,%.2f) t=[%.2f,%.2f] fill=t0%d/t1%d\n",
+                    // The TARGETS are printed beside the flags: "fill=t0 1" with target 0.00 is a run that
+                    // owns its corner, and one with a non-zero target is a run stopping at its neighbour's
+                    // face. Without them the log cannot distinguish the two, which is the whole question here.
+                    std::printf("[kitchen] cell %-12s wall=%d a=(%.2f,%.2f) b=(%.2f,%.2f) t=[%.2f,%.2f] "
+                                "fill=t0%d/t1%d target=[%.2f,%.2f] W=%.2f\n",
                                 g.id.c_str(), g.wall_seg_id, g.a.x(), g.a.y(), bb.x(), bb.y(),
-                                s.t0, s.t1, fl[k] ? 1 : 0, fh[k] ? 1 : 0);
+                                s.t0, s.t1, fl[k] ? 1 : 0, fh[k] ? 1 : 0, tl[k], th[k], g.W);
                 }
         }
     }
@@ -502,7 +545,9 @@ public:
           island_yaw_var_ = kWallChartYawVar * 100.0f; return; }
         if (island_belief_)
         {
-            island_belief_->set_corner_fill(island_anchored_, false);   // anchor the near end to the wall (t0→0)
+            // Anchor the near end to the wall (t0→0). A peninsula touches ONE wall and no second run, so it
+            // has no corner to share and its target is the wall itself.
+            island_belief_->set_corner_fill({island_anchored_, 0.0f, false}, {});
             CabinetFrame f = frame_template;
             f.points = pts; f.R.assign(pts.size(), bp_.sigma_base_m * bp_.sigma_base_m);
             island_belief_->update(f);
@@ -856,21 +901,47 @@ inline bool KitchenManager::self_test()
     check(base == 3, "exactly 3 BASE cells activate (the U's three runs)");
     check(upper == 0, "NO upper cells activate (no upper evidence)");
 
-    // CORNER-FILL: the U's back (north) run is observed only over [0.3, 1.7], but BOTH side runs (west, east)
-    // reach the shared corners (0,3) and (2,3), so the north run must extend to MEET them — filling to the full
-    // wall [0, 2] (L ≈ 2.0), leaving no hole in either inside corner. Depth/height untouched by the fill.
-    for (const auto& b : boxes)
-        if (b.tier == 0 and std::abs(b.cy - 2.45f) < 0.2f)   // north run (front face at y = 3 - 0.55)
+    // ★THESE CHECKS MATCH ON wall_seg_id, NOT ON A COORDINATE (fixed 2026-08-16). They used to select a run
+    // by `std::abs(b.cy - 2.45f) < 0.2f`, i.e. by its FRONT-FACE coordinate — but KitchenBox.cx/cy is the box
+    // CENTRE, half a depth further back (the north run's centre is 2.726, not 2.45). Every corner-fill check
+    // below therefore matched NOTHING and the test reported "all checks passed" while asserting nothing at
+    // all about the corner. That is how an expectation encoding the double-claimed corner survived in here.
+    const auto box_on_wall = [&](int seg) -> const KitchenBox*
+    { for (const auto& b : boxes) if (b.tier == 0 and b.wall_seg_id == seg) return &b; return nullptr; };
+    const KitchenBox* west  = box_on_wall(0);
+    const KitchenBox* north = box_on_wall(1);
+    const KitchenBox* east  = box_on_wall(2);
+    check(west and north and east, "one base run on each of the three walls");
+
+    // CORNER OWNERSHIP, read off the evidence. At the NW vertex (0,3) the west run stops 0.4 m short and the
+    // north run 0.55 m short, so WEST owns it and north is set back by west's depth; at the NE vertex (2,3)
+    // north is the nearer and owns it, so EAST is set back by north's depth. Measured after 30 cycles:
+    // north t=[0.55, 2.00] (L 1.45), west t=[0.40, 2.54] (L 2.14), east t=[0.55, 2.60] (L 2.05).
+    if (north)
+    {
+        check(north->L > 1.35f and north->L < 1.65f,
+              "north run keeps the NE vertex but stops at the west run's face (it does not take both corners)");
+        check(north->d > 0.35f and north->d < 0.75f, "north run depth stays physical (near standard)");
+        check(north->z1 < 1.0f, "north run top stays at the base worktop (no ceiling-touching)");
+    }
+    // A run with NO reaching neighbour at a corner must not fill to it: the west run's LOW end (0,0) has no
+    // perpendicular run, so it stays at its observed start (~0.4) while its NW end fills towards the vertex.
+    if (west)
+        check(west->L > 2.0f and west->L < 2.35f, "west run fills its owned (NW) corner, not its free (0,0) end");
+    if (east)
+        check(east->L > 1.9f and east->L < 2.2f, "east run stops at the north run's face, not at the NE vertex");
+
+    // ★AND THE PROPERTY THE WHOLE CHANGE EXISTS FOR: NO TWO ACTIVE RUNS SHARE SPACE. Every check above is
+    // about one run's length; none of them could have caught two runs occupying the same corner, which is why
+    // the defect survived a self-test that passed. State the invariant directly.
+    for (std::size_t bi = 0; bi < boxes.size(); ++bi)
+        for (std::size_t bj = bi + 1; bj < boxes.size(); ++bj)
         {
-            check(b.L > 1.9f, "north run fills corner-to-corner to both shared vertices (no hole in the L)");
-            check(b.d > 0.35f and b.d < 0.75f, "north run depth stays physical (near standard)");
-            check(b.z1 < 1.0f, "north run top stays at the base worktop (no ceiling-touching)");
+            if (boxes[bi].tier != boxes[bj].tier) continue;      // different tiers stack by design
+            const rc::geom::Footprint fi{boxes[bi].cx, boxes[bi].cy, boxes[bi].L, boxes[bi].d, boxes[bi].yaw};
+            const rc::geom::Footprint fj{boxes[bj].cx, boxes[bj].cy, boxes[bj].L, boxes[bj].d, boxes[bj].yaw};
+            check(rc::geom::overlap_ratio(fi, fj) < 0.02f, "no two same-tier runs overlap (the L corner is claimed once)");
         }
-    // A run with NO reaching neighbour at a corner must NOT fill to it: the west run's LOW end (0,0) has no
-    // perpendicular run, so it stays at its observed start (~0.4), only its NW-corner (high) end fills.
-    for (const auto& b : boxes)
-        if (b.tier == 0 and std::abs(b.cx - 0.55f) < 0.2f)   // west run (front face at x = 0.55)
-            check(b.L > 2.4f and b.L < 2.75f, "west run fills only its shared (NW) corner, not the free (0,0) end");
 
     // Corner-leakage rejection: a TIGHT cluster (many points, ~4 cm along-wall span) must NOT activate a run.
     // It is the tail of an adjacent run leaking across a corner, not a run of its own — the raw-count existence
