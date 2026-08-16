@@ -11,11 +11,21 @@
 #include "specificworker.h"
 
 #include "../../common/owned_nodes/owned_nodes.h"   // rc::owned:: (SHARED ownership sweep)
+#include "../../common/stream_gate/stream_gate.h"   // rc::stream:: (SHARED primary-input gate)
 
 #include <cstdint>
 #include <print>
 
 #include <QDateTime>   // wall-clock ms for the cold-start stall grace
+
+// The one declaration of what this agent OWNS. It used to be repeated verbatim inside both sweep
+// functions, which is two places for the node-type list to drift apart.
+static const rc::owned::Spec kOwned{
+    .agent = "refrigerator_concept",
+    .name_prefix = "refrigerator",
+    .node_types = {"object"},
+    .legacy_parent_types = {},
+};
 
 // ─── Presence state delegators ───────────────────────────────────────────────────────────────────
 
@@ -64,16 +74,11 @@ bool SpecificWorker::masks_stream_ready(std::string *detail) const
 // arrives (age < 0) the grace is measured from Operating entry, so producer startup isn't misread as a stall.
 bool SpecificWorker::masks_stream_stalled(std::int64_t *age_ms_out) const
 {
-    const int timeout = cfg_.masks_stall_timeout_ms;
-    if (timeout <= 0 or not mask_ingestor_) return false;   // 0 ⇒ gate disabled
+    if (not mask_ingestor_) return false;
     const std::int64_t age = mask_ingestor_->ms_since_last_frame();
     if (age_ms_out) *age_ms_out = age;
-    if (age < 0)   // no frame ever — measure from Operating entry (the producer may be mid-startup)
-    {
-        const std::int64_t since_entry = QDateTime::currentMSecsSinceEpoch() - operating_since_ms_;
-        return operating_since_ms_ > 0 and since_entry > timeout;
-    }
-    return age > timeout;
+    return rc::stream::stalled(age, cfg_.masks_stall_timeout_ms, operating_since_ms_,
+                               QDateTime::currentMSecsSinceEpoch());
 }
 
 // Admission: the producer is currently LIVE (a fresh masks frame within the timeout window). Unlike the
@@ -83,10 +88,9 @@ bool SpecificWorker::masks_stream_stalled(std::int64_t *age_ms_out) const
 bool SpecificWorker::masks_stream_live() const
 {
     if (not mask_ingestor_) return false;
-    const int timeout = cfg_.masks_stall_timeout_ms;
-    if (timeout <= 0) return mask_ingestor_->stream_ready();
-    const std::int64_t age = mask_ingestor_->ms_since_last_frame();
-    return age >= 0 and age < timeout;
+    // Gate off ⇒ defer to this agent's own node-exists probe; see the warning on rc::stream::live.
+    if (not rc::stream::gate_enabled(cfg_.masks_stall_timeout_ms)) return mask_ingestor_->stream_ready();
+    return rc::stream::live(mask_ingestor_->ms_since_last_frame(), cfg_.masks_stall_timeout_ms);
 }
 
 
@@ -97,12 +101,6 @@ void SpecificWorker::remove_owned_refrigerator_nodes()
 {
     if (not G)
         return;
-    static const rc::owned::Spec kOwned{
-        .agent = "refrigerator_concept",
-        .name_prefix = "refrigerator",
-        .node_types = {"object"},
-        .legacy_parent_types = {},
-    };
     rc::owned::remove_instance_nodes(*G, kOwned);
 }
 
@@ -116,42 +114,12 @@ void SpecificWorker::cleanup_owned_nodes()
     // instances_), while the refrigerator parents still exist for the parent-type lookup.
     remove_stale_affordance_nodes();
 
-    if (G and fitter_)
-    {
-        std::vector<std::pair<std::uint64_t, std::string>> affordance_nodes;
-        std::vector<std::pair<std::uint64_t, std::string>> refrigerator_nodes;
-
-        affordance_nodes.reserve(fitter_->instances().size());
-        refrigerator_nodes.reserve(fitter_->instances().size());
-
-        for (const auto& [id, inst] : fitter_->instances())
-        {
-            // Delete the affordance node whenever it EXISTS (node_id != 0), not
-            // only when the FSM is active: is_active() is (state != idle), so an
-            // affordance that created its DSR node but has since returned to idle
-            // would otherwise be left orphaned (its parent refrigerator node is deleted
-            // below), leaving a dangling refrigerator_afford node + edge in the graph.
-            if (inst.affordance.node_id() != 0)
-                affordance_nodes.emplace_back(inst.affordance.node_id(), inst.node_name);
-            refrigerator_nodes.emplace_back(id, inst.node_name);
-        }
-
-        // Remove affordance nodes first (children of refrigerator nodes)
-        for (const auto& [affordance_id, node_name] : affordance_nodes)
-        {
-            G->delete_node(affordance_id);
-            qInfo() << "[refrigerator_concept] removed affordance node for"
-                    << QString::fromStdString(node_name);
-        }
-
-        // Remove refrigerator nodes themselves
-        for (const auto& [refrigerator_id, node_name] : refrigerator_nodes)
-        {
-            G->delete_node(refrigerator_id);
-            qInfo() << "[refrigerator_concept] removed refrigerator node"
-                    << QString::fromStdString(node_name);
-        }
-    }
+    // ★THE PER-INSTANCE SWEEP THAT USED TO BE HERE IS GONE (2026-08-16). It walked fitter_->instances()
+    // and deleted each node by id — but [Owns].nodes already carries a WILDCARD ("refrigerator_*") that
+    // matches every instance this agent ever names, so the coordinator's sweep below deletes exactly the same set. Worse,
+    // the loop ran those deletes while the presence MONITOR was still live; bottle_concept removed its copy
+    // for that reason on 2026-07-31 and chair's own config comment says the same. Stopping the monitor first
+    // and letting the shared sweep do it is the form all seven now share.
 
     presence_coordinator_.cleanup_owned_nodes();
 }
@@ -164,12 +132,6 @@ void SpecificWorker::remove_stale_affordance_nodes()
 {
     if (not G)
         return;
-    static const rc::owned::Spec kOwned{
-        .agent = "refrigerator_concept",
-        .name_prefix = "refrigerator",
-        .node_types = {"object"},
-        .legacy_parent_types = {},
-    };
     rc::owned::remove_stale_affordances(*G, kOwned);
 }
 
