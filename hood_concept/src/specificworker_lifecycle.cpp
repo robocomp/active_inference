@@ -267,8 +267,13 @@ void SpecificWorker::run_instance_tracker()
             if (not foreign_claims_.empty())
             {
                 const rc::exclusion::Claim* who = nullptr;
+                // ★A HOOD IS BORN HANGING — the same [body_z0_m, +vertical_extent_m] span
+                // HoodSceneGraph::create_instance_from_detection publishes. Omitting the band here would
+                // suppress the birth of every hood in a real kitchen: a hood is over a worktop by definition,
+                // so in plan view the base run below always claims 100% of it.
                 const float unclaimed = rc::exclusion::p_unclaimed(
-                    {dv.xy.x(), dv.xy.y(), cfg_.tracker_birth_width_m, cfg_.tracker_birth_depth_m, 0.0f}, foreign_claims_, &who);
+                    {dv.xy.x(), dv.xy.y(), cfg_.tracker_birth_width_m, cfg_.tracker_birth_depth_m, 0.0f}, foreign_claims_, &who,
+                    cfg_.body_z0_m, cfg_.body_z0_m + cfg_.vertical_extent_m);
                 dv.birth_evidence *= unclaimed;
                 if (unclaimed < 0.99f)
                     std::print("[hood] birth cand CLAIMED by '{}' ({:.0f}%): birth_ev x{:.2f}\n",
@@ -399,7 +404,8 @@ void SpecificWorker::run_instance_tracker()
             // stays senior by default — the rule can fail to catch a collision, never invent one.
             if (auto it = fitter_->instances().find(new_id); it != fitter_->instances().end())
                 it->second.exclusion.resolve_at_birth({c.x(), c.y(), cfg_.tracker_birth_width_m, cfg_.tracker_birth_depth_m, 0.0f},
-                                                      foreign_claims_);
+                                                      foreign_claims_,
+                                                      cfg_.body_z0_m, cfg_.body_z0_m + cfg_.vertical_extent_m);
             // Shadow-mode birth record (CONCEPT_AGENT_LIFECYCLE.md §4.2): captures the place AND the
             // viewpoint that produced it, so a phantom that dies young is attributable to both.
             log_phantom_event("BIRTH", new_id, "", c.x(), c.y(), nullptr, "");

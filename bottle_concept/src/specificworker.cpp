@@ -871,8 +871,14 @@ void SpecificWorker::run_instance_tracker()
                 if (not foreign_claims_.empty())
                 {
                     const rc::exclusion::Claim* who = nullptr;
+                    // ★A BOTTLE STANDS ON SOMETHING, ALWAYS. Its footprint sits inside a table's or a
+                    // worktop's for its whole life, so with no vertical band every bottle candidate in the
+                    // room reads as 100% claimed and a bottle on a table could never be born at all. The band
+                    // is the slice centroid ± half the prior height, which clears the surface it rests on.
+                    const float cand_hz = 0.5f * cfg_.prior_height;
                     const float unclaimed = rc::exclusion::p_unclaimed(
-                        {dv.xy.x(), dv.xy.y(), 2.0f * cfg_.prior_radius, 2.0f * cfg_.prior_radius, 0.0f}, foreign_claims_, &who);
+                        {dv.xy.x(), dv.xy.y(), 2.0f * cfg_.prior_radius, 2.0f * cfg_.prior_radius, 0.0f}, foreign_claims_, &who,
+                        sl.centroid.z() - cand_hz, sl.centroid.z() + cand_hz);
                     dv.birth_evidence *= unclaimed;
                     if (unclaimed < 0.99f)
                         std::print("[bottle] birth cand CLAIMED by '{}' ({:.0f}%): birth_ev x{:.2f}\n",
@@ -980,7 +986,8 @@ void SpecificWorker::run_instance_tracker()
             // stays senior by default — the rule can fail to catch a collision, never invent one.
             if (auto it = fitter_->instances().find(new_id); it != fitter_->instances().end())
                 it->second.exclusion.resolve_at_birth({c.x(), c.y(), 2.0f * cfg_.prior_radius, 2.0f * cfg_.prior_radius, 0.0f},
-                                                      foreign_claims_);
+                                                      foreign_claims_,
+                                                      c.z() - 0.5f * cfg_.prior_height, c.z() + 0.5f * cfg_.prior_height);
             // Shadow-mode birth record (CONCEPT_AGENT_LIFECYCLE.md §4.2): place + viewpoint that
             // produced it, so a phantom that dies young is attributable to both.
             log_phantom_event("BIRTH", new_id, "", c.x(), c.y(), nullptr, "");

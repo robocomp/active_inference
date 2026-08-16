@@ -268,7 +268,11 @@ void TableExistence::update_and_remove(TableFitter& fitter, ConceptLidarIngestor
             if (claims_)
             {
                 const auto& bs0 = inst.ai2_belief.state();
-                const float w_excl = inst.exclusion.occupancy_weight({bs0.cx, bs0.cy, bs0.w, bs0.h, bs0.yaw}, *claims_);
+                // A table stands on the floor and its band is [0, surface height]. It matters here for the
+                // opposite reason to the hood's: what sits ON a table (a bottle) must not read as a claim on
+                // the table's own volume, and it no longer can.
+                const float w_excl = inst.exclusion.occupancy_weight({bs0.cx, bs0.cy, bs0.w, bs0.h, bs0.yaw},
+                                                                     *claims_, 0.0f, bs0.H);
                 if (w_excl < 1.0f) ev.e_occ *= w_excl;
             }
             inst.dbg_ex_lidar_occ = ev.e_occ; inst.dbg_ex_lidar_free = ev.e_free; inst.dbg_ex_lidar_n = ev.n_reached;

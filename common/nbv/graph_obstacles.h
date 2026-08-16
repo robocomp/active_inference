@@ -44,11 +44,27 @@ namespace rc::nbv
 // input to the standalone-testable viewpoint scorer), so identity rides alongside rather than inside it.
 // rc::exclusion needs it: "somebody else already claims this space" is not a useful thing to log without
 // saying WHO, and a claim has to be recognisable across cycles.
+//
+// ★AND THE VERTICAL BAND, added 2026-08-16 — the z was always in the RT matrix and was being thrown away.
+// A footprint alone cannot answer "is this space already taken": a kitchen has a hood over a worktop, a wall
+// unit over a base unit and a bottle on a table, and in plan view each of those pairs reads as one object
+// fully inside another. Measured on the live run: hood_1 (z 1.99..2.28) sits 100.0% inside the footprint of
+// cabinet_w13_base (z 0.02..0.76), so the explained-away rule was discarding ~0.97 m of the very wall run
+// the cabinet was fitting, as "already explained" by something 1.2 m above it.
+//
+// The convention is uniform and deliberate across the fleet (see the identical comment in every
+// <concept>_scene_graph.cpp): NODE ORIGIN = BASE, top = origin.z + height_m. So the band is
+// [M(2,3), M(2,3) + height_m] and needs no per-concept adapter.
+//
+// z1 <= z0 means UNKNOWN vertical extent (no height_m published). Callers must read that as "spans every
+// height" so an unsized node keeps its old, purely-2-D behaviour rather than silently ceasing to claim.
 struct IdentifiedObstacle
 {
     Obstacle      fp{};
     std::string   name;
     std::uint64_t id = 0;
+    float         z0 = 0.0f;   // base, room frame (m)
+    float         z1 = 0.0f;   // top; <= z0 ⇒ height unknown ⇒ treat as unbounded
 };
 
 inline std::vector<IdentifiedObstacle> collect_graph_obstacles_identified(DSR::DSRGraph& G,
@@ -73,10 +89,15 @@ inline std::vector<IdentifiedObstacle> collect_graph_obstacles_identified(DSR::D
             if (not tr.has_value())   // ALWAYS check: a missing node/edge in the RT chain returns nullopt
                 continue;
             const auto& M = tr.value();
+            // Vertical band: origin is the BASE by fleet convention, top = base + height_m. A node with no
+            // height_m leaves z1 == z0, which every consumer reads as "unknown ⇒ spans all heights".
+            const float z0 = static_cast<float>(M(2, 3));
+            const auto  hm = G.get_attrib_by_name<height_m_att>(n);
+            const float z1 = (hm.has_value() and hm.value() > 0.0f) ? z0 + hm.value() : z0;
             obs.push_back({{static_cast<float>(M(0, 3)), static_cast<float>(M(1, 3)),
                             w.value(), d.value(),
                             std::atan2(static_cast<float>(M(1, 0)), static_cast<float>(M(0, 0)))},
-                           n.name(), n.id()});
+                           n.name(), n.id(), z0, z1});
         }
     return obs;
 }

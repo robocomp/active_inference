@@ -520,7 +520,9 @@ CabinetFitter::CabinetObservation CabinetFitter::observe_slice(CabinetInstance& 
         // nothing because they do not overlap. This is what birth exclusion and the occupancy discount could
         // not reach: cabinet_2 grew ~6 m into refrigerator_1 and collapsed its depth to 0.12 m while being
         // SENIOR, alone and unclaimed at its own birth.
-        if (foreign_claims_ and rc::exclusion::explained_by_other(p.x(), p.y(), *foreign_claims_))
+        // The point's z is part of the question: a claim is a VOLUME, and a hood over a worktop shares its
+        // footprint with the cabinet below without sharing any of its space.
+        if (foreign_claims_ and rc::exclusion::explained_by_other(p.x(), p.y(), p.z(), *foreign_claims_))
         {
             ++n_explained_away;
             continue;

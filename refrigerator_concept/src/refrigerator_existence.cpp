@@ -234,8 +234,10 @@ void RefrigeratorExistence::update_and_remove(RefrigeratorFitter& fitter, Concep
             if (claims_)
             {
                 const auto& bs0 = inst.ai2_belief.state();
+                // A fridge stands on the floor, so its band is [0, height] — which is what keeps a hood or a
+                // wall unit directly above it from reading as a claim on its volume.
                 const float w_excl = inst.exclusion.occupancy_weight({bs0.cx, bs0.cy, bs0.w, bs0.h, bs0.yaw},
-                                                                     *claims_);
+                                                                     *claims_, 0.0f, bs0.H);
                 if (w_excl < 1.0f)
                 {
                     ev.e_occ *= w_excl;

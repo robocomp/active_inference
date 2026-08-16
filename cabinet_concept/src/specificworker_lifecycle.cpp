@@ -464,6 +464,12 @@ void SpecificWorker::run_kitchen_model()
     // Filtered HERE rather than inside KitchenManager::update so the routing stays untouched, and pts and
     // pt_labels are filtered TOGETHER — they are parallel arrays and a lone filter would silently mis-label
     // every point after the first drop.
+    //
+    // ★AND THE POINT'S z GOES IN (2026-08-16). Without it this was the most destructive form of the rule, not
+    // the safest: a kitchen is built out of things stacked over one another, so hood_1 — measured 100.0%
+    // inside cabinet_w13_base's footprint and 1.2 m above it — was silently deleting every return along
+    // ~0.97 m of the cabinet's own wall run. A 2-D containment test cannot tell "somebody else is here" from
+    // "somebody else is overhead", and in this room the second is the common case.
     if (not foreign_claims_.empty() and not pts.empty())
     {
         const bool labelled = (pt_labels.size() == pts.size());
@@ -473,7 +479,7 @@ void SpecificWorker::run_kitchen_model()
         if (labelled) keep_labels.reserve(pts.size());
         for (std::size_t i = 0; i < pts.size(); ++i)
         {
-            if (rc::exclusion::explained_by_other(pts[i].x(), pts[i].y(), foreign_claims_))
+            if (rc::exclusion::explained_by_other(pts[i].x(), pts[i].y(), pts[i].z(), foreign_claims_))
                 continue;
             keep_pts.push_back(pts[i]);
             if (labelled) keep_labels.push_back(pt_labels[i]);
@@ -950,8 +956,14 @@ void SpecificWorker::run_instance_tracker()
                 if (not foreign_claims_.empty())
                 {
                     const rc::exclusion::Claim* who = nullptr;
+                    // The candidate's own vertical band, derived the SAME way CabinetSceneGraph derives the
+                    // newborn's z0 — centred on the slice, not planted on the floor, because a wall unit is
+                    // born high. Without a band, a base candidate under a hood is charged for space it does
+                    // not occupy, and a wall unit is charged for the base run beneath it.
+                    const float cand_z0 = std::max(0.0f, dv.z - 0.5f * cfg_.tracker_birth_height_m);
                     const float unclaimed = rc::exclusion::p_unclaimed(
-                        {dv.xy.x(), dv.xy.y(), cfg_.tracker_birth_width_m, cfg_.tracker_birth_depth_m, 0.0f}, foreign_claims_, &who);
+                        {dv.xy.x(), dv.xy.y(), cfg_.tracker_birth_width_m, cfg_.tracker_birth_depth_m, 0.0f}, foreign_claims_, &who,
+                        cand_z0, cand_z0 + cfg_.tracker_birth_height_m);
                     dv.birth_evidence *= unclaimed;
                     if (unclaimed < 0.99f)
                         std::print("[cabinet] birth cand CLAIMED by '{}' ({:.0f}%): birth_ev x{:.2f}\n",
@@ -1067,8 +1079,15 @@ void SpecificWorker::run_instance_tracker()
             // carcass, standing legitimately beside its neighbour in the run, wake up after a RESTART, find the
             // neighbour present, and declare ITSELF the junior. Anything not created this run stays senior.
             if (auto it = fitter_->instances().find(new_id); it != fitter_->instances().end())
+            {
+                // Same band CabinetSceneGraph gives the node it just created (z0 centred on the detection,
+                // clamped to the floor). Seniority is recorded ONCE and never revisited, so a wall unit
+                // stamped junior here for the base run below it would carry that for life.
+                const float bz0 = std::max(0.0f, c.z() - 0.5f * cfg_.tracker_birth_height_m);
                 it->second.exclusion.resolve_at_birth({c.x(), c.y(), cfg_.tracker_birth_width_m,
-                                                      cfg_.tracker_birth_depth_m, 0.0f}, foreign_claims_);
+                                                      cfg_.tracker_birth_depth_m, 0.0f}, foreign_claims_,
+                                                      bz0, bz0 + cfg_.tracker_birth_height_m);
+            }
             // Shadow-mode birth record (CONCEPT_AGENT_LIFECYCLE.md §4.2): captures the place AND the
             // viewpoint that produced it, so a phantom that dies young is attributable to both.
             log_phantom_event("BIRTH", new_id, "", c.x(), c.y(), nullptr, "");

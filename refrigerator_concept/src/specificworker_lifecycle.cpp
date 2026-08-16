@@ -252,7 +252,10 @@ void SpecificWorker::run_instance_tracker()
                 const rc::geom::Footprint cand{dv.xy.x(), dv.xy.y(),
                                                cfg_.tracker_birth_width_m, cfg_.tracker_birth_depth_m, 0.0f};
                 const rc::exclusion::Claim* who = nullptr;
-                const float unclaimed = rc::exclusion::p_unclaimed(cand, foreign_claims_, &who);
+                // A fridge is born standing on the floor, so its band is [0, birth height]. A hood or a wall
+                // unit above the candidate shares its footprint and none of its volume.
+                const float unclaimed = rc::exclusion::p_unclaimed(cand, foreign_claims_, &who,
+                                                                   0.0f, cfg_.tracker_birth_height_m);
                 dv.birth_evidence *= unclaimed;
                 if (unclaimed < 0.99f)
                     std::print("[fridge-filter] birth cand slice={} CLAIMED by '{}' ({:.0f}%): birth_ev x{:.2f} -> {:.3f}\n",
@@ -400,7 +403,8 @@ void SpecificWorker::run_instance_tracker()
             // stays senior by default — the rule can fail to catch a collision, never invent one.
             if (auto it = fitter_->instances().find(new_id); it != fitter_->instances().end())
                 it->second.exclusion.resolve_at_birth({c.x(), c.y(), cfg_.tracker_birth_width_m,
-                                                       cfg_.tracker_birth_depth_m, 0.0f}, foreign_claims_);
+                                                       cfg_.tracker_birth_depth_m, 0.0f}, foreign_claims_,
+                                                      0.0f, cfg_.tracker_birth_height_m);
             // Shadow-mode birth record (CONCEPT_AGENT_LIFECYCLE.md §4.2): captures the place AND the
             // viewpoint that produced it, so a phantom that dies young is attributable to both.
             log_phantom_event("BIRTH", new_id, "", c.x(), c.y(), nullptr, "");

@@ -260,7 +260,13 @@ void BottleExistence::update_and_remove(BottleFitter& fitter, const Inputs& in,
             if (claims_)
             {
                 const auto& bs0 = inst.ai2_belief.state();
-                const float w_excl = inst.exclusion.occupancy_weight({bs0.cx, bs0.cy, 2.0f * bs0.radius, 2.0f * bs0.radius, 0.0f}, *claims_);
+                // ★A BOTTLE IS THE OTHER CONCEPT THAT LIVES ENTIRELY INSIDE SOMEBODY ELSE'S FOOTPRINT. It
+                // stands ON a table or a worktop, so a plan-view test says the support "claims" 100% of it,
+                // every cycle, for as long as it exists. cz is the cylinder CENTRE, so the band is
+                // cz ± height/2 — and it clears the surface it rests on.
+                const float half_h = 0.5f * bs0.height;
+                const float w_excl = inst.exclusion.occupancy_weight({bs0.cx, bs0.cy, 2.0f * bs0.radius, 2.0f * bs0.radius, 0.0f},
+                                                                     *claims_, bs0.cz - half_h, bs0.cz + half_h);
                 if (w_excl < 1.0f)
                     ev.e_occ *= w_excl;
             }

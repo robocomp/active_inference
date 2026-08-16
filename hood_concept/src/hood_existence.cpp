@@ -233,7 +233,16 @@ void HoodExistence::update_and_remove(HoodFitter& fitter, ConceptLidarIngestor* 
             if (claims_)
             {
                 const auto& bs0 = inst.ai2_belief.state();
-                const float w_excl = inst.exclusion.occupancy_weight({bs0.cx, bs0.cy, bs0.w, bs0.h, bs0.yaw}, *claims_);
+                // ★THE BAND IS NOT OPTIONAL FOR THIS CONCEPT. A hood hangs over a worktop by definition, so
+                // in plan view it is ALWAYS inside something — z0()/z1() is the only thing separating "the
+                // cabinet below already explains me" from the truth, which is that it never touches me.
+                // bs0.H is the TOP of the hanging body (HoodBeliefState::H → HoodState::z_top), so the band is
+                // [H - extent, H]. Do NOT read it as a floor-anchored height: that conflation is the exact
+                // one HoodState was rewritten to end, and here it would put the hood's band on the floor,
+                // inside the cabinet it is supposed to be clear of.
+                const float w_excl = inst.exclusion.occupancy_weight({bs0.cx, bs0.cy, bs0.w, bs0.h, bs0.yaw},
+                                                                     *claims_,
+                                                                     bs0.H - cfg_.vertical_extent_m, bs0.H);
                 if (w_excl < 1.0f) ev.e_occ *= w_excl;
             }
             inst.dbg_ex_lidar_occ = ev.e_occ; inst.dbg_ex_lidar_free = ev.e_free; inst.dbg_ex_lidar_n = ev.n_reached;

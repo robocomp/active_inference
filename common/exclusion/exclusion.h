@@ -31,6 +31,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <string>
@@ -47,11 +48,38 @@ namespace rc::exclusion
 {
 
 // One other concept's standing claim on a piece of the room.
+//
+// ★A CLAIM IS A VOLUME, NOT A FOOTPRINT (2026-08-16). The first version of this module compared footprints
+// only, and in a kitchen that is not enough to mean anything: a hood hangs over a worktop, a wall unit over a
+// base unit, a bottle stands on a table. Every one of those pairs reads as 100% overlap in plan view while
+// the two objects share no space at all. Measured live: hood_1 (z 1.99..2.28) lay entirely inside the
+// footprint of cabinet_w13_base (z 0.02..0.76), so the explained-away rule was deleting ~0.97 m of the
+// cabinet's own wall run as evidence "already explained" by something 1.2 m above it.
+//
+// z1 <= z0 means the height was never published ⇒ UNBOUNDED, i.e. exactly the old 2-D behaviour. That is the
+// safe direction for an unsized node: it keeps claiming, so the rule can still fail to catch a collision but
+// never invents one — the same asymmetry seniority is built on.
 struct Claim
 {
     std::string        node;   // e.g. "door_3" — what to name in a log, and what identifies it across cycles
     std::uint64_t      id = 0;
     rc::geom::Footprint fp{};
+    float              z0 = 0.0f;   // base, room frame (m)
+    float              z1 = 0.0f;   // top; <= z0 ⇒ height unknown ⇒ spans every height
+
+    bool has_z() const { return z1 > z0; }
+
+    // Does this claim share any height with the band [q0, q1]? An unknown band on EITHER side means "we
+    // cannot separate them vertically", which must answer yes — silence is not evidence of clearance.
+    bool overlaps_z(float q0, float q1) const
+    {
+        if (not has_z() or not (q1 > q0))
+            return true;
+        return std::max(z0, q0) < std::min(z1, q1);
+    }
+
+    // The single-point form: is `pz` inside the claimed band?
+    bool contains_z(float pz) const { return not has_z() or (pz >= z0 and pz <= z1); }
 };
 
 // Every fitted object in the graph that is NOT one of ours, as a true oriented footprint in the room frame.
@@ -68,7 +96,7 @@ inline std::vector<Claim> foreign_claims(DSR::DSRGraph& G, DSR::InnerEigenAPI* i
     {
         if (std::string_view(o.name).starts_with(my_prefix))
             continue;                        // one of ours — merge_overlapping_instances owns that case
-        out.push_back({o.name, o.id, {o.fp.cx, o.fp.cy, o.fp.w, o.fp.h, o.fp.yaw}});
+        out.push_back({o.name, o.id, {o.fp.cx, o.fp.cy, o.fp.w, o.fp.h, o.fp.yaw}, o.z0, o.z1});
     }
     return out;
 }
@@ -79,23 +107,32 @@ inline std::vector<Claim> foreign_claims(DSR::DSRGraph& G, DSR::InnerEigenAPI* i
 //
 // overlap_ratio is a fraction of the SMALLER footprint, so a small object sitting entirely inside a large one
 // reads 1.0 — which is the honest answer to "is this volume already accounted for".
+//
+// `q0..q1` is the querying object's own vertical band. A claim that shares no height with it is not a claim
+// on this object at all — a hood at 2.0 m explains nothing about a base unit at 0.5 m, however exactly their
+// footprints coincide. Leave the band at its default (q1 <= q0) and the test degrades to the old plan-view
+// answer, which is what a caller with no height estimate should get.
 inline float claimed_fraction(const rc::geom::Footprint& fp, const std::vector<Claim>& claims,
-                              const Claim** who = nullptr)
+                              const Claim** who = nullptr, float q0 = 0.0f, float q1 = 0.0f)
 {
     float worst = 0.0f;
     const Claim* best = nullptr;
     for (const auto& c : claims)
+    {
+        if (not c.overlaps_z(q0, q1))
+            continue;                        // different storey of the same footprint — not our neighbour
         if (const float r = rc::geom::overlap_ratio(fp, c.fp); r > worst)
         { worst = r; best = &c; }
+    }
     if (who) *who = best;
     return worst;
 }
 
 // The weight to multiply evidence by: 1 where the space is free, 0 where another object fully explains it.
 inline float p_unclaimed(const rc::geom::Footprint& fp, const std::vector<Claim>& claims,
-                         const Claim** who = nullptr)
+                         const Claim** who = nullptr, float q0 = 0.0f, float q1 = 0.0f)
 {
-    return 1.0f - claimed_fraction(fp, claims, who);
+    return 1.0f - claimed_fraction(fp, claims, who, q0, q1);
 }
 
 // ─── Explained-away evidence: the object limits its own growth ───────────────────────────────────
@@ -133,6 +170,23 @@ inline bool inside(const rc::geom::Footprint& f, float px, float py)
 
 // Is this room-frame point already explained by somebody else's object? Such points must not be admitted as
 // support for THIS object's extent. `self` is excluded by the caller (foreign_claims already drops our own).
+//
+// ★PASS THE POINT'S z. This is a test on a VOLUME (see Claim): a return off the underside of a hood and a
+// return off the worktop below it project to the same (x, y) and are not the same evidence. Dropping the
+// second because of the first is how this rule went from protecting a fit to starving one — measured, it was
+// discarding ~0.97 m of cabinet_w13_base's wall run under hood_1's footprint. A claim with no published
+// height still matches at every z, so nothing that used to be caught stops being caught.
+inline bool explained_by_other(float px, float py, float pz, const std::vector<Claim>& claims)
+{
+    for (const auto& c : claims)
+        if (inside(c.fp, px, py) and c.contains_z(pz))
+            return true;
+    return false;
+}
+
+// The heightless form, for a caller that genuinely has no z (a 2-D detection). Identical to the old
+// behaviour. Prefer the 3-argument overload wherever the point has a z — which, for every mask/LiDAR point
+// in this tree, it does.
 inline bool explained_by_other(float px, float py, const std::vector<Claim>& claims)
 {
     for (const auto& c : claims)
@@ -165,12 +219,18 @@ struct Seniority
     // fridge, standing legitimately beside a real cabinet, wake up after a restart, find the cabinet already
     // present, and declare ITSELF the junior — quietly discounting an object that was never in doubt. Birth is
     // the only moment at which "who was here first" is actually observed rather than inferred.
-    void resolve_at_birth(const rc::geom::Footprint& fp, const std::vector<Claim>& claims)
+    //
+    // `q0..q1` is the newborn's own vertical band; leave it defaulted only if the agent has no height at
+    // birth. Getting it right matters most HERE, because seniority is recorded once and never revisited: a
+    // fridge born under a hood with no z would be stamped junior for its whole life on a footprint overlap
+    // that never existed in three dimensions.
+    void resolve_at_birth(const rc::geom::Footprint& fp, const std::vector<Claim>& claims,
+                          float q0 = 0.0f, float q1 = 0.0f)
     {
         if (resolved)
             return;
         const Claim* who = nullptr;
-        const float frac = claimed_fraction(fp, claims, &who);
+        const float frac = claimed_fraction(fp, claims, &who, q0, q1);
         resolved    = true;
         junior      = frac > 0.0f;
         senior_node = who ? who->node : std::string{};
@@ -181,10 +241,11 @@ struct Seniority
     // weight to apply to this instance's OCCUPANCY evidence: 1.0 for a senior or unclaimed instance, and
     // 1 - overlap for a junior one still sitting inside its senior's footprint (the discount follows the
     // neighbour if it moves, and lifts entirely if the junior ever moves out from under it).
-    float occupancy_weight(const rc::geom::Footprint& fp, const std::vector<Claim>& claims)
+    float occupancy_weight(const rc::geom::Footprint& fp, const std::vector<Claim>& claims,
+                           float q0 = 0.0f, float q1 = 0.0f)
     {
         const Claim* who = nullptr;
-        const float frac = claimed_fraction(fp, claims, &who);
+        const float frac = claimed_fraction(fp, claims, &who, q0, q1);
         if (not resolved)
         {
             // Never observed a birth for this instance (adopted at startup, or an agent that has not wired

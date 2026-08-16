@@ -990,8 +990,12 @@ void SpecificWorker::run_instance_tracker()
             if (not foreign_claims_.empty())
             {
                 const rc::exclusion::Claim* who = nullptr;
+                // A door leaf runs floor to lintel: band [0, prior height]. It is the tallest thing any of
+                // these concepts publishes, so in practice it overlaps everything its footprint touches —
+                // which is the honest answer, and the reason door_3 correctly claimed the phantom fridge.
                 const float unclaimed = rc::exclusion::p_unclaimed(
-                    {dv.xy.x(), dv.xy.y(), cfg_.door_prior_w_m, 0.10f /*leaf thickness*/, 0.0f}, foreign_claims_, &who);
+                    {dv.xy.x(), dv.xy.y(), cfg_.door_prior_w_m, 0.10f /*leaf thickness*/, 0.0f}, foreign_claims_, &who,
+                    0.0f, cfg_.door_prior_h_m);
                 dv.birth_evidence *= unclaimed;
                 if (unclaimed < 0.99f)
                     std::print("[door] birth cand CLAIMED by '{}' ({:.0f}%): birth_ev x{:.2f}\n",
@@ -1282,7 +1286,7 @@ void SpecificWorker::run_instance_tracker()
             // stays senior by default — the rule can fail to catch a collision, never invent one.
             if (auto it = fitter_->instances().find(new_id); it != fitter_->instances().end())
                 it->second.exclusion.resolve_at_birth({c.x(), c.y(), cfg_.door_prior_w_m, 0.10f /*leaf thickness*/, 0.0f},
-                                                      foreign_claims_);
+                                                      foreign_claims_, 0.0f, cfg_.door_prior_h_m);
             // Shadow-mode birth record (CONCEPT_AGENT_LIFECYCLE.md §4.2): place + viewpoint that
             // produced it, so a phantom that dies young is attributable to both.
             log_phantom_event("BIRTH", new_id, "", c.x(), c.y(), nullptr, "");

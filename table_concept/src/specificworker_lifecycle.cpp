@@ -213,8 +213,11 @@ void SpecificWorker::run_instance_tracker()
             if (not foreign_claims_.empty())
             {
                 const rc::exclusion::Claim* who = nullptr;
+                // A table is born standing on the floor: band [0, birth height]. Anything ON it (a bottle) or
+                // over it no longer reads as a claim on the space the table itself occupies.
                 const float unclaimed = rc::exclusion::p_unclaimed(
-                    {dv.xy.x(), dv.xy.y(), cfg_.tracker_birth_width_m, cfg_.tracker_birth_depth_m, 0.0f}, foreign_claims_, &who);
+                    {dv.xy.x(), dv.xy.y(), cfg_.tracker_birth_width_m, cfg_.tracker_birth_depth_m, 0.0f}, foreign_claims_, &who,
+                    0.0f, cfg_.tracker_birth_height_m);
                 dv.birth_evidence *= unclaimed;
                 if (unclaimed < 0.99f)
                     std::print("[table] birth cand CLAIMED by '{}' ({:.0f}%): birth_ev x{:.2f}\n",
@@ -285,7 +288,7 @@ void SpecificWorker::run_instance_tracker()
             // stays senior by default — the rule can fail to catch a collision, never invent one.
             if (auto it = fitter_->instances().find(new_id); it != fitter_->instances().end())
                 it->second.exclusion.resolve_at_birth({c.x(), c.y(), cfg_.tracker_birth_width_m, cfg_.tracker_birth_depth_m, 0.0f},
-                                                      foreign_claims_);
+                                                      foreign_claims_, 0.0f, cfg_.tracker_birth_height_m);
             // Shadow-mode record (§4.2): a phantom is a birth that dies young from a confident view, so the
             // birth half is where the place + viewpoint that produced it is captured.
             log_phantom_event("BIRTH", new_id, "", c.x(), c.y(), nullptr, "");

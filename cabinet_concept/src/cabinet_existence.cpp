@@ -167,7 +167,11 @@ void CabinetExistence::update_and_remove(CabinetFitter& fitter, ConceptLidarInge
             if (claims_)
             {
                 const auto& bs0 = inst.ai2_belief.state();
-                const float w_excl = inst.exclusion.occupancy_weight({bs0.cx, bs0.cy, bs0.L, bs0.d, bs0.yaw}, *claims_);
+                // The vertical band is as much of the question as the footprint: a hood or a wall unit shares
+                // a base run's plan-view outline and none of its volume, and discounting occupancy for that
+                // would mute the returns off the run's own front face.
+                const float w_excl = inst.exclusion.occupancy_weight({bs0.cx, bs0.cy, bs0.L, bs0.d, bs0.yaw},
+                                                                     *claims_, bs0.z0, bs0.z1);
                 if (w_excl < 1.0f) ev.e_occ *= w_excl;
             }
             inst.dbg_ex_lidar_occ = ev.e_occ; inst.dbg_ex_lidar_free = ev.e_free; inst.dbg_ex_lidar_n = ev.n_reached;
