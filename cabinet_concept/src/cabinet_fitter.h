@@ -14,6 +14,7 @@
 #pragma once
 
 #include <cstdint>
+#include "../../common/exclusion/exclusion.h"   // rc::exclusion:: (SHARED)
 #include <fstream>
 #include <memory>
 #include <optional>
@@ -41,6 +42,11 @@ namespace rc {
 class CabinetFitter
 {
 public:
+    // Other concepts' standing claims (SHARED, common/exclusion), refreshed once per cycle by the
+    // worker. A support point another object already explains is not evidence for THIS one — see
+    // exclusion.h: that is what stops an extent growing into a neighbour.
+    void set_foreign_claims(const std::vector<rc::exclusion::Claim>* c) { foreign_claims_ = c; }
+
     struct CabinetObservation
     {
         bool has_fresh_data = false;
@@ -157,6 +163,7 @@ public:
     { return projection_->compute_silhouette_existence(inst); }
 
 private:
+    const std::vector<rc::exclusion::Claim>* foreign_claims_ = nullptr;
     // Nearest room-polygon wall segment to a room-frame point, as a WallRef (point on the line +
     // INWARD unit normal). ok=false when no polygon is available, which makes the wall-flush factor
     // inert rather than guessing — an unknown room is exactly the free-standing case.

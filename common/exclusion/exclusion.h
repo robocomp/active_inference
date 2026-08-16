@@ -31,6 +31,7 @@
 
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -95,6 +96,49 @@ inline float p_unclaimed(const rc::geom::Footprint& fp, const std::vector<Claim>
                          const Claim** who = nullptr)
 {
     return 1.0f - claimed_fraction(fp, claims, who);
+}
+
+// ─── Explained-away evidence: the object limits its own growth ───────────────────────────────────
+//
+// ★THE POINT THAT CLOSES THE LOOP. Birth exclusion stops a concept CONDENSING onto another object, and the
+// occupancy discount stops a junior being CONFIRMED by its senior's returns. Neither stops a believed object
+// from GROWING into a neighbour: cabinet_2 expanded across ~6 m into refrigerator_1 and collapsed its depth
+// to 0.12 m, because every point on the fridge's face was, to the cabinet, perfectly good evidence of more
+// cabinet. Seniority cannot help — the cabinet was senior, alone and unclaimed when it was born.
+//
+// The rule is not a limit and not a clamp. It is Occam, stated locally:
+//
+//     A point another component already explains is not evidence for me. Growing my extent to cover it buys
+//     no likelihood and costs complexity, so my own fit stops there.
+//
+// This is the SAME principle the fleet already applies to birth ("model expansion must lower total free
+// energy") — growth is that event made continuous. It needs no arbitration: whichever object has weaker
+// support for the contested volume gives it up, because the cost is paid by whoever is wrong.
+//
+// ★AND IT IS SAFE FOR THE KITCHEN RUN BY GEOMETRY, NOT BY EXEMPTION. Abutting carcasses do not overlap
+// (two touching 0.6 m boxes measure an overlap ratio of 0.000), so a run pays nothing. No rig-membership
+// whitelist, no "unless it is a kitchen" branch — the special case that would have made this fragile simply
+// does not arise.
+//
+// Point-in-rectangle is geometry, not a tuned cutoff: the point is either inside another object's footprint
+// or it is not.
+inline bool inside(const rc::geom::Footprint& f, float px, float py)
+{
+    const float c = std::cos(f.yaw), s = std::sin(f.yaw);
+    const float dx = px - f.cx, dy = py - f.cy;
+    const float lx =  c * dx + s * dy;      // world → object-local
+    const float ly = -s * dx + c * dy;
+    return std::abs(lx) <= 0.5f * f.w and std::abs(ly) <= 0.5f * f.h;
+}
+
+// Is this room-frame point already explained by somebody else's object? Such points must not be admitted as
+// support for THIS object's extent. `self` is excluded by the caller (foreign_claims already drops our own).
+inline bool explained_by_other(float px, float py, const std::vector<Claim>& claims)
+{
+    for (const auto& c : claims)
+        if (inside(c.fp, px, py))
+            return true;
+    return false;
 }
 
 // ─── Seniority ───────────────────────────────────────────────────────────────────────────────────

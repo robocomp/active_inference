@@ -508,17 +508,32 @@ CabinetFitter::CabinetObservation CabinetFitter::observe_slice(CabinetInstance& 
     // Simple SDF split into on-surface (candidate) vs off-surface (residual). An L-corner mask is separated
     // UPSTREAM into two single-arm sub-slices (SpecificWorker::split_lshaped_cabinet_masks + cabinet_lshape_
     // split.h), so this run always sees a clean single-arm cloud — no per-instance corner arbitration here.
+    std::size_t n_explained_away = 0;
     observation.candidate_pts.reserve(end > begin ? end - begin : 0);
     observation.residual_pts.reserve(end > begin ? end - begin : 0);
     for (std::size_t i = begin; i < end; ++i)
     {
         const auto& p = masks_packet.support_points[i];
+        // ★A POINT ANOTHER OBJECT ALREADY EXPLAINS IS NOT EVIDENCE FOR THIS ONE (SHARED, common/exclusion).
+        // Occam, stated locally: growing our extent to cover it buys no likelihood and costs complexity, so
+        // the fit stops there of its own accord — no clamp, no arbitration, and abutting neighbours pay
+        // nothing because they do not overlap. This is what birth exclusion and the occupancy discount could
+        // not reach: cabinet_2 grew ~6 m into refrigerator_1 and collapsed its depth to 0.12 m while being
+        // SENIOR, alone and unclaimed at its own birth.
+        if (foreign_claims_ and rc::exclusion::explained_by_other(p.x(), p.y(), *foreign_claims_))
+        {
+            ++n_explained_away;
+            continue;
+        }
         const float sdf = inst.model.sdf_point(p);
         if (std::abs(sdf) < cfg_.sdf_threshold_for_storage)
             observation.candidate_pts.push_back(p);
         else
             observation.residual_pts.push_back(p);
     }
+    if (n_explained_away > 0 and should_log(inst))
+        std::print("[{}] [exclusion] {} of {} support points dropped — already explained by another object\n",
+                   inst.node_name, n_explained_away, end > begin ? end - begin : 0);
 
     const float total = static_cast<float>(observation.candidate_pts.size() + observation.residual_pts.size());
     observation.has_fresh_data   = total > 0.0f;

@@ -441,6 +441,7 @@ void SpecificWorker::compute()
     // the existence occupancy discount. Main thread — collect_graph_obstacles uses ts==0 (CLAUDE.md).
     if (G) foreign_claims_ = rc::exclusion::foreign_claims(*G, inner_eigen_.get(), "cabinet");
     if (existence_) existence_->set_foreign_claims(&foreign_claims_);
+    if (fitter_) fitter_->set_foreign_claims(&foreign_claims_);
 
     if (not G or not rt_api_)
         return;
