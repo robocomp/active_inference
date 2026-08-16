@@ -233,8 +233,8 @@ MotionPreintegration   = true   # 2026-08-13 LANDED ON. The controlled A/B (same
 # has no reference floor at all. Only the SCALE needs the regression. So: realistic sigma, large scale.
 # 0.006 m/sqrt(s) = 19 mm/s of reported jitter at the 10 Hz odometry rate — an encoder-plausible
 # number that perturbs a parked pose by ~0.2 mm per sample instead of 25 mm.
-OdomInjectSigmaV       = 0.006  # m/sqrt(s)
-OdomInjectSigmaOmega   = 0.010  # rad/sqrt(s)
+OdomInjectSigmaV       = 0.0    # m/sqrt(s)   ← ZEROED 08-16: recovery test COMPLETE (all four
+OdomInjectSigmaOmega   = 0.0    # rad/sqrt(s)    parameters recovered 99/102/84/93%). These must
 
 # ── scale: LARGE, and it costs nothing while parked ──
 # DETERMINISTIC — the value IS the fractional error for the whole run (v_reported = v_true*(1+s)),
@@ -242,8 +242,9 @@ OdomInjectSigmaOmega   = 0.010  # rad/sqrt(s)
 # it can: a scale multiplies TRUE motion, so while the robot is parked it contributes exactly zero and
 # cannot destabilise anything. All of this injection's cost to stability sits in sigma, above.
 # Different signs on purpose, so a sign error in the estimator cannot pass by symmetry.
-OdomInjectScaleV       = 0.10   # odometry reports 10% MORE travel than truth
-OdomInjectScaleOmega   = -0.06  # and 6% LESS rotation
+OdomInjectScaleV       = 0.0    #                stay ZERO for normal operation: they deliberately
+OdomInjectScaleOmega   = 0.0    #                corrupt the odometry every consumer depends on.
+# To re-run the recovery test: sigma 0.006 / 0.010, scale +0.10 / -0.06 (see the notes above).
 
 # ── Kinematic clamp on the published pose ─────────────────────────────────────
 # Bounds the pose delta between two published RT blocks to what the robot can physically do in the
