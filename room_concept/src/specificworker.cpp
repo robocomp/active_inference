@@ -899,6 +899,30 @@ void SpecificWorker::modify_node_attrs_slot(std::uint64_t id, const std::vector<
         {
             rc::ImuReading imu;
             imu.gyro_z = gyro.value().get()[2];      // about robot +Z, CCW+, same convention as odom.rot
+
+            // ── ROTATION ERROR IS INJECTED HERE, BECAUSE THIS IS THE CHANNEL THAT WINS ────────────
+            // integrate_odometry_over_window takes dtheta from the gyro whenever the IMU brackets the
+            // segment and only falls back to odom.rot otherwise. So injecting on the wheel channel
+            // alone perturbed a value that is overwritten before it is used, and the recovery test
+            // measured nothing: against an injected s_omega = -0.06 the calibrator recovered +0.0009,
+            // with the estimate converging monotonically to ZERO as window length removed the
+            // contamination (-0.126 -> -0.020 -> -0.0017 -> +0.0009). That convergence to zero is the
+            // bypass being measured, and it is why the injection moved here.
+            //
+            // ★ The SAME error is still applied to odom.rot at the wheel ingress, deliberately. The
+            // pipeline picks per SEGMENT, so if the two channels carried different errors the truth
+            // would depend on the IMU's coverage fraction — an unknown that would dilute the recovered
+            // scale by (1 - coverage) and be indistinguishable from estimator bias. Same error on both
+            // makes the ground truth well defined however the pipeline chooses.
+            //
+            // The density is applied to the RATE as sigma/sqrt(dt) so the accumulated increment has
+            // variance sigma^2*dt — the same construction as the wheel channel, but dt here is the
+            // ~100 Hz IMU spacing rather than the ~10 Hz odometry spacing, so the same sigma means a
+            // ~3x larger per-sample rate perturbation and identical growth over any interval. Getting
+            // that wrong would inject a rate-dependent error, which is the exact defect this whole
+            // model exists to remove.
+            // Applied below, once the integration stamp is known — the density needs the sample
+            // spacing, and the dedup must not see two different perturbations of the same sample.
             if (const auto ts = G->get_attrib_by_name<imu_time_stamp_att>(robot_node); ts.has_value())
                 imu.source_ts_ms = static_cast<std::int64_t>(ts.value());
             if (const auto sts = G->get_attrib_by_name<imu_sim_time_stamp_att>(robot_node); sts.has_value())
@@ -911,6 +935,21 @@ void SpecificWorker::modify_node_attrs_slot(std::uint64_t id, const std::vector<
             const std::int64_t key = imu.integration_ts_ms();
             if (key > 0 and key != last_imu_sim_ts_)
             {
+                // Inject HERE: after the dedup, so a re-signalled sample is not perturbed twice, and
+                // with the previous stamp still in hand so the density has the real sample spacing.
+                if (params.ODOM_INJECT_SCALE_OMEGA != 0.f or params.ODOM_INJECT_SIGMA_OMEGA > 0.f)
+                {
+                    imu.gyro_z *= (1.f + params.ODOM_INJECT_SCALE_OMEGA);
+                    if (params.ODOM_INJECT_SIGMA_OMEGA > 0.f)
+                    {
+                        static std::mt19937 imu_gen{std::random_device{}()};
+                        const float dt_imu = (last_imu_sim_ts_ > 0)
+                            ? std::clamp(static_cast<float>(key - last_imu_sim_ts_) * 1e-3f, 1e-3f, 0.5f)
+                            : 0.01f;
+                        imu.gyro_z += std::normal_distribution<float>(
+                            0.f, params.ODOM_INJECT_SIGMA_OMEGA / std::sqrt(dt_imu))(imu_gen);
+                    }
+                }
                 last_imu_sim_ts_ = key;
                 imu.recv_ts_ms = static_cast<std::int64_t>(
                     std::chrono::duration_cast<std::chrono::milliseconds>(

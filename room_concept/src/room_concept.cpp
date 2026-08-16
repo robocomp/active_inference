@@ -323,6 +323,9 @@ namespace rc
             << ",inj_active,inj_sigma_v,inj_sigma_w,inj_scale_v,inj_scale_w"
             << ",preint_n,preint_T"
             << ",slot_mcov_xy,slot_mcov_xt,slot_mcov_yt"
+            // imu_cover fraction of the interval's segments whose heading came from the GYRO rather
+            //            than the wheels. -1 when no segments were integrated.
+            << ",imu_cover"
             << "\n";
         debug_log_.flush();
         qInfo() << "Debug log writing to" << QString::fromStdString(debug_log_path_);
@@ -4256,7 +4259,8 @@ namespace rc
                    << ',' << last_preint_duration_s_
                    << ',' << last_slot_motion_cov_(0, 1)
                    << ',' << last_slot_motion_cov_(0, 2)
-                   << ',' << last_slot_motion_cov_(1, 2);
+                   << ',' << last_slot_motion_cov_(1, 2)
+                   << ',' << last_imu_cover_;
     }
 
     Eigen::Matrix3f RoomConcept::compute_motion_covariance(const OdometryPrior &odometry_prior,
@@ -4702,6 +4706,15 @@ namespace rc
                               << " | " << imu_segments << "/" << (imu_segments + wheel_segments)
                               << " segments from IMU";
         }
+
+        // Per-WINDOW coverage, mirrored for the debug log. The 5 s stats above reset themselves, so
+        // they cannot be sampled per row — and without a coverage column the rotation channel is
+        // uninterpretable: a scale that fails to recover looks identical whether the estimator is
+        // wrong or the injected channel simply was not the one in use. That ambiguity already cost
+        // one full recovery run.
+        last_imu_cover_ = (imu_segments + wheel_segments) > 0
+                        ? static_cast<float>(imu_segments) / static_cast<float>(imu_segments + wheel_segments)
+                        : -1.f;
 
         if (imu_stats_last_log_ms_ == 0)
             imu_stats_last_log_ms_ = t_end_ms;

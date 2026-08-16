@@ -1229,6 +1229,7 @@ private:
    /// of step before.
    void write_debug_tail();
    Eigen::Matrix3f last_slot_motion_cov_  = Eigen::Matrix3f::Zero();  // full 3x3, for the off-diagonals
+   float           last_imu_cover_        = -1.f;  // fraction of segments whose dtheta came from the gyro
    int             last_preint_samples_   = 0;    // odometry samples summarised into this slot's factor
    float           last_preint_duration_s_ = 0.f; // and over how long — reveals strided chaining
    bool imu_injection_announced_ = false;  // one-shot "dtheta really is coming from the gyro" log
