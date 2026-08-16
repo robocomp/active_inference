@@ -97,17 +97,17 @@ void SpecificWorker::refresh_belief_inspector()
             c.s.initialized = true;   // an active cell is by definition a live belief
             cards.push_back(std::move(c));
         }
-        if (const auto* isl = kitchen_mgr_.island())   // the free-standing peninsula has no cell
+        if (const auto* pen = kitchen_mgr_.peninsula())   // the peninsula has no cell
         {
             rc::BeliefCard c;
-            c.node  = "island";
-            c.model = "wall-run island";
-            const auto& S = isl->covariance();
-            const auto& s = isl->state();
+            c.node  = "peninsula";
+            c.model = "wall-run peninsula";
+            const auto& S = pen->covariance();
+            const auto& s = pen->state();
             const std::array<float, rc::WallRunBelief::N> v = {s.t0, s.t1, s.d, s.z0, s.z1};
             fill(c, S, v, rc::kWallRunDofs);
-            c.s.logodds     = kitchen_mgr_.island_existence();
-            c.s.p_exists    = 1.0f / (1.0f + std::exp(-kitchen_mgr_.island_existence()));
+            c.s.logodds     = kitchen_mgr_.peninsula_existence();
+            c.s.p_exists    = 1.0f / (1.0f + std::exp(-kitchen_mgr_.peninsula_existence()));
             c.s.initialized = true;
             cards.push_back(std::move(c));
         }
@@ -232,14 +232,14 @@ void SpecificWorker::refresh_belief_strip()
                 r.logdet_nats = llt.matrixL().toDenseMatrix().diagonal().array().log().sum();
             rows.push_back(std::move(r));
         }
-        if (const auto* isl = kitchen_mgr_.island())   // the free-standing peninsula has no cell
+        if (const auto* pen = kitchen_mgr_.peninsula())   // the peninsula has no cell
         {
             rc::BeliefStripRow r;
-            r.node        = "island";
-            r.model       = "wall-run island";
-            r.p_exists    = 1.0f / (1.0f + std::exp(-kitchen_mgr_.island_existence()));
+            r.node        = "peninsula";
+            r.model       = "wall-run peninsula";
+            r.p_exists    = 1.0f / (1.0f + std::exp(-kitchen_mgr_.peninsula_existence()));
             r.initialized = true;
-            const auto& S = isl->covariance();
+            const auto& S = pen->covariance();
             r.gap_nats = rc::any_sigma_star(rc::kWallRunDofs)
                        ? rc::adequacy_gap_nats(rc::kWallRunDofs, [&](std::size_t j) { return S(j, j); })
                        : -1.0f;

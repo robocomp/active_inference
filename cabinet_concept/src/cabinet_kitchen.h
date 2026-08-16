@@ -120,9 +120,9 @@ struct KitchenCellDiag
     int   n_far = 0;                              // routed points beyond the tier's nominal depth
     float far_t_min = 0.0f, far_t_max = 0.0f;     // their along-wall span, same frame as t0/t1
 
-    // ── ISLAND / PENINSULA chart provenance (island row only) ───────────────────────────────────
-    // ★The "island" in this apartment is NOT free-standing: it is a cabinet whose SHORT side is
-    // against a wall. derive_island_chart has a peninsula branch for exactly that (axis = the wall's
+    // ── PENINSULA chart provenance (peninsula row only) ─────────────────────────────────────────
+    // ★The "peninsula" in this apartment is NOT free-standing: it is a cabinet whose SHORT side is
+    // against a wall. derive_peninsula_chart has a peninsula branch for exactly that (axis = the wall's
     // inward normal, near end anchored to the wall), and a PCA fallback for a genuinely free unit.
     // Which one fired decides whether the run lands on the kitchen grid or at an arbitrary angle —
     // and it was never logged, so we could only infer it from the resulting yaw.
@@ -159,7 +159,7 @@ struct KitchenBox   // an active cell's derived room-frame box (for DSR publishi
     // wrote pose with NO covariance while the classic path wrote one, so every kitchen run looked
     // equally (un)certain.
     // True when this run's chart axis came from a WALL (the peninsula branch), false for a genuinely
-    // free-standing unit fitted by PCA. ★The apartment's "island" is the former: a cabinet with its
+    // free-standing unit fitted by PCA. ★The apartment's "peninsula" is the former: a cabinet with its
     // SHORT side against a wall. Only the mask LABEL ("kitchen island", an ADE20K class) sends it
     // down the island path; its geometry is wall-attached, and the distinction changes both how much
     // its yaw should be trusted and what the node should honestly be called.
@@ -184,9 +184,9 @@ public:
     {
         cells_.clear();
         bp_ = bp;
-        base_tier_prior_ = tier_priors[0];   // island uses the base tier prior
+        base_tier_prior_ = tier_priors[0];   // the peninsula uses the base tier prior
         h_room_ = H_room;
-        walls_ = walls;                      // kept for island axis-snapping
+        walls_ = walls;                      // kept for peninsula attachment + axis-snapping
         for (const auto& wl : walls)
             for (int t = 0; t < 2; ++t)
             {
@@ -389,7 +389,7 @@ public:
         };
         for (std::size_t k = 0; k < K; ++k)
             if (cells_[k].active()) add_box(*cells_[k].belief, cells_[k].geom.id);
-        if (island_belief_) add_box(*island_belief_, "island");
+        if (peninsula_belief_) add_box(*peninsula_belief_, "peninsula");
 
         // Second pass: update each active cell's belief with its assigned points (+ the corner-fill flags set above).
         for (std::size_t k = 0; k < K; ++k)
@@ -529,33 +529,34 @@ public:
     }
     void set_corner_fill_log(bool on) { corner_fill_log_ = on; }
 
-    // The free-standing island (peninsula / 4th cabinet): a single run, NOT wall-anchored. Its chart is derived
+    // The PENINSULA: the run that is not one of the (wall, tier) cells. Its chart is derived
     // from its own points (horizontal PCA, snapped to the nearest wall axis for room-grid alignment) and frozen at
-    // birth. Same coverage-gated existence + persistence as the wall cells. `pts` = only the kitchen-island masks.
-    void update_island(const std::vector<Eigen::Vector3f>& pts, const KitchenManagerParams& mp,
+    // birth. Same coverage-gated existence + persistence as the wall cells. `pts` = only the island-LABELLED masks
+    // (the ADE20K class is still called "kitchen island"; what we build from it is a peninsula).
+    void update_peninsula(const std::vector<Eigen::Vector3f>& pts, const KitchenManagerParams& mp,
                        const CabinetFrame& frame_template)
     {
         // EVIDENCE OF ABSENCE FIRST — before any early return on "no island mask this frame". A phantom island
         // is exactly the case that gets no masks, so deferring this behind the mask check would make it immortal.
-        island_diag_.n_route = static_cast<int>(pts.size());
-        island_diag_.ex_occ = island_diag_.ex_free = island_diag_.ex_dL = 0.0f; island_diag_.ex_n = 0;
-        if (island_belief_ and mp.lidar_existence_enabled and not frame_template.lidar_freespace.endpoints.empty())
+        peninsula_diag_.n_route = static_cast<int>(pts.size());
+        peninsula_diag_.ex_occ = peninsula_diag_.ex_free = peninsula_diag_.ex_dL = 0.0f; peninsula_diag_.ex_n = 0;
+        if (peninsula_belief_ and mp.lidar_existence_enabled and not frame_template.lidar_freespace.endpoints.empty())
         {
-            integrate_absence(*island_belief_, island_exist_, island_diag_, mp, frame_template);
-            if (island_exist_ <= mp.retire_logodds and island_diag_.retire_streak >= mp.retire_frames)
-            { island_belief_.reset(); island_exist_ = 0.0f; island_cov_ema_ = 0.0f; island_diag_ = {};
-              island_yaw_var_ = kWallChartYawVar * 100.0f; return; }
+            integrate_absence(*peninsula_belief_, peninsula_exist_, peninsula_diag_, mp, frame_template);
+            if (peninsula_exist_ <= mp.retire_logodds and peninsula_diag_.retire_streak >= mp.retire_frames)
+            { peninsula_belief_.reset(); peninsula_exist_ = 0.0f; peninsula_cov_ema_ = 0.0f; peninsula_diag_ = {};
+              peninsula_yaw_var_ = kWallChartYawVar * 100.0f; return; }
         }
         if (pts.size() < 2)                        // no island evidence this frame
         {
-            if (not island_belief_)                // fade a CANDIDATE; a born island PERSISTS through look-away
-                island_exist_ = std::max(-mp.logodds_cap, island_exist_ - mp.absence_decay);
+            if (not peninsula_belief_)                // fade a CANDIDATE; a born island PERSISTS through look-away
+                peninsula_exist_ = std::max(-mp.logodds_cap, peninsula_exist_ - mp.absence_decay);
             return;
         }
-        WallChart ch; bool anchored = island_anchored_, axis_from_wall = island_axis_from_wall_;
-        if (island_belief_) ch = island_chart_;    // frozen chart once born
-        else if (not derive_island_chart(pts, mp, ch, anchored, axis_from_wall,
-                                         &island_diag_.attach_seg, &island_diag_.wall_gap))
+        WallChart ch; bool anchored = peninsula_anchored_, axis_from_wall = peninsula_axis_from_wall_;
+        if (peninsula_belief_) ch = peninsula_chart_;    // frozen chart once born
+        else if (not derive_peninsula_chart(pts, mp, ch, anchored, axis_from_wall,
+                                         &peninsula_diag_.attach_seg, &peninsula_diag_.wall_gap))
         {
             // ★SAY SO. A cluster of cabinet-labelled points that abuts neither a wall nor a cabinet is now
             // REFUSED, where before it became a free-standing island at an arbitrary angle. That is the
@@ -572,11 +573,11 @@ public:
         for (const auto& p : pts) { ch.to_wall(p, t, s);
             tmn = std::min(tmn, t); tmx = std::max(tmx, t); smn = std::min(smn, s); smx = std::max(smx, s); }
         const float cov = std::clamp((tmx - tmn) / mp.coverage_ref_m, 0.0f, 1.0f);
-        island_exist_   = std::min(mp.logodds_cap, island_exist_ + mp.presence_gain);
-        island_cov_ema_ += mp.coverage_ema_rate * (cov - island_cov_ema_);
+        peninsula_exist_   = std::min(mp.logodds_cap, peninsula_exist_ + mp.presence_gain);
+        peninsula_cov_ema_ += mp.coverage_ema_rate * (cov - peninsula_cov_ema_);
 
-        if (not island_belief_ and island_exist_ >= mp.activate_logodds
-            and island_cov_ema_ >= mp.coverage_birth and cov >= 0.5f and pts.size() >= 8)
+        if (not peninsula_belief_ and peninsula_exist_ >= mp.activate_logodds
+            and peninsula_cov_ema_ >= mp.coverage_birth and cov >= 0.5f and pts.size() >= 8)
         {
             WallRunState s0;
             s0.t0 = anchored ? 0.0f : std::clamp(tmn, 0.0f, ch.W);   // peninsula near end sits ON the wall
@@ -584,54 +585,54 @@ public:
             s0.d  = std::clamp(smx - smn, 0.35f, 1.2f);              // seed depth = observed cabinet width
             s0.z0 = base_tier_prior_.z0_mean; s0.z1 = base_tier_prior_.z1_mean;
             if (not (mp.object_exclusion_enabled and run_engulfed(s0, ch, frame_template.scene_objects, mp)))
-            { island_chart_ = ch; island_anchored_ = anchored; island_axis_from_wall_ = axis_from_wall;
-              island_belief_ = std::make_unique<WallRunBelief>(s0, bp_, island_chart_, base_tier_prior_); }
+            { peninsula_chart_ = ch; peninsula_anchored_ = anchored; peninsula_axis_from_wall_ = axis_from_wall;
+              peninsula_belief_ = std::make_unique<WallRunBelief>(s0, bp_, peninsula_chart_, base_tier_prior_); }
         }
         // (No coverage-kill: a partially-occluded island is absence of evidence, not evidence it shrank — the
         //  free-space carve retracts a genuinely-empty end. Killing on low coverage removed occluded units.)
-        if (island_belief_ and mp.object_exclusion_enabled and not frame_template.scene_objects.empty()
-            and run_engulfed(island_belief_->state(), island_belief_->chart(), frame_template.scene_objects, mp))
-        { island_belief_.reset(); island_exist_ = 0.0f; island_cov_ema_ = 0.0f;
-          island_yaw_var_ = kWallChartYawVar * 100.0f; return; }
-        if (island_belief_)
+        if (peninsula_belief_ and mp.object_exclusion_enabled and not frame_template.scene_objects.empty()
+            and run_engulfed(peninsula_belief_->state(), peninsula_belief_->chart(), frame_template.scene_objects, mp))
+        { peninsula_belief_.reset(); peninsula_exist_ = 0.0f; peninsula_cov_ema_ = 0.0f;
+          peninsula_yaw_var_ = kWallChartYawVar * 100.0f; return; }
+        if (peninsula_belief_)
         {
             // Anchor the near end to the wall (t0→0). A peninsula touches ONE wall and no second run, so it
             // has no corner to share and its target is the wall itself.
-            island_belief_->set_corner_fill({island_anchored_, 0.0f, false}, {});
+            peninsula_belief_->set_corner_fill({peninsula_anchored_, 0.0f, false}, {});
             CabinetFrame f = frame_template;
             f.points = pts; f.R.assign(pts.size(), bp_.sigma_base_m * bp_.sigma_base_m);
             // The wall runs are objects to the island exactly as it is one to them — the same snapshot taken
             // in update(), minus the island's own box. A peninsula grows along a wall it shares with a run,
             // so this is the pair most likely to interpenetrate, not a corner case.
             for (std::size_t b = 0; b < sib_boxes_.size(); ++b)
-                if (sib_ids_[b] != "island")
+                if (sib_ids_[b] != "peninsula")
                     f.scene_objects.push_back(sib_boxes_[b]);
-            island_belief_->update(f);
-            island_diag_.anchored = island_anchored_;
+            peninsula_belief_->update(f);
+            peninsula_diag_.anchored = peninsula_anchored_;
             // Depth-axis spread of the island's own points, same reading as a wall cell's.
             {
                 float t, sv, lmn = 1e9f, lmx = -1e9f, tmn2 = 1e9f, tmx2 = -1e9f; double lsum = 0.0;
-                for (const auto& p : pts) { island_belief_->chart().to_wall(p, t, sv);
+                for (const auto& p : pts) { peninsula_belief_->chart().to_wall(p, t, sv);
                     lmn = std::min(lmn, sv); lmx = std::max(lmx, sv); lsum += sv;
                     tmn2 = std::min(tmn2, t); tmx2 = std::max(tmx2, t); }
-                island_diag_.lat_min = lmn; island_diag_.lat_max = lmx;
-                island_diag_.lat_mean = static_cast<float>(lsum / static_cast<double>(pts.size()));
-                island_diag_.span = tmx2 - tmn2;
+                peninsula_diag_.lat_min = lmn; peninsula_diag_.lat_max = lmx;
+                peninsula_diag_.lat_mean = static_cast<float>(lsum / static_cast<double>(pts.size()));
+                peninsula_diag_.span = tmx2 - tmn2;
                 // Same reading for the free-standing run, against the base tier's nominal depth.
-                island_diag_.n_far = 0; island_diag_.far_t_min = 0.0f; island_diag_.far_t_max = 0.0f;
+                peninsula_diag_.n_far = 0; peninsula_diag_.far_t_min = 0.0f; peninsula_diag_.far_t_max = 0.0f;
                 for (const auto& p : pts)
                 {
-                    island_belief_->chart().to_wall(p, t, sv);
+                    peninsula_belief_->chart().to_wall(p, t, sv);
                     if (sv <= base_tier_prior_.d_mean) continue;
-                    if (island_diag_.n_far == 0) { island_diag_.far_t_min = island_diag_.far_t_max = t; }
-                    else { island_diag_.far_t_min = std::min(island_diag_.far_t_min, t);
-                           island_diag_.far_t_max = std::max(island_diag_.far_t_max, t); }
-                    ++island_diag_.n_far;
+                    if (peninsula_diag_.n_far == 0) { peninsula_diag_.far_t_min = peninsula_diag_.far_t_max = t; }
+                    else { peninsula_diag_.far_t_min = std::min(peninsula_diag_.far_t_min, t);
+                           peninsula_diag_.far_t_max = std::max(peninsula_diag_.far_t_max, t); }
+                    ++peninsula_diag_.n_far;
                 }
             }
             // Re-measure how well THIS cycle's points pin the frozen chart's axis. Held across look-away
             // (it is a property of the chart + the evidence that produced it, not of the current frame).
-            island_yaw_var_ = derived_chart_yaw_var(pts, island_belief_->chart(), bp_.sigma_base_m);
+            peninsula_yaw_var_ = derived_chart_yaw_var(pts, peninsula_belief_->chart(), bp_.sigma_base_m);
         }
     }
 
@@ -647,11 +648,11 @@ public:
                 fill_box_covariance(*c.belief, kWallChartYawVar, b);   // chart axis = the room polygon's wall
                 out.push_back(b);
             }
-        if (island_belief_)                        // the free-standing 4th cabinet (wall_seg_id = -1 ⇒ named _island)
+        if (peninsula_belief_)                        // the peninsula (wall_seg_id = -1 ⇒ named cabinet_peninsula)
         {
-            KitchenBox b; b.id = "island"; b.wall_seg_id = -1; b.tier = 0; b.existence = island_exist_;
-            b.anchored = island_anchored_;
-            island_belief_->room_box(b.cx, b.cy, b.yaw, b.L, b.d, b.z0, b.z1);
+            KitchenBox b; b.id = "peninsula"; b.wall_seg_id = -1; b.tier = 0; b.existence = peninsula_exist_;
+            b.anchored = peninsula_anchored_;
+            peninsula_belief_->room_box(b.cx, b.cy, b.yaw, b.L, b.d, b.z0, b.z1);
             // ★If the PENINSULA branch fired, this run's axis is a WALL's inward normal — polygon-derived
             // exactly like a wall cell's, so it deserves the same trust, and reporting the PCA misalignment
             // instead would make the metaconcept distrust an axis that is in fact pinned. Take the WORSE of
@@ -660,9 +661,9 @@ public:
             // hand the polygon's variance to a run whose direction came from PCA — claiming a certainty it
             // has not got, in the one channel built to stop exactly that. A cabinet-attached run keeps its
             // MEASURED value, which is what lets an 8° misalignment surface instead of hiding.
-            fill_box_covariance(*island_belief_,
-                                island_axis_from_wall_ ? std::max(kWallChartYawVar, island_yaw_var_)
-                                                       : island_yaw_var_, b);
+            fill_box_covariance(*peninsula_belief_,
+                                peninsula_axis_from_wall_ ? std::max(kWallChartYawVar, peninsula_yaw_var_)
+                                                       : peninsula_yaw_var_, b);
             out.push_back(b);
         }
         return out;
@@ -689,16 +690,16 @@ public:
                 clamp_end_targets_out_of_siblings(*c.belief, cell_id, t0, t1);
                 c.belief->set_end_prior(t0, t0_info, t1, t1_info); return;
             }
-        if (cell_id == "island" and island_belief_)
+        if (cell_id == "peninsula" and peninsula_belief_)
         {
-            clamp_end_targets_out_of_siblings(*island_belief_, cell_id, t0, t1);
-            island_belief_->set_end_prior(t0, t0_info, t1, t1_info);
+            clamp_end_targets_out_of_siblings(*peninsula_belief_, cell_id, t0, t1);
+            peninsula_belief_->set_end_prior(t0, t0_info, t1, t1_info);
         }
     }
     void clear_end_priors()
     {
         for (auto& c : cells_) if (c.belief) c.belief->clear_end_prior();
-        if (island_belief_) island_belief_->clear_end_prior();
+        if (peninsula_belief_) peninsula_belief_->clear_end_prior();
     }
 
     // Move an end TARGET off any sibling run it lands inside, onto that run's near face. Uses the same OBB
@@ -734,19 +735,19 @@ public:
     {
         for (const auto& c : cells_)
             if (c.geom.id == cell_id and c.belief) return &c.belief->chart();
-        if (cell_id == "island" and island_belief_) return &island_belief_->chart();
+        if (cell_id == "peninsula" and peninsula_belief_) return &peninsula_belief_->chart();
         return nullptr;
     }
 
     const std::vector<KitchenCellRun>& cells() const { return cells_; }
-    const KitchenCellDiag& island_diag() const { return island_diag_; }
-    // The free-standing island/peninsula run — it has no cell (its chart is derived from its own points),
+    const KitchenCellDiag& peninsula_diag() const { return peninsula_diag_; }
+    // The peninsula run — it has no cell (its chart is derived from its own points or its host wall),
     // so the dashboard needs a direct handle to give it a belief card. Null until activated.
-    const WallRunBelief* island()          const { return island_belief_.get(); }
-    float                island_existence() const { return island_exist_; }
+    const WallRunBelief* peninsula()          const { return peninsula_belief_.get(); }
+    float                peninsula_existence() const { return peninsula_exist_; }
     // ★Was hard-coded to 0 in the CSV writer, hiding one of the island's own birth gates — awkward
     // precisely when birth is what is being debugged.
-    float                island_cov_ema()   const { return island_cov_ema_; }
+    float                peninsula_cov_ema()   const { return peninsula_cov_ema_; }
 
     static bool self_test();
 
@@ -767,7 +768,7 @@ private:
     static constexpr float kWallChartYawVar = kWallChartYawStd * kWallChartYawStd;
 
     // The ISLAND's chart is derived from its OWN points and then FROZEN at birth, so its axis error is
-    // dominated by BIAS, not scatter: derive_island_chart makes a one-shot discrete choice (snap to a wall
+    // dominated by BIAS, not scatter: derive_peninsula_chart makes a one-shot discrete choice (snap to a wall
     // axis / take a wall normal) that no later evidence can revise, because yaw is not a DOF. Reporting only
     // the precision of a slope estimate would therefore be badly over-confident — it answers "how repeatably
     // could I measure a tilt?" when the question is "how far is the frozen axis from what the points say?".
@@ -888,7 +889,7 @@ private:
     //   (b) another active CABINET RUN — gives an attachment POINT; the axis then comes from the cluster's own
     //       spread, snapped to a wall direction, so the run still lands on the kitchen grid.
     // False if too few points, degenerate, or attached to nothing.
-    bool derive_island_chart(const std::vector<Eigen::Vector3f>& pts, const KitchenManagerParams& mp,
+    bool derive_peninsula_chart(const std::vector<Eigen::Vector3f>& pts, const KitchenManagerParams& mp,
                              WallChart& ch, bool& anchored, bool& axis_from_wall,
                              int* out_seg = nullptr, float* out_gap = nullptr) const
     {
@@ -936,7 +937,7 @@ private:
             float bestg = mp.attach_gap_m;
             for (std::size_t b = 0; b < sib_boxes_.size(); ++b)
             {
-                if (sib_ids_[b] == "island") continue;                   // that is us
+                if (sib_ids_[b] == "peninsula") continue;                   // that is us
                 const auto& o = sib_boxes_[b];
                 const float c = std::cos(o.yaw), s = std::sin(o.yaw);
                 float mind = 1e9f;
@@ -1008,32 +1009,32 @@ private:
     std::vector<KitchenCellRun> cells_;
     CabinetBeliefParams         bp_;
     bool                        corner_fill_log_ = false;
-    // Free-standing island (peninsula / 4th cabinet) — NOT wall-anchored: a single run whose chart is derived
-    // from its OWN points (PCA), snapped to the nearest wall axis, then fit with the same WallRunBelief.
-    std::vector<KitchenWall>       walls_;              // kept for island axis-snap
+    // The PENINSULA — a run that is not a (wall, tier) cell but is still ATTACHED, to a wall or to another
+    // cabinet (there is no free-standing kind), then fit with the same WallRunBelief.
+    std::vector<KitchenWall>       walls_;              // kept for peninsula attachment + axis-snap
     WallTierPrior                  base_tier_prior_;
     float                          h_room_ = 2.6f;
-    std::unique_ptr<WallRunBelief> island_belief_;      // null until activated
-    WallChart                      island_chart_;       // frozen at birth
-    bool                           island_anchored_ = false;   // peninsula: near end pinned to the wall (t0→0)
+    std::unique_ptr<WallRunBelief> peninsula_belief_;      // null until activated
+    WallChart                      peninsula_chart_;       // frozen at birth
+    bool                           peninsula_anchored_ = false;   // peninsula: near end pinned to the wall (t0→0)
     // ★`anchored` STOPPED BEING ONE FACT when the free-standing branch went. It used to mean both "the near
     // end is pinned" and "the axis came from the room polygon", because only the wall branch produced either.
     // Now every run is pinned — that is the rule — while a run attached to a CABINET still takes its axis
     // from its own points. Conflating them made a PCA-snapped axis report the polygon's variance, i.e. claim
     // a certainty it has not got, which is the exact failure the published-covariance channel exists to
     // prevent. So the axis provenance is its own bit and only it selects the yaw variance.
-    bool                           island_axis_from_wall_ = false;
+    bool                           peninsula_axis_from_wall_ = false;
     // MEASURED variance of the frozen chart's axis (derived_chart_yaw_var). Seeded pessimistic so a
     // just-born island never advertises a tight axis before any point has scored it.
-    float                          island_yaw_var_ = kWallChartYawVar * 100.0f;
-    float                          island_exist_   = 0.0f;
-    float                          island_cov_ema_ = 0.0f;
-    KitchenCellDiag                island_diag_;               // per-cycle observability (CSV/dashboard)
+    float                          peninsula_yaw_var_ = kWallChartYawVar * 100.0f;
+    float                          peninsula_exist_   = 0.0f;
+    float                          peninsula_cov_ema_ = 0.0f;
+    KitchenCellDiag                peninsula_diag_;               // per-cycle observability (CSV/dashboard)
     // This cycle's snapshot of every run's box, taken in update() BEFORE any of them is refitted, so which
-    // run avoids which does not depend on the order cells happen to be stored in. update_island() runs after
+    // run avoids which does not depend on the order cells happen to be stored in. update_peninsula() runs after
     // update() and reuses it rather than re-reading half-updated states.
     std::vector<SceneObjectBox>    sib_boxes_;
-    std::vector<std::string>       sib_ids_;                   // parallel to sib_boxes_ ("island" for the island)
+    std::vector<std::string>       sib_ids_;                   // parallel to sib_boxes_ ("peninsula" for the island)
 };
 
 inline bool KitchenManager::self_test()
@@ -1235,7 +1236,7 @@ inline bool KitchenManager::self_test()
         // ★THE ISLAND IS THE CASE ROUTING CANNOT SOLVE. Wall cells partition their evidence by hard argmax
         // over charts, so a point belongs to exactly one of them and neither can grow on the other's returns
         // — which is why the two cases above are answered by the target clamp alone. The island is fitted
-        // from a DIFFERENT mask label through a SEPARATE call (update_island), so no argmax ever compares it
+        // from a DIFFERENT mask label through a SEPARATE call (update_peninsula), so no argmax ever compares it
         // with a wall run, and its chart is PCA-derived and free to lie anywhere. Nothing but the fit's
         // non-penetration term stands between a peninsula and the run it grows along.
         {
@@ -1247,13 +1248,13 @@ inline bool KitchenManager::self_test()
                 const float x = ev_x0 + (ev_x1 - ev_x0) * static_cast<float>(i) / 20.0f;
                 for (int j = 0; j <= 4; ++j) island.emplace_back(x, 1.20f, 0.80f * static_cast<float>(j) / 4.0f);
             }
-            for (int it = 0; it < 80; ++it) { m9.update(pts, mp, tmpl); m9.update_island(island, mp, tmpl); }
-            const KitchenBox* isl = nullptr;
-            for (const auto& b : m9.active_boxes()) if (b.wall_seg_id < 0) isl = &b;
-            check(isl != nullptr, "the island activates (else the check below proves nothing)");
+            for (int it = 0; it < 80; ++it) { m9.update(pts, mp, tmpl); m9.update_peninsula(island, mp, tmpl); }
+            const KitchenBox* pen = nullptr;
+            for (const auto& b : m9.active_boxes()) if (b.wall_seg_id < 0) pen = &b;
+            check(pen != nullptr, "the island activates (else the check below proves nothing)");
             // ★WHAT THIS ASSERTS, AND WHAT IT DELIBERATELY DOES NOT. The island's near end is driven off its
             // own raw evidence, away from the west run — measured 0.300 → 0.367 — which is only possible if
-            // update_island is being handed the wall runs. Blind, it sits at exactly ev_x0 and its length is
+            // update_peninsula is being handed the wall runs. Blind, it sits at exactly ev_x0 and its length is
             // exactly the evidence span.
             //
             // It does NOT assert the overlap reaches zero, because here it does not: ~0.18 m of
@@ -1263,12 +1264,12 @@ inline bool KitchenManager::self_test()
             // object_exclusion_precision and extent_precision both at 800 that cost is split. Making one
             // yield outright would mean weighting by support strength: a real change to the generative model,
             // and the user's call, not something to smuggle in behind a test tolerance.
-            if (isl)
+            if (pen)
             {
-                const float low = isl->cx - 0.5f * isl->L;
+                const float low = pen->cx - 0.5f * pen->L;
                 check(low > ev_x0 + 0.01f,               // 1 cm ⇒ clear of float noise, vs the 6.7 cm measured
                       "the island is pushed off its own evidence, out of the wall run it started inside");
-                check(isl->L < (ev_x1 - ev_x0),
+                check(pen->L < (ev_x1 - ev_x0),
                       "the island is SHORTER than its raw evidence span (it yielded, rather than growing)");
             }
         }
@@ -1330,26 +1331,26 @@ inline bool KitchenManager::self_test()
     {
         KitchenManager m5; m5.build(walls, tiers, tp, bp, 2.6f);
         const auto floating = cloud_at(1.0f, 1.4f);       // nearest wall 0.4 m away — abuts nothing
-        for (int it = 0; it < 40; ++it) { m5.update({}, mp, tmpl); m5.update_island(floating, mp, tmpl); }
+        for (int it = 0; it < 40; ++it) { m5.update({}, mp, tmpl); m5.update_peninsula(floating, mp, tmpl); }
         check(m5.active_boxes().empty(), "a cloud abutting NOTHING activates no cabinet at all");
     }
     {
         KitchenManager m6b; m6b.build(walls, tiers, tp, bp, 2.6f);
         const auto against_wall = cloud_at(0.6f, 1.4f);   // same cloud, left edge ON the west wall (x = 0)
-        for (int it = 0; it < 40; ++it) { m6b.update({}, mp, tmpl); m6b.update_island(against_wall, mp, tmpl); }
+        for (int it = 0; it < 40; ++it) { m6b.update({}, mp, tmpl); m6b.update_peninsula(against_wall, mp, tmpl); }
         const auto ib = m6b.active_boxes();
-        int islands = 0, walls_on = 0;
-        for (const auto& b : ib) (b.wall_seg_id < 0 ? islands : walls_on)++;
-        check(islands == 1 and walls_on == 0, "the SAME cloud, against a wall, activates ONE peninsula run");
+        int peninsulas = 0, walls_on = 0;
+        for (const auto& b : ib) (b.wall_seg_id < 0 ? peninsulas : walls_on)++;
+        check(peninsulas == 1 and walls_on == 0, "the SAME cloud, against a wall, activates ONE peninsula run");
         for (const auto& b : ib) if (b.wall_seg_id < 0)
         {
             check(b.L > 0.9f and b.L < 1.6f, "peninsula length matches the cloud extent (~1.2 m)");
             check(b.anchored, "a run that reaches the graph is ALWAYS attached — there is no other kind now");
         }
         // and it persists through look-away, exactly as before
-        for (int it = 0; it < 80; ++it) m6b.update_island({}, mp, tmpl);
-        int isl_after = 0; for (const auto& b : m6b.active_boxes()) if (b.wall_seg_id < 0) ++isl_after;
-        check(isl_after == 1, "the peninsula PERSISTS through look-away");
+        for (int it = 0; it < 80; ++it) m6b.update_peninsula({}, mp, tmpl);
+        int pen_after = 0; for (const auto& b : m6b.active_boxes()) if (b.wall_seg_id < 0) ++pen_after;
+        check(pen_after == 1, "the peninsula PERSISTS through look-away");
     }
 
     // PENINSULA: an elongated cabinet ATTACHED to the north wall (y=3) by a short side, long axis PERPENDICULAR
@@ -1364,10 +1365,10 @@ inline bool KitchenManager::self_test()
             const float x = 1.0f - 0.25f + 0.5f * static_cast<float>(j) / 8.0f;
             for (int k = 0; k <= 3; ++k) pen.emplace_back(x, y, 0.80f * static_cast<float>(k) / 3.0f);
         }
-        for (int it = 0; it < 40; ++it) { m6.update({}, mp, tmpl); m6.update_island(pen, mp, tmpl); }
-        int isl = 0; float cy = 0.0f, L = 0.0f;
-        for (const auto& b : m6.active_boxes()) if (b.wall_seg_id < 0) { ++isl; cy = b.cy; L = b.L; }
-        check(isl == 1, "a wall-adjacent peninsula activates ONE island run");
+        for (int it = 0; it < 40; ++it) { m6.update({}, mp, tmpl); m6.update_peninsula(pen, mp, tmpl); }
+        int n_pen = 0; float cy = 0.0f, L = 0.0f;
+        for (const auto& b : m6.active_boxes()) if (b.wall_seg_id < 0) { ++n_pen; cy = b.cy; L = b.L; }
+        check(n_pen == 1, "a wall-adjacent peninsula activates ONE peninsula run");
         check(L > 1.0f, "peninsula length spans into the room (long axis ⊥ wall)");
         check(cy > 2.2f and cy < 2.75f, "peninsula near end anchored to the north wall (box reaches y≈3)");
     }
@@ -1471,8 +1472,8 @@ inline bool KitchenManager::self_test()
         // variance by construction, checked above. So the cloud hangs off the north RUN instead (0.55 m from
         // the north wall, too far for the wall branch, touching the run's face), which is a real peninsula
         // and still takes its axis from its own points.
-        const auto island_axis_var = [&](float tilt_rad) -> float {
-            std::vector<Eigen::Vector3f> isl;
+        const auto peninsula_axis_var = [&](float tilt_rad) -> float {
+            std::vector<Eigen::Vector3f> pen;
             const Eigen::Vector2f c(1.00f, 1.95f);                       // hangs off the north run, clear of walls
             const Eigen::Vector2f dir(std::sin(tilt_rad), std::cos(tilt_rad));   // tilt off +y
             const Eigen::Vector2f nrm(-dir.y(), dir.x());
@@ -1482,20 +1483,20 @@ inline bool KitchenManager::self_test()
                 for (int j = 0; j <= 4; ++j)                                     // front face, 0.6 m deep
                 {
                     const Eigen::Vector2f p = c + t * dir + 0.30f * nrm;
-                    isl.emplace_back(p.x(), p.y(), 0.80f * static_cast<float>(j) / 4.0f);
+                    pen.emplace_back(p.x(), p.y(), 0.80f * static_cast<float>(j) / 4.0f);
                 }
             }
             KitchenManager m; m.build(walls, tiers, tp, bp, 2.6f);
             std::vector<Eigen::Vector3f> host;   // the north run it attaches to must exist first
             push_front(host, walls[1], 0.3f, 1.7f);
-            for (int it = 0; it < 40; ++it) { m.update(host, mp, tmpl); m.update_island(isl, mp, tmpl); }
+            for (int it = 0; it < 40; ++it) { m.update(host, mp, tmpl); m.update_peninsula(pen, mp, tmpl); }
             const auto b = m.active_boxes();
             const auto it = std::ranges::find_if(b, [](const KitchenBox& x) { return x.wall_seg_id < 0; });
             return it == b.end() ? -1.0f : it->var_yaw;
         };
-        const float v_aligned  = island_axis_var(0.0f);
-        const float v_tilted   = island_axis_var(8.0f * std::numbers::pi_v<float> / 180.0f);
-        check(v_aligned >= 0.0f and v_tilted >= 0.0f, "(i) both islands activated for the axis check");
+        const float v_aligned  = peninsula_axis_var(0.0f);
+        const float v_tilted   = peninsula_axis_var(8.0f * std::numbers::pi_v<float> / 180.0f);
+        check(v_aligned >= 0.0f and v_tilted >= 0.0f, "(i) both peninsulas activated for the axis check");
         // An axis that genuinely matches its points may report tightly — that is honest.
         check(v_aligned < kWallChartYawVar,
               "(i) an island whose frozen axis MATCHES its points reports a tight axis");

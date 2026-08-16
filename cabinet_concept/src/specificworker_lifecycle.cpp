@@ -287,7 +287,7 @@ std::vector<rc::SceneObjectBox> SpecificWorker::read_scene_objects() const
 // and the disasters (crossings, 10 cm slivers, ceiling boxes) are unrepresentable — the wall chart fixes yaw
 // to the wall, pins the back on the wall, and bounds t∈[0,W], z∈[0,H_room]. Per cycle: gather the run-mask
 // support points, soft-route them to cells (responsibility → per-point R), let each active cell run one AI2
-// update, and reconcile the active set with DSR box nodes. Free-standing islands (peninsulas) route to no wall
+// update, and reconcile the active set with DSR box nodes. Free-standing peninsulas (peninsulas) route to no wall
 // and fall through here — that is Stage 4 (generic tracker), deliberately not handled yet.
 void SpecificWorker::run_kitchen_model()
 {
@@ -321,16 +321,16 @@ void SpecificWorker::run_kitchen_model()
     }
 
     const auto& pkt = mask_ingestor_->packet();                    // ZED-depth run masks (base + upper labels)
-    std::vector<Eigen::Vector3f> pts, island_pts;                  // wall-run points vs free-standing island points
+    std::vector<Eigen::Vector3f> pts, peninsula_pts;                  // wall-run points vs peninsula points
     std::vector<std::uint8_t>    pt_labels;                        // 0 = carcass mask, 1 = worktop mask
     double radius_wsum = 0.0, dotd_wsum = 0.0, w_sum = 0.0;         // point-weighted mean off-centring + mask motion
     if (pkt.valid)
         for (const auto& sl : pkt.slices)
         {
-            const bool is_island = sl.label == "kitchen_island" or sl.label == "kitchen island" or sl.label == "island";
+            const bool is_peninsula_mask = sl.label == "kitchen_island" or sl.label == "kitchen island" or sl.label == "island";
             const bool run_label = sl.label == "cabinet" or sl.label == "chest of drawers"
                                    or sl.label == "counter" or sl.label == "countertop";
-            if (sl.depth_var > 0.0f or not (run_label or is_island)) continue;   // ZED-depth cabinet/island masks
+            if (sl.depth_var > 0.0f or not (run_label or is_peninsula_mask)) continue;   // ZED-depth cabinet/island masks
             const std::size_t b = std::min(sl.support_begin, pkt.support_points.size());
             const std::size_t e = std::min(sl.support_end,   pkt.support_points.size());
             const double wn = static_cast<double>(e - b);
@@ -342,11 +342,11 @@ void SpecificWorker::run_kitchen_model()
             // also take in the overhang and whatever stands on it — so when a run fits an impossible
             // depth, the label of the far points is the thing that identifies the culprit.
             const bool worktop_label = sl.label == "counter" or sl.label == "countertop";
-            std::vector<Eigen::Vector3f>& dst = is_island ? island_pts : pts;
+            std::vector<Eigen::Vector3f>& dst = is_peninsula_mask ? peninsula_pts : pts;
             for (std::size_t k = b; k < e; k += 2)
             {
                 dst.push_back(pkt.support_points[k]);
-                if (not is_island) pt_labels.push_back(worktop_label ? 1 : 0);
+                if (not is_peninsula_mask) pt_labels.push_back(worktop_label ? 1 : 0);
             }
         }
 
@@ -380,7 +380,7 @@ void SpecificWorker::run_kitchen_model()
 
     // SCENE-OBJECT NON-PENETRATION: read OTHER agents' furniture (fridge/table/…) so a run does not cross them.
     // The exclusion factor retracts a crossing end; a run engulfed by an object is retired (the on-fridge false
-    // cabinet the LiDAR carve can't reach). Same frame flows to both update() and update_island().
+    // cabinet the LiDAR carve can't reach). Same frame flows to both update() and update_peninsula().
     if (cfg_.object_exclusion_precision > 0.0f)
         tmpl.scene_objects = read_scene_objects();
 
@@ -500,7 +500,7 @@ void SpecificWorker::run_kitchen_model()
     }
 
     kitchen_mgr_.update(pts, mp, tmpl, &pt_labels);
-    kitchen_mgr_.update_island(island_pts, mp, tmpl);              // the free-standing 4th cabinet (peninsula)
+    kitchen_mgr_.update_peninsula(peninsula_pts, mp, tmpl);              // the free-standing 4th cabinet (peninsula)
     publish_kitchen_boxes();
     log_kitchen_cells(sweep_n, mask_lidar_dr, mask_lidar_n);   // per-cycle cell CSV
 
@@ -592,7 +592,7 @@ void SpecificWorker::publish_kitchen_boxes()
             // ★THERE IS NO `cabinet_island` ANY MORE (2026-08-16, the user's rule). An island is not an
             // object this agent may interpret: every cabinet abuts a wall or another cabinet, so the run
             // that used to take that name is a PENINSULA and nothing else can be born. The branch that
-            // produced the other name is gone from derive_island_chart, so a ternary here would be
+            // produced the other name is gone from derive_peninsula_chart, so a ternary here would be
             // reporting a distinction the model no longer makes.
             const std::string name = (b.wall_seg_id < 0)
                 ? std::string("cabinet_peninsula")
@@ -785,7 +785,7 @@ void SpecificWorker::log_kitchen_cells(std::size_t sweep_n, float mask_lidar_dr,
                            // the run's own interval, so far_t_* can be read against it directly
                            << (b ? b->state().t0 : 0.0f) << ',' << (b ? b->state().t1 : 0.0f) << ','
                            << dg.n_far << ',' << dg.far_t_min << ',' << dg.far_t_max << ','
-                           // ── island/peninsula chart provenance (island row only) ────────────
+                           // ── peninsula chart provenance (peninsula row only) ────────────────
                            << (dg.anchored ? 1 : 0) << ',' << dg.attach_seg << ',' << dg.wall_gap << ','
                            << mask_lidar_dr << ',' << mask_lidar_n << '\n';
     };
@@ -796,12 +796,12 @@ void SpecificWorker::log_kitchen_cells(std::size_t sweep_n, float mask_lidar_dr,
         row(c.geom.id, c.geom.wall_seg_id, c.geom.tier, c.active(),
             it != kitchen_nodes_.end() ? it->second : 0, c.existence, c.cov_ema, c.diag, c.belief.get(), c.fe);
     }
-    if (const auto* isl = kitchen_mgr_.island(); isl or kitchen_mgr_.island_diag().n_route > 0)
+    if (const auto* pen = kitchen_mgr_.peninsula(); pen or kitchen_mgr_.peninsula_diag().n_route > 0)
     {
-        const auto it = kitchen_nodes_.find("island");
-        row("island", -1, 0, isl != nullptr, it != kitchen_nodes_.end() ? it->second : 0,
-            kitchen_mgr_.island_existence(), kitchen_mgr_.island_cov_ema(),
-            kitchen_mgr_.island_diag(), isl, 0.0f);
+        const auto it = kitchen_nodes_.find("peninsula");
+        row("peninsula", -1, 0, pen != nullptr, it != kitchen_nodes_.end() ? it->second : 0,
+            kitchen_mgr_.peninsula_existence(), kitchen_mgr_.peninsula_cov_ema(),
+            kitchen_mgr_.peninsula_diag(), pen, 0.0f);
     }
     kitchen_cells_csv_.flush();
 }
