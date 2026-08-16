@@ -322,6 +322,13 @@ namespace rc
             // imu_cover fraction of the interval's segments whose heading came from the GYRO rather
             //            than the wheels. -1 when no segments were integrated.
             << ",imu_cover"
+            // pub_cov_*  what the RT edge actually carried, AFTER the worker's kinematic clamp folded
+            //            its un-applied residual in. cov_xx above is the PRE-clamp value, so these two
+            //            differing is the clamp's contribution made visible instead of inferred.
+            // clamp_hit  1 when the clamp fired on this frame, so its rate is measured not asserted.
+            // wg_ratio   wheel/gyro heading ratio over IMU-covered segments; NaN until enough rotation
+            //            has accumulated for the quotient to mean anything.
+            << ",pub_cov_xx,pub_cov_tt,clamp_hit,wg_ratio"
             << "\n";
         debug_log_.flush();
         qInfo() << "Debug log writing to" << QString::fromStdString(debug_log_path_);
@@ -4251,7 +4258,11 @@ namespace rc
                    << ',' << last_slot_motion_cov_(0, 1)
                    << ',' << last_slot_motion_cov_(0, 2)
                    << ',' << last_slot_motion_cov_(1, 2)
-                   << ',' << last_imu_cover_;
+                   << ',' << last_imu_cover_
+                   << ',' << last_pub_cov_xx_
+                   << ',' << last_pub_cov_tt_
+                   << ',' << (last_clamp_hit_ ? 1 : 0)
+                   << ',' << last_wheel_gyro_ratio_;
     }
 
     Eigen::Matrix3f RoomConcept::compute_motion_covariance(const OdometryPrior &odometry_prior,
@@ -4728,6 +4739,7 @@ namespace rc
             const bool ratio_valid = std::abs(imu_dtheta_sum_) > kMinRotForRatio;
             const double ratio = ratio_valid ? wheel_dtheta_sum_ / imu_dtheta_sum_
                                              : std::numeric_limits<double>::quiet_NaN();
+            last_wheel_gyro_ratio_ = static_cast<float>(ratio);   // NaN while the guard is unmet
             qInfo().nospace() << "[ImuInject] clock="
                               << (imu_stats_sim_clock_ ? "SIM" : "WALL(unbound)")
                               << " coverage=" << QString::number(cover, 'f', 1) << "%"

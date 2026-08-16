@@ -530,6 +530,7 @@ bool SpecificWorker::maybe_publish_corrected_pose()
     // rejected — only rate-limited. At a typical 0.35 m/s cruise there is ~20 mm/frame of headroom
     // under the limit, which absorbs the p50 innovation (12 mm) in one frame and the p99 (97 mm) in
     // about five. A genuine relocalization therefore still converges, just over a few frames.
+    bool clamp_fired = false;
     if (params.POSE_CLAMP_ENABLED and last_published_pose_.has_value()
         and last_published_ts_ms_ > 0 and loc_res->timestamp_ms > last_published_ts_ms_)
     {
@@ -569,6 +570,7 @@ bool SpecificWorker::maybe_publish_corrected_pose()
                 clamped.linear() = Eigen::Rotation2Df(prev_th + th_c).toRotationMatrix();
                 loc_res->robot_pose = clamped;
 
+                clamp_fired = true;
                 if (++pose_clamp_hits_ % 20 == 1)
                     qWarning() << "[pose-clamp] implied" << (n_xy / dt) << "m/s /" << (std::abs(d_th) / dt)
                                << "rad/s over dt" << dt << "s — limits" << params.POSE_CLAMP_V_MAX << "/"
@@ -577,6 +579,15 @@ bool SpecificWorker::maybe_publish_corrected_pose()
             }
         }
     }
+
+    // Hand the ACTUALLY-PUBLISHED covariance back for the debug log. The clamp above runs downstream
+    // of RoomConcept's own write, so cov_xx there is the PRE-clamp value while every consumer sees
+    // this one; without recording it the published sigma is simply not observable from any log, which
+    // is how a claim about it came to be made and then retracted.
+    // ⚠ ONE-FRAME LAG BY CONSTRUCTION: RoomConcept writes its row before returning, so these values
+    // land on the NEXT row. Join pub_cov_* to the frame BEFORE, not the one they appear on.
+    room_concept_.note_published_covariance(loc_res->covariance(0, 0), loc_res->covariance(2, 2),
+                                            clamp_fired);
 
     // Publish (corrected pose → robot↔room RT) at the optimizer rate.
     scene_graph_->update(*loc_res, last_robot_adv_speed_, last_robot_side_speed_, last_robot_rot_speed_);

@@ -793,6 +793,16 @@ public:
                                 float normalized_rot,
                                 std::int64_t ts_ms);
 
+    /// What the RT edge ACTUALLY carried, recorded by the worker after the kinematic clamp has folded
+    /// in its un-applied residual. The clamp runs downstream of this class's own debug write, so
+    /// cov_xx in the log is the PRE-clamp value while every consumer sees the post-clamp one — a gap
+    /// that made the published sigma unobservable from any log, and produced a claim about it that had
+    /// to be retracted. `clamp_hit` makes the clamp's firing rate a measurement rather than a comment.
+    /// ⚠ ONE-FRAME LAG: the caller runs after this class has already written its row, so these values
+    /// appear on the NEXT row. Join them to the frame BEFORE the one they sit on.
+    void note_published_covariance(float pub_cov_xx, float pub_cov_tt, bool clamp_hit)
+    { last_pub_cov_xx_ = pub_cov_xx; last_pub_cov_tt_ = pub_cov_tt; last_clamp_hit_ = clamp_hit; }
+
     /// Thread-safe: record the latest measured odometry sample entering the motion pipeline.
     void record_odometry_ingress(const std::string& source,
                                  float raw_adv,
@@ -1214,6 +1224,13 @@ private:
    void write_debug_tail();
    Eigen::Matrix3f last_slot_motion_cov_  = Eigen::Matrix3f::Zero();  // full 3x3, for the off-diagonals
    float           last_imu_cover_        = -1.f;  // fraction of segments whose dtheta came from the gyro
+   // Running wheel/gyro heading ratio over IMU-covered segments. NaN until enough rotation has
+   // accumulated to make the quotient mean anything (see the [ImuInject] guard) — a column that
+   // reports a number for a parked robot is the defect that guard exists to prevent.
+   float           last_wheel_gyro_ratio_ = std::numeric_limits<float>::quiet_NaN();
+   float           last_pub_cov_xx_ = std::numeric_limits<float>::quiet_NaN();  // post-clamp, as published
+   float           last_pub_cov_tt_ = std::numeric_limits<float>::quiet_NaN();
+   bool            last_clamp_hit_  = false;
    int             last_preint_samples_   = 0;    // odometry samples summarised into this slot's factor
    float           last_preint_duration_s_ = 0.f; // and over how long — reveals strided chaining
    bool imu_injection_announced_ = false;  // one-shot "dtheta really is coming from the gyro" log
