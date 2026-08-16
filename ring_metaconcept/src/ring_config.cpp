@@ -29,6 +29,8 @@ RingConfig load_ring_config(const ConfigLoader& cfg)
     out.ring_class        = gets("RingMetaconcept.RingClass",   "chair");
     out.node_subtype      = gets("RingMetaconcept.NodeSubtype", "dining_set");
     out.node_prefix       = gets("RingMetaconcept.NodePrefix",  "dining_set_");
+    out.publish           = cfg.exists("RingMetaconcept.Publish")
+                                ? cfg.get<bool>("RingMetaconcept.Publish") : true;
     out.sigma_slot_m          = getf("RingMetaconcept.SigmaSlotM", 0.20f);
     out.clutter_frac          = getf("RingMetaconcept.ClutterFrac", 0.20f);
     out.occupancy_q           = getf("RingMetaconcept.OccupancyQ", 0.70f);
@@ -48,9 +50,10 @@ RingConfig load_ring_config(const ConfigLoader& cfg)
     out.csv_path          = gets("RingMetaconcept.CsvPath", "");
     out.fit_csv_path      = gets("RingMetaconcept.FitCsvPath", "");
 
-    std::print("ring_metaconcept: configuration loaded (anchor='{}' ring='{}' owns='{}*' csv='{}').\n",
+    std::print("ring_metaconcept: configuration loaded (anchor='{}' ring='{}' owns='{}*' csv='{}') PUBLISH={}.\n",
                out.anchor_class, out.ring_class, out.node_prefix,
-               out.csv_path.empty() ? "<disabled>" : out.csv_path);
+               out.csv_path.empty() ? "<disabled>" : out.csv_path,
+               out.publish ? "true (steering)" : "false (observe-only)");
     return out;
 }
 

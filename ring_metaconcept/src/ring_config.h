@@ -39,6 +39,19 @@ struct RingConfig
     std::string node_subtype = "dining_set";     // object_subtype written on the owned node
     std::string node_prefix  = "dining_set_";    // owned-node NAME prefix (sweep/cleanup key)
 
+    // ★THE SWITCH between measuring and steering, mirroring kitchen_metaconcept. false = the agent
+    // polls, fits and logs the down-prior it WOULD publish, and writes NOTHING to the graph — no rig
+    // node, no group_member edge, no attribute. true = it steers.
+    //
+    // Defaults TRUE, unlike kitchen: this agent has been publishing since M3 and is live-validated,
+    // so the switch exists to give it an OBSERVE-ONLY mode, not to hold it back. That mode is the
+    // thing that was missing on 2026-08-11, when the rig was welded to the wrong table: the only way
+    // to stop it steering was to wait for the evidence to go negative. (It did — log_odds sat at
+    // -3.2, so publish_rig retired the node and pushed nothing, which is exactly why no chair was
+    // ever told to face a table 5 m away. The existence rule covered it; a switch would have made
+    // that deliberate rather than lucky.)
+    bool publish = true;
+
     // ── Arrangement belief ────────────────────────────────────────────────────────
     // Slack between a seat and the chair on it (NOT sensor noise — that arrives per-member as the
     // peer's own published Σ). Chairs get pushed in and out, so this is deliberately loose.

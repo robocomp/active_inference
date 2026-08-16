@@ -818,6 +818,10 @@ void SpecificWorker::associate_and_maintain(const std::vector<rc::Cluster>& clus
         rc::RingHypothesis h = std::move(hypotheses_[idx]);
         if (++h.miss >= hold)
         {
+            // Deliberately NOT gated on cfg_.publish: in observe-only nothing was ever born, so this
+            // is a provable no-op (RingSceneGraph keys on rigs_, which only ensure_rig_node fills).
+            // Gating it would be worse than useless — it is the one call that reaps a node whose
+            // hypothesis has died, and skipping it could strand one.
             if (scene_graph_)
                 scene_graph_->remove_rig_node(h.key);
             std::print("ring_metaconcept: rig={} retired after {} cycles without members\n", h.key, h.miss);
@@ -839,7 +843,9 @@ void SpecificWorker::associate_and_maintain(const std::vector<rc::Cluster>& clus
 void SpecificWorker::publish_rig(rc::RingHypothesis& h, const MemberSnapshot& members,
                                  const rc::Cluster& cluster)
 {
-    if (not scene_graph_)
+    // ★Observe-only mode writes NOTHING to the graph — not even a retirement. Placed ahead of every
+    // other branch for exactly that reason, and mirroring kitchen_metaconcept::publish_priors.
+    if (not cfg_.publish or not scene_graph_)
         return;
 
     if (h.belief.log_odds() <= 0.0f)

@@ -53,6 +53,17 @@ AnchorClass = "table"          # central member (the dining table)
 RingClass = "chair"            # ring members arranged around the anchor
 NodeSubtype = "dining_set"     # object_subtype written on the node this agent owns / births (M3+)
 NodePrefix = "dining_set_"     # owned-node NAME prefix — the stale-sweep / cleanup key
+
+# ★THE SWITCH between measuring and steering, same key and same meaning as kitchen_metaconcept's.
+# false = the agent polls, fits, and logs the down-prior it WOULD publish, writing NOTHING to the
+# graph: no dining_set node, no group_member edge, no attribute. true = it steers.
+#
+# ★Defaults TRUE here, unlike kitchen. This agent has published since M3 and is live-validated
+# (chair_concept reads rig_yaw_prior / rig_yaw_kappa off the edge and turns real chairs), so the
+# switch exists to give it an OBSERVE-ONLY mode, not to hold it back. Turning it off is the way to
+# watch the fit without letting it act — which is what was missing on 2026-08-11, when the rig was
+# welded to the wrong table and the only lever was waiting for the evidence to go negative.
+Publish = true
 LogPeriodFrames = 30           # per-cycle log + CSV throttle for the graph-reader
 CsvPath = "etc/ring_members.csv"   # per-member snapshot (pose + published Σ); "" disables
 FitCsvPath = "etc/ring_fit.csv"    # arrangement fit + the down-prior it WOULD publish; "" disables
