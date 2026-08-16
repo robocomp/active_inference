@@ -33,6 +33,8 @@
 
 #include "specificworker.h"
 
+#include "../../common/obj/convergence.h"   // rc::converge::step (SHARED)
+
 #include "../../common/dashboard/belief_series.h"   // rc::dash::publish_belief_series (SHARED)
 
 #include "../../common/birth_surprise/residual_field_reader.h"   // rc::read_residual_field (SHARED)
@@ -2071,22 +2073,13 @@ void SpecificWorker::step_convergence(rc::DoorInstance& inst,
         : std::numeric_limits<float>::max();
     inst.prev_conv_state = s;
     inst.has_prev_conv_state = true;
-    if (state_delta < cfg_.state_eps)
-    {
-        inst.frames_converged = std::min(inst.frames_converged + 1, cfg_.K_stable);
-    }
-    else
-    {
-        inst.frames_converged = 0;
-        inst.model_stable     = false;
-    }
 
-    // Model uncertainty for model_uncertainty_att: sum of the belief's per-DOF posterior stds over
-    // position + size (m), from the AI2 covariance Σ. Shrinks as the robot gathers viewpoints — the
-    // AI2-native replacement for the old queue face-coverage deficit.
+    // The convergence RULE (counter, verdict, graph writes) is shared — common/obj/convergence.h. What stays
+    // here is the one per-object part: which DOFs enter state_delta, above.
     const float model_uncertainty = belief_uncertainty(inst);
-    G->add_or_modify_attrib_local<model_uncertainty_att>(node, model_uncertainty);
-
+    const bool stable_edge = rc::converge::step(*G, node, state_delta, model_uncertainty,
+                                                inst.frames_converged, inst.model_stable,
+                                                {cfg_.state_eps, cfg_.K_stable});
     if (fitter_->should_log(inst))
     {
         const auto& cs = inst.model.state();
@@ -2095,26 +2088,8 @@ void SpecificWorker::step_convergence(rc::DoorInstance& inst,
                    model_uncertainty);
     }
 
-    if (inst.frames_converged >= cfg_.K_stable)
-    {
-        if (not inst.model_stable)
-        {
-            inst.model_stable = true;
-            G->add_or_modify_attrib_local<model_stable_att>(node, true);
-            G->update_node(node);
-            std::print("door_concept: node '{}' STABLE (F={:.4f})\n",
-                       inst.node_name, free_energy);
-        }
-    }
-    else
-    {
-        if (inst.model_stable)
-        {
-            G->add_or_modify_attrib_local<model_stable_att>(node, false);
-            G->update_node(node);
-        }
-        inst.model_stable = false;
-    }
+    if (stable_edge and inst.model_stable)
+        std::print("door_concept: node '{}' STABLE (F={:.4f})\n", inst.node_name, free_energy);
 }
 
 void SpecificWorker::step_epistemic(rc::DoorInstance& inst, DSR::Node& node)
