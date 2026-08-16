@@ -575,9 +575,22 @@ RotGain = 1.5
 # ★The growth-rate cap (PosePredictionHorizon/PoseXYStdGrowthPerMps) is untouched and still guards the
 # real constraint — do not outrun the rate localisation can correct. It bound only 6.4% of the lap; the
 # absolute ramp was doing 93% of the throttling. Restore 0.03 to get the old behaviour back.
-PoseXYStdSlow = 0.08
-PoseXYStdStop = 0.12
-PoseThetaStdSlow = 0.04
+# ★★2026-08-16 RE-DERIVED, was 0.08. Same rule as the 08-02 fix, applied to the CURRENT localiser:
+# the knee must sit at ~p90 of sigma while MOVING, or the ramp never releases and becomes a constant
+# tax. Measured over 9679 moving frames: sigma_xy med 0.0586, p75 0.0792, p90 0.0962, p95 0.1207 —
+# against 0.0524 / 0.0744 on the 08-13 run that felt quick. The knees did not move; SIGMA did, by
+# ~12% at the median and ~29% at p90, so a quarter of moving frames are now over a knee that used to
+# be clear. On a rotation-heavy tour the coupling then multiplies the xy and theta cuts together.
+# ⚠ This re-tracks the throttle to what the localiser delivers; it does NOT explain why sigma rose.
+# Measured, that rise is in the LAPLACE curvature, not the innovations (innovations are at their
+# LOWEST while sigma is at its highest) — i.e. a flatter minimum, which is geometry, not odometry.
+PoseXYStdSlow = 0.10
+PoseXYStdStop = 0.14   # ramp width held at 0.04, as before
+# ★★2026-08-16 RE-DERIVED, was 0.04. sigma_th med 0.0318, p75 0.0421, p90 0.0526 while moving (08-13:
+# 0.0242 / 0.0383). At 0.04 the theta ramp now bites on >25% of moving frames, and because adv is
+# coupled to it as rot_scale^(0.5*turning_ratio), a turning tour pays that cut on FORWARD speed too.
+# 0.055 restores the "theta is never the binding term" property the 08-02 measurement relied on.
+PoseThetaStdSlow = 0.055
 PoseThetaStdStop = 0.20
 # ── A/B LEVER OVER THE WHOLE POSE-COVARIANCE LIMITER ─────────────────────────────────────────────
 # 1.0 = the limiter exactly as configured below. 0.0 = it still computes and still REPORTS, but never
@@ -601,7 +614,11 @@ PoseThetaStdStop = 0.20
 # READ THE RESULT AS: if confidence still tracks speed at 0.0, the estimator is responding to motion and
 # the governor is innocent. If the tracking vanishes, the governor was driving it and the latch is real.
 # RESTORE TO 1.0 AFTER THE RUN.
-PoseUncertaintyCoupling = 0.0
+# RESTORED to 1.0 on 2026-08-16: the throttle is live again, but now against RE-DERIVED knees (above).
+# The 0.0 measurement did its job -- it showed the throttle was costing >50% of speed (median while
+# moving 0.286 -> 0.631 m/s) and buying nothing: sigma_xy was IDENTICAL across the two arms, 0.0680 vs
+# 0.0681, and confidence 0.679 vs 0.677. Driving twice as fast did not degrade localisation at all.
+PoseUncertaintyCoupling = 1.0
 MinAdvSpeedScale = 0.15
 MinRotSpeedScale = 0.05
 PosePredictionHorizon = 0.4
