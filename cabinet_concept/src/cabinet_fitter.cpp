@@ -1016,7 +1016,7 @@ void CabinetFitter::log_ai2_csv(const CabinetInstance& inst, int npts, float R, 
                  << "dyaw_points,obliquity_cos,wall_gap,wall_lambda,attach_end,wall_gap_end,span_obs,span_pts,span_lidar_rays,"
                  << "ex_L,ex_p,ex_locc,ex_lfree,ex_lfree_eff,ex_ln,ex_socc,ex_sfree,ex_sfree_eff,ex_sndet,ex_streak,"
                  << "ex_pdetect,ex_central,ex_verify,ex_wantsverify,"
-                 << "axis_resid,cand_pts,resid_pts,nbv_gain,ricoh_attn\n";   // + Manhattan-yaw residual (rad) & candidate/residual split (merge diag)
+                 << "axis_resid,cand_pts,resid_pts,nbv_gain,ricoh_det,ricoh_attn\n";   // + Manhattan-yaw residual (rad) & candidate/residual split (merge diag)
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
@@ -1055,7 +1055,7 @@ void CabinetFitter::log_ai2_csv(const CabinetInstance& inst, int npts, float R, 
              // cycle. It was computed and shown nowhere — the whole peripheral channel was
              // invisible in every agent's log, which is why 'is it producing anything?' could
              // not be answered offline for cabinet/hood, the two it exists for.
-             << ',' << ricoh_attention_ << '\n';   // + axis residual (rad) & candidate/residual split (merge diag)
+             << ',' << ricoh_dets_ << ',' << ricoh_attention_ << '\n';   // + axis residual (rad) & candidate/residual split (merge diag)
     ai2_csv_.flush();
 }
 

@@ -918,7 +918,7 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
                  // NBV emission: what the planner proposed THIS cycle (the affordance node holds the
                  // FROZEN pose during a claim, so it cannot answer this). nbv_vfov=0 ⇒ the camera
                  // model was still incomplete when the proposal was made.
-                 << "nbv_standoff,nbv_tx,nbv_ty,nbv_pdetect,nbv_fill,nbv_vfov,nbv_gain,ricoh_attn\n";
+                 << "nbv_standoff,nbv_tx,nbv_ty,nbv_pdetect,nbv_fill,nbv_vfov,nbv_gain,ricoh_det,ricoh_attn\n";
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
@@ -970,7 +970,7 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
              // cycle. It was computed and shown nowhere — the whole peripheral channel was
              // invisible in every agent's log, which is why 'is it producing anything?' could
              // not be answered offline for cabinet/hood, the two it exists for.
-             << ',' << ricoh_attention_ << '\n';
+             << ',' << ricoh_dets_ << ',' << ricoh_attention_ << '\n';
     ai2_csv_.flush();
 }
 

@@ -174,10 +174,15 @@ public:
 
     // Unassigned peripheral detections this cycle, for the ai2 log. Set by the worker after
     // process_ricoh_bearings; the fitter owns the CSV, so the count has to reach it.
-    void set_ricoh_attention(int n) { ricoh_attention_ = n; }
+    // ★TWO COUNTS, NOT ONE. ricoh_attn alone cannot answer "is the peripheral channel producing
+    // anything?": it counts UNASSIGNED detections, so a channel working perfectly — every detection
+    // matching the live instance — reads exactly the same zero as a channel receiving nothing at all.
+    // ricoh_det is the raw gather() count, which separates "no detections" from "all of them matched".
+    void set_ricoh_counts(int dets, int attn) { ricoh_dets_ = dets; ricoh_attention_ = attn; }
 
 private:
     int ricoh_attention_ = 0;
+    int ricoh_dets_ = 0;
     // Compute the localization/chain covariance term (J·Σ_chain·Jᵀ) at the hood centre by transforming
     // it from the measurement frame back to room with ZERO input cov; stored on the instance for the
     // RT-cov write. No-op unless set_chain_cov_source enabled it.

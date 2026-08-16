@@ -362,6 +362,8 @@ void SpecificWorker::process_ricoh_bearings()
     for (const auto& at : res.attention)
         ricoh_attention_targets_.push_back({at.azimuth_rad, at.range_m, at.confidence, {at.xy.x(), at.xy.y()}});
     ev_g_.ricoh_attention = static_cast<int>(ricoh_attention_targets_.size());
-    if (fitter_) fitter_->set_ricoh_attention(ev_g_.ricoh_attention);   // → ai2_log ricoh_attn
+    // Both counts: gathered vs unassigned. Zero attention with non-zero dets means the channel
+    // is WORKING and everything it saw matched — the opposite conclusion from zero of both.
+    if (fitter_) fitter_->set_ricoh_counts(static_cast<int>(dets.size()), ev_g_.ricoh_attention);
 }
 
