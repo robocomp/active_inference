@@ -304,12 +304,31 @@ void SpecificWorker::setup_custom_viewers()
             });
         }
 
+        // Semantic (ADE20K) overlay on the panorama — the strip pass's own output, made visible.
+        QPushButton* rsem_btn = nullptr;
+        if (params.RICOH_SEMANTIC_ENABLED)
+        {
+            rsem_btn = new QPushButton("Sem360: OFF", ricoh_panel);
+            rsem_btn->setCheckable(true);
+            rsem_btn->setCursor(Qt::PointingHandCursor);
+            rsem_btn->setStyleSheet(QString(
+                "QPushButton { border: 2px solid %1; border-radius: 4px; padding: 3px 8px; }"
+                "QPushButton:checked { background-color: %1; color: #101010; }").arg("#B48CFF"));
+            connect(rsem_btn, &QPushButton::toggled, this, [this, rsem_btn](bool checked)
+            {
+                ricoh_semantic_overlay_enabled_ = checked;
+                rsem_btn->setText(checked ? "Sem360: ON" : "Sem360: OFF");
+            });
+        }
+
         controls->addWidget(models_btn);
         controls->addWidget(lidar_btn);
         if (depth_btn != nullptr)
             controls->addWidget(depth_btn);
         if (rroom_btn != nullptr)
             controls->addWidget(rroom_btn);
+        if (rsem_btn != nullptr)
+            controls->addWidget(rsem_btn);
         if (collect_btn != nullptr)
             controls->addWidget(collect_btn);
         if (rebuild_btn != nullptr)

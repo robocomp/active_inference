@@ -680,6 +680,18 @@ void SpecificWorker::on_render_tick()
                 if (rres and not rres->frame.rgbd.bgr.empty())
                 {
                     cv::Mat pano = rres->frame.rgbd.bgr;   // BGR panorama the worker processed
+                    // Dense ADE20K class map UNDER everything else, same order as the ZED window. This is
+                    // the strip pass's own output: with it on you can see directly whether the model
+                    // segments the hood and what it calls it — the agents' counters read zero whether the
+                    // labels are wrong or the stage never ran, and could not tell those apart.
+                    // Only the scheduled strip is filled; the rest of the panorama is IGNORE and stays raw,
+                    // which also makes the round-robin window visible as it sweeps.
+                    if (ricoh_semantic_overlay_enabled_ and rres->semantic
+                        and not rres->semantic->labels.empty())
+                        if (auto* s360 = dynamic_cast<rc::SemanticStage360*>(
+                                ricoh_worker_ ? ricoh_worker_->stage("semantic360") : nullptr);
+                            s360 and s360->processor())
+                            pano = s360->processor()->compose_semantic_canvas(pano, *rres->semantic);
                     // Project the DSR scene (model boxes + room floor/ceiling/walls) onto the panorama
                     // when the Ricoh "Models" toggle is on. Draw on a clone (BGR) so we never mutate
                     // the worker's frame; the popup viewer converts BGR→RGB on display.

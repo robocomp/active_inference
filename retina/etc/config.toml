@@ -198,7 +198,7 @@ refine_labels = ["table", "chair", "monitor", "tv", "bottle", "cabinet"]   # whi
 show_voxel_viewer = true
 show_yolo_viewer  = true
 show_ricoh_viewer = true   # creates the Ricoh360 button+popup (popup hidden until toggled)
-perf_log = false   # per-frame compute/yolo/pose timing -> etc/viewer_perf.csv (diagnostic; flushes CSVs every
+perf_log = true    # per-frame compute/yolo/pose timing -> etc/viewer_perf.csv (diagnostic; flushes CSVs every
                    # frame — leave OFF in production, flip true only to capture a timing trace)
                    # ★ON again 2026-08-15 to verify the round-robin panorama pass: Ricoh.yolo_strips_per_frame
                    # went 3 -> 1, so etc/viewer_perf_ricoh_worker.csv should show seg_ms ~11 ms instead of

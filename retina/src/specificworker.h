@@ -236,6 +236,11 @@ class SpecificWorker : public GenericWorker
         // also GATES THE STAGE — the model does no work while the overlay is off. Relative per strip, not
         // metric: see src/depth_processor.h before reading anything geometric off it.
         bool ricoh_depth_overlay_enabled_ = false;
+        // Dense ADE20K class map blended onto the panorama. The ricoh semantic pass is the only way
+        // cabinet/hood get a peripheral detection, and when it produced nothing there was no way to see
+        // WHETHER it was segmenting and the labels were wrong, or not segmenting at all — the agents'
+        // counters read zero either way. This makes the model's own output visible.
+        bool ricoh_semantic_overlay_enabled_ = false;
         // ZED-window depth overlay: 0=off, 1=aligned model depth, 2=difference vs the ZED's own depth.
         // The ZED MEASURES depth, so it is the one place the model can be scored densely over a whole
         // frame instead of on the LiDAR's horizon stripe — mode 2 is that comparison made visible.
