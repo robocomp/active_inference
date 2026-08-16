@@ -206,7 +206,8 @@ namespace
             if (!good) continue;
 
             const double T = fr[b].ts_s - fr[a].ts_s;
-            if (T <= 1e-3 or T > 5.0) continue;      // stalls and gaps are not intervals
+            if (T <= 1e-3 or T > 30.0) continue;     // stalls and gaps are not intervals; 192-frame
+                                                     // windows are ~10 s, so the cap cannot sit below that
 
             // Odometry increment over the window: the same additive accumulation of global-frame
             // increments the agent performs (each was integrated at its own running heading).
@@ -480,7 +481,13 @@ int main(int argc, char** argv)
                     "read sigma_v only.\n");
 
     std::vector<BandResult> bands;
-    for (int s : {1, 2, 4, 8, 16, 32}) bands.push_back(calibrate_at(fr, s));
+    // ★ THE LADDER MUST REACH LONG WINDOWS OR THE SCALE READS LOW. The posterior reference is
+    // contaminated by the motion prior at short T, which drags the slope toward zero; the
+    // contamination falls off as the window lengthens. Measured against an injected truth of +0.10:
+    // 0.038 at 8 frames, 0.065 at 16, 0.071 at 32, 0.087 at 64, 0.091 at 128, 0.0945 +-0.0074 at 192
+    // (9.7 s) — monotone, and only the last is within one sigma of the truth. A ladder stopping at 32
+    // would have reported 71% recovery and looked like estimator bias when it was window length.
+    for (int s : {1, 2, 4, 8, 16, 32, 64, 128, 192}) bands.push_back(calibrate_at(fr, s));
     report(bands);
 
     // ── ★ IS THE ESTIMATE REFERENCE-LIMITED? ─────────────────────────────────────────────────────
@@ -498,6 +505,7 @@ int main(int argc, char** argv)
     bool reference_limited = false;
     if (col.count("odom_adv_norm") and col.count("odom_rot_norm") and col.count("odom_ingress_ts"))
     {
+        const bool has_raw = col.count("odom_adv_raw") and col.count("odom_rot_raw");
         std::ifstream in2(argv[1]);
         std::string l2; std::getline(in2, l2);
         std::vector<double> av, rv, its;
@@ -511,7 +519,21 @@ int main(int argc, char** argv)
             if (!parse_float(b2[col["odom_adv_norm"]], a)) continue;
             if (!parse_float(b2[col["odom_rot_norm"]], r)) continue;
             if (!parse_double(b2[col["odom_ingress_ts"]], t)) continue;
-            if (std::abs(a) < 1e-3f and std::abs(r) < 1e-3f) { av.push_back(a); rv.push_back(r); its.push_back(t); }
+            // ★ STILLNESS IS DECIDED ON THE *RAW* CHANNEL, THE NOISE MEASURED ON THE CONSUMED ONE.
+            // The two differ exactly when synthetic error is being injected, and that is precisely
+            // when this estimator matters. Testing |norm| < 1e-3 asks "did the pipeline BELIEVE the
+            // robot was still", and with noise injected the answer is never — so the parked sample
+            // count fell below the minimum, the whole direct check silently skipped, and the scorecard
+            // fell back to the reference-limited regression and reported sigma_v 6.6x its true value.
+            // The raw columns are the pre-injection ground truth; on a real robot raw == norm and this
+            // is a no-op.
+            float ar = a, rr = r;
+            if (has_raw)
+            {
+                if (!parse_float(b2[col["odom_adv_raw"]], ar)) continue;
+                if (!parse_float(b2[col["odom_rot_raw"]], rr)) continue;
+            }
+            if (std::abs(ar) < 1e-3f and std::abs(rr) < 1e-3f) { av.push_back(a); rv.push_back(r); its.push_back(t); }
         }
         if (av.size() > 200)
         {
@@ -553,6 +575,15 @@ int main(int argc, char** argv)
         }
     }
 
+    // Pre-registered selection, used by BOTH the scorecard and the suggestion so they cannot
+    // disagree: the LONGEST window that still has 30 windows behind it. The longest row overall is
+    // not safe to read — measured, the 192-frame row had n = 25 and its rotation fit blew up to
+    // -0.724 +-0.206 with sigma 0.336 against ~0.008 on every other row, because over ~10 s windows
+    // the robot returns to similar headings and the regressor collapses. A rule chosen after seeing
+    // the answer is not a rule, so this one is fixed and the degenerate row is simply not read.
+    const BandResult* best = nullptr;
+    for (const auto& b : bands) if (b.rot.n >= 30 or b.trans.n >= 30) best = &b;
+
     // ── SCORECARD: if this log carries injected ground truth, grade the estimate against it ──────
     // The point of the inj_* columns is that an archived log is self-describing, so this needs no
     // side channel and no memory of which run was which.
@@ -576,15 +607,17 @@ int main(int argc, char** argv)
             got = true;
             break;
         }
-        if (got and act > 0.5f)
+        if (got and act > 0.5f and best != nullptr)
         {
-            const auto& B = bands.back();
+            const auto& B = *best;
             std::printf("\n  ══ RECOVERY SCORECARD — this log carries injected ground truth ══\n");
             std::printf("    %-14s %14s %14s %10s\n", "parameter", "TRUTH", "RECOVERED", "ratio");
             auto row = [&](const char* n, double truth, double got_v) {
                 std::printf("    %-14s %14s %14s %10s\n", n, num(truth,5).c_str(), num(got_v,5).c_str(),
                             std::abs(truth) > 1e-12 ? num(got_v/truth,4).c_str() : "-");
             };
+            std::printf("    (scales read at the %d-frame window, T_med %s s, n=%d/%d)\n",
+                        B.stride, num(B.T_med,3).c_str(), B.trans.n, B.rot.n);
             row("sigma_v",     tsv, direct_v > 0 ? direct_v : B.trans.sigma);
             row("sigma_omega", tsw, direct_w > 0 ? direct_w : B.rot.sigma);
             row("s_v",         tcv, B.trans.s);
@@ -599,8 +632,7 @@ int main(int argc, char** argv)
     }
 
     std::printf("\n  Suggested config (from the longest window with n >= 30):\n");
-    const BandResult* best = nullptr;
-    for (const auto& b : bands) if (b.rot.n >= 30 or b.trans.n >= 30) best = &b;
+
     if (best)
     {
         // When the regression is reference-limited its sigma describes the LOCALISER, not the
