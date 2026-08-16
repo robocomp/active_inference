@@ -59,6 +59,10 @@ struct OutlineSeg
     // fitted. So when a run and a fridge share wall, the RUN yields and the fridge does not, and that
     // follows from what each thing is rather than from an arbitration rule.
     bool            ends_free = true;
+    // The yaw variance this member's OWN agent published (rad²). Used to propagate how well the
+    // joint VERTEX is determined — two near-parallel runs pin their crossing point very badly, and
+    // the correction derived from it is worth exactly as much as that point is.
+    float           var_yaw = 0.0f;
 
     // The front face: the segment [a, b] the room actually sees.
     Eigen::Vector2f face_a() const { return centre + 0.5f * depth * n - 0.5f * length * u; }
@@ -194,6 +198,12 @@ public:
         Eigen::Vector2f target{0, 0};// where the end should be, room frame
         JointKind cause = JointKind::Corner;
         int   other = -1;            // the run it must meet
+        // ★Variance of `target` ALONG the run's own axis (m²), propagated from both members'
+        // published yaw uncertainty through the intersection geometry. A vertex pinned by two runs
+        // meeting at a right angle is sharp; one pinned by two near-parallel runs is not pinned at
+        // all, and this is what says so. Consumed as precision, so a badly-determined corner asks
+        // for nothing instead of being rejected by a cutoff.
+        float target_var = 0.0f;
     };
     std::vector<EndCorrection> end_corrections() const
     {
@@ -203,8 +213,39 @@ public:
             if (self < 0 or not segs_[static_cast<std::size_t>(self)].ends_free) return;
             if (std::abs(gap) < kJoinTolM) return;                       // already meets: nothing to say
             const auto& g = segs_[static_cast<std::size_t>(self)];
+
+            // ★NEVER ask a run to EXTEND into a fixed-extent neighbour. `ends_free = false` already
+            // says an appliance's width is the object; it says just as much that the appliance's BODY
+            // FILLS that stretch of wall, so the space between a run's end and a fridge is not a hole
+            // to be closed by growing the run — it is the fridge. Retracting OFF one stays allowed;
+            // only growth into it is refused. Without this the outline hands back exactly the overlap
+            // that cabinet_concept's exclusion just removed. (Measured live 2026-08-16: a +0.255 m
+            // extension of cabinet_w13_base straight at refrigerator_1.)
+            if (gap > 0.0f and other >= 0 and not segs_[static_cast<std::size_t>(other)].ends_free)
+                return;
+
             EndCorrection c;
             c.seg = self; c.other = other; c.high_end = high; c.cause = j.kind;
+
+            // ★How well is the vertex this correction aims at actually pinned? Rotating the OTHER run
+            // by δ swings its face line, and the crossing slides along THIS run by L·δ/|sin θ| — so as
+            // two runs approach parallel the crossing point runs away to infinity and its position
+            // stops meaning anything. Propagate that, using each producer's own published yaw
+            // variance, and let the consumer weigh it as precision.
+            //
+            // Live 2026-08-16, cabinet_w13_base × refrigerator_1: |sin θ| thrashed between 0.03 and
+            // 0.97 on consecutive cycles, the vertex slid 1.3 m, and the correction flipped between
+            // +0.80 and −0.49 m — all of it published at full strength, because the precision was
+            // derived from the member's POSITION covariance alone and never asked whether the corner
+            // it was aiming at existed. At |sin θ| = 0.03 this term alone gives σ ≈ 1 m, i.e. inert;
+            // at a right angle it is a few cm and changes nothing.
+            const auto& o = segs_[static_cast<std::size_t>(other)];
+            const float sin_t = std::max(1e-3f, j.cross);
+            const float L_o   = std::abs(o.along(j.vertex));   // lever arm from the other run's centre
+            const float L_s   = std::abs(g.along(j.vertex));   // and from this run's own centre
+            const float s_o   = L_o * std::sqrt(std::max(0.0f, o.var_yaw)) / sin_t;
+            const float s_s   = L_s * std::sqrt(std::max(0.0f, g.var_yaw)) / sin_t;
+            c.target_var = s_o * s_o + s_s * s_s;
             // gap > 0 ⇒ the end stops short and must EXTEND outward; gap < 0 ⇒ it overshoots and must
             // RETRACT. Either way the end moves outward by `gap` along its own outward direction.
             c.delta  = gap;
@@ -327,6 +368,8 @@ private:
     std::vector<OutlineSeg>   segs_;
     std::vector<OutlineJoint> joints_;
 };
+
+inline constexpr float kPiF = 3.14159265358979f;
 
 inline bool kitchen_outline_self_test()
 {
@@ -546,6 +589,64 @@ inline bool kitchen_outline_self_test()
         check(o2.joints().size() == 1 and o2.joints().front().kind == JointKind::Corner,
               "(i) the control is a clean corner");
         check(o2.end_corrections().empty(), "(i) ★a continuous shape is told NOTHING");
+    }
+
+    // ── (k) ★A run is never told to GROW into a fixed-extent neighbour ──────────────────────────
+    // Live 2026-08-16: the outline asked cabinet_w13_base to extend +0.255 m straight at
+    // refrigerator_1 — handing back exactly the overlap cabinet_concept's exclusion had removed.
+    // ends_free=false already says an appliance cannot yield; it says just as much that its body
+    // FILLS that stretch, so the space in front of it is not a hole to close by growing.
+    {
+        OutlineSeg run; run.name = "run"; run.u = {0, 1}; run.n = {1, 0};
+        run.depth = 0.60f; run.length = 2.00f; run.centre = Eigen::Vector2f(0.0f, 1.00f);
+        OutlineSeg fri; fri.name = "fridge"; fri.u = {0, 1}; fri.n = {1, 0};
+        fri.depth = 0.60f; fri.length = 0.66f; fri.centre = Eigen::Vector2f(0.0f, 2.63f);
+        fri.ends_free = false;                       // run ends at y=2.00, fridge starts at y=2.30
+        KitchenOutline o; o.set_segments({run, fri});
+        for (const auto& c : o.end_corrections())
+            check(not (c.seg == 0 and c.delta > 0.0f),
+                  "(k) ★the run must NOT be told to extend into the appliance");
+    }
+
+    // ── (l) ★A corner between near-parallel runs asks for almost nothing ─────────────────────────
+    // Rotating the other run by δ swings the crossing along this one by L·δ/|sin θ|, so as two runs
+    // approach parallel their vertex runs away and stops being a place at all. Live 2026-08-16,
+    // cabinet_w13_base × refrigerator_1: |sin θ| thrashed 0.03..0.97 on consecutive cycles, the
+    // vertex slid 1.3 m and the correction flipped between +0.80 and −0.49 m — every one published
+    // at full strength, because the precision came from the member's POSITION covariance alone and
+    // never asked whether the corner it aimed at existed. Measured here: σ(target) grows
+    // 0.028 → 0.032 → 0.080 → 0.316 m as the corner closes from 90° to 5°.
+    {
+        const auto build = [](float yaw_b_deg)
+        {
+            const float sd = 1.0f * kPiF / 180.0f;                 // both publish a 1° yaw σ
+            OutlineSeg a; a.name = "a"; a.u = {1, 0}; a.n = {0, -1};
+            a.depth = 0.60f; a.length = 2.00f; a.centre = Eigen::Vector2f(1.22f, 0.30f);
+            a.var_yaw = sd * sd;                                   // face at y=0, stops 0.22 short
+            const float r = yaw_b_deg * kPiF / 180.0f;
+            OutlineSeg b; b.name = "b";
+            b.u = {std::cos(r), std::sin(r)};
+            b.n = {std::sin(r), -std::cos(r)};                     // a's normal, rotated with it
+            b.depth = 0.60f; b.length = 2.00f;
+            b.centre = -0.30f * b.n + 1.00f * b.u;                 // its LOW end sits on the vertex
+            b.var_yaw = sd * sd;
+            return std::vector<OutlineSeg>{a, b};
+        };
+        const auto worst_var = [&](float deg)
+        {
+            KitchenOutline o; o.set_segments(build(deg));
+            float v = -1.0f;
+            for (const auto& c : o.end_corrections()) v = std::max(v, c.target_var);
+            return v;
+        };
+        const float var_perp = worst_var(90.0f);
+        const float var_thin = worst_var(5.0f);
+        check(var_perp > 0.0f and var_thin > 0.0f,
+              "(l) both configurations must actually produce a correction to compare");
+        check(var_perp > 0.0f and var_perp < 0.005f,
+              "(l) a clean right-angled corner stays sharp (sigma a few cm)");
+        check(var_thin > 25.0f * var_perp,
+              "(l) ★a 5° corner's target is FAR less certain than a right-angled one");
     }
 
     if (ok) std::printf("[kitchen_outline::self_test] all checks passed\n");

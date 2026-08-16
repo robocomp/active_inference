@@ -747,6 +747,7 @@ void SpecificWorker::step_outline(const MemberSnapshot& s)
         if (g.n.dot(*interior - g.centre) < 0.0f) g.n = -g.n;
         g.length = m.length;
         g.depth  = m.depth;
+        g.var_yaw = m.var_yaw;   // how well its own agent knows its heading — pins the joint vertex
         // A cabinet RUN's ends are free — level-1 declares t0/t1 free with no prior at all. An
         // appliance's are not: a fridge's width is the object itself. So when the two share wall,
         // the run yields and the appliance does not, from what each thing IS.
@@ -804,14 +805,15 @@ void SpecificWorker::publish_priors(const MemberSnapshot& s)
         return;
 
     // Collect the end corrections by member, from both chains.
-    struct Ends { bool has_lo = false, has_hi = false; Eigen::Vector2f lo{0,0}, hi{0,0}; };
+    struct Ends { bool has_lo = false, has_hi = false; Eigen::Vector2f lo{0,0}, hi{0,0};
+                  float lo_var = 0.0f, hi_var = 0.0f; };
     std::unordered_map<std::string, Ends> ends;
     for (const auto* o : {&outline_floor_, &outline_wall_})
         for (const auto& c : o->end_corrections())
         {
             auto& e = ends[o->segments()[static_cast<std::size_t>(c.seg)].name];
-            if (c.high_end) { e.has_hi = true; e.hi = c.target; }
-            else            { e.has_lo = true; e.lo = c.target; }
+            if (c.high_end) { e.has_hi = true; e.hi = c.target; e.hi_var = c.target_var; }
+            else            { e.has_lo = true; e.lo = c.target; e.lo_var = c.target_var; }
         }
 
     std::unordered_set<std::uint64_t> keep;
@@ -829,12 +831,23 @@ void SpecificWorker::publish_priors(const MemberSnapshot& s)
         }
         if (const auto it = ends.find(m.name); it != ends.end())
         {
-            // How well the joint is located: the two members' own published position uncertainty is
-            // all we have, and it is the honest scale. Scaled by the frame's existence probability.
-            const float var = std::max(1e-4f, m.var_x + m.var_y);
-            const float info = kitchen_belief_.p_frame() / var;
-            if (it->second.has_lo) { p.end_lo = it->second.lo; p.end_lo_info = info; }
-            if (it->second.has_hi) { p.end_hi = it->second.hi; p.end_hi_info = info; }
+            // How well the joint is located. Two things are uncertain and BOTH belong here: where
+            // this member is (its own published position covariance) and where the corner it is
+            // being sent to actually is (EndCorrection::target_var, propagated from both runs' yaw
+            // uncertainty through the intersection). Leaving the second one out is what let a corner
+            // between two near-parallel runs — a point that slid 1.3 m between cycles — publish an
+            // end target at full strength. Scaled by the frame's existence probability.
+            const float pos_var = m.var_x + m.var_y;
+            if (it->second.has_lo)
+            {
+                p.end_lo      = it->second.lo;
+                p.end_lo_info = kitchen_belief_.p_frame() / std::max(1e-4f, pos_var + it->second.lo_var);
+            }
+            if (it->second.has_hi)
+            {
+                p.end_hi      = it->second.hi;
+                p.end_hi_info = kitchen_belief_.p_frame() / std::max(1e-4f, pos_var + it->second.hi_var);
+            }
         }
         scene_graph_->publish_member_prior(p);
         keep.insert(m.id);
