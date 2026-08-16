@@ -311,16 +311,12 @@ namespace rc
             // frames that happened to take that path (which is how n_lidar came to read 0 on 98% of
             // rows). Old logs simply lack these fields; a reader keyed on the header handles that.
             //
-            // inj_*      ground truth of a synthetic-error injection run, so the log is SELF-DESCRIBING
-            //            and a recovery test can be scored from an archived file alone. inj_scale_* is
-            //            the REALISED draw, not the configured std. inj_active = 0 on any normal run.
             // preint_*   how many odometry samples the motion factor summarised and over how long —
             //            the direct witness of whether striding is chaining intervals as intended.
             // slot_mcov_ off-diagonals of the motion covariance. The whole argument for propagating it
             //   xy/xt/yt is that a heading error rotates subsequent translation; these are the terms
             //            that carries, and until now only the diagonal was logged, so the change's
             //            central claim was the one thing the log could not show.
-            << ",inj_active,inj_sigma_v,inj_sigma_w,inj_scale_v,inj_scale_w"
             << ",preint_n,preint_T"
             << ",slot_mcov_xy,slot_mcov_xt,slot_mcov_yt"
             // imu_cover fraction of the interval's segments whose heading came from the GYRO rather
@@ -4250,12 +4246,7 @@ namespace rc
     {
         if (not debug_log_.is_open())
             return;
-        debug_log_ << ',' << (injection_truth_.active ? 1 : 0)
-                   << ',' << injection_truth_.sigma_v
-                   << ',' << injection_truth_.sigma_w
-                   << ',' << injection_truth_.scale_v
-                   << ',' << injection_truth_.scale_w
-                   << ',' << last_preint_samples_
+        debug_log_ << ',' << last_preint_samples_
                    << ',' << last_preint_duration_s_
                    << ',' << last_slot_motion_cov_(0, 1)
                    << ',' << last_slot_motion_cov_(0, 2)

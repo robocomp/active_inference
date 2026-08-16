@@ -30,11 +30,6 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.GridSearchMaxSamples", room_concept.params.grid_search_max_samples);
 
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.OdometryNoiseFactor", p.ODOMETRY_NOISE_FACTOR);
-    // Synthetic error injection — see RoomConfig::ODOM_INJECT_*. Zero (the default) is inert.
-    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.OdomInjectSigmaV",     p.ODOM_INJECT_SIGMA_V);
-    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.OdomInjectSigmaOmega", p.ODOM_INJECT_SIGMA_OMEGA);
-    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.OdomInjectScaleV",     p.ODOM_INJECT_SCALE_V);
-    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.OdomInjectScaleOmega", p.ODOM_INJECT_SCALE_OMEGA);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.OdomNoiseScale", room_concept.params.odom_noise_scale);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.DifferentialTest", room_concept.params.differential_test_enabled);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.SdfCurrentSlotOnly", room_concept.params.sdf_current_slot_only);

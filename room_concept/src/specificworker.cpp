@@ -162,39 +162,6 @@ void SpecificWorker::initialize()
     room_concept_.set_run_context(run_ctx);
     room_concept_.params.prediction_early_exit = params.PREDICTION_EARLY_EXIT;
 
-    // ── Draw the synthetic odometry scale error, ONCE, before any consumer exists ────────────────
-    // See the injection site in the DSR polling path. The scale is a property of the RUN (a wheel
-    // radius does not change per sample), and the realised draw — not the configured std — is the
-    // ground truth a calibrator recovery test scores against, so it is published to the debug log
-    // rather than only printed. inj_active gates the whole thing so a normal run writes zeros and a
-    // reader can never mistake a real run for an injected one.
-    {
-        // ★ DETERMINISTIC, not drawn. The first version drew the scale from N(0, config^2) to model a
-        // robot whose wheel radius is simply unknown. For a RECOVERY TEST that is the wrong trade: two
-        // consecutive runs drew s_omega = +0.0149 and -0.0114, both inside the calibrator's own ~0.015
-        // bias floor, so neither could be scored and the experiment turned on a coin flip. The config
-        // value IS the scale now — repeatable, guaranteed above the floor, and the truth is legible in
-        // the config as well as in the log. Realism is not what this knob is for.
-        inj_scale_v_ = params.ODOM_INJECT_SCALE_V;
-        inj_scale_w_ = params.ODOM_INJECT_SCALE_OMEGA;
-
-        rc::RoomConcept::InjectionTruth truth;
-        truth.active   = (params.ODOM_INJECT_SIGMA_V > 0.f or params.ODOM_INJECT_SIGMA_OMEGA > 0.f
-                          or inj_scale_v_ != 0.f or inj_scale_w_ != 0.f);
-        truth.sigma_v  = params.ODOM_INJECT_SIGMA_V;
-        truth.sigma_w  = params.ODOM_INJECT_SIGMA_OMEGA;
-        truth.scale_v  = inj_scale_v_;
-        truth.scale_w  = inj_scale_w_;
-        room_concept_.set_injection_truth(truth);
-        if (truth.active)
-            qWarning().nospace()
-                << "[OdomInject] ACTIVE — THIS RUN'S LOCALISATION IS DELIBERATELY DEGRADED. "
-                << "GROUND TRUTH: sigma_v=" << truth.sigma_v << " m/sqrt(s)  sigma_omega="
-                << truth.sigma_w << " rad/sqrt(s)  s_v=" << truth.scale_v
-                << "  s_omega=" << truth.scale_w
-                << "  (also written to every debug-log row as inj_*)";
-    }
-
     initialize_room_model_from_svg();
     const std::string pose_path = pose_file_path();
     room_concept_.set_seed_pose_file(pose_path);
@@ -900,29 +867,6 @@ void SpecificWorker::modify_node_attrs_slot(std::uint64_t id, const std::vector<
             rc::ImuReading imu;
             imu.gyro_z = gyro.value().get()[2];      // about robot +Z, CCW+, same convention as odom.rot
 
-            // ── ROTATION ERROR IS INJECTED HERE, BECAUSE THIS IS THE CHANNEL THAT WINS ────────────
-            // integrate_odometry_over_window takes dtheta from the gyro whenever the IMU brackets the
-            // segment and only falls back to odom.rot otherwise. So injecting on the wheel channel
-            // alone perturbed a value that is overwritten before it is used, and the recovery test
-            // measured nothing: against an injected s_omega = -0.06 the calibrator recovered +0.0009,
-            // with the estimate converging monotonically to ZERO as window length removed the
-            // contamination (-0.126 -> -0.020 -> -0.0017 -> +0.0009). That convergence to zero is the
-            // bypass being measured, and it is why the injection moved here.
-            //
-            // ★ The SAME error is still applied to odom.rot at the wheel ingress, deliberately. The
-            // pipeline picks per SEGMENT, so if the two channels carried different errors the truth
-            // would depend on the IMU's coverage fraction — an unknown that would dilute the recovered
-            // scale by (1 - coverage) and be indistinguishable from estimator bias. Same error on both
-            // makes the ground truth well defined however the pipeline chooses.
-            //
-            // The density is applied to the RATE as sigma/sqrt(dt) so the accumulated increment has
-            // variance sigma^2*dt — the same construction as the wheel channel, but dt here is the
-            // ~100 Hz IMU spacing rather than the ~10 Hz odometry spacing, so the same sigma means a
-            // ~3x larger per-sample rate perturbation and identical growth over any interval. Getting
-            // that wrong would inject a rate-dependent error, which is the exact defect this whole
-            // model exists to remove.
-            // Applied below, once the integration stamp is known — the density needs the sample
-            // spacing, and the dedup must not see two different perturbations of the same sample.
             if (const auto ts = G->get_attrib_by_name<imu_time_stamp_att>(robot_node); ts.has_value())
                 imu.source_ts_ms = static_cast<std::int64_t>(ts.value());
             if (const auto sts = G->get_attrib_by_name<imu_sim_time_stamp_att>(robot_node); sts.has_value())
@@ -935,21 +879,6 @@ void SpecificWorker::modify_node_attrs_slot(std::uint64_t id, const std::vector<
             const std::int64_t key = imu.integration_ts_ms();
             if (key > 0 and key != last_imu_sim_ts_)
             {
-                // Inject HERE: after the dedup, so a re-signalled sample is not perturbed twice, and
-                // with the previous stamp still in hand so the density has the real sample spacing.
-                if (params.ODOM_INJECT_SCALE_OMEGA != 0.f or params.ODOM_INJECT_SIGMA_OMEGA > 0.f)
-                {
-                    imu.gyro_z *= (1.f + params.ODOM_INJECT_SCALE_OMEGA);
-                    if (params.ODOM_INJECT_SIGMA_OMEGA > 0.f)
-                    {
-                        static std::mt19937 imu_gen{std::random_device{}()};
-                        const float dt_imu = (last_imu_sim_ts_ > 0)
-                            ? std::clamp(static_cast<float>(key - last_imu_sim_ts_) * 1e-3f, 1e-3f, 0.5f)
-                            : 0.01f;
-                        imu.gyro_z += std::normal_distribution<float>(
-                            0.f, params.ODOM_INJECT_SIGMA_OMEGA / std::sqrt(dt_imu))(imu_gen);
-                    }
-                }
                 last_imu_sim_ts_ = key;
                 imu.recv_ts_ms = static_cast<std::int64_t>(
                     std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -985,54 +914,10 @@ void SpecificWorker::modify_node_attrs_slot(std::uint64_t id, const std::vector<
                                 return value + dist(gen);
                             };
 
-                            // ── SYNTHETIC ERROR INJECTION, for calibrator recovery tests ─────────────
-                            // MEASURED 08-13 over 24434 parked frames: this simulator's odometry has
-                            // sigma_v = 3.9e-7 m/sqrt(s) and sigma_omega = 2.2e-8 rad/sqrt(s) — five to
-                            // six orders below the values the motion prior is configured with, because
-                            // webots-bridge publishes the supervisor's GROUND-TRUTH velocity and there is
-                            // no encoder in this loop at all. So nothing here can be CALIBRATED; what can
-                            // be done is to inject a KNOWN error and check the calibrator recovers it.
-                            //
-                            // OdometryNoiseFactor above cannot serve: it is multiplicative AND returns
-                            // early on value == 0, so it injects nothing while parked (no floor) and it
-                            // redraws every sample (no constant scale). Two separate mechanisms are
-                            // needed because the model separates them, and they scale differently with
-                            // the interval — random as sqrt(T), a scale as T:
-                            //
-                            //  * DENSITY noise reproduces Q: to make the INCREMENT variance sigma^2*dt,
-                            //    the velocity perturbation must have std sigma/sqrt(dt). Injecting a
-                            //    fixed velocity std instead would make the accumulated error grow like T
-                            //    rather than sqrt(T) and would silently be a bias, not noise.
-                            //  * SCALE is drawn ONCE per process, not per sample, because that is what a
-                            //    wheel-radius or wheelbase error IS. Redrawing it per sample makes it
-                            //    just more white noise.
-                            //
-                            // ⚠ The scale is drawn once from N(0, sigma_scale^2) and PRINTED at first
-                            // use: that realised value is the ground truth a recovery test scores
-                            // against, so it has to be recoverable from the log, not just from the seed.
-                            // The realised scales are drawn ONCE in initialize(), on the main thread,
-                            // before any reader exists — not lazily here. This callback runs off the
-                            // DSR polling path while the logger reads the same values from the compute
-                            // thread, and a function-local static initialised here would be published
-                            // to that reader without ordering. Drawing at startup removes the race
-                            // rather than papering it with an atomic.
-                            const float dt_inj = (last_robot_current_speed_timestamp_ > 0)
-                                ? std::max(1e-3f, static_cast<float>(source_ts - last_robot_current_speed_timestamp_) * 1e-3f)
-                                : 0.05f;
-                            const float inv_sqrt_dt_inj = 1.f / std::sqrt(dt_inj);
-                            const float inj_scale_v = inj_scale_v_;
-                            const float inj_scale_w = inj_scale_w_;
-                            auto inject = [&](float value, float sigma_density, float scale) -> float {
-                                float v = value * (1.f + scale);
-                                if (sigma_density > 0.f)
-                                    v += std::normal_distribution<float>(0.f, sigma_density * inv_sqrt_dt_inj)(gen);
-                                return v;
-                            };
-
                             rc::OdometryReading odom;
-                            odom.adv  = inject(add_noise(adv_value.value()),  params.ODOM_INJECT_SIGMA_V,     inj_scale_v);
-                            odom.side = inject(add_noise(side_value.value()), params.ODOM_INJECT_SIGMA_V,     inj_scale_v);
-                            odom.rot  = inject(add_noise(rot_value.value()),  params.ODOM_INJECT_SIGMA_OMEGA, inj_scale_w);
+                            odom.adv = add_noise(adv_value.value());
+                            odom.side = add_noise(side_value.value());
+                            odom.rot = add_noise(rot_value.value());
                             odom.source_ts_ms = static_cast<std::int64_t>(source_ts);
                             // The producer's own clock, where it has one. A simulator's velocities are
                             // per SIMULATION second, so integrating them over wall-clock intervals

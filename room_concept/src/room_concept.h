@@ -793,21 +793,6 @@ public:
                                 float normalized_rot,
                                 std::int64_t ts_ms);
 
-    /// Ground truth of a synthetic-error injection run, written to every debug-log row so the log is
-    /// SELF-DESCRIBING: a calibrator recovery test scores against the realised scale draw, and a value
-    /// that exists only in stdout cannot be recovered from an archived log. `active` is false on every
-    /// normal run, which is what stops a reader mistaking one for the other.
-    struct InjectionTruth
-    {
-        bool  active  = false;
-        float sigma_v = 0.f;   // m/sqrt(s)   — configured density
-        float sigma_w = 0.f;   // rad/sqrt(s) — configured density
-        float scale_v = 0.f;   // REALISED draw, not the configured std
-        float scale_w = 0.f;
-    };
-    /// Call ONCE, from the main thread during initialize(), before any reader exists.
-    void set_injection_truth(const InjectionTruth& t) { injection_truth_ = t; }
-
     /// Thread-safe: record the latest measured odometry sample entering the motion pipeline.
     void record_odometry_ingress(const std::string& source,
                                  float raw_adv,
@@ -1223,7 +1208,6 @@ private:
    // The early-exit writer lives in a different function from the slot build, so anything it must log
    // has to be a member. Getting this wrong is how columns end up hardcoded to zero on one path only
    // (n_lidar still is), which then silently halves the usable population of every analysis.
-   InjectionTruth  injection_truth_{};
    /// The appended tail of a debug-log row, emitted by BOTH writers so they cannot drift apart. One
    /// function rather than two copies precisely because two copies is how this file's columns got out
    /// of step before.

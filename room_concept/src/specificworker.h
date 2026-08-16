@@ -95,11 +95,6 @@ class SpecificWorker : public GenericWorker
         // ── Velocity / odometry buffers (thread-safe) ──────────────────────────
         rc::VelocityBuffer velocity_buffer_{20};
         rc::OdometryBuffer odometry_buffer_{20};
-        // Realised synthetic scale error for this run, drawn once in initialize() (main thread,
-        // before any consumer). Zero unless RoomConcept.OdomInjectScale* is set. See the injection
-        // site in the DSR polling path and RoomConcept::InjectionTruth.
-        float inj_scale_v_ = 0.f;
-        float inj_scale_w_ = 0.f;
         // Deeper than the odometry buffer: the IMU runs ~125 Hz against odometry's 10 Hz, and it must
         // still span the gap between two lidar sweeps (50-100 ms, so 6-13 samples) with slack for a
         // late one. 20 entries would not cover two sweeps.
