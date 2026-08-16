@@ -470,8 +470,6 @@ public:
         std::vector<float> tl(K, 0.0f), th(K, 0.0f);
         std::vector<char>  sl(K, 0), sh(K, 0);
         for (std::size_t k = 0; k < K; ++k) th[k] = cells_[k].geom.W;
-        const auto endpt = [](const KitchenCell& g, bool high)
-        { return high ? Eigen::Vector2f(g.a + g.W * g.u) : g.a; };
         for (std::size_t i = 0; i < K; ++i)
         {
             if (not cells_[i].active()) continue;
@@ -480,29 +478,70 @@ public:
                 if (not cells_[j].active()) continue;
                 const auto& gi = cells_[i].geom; const auto& gj = cells_[j].geom;
                 if (gi.tier != gj.tier or gi.wall_seg_id == gj.wall_seg_id) continue;
-                // Try all four endpoint pairings for a shared vertex V (walls meet at a polygon corner).
-                for (int hi = 0; hi < 2; ++hi) for (int hj = 0; hj < 2; ++hj)
-                {
-                    if ((endpt(gi, hi) - endpt(gj, hj)).norm() > mp.corner_join_tol_m) continue;  // no shared vertex
-                    const auto& si = cells_[i].belief->state(); const auto& sj = cells_[j].belief->state();
-                    const float gap_i = hi ? (gi.W - si.t1) : si.t0;    // how far each run stops short of the vertex
-                    const float gap_j = hj ? (gj.W - sj.t1) : sj.t0;
-                    if (gap_i > mp.corner_capture_m or gap_j > mp.corner_capture_m) continue;      // not an L here
-                    (hi ? fh[i] : fl[i]) = 1;
-                    (hj ? fh[j] : fl[j]) = 1;
-                    // The corner is ONE volume. It goes to the run with support nearest V; the other stops a
-                    // depth short of the vertex, which is where the winner's carcass side actually stands.
-                    const bool i_owns = (gap_i != gap_j) ? (gap_i < gap_j)
-                                      : (si.d  != sj.d)  ? (si.d  > sj.d)
-                                                         : true;          // i < j ⇒ deterministic
-                    const std::size_t lose    = i_owns ? j  : i;
-                    const int         lose_hi = i_owns ? hj : hi;
-                    const float       setback = i_owns ? si.d : sj.d;     // the winner's depth = its side face
-                    if (lose_hi)
-                    { th[lose] = std::min(th[lose], cells_[lose].geom.W - setback); sh[lose] = 1; }
-                    else
-                    { tl[lose] = std::max(tl[lose], setback);                       sl[lose] = 1; }
-                }
+                // ★THE CORNER IS WHERE THE WALL LINES CROSS, NOT WHERE THE SEGMENTS HAPPEN TO END. This used
+                // to pair two runs only if a chart ENDPOINT of one sat within corner_join_tol_m (0.10 m) of an
+                // endpoint of the other. Measured live: the vertex is 0.685 m INSIDE one chart and 0.097 m
+                // inside the other, because that wall segment runs straight past the corner to the far side of
+                // its neighbour's depth band (a stepped wall, which this apartment has). No endpoints
+                // coincided, so nothing paired, so no fill ran at all — and the corner stayed a 0.39 x 0.69 m
+                // hole while both runs sat within 0.4 m of it.
+                if (std::abs(gi.u.dot(gj.u)) > 0.5f) continue;         // not perpendicular ⇒ not an L corner
+                const float den = gi.u.x() * (-gj.u.y()) - gi.u.y() * (-gj.u.x());
+                if (std::abs(den) < 1e-6f) continue;
+                const Eigen::Vector2f rhs = gj.a - gi.a;
+                const float si_ = (rhs.x() * (-gj.u.y()) - rhs.y() * (-gj.u.x())) / den;
+                const Eigen::Vector2f V = gi.a + si_ * gi.u;           // the two wall LINES cross here
+                const float tvi = (V - gi.a).dot(gi.u), tvj = (V - gj.a).dot(gj.u);
+                if (tvi < -mp.corner_capture_m or tvi > gi.W + mp.corner_capture_m) continue;
+                if (tvj < -mp.corner_capture_m or tvj > gj.W + mp.corner_capture_m) continue;
+                const auto& si = cells_[i].belief->state(); const auto& sj = cells_[j].belief->state();
+                // How far each run currently stops short of V, and from which side it approaches.
+                const float gap_i = (si.t1 < tvi) ? (tvi - si.t1) : (si.t0 > tvi) ? (si.t0 - tvi) : 0.0f;
+                const float gap_j = (sj.t1 < tvj) ? (tvj - sj.t1) : (sj.t0 > tvj) ? (sj.t0 - tvj) : 0.0f;
+                if (gap_i > mp.corner_capture_m or gap_j > mp.corner_capture_m) continue;   // not an L here
+                const bool i_high = 0.5f * (si.t0 + si.t1) < tvi;   // i reaches V with its HIGH end
+                const bool j_high = 0.5f * (sj.t0 + sj.t1) < tvj;
+
+                // ★AND THE OWNER MUST SPAN THE CORNER SQUARE, NOT MERELY TOUCH THE VERTEX. Reaching V covers
+                // the square only when the square lies BEHIND the vertex along the owner's axis, which is the
+                // case for a plain convex corner and is why the U rig passed. On a stepped corner the square
+                // lies BEYOND V, so a run filled to V stops exactly at its near edge and the hole survives.
+                // The square is (owner's depth band) x (loser's depth band); its far edge along the owner's
+                // axis is V displaced by the LOSER's depth projected onto that axis.
+                const float off_i = sj.d * gj.n.dot(gi.u);   // where i must reach to cover the square
+                const float off_j = si.d * gi.n.dot(gj.u);
+                const float need_i = i_high ? std::max(tvi, tvi + off_i) : std::min(tvi, tvi + off_i);
+                const float need_j = j_high ? std::max(tvj, tvj + off_j) : std::min(tvj, tvj + off_j);
+                // A run can only own the corner if its own chart reaches that far — a wall segment that stops
+                // at the vertex cannot cover the square however hard it is pushed.
+                const bool fit_i = need_i >= -1e-3f and need_i <= gi.W + 1e-3f;
+                const bool fit_j = need_j >= -1e-3f and need_j <= gj.W + 1e-3f;
+                if (not fit_i and not fit_j) continue;      // neither wall is long enough; not our corner
+                // Between two capable runs, the one that has to grow LEAST into unobserved space takes it —
+                // Occam, and it keeps the answer stable because the two extensions rarely tie. Then the deeper
+                // run, then the lower index, so it can never oscillate.
+                const float ext_i = std::abs(need_i - (i_high ? si.t1 : si.t0));
+                const float ext_j = std::abs(need_j - (j_high ? sj.t1 : sj.t0));
+                const bool i_owns = (fit_i != fit_j) ? fit_i
+                                  : (ext_i != ext_j) ? (ext_i < ext_j)
+                                  : (si.d  != sj.d)  ? (si.d  > sj.d)
+                                                     : true;          // i < j ⇒ deterministic
+                (i_high ? fh[i] : fl[i]) = 1;
+                (j_high ? fh[j] : fl[j]) = 1;
+                const std::size_t win = i_owns ? i : j, lose = i_owns ? j : i;
+                const bool win_high = i_owns ? i_high : j_high, lose_high = i_owns ? j_high : i_high;
+                const float win_need = i_owns ? need_i : need_j;
+                // The loser stops at the near edge of the owner's depth band, measured along its OWN axis —
+                // which is the vertex itself when the owner's band lies ahead of it, and the vertex offset by
+                // the owner's depth when the band lies behind. Getting that sign from the geometry rather than
+                // assuming it is what makes this work on a stepped corner as well as a plain one.
+                const float tv_l  = lose == i ? tvi : tvj;
+                const float off_l = (lose == i) ? sj.d * gj.n.dot(gi.u) : si.d * gi.n.dot(gj.u);
+                const float lose_target = lose_high ? std::min(tv_l, tv_l + off_l)
+                                                    : std::max(tv_l, tv_l + off_l);
+                if (win_high) th[win] = std::min(th[win], win_need); else tl[win] = std::max(tl[win], win_need);
+                if (lose_high) { th[lose] = std::min(th[lose], lose_target); sh[lose] = 1; }
+                else           { tl[lose] = std::max(tl[lose], lose_target); sl[lose] = 1; }
             }
         }
         for (std::size_t k = 0; k < K; ++k)
@@ -1127,6 +1166,55 @@ inline bool KitchenManager::self_test()
     };
     check(covered_by(0.20f, 2.90f) == 1, "the NW inside corner is filled by exactly ONE run (not two, not none)");
     check(covered_by(1.80f, 2.90f) == 1, "the NE inside corner is filled by exactly ONE run (not two, not none)");
+
+    // ★A STEPPED CORNER — the live configuration, and the one every check above misses. Both runs above meet
+    // at a shared polygon VERTEX, so pairing them on coincident chart endpoints worked. Here wall B runs
+    // straight PAST the corner to the far side of wall A's depth band, so the vertex sits 1.00 m inside B's
+    // chart and exactly AT A's end. Nothing coincides, nothing paired, no fill ran — measured live as a
+    // 0.39 x 0.69 m hole with both runs sitting within 0.4 m of it.
+    //
+    // It also pins the second half: only ONE of these two runs CAN close it. The square is A's depth band
+    // (x 1.45..2) x B's depth band (y 2..2.55); A would have to grow past the end of its own wall to cover it,
+    // B only has to stretch its near end along a wall it already owns. So B takes it and A stops at the
+    // vertex line — "one of the two should stretch up to the wall", decided by which one is able to.
+    {
+        const Eigen::Vector2f IA(1.0f, 1.5f), IB(1.0f, 3.0f);
+        const std::vector<KitchenWall> ws = {
+            make_kitchen_wall({2.0f, 0.0f}, {2.0f, 2.0f}, IA, 0),   // A: x=2, room to its LEFT, ENDS at the corner
+            make_kitchen_wall({0.0f, 2.0f}, {3.0f, 2.0f}, IB, 1),   // B: y=2, room ABOVE, runs straight PAST it
+        };
+        KitchenManager ms; ms.build(ws, tiers, tp, bp, 2.6f);
+        std::vector<Eigen::Vector3f> ps;
+        push_front(ps, ws[0], 0.40f, 1.60f);   // A stops 0.40 m short of the corner
+        push_front(ps, ws[1], 2.30f, 2.90f);   // B stops 0.30 m short of it, on the far side
+        for (int it = 0; it < 60; ++it) ms.update(ps, mp, tmpl);
+        const auto bs = ms.active_boxes();
+        const auto cov = [&](float px, float py)
+        {
+            int n = 0;
+            for (const auto& b : bs)
+            {
+                if (b.tier != 0) continue;
+                const float c = std::cos(b.yaw), sn = std::sin(b.yaw);
+                const float dx = px - b.cx, dy = py - b.cy;
+                const float lx =  c * dx + sn * dy, ly = -sn * dx + c * dy;
+                if (std::abs(lx) <= 0.5f * b.L and std::abs(ly) <= 0.5f * b.d) ++n;
+            }
+            return n;
+        };
+        check(bs.size() == 2, "both runs of the stepped corner activate");
+        // Three probes across the corner square, so a run that merely clips one edge cannot pass.
+        check(cov(1.60f, 2.15f) == 1, "stepped corner, near A's wall: covered exactly once");
+        check(cov(1.85f, 2.40f) == 1, "stepped corner, deep in the square: covered exactly once");
+        check(cov(1.50f, 2.50f) == 1, "stepped corner, far diagonal: covered exactly once");
+        float worst_s = 0.0f;
+        for (std::size_t i = 0; i < bs.size(); ++i)
+            for (std::size_t j = i + 1; j < bs.size(); ++j)
+                if (bs[i].tier == bs[j].tier)
+                    worst_s = std::max(worst_s, rc::geom::overlap_ratio({bs[i].cx, bs[i].cy, bs[i].L, bs[i].d, bs[i].yaw},
+                                                                        {bs[j].cx, bs[j].cy, bs[j].L, bs[j].d, bs[j].yaw}));
+        check(worst_s < 0.05f, "...and the two runs of a stepped corner still do not overlap");
+    }
 
     // ★AND THE PROPERTY THE WHOLE CHANGE EXISTS FOR: NO TWO ACTIVE RUNS SHARE SPACE. Every check above is
     // about one run's length; none of them could have caught two runs occupying the same corner, which is why
