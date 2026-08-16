@@ -481,7 +481,11 @@ void SpecificWorker::run_kitchen_model()
         const std::size_t dropped = pts.size() - keep_pts.size();
         if (dropped > 0)
         {
-            if (cfg_.verbose_log)
+            // NOT gated on verbose_log. The sibling exclusion reports (birth, occupancy) are not, and this is
+            // the one that says whether the rule is running at all — the first thing anyone asks. Throttled
+            // rather than silenced: a drop happening every cycle should say so periodically, not never.
+            static int excl_log = 0;
+            if ((excl_log++ % 30) == 0)
                 std::print("cabinet_concept: [exclusion] {} of {} kitchen points dropped — already explained "
                            "by another object\n", dropped, pts.size());
             pts.swap(keep_pts);
