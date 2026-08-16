@@ -454,6 +454,41 @@ void SpecificWorker::run_kitchen_model()
     // Level-2 first: the arrangement's end targets must be in place BEFORE the fit, or they would
     // only take effect a cycle late and always chase the data.
     apply_arrangement_end_priors();
+
+    // ★A POINT ANOTHER OBJECT ALREADY EXPLAINS IS NOT EVIDENCE FOR A KITCHEN CELL EITHER (SHARED,
+    // common/exclusion). The instance path got this in 8b74282; the KITCHEN path is where cabinet actually
+    // lives — its belief unit is a (wall, tier) cell, not a fitter instance — so the drop has to happen here
+    // too or the rule simply never runs for this agent. Measured 2026-08-16: cell w-42_-5_d18_t0 grew along
+    // the same wall as refrigerator_1, same yaw, until its near end sat ~4 cm from the fridge's footprint.
+    //
+    // Filtered HERE rather than inside KitchenManager::update so the routing stays untouched, and pts and
+    // pt_labels are filtered TOGETHER — they are parallel arrays and a lone filter would silently mis-label
+    // every point after the first drop.
+    if (not foreign_claims_.empty() and not pts.empty())
+    {
+        const bool labelled = (pt_labels.size() == pts.size());
+        std::vector<Eigen::Vector3f> keep_pts;
+        std::vector<std::uint8_t>    keep_labels;
+        keep_pts.reserve(pts.size());
+        if (labelled) keep_labels.reserve(pts.size());
+        for (std::size_t i = 0; i < pts.size(); ++i)
+        {
+            if (rc::exclusion::explained_by_other(pts[i].x(), pts[i].y(), foreign_claims_))
+                continue;
+            keep_pts.push_back(pts[i]);
+            if (labelled) keep_labels.push_back(pt_labels[i]);
+        }
+        const std::size_t dropped = pts.size() - keep_pts.size();
+        if (dropped > 0)
+        {
+            if (cfg_.verbose_log)
+                std::print("cabinet_concept: [exclusion] {} of {} kitchen points dropped — already explained "
+                           "by another object\n", dropped, pts.size());
+            pts.swap(keep_pts);
+            if (labelled) pt_labels.swap(keep_labels);
+        }
+    }
+
     kitchen_mgr_.update(pts, mp, tmpl, &pt_labels);
     kitchen_mgr_.update_island(island_pts, mp, tmpl);              // the free-standing 4th cabinet (peninsula)
     publish_kitchen_boxes();
