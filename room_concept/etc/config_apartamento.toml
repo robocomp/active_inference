@@ -223,16 +223,27 @@ MotionPreintegration   = true   # 2026-08-13 LANDED ON. The controlled A/B (same
 # estimator is. These sit 4-5x above it, and are also close to what the motion prior ALREADY assumes
 # (PreintOdomSigmaVLat 0.0894, SigmaOmega 0.0447) — so for the first time the model is roughly
 # correctly specified rather than asserting noise the input does not have.
-OdomInjectSigmaV       = 0.08   # m/sqrt(s)   — additive density, acts even when parked
-OdomInjectSigmaOmega   = 0.04   # rad/sqrt(s)
-# Scale: the std of a multiplicative error DRAWN ONCE per process. 0.12 because the calibrator's own
-# bias floor on this quantity is ~0.015 (measured with injection OFF), so the draw must land well
-# clear of it; at 0.12 there is a ~80% chance of |s| > 0.03, which is 6-15 sigma for the fit.
-# ★ SCORE AGAINST THE PRINTED VALUE, NOT AGAINST THESE. The realised draw is what the run actually
-# has, and it is logged at startup as "[OdomInject] GROUND TRUTH ... s_v=... s_omega=...". If the
-# draw came out near zero, restart to redraw rather than reading a null result as a failure.
-OdomInjectScaleV       = 0.12
-OdomInjectScaleOmega   = 0.12
+# ── sigma: SMALL AND REALISTIC, and it does NOT need to be large ──
+# The first attempt used 0.08 / 0.04 to clear the calibrator's regression floor. That was a confusion
+# of two different tests, and the robot showed it: MEASURED over 1105 frames in which the robot was
+# TRULY PARKED, the injected stream reported |v| median 0.146 m/s (max 0.81), producing 6 mm of
+# phantom motion per frame for the SDF to undo, and early exit fell 99.8% -> 93.9%.
+# ★ sigma does not need to clear that floor, because sigma is recovered by the DIRECT PARKED
+# MEASUREMENT, which reads the odometry stream with the localiser nowhere in the loop and therefore
+# has no reference floor at all. Only the SCALE needs the regression. So: realistic sigma, large scale.
+# 0.006 m/sqrt(s) = 19 mm/s of reported jitter at the 10 Hz odometry rate — an encoder-plausible
+# number that perturbs a parked pose by ~0.2 mm per sample instead of 25 mm.
+OdomInjectSigmaV       = 0.006  # m/sqrt(s)
+OdomInjectSigmaOmega   = 0.010  # rad/sqrt(s)
+
+# ── scale: LARGE, and it costs nothing while parked ──
+# DETERMINISTIC — the value IS the fractional error for the whole run (v_reported = v_true*(1+s)),
+# not a std to draw from. It must clear the calibrator's own ~0.015 bias floor by a wide margin, and
+# it can: a scale multiplies TRUE motion, so while the robot is parked it contributes exactly zero and
+# cannot destabilise anything. All of this injection's cost to stability sits in sigma, above.
+# Different signs on purpose, so a sign error in the estimator cannot pass by symmetry.
+OdomInjectScaleV       = 0.10   # odometry reports 10% MORE travel than truth
+OdomInjectScaleOmega   = -0.06  # and 6% LESS rotation
 
 # ── Kinematic clamp on the published pose ─────────────────────────────────────
 # Bounds the pose delta between two published RT blocks to what the robot can physically do in the

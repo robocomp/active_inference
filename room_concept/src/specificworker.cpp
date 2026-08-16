@@ -169,11 +169,14 @@ void SpecificWorker::initialize()
     // rather than only printed. inj_active gates the whole thing so a normal run writes zeros and a
     // reader can never mistake a real run for an injected one.
     {
-        std::mt19937 gen{std::random_device{}()};
-        if (params.ODOM_INJECT_SCALE_V > 0.f)
-            inj_scale_v_ = std::normal_distribution<float>(0.f, params.ODOM_INJECT_SCALE_V)(gen);
-        if (params.ODOM_INJECT_SCALE_OMEGA > 0.f)
-            inj_scale_w_ = std::normal_distribution<float>(0.f, params.ODOM_INJECT_SCALE_OMEGA)(gen);
+        // ★ DETERMINISTIC, not drawn. The first version drew the scale from N(0, config^2) to model a
+        // robot whose wheel radius is simply unknown. For a RECOVERY TEST that is the wrong trade: two
+        // consecutive runs drew s_omega = +0.0149 and -0.0114, both inside the calibrator's own ~0.015
+        // bias floor, so neither could be scored and the experiment turned on a coin flip. The config
+        // value IS the scale now — repeatable, guaranteed above the floor, and the truth is legible in
+        // the config as well as in the log. Realism is not what this knob is for.
+        inj_scale_v_ = params.ODOM_INJECT_SCALE_V;
+        inj_scale_w_ = params.ODOM_INJECT_SCALE_OMEGA;
 
         rc::RoomConcept::InjectionTruth truth;
         truth.active   = (params.ODOM_INJECT_SIGMA_V > 0.f or params.ODOM_INJECT_SIGMA_OMEGA > 0.f
