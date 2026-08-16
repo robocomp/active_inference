@@ -324,6 +324,33 @@ void SpecificWorker::run_kitchen_model()
     std::vector<Eigen::Vector3f> pts, peninsula_pts;                  // wall-run points vs peninsula points
     std::vector<std::uint8_t>    pt_labels;                        // 0 = carcass mask, 1 = worktop mask
     double radius_wsum = 0.0, dotd_wsum = 0.0, w_sum = 0.0;         // point-weighted mean off-centring + mask motion
+    // ★AN INSTANCE MASK PREVAILS OVER A SEMANTIC ONE (the user's rule, 2026-08-16). The semantic segmenter
+    // paints the whole kitchen wall as `cabinet` — INCLUDING the lower half of the refrigerator standing
+    // against it (kitchen_1.png: one cyan `sem:cabinet 1.00` region swallowing the orange `refrigerator 0.93`
+    // instance mask below the freezer line). Those points are not evidence of cabinet, and taking them had two
+    // consequences, the second much worse than the first: the wall run grew over the fridge, and then the run
+    // CLAIMED that volume, so the fridge could not be born into it —
+    //   [fridge-filter] birth cand slice=0 CLAIMED by 'cabinet_w13_base' (35%): birth_ev x0.65
+    // The exclusion rule was working exactly as designed; it was defending a belief built from another
+    // object's pixels. No amount of tuning on the exclusion side fixes that — the evidence is wrong.
+    //
+    // So a SEMANTIC point that falls inside the room-frame box of an INSTANCE detection of some other class is
+    // dropped before it becomes evidence. This is the same Occam sentence common/exclusion makes between
+    // objects, made one level earlier, between MASKS — and that earlier level is the one that matters here,
+    // because it works before either object exists. `rc::exclusion` could never have reached this: it compares
+    // things already in the graph, and the whole failure is that the fridge never got there.
+    std::vector<std::pair<Eigen::Vector3f, Eigen::Vector3f>> instance_boxes;   // room-frame AABBs, other classes
+    if (pkt.valid)
+        for (const auto& sl : pkt.slices)
+        {
+            if (not sl.is_instance() or not sl.may_fit_geometry()) continue;
+            if (sl.label == "cabinet" or sl.label == "chest of drawers"
+                or sl.label == "counter" or sl.label == "countertop") continue;   // ours: not a rival claim
+            if (sl.support_end <= sl.support_begin) continue;                     // no points ⇒ no box
+            instance_boxes.emplace_back(sl.bbox_min, sl.bbox_max);
+        }
+    std::size_t n_sem_dropped = 0, n_sem_total = 0;
+
     if (pkt.valid)
         for (const auto& sl : pkt.slices)
         {
@@ -343,12 +370,36 @@ void SpecificWorker::run_kitchen_model()
             // depth, the label of the far points is the thing that identifies the culprit.
             const bool worktop_label = sl.label == "counter" or sl.label == "countertop";
             std::vector<Eigen::Vector3f>& dst = is_peninsula_mask ? peninsula_pts : pts;
+            // Only a SEMANTIC slice yields: instance-vs-instance is a different question, and merge /
+            // rc::exclusion already own it. `sem` is read once per slice, not per point.
+            const bool sem = sl.is_semantic() and not instance_boxes.empty();
+            if (sl.is_semantic()) n_sem_total += (e > b) ? (e - b) / 2 : 0;
             for (std::size_t k = b; k < e; k += 2)
             {
-                dst.push_back(pkt.support_points[k]);
+                const auto& p = pkt.support_points[k];
+                if (sem)
+                {
+                    bool claimed = false;
+                    for (const auto& [mn, mx] : instance_boxes)
+                        if (p.x() >= mn.x() and p.x() <= mx.x() and p.y() >= mn.y() and p.y() <= mx.y()
+                            and p.z() >= mn.z() and p.z() <= mx.z())
+                        { claimed = true; break; }
+                    if (claimed) { ++n_sem_dropped; continue; }
+                }
+                dst.push_back(p);
                 if (not is_peninsula_mask) pt_labels.push_back(worktop_label ? 1 : 0);
             }
         }
+    if (n_sem_dropped > 0)
+    {
+        // NOT gated on verbose_log, for the same reason the exclusion drop is not: this is the line that says
+        // whether the seg-over-sem rule is doing anything, and it is the first thing anyone will ask.
+        static int sem_log = 0;
+        if ((sem_log++ % 30) == 0)
+            std::print("cabinet_concept: [seg>sem] {} of {} semantic points dropped — inside an INSTANCE "
+                       "detection of another class ({} such boxes)\n",
+                       n_sem_dropped, n_sem_total, instance_boxes.size());
+    }
 
     // STILLNESS / VOR gate (be still to UPDATE, else CONFIRM) — ALIGNED with chair_concept. The frame's authority
     // to MOVE the geometry is capped by a common-mode covariance (NOT a hard gate) that the belief's Woodbury

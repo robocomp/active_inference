@@ -104,6 +104,24 @@ public:
         // The one predicate a fit/birth path should ask. Named for the RULE, not for the sensor, so a third
         // camera lands here rather than in seven `== zed` comparisons.
         bool  may_fit_geometry() const { return is_zed() and has_depth; }
+
+        // ★★INSTANCE (YOLO-seg) vs SEMANTIC (YOLO-sem), and it was published all along. The retina tags a
+        // semantic detection with `class_id = 1000 + id` — "class_id offset by 1000 keeps semantic ids clear
+        // of the COCO id range" (retina/src/semantic_mask_stage.cpp) — and the viewer prefixes those labels
+        // with "sem:" ON SCREEN ONLY. So the distinction is visible to a human watching the overlay and, until
+        // now, to NO consumer: `grep class_id` across every agent found the ingestor writing it and nobody
+        // reading it. Exactly the shape of the mask_source defect: the producer said it, the ingestor carried
+        // it, no agent COULD ask.
+        //
+        // The rule it enables (the user's): AN INSTANCE MASK PREVAILS OVER A SEMANTIC ONE where they overlap.
+        // Measured live: the semantic `cabinet` mask covers the lower half of the refrigerator, so cabinet's
+        // wall run grew over the fridge and then out-claimed its birth — "[fridge-filter] birth cand slice=0
+        // CLAIMED by 'cabinet_w13_base' (35%)" — and no refrigerator was ever created.
+        //
+        // A producer predating the semantic branch publishes class_id < 1000 (or the -1 default), which reads
+        // as an instance and keeps every existing consumer's behaviour.
+        bool  is_semantic() const { return class_id >= 1000.0f; }
+        bool  is_instance() const { return not is_semantic(); }
         // Depth-uncertainty channel (common/depth_projection). σ_range² (m²) to ADD to R along the mask
         // ray, SAME currency as motion_var — sum them. 0 for dense-depth zed masks; the scored range
         // variance for ricoh masks depth-filled from reprojected lidar (grows as hits get sparse/scattered,
