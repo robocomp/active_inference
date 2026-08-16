@@ -339,9 +339,13 @@ public:
         //
         // The corner claim is "there is carcass at the vertex" — the SAME claim a mask point landing there
         // would make, about the same quantity. So it is worth the same: extent_precision, the model's own
-        // declared number for it. No new constant, and the fill stays in the same league as the free-space
-        // carve, so a beam that genuinely passes through the corner can still retract the end.
-        const float lam = params_.extent_precision > 0.0f ? params_.extent_precision : 40.0f;
+        // declared number for it. NO constant of its own, and the fill stays in the same league as the
+        // free-space carve, so a beam that genuinely passes through the corner can still retract the end.
+        //
+        // extent_precision == 0 means the end channel is switched off entirely; the fill then contributes
+        // nothing, which is the coherent answer — a structural claim about an end nobody is estimating.
+        const float lam = params_.extent_precision;
+        if (lam <= 0.0f) return;
         const auto push = [&](int idx, float e)
         { Eigen::Matrix<float, 5, 1> J = Eigen::Matrix<float, 5, 1>::Zero(); J(idx) = 1.0f;
           Id.noalias() += lam * (J * J.transpose()); bd.noalias() += -lam * J * e; };

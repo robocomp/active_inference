@@ -915,8 +915,9 @@ inline bool KitchenManager::self_test()
 
     // CORNER OWNERSHIP, read off the evidence. At the NW vertex (0,3) the west run stops 0.4 m short and the
     // north run 0.55 m short, so WEST owns it and north is set back by west's depth; at the NE vertex (2,3)
-    // north is the nearer and owns it, so EAST is set back by north's depth. Measured after 30 cycles:
-    // north t=[0.55, 2.00] (L 1.45), west t=[0.40, 2.54] (L 2.14), east t=[0.55, 2.60] (L 2.05).
+    // north is the nearer and owns it, so EAST is set back by north's depth. Measured, steady state:
+    // west t=[0.40, 3.00] (L 2.60, reaching its vertex), north t=[0.55, 2.00] (L 1.45), east t=[0.55, 2.60]
+    // (L 2.05). Each vertex is reached by exactly one run and each corner volume is filled exactly once.
     if (north)
     {
         check(north->L > 1.35f and north->L < 1.65f,
@@ -925,11 +926,31 @@ inline bool KitchenManager::self_test()
         check(north->z1 < 1.0f, "north run top stays at the base worktop (no ceiling-touching)");
     }
     // A run with NO reaching neighbour at a corner must not fill to it: the west run's LOW end (0,0) has no
-    // perpendicular run, so it stays at its observed start (~0.4) while its NW end fills towards the vertex.
+    // perpendicular run, so it stays at its observed start (~0.4) while its NW end fills TO the vertex.
     if (west)
-        check(west->L > 2.0f and west->L < 2.35f, "west run fills its owned (NW) corner, not its free (0,0) end");
+        check(west->L > 2.5f and west->L < 2.7f, "west run fills its owned (NW) corner, not its free (0,0) end");
     if (east)
         check(east->L > 1.9f and east->L < 2.2f, "east run stops at the north run's face, not at the NE vertex");
+
+    // ★NO OVERLAP AND NO HOLE ARE TWO HALVES OF ONE STATEMENT, so both are checked, at the two places where
+    // they compete: just inside each shared vertex. Covered TWICE was the reported defect (both runs filling
+    // to V); covered ZERO times is what a naive fix trades it for, and is what the corner-fill precision
+    // sat at for 400 cycles before it was weighed properly. Exactly once is the whole requirement.
+    const auto covered_by = [&](float px, float py)
+    {
+        int n = 0;
+        for (const auto& b : boxes)
+        {
+            if (b.tier != 0) continue;
+            const float c = std::cos(b.yaw), sn = std::sin(b.yaw);
+            const float dx = px - b.cx, dy = py - b.cy;
+            const float lx =  c * dx + sn * dy, ly = -sn * dx + c * dy;
+            if (std::abs(lx) <= 0.5f * b.L and std::abs(ly) <= 0.5f * b.d) ++n;
+        }
+        return n;
+    };
+    check(covered_by(0.20f, 2.90f) == 1, "the NW inside corner is filled by exactly ONE run (not two, not none)");
+    check(covered_by(1.80f, 2.90f) == 1, "the NE inside corner is filled by exactly ONE run (not two, not none)");
 
     // ★AND THE PROPERTY THE WHOLE CHANGE EXISTS FOR: NO TWO ACTIVE RUNS SHARE SPACE. Every check above is
     // about one run's length; none of them could have caught two runs occupying the same corner, which is why
