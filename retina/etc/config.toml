@@ -260,7 +260,8 @@ yolo_strips_per_frame = 1
 # consumer already refuses to fit it.
 # Model/thresholds are shared with [Semantic] (the ZED's ADE20K block); this is a SECOND session on the
 # ricoh worker, so watch cpu on the panel after enabling.
-semantic_enabled      = false   # flip true to give cabinet/hood peripheral vision
+semantic_enabled      = true    # ON 2026-08-16 — cabinet/hood get a peripheral channel for the first time
+                                # Classes resolve from [Semantic].accepted_labels, which has both.
 semantic_decimation   = 1       # run every ricoh frame; raise if the second session costs too much
 yolo_strip_overlap_px = 200   # circular-pad margin so a seam-straddling object survives whole. 80→200 so a
                               # chair on the wraparound seam (directly behind the robot) stays whole in one
