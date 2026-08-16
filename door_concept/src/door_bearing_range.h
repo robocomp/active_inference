@@ -47,6 +47,8 @@
 
 #pragma once
 
+#include "../../common/birth_surprise/birth_surprise_probe.h"   // rc::GridField (SHARED)
+
 #include <cmath>
 #include <cstdint>
 #include <algorithm>
@@ -62,25 +64,9 @@ namespace rc::door
 // One snapshot of residual_concept's published residual field. Row-major, i = y*width + x.
 // Mirrors table_concept's rc::GridField; kept local while this is a prototype rather than promoted to
 // common/, so nothing else has to change to try it.
-struct ResidualField
-{
-    std::vector<float> prob;                     // P(occupied ∧ ¬explained)
-    float xmin = 0.f, ymin = 0.f, cell = 0.f;    // room-frame origin of cell (0,0), cell size (m)
-    int   width = 0, height = 0;
-
-    bool valid() const
-    { return width > 0 and height > 0 and cell > 0.f and static_cast<int>(prob.size()) >= width * height; }
-
-    // Nearest-cell lookup; returns 0 outside the grid so a ray that leaves the room simply finds nothing.
-    float at_world(float wx, float wy) const
-    {
-        if (not valid()) return 0.f;
-        const int x = static_cast<int>((wx - xmin) / cell);
-        const int y = static_cast<int>((wy - ymin) / cell);
-        if (x < 0 or y < 0 or x >= width or y >= height) return 0.f;
-        return prob[static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x)];
-    }
-};
+// ★The private ResidualField that used to live here is gone (2026-08-16): it was rc::GridField minus the
+// VARIANCE channel, and its at_world() accessor is now on the shared type, which every other agent gains.
+using ResidualField = rc::GridField;
 
 struct BearingRangeParams
 {

@@ -40,7 +40,20 @@ struct GridField
     { return width > 0 and height > 0 and cell > 0.f and static_cast<int>(prob.size()) >= width * height; }
     float cell_cx(int x) const { return xmin + (static_cast<float>(x) + 0.5f) * cell; }
     float cell_cy(int y) const { return ymin + (static_cast<float>(y) + 0.5f) * cell; }
+
+    // Nearest-cell lookup; 0 outside the grid, so a ray that leaves the room simply finds nothing.
+    // ★Came from door_concept, which had grown its own ResidualField with this accessor and WITHOUT the
+    // variance channel. Union, not intersection: the accessor moves here and door gets `var` back.
+    float at_world(float wx, float wy) const
+    {
+        if (not valid()) return 0.f;
+        const int x = static_cast<int>((wx - xmin) / cell);
+        const int y = static_cast<int>((wy - ymin) / cell);
+        if (x < 0 or y < 0 or x >= width or y >= height) return 0.f;
+        return prob[static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x)];
+    }
 };
+
 
 // A believed instance's footprint (room frame) — used to mark residual regions an existing concept already explains.
 struct FootprintBox { float cx, cy, w, h, yaw; };

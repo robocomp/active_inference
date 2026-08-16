@@ -771,6 +771,8 @@ void SpecificWorker::load_params()
 	load_optional_cast<double>("Controller.SharpTurnSlowdown", params.sharp_turn_slowdown);
 	load_optional_cast<double>("Controller.MaxRotSpeed", params.max_rot_speed_rps);
 	load_optional_cast<double>("Controller.FootprintSafetyMarginM", params.footprint_safety_margin_m);
+	load_optional_cast<double>("Controller.PoseUncertaintyCoupling", params.pose_uncertainty_coupling);
+	load_optional("Controller.TrackerUsesLatestPose", params.tracker_uses_latest_pose);
 	// Clearance PREFERENCE inside the A* cost (grid_planner.h). Distinct from FootprintSafetyMarginM,
 	// which is a hard admissibility margin — this one never makes a passable gap unplannable.
 
@@ -861,6 +863,7 @@ void SpecificWorker::load_params()
 	load_optional_cast<double>("Controller.AffordanceDwellMs", params.affordance_dwell_ms);
 	load_optional("Controller.AffordanceDwellMaskHits",        params.affordance_dwell_mask_hits);
 	load_optional_cast<double>("Controller.AffordanceDwellMaxMs", params.affordance_dwell_max_ms);
+	load_optional_cast<double>("Controller.AffordanceApproachRecheckM", params.affordance_approach_recheck_m);
 	load_optional("Controller.CameraNodeName",                 params.camera_node_name);
 
 	// Physical-stuck detection + reverse-and-turn escape (see ControllerParams).

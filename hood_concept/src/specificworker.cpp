@@ -29,6 +29,8 @@
  */
 
 #include "specificworker.h"
+
+#include "../../common/birth_surprise/residual_field_reader.h"   // rc::read_residual_field (SHARED)
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion:: (SHARED)
 #include "hood_geometry.h"   // rc::geom pure footprint/uncertainty helpers
 
@@ -595,22 +597,7 @@ void SpecificWorker::compute()
 // so BOTH the fused-birth path (run_instance_tracker) and the logging probe (log_birth_surprise) share one read.
 bool SpecificWorker::read_residual_field()
 {
-    residual_field_ = rc::GridField{};   // reset (empty ⇒ invalid ⇒ consumers no-op)
-    if (room_node_id_ == 0) return false;
-    const auto gopt = G->get_node("residual");   // node renamed "grid"→"residual" (type stays "grid")
-    if (not gopt.has_value()) return false;
-    const auto& gnode = gopt.value();
-    const auto pa = G->get_attrib_by_name<grid_occupancy_prob_att>(gnode);
-    const auto ma = G->get_attrib_by_name<grid_field_meta_att>(gnode);
-    if (not (pa.has_value() and ma.has_value())) return false;
-    const auto& M = ma.value().get();
-    if (M.size() < 5) return false;
-    residual_field_.prob = pa.value().get();   // snapshot copy (small, ~2 Hz)
-    if (const auto va = G->get_attrib_by_name<grid_occupancy_var_att>(gnode); va.has_value())
-        residual_field_.var = va.value().get();
-    residual_field_.xmin = M[0]; residual_field_.ymin = M[1]; residual_field_.cell = M[2];
-    residual_field_.width = static_cast<int>(M[3]); residual_field_.height = static_cast<int>(M[4]);
-    return residual_field_.valid();
+    return rc::read_residual_field(*G, room_node_id_, residual_field_);
 }
 
 void SpecificWorker::log_birth_surprise()

@@ -33,6 +33,8 @@
 
 #include "specificworker.h"
 
+#include "../../common/birth_surprise/residual_field_reader.h"   // rc::read_residual_field (SHARED)
+
 #include "../../common/peripheral_channel/peripheral_channel.h"   // THE shared ricoh path
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion — the SHARED no-two-objects rule
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion:: (SHARED)
@@ -1361,21 +1363,7 @@ void SpecificWorker::run_instance_tracker()
 // residual_concept is not up yet, which is the normal state during startup.
 bool SpecificWorker::read_residual_field()
 {
-    residual_field_ = rc::door::ResidualField{};
-    const auto gopt = G->get_node("residual");   // node named "residual" (type "grid")
-    if (not gopt.has_value()) return false;
-    const auto pa = G->get_attrib_by_name<grid_occupancy_prob_att>(gopt.value());
-    const auto ma = G->get_attrib_by_name<grid_field_meta_att>(gopt.value());
-    if (not (pa.has_value() and ma.has_value())) return false;
-    const auto& M = ma.value().get();
-    if (M.size() < 5) return false;
-    residual_field_.prob   = pa.value().get();   // snapshot copy
-    residual_field_.xmin   = M[0];
-    residual_field_.ymin   = M[1];
-    residual_field_.cell   = M[2];
-    residual_field_.width  = static_cast<int>(M[3]);
-    residual_field_.height = static_cast<int>(M[4]);
-    return residual_field_.valid();
+    return rc::read_residual_field(*G, room_node_id_, residual_field_);
 }
 
 // Load the room's delimiting polygon (a trusted NOMINAL model authored by room_concept, never fitted) into the

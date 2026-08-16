@@ -30,6 +30,8 @@
  */
 
 #include "specificworker.h"
+
+#include "../../common/birth_surprise/residual_field_reader.h"   // rc::read_residual_field (SHARED)
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion:: (SHARED)
 #include "../../common/diag_log/rotating_csv.h"   // keep the previous run instead of wiping it
 #include "../../common/nbv/graph_obstacles.h"   // rc::nbv::collect_graph_obstacles — shared, DSR-side
@@ -518,10 +520,6 @@ void SpecificWorker::compute()
     // mature a coherent unmodeled arm (e.g. an L-corner's perpendicular arm) into its own axis-aligned run.
     birth_from_residual();
 
-    // Ricoh 360 = peripheral attention: associate ricoh detections to cabinets BY DIRECTION (after the ZED fits,
-    // so cabinet positions are current); an unassigned bearing becomes a "seek a ZED view here" attention target.
-    process_ricoh_bearings();
-
     // Evidence-based removal: each existence channel integrates on its OWN sensor cadence (silhouette/mask on a
     // fresh mask frame, LiDAR carve on a fresh sweep) — a camera-only cycle still accrues absence, a LiDAR-only
     // cycle still carves free space. After the fits so footprints are current. OFF unless enabled.
@@ -536,6 +534,17 @@ void SpecificWorker::compute()
             });
 
     }   // end classic instance pipeline (skipped when cfg_.kitchen_model)
+
+    // Ricoh 360 = peripheral attention: associate ricoh detections to this agent's tracks BY DIRECTION
+    // (after the fits, so the geometry is current); an unassigned bearing becomes a "seek a ZED view
+    // here" attention target.
+    // ★OUTSIDE the if/else BECAUSE THE PERIPHERAL CHANNEL IS NOT A PROPERTY OF THE FIT MODEL. It sat
+    // inside the classic-only branch, so the mode this agent actually runs in (KitchenModel = true)
+    // never called it once — the ADE20K 360 strip pass exists precisely to feed cabinet, and was being
+    // defeated one level ABOVE the channel it feeds. process_ricoh_bearings() now picks its own tracks
+    // per model. Running it after removal rather than before is deliberate: a confirm must not be able
+    // to speak for an instance this cycle already retired.
+    process_ricoh_bearings();
 
     // ── Evidence monitor: global counters + throttled snapshot push ──
     ev_g_.instances    = cfg_.kitchen_model ? static_cast<int>(kitchen_mgr_.active_boxes().size())
@@ -568,22 +577,7 @@ void SpecificWorker::compute()
 // so BOTH the fused-birth path (run_instance_tracker) and the logging probe (log_birth_surprise) share one read.
 bool SpecificWorker::read_residual_field()
 {
-    residual_field_ = rc::GridField{};   // reset (empty ⇒ invalid ⇒ consumers no-op)
-    if (room_node_id_ == 0) return false;
-    const auto gopt = G->get_node("residual");   // node renamed "grid"→"residual" (type stays "grid")
-    if (not gopt.has_value()) return false;
-    const auto& gnode = gopt.value();
-    const auto pa = G->get_attrib_by_name<grid_occupancy_prob_att>(gnode);
-    const auto ma = G->get_attrib_by_name<grid_field_meta_att>(gnode);
-    if (not (pa.has_value() and ma.has_value())) return false;
-    const auto& M = ma.value().get();
-    if (M.size() < 5) return false;
-    residual_field_.prob = pa.value().get();   // snapshot copy (small, ~2 Hz)
-    if (const auto va = G->get_attrib_by_name<grid_occupancy_var_att>(gnode); va.has_value())
-        residual_field_.var = va.value().get();
-    residual_field_.xmin = M[0]; residual_field_.ymin = M[1]; residual_field_.cell = M[2];
-    residual_field_.width = static_cast<int>(M[3]); residual_field_.height = static_cast<int>(M[4]);
-    return residual_field_.valid();
+    return rc::read_residual_field(*G, room_node_id_, residual_field_);
 }
 
 void SpecificWorker::log_birth_surprise()
