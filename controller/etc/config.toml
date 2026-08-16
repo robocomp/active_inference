@@ -579,6 +579,29 @@ PoseXYStdSlow = 0.08
 PoseXYStdStop = 0.12
 PoseThetaStdSlow = 0.04
 PoseThetaStdStop = 0.20
+# ── A/B LEVER OVER THE WHOLE POSE-COVARIANCE LIMITER ─────────────────────────────────────────────
+# 1.0 = the limiter exactly as configured below. 0.0 = it still computes and still REPORTS, but never
+# restrains the base. 0.5 = half the restraint. It multiplies the RESULT rather than any of the knees,
+# so it cannot silently re-tune one term against another, and the reported scale is what was applied.
+# WHY: "is the pose covariance what is slowing the robot" is not answerable by reading the code. Drive
+# the same route at 1.0 and at 0.0 and compare mean_speed_mps in the run JSON.
+# ⚠NOT A CURE. At 0 the robot drives fast on a pose it has less reason to trust; clearance comes from
+# live LiDAR in the ROBOT frame, so this is not immediately unsafe, but a run at 0 is a MEASUREMENT and
+# not a setting to leave behind. If the 0 run is the good one, fix whatever inflated sigma.
+# ⚠⚠ SET TO 0.0 ON 2026-08-16 AS A MEASUREMENT, NOT A SETTING. This is the experiment the note above
+# prescribes. Reason: in room_concept's logs the published sigma_xy is LOWER while the robot moves than
+# while it is parked — corr(sigma_xy, |v|) = -0.147, corr(sigma_xy, |omega|) = -0.174, and by |omega|
+# band the median runs 0.0634 (<0.05) -> 0.0589 -> 0.0546 (0.3-0.6 rad/s), i.e. TIGHTEST while turning.
+# Rotation gives the SDF views of different walls, so the Hessian is better conditioned; a parked robot
+# stares at one geometry and the minimum is flatter.
+# ★ That inverts the usual assumption and gives a sigma-keyed throttle a self-reinforcing direction:
+# low confidence -> slow down -> less motion -> sigma RISES -> slower still. A latch rather than a
+# regulator. On the observed run the correlation is only +0.155 (speed) / +0.208 (rotation), so if a
+# latch exists it is not dominating — which is exactly why this needs the A/B rather than an argument.
+# READ THE RESULT AS: if confidence still tracks speed at 0.0, the estimator is responding to motion and
+# the governor is innocent. If the tracking vanishes, the governor was driving it and the latch is real.
+# RESTORE TO 1.0 AFTER THE RUN.
+PoseUncertaintyCoupling = 0.0
 MinAdvSpeedScale = 0.15
 MinRotSpeedScale = 0.05
 PosePredictionHorizon = 0.4
@@ -744,6 +767,20 @@ AffordanceDwellMaskHits = 5
 # BOUND on the whole wait (clock + acquisition). A mask that is never coming must not park the robot:
 # past this the dwell ends anyway and the log says the acquisition failed, which is itself a result.
 AffordanceDwellMaxMs = 12000.0
+# ── RE-ASK THE STANDPOINT IN THE LAST METRES, WITH EVIDENCE THAT HAS NOT FADED ────────────────────
+# The affordance standpoint is already re-tested every control cycle — but only against the planner
+# grid, and the grid's occupancy is rasterised from beliefs that DECAY. When residual_concept's hull
+# over a real object fades, the cells under it read FREE, the test answers "fine" and goes on answering
+# "fine" however often it is asked, and the robot drives at a standpoint sitting inside something the
+# map has forgotten. Asking a stale question faster does not help; asking with fresher evidence does.
+# Inside this radius of the standpoint the LIVE LiDAR return cloud is admitted as evidence about the
+# standpoint itself, and one that the body would touch is moved to the nearest pose free under BOTH the
+# grid and the cloud. MEASUREMENT SUPPORT, not a behaviour threshold: further out those cells are
+# usually occluded by the very thing being approached, so the cloud says nothing about them. The same
+# number bounds the displacement — a viewpoint dragged further than the distance at which its problem
+# was noticed is no longer that affordance's viewpoint, so instead the run says it cannot repair it.
+# 0 disables it and only the grid test remains.
+AffordanceApproachRecheckM = 1.5
 # The camera node whose rgb media descriptor backs that view. DISPLAY ONLY: if the node or its stream is
 # absent the panel draws the mask silhouettes on a plain ground and says the picture is missing.
 CameraNodeName = "zed"
