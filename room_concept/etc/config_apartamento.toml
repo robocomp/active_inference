@@ -207,6 +207,33 @@ MotionPreintegration   = true   # 2026-08-13 LANDED ON. The controlled A/B (same
 # PreintCmdScaleV      = 0.20     # = CmdNoiseTrans
 # PreintCmdScaleOmega  = 0.18     # = CmdNoiseRot
 
+# ── Synthetic odometry error injection — CALIBRATOR RECOVERY TEST ─────────────
+# ⚠⚠ THIS IS A TEST CONFIGURATION AND IT DELIBERATELY DEGRADES LOCALISATION. Set all four back to
+# 0 (or delete them) before any run whose numbers are meant to describe the estimator. A run with
+# these on measures the CALIBRATOR, not room_concept.
+#
+# WHY IT EXISTS. Measured 08-13 and again 08-16: this simulator's odometry IS the supervisor's
+# ground-truth velocity (sigma_v = 1.3e-8 m/sqrt(s) parked — six orders below what the motion prior
+# is configured with), so nothing here can be calibrated. What CAN be done is inject a known error
+# and check tools/motion_calib.cpp recovers it.
+#
+# WHY THESE MAGNITUDES. The calibrator's regression is REFERENCE-LIMITED: it compares odometry
+# against the localiser's own posterior, whose jitter measures ~0.021 m/sqrt(s) and ~0.008
+# rad/sqrt(s) at the long-window end. An injection below that is invisible no matter how correct the
+# estimator is. These sit 4-5x above it, and are also close to what the motion prior ALREADY assumes
+# (PreintOdomSigmaVLat 0.0894, SigmaOmega 0.0447) — so for the first time the model is roughly
+# correctly specified rather than asserting noise the input does not have.
+OdomInjectSigmaV       = 0.08   # m/sqrt(s)   — additive density, acts even when parked
+OdomInjectSigmaOmega   = 0.04   # rad/sqrt(s)
+# Scale: the std of a multiplicative error DRAWN ONCE per process. 0.12 because the calibrator's own
+# bias floor on this quantity is ~0.015 (measured with injection OFF), so the draw must land well
+# clear of it; at 0.12 there is a ~80% chance of |s| > 0.03, which is 6-15 sigma for the fit.
+# ★ SCORE AGAINST THE PRINTED VALUE, NOT AGAINST THESE. The realised draw is what the run actually
+# has, and it is logged at startup as "[OdomInject] GROUND TRUTH ... s_v=... s_omega=...". If the
+# draw came out near zero, restart to redraw rather than reading a null result as a failure.
+OdomInjectScaleV       = 0.12
+OdomInjectScaleOmega   = 0.12
+
 # ── Kinematic clamp on the published pose ─────────────────────────────────────
 # Bounds the pose delta between two published RT blocks to what the robot can physically do in the
 # elapsed time. Measured on this agent's own debug log: 92.8% of frames coast on the odometry
