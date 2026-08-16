@@ -618,7 +618,12 @@ PoseThetaStdStop = 0.20
 # The 0.0 measurement did its job -- it showed the throttle was costing >50% of speed (median while
 # moving 0.286 -> 0.631 m/s) and buying nothing: sigma_xy was IDENTICAL across the two arms, 0.0680 vs
 # 0.0681, and confidence 0.679 vs 0.677. Driving twice as fast did not degrade localisation at all.
-PoseUncertaintyCoupling = 1.0
+# 2026-08-16: 1.0 -> 0.8 for the next run. This is the BLEND GAIN on the whole uncertainty limiter:
+# scale = 1 - k*(1 - raw_ramp), so 0.8 keeps the ramp's shape and applies 80% of whatever cut it asks
+# for. On the last completed tour the raw ramp averaged 0.761 and hit its 0.15 floor on 10% of samples;
+# at k = 0.8 those become ~0.809 and ~0.32, so the brake still responds to sigma but can no longer take
+# the robot to a sixth of commanded speed.
+PoseUncertaintyCoupling = 0.8
 MinAdvSpeedScale = 0.15
 MinRotSpeedScale = 0.05
 PosePredictionHorizon = 0.4
@@ -849,6 +854,17 @@ EdgeType = "target"
 
 [Transforms]
 interpolate_rt = true
+# ── PER-CONSUMER POSE: the control law gets the FRESHEST pose, not the scan-aligned one ──────────
+# true  = the tracker (and the ESDF built inside the same call) reads the newest room<-robot RT block.
+# false = the previous behaviour: one pose for everything, pinned to the last LiDAR stamp.
+# WHY: measured over 6000 cycles, the newest block already led the scan the loop was pinning to by
+# 33 ms (p50) / 68 ms (p90) and that lead was simply declined. Nothing is extrapolated — it is a real
+# block, one query later — so this costs no accuracy and introduces no model. At 0.35 m/s it removes
+# 12-24 mm of cross-track error the feedback was correcting on stale evidence, against a gain worth
+# 2.78 rad/s per metre. See HANDOFF_delay_and_feedforward.md, Issue 1.
+# ⚠A fresher pose is a LESS SMOOTHED pose. If the newest block is jumpy this appears as e_y noise and
+# therefore rot chatter: compare cross_track_rms_m and rot_reversals against a run with this false.
+TrackerUsesLatestPose = true
 
 # (Display-side dead-reckoning of the cloud/icon to "now" lived here. REMOVED 2026-08-04: it only ever
 # applied when overlay_draw_one_frame_old was OFF, and that A/B settled ON — the cloud is registered
