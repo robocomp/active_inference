@@ -66,6 +66,11 @@ struct ChairInstance
     // FE across a gated/rejected cycle (which took no measurement). fe_baseline tracks DOWN fast / UP slow so a
     // sustained rise (the chair moved) surfaces as fe_surprise before the baseline accepts it.
     float dbg_energy   = 0.0f;
+    // ★HELD like dbg_energy beside it (2026-08-16): this frame's off-surface (residual) support-point
+    // count, persisted so the dashboard trace keeps its last reading between mask frames instead of
+    // adding no point at all and vanishing — which is what it did while the count lived only on the
+    // local observation. The other four concept agents have held it all along.
+    int   dbg_resid_pts = 0;
     float fe_baseline  = -1.0f;   // <0 = uninitialised (seed to the first accepted FE)
     float fe_surprise  = 0.0f;
     // ★The PUBLISHED epistemic_gain — the number the controller's affordance selection ranks on

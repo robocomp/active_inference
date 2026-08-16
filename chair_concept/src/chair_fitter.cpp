@@ -544,6 +544,7 @@ float ChairFitter::run_inference(ChairInstance& inst, const ChairObservation& ob
         inst.last_clutter_frac = inst.ai2_belief.clutter_fraction(frame.points, R);
     }
     inst.dbg_energy = energy;   // remember for the next gated/aged cycle to HOLD
+    inst.dbg_resid_pts = static_cast<int>(observation.residual_pts.size());   // HELD, see chair_instance.h
 
     // Write belief → legacy ChairState so downstream publish/viewer/RT code is unchanged.
     const auto& bs = inst.ai2_belief.state();

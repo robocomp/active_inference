@@ -573,6 +573,7 @@ float DoorFitter::run_inference(DoorInstance& inst, const DoorObservation& obser
         inst.last_clutter_frac = inst.ai2_belief.clutter_fraction(frame.points, R);
     }
     inst.dbg_energy = energy;   // remember for the next gated/aged cycle to HOLD
+    inst.dbg_resid_pts = static_cast<int>(observation.residual_pts.size());   // HELD, see door_instance.h
 
     // Write belief → cached aperture/leaf geometry + room-frame DoorState (the single authoring point).
     const auto& bs = inst.ai2_belief.state();
