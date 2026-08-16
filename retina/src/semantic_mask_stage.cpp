@@ -38,7 +38,21 @@ void SemanticMaskStage::run(const PerceptionFrame& in, PerceptionResult& out)
         return;
 
     const int W = labels.cols, H = labels.rows;
-    const int min_area = std::max(1, static_cast<int>(min_area_frac_ * static_cast<double>(W) * H));
+    // ★THE DENOMINATOR IS WHAT WAS LOOKED AT, NOT THE CANVAS. min_area_frac is "how much of an
+    // OBSERVATION must a region cover to be worth keeping", and that only equals a fraction of the map
+    // when the model ran over the whole map. It does on the ZED; it does NOT on the 360, where
+    // SemanticStage360 infers one 640-wide strip and pastes it into a 1920-wide canvas — everything
+    // else IGNORE. Dividing by the canvas there demanded 3× the area on the ONE camera whose angular
+    // resolution is already the coarser of the two, and the value 0.003 was never the wrong number:
+    // it was being applied to an area nobody had looked at.
+    // Measured 2026-08-16 on 18 saved panoramas: `hood` regions run 842–6338 px against a canvas-derived
+    // floor of 5529 — 3 of 13 survived. Against the strip's own 1843, 8 of 13 do. A cabinet run is
+    // 10k–52k px, which is exactly why this stayed invisible: it only ever bit the smallest class.
+    // 0 ⇒ the producer looked at everything (ZED, or one predating the field) ⇒ unchanged behaviour.
+    const long long inferred = out.semantic->inferred_area_px > 0
+        ? out.semantic->inferred_area_px
+        : static_cast<long long>(W) * H;
+    const int min_area = std::max(1, static_cast<int>(min_area_frac_ * static_cast<double>(inferred)));
 
     // YOLO-seg priority mask: OR of every existing detection's mask (thresholded @127). A semantic component
     // mostly inside this region is a duplicate of an authoritative YOLO detection → dropped.
@@ -134,7 +148,10 @@ void SemanticMaskStage::run(const PerceptionFrame& in, PerceptionResult& out)
         std::string per;
         for (std::size_t ci = 0; ci < accepted_.size(); ++ci)
             per += (per.empty() ? "" : " ") + accepted_[ci].second + "=" + std::to_string(per_class[ci]);
-        std::println("[SemanticMasks] +{} masks ({})", new_dets.size(), per);
+        // min_area is printed because it is now DERIVED per frame, not a constant: on the 360 it tracks
+        // how many strips were scheduled. A reader comparing two runs needs the floor that was in force.
+        std::println("[SemanticMasks] +{} masks ({}) min_area={} of {} px looked at",
+                     new_dets.size(), per, min_area, inferred);
     }
 }
 

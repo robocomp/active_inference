@@ -20,6 +20,7 @@
 #include "controller_world_model.h"
 #include "grid_planner.h"
 #include "route_follower.h"
+#include "stall_judge.h"
 #include "trajectory_controller.h"
 #include "../../common/affordance_manager/affordance_manager.h"
 
@@ -209,8 +210,12 @@ private:
     // planner that cannot return a path. That branch now HOLDS and reports instead.
     // Wedge = the robot was told to travel and did not GET anywhere. Judged on net displacement from
     // where the clock started, never on an instantaneous speed reading (pose jitter reads as speed).
-    bool detect_stuck(bool pursuing, float cmd_lin_mps, const Eigen::Vector2f &pos_room,
-                      std::uint64_t now_ms);
+    // Returns true ONLY for a WEDGE, which is the only verdict an escape answers. A ThrottleStall is
+    // handled inside — reported and counted, never escaped — because the cure for "our limiter is
+    // holding the base at 15%" is not a manoeuvre. See stall_judge.h for why the two must not be
+    // conflated, and why judging on the post-throttle command alone made the second one invisible.
+    bool detect_stuck(bool pursuing, float asked_lin_mps, float cmd_lin_mps, float pose_sigma_m,
+                      const Eigen::Vector2f &pos_room, std::uint64_t now_ms);
     void reset_stuck_window();
     // Begin an escape: choose turn direction from side clearance, drop a temp obstacle at
     // the stuck spot, reset the plan, and record the start pose/time.
@@ -447,13 +452,19 @@ private:
     // Rate limit for the "target is boxed in" warning — the condition persists as long as the target does.
     std::uint64_t last_unreachable_log_ms_ = 0;
 
-    // Physical-stuck recovery state.
-    std::uint64_t stuck_since_ms_ = 0;          // start of the current wedge window (0 = not wedged)
-    // Anchor for the wedge judgement: where the robot was when the clock started, and how far it has
-    // been TOLD to travel since. Compared as distances — an oscillating pose adds nothing to the first.
-    Eigen::Vector2f stuck_anchor_pos_ = Eigen::Vector2f::Zero();
-    float stuck_cmd_travel_m_ = 0.f;
-    std::uint64_t stuck_last_ms_ = 0;
+    // Physical-stuck recovery state. The DECISION lives in rc::StallJudge (stall_judge.h) — pure, and
+    // therefore testable without a graph or a robot, which is why the defect it now fixes could survive
+    // here for as long as it did. This class only feeds it numbers and acts on the verdict.
+    rc::StallJudge stall_judge_;
+    // Throttle stalls: the robot brought to a standstill by our OWN speed limiter. Reported, never
+    // escaped — reversing does not fix a limiter. Accumulated so the end-of-run line can say how much of
+    // the run went this way, which is the number that would have made 2026-08-16 a glance.
+    float stall_throttled_s_ = 0.f;
+    int   stall_throttled_windows_ = 0;
+    std::ofstream stall_events_csv_;
+    bool  stall_events_csv_open_ = false;
+    void  log_stall_event(const char *verdict, const rc::StallJudge::Report &r,
+                          const Eigen::Vector2f &pos, float sigma, std::uint64_t t_ms);
     // Rate limit for the planner-failure HOLD message. Planner failure is deliberately NOT routed into the
     // stuck/escape reflex (reversing cannot fix a planner), so this line is the only signal that it happened.
     std::uint64_t last_no_route_log_ms_ = 0;
@@ -481,6 +492,55 @@ private:
     // The reachability repair, computed ONCE for a given raw standpoint and held. Recomputing it per
     // cycle makes the target follow the robot (nearest_reachable is measured FROM the robot).
     std::optional<Eigen::Vector2f> unroutable_fix_;
+
+    // ── PER-CONSUMER POSE (see ControllerWorldModel's two readers) ───────────────────────────────
+    // The freshest pose the RT tree holds, resolved once per cycle and given ONLY to the control law.
+    // Everything else keeps the scan-aligned pose it already had, because the split is the point: the
+    // tracker's e_y/e_psi are about where the robot IS, while anything reasoning about the obstacle set
+    // alongside the instant it was captured wants the pose that goes with it. Empty ⇒ the tree had
+    // nothing fresher and the scan-aligned pose is used, which is exactly the previous behaviour.
+    std::optional<ControllerRobotPose> tracker_pose_;
+    // How far the fresh pose sits from the scan-aligned one, i.e. the correction actually applied. This
+    // is the number that says whether the split bought anything, and it costs one subtraction.
+    float tracker_pose_lead_m_ = 0.f;
+    std::uint64_t tracker_pose_log_ms_ = 0;
+
+    // ── YAW-CORRECTION MONITOR (temporary; delete with GridPlanner::pose_free_legacy) ─────────────
+    // The footprint used to be rasterised 90 degrees from its direction of travel. Correcting it moves a
+    // boundary the whole stack stands on, and the effect is invisible from behaviour — a robot that no
+    // longer scrapes looks exactly like a robot that never did. So it is MEASURED: once, over the whole
+    // C-space, for how much room the correction took and gave; and then continuously, at the only two
+    // poses the controller actually commits to — where the robot IS and where it is going — for how
+    // often the two answers differ in practice. A change nobody can see the effect of is a change
+    // nobody can defend.
+    bool census_logged_ = false;
+    long yawfix_cycles_ = 0;
+    long yawfix_robot_now_blocked_ = 0;    // corrected refuses the robot's own pose; legacy allowed it
+    long yawfix_robot_now_free_ = 0;       // ...and the reverse: room the correction gave back
+    long yawfix_target_now_blocked_ = 0;
+    long yawfix_target_now_free_ = 0;
+    std::uint64_t yawfix_log_ms_ = 0;
+    void monitor_footprint_orientation(const ControllerPlanningStep &step, std::uint64_t timestamp_ms);
+
+    // ── FINAL-APPROACH RE-CHECK (see recheck_standpoint_on_approach) ─────────────────────────────
+    // Where the live LiDAR moved the standpoint to, and which target it belongs to. HELD once taken,
+    // for the same reason unroutable_fix_ is: a displacement recomputed from scratch every cycle
+    // against a flickering cloud is a target that jitters, and a target that moves when the evidence
+    // blinks is not a target. It is dropped the moment it stops being admissible, never on a whim.
+    std::optional<Eigen::Vector2f> approach_fix_;
+    std::string approach_fix_name_;
+    // The standpoint the held fix was derived FROM. A producer is free to republish its viewpoint
+    // somewhere else under the same name, and a fix that outlived the pose it repaired would silently
+    // ignore that — the robot driving to a correction for a problem that has moved.
+    Eigen::Vector2f approach_fix_anchor_{0.f, 0.f};
+    std::uint64_t approach_blocked_log_ms_ = 0;   // rate limit for "found nowhere better"
+    // Re-ask the standpoint against the LIVE return cloud once the robot is close enough for that cloud
+    // to carry information about it, and move it if it is occupied by something the grid has forgotten.
+    // Mutates step.target (position and, when it moves, the facing yaw that aims at the object).
+    void recheck_standpoint_on_approach(ControllerPlanningStep &step,
+                                        ControllerWorldModel &world_model,
+                                        ControllerObstacleTracker &obstacle_tracker,
+                                        std::uint64_t timestamp_ms);
 
     rc::MissionRunner mission_;
     // CONTINUOUS ROUTE MODE. The whole mission as one arc-length curve; no per-waypoint target, no

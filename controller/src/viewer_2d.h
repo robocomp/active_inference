@@ -18,6 +18,8 @@
 #include "lidar_buffer_types.h"
 
 #include <optional>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 class AbstractGraphicViewer;
@@ -96,6 +98,19 @@ private:
     QGraphicsEllipseItem *target_marker_ = nullptr;
     std::vector<QGraphicsLineItem *> robot_traj_items_;
     std::optional<Eigen::Vector2f> last_robot_pos_;
+
+    // ── WHICH HUE THIS OBJECT GETS, AND WHY IT NEVER CHANGES ─────────────────────────────────────
+    // Slots are handed out in FIRST-SEEN order and never taken back, keyed on the object's stable
+    // identity (ControllerObstacleVisual::color_key = the DSR node name). Two properties follow, and
+    // both matter more than which colour any one object gets:
+    //   an object keeps its colour for the whole session, so you can track it across frames; and
+    //   an object appearing or vanishing REPAINTS NOTHING ELSE — colour follows the entity, never its
+    //   rank in a list that reshuffles. Hashing the name would give the second but not stable
+    //   separation: five objects could collide into two hues by luck. A registry cannot.
+    // The map only ever grows, by one small string per distinct object the run has seen.
+    std::unordered_map<std::string, int> object_color_slots_;
+    int next_object_color_slot_ = 0;
+    int object_color_slot(const std::string &key);
 
     void clear_polygon_item(QGraphicsPolygonItem *&item);
     void clear_lidar_items();

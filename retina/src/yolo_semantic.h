@@ -44,6 +44,14 @@ struct SemanticMap
     // model output is logits we normalize, else the raw winning channel value). Empty if
     // the caller asked to skip the score map.
     cv::Mat scores;
+    // ★HOW MUCH OF `labels` THE MODEL ACTUALLY RAN OVER, in pixels. 0 ⇒ all of it — the ZED case, and
+    // any producer predating this field. SemanticStage360 is why it exists: it infers ONE strip and
+    // pastes it into a full-panorama canvas, so `labels` is 3× larger than what was looked at, and a
+    // consumer sizing anything off labels.cols*labels.rows measures a 120° observation against a 360°
+    // image. Nobody chose that ratio — it appeared when the canvas grew under the knob (see
+    // SemanticMaskStage::run, where a hood-sized region was the thing it silently cost).
+    // A pixel COUNT, not a rect: the scheduled strips need not be contiguous.
+    long long inferred_area_px = 0;
 };
 
 class YoloSemanticSegmenter

@@ -93,7 +93,7 @@ struct RoomConfig
     // Robot BODY-FRAME velocity (adv=fwd, side=lat, rot=yaw-rate) is published on the robot↔room RT
     // edge (rt_translation_velocity / rt_rotation_euler_xyz_velocity) so the controller reads velocity
     // DIRECTLY instead of differentiating the pose (which would turn lidar-correction jumps into spikes).
-    // A diagonal velocity covariance (variances below) goes on rt_se2_covariance_velocity.
+    // A diagonal velocity covariance (variances below) goes on rt_covariance_velocity.
     float ROBOT_VEL_COV_ADV            = 0.0025f; // (0.05 m/s)²
     float ROBOT_VEL_COV_SIDE           = 0.0025f; // (0.05 m/s)²
     float ROBOT_VEL_COV_ROT            = 0.01f;   // (0.1 rad/s)²

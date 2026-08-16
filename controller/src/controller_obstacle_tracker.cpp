@@ -375,7 +375,13 @@ std::vector<Eigen::Vector2f> ControllerObstacleTracker::read_temporary_obstacle_
         if ((point_room - region_center_room).norm() > search_radius)
             continue;
         const Eigen::Vector2f from_robot = point_room - robot_pose.pos;
-        if (from_robot.norm() < footprint.support_radius_yaw(robot_pose.theta, from_robot))
+        // ★THE QUARTER TURN, IN THE OTHER DIRECTION. `robot_pose.theta` is ALREADY the footprint's own
+        // rotation — as_transform() applies it unrotated, and a room YAW is theta + pi/2 (see the
+        // trajectory controller's terminal-align branch). Handing it to the _yaw overload subtracted a
+        // quarter turn that was never added, so the self-filter's lobe pointed 90 degrees off the body:
+        // it kept returns lying along the robot's own flanks — which then got fitted as obstacles glued
+        // to it — and deleted real ones ahead. Same 4.2 cm, opposite sign.
+        if (from_robot.norm() < footprint.support_radius(robot_pose.theta, from_robot))
             continue;
 
         const Eigen::Vector2f point_robot = robot_from_room * point_room;
@@ -1126,6 +1132,10 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
             .polygon = polygon,
             .kind = kind,
             .label = visual_label,
+            // The identity the canvas colours by — see ControllerObstacleVisual::color_key. The node
+            // name, not visual_label: that one is a per-rebuild counter and would re-hue an object
+            // whenever a sibling of the same type came or went.
+            .color_key = node.name(),
             .round = round_footprint,
             // The disc spans the same extent as the box it replaces: a round table whose belief says
             // 0.90 m across is drawn 0.90 m across. Taking the LARGER of the two is what makes it a

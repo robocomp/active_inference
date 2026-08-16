@@ -417,7 +417,11 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose,
             vel_cov[7]  = params_->ROBOT_VEL_COV_SIDE;   // (1,1) var_y
             vel_cov[35] = params_->ROBOT_VEL_COV_ROT;    // (5,5) var_yaw — was [14] = var_Z
         }
-        G_->add_or_modify_attrib_local<rt_se2_covariance_velocity_att>(edge.value(), vel_cov);
+        // Written raw rather than through RT_API::insert_or_assign_edge_RT_covariance so all three
+        // twist attributes ride ONE get_edge/insert_or_assign_edge round trip: the API call would
+        // fetch and re-publish the edge a second time per odometry cycle, and every extra edge
+        // write-back on this path is another chance to re-publish stale ring state (see above).
+        G_->add_or_modify_attrib_local<rt_covariance_velocity_att>(edge.value(), vel_cov);
         G_->insert_or_assign_edge(edge.value());
     }
 

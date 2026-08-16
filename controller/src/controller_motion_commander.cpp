@@ -130,6 +130,25 @@ void ControllerMotionCommander::apply_uncertainty_speed_limit(float &adv_mps, fl
                                              std::max(0.f, params_->adv_rotation_coupling_exponent) * turning_ratio);
     adv_scale = std::min(adv_scale, coupled_adv_scale);
 
+    // ── HOW HARD LOCALISATION UNCERTAINTY IS ALLOWED TO BITE ─────────────────────────────────────
+    // An A/B lever over everything above, applied to the RESULT rather than to any of the knees, so it
+    // cannot silently re-tune one term relative to another: 1 = exactly the behaviour without it, 0 =
+    // the limiter computes and REPORTS but never restrains, 0.5 = half the restraint. The point is to
+    // answer "is the pose covariance what is slowing the robot" by measurement instead of by argument —
+    // drive the same route at 1.0 and at 0.0 and compare, which no amount of reading the code can do.
+    // ★A DIAGNOSTIC LEVER, NOT A CURE. Turning it down does not make the robot better localised; it
+    // makes it drive fast on a pose it has less reason to trust. If a run at 0 is the good one, the fix
+    // belongs in whatever inflated sigma — not here.
+    // ★The diagnostic below records the SCALE ACTUALLY APPLIED, so a run at 0 reports 1.000 throughout
+    // and profile.csv keeps meaning "what the robot obeyed". The raw ramp is still visible as the gap
+    // between cmd_adv (mppi_diag) and adv_mps (profile).
+    if (params_->pose_uncertainty_coupling < 1.f)
+    {
+        const float k = std::clamp(params_->pose_uncertainty_coupling, 0.f, 1.f);
+        adv_scale = 1.f - k * (1.f - adv_scale);
+        rot_scale = 1.f - k * (1.f - rot_scale);
+    }
+
     // Recorded AFTER the rotation coupling, so adv_scale is the multiplier actually applied — the coupling
     // is frequently the binding one while turning, and reporting the pre-coupling ramp would hide that.
     uncertainty_diag_ = UncertaintyDiag{.valid = true,

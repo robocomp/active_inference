@@ -184,6 +184,26 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         return std::nullopt;
     }
 
+    // ── THE CONTROL LAW'S OWN POSE, RESOLVED HERE AND USED ONLY BY IT ────────────────────────────
+    // `robot_pose` above is SCAN-ALIGNED: read_robot_pose_in_room pins the query to the last LiDAR
+    // stamp so the pose goes with the observations the obstacle set was built from. That is right for
+    // the obstacle side and wrong for the tracker, whose e_y and e_psi are about where the robot IS —
+    // and the cost is not hypothetical: the newest RT block already leads that scan by 33 ms at the
+    // median and 68 ms at p90 (measured over 6000 cycles of overlay_lag_eval.csv), so the loop was
+    // declining a fresher pose that already existed. At 0.35 m/s that is 12-24 mm of cross-track error
+    // the feedback then demanded 0.034-0.067 rad/s to correct, on evidence it did not need to be
+    // holding. No extrapolation and no model: this is a real RT block, just a later one.
+    // ★Guarded so this cannot silently become the only pose. If the tree has nothing fresher the
+    // optional stays empty and the tracker gets the scan-aligned pose — the previous behaviour exactly.
+    tracker_pose_.reset();
+    tracker_pose_lead_m_ = 0.f;
+    if (params_ == nullptr or params_->tracker_uses_latest_pose)
+        if (const auto fresh = world_model.read_robot_pose_latest(timestamp_ms); fresh.has_value())
+        {
+            tracker_pose_ = *fresh;
+            tracker_pose_lead_m_ = (fresh->pos - robot_pose->pos).norm();
+        }
+
     update_base_speed(*robot_pose, timestamp_ms);   // base speed for the contract stillness gate
     overlay_now_ms_ = timestamp_ms;                 // overlay dead-reckoning target + base time
     overlay_lidar_ts_ms_ = obstacle_tracker.last_lidar_timestamp_ms();
@@ -566,6 +586,14 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         }
     }
 
+    // ── AND ONE MORE TIME, CLOSE IN, WITH EVIDENCE THE GRID DOES NOT CARRY ───────────────────────
+    // Everything above this line reads the planner grid, and the grid forgets: residual_concept's hulls
+    // decay, so a standpoint inside a real object reads free and keeps reading free no matter how often
+    // it is re-tested. This asks the last metres against the live return cloud instead. It runs AFTER
+    // the repair on purpose — the pose it must judge is the one the robot is actually driving to, not
+    // the one the producer published.
+    recheck_standpoint_on_approach(step, world_model, obstacle_tracker, timestamp_ms);
+
     current_target_room_ = step.target.room_pos;
     step.target_changed = !last_target_info_.has_value()
                        || !ControllerWorldModel::same_target_instance(*last_target_info_, step.target);
@@ -599,8 +627,13 @@ rc::RouteOptimizerConfig ControllerSession::make_route_optimizer_config() const
     // machinery robot_footprint.h was written to provide, and the reason it exists ("a rectangle
     // reaches further along its diagonal than across its width, and a disc model has to assume the
     // worst case in every direction").
-    opt.support_radius = [](float heading, const Eigen::Vector2f &dir_world)
-    { return rc::RobotFootprint::shadow().support_radius(heading, dir_world); };
+    // ★THE SAME QUARTER TURN THE GRID PLANNER WAS MISSING. RouteOptimizer computes this heading as
+    // atan2(tangent.y, tangent.x) — a room YAW — while RobotFootprint::support_radius takes its own
+    // theta, whose forward axis is +y. Passed raw, the guard tested a body lying 90 degrees across the
+    // route it was checking: 4.2 cm too narrow where the route runs beside something and 4.2 cm too
+    // long where it approaches one. Same defect, same fix, and support_radius_yaw exists to state it.
+    opt.support_radius = [](float heading_yaw, const Eigen::Vector2f &dir_world)
+    { return rc::RobotFootprint::shadow().support_radius_yaw(heading_yaw, dir_world); };
     // Only used if support_radius is ever unset. INSCRIBED, not circumscribed: below the inscribed
     // radius the body cannot fit at ANY heading, so it is a true bound; the circumscribed radius is the
     // worst case over all headings at once and sits above every clearance this apartment affords.
@@ -1044,6 +1077,13 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
     // exists — e.g. the robot is boxed in and plan_path keeps failing. Step it here, before any
     // (re)planning, so the reverse-out completes. begin_escape reset current_plan_, so once the
     // escape finishes the next plan_path routes around the temp obstacle dropped at the wedge spot.
+    // Measure what the yaw correction did, at the two poses the controller commits to. HERE and not in
+    // build_planning_step because that function returns early for a manual target and for a running
+    // mission — and a mission is precisely where corridors are driven, so monitoring only the affordance
+    // path would have watched the one mode with the least of what it is looking for. Temporary; see the
+    // function. Cheap: four grid lookups, plus one whole-map census on the first world.
+    monitor_footprint_orientation(step, time_source());
+
     if (escape_active_)
     {
         display.set_stuck_active(true);   // this path returns before compute()'s update_custom_widget
@@ -1494,6 +1534,251 @@ bool ControllerSession::fix_still_good(const Eigen::Vector2f &pos, const Control
 {
     return wants_final_facing(target) ? grid_planner_.can_turn_here(pos)
                                       : grid_planner_.pose_free(pos, target.yaw_rad);
+}
+
+// ── WHAT THE YAW CORRECTION ACTUALLY DID, MEASURED ───────────────────────────────────────────────
+// Two readings, because they answer two different questions.
+//
+// THE CENSUS is the whole C-space, once, on the first real world: how much of it changed hands.
+// ★It does NOT shrink. A quarter turn is exactly two of the eight heading buckets, so the corrected
+// rasterisation at heading h is the old one at heading h-2 — summed over all headings both cover the
+// identical set of body placements, and the free totals come out equal to the state. Measured on the
+// recorded apartment: 74385 free states before, 74385 after, with 2882 of them (3.9%) swapping sides.
+// That is the honest answer to "does this cost us space": no, it MOVES it. A gap running east-west
+// stops admitting east-west travel — the body is 0.543 m across, and the old orientation asked that gap
+// for 0.460 — and starts admitting north-south, which is the 4.2 cm of head-on room the old
+// orientation was spending on the body's length. So expect both: corridors that close, and standpoints
+// that stop reporting BOXED IN. Costs one cycle (~25 ms on this map) and never runs again.
+//
+// THE COUNTERS are the live poses the controller commits to — where the robot is, and where it is going.
+// The census says how much space moved; these say whether any of it was space the robot was USING. That
+// distinction is the whole question: a correction that removes ten thousand states the robot never
+// visits costs nothing, and one that removes the standpoint it is driving to costs a run.
+void ControllerSession::monitor_footprint_orientation(const ControllerPlanningStep &step,
+                                                      std::uint64_t timestamp_ms)
+{
+    if (not census_logged_ and grid_planner_.width() > 0 and grid_planner_.occupied_cells() > 0)
+    {
+        census_logged_ = true;
+        const auto c = grid_planner_.orientation_census();
+        std::println("[footprint] YAW CORRECTION census over the live map: {} (cell,heading) states, "
+                     "{} free — unchanged in TOTAL, as it must be (a quarter turn is 2 of 8 buckets, so "
+                     "the two rasterisations cover the same placements). {} of them ({:.1f}% of the free "
+                     "C-space) CHANGED HANDS: that many headings the body may no longer hold where it "
+                     "stands, and as many it now may. Expect corridors that close and standpoints that "
+                     "stop reporting BOXED IN — not less room overall.{}",
+                     c.states, c.free_now, c.lost,
+                     c.free_legacy > 0 ? 100.0 * c.lost / c.free_legacy : 0.0,
+                     c.lost == 0 ? "   ⚠ZERO — the correction did not land." : "");
+    }
+
+    // The robot's own pose, at the heading it is actually holding (body theta -> yaw).
+    const float robot_yaw = step.robot_pose.theta + static_cast<float>(M_PI_2);
+    ++yawfix_cycles_;
+    const bool r_now = grid_planner_.pose_free(step.robot_pose.pos, robot_yaw);
+    const bool r_was = grid_planner_.pose_free_legacy(step.robot_pose.pos, robot_yaw);
+    yawfix_robot_now_blocked_ += (r_was and not r_now);
+    yawfix_robot_now_free_ += (r_now and not r_was);
+    const bool t_now = grid_planner_.pose_free(step.target.room_pos, step.target.yaw_rad);
+    const bool t_was = grid_planner_.pose_free_legacy(step.target.room_pos, step.target.yaw_rad);
+    yawfix_target_now_blocked_ += (t_was and not t_now);
+    yawfix_target_now_free_ += (t_now and not t_was);
+
+    // Report only when the two rasterisations DISAGREED about something the robot cared about. Steady
+    // state should look steady: on an open floor they agree every cycle and this stays silent.
+    const long disagreements = yawfix_robot_now_blocked_ + yawfix_robot_now_free_
+                             + yawfix_target_now_blocked_ + yawfix_target_now_free_;
+    if (disagreements > 0 and timestamp_ms - yawfix_log_ms_ >= 10000)
+    {
+        yawfix_log_ms_ = timestamp_ms;
+        std::println("[footprint] yaw-correction monitor, {} cycles: at the ROBOT's own pose the "
+                     "corrected body was refused {}x where the old one passed (and freed {}x); at the "
+                     "TARGET, refused {}x / freed {}x. A 'refused at the robot' is the interesting one — "
+                     "it means the body was already somewhere the old rasterisation thought was fine.",
+                     yawfix_cycles_, yawfix_robot_now_blocked_, yawfix_robot_now_free_,
+                     yawfix_target_now_blocked_, yawfix_target_now_free_);
+    }
+}
+
+// ── THE STANDPOINT, RE-ASKED IN THE LAST METRES AGAINST EVIDENCE THAT HAS NOT FADED ──────────────
+// WHAT WAS ALREADY THERE, so this is not mistaken for a check that did not exist: the standpoint IS
+// re-tested every cycle. set_world() re-rasterises the whole obstacle set each compute, and the repair
+// in build_planning_step re-runs nearest_free / nearest_rotatable on the raw published pose. What was
+// missing is not FREQUENCY, it is EVIDENCE. Every one of those tests reads the planner grid, and the
+// grid's occupancy is rasterised from beliefs that DECAY — residual_concept's occupancy hulls above
+// all. When the hull over a real object fades, the cells under it read free, `pose_free` answers "fine"
+// and goes on answering "fine" however many times it is asked, and the robot drives at a standpoint
+// inside something the map has forgotten. Re-asking a stale question faster cannot fix that.
+//
+// The live return cloud does not decay: it is re-measured every sweep and nothing has to believe in it.
+// So in the last metres — where those returns actually carry information about the standpoint, rather
+// than about whatever occludes it — the standpoint is asked again with the cloud admitted as evidence,
+// and moved if the body placed there would be in contact.
+//
+// Three properties keep this from becoming its own fault:
+//   ANCHORED at the standpoint, never at the robot, so the search is deterministic and the target
+//     cannot chase the robot the way a robot-relative repair once did.
+//   HELD once taken (approach_fix_), so a cloud that flickers at the boundary cannot make the goal
+//     jitter — the fix is dropped when it stops being admissible, not when the evidence blinks.
+//   BOUNDED by the same window it was noticed in: an affordance viewpoint dragged further than that is
+//     no longer a viewpoint of that object, and a target we cannot repair is reported, not invented.
+void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &step,
+                                                       ControllerWorldModel &world_model,
+                                                       ControllerObstacleTracker &obstacle_tracker,
+                                                       std::uint64_t timestamp_ms)
+{
+    const float window = params_ != nullptr ? params_->affordance_approach_recheck_m : 0.f;
+    if (window <= 0.f or not step.target.from_affordance)
+    {
+        approach_fix_.reset();
+        approach_fix_name_.clear();
+        return;
+    }
+    // Keyed by NAME, like the reachability repair: the name is the identity that survives every repair
+    // that moves the pose, and it needs no tolerance to compare.
+    if (approach_fix_name_ != step.target.node_name)
+    {
+        approach_fix_.reset();
+        approach_fix_name_.clear();
+    }
+
+    // The anchor is the standpoint as the grid repair left it — that is the pose the robot is actually
+    // driving to, and searching around anything else would be answering about a pose already rejected.
+    const Eigen::Vector2f anchor = step.target.room_pos;
+    // A held fix belongs to the pose it repaired. If that pose has moved further than the fix itself was
+    // allowed to move, it is a different standpoint and the old correction is about a problem elsewhere.
+    if (approach_fix_.has_value() and (anchor - approach_fix_anchor_).norm() > window)
+    {
+        approach_fix_.reset();
+        approach_fix_name_.clear();
+    }
+    // ★MEASURED TO WHAT WE ARE DRIVING TO, not to the anchor. Once a fix is taken the robot approaches
+    // the MOVED pose, so a window measured against the anchor walks out of range exactly because the fix
+    // worked — which would drop it and put the target straight back where the returns said it must not
+    // be, once per lap of that loop, forever.
+    const Eigen::Vector2f driving_to = approach_fix_.value_or(anchor);
+    if (not approach_fix_.has_value() and (step.plan_origin - driving_to).norm() > window) return;
+
+    auto *lidar = obstacle_tracker.lidar_buffer();
+    if (lidar == nullptr) return;
+    const auto [cloud_opt] = lidar->read_last();
+    if (not cloud_opt.has_value()) return;
+    const auto &[xs, ys, zs] = cloud_opt.value();
+    const std::size_t n_pts = std::min({xs.size(), ys.size(), zs.size()});
+    if (n_pts == 0) return;
+
+    // The SAME standoff the planner obeys — footprint_safety_margin_m, the one number robot_footprint.h
+    // exists to keep from multiplying. Nothing here introduces a second one.
+    rc::RobotFootprint body = rc::RobotFootprint::shadow();
+    body.set_safety_margin(params_ != nullptr ? params_->footprint_safety_margin_m : 0.f);
+    const float reach = body.circumscribed_radius() + body.safety_margin();
+
+    // Body-frame test at a pose. The footprint's own forward axis is +y while a room yaw has forward
+    // at +x, hence the quarter turn — the same convention support_radius_yaw() states.
+    const auto inside_body = [&](const Eigen::Vector2f &p, const Eigen::Vector2f &centre, float yaw)
+    {
+        const float th = yaw - static_cast<float>(M_PI_2);
+        const Eigen::Vector2f d = p - centre;
+        const float c = std::cos(th), s = std::sin(th);
+        return body.contains({c * d.x() + s * d.y(), -s * d.x() + c * d.y()});
+    };
+
+    // Returns that could touch ANY candidate the search may return, with the robot's own body removed.
+    // Self-returns must go first: the wheels sit at 0.25 m and the robot is by definition standing next
+    // to the standpoint by the time this runs, so leaving them in would condemn every standpoint the
+    // moment the robot got close enough to check it.
+    constexpr float kBodyZLo = 0.05f;   // above this is the body, below it is the floor beneath us
+    constexpr float kBodyZHi = 1.45f;   // the mesh tops out at 1.42 m
+    const float robot_yaw = step.robot_pose.theta + static_cast<float>(M_PI_2);
+    std::vector<Eigen::Vector2f> returns;
+    for (std::size_t i = 0; i < n_pts; ++i)
+    {
+        if (zs[i] < kBodyZLo or zs[i] > kBodyZHi) continue;
+        const Eigen::Vector2f p{xs[i], ys[i]};
+        if ((p - anchor).norm() > window + reach) continue;
+        if (inside_body(p, step.robot_pose.pos, robot_yaw)) continue;   // the robot seeing itself
+        returns.push_back(p);
+    }
+    if (returns.empty()) return;   // no evidence is not the same as clear, and it licenses nothing
+
+    // WHICH HEADINGS THE BODY WILL ACTUALLY HOLD THERE decides the shape of the test, because a rigid
+    // footprint is not rotation-invariant and assuming a disc is what the footprint planner exists to
+    // stop doing. A target that ends in a terminal rotation sweeps every heading, so it must clear the
+    // circumscribed disc; one that does not is tested at the two headings it really occupies — the
+    // arrival heading (it drives in along the bearing from wherever it is) and the commanded facing.
+    const bool rotates = wants_final_facing(step.target);
+    const auto clear_of_returns = [&](const Eigen::Vector2f &centre)
+    {
+        const Eigen::Vector2f approach_dir = centre - step.plan_origin;
+        const float arrival_yaw = approach_dir.squaredNorm() > 1e-8f
+                                ? std::atan2(approach_dir.y(), approach_dir.x())
+                                : step.target.yaw_rad;
+        for (const auto &p : returns)
+        {
+            if ((p - centre).norm() > reach) continue;            // cannot reach it at any heading
+            if (rotates) return false;                            // ...and it turns through all of them
+            if (inside_body(p, centre, arrival_yaw)) return false;
+            if (inside_body(p, centre, step.target.yaw_rad)) return false;
+        }
+        return true;
+    };
+
+    const auto aim_at_object = [&]()
+    {
+        // The producer's yaw faced the object from the viewpoint it published; the standpoint has moved.
+        if (step.target.parent_node_id == 0) return;
+        if (const auto obj = world_model.read_node_room_xy(step.target.parent_node_id, timestamp_ms);
+            obj.has_value())
+            step.target.yaw_rad = std::atan2(obj->y() - step.target.room_pos.y(),
+                                             obj->x() - step.target.room_pos.x());
+    };
+
+    // A fix already taken is kept for as long as it is still admissible — the whole point of holding it.
+    if (approach_fix_.has_value())
+    {
+        if (grid_planner_.pose_free(*approach_fix_, step.target.yaw_rad) and clear_of_returns(*approach_fix_))
+        {
+            step.target.room_pos = *approach_fix_;
+            aim_at_object();
+            return;
+        }
+        std::println("[approach] '{}' — the moved standpoint ({:.2f},{:.2f}) is no longer clear either; "
+                     "re-solving against the live returns.",
+                     step.target.node_name, approach_fix_->x(), approach_fix_->y());
+        approach_fix_.reset();
+    }
+
+    // One search, both questions: the grid (which knows about walls, and about obstacles no longer in
+    // view) AND the cloud (which knows about what is there now). nearest_free_where returns the anchor
+    // itself when the anchor already satisfies both, so this both tests and repairs in one call.
+    const auto fix = grid_planner_.nearest_free_where(anchor, step.target.yaw_rad, clear_of_returns, window);
+    if (not fix.has_value())
+    {
+        // Nowhere within the window is clear under both. Say so and leave the target alone: inventing a
+        // standpoint outside the window would service the affordance from somewhere it cannot see its
+        // object, and driving on silently is what this whole function exists to stop.
+        if (timestamp_ms - approach_blocked_log_ms_ >= 3000)
+        {
+            approach_blocked_log_ms_ = timestamp_ms;
+            std::println("[approach] ⚠ '{}' at ({:.2f},{:.2f}) is occupied by {} live LiDAR return(s) the "
+                         "planner grid no longer carries, and NOTHING within {:.2f} m is clear under both. "
+                         "Holding the target as published — it will drive into that.",
+                         step.target.node_name, anchor.x(), anchor.y(), returns.size(), window);
+        }
+        return;
+    }
+    if ((*fix - anchor).squaredNorm() <= 1e-6f) return;   // the standpoint is clear; nothing to do
+
+    approach_fix_ = *fix;
+    approach_fix_name_ = step.target.node_name;
+    approach_fix_anchor_ = anchor;
+    std::println("[approach] '{}' — {:.2f} m out, the live LiDAR says ({:.2f},{:.2f}) is OCCUPIED by "
+                 "something the grid has forgotten (residual decays; returns do not). Standpoint moved to "
+                 "({:.2f},{:.2f}), {:.2f} m away.",
+                 step.target.node_name, (step.plan_origin - anchor).norm(),
+                 anchor.x(), anchor.y(), fix->x(), fix->y(), (*fix - anchor).norm());
+    step.target.room_pos = *fix;
+    aim_at_object();
 }
 
 bool ControllerSession::wants_final_facing(const ControllerTargetInfo &target) const
@@ -2123,7 +2408,15 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     else
         path_controller.set_speed_limit(std::nullopt);
 
-    const auto control_output = path_controller.compute(robot_pose.as_transform());
+    // ★THE ONE CONSUMER THAT GETS THE FRESH POSE. compute() serves the control law AND expresses the
+    // room-frame cloud in the robot frame for the ESDF, and BOTH want "where the robot is now": the
+    // cloud is a map registered at its own per-plane stamps, so bringing it into the robot frame with a
+    // stale pose displaces every obstacle by the robot's motion since the scan — pushing them behind
+    // where they really are relative to the body, which is the unsafe direction. So the freshest pose is
+    // the right argument for the whole call, not merely tolerable for half of it.
+    // Everything else in this function keeps `robot_pose`, the scan-aligned one.
+    const auto &control_pose = tracker_pose_.has_value() ? *tracker_pose_ : robot_pose;
+    const auto control_output = path_controller.compute(control_pose.as_transform());
     // Surface what the ARRIVAL test is waiting on, every cycle, before any of the branches below can return
     // early — otherwise the readout would freeze exactly in the states worth watching (aligning, blocked).
     // The affordance program, rebuilt from state that already exists. Runs EVERY cycle an affordance is
@@ -2533,7 +2826,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                                // No-progress clock (ms): 0 = fresh/moving, climbs toward stuck_confirm_ms.
                                // The escape fires when this crosses the threshold — the last row before the
                                // "[recovery] STUCK -> escape" line is the smoking gun (cmd_* ~0, this ~confirm_ms).
-                               << (stuck_since_ms_ != 0 ? t_ms - stuck_since_ms_ : 0) << ','
+                               << (stall_judge_.since_ms() != 0 ? t_ms - stall_judge_.since_ms() : 0) << ','
                                << (escape_active_ ? 1 : 0) << ',' << od.n_temp << ',' << od.n_virtual << ','
                                << od.near_temp_m << ',' << od.near_virtual_m << ','
                                << od.near_temp_log_odds << ',' << od.near_temp_missed << ','
@@ -2633,6 +2926,12 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     float adv_mps = control_output.adv;
     float side_mps = control_output.side;
     float rot_rps = -control_output.rot;
+    // ★WHAT THE TRACKER ASKED FOR, CAPTURED BEFORE THE LIMITER OVERWRITES IT. The stall judge needs both
+    // sides of this line: the ask expresses INTENT (and so decides whether anything is being predicted at
+    // all), the post-limiter value is what the base was actually told. Reading only the second is what
+    // made a robot frozen by its own speed limit indistinguishable from a robot with nowhere to go —
+    // see stall_judge.h.
+    const float asked_lin_mps = std::hypot(adv_mps, side_mps);
     motion_commander.apply_uncertainty_speed_limit(adv_mps, side_mps, rot_rps);
     // Publish what the limiter did into the actuation stream. It sits between the MPPI's command and the
     // wheels, and until now a lap could show a 17% gap between the two with no way to say whether this
@@ -2661,7 +2960,14 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // above; this catches the INVISIBLE wedge the planner can't see. Sustained → escape: reverse+turn out
     // and drop a marker so the next plan routes around. base_speed_lin_ is the EMA measured base speed.
     const float cmd_lin = std::hypot(adv_mps, side_mps);
-    if (detect_stuck(/*pursuing=*/true, cmd_lin, robot_pose.pos, time_source()))
+    // The sigma the limiter ITSELF used this cycle, not a second reading of the graph — so the judge and
+    // the throttle can never disagree about how well the robot is localised. `valid` false means no
+    // covariance reached the limiter, so it did not throttle; 0 then makes the sigma clause a no-op,
+    // which is right because the branch that consults it is unreachable when nothing was throttled.
+    const auto unc = motion_commander.last_uncertainty_diag();
+    const float pose_sigma_m = unc.valid ? unc.xy_std_m : 0.f;
+    if (detect_stuck(/*pursuing=*/true, asked_lin_mps, cmd_lin, pose_sigma_m,
+                     robot_pose.pos, time_source()))
     {
         begin_escape(robot_pose, obstacle_tracker, path_controller, time_source());
         step_escape(robot_pose, path_controller, motion_commander, time_source());
@@ -2941,7 +3247,15 @@ void ControllerSession::update_overlay_extrapolation(const ControllerWorldModel 
             if (overlay_csv_.is_open())
                 overlay_csv_ << "t_ms,lidar_ts,gap_ms,pose_age_ms,vx,vy,omega,RTdelta_m,"
                                 "cmd_adv,cmd_rot,cur_adv,cur_rot,rt_lead_ms,rt_fix_dt_ms,"
-                                "twist_pred_dt_ms,twist_pred_err_m,twist_pred_err_deg\n";
+                                "twist_pred_dt_ms,twist_pred_err_m,twist_pred_err_deg,"
+                                // ★THE PER-CONSUMER POSE SPLIT, MEASURED. How far the FRESH pose given
+                                // to the control law sits from the SCAN-ALIGNED one everything else
+                                // uses — i.e. the correction the split actually applies, in metres.
+                                // 0 means the tree had nothing fresher and the two are the same pose,
+                                // which is also what this column reads when TrackerUsesLatestPose is
+                                // false. Multiply by the (1/L^2)=2.78 rad/s per metre feedback gain to
+                                // read it as the demand the loop is no longer making on stale evidence.
+                                "tracker_pose_lead_m\n";
             // Announce the resolved absolute path (it's a relative path → lands in the process CWD,
             // which is easy to miss), or the failure — so this is never silently a no-op again.
             std::error_code ec;
@@ -2978,6 +3292,7 @@ void ControllerSession::update_overlay_extrapolation(const ControllerWorldModel 
             overlay_csv_ << ',';
             if (obstacle_tracker.twist_pred_err_deg().has_value())
                 overlay_csv_ << *obstacle_tracker.twist_pred_err_deg();
+            overlay_csv_ << ',' << tracker_pose_lead_m_;
             overlay_csv_ << '\n';
             overlay_csv_.flush();
         }
@@ -3129,6 +3444,10 @@ void ControllerSession::finalize_reached(rc::AffordanceManager &affordance_manag
     last_target_info_.reset();
     active_target_id_ = 0;
     current_target_room_.reset();
+    // The final-approach correction belongs to the standpoint just retired. Re-selecting the same
+    // affordance later must re-measure, not inherit an answer taken against a scan that is now old.
+    approach_fix_.reset();
+    approach_fix_name_.clear();
     manual_target_room_.reset();
     manual_target_origin_room_.reset();
     manual_target_dirty_ = false;
@@ -3290,69 +3609,82 @@ void ControllerSession::reset_stuck_state()
     escape_active_ = false;
 }
 
-bool ControllerSession::detect_stuck(bool pursuing, float cmd_lin_mps,
-                                     const Eigen::Vector2f &pos_room, std::uint64_t now_ms)
+bool ControllerSession::detect_stuck(bool pursuing, float asked_lin_mps, float cmd_lin_mps,
+                                    float pose_sigma_m, const Eigen::Vector2f &pos_room,
+                                    std::uint64_t now_ms)
 {
     if (!params_ || !params_->stuck_recovery_enabled) { reset_stuck_window(); return false; }
-    // Not commanding translation ⇒ nothing is being predicted, so nothing can be contradicted.
-    if (!pursuing || cmd_lin_mps <= 0.f) { reset_stuck_window(); return false; }
 
-    // ── A WEDGE IS UNACHIEVED NET DISPLACEMENT, NOT A LOW SPEED READING ──────────────────────────
-    // This used to compare base_speed_lin_ against stuck_slip_ratio * commanded. base_speed_lin_ is an
-    // EMA of |dpos|/dt evaluated ONLY on cycles where the pose changed, dividing by the pose-CHANGE
-    // interval — a design that is right for a smooth velocity readout and structurally unable to express
-    // a wedge. A robot jittering +-3 cm about a fixed point produces large |dpos| over a short dt, so it
-    // reports a healthy speed while going nowhere. MEASURED on the run that prompted this: commanded
-    // 10.33 m of travel over 20 s, path length 2.13 m, NET DISPLACEMENT 0.008 m — eight millimetres —
-    // with the base pinned at 0.55 m/s and 0.80 rad/s, no safety guard firing, and the wedge silent.
-    //
-    // So compare the two quantities the prediction is actually about: how far the robot was TOLD to
-    // travel since the clock started, against how far it ACTUALLY GOT from where it started. Net
-    // displacement is immune to oscillation by construction — jitter contributes nothing to it, which is
-    // the whole point — and no new parameter appears: stuck_slip_ratio and stuck_confirm_ms keep their
-    // meanings, applied to distance instead of to speed.
-    if (stuck_since_ms_ == 0)
+    // ── THE WINDOW IS OPENED BY THE ASK, AND THE VERDICT NAMES THE CAUSE ─────────────────────────
+    // Both halves used to be one number and one branch, taken AFTER the pose-covariance limiter had
+    // already scaled the command down — so the harder the limiter held the robot, the smaller the bar it
+    // had to clear, and a robot frozen at 0.011 m/s was certified healthy every window. See stall_judge.h
+    // for the measurement and for why "just use the pre-throttle ask" is not on its own a fix.
+    const rc::StallJudge::Params jp{.slip_ratio = params_->stuck_slip_ratio,
+                                    .confirm_ms = params_->stuck_confirm_ms};
+    const auto r = stall_judge_.note(pursuing, asked_lin_mps, cmd_lin_mps, pose_sigma_m,
+                                     pos_room, now_ms, jp);
+    if (r.verdict == rc::StallVerdict::None) return false;
+
+    if (r.verdict == rc::StallVerdict::Wedge)
     {
-        stuck_since_ms_ = now_ms;
-        stuck_anchor_pos_ = pos_room;
-        stuck_cmd_travel_m_ = 0.f;
-        stuck_last_ms_ = now_ms;
-        return false;
+        std::println("[controller] WEDGE — commanded {:.2f} m of travel over {:.1f} s and achieved {:.3f} m "
+                     "net ({:.0f}% of it, floor {:.0f}%). Escaping.",
+                     r.commanded_m, r.window_s, r.achieved_m,
+                     r.asked_m > 1e-6f ? 100.f * r.achieved_m / r.asked_m : 0.f,
+                     100.f * params_->stuck_slip_ratio);
+        log_stall_event("wedge", r, pos_room, pose_sigma_m, now_ms);
+        return true;
     }
-    const float dt = static_cast<float>(now_ms - stuck_last_ms_) * 1e-3f;
-    stuck_last_ms_ = now_ms;
-    if (dt > 0.f) stuck_cmd_travel_m_ += cmd_lin_mps * dt;
 
-    // ★JUDGED AT THE END OF A FULL WINDOW, NOT CONTINUOUSLY. Testing the ratio on every cycle looks
-    // natural and is wrong: early in the window the commanded travel is a few centimetres, so ANY pose
-    // jitter clears stuck_slip_ratio * that, restarts the clock, and the window can never mature. (My
-    // first version did exactly this and the replay below never fired.) Over a full stuck_confirm_ms the
-    // commanded travel is ~0.8 m at cruise, so the bar is ~0.2 m — far above jitter, and far below what
-    // a healthy robot covers. Same two parameters, and stuck_confirm_ms now also means what it says:
-    // how long the robot is watched before being judged.
-    if (now_ms - stuck_since_ms_ <= static_cast<std::uint64_t>(params_->stuck_confirm_ms)) return false;
+    // ── THROTTLE STALL: OUR OWN LIMITER STOPPED THE ROBOT ────────────────────────────────────────
+    // Reported, never escaped. Reversing does not raise a speed limiter, so an escape here would fire,
+    // end, find the limiter still floored and fire again — with a virtual obstacle dropped at every
+    // round — which is the same closed loop "planner failure is not a wedge" exists to prevent.
+    // It re-reports once per window on purpose: fifteen seconds of frozen must not read like one bad
+    // window, and the accumulated total is what the end-of-run line quotes.
+    stall_throttled_s_ += r.window_s;
+    ++stall_throttled_windows_;
+    std::println("[controller] ⚠STALLED BY OUR OWN SPEED LIMIT — the tracker asked for {:.2f} m over "
+                 "{:.1f} s, the pose-covariance limiter let through {:.3f} m ({:.0f}% of it), and the robot "
+                 "moved {:.3f} m net, which is inside its own position sigma of {:.3f} m. NOT escaping: "
+                 "reversing cannot raise a speed limit. Total this run: {:.1f} s over {} window(s). "
+                 "sigma is above PoseXYStdStop ⇒ look at the localiser, not at the controller.",
+                 r.asked_m, r.window_s, r.commanded_m, 100.f * r.delivered, r.achieved_m, pose_sigma_m,
+                 stall_throttled_s_, stall_throttled_windows_);
+    log_stall_event("throttle_stall", r, pos_room, pose_sigma_m, now_ms);
+    return false;
+}
 
-    const float achieved_m = (pos_room - stuck_anchor_pos_).norm();
-    if (achieved_m >= params_->stuck_slip_ratio * stuck_cmd_travel_m_)
+// One row per verdict. These are RARE events whose diagnosis previously existed only on stdout, where it
+// scrolls away and cannot be compared between runs — the same reason route_events.csv exists. Archived
+// with the run, so "how often did this happen, and where" becomes answerable across runs instead of
+// requiring the afternoon it took the first time.
+void ControllerSession::log_stall_event(const char *verdict, const rc::StallJudge::Report &r,
+                                        const Eigen::Vector2f &pos, float sigma, std::uint64_t t_ms)
+{
+    if (not stall_events_csv_open_)
     {
-        // It went where it was told. Start the next window HERE, so each verdict is about one stretch.
-        stuck_since_ms_ = now_ms;
-        stuck_anchor_pos_ = pos_room;
-        stuck_cmd_travel_m_ = 0.f;
-        return false;
+        stall_events_csv_.open("stall_events.csv", std::ios::out | std::ios::trunc);
+        // Locale-independent output: the C++ global locale is "C" today, but a single std::locale::global
+        // anywhere in the process would start emitting decimal COMMAS into a file every reader parses as
+        // points. Cheap insurance, applied to every data file this agent writes.
+        stall_events_csv_.imbue(std::locale::classic());
+        stall_events_csv_ << "t_ms,verdict,window_s,asked_m,commanded_m,achieved_m,delivered,"
+                             "pose_sigma_m,x,y,total_throttled_s\n";
+        stall_events_csv_open_ = true;
+        mission_.archive_on_stop("stall_events.csv");
     }
-    std::println("[controller] WEDGE — commanded {:.2f} m of travel over {:.1f} s and achieved {:.3f} m "
-                 "net ({:.0f}% of it, floor {:.0f}%). Escaping.",
-                 stuck_cmd_travel_m_, static_cast<float>(now_ms - stuck_since_ms_) * 1e-3f, achieved_m,
-                 stuck_cmd_travel_m_ > 1e-6f ? 100.f * achieved_m / stuck_cmd_travel_m_ : 0.f,
-                 100.f * params_->stuck_slip_ratio);
-    return true;
+    if (not stall_events_csv_.is_open()) return;
+    stall_events_csv_ << t_ms << ',' << verdict << ',' << r.window_s << ',' << r.asked_m << ','
+                      << r.commanded_m << ',' << r.achieved_m << ',' << r.delivered << ','
+                      << sigma << ',' << pos.x() << ',' << pos.y() << ',' << stall_throttled_s_ << '\n';
+    stall_events_csv_.flush();
 }
 
 void ControllerSession::reset_stuck_window()
 {
-    stuck_since_ms_ = 0;
-    stuck_cmd_travel_m_ = 0.f;
+    stall_judge_.reset();
 }
 
 void ControllerSession::begin_escape(const ControllerRobotPose &robot_pose,
@@ -3420,7 +3752,7 @@ void ControllerSession::begin_escape(const ControllerRobotPose &robot_pose,
     escape_start_ms_ = now_ms;
     escape_start_pos_ = robot_pose.pos;
     ++escape_count_;
-    stuck_since_ms_ = 0;
+    stall_judge_.reset();
 
     // ── CHARGE THIS ESCAPE TO THE AFFORDANCE IT HAPPENED UNDER ───────────────────────────────────
     // An escape is a reflex, not a plan: it reverses out and lets the planner try again. That is right

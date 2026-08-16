@@ -18,9 +18,23 @@ public:
     const ControllerGraphState &graph_state() const { return graph_state_; }
 
     std::optional<std::vector<Eigen::Vector2f>> read_room_polygon() const;
+    // ── TWO POSES, BECAUSE TWO CONSUMERS WANT DIFFERENT INSTANTS ─────────────────────────────────
+    // This one is SCAN-ALIGNED: it queries the RT tree at the last LiDAR stamp, so the pose it returns
+    // is contemporaneous with the observations that produced the current obstacle set. Everything that
+    // reasons about that set together with where the robot was when it was taken should keep using it.
     std::optional<ControllerRobotPose> read_robot_pose_in_room(
         std::uint64_t timestamp_ms,
         const std::optional<std::uint64_t> &last_lidar_timestamp_ms) const;
+
+    // ...and this one is the FRESHEST pose the RT tree holds, for the control law, whose error terms
+    // are about where the robot IS. Measured 2026-08-16: the newest room<-robot block already leads the
+    // scan the loop was pinning to by 33 ms at the median and 68 ms at p90, and that lead was simply
+    // being declined — it is a real block, not an extrapolation, so recovering it costs nothing and
+    // introduces no model. Against a feedback term worth 2.78 rad/s per metre of cross-track, ~35 ms at
+    // 0.35 m/s is 12 mm is 0.034 rad/s of demand that was being asked for on stale evidence.
+    // ★It is the SAME query chain with the scan pin removed, so the fallbacks (exact ts, then 0) and the
+    // Interpolated/Nearest choice are unchanged; only the instant asked for differs.
+    std::optional<ControllerRobotPose> read_robot_pose_latest(std::uint64_t timestamp_ms) const;
     std::optional<ControllerPoseUncertainty> read_pose_uncertainty() const;
 
     /// Age, in ms, of the pose currently on the room<-robot RT edge, measured against ITS OWN validity

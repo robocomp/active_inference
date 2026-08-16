@@ -33,6 +33,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <iosfwd>
 #include <optional>
 #include <string>
@@ -107,14 +108,48 @@ public:
     // reporting them all as "no path" is what sent one debugging round chasing a performance red herring.
     const std::string& last_failure() const { return last_failure_; }
 
+    // ── WHAT `theta` MEANS EVERYWHERE IN THIS CLASS ───────────────────────────────────────────────
+    // A room YAW: the direction the robot FACES, forward = +x at 0, counter-clockwise. That is what
+    // every caller already passes (an affordance's target.yaw_rad, a robot pose's theta + pi/2) and what
+    // plan()'s move table means. It is NOT RobotFootprint's own theta — that class's forward axis is +y,
+    // so the two differ by a quarter turn, and rebuild_offsets() is the single place the conversion is
+    // applied. Getting it wrong is silent (the hull is nearly symmetric), so it is pinned by self_test.
     // Is this pose footprint-feasible? Exposed so the caller can test a target BEFORE committing to it —
     // one predicate shared by planning and target repair, so the two can no longer disagree.
     bool pose_free(const Eigen::Vector2f& pos_room, float theta) const;
+
+    // ── MIGRATION MONITOR (temporary; delete once the yaw correction is trusted) ───────────────────
+    // The same question answered with the body oriented as it WAS before the correction — turned 90 deg
+    // from its direction of travel. A change of this kind is easy to argue about and hard to see, so it
+    // is instrumented instead: these two say what it actually did to the world the robot is in.
+    bool pose_free_legacy(const Eigen::Vector2f& pos_room, float theta) const;
+    // Free (cell, heading) states under each rasterisation.
+    // ★THE TOTALS ARE EQUAL BY CONSTRUCTION, AND THAT IS THE POINT. With 8 headings a quarter turn is
+    // exactly two buckets, so the corrected offsets at heading h ARE the legacy offsets at heading h-2:
+    // summed over all headings the two rasterisations cover the identical set of body placements. The
+    // correction therefore cannot change HOW MUCH space is free — only WHICH HEADING is free WHERE. A
+    // gap running east-west stops admitting east-west travel and starts admitting north-south.
+    // So read `lost` (== `gained`), not the totals: it is how much of the free C-space changed hands,
+    // and it is the only number here that can be zero if the correction failed to land.
+    struct OrientationCensus { long states = 0, free_now = 0, free_legacy = 0, lost = 0, gained = 0; };
+    OrientationCensus orientation_census() const;
 
     // Nearest footprint-feasible pose to `pos_room`, searched outward. Replaces repair_target's ring search,
     // and because it uses the SAME predicate the planner does, a repaired target is feasible by construction.
     std::optional<Eigen::Vector2f> nearest_free(const Eigen::Vector2f& pos_room, float theta,
                                                 float max_radius_m = 3.0f) const;
+
+    // Same expanding-ring search, ANDed with an extra predicate the caller supplies. It exists because the
+    // grid is not the only evidence there is: the occupancy it rasterises comes from beliefs that DECAY, so a
+    // cell an object still occupies reads free once the belief that put it there has faded — and re-asking the
+    // grid, however often, keeps returning the same wrong answer. The caller passes the evidence the grid does
+    // not carry (live LiDAR at the final approach), and the search remains ONE search, so a pose it returns is
+    // admissible under both questions by construction rather than by two stages agreeing.
+    // `admissible` is called on candidate CENTRES only; it is never asked about the footprint's cells, so it
+    // must itself account for the body's extent.
+    std::optional<Eigen::Vector2f> nearest_free_where(const Eigen::Vector2f& pos_room, float theta,
+                                                      const std::function<bool(const Eigen::Vector2f&)>& admissible,
+                                                      float max_radius_m = 3.0f) const;
 
     // Nearest pose to `goal_room` that is ACTUALLY REACHABLE from `start_room`, under exactly the move
     // model plan() uses. This is the missing half of nearest_free: that one tests whether the footprint
@@ -204,6 +239,7 @@ private:
     Eigen::Vector2f cell_to_world(int ix, int iy) const;
     // Footprint at heading bucket `h` centred on cell (ix,iy) overlaps no occupied cell and stays in bounds.
     bool  cell_free(int ix, int iy, int h) const;
+    bool  cell_free_legacy(int ix, int iy, int h) const;   // migration monitor — see rebuild_offsets()
     bool  cell_free_at(const Eigen::Vector2f& pos_room, int heading_index) const;
     void  rebuild_offsets();
     void  build_distance_field() const;   // lazy; fills dist_ with metres, sets dist_valid_
@@ -217,6 +253,10 @@ private:
     int   w_ = 0, h_ = 0;
     // Precomputed footprint coverage per heading bucket — the reason exact collision is affordable here.
     std::vector<std::vector<Eigen::Vector2i>> offsets_;
+    // The SAME coverage as it was rasterised before the yaw correction, i.e. with the body turned 90 deg
+    // from its direction of travel. Exists only so the correction can be MEASURED against the live world
+    // (orientation_census / pose_free_legacy) instead of asserted. Delete with them.
+    std::vector<std::vector<Eigen::Vector2i>> offsets_legacy_;
     float offsets_cell_ = 0.f, offsets_margin_ = -1.f;
     bool room_mask_usable_ = true;  // false ⇒ the room polygon was discarded (see set_world)
     int last_obstacle_count_ = 0;   // polygons in the last set_world — for the failure report

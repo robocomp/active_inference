@@ -33,6 +33,8 @@
 
 #include "specificworker.h"
 
+#include "../../common/dashboard/belief_series.h"   // rc::dash::publish_belief_series (SHARED)
+
 #include "../../common/birth_surprise/residual_field_reader.h"   // rc::read_residual_field (SHARED)
 
 #include "../../common/peripheral_channel/peripheral_channel.h"   // THE shared ricoh path
@@ -2016,51 +2018,17 @@ void SpecificWorker::publish_door_diagnostics(const rc::DoorInstance& inst,
                                                const DoorObservation& observation,
                                                float free_energy)
 {
-
-    // Register lazily & idempotently HERE (same thread/object that adds points). The instance is
-    // often created via the graph-signal path before the plots exist (created=false in the compute
-    // loop), so the old `if (created)` registration never fired and every point was dropped.
-    if (ts_plot_)
-    {
-        ts_plot_->add_series(inst.node_name + "_fe", QColor(255, 170, 0), 1.1f);
-        ts_plot_->add_point (inst.node_name + "_fe", free_energy);
-        // FE BASELINE on the SAME panel (same units): the FE lifting ABOVE the grey baseline IS the
-        // surprise, shown visually. The smoothed gap goes on its own panel (much smaller scale).
-        ts_plot_->add_series(inst.node_name + "_base", QColor(140, 140, 140), 0.9f);
-        if (ts_surprise_plot_)
-            ts_surprise_plot_->add_series(inst.node_name + "_surprise", QColor(255, 60, 60), 1.3f);
-        if (inst.fe_baseline >= 0.0f)   // skip the uninitialised (-1) baseline before the first fit
-        {
-            ts_plot_->add_point(inst.node_name + "_base", inst.fe_baseline);
-            if (ts_surprise_plot_)
-                ts_surprise_plot_->add_point(inst.node_name + "_surprise", inst.fe_surprise);
-        }
-        if (ts_cov_plot_)
-        {
-            ts_cov_plot_->add_series(inst.node_name + "_cov", QColor(0, 190, 255), 1.1f);
-            ts_cov_plot_->add_point (inst.node_name + "_cov", belief_uncertainty(inst));
-        }
-        if (ts_res_plot_)
-        {
-            ts_res_plot_->add_series(inst.node_name + "_res", QColor(170, 80, 255), 1.1f);
-            // Residual points only exist on FRESH-mask frames; plotting 0 on every idle cycle made the
-            // series crash thousands→0 between masks. Only sample on fresh frames so the line holds
-            // the last real value between detections (a meaningful per-mask residual-count trend).
-            if (observation.has_fresh_data)
-                ts_res_plot_->add_point (inst.node_name + "_res", static_cast<float>(observation.residual_pts.size()));
-        }
-        // (The inferred-dimensions trace that used to live here is gone: the BeliefInspector below shows
-        // every DOF's value AND its σ live, so a separate trace was showing the same thing twice.)
-        // (The pose-σ trace that used to live here is gone: the BeliefInspector panel now shows σ for EVERY
-        // DOF, next to the whole correlation structure and the yaw-mode posterior.)
-    }
+    rc::dash::publish_belief_series({ts_plot_, ts_surprise_plot_, ts_cov_plot_, ts_res_plot_},
+                                   {.node = inst.node_name,
+                                     .free_energy  = free_energy,
+                                     .fe_baseline  = inst.fe_baseline,
+                                     .fe_surprise  = inst.fe_surprise,
+                                     .uncertainty  = belief_uncertainty(inst),
+                                     .residual_pts = static_cast<float>(inst.dbg_resid_pts)});
 
     if (fitter_->should_log(inst))
         std::print("[{}] series: FE={:.4f} U(Σ)={:.3f} res={}\n",
-                   inst.node_name,
-                   free_energy,
-                   belief_uncertainty(inst),
-                   observation.residual_pts.size());
+                   inst.node_name, free_energy, belief_uncertainty(inst), observation.residual_pts.size());
 }
 
 void SpecificWorker::publish_door_intentions(rc::DoorInstance& inst,

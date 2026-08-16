@@ -39,10 +39,74 @@ void GridPlanner::rebuild_offsets()
         return;
     footprint.set_safety_margin(params.safety_margin_m);
     offsets_.assign(kHeadings, {});
+    offsets_legacy_.assign(kHeadings, {});
     for (int h = 0; h < kHeadings; ++h)
-        offsets_[h] = footprint.cell_offsets(cell_, 2.0f * static_cast<float>(M_PI) * h / kHeadings);
+    {
+        // ── HEADING INDEX h IS A YAW, AND THE FOOTPRINT'S OWN THETA IS NOT ───────────────────────
+        // h means "travelling in direction (DX[h], DY[h])", i.e. a room YAW: forward = +x at h = 0.
+        // Every caller agrees — pose_free is handed target.yaw_rad and robot theta + pi/2, and plan()'s
+        // move table is (cos, sin) of this same angle. RobotFootprint's theta is a DIFFERENT quantity:
+        // its forward axis is +y, so a yaw becomes a footprint theta only after a quarter turn. That is
+        // the entire reason support_radius_yaw() exists, and this line is where it was missing.
+        // ★WHAT IT COST. The body is 0.2716 m half-width laterally and 0.2300 m half-length. Rotated
+        // 90 deg from its direction of travel, the planner modelled it 4.2 cm too NARROW across the
+        // track — where a corridor closes — and 4.2 cm too LONG along it, where a standoff or a pocket
+        // does. At the configured 0.05 m margin that left 8.4 mm of genuine standoff sideways instead
+        // of 50, which is the difference between a comfortable pass and a scrape. Silent, because the
+        // hull is nearly symmetric and nothing ever throws.
+        const float yaw = 2.0f * static_cast<float>(M_PI) * h / kHeadings;
+        offsets_[h] = footprint.cell_offsets(cell_, yaw - static_cast<float>(M_PI_2));
+        // MIGRATION MONITOR — see orientation_census() / pose_free_legacy(). The pre-correction
+        // rasterisation, kept ONLY so the change can be measured against the world the robot is
+        // actually in rather than argued about. Delete both, and the census, once it is trusted.
+        offsets_legacy_[h] = footprint.cell_offsets(cell_, yaw);
+    }
     offsets_cell_ = cell_;
     offsets_margin_ = params.safety_margin_m;
+}
+
+bool GridPlanner::cell_free_legacy(int ix, int iy, int h) const
+{
+    if (offsets_legacy_.size() != kHeadings) return false;
+    for (const auto& o : offsets_legacy_[h])
+    {
+        const int nx = ix + o.x(), ny = iy + o.y();
+        if (not in_bounds(nx, ny)) return false;
+        if (occ_[idx(nx, ny)]) return false;
+    }
+    return true;
+}
+
+bool GridPlanner::pose_free_legacy(const Eigen::Vector2f& pos_room, float yaw) const
+{
+    int ix, iy;
+    if (not world_to_cell(pos_room, ix, iy)) return false;
+    const_cast<GridPlanner*>(this)->rebuild_offsets();
+    float t = std::fmod(yaw, 2.0f * static_cast<float>(M_PI));
+    if (t < 0) t += 2.0f * static_cast<float>(M_PI);
+    const int h = static_cast<int>(std::lround(t / (2.0f * static_cast<float>(M_PI)) * kHeadings)) % kHeadings;
+    return cell_free_legacy(ix, iy, h);
+}
+
+GridPlanner::OrientationCensus GridPlanner::orientation_census() const
+{
+    OrientationCensus c;
+    if (w_ <= 0 or h_ <= 0) return c;
+    const_cast<GridPlanner*>(this)->rebuild_offsets();
+    if (offsets_.size() != kHeadings or offsets_legacy_.size() != kHeadings) return c;
+    for (int iy = 0; iy < h_; ++iy)
+        for (int ix = 0; ix < w_; ++ix)
+            for (int hh = 0; hh < kHeadings; ++hh)
+            {
+                ++c.states;
+                const bool now = cell_free(ix, iy, hh);
+                const bool was = cell_free_legacy(ix, iy, hh);
+                c.free_now += now;
+                c.free_legacy += was;
+                c.lost += (was and not now);
+                c.gained += (now and not was);
+            }
+    return c;
 }
 
 void GridPlanner::set_world(const std::vector<Eigen::Vector2f>& room_polygon,
@@ -358,7 +422,17 @@ GridPlanner::RotationSweep GridPlanner::rotation_sweep(const Eigen::Vector2f& po
 std::optional<Eigen::Vector2f> GridPlanner::nearest_free(const Eigen::Vector2f& pos_room, float theta,
                                                          float max_radius_m) const
 {
-    if (pose_free(pos_room, theta)) return pos_room;
+    return nearest_free_where(pos_room, theta, {}, max_radius_m);
+}
+
+std::optional<Eigen::Vector2f> GridPlanner::nearest_free_where(
+    const Eigen::Vector2f& pos_room, float theta,
+    const std::function<bool(const Eigen::Vector2f&)>& admissible, float max_radius_m) const
+{
+    const auto ok = [&](const Eigen::Vector2f& w)
+    { return pose_free(w, theta) and (not admissible or admissible(w)); };
+
+    if (ok(pos_room)) return pos_room;
     const int max_r = static_cast<int>(std::ceil(max_radius_m / cell_));
     int cx, cy;
     world_to_cell(pos_room, cx, cy);
@@ -376,7 +450,7 @@ std::optional<Eigen::Vector2f> GridPlanner::nearest_free(const Eigen::Vector2f& 
                 const int nx = cx + dx, ny = cy + dy;
                 if (not in_bounds(nx, ny)) continue;
                 const auto w = cell_to_world(nx, ny);
-                if (not pose_free(w, theta)) continue;
+                if (not ok(w)) continue;
                 const float d2 = (w - pos_room).squaredNorm();
                 if (d2 < best_d2) { best_d2 = d2; best = w; }
             }
@@ -817,16 +891,27 @@ bool GridPlanner::self_test()
     }
 
     // (7) FEASIBLE AT BOTH ENDS, IMPOSSIBLE IN THE MIDDLE — the failure the arrival path cannot see.
-    // A standpoint is verified at ONE heading; the terminal rotation sweeps the whole arc. For a
-    // 0.46 x 0.65 body the width swept peaks at the DIAGONAL (0.796 m), so a slot between 0.65 and
-    // 0.796 m admits the robot pointing along it and across it, and traps it at 45 degrees.
+    // A standpoint is verified at ONE heading; the terminal rotation sweeps the whole arc. The Shadow
+    // hull measures 0.543 m across and 0.460 m along, so lying in a corridor it needs 0.543 m — but the
+    // span it sweeps while turning PEAKS at 0.615 m around 30 deg (measured off the hull itself, not
+    // guessed from a bounding box). A slot between the two admits the robot pointing along it and traps
+    // it part-way round.
+    // ★THE NUMBERS HERE WERE RESTATED WITH THE YAW CORRECTION, and the old ones are worth recording
+    // because they were wrong twice over: they read "0.46 x 0.65 body, diagonal 0.796 m", which is the
+    // INSCRIBED and CIRCUMSCRIBED diameters treated as though they were the body's sides. The slot they
+    // produced (0.75 m) only trapped the robot because the 0.10 m raster was inflating everything by two
+    // cells — so the test was passing on rasterisation error, against a body that was itself rotated 90
+    // degrees. Both are fixed: the true hull, and a cell fine enough that the assertion is about the
+    // body rather than about the grid.
     {
         GridPlanner p; p.params.safety_margin_m = 0.f;
-        const std::vector<Eigen::Vector2f> room{{0.f, 0.f}, {6.f, 0.f}, {6.f, 6.f}, {0.f, 6.f}};
-        // A 0.75 m slot running along x at y = 3.
-        p.set_world(room, {{{0.f, 0.f}, {6.f, 0.f}, {6.f, 2.625f}, {0.f, 2.625f}},
-                           {{0.f, 3.375f}, {6.f, 3.375f}, {6.f, 6.f}, {0.f, 6.f}}});
-        const Eigen::Vector2f spot{3.f, 3.f};
+        p.params.cell_size_m = 0.01f;   // the trapping window is 7 cm wide; the raster must not fill it
+        const std::vector<Eigen::Vector2f> room{{0.f, 0.f}, {3.f, 0.f}, {3.f, 3.f}, {0.f, 3.f}};
+        // A 0.58 m slot running along x at y = 1.5: wider than the body lying in it (0.543), narrower
+        // than the widest span it sweeps turning round (0.615).
+        p.set_world(room, {{{0.f, 0.f}, {3.f, 0.f}, {3.f, 1.21f}, {0.f, 1.21f}},
+                           {{0.f, 1.79f}, {3.f, 1.79f}, {3.f, 3.f}, {0.f, 3.f}}});
+        const Eigen::Vector2f spot{1.5f, 1.5f};
         const float along = 0.f, back = static_cast<float>(M_PI);
         const auto sweep = p.rotation_sweep(spot, along, back);
         std::printf("  narrow slot: free along=%s free reversed=%s | can it TURN? %s (tightest %.3f m at %.0f deg)\n",
@@ -865,6 +950,108 @@ bool GridPlanner::self_test()
         const auto same = p.nearest_rotatable(open_spot);
         check(same.has_value() and (*same - open_spot).norm() < 1e-6f,
               "an already-rotatable standpoint must be returned untouched");
+    }
+
+    // (9) nearest_free_where: the search must honour evidence the GRID DOES NOT HAVE. This is the case
+    // the controller's final-approach re-check depends on — an empty grid, so every pose passes
+    // pose_free, and an obstacle known only to the caller (a live LiDAR return over a decayed hull).
+    // Re-asking the grid there returns the same wrong answer forever; the predicate is what changes it.
+    {
+        GridPlanner p; p.params.safety_margin_m = 0.f;
+        const std::vector<Eigen::Vector2f> room{{0.f, 0.f}, {6.f, 0.f}, {6.f, 6.f}, {0.f, 6.f}};
+        p.set_world(room, {});                       // NOTHING is occupied: the grid has forgotten
+        const Eigen::Vector2f standpoint{3.f, 3.f};
+        check(p.pose_free(standpoint, 0.f), "the grid must call it free — that IS the failure being modelled");
+        check(p.nearest_free(standpoint, 0.f).value_or(Eigen::Vector2f{-9.f, -9.f}).isApprox(standpoint),
+              "and nearest_free must therefore leave it exactly where it is");
+        // Known only to the caller: everything within 0.5 m of the standpoint is really occupied.
+        const auto admissible = [&](const Eigen::Vector2f &w) { return (w - standpoint).norm() > 0.5f; };
+        const auto moved = p.nearest_free_where(standpoint, 0.f, admissible, 1.5f);
+        std::printf("  nearest_free_where with caller-supplied evidence: %s (moved %.2f m)\n",
+                    moved ? std::format("({:.2f},{:.2f})", moved->x(), moved->y()).c_str() : "none",
+                    moved ? (*moved - standpoint).norm() : 0.f);
+        check(moved.has_value(), "open floor is right there — the search must find somewhere");
+        check(moved and admissible(*moved), "★the returned pose must satisfy the EXTRA predicate");
+        check(moved and p.pose_free(*moved, 0.f), "...and still be footprint-feasible on the grid");
+        check(moved and (*moved - standpoint).norm() < 0.75f,
+              "it must take the NEAREST admissible pose, not wander: a viewpoint dragged far is no "
+              "longer that affordance's viewpoint");
+        // A predicate nothing can satisfy must REPORT that, never invent a pose outside the bound.
+        check(not p.nearest_free_where(standpoint, 0.f, [](const Eigen::Vector2f &) { return false; }, 1.5f)
+                    .has_value(),
+              "an unsatisfiable predicate must return nullopt, so the caller can say so out loud");
+    }
+
+    // (10) ★HEADING IS A YAW, AND THE BODY MUST FACE ALONG IT. This is the convention the whole class
+    // runs on and it was silently violated for the class's whole life: offsets_[h] was rasterised at
+    // RobotFootprint's theta while h meant a yaw, so the body sat 90 deg across its own direction of
+    // travel. Nothing threw, because the hull is nearly symmetric — the only symptom was 4.2 cm of
+    // missing width where a corridor closes. It is unprovable from behaviour, so it is pinned here.
+    {
+        GridPlanner p;
+        p.params.cell_size_m = 0.02f;      // fine, so the assertion is about the body and not the raster
+        p.params.safety_margin_m = 0.f;
+        const std::vector<Eigen::Vector2f> room{{0.f, 0.f}, {4.f, 0.f}, {4.f, 4.f}, {0.f, 4.f}};
+        p.set_world(room, {});             // empty world: this is about the offsets, not the occupancy
+        const auto span = [](const std::vector<Eigen::Vector2i>& o)
+        {
+            int mx = 0, my = 0;
+            for (const auto& c : o) { mx = std::max(mx, std::abs(c.x())); my = std::max(my, std::abs(c.y())); }
+            return std::pair{mx, my};
+        };
+        const auto [along0, across0] = span(p.offsets_[0]);                 // yaw 0   → travelling +x
+        const auto [across90, along90] = span(p.offsets_[kHeadings / 4]);   // yaw 90  → travelling +y
+        std::printf("  heading convention: at yaw 0 the body spans %d cells along-track / %d across-track;"
+                    " at yaw 90, %d / %d\n", along0, across0, along90, across90);
+        // The Shadow hull is 0.2716 m half-width LATERALLY and 0.2300 m half-length. So whichever way it
+        // is pointing, it must measure WIDER across its track than it is long along it.
+        check(across0 > along0,
+              "★at yaw 0 (travelling +x) the body must be wider in y than it is long in x — if this is "
+              "reversed the footprint is rotated 90 deg from its direction of travel");
+        check(across90 > along90, "★and the same at yaw 90 deg, which is that statement rotated");
+        // ...and the correction must actually differ from what it replaced, or the monitor is measuring
+        // nothing. The legacy rasterisation is the transposed one, by construction.
+        const auto [l_along0, l_across0] = span(p.offsets_legacy_[0]);
+        check(l_across0 < l_along0, "the legacy offsets must be the TRANSPOSED ones — that is the bug "
+                                    "being measured against, and a monitor that reports no difference "
+                                    "is a monitor that is not wired up");
+    }
+
+    // (11) The census must SEE the difference in a world where it can matter: a corridor narrower than
+    // the body's width but wider than its length admits travel along it in exactly one of the two
+    // rasterisations, which is the whole physical content of the correction.
+    {
+        GridPlanner p;
+        p.params.cell_size_m = 0.02f;
+        p.params.safety_margin_m = 0.f;
+        const std::vector<Eigen::Vector2f> room{{0.f, 0.f}, {4.f, 0.f}, {4.f, 4.f}, {0.f, 4.f}};
+        // A horizontal corridor 0.52 m tall: wider than the body is LONG (0.460) and narrower than it is
+        // WIDE (0.543), so driving along +x through it is impossible and only the corrected orientation
+        // knows that.
+        p.set_world(room, {{{0.f, 0.f}, {4.f, 0.f}, {4.f, 1.74f}, {0.f, 1.74f}},
+                           {{0.f, 2.26f}, {4.f, 2.26f}, {4.f, 4.f}, {0.f, 4.f}}});
+        const Eigen::Vector2f mid{2.f, 2.f};
+        std::printf("  corridor 0.52 m: along +x corrected=%s legacy=%s\n",
+                    p.pose_free(mid, 0.f) ? "fits" : "BLOCKED",
+                    p.pose_free_legacy(mid, 0.f) ? "fits" : "BLOCKED");
+        check(not p.pose_free(mid, 0.f),
+              "★the body is 0.543 m wide: it does NOT fit down a 0.52 m corridor, and the corrected "
+              "rasterisation is the one that says so");
+        check(p.pose_free_legacy(mid, 0.f),
+              "...while the legacy one waved it through — this is the scrape, reproduced");
+        const auto c = p.orientation_census();
+        std::printf("  census: %ld states, free %ld -> %ld (lost %ld, gained %ld)\n",
+                    c.states, c.free_legacy, c.free_now, c.lost, c.gained);
+        check(c.states > 0 and c.lost > 0,
+              "the census must report states changing hands, or it is not measuring anything");
+        // ★AND THE TOTAL MUST NOT MOVE. A quarter turn is exactly two of eight buckets, so the corrected
+        // offsets at heading h are the legacy offsets at h-2 and the two rasterisations cover the same
+        // set of placements overall. This is what says the correction REDISTRIBUTES space rather than
+        // costing it — and it is the invariant that would break first if someone "fixed" the conversion
+        // by inflating the footprint instead of rotating it.
+        check(c.free_now == c.free_legacy and c.lost == c.gained,
+              "★the correction must conserve total free C-space: it rotates the body, it does not "
+              "grow it. Unequal totals mean something is being inflated, not turned");
     }
 
     std::printf("GridPlanner::self_test %s\n", ok ? "PASS" : "FAIL");

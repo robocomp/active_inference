@@ -43,6 +43,9 @@
 #include "../src/grid_planner.h"
 #include "../src/route_follower.h"
 #include "../src/route_optimizer.h"
+// Header-only, pure, and it guards a SAFETY reflex — so it belongs in the one command that runs every
+// self-test rather than in a scratch main that ages. See stall_judge.h for what it caught.
+#include "../src/stall_judge.h"
 
 using Eigen::Vector2f;
 
@@ -366,7 +369,8 @@ int main(int argc, char **argv)
             const bool ok = rc::GridPlanner::self_test()
                           & rc::RouteSpline::self_test()
                           & rc::RouteFollower::self_test()
-                          & rc::route_optimizer_self_test();
+                          & rc::route_optimizer_self_test()
+                          & rc::StallJudge::self_test();
             std::printf("\n%s\n", ok ? "ALL SELF-TESTS PASS" : "SELF-TESTS FAILED");
             return ok ? 0 : 1;
         }

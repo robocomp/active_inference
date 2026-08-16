@@ -1339,15 +1339,36 @@ void SpecificWorker::process_ricoh_bearings()
 
     const auto dets = rc::peripheral::gather(mask_ingestor_->packet(), "cabinet", robot_xy,
                                              cfg_.ricoh_attention_conf);
+    // ★WHAT A "TRACK" IS DEPENDS ON THE MODEL, AND THIS AGENT HAS TWO. The classic path tracks fitter
+    // INSTANCES; the kitchen path has none — its unit is a (wall,tier) CELL owned by kitchen_mgr_, and
+    // fitter_->instances() is permanently EMPTY there. Reading only the fitter meant that in kitchen
+    // mode — the mode this agent actually runs in — every peripheral detection matched nothing and fell
+    // through to "attention", and this function was not even called (it sat inside the classic-only
+    // branch). Measured 2026-08-16: 196 ricoh `cabinet` slices arrived in 113 of 469 frames, depth-filled,
+    // and were read by nobody. Same trap as the growth term: ask what this agent's UNIT is first.
     std::vector<rc::peripheral::TrackRef> tracks;
-    tracks.reserve(fitter_->instances().size());
-    for (const auto& [id, inst] : fitter_->instances())
+    if (cfg_.kitchen_model)
     {
-        const auto& st = inst.model.state();
-        // A cabinet RUN is a long box: L along the run axis, d deep. Half-diagonal is the same
-        // circumscribed radius the other agents use, just from this model's own field names.
-        tracks.push_back({id, {st.cx, st.cy}, 0.5f * std::sqrt(st.L * st.L + st.d * st.d)});
+        // Cell ids are STRINGS, so the numeric TrackRef id is the box's index this cycle. That is
+        // enough for association (which only needs to know "some track matched") and deliberately NOT
+        // enough to route a confirm — see the confirm block below for why that is not wired yet.
+        const auto boxes = kitchen_mgr_.active_boxes();
+        tracks.reserve(boxes.size());
+        for (std::size_t i = 0; i < boxes.size(); ++i)
+        {
+            const auto& b = boxes[i];
+            tracks.push_back({static_cast<std::uint64_t>(i) + 1, {b.cx, b.cy},
+                              0.5f * std::sqrt(b.L * b.L + b.d * b.d)});
+        }
     }
+    else
+        for (const auto& [id, inst] : fitter_->instances())
+        {
+            const auto& st = inst.model.state();
+            // A cabinet RUN is a long box: L along the run axis, d deep. Half-diagonal is the same
+            // circumscribed radius the other agents use, just from this model's own field names.
+            tracks.push_back({id, {st.cx, st.cy}, 0.5f * std::sqrt(st.L * st.L + st.d * st.d)});
+        }
 
     rc::peripheral::Params pp;
     pp.angular_margin_rad = cfg_.ricoh_attention_angle_margin_rad;
@@ -1357,7 +1378,23 @@ void SpecificWorker::process_ricoh_bearings()
     // A MATCH IS EVIDENCE, not a no-op: confirm-only, e_free hard 0, so this channel can only push L up.
     // A ricoh miss charges nothing — the 360 detector's p_detect at a given range is uncharacterised, and
     // absence weighted by an unknown p_detect is the ratchet that has bitten this fleet before.
-    if (cfg_.ricoh_confirm_enabled)
+    // ★NOT WIRED IN KITCHEN MODE, ON PURPOSE — and refused loudly rather than silently no-opped. A
+    // kitchen cell's existence is a plain float log-odds nudged by hand-set presence_gain/absence_decay
+    // constants; it is NOT an rc::exist channel, so there is nothing here to integrate an Evidence into.
+    // Falling through would have looked identical to "working": the lookup below searches
+    // fitter_->instances(), which is empty in kitchen mode, so every confirm would quietly vanish.
+    // Unifying kitchen existence with rc::exist is its own piece of work, not a rider on this wiring.
+    if (cfg_.ricoh_confirm_enabled and cfg_.kitchen_model)
+    {
+        static bool warned = false;
+        if (not warned)
+        {
+            warned = true;
+            std::println("[ricoh] RicohConfirmEnabled is ON but the kitchen model has no rc::exist "
+                         "channel to integrate a confirm into — confirms IGNORED (attention still works)");
+        }
+    }
+    else if (cfg_.ricoh_confirm_enabled)
         for (const auto& cf : res.confirms)
         {
             auto& insts = fitter_->instances();
@@ -1378,5 +1415,14 @@ void SpecificWorker::process_ricoh_bearings()
     // Both counts: gathered vs unassigned. Zero attention with non-zero dets means the channel
     // is WORKING and everything it saw matched — the opposite conclusion from zero of both.
     if (fitter_) fitter_->set_ricoh_counts(static_cast<int>(dets.size()), ev_g_.ricoh_attention);
+
+    // ★AND SAY IT OUT LOUD, because in kitchen mode the CSV above is never written — ai2_csv_path is a
+    // CLASSIC-path log, so set_ricoh_counts() lands in a file nobody opens and the channel would be as
+    // invisible after this fix as it was before it. Throttled, and always printed when something was
+    // gathered, so a working channel cannot be mistaken for a dead one.
+    static int rdbg = 0;
+    if (not dets.empty() or ++rdbg % 100 == 0)
+        std::println("cabinet_concept: [ricoh] dets={} tracks={} confirms={} attention={}",
+                     dets.size(), tracks.size(), res.confirms.size(), res.attention.size());
 }
 

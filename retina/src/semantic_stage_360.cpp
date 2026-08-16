@@ -66,6 +66,11 @@ void SemanticStage360::run(const PerceptionFrame& in, PerceptionResult& out)
     // survives as one box; here the pieces are pasted back into the same global canvas at the same
     // pixels, so a component that spans a seam is only split when the two halves are in strips looked
     // at on DIFFERENT frames — and then they are genuinely two observations, not one.
+    // Pixels the model actually ran over this frame. Accumulated per strip that SUCCEEDED, so a strip
+    // the model bailed on is not counted as looked-at — the number stays the honest denominator for a
+    // downstream size test even on a partial frame.
+    long long inferred_px = 0;
+
     for (const int s : strips)
     {
         if (s < 0 or s >= n_strips_)
@@ -84,12 +89,16 @@ void SemanticStage360::run(const PerceptionFrame& in, PerceptionResult& out)
         m.labels.copyTo(labels(roi));   // copyTo into a ROI is a deep write into OUR buffer
         if (want_scores_ and not m.scores.empty() and m.scores.size() == m.labels.size())
             m.scores.copyTo(scores(roi));
+        inferred_px += static_cast<long long>(w) * H;
     }
 
     // `labels`/`scores` are buffers this stage allocated and nothing else references, so handing them
     // over is already the deep copy the worker→main thread boundary requires (CLAUDE.md cv::Mat rule) —
     // unlike the ZED stage, which must clone because it forwards the processor's cached map.
-    out.semantic = rc::semantic::SemanticMap{std::move(labels), std::move(scores)};
+    // ★inferred_area_px travels WITH the map, not as a separate field on the result, because it is a
+    // property OF this map: any consumer that has the labels has the area they were inferred over, and
+    // cannot accidentally size against the canvas instead.
+    out.semantic = rc::semantic::SemanticMap{std::move(labels), std::move(scores), inferred_px};
     out.semantic_fresh = true;
 }
 

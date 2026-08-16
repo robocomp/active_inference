@@ -25,16 +25,56 @@ struct ObstaclePalette
     QColor edge;
 };
 
-ObstaclePalette obstacle_palette(ControllerObstacleKind kind)
+// ── ONE HUE PER OBJECT ───────────────────────────────────────────────────────────────────────────
+// Every concept-agent object used to be drawn the same green, so a canvas with a table, four chairs, a
+// bottle and a fridge on it was one undifferentiated green mass and the only thing separating them was
+// a two-character label. Identity is a CATEGORICAL quantity; it gets categorical hues.
+//
+// WHY THESE SEVEN AND NOT MORE. The obstacle KINDS keep their existing colours — orange for anything
+// unmodelled, crimson for residual_concept's occupancy — and those are filled footprints too, so an
+// object hue that lands near either destroys the kind encoding to buy the object encoding. The seven
+// below are the largest set that clears, WITH those two reserved colours in the set, the all-pairs
+// separation gates on a light surface: worst pair ΔE 8.1 under simulated colour-vision deficiency
+// (protan/deutan) and 16.2 with normal vision, in OKLab×100. ALL pairs, not adjacent ones: two
+// footprints can end up side by side anywhere on a map, so there is no ordering to lean on.
+// Verified with the dataviz skill's validator, not by eye.
+// One slot (the lime) sits below 3:1 contrast against the light background; every footprint carries a
+// direct label in its own hue, which is the secondary encoding that requirement asks for.
+// PAST SEVEN OBJECTS THE SLOTS REPEAT. That is a deliberate wrap, not a generated hue: an eighth
+// invented colour would have no separation guarantee at all, and the label still tells them apart.
+constexpr int kObjectHueCount = 7;
+QColor object_hue(int slot)
+{
+    static const QColor kHues[kObjectHueCount] = {
+        QColor(0x3a, 0x95, 0xcd),   // blue
+        QColor(0x00, 0x8d, 0x65),   // teal-green
+        QColor(0xed, 0x3b, 0x87),   // magenta
+        QColor(0x7d, 0x4b, 0x92),   // plum
+        QColor(0x89, 0xb3, 0x1d),   // lime
+        QColor(0x23, 0x51, 0xde),   // indigo
+        QColor(0xa3, 0x61, 0xfb)};  // violet
+    return kHues[((slot % kObjectHueCount) + kObjectHueCount) % kObjectHueCount];
+}
+
+// The four roles, derived from ONE hue so they cannot drift apart: the pen and the centre dot carry the
+// validated colour at full opacity (they are what the eye actually matches on), the fill is the same hue
+// dropped to a wash so overlapping footprints stay readable, and the edge is a darkened form of it.
+ObstaclePalette palette_from_hue(const QColor &hue)
+{
+    QColor fill = hue;   fill.setAlpha(110);
+    QColor centre = hue; centre.setAlpha(235);
+    QColor edge = hue.darker(160); edge.setAlpha(240);
+    return {hue, fill, centre, edge};
+}
+
+ObstaclePalette obstacle_palette(ControllerObstacleKind kind, int object_slot = 0)
 {
     switch (kind)
     {
         case ControllerObstacleKind::Object:
-        // Model objects interpreted by a concept agent (table/cylinder/chair/object) — green.
-        return {QColor(34, 139, 58),
-            QColor(74, 200, 110, 130),
-            QColor(110, 231, 140, 230),
-            QColor(20, 101, 42, 240)};
+        // Model objects interpreted by a concept agent (table/cylinder/chair/object) — one hue each,
+        // assigned per OBJECT IDENTITY by Viewer2D::object_color_slot.
+        return palette_from_hue(object_hue(object_slot));
         case ControllerObstacleKind::Temporary:
         // The controller's OWN temporary lidar obstacles (unexplained returns) — orange.
         return {QColor(194, 103, 25),
@@ -204,6 +244,18 @@ void Viewer2D::update_robot(const Eigen::Affine2f &robot_pose)
     const float angle_rad = std::atan2(robot_pose.linear()(1, 0), robot_pose.linear()(0, 0));
     agv_->robot_poly()->setPos(translation.x(), translation.y());
     agv_->robot_poly()->setRotation(qRadiansToDegrees(angle_rad));
+}
+
+// See the declaration for why this is a registry and not a hash of the name. An object with no
+// identity to key on (older producers, or a visual built without one) all share slot 0 rather than
+// each grabbing a fresh colour — one shared "unidentified" hue is honest; seven of them would assert
+// distinctions the data does not contain.
+int Viewer2D::object_color_slot(const std::string &key)
+{
+    if (key.empty()) return 0;
+    const auto [it, inserted] = object_color_slots_.try_emplace(key, next_object_color_slot_);
+    if (inserted) ++next_object_color_slot_;
+    return it->second;
 }
 
 void Viewer2D::clear_polygon_item(QGraphicsPolygonItem *&item)
@@ -489,7 +541,10 @@ void Viewer2D::draw_path(const PathDrawData &data)
             if (obstacle.size() < 3)
                 continue;
 
-            const auto palette = obstacle_palette(obstacle_visual.kind);
+            const auto palette = obstacle_palette(obstacle_visual.kind,
+                                                  obstacle_visual.kind == ControllerObstacleKind::Object
+                                                      ? object_color_slot(obstacle_visual.color_key)
+                                                      : 0);
             const bool is_grid_cell = obstacle_visual.kind == ControllerObstacleKind::GridOccupancy;
             // Grid cells tile edge-to-edge — use a thin hairline pen so they read as one filled region
             // (a 0.085 m border per 0.35 m cell would drown the fill). Real obstacles keep the bold edge.
@@ -590,7 +645,13 @@ void Viewer2D::draw_path(const PathDrawData &data)
                 label_font.setPointSizeF(8.0);
                 label_font.setBold(true);
                 auto *label = agv_->scene.addSimpleText(QString::fromStdString(obstacle_visual.label), label_font);
-                label->setBrush(QBrush(palette.pen));
+                // ★INK, NOT THE OBJECT'S HUE. The tag is what tells two footprints apart when their
+                // colours are hard to separate — colour-vision deficiency, a projector, a printout —
+                // so it is the one thing that must stay readable in every case. Drawn in the object's
+                // own hue it inherited that hue's contrast against the background, which for the
+                // lighter slots is under 3:1: the label went faint exactly where it was needed most.
+                // Identity is carried by the footprint beside it; the text carries the name.
+                label->setBrush(QBrush(QColor(28, 37, 42)));
                 label->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
                 label->setPos(center.x() + 0.06, center.y() - 0.06);
                 label->setZValue(20);

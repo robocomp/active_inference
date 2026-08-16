@@ -33,6 +33,12 @@ struct ControllerObstacleVisual
     ControllerPolygon polygon;
     ControllerObstacleKind kind = ControllerObstacleKind::Obstacle;
     std::string label;   // short tag drawn on the footprint: t_1/c_1/b_1 (objects), o_1/o_2 (obstacles)
+    // ── STABLE IDENTITY, for anything that must follow the OBJECT rather than its rank ────────────
+    // The DSR node name. `label` cannot serve: it is a per-type counter reset on every rebuild, so a
+    // table becomes t_1 or t_2 depending on which siblings happen to exist that cycle. Colouring by it
+    // would repaint every survivor whenever one object appears or disappears — the viewer equivalent of
+    // a legend that reshuffles itself. The node name does not move.
+    std::string color_key;
     // ── ROUND FOOTPRINT (display only) ────────────────────────────────────────────────────────────
     // A round table's belief has no yaw and no width/depth — it has a RADIUS — and drawing it as the
     // axis-aligned box its w/h attributes imply asserts corners and an orientation the agent never
@@ -224,6 +230,16 @@ struct ControllerParams
     float max_rot_accel_rps2 = 4.0f;
     float max_rot_decel_rps2 = 8.0f;
     bool interpolate_rt = true;
+    // ── PER-CONSUMER POSE: give the CONTROL LAW the freshest pose the RT tree holds ───────────────
+    // false = the previous behaviour, one pose for everything, pinned to the last LiDAR stamp.
+    // The loop was declining a fresher block that already existed — measured lead 33 ms p50 / 68 ms p90
+    // over 6000 cycles — which at 0.35 m/s is 12-24 mm of cross-track the feedback then had to correct.
+    // Nothing is extrapolated: it is a real RT block, one query later. See ControllerWorldModel's two
+    // readers, and HANDOFF_delay_and_feedforward.md Issue 1.
+    // ⚠WHAT TO WATCH on the first runs: a fresher pose is also a LESS SMOOTHED one, so if the newest
+    // block is jumpy this shows up as e_y noise, i.e. rot chatter. Compare cross_track_rms_m and
+    // rot_reversals against a run with this false before keeping it.
+    bool tracker_uses_latest_pose = true;
     // Dead-reckon the DISPLAYED lidar cloud + robot icon forward from the last lidar
     // timestamp to "now" using the measured base velocity, so the overlay tracks the robot
     // instead of trailing it by the lidar/pose latency. Display-only — the obstacle buffer
@@ -289,6 +305,14 @@ struct ControllerParams
     float pose_xy_std_stop_m = 0.12f;
     float pose_theta_std_slow_rad = 0.04f;
     float pose_theta_std_stop_rad = 0.20f;
+    // ── A/B LEVER OVER THE WHOLE POSE-COVARIANCE LIMITER ──────────────────────────────────────────
+    // 1 = the limiter as configured; 0 = it computes and reports but never restrains; 0.5 = half. It
+    // multiplies the RESULT, so it cannot re-tune one term against another, and the diagnostic records
+    // what was actually applied. Exists so "is sigma what is slowing the robot" can be answered by
+    // driving the same route twice instead of by reading the code.
+    // ⚠NOT A CURE: at 0 the robot drives fast on a pose it has less reason to trust. If the 0 run is the
+    // good one, fix whatever inflated sigma.
+    float pose_uncertainty_coupling = 1.0f;
     float min_adv_speed_scale = 0.15f;
     float min_rot_speed_scale = 0.05f;
     float uncertainty_prediction_horizon_s = 0.4f;
@@ -400,6 +424,22 @@ struct ControllerParams
     // BOUND on the whole wait. A mask that is never going to arrive must not park the robot forever:
     // past this the dwell ends regardless and the log says the acquisition failed, which is a result.
     float affordance_dwell_max_ms = 12000.0f;
+
+    // ── RE-ASK THE STANDPOINT IN THE LAST METRES, AGAINST EVIDENCE THAT HAS NOT FADED ─────────────
+    // The standpoint IS re-tested every cycle — but only against the planner grid, whose occupancy comes
+    // from beliefs that decay. When residual_concept's hull over a real object fades, the cells under it
+    // read FREE, so the test answers "fine" however many times it is asked, and the robot drives into
+    // something the grid has forgotten. Re-asking a stale question more often cannot fix that; asking a
+    // question with fresher evidence can.
+    // Inside this radius of the standpoint the live LiDAR return cloud is admitted as evidence about the
+    // standpoint itself, and a standpoint whose footprint contains returns is moved to the nearest pose
+    // that is free under BOTH the grid and the cloud. This is a MEASUREMENT-SUPPORT window, not a
+    // behaviour threshold: further out the standpoint's own cells are usually occluded by whatever the
+    // robot is approaching, so the cloud carries no information about them and the test would be answering
+    // from absence. The same number bounds how far the standpoint may be displaced — a viewpoint dragged
+    // further than the distance at which its problem was noticed is no longer that affordance's viewpoint.
+    // 0 disables it and only the grid test remains.
+    float affordance_approach_recheck_m = 1.5f;
 
     // Physical-WEDGE detection + reverse-and-turn escape. Distinct from the MPPI's geometric
     // path_blocked (a VISIBLE obstacle on the planned path, handled by modelling + replanning): a wedge
