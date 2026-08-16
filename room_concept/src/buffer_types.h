@@ -34,4 +34,9 @@ namespace rc
     /// Single-channel circular buffer for measured odometry readings
     using OdometryBuffer = BufferSync<InOut<OdometryReading, OdometryReading>>;
 
+    /// Single-channel circular buffer for inertial samples. Deeper than the odometry buffer because
+    /// it runs an order of magnitude faster (~125 Hz vs 10 Hz) and must still span the interval
+    /// between two lidar sweeps for the preintegrator to have anything to integrate.
+    using ImuBuffer = BufferSync<InOut<ImuReading, ImuReading>>;
+
 } // namespace rc

@@ -303,6 +303,26 @@ namespace rc
             << ",ml_bias_x,ml_bias_y,ml_bias_theta"
             << ",early_exit_metric"
             << ",recovery_bad,recovery_cooldown,search_active"
+            // ★ APPENDED 08-16, AT THE END, ON BOTH WRITERS TOGETHER. This file's history is the
+            // reason for that discipline: a group once declared mid-header while both writers emitted
+            // it LAST mislabelled every column from slot_poses_pre onward. New columns go at the tail
+            // and nowhere else, and every one below is written on BOTH paths — a column that exists on
+            // only one is worse than no column, because it silently restricts the analysis to the
+            // frames that happened to take that path (which is how n_lidar came to read 0 on 98% of
+            // rows). Old logs simply lack these fields; a reader keyed on the header handles that.
+            //
+            // inj_*      ground truth of a synthetic-error injection run, so the log is SELF-DESCRIBING
+            //            and a recovery test can be scored from an archived file alone. inj_scale_* is
+            //            the REALISED draw, not the configured std. inj_active = 0 on any normal run.
+            // preint_*   how many odometry samples the motion factor summarised and over how long —
+            //            the direct witness of whether striding is chaining intervals as intended.
+            // slot_mcov_ off-diagonals of the motion covariance. The whole argument for propagating it
+            //   xy/xt/yt is that a heading error rotates subsequent translation; these are the terms
+            //            that carries, and until now only the diagonal was logged, so the change's
+            //            central claim was the one thing the log could not show.
+            << ",inj_active,inj_sigma_v,inj_sigma_w,inj_scale_v,inj_scale_w"
+            << ",preint_n,preint_T"
+            << ",slot_mcov_xy,slot_mcov_xt,slot_mcov_yt"
             << "\n";
         debug_log_.flush();
         qInfo() << "Debug log writing to" << QString::fromStdString(debug_log_path_);
@@ -2198,6 +2218,21 @@ namespace rc
                 slot_motion_cov = stride_preint_accum_.covariance();
         }
 
+        // Mirror what this slot's motion factor actually got, for BOTH debug-log writers (the
+        // early-exit one is in another function and can only see members).
+        last_slot_motion_cov_ = slot_motion_cov;
+        if (params.motion_preintegration and params.window_stride_enabled and stride_preint_accum_.samples > 0)
+        {
+            last_preint_samples_    = stride_preint_accum_.samples;
+            last_preint_duration_s_ = stride_preint_accum_.duration_s;
+        }
+        else if (params.motion_preintegration and selected_prior.has_preint)
+        {
+            last_preint_samples_    = selected_prior.preint.samples;
+            last_preint_duration_s_ = selected_prior.preint.duration_s;
+        }
+        else { last_preint_samples_ = 0; last_preint_duration_s_ = 0.f; }
+
         WindowSlot new_slot;
         new_slot.pose = torch::tensor({pred_pos.x(), pred_pos.y(), pred_theta},
             torch::TensorOptions().dtype(torch::kFloat32).device(get_device()).requires_grad(true));
@@ -2784,6 +2819,7 @@ namespace rc
                        << ',' << recovery_.consecutive_bad_frames
                        << ',' << recovery_.cooldown
                        << ',' << (grid_search_active_.load(std::memory_order_relaxed) ? 1 : 0);
+            write_debug_tail();
 
             debug_log_ << '\n';
             debug_log_.flush();
@@ -3233,6 +3269,7 @@ namespace rc
                        << ',' << recovery_.consecutive_bad_frames
                        << ',' << recovery_.cooldown
                        << ',' << (grid_search_active_.load(std::memory_order_relaxed) ? 1 : 0);
+            write_debug_tail();
             debug_log_ << '\n';
             debug_log_.flush();
         }
@@ -4180,6 +4217,22 @@ namespace rc
      * Compute motion-based covariance consistently
      * σ = base + k * distance
      */
+    void RoomConcept::write_debug_tail()
+    {
+        if (not debug_log_.is_open())
+            return;
+        debug_log_ << ',' << (injection_truth_.active ? 1 : 0)
+                   << ',' << injection_truth_.sigma_v
+                   << ',' << injection_truth_.sigma_w
+                   << ',' << injection_truth_.scale_v
+                   << ',' << injection_truth_.scale_w
+                   << ',' << last_preint_samples_
+                   << ',' << last_preint_duration_s_
+                   << ',' << last_slot_motion_cov_(0, 1)
+                   << ',' << last_slot_motion_cov_(0, 2)
+                   << ',' << last_slot_motion_cov_(1, 2);
+    }
+
     Eigen::Matrix3f RoomConcept::compute_motion_covariance(const OdometryPrior &odometry_prior,
                                                              bool is_measured_odometry)
     {
@@ -4468,7 +4521,9 @@ namespace rc
                 const std::vector<OdometryReading> &odometry_history,
                 const int64_t &t_start_ms,
                 const int64_t &t_end_ms,
-                rc::preint::Interval *preint_out)
+                rc::preint::Interval *preint_out,
+                const std::vector<ImuReading> *imu_history,
+                const SimClockMap *sim_clock)
     {
         Eigen::Vector3f total_delta = Eigen::Vector3f::Zero();
         float running_theta = std::atan2(robot_pose.linear()(1,0), robot_pose.linear()(0,0));
@@ -4478,26 +4533,90 @@ namespace rc
         rc::preint::Integrator preint(running_theta);
         preint.set_noise(params.odom_preint_noise);
 
-        // Integrate over all odometry readings in [t_start_ms, t_end_ms] using source/recv epoch-ms.
+        // ── ONE CLOCK, and it is the producer's ────────────────────────────────────────────────────
+        // The two ends of this interval come from different places. The BOUNDS are lidar sweep stamps,
+        // which are local wall-clock. The RATES are in whatever clock the producer measured them in --
+        // and a simulator measures per SIMULATION second while running behind real time, so
+        // integrating its rates over wall intervals under-counts by exactly the sim/wall ratio (~6%
+        // here; the mirror image of the bug webots-bridge commit 5968a65 fixed from the other side).
+        //
+        // Converting the two BOUNDS is the cheap direction: everything below then works in one clock,
+        // and because this function returns a DISPLACEMENT rather than a rate, no caller has to know.
+        // On real hardware the map is identity and none of this costs anything.
+        const bool use_sim_clock = sim_clock != nullptr and sim_clock->valid()
+                                   and not odometry_history.empty()
+                                   and odometry_history.front().simulated;
+        const auto to_clock = [&](std::int64_t wall_ms) -> std::int64_t
+        { return use_sim_clock ? sim_clock->to_sim(wall_ms) : wall_ms; };
+        const auto stamp_of = [&](const OdometryReading &o) -> std::int64_t
+        { return use_sim_clock ? o.integration_ts_ms() : o.effective_ts_ms(); };
+
+        const std::int64_t win_start_ms = to_clock(t_start_ms);
+        const std::int64_t win_end_ms   = to_clock(t_end_ms);
+
+        // ── Heading change from the gyro, over an arbitrary sub-interval ───────────────────────────
+        // Yaw is the channel wheel odometry gets worst: a differential base turns by scrubbing its
+        // wheels sideways, so it over-reports rotation -- measured 8.2% on this robot, against
+        // translation exact to 0.1%. The gyro measures the body rate directly and carries no such
+        // error. It also runs ~10x faster, so this integrates the rate as it actually varied instead
+        // of holding one 10 Hz `rot` sample flat across a whole sweep interval.
+        //
+        // Returns false unless the IMU brackets the WHOLE segment; partial coverage is deliberately
+        // refused, because a Δθ covering part of a segment silently under-rotates, which is worse
+        // than a consistent wheel estimate.
+        const auto imu_stamp = [&](const ImuReading &s) -> std::int64_t
+        { return use_sim_clock ? s.integration_ts_ms() : s.effective_ts_ms(); };
+        const auto imu_dtheta = [&](std::int64_t seg_start, std::int64_t seg_end, float &dtheta_out) -> bool
+        {
+            if (imu_history == nullptr or imu_history->size() < 2) return false;
+            if (imu_stamp(imu_history->front()) > seg_start or imu_stamp(imu_history->back()) < seg_end)
+                return false;
+            double acc = 0.0;
+            bool any = false;
+            for (size_t k = 0; k + 1 < imu_history->size(); ++k)
+            {
+                const std::int64_t a = imu_stamp((*imu_history)[k]);
+                const std::int64_t b = imu_stamp((*imu_history)[k + 1]);
+                if (b <= a) continue;
+                const std::int64_t s = std::max(a, seg_start);
+                const std::int64_t e = std::min(b, seg_end);
+                if (e <= s) continue;
+                // Trapezoid across the sample pair, so a rate ramping through the segment is not
+                // biased by holding the leading sample flat.
+                const double w0 = (*imu_history)[k].gyro_z, w1 = (*imu_history)[k + 1].gyro_z;
+                const double span = static_cast<double>(b - a);
+                const double f0 = static_cast<double>(s - a) / span;
+                const double f1 = static_cast<double>(e - a) / span;
+                const double wm = 0.5 * ((w0 + (w1 - w0) * f0) + (w0 + (w1 - w0) * f1));
+                acc += wm * static_cast<double>(e - s) * 0.001;
+                any = true;
+            }
+            if (not any) return false;
+            dtheta_out = static_cast<float>(acc);
+            return true;
+        };
+        int imu_segments = 0, wheel_segments = 0;
+
+        // Integrate over all odometry readings in [win_start_ms, win_end_ms], on the clock chosen above.
         for (size_t i = 0; i < odometry_history.size(); ++i)
         {
             const auto& odom = odometry_history[i];
 
             // Get time window for this reading
-            const std::int64_t cmd_start_ms = odom.effective_ts_ms();
+            const std::int64_t cmd_start_ms = stamp_of(odom);
             const std::int64_t cmd_end_ms = (i + 1 < odometry_history.size())
-                           ? odometry_history[i + 1].effective_ts_ms()
-                           : t_end_ms;
+                           ? stamp_of(odometry_history[i + 1])
+                           : win_end_ms;
 
             if (cmd_start_ms <= 0 || cmd_end_ms <= 0 || cmd_end_ms <= cmd_start_ms)
                 continue;
 
-            // Clip to [t_start_ms, t_end_ms]
-            if (cmd_end_ms < t_start_ms) continue;
-            if (cmd_start_ms > t_end_ms) break;
+            // Clip to [win_start_ms, win_end_ms]
+            if (cmd_end_ms < win_start_ms) continue;
+            if (cmd_start_ms > win_end_ms) break;
 
-            const std::int64_t effective_start_ms = std::max(cmd_start_ms, t_start_ms);
-            const std::int64_t effective_end_ms = std::min(cmd_end_ms, t_end_ms);
+            const std::int64_t effective_start_ms = std::max(cmd_start_ms, win_start_ms);
+            const std::int64_t effective_end_ms = std::min(cmd_end_ms, win_end_ms);
 
             const float dt = static_cast<float>(effective_end_ms - effective_start_ms) * 0.001f;
             if (dt <= 0) continue;
@@ -4505,7 +4624,26 @@ namespace rc
             // Odometry velocities are in robot frame: adv=forward(Y), side=lateral(X), rot=angular
             const float dx_local = odom.side * dt;   // lateral (X in robot frame)
             const float dy_local = odom.adv * dt;    // forward (Y in robot frame)
-            const float dtheta = odom.rot * dt;      // odometry buffer is CCW+; use directly
+
+            // THE INJECTION. Heading change from the gyro when it brackets this segment, otherwise
+            // the wheel-derived rate. Translation stays on the wheels either way -- an accelerometer
+            // cannot supply it without a drifting double integration, and the wheels are already
+            // exact there.
+            float dtheta = odom.rot * dt;            // odometry buffer is CCW+; use directly
+            float rot_eff = odom.rot;
+            if (float dth_imu = 0.f; imu_dtheta(effective_start_ms, effective_end_ms, dth_imu))
+            {
+                // Keep BOTH on the covered segments: their ratio is how much heading the gyro is
+                // taking out of the wheel estimate, which is the whole point of the injection and the
+                // one number that says it is doing something rather than merely running.
+                wheel_dtheta_sum_ += dtheta;
+                imu_dtheta_sum_   += dth_imu;
+                dtheta = dth_imu;
+                rot_eff = dth_imu / dt;              // the mean rate the gyro actually saw
+                ++imu_segments;
+            }
+            else
+                ++wheel_segments;
 
             // Transform to global frame using MIDPOINT theta (reduces integration bias)
             const float theta_mid = running_theta + 0.5f * dtheta;
@@ -4513,10 +4651,52 @@ namespace rc
             total_delta[1] += dx_local * std::sin(theta_mid) + dy_local * std::cos(theta_mid);
             total_delta[2] += dtheta;
 
+            // Preintegration sees the SAME rate the mean used, or its covariance would describe a
+            // trajectory that was not integrated.
             if (preint_out != nullptr)
-                preint.add(odom.side, odom.adv, odom.rot, dt);
+                preint.add(odom.side, odom.adv, rot_eff, dt);
 
             running_theta += dtheta;
+        }
+
+        // ── Proof of life, then periodic health ────────────────────────────────────────────────────
+        // A channel that silently fails to bind is a recurring failure mode here, and an unused or
+        // degrading IMU is invisible in every outcome metric until it has already cost accuracy. The
+        // one-shot says it bound; the periodic line says it is STILL bound, how much of each interval
+        // the IMU actually covers, and how much heading it is removing from the wheel estimate.
+        imu_seg_used_  += imu_segments;
+        imu_seg_total_ += imu_segments + wheel_segments;
+        imu_stats_sim_clock_ = use_sim_clock;
+
+        if (not imu_injection_announced_ and imu_segments > 0)
+        {
+            imu_injection_announced_ = true;
+            qInfo().nospace() << "[ImuInject] gyro heading ACTIVE | clock="
+                              << (use_sim_clock ? "SIM (producer)" : "WALL — sim map NOT bound")
+                              << " | " << imu_segments << "/" << (imu_segments + wheel_segments)
+                              << " segments from IMU";
+        }
+
+        if (imu_stats_last_log_ms_ == 0)
+            imu_stats_last_log_ms_ = t_end_ms;
+        else if (t_end_ms - imu_stats_last_log_ms_ >= 5000 and imu_seg_total_ > 0)
+        {
+            const double cover = 100.0 * imu_seg_used_ / imu_seg_total_;
+            // Ratio of what the wheels would have said to what the gyro said, over the same segments.
+            // Expect ~1.05-1.08 on this robot: a differential base over-reports rotation because it
+            // turns by scrubbing. A ratio pinned at 1.000 means the gyro is agreeing suspiciously
+            // exactly -- more likely the same source twice than two sensors agreeing.
+            const double ratio = std::abs(imu_dtheta_sum_) > 1e-4
+                               ? wheel_dtheta_sum_ / imu_dtheta_sum_ : std::numeric_limits<double>::quiet_NaN();
+            qInfo().nospace() << "[ImuInject] clock="
+                              << (imu_stats_sim_clock_ ? "SIM" : "WALL(unbound)")
+                              << " coverage=" << QString::number(cover, 'f', 1) << "%"
+                              << " (" << imu_seg_used_ << "/" << imu_seg_total_ << " seg)"
+                              << " dtheta wheel/gyro=" << QString::number(ratio, 'f', 4)
+                              << " over " << QString::number(imu_dtheta_sum_, 'f', 3) << " rad";
+            imu_stats_last_log_ms_ = t_end_ms;
+            imu_seg_used_ = imu_seg_total_ = 0;
+            imu_dtheta_sum_ = wheel_dtheta_sum_ = 0.0;
         }
 
         if (preint_out != nullptr)
@@ -4567,12 +4747,20 @@ namespace rc
         prior.fresh = has_fresh_measurement();
 
         rc::preint::Interval interval;
+        // The IMU history is the fast channel the heading comes from; the clock map puts the lidar
+        // sweep bounds into the same clock the rates are measured in. Both are optional -- absent,
+        // this degrades exactly to the previous wheel-only, wall-clock behaviour.
+        std::vector<ImuReading> imu_history;
+        if (run_ctx_.imu_buffer != nullptr)
+            imu_history = run_ctx_.imu_buffer->get_snapshot<0>();
         prior.delta_pose = integrate_odometry_over_window(
             last_update_result.robot_pose,
             odometry_history,
             prev_ts,
             lidar_timestamp,
-            params.motion_preintegration ? &interval : nullptr);
+            params.motion_preintegration ? &interval : nullptr,
+            imu_history.empty() ? nullptr : &imu_history,
+            run_ctx_.sim_clock);
 
         prior.valid = true;
 

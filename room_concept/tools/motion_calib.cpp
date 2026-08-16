@@ -553,6 +553,51 @@ int main(int argc, char** argv)
         }
     }
 
+    // ── SCORECARD: if this log carries injected ground truth, grade the estimate against it ──────
+    // The point of the inj_* columns is that an archived log is self-describing, so this needs no
+    // side channel and no memory of which run was which.
+    if (col.count("inj_active"))
+    {
+        std::ifstream in3(argv[1]);
+        std::string l3; std::getline(in3, l3);
+        std::vector<std::string_view> b3;
+        float act = 0, tsv = 0, tsw = 0, tcv = 0, tcw = 0;
+        bool got = false;
+        while (std::getline(in3, l3))
+        {
+            std::string_view lv(l3);
+            split(lv, b3);
+            if (b3.size() < ncols) continue;
+            if (!parse_float(b3[col["inj_active"]], act)) continue;
+            parse_float(b3[col["inj_sigma_v"]], tsv);
+            parse_float(b3[col["inj_sigma_w"]], tsw);
+            parse_float(b3[col["inj_scale_v"]], tcv);
+            parse_float(b3[col["inj_scale_w"]], tcw);
+            got = true;
+            break;
+        }
+        if (got and act > 0.5f)
+        {
+            const auto& B = bands.back();
+            std::printf("\n  ══ RECOVERY SCORECARD — this log carries injected ground truth ══\n");
+            std::printf("    %-14s %14s %14s %10s\n", "parameter", "TRUTH", "RECOVERED", "ratio");
+            auto row = [&](const char* n, double truth, double got_v) {
+                std::printf("    %-14s %14s %14s %10s\n", n, num(truth,5).c_str(), num(got_v,5).c_str(),
+                            std::abs(truth) > 1e-12 ? num(got_v/truth,4).c_str() : "-");
+            };
+            row("sigma_v",     tsv, direct_v > 0 ? direct_v : B.trans.sigma);
+            row("sigma_omega", tsw, direct_w > 0 ? direct_w : B.rot.sigma);
+            row("s_v",         tcv, B.trans.s);
+            row("s_omega",     tcw, B.rot.s);
+            std::printf("    ★ sigma is scored against the DIRECT parked measurement (the regression is\n"
+                        "      reference-limited); the scales against the long-window regression.\n"
+                        "    ⚠ s_* truth is the REALISED draw for this run, which is what the estimator\n"
+                        "      can possibly recover — not the configured prior width.\n");
+        }
+        else if (got)
+            std::printf("\n  (inj_active = 0 — no injected truth in this log; a normal run.)\n");
+    }
+
     std::printf("\n  Suggested config (from the longest window with n >= 30):\n");
     const BandResult* best = nullptr;
     for (const auto& b : bands) if (b.rot.n >= 30 or b.trans.n >= 30) best = &b;

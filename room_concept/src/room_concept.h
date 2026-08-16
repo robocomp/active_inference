@@ -727,6 +727,8 @@ public:
         HighLidarBuffer* high_lidar_buffer   = nullptr;  // lidar + GT pose
         VelocityBuffer* velocity_buffer = nullptr;  // joystick / controller commands
         OdometryBuffer* odometry_buffer = nullptr;  // measured odometry (encoders/IMU)
+        ImuBuffer* imu_buffer = nullptr;            // inertial samples, ~10x the odometry rate
+        const SimClockMap* sim_clock = nullptr;     // producer sim clock <- local wall clock
     };
 
     /// Thread-safe command variants (pushed from UI thread, drained in run loop)
@@ -790,6 +792,21 @@ public:
                                 float normalized_adv,
                                 float normalized_rot,
                                 std::int64_t ts_ms);
+
+    /// Ground truth of a synthetic-error injection run, written to every debug-log row so the log is
+    /// SELF-DESCRIBING: a calibrator recovery test scores against the realised scale draw, and a value
+    /// that exists only in stdout cannot be recovered from an archived log. `active` is false on every
+    /// normal run, which is what stops a reader mistaking one for the other.
+    struct InjectionTruth
+    {
+        bool  active  = false;
+        float sigma_v = 0.f;   // m/sqrt(s)   — configured density
+        float sigma_w = 0.f;   // rad/sqrt(s) — configured density
+        float scale_v = 0.f;   // REALISED draw, not the configured std
+        float scale_w = 0.f;
+    };
+    /// Call ONCE, from the main thread during initialize(), before any reader exists.
+    void set_injection_truth(const InjectionTruth& t) { injection_truth_ = t; }
 
     /// Thread-safe: record the latest measured odometry sample entering the motion pipeline.
     void record_odometry_ingress(const std::string& source,
@@ -1202,6 +1219,29 @@ private:
    rc::preint::Interval stride_preint_accum_{};
    bool preint_announced_ = false;   // one-shot "the propagated covariance is really in force" log
 
+   // ---- Debug-log mirrors, set where the newest slot is BUILT so BOTH writer paths can emit them ----
+   // The early-exit writer lives in a different function from the slot build, so anything it must log
+   // has to be a member. Getting this wrong is how columns end up hardcoded to zero on one path only
+   // (n_lidar still is), which then silently halves the usable population of every analysis.
+   InjectionTruth  injection_truth_{};
+   /// The appended tail of a debug-log row, emitted by BOTH writers so they cannot drift apart. One
+   /// function rather than two copies precisely because two copies is how this file's columns got out
+   /// of step before.
+   void write_debug_tail();
+   Eigen::Matrix3f last_slot_motion_cov_  = Eigen::Matrix3f::Zero();  // full 3x3, for the off-diagonals
+   int             last_preint_samples_   = 0;    // odometry samples summarised into this slot's factor
+   float           last_preint_duration_s_ = 0.f; // and over how long — reveals strided chaining
+   bool imu_injection_announced_ = false;  // one-shot "dtheta really is coming from the gyro" log
+   // Rolling stats for the periodic [ImuInject] line. The one-shot above proves the path bound at
+   // all; these say whether it is still binding, how much of each interval the IMU actually covers,
+   // and -- the number that matters -- how much heading the gyro is taking OUT of the wheel estimate.
+   // A silently degrading channel (IMU stalls, buffer too shallow, clock map lost) reads as normal in
+   // every outcome metric until it has already cost accuracy.
+   int          imu_seg_used_ = 0, imu_seg_total_ = 0;
+   double       imu_dtheta_sum_ = 0.0, wheel_dtheta_sum_ = 0.0;  // rad, over IMU-covered segments only
+   bool         imu_stats_sim_clock_ = false;
+   std::int64_t imu_stats_last_log_ms_ = 0;
+
    // Running second moment of the innovation, per axis (x, y, theta). See Params::adaptive_cov_enabled.
    Eigen::Vector3f innov_m2_ = Eigen::Vector3f::Zero();
    /// Raise the published covariance to at least the error the innovations demonstrate. Call ONLY on
@@ -1426,11 +1466,16 @@ private:
                                                    const int64_t &t_start_ms, const int64_t &t_end_ms,
                                                    rc::preint::Interval *preint_out = nullptr);
 
-    /// Integrate measured odometry (adv, side, rot) over the same time window
+    /// Integrate measured odometry (adv, side, rot) over the same time window.
+    /// `imu_history` is optional; when it covers a segment, that segment's heading change comes from
+    /// the gyro instead of the wheel-derived rot. Bounds are WALL epoch-ms and are converted
+    /// internally to whatever clock the readings are measured in -- see the note at the definition.
     Eigen::Vector3f integrate_odometry_over_window(const Eigen::Affine2f &robot_pose,
                                                    const std::vector<OdometryReading> &odometry_history,
                                                    const int64_t &t_start_ms, const int64_t &t_end_ms,
-                                                   rc::preint::Interval *preint_out = nullptr);
+                                                   rc::preint::Interval *preint_out = nullptr,
+                                                   const std::vector<ImuReading> *imu_history = nullptr,
+                                                   const SimClockMap *sim_clock = nullptr);
 
     /// Compute odometry prior from measured velocities (encoder/IMU feedback)
     OdometryPrior compute_measured_odometry_prior(

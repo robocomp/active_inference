@@ -95,6 +95,19 @@ class SpecificWorker : public GenericWorker
         // ── Velocity / odometry buffers (thread-safe) ──────────────────────────
         rc::VelocityBuffer velocity_buffer_{20};
         rc::OdometryBuffer odometry_buffer_{20};
+        // Realised synthetic scale error for this run, drawn once in initialize() (main thread,
+        // before any consumer). Zero unless RoomConcept.OdomInjectScale* is set. See the injection
+        // site in the DSR polling path and RoomConcept::InjectionTruth.
+        float inj_scale_v_ = 0.f;
+        float inj_scale_w_ = 0.f;
+        // Deeper than the odometry buffer: the IMU runs ~125 Hz against odometry's 10 Hz, and it must
+        // still span the gap between two lidar sweeps (50-100 ms, so 6-13 samples) with slack for a
+        // late one. 20 entries would not cover two sweeps.
+        rc::ImuBuffer imu_buffer_{256};
+        // Fitted from the (wall, sim) stamp pairs arriving on every odometry sample; used to put the
+        // lidar sweep bounds on the same clock as the rates integrated between them.
+        rc::SimClockMap sim_clock_;
+        std::int64_t last_imu_sim_ts_ = 0;    // dedup: the graph re-signals on unrelated attribute writes
         std::uint64_t last_robot_ref_speed_timestamp_ = 0;
         std::uint64_t last_robot_current_speed_timestamp_ = 0;
         float last_robot_adv_speed_  = 0.f;   // robot-frame forward velocity (m/s), updated from DSR

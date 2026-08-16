@@ -157,8 +157,40 @@ void SpecificWorker::initialize()
     run_ctx.high_lidar_buffer = &lidar_ingestor_->buffer();
     run_ctx.velocity_buffer = &velocity_buffer_;
     run_ctx.odometry_buffer = &odometry_buffer_;
+    run_ctx.imu_buffer      = &imu_buffer_;
+    run_ctx.sim_clock       = &sim_clock_;
     room_concept_.set_run_context(run_ctx);
     room_concept_.params.prediction_early_exit = params.PREDICTION_EARLY_EXIT;
+
+    // ── Draw the synthetic odometry scale error, ONCE, before any consumer exists ────────────────
+    // See the injection site in the DSR polling path. The scale is a property of the RUN (a wheel
+    // radius does not change per sample), and the realised draw — not the configured std — is the
+    // ground truth a calibrator recovery test scores against, so it is published to the debug log
+    // rather than only printed. inj_active gates the whole thing so a normal run writes zeros and a
+    // reader can never mistake a real run for an injected one.
+    {
+        std::mt19937 gen{std::random_device{}()};
+        if (params.ODOM_INJECT_SCALE_V > 0.f)
+            inj_scale_v_ = std::normal_distribution<float>(0.f, params.ODOM_INJECT_SCALE_V)(gen);
+        if (params.ODOM_INJECT_SCALE_OMEGA > 0.f)
+            inj_scale_w_ = std::normal_distribution<float>(0.f, params.ODOM_INJECT_SCALE_OMEGA)(gen);
+
+        rc::RoomConcept::InjectionTruth truth;
+        truth.active   = (params.ODOM_INJECT_SIGMA_V > 0.f or params.ODOM_INJECT_SIGMA_OMEGA > 0.f
+                          or inj_scale_v_ != 0.f or inj_scale_w_ != 0.f);
+        truth.sigma_v  = params.ODOM_INJECT_SIGMA_V;
+        truth.sigma_w  = params.ODOM_INJECT_SIGMA_OMEGA;
+        truth.scale_v  = inj_scale_v_;
+        truth.scale_w  = inj_scale_w_;
+        room_concept_.set_injection_truth(truth);
+        if (truth.active)
+            qWarning().nospace()
+                << "[OdomInject] ACTIVE — THIS RUN'S LOCALISATION IS DELIBERATELY DEGRADED. "
+                << "GROUND TRUTH: sigma_v=" << truth.sigma_v << " m/sqrt(s)  sigma_omega="
+                << truth.sigma_w << " rad/sqrt(s)  s_v=" << truth.scale_v
+                << "  s_omega=" << truth.scale_w
+                << "  (also written to every debug-log row as inj_*)";
+    }
 
     initialize_room_model_from_svg();
     const std::string pose_path = pose_file_path();
@@ -836,8 +868,13 @@ void SpecificWorker::modify_node_attrs_slot(std::uint64_t id, const std::vector<
         "robot_ref_rot_speed",
         "robot_ref_speed_timestamp"
     });
+    const bool touches_imu = touches_any({
+        "imu_gyroscope",
+        "imu_time_stamp",
+        "imu_sim_time_stamp"
+    });
 
-    if (not touches_current_speed and not touches_ref_speed)
+    if (not touches_current_speed and not touches_ref_speed and not touches_imu)
         return;
 
     const auto node_opt = G->get_node(id);
@@ -845,6 +882,44 @@ void SpecificWorker::modify_node_attrs_slot(std::uint64_t id, const std::vector<
         return;
 
     const auto &robot_node = node_opt.value();
+
+    // ── Inertial samples: the FAST channel ────────────────────────────────────────────────────────
+    // Arrives an order of magnitude faster than odometry (~125 Hz against 10 Hz) and matters because
+    // yaw is the one channel wheel odometry gets badly wrong: a differential base turns by scrubbing
+    // its wheels, so it over-reports rotation -- measured at 8.2% on this robot, against translation
+    // that is exact to 0.1%. Buffering these lets the motion prior integrate the gyro across the
+    // interval between two lidar sweeps instead of holding one 10 Hz rot sample constant across it.
+    if (touches_imu)
+    {
+        if (const auto gyro = G->get_attrib_by_name<imu_gyroscope_att>(robot_node);
+            gyro.has_value() and gyro.value().get().size() >= 3)
+        {
+            rc::ImuReading imu;
+            imu.gyro_z = gyro.value().get()[2];      // about robot +Z, CCW+, same convention as odom.rot
+            if (const auto ts = G->get_attrib_by_name<imu_time_stamp_att>(robot_node); ts.has_value())
+                imu.source_ts_ms = static_cast<std::int64_t>(ts.value());
+            if (const auto sts = G->get_attrib_by_name<imu_sim_time_stamp_att>(robot_node); sts.has_value())
+                imu.sim_ts_ms = static_cast<std::int64_t>(sts.value());
+            if (const auto sim_flag = G->get_attrib_by_name<imu_simulated_att>(robot_node); sim_flag.has_value())
+                imu.simulated = sim_flag.value();
+
+            // Dedup on the integration stamp. The graph re-signals this node for unrelated attribute
+            // writes, and re-buffering the same sample would make it count twice in the interval.
+            const std::int64_t key = imu.integration_ts_ms();
+            if (key > 0 and key != last_imu_sim_ts_)
+            {
+                last_imu_sim_ts_ = key;
+                imu.recv_ts_ms = static_cast<std::int64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count());
+                if (imu.simulated and imu.sim_ts_ms > 0)
+                    sim_clock_.observe(imu.source_ts_ms, imu.sim_ts_ms);
+                imu_buffer_.put<0>(std::move(imu), static_cast<std::uint64_t>(key));
+            }
+        }
+        if (not touches_current_speed and not touches_ref_speed)
+            return;
+    }
 
     if (touches_current_speed)
     {
@@ -893,28 +968,18 @@ void SpecificWorker::modify_node_attrs_slot(std::uint64_t id, const std::vector<
                             // ⚠ The scale is drawn once from N(0, sigma_scale^2) and PRINTED at first
                             // use: that realised value is the ground truth a recovery test scores
                             // against, so it has to be recoverable from the log, not just from the seed.
+                            // The realised scales are drawn ONCE in initialize(), on the main thread,
+                            // before any reader exists — not lazily here. This callback runs off the
+                            // DSR polling path while the logger reads the same values from the compute
+                            // thread, and a function-local static initialised here would be published
+                            // to that reader without ordering. Drawing at startup removes the race
+                            // rather than papering it with an atomic.
                             const float dt_inj = (last_robot_current_speed_timestamp_ > 0)
                                 ? std::max(1e-3f, static_cast<float>(source_ts - last_robot_current_speed_timestamp_) * 1e-3f)
                                 : 0.05f;
                             const float inv_sqrt_dt_inj = 1.f / std::sqrt(dt_inj);
-                            static bool  scale_drawn = false;
-                            static float inj_scale_v = 0.f, inj_scale_w = 0.f;
-                            if (not scale_drawn)
-                            {
-                                scale_drawn = true;
-                                if (params.ODOM_INJECT_SCALE_V > 0.f)
-                                    inj_scale_v = std::normal_distribution<float>(0.f, params.ODOM_INJECT_SCALE_V)(gen);
-                                if (params.ODOM_INJECT_SCALE_OMEGA > 0.f)
-                                    inj_scale_w = std::normal_distribution<float>(0.f, params.ODOM_INJECT_SCALE_OMEGA)(gen);
-                                if (params.ODOM_INJECT_SIGMA_V > 0.f or params.ODOM_INJECT_SIGMA_OMEGA > 0.f
-                                    or inj_scale_v != 0.f or inj_scale_w != 0.f)
-                                    qInfo().nospace()
-                                        << "[OdomInject] GROUND TRUTH for this run — sigma_v="
-                                        << params.ODOM_INJECT_SIGMA_V << " m/sqrt(s)  sigma_omega="
-                                        << params.ODOM_INJECT_SIGMA_OMEGA << " rad/sqrt(s)  s_v="
-                                        << inj_scale_v << "  s_omega=" << inj_scale_w
-                                        << "  (scales DRAWN ONCE; score the calibrator against these)";
-                            }
+                            const float inj_scale_v = inj_scale_v_;
+                            const float inj_scale_w = inj_scale_w_;
                             auto inject = [&](float value, float sigma_density, float scale) -> float {
                                 float v = value * (1.f + scale);
                                 if (sigma_density > 0.f)
@@ -927,6 +992,19 @@ void SpecificWorker::modify_node_attrs_slot(std::uint64_t id, const std::vector<
                             odom.side = inject(add_noise(side_value.value()), params.ODOM_INJECT_SIGMA_V,     inj_scale_v);
                             odom.rot  = inject(add_noise(rot_value.value()),  params.ODOM_INJECT_SIGMA_OMEGA, inj_scale_w);
                             odom.source_ts_ms = static_cast<std::int64_t>(source_ts);
+                            // The producer's own clock, where it has one. A simulator's velocities are
+                            // per SIMULATION second, so integrating them over wall-clock intervals
+                            // under-counts by the sim/wall ratio; this is the stamp that makes the
+                            // interval agree with the rate. Absent on real hardware, where the two
+                            // clocks are the same thing and integration_ts_ms() falls back cleanly.
+                            if (const auto sim_ts = G->get_attrib_by_name<robot_current_speed_sim_timestamp_att>(robot_node);
+                                sim_ts.has_value())
+                                odom.sim_ts_ms = static_cast<std::int64_t>(sim_ts.value());
+                            if (const auto sim_flag = G->get_attrib_by_name<robot_current_speed_simulated_att>(robot_node);
+                                sim_flag.has_value())
+                                odom.simulated = sim_flag.value();
+                            if (odom.simulated and odom.sim_ts_ms > 0)
+                                sim_clock_.observe(odom.source_ts_ms, odom.sim_ts_ms);
                             odom.recv_ts_ms = static_cast<std::int64_t>(
                                 std::chrono::duration_cast<std::chrono::milliseconds>(
                                     std::chrono::system_clock::now().time_since_epoch()).count());
