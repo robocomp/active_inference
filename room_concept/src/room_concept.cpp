@@ -2979,7 +2979,27 @@ namespace rc
             rc::preint::Interval synth;
             synth.delta   = selection.selected_prior.delta_pose;
             synth.cov     = selection.selected_prior.covariance_eigen;
-            synth.samples = 1;
+            // ⚠ The TIMING is a property of the interval, not of either channel, so it must be carried
+            // across from a real interval rather than invented. An earlier version set samples = 1 and
+            // left duration_s at 0; chaining those then accumulated a count that meant nothing and a
+            // duration that stayed zero for ever — preint_n read 1..8 while preint_T read 0 on 2254 of
+            // 2404 rows. A diagnostic that disagrees with itself is worse than no diagnostic, because
+            // the disagreement is only visible if someone cross-tabulates the two columns.
+            if (selection.measured_prior.has_preint)
+            {
+                synth.samples    = selection.measured_prior.preint.samples;
+                synth.duration_s = selection.measured_prior.preint.duration_s;
+            }
+            else if (selection.command_prior.has_preint)
+            {
+                synth.samples    = selection.command_prior.preint.samples;
+                synth.duration_s = selection.command_prior.preint.duration_s;
+            }
+            else
+            {
+                synth.samples    = 1;
+                synth.duration_s = selection.selected_prior.dt * 1e-3f;   // dt is milliseconds
+            }
             selection.selected_prior.preint = synth;
             selection.selected_prior.has_preint = true;
         }
@@ -3208,7 +3228,13 @@ namespace rc
                 << ',' << last_selected_prior_.delta_pose[2]
                 << ',' << sel_cov_xx << ',' << sel_cov_tt
                 << ',' << x << ',' << y << ',' << phi
-                << ',' << 0 << ',' << 0   // slot_mcov (not available here)
+                // slot_mcov: was hardcoded 0 here because the local is out of scope on this path, so
+                // the two columns read zero on 93% of rows (1690 of 1822 measured) and any analysis of
+                // the motion covariance silently ran on the 7% that took the Adam path — which is
+                // conditioned on the prediction having already FAILED, i.e. the least representative
+                // frames in the log. Same defect as n_lidar two lines up. The value is now mirrored in
+                // last_slot_motion_cov_ at the slot build, which both writers can reach.
+                << ',' << last_slot_motion_cov_(0, 0) << ',' << last_slot_motion_cov_(2, 2)
                 << ',' << 1               // early_exit = 1
                 << ',' << 0               // iters
                 << ',' << mean_sdf_pred
