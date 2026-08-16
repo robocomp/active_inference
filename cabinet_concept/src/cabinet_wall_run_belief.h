@@ -55,6 +55,28 @@ struct WallChart
     { const Eigen::Vector2f q(p.x() - A.x(), p.y() - A.y()); t = q.dot(u); s = q.dot(n); }
 };
 
+// An object's OBB footprint → its EXACT 1-D shadows on a wall chart's axes (u = along-wall, n = depth).
+// The min/max of the four projected corners is the exact interval a rotated rectangle spans on each axis,
+// for any object yaw — no bounding-box inflation.
+//
+// Extracted from accumulate_object_exclusion when the end-prior clamp needed the same projection: the run's
+// fit and the TARGET handed to that fit must agree about where a neighbour stands, and two copies of this
+// arithmetic would be two chances to disagree about it.
+inline void obb_shadow_on_chart(const SceneObjectBox& o, const WallChart& chart,
+                                float& t0, float& t1, float& s0, float& s1)
+{
+    const Eigen::Vector2f ex(std::cos(o.yaw), std::sin(o.yaw)), ey(-std::sin(o.yaw), std::cos(o.yaw));
+    const Eigen::Vector2f c(o.cx, o.cy);
+    t0 = s0 = 1e30f; t1 = s1 = -1e30f;
+    for (float sx : {-0.5f, 0.5f}) for (float sy : {-0.5f, 0.5f})
+    {
+        const Eigen::Vector2f q = c + sx * o.w * ex + sy * o.d * ey - chart.A;
+        const float t = q.dot(chart.u), sl = q.dot(chart.n);
+        t0 = std::min(t0, t); t1 = std::max(t1, t);
+        s0 = std::min(s0, sl); s1 = std::max(s1, sl);
+    }
+}
+
 // Per-tier standardized-but-physical priors (tight, σ covers the GT spread) — NOT hard constants.
 struct WallTierPrior
 {
@@ -280,18 +302,8 @@ public:
 
         for (const auto& o : f.scene_objects)
         {
-            // OBB footprint → EXACT 1-D shadows on the wall axes (u = along, n = depth): min/max of the 4
-            // projected corners is the exact interval a rotated rectangle spans on each axis (any object yaw).
-            const Eigen::Vector2f ex(std::cos(o.yaw), std::sin(o.yaw)), ey(-std::sin(o.yaw), std::cos(o.yaw));
-            const Eigen::Vector2f c(o.cx, o.cy);
-            float o_t0 = 1e30f, o_t1 = -1e30f, o_s0 = 1e30f, o_s1 = -1e30f;
-            for (float sx : {-0.5f, 0.5f}) for (float sy : {-0.5f, 0.5f})
-            {
-                const Eigen::Vector2f q = c + sx * o.w * ex + sy * o.d * ey - chart_.A;
-                const float t = q.dot(chart_.u), sl = q.dot(chart_.n);
-                o_t0 = std::min(o_t0, t); o_t1 = std::max(o_t1, t);
-                o_s0 = std::min(o_s0, sl); o_s1 = std::max(o_s1, sl);
-            }
+            float o_t0, o_t1, o_s0, o_s1;
+            obb_shadow_on_chart(o, chart_, o_t0, o_t1, o_s0, o_s1);
             // 3-D conflict gate: the object must occupy the run's depth band [0,d] AND z band [z0,z1] AND
             // overlap it along the wall — else no penetration (object in front/behind, above/below, or aside).
             if (o_s1 <= 0.0f or o_s0 >= s.d)   continue;

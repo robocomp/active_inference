@@ -356,6 +356,35 @@ public:
         // active and reaching that same corner — then the belief's corner-fill factor pushes the end to it.
         route_corner_fill(mp);
 
+        // ★A SIBLING CELL IS AN OBJECT TOO (2026-08-16). The runs of ONE kitchen could grow through each
+        // other anywhere, and nothing said they could not: `accumulate_object_exclusion` — the non-penetration
+        // term that already retracts a run out of another agent's furniture, with an exact OBB shadow and a
+        // full depth/z/along-wall conflict gate — only ever saw `scene_objects`, i.e. OTHER agents' boxes.
+        // Its own siblings were invisible to it, and so was `rc::exclusion` (foreign_claims() drops
+        // same-prefix nodes by design). route_corner_fill covers ONE case of this, the shared vertex, and
+        // only when both runs are already within corner_capture_m of it; away from a corner, or before that
+        // pairing engages, there was no term at all.
+        //
+        // So feed it the siblings. No new mechanism, no new constant, and no special-casing of tiers: the
+        // existing gate `o.z1 <= s.z0 or o.z0 >= s.z1` already lets a wall unit sit above a base unit
+        // untouched, which is the same z reasoning common/exclusion needed.
+        //
+        // ★SNAPSHOT BEFORE THE LOOP, not inside it. Reading each sibling's box as we go would let cell 0's
+        // freshly updated state be what cell 1 avoids while cell 1's stale state is what cell 0 avoided —
+        // making the result depend on cell ORDER, which is the kind of asymmetry that shows up months later
+        // as one particular run always losing.
+        sib_boxes_.clear(); sib_ids_.clear();
+        const auto add_box = [&](const WallRunBelief& b, const std::string& owner)
+        {
+            SceneObjectBox o; float L = 0.0f;
+            b.room_box(o.cx, o.cy, o.yaw, L, o.d, o.z0, o.z1);
+            o.w = L;                              // SceneObjectBox.w is the extent along its own +x = the run's L
+            sib_boxes_.push_back(o); sib_ids_.push_back(owner);
+        };
+        for (std::size_t k = 0; k < K; ++k)
+            if (cells_[k].active()) add_box(*cells_[k].belief, cells_[k].geom.id);
+        if (island_belief_) add_box(*island_belief_, "island");
+
         // Second pass: update each active cell's belief with its assigned points (+ the corner-fill flags set above).
         for (std::size_t k = 0; k < K; ++k)
         {
@@ -363,6 +392,9 @@ public:
             if (not c.active() or cpts[k].empty()) continue;
             CabinetFrame f = frame_template;            // carries chain/ego/lidar_freespace
             f.points = std::move(cpts[k]); f.R = std::move(cR[k]);
+            for (std::size_t b = 0; b < sib_boxes_.size(); ++b)
+                if (sib_ids_[b] != c.geom.id)           // everything except THIS run
+                    f.scene_objects.push_back(sib_boxes_[b]);
             c.fe = c.belief->update(f);   // the returned free energy was being discarded
         }
 
@@ -550,6 +582,12 @@ public:
             island_belief_->set_corner_fill({island_anchored_, 0.0f, false}, {});
             CabinetFrame f = frame_template;
             f.points = pts; f.R.assign(pts.size(), bp_.sigma_base_m * bp_.sigma_base_m);
+            // The wall runs are objects to the island exactly as it is one to them — the same snapshot taken
+            // in update(), minus the island's own box. A peninsula grows along a wall it shares with a run,
+            // so this is the pair most likely to interpenetrate, not a corner case.
+            for (std::size_t b = 0; b < sib_boxes_.size(); ++b)
+                if (sib_ids_[b] != "island")
+                    f.scene_objects.push_back(sib_boxes_[b]);
             island_belief_->update(f);
             island_diag_.anchored = island_anchored_;
             // Depth-axis spread of the island's own points, same reading as a wall cell's.
@@ -610,18 +648,65 @@ public:
     }
     // Hand a level-2 END PRIOR to one cell's belief. `t0/t1` are already in that cell's chart — the
     // worker projects the room-frame targets, since only it reads the graph. info 0 clears that end.
+    //
+    // ★THE TARGET IS CLAMPED OUT OF A SIBLING'S BODY FIRST. The arrangement prior is the one mechanism that
+    // drives an end to where NO point supports it — that is its whole job, making the kitchen read as one
+    // continuous surface — and it knows nothing about which run already stands there. Left alone it becomes
+    // a tug-of-war against non-penetration decided by whichever precision is larger, which is comparing a
+    // metaconcept's confidence about STYLE with a physical fact. Measured on the rig: with both at 800 they
+    // split the difference and left 0.145 m² of interpenetration standing.
+    //
+    // Clamping the TARGET resolves it where the contradiction actually is, and it costs the metaconcept
+    // nothing it was entitled to: continuity is still requested, just to the neighbour's FACE, which is
+    // where a continuous kitchen surface has its seam anyway. Exactly the setback route_corner_fill applies
+    // at a vertex, applied to the other driver of growth. No precision comparison, no new constant.
     void set_cell_end_prior(const std::string& cell_id, float t0, float t0_info, float t1, float t1_info)
     {
         for (auto& c : cells_)
             if (c.geom.id == cell_id and c.belief)
-            { c.belief->set_end_prior(t0, t0_info, t1, t1_info); return; }
+            {
+                clamp_end_targets_out_of_siblings(*c.belief, cell_id, t0, t1);
+                c.belief->set_end_prior(t0, t0_info, t1, t1_info); return;
+            }
         if (cell_id == "island" and island_belief_)
+        {
+            clamp_end_targets_out_of_siblings(*island_belief_, cell_id, t0, t1);
             island_belief_->set_end_prior(t0, t0_info, t1, t1_info);
+        }
     }
     void clear_end_priors()
     {
         for (auto& c : cells_) if (c.belief) c.belief->clear_end_prior();
         if (island_belief_) island_belief_->clear_end_prior();
+    }
+
+    // Move an end TARGET off any sibling run it lands inside, onto that run's near face. Uses the same OBB
+    // shadow the fit's non-penetration term uses (obb_shadow_on_chart), so the target and the fit cannot
+    // disagree about where the neighbour is. Reads the snapshot taken in update(); on the very first cycle
+    // it is empty and nothing is clamped, which is correct — no run has a body yet.
+    void clamp_end_targets_out_of_siblings(const WallRunBelief& belief, const std::string& self_id,
+                                           float& t0, float& t1) const
+    {
+        const auto& s = belief.state();
+        for (std::size_t b = 0; b < sib_boxes_.size(); ++b)
+        {
+            if (sib_ids_[b] == self_id) continue;                   // never clamp against ourselves
+            const auto& o = sib_boxes_[b];
+            float o_t0, o_t1, o_s0, o_s1;
+            obb_shadow_on_chart(o, belief.chart(), o_t0, o_t1, o_s0, o_s1);
+            if (o_s1 <= 0.0f or o_s0 >= s.d)  continue;             // sibling is in front of / behind us
+            if (o.z1 <= s.z0 or o.z0 >= s.z1) continue;             // a different storey — see common/exclusion
+            // ★THE TEST IS "WOULD REACHING IT CROSS THE SIBLING", NOT "IS IT INSIDE THE SIBLING". A target
+            // BEYOND a neighbour is the worse request of the two — it asks the run to swallow it whole — and
+            // an inside-the-body test misses it entirely, which is exactly what the rig caught. So this is
+            // the same case split accumulate_object_exclusion makes, on the same margin, so the target the
+            // fit is given and the boundary the fit enforces are the identical number.
+            const float tc = 0.5f * (s.t0 + s.t1);
+            const float m  = bp_.object_exclusion_margin_m;
+            if (tc >= o_t1)      t0 = std::max(t0, o_t1 + m);       // sibling below our centre ⇒ t0 stops above it
+            else if (tc <= o_t0) t1 = std::min(t1, o_t0 - m);       // sibling above our centre ⇒ t1 stops below it
+            // else our centre is inside the sibling: engulfed, which is the retirement pass's call, not ours.
+        }
     }
     // The chart a cell is fitted in — the worker needs it to project a room-frame end target onto t.
     const WallChart* cell_chart(const std::string& cell_id) const
@@ -859,6 +944,11 @@ private:
     float                          island_exist_   = 0.0f;
     float                          island_cov_ema_ = 0.0f;
     KitchenCellDiag                island_diag_;               // per-cycle observability (CSV/dashboard)
+    // This cycle's snapshot of every run's box, taken in update() BEFORE any of them is refitted, so which
+    // run avoids which does not depend on the order cells happen to be stored in. update_island() runs after
+    // update() and reuses it rather than re-reading half-updated states.
+    std::vector<SceneObjectBox>    sib_boxes_;
+    std::vector<std::string>       sib_ids_;                   // parallel to sib_boxes_ ("island" for the island)
 };
 
 inline bool KitchenManager::self_test()
@@ -979,6 +1069,124 @@ inline bool KitchenManager::self_test()
         }
         for (int it = 0; it < 60; ++it) m2.update(tight, mp, tmpl);
         check(m2.active_boxes().empty(), "a 4 cm cluster does NOT activate a degenerate sliver run");
+    }
+
+    // ★CELL-vs-CELL PENETRATION AWAY FROM A SHARED VERTEX. route_corner_fill only arbitrates a corner two
+    // runs BOTH reach, and rc::exclusion cannot see this pair at all (foreign_claims drops same-prefix nodes).
+    // In between sat a real gap, and the live room is the reason it is not hypothetical: a wall SEGMENT can
+    // extend past the room corner, so a run's own chart legitimately covers its neighbour's body and nothing
+    // stopped it growing there. Reproduced here by starting the north wall 0.8 m PAST the corner — the two
+    // endpoints are then 0.8 m apart, far beyond corner_join_tol_m (0.10), so the corner machinery never
+    // engages and only sibling non-penetration can answer.
+    //
+    // ⚠The term rides on ObjectExclusionPrecision, which DEFAULTS TO 0 (off) and is 800 in cabinet's
+    // config.toml. Set here to match the live agent — a default-constructed params would test nothing and
+    // pass, which is the same shape of trap as the front-face predicates above.
+    {
+        CabinetBeliefParams bp2 = bp;
+        bp2.object_exclusion_precision = 800.0f;
+        const Eigen::Vector2f I2(1.0f, 1.5f);
+        const std::vector<KitchenWall> w2 = {
+            make_kitchen_wall({0.0f, 0.0f}, {0.0f, 3.0f}, I2, 0),   // west
+            make_kitchen_wall({-0.8f, 3.0f}, {2.0f, 3.0f}, I2, 1),  // north, starting 0.8 m PAST the corner
+        };
+        KitchenManager m7; m7.build(w2, tiers, tp, bp2, 2.6f);
+        std::vector<Eigen::Vector3f> p2;
+        push_front(p2, w2[0], 0.4f, 2.9f);   // west run driven almost INTO the corner
+        push_front(p2, w2[1], 1.1f, 2.5f);   // north run over x ∈ [0.3, 1.7] — its chart reaches x = −0.8
+        for (int it = 0; it < 20; ++it) m7.update(p2, mp, tmpl);
+        // ★NOW DRIVE THE END WHERE NO POINT SUPPORTS IT — with the LEVEL-2 ARRANGEMENT END PRIOR, which is
+        // the live mechanism that does exactly that. kitchen_metaconcept tells a run where to end so the
+        // kitchen reads as one continuous surface; it knows nothing about which sibling already stands
+        // there, and its prior enters at whatever information it declares. Here it aims the north run's low
+        // end at t = 0.0 (x = −0.8), straight through the west run's body, with information matching the
+        // model's own end precision. Without sibling non-penetration nothing at all opposes it.
+        std::string north_id;   // looked up, never spelled out — a hardcoded cell id silently aims the
+        for (const auto& c : m7.cells())                 // prior at nothing and the test then proves nothing
+            if (c.active() and c.geom.wall_seg_id == 1 and c.geom.tier == 0) north_id = c.geom.id;
+        check(not north_id.empty(), "the north run is found for the end-prior probe");
+        for (int it = 0; it < 60; ++it)
+        {
+            m7.set_cell_end_prior(north_id, 0.0f, 800.0f, 0.0f, 0.0f);
+            m7.update(p2, mp, tmpl);
+        }
+        const auto b7 = m7.active_boxes();
+        float worst = 0.0f;
+        for (std::size_t i = 0; i < b7.size(); ++i)
+            for (std::size_t j = i + 1; j < b7.size(); ++j)
+            {
+                if (b7[i].tier != b7[j].tier) continue;
+                worst = std::max(worst, rc::geom::overlap_ratio({b7[i].cx, b7[i].cy, b7[i].L, b7[i].d, b7[i].yaw},
+                                                                {b7[j].cx, b7[j].cy, b7[j].L, b7[j].d, b7[j].yaw}));
+            }
+        check(b7.size() == 2, "both runs activate on overlapping wall segments");
+        check(worst < 0.05f, "two runs whose CHARTS overlap still do not occupy the same space");
+
+        // ★THE SECOND DRIVER: EVIDENCE, not a prior. Above, the end prior aimed a run through its neighbour;
+        // here the run's OWN mask points do, which is the case the target clamp cannot touch and only the
+        // fit's non-penetration term answers. Routing breaks a tie between two charts that both contain a
+        // point by taking the FIRST cell, so listing the north wall first hands it the contested points and
+        // its censored extent bound then grows it straight along the west run's body.
+        const std::vector<KitchenWall> w3 = {
+            make_kitchen_wall({-0.8f, 3.0f}, {2.0f, 3.0f}, I2, 0),  // north FIRST ⇒ it wins the contested points
+            make_kitchen_wall({0.0f, 0.0f}, {0.0f, 3.0f}, I2, 1),   // west
+        };
+        KitchenManager m8; m8.build(w3, tiers, tp, bp2, 2.6f);
+        std::vector<Eigen::Vector3f> p3;
+        push_front(p3, w3[0], 0.4f, 2.5f);   // north evidence reaching x = −0.4, THROUGH the west run's body
+        push_front(p3, w3[1], 0.4f, 2.9f);
+        for (int it = 0; it < 80; ++it) m8.update(p3, mp, tmpl);
+        const auto b8 = m8.active_boxes();
+        float worst8 = 0.0f;
+        for (std::size_t i = 0; i < b8.size(); ++i)
+            for (std::size_t j = i + 1; j < b8.size(); ++j)
+            {
+                if (b8[i].tier != b8[j].tier) continue;
+                worst8 = std::max(worst8, rc::geom::overlap_ratio({b8[i].cx, b8[i].cy, b8[i].L, b8[i].d, b8[i].yaw},
+                                                                  {b8[j].cx, b8[j].cy, b8[j].L, b8[j].d, b8[j].yaw}));
+            }
+        check(worst8 < 0.05f, "a run's own mask evidence does not grow it through a sibling either");
+
+        // ★THE ISLAND IS THE CASE ROUTING CANNOT SOLVE. Wall cells partition their evidence by hard argmax
+        // over charts, so a point belongs to exactly one of them and neither can grow on the other's returns
+        // — which is why the two cases above are answered by the target clamp alone. The island is fitted
+        // from a DIFFERENT mask label through a SEPARATE call (update_island), so no argmax ever compares it
+        // with a wall run, and its chart is PCA-derived and free to lie anywhere. Nothing but the fit's
+        // non-penetration term stands between a peninsula and the run it grows along.
+        {
+            const float ev_x0 = 0.30f, ev_x1 = 1.60f;   // the island's raw mask evidence, along +x
+            KitchenManager m9; m9.build(walls, tiers, tp, bp2, 2.6f);
+            std::vector<Eigen::Vector3f> island;   // a run along +x at y = 1.2, starting INSIDE the west run
+            for (int i = 0; i <= 20; ++i)
+            {
+                const float x = ev_x0 + (ev_x1 - ev_x0) * static_cast<float>(i) / 20.0f;
+                for (int j = 0; j <= 4; ++j) island.emplace_back(x, 1.20f, 0.80f * static_cast<float>(j) / 4.0f);
+            }
+            for (int it = 0; it < 80; ++it) { m9.update(pts, mp, tmpl); m9.update_island(island, mp, tmpl); }
+            const KitchenBox* isl = nullptr;
+            for (const auto& b : m9.active_boxes()) if (b.wall_seg_id < 0) isl = &b;
+            check(isl != nullptr, "the island activates (else the check below proves nothing)");
+            // ★WHAT THIS ASSERTS, AND WHAT IT DELIBERATELY DOES NOT. The island's near end is driven off its
+            // own raw evidence, away from the west run — measured 0.300 → 0.367 — which is only possible if
+            // update_island is being handed the wall runs. Blind, it sits at exactly ev_x0 and its length is
+            // exactly the evidence span.
+            //
+            // It does NOT assert the overlap reaches zero, because here it does not: ~0.18 m of
+            // interpenetration survives. Both beliefs hold GENUINE mask evidence inside the contested volume
+            // (the island's points really do start 0.25 m inside the west run's believed body), so the model
+            // does what it says it does — no arbitration, the cost falls on whoever is wrong, and with
+            // object_exclusion_precision and extent_precision both at 800 that cost is split. Making one
+            // yield outright would mean weighting by support strength: a real change to the generative model,
+            // and the user's call, not something to smuggle in behind a test tolerance.
+            if (isl)
+            {
+                const float low = isl->cx - 0.5f * isl->L;
+                check(low > ev_x0 + 0.01f,               // 1 cm ⇒ clear of float noise, vs the 6.7 cm measured
+                      "the island is pushed off its own evidence, out of the wall run it started inside");
+                check(isl->L < (ev_x1 - ev_x0),
+                      "the island is SHORTER than its raw evidence span (it yielded, rather than growing)");
+            }
+        }
     }
 
     // A GENUINE narrow run (~0.35 m, one carcass) still activates — coverage discriminates slivers from real
