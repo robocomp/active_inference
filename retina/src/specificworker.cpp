@@ -35,6 +35,7 @@
 #include "seg_stage.h"
 #include "pose_stage.h"
 #include "semantic_stage.h"
+#include "semantic_stage_360.h"
 #include "semantic_mask_stage.h"
 #include "sam2_stage.h"
 #include "bearing_stage.h"
@@ -371,6 +372,53 @@ void SpecificWorker::initialize()
             ricoh_stages.push_back(std::move(seg360));
         }
         if (params.RICOH_PUBLISH_MASKS)
+        // ── ADE20K on the SAME scheduled strip (Ricoh.semantic_enabled) ───────────────────────────
+        // ★THIS IS WHAT GIVES cabinet_concept AND hood_concept A PERIPHERAL CHANNEL AT ALL. Their labels
+        // come from YOLO-sem (class_id = 1000 + ade_id), and the ricoh's YOLO-seg accepted_labels holds
+        // neither "cabinet" nor "hood" — so gather() could never match a slice for them and their ricoh
+        // code, shared or not, was unable to fire once. Affordable because the round-robin freed ~20 ms:
+        // seg went 32.0 -> 12.2 ms measured, leaving ~38 of the 50 ms budget.
+        // Order matters: seg ADVANCES the shared strip window, this READS it, BearingStage runs last and
+        // turns every mask — YOLO-seg's and the semantic ones alike — into an azimuth.
+        if (params.RICOH_SEMANTIC_ENABLED and not params.SEMANTIC_SEG_MODEL_PATH.empty())
+        {
+            rc::semantic::YoloSemanticProcessor::Config scfg;
+            scfg.model_path  = params.SEMANTIC_SEG_MODEL_PATH;
+            scfg.conf_thresh = params.SEMANTIC_SEG_CONF_THRESH;
+            scfg.input_size  = params.SEMANTIC_SEG_INPUT_SIZE;
+            scfg.use_gpu     = params.SEMANTIC_SEG_USE_GPU;
+            scfg.use_trt     = params.SEMANTIC_SEG_USE_TRT;
+            auto sem360 = std::make_unique<rc::SemanticStage360>(scfg, ricoh_strips_,
+                                                                 params.RICOH_YOLO_N_STRIPS,
+                                                                 params.RICOH_SEMANTIC_DECIMATION);
+            auto* sem360_ptr = sem360.get();
+            if (sem360_ptr->ready())
+            {
+                ricoh_stages.push_back(std::move(sem360));
+                // Same class resolution the ZED path uses, against THIS model's own table.
+                const auto& rnames = sem360_ptr->processor()->class_names();
+                const auto ieq = [](const std::string& a, const std::string& b)
+                {
+                    return a.size() == b.size() and std::equal(a.begin(), a.end(), b.begin(),
+                        [](char x, char y){ return std::tolower((unsigned char)x) == std::tolower((unsigned char)y); });
+                };
+                std::vector<std::pair<int, std::string>> racc;
+                for (const auto& want : params.SEMANTIC_ACCEPTED_LABELS)
+                    if (const auto it = std::find_if(rnames.begin(), rnames.end(),
+                            [&](const std::string& n){ return ieq(n, want); }); it != rnames.end())
+                        racc.emplace_back(static_cast<int>(std::distance(rnames.begin(), it)), want);
+                if (not racc.empty())
+                    ricoh_stages.push_back(std::make_unique<rc::SemanticMaskStage>(
+                        std::move(racc), params.SEMANTIC_MASK_MIN_AREA_FRAC,
+                        params.SEMANTIC_MASK_OVERLAP_DROP_FRAC, params.SEMANTIC_MASK_MORPH_KERNEL,
+                        params.SEMANTIC_MASK_SCORE_DEFAULT));
+                std::println("[Ricoh] ADE20K strip pass ON ({} classes, decim {})",
+                             racc.size(), params.RICOH_SEMANTIC_DECIMATION);
+            }
+            else
+                std::println("[Ricoh] ADE20K strip pass requested but the model did not load — seg only");
+        }
+
             ricoh_stages.push_back(std::make_unique<rc::BearingStage>(G));   // runs after seg (reads masks)
         // Monocular depth on the same panorama, own strip geometry ([RicohDepth]). Independent of seg —
         // it reads only in.rgbd.bgr — so stage order does not matter; last keeps the cheap stages first.

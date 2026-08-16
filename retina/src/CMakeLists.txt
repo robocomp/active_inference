@@ -37,6 +37,7 @@ LIST(APPEND SOURCES
   ../src/pose_stage.cpp
   ../src/semantic_stage.cpp
   ../src/semantic_mask_stage.cpp
+  ../src/semantic_stage_360.cpp
   ../src/sam2_stage.cpp
   ../src/sam2_processor.cpp
   ../src/bearing_stage.cpp

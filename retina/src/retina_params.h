@@ -195,6 +195,10 @@ struct RetinaParams
     // Strips segmented PER FRAME (Ricoh.yolo_strips_per_frame). 0 or >= n_strips = all, the original
     // behaviour. 1 = round-robin: a third of the cost, full 360 coverage every 3 frames.
     int         RICOH_YOLO_STRIPS_PER_FRAME = 0;
+    // ADE20K on the scheduled panorama strip (Ricoh.semantic_*). OFF by default: it is a second ONNX
+    // session on the ricoh worker, and it is the ONLY way cabinet/hood ever see a peripheral detection.
+    bool        RICOH_SEMANTIC_ENABLED     = false;
+    int         RICOH_SEMANTIC_DECIMATION  = 1;
     int         RICOH_YOLO_STRIP_OVERLAP_PX= 80;      // Ricoh.yolo_strip_overlap_px
     float       RICOH_YOLO_MERGE_IOU       = 0.5f;    // Ricoh.yolo_merge_iou — cross-strip dedup threshold
     // Publish the ricoh 360 detections into the shared "masks" node as NO-DEPTH bearing slices (Part B,

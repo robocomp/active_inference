@@ -248,6 +248,20 @@ yolo_n_strips         = 3
 # matters for the confirmation consumers — bottle/chair/door confirm STATIC objects through this
 # channel, so a strip that stops being visited stops confirming what stands in it.
 yolo_strips_per_frame = 1
+
+# ── ADE20K (YOLO-sem) on the SAME scheduled strip ─────────────────────────────────────────────────
+# ★THIS IS THE ONLY WAY cabinet_concept AND hood_concept EVER SEE A PERIPHERAL DETECTION. Their labels
+# are YOLO-sem classes (published as class_id = 1000 + ade_id), and the ricoh's YOLO-seg accepted_labels
+# above contains neither "cabinet" nor "hood" — so their ricoh code, 94 lines each and now shared,
+# could never fire even once. Affordable because the round-robin freed ~20 ms/frame (seg 32.0 -> 12.2
+# measured), leaving ~38 ms of the 50 ms worker budget.
+# It runs on the strip YOLO-seg just chose — the window is shared, not two counters that would drift —
+# and its output is a BEARING, not a mask: a 360 detection carries no usable geometry and every
+# consumer already refuses to fit it.
+# Model/thresholds are shared with [Semantic] (the ZED's ADE20K block); this is a SECOND session on the
+# ricoh worker, so watch cpu on the panel after enabling.
+semantic_enabled      = false   # flip true to give cabinet/hood peripheral vision
+semantic_decimation   = 1       # run every ricoh frame; raise if the second session costs too much
 yolo_strip_overlap_px = 200   # circular-pad margin so a seam-straddling object survives whole. 80→200 so a
                               # chair on the wraparound seam (directly behind the robot) stays whole in one
                               # strip. Clamped to strip_w/2=320; each strip → 1040px (1.6× squash, was 1.25×).
