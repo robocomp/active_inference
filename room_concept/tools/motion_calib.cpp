@@ -61,6 +61,7 @@
 #include <cstdio>
 #include <clocale>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <random>
 #include <string>
@@ -189,11 +190,12 @@ namespace
     }
 
     /// Accumulate over disjoint windows of `stride` frames and fit. `stride` in frames.
-    struct BandResult { int stride; double T_med; Fit rot, trans; };
+    struct BandResult { int stride; double T_med; Fit rot, trans; int rejected_jump = 0; };
 
     BandResult calibrate_at(const std::vector<Frame>& fr, int stride)
     {
         BandResult br; br.stride = stride;
+        int rejected_jump = 0;
         std::vector<double> d_rot, e_rot, T_rot, d_tr, e_tr, T_tr, Ts;
 
         for (size_t a = 0; a + static_cast<size_t>(stride) < fr.size(); a += static_cast<size_t>(stride))
@@ -203,6 +205,21 @@ namespace
             // as an enormous "odometry error" that is nothing of the kind.
             bool good = true;
             for (size_t i = a; i <= b; ++i) if (!fr[i].ok) { good = false; break; }
+            // ★ AND REJECT WINDOWS CONTAINING A POSE DISCONTINUITY. The reference is the localiser's
+            // posterior, and a relocalisation moves it by more than the robot could have travelled —
+            // measured on this log, 5 steps above 15 cm between consecutive frames, two of them 0.61 m
+            // and 0.39 m around a recovery episode. That is not a report about motion, so charging it
+            // to the odometry would put a 0.6 m outlier into a weighted least squares whose typical
+            // increment is ~1 m. Validity flags do not catch it: those frames are perfectly valid, the
+            // localiser simply changed its mind. The bound is kinematic (~3x the base's top speed), so
+            // it can only ever reject a physical impossibility, never real motion.
+            if (good)
+                for (size_t i = a; i < b; ++i)
+                {
+                    const double step = std::hypot(fr[i+1].px - fr[i].px, fr[i+1].py - fr[i].py);
+                    const double gap  = std::max(1e-3, fr[i+1].ts_s - fr[i].ts_s);
+                    if (step / gap > 2.0) { good = false; ++rejected_jump; break; }
+                }
             if (!good) continue;
 
             const double T = fr[b].ts_s - fr[a].ts_s;
@@ -255,6 +272,7 @@ namespace
 
         std::sort(Ts.begin(), Ts.end());
         br.T_med = Ts.empty() ? 0.0 : Ts[Ts.size() / 2];
+        br.rejected_jump = rejected_jump;
         br.rot   = fit_scale_and_density(d_rot, e_rot, T_rot);
         br.trans = fit_scale_and_density(d_tr,  e_tr,  T_tr);
         return br;
@@ -581,8 +599,32 @@ int main(int argc, char** argv)
     // -0.724 +-0.206 with sigma 0.336 against ~0.008 on every other row, because over ~10 s windows
     // the robot returns to similar headings and the regressor collapses. A rule chosen after seeing
     // the answer is not a rule, so this one is fixed and the degenerate row is simply not read.
-    const BandResult* best = nullptr;
-    for (const auto& b : bands) if (b.rot.n >= 30 or b.trans.n >= 30) best = &b;
+    // ★ SELECTED PER CHANNEL, and guarded on the fitted sigma rather than on n alone. The two
+    // channels degenerate at DIFFERENT window lengths: over ~10 s windows this robot's net heading
+    // change collapses (it turns back and forth), so the rotation regressor loses its span while the
+    // translation regressor still has plenty. Measured on a 17k-frame run, the 192-frame row gave
+    // rotation s = -0.555 +-0.110 with sigma 0.2135 against -0.056 +-0.003 and sigma 0.0095 one row
+    // up — a 22x jump in a quantity that is a PHYSICAL CONSTANT and cannot legitimately move like
+    // that. n was 62 there, so an n threshold does not catch it; the sigma consistency does. Same
+    // rule, fixed in advance, applied independently to each channel.
+    const auto pick = [&bands](bool rotation) -> const BandResult* {
+        double sig_min = std::numeric_limits<double>::max();
+        for (const auto& b : bands)
+        {
+            const Fit& f = rotation ? b.rot : b.trans;
+            if (f.n >= 30 and f.sigma > 0) sig_min = std::min(sig_min, f.sigma);
+        }
+        const BandResult* best = nullptr;
+        for (const auto& b : bands)
+        {
+            const Fit& f = rotation ? b.rot : b.trans;
+            if (f.n >= 30 and f.sigma <= 3.0 * sig_min) best = &b;
+        }
+        return best;
+    };
+    const BandResult* best_rot   = pick(true);
+    const BandResult* best_trans = pick(false);
+    const BandResult* best = (best_trans != nullptr) ? best_trans : best_rot;
 
     // ── SCORECARD: if this log carries injected ground truth, grade the estimate against it ──────
     // The point of the inj_* columns is that an archived log is self-describing, so this needs no
@@ -607,21 +649,23 @@ int main(int argc, char** argv)
             got = true;
             break;
         }
-        if (got and act > 0.5f and best != nullptr)
+        if (got and act > 0.5f and best_rot != nullptr and best_trans != nullptr)
         {
-            const auto& B = *best;
+            const auto& BR = *best_rot;
+            const auto& BT = *best_trans;
             std::printf("\n  ══ RECOVERY SCORECARD — this log carries injected ground truth ══\n");
             std::printf("    %-14s %14s %14s %10s\n", "parameter", "TRUTH", "RECOVERED", "ratio");
             auto row = [&](const char* n, double truth, double got_v) {
                 std::printf("    %-14s %14s %14s %10s\n", n, num(truth,5).c_str(), num(got_v,5).c_str(),
                             std::abs(truth) > 1e-12 ? num(got_v/truth,4).c_str() : "-");
             };
-            std::printf("    (scales read at the %d-frame window, T_med %s s, n=%d/%d)\n",
-                        B.stride, num(B.T_med,3).c_str(), B.trans.n, B.rot.n);
-            row("sigma_v",     tsv, direct_v > 0 ? direct_v : B.trans.sigma);
-            row("sigma_omega", tsw, direct_w > 0 ? direct_w : B.rot.sigma);
-            row("s_v",         tcv, B.trans.s);
-            row("s_omega",     tcw, B.rot.s);
+            std::printf("    (s_v read at %d frames / %s s, n=%d;  s_omega at %d frames / %s s, n=%d)\n",
+                        BT.stride, num(BT.T_med,3).c_str(), BT.trans.n,
+                        BR.stride, num(BR.T_med,3).c_str(), BR.rot.n);
+            row("sigma_v",     tsv, direct_v > 0 ? direct_v : BT.trans.sigma);
+            row("sigma_omega", tsw, direct_w > 0 ? direct_w : BR.rot.sigma);
+            row("s_v",         tcv, BT.trans.s);
+            row("s_omega",     tcw, BR.rot.s);
             std::printf("    ★ sigma is scored against the DIRECT parked measurement (the regression is\n"
                         "      reference-limited); the scales against the long-window regression.\n"
                         "    ⚠ s_* truth is the REALISED draw for this run, which is what the estimator\n"
@@ -639,16 +683,18 @@ int main(int argc, char** argv)
         // odometry, so emitting it here would hand the user a number the warning above just told
         // them not to use. Fall back to the direct parked measurement, and say which was used.
         const bool use_direct = reference_limited and direct_v > 0 and direct_w > 0;
-        const double out_w = use_direct ? direct_w : best->rot.sigma;
-        const double out_v = use_direct ? direct_v : best->trans.sigma;
+        const double out_w = use_direct ? direct_w : (best_rot   ? best_rot->rot.sigma   : 0.0);
+        const double out_v = use_direct ? direct_v : (best_trans ? best_trans->trans.sigma : 0.0);
         std::printf("    # sigma from: %s\n", use_direct
                     ? "the DIRECT parked measurement (the regression is reference-limited)"
                     : "the regression");
         std::printf("    PreintOdomSigmaOmega = %s\n", num(out_w, 5).c_str());
         std::printf("    PreintOdomSigmaVLat  = %s\n", num(out_v, 5).c_str());
         std::printf("    PreintOdomSigmaVLong = %s\n", num(out_v, 5).c_str());
-        std::printf("    PreintOdomScaleOmega = %s   # |s_omega| measured\n", num(std::abs(best->rot.s), 5).c_str());
-        std::printf("    PreintOdomScaleV     = %s   # |s_v| measured\n", num(std::abs(best->trans.s), 5).c_str());
+        std::printf("    PreintOdomScaleOmega = %s   # |s_omega| measured\n",
+                    num(best_rot   ? std::abs(best_rot->rot.s)     : 0.0, 5).c_str());
+        std::printf("    PreintOdomScaleV     = %s   # |s_v| measured\n",
+                    num(best_trans ? std::abs(best_trans->trans.s) : 0.0, 5).c_str());
         std::printf("\n  ⚠ The scale keys are PRIOR WIDTHS over an unknown constant, and what is measured\n"
                     "    here is ONE realisation of it. A single run cannot separate 'the scale is 0.07'\n"
                     "    from 'the scale is drawn from N(0, 0.07^2)'. Use |s| as a lower bound on the\n"
