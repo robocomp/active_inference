@@ -1105,7 +1105,7 @@ void HoodFitter::log_ai2_csv(const HoodInstance& inst, int npts, float R, bool g
                  << "roi_fill,roi_fill_h,roi_fill_v,roi_valid,det_alive,frames_since_det,"
                  // What the NBV actually proposed (lags the state columns by one cycle; see the instance).
                  // nbv_vfov=0 ⇒ the sensor model was incomplete and NO proposal was made that cycle.
-                 << "nbv_standoff,nbv_tx,nbv_ty,nbv_pdetect,nbv_vfov,nbv_gain\n";
+                 << "nbv_standoff,nbv_tx,nbv_ty,nbv_pdetect,nbv_vfov,nbv_gain,ricoh_attn\n";
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
@@ -1164,7 +1164,12 @@ void HoodFitter::log_ai2_csv(const HoodInstance& inst, int npts, float R, bool g
              << inst.frames_since_detection << ','
              << inst.dbg_nbv_standoff << ',' << inst.dbg_nbv_target_x << ',' << inst.dbg_nbv_target_y << ','
              << inst.dbg_nbv_pdetect << ',' << inst.dbg_nbv_vfov << ','
-             << inst.dbg_nbv_gain << '\n';
+             << inst.dbg_nbv_gain
+             // Peripheral (ricoh-360) attention: unassigned 360 detections of this label this
+             // cycle. It was computed and shown nowhere — the whole peripheral channel was
+             // invisible in every agent's log, which is why 'is it producing anything?' could
+             // not be answered offline for cabinet/hood, the two it exists for.
+             << ',' << ricoh_attention_ << '\n';
     ai2_csv_.flush();
 }
 

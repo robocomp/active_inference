@@ -329,7 +329,19 @@ public:
     void accumulate_corner_fill(const WallRunState& s,
                                 Eigen::Matrix<float, 5, 5>& Id, Eigen::Matrix<float, 5, 1>& bd) const
     {
-        constexpr float lam = 40.0f;   // strong: the corner is empty of mask points, so nothing opposes the fill
+        // ★THE FILL WEIGHS WHAT ITS CLAIM IS WORTH, NOT 40 (fixed 2026-08-16). This was `constexpr float
+        // lam = 40.0f`, commented "strong: the corner is empty of mask points, so nothing opposes the fill".
+        // Nothing did oppose it — and it still could not close a corner, because 40 is 1/20th of
+        // extent_precision (800), the precision at which a run's end is known from ONE mask point. A run that
+        // had already settled its end carried a posterior precision near 4800, so the fill was a per-cycle
+        // nudge whose total authority was bounded: measured on the U rig, t1 converged GEOMETRICALLY to 2.537
+        // of W=3.00 and sat there for 400 cycles, leaving a 0.46 m hole. It is not slow, it is a fixed point.
+        //
+        // The corner claim is "there is carcass at the vertex" — the SAME claim a mask point landing there
+        // would make, about the same quantity. So it is worth the same: extent_precision, the model's own
+        // declared number for it. No new constant, and the fill stays in the same league as the free-space
+        // carve, so a beam that genuinely passes through the corner can still retract the end.
+        const float lam = params_.extent_precision > 0.0f ? params_.extent_precision : 40.0f;
         const auto push = [&](int idx, float e)
         { Eigen::Matrix<float, 5, 1> J = Eigen::Matrix<float, 5, 1>::Zero(); J(idx) = 1.0f;
           Id.noalias() += lam * (J * J.transpose()); bd.noalias() += -lam * J * e; };

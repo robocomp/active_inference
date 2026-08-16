@@ -172,7 +172,12 @@ public:
     SilhouetteExistence compute_silhouette_existence(const HoodInstance& inst)
     { return projection_->compute_silhouette_existence(inst); }
 
+    // Unassigned peripheral detections this cycle, for the ai2 log. Set by the worker after
+    // process_ricoh_bearings; the fitter owns the CSV, so the count has to reach it.
+    void set_ricoh_attention(int n) { ricoh_attention_ = n; }
+
 private:
+    int ricoh_attention_ = 0;
     // Compute the localization/chain covariance term (J·Σ_chain·Jᵀ) at the hood centre by transforming
     // it from the measurement frame back to room with ZERO input cov; stored on the instance for the
     // RT-cov write. No-op unless set_chain_cov_source enabled it.

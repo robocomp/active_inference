@@ -162,7 +162,12 @@ public:
     SilhouetteExistence compute_silhouette_existence(const CabinetInstance& inst)
     { return projection_->compute_silhouette_existence(inst); }
 
+    // Unassigned peripheral detections this cycle, for the ai2 log. Set by the worker after
+    // process_ricoh_bearings; the fitter owns the CSV, so the count has to reach it.
+    void set_ricoh_attention(int n) { ricoh_attention_ = n; }
+
 private:
+    int ricoh_attention_ = 0;
     const std::vector<rc::exclusion::Claim>* foreign_claims_ = nullptr;
     // Nearest room-polygon wall segment to a room-frame point, as a WallRef (point on the line +
     // INWARD unit normal). ok=false when no polygon is available, which makes the wall-flush factor
