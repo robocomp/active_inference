@@ -4716,13 +4716,26 @@ namespace rc
             // Expect ~1.05-1.08 on this robot: a differential base over-reports rotation because it
             // turns by scrubbing. A ratio pinned at 1.000 means the gyro is agreeing suspiciously
             // exactly -- more likely the same source twice than two sensors agreeing.
-            const double ratio = std::abs(imu_dtheta_sum_) > 1e-4
-                               ? wheel_dtheta_sum_ / imu_dtheta_sum_ : std::numeric_limits<double>::quiet_NaN();
+            // ★ THE GUARD MUST BE A MEANINGFUL ROTATION, NOT A NON-ZERO ONE. At 1e-4 rad this printed
+            // a ratio for a robot standing still: observed live, "wheel/gyro=-9.6824 over -0.001 rad"
+            // — one milliradian of true rotation, so the quotient was 0/0 and the number was noise
+            // wearing four decimal places. It is worse now that the wheel channel carries injected
+            // noise: over a 5 s window a parked robot accumulates sigma_w*sqrt(T) = 0.010*sqrt(5) =
+            // 0.022 rad of random walk against ~0 of signal, so a parked window CANNOT produce a
+            // meaningful ratio however long it runs. 0.5 rad is roughly 30 degrees — enough that the
+            // scrubbing error being measured is well clear of the noise floor.
+            constexpr double kMinRotForRatio = 0.5;   // rad
+            const bool ratio_valid = std::abs(imu_dtheta_sum_) > kMinRotForRatio;
+            const double ratio = ratio_valid ? wheel_dtheta_sum_ / imu_dtheta_sum_
+                                             : std::numeric_limits<double>::quiet_NaN();
             qInfo().nospace() << "[ImuInject] clock="
                               << (imu_stats_sim_clock_ ? "SIM" : "WALL(unbound)")
                               << " coverage=" << QString::number(cover, 'f', 1) << "%"
                               << " (" << imu_seg_used_ << "/" << imu_seg_total_ << " seg)"
-                              << " dtheta wheel/gyro=" << QString::number(ratio, 'f', 4)
+                              << " dtheta wheel/gyro="
+                              << (ratio_valid ? QString::number(ratio, 'f', 4)
+                                              : QString("n/a (needs >%1 rad of turning)")
+                                                    .arg(kMinRotForRatio, 0, 'f', 1))
                               << " over " << QString::number(imu_dtheta_sum_, 'f', 3) << " rad";
             imu_stats_last_log_ms_ = t_end_ms;
             imu_seg_used_ = imu_seg_total_ = 0;
