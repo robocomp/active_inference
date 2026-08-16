@@ -589,13 +589,13 @@ void SpecificWorker::publish_kitchen_boxes()
         auto it = kitchen_nodes_.find(b.id);
         if (it == kitchen_nodes_.end())
         {
-            // ★Name it for what it IS. Only the mask label sends a run down the island path; the
-            // geometry decides whether it is free-standing or a PENINSULA (short side against a
-            // wall — which is what the apartment actually has). Calling a wall-attached cabinet an
-            // "island" misdescribes it in the graph and hides which branch of derive_island_chart
-            // fired, so the name now carries the answer.
+            // ★THERE IS NO `cabinet_island` ANY MORE (2026-08-16, the user's rule). An island is not an
+            // object this agent may interpret: every cabinet abuts a wall or another cabinet, so the run
+            // that used to take that name is a PENINSULA and nothing else can be born. The branch that
+            // produced the other name is gone from derive_island_chart, so a ternary here would be
+            // reporting a distinction the model no longer makes.
             const std::string name = (b.wall_seg_id < 0)
-                ? (b.anchored ? std::string("cabinet_peninsula") : std::string("cabinet_island"))
+                ? std::string("cabinet_peninsula")
                 : "cabinet_w" + std::to_string(b.wall_seg_id) + (b.tier == 0 ? "_base" : "_up");
             DSR::Node node = DSR::Node::create<object_node_type>(name);
             // Display asset for the retina 3D viewer (relative to its meshes/ root); the viewer loads &
