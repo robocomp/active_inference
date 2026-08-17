@@ -52,6 +52,19 @@ struct BottleBeliefParams
     // Priors (broad; only break the empty-cloud degeneracy)
     float prior_pos_std   = 0.30f;   // position prior std (m) on cx,cy,cz
     float prior_size_std  = 0.03f;   // size prior std (m) on radius,height
+    // ★★THE SIZE PRIOR MUST BE ASSERTED EVERY UPDATE, NOT ONLY AT BIRTH (2026-08-17, live runaway).
+    // prior_cov_diag() is an ENGINE HOOK: it sets the covariance at CONSTRUCTION and is never consulted
+    // again, so `prior_size_std` was the birth uncertainty and nothing afterwards said what a bottle's size
+    // IS. bottle_2 walked its radius 0.030 → 4.51 m over one 150k-cycle run — a 4.5 m disc at table height,
+    // std_r still 0.049, i.e. CONFIDENTLY wrong — while the manifest declared 0.031 m from = "measured".
+    // Same defect cabinet fixed with accumulate_tier_prior: "the engine applies that prior ONCE, at
+    // construction, and then re-anchors to the running posterior, so the model declares a 0.60±0.04 carcass
+    // and then lets the state walk to 0.906 unopposed. This asserts it every update."
+    // Gain 0 disables it (and restores the old behaviour exactly).
+    float size_anchor_gain   = 1.0f;    // weight on the per-update size anchor; 0 = off
+    float size_anchor_radius = 0.031f;  // the DECLARED radius (m) — manifest prior.radius.mean_m, measured
+    float size_anchor_height = 0.20f;   // the DECLARED height (m) — manifest model.geometry.extent_m
+    float size_anchor_std_m  = 0.03f;   // σ of the declaration; data still leads inside this
 
     // Temporal transition (predict): rigid + static ⇒ small process noise per frame. SIZE (radius,height) is a
     // CONSTANT physical property, so its process noise is ~0 — once converged it STICKS and can't be re-inflated

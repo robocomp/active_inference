@@ -148,6 +148,26 @@ void BottleBelief::accumulate_extra(const BottleBeliefState& s, const BottleFram
         }
     }
 
+    // ★THE DECLARED SIZE, ASSERTED EVERY UPDATE. Without this the only statement about a bottle's size is the
+    // construction-time covariance, and nothing stops the state walking: measured live, radius 0.030 → 4.51 m
+    // with std_r 0.049 (confidently wrong), converging on a flat disc at table height because that is what a
+    // huge thin cylinder fits when the points come from worktops. A bottle's radius is KNOWN — 0.031 m,
+    // measured off the sim asset and declared `from = "measured"` in its manifest — so the model should say so
+    // on every cycle, not once. An ordinary Gaussian factor, same information form as every other term here,
+    // so a genuinely well-observed size can still move within σ.
+    if (params_.size_anchor_gain > 0.0f and params_.size_anchor_std_m > 0.0f)
+    {
+        const float w = params_.size_anchor_gain / (params_.size_anchor_std_m * params_.size_anchor_std_m);
+        const auto push = [&](int idx, float residual)
+        {
+            Eigen::Matrix<float, 5, 1> J = Eigen::Matrix<float, 5, 1>::Zero(); J(idx) = 1.0f;
+            Id.noalias() += w * (J * J.transpose());
+            bd.noalias() += -w * J * residual;
+        };
+        push(3, s.radius - params_.size_anchor_radius);
+        push(4, s.height - params_.size_anchor_height);
+    }
+
     // Second, YOLO-independent evidence channel: LiDAR first-hit range. Sphere-traces THIS belief's own SDF,
     // so the exact same call drops into table/chair accumulate_extra unchanged. No-op if f.lidar.precision==0.
     rc::ai::accumulate_lidar_rays<5>(*this, s, f.lidar, Id, bd);

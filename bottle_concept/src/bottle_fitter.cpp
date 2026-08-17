@@ -258,6 +258,12 @@ float BottleFitter::run_inference(BottleInstance& inst, const BottleObservation&
         p.clutter_scale_m      = cfg_.ai2_clutter_scale_m;
         p.prior_pos_std        = cfg_.ai2_prior_pos_std;
         p.prior_size_std       = cfg_.ai2_prior_size_std;
+        // ★The declared size, asserted every update (see BottleBeliefParams::size_anchor_*). The MEANS come
+        // from the manifest-resolved priors, so the anchor and the birth seed can never disagree.
+        p.size_anchor_gain   = cfg_.size_anchor_gain;
+        p.size_anchor_radius = cfg_.prior_radius;
+        p.size_anchor_height = cfg_.prior_height;
+        p.size_anchor_std_m  = cfg_.size_anchor_std_m;
         p.process_std_m        = cfg_.ai2_process_std_m;
         p.process_std_moved_m  = cfg_.ai2_process_std_moved_m;
         p.process_std_size_m   = cfg_.ai2_process_std_size_m;

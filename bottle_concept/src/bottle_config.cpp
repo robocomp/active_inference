@@ -70,6 +70,8 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     // ⚠The radius disagrees today: manifest 0.031 (measured, cyberbotics BeerBottle) vs this agent's 0.035
     // default. If config is silent the manifest now wins; if config sets it, the override prints. Either way
     // the disagreement stops being invisible.
+    out.size_anchor_gain   = getf("BottleModel.SizeAnchorGain",  1.0f);
+    out.size_anchor_std_m  = getf("BottleModel.SizeAnchorStdM",  0.03f);
     out.prior_radius       = rc::manifest::resolve(cfg, "BottleModel.PriorRadius",
                                 man, "prior.radius.mean_m", 0.035f, "bottle prior radius");
     out.prior_height       = rc::manifest::resolve(cfg, "BottleModel.PriorHeight",

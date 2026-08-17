@@ -47,6 +47,10 @@ struct BottleConfig
 
     // BottleModel prior geometry (forwarded to BottleModelParams — the model is the SDF + state carrier).
     float prior_radius      = 0.035f;
+    // ★Per-update size anchor (bottle_belief.h size_anchor_*). Gain 0 restores the pre-2026-08-17 behaviour,
+    // in which the declared size was asserted only at construction and a radius walked to 4.51 m.
+    float size_anchor_gain  = 1.0f;    // BottleModel.SizeAnchorGain
+    float size_anchor_std_m = 0.03f;   // BottleModel.SizeAnchorStdM
     float prior_height      = 0.20f;
     float prior_size_std    = 0.03f;
     float mask_precision    = 0.0f;   // occluding-contour silhouette weight (per-ray precision; 0 = off)
