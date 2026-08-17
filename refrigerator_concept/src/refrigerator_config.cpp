@@ -80,7 +80,10 @@ RefrigeratorConfig load_refrigerator_config(const ConfigLoader& cfg)
     out.ai2_prior_size_std   = getf("RefrigeratorModel.AI2PriorSizeStd",     0.30f);
     out.ai2_prior_footprint_m   = getf("RefrigeratorModel.AI2PriorFootprintM",   0.60f);
     out.ai2_prior_footprint_std = getf("RefrigeratorModel.AI2PriorFootprintStd", 0.08f);
-    out.ai2_prior_height_m      = getf("RefrigeratorModel.AI2PriorHeightM",      1.70f);
+    // ★FALLBACK ALIGNED TO THE MANIFEST (2026-08-17). This read 1.70 while the manifest and config.toml
+    // both say 1.90 — invisible while config is present, and a silently shorter fridge the moment it is
+    // not. A code default that contradicts the declaration is the same defect class as an inherited one.
+    out.ai2_prior_height_m      = getf("RefrigeratorModel.AI2PriorHeightM",      1.90f);
     out.ai2_prior_height_std    = getf("RefrigeratorModel.AI2PriorHeightStd",    0.50f);
     out.ai2_depth_unobs_precision = getf("RefrigeratorModel.AI2DepthUnobsPrecision", 1500.0f);
     out.ai2_depth_obs_band_m      = getf("RefrigeratorModel.AI2DepthObsBandM",       0.10f);
@@ -124,6 +127,7 @@ RefrigeratorConfig load_refrigerator_config(const ConfigLoader& cfg)
     out.ai2_trunc_gate_frac    = getf("RefrigeratorModel.AI2TruncGateFrac",   0.10f);
     out.ai2_gn_iters         = geti("RefrigeratorModel.AI2GnIters",          4);
     out.ai2_csv_path         = gets("RefrigeratorModel.AI2CsvPath",          "");
+    out.detect_probe_csv_path = gets("RefrigeratorConcept.DetectProbeCsvPath", out.detect_probe_csv_path);
     out.birth_surprise_probe = getb("RefrigeratorModel.BirthSurpriseProbe",  false);
     out.pixel_sigma_over_f     = getf("RefrigeratorModel.PixelSigmaOverF",       0.0015f);
     out.depth_sigma0_m         = getf("RefrigeratorModel.DepthSigma0M",          0.006f);
@@ -229,6 +233,32 @@ RefrigeratorConfig load_refrigerator_config(const ConfigLoader& cfg)
     out.ricoh_confirm_enabled        = getb("RefrigeratorConcept.RicohConfirmEnabled",        out.ricoh_confirm_enabled);
     out.ricoh_confirm_detection_prob = getf("RefrigeratorConcept.RicohConfirmDetectionProb", out.ricoh_confirm_detection_prob);
     out.ricoh_confirm_clutter_prob   = getf("RefrigeratorConcept.RicohConfirmClutterProb",   out.ricoh_confirm_clutter_prob);
+
+    // ── THE DECLARED VERTICAL SPAN, ADOPTED (shared: rc::manifest::adopt_span) ─────────────────────
+    // The manifest states the anchoring ONCE, as a fact about the object, and the span is derived from it —
+    // instead of every site that needs a z-band restating the same assumption in its own arithmetic. That
+    // restating is how hood_concept, cloned from a floor-anchored parent, ran for days with a LiDAR band
+    // DISJOINT from its body while every channel reported full coverage.
+    // ★z_top is the AI2 HEIGHT PRIOR (1.90), NOT Tracker.BirthHeightM. Birth height is deliberately 0.75 —
+    // below plaus_height_min so every real fridge grows INTO its size — so it is the wrong number for a
+    // class-level span. Getting that backwards would declare a body half the height of the object.
+    {
+        const auto span = rc::manifest::adopt_span(kManifestPath, "refrigerator",
+                                                  rc::manifest::Support::floor_anchored,
+                                                  out.ai2_prior_height_m, out.ai2_prior_height_m);
+        rc::manifest::Geometry decl;
+        decl.support  = span.support;
+        decl.z_top_m  = out.ai2_prior_height_m;
+        decl.extent_m = out.ai2_prior_height_m;
+        decl.valid    = true;
+        bool ok_bands = true;
+        ok_bands &= rc::manifest::band_contains_body("refrigerator ", "lidar_select",
+                        span.z0 - out.lidar_select_margin_m, span.z1 + out.lidar_select_margin_m, decl);
+        ok_bands &= rc::manifest::band_contains_body("refrigerator ", "point_ownership",
+                        span.z0 - out.support_select_height_margin_m, span.z1 + out.support_select_height_margin_m, decl);
+        if (ok_bands)
+            std::print("[manifest] refrigerator ✓ every derived z-band contains the declared body\n");
+    }
 
     return out;
 }

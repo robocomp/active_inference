@@ -42,6 +42,28 @@ std_m = 0.30
 why  = "BROAD and mean-less: only breaks the empty-cloud degeneracy. Tables vary far too much to assert a size"
 
 [model.geometry]
+# ★★THE SPAN KEYS WERE MISSING UNTIL 2026-08-17, AND THE BLOCK EXISTING MADE THAT INVISIBLE. This section was
+# here, so it looked declared; but load_geometry() reads model.geometry.{support,z_top_m,extent_m,from}, and
+# none of those were present — support parsed as `unknown`, valid came back FALSE, and the declarative
+# geometry was inert while the file read as complete. A block that exists with the wrong keys is worse than
+# an absent one: the absence is visible.
+support   = "floor_anchored"       # floor_anchored | leg_supported | hangs | counter_top | resolved
+z_top_m   = 0.75                   # prior mean of the SURFACE height — the body spans [0, table_height]
+extent_m  = 0.75                   # floor_anchored ⇒ extent == z_top, stated rather than derived so a clone
+                                   # that CHANGES the support cannot keep a floor-referenced extent silently
+from      = "nominal"              # measured | fitted | nominal | inherited
+why_span  = """
+A table stands on the floor, so the body spans [0, table_height] and the fitted DOF is the SURFACE height.
+Declaring it is what lets band_contains_body() speak: every vertical band this agent derives (LiDAR
+pre-selection, support-bank point ownership, the existence carve) is floor-referenced by inheritance — correct
+HERE, and wrong the moment this file is cloned for something that hangs or sits on a counter, which is exactly
+what happened to hood_concept.
+
+The model is leg_supported in SHAPE, but the BODY still starts at the floor, so floor_anchored is the honest
+span statement; leg geometry stays below. `nominal` — 0.75 m is the class template in table_model.h, not a
+measurement of this table.
+"""
+
 top_thickness_m = 0.03
 leg_radius_m = 0.025
 why = "fixed, not fitted — the top/leg attribution band for the compound SDF"

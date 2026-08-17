@@ -207,6 +207,23 @@ audit_agent() {
         mark wr
     fi
 
+    # 10b. THE MANIFEST'S VALUES MUST BE READ, NOT JUST VALIDATED. provenance_ok stops an INHERITED number;
+    #    it does nothing about a manifest whose geometry no code ever consults. Measured 2026-08-17: armed in
+    #    8 of 8, read in 1 of 8 — a validated declaration nobody reads guards nothing, and the four traps it
+    #    exists to catch (one authoritative z-span for the SDF / admission band / NBV target / LiDAR carve,
+    #    manifest-over-config precedence, and band_contains_body) were live in hood only.
+    #    `resolved` support (bottle, cabinet) has no class-level span BY DECLARATION — the belief unit carries
+    #    it — so asking those two for a span is the wrong question and reads n/a, not a failure.
+    local man="common/concept_manifest/${name}.concept.toml"
+    if [[ -f "$man" ]] && grep -q 'support *= *"resolved"' "$man"; then
+        grep -rqE "rc::manifest::resolve" "$src" 2>/dev/null && mark ok || mark na
+    elif [[ -f "$man" ]]; then
+        if grep -rqE "adopt_span|load_geometry" "$src" 2>/dev/null \
+           && grep -rq "band_contains_body" "$src" 2>/dev/null; then mark ok; else mark wr; fi
+    else
+        mark wr
+    fi
+
     # 11. BIRTH IS AN OBSERVATION, NOT A CYCLE. common/instance_tracker/birth_evidence.h says "every concept
     #    agent must use it": agents feed the tracker on EVERY compute cycle (a candidate with no matching
     #    detection expires), so leaving birth_evidence at its 1.0 default makes birth_frames count COMPUTE
@@ -270,9 +287,9 @@ audit_agent() {
 echo
 echo "concept-agent alignment audit — $ROOT"
 echo
-printf "  %-22s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s\n" \
-       agent room_poly any_usable contract "sigma*" envelope strip poll removal shared csv_rot manifest birth absence mask_src decision
-printf "  %s\n" "$(printf '%.0s-' {1..218})"
+printf "  %-22s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s\n" \
+       agent room_poly any_usable contract "sigma*" envelope strip poll removal shared csv_rot manifest priors birth absence mask_src decision
+printf "  %s\n" "$(printf '%.0s-' {1..231})"
 
 skipped=()
 for d in *_concept; do
@@ -308,6 +325,12 @@ if [[ $QUIET -eq 0 ]]; then
   csv_rot                 no diagnostics CSV opens with ios::trunc — a restart must not erase the run that
                           produced the fault. 'N trunc' = that many truncating opens remain (an ios::app
                           conditional is not one)
+  priors                  the manifest's VALUES are actually read, not merely validated. provenance_ok
+                          alone is a validated declaration NOBODY READS: on 2026-08-17 it was armed in all 8
+                          agents while load_geometry/z_span/resolve/band_contains_body ran in HOOD ALONE, and
+                          refrigerator — the agent hood was cloned FROM — declared no [model.geometry] at all.
+                          'n/a' = support = "resolved" (bottle, cabinet): the span is per belief unit, so
+                          there is no class-level band to adopt and asking for one would be the wrong question
   manifest                the agent declares what its object IS in a manifest AND reads it. An inherited
                           world fact ('from = \"inherited\"') stops the agent at startup — a note could not
   birth                   birth_evidence must come from rc::birth::evidence — an OBSERVATION, admitted by

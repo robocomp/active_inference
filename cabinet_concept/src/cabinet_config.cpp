@@ -29,6 +29,14 @@ CabinetConfig load_cabinet_config(const ConfigLoader& cfg)
     if (not rc::manifest::provenance_ok(kManifestPath, "cabinet"))
         std::exit(EXIT_FAILURE);
 
+    // ★NO CLASS-LEVEL z-SPAN TO ADOPT, AND THAT IS A DECLARATION, NOT A GAP. cabinet's manifest states
+    // support = "resolved": the belief unit is a (wall, tier) CELL, and each cell's span comes from its own
+    // WallTierPrior (base ~[0, 0.87], upper ~[1.40, 2.10]) rather than from any class constant. Declaring one
+    // enum here would be a WRONG statement about the object, so rc::manifest::Geometry::z_span() returns an
+    // EMPTY band for `resolved` deliberately — a caller that built a band from it would get nothing rather
+    // than a plausible-looking floor-referenced guess. band_contains_body() is therefore checked PER CELL by
+    // the kitchen model, not once here. Same reasoning applies to bottle (`resolved` per support surface).
+
     // ConfigLoader::get has no default overload; TOML numeric floats are stored as double.
     auto getf = [&](const std::string& k, float def) -> float {
         return cfg.exists(k) ? static_cast<float>(cfg.get<double>(k)) : def;

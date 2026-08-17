@@ -107,6 +107,7 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.fixation_still_dotd    = getf("TableModel.FixationStillDotd",   0.05f);
     out.ai2_gn_iters         = geti("TableModel.AI2GnIters",          4);
     out.ai2_csv_path         = gets("TableModel.AI2CsvPath",          "");
+    out.detect_probe_csv_path = gets("TableConcept.DetectProbeCsvPath", out.detect_probe_csv_path);
     out.birth_surprise_probe = getb("TableModel.BirthSurpriseProbe",  false);
     out.pixel_sigma_over_f     = getf("TableModel.PixelSigmaOverF",       0.0015f);
     out.depth_sigma0_m         = getf("TableModel.DepthSigma0M",          0.006f);
@@ -190,6 +191,32 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.ricoh_confirm_enabled        = getb("TableConcept.RicohConfirmEnabled",        out.ricoh_confirm_enabled);
     out.ricoh_confirm_detection_prob = getf("TableConcept.RicohConfirmDetectionProb", out.ricoh_confirm_detection_prob);
     out.ricoh_confirm_clutter_prob   = getf("TableConcept.RicohConfirmClutterProb",   out.ricoh_confirm_clutter_prob);
+
+    // ── THE DECLARED VERTICAL SPAN, ADOPTED (shared: rc::manifest::adopt_span) ─────────────────────
+    // The manifest states the anchoring ONCE, as a fact about the object, and the span is derived from it —
+    // instead of every site that needs a z-band restating the same assumption in its own arithmetic. That
+    // restating is how hood_concept, cloned from a floor-anchored parent, ran for days with a LiDAR band
+    // DISJOINT from its body while every channel reported full coverage.
+    // ★For a table, Tracker.BirthHeightM (0.75) IS the class surface height, so it is the right span top —
+    // the opposite of refrigerator, where birth height is deliberately far below the object. The asymmetry is
+    // real; do not copy either choice without checking which one this object's birth height means.
+    {
+        const auto span = rc::manifest::adopt_span(kManifestPath, "table",
+                                                  rc::manifest::Support::floor_anchored,
+                                                  out.tracker_birth_height_m, out.tracker_birth_height_m);
+        rc::manifest::Geometry decl;
+        decl.support  = span.support;
+        decl.z_top_m  = out.tracker_birth_height_m;
+        decl.extent_m = out.tracker_birth_height_m;
+        decl.valid    = true;
+        bool ok_bands = true;
+        ok_bands &= rc::manifest::band_contains_body("table ", "lidar_select",
+                        span.z0 - out.lidar_select_margin_m, span.z1 + out.lidar_select_margin_m, decl);
+        ok_bands &= rc::manifest::band_contains_body("table ", "point_ownership",
+                        span.z0 - out.support_select_height_margin_m, span.z1 + out.support_select_height_margin_m, decl);
+        if (ok_bands)
+            std::print("[manifest] table ✓ every derived z-band contains the declared body\n");
+    }
 
     return out;
 }

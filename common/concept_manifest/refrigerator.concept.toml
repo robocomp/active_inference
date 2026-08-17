@@ -25,6 +25,26 @@ opens          = "front"            # has a hinged face — see prior.clearance 
 # 180° front/back is NOT folded away: it is an honest ambiguity left in the reported σ_yaw, and it is resolved
 # by prior.clearance (geometry) + cue.door_seam (appearance), not by a representation trick.
 
+[model.geometry]
+support   = "floor_anchored"       # floor_anchored | leg_supported | hangs | counter_top | resolved
+z_top_m   = 1.90                   # prior mean of H (prior.height below) — the span is [0, H], H is a DOF
+extent_m  = 1.90                   # floor_anchored ⇒ extent == z_top; stated so a clone that CHANGES the
+                                   # support cannot keep a floor-referenced extent by inheritance
+from      = "nominal"              # measured | fitted | nominal | inherited
+why      = """
+★THIS BLOCK WAS MISSING UNTIL 2026-08-17, AND THIS IS THE AGENT hood_concept WAS CLONED FROM. The manifest
+machinery — one authoritative z-span for the SDF, the point-admission band, the NBV Target and the LiDAR
+carve, plus band_contains_body() — exists precisely BECAUSE that clone inherited this object's
+floor-anchored vertical assumptions and ran for days with a LiDAR selection band DISJOINT from the hood body.
+The guard was armed on the child and not on the parent, so the next clone of this file would have started
+from the same silence.
+
+The span is [0, H] because a fridge rests on the floor; `[model].support` said so in prose since 2026-08-03
+but load_geometry() reads [model.geometry], so nothing enforced it. H is a real DOF with a BROAD prior
+(1.90 ± 0.30, see prior.height) — the number here is the class prior, not a measurement of this fridge, hence
+`nominal`. A future refit may make it `fitted`; do not upgrade the word without the measurement.
+"""
+
 # ── Priors: what a refrigerator is like before this one is measured ────────────────────────────────────
 [prior.footprint]
 kind = "gaussian"

@@ -27,6 +27,12 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     if (not rc::manifest::provenance_ok(kManifestPath, "bottle"))
         std::exit(EXIT_FAILURE);
 
+    // Loaded ONCE for the resolve() calls below — the manifest is read for VALUES here, not merely
+    // cross-checked. An unreadable manifest leaves `man` empty, so every resolve() falls through to the
+    // config/agent default exactly as before.
+    ConfigLoader man;
+    try { man.load(kManifestPath); } catch (...) {}
+
     auto getf = [&](const std::string& k, float def) -> float {
         return cfg.exists(k) ? static_cast<float>(cfg.get<double>(k)) : def;
     };
@@ -56,8 +62,18 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     out.support_select_height_margin_m = getf("BottleConcept.SupportSelectHeightMarginM",  0.10f);
     out.masks_stall_timeout_ms       = geti("Media.MasksStallTimeoutMs",           3000);
 
-    out.prior_radius       = getf("BottleModel.PriorRadius",       0.035f);
-    out.prior_height       = getf("BottleModel.PriorHeight",       0.20f);
+    // ★MANIFEST-AUTHORITATIVE (rc::manifest::resolve): manifest → config override, which PRINTS when the two
+    // disagree → agent default. A bottle's support is `resolved` (it stands on whatever it stands on), so
+    // there is no CLASS-level z-span to adopt and no band to check — Geometry::z_span() returns an EMPTY band
+    // for `resolved` deliberately, rather than a plausible-looking wrong one. What the manifest DOES declare
+    // is these two scalars, both measured off the sim asset, so they are read from it.
+    // ⚠The radius disagrees today: manifest 0.031 (measured, cyberbotics BeerBottle) vs this agent's 0.035
+    // default. If config is silent the manifest now wins; if config sets it, the override prints. Either way
+    // the disagreement stops being invisible.
+    out.prior_radius       = rc::manifest::resolve(cfg, "BottleModel.PriorRadius",
+                                man, "prior.radius.mean_m", 0.035f, "bottle prior radius");
+    out.prior_height       = rc::manifest::resolve(cfg, "BottleModel.PriorHeight",
+                                man, "model.geometry.extent_m", 0.20f, "bottle prior height");
     out.prior_size_std     = getf("BottleModel.PriorSizeStd",      0.03f);
     out.mask_precision     = getf("BottleModel.MaskPrecision",     0.0f);
     out.mask_conf_weight   = getb("BottleModel.MaskConfWeight",    true);

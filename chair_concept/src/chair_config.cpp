@@ -177,6 +177,31 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
     out.bearing_yaw_std_rad      = getf("Bearing.YawStdRad",        3.14f);
 
     std::print("chair_concept: configuration loaded.\n");
+    // ── THE DECLARED VERTICAL SPAN, ADOPTED (shared: rc::manifest::adopt_span) ─────────────────────
+    // The manifest states the anchoring ONCE, as a fact about the object, and the span is derived from it —
+    // instead of every site that needs a z-band restating the same assumption in its own arithmetic. That
+    // restating is how hood_concept, cloned from a floor-anchored parent, ran for days with a LiDAR band
+    // DISJOINT from its body while every channel reported full coverage.
+    // ★z_top = seat top + backrest = 0.595 + 0.655 = 1.25 m, from the BIRTH template that actually runs.
+    // ⚠The manifest declares 0.90 (a 0.45/0.45 split from chair_model.h). Those disagree, and adopt_span
+    // PRINTS it rather than one of them winning quietly — which is the whole reason this call exists. Resolve
+    // it by measuring these chairs, then set `from = "measured"`; do not silently align one to the other.
+    {
+        const auto span = rc::manifest::adopt_span(kManifestPath, "chair",
+                                                  rc::manifest::Support::floor_anchored,
+                                                  (out.tracker_birth_seat_h + out.tracker_birth_back_h), (out.tracker_birth_seat_h + out.tracker_birth_back_h));
+        rc::manifest::Geometry decl;
+        decl.support  = span.support;
+        decl.z_top_m  = (out.tracker_birth_seat_h + out.tracker_birth_back_h);
+        decl.extent_m = (out.tracker_birth_seat_h + out.tracker_birth_back_h);
+        decl.valid    = true;
+        bool ok_bands = true;
+        ok_bands &= rc::manifest::band_contains_body("chair ", "point_ownership",
+                        span.z0 - out.support_select_height_margin_m, span.z1 + out.support_select_height_margin_m, decl);
+        if (ok_bands)
+            std::print("[manifest] chair ✓ every derived z-band contains the declared body\n");
+    }
+
     return out;
 }
 

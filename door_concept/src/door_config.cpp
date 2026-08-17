@@ -163,6 +163,29 @@ DoorConfig load_door_config(const ConfigLoader& cfg)
     out.bearing_yaw_std_rad      = getf("Bearing.YawStdRad",        3.14f);
 
     std::print("door_concept: configuration loaded.\n");
+    // ── THE DECLARED VERTICAL SPAN, ADOPTED (shared: rc::manifest::adopt_span) ─────────────────────
+    // The manifest states the anchoring ONCE, as a fact about the object, and the span is derived from it —
+    // instead of every site that needs a z-band restating the same assumption in its own arithmetic. That
+    // restating is how hood_concept, cloned from a floor-anchored parent, ran for days with a LiDAR band
+    // DISJOINT from its body while every channel reported full coverage.
+    // ★z_top is the door-leaf height prior (2.00), matching the manifest. A door has no LiDAR sweep, so
+    // there is no selection band to check — only point ownership.
+    {
+        const auto span = rc::manifest::adopt_span(kManifestPath, "door",
+                                                  rc::manifest::Support::floor_anchored,
+                                                  out.door_prior_h_m, out.door_prior_h_m);
+        rc::manifest::Geometry decl;
+        decl.support  = span.support;
+        decl.z_top_m  = out.door_prior_h_m;
+        decl.extent_m = out.door_prior_h_m;
+        decl.valid    = true;
+        bool ok_bands = true;
+        ok_bands &= rc::manifest::band_contains_body("door ", "point_ownership",
+                        span.z0 - out.support_select_height_margin_m, span.z1 + out.support_select_height_margin_m, decl);
+        if (ok_bands)
+            std::print("[manifest] door ✓ every derived z-band contains the declared body\n");
+    }
+
     return out;
 }
 

@@ -302,6 +302,59 @@ inline float resolve(const ConfigLoader& cfg, const char* cfg_key,
     return agent_default;
 }
 
+// ─── ADOPT THE DECLARED SPAN — the ~30 lines hood proved, so the next agent does not retype them ──
+//
+// The caller has already settled `z_top` and `extent` through resolve() (manifest → config override →
+// default). This loads [model.geometry], reports any contradiction, and hands back the span derived through
+// the SAME z_span() the manifest uses — so a config override of the height moves the span with it and no
+// site re-states the anchoring in its own arithmetic.
+//
+// ★`fallback` is THIS AGENT'S OWN CLAIM about its object, used when the manifest cannot be read. It must not
+// be a guess: state it, so an unreadable manifest still derives a span from an anchoring rather than
+// defaulting to the floor. That default-to-the-floor is exactly how a cloned box kept its parent's geometry.
+//
+// ★A support that CONTRADICTS the fallback is reported loudly rather than quietly obeyed. A hood declaring
+// floor_anchored is a WRONG statement, not a missing one, and it cost p_detect = 0 at every range.
+struct AdoptedSpan
+{
+    Support support = Support::unknown;
+    float   z0 = 0.0f, z1 = 0.0f;
+    bool    from_manifest = false;   // false ⇒ the fallback anchoring was used (manifest absent/resolved)
+};
+
+inline AdoptedSpan adopt_span(const std::string& path, std::string_view who, Support fallback,
+                              float z_top, float extent)
+{
+    AdoptedSpan out;
+    out.support = fallback;
+    const auto g = load_geometry(path, who);
+    if (g.valid)
+    {
+        float mz0 = 0.0f, mz1 = 0.0f; g.z_span(mz0, mz1);
+        if (g.support != fallback)
+            std::print("[manifest] ★{} declares support={} but the agent's own claim is {} — one of the two "
+                       "is a WRONG statement about the object, not a missing one. Fix the manifest or the "
+                       "fallback; do not leave them disagreeing.\n",
+                       who, support_name(g.support), support_name(fallback));
+        if (std::abs((mz1 - mz0) - extent) > 1e-3f and extent > 0.0f)
+            std::print("[manifest] OVERRIDE {} extent: config/agent={:.3f} manifest={:.3f} — the settled value "
+                       "wins, but a world fact is being contradicted; say why in the manifest\n",
+                       who, extent, mz1 - mz0);
+        out.support = g.support;
+        out.from_manifest = true;
+    }
+    Geometry span;
+    span.support  = out.support;
+    span.z_top_m  = z_top;
+    span.z_base_m = 0.0f;
+    span.extent_m = extent;
+    span.z_span(out.z0, out.z1);
+    std::print("[manifest] {} body span = [{:.2f},{:.2f}] m (support={}{})\n",
+               who, out.z0, out.z1, support_name(out.support),
+               out.from_manifest ? "" : ", AGENT FALLBACK — manifest silent");
+    return out;
+}
+
 // ─── BAND COHERENCE: does this z-band actually contain the body? ─────────────────────────────────
 //
 // ★THE CHEAPEST CHECK IN THE FLEET, AND IT WOULD HAVE CAUGHT A WEEK OF WORK. An agent derives several
