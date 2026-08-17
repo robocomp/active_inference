@@ -225,6 +225,8 @@ private:
                                 Eigen::Vector2f xy = Eigen::Vector2f::Zero(); };
     std::vector<RicohBearingTarget> ricoh_attention_targets_;   // unassigned ricoh bearings this cycle
     void process_ricoh_bearings();   // associate ricoh detections to hoods BY DIRECTION; collect the unassigned
+    void log_detect_probe();         // rc::probe row per live instance: viewpoint + framing + detector outcome
+    std::ofstream detect_probe_csv_;
     rc::TimeSeriesPlot*  ts_cov_plot_   = nullptr;   // belief uncertainty U(Σ) = Σ pos+size posterior std (m)
     rc::TimeSeriesPlot*  ts_res_plot_   = nullptr;   // residual point count
     // Bottom panel (replaces the old σ_w/σ_h time-series): the WHOLE belief — every state DOF with its

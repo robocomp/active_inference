@@ -54,12 +54,24 @@ struct TableConfig
     bool  show_dashboard         = true;
 
     // ── Shape model-selection (round vs square) — free-energy evidence, no threshold ──────────────────
-    // Every shape_eval_period cycles (once the support bank has ≥ shape_eval_min_points) fit a ROUND model to
-    // the accumulated cloud and accumulate a bounded log-Bayes-factor (round − square) → inst.subtype. The
-    // accumulator is clamped to ±shape_evidence_clamp so a converged run can still RECANT if evidence turns.
+    // Every shape_eval_period cycles (once the support bank has ≥ shape_eval_min_points) fit BOTH shape
+    // models to the accumulated cloud and accumulate a bounded log-Bayes-factor (round − square) →
+    // inst.subtype. The accumulator is clamped to ±shape_evidence_clamp so a converged run can still RECANT.
     int   shape_eval_period      = 30;
     int   shape_eval_min_points  = 300;
     float shape_evidence_clamp   = 8.0f;
+    // Iterations each hypothesis gets on the accumulated cloud, and the point budget the test runs on. BOTH
+    // models get this same budget from the same cloud-derived seed — see TableFitter::evaluate_shape for why
+    // any asymmetry here is fatal to the comparison.
+    //
+    // These are a COST setting, not a tuning knob: the test is a batch refit on the agent's main thread, so
+    // it is paid as a hitch in the belief loop (~107 ms/cycle live). Measured in tests/shape_asymmetry on a
+    // 3350-point bank, the verdict is the SAME at every combination from 500 pts x 10 iters to 3350 x 40 —
+    // rect -0.92, round +0.013 — because both hypotheses score the SAME points, so the comparison is PAIRED
+    // and the variance of the difference is far below that of either mean. Cost is not the same: 33 ms at
+    // 500x20 against 385 ms at 3350x40. 1500x20 is ~75 ms, under what the old (unfair) round-only fit cost.
+    int   shape_fit_iters        = 20;
+    int   shape_fit_max_points   = 1500;
     // Low-pass rate for the shape log-Bayes-factor. 0 = the legacy SUM (kept for A/B).
     // >0 makes shape_evidence track the CURRENT evidence with a time constant instead of accumulating,
     // because the quantity being re-scored is the accumulated support-bank cloud — largely the SAME points
@@ -178,6 +190,11 @@ struct TableConfig
                                          // from the retina. <=0 disables just this condition.
     int   ai2_gn_iters        = 4;       // Gauss-Newton iterations per frame
     std::string ai2_csv_path  = "";      // if non-empty, append per-cycle belief (state + Σ diag + mask R) to CSV
+    // The DETECTOR's truth table (rc::probe) — one row per cycle per instance: viewpoint, framing, and what
+    // YOLO did about it. Separate file, shared format across agents; see common/detect_probe/detect_probe.h.
+    // ON by default: this is the dataset the removal channel's p_detect has to be calibrated against, and a
+    // knob that defaults off produces a file nobody has when the question is finally asked.
+    std::string detect_probe_csv_path = "etc/detect_probe.csv";
     // Anisotropic per-point R (PRECISION_AS_INFORMATION.md Stage 1). Replaces the scalar per-point variance with
     // the deprojection noise projected on the SDF normal → a grazing view carries ~0 yaw information by
     // construction (no obliquity/range yaw gains needed). The 4 constants are PHYSICAL (ZED sensor), not tuning.

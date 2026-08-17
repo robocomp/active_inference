@@ -90,6 +90,15 @@ void HoodExistence::update_and_remove(HoodFitter& fitter, ConceptLidarIngestor* 
         const auto& S  = inst.ai2_belief.covariance();
         const float surf_sigma = std::sqrt(std::max(0.0f, 0.5f * (S(0, 0) + S(1, 1))));   // footprint position σ
         const bool observed = inst.frames_since_detection == 0;                      // fresh mask this cycle
+        // ★★VIEWPOINT NOVELTY for the correlated-observation weighting. Both channels below integrate
+        // through inst.existence, and a run of them from ONE robot pose is one observation repeated, not
+        // N independent ones — measured on hood_1 as 169 absence cycles from FIVE positions inside 10 cm,
+        // which took ex_p 0.959 -> 0.053. rho_eff already damps an AMBIGUOUS look; this damps a REPEATED
+        // one, and the LiDAR needed it precisely because it sees well (rho*(1-p_detect) -> ~0.06 there).
+        // Scale is the object's own angular half-size — no new constant. Observer = the LiDAR origin,
+        // which is the robot; the camera rides the same body, so one call covers both channels.
+        inst.existence.note_viewpoint(origin.x(), origin.y(), bs.cx, bs.cy,
+                                      0.5f * std::hypot(bs.w, bs.h));
         bool integrated = false;
 
         // SILHOUETTE / MASK channel (pixel-level) — CAMERA clock: project the hoodtop silhouette and compare,
@@ -189,14 +198,33 @@ void HoodExistence::update_and_remove(HoodFitter& fitter, ConceptLidarIngestor* 
                 // update is 0. Scaling the full likelihood ratio by p_detect gives exactly that, keeps the
                 // update SYMMETRIC as this file requires, and still reproduces the old behaviour at
                 // p_detect -> 1 where the two forms coincide.
-                ev_sil.log_odds_delta = p_detect * d_full;
+                // ★★★A DETECTION IS SELF-CERTIFYING — the model may price a MISS, never a HIT.
+                // p_detect answers "could this look have resolved the object". When a mask of this label
+                // actually arrived, that question is settled BY THE OBSERVATION, and `raw_free` is already
+                // 0 on such a cycle (see above), so the delta here is pure occupancy from a real detection.
+                // Scaling it by a PREDICTED p_detect then throws away a confirmation the detector just
+                // made, and at p_detect≈0 throws away all of it — the camera can neither refute nor DEFEND,
+                // leaving the LiDAR carve to decide alone. That is what killed hood_1 (ex_p 0.959 -> 0.053
+                // with ex_socc = 0.0 and ex_pdetect = 0.000 on every cycle of the decay).
+                // ★MEASURED 2026-08-17, and this is why it is not a tuning question: calibrating p_detect
+                // against the observed fire rate over 13 316 in-view rows, the bin the model calls
+                // [0.0,0.1) — 38% of all cycles — actually fires **35.3%** of the time. The model is
+                // silencing a channel that is working.
+                // ★NO RATCHET. The one this file warns about came from letting an OCCUPANCY-ONLY delta
+                // stand at p_detect→0 on cycles with no detection at all — a phantom hood accreting LiDAR
+                // returns from the real table inside its volume. This is the opposite case and cannot do
+                // that: `observed` requires a fresh mask OF THIS LABEL, which a phantom by definition does
+                // not get. False positives are already priced by clutter_prob inside the likelihood ratio,
+                // which is where that risk belongs — not in a geometric visibility term.
+                const float p_confirm = observed ? 1.0f : p_detect;
+                ev_sil.log_odds_delta = p_confirm * d_full;
                 inst.dbg_ex_sil_free_eff = raw_free * p_detect;   // diagnostic: absence mass actually admitted
                 inst.dbg_ex_pdetect = p_detect; inst.dbg_ex_central = sil.central_frac();
                 // p_detect passed EXPLICITLY: log_odds_delta already carries it, but the second argument is
                 // also what the frame-correlation weighting reads (rho_eff = rho*(1-p_detect)). Defaulting it
                 // to 1.0 tells the belief every miss was a maximally unambiguous look, so correlated misses
                 // count as independent. Inert while ExistenceFrameCorrelation is 0; wrong once it is measured.
-                inst.existence.integrate(ev_sil, p_detect);
+                inst.existence.integrate(ev_sil, p_confirm);
                 integrated = true;
                 // Route the un-resolvable absence into an epistemic VERIFY pull (decayed accumulator). When it
                 // builds up, the hood is flagged for verification (the epistemic planner drives the robot to a

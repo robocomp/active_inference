@@ -175,6 +175,11 @@ struct RefrigeratorConfig
     float ai2_trunc_gate_frac = 0.10f;
     int   ai2_gn_iters        = 4;       // Gauss-Newton iterations per frame
     std::string ai2_csv_path  = "";      // if non-empty, append per-cycle belief (state + Σ diag + mask R) to CSV
+    // The DETECTOR's truth table (rc::probe) — one row per cycle per instance: viewpoint, framing, and what
+    // YOLO did about it. Separate file, shared format across agents; see common/detect_probe/detect_probe.h.
+    // ON by default: this is the dataset the removal channel's p_detect has to be calibrated against, and a
+    // knob that defaults off produces a file nobody has when the question is finally asked.
+    std::string detect_probe_csv_path = "etc/detect_probe.csv";
     // Anisotropic per-point R (PRECISION_AS_INFORMATION.md Stage 1). Replaces the scalar per-point variance with
     // the deprojection noise projected on the SDF normal → a grazing view carries ~0 yaw information by
     // construction (no obliquity/range yaw gains needed). The 4 constants are PHYSICAL (ZED sensor), not tuning.

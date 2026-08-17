@@ -296,7 +296,7 @@ int main(int argc, char** argv)
     { std::printf("usage: %s <ai2_log.csv> [--label det_alive|fresh] [--no-weights] [--bins N]\n"
                   "          [--hfov DEG --vfov DEG --camh M]\n", argv[0]); return 1; }
 
-    std::string path = argv[1], label = "det_alive";
+    std::string path = argv[1], label = "det_alive";   // overridden to "fired" below when the probe column exists
     bool use_weights = true; int bins = 16;
     float hfov_deg = 110.0f, vfov_deg = 77.6f, cam_h = 0.945f;   // the live sim rig, overridable
     for (int i = 2; i < argc; ++i)
@@ -327,8 +327,21 @@ int main(int argc, char** argv)
                                            "  that includes the calibration columns?\n", n); std::exit(1); }
         return it->second;
     };
+    // Optional lookup: -1 when absent, so a file that simply does not carry a column is handled without
+    // pretending it does.
+    const auto opt = [&](const char* n) -> int
+    { const auto it = col.find(n); return it == col.end() ? -1 : it->second; };
     const int c_fill = need("roi_fill"), c_h = need("roi_fill_h"), c_v = need("roi_fill_v");
-    const int c_valid = need("roi_valid"), c_alive = need("det_alive"), c_fsd = need("frames_since_det");
+    // ★ALSO ACCEPTS detect_probe.csv (rc::probe), which carries a REAL per-cycle outcome column.
+    // `det_alive` is a LATCHED liveness flag — measured 1 in 9432/9432 hood rows, still 1 at
+    // frames_since_det = 6172 — so on an ai2 log the only usable label is `fresh`. The probe file
+    // settles it by logging `fired` directly; when that column exists it wins, and the two ai2-only
+    // columns are then optional rather than required.
+    const int c_valid = need("roi_valid");
+    const int c_fired = opt("fired");
+    if (c_fired >= 0) label = "fired";   // the probe file settles the label; say so in the report
+    const int c_alive = (c_fired >= 0) ? opt("det_alive") : need("det_alive");
+    const int c_fsd   = (c_fired >= 0) ? opt("frames_since_det") : need("frames_since_det");
     const int c_exp = need("ex_p");
 
     std::vector<Trial> all;
@@ -338,14 +351,16 @@ int main(int argc, char** argv)
         if (line.empty()) continue;
         ++lines;
         const auto f = split(line);
-        const int wide = std::max({c_fill, c_h, c_v, c_valid, c_alive, c_fsd, c_exp});
+        const int wide = std::max({c_fill, c_h, c_v, c_valid, c_alive, c_fsd, c_exp, c_fired});
         if (static_cast<int>(f.size()) <= wide) { ++dropped_parse; continue; }
 
         const auto fill = parse_float(f[c_fill]); const auto fh = parse_float(f[c_h]);
         const auto fv = parse_float(f[c_v]);      const auto valid = parse_float(f[c_valid]);
-        const auto alive = parse_float(f[c_alive]); const auto fsd = parse_float(f[c_fsd]);
+        const auto alive = (c_alive >= 0) ? parse_float(f[c_alive]) : std::optional<float>{0.0f};
+        const auto fsd   = (c_fsd   >= 0) ? parse_float(f[c_fsd])   : std::optional<float>{0.0f};
+        const auto fired_v = (c_fired >= 0) ? parse_float(f[c_fired]) : std::optional<float>{0.0f};
         const auto pex = parse_float(f[c_exp]);
-        if (not (fill and fh and fv and valid and alive and fsd and pex)) { ++dropped_parse; continue; }
+        if (not (fill and fh and fv and valid and alive and fsd and fired_v and pex)) { ++dropped_parse; continue; }
         if (*valid < 0.5f) { ++dropped_invalid; continue; }   // degenerate projection: fill is meaningless
 
         Trial t;
@@ -353,7 +368,8 @@ int main(int argc, char** argv)
         // Two label conventions, because they answer different questions: `det_alive` is the agent's own
         // liveness flag (may latch across frames), `fresh` is "a mask arrived THIS cycle". If the two fits
         // disagree materially, the latch is smearing detections across cycles the detector did not fire in.
-        t.fired  = (label == "fresh") ? (*fsd <= 0.5f) : (*alive > 0.5f);
+        t.fired  = (c_fired >= 0) ? (*fired_v > 0.5f)
+                                  : ((label == "fresh") ? (*fsd <= 0.5f) : (*alive > 0.5f));
         t.weight = use_weights ? std::clamp(*pex, 0.0f, 1.0f) : 1.0f;
         all.push_back(t);
     }

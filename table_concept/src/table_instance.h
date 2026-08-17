@@ -152,7 +152,15 @@ struct TableInstance
     // produced it. -1 = never evaluated, which is different from "evaluated and found square".
     float       dbg_shape_lbf   = 0.0f;    // this evaluation's log-Bayes-factor, e_square - e_round
     float       dbg_e_square    = -1.0f;   // free energy of the SQUARE hypothesis on the accumulated cloud
-    float       dbg_e_round     = -1.0f;   // ...and of the ROUND one, same cloud, same R
+    float       dbg_e_round     = -1.0f;   // ...and of the ROUND one, same cloud, same R, same seed, same iters
+    // ★AND WHAT EACH HYPOTHESIS ACTUALLY CLAIMED. Both models are refitted to the bank at every evaluation
+    // (they are NOT the tracking belief), so their geometry is the only way to tell a real shape verdict from
+    // a refit that ran away — the failure mode that made a 1.26 x 0.69 m table read as round was invisible
+    // while only the two energies were logged, because a bad fit and a different shape look identical in a
+    // scalar. If dbg_shape_sq_w/h disagree with the published w/h, the comparison is not about shape.
+    float       dbg_shape_sq_w  = -1.0f;   // refitted SQUARE hypothesis extent on the bank
+    float       dbg_shape_sq_h  = -1.0f;
+    float       dbg_shape_rd_r  = -1.0f;   // refitted ROUND hypothesis disc radius on the same bank
     int         dbg_shape_pts   = 0;       // points in the bank at that evaluation (the decision's evidence)          // cycles since the last periodic shape evaluation
     // Most recent fresh-frame residual points (model-unexplained), held for the viewer.
     std::vector<Eigen::Vector3f> last_residual_pts;

@@ -363,6 +363,53 @@ public:
     // side would be a ratchet.
     void set_frame_correlation(float rho) { rho_ = std::clamp(rho, 0.0f, 0.95f); }
     float frame_correlation() const { return rho_; }
+
+    // ★★★AND THE SECOND CAUSE OF CORRELATION: THE OBSERVER DID NOT MOVE.
+    //
+    // `rho_eff = rho*(1-p_detect)` models one cause — an AMBIGUOUS look, whose excuse weakens as
+    // conditions improve. It has no term for the other, which is simply that two observations ARE THE
+    // SAME OBSERVATION. A parked robot re-probes identical geometry at 20 Hz; how confident each look is
+    // says nothing about how many looks there were, and the p_detect form gets this exactly backwards —
+    // it damps LEAST for the channel that sees BEST, which is the one most able to repeat itself.
+    //
+    // MEASURED 2026-08-17 (hood_1, the run that killed it): 169 cycles of LiDAR absence from FIVE
+    // distinct robot positions inside 10 cm, with p_detect_lidar 0.74-0.96 ⇒ rho_eff 0.02-0.12 against
+    // rho = 0.477. So ~169 independent refutations were charged for what was, in information terms,
+    // about five looks. ex_p 0.959 -> 0.053. Across the fleet the same read gave misses-per-distinct-
+    // viewpoint of x27.3 (table_2, 82 misses from THREE viewpoints), x5.1 (hood), x2.2, x2.1.
+    //
+    // ★THE SCALE IS THE OBJECT'S OWN GEOMETRY, so this adds NO tuned constant. Two looks are the same
+    // look when the viewing direction has moved by much less than the object's angular half-size
+    // atan(R/d) — that is precisely the displacement at which a different aspect comes into view — and
+    // when the range has moved by much less than R. Stationarity decays as a Gaussian in those units.
+    //
+    // ★MAX, not product: either cause alone is enough to make the k-th observation worth little. The
+    // ambiguity term still governs a moving robot, and this one governs a stationary one.
+    //
+    // Anchored to the START of the current same-sign run, not to the previous frame: the question a run
+    // asks is "how much genuinely new evidence has accumulated SINCE this run began", and per-frame
+    // deltas would let a slow drift look novel every cycle while never leaving the same spot.
+    void note_viewpoint(float obs_x, float obs_y, float tgt_x, float tgt_y, float radius_m)
+    {
+        const float dx = tgt_x - obs_x, dy = tgt_y - obs_y;
+        const float d  = std::hypot(dx, dy);
+        if (not std::isfinite(d) or d < 1e-3f)
+            return;                                   // observer on top of the target: bearing undefined
+        const float bearing = std::atan2(dy, dx);
+        const float R       = std::max(radius_m, 1e-3f);
+        if (not have_anchor_)
+        {
+            anchor_bearing_ = bearing; anchor_range_ = d; have_anchor_ = true;
+            stationarity_ = 1.0f;                     // first look of a run: nothing new yet BY DEFINITION
+            return;
+        }
+        const float half = std::max(std::atan2(R, std::max(d, 1e-3f)), 1e-3f);   // angular half-size
+        const float db   = std::remainder(bearing - anchor_bearing_, 2.0f * static_cast<float>(M_PI));
+        const float dr   = d - anchor_range_;
+        const float u2   = (db / half) * (db / half) + (dr / R) * (dr / R);
+        stationarity_    = std::exp(-std::clamp(u2, 0.0f, 60.0f));
+    }
+
     int   run_length() const { return run_k_; }   // consecutive same-sign observations (diagnostic)
 
     // Fold one modality's per-cycle evidence. HOLD (no change) when the instance wasn't probed this cycle.
@@ -408,7 +455,13 @@ public:
         if (sign != 0)
         {
             if (sign == run_sign_) ++run_k_;
-            else { run_sign_ = sign; run_k_ = 1; }
+            else
+            {
+                run_sign_ = sign; run_k_ = 1;
+                // A new run re-anchors the viewpoint: novelty is only meaningful relative to where this
+                // run started, so the next note_viewpoint() takes a fresh anchor.
+                have_anchor_ = false; stationarity_ = 0.0f;
+            }
         }
         // The correlation weighting reads the CONDITIONS, and p_vis is exactly "how unambiguous was this
         // look" — the same quantity, so it is passed straight through rather than asked for twice.
@@ -457,7 +510,8 @@ private:
     //     there the charge is already ~0, since ΔL is p_detect-weighted upstream.
     float marginal_weight(int k, float p_detect) const
     {
-        const float rho = rho_ * std::clamp(1.0f - p_detect, 0.0f, 1.0f);
+        const float ambiguity  = std::clamp(1.0f - p_detect, 0.0f, 1.0f);
+        const float rho = rho_ * std::max(ambiguity, std::clamp(stationarity_, 0.0f, 1.0f));
         if (rho <= 1e-4f or k <= 1) return 1.0f;
         const auto n_eff = [&](int n) { return n <= 0 ? 0.0f
                                                       : static_cast<float>(n) / (1.0f + (n - 1) * rho); };
@@ -468,6 +522,13 @@ private:
     float rho_      = 0.0f;   // frame-to-frame correlation of same-sign observations; 0 ⇒ independent
     int   run_sign_ = 0;      // +1 confirming run, −1 absence run, 0 = none yet
     int   run_k_    = 0;      // length of the current same-sign run
+    // Viewpoint novelty since the current run began. 1 = the observer has not moved ⇒ every further
+    // observation in this run is the SAME observation. Defaults to 0 so an agent that never calls
+    // note_viewpoint keeps exactly the previous behaviour.
+    float stationarity_    = 0.0f;
+    float anchor_bearing_  = 0.0f;
+    float anchor_range_    = 0.0f;
+    bool  have_anchor_     = false;
 };
 
 

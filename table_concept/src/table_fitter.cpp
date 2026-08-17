@@ -827,32 +827,103 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
     return energy;
 }
 
+// Seed for the shape hypothesis test, derived from the CLOUD alone: xy centroid, a high-quantile top height,
+// and the mean top-band radius as a size hint (w/h split 1.2/0.8 so the fit has an orientation to resolve).
+// Mirrors tests/compare_models' init_from_cloud. Both hypotheses start here — see evaluate_shape on why.
+static TableBeliefState shape_seed_from_cloud(const std::vector<Eigen::Vector3f>& pts)
+{
+    double sx = 0.0, sy = 0.0;
+    std::vector<float> zs; zs.reserve(pts.size());
+    for (const auto& p : pts) { sx += p.x(); sy += p.y(); zs.push_back(p.z()); }
+    const float cx = static_cast<float>(sx / static_cast<double>(pts.size()));
+    const float cy = static_cast<float>(sy / static_cast<double>(pts.size()));
+    std::ranges::sort(zs);
+    const float H = zs[static_cast<std::size_t>(0.90 * static_cast<double>(zs.size() - 1))];   // ~tabletop
+    float rad = 0.0f; int n = 0;
+    for (const auto& p : pts)
+        if (std::abs(p.z() - H) < 0.08f) { rad += std::hypot(p.x() - cx, p.y() - cy); ++n; }
+    rad = std::clamp(n > 0 ? rad / static_cast<float>(n) * 1.3f : 0.5f, 0.2f, 1.5f);  // mean radius → size hint
+    return {cx, cy, H, 1.2f * rad, 0.8f * rad, 0.0f};
+}
+
 // Round-vs-square shape hypothesis test by free energy / model evidence (CONCEPT_AGENT_RECIPE.md §6, the
 // "evidence over hypotheses, not a threshold" pattern; validated offline in tests/compare_models). Every
-// cfg_.shape_eval_period cycles, once the ownership-gated support bank has enough points, fit a ROUND model
-// (disc top + 4 ring legs — MATCHED primitive cardinality with the square's top+4legs, so the mixture-prior
-// baseline cancels and only disc-vs-box TOP shape is measured) to the SAME accumulated cloud with the SAME R,
-// and accumulate a BOUNDED sequential log-Bayes-factor (E_square − E_round). subtype flips at the zero
-// boundary — no tuned cutoff. The clamp lets a converged run RECANT if a fuller view turns the evidence.
+// cfg_.shape_eval_period cycles, once the ownership-gated support bank has enough points, fit BOTH shape
+// models — square(box top + 4 legs) and round(disc top + 4 ring legs, MATCHED primitive cardinality so the
+// mixture-prior baseline cancels and only disc-vs-box TOP shape is measured) — to the SAME accumulated cloud,
+// with the SAME R, the SAME seed and the SAME iteration budget, and accumulate a BOUNDED sequential
+// log-Bayes-factor (E_square − E_round). subtype flips at the zero boundary — no tuned cutoff. The clamp lets
+// a converged run RECANT if a fuller view turns the evidence.
+//
+// ★A MODEL COMPARISON IS ONLY A COMPARISON IF BOTH SIDES ARE SCORED THE SAME WAY. Until 2026-08-17 this
+// refitted the ROUND hypothesis to the cloud and scored the SQUARE one at the LIVE TRACKING BELIEF's state —
+// a state fitted to the mask stream under priors, process noise and common-mode inflation, NOT to this cloud.
+// So one hypothesis was optimised on the very data it was scored on and the other was not, and every
+// transient error the tracker carried (a still-converging extent, an ego-motion-inflated size) was charged to
+// the SQUARE alone and read as evidence for ROUND. LIVE SYMPTOM (table_3, a 1.26 x 0.69 m RECTANGULAR table):
+// classified round for ~2000 cycles, then flipped to square with NO change in the round model and no change
+// in the object — e_round sat pinned at 5.3085 (converged, refitted every time) while e_square walked from
+// 5.97 down to 5.02 as the tracker's extent converged from 1.30x0.61 to 1.26x0.69. The verdict was measuring
+// TRACKER CONVERGENCE, not shape. Measured in tests/shape_asymmetry: on a rectangular cloud a mid-convergence
+// tracker gave lbf +1.45 (ROUND, wrong); refitting both from a cloud-derived seed gives -0.63 (square) and —
+// the property that matters — the SAME -0.63 from every tracker state, because the shape verdict is now a
+// function of the CLOUD alone. That also fixes the mirror case: the round cloud's true margin is only
+// ~+0.01 nats/point (a box circumscribing a disc pays nothing for its empty corners — there is no free-space
+// term in either model), so ANY procedural asymmetry is one to two orders of magnitude larger than the signal
+// being measured and simply overwrites it.
 void TableFitter::evaluate_shape(TableInstance& inst)
 {
     if (cfg_.shape_eval_period <= 0) return;                              // gate disabled
     if (++inst.shape_eval_ctr < cfg_.shape_eval_period) return;
     inst.shape_eval_ctr = 0;
-    const auto& cloud = inst.support_bank_pts;
-    if (static_cast<int>(cloud.size()) < cfg_.shape_eval_min_points) return;
+    const auto& bank = inst.support_bank_pts;
+    if (static_cast<int>(bank.size()) < cfg_.shape_eval_min_points) return;
 
-    const float R = cfg_.ai2_sigma_base_m * cfg_.ai2_sigma_base_m;        // SAME R as the square → normaliser cancels
-    // Square hypothesis: the already-fitted belief's clutter-inclusive free energy on the accumulated cloud.
-    const float e_square = inst.ai2_belief.mean_energy(cloud, inst.ai2_belief.state(), R);
-    // Round hypothesis: fit a fresh round(ring) belief to the same cloud, seeded from the square's pose/size.
-    const auto& sq = inst.ai2_belief.state();
+    // Stride-subsample to the point budget. This is a BATCH refit on the main thread every
+    // shape_eval_period cycles, so its cost is a hitch in the belief loop; both hypotheses score the SAME
+    // points, which makes the comparison PAIRED and its result nearly independent of the count (see
+    // TableConfig::shape_fit_max_points for the measurements).
+    std::vector<Eigen::Vector3f> sub;
+    if (const auto cap = static_cast<std::size_t>(std::max(1, cfg_.shape_fit_max_points)); bank.size() > cap)
+    {
+        sub.reserve(cap);
+        const double step = static_cast<double>(bank.size()) / static_cast<double>(cap);
+        for (std::size_t i = 0; i < cap; ++i) sub.push_back(bank[static_cast<std::size_t>(i * step)]);
+    }
+    const std::vector<Eigen::Vector3f>& cloud = sub.empty() ? bank : sub;
+
+    const float R = cfg_.ai2_sigma_base_m * cfg_.ai2_sigma_base_m;        // SAME R both sides → normaliser cancels
+    const int   iters = std::max(1, cfg_.shape_fit_iters);
+    TableFrame  f; f.points = cloud;
+
+    // Seed derived from the CLOUD, not from the tracker: xy centroid, a high-quantile top height, and the
+    // mean top-band radius as a size hint (tests/compare_models' init_from_cloud). Both hypotheses start
+    // from it, so neither inherits the tracker's transient error and neither gets a better starting point.
+    const auto seed = shape_seed_from_cloud(cloud);
+
+    // Square hypothesis: a fresh belief with the PLAIN SDF-mixture parameters — the same mixture, clutter
+    // floor and geometry constants the round model has, and none of the tracking-only factors (footprint
+    // residual, coverage/free-space/moment precisions, process noise) that have no counterpart on the round
+    // side and would make this an unequal contest again.
+    TableBeliefParams sp;
+    sp.sigma_base_m = cfg_.ai2_sigma_base_m; sp.clutter_frac = cfg_.ai2_clutter_frac;
+    sp.clutter_scale_m = cfg_.ai2_clutter_scale_m; sp.prior_size_std = cfg_.ai2_prior_size_std;
+    sp.top_thickness = TableModel::TOP_THICKNESS; sp.leg_radius = TableModel::LEG_RADIUS;
+    TableBelief square(seed, sp);
+    for (int it = 0; it < iters; ++it) { square.update(f); square.resolve_orientation(cloud, R); }
+    const float e_square = square.mean_energy(cloud, square.state(), R);
+
+    // Round hypothesis: same cloud, same seed, same budget.
     RoundTableParams rp; rp.sigma_base_m = cfg_.ai2_sigma_base_m; rp.clutter_frac = cfg_.ai2_clutter_frac;
     rp.clutter_scale_m = cfg_.ai2_clutter_scale_m; rp.prior_size_std = cfg_.ai2_prior_size_std;
-    RoundTableBelief round({sq.cx, sq.cy, sq.H, 0.25f * (sq.w + sq.h)}, rp, RoundBase::Ring);
-    TableFrame f; f.points = cloud;
-    for (int it = 0; it < 40; ++it) round.update(f);
+    RoundTableBelief round({seed.cx, seed.cy, seed.H, 0.25f * (seed.w + seed.h)}, rp, RoundBase::Ring);
+    for (int it = 0; it < iters; ++it) round.update(f);
     const float e_round = round.mean_energy(cloud, round.state(), R);
+
+    // What each hypothesis actually claimed, so the verdict can be read back against the object.
+    inst.dbg_shape_sq_w  = square.state().w;
+    inst.dbg_shape_sq_h  = square.state().h;
+    inst.dbg_shape_rd_r  = round.state().radius;
 
     // Bounded sequential accumulation of the per-evaluation log-Bayes-factor (>0 ⇒ round explains it better).
     // ★NOT A SUM WHEN THE ALPHA IS SET. What is being re-scored is the accumulated support-bank cloud —
@@ -882,8 +953,10 @@ void TableFitter::evaluate_shape(TableInstance& inst)
     const std::string prev = inst.subtype;
     inst.subtype = inst.shape_evidence > 0.0f ? "round" : "square";
     if (inst.subtype != prev)
-        std::print("[{}] shape → {} (log-BF acc={:.2f}; e_sq={:.3f} e_round={:.3f})\n",
-                   inst.node_name, inst.subtype, inst.shape_evidence, e_square, e_round);
+        std::print("[{}] shape → {} (log-BF acc={:.2f}; e_sq={:.3f} [{:.2f}x{:.2f}] e_round={:.3f} [r={:.2f}] "
+                   "on {} pts)\n",
+                   inst.node_name, inst.subtype, inst.shape_evidence, e_square, inst.dbg_shape_sq_w,
+                   inst.dbg_shape_sq_h, e_round, inst.dbg_shape_rd_r, cloud.size());
 }
 
 // Append one AI2 belief row (state + Σ-diag std + mask R/bias/trunc + mode evidence + LiDAR diag) to the CSV.
@@ -917,7 +990,7 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
                  // labels drifted out of order while every value read "ok": a mislabelled instrument is
                  // worse than none, because it is believed. If this file is touched again, the durable fix
                  // is to emit the header FROM the value list rather than maintaining two.
-                 "shape_round,shape_evidence,shape_lbf,e_square,e_round,shape_pts,bank_pts,"
+                 "shape_round,shape_evidence,shape_lbf,e_square,e_round,shape_sq_w,shape_sq_h,shape_rd_r,shape_pts,bank_pts,"
                  << "mom_major,mom_minor,mom_phi,mom_pts,"   // RAW footprint statistic (basin diagnosis)   // rogue-mask diag
                  << "ex_L,ex_p,ex_locc,ex_lfree,ex_lfree_eff,ex_ln,ex_socc,ex_sfree,ex_sfree_eff,ex_sndet,ex_streak,"
                  << "ex_pdetect,ex_central,ex_verify,ex_wantsverify,"   // existence-removal + verification-gate diag
@@ -962,6 +1035,7 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
              << inst.ai2_belief.dbg_moment_aniso() << ',' << inst.ai2_belief.dbg_moment_r_yaw() << ','   // rogue-mask diag
              << (inst.subtype == "round" ? 1 : 0) << ',' << inst.shape_evidence << ','
              << inst.dbg_shape_lbf << ',' << inst.dbg_e_square << ',' << inst.dbg_e_round << ','
+             << inst.dbg_shape_sq_w << ',' << inst.dbg_shape_sq_h << ',' << inst.dbg_shape_rd_r << ','
              << inst.dbg_shape_pts << ',' << inst.support_bank_pts.size() << ','
              << inst.ai2_belief.dbg_moment_ext_major() << ',' << inst.ai2_belief.dbg_moment_ext_minor() << ','
              << inst.ai2_belief.dbg_moment_phi() << ',' << inst.ai2_belief.dbg_moment_pts() << ','

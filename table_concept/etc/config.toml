@@ -382,11 +382,22 @@ ExistenceLegOccupancy = true
 #
 # The decision is made on points THIS AGENT accumulated from its own masks' 3D support (the support bank),
 # not on anything the retina publishes back: one view of a table is a partial arc, and round-vs-square
-# only separates once the accumulated cloud spans enough of the rim. Every ShapeEvalPeriod cycles the ROUND
-# hypothesis is re-fitted to that cloud and scored against the SQUARE one at the same R, and the subtype
-# flips at the zero boundary of a bounded accumulated log-Bayes-factor — evidence, not a threshold.
+# only separates once the accumulated cloud spans enough of the rim. Every ShapeEvalPeriod cycles BOTH
+# hypotheses are re-fitted to that cloud — same seed, same R, same iteration budget — and the subtype flips
+# at the zero boundary of a bounded accumulated log-Bayes-factor: evidence, not a threshold.
+#
+# ★2026-08-17: only the ROUND hypothesis used to be re-fitted; the SQUARE one was scored at the live
+# TRACKING belief's state, which is fitted to the mask stream and not to this cloud. One side was therefore
+# optimised on the data it was scored on and the other was not, so the tracker's own transient error read as
+# evidence for ROUND — a 1.26 x 0.69 m RECTANGULAR table (table_3) was classified round for ~2000 cycles.
+# See TableFitter::evaluate_shape and tests/shape_asymmetry.
 ShapeEvalPeriod = 30       # cycles between evaluations
 ShapeEvalMinPoints = 300   # accumulated points before the test can run at all
+# Cost of one evaluation — a batch refit of BOTH models, on the main thread, so it is a hitch in the belief
+# loop (~107 ms/cycle live). The verdict is unchanged from 500x10 to 3350x40 (both models score the SAME
+# points, so the comparison is paired); the cost is not: 33 ms vs 385 ms. Measured in tests/shape_asymmetry.
+ShapeFitIters = 20         # iterations EACH hypothesis gets (identical budgets, or the test is not a test)
+ShapeFitMaxPoints = 1500   # stride-subsample of the support bank the test runs on
 # Convergence / cadence + a couple of tuned constants promoted here from hardcoded values (defaults unchanged).
 # StateEps / KStable / DetectionAliveMaxFrames were read by getters with the keys ABSENT from config (silent
 # defaults) — now exposed; a NEW concept agent must expose its own. MatchedFramesBeforeAging / CentralRegionFrac

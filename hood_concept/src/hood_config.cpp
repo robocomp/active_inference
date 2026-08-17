@@ -227,6 +227,7 @@ HoodConfig load_hood_config(const ConfigLoader& cfg)
     out.ai2_trunc_gate_frac    = getf("HoodModel.AI2TruncGateFrac",   0.10f);
     out.ai2_gn_iters         = geti("HoodModel.AI2GnIters",          4);
     out.ai2_csv_path         = gets("HoodModel.AI2CsvPath",          "");
+    out.detect_probe_csv_path = gets("HoodConcept.DetectProbeCsvPath", out.detect_probe_csv_path);
     out.birth_surprise_probe = getb("HoodModel.BirthSurpriseProbe",  false);
     out.pixel_sigma_over_f     = getf("HoodModel.PixelSigmaOverF",       0.0015f);
     out.depth_sigma0_m         = getf("HoodModel.DepthSigma0M",          0.006f);

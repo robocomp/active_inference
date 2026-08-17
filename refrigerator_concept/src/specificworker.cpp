@@ -511,6 +511,7 @@ void SpecificWorker::compute()
     // collect_graph_obstacles uses a ts==0 transform (CLAUDE.md).
     foreign_claims_ = rc::exclusion::foreign_claims(*G, inner_eigen_.get(), "refrigerator");
     if (existence_) existence_->set_foreign_claims(&foreign_claims_);
+    if (fitter_) fitter_->set_foreign_claims(&foreign_claims_);   // the FIT judges the same geometry
 
     if (lidar_ingestor_)
     {
@@ -551,6 +552,10 @@ void SpecificWorker::compute()
     // Ricoh 360 = peripheral attention: associate ricoh detections to refrigerators BY DIRECTION (after the ZED fits,
     // so refrigerator positions are current); an unassigned bearing becomes a "seek a ZED view here" attention target.
     process_ricoh_bearings();
+
+    // The detector's truth table. BEFORE removal on purpose: an instance killed this cycle must still
+    // leave the row that records the look which killed it — that row is the whole point of the file.
+    log_detect_probe();
 
     // Evidence-based removal: each existence channel integrates on its OWN sensor cadence (silhouette/mask on a
     // fresh mask frame, LiDAR carve on a fresh sweep) — a camera-only cycle still accrues absence, a LiDAR-only

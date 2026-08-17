@@ -13,6 +13,7 @@
 #include "specificworker.h"
 
 #include "../../common/peripheral_channel/peripheral_channel.h"   // THE shared ricoh path
+#include "../../common/detect_probe/detect_probe.h"   // rc::probe — the detector's truth table (SHARED)
 
 #include "../../common/existence_belief/existence_belief.h"   // rc::exist — peripheral CONFIRM-ONLY
 #include "table_geometry.h"   // rc::geom::footprint_overlap_ratio
@@ -163,11 +164,13 @@ void SpecificWorker::run_instance_tracker()
                 // unambiguously, and the retina has been publishing it all along. A ricoh slice may
                 // still CONFIRM a live instance or raise a proto-object to go and look
                 // at; it may not move one. ★THE MECHANISM HERE IS THIS AGENT'S OWN
-                // process_ricoh_bearings, NOT common/bearing_confirm — that module is used by
+                // process_ricoh_bearings. (It used to say "NOT common/bearing_confirm"; that module was DELETED on
+                // 2026-08-17 with no caller left — the pointer itself had become the wild goose chase it warned
+                // about. The shared path is common/peripheral_channel.) The distinction that remains is
                 // bottle/chair/door, which consume BEARING-ONLY slices (has_depth=false, azimuth).
                 // This agent instead consumes ricoh slices that carry 3D points from the LiDAR
                 // depth-fill. Both are the same channel; naming the wrong one sent an audit
-                // looking for a bearing_confirm call that was never going to be here.
+                // which SLICE KIND each agent consumes — see peripheral_channel.h.
                 // See MaskIngestor::MaskSlice::may_fit_geometry.
             if (sl.label != "table" or sl.support_end <= sl.support_begin or not sl.may_fit_geometry())
                 continue;
@@ -367,3 +370,77 @@ void SpecificWorker::process_ricoh_bearings()
     if (fitter_) fitter_->set_ricoh_counts(static_cast<int>(dets.size()), ev_g_.ricoh_attention);
 }
 
+
+
+// ─── Detector truth table (rc::probe) ─────────────────────────────────────────────────────────────
+//
+// One row per cycle per live instance: WHERE the robot was standing, HOW the object projected, and what
+// the detector did. See common/detect_probe/detect_probe.h for why each column exists — in short, the
+// existing ai2 log can say "no mask this cycle" but cannot say from how many DISTINCT viewpoints, nor
+// with what score it fired, nor whether the detector actually saw the object and named it something
+// else. Those three gaps are what make a miss unattributable today.
+//
+// ★WHY THE ROBOT POSE IS THE POINT. Absence is integrated as if every frame were an independent trial.
+// It is not — a miss from a pose repeats at 20 Hz from that same pose, so standing still manufactures
+// ~100 refutations of a single look. Without (rx,ry,rtheta) that hypothesis cannot even be TESTED, so
+// this column is the one that unblocks the whole question.
+void SpecificWorker::log_detect_probe()
+{
+    if (cfg_.detect_probe_csv_path.empty() or not fitter_ or not mask_ingestor_)
+        return;
+    if (not rc::probe::ensure_open(detect_probe_csv_, cfg_.detect_probe_csv_path))
+        return;
+
+    // Pose is REQUIRED, not optional-with-a-fallback: a row whose viewpoint silently defaulted to the
+    // origin would cluster with every other failed lookup and invent a viewpoint that never existed.
+    // No pose ⇒ no row.
+    if (not inner_eigen_)
+        return;
+    const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", 0);
+    if (not rtb.has_value())
+        return;
+    const auto& Tb = rtb.value();
+    const float rx = static_cast<float>(Tb(0, 3)), ry = static_cast<float>(Tb(1, 3));
+    const float rtheta = static_cast<float>(std::atan2(Tb(1, 0), Tb(0, 0)));
+    float cam_z = static_cast<float>(Tb(2, 3));
+    if (const auto rtz = inner_eigen_->get_transformation_matrix("room", "zed", 0); rtz.has_value())
+        cam_z = static_cast<float>(rtz.value()(2, 3));
+
+    const auto& pkt = mask_ingestor_->packet();
+    int n_all = 0, n_my = 0;
+    if (pkt.valid)
+        for (const auto& sl : pkt.slices)
+        {
+            if (not sl.is_zed()) continue;   // the ZED is the detector this file is about
+            ++n_all;
+            if (sl.label == "table") ++n_my;
+        }
+
+    for (const auto& [id, inst] : fitter_->instances())
+    {
+        const auto& s = inst.model.state();
+        rc::probe::Sample row;
+        row.cycle    = inst.processed_cycles;
+        row.node     = inst.node_name;
+        row.stamp_ms = inst.dbg_pkt_ts_ms;
+        row.rx = rx; row.ry = ry; row.rtheta = rtheta; row.cam_z = cam_z;
+        row.ocx = s.cx; row.ocy = s.cy; row.ocz = s.table_height;
+        row.range_m       = inst.last_range;
+        row.roi_fill      = inst.roi_fill;
+        row.roi_fill_h    = inst.roi_fill_h;
+        row.roi_fill_v    = inst.roi_fill_v;
+        row.roi_valid     = inst.roi_valid;
+        row.obliquity_cos = inst.dbg_obliquity_cos;
+        row.trunc_frac    = inst.last_trunc_frac;
+        row.p_detect      = inst.dbg_ex_pdetect;
+        row.p_exists      = inst.existence.p_exists();
+        // ★THE LABEL, and it is not det_alive. detection_alive LATCHES across frames (measured on hood:
+        // 1 in 9432/9432 rows, still 1 at frames_since_det=6172), so as an outcome it is degenerate and
+        // fit_envelope correctly refuses to fit it. The per-cycle outcome is "a mask arrived THIS cycle".
+        row.fired = (inst.frames_since_detection == 0);
+        row.conf  = row.fired ? inst.last_mask_confidence : 0.0f;
+        row.n_my = n_my; row.n_all = n_all;
+        row.sibling = rc::probe::nearest_other_label(pkt, "table", {s.cx, s.cy});
+        rc::probe::append(detect_probe_csv_, row);
+    }
+}
