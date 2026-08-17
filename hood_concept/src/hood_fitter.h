@@ -13,6 +13,8 @@
 
 #pragma once
 
+#include "../../common/exclusion/exclusion.h"   // rc::exclusion::Claim (SHARED)
+
 #include <chrono>
 #include <cstdint>
 #include <fstream>
@@ -42,6 +44,11 @@ namespace rc {
 class HoodFitter
 {
 public:
+    // The other concepts' standing claims on space (common/exclusion). Set once per cycle by the
+    // worker, alongside the existence channel's copy, so the FIT and the EXISTENCE belief judge the
+    // same geometry. Null ⇒ the rule is inert and the fitter behaves exactly as before.
+    void set_foreign_claims(const std::vector<rc::exclusion::Claim>* c) { foreign_claims_ = c; }
+
     struct HoodObservation
     {
         bool has_fresh_data = false;
@@ -181,6 +188,8 @@ public:
     void set_ricoh_counts(int dets, int attn) { ricoh_dets_ = dets; ricoh_attention_ = attn; }
 
 private:
+    const std::vector<rc::exclusion::Claim>* foreign_claims_ = nullptr;
+    mutable std::size_t n_explained_away_ = 0;   // points dropped this cycle (diagnostic)
     int ricoh_attention_ = 0;
     int ricoh_dets_ = 0;
     // Compute the localization/chain covariance term (J·Σ_chain·Jᵀ) at the hood centre by transforming

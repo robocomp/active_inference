@@ -787,6 +787,7 @@ void SpecificWorker::compute()
     // Feeds BOTH the birth filter (a candidate on somebody else's object accrues no evidence) and
     // the existence occupancy discount. Main thread — collect_graph_obstacles uses ts==0 (CLAUDE.md).
     if (G) foreign_claims_ = rc::exclusion::foreign_claims(*G, inner_eigen_.get(), "door");
+    if (fitter_) fitter_->set_foreign_claims(&foreign_claims_);   // the FIT judges the same geometry
 
     if (not G or not rt_api_)
         return;

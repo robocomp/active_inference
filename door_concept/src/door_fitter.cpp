@@ -4,6 +4,8 @@
 
 #include "door_fitter.h"
 
+#include "../../common/exclusion/exclusion.h"   // rc::exclusion — the SHARED no-two-objects rule
+
 #include "../../common/diag_log/rotating_csv.h"   // keep the previous run instead of wiping it
 #include "door_support_bank.h"   // rc::support_bank:: adapter (SHARED bank)
 
@@ -358,6 +360,22 @@ DoorFitter::DoorObservation DoorFitter::observe(DoorInstance& inst, const DSR::N
             for (std::size_t i = begin; i < end; ++i)
             {
                 const auto& p = masks_packet.support_points[i];
+                // ★A POINT ANOTHER OBJECT ALREADY EXPLAINS IS NOT EVIDENCE FOR THIS ONE (SHARED, common/exclusion).
+                // Occam, stated locally: growing this object's extent to cover it buys no likelihood and costs
+                // complexity, so the fit stops there of its own accord — no clamp, no arbitration, and an ABUTTING
+                // neighbour pays nothing because it does not overlap. The point's z is part of the question: a claim
+                // is a VOLUME, so a hood over a worktop shares its footprint without sharing its space.
+                // Measured 2026-08-17: bottle_2 walked its radius to 4.51 m, converging on a flat disc at worktop
+                // height — the worktop's own returns, admitted as evidence of bottle.
+                if (foreign_claims_ and rc::exclusion::explained_by_other(p.x(), p.y(), p.z(), *foreign_claims_))
+                {
+                    // NOT gated on a verbose flag: this is the one line that says whether the rule is running at
+                    // all, which is the first thing anyone asks. Throttled rather than silenced.
+                    if ((n_explained_away_++ % 200) == 0)
+                        std::print("[{}] [exclusion] point dropped — already explained by another object "
+                                   "({} so far this run)\n", inst.node_name, n_explained_away_);
+                    continue;
+                }
                 // Same SDF the belief fits with (door_geometry.h), evaluated at the cached leaf pose —
                 // there is no longer a second, independently-derived panel SDF that could disagree.
                 const float sdf = door::leaf_sdf(inst.leaf_pose, p);

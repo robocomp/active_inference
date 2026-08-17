@@ -4,6 +4,8 @@
 
 #include "bottle_fitter.h"
 
+#include "../../common/exclusion/exclusion.h"   // rc::exclusion — the SHARED no-two-objects rule
+
 #include "../../common/diag_log/rotating_csv.h"   // keep the previous run instead of wiping it
 #include "bottle_support_bank.h"   // rc::support_bank:: adapter (SHARED bank)
 #include "../../common/lidar_select/lidar_select.h"   // rc::lidar_select:: (SHARED)
@@ -189,6 +191,22 @@ BottleFitter::BottleObservation BottleFitter::observe(BottleInstance& inst,
             for (std::size_t i = begin; i < end; ++i)
             {
                 const auto& p = mask_ingestor_->packet().support_points[i];
+                // ★A POINT ANOTHER OBJECT ALREADY EXPLAINS IS NOT EVIDENCE FOR THIS ONE (SHARED, common/exclusion).
+                // Occam, stated locally: growing this object's extent to cover it buys no likelihood and costs
+                // complexity, so the fit stops there of its own accord — no clamp, no arbitration, and an ABUTTING
+                // neighbour pays nothing because it does not overlap. The point's z is part of the question: a claim
+                // is a VOLUME, so a hood over a worktop shares its footprint without sharing its space.
+                // Measured 2026-08-17: bottle_2 walked its radius to 4.51 m, converging on a flat disc at worktop
+                // height — the worktop's own returns, admitted as evidence of bottle.
+                if (foreign_claims_ and rc::exclusion::explained_by_other(p.x(), p.y(), p.z(), *foreign_claims_))
+                {
+                    // NOT gated on a verbose flag: this is the one line that says whether the rule is running at
+                    // all, which is the first thing anyone asks. Throttled rather than silenced.
+                    if ((n_explained_away_++ % 200) == 0)
+                        std::print("[{}] [exclusion] point dropped — already explained by another object "
+                                   "({} so far this run)\n", inst.node_name, n_explained_away_);
+                    continue;
+                }
                 const float sdf = inst.model.sdf_point(p);
                 if (std::abs(sdf) < cfg_.sdf_threshold_for_storage)
                     candidate_pts.push_back(p);

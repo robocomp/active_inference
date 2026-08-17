@@ -19,6 +19,8 @@
 
 #pragma once
 
+#include "../../common/exclusion/exclusion.h"   // rc::exclusion::Claim (SHARED)
+
 #include <chrono>
 #include <cstdint>
 #include <fstream>
@@ -44,6 +46,11 @@ namespace rc {
 class BottleFitter
 {
 public:
+    // The other concepts' standing claims on space (common/exclusion). Set once per cycle by the
+    // worker, alongside the existence channel's copy, so the FIT and the EXISTENCE belief judge the
+    // same geometry. Null ⇒ the rule is inert and the fitter behaves exactly as before.
+    void set_foreign_claims(const std::vector<rc::exclusion::Claim>* c) { foreign_claims_ = c; }
+
     BottleFitter(std::shared_ptr<DSR::DSRGraph> graph,
                  DSR::InnerEigenAPI* inner_eigen,
                  BottleConfig& cfg,
@@ -121,6 +128,8 @@ public:
     void note_birth(std::uint64_t id, const Eigen::Vector2f& xy) { birth_seeds_[id] = xy; }
 
 private:
+    const std::vector<rc::exclusion::Claim>* foreign_claims_ = nullptr;
+    mutable std::size_t n_explained_away_ = 0;   // points dropped this cycle (diagnostic)
     // Object-specific belief pre-step: decide the resting surface (room vs a table) + set the table-top
     // z anchor (hysteretic re-parent). Reads via scene_graph_; called at the head of run_inference.
     void update_support_surface(BottleInstance& inst);

@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include "../../common/exclusion/exclusion.h"   // rc::exclusion::Claim (SHARED)
+
 #include <cstdint>
 #include <fstream>
 #include <memory>
@@ -68,6 +70,11 @@ struct DoorSilhouette
 class DoorFitter
 {
 public:
+    // The other concepts' standing claims on space (common/exclusion). Set once per cycle by the
+    // worker, alongside the existence channel's copy, so the FIT and the EXISTENCE belief judge the
+    // same geometry. Null ⇒ the rule is inert and the fitter behaves exactly as before.
+    void set_foreign_claims(const std::vector<rc::exclusion::Claim>* c) { foreign_claims_ = c; }
+
     struct DoorObservation
     {
         bool has_fresh_data = false;
@@ -172,6 +179,8 @@ public:
                                  float nominal_range, float along_std, float across_std, float yaw_std);
 
 private:
+    const std::vector<rc::exclusion::Claim>* foreign_claims_ = nullptr;
+    mutable std::size_t n_explained_away_ = 0;   // points dropped this cycle (diagnostic)
     DoorBeliefParams make_belief_params() const;   // config → belief params (shared by init + hypothesis seed)
     // The SINGLE authoring point for a door's geometry: refresh the cached aperture / leaf / leaf_pose from
     // the belief and write the room-frame read-back into DoorState. Called from ensure_instance (pre-belief),
