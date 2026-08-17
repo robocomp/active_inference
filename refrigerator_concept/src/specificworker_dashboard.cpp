@@ -9,6 +9,8 @@
 
 #include "specificworker.h"
 
+#include "../../common/dashboard/belief_certainty.h"   // rc::dash::fill_certainty (SHARED)
+
 #include "../../common/dashboard/window_geometry.h"    // rc::dashboard:: (SHARED)
 #include "../../common/dashboard/concept_dashboard.h"  // rc::dashboard::build (SHARED)
 #include "../../common/dashboard/belief_card_fill.h"   // rc::dashboard::fill_* (SHARED)
@@ -75,17 +77,7 @@ void SpecificWorker::refresh_belief_strip()
         // `adequacy_gap_nats` returns 0 for a DOF table with no σ* anywhere — an empty sum — and 0 is
         // exactly the value that means "adequate". Ask first, and carry "no demand" as the -1 sentinel;
         // the strip then falls back to ½·ln|Σ| and says so in its heading.
-        r.gap_nats = rc::any_sigma_star(rc::kRefrigeratorDofs)
-                   ? rc::adequacy_gap_nats(rc::kRefrigeratorDofs, [&](std::size_t j) { return S(j, j); })
-                   : -1.0f;
-
-        // Fallback certainty channel: ½·ln det Σ via the Cholesky (Σ log L_ii), not log(det()) — a
-        // covariance with centimetre σ has a determinant near the floor of float, where a direct
-        // determinant is numerical noise.
-        const auto llt = S.llt();
-        if (llt.info() == Eigen::Success)
-            r.logdet_nats = llt.matrixL().toDenseMatrix().diagonal().array().log().sum();
-
+        rc::dash::fill_certainty(r, S, rc::kRefrigeratorDofs);
         // Birth from the node's own creation stamp, so `age` survives a dashboard opened long after the
         // instance was born. Absent ⇒ 0 ⇒ the widget falls back to when it first saw the row.
         if (const auto n = G->get_node(inst.node_id); n.has_value())

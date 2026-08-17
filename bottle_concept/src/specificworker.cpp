@@ -26,6 +26,8 @@
 
 #include "specificworker.h"
 
+#include "../../common/dashboard/belief_certainty.h"   // rc::dash::fill_certainty (SHARED)
+
 #include "../../common/dashboard/belief_series.h"   // rc::dash::publish_belief_series (SHARED)
 
 #include "../../common/peripheral_channel/peripheral_channel.h"   // THE shared ricoh path
@@ -1302,12 +1304,7 @@ void SpecificWorker::refresh_belief_strip()
         if (inst.existence_seeded)
             r.p_exists = inst.existence.p_exists();
         const auto S = inst.ai2_belief.covariance();
-        r.gap_nats = rc::any_sigma_star(rc::kBottleDofs)
-                   ? rc::adequacy_gap_nats(rc::kBottleDofs, [&](std::size_t j) { return S(j, j); })
-                   : -1.0f;
-        const auto llt = S.llt();
-        if (llt.info() == Eigen::Success)
-            r.logdet_nats = llt.matrixL().toDenseMatrix().diagonal().array().log().sum();
+        rc::dash::fill_certainty(r, S, rc::kBottleDofs);
         if (const auto n = G->get_node(inst.node_id); n.has_value())
             r.birth_ms = G->get_attrib_by_name<timestamp_creation_att>(n.value()).value_or(0);
         rows.push_back(std::move(r));

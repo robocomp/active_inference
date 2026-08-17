@@ -9,6 +9,8 @@
 
 #include "specificworker.h"
 
+#include "../../common/dashboard/belief_certainty.h"   // rc::dash::fill_certainty (SHARED)
+
 #include "../../common/dashboard/window_geometry.h"    // rc::dashboard:: (SHARED)
 #include "../../common/dashboard/concept_dashboard.h"  // rc::dashboard::build (SHARED)
 #include "../../common/dashboard/belief_card_fill.h"   // rc::dashboard::fill_* (SHARED)
@@ -78,17 +80,7 @@ void SpecificWorker::refresh_belief_strip()
         const auto S = inst.ai2_belief.covariance_reported();
         // `adequacy_gap_nats` returns 0 for a DOF table with no σ* anywhere — an empty sum — and 0 is
         // exactly the value that means "adequate". Ask first, and carry "no demand" as the -1 sentinel.
-        r.gap_nats   = rc::any_sigma_star(rc::kTableDofs)
-                     ? rc::adequacy_gap_nats(rc::kTableDofs, [&](std::size_t j) { return S(j, j); })
-                     : -1.0f;
-
-        // Fallback channel, computed even though the table publishes σ*: ½·ln det Σ via the Cholesky
-        // (Σ log L_ii), not log(det()) — a 7-DOF covariance with centimetre σ has a determinant around
-        // 1e-20, where a direct determinant is numerical noise.
-        const auto llt = S.llt();
-        if (llt.info() == Eigen::Success)
-            r.logdet_nats = llt.matrixL().toDenseMatrix().diagonal().array().log().sum();
-
+        rc::dash::fill_certainty(r, S, rc::kTableDofs);
         // Birth from the node's own creation stamp, so `age` survives a dashboard opened long after the
         // table was born. Absent (an older node, or one this agent adopted) ⇒ 0 ⇒ the widget falls back
         // to when it first saw the row and says so by measuring from there.

@@ -9,6 +9,8 @@
 
 #include "specificworker.h"
 
+#include "../../common/dashboard/belief_certainty.h"   // rc::dash::fill_certainty (SHARED)
+
 #include "../../common/dashboard/window_geometry.h"    // rc::dashboard:: (SHARED)
 #include "../../common/dashboard/concept_dashboard.h"  // rc::dashboard::build (SHARED)
 #include "../../common/dashboard/belief_card_fill.h"   // rc::dashboard::fill_* (SHARED)
@@ -224,12 +226,7 @@ void SpecificWorker::refresh_belief_strip()
             r.initialized = true;   // an active cell is by definition a live belief
 
             const auto& S = cell.belief->covariance();
-            r.gap_nats = rc::any_sigma_star(rc::kWallRunDofs)
-                       ? rc::adequacy_gap_nats(rc::kWallRunDofs, [&](std::size_t j) { return S(j, j); })
-                       : -1.0f;
-            const auto llt = S.llt();
-            if (llt.info() == Eigen::Success)
-                r.logdet_nats = llt.matrixL().toDenseMatrix().diagonal().array().log().sum();
+            rc::dash::fill_certainty(r, S, rc::kWallRunDofs);
             rows.push_back(std::move(r));
         }
         if (const auto* pen = kitchen_mgr_.peninsula())   // the peninsula has no cell
@@ -240,12 +237,7 @@ void SpecificWorker::refresh_belief_strip()
             r.p_exists    = 1.0f / (1.0f + std::exp(-kitchen_mgr_.peninsula_existence()));
             r.initialized = true;
             const auto& S = pen->covariance();
-            r.gap_nats = rc::any_sigma_star(rc::kWallRunDofs)
-                       ? rc::adequacy_gap_nats(rc::kWallRunDofs, [&](std::size_t j) { return S(j, j); })
-                       : -1.0f;
-            const auto llt = S.llt();
-            if (llt.info() == Eigen::Success)
-                r.logdet_nats = llt.matrixL().toDenseMatrix().diagonal().array().log().sum();
+            rc::dash::fill_certainty(r, S, rc::kWallRunDofs);
             rows.push_back(std::move(r));
         }
         belief_strip_->update_view(rows);
@@ -265,16 +257,7 @@ void SpecificWorker::refresh_belief_strip()
         // The same REPORTED covariance the inspector and the NBV planner use, so the strip cannot
         // disagree with either.
         const auto S = inst.ai2_belief.covariance_reported();
-        r.gap_nats = rc::any_sigma_star(rc::kCabinetDofs)
-                   ? rc::adequacy_gap_nats(rc::kCabinetDofs, [&](std::size_t j) { return S(j, j); })
-                   : -1.0f;
-
-        // Fallback channel: ½·ln det Σ via the Cholesky (Σ log L_ii), not log(det()) — a covariance with
-        // centimetre σ has a determinant where a direct determinant is numerical noise.
-        const auto llt = S.llt();
-        if (llt.info() == Eigen::Success)
-            r.logdet_nats = llt.matrixL().toDenseMatrix().diagonal().array().log().sum();
-
+        rc::dash::fill_certainty(r, S, rc::kCabinetDofs);
         if (const auto n = G->get_node(inst.node_id); n.has_value())
             r.birth_ms = G->get_attrib_by_name<timestamp_creation_att>(n.value()).value_or(0);
 

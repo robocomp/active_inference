@@ -33,6 +33,8 @@
 
 #include "specificworker.h"
 
+#include "../../common/dashboard/belief_certainty.h"   // rc::dash::fill_certainty (SHARED)
+
 #include "../../common/obj/convergence.h"   // rc::converge::step (SHARED)
 
 #include "../../common/dashboard/belief_series.h"   // rc::dash::publish_belief_series (SHARED)
@@ -590,16 +592,7 @@ void SpecificWorker::refresh_belief_strip()
         // The same REPORTED covariance the inspector and the NBV planner use (its yaw entry carries the
         // 4-mode orientation entropy), so the strip cannot disagree with either.
         const auto S = inst.ai2_belief.covariance_reported();
-        r.gap_nats = rc::any_sigma_star(rc::kChairDofs)
-                   ? rc::adequacy_gap_nats(rc::kChairDofs, [&](std::size_t j) { return S(j, j); })
-                   : -1.0f;
-
-        // Fallback channel: ½·ln det Σ via the Cholesky (Σ log L_ii), not log(det()) — a covariance with
-        // centimetre σ has a determinant where a direct determinant is numerical noise.
-        const auto llt = S.llt();
-        if (llt.info() == Eigen::Success)
-            r.logdet_nats = llt.matrixL().toDenseMatrix().diagonal().array().log().sum();
-
+        rc::dash::fill_certainty(r, S, rc::kChairDofs);
         if (const auto n = G->get_node(inst.node_id); n.has_value())
             r.birth_ms = G->get_attrib_by_name<timestamp_creation_att>(n.value()).value_or(0);
 
