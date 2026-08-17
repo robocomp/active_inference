@@ -30,6 +30,8 @@
 
 #include "specificworker.h"
 
+#include "../../common/diag_log/rotating_csv.h"   // keep the previous run instead of wiping it
+
 #include "../../common/obj/convergence.h"   // rc::converge::step (SHARED)
 
 #include "../../common/dashboard/belief_series.h"   // rc::dash::publish_belief_series (SHARED)
@@ -633,7 +635,7 @@ void SpecificWorker::log_birth_surprise()
     // latter should be ~0 if residual_concept's concept-subtraction is working — a free sanity check).
     if (not birth_surprise_csv_.is_open())
     {
-        birth_surprise_csv_.open("etc/birth_surprise.csv", std::ios::out | std::ios::trunc);
+        rc::diag::open_rotating(birth_surprise_csv_, "etc/birth_surprise.csv");
         birth_surprise_csv_.imbue(std::locale::classic());   // ★Qt imbues the GLOBAL locale, so operator<< inserts THOUSANDS
                                             // SEPARATORS into integers (pkt_ts 1785763853131 → "1,785,763,853,131"),
                                             // splitting one CSV field into five. Field counts then vary per row and
@@ -661,7 +663,7 @@ void SpecificWorker::log_birth_surprise()
     //    table footprint (associate, not birth). This is the signal that would let residual GATE/accelerate birth.
     if (not birth_fusion_csv_.is_open())
     {
-        birth_fusion_csv_.open("etc/birth_fusion.csv", std::ios::out | std::ios::trunc);
+        rc::diag::open_rotating(birth_fusion_csv_, "etc/birth_fusion.csv");
         birth_fusion_csv_.imbue(std::locale::classic());   // ★Qt imbues the GLOBAL locale, so operator<< inserts THOUSANDS
                                             // SEPARATORS into integers (pkt_ts 1785763853131 → "1,785,763,853,131"),
                                             // splitting one CSV field into five. Field counts then vary per row and

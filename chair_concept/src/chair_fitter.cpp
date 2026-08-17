@@ -3,6 +3,8 @@
  */
 
 #include "chair_fitter.h"
+
+#include "../../common/diag_log/rotating_csv.h"   // keep the previous run instead of wiping it
 #include "chair_support_bank.h"
 #include "../../common/occlusion/occlusion.h"   // rc::occlusion:: (SHARED LoS occlusion)   // rc::support_bank:: adapter (SHARED bank)
 
@@ -576,7 +578,7 @@ void ChairFitter::log_ai2_csv(const ChairInstance& inst, int npts, float R, bool
         return;
     if (not ai2_csv_.is_open())
     {
-        ai2_csv_.open(cfg_.ai2_csv_path, std::ios::out | std::ios::trunc);
+        rc::diag::open_rotating(ai2_csv_, cfg_.ai2_csv_path);
         if (not ai2_csv_.is_open()) { cfg_.ai2_csv_path.clear(); return; }
         ai2_csv_ << "cycle,node,npts,gated,energy,fe_baseline,fe_surprise,R,motion_var,depth_var,trunc_frac,range,obliquity_cos,clutter_frac,"
                  << "cx,cy,yaw,seat_w,seat_d,seat_h,back_h,std_cx,std_cy,std_yaw,std_yaw_rep,rig_found,rig_kappa,rig_prior_deg,facc1,facc2,facc3,"

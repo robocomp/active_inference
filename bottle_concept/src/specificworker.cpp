@@ -26,6 +26,8 @@
 
 #include "specificworker.h"
 
+#include "../../common/diag_log/rotating_csv.h"   // keep the previous run instead of wiping it
+
 #include "../../common/dashboard/belief_certainty.h"   // rc::dash::fill_certainty (SHARED)
 
 #include "../../common/dashboard/belief_series.h"   // rc::dash::publish_belief_series (SHARED)
@@ -1212,7 +1214,7 @@ void SpecificWorker::log_epistemic_csv(const rc::BottleInstance& inst,
 
     if (not epistemic_csv_.is_open())
     {
-        epistemic_csv_.open(cfg_.epistemic_csv_path, std::ios::out | std::ios::trunc);
+        rc::diag::open_rotating(epistemic_csv_, cfg_.epistemic_csv_path);
         if (not epistemic_csv_.is_open())
         {
             std::print("bottle_concept: [epistemic] cannot open CSV '{}'\n", cfg_.epistemic_csv_path);

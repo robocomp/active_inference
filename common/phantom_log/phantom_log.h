@@ -27,6 +27,8 @@
 
 #pragma once
 
+#include "../diag_log/rotating_csv.h"   // rc::diag::open_rotating — keep the previous run
+
 #include <cstdint>
 #include <fstream>
 #include <locale>     // std::locale::classic — see the imbue in open()
@@ -65,16 +67,22 @@ struct PhantomEvent
     std::string_view note;           // free-form ("logodds -3.04", "outside room", …)
 };
 
-// Append-only CSV writer. One instance per agent; open() once (truncating, like the sibling *_events.csv
-// writers) and write() per event. Silently inert if the path is empty or cannot be opened — recording must
-// never be able to take an agent down.
+// Append-only CSV writer. One instance per agent; open() once and write() per event. Silently inert if the
+// path is empty or cannot be opened — recording must never be able to take an agent down.
+//
+// ★IT ROTATES, IT DOES NOT TRUNCATE (2026-08-16). It used to open with std::ios::trunc "like the sibling
+// *_events.csv writers", which is the exact behaviour common/diag_log/rotating_csv.h was written to end: the
+// recorder erased the tape whenever the thing being recorded restarted, and the restart is often provoked BY
+// the fault, so the interesting run was reliably the one that got lost. A PHANTOM log is the worst possible
+// file to lose that way — a phantom is intermittent by definition, and the evidence that it was born, lived
+// and died is precisely what a restart threw away. One fix here reaches all seven agents.
 class PhantomLog
 {
 public:
     void open(const std::string& path)
     {
         if (path.empty()) return;
-        f_.open(path, std::ios::out | std::ios::trunc);
+        rc::diag::open_rotating(f_, path);
         if (not f_.is_open()) return;
         // ★MANDATORY on these machines (LANG=es_ES.UTF-8): Qt calls setlocale(LC_ALL, "") at startup, and if
         // the C++ global locale is ever imbued from it, operator<< starts inserting THOUSANDS separators and a

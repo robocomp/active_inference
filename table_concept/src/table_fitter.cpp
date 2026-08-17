@@ -10,6 +10,8 @@
  */
 
 #include "table_fitter.h"
+
+#include "../../common/diag_log/rotating_csv.h"   // keep the previous run instead of wiping it
 #include "table_support_bank.h"
 #include "round_table_belief.h"   // round hypothesis for the shape model-selection (evaluate_shape)
 #include "../../common/object_anchor/object_anchor_contract.h"
@@ -873,7 +875,7 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
         return;
     if (not ai2_csv_.is_open())
     {
-        ai2_csv_.open(cfg_.ai2_csv_path, std::ios::out | std::ios::trunc);
+        rc::diag::open_rotating(ai2_csv_, cfg_.ai2_csv_path);
         ai2_csv_.imbue(std::locale::classic());   // ★Qt imbues the GLOBAL locale, so operator<< inserts THOUSANDS
                                             // SEPARATORS into integers (pkt_ts 1785763853131 → "1,785,763,853,131"),
                                             // splitting one CSV field into five. Field counts then vary per row and

@@ -3,6 +3,8 @@
  */
 
 #include "door_fitter.h"
+
+#include "../../common/diag_log/rotating_csv.h"   // keep the previous run instead of wiping it
 #include "door_support_bank.h"   // rc::support_bank:: adapter (SHARED bank)
 
 #include <algorithm>
@@ -601,7 +603,7 @@ void DoorFitter::log_ai2_csv(const DoorInstance& inst, int npts, float R, bool g
         return;
     if (not ai2_csv_.is_open())
     {
-        ai2_csv_.open(cfg_.ai2_csv_path, std::ios::out | std::ios::trunc);
+        rc::diag::open_rotating(ai2_csv_, cfg_.ai2_csv_path);
         if (not ai2_csv_.is_open()) { cfg_.ai2_csv_path.clear(); return; }
         ai2_csv_ << "cycle,node,npts,gated,energy,fe_baseline,fe_surprise,R,motion_var,depth_var,trunc_frac,range,clutter_frac,"
                  << "s,w,h,cx,cy,yaw,std_s,std_w,std_h,phi\n";   // phi APPENDED so the existing columns stay byte-identical
