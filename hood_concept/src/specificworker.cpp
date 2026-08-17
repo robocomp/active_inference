@@ -458,22 +458,16 @@ void SpecificWorker::log_phantom_event(std::string_view event, std::uint64_t id,
     e.event = event; e.id = id; e.name = name; e.x = x; e.y = y; e.note = note;
     // Observer pose → view bearing. The classifier failure is VIEWPOINT-dependent, so the eventual p_FA field
     // is keyed on (world cell × bearing); a place-only key would suppress a genuine object placed there.
-    if (inner_eigen_)
-        if (const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", 0); rtb.has_value())
-        {
-            const auto& Tm = rtb.value();
-            e.robot_x = static_cast<float>(Tm(0, 3));
-            e.robot_y = static_cast<float>(Tm(1, 3));
-            e.robot_yaw = std::atan2(static_cast<float>(Tm(1, 0)), static_cast<float>(Tm(0, 0)));
-            e.view_bearing = std::atan2(e.robot_y - y, e.robot_x - x);   // instance → camera, room frame
-            e.range_m = std::hypot(e.robot_x - x, e.robot_y - y);
-        }
+    // Observer pose → view bearing. SHARED (common/phantom_log/observer_pose.h): the classifier failure is
+    // VIEWPOINT-dependent, so the false-alarm field is keyed on (world cell × bearing), never place alone.
+    rc::history::note_observer(e, inner_eigen_.get(), x, y);
     if (inst)   // death: carry the existence state that says whether this was a CONFIDENT kill
     {
         e.age_cycles    = inst->processed_cycles;
         e.p_detect      = inst->dbg_ex_pdetect;
         e.central_frac  = inst->dbg_ex_central;
-        e.in_fov_frac   = (inst->dbg_ex_sil_ndet > 0) ? 1.0f : 0.0f;
+        e.in_fov_frac   = (inst->dbg_ex_sil_ntotal > 0)   // ★a FRACTION, not a probed/not-probed flag:
+                        ? static_cast<float>(inst->dbg_ex_sil_ndet) / inst->dbg_ex_sil_ntotal : 0.0f;
         e.exist_logodds = inst->existence.logodds();
     }
     phantom_log_.write(e);

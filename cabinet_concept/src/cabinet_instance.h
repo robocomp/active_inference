@@ -234,6 +234,9 @@ struct CabinetInstance
     // absence-confidence scaling AND the observed-guard (so raw→eff shows how much the absence was degraded).
     float dbg_ex_lidar_occ = 0.0f, dbg_ex_lidar_free = 0.0f, dbg_ex_lidar_free_eff = 0.0f;  int dbg_ex_lidar_n   = 0;
     float dbg_ex_sil_occ   = 0.0f, dbg_ex_sil_free   = 0.0f, dbg_ex_sil_free_eff   = 0.0f;  int dbg_ex_sil_ndet  = 0;
+    // Silhouette samples ATTEMPTED — the denominator of the phantom log's in_fov_frac. Storing ndet
+    // without it is why that column carried a 0-or-1 flag in a field documented as a fraction.
+    int   dbg_ex_sil_ntotal = 0;
     // Verification-gated removal diagnostics: p_detect (how resolving this view is), central_frac, and the
     // decayed go-verify surprise. Show why an absence went to REMOVAL (high p_detect) vs VERIFICATION (low).
     float dbg_ex_pdetect = 1.0f, dbg_ex_central = 0.0f;

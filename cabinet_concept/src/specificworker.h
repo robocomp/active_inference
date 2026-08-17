@@ -55,6 +55,7 @@
 #include "cabinet_scene_graph.h" // rc::CabinetSceneGraph (DSR node/RT I/O)
 #include "cabinet_fitter.h"
 #include "../../common/phantom_log/phantom_log.h"   // rc::history::PhantomLog (shadow-mode birth/death record)      // rc::CabinetFitter (active-inference core)
+#include "../../common/phantom_log/observer_pose.h"   // rc::history::note_observer (SHARED)
 #include "cabinet_kitchen.h"     // rc::KitchenManager (Stage 2 kitchen-of-runs model)
 #include "cabinet_existence.h"   // rc::CabinetExistence (evidence-based removal)
 #include "../../common/birth_surprise/birth_surprise_probe.h"   // rc::BirthSurpriseProbe (SHARED, read-only: residual grid → birth surprise)

@@ -51,6 +51,7 @@
 #include "chair_scene_graph.h" // rc::ChairSceneGraph (DSR node/RT I/O)
 #include "chair_fitter.h"      // rc::ChairFitter (active-inference core)
 #include "../../common/phantom_log/phantom_log.h"   // rc::history::PhantomLog (shadow-mode birth/death record)
+#include "../../common/phantom_log/observer_pose.h"   // rc::history::note_observer (SHARED)
 #include "epistemic_planner.h"
 #include "../../common/object_affordance/object_affordance.h"
 #include "chair_model.h"

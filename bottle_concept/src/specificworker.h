@@ -66,6 +66,7 @@
 #include "bottle_fitter.h"
 #include "bottle_existence.h"
 #include "../../common/phantom_log/phantom_log.h"   // rc::history::PhantomLog (shadow-mode birth/death record)      // rc::BottleFitter (active-inference fit core)
+#include "../../common/phantom_log/observer_pose.h"   // rc::history::note_observer (SHARED)
 #include "../../common/lidar_ingestor/concept_lidar_ingestor.h"  // rc::ConceptLidarIngestor (lidar3D media plane → room-frame sweep)
 #include "../../common/instance_tracker/instance_tracker.h"   // rc::InstanceTracker (birth/associate/death)
 #include "../../common/dashboard/belief_inspector.h"

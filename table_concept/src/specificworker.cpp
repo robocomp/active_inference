@@ -484,16 +484,9 @@ void SpecificWorker::log_phantom_event(std::string_view event, std::uint64_t id,
     // Observer pose → view bearing. The classifier failure is VIEWPOINT-dependent (a radiator only reads as a
     // chair from certain angles), so the eventual false-alarm field is keyed on (world cell × bearing); a
     // place-only key would suppress a genuine object placed there from every direction.
-    if (inner_eigen_)
-        if (const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", 0); rtb.has_value())
-        {
-            const auto& Tm = rtb.value();
-            e.robot_x = static_cast<float>(Tm(0, 3));
-            e.robot_y = static_cast<float>(Tm(1, 3));
-            e.robot_yaw = std::atan2(static_cast<float>(Tm(1, 0)), static_cast<float>(Tm(0, 0)));
-            e.view_bearing = std::atan2(e.robot_y - y, e.robot_x - x);   // instance → camera, room frame
-            e.range_m = std::hypot(e.robot_x - x, e.robot_y - y);
-        }
+    // Observer pose → view bearing. SHARED (common/phantom_log/observer_pose.h): the classifier failure is
+    // VIEWPOINT-dependent, so the false-alarm field is keyed on (world cell × bearing), never place alone.
+    rc::history::note_observer(e, inner_eigen_.get(), x, y);
     if (inst)   // death: carry the existence-channel state that decides whether this was a CONFIDENT kill
     {
         e.age_cycles    = inst->processed_cycles;

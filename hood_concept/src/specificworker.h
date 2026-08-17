@@ -57,6 +57,7 @@
 #include "hood_scene_graph.h" // rc::HoodSceneGraph (DSR node/RT I/O)
 #include "hood_fitter.h"
 #include "../../common/phantom_log/phantom_log.h"   // rc::history::PhantomLog (shadow-mode birth/death record)      // rc::HoodFitter (active-inference core)
+#include "../../common/phantom_log/observer_pose.h"   // rc::history::note_observer (SHARED)
 #include "hood_existence.h"   // rc::HoodExistence (evidence-based removal)
 #include "../../common/birth_surprise/birth_surprise_probe.h"   // rc::BirthSurpriseProbe (SHARED, read-only: residual grid → birth surprise)
 #include "epistemic_planner.h"

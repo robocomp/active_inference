@@ -99,7 +99,7 @@ void CabinetExistence::update_and_remove(CabinetFitter& fitter, ConceptLidarInge
         if (fresh_masks)
         {
             const auto sil = fitter.compute_silhouette_existence(inst);
-            inst.dbg_ex_sil_occ = sil.e_occ; inst.dbg_ex_sil_free = sil.e_free; inst.dbg_ex_sil_ndet = sil.n_detectable;
+            inst.dbg_ex_sil_occ = sil.e_occ; inst.dbg_ex_sil_free = sil.e_free; inst.dbg_ex_sil_ndet = sil.n_detectable; inst.dbg_ex_sil_ntotal = sil.n_total;
             if (sil.n_detectable > 0)
             {
                 // Observed-guard (mirrors the LiDAR hollow guard): if the cabinet was DETECTED by any sensor this

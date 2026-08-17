@@ -59,6 +59,11 @@ struct PhantomEvent
 
     // ── Attribution: was the DISCONFIRMATION confident? (death only; 0 at birth) ──────────────────────
     float p_detect    = 0.0f;        // P(detect | present) at death — THE field that validates the log
+    // ★A FRACTION, NOT A FLAG: detectable silhouette samples / attempted (SilhouetteExistence::in_fov_frac()).
+    // The attribution question is "how much of the object could the sensor actually have SEEN from here",
+    // and a 0-or-1 probed/not-probed stand-in cannot answer it — worse, written into a column documented as a
+    // fraction it reads as data while carrying none. Five agents wrote the flag; table wrote the fraction and
+    // said why. The note is here, on the field, so the next agent reads it before choosing what to store.
     float in_fov_frac = 0.0f;
     float central_frac = 0.0f;
     int   fixated     = 0;           // was the killing observation an admissible (close/centred/still) view?
