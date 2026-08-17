@@ -34,6 +34,12 @@ void BottleSceneGraph::set_chain_cov_source(DSR::InnerGaussianAPI* gaussian, std
     chain_cov_enabled_ = enabled and (gaussian_ != nullptr) and not chain_src_frame_.empty();
 }
 
+// ★THE ONE BOTTLE-SPECIFIC FACT: what a bottle may stand on. A microwave would pass {"cabinet", "table"};
+// the mechanism does not change. Names, not types — every fitted object is node type "object" with its class
+// in the name (see the object-type migration).
+static constexpr std::string_view kSupportPrefixesArr[] = {"table"};
+static constexpr std::span<const std::string_view> kSupportPrefixes{kSupportPrefixesArr};
+
 std::optional<DSR::Node> BottleSceneGraph::find_table_node(float bx, float by) const
 {
     if (not inner_eigen_)
@@ -71,94 +77,21 @@ std::optional<float> BottleSceneGraph::find_table_top(float bx, float by) const
 
 float BottleSceneGraph::table_top_of(std::uint64_t table_id) const
 {
-    constexpr float nan = std::numeric_limits<float>::quiet_NaN();
-    if (not inner_eigen_ or table_id == 0)
-        return nan;
-    const auto t = G_->get_node(table_id);
-    if (not t.has_value() or not t->name().starts_with("table"))   // table migrated to generic type "object"
-        return nan;
-    const float h = G_->get_attrib_by_name<height_m_att>(t.value()).value_or(0.0f);
-    if (h <= 0.0f)
-        return nan;
-    const auto org = inner_eigen_->transform("room", Mat::Vector3d(0.0, 0.0, 0.0), t->name(), 0);
-    if (not org.has_value())
-        return nan;
-    return static_cast<float>(org->z()) + h;
+    return rc::support::support_top_z(*G_, inner_eigen_, table_id, kSupportPrefixes);
 }
 
 BottleSceneGraph::SupportDecision
 BottleSceneGraph::decide_support_surface(float cx, float cy, float base_z,
-                                         std::uint64_t room_node_id) const
+                                        std::uint64_t room_node_id) const
 {
-    SupportDecision room_dec;                 // default: hang from the room (NaN top ⇒ no z anchor)
-    room_dec.parent_id = room_node_id;
-    if (const auto r = G_->get_node(room_node_id); r.has_value())
-        room_dec.parent_name = r->name();
-    if (not inner_eigen_)
-        return room_dec;
-
-    const float sz0      = std::max(0.005f, cfg_.support_sigma_z);
-    const float margin_m = cfg_.support_footprint_margin;
-    const float lambda   = cfg_.support_lambda_xy;
-
-    // Room/floor hypothesis: a bottle on the floor has base_z ≈ 0.
-    const float ll_room = -0.5f * (base_z / sz0) * (base_z / sz0);
-
-    float best_ll = -std::numeric_limits<float>::infinity();
-    SupportDecision best;
-    // Tables migrated to the generic node type "object"; identify them by name (subtype=="table").
-    for (const auto& t : G_->get_nodes_by_type("object"))
-    {
-        if (not t.name().starts_with("table"))
-            continue;
-        const float w = G_->get_attrib_by_name<width_m_att> (t).value_or(0.0f);
-        const float d = G_->get_attrib_by_name<depth_m_att> (t).value_or(0.0f);
-        const float h = G_->get_attrib_by_name<height_m_att>(t).value_or(0.0f);
-        if (w <= 0.0f or d <= 0.0f or h <= 0.0f)
-            continue;
-
-        // Bottle base in this table's LOCAL frame → oriented footprint + vertical residual in one step.
-        const auto loc = inner_eigen_->transform(t.name(), Mat::Vector3d(cx, cy, base_z), "room", 0);
-        if (not loc.has_value())
-            continue;
-        const float lx = std::abs(static_cast<float>(loc->x()));
-        const float ly = std::abs(static_cast<float>(loc->y()));
-        const float hw = 0.5f * w, hd = 0.5f * d;
-        if (lx > hw + margin_m or ly > hd + margin_m)   // centre not over this table (+margin)
-            continue;
-
-        const float dxo = std::max(0.0f, lx - hw);
-        const float dyo = std::max(0.0f, ly - hd);
-        const float d_xy2 = dxo * dxo + dyo * dyo;
-        const float r_z = static_cast<float>(loc->z()) - h;   // base vs table top (local top = z=h)
-
-        // Inflate σ_z by the table's published top-z variance: a poorly-known table is a weak anchor.
-        float sz2 = sz0 * sz0;
-        if (const auto e = G_->get_edge(room_node_id, t.id(), "RT"); e.has_value())
-            if (const auto cov = G_->get_attrib_by_name<rt_covariance_att>(e.value()); cov.has_value())
-            {
-                const auto& v = cov->get();
-                if (v.size() >= 36) sz2 += std::max(0.0f, v[2 * 6 + 2]);   // z-variance block
-            }
-
-        const float ll = -0.5f * (r_z * r_z) / sz2 - lambda * d_xy2;
-        if (ll > best_ll)
-        {
-            best_ll = ll;
-            best.parent_id   = t.id();
-            best.parent_name = t.name();
-            best.top_z       = table_top_of(t.id());
-        }
-    }
-
-    // Pick the best table only if it beats the room/floor hypothesis by the decision margin.
-    if (std::isfinite(best_ll) and best_ll > ll_room + cfg_.support_decision_margin)
-    {
-        best.margin = best_ll - ll_room;
-        return best;
-    }
-    room_dec.margin = ll_room - best_ll;
-    return room_dec;
+    // The whole rule — floor-vs-supports likelihood comparison, oriented footprint in the support's own
+    // frame, σ_z inflated by the support's published z-variance, decision margin — is shared. The only
+    // bottle-specific input is which names may support a bottle, and the four config knobs.
+    return rc::support::decide(*G_, inner_eigen_, room_node_id, cx, cy, base_z, kSupportPrefixes,
+                               {.sigma_z_m          = cfg_.support_sigma_z,
+                                .footprint_margin_m = cfg_.support_footprint_margin,
+                                .lambda_xy          = cfg_.support_lambda_xy,
+                                .decision_margin    = cfg_.support_decision_margin});
 }
 
 std::uint64_t BottleSceneGraph::create_instance_from_detection(const Eigen::Vector3f& centroid_room,

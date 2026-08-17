@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include "../../common/support_parent/support_parent.h"   // rc::support:: (SHARED)
+
 #include <cstdint>
 #include <functional>
 #include <limits>
@@ -58,13 +60,11 @@ public:
     // (base_z, not the anchored cz) must sit at its top. σ_z is inflated by the table's published
     // top-z variance, so a poorly-known table is a weak anchor. Returns the chosen RT parent + its
     // top z in room frame (NaN ⇒ room/floor, no z anchor) and the winner's log-evidence margin.
-    struct SupportDecision
-    {
-        std::uint64_t parent_id   = 0;
-        std::string   parent_name = "room";
-        float         top_z       = std::numeric_limits<float>::quiet_NaN();
-        float         margin      = 0.0f;
-    };
+    // ★THE RULE IS SHARED (common/support_parent/support_parent.h, extracted from here 2026-08-17). It was
+    // the only implementation in the fleet, and the next object that rests on something is a MICROWAVE on a
+    // worktop — cloning this file is the inheritance the shared core exists to prevent. What stays here is
+    // the one bottle-specific fact: WHICH node names may support a bottle.
+    using SupportDecision = rc::support::Decision;
     SupportDecision decide_support_surface(float cx, float cy, float base_z,
                                            std::uint64_t room_node_id) const;
     // Table top z (room frame) of a specific table node id, or NaN if it's not a valid table.
