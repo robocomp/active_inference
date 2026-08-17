@@ -107,6 +107,7 @@ private:
     // the sole writer) and hand it to the belief. Inert when absent / kappa<=0 / stale.
     void refresh_rig_yaw_prior(rc::ChairInstance& inst, const DSR::Node& node);
     void run_instance_tracker();          // data-driven birth/associate/death (the only instance-lifecycle path)
+    void retire_instance(std::uint64_t id);   // shared teardown: affordance + fitter forget + graph delete
     void merge_overlapping_instances();   // collapse two instances on the same chair (seat-footprint overlap)
     void update_existence_beliefs();      // continuous existence log-odds → evidence-based removal (no age immunity)
     // SHADOW-MODE birth/death recorder (CONCEPT_AGENT_LIFECYCLE.md §4.2). Records ONLY — never feeds back into

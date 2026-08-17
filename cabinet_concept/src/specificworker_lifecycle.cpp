@@ -16,6 +16,7 @@
 #include "../../common/instance_tracker/birth_evidence.h"   // rc::birth:: the shared CREATE policy
 #include "../../common/diag_log/rotating_csv.h"   // keep the previous run instead of wiping it
 #include "cabinet_geometry.h"        // rc::geom::footprint_overlap_ratio, point_in_footprint
+#include "../../common/track/merge_instances.h"   // rc::track::merge_overlapping — the SHARED merge sweep
 #include "cabinet_residual_birth.h"  // rc::find_residual_birth (residual-cluster → new-run seed)
 #include "cabinet_lshape_split.h"    // rc::lshape_split (L-corner mask → two arms)
 
@@ -87,28 +88,21 @@ void SpecificWorker::merge_overlapping_instances()
 {
     if (cfg_.tracker_merge_overlap <= 0.0f)
         return;
-    auto& insts = fitter_->instances();
-    if (insts.size() < 2)
-        return;
-
-    std::vector<std::uint64_t> ids;
-    ids.reserve(insts.size());
-    for (auto& [id, _] : insts) ids.push_back(id);
 
     // Per-instance joint std helper: √Σᵢᵢ + a sensor floor, for the collinear-merge acceptance widths.
     const auto sd = [](const rc::CabinetInstance& in, int i)
     { return in.ai2_initialized ? std::sqrt(std::max(0.0f, in.ai2_belief.covariance()(i, i))) : 1.0f; };
 
-    std::unordered_set<std::uint64_t> removed;
-    for (std::size_t i = 0; i < ids.size(); ++i)
-    {
-        if (removed.count(ids[i])) continue;
-        for (std::size_t j = i + 1; j < ids.size(); ++j)
+    // ★THE SWEEP IS SHARED (common/track) AND CABINET IS WHY ITS SEAM IS SHAPED THE WAY IT IS. The other
+    // six agents ask "do these two footprints overlap enough?" and then delete one. A run merge is neither:
+    // it fuses fragments that need NOT overlap at all, and it GRAFTS the fused interval onto the keeper
+    // before the other goes. So the shared sweep takes a decision that returns a PAYLOAD (the fused
+    // geometry) and an apply step that may mutate the keeper — an "overlap ratio + threshold" seam would
+    // have left this family outside the shared code, which is the family whose merge is the interesting one.
+    rc::track::merge_overlapping(
+        fitter_->instances(), ev_g_,
+        [&](const rc::CabinetInstance& A, const rc::CabinetInstance& B) -> std::optional<rc::geom::RunMerge>
         {
-            if (removed.count(ids[j])) continue;
-            const auto ia = insts.find(ids[i]), ib = insts.find(ids[j]);
-            if (ia == insts.end() or ib == insts.end()) continue;
-
             // MERGE NEEDS YAW EVIDENCE ON BOTH SIDES. The collinear test asserts "these two runs share an
             // axis"; that claim is only supportable once each run's axis has actually been MEASURED. A
             // just-born fragment is not ai2_initialized, so sd() would hand the parallel gate an
@@ -118,25 +112,22 @@ void SpecificWorker::merge_overlapping_instances()
             // instances fit before they are merge-eligible lets the split's two arms persist as separate
             // runs and re-associate to their own tracks next cycle. This is evidence-gating, not a threshold:
             // no measured axis ⇒ no support for "same axis" ⇒ not mergeable yet.
-            if (not ia->second.ai2_initialized or not ib->second.ai2_initialized) continue;
+            if (not A.ai2_initialized or not B.ai2_initialized) return std::nullopt;
 
-            const auto& sa = ia->second.model.state();
-            const auto& sb = ib->second.model.state();
+            const auto& sa = A.model.state();
+            const auto& sb = B.model.state();
 
             // A base run and the wall units above it are DISTINCT runs that happen to share a footprint,
             // so an oriented-rectangle overlap would wrongly fuse them. Separate them by their vertical
             // band first: only merge instances whose carcasses actually overlap in z. (Two base runs meeting
             // at an L-corner have z overlap and different yaw — handled by the collinear test's angle gate.)
-            const float z_overlap = std::min(sa.z1, sb.z1) - std::max(sa.z0, sb.z0);
-            if (z_overlap <= 0.0f) continue;
+            if (std::min(sa.z1, sb.z1) - std::max(sa.z0, sb.z0) <= 0.0f) return std::nullopt;
 
             // WALL-KEYED IDENTITY (re-key Stage 3). Two runs committed to the SAME wall + same tier, both
             // FLUSH-anchored, ARE the same physical run — merge them BY CONSTRUCTION (take the union
             // interval), with NO σ-gated collinear test that an unconverged covariance could defeat (the
             // root cause behind the whole merge-churn patch chain). A free-standing or not-yet-committed
             // run has no reliable wall id, so it falls back to the geometric collinear test below.
-            const auto& A = ia->second;
-            const auto& B = ib->second;
             const bool same_cell = A.committed_wall_seg_id >= 0
                                    and A.committed_wall_seg_id == B.committed_wall_seg_id
                                    and A.ai2_belief.tier() == B.ai2_belief.tier();
@@ -160,15 +151,15 @@ void SpecificWorker::merge_overlapping_instances()
                 const float s_L   = std::hypot(sd(A, 3), sd(B, 3)) + cfg_.merge_gap_floor_m;
                 m = rc::geom::collinear_merge(sa, sb, s_yaw, s_lat, s_L, cfg_.merge_n_sigma);
             }
-            if (not m.merge) continue;
-
-            // Keep the more-observed instance and GRAFT the fused length onto it, so the union interval
-            // (extent the other fragment proved) is not thrown away — the extent channel is grow-only, so
-            // re-observing it from scratch would be slow. Position/yaw follow to the fused axis midpoint.
-            const bool keep_i = ia->second.matched_frames >= ib->second.matched_frames;
-            const std::uint64_t keep = keep_i ? ids[i] : ids[j];
-            const std::uint64_t drop = keep_i ? ids[j] : ids[i];
-            auto& kinst = insts.at(keep);
+            return m.merge ? std::optional{m} : std::nullopt;
+        },
+        [](const rc::CabinetInstance& in) { return in.matched_frames; },
+        [&](std::uint64_t keep, std::uint64_t drop, rc::CabinetInstance& kinst, const rc::CabinetInstance&,
+            const rc::geom::RunMerge& m)
+        {
+            // GRAFT the fused length onto the keeper, so the union interval (extent the other fragment
+            // proved) is not thrown away — the extent channel is grow-only, so re-observing it from
+            // scratch would be slow. Position/yaw follow to the fused axis midpoint.
             rc::CabinetBeliefState fused = kinst.ai2_belief.state();
             fused.cx = m.cx; fused.cy = m.cy; fused.yaw = m.yaw; fused.L = m.L;
             kinst.ai2_belief.set_state(fused);
@@ -177,12 +168,8 @@ void SpecificWorker::merge_overlapping_instances()
             std::print("cabinet_concept: [tracker] COLLINEAR MERGE id={} into id={} "
                        "(gap={:.2f} dlat={:.2f} dyaw={:.3f} → L={:.2f})\n",
                        drop, keep, m.gap, m.d_lat, m.d_yaw, m.L);
-            ++ev_g_.merges; ++ev_g_.merges_cum;   // EvidenceMonitor counter
             retire_instance(drop);
-            removed.insert(drop);
-            if (drop == ids[i]) break;   // this i is gone; advance to the next i
-        }
-    }
+        });
 }
 
 // One tracker cycle: merge overlaps, build tracks from live instances (Mahalanobis gate on belief Σ) and

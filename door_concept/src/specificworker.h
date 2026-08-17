@@ -111,6 +111,7 @@ private:
     void load_config(const ConfigLoader& cfg);
     void process_door_node(const DSR::Node& node);
     void run_instance_tracker();          // data-driven birth/associate/death (the only instance-lifecycle path)
+    void retire_instance(std::uint64_t id);   // shared teardown: affordance + fitter forget + graph delete
     void merge_overlapping_instances();   // collapse two instances on the same door (seat-footprint overlap)
     // NBV decision monitor → etc/door_nbv_log.csv (where the door is vs where we told the robot to stand).
     void log_nbv_decision(const rc::DoorInstance& inst, const rc::nbv::Plan& plan,

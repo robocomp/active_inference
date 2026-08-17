@@ -249,6 +249,7 @@ private:
     void run_instance_tracker();   // called each cycle from compute()
     // Collapse two instances fitted to the SAME physical bottle (circle footprints overlap beyond
     // Tracker.MergeOverlap), keeping the more-observed one. Runs before associate/birth each cycle.
+    void retire_instance(std::uint64_t id);   // shared teardown: affordance + fitter forget + graph delete
     void merge_overlapping_instances();
     // Retire an instance whose fit has explained no data (belief energy == 0) for cfg_.diverged_retire_frames
     // consecutive frames — a diverged/degenerate model (radius/centre runaway) that must not keep writing a

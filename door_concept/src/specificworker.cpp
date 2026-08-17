@@ -48,6 +48,7 @@
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion:: (SHARED)
 
 #include "../../common/footprint/footprint.h"   // rc::geom:: Footprint / overlap_ratio (SHARED)
+#include "../../common/track/merge_instances.h"   // rc::track::merge_overlapping — the SHARED merge sweep
 #include "../../common/instance_tracker/birth_evidence.h"   // rc::birth:: the shared CREATE policy
 #include "../../common/nbv/graph_obstacles.h"   // rc::nbv::collect_graph_obstacles — shared, DSR-side
 #include "door_dof.h"   // rc::kDoorDofs — names/units for the BeliefInspector rows
@@ -846,46 +847,45 @@ void SpecificWorker::compute()
 // Collapse instances whose seat footprints overlap (same physical door fitted twice): keep the one with
 // more integrated fresh evidence, retire the other (affordance + node). Runs before tracking so a
 // duplicate is gone before it is fed a mask. Mirrors table_concept::merge_overlapping_instances.
+// Retire one instance: drop its affordance node, forget it in the fitter, delete its graph node. The single
+// teardown path shared by every lifecycle exit (merge / death), keeping the affordance+fitter+graph invariant.
+// ★Named to match the other four agents, which already had it — this was the same three lines written inline.
+void SpecificWorker::retire_instance(std::uint64_t id)
+{
+    if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
+        it->second.affordance.remove();
+    fitter_->forget_node(id);
+    G->delete_node(id);
+}
+
+
 void SpecificWorker::merge_overlapping_instances()
 {
     if (cfg_.tracker_merge_overlap <= 0.0f)
         return;
-    auto& insts = fitter_->instances();
-    if (insts.size() < 2)
-        return;
 
-    std::vector<std::uint64_t> ids;
-    ids.reserve(insts.size());
-    for (auto& [id, _] : insts) ids.push_back(id);
-
-    std::unordered_set<std::uint64_t> removed;
-    for (std::size_t i = 0; i < ids.size(); ++i)
-    {
-        if (removed.count(ids[i])) continue;
-        for (std::size_t j = i + 1; j < ids.size(); ++j)
+    // The sweep is SHARED (common/track); only the two per-object questions stay here.
+    // ★A DOOR'S FOOTPRINT IS ITS APERTURE, NOT ITS LEAF — see footprint_of above: two doors are the same
+    // door when their apertures coincide, and a swung leaf moves while the aperture does not.
+    // ★The counter comes from the sweep now. It USED TO BE ABSENT HERE: door merged instances and never
+    // touched ev_g_.merges, so the dashboard's `merges=%d/%ld` read 0/0 for the life of the agent while
+    // merges were being printed to stdout beside it. bottle and chair had the same hole.
+    rc::track::merge_overlapping(
+        fitter_->instances(), ev_g_,
+        [&](const auto& a, const auto& b) -> std::optional<float>
         {
-            if (removed.count(ids[j])) continue;
-            const auto ia = insts.find(ids[i]), ib = insts.find(ids[j]);
-            if (ia == insts.end() or ib == insts.end()) continue;
-
-            const float ratio = footprint_overlap_ratio(ia->second.model.state(), ib->second.model.state());
-            if (ratio < cfg_.tracker_merge_overlap) continue;
-
-            const bool keep_i = ia->second.matched_frames >= ib->second.matched_frames;
-            const std::uint64_t keep = keep_i ? ids[i] : ids[j];
-            const std::uint64_t drop = keep_i ? ids[j] : ids[i];
+            const float ratio = footprint_overlap_ratio(a.model.state(), b.model.state());
+            return ratio >= cfg_.tracker_merge_overlap ? std::optional{ratio} : std::nullopt;
+        },
+        [](const auto& in) { return in.matched_frames; },      // keep the more-observed instance
+        [&](std::uint64_t keep, std::uint64_t drop, auto&, const auto& dropped, float ratio)
+        {
             std::print("door_concept: [tracker] MERGE id={} into id={} (footprint overlap {:.2f})\n",
                        drop, keep, ratio);
-            log_tracker_event("MERGE", drop, ia->second.model.state().cx, ia->second.model.state().cy,
+            log_tracker_event("MERGE", drop, dropped.model.state().cx, dropped.model.state().cy,
                               std::format("into {} overlap {:.2f}", keep, ratio));
-            if (auto it = insts.find(drop); it != insts.end())
-                it->second.affordance.remove();
-            fitter_->forget_node(drop);
-            G->delete_node(drop);
-            removed.insert(drop);
-            if (drop == ids[i]) break;   // this i is gone; advance to the next i
-        }
-    }
+            retire_instance(drop);
+        });
 }
 
 // Data-driven multi-instance lifecycle (mirrors table_concept). Doors are persistent furniture, so

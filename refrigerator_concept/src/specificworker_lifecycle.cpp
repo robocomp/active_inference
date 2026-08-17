@@ -15,6 +15,7 @@
 
 #include "../../common/existence_belief/existence_belief.h"   // rc::exist — peripheral CONFIRM-ONLY
 #include "refrigerator_geometry.h"   // rc::geom::footprint_overlap_ratio
+#include "../../common/track/merge_instances.h"   // rc::track::merge_overlapping — the SHARED merge sweep
 #include "../../common/instance_tracker/birth_evidence.h"   // rc::birth — the SHARED CREATE policy
 #include "../../common/exclusion/exclusion.h"               // rc::exclusion — the SHARED no-two-objects rule
 
@@ -66,39 +67,24 @@ void SpecificWorker::merge_overlapping_instances()
 {
     if (cfg_.tracker_merge_overlap <= 0.0f)
         return;
-    auto& insts = fitter_->instances();
-    if (insts.size() < 2)
-        return;
 
-    std::vector<std::uint64_t> ids;
-    ids.reserve(insts.size());
-    for (auto& [id, _] : insts) ids.push_back(id);
-
-    std::unordered_set<std::uint64_t> removed;
-    for (std::size_t i = 0; i < ids.size(); ++i)
-    {
-        if (removed.count(ids[i])) continue;
-        for (std::size_t j = i + 1; j < ids.size(); ++j)
+    // The sweep is SHARED (common/track); only the two per-object questions stay here — when are two
+    // fitted rectangles the same refrigerator, and what does retiring one mean. The counter is filled by the
+    // sweep itself, because three agents proved a call-site counter gets forgotten.
+    rc::track::merge_overlapping(
+        fitter_->instances(), ev_g_,
+        [&](const auto& a, const auto& b) -> std::optional<float>
         {
-            if (removed.count(ids[j])) continue;
-            const auto ia = insts.find(ids[i]), ib = insts.find(ids[j]);
-            if (ia == insts.end() or ib == insts.end()) continue;
-
-            const float ratio = rc::geom::footprint_overlap_ratio(ia->second.model.state(), ib->second.model.state());
-            if (ratio < cfg_.tracker_merge_overlap) continue;
-
-            // Keep the more-observed instance (more integrated fresh frames); retire the other.
-            const bool keep_i = ia->second.matched_frames >= ib->second.matched_frames;
-            const std::uint64_t keep = keep_i ? ids[i] : ids[j];
-            const std::uint64_t drop = keep_i ? ids[j] : ids[i];
+            const float ratio = rc::geom::footprint_overlap_ratio(a.model.state(), b.model.state());
+            return ratio >= cfg_.tracker_merge_overlap ? std::optional{ratio} : std::nullopt;
+        },
+        [](const auto& in) { return in.matched_frames; },      // keep the more-observed instance
+        [&](std::uint64_t keep, std::uint64_t drop, auto&, const auto&, float ratio)
+        {
             std::print("refrigerator_concept: [tracker] MERGE id={} into id={} (footprint overlap {:.2f})\n",
                        drop, keep, ratio);
-            ++ev_g_.merges; ++ev_g_.merges_cum;   // EvidenceMonitor counter
             retire_instance(drop);
-            removed.insert(drop);
-            if (drop == ids[i]) break;   // this i is gone; advance to the next i
-        }
-    }
+        });
 }
 
 // One tracker cycle: merge overlaps, build tracks from live instances (Mahalanobis gate on belief Σ) and
@@ -689,7 +675,7 @@ void SpecificWorker::log_detect_probe()
         row.obliquity_cos = inst.dbg_obliquity_cos;
         row.trunc_frac    = inst.last_trunc_frac;
         row.p_detect      = inst.dbg_ex_pdetect;
-        row.p_exists      = inst.existence.p_exists();
+        row.p_exists_prior = inst.existence.p_exists();   // PRIOR: this runs before the update below
         // ★THE LABEL, and it is not det_alive. detection_alive LATCHES across frames (measured on hood:
         // 1 in 9432/9432 rows, still 1 at frames_since_det=6172), so as an outcome it is degenerate and
         // fit_envelope correctly refuses to fit it. The per-cycle outcome is "a mask arrived THIS cycle".

@@ -36,6 +36,7 @@
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion — the SHARED no-two-objects rule
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion:: (SHARED)
 #include "../../common/footprint/footprint.h"   // rc::geom:: (SHARED)
+#include "../../common/track/merge_instances.h"   // rc::track::merge_overlapping — the SHARED merge sweep
 #include <QSize>
 #include <QVBoxLayout>
 #include <QFontMetrics>
@@ -715,50 +716,47 @@ void SpecificWorker::compute()
 // Collapse instances whose circle footprints overlap (same physical bottle fitted twice): keep the one
 // with more integrated fresh evidence, retire the other (affordance + node). Runs before tracking so a
 // duplicate is gone before it is fed a mask. Mirrors table_concept::merge_overlapping_instances.
+// Retire one instance: drop its affordance node, forget it in the fitter, delete its graph node. The single
+// teardown path shared by every lifecycle exit (merge / death), keeping the affordance+fitter+graph invariant.
+// ★Named to match the other four agents, which already had it — this was the same three lines written inline.
+void SpecificWorker::retire_instance(std::uint64_t id)
+{
+    if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
+        it->second.affordance.remove();
+    fitter_->forget_node(id);
+    G->delete_node(id);
+}
+
+
 void SpecificWorker::merge_overlapping_instances()
 {
     if (cfg_.tracker_merge_overlap <= 0.0f)
         return;
-    auto& insts = fitter_->instances();
-    if (insts.size() < 2)
-        return;
 
-    std::vector<std::uint64_t> ids;
-    ids.reserve(insts.size());
-    for (auto& [id, _] : insts) ids.push_back(id);
-
-    std::unordered_set<std::uint64_t> removed;
-    for (std::size_t i = 0; i < ids.size(); ++i)
-    {
-        if (removed.count(ids[i])) continue;
-        for (std::size_t j = i + 1; j < ids.size(); ++j)
+    // The sweep is SHARED (common/track); only the two per-object questions stay here.
+    // ★The counter comes from the sweep now, and bottle is where it mattered most: this agent RESET
+    // ev_g_.merges every cycle and never incremented it, so the dashboard's `merges=%d/%ld` read 0/0 for
+    // the life of the agent while MERGE lines scrolled past on stdout. chair and door had the same hole.
+    rc::track::merge_overlapping(
+        fitter_->instances(), ev_g_,
+        [&](const auto& a, const auto& b) -> std::optional<float>
         {
-            if (removed.count(ids[j])) continue;
-            const auto ia = insts.find(ids[i]), ib = insts.find(ids[j]);
-            if (ia == insts.end() or ib == insts.end()) continue;
-
-            const auto& sa = ia->second.model.state();
-            const auto& sb = ib->second.model.state();
+            const auto& sa = a.model.state();
+            const auto& sb = b.model.state();
             // Two bottles cannot share physical space. SHARED exact two-circle lens: a cylinder's
             // footprint is a CIRCLE, and its bounding square would overestimate the area by 4/pi and
             // make the answer depend on a yaw a cylinder does not have.
             const float ratio = rc::geom::overlap_ratio(rc::geom::Circle{sa.cx, sa.cy, sa.radius},
                                                         rc::geom::Circle{sb.cx, sb.cy, sb.radius});
-            if (ratio < cfg_.tracker_merge_overlap) continue;
-
-            const bool keep_i = ia->second.matched_frames >= ib->second.matched_frames;
-            const std::uint64_t keep = keep_i ? ids[i] : ids[j];
-            const std::uint64_t drop = keep_i ? ids[j] : ids[i];
+            return ratio >= cfg_.tracker_merge_overlap ? std::optional{ratio} : std::nullopt;
+        },
+        [](const auto& in) { return in.matched_frames; },      // keep the more-observed instance
+        [&](std::uint64_t keep, std::uint64_t drop, auto&, const auto&, float ratio)
+        {
             std::print("bottle_concept: [tracker] MERGE id={} into id={} (circle overlap {:.2f})\n",
                        drop, keep, ratio);
-            if (auto it = insts.find(drop); it != insts.end())
-                it->second.affordance.remove();
-            fitter_->forget_node(drop);
-            G->delete_node(drop);
-            removed.insert(drop);
-            if (drop == ids[i]) break;   // this i is gone; advance to the next i
-        }
-    }
+            retire_instance(drop);
+        });
 }
 
 void SpecificWorker::retire_diverged_instances()
