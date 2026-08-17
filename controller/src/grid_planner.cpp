@@ -55,7 +55,7 @@ void GridPlanner::rebuild_offsets()
         // of 50, which is the difference between a comfortable pass and a scrape. Silent, because the
         // hull is nearly symmetric and nothing ever throws.
         const float yaw = 2.0f * static_cast<float>(M_PI) * h / kHeadings;
-        offsets_[h] = footprint.cell_offsets(cell_, yaw - static_cast<float>(M_PI_2));
+        offsets_[h] = footprint.cell_offsets_yaw(cell_, yaw);
         // MIGRATION MONITOR — see orientation_census() / pose_free_legacy(). The pre-correction
         // rasterisation, kept ONLY so the change can be measured against the world the robot is
         // actually in rather than argued about. Delete both, and the census, once it is trusted.
@@ -66,15 +66,14 @@ void GridPlanner::rebuild_offsets()
 }
 
 bool GridPlanner::cell_free_legacy(int ix, int iy, int h) const
+{ return cell_free_in(offsets_legacy_, ix, iy, h); }
+
+int GridPlanner::heading_bucket(float yaw) const
 {
-    if (offsets_legacy_.size() != kHeadings) return false;
-    for (const auto& o : offsets_legacy_[h])
-    {
-        const int nx = ix + o.x(), ny = iy + o.y();
-        if (not in_bounds(nx, ny)) return false;
-        if (occ_[idx(nx, ny)]) return false;
-    }
-    return true;
+    const float two_pi = 2.0f * static_cast<float>(M_PI);
+    float t = std::fmod(yaw, two_pi);
+    if (t < 0) t += two_pi;
+    return static_cast<int>(std::lround(t / two_pi * kHeadings)) % kHeadings;
 }
 
 bool GridPlanner::pose_free_legacy(const Eigen::Vector2f& pos_room, float yaw) const
@@ -82,10 +81,7 @@ bool GridPlanner::pose_free_legacy(const Eigen::Vector2f& pos_room, float yaw) c
     int ix, iy;
     if (not world_to_cell(pos_room, ix, iy)) return false;
     const_cast<GridPlanner*>(this)->rebuild_offsets();
-    float t = std::fmod(yaw, 2.0f * static_cast<float>(M_PI));
-    if (t < 0) t += 2.0f * static_cast<float>(M_PI);
-    const int h = static_cast<int>(std::lround(t / (2.0f * static_cast<float>(M_PI)) * kHeadings)) % kHeadings;
-    return cell_free_legacy(ix, iy, h);
+    return cell_free_legacy(ix, iy, heading_bucket(yaw));
 }
 
 GridPlanner::OrientationCensus GridPlanner::orientation_census() const
@@ -346,10 +342,11 @@ Eigen::Vector2f GridPlanner::distance_gradient_at(const Eigen::Vector2f& pos_roo
     return {dx / (2.f * e), dy / (2.f * e)};
 }
 
-bool GridPlanner::cell_free(int ix, int iy, int h) const
+bool GridPlanner::cell_free_in(const std::vector<std::vector<Eigen::Vector2i>>& offsets,
+                              int ix, int iy, int h) const
 {
-    if (offsets_.size() != kHeadings) return false;
-    for (const auto& o : offsets_[h])
+    if (offsets.size() != kHeadings) return false;
+    for (const auto& o : offsets[h])
     {
         const int nx = ix + o.x(), ny = iy + o.y();
         if (not in_bounds(nx, ny)) return false;      // footprint off the map == unsafe
@@ -357,6 +354,8 @@ bool GridPlanner::cell_free(int ix, int iy, int h) const
     }
     return true;
 }
+
+bool GridPlanner::cell_free(int ix, int iy, int h) const { return cell_free_in(offsets_, ix, iy, h); }
 
 bool GridPlanner::cell_free_at(const Eigen::Vector2f& pos_room, int heading_index) const
 {
@@ -370,10 +369,7 @@ bool GridPlanner::pose_free(const Eigen::Vector2f& pos_room, float theta) const
 {
     int ix, iy;
     if (not world_to_cell(pos_room, ix, iy)) return false;
-    float t = std::fmod(theta, 2.0f * static_cast<float>(M_PI));
-    if (t < 0) t += 2.0f * static_cast<float>(M_PI);
-    const int h = static_cast<int>(std::lround(t / (2.0f * static_cast<float>(M_PI)) * kHeadings)) % kHeadings;
-    return cell_free(ix, iy, h);
+    return cell_free(ix, iy, heading_bucket(theta));
 }
 
 float GridPlanner::pose_clearance(const Eigen::Vector2f& pos_room, float theta) const
@@ -383,9 +379,7 @@ float GridPlanner::pose_clearance(const Eigen::Vector2f& pos_room, float theta) 
     const_cast<GridPlanner*>(this)->rebuild_offsets();
     const_cast<GridPlanner*>(this)->build_distance_field();
     if (offsets_.size() != kHeadings or dist_.empty()) return 0.f;
-    float t = std::fmod(theta, 2.0f * static_cast<float>(M_PI));
-    if (t < 0) t += 2.0f * static_cast<float>(M_PI);
-    const int h = static_cast<int>(std::lround(t / (2.0f * static_cast<float>(M_PI)) * kHeadings)) % kHeadings;
+    const int h = heading_bucket(theta);
     float worst = std::numeric_limits<float>::max();
     for (const auto& o : offsets_[h])
     {

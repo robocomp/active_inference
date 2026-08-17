@@ -296,6 +296,18 @@ private:
                           int laps,
                           const rc::RouteOptimizerConfig &opt) const;
     bool route_events_csv_open_ = false;
+    // Rate limit for the deferred-waypoint re-offer (see drive_mission_route). ~1 Hz: the test is cheap,
+    // but a recovery re-authors a route window and that is not.
+    std::uint64_t last_reinstate_ms_ = 0;
+    // The planner callbacks the route path hands to RouteFollower. ONE spelling: they were written out
+    // character-for-character at the repair site and again at the reinstate site.
+    rc::RouteFollower::PlanFn route_plan_fn();
+    rc::RouteFollower::FreeFn route_free_fn();
+    // THE INVARIANT after anything re-authors the curve under the follower: count it, tell the mission,
+    // and make the follower re-install. It was five statements copied twice; a missed line means the
+    // robot keeps driving the old curve, which is not a failure that announces itself.
+    void on_route_reauthored(const char *event, float window_m, rc::TrajectoryController &path_controller,
+                             std::uint64_t now_ms);
     void log_route_event(const char *event, bool ok, std::uint64_t t_ms,
                          const rc::TrajectoryController &path_controller,
                          float window_m);
@@ -503,7 +515,6 @@ private:
     // How far the fresh pose sits from the scan-aligned one, i.e. the correction actually applied. This
     // is the number that says whether the split bought anything, and it costs one subtraction.
     float tracker_pose_lead_m_ = 0.f;
-    std::uint64_t tracker_pose_log_ms_ = 0;
 
     // ── YAW-CORRECTION MONITOR (temporary; delete with GridPlanner::pose_free_legacy) ─────────────
     // The footprint used to be rasterised 90 degrees from its direction of travel. Correcting it moves a
@@ -527,13 +538,22 @@ private:
     // for the same reason unroutable_fix_ is: a displacement recomputed from scratch every cycle
     // against a flickering cloud is a target that jitters, and a target that moves when the evidence
     // blinks is not a target. It is dropped the moment it stops being admissible, never on a whim.
-    std::optional<Eigen::Vector2f> approach_fix_;
-    std::string approach_fix_name_;
-    // The standpoint the held fix was derived FROM. A producer is free to republish its viewpoint
+    // ONE optional, not three members synced by hand. They were cleared in pairs at four sites and
+    // approach_fix_anchor_ was cleared at none of them — a sync that was already partial. Bundled, every
+    // one of those sites is a single .reset() and the inconsistency is unrepresentable.
+    struct ApproachFix
+    {
+        Eigen::Vector2f pos;
+        std::string name;      // the target it belongs to; the identity that survives a repair
+        Eigen::Vector2f anchor;   // the standpoint it was derived FROM (see the anchor-moved guard)
+    };
+    // `anchor` is the standpoint the fix was derived FROM. A producer is free to republish its viewpoint
     // somewhere else under the same name, and a fix that outlived the pose it repaired would silently
     // ignore that — the robot driving to a correction for a problem that has moved.
-    Eigen::Vector2f approach_fix_anchor_{0.f, 0.f};
+    std::optional<ApproachFix> approach_fix_;
     std::uint64_t approach_blocked_log_ms_ = 0;   // rate limit for "found nowhere better"
+    // The body used by the approach re-check, held rather than rebuilt per call (shadow() allocates).
+    rc::RobotFootprint approach_body_ = rc::RobotFootprint::shadow();
     // Re-ask the standpoint against the LIVE return cloud once the robot is close enough for that cloud
     // to carry information about it, and move it if it is occupied by something the grid has forgotten.
     // Mutates step.target (position and, when it moves, the facing yaw that aims at the object).

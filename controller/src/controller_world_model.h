@@ -56,6 +56,12 @@ public:
     static bool same_target_instance(const ControllerTargetInfo &lhs, const ControllerTargetInfo &rhs);
 
 private:
+    // The two public pose readers differ ONLY in which instants they try, so that is the only thing they
+    // state: the guard, the TimeQuery choice, the RT walk and the matrix->pose decode live here once.
+    // They were two copies, and the one that gets forgotten on the next change is the one feeding the
+    // control law. Tried in order; the first instant that resolves wins.
+    std::optional<ControllerRobotPose> pose_from_rt(std::initializer_list<std::uint64_t> instants) const;
+
     const ControllerParams *params_ = nullptr;
     rc::AffordanceManager *affordance_manager_ = nullptr;
     std::shared_ptr<DSR::DSRGraph> graph_;

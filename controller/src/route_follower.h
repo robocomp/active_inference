@@ -31,6 +31,20 @@
 namespace rc
 {
 
+// Everything RouteFollower::repair's two callers differ by, PASSED rather than stashed. At namespace
+// scope because a nested class's default member initializers cannot be used in a default argument of the
+// enclosing class — and the default argument is the point: ordinary repairs should say nothing at all.
+struct RouteRepairOptions
+{
+    // false = re-author the window even though nothing is blocking it. Only recovery wants that: putting
+    // a waypoint BACK is not a response to a blockage, so the guard that stops detour storms would
+    // refuse every recovery. Leave true for anything reacting to an obstacle.
+    bool require_blockage = true;
+    // One more via-point to route through, at the arc length it holds in the tour, so a reinstated
+    // waypoint is visited in the authored order rather than wherever a shortest path would put it.
+    std::optional<std::pair<float, Eigen::Vector2f>> extra_via;
+};
+
 class RouteFollower
 {
 public:
@@ -73,11 +87,47 @@ public:
     // blockage turns into a permanent detour, and it was observed doing exactly that (13 repairs in 23 s,
     // in places the robot had driven cleanly many times).
     enum class RepairResult { NotNeeded, Repaired, Failed };
+    // See RouteRepairOptions. This was briefly a `bool force` plus a member set immediately before the
+    // call and cleared inside it — which made repair() a function of hidden state, and made the
+    // "consumed by repair" contract false on its four early returns.
     RepairResult repair(const Eigen::Vector2f &robot_pos,
                         float back_m,
                         float ahead_m,
                         const PlanFn &plan,
-                        const FreeFn &is_free);
+                        const FreeFn &is_free,
+                        const RouteRepairOptions &opts = {});
+
+    // ── WAYPOINTS DROPPED AT BUILD, AND GETTING THEM BACK ────────────────────────────────────────
+    // A waypoint the planner cannot reach when the route is built is dropped so the tour stays drivable.
+    // That was the end of it: the drop was permanent, and it was SELF-FULFILLING — the waypoint leaves
+    // the route, so the robot never drives toward it, so the close-range evidence that would free it is
+    // never gathered. A door that was shut at t=0, a chair pushed out, a person standing in a doorway:
+    // all of them removed a waypoint for the whole mission however briefly they were there.
+    //
+    // So a drop is now a DEFERRAL. The waypoint is remembered with the place it holds in the tour, and
+    // re-offered when the robot comes near enough for the map about it to have actually changed —
+    // which is what makes this cheap: no timer sweeps waypoints the robot is nowhere near, and a
+    // waypoint that is never approached is never re-tested.
+    struct Deferred
+    {
+        Eigen::Vector2f pos;      // the authored waypoint, as recorded
+        std::size_t after_index;  // where it belongs in wp_pos_ — the tour order survives the drop
+        int attempts = 0;         // re-entry tries, so a permanently blocked one stops costing searches
+    };
+    int deferred_count() const { return static_cast<int>(deferred_.size()); }
+
+    // Re-test the deferred waypoints the robot is now approaching and splice back any that have become
+    // reachable. Cheap to call often — it only plans for a waypoint that is BOTH within `ahead_m` of the
+    // robot and still ahead of it on the route — but the caller should still rate-limit, because a
+    // successful recovery re-authors a window and that is not free.
+    // After kMaxReinstateAttempts refusals a waypoint is retired: at some point "blocked" is the answer,
+    // and re-planning to it every approach is a search per cycle that buys nothing.
+    static constexpr int kMaxReinstateAttempts = 4;
+    struct ReinstateResult { int tested = 0, recovered = 0, retired = 0; };
+    ReinstateResult reinstate_deferred(const Eigen::Vector2f &robot_pos,
+                                       float ahead_m,
+                                       const PlanFn &plan,
+                                       const FreeFn &is_free);
 
     // Hand the follower a distance field and weights, and every fit — build AND repair — is variationally
     // optimised (see route_optimizer.h). Anchors are filled in from the route's own waypoints, so the
@@ -182,6 +232,9 @@ private:
     std::vector<Eigen::Vector2f> poly_;
     std::vector<Eigen::Vector2f> wp_pos_;   // waypoint positions, laps concatenated — re-projected after a repair
     std::vector<float> wp_s_;      // arc length of every waypoint, laps concatenated
+    // Dropped at build and awaiting a second chance — see Deferred. Indices into wp_pos_, kept correct
+    // across a recovery (inserting one shifts every later entry).
+    std::vector<Deferred> deferred_;
     RouteOptimizerConfig opt_;     // disabled until set_optimizer supplies a distance field
     float spacing_ = 0.05f;        // fit parameters, remembered so a repair refits identically
     float smoothing_ = 0.40f;

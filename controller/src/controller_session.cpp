@@ -674,6 +674,7 @@ void ControllerSession::log_route_geometry()
     if (!route_geom_csv_open_)
     {
         route_geom_csv_.open("route_geometry.csv", std::ios::out | std::ios::trunc);
+        route_geom_csv_.imbue(std::locale::classic());  // decimal POINT regardless of LANG (CLAUDE.md)
         if (route_geom_csv_.is_open()) route_geom_csv_ << "event_id,kind,i,x,y\n";
         route_geom_csv_open_ = true;
     }
@@ -737,6 +738,7 @@ void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
     if (!mppi_csv_open_)
     {
         mppi_csv_.open("mppi_diag.csv", std::ios::out | std::ios::trunc);
+        mppi_csv_.imbue(std::locale::classic());  // decimal POINT regardless of LANG (CLAUDE.md)
         if (mppi_csv_.is_open())
             mppi_csv_ << "# per-cycle control record. The ess/lambda/g_* columns describe the MPPI SAMPLER\n"
                          "# and are ZERO when ControlMode=pd — that is the sampler not running, not a bug.\n"
@@ -838,6 +840,7 @@ void ControllerSession::log_route_event(const char *event, bool ok, std::uint64_
     if (!route_events_csv_open_)
     {
         route_events_csv_.open("route_events.csv", std::ios::out | std::ios::trunc);
+        route_events_csv_.imbue(std::locale::classic());  // decimal POINT regardless of LANG (CLAUDE.md)
         if (route_events_csv_.is_open())
             route_events_csv_ << "t_ms,event,ok,mission,route_len_m,samples,corrections,window_m,"
                                  "opt_ran,opt_rejected,opt_iters,cost_before,cost_after,"
@@ -903,12 +906,19 @@ bool ControllerSession::build_route(const ControllerRobotPose &robot_pose)
         const auto safe = grid_planner_.nearest_free(raw, yaw);
         if (not safe.has_value())
         {
-            // Boxed in beyond the repair radius. Dropping one waypoint keeps the tour drivable, which is
-            // better than refusing to move at all — but it CHANGES THE ROUTE, so it is said out loud
-            // rather than swallowed: a benchmark whose stimulus quietly differs is worse than no run.
-            std::println("[route] waypoint {} at ({:.2f},{:.2f}) is BOXED IN — dropping it from the route. "
-                         "The driven route no longer matches the recorded one.", i + 1, raw.x(), raw.y());
+            // Boxed in beyond the repair radius. It CHANGES THE ROUTE, so it is said out loud rather
+            // than swallowed: a benchmark whose stimulus quietly differs is worse than no run.
+            // ★HANDED ON RAW RATHER THAN DROPPED HERE (2026-08-17). There used to be two independent,
+            // permanent drop sites — this one and RouteFollower's — and neither remembered anything.
+            // Passing the unrepaired waypoint through means its hop simply fails in the builder, which
+            // DEFERS it, so both cases funnel into the one mechanism that can give it back. The
+            // immediate behaviour is unchanged (an infeasible pose cannot be planned to either way);
+            // what changes is that the tour can recover it when the robot gets there.
+            std::println("[route] waypoint {} at ({:.2f},{:.2f}) is BOXED IN — deferring it. The driven "
+                         "route does not match the recorded one until it comes back.", i + 1, raw.x(), raw.y());
             ++skipped;
+            wps.push_back(raw);
+            raw_wps.push_back(raw);
             continue;
         }
         if ((*safe - raw).squaredNorm() > 1e-6f) ++repaired;
@@ -921,7 +931,7 @@ bool ControllerSession::build_route(const ControllerRobotPose &robot_pose)
         return false;
     }
     if (repaired > 0 or skipped > 0)
-        std::println("[route] {} waypoint(s) moved to the nearest feasible pose, {} dropped.",
+        std::println("[route] {} waypoint(s) moved to the nearest feasible pose, {} deferred.",
                      repaired, skipped);
 
     // ── VARIATIONAL ROUTE OPTIMISATION ──
@@ -1107,6 +1117,34 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
 // Built once and driven in ARC-LENGTH coordinates. There is no target to replan to here, and
 // re-issuing a path is exactly what destroys the follower's continuity — so this regime repairs
 // its curve in place and never re-plans. Nothing in drive_point_target runs in this mode.
+rc::RouteFollower::PlanFn ControllerSession::route_plan_fn()
+{
+    return [this](const Eigen::Vector2f &a, const Eigen::Vector2f &b)
+    {
+        auto r = grid_planner_.plan(a, b);
+        if (not r.has_value()) last_plan_failure_ = grid_planner_.last_failure();
+        return r;
+    };
+}
+
+rc::RouteFollower::FreeFn ControllerSession::route_free_fn()
+{
+    return [this](const Eigen::Vector2f &p, float hdg) { return grid_planner_.pose_free(p, hdg); };
+}
+
+void ControllerSession::on_route_reauthored(const char *event, float window_m,
+                                           rc::TrajectoryController &path_controller,
+                                           std::uint64_t now_ms)
+{
+    ++route_repair_count_;
+    mission_.note_replan();   // count what HAPPENED, not the reflex that asked for it
+    // Force the new curve to be installed: the follower is still holding the old one.
+    path_controller.stop();
+    current_plan_.reset();
+    plan_spline_valid_ = false;   // the fitted curve belongs to the plan being dropped
+    log_route_event(event, true, now_ms, path_controller, window_m);
+}
+
 bool ControllerSession::drive_mission_route(const ControllerPlanningStep &step,
                                            rc::TrajectoryController &path_controller,
                                            ControllerMotionCommander &motion_commander,
@@ -1131,6 +1169,27 @@ bool ControllerSession::drive_mission_route(const ControllerPlanningStep &step,
         }
         return false;
     }
+    // ── SECOND CHANCE FOR THE WAYPOINTS THE BUILD COULD NOT REACH ────────────────────────────────
+    // A waypoint blocked when the route was built used to be gone for the whole mission, and that drop
+    // was SELF-FULFILLING: out of the route means the robot never drives toward it, so the close-range
+    // evidence that would free it is never gathered. Now it is deferred and re-offered here.
+    // Rate-limited to ~1 Hz because a successful recovery re-authors a window; the test itself is nearly
+    // free, since reinstate_deferred only plans for a waypoint the robot is BOTH near and still short of.
+    // Costs exactly nothing on the overwhelmingly common route with nothing deferred.
+    if (route_active_ and route_.deferred_count() > 0
+        and time_source() - last_reinstate_ms_ >= 1000)
+    {
+        last_reinstate_ms_ = time_source();
+        // The same window a repair re-authors: it is how far ahead the route may be re-planned, so it is
+        // also how far ahead a waypoint can be put back into one. No second allowance to keep in step.
+        constexpr float kReinstateAheadM = 4.0f;
+        const auto rr = route_.reinstate_deferred(step.robot_pose.pos, kReinstateAheadM,
+                                                  route_plan_fn(), route_free_fn());
+        // The curve changed under the follower — same obligation as a repair, same one place.
+        if (rr.recovered > 0)
+            on_route_reauthored("reinstate", kReinstateAheadM, path_controller, time_source());
+    }
+
     // ── LOCAL REPAIR ──
     // A recovery reflex fired and put a new obstacle in the planner's world. In leg mode the next
     // cycle simply replanned to the current target; here there is no target to replan to, so the
@@ -1146,13 +1205,7 @@ bool ControllerSession::drive_mission_route(const ControllerPlanningStep &step,
         constexpr float kRepairBackM = 1.0f;
         constexpr float kRepairAheadM = 4.0f;
         const auto result = route_.repair(step.robot_pose.pos, kRepairBackM, kRepairAheadM,
-                          [this](const Eigen::Vector2f &a, const Eigen::Vector2f &b)
-                          {
-                              auto r = grid_planner_.plan(a, b);
-                              if (not r.has_value()) last_plan_failure_ = grid_planner_.last_failure();
-                              return r;
-                          },
-                          [this](const Eigen::Vector2f &p, float hdg) { return grid_planner_.pose_free(p, hdg); });
+                                          route_plan_fn(), route_free_fn());
 
         using RR = rc::RouteFollower::RepairResult;
         if (result == RR::NotNeeded)
@@ -1166,13 +1219,7 @@ bool ControllerSession::drive_mission_route(const ControllerPlanningStep &step,
         else if (result == RR::Repaired)
         {
             route_repair_pending_ = false;
-            ++route_repair_count_;
-            mission_.note_replan();   // count the repair that HAPPENED, not the reflex that asked for one
-            // Force the repaired curve to be installed: the follower is still holding the old one.
-            path_controller.stop();
-            current_plan_.reset();
-            plan_spline_valid_ = false;   // the fitted curve belongs to the plan being dropped
-            log_route_event("repair", true, time_source(), path_controller, kRepairBackM + kRepairAheadM);
+            on_route_reauthored("repair", kRepairBackM + kRepairAheadM, path_controller, time_source());
         }
         else
         {
@@ -1628,36 +1675,30 @@ void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &s
                                                        std::uint64_t timestamp_ms)
 {
     const float window = params_ != nullptr ? params_->affordance_approach_recheck_m : 0.f;
-    if (window <= 0.f or not step.target.from_affordance)
-    {
-        approach_fix_.reset();
-        approach_fix_name_.clear();
-        return;
-    }
+    if (window <= 0.f or not step.target.from_affordance) { approach_fix_.reset(); return; }
     // Keyed by NAME, like the reachability repair: the name is the identity that survives every repair
     // that moves the pose, and it needs no tolerance to compare.
-    if (approach_fix_name_ != step.target.node_name)
-    {
+    if (approach_fix_.has_value() and approach_fix_->name != step.target.node_name)
         approach_fix_.reset();
-        approach_fix_name_.clear();
-    }
 
     // The anchor is the standpoint as the grid repair left it — that is the pose the robot is actually
     // driving to, and searching around anything else would be answering about a pose already rejected.
     const Eigen::Vector2f anchor = step.target.room_pos;
     // A held fix belongs to the pose it repaired. If that pose has moved further than the fix itself was
     // allowed to move, it is a different standpoint and the old correction is about a problem elsewhere.
-    if (approach_fix_.has_value() and (anchor - approach_fix_anchor_).norm() > window)
-    {
+    if (approach_fix_.has_value() and (anchor - approach_fix_->anchor).squaredNorm() > window * window)
         approach_fix_.reset();
-        approach_fix_name_.clear();
-    }
     // ★MEASURED TO WHAT WE ARE DRIVING TO, not to the anchor. Once a fix is taken the robot approaches
     // the MOVED pose, so a window measured against the anchor walks out of range exactly because the fix
     // worked — which would drop it and put the target straight back where the returns said it must not
     // be, once per lap of that loop, forever.
-    const Eigen::Vector2f driving_to = approach_fix_.value_or(anchor);
-    if (not approach_fix_.has_value() and (step.plan_origin - driving_to).norm() > window) return;
+    // Measured to the pose actually being driven to, so a held fix does not walk itself out of the
+    // window and get dropped. ★The gate applies WHETHER OR NOT a fix is held: the earlier spelling
+    // (`not approach_fix_.has_value() and ...`) disabled it outright once a fix existed, so the full
+    // cloud read and scan below then ran every cycle for the rest of the target's life however far away
+    // the robot was. That is the opposite of what the comment above claims. Caught by review 2026-08-17.
+    const Eigen::Vector2f driving_to = approach_fix_.has_value() ? approach_fix_->pos : anchor;
+    if ((step.plan_origin - driving_to).squaredNorm() > window * window) return;
 
     auto *lidar = obstacle_tracker.lidar_buffer();
     if (lidar == nullptr) return;
@@ -1669,19 +1710,18 @@ void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &s
 
     // The SAME standoff the planner obeys — footprint_safety_margin_m, the one number robot_footprint.h
     // exists to keep from multiplying. Nothing here introduces a second one.
-    rc::RobotFootprint body = rc::RobotFootprint::shadow();
-    body.set_safety_margin(params_ != nullptr ? params_->footprint_safety_margin_m : 0.f);
-    const float reach = body.circumscribed_radius() + body.safety_margin();
-
-    // Body-frame test at a pose. The footprint's own forward axis is +y while a room yaw has forward
-    // at +x, hence the quarter turn — the same convention support_radius_yaw() states.
-    const auto inside_body = [&](const Eigen::Vector2f &p, const Eigen::Vector2f &centre, float yaw)
-    {
-        const float th = yaw - static_cast<float>(M_PI_2);
-        const Eigen::Vector2f d = p - centre;
-        const float c = std::cos(th), s = std::sin(th);
-        return body.contains({c * d.x() + s * d.y(), -s * d.x() + c * d.y()});
-    };
+    // ★HELD AS A MEMBER, not rebuilt per call: shadow() allocates an 18-vertex polygon, and this runs on
+    // the control thread. The margin is re-set only when the configured one moves.
+    const float margin = params_ != nullptr ? params_->footprint_safety_margin_m : 0.f;
+    if (std::abs(approach_body_.safety_margin() - margin) > 1e-6f)
+        approach_body_.set_safety_margin(margin);
+    const auto &body = approach_body_;
+    // ★NOT `+ safety_margin()`. circumscribed_radius() ALREADY adds the margin (robot_footprint.cpp:48),
+    // so adding it again stacked a second 0.05 m — 0.375 m where the body reaches 0.325 — which is the
+    // exact multiplying-margin failure robot_footprint.h was written to abolish, reintroduced inside the
+    // file that quotes it. Caught by review 2026-08-17.
+    const float reach = body.circumscribed_radius();
+    const float reach2 = reach * reach;
 
     // Returns that could touch ANY candidate the search may return, with the robot's own body removed.
     // Self-returns must go first: the wheels sit at 0.25 m and the robot is by definition standing next
@@ -1691,12 +1731,13 @@ void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &s
     constexpr float kBodyZHi = 1.45f;   // the mesh tops out at 1.42 m
     const float robot_yaw = step.robot_pose.theta + static_cast<float>(M_PI_2);
     std::vector<Eigen::Vector2f> returns;
+    returns.reserve(256);                    // typical near-anchor count; avoids ~10 reallocations
     for (std::size_t i = 0; i < n_pts; ++i)
     {
         if (zs[i] < kBodyZLo or zs[i] > kBodyZHi) continue;
         const Eigen::Vector2f p{xs[i], ys[i]};
-        if ((p - anchor).norm() > window + reach) continue;
-        if (inside_body(p, step.robot_pose.pos, robot_yaw)) continue;   // the robot seeing itself
+        if ((p - anchor).squaredNorm() > (window + reach) * (window + reach)) continue;
+        if (body.contains_yaw(p, step.robot_pose.pos, robot_yaw)) continue;   // the robot seeing itself
         returns.push_back(p);
     }
     if (returns.empty()) return;   // no evidence is not the same as clear, and it licenses nothing
@@ -1715,10 +1756,10 @@ void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &s
                                 : step.target.yaw_rad;
         for (const auto &p : returns)
         {
-            if ((p - centre).norm() > reach) continue;            // cannot reach it at any heading
+            if ((p - centre).squaredNorm() > reach2) continue;     // cannot reach it at any heading
             if (rotates) return false;                            // ...and it turns through all of them
-            if (inside_body(p, centre, arrival_yaw)) return false;
-            if (inside_body(p, centre, step.target.yaw_rad)) return false;
+            if (body.contains_yaw(p, centre, arrival_yaw)) return false;
+            if (body.contains_yaw(p, centre, step.target.yaw_rad)) return false;
         }
         return true;
     };
@@ -1736,15 +1777,16 @@ void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &s
     // A fix already taken is kept for as long as it is still admissible — the whole point of holding it.
     if (approach_fix_.has_value())
     {
-        if (grid_planner_.pose_free(*approach_fix_, step.target.yaw_rad) and clear_of_returns(*approach_fix_))
+        const Eigen::Vector2f held = approach_fix_->pos;
+        if (grid_planner_.pose_free(held, step.target.yaw_rad) and clear_of_returns(held))
         {
-            step.target.room_pos = *approach_fix_;
+            step.target.room_pos = held;
             aim_at_object();
             return;
         }
         std::println("[approach] '{}' — the moved standpoint ({:.2f},{:.2f}) is no longer clear either; "
                      "re-solving against the live returns.",
-                     step.target.node_name, approach_fix_->x(), approach_fix_->y());
+                     step.target.node_name, held.x(), held.y());
         approach_fix_.reset();
     }
 
@@ -1769,9 +1811,7 @@ void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &s
     }
     if ((*fix - anchor).squaredNorm() <= 1e-6f) return;   // the standpoint is clear; nothing to do
 
-    approach_fix_ = *fix;
-    approach_fix_name_ = step.target.node_name;
-    approach_fix_anchor_ = anchor;
+    approach_fix_ = ApproachFix{.pos = *fix, .name = step.target.node_name, .anchor = anchor};
     std::println("[approach] '{}' — {:.2f} m out, the live LiDAR says ({:.2f},{:.2f}) is OCCUPIED by "
                  "something the grid has forgotten (residual decays; returns do not). Standpoint moved to "
                  "({:.2f},{:.2f}), {:.2f} m away.",
@@ -2255,6 +2295,7 @@ void ControllerSession::ensure_band_csv(bool band_enabled)
 {
     if (band_csv_open_) return;
     band_csv_.open("band_diag.csv", std::ios::out | std::ios::trunc);
+    band_csv_.imbue(std::locale::classic());  // decimal POINT regardless of LANG (CLAUDE.md)
     band_csv_open_ = true;
     if (!band_csv_.is_open()) return;
     if (not band_enabled)
@@ -2773,6 +2814,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
             if (!proximity_csv_open_)
             {
                 proximity_csv_.open(params_->proximity_csv_path, std::ios::out | std::ios::trunc);
+                proximity_csv_.imbue(std::locale::classic());  // decimal POINT regardless of LANG (CLAUDE.md)
                 if (proximity_csv_.is_open())
                     proximity_csv_ << "t_ms,rx,ry,rtheta,vx,vy,omega,cmd_adv,cmd_side,cmd_rot,min_esdf,"
                                       "n_esdf_pts,nearest_esdf_pt_m,nearest_lidar_m,nearest_obst_m,n_obst,"
@@ -3244,6 +3286,7 @@ void ControllerSession::update_overlay_extrapolation(const ControllerWorldModel 
         if (!overlay_csv_open_)
         {
             overlay_csv_.open(params_->overlay_csv_path, std::ios::out | std::ios::trunc);
+            overlay_csv_.imbue(std::locale::classic());  // decimal POINT regardless of LANG (CLAUDE.md)
             if (overlay_csv_.is_open())
                 overlay_csv_ << "t_ms,lidar_ts,gap_ms,pose_age_ms,vx,vy,omega,RTdelta_m,"
                                 "cmd_adv,cmd_rot,cur_adv,cur_rot,rt_lead_ms,rt_fix_dt_ms,"
@@ -3447,7 +3490,6 @@ void ControllerSession::finalize_reached(rc::AffordanceManager &affordance_manag
     // The final-approach correction belongs to the standpoint just retired. Re-selecting the same
     // affordance later must re-measure, not inherit an answer taken against a scan that is now old.
     approach_fix_.reset();
-    approach_fix_name_.clear();
     manual_target_room_.reset();
     manual_target_origin_room_.reset();
     manual_target_dirty_ = false;
@@ -3752,7 +3794,7 @@ void ControllerSession::begin_escape(const ControllerRobotPose &robot_pose,
     escape_start_ms_ = now_ms;
     escape_start_pos_ = robot_pose.pos;
     ++escape_count_;
-    stall_judge_.reset();
+    reset_stuck_window();
 
     // ── CHARGE THIS ESCAPE TO THE AFFORDANCE IT HAPPENED UNDER ───────────────────────────────────
     // An escape is a reflex, not a plan: it reverses out and lets the planner try again. That is right

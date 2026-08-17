@@ -78,6 +78,7 @@
 
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <vector>
 #include <Eigen/Dense>
@@ -112,6 +113,19 @@ public:
     // Is a point (robot frame) inside the footprint, grown by the safety margin?
     bool contains(const Eigen::Vector2f& p_robot) const;
 
+    // Same question about a WORLD point, for a body standing at `centre` facing room-yaw `yaw`. The
+    // quarter turn lives here for the reason stated below: the footprint's forward axis is +y while a
+    // room yaw has forward at +x, and every hand-rolled copy of that conversion is a 4.2 cm error
+    // waiting to happen silently. Three such copies were found and fixed on 2026-08-16/17; this is so
+    // there is no reason to write a fourth.
+    bool contains_yaw(const Eigen::Vector2f& p_world, const Eigen::Vector2f& centre, float yaw) const
+    {
+        const float th = yaw - 1.57079633f;
+        const Eigen::Vector2f d = p_world - centre;
+        const float c = std::cos(th), s = std::sin(th);
+        return contains({c * d.x() + s * d.y(), -s * d.x() + c * d.y()});
+    }
+
     // The footprint placed at a world pose: translation + heading (rad), safety margin applied.
     std::vector<Eigen::Vector2f> at_pose(const Eigen::Vector2f& pos, float theta) const;
 
@@ -138,6 +152,14 @@ public:
     // enough to run inside a planner's inner loop instead of approximating it with an inflated obstacle set.
     // Conservative: a cell is included if ANY part of it is covered, so the test never under-reports overlap.
     std::vector<Eigen::Vector2i> cell_offsets(float cell_size, float theta) const;
+
+    // Same, for a body facing room-yaw `yaw` — the quarter turn applied once, here, rather than at each
+    // caller. GridPlanner's heading buckets ARE yaws (its move table is (cos, sin) of them), and feeding
+    // them to cell_offsets() raw is precisely the defect fixed on 2026-08-16: the body was rasterised
+    // 90 degrees across its own direction of travel for the class's whole life, costing 4.2 cm of width
+    // where a corridor closes, silently, because the hull is nearly symmetric.
+    std::vector<Eigen::Vector2i> cell_offsets_yaw(float cell_size, float yaw) const
+    { return cell_offsets(cell_size, yaw - 1.57079633f); }
 
     static bool self_test();
 

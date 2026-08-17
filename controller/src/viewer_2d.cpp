@@ -53,7 +53,8 @@ QColor object_hue(int slot)
         QColor(0x89, 0xb3, 0x1d),   // lime
         QColor(0x23, 0x51, 0xde),   // indigo
         QColor(0xa3, 0x61, 0xfb)};  // violet
-    return kHues[((slot % kObjectHueCount) + kObjectHueCount) % kObjectHueCount];
+    // Slots come from a registry that only ever counts up from 0, so no negative normalisation is needed.
+    return kHues[slot % kObjectHueCount];
 }
 
 // The four roles, derived from ONE hue so they cannot drift apart: the pen and the centre dot carry the
@@ -541,10 +542,10 @@ void Viewer2D::draw_path(const PathDrawData &data)
             if (obstacle.size() < 3)
                 continue;
 
+            // No kind test here: obstacle_palette ignores the slot for every non-Object kind, and only
+            // objects carry a color_key — object_color_slot("") returns 0 without touching the registry.
             const auto palette = obstacle_palette(obstacle_visual.kind,
-                                                  obstacle_visual.kind == ControllerObstacleKind::Object
-                                                      ? object_color_slot(obstacle_visual.color_key)
-                                                      : 0);
+                                                  object_color_slot(obstacle_visual.color_key));
             const bool is_grid_cell = obstacle_visual.kind == ControllerObstacleKind::GridOccupancy;
             // Grid cells tile edge-to-edge — use a thin hairline pen so they read as one filled region
             // (a 0.085 m border per 0.35 m cell would drown the fill). Real obstacles keep the bold edge.

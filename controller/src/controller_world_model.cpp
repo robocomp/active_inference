@@ -95,75 +95,44 @@ std::optional<std::vector<Eigen::Vector2f>> ControllerWorldModel::read_room_poly
     return polygon;
 }
 
+std::optional<ControllerRobotPose> ControllerWorldModel::pose_from_rt(
+    std::initializer_list<std::uint64_t> instants) const
+{
+    if (!inner_eigen_api_ || !graph_state_.ready() || !params_)
+        return std::nullopt;
+
+    const auto time_query = params_->interpolate_rt ? DSR::RT_API::TimeQuery::Interpolated
+                                                    : DSR::RT_API::TimeQuery::Nearest;
+    for (const std::uint64_t ts : instants)
+    {
+        const auto room_T_robot = inner_eigen_api_->get_transformation_matrix(graph_state_.room_name,
+                                                                             graph_state_.robot_name,
+                                                                             ts, "RT", time_query);
+        if (!room_T_robot.has_value()) continue;
+        const auto &matrix = room_T_robot->matrix();
+        ControllerRobotPose pose;
+        pose.pos = Eigen::Vector2f(static_cast<float>(matrix(0, 3)), static_cast<float>(matrix(1, 3)));
+        pose.theta = std::atan2(static_cast<float>(matrix(1, 0)), static_cast<float>(matrix(0, 0)));
+        return pose;
+    }
+    return std::nullopt;
+}
+
+// SCAN-ALIGNED — the pose contemporaneous with the observations the obstacle set was built from.
+// Falls back to `now`, then to the untimestamped edge, exactly as before.
 std::optional<ControllerRobotPose> ControllerWorldModel::read_robot_pose_in_room(
     std::uint64_t timestamp_ms,
     const std::optional<std::uint64_t> &last_lidar_timestamp_ms) const
 {
-    if (!inner_eigen_api_ || !graph_state_.ready() || !params_)
-        return std::nullopt;
-
-    const auto time_query = params_->interpolate_rt ? DSR::RT_API::TimeQuery::Interpolated
-                                                    : DSR::RT_API::TimeQuery::Nearest;
-    const std::uint64_t query_ts = last_lidar_timestamp_ms.value_or(timestamp_ms);
-    auto room_T_robot = inner_eigen_api_->get_transformation_matrix(graph_state_.room_name,
-                                                                    graph_state_.robot_name,
-                                                                    query_ts,
-                                                                    "RT",
-                                                                    time_query);
-    if (!room_T_robot.has_value())
-        room_T_robot = inner_eigen_api_->get_transformation_matrix(graph_state_.room_name,
-                                                                   graph_state_.robot_name,
-                                                                   timestamp_ms,
-                                                                   "RT",
-                                                                   time_query);
-    if (!room_T_robot.has_value())
-        room_T_robot = inner_eigen_api_->get_transformation_matrix(graph_state_.room_name,
-                                                                   graph_state_.robot_name,
-                                                                   0,
-                                                                   "RT",
-                                                                   time_query);
-    if (!room_T_robot.has_value())
-        return std::nullopt;
-
-    const auto &matrix = room_T_robot->matrix();
-
-    ControllerRobotPose pose;
-    pose.pos = Eigen::Vector2f(static_cast<float>(matrix(0, 3)), static_cast<float>(matrix(1, 3)));
-    pose.theta = std::atan2(static_cast<float>(matrix(1, 0)), static_cast<float>(matrix(0, 0)));
-    return pose;
+    return pose_from_rt({last_lidar_timestamp_ms.value_or(timestamp_ms), timestamp_ms, 0});
 }
 
-// The freshest pose the tree holds — see the header for why this exists separately. Deliberately NOT
-// implemented by calling read_robot_pose_in_room(ts, nullopt): that spelling works today only because
-// value_or falls through to the same timestamp, and it would silently change meaning if the pinning
-// there ever grew a condition. The instant asked for is the whole point of this function, so it says it.
+// FRESHEST — see the header for why the control law wants this one and nothing else does. Asking for a
+// future instant cannot invent a pose: cortex's bracketing_blocks CLAMPS past the newest block.
 std::optional<ControllerRobotPose> ControllerWorldModel::read_robot_pose_latest(
     std::uint64_t timestamp_ms) const
 {
-    if (!inner_eigen_api_ || !graph_state_.ready() || !params_)
-        return std::nullopt;
-
-    const auto time_query = params_->interpolate_rt ? DSR::RT_API::TimeQuery::Interpolated
-                                                    : DSR::RT_API::TimeQuery::Nearest;
-    auto room_T_robot = inner_eigen_api_->get_transformation_matrix(graph_state_.room_name,
-                                                                    graph_state_.robot_name,
-                                                                    timestamp_ms,
-                                                                    "RT",
-                                                                    time_query);
-    if (!room_T_robot.has_value())
-        room_T_robot = inner_eigen_api_->get_transformation_matrix(graph_state_.room_name,
-                                                                   graph_state_.robot_name,
-                                                                   0,
-                                                                   "RT",
-                                                                   time_query);
-    if (!room_T_robot.has_value())
-        return std::nullopt;
-
-    const auto &matrix = room_T_robot->matrix();
-    ControllerRobotPose pose;
-    pose.pos = Eigen::Vector2f(static_cast<float>(matrix(0, 3)), static_cast<float>(matrix(1, 3)));
-    pose.theta = std::atan2(static_cast<float>(matrix(1, 0)), static_cast<float>(matrix(0, 0)));
-    return pose;
+    return pose_from_rt({timestamp_ms, 0});
 }
 
 std::optional<Eigen::Vector2f> ControllerWorldModel::read_node_room_xy(std::uint64_t node_id,

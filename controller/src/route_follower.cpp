@@ -39,6 +39,7 @@ bool RouteFollower::build(const Eigen::Vector2f &start,
     //    never approved is exactly the lossy shortcut the grid planner exists to remove.
     poly_.push_back(start);
     Eigen::Vector2f from = start;
+    deferred_.clear();
     int unreachable = 0;
     for (int lap = 0; lap < laps; ++lap)
         for (const auto &wp : waypoints)
@@ -56,9 +57,15 @@ bool RouteFollower::build(const Eigen::Vector2f &start,
                 // Dropping it keeps the tour drivable, which is better than refusing to move at all — the
                 // same policy the caller already applies to a boxed-in waypoint. It CHANGES THE ROUTE, so
                 // it is said out loud rather than swallowed.
+                // ★DEFERRED, NOT DISCARDED (2026-08-17). Dropping it permanently was self-fulfilling:
+                // the waypoint leaves the route, so the robot never drives toward it, so the close-range
+                // evidence that would free it is never gathered. Remembered with the place it holds in
+                // the tour and re-offered by reinstate_deferred() when the robot comes near.
                 ++unreachable;
-                std::printf("[route] waypoint (%.2f,%.2f) is UNREACHABLE from (%.2f,%.2f) — skipping it. "
-                            "The driven route no longer matches the recorded one.\n",
+                deferred_.push_back(Deferred{.pos = wp, .after_index = wp_pos_.size()});
+                std::printf("[route] waypoint (%.2f,%.2f) is UNREACHABLE from (%.2f,%.2f) — DEFERRED "
+                            "(will be re-tried when the robot gets near it). The driven route does not "
+                            "match the recorded one until it comes back.\n",
                             wp.x(), wp.y(), from.x(), from.y());
                 std::fflush(stdout);
                 continue;                       // `from` stays put: the next hop starts where we still are
@@ -81,12 +88,78 @@ bool RouteFollower::build(const Eigen::Vector2f &start,
     //      fit_from_polyline so a repair reproduces them by the same code.
     if (not fit_from_polyline(is_free)) return false;
 
-    std::printf("[route] built: %d lap(s) x %d reachable waypoints (%d UNREACHABLE, skipped) -> %.2f m, "
+    std::printf("[route] built: %d lap(s) x %d reachable waypoints (%d UNREACHABLE, deferred) -> %.2f m, "
                 "%zu samples at %.0f cm, %d feasibility corrections\n",
                 laps, wp_per_lap_, unreachable, spline_.length(), spline_.samples().size(),
                 spline_.spacing() * 100, spline_.corrections());
     std::fflush(stdout);
     return true;
+}
+
+// ── SECOND CHANCE FOR A WAYPOINT THE WORLD REFUSED AT BUILD TIME ────────────────────────────────
+// See the header for why a drop is a deferral. The two gates are what make this cheap AND what make it
+// mean something: the waypoint must still be AHEAD (splicing in one the robot has driven past means
+// going backwards) and the robot must be NEAR it (only then can the map about it have changed — this is
+// the "as the robot approaches" the whole mechanism is for, expressed as a condition rather than a
+// timer). A waypoint nobody approaches is never re-planned to, so a tour that avoids it costs nothing.
+RouteFollower::ReinstateResult RouteFollower::reinstate_deferred(const Eigen::Vector2f &robot_pos,
+                                                                 float ahead_m,
+                                                                 const PlanFn &plan,
+                                                                 const FreeFn &is_free)
+{
+    ReinstateResult r;
+    if (deferred_.empty() or not spline_.valid() or not plan) return r;
+
+    // erase_if rather than an index cursor: five branches, two of which remove and three of which do
+    // not, is exactly the shape where a hand-rolled `++d` gets forgotten and the loop spins forever.
+    // The predicate runs once per element in order and repair() never touches deferred_, so the side
+    // effects below are safe inside it.
+    std::erase_if(deferred_, [&](Deferred &dw)
+    {
+        // Retire the hopeless. At some point "blocked" IS the answer, and re-planning to it on every
+        // approach is an A* per cycle that buys nothing — the same livelock the affordance side solved
+        // with known_useless_spot().
+        if (dw.attempts >= kMaxReinstateAttempts)
+        {
+            std::printf("[route] waypoint (%.2f,%.2f) stays OUT of the tour: %d approaches and still "
+                        "unreachable. Not asking again this run.\n", dw.pos.x(), dw.pos.y(), dw.attempts);
+            std::fflush(stdout);
+            ++r.retired;
+            return true;
+        }
+
+        // Where it belongs in arc length: just before the survivor that follows it. That survivor is
+        // also what says whether the waypoint is still ahead of the robot at all.
+        const float s_next = dw.after_index < wp_s_.size() ? wp_s_[dw.after_index] : spline_.length();
+        if (s_next <= progress_ + 0.10f) return false;                       // already driven past it
+        if ((robot_pos - dw.pos).norm() > ahead_m) return false;             // not near enough yet
+
+        ++r.tested;
+        ++dw.attempts;
+        if (const auto hop = plan(robot_pos, dw.pos); not hop.has_value() or hop->size() < 2)
+            return false;                       // still blocked; it keeps its place and its counter
+
+        // Reachable again. Re-author the window through it — an unblocked window is exactly the
+        // situation a recovery happens in, so the ordinary blockage guard has to be lifted for it.
+        constexpr float kBackM = 1.0f;
+        const RouteRepairOptions opts{.require_blockage = false,
+                                 .extra_via = std::make_pair(std::max(progress_ + 0.20f, s_next - 0.01f),
+                                                             dw.pos)};
+        if (repair(robot_pos, kBackM, ahead_m, plan, is_free, opts) != RepairResult::Repaired)
+        {
+            std::printf("[route] waypoint (%.2f,%.2f) is reachable again but the window would not "
+                        "re-author through it — leaving it deferred.\n", dw.pos.x(), dw.pos.y());
+            std::fflush(stdout);
+            return false;
+        }
+        std::printf("[route] ★waypoint (%.2f,%.2f) is REACHABLE AGAIN and back in the tour after %d "
+                    "attempt(s) — the route now matches the recorded one more closely.\n",
+                    dw.pos.x(), dw.pos.y(), dw.attempts);
+        std::fflush(stdout);
+        ++r.recovered;
+        return true;
+    });
+    return r;
 }
 
 std::vector<float> RouteFollower::anchor_polyline_arclengths() const
@@ -205,7 +278,8 @@ RouteFollower::RepairResult RouteFollower::repair(const Eigen::Vector2f &robot_p
                                                   float back_m,
                                                   float ahead_m,
                                                   const PlanFn &plan,
-                                                  const FreeFn &is_free)
+                                                  const FreeFn &is_free,
+                                                  const RouteRepairOptions &opts)
 {
     if (not spline_.valid() or poly_.size() < 2 or not plan) return RepairResult::Failed;
 
@@ -231,7 +305,10 @@ RouteFollower::RepairResult RouteFollower::repair(const Eigen::Vector2f &robot_p
         for (float s = s0; s <= s1; s += spline_.spacing())
             if (not is_free(spline_.position_at(s), spline_.heading_at(s)))
                 blocked_before += spline_.spacing();
-        if (blocked_before <= 0.f) return RepairResult::NotNeeded;
+        // See RepairOptions::require_blockage: recovery must proceed on an UNBLOCKED window, which is
+        // the one situation this guard would otherwise refuse. Every other caller wants it — it is what
+        // keeps a transient obstacle from becoming a permanent detour.
+        if (blocked_before <= 0.f and opts.require_blockage) return RepairResult::NotNeeded;
     }
 
     // Map the arc-length window onto the POLYLINE, which is what gets spliced. Do it by ARC LENGTH, never
@@ -274,9 +351,19 @@ RouteFollower::RepairResult RouteFollower::repair(const Eigen::Vector2f &robot_p
     // and a shortcut silently rewrites the stimulus the run is supposed to measure.
     // So the window is re-planned as a CHAIN through the waypoints it contains. A repair can then route
     // around a blocker but can never straighten the tour.
-    std::vector<Eigen::Vector2f> via;
+    std::vector<std::pair<float, Eigen::Vector2f>> via_s;
     for (std::size_t j = 0; j < wp_s_.size() and j < wp_pos_.size(); ++j)
-        if (wp_s_[j] > s0 + 0.10f and wp_s_[j] < s1 - 0.10f) via.push_back(wp_pos_[j]);
+        if (wp_s_[j] > s0 + 0.10f and wp_s_[j] < s1 - 0.10f) via_s.emplace_back(wp_s_[j], wp_pos_[j]);
+    // A waypoint being REINSTATED joins the chain at the arc length it holds in the tour, so the detour
+    // visits it in the authored order rather than wherever a shortest path would put it.
+    if (opts.extra_via.has_value())
+    {
+        via_s.emplace_back(*opts.extra_via);
+        std::ranges::sort(via_s, {}, &std::pair<float, Eigen::Vector2f>::first);
+    }
+    std::vector<Eigen::Vector2f> via;
+    via.reserve(via_s.size());
+    for (const auto &[s_at, p] : via_s) via.push_back(p);
 
     std::vector<Eigen::Vector2f> hop{poly_[i0]};
     Eigen::Vector2f from = poly_[i0];
@@ -804,6 +891,74 @@ bool RouteFollower::self_test()
         std::printf("  failed repair: length %.2f -> %.2f m, curve moved %.6f m\n",
                     len_pre_fail, r.length(), fail_move);
         check(fail_move < 1e-6f, "a FAILED repair must leave the route bit-identical");
+    }
+
+    // ── A BLOCKED WAYPOINT IS DEFERRED, NOT LOST, AND COMES BACK WHEN THE WORLD DOES ─────────────
+    // The failure this exists to prevent is silent and permanent: a waypoint unreachable for the few
+    // seconds the route was built is dropped for the whole mission, and because it leaves the route the
+    // robot never goes near it, so nothing ever revises the verdict.
+    {
+        RouteFollower r;
+        const FreeFn all_free = [](const Eigen::Vector2f &, float) { return true; };
+        const std::vector<Eigen::Vector2f> wps{{4.f, 0.f}, {4.f, 4.f}, {0.f, 4.f}};
+        // A "door" at (4,4) that is shut while the route is built and open afterwards.
+        bool door_shut = true;
+        const PlanFn gated = [&door_shut](const Eigen::Vector2f &a, const Eigen::Vector2f &b)
+            -> std::optional<std::vector<Eigen::Vector2f>>
+        {
+            if (door_shut and (b - Eigen::Vector2f{4.f, 4.f}).norm() < 0.1f) return std::nullopt;
+            return std::vector<Eigen::Vector2f>{a, b};
+        };
+        check(r.build({0.f, 0.f}, wps, 1, gated, all_free), "the tour must still build with one shut door");
+        std::printf("  deferral: built with %d deferred waypoint(s)\n", r.deferred_count());
+        check(r.deferred_count() == 1, "★the unreachable waypoint must be REMEMBERED, not discarded");
+
+        // Far away: nothing is re-planned, because nothing can have been learned about it.
+        r.advance({4.f, 0.2f});
+        const auto far_res = r.reinstate_deferred({4.f, 0.2f}, 1.0f, gated, all_free);
+        check(far_res.tested == 0 and r.deferred_count() == 1,
+              "★a waypoint the robot is nowhere near must not cost a search — that is what makes this cheap");
+
+        // The door opens, and the robot comes within reach of it.
+        door_shut = false;
+        const float len_before = r.length();
+        const auto res = r.reinstate_deferred({4.f, 2.6f}, 4.0f, gated, all_free);
+        std::printf("  reinstate: tested %d, recovered %d, route %.2f m -> %.2f m, %d still deferred\n",
+                    res.tested, res.recovered, len_before, r.length(), r.deferred_count());
+        check(res.recovered == 1, "★a waypoint that became reachable must be put BACK into the tour");
+        check(r.deferred_count() == 0, "and it must stop being deferred once recovered");
+        // It is back because the route now goes there: the corner at (4,4) is on the driven curve.
+        float nearest = 1e9f;
+        for (const auto &p : r.path()) nearest = std::min(nearest, (p - Eigen::Vector2f{4.f, 4.f}).norm());
+        std::printf("  the recovered waypoint is now %.3f m from the driven curve\n", nearest);
+        check(nearest < 0.5f, "★the route must actually PASS THROUGH it — a counter is not a recovery");
+    }
+
+    // ...AND A WAYPOINT THAT IS GENUINELY WALLED OFF MUST STOP COSTING SEARCHES. Without this, every
+    // approach re-runs an A* that has already failed — the livelock the affordance side solved with
+    // known_useless_spot().
+    {
+        RouteFollower r;
+        const FreeFn all_free = [](const Eigen::Vector2f &, float) { return true; };
+        const std::vector<Eigen::Vector2f> wps{{4.f, 0.f}, {4.f, 4.f}, {0.f, 4.f}};
+        int calls = 0;
+        const PlanFn walled = [&calls](const Eigen::Vector2f &a, const Eigen::Vector2f &b)
+            -> std::optional<std::vector<Eigen::Vector2f>>
+        {
+            if ((b - Eigen::Vector2f{4.f, 4.f}).norm() < 0.1f) { ++calls; return std::nullopt; }
+            return std::vector<Eigen::Vector2f>{a, b};
+        };
+        check(r.build({0.f, 0.f}, wps, 1, walled, all_free), "the tour must build");
+        const int after_build = calls;
+        r.advance({4.f, 2.0f});
+        int rounds = 0;
+        while (r.deferred_count() > 0 and rounds < 20)
+        { r.reinstate_deferred({4.f, 2.6f}, 4.0f, walled, all_free); ++rounds; }
+        std::printf("  retirement: gave up after %d rounds, %d extra plan calls (cap %d)\n",
+                    rounds, calls - after_build, kMaxReinstateAttempts);
+        check(r.deferred_count() == 0, "a permanently blocked waypoint must be RETIRED, not retried forever");
+        check(calls - after_build <= kMaxReinstateAttempts,
+              "★and it must cost at most kMaxReinstateAttempts searches, however long the tour is");
     }
 
     std::printf("RouteFollower::self_test %s\n", ok ? "PASS" : "FAIL");

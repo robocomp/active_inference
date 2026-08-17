@@ -240,6 +240,13 @@ private:
     // Footprint at heading bucket `h` centred on cell (ix,iy) overlaps no occupied cell and stays in bounds.
     bool  cell_free(int ix, int iy, int h) const;
     bool  cell_free_legacy(int ix, int iy, int h) const;   // migration monitor — see rebuild_offsets()
+    // The footprint at `offsets[h]` centred on (ix,iy) overlaps nothing occupied and stays in bounds.
+    // Shared by cell_free and its legacy twin so the body exists once — the twin is scheduled for
+    // deletion, and one substituted array is not a reason to copy a loop.
+    bool  cell_free_in(const std::vector<std::vector<Eigen::Vector2i>>& offsets, int ix, int iy, int h) const;
+    // Room YAW -> heading bucket. ONE place: the fmod/lround quantisation was written out three times,
+    // and the whole class exists on the premise that a convention lives in a single spot.
+    int   heading_bucket(float yaw) const;
     bool  cell_free_at(const Eigen::Vector2f& pos_room, int heading_index) const;
     void  rebuild_offsets();
     void  build_distance_field() const;   // lazy; fills dist_ with metres, sets dist_valid_

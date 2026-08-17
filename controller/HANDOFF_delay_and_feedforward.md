@@ -1,3 +1,13 @@
+> **⚠ SUPERSEDED 2026-08-16 — both issues are FIXED.**
+> Measurement lag: `TrackerUsesLatestPose = true`. The newest room←robot RT block already led the
+> pinned scan by 33 ms p50 / 68 ms p90 and that lead was being *declined*; it is now taken.
+> Gains: not an open item after all. `-(2/L)e_psi - (1/L^2)e_y` is a **pole placement**, not a tuned
+> pair — the closed loop is `e'' + (2v/L)e' + (v/L)^2 e = 0`, a double pole at `-v/L`, **zeta = 1
+> exactly**, and in ARC LENGTH the speed cancels (`e'' + (2/L)e' + (1/L^2)e = 0`), so the error decays
+> over a fixed DISTANCE `L` at any speed with no gain schedule. `g_dc = 1.124 = 1/0.89` is the
+> identified DC gain; `T_lag = 0.42` the identified lag. Kept below for the reasoning and the
+> measurements; do not act on it as a task list.
+
 # PLAIN: delay and feedback gains — and why the feedforward is neither
 
 *Written 2026-08-16 from the thesis-side review; restructured the same day. The controller is
