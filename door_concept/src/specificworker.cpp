@@ -201,6 +201,16 @@ void SpecificWorker::request_shutdown()
     if (shutting_down_.exchange(true))
         return;
 
+    // ★SEVER THE GRAPH CALLBACKS BEFORE ANY TEARDOWN. This agent connects del_node_signal to del_node_slot,
+    // and cleanup_owned_nodes() below calls G->delete_node() — from the MAIN thread, where emitter and
+    // receiver share a thread and Qt's Auto connection therefore resolves to DIRECT. So the slot re-enters
+    // synchronously while the object is being torn down. bottle_concept severed the callbacks here and
+    // wrote down the symptom it was fixing ("a del_node delta ... on this already-destructing object — the
+    // exit segfault"); the other six kept the connection live. Dropping inner_eigen_ afterwards (while G is
+    // still fully alive) also unsubscribes its internal graph signals cleanly.
+    if (G)
+        disconnect(G.get(), nullptr, this, nullptr);
+
     save_window_settings();
     save_dashboard_geometry();
     save_strip_geometry();       // …nor is the compact belief strip   // the standalone dashboard is not in `windows`, so save it explicitly
