@@ -10,6 +10,8 @@
  */
 
 #include "specificworker.h"
+
+#include "../../common/diag_log/rotating_csv.h"   // keep the previous run instead of wiping it
 #include "../../common/nbv/graph_obstacles.h"   // rc::nbv::sensor_from_graph / collect_graph_obstacles
 
 #include <algorithm>
@@ -403,7 +405,7 @@ void SpecificWorker::log_epistemic_csv(const rc::HumanInstance& inst, const rc::
         return;
     if (not epistemic_csv_.is_open())
     {
-        epistemic_csv_.open(cfg_.epistemic_csv_path, std::ios::out | std::ios::trunc);
+        rc::diag::open_rotating(epistemic_csv_, cfg_.epistemic_csv_path);
         if (not epistemic_csv_.is_open())
         {
             std::print("human_concept: [epistemic] cannot open CSV '{}'\n", cfg_.epistemic_csv_path);
@@ -436,7 +438,7 @@ void SpecificWorker::log_fit_csv(const rc::HumanInstance& inst, float free_energ
     namespace KP = rc::human::KP;
     if (not fit_csv_.is_open())
     {
-        fit_csv_.open(cfg_.fit_csv_path, std::ios::out | std::ios::trunc);
+        rc::diag::open_rotating(fit_csv_, cfg_.fit_csv_path);
         if (not fit_csv_.is_open())
         {
             std::print("human_concept: [fit] cannot open CSV '{}'\n", cfg_.fit_csv_path);

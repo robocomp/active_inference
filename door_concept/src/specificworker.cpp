@@ -33,6 +33,8 @@
 
 #include "specificworker.h"
 
+#include "../../common/diag_log/rotating_csv.h"   // keep the previous run instead of wiping it
+
 #include "../../common/dashboard/belief_certainty.h"   // rc::dash::fill_certainty (SHARED)
 
 #include "../../common/obj/convergence.h"   // rc::converge::step (SHARED)
@@ -119,7 +121,7 @@ float footprint_overlap_ratio(const rc::DoorState& a, const rc::DoorState& b)
 // "create then remove" churn can be diagnosed from a file, not stdout. seq gives ordering.
 void log_tracker_event(const char* ev, std::uint64_t id, float x, float y, const std::string& note)
 {
-    static std::ofstream f = [] { std::ofstream o("etc/door_events.csv", std::ios::trunc);
+    static std::ofstream f = [] { std::ofstream o; rc::diag::open_rotating(o, "etc/door_events.csv");
                                    o << "seq,event,id,x,y,note\n"; return o; }();
     static int seq = 0;
     f << seq++ << ',' << ev << ',' << id << ',' << x << ',' << y << ',' << note << '\n';
@@ -1009,7 +1011,7 @@ void SpecificWorker::run_instance_tracker()
     {
         static std::ofstream dcsv = []
         {
-            std::ofstream f("etc/door_dets_log.csv", std::ios::trunc);
+            std::ofstream f; rc::diag::open_rotating(f, "etc/door_dets_log.csv");
             f << "cycle,n_door_slices,slice_idx,npts,conf,cx,cy,range,trunc_frac,motion_var\n";
             return f;
         }();
@@ -1498,6 +1500,8 @@ void SpecificWorker::load_identities()
 
 void SpecificWorker::save_identities() const
 {
+    // DIAG-ROTATE: exempt — this is PERSISTED STATE, not a diagnostics log. note_identity() rewrites the
+    // whole table on every identity change, so rotating here would leave one stamped copy per door seen.
     std::ofstream f("etc/door_identities.csv", std::ios::trunc);
     if (not f)
         return;
@@ -1572,7 +1576,7 @@ void SpecificWorker::log_nbv_decision(const rc::DoorInstance& inst, const rc::nb
 {
     static std::ofstream csv = []
     {
-        std::ofstream f("etc/door_nbv_log.csv", std::ios::trunc);
+        std::ofstream f; rc::diag::open_rotating(f, "etc/door_nbv_log.csv");
         f.imbue(std::locale::classic());
         f << "cycle,node,valid,door_cx,door_cy,door_yaw,door_w,ap_cx,ap_cy,"
              "face,standoff_m,band_min_m,band_max_m,tgt_x,tgt_y,tgt_yaw,dist_to_door_m,tgt_in_room,gain,"
@@ -1892,7 +1896,7 @@ void SpecificWorker::update_existence_beliefs()
                 // or fully occluded) ⇒ HOLD, L must not move — that is the "robot turned around" case. A real
                 // door in view shows occ≫free. A phantom in a resolving view (pdet high) shows free≫occ and a
                 // rising strk. free_eff≪free means "seen, but this view could not resolve it" ⇒ go verify, not delete.
-                static std::ofstream ex_csv = []{ std::ofstream f("etc/door_existence_log.csv", std::ios::trunc);
+                static std::ofstream ex_csv = []{ std::ofstream f; rc::diag::open_rotating(f, "etc/door_existence_log.csv");
                     f << "cycle,node,L,p_exists,cx,cy,inroom,roomprior_loaded,won,since_det,"
                          "sil_occ,sil_free,sil_free_eff,n_detectable,n_total,n_occluded,"
                          "resolvability,central_frac,p_detect,oblq,remove_streak,"

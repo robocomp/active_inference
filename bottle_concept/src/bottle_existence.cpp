@@ -4,6 +4,8 @@
 
 #include "bottle_existence.h"
 
+#include "../../common/diag_log/rotating_csv.h"   // keep the previous run instead of wiping it
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -312,7 +314,7 @@ void BottleExistence::update_and_remove(BottleFitter& fitter, const Inputs& in,
         if (log_now)
         {
             static std::ofstream ex_csv = []{
-                std::ofstream f("etc/bottle_existence_log.csv", std::ios::trunc);
+                std::ofstream f; rc::diag::open_rotating(f, "etc/bottle_existence_log.csv");
                 f.imbue(std::locale::classic());
                 f << "cycle,node,L,p_exists,cx,cy,detected,since_det,p_detect,fill_max,fill_min,"
                      "vis,occl_total,occl_dropped,cam_usable,lidar_occ,lidar_free,lidar_n,lidar_p_resolve,"

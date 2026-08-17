@@ -33,6 +33,8 @@
 
 #include "specificworker.h"
 
+#include "../../common/diag_log/rotating_csv.h"   // keep the previous run instead of wiping it
+
 #include "../../common/dashboard/belief_certainty.h"   // rc::dash::fill_certainty (SHARED)
 
 #include "../../common/obj/convergence.h"   // rc::converge::step (SHARED)
@@ -92,7 +94,7 @@ float belief_uncertainty(const rc::ChairInstance& inst)
 // "create then remove" churn can be diagnosed from a file, not stdout. seq gives ordering.
 void log_tracker_event(const char* ev, std::uint64_t id, float x, float y, const std::string& note)
 {
-    static std::ofstream f = [] { std::ofstream o("etc/chair_events.csv", std::ios::trunc);
+    static std::ofstream f = [] { std::ofstream o; rc::diag::open_rotating(o, "etc/chair_events.csv");
                                    o << "seq,event,id,x,y,note\n"; return o; }();
     static int seq = 0;
     f << seq++ << ',' << ev << ',' << id << ',' << x << ',' << y << ',' << note << '\n';
@@ -982,7 +984,7 @@ void SpecificWorker::run_instance_tracker()
     {
         static std::ofstream dcsv = []
         {
-            std::ofstream f("etc/chair_dets_log.csv", std::ios::trunc);
+            std::ofstream f; rc::diag::open_rotating(f, "etc/chair_dets_log.csv");
             f << "cycle,n_chair_slices,slice_idx,npts,conf,cx,cy,range,trunc_frac,motion_var\n";
             return f;
         }();
@@ -1557,7 +1559,7 @@ void SpecificWorker::update_existence_beliefs()
                            inst.assigned_mask_idx >= 0 ? 1 : 0, inst.frames_since_detection, occluded, zed_pd);
                 // Same diagnostic to a CSV (you read those) — roomprior=0 ⇒ polygon NOT loaded; inroom=0 ⇒ outside walls;
                 // zed_pd=0 ⇒ ZED can't reliably see it (far/edge) so absence won't remove it (ricoh-only-visible).
-                static std::ofstream ex_csv = []{ std::ofstream f("etc/chair_existence_log.csv", std::ios::trunc);
+                static std::ofstream ex_csv = []{ std::ofstream f; rc::diag::open_rotating(f, "etc/chair_existence_log.csv");
                     f << "cycle,node,L,cx,cy,inroom,roomprior_loaded,roi,won,since_det,occluded,zed_pd\n"; return f; }();
                 if (ex_csv)
                 {

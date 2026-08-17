@@ -161,7 +161,39 @@ audit_agent() {
         want=$((want+1))
         grep -rq "common/lidar_select/" "$src" 2>/dev/null && have=$((have+1))
     fi
+    # ★THE 2026-08-16 EXTRACTIONS ARE ASSERTED BY SYMBOL, NOT BY DIRECTORY. Every agent already includes
+    #   something from common/dashboard/ for other reasons, so `grep common/dashboard/` would read green the
+    #   moment anyone touched a panel — which is precisely how this column stayed green while decide_removal
+    #   was hand-written in three places. Name the entry point that must actually be CALLED.
+    for sym in "rc::stream::stalled" "rc::dash::publish_belief_series" "rc::dash::fill_certainty"; do
+        want=$((want+1))
+        grep -rqF "$sym" "$src" 2>/dev/null && have=$((have+1))
+    done
+    # Conditional, for the same reason lidar_select is: charge it only where the obligation exists.
+    if grep -rq "step_convergence" "$src" 2>/dev/null; then       # bottle has no convergence step
+        want=$((want+1)); grep -rqF "rc::converge::step" "$src" 2>/dev/null && have=$((have+1))
+    fi
+    if grep -rq "residual_field_" "$src" 2>/dev/null; then        # only agents that read the residual field
+        want=$((want+1)); grep -rqF "rc::read_residual_field" "$src" 2>/dev/null && have=$((have+1))
+    fi
     if [[ $have -eq $want ]]; then mark ok; else printf "%-13s" "$have/$want"; fi
+
+    # 9b. NO DIAGNOSTICS CSV MAY TRUNCATE. rotating_csv.h exists because a restart wiped the 31 MB run that
+    #    produced the fault being chased, and the restart is often provoked BY the fault. This asserts the
+    #    NEGATIVE — that no truncating open survives — because adoption of a writer is not the same claim as
+    #    absence of the old one, and 13 sites plus PhantomLog in common/ were still truncating six days after
+    #    the module landed. An `ios::app` conditional (bottle's evaluation log appends on purpose) is not a
+    #    truncating open and is not counted.
+    local trunc_left
+    #    A site may DECLARE itself exempt with a `DIAG-ROTATE: exempt` comment on the preceding lines, for the
+    #    one honest case: a PERSISTED STATE table rewritten in full on every change (door_identities.csv is
+    #    rewritten by note_identity on every door seen — rotating it would leave one stamped copy per door).
+    #    Same principle as the sigma* probe honouring "SIGMA-STAR: none": an audit that scores the
+    #    inapplicable as a failure is one people learn to skip.
+    trunc_left=$(grep -rn -B3 "ios::trunc" "$src" 2>/dev/null \
+                 | awk '/DIAG-ROTATE: exempt/ {skip=1} /ios::trunc/ {if (skip) {skip=0; next} if ($0 !~ /ios::app/) c++} END {print c+0}')
+    [[ -z "$trunc_left" ]] && trunc_left=0
+    if [[ "$trunc_left" -eq 0 ]]; then mark ok; else printf "%-13s" "${trunc_left} trunc"; fi
 
     # 10. THE MANIFEST IS AUTHORITATIVE, AND AN INHERITED WORLD FACT IS FATAL. A concept agent must declare
     #    what its object IS in common/concept_manifest/<concept>.concept.toml and READ it — not merely
@@ -238,9 +270,9 @@ audit_agent() {
 echo
 echo "concept-agent alignment audit — $ROOT"
 echo
-printf "  %-22s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s\n" \
-       agent room_poly any_usable contract "sigma*" envelope strip poll removal shared manifest birth absence mask_src decision
-printf "  %s\n" "$(printf '%.0s-' {1..205})"
+printf "  %-22s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s%-13s\n" \
+       agent room_poly any_usable contract "sigma*" envelope strip poll removal shared csv_rot manifest birth absence mask_src decision
+printf "  %s\n" "$(printf '%.0s-' {1..218})"
 
 skipped=()
 for d in *_concept; do
@@ -273,6 +305,9 @@ if [[ $QUIET -eq 0 ]]; then
   removal                 ONE removal authority: an existence channel AND an armed miss counter is two
   shared                  how many of the modules an object-concept agent is expected to use it actually
                           uses. Extraction is not adoption — every gap this session began as a green matrix
+  csv_rot                 no diagnostics CSV opens with ios::trunc — a restart must not erase the run that
+                          produced the fault. 'N trunc' = that many truncating opens remain (an ios::app
+                          conditional is not one)
   manifest                the agent declares what its object IS in a manifest AND reads it. An inherited
                           world fact ('from = \"inherited\"') stops the agent at startup — a note could not
   birth                   birth_evidence must come from rc::birth::evidence — an OBSERVATION, admitted by
