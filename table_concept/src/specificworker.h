@@ -56,6 +56,7 @@
 #include "table_fitter.h"      // rc::TableFitter (active-inference core)
 #include "../../common/phantom_log/phantom_log.h"   // rc::history::PhantomLog (shadow-mode birth/death record)
 #include "../../common/phantom_log/observer_pose.h"   // rc::history::note_observer (SHARED)
+#include "../../common/agent_exit/terminal_exit.h"   // rc::agent::terminal_exit (SHARED)
 #include "table_existence.h"   // rc::TableExistence (evidence-based removal)
 #include "../../common/birth_surprise/birth_surprise_probe.h"   // rc::BirthSurpriseProbe (SHARED, read-only: residual grid → birth surprise)
 #include "epistemic_planner.h"

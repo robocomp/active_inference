@@ -156,20 +156,10 @@ void SpecificWorker::terminal_shutdown()
     if (terminating.exchange(true))
         return;   // _Exit is coming; never run this twice
 
-    // Crash-free terminal exit (matches bottle_concept). After our cleanup (owned
-    // nodes deleted, peers notified) hard-exit instead of returning into the Ice communicator teardown +
-    // C++ static destruction, which run with undefined cross-TU order and abort (a global/DDS holder
-    // copies a graph Node after the node-type registry static is gone → Node::type() throws).
-    request_shutdown();
-    if (G)
-    {
-        try { G->reset(); }   // clean DDS participant/entity removal without touching the Ice communicator
-        catch (...) { /* best-effort: we are exiting regardless */ }
-    }
-    std::cout.flush();
-    std::cerr.flush();
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));   // let the del-deltas reach peers
-    std::_Exit(EXIT_SUCCESS);
+    // SHARED (common/agent_exit) — the reasoning for every step, including why G->reset() cannot be skipped,
+    // now lives with the code instead of in seven copies of the same comment block.
+    rc::agent::terminal_exit([this] { request_shutdown(); },
+                             [this] { if (G) G->reset(); });
 }
 
 // ─── Initialisation ──────────────────────────────────────────────────────────────────────────────

@@ -53,6 +53,7 @@
 #include "door_bearing_range.h"   // rc::door::ResidualField / range_along_bearing (bearing → range cascade)
 #include "../../common/phantom_log/phantom_log.h"   // rc::history::PhantomLog (shadow-mode birth/death record)      // rc::DoorFitter (active-inference core)
 #include "../../common/phantom_log/observer_pose.h"   // rc::history::note_observer (SHARED)
+#include "../../common/agent_exit/terminal_exit.h"   // rc::agent::terminal_exit (SHARED)
 #include "epistemic_planner.h"
 #include "../../common/object_affordance/object_affordance.h"
 #include "door_model.h"

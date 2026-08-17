@@ -163,33 +163,10 @@ void SpecificWorker::terminal_shutdown()
     if (terminating.exchange(true))
         return;   // _Exit is coming; never run this twice
 
-    // 1) Sever our graph callbacks, delete our owned DSR nodes (publishes del-deltas) and notify
-    //    peers. Idempotent (shutting_down_ guard).
-    request_shutdown();
-
-    // 2) Cleanly remove THIS agent's DDS participant and entities from the shared graph. This is the
-    //    crucial step that a bare _Exit skips: without it, peers (retina) keep seeing our
-    //    half-deleted 'bottle_*' node (node present, room->bottle RT edge gone) and SEGV walking the
-    //    RT tree, and a fast restart hits "agent id 10 already connected". DSRGraph::reset() runs
-    //    remove_participant_and_entities() (the clean "Publisher unmatched" path) WITHOUT touching
-    //    the Ice communicator, so it does not trip the IceUtil::Mutex teardown abort.
-    if (G)
-    {
-        try { G->reset(); }
-        catch (...) { /* best-effort: we are exiting regardless */ }
-    }
-
-    // 3) Give the DDS writers a brief window to actually transmit the entity removals + participant
-    //    departure to peers before the process vanishes, so no peer is left reading a stale node.
-    std::cout.flush();
-    std::cerr.flush();
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
-
-    // 4) Hard-exit, skipping C++ static destruction and the Ice::Application communicator teardown
-    //    that races an Ice worker thread against IceUtil::Mutex destruction (ThreadSyscallException
-    //    EINVAL) — bottle is the only agent with an active OUTGOING Ice client proxy, so the only one
-    //    that hits it. State is persisted, graph presence cleanly removed; the OS reclaims the rest.
-    std::_Exit(EXIT_SUCCESS);
+    // SHARED (common/agent_exit) — the reasoning for every step, including why G->reset() cannot be skipped,
+    // now lives with the code instead of in seven copies of the same comment block.
+    rc::agent::terminal_exit([this] { request_shutdown(); },
+                             [this] { if (G) G->reset(); });
 }
 
 // Persist/restore the standalone dashboard window's geometry. The generated save_window_settings()

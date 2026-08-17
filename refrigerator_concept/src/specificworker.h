@@ -57,6 +57,7 @@
 #include "refrigerator_fitter.h"
 #include "../../common/phantom_log/phantom_log.h"   // rc::history::PhantomLog (shadow-mode birth/death record)      // rc::RefrigeratorFitter (active-inference core)
 #include "../../common/phantom_log/observer_pose.h"   // rc::history::note_observer (SHARED)
+#include "../../common/agent_exit/terminal_exit.h"   // rc::agent::terminal_exit (SHARED)
 #include "refrigerator_existence.h"
 #include "../../common/exclusion/exclusion.h"   // rc::exclusion::Claim (SHARED)   // rc::RefrigeratorExistence (evidence-based removal)
 #include "../../common/birth_surprise/birth_surprise_probe.h"   // rc::BirthSurpriseProbe (SHARED, read-only: residual grid → birth surprise)
