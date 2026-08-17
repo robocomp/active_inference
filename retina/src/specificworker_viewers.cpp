@@ -321,7 +321,27 @@ void SpecificWorker::setup_custom_viewers()
             });
         }
 
+        // Seg overlay: the YOLO-seg + semantic silhouettes drawn on the panorama. Worth its own switch
+        // because it is the layer that OCCLUDES everything under it — with masks on you cannot judge the
+        // raw image, the depth ramp, or the ADE20K map beneath them.
+        auto* rseg_btn = new QPushButton(ricoh_seg_overlay_enabled_ ? "Seg: ON" : "Seg: OFF", ricoh_panel);
+        rseg_btn->setCheckable(true);
+        rseg_btn->setChecked(ricoh_seg_overlay_enabled_);
+        rseg_btn->setCursor(Qt::PointingHandCursor);
+        rseg_btn->setStyleSheet(QString(
+            "QPushButton { border: 2px solid %1; border-radius: 4px; padding: 3px 8px; }"
+            "QPushButton:checked { background-color: %1; color: #101010; }").arg("#5FD3A0"));
+        connect(rseg_btn, &QPushButton::toggled, this, [this, rseg_btn](bool checked)
+        {
+            ricoh_seg_overlay_enabled_ = checked;
+            // Drop the echo cache with the layer. Otherwise re-enabling replays detections from before
+            // the toggle — stale by an unbounded amount, and drawn as though they were current.
+            ricoh_seg_echo_.clear();
+            rseg_btn->setText(checked ? "Seg: ON" : "Seg: OFF");
+        });
+
         controls->addWidget(models_btn);
+        controls->addWidget(rseg_btn);
         controls->addWidget(lidar_btn);
         if (depth_btn != nullptr)
             controls->addWidget(depth_btn);

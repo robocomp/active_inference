@@ -70,6 +70,15 @@ public:
     cv::Mat compose_detection_canvas(const cv::Mat& rgb_frame,
                                      const std::vector<SegDetection>& detections) const;
 
+    // Near-miss probe passthrough (see YoloSegDetector::NearMiss). Enabled by a floor > 0; the detections
+    // it exposes are the ones this frame threw away for being under the confidence threshold, which is the
+    // difference between "the object is not there" and "the detector nearly fired".
+    void set_probe_floor(float f) { if (detector_) detector_->set_probe_floor(f); }
+    [[nodiscard]] std::vector<YoloSegDetector::NearMiss> near_misses() const
+    { return detector_ ? detector_->last_near_misses() : std::vector<YoloSegDetector::NearMiss>{}; }
+    [[nodiscard]] const std::vector<std::string>& detector_class_names() const
+    { static const std::vector<std::string> none; return detector_ ? detector_->class_names() : none; }
+
 private:
     std::vector<cv::Point> get_tray_mask_polygon(const cv::Size& image_size) const;
     std::string normalize_yolo_label(const std::string& label) const;

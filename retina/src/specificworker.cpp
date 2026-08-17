@@ -33,6 +33,7 @@
 #include "image_popup_viewer.h"
 #include "perception_worker.h"
 #include "seg_stage.h"
+#include "../../common/diag_log/rotating_csv.h"   // rc::diag::open_rotating (SHARED)
 #include "pose_stage.h"
 #include "semantic_stage.h"
 #include "semantic_stage_360.h"
@@ -162,7 +163,14 @@ void SpecificWorker::initialize()
     // Build the ZED worker's stage list (seg + optional pose/semantic; each loads its ONNX model here).
     // The worker itself is STARTED later, after the media plane is up — its ZedSource pulls from it.
     std::vector<std::unique_ptr<rc::Stage>> zed_stages;
-    zed_stages.push_back(std::make_unique<rc::SegStage>(yolo_config));
+    {
+        auto seg = std::make_unique<rc::SegStage>(yolo_config);
+        // Capture what the detector rejects (see YoloSegDetector::NearMiss). The model emits its rows
+        // regardless of the threshold, so this costs one comparison and no extra inference — and it is
+        // the only place the difference between "absent" and "nearly detected" still exists.
+        seg->processor().set_probe_floor(params.YOLO_PROBE_FLOOR);
+        zed_stages.push_back(std::move(seg));
+    }
 
     // --- Human pose (optional second model → BODY_18 skeletons on the 'skeleton' node) ---
     if (params.HUMAN_POSE_ENABLED)
@@ -365,6 +373,9 @@ void SpecificWorker::initialize()
         std::vector<std::unique_ptr<rc::Stage>> ricoh_stages;
         {
             auto seg360 = std::make_unique<rc::SegStage>(ricoh_yolo_cfg, cfg360);
+            // Capture what the detector rejects. Costs one comparison per model row — the rows are
+            // computed regardless of the threshold, so nothing extra is inferred.
+            seg360->processor().set_probe_floor(params.YOLO_PROBE_FLOOR);
             // Selective pass over the panorama. The 360 seg is this component's single largest GPU
             // block (32 ms measured, 52% of the ricoh worker) and most of what it re-describes each
             // frame has not changed. Round-robin keeps every direction on a guaranteed revisit period.
@@ -872,13 +883,75 @@ void SpecificWorker::on_render_tick()
                     ricoh_viewer_->set_depth_readout(room_log_range, model_readout,
                                                      not room_log_range.empty() or not model_readout.empty());
 
-                    if (rres->masks and not rres->masks->empty())
+                    // ── Seg silhouettes, de-flickered ──────────────────────────────────────────────
+                    // Only one strip is segmented per frame, so drawing just this frame's masks blinks
+                    // each detection on for one frame in three. The echo cache below keeps the last
+                    // detections seen in each strip and redraws them dimmed until that strip comes round
+                    // again. DISPLAY ONLY — rres->masks itself is never touched, so what reaches the
+                    // graph stays strictly per-frame (see the member's comment for why that matters).
+                    auto* seg = dynamic_cast<rc::SegStage*>(ricoh_worker_->stage("seg"));
+                    if (ricoh_seg_overlay_enabled_ and seg and rres->masks)
                     {
+                        const int n_strips = std::max(1, params.RICOH_YOLO_N_STRIPS);
+                        if (static_cast<int>(ricoh_seg_echo_.size()) != n_strips)
+                            ricoh_seg_echo_.assign(static_cast<std::size_t>(n_strips), {});
+
+                        // Fold a frame in ONCE. The render timer and the worker run at different rates,
+                        // so keying on the stamp is what stops a slow render tick from ageing the echo
+                        // several revolutions in place — or a fast one from never ageing it at all.
+                        if (rres->frame.stamp != ricoh_seg_stamp_)
+                        {
+                            ricoh_seg_stamp_ = rres->frame.stamp;
+                            ++ricoh_seg_tick_;
+                            // ★Clear the strips that were LOOKED AT, not the ones that produced
+                            // detections. A strip visited and found EMPTY must drop its echo, and only
+                            // the schedule knows the difference between "nothing there now" and "not
+                            // looked at this frame". Read from the result's own snapshot — the shared
+                            // StripSchedule is worker-thread-only and reading it here would race.
+                            const std::vector<int>& looked = rres->strips_looked;
+                            if (looked.empty())   // empty ⇒ the whole panorama was segmented
+                                for (auto& e : ricoh_seg_echo_) { e.dets.clear(); e.seen_at = ricoh_seg_tick_; }
+                            else
+                                for (const int s : looked)
+                                    if (s >= 0 and s < n_strips)
+                                        ricoh_seg_echo_[static_cast<std::size_t>(s)] = {{}, ricoh_seg_tick_};
+
+                            const int strip_w = std::max(1, pano.cols / n_strips);
+                            for (const auto& d : *rres->masks)
+                            {
+                                const int cxp = d.bbox.x + d.bbox.width / 2;
+                                const int s = std::clamp(cxp / strip_w, 0, n_strips - 1);
+                                ricoh_seg_echo_[static_cast<std::size_t>(s)].dets.push_back(d);
+                                ricoh_seg_echo_[static_cast<std::size_t>(s)].seen_at = ricoh_seg_tick_;
+                            }
+                        }
+
+                        std::vector<SegDetection> fresh, echo;
+                        for (const auto& e : ricoh_seg_echo_)
+                        {
+                            // One full revolution is the staleness bound, because that is exactly how
+                            // long a direction can legitimately go unvisited. Nothing to tune.
+                            if (ricoh_seg_tick_ - e.seen_at >= n_strips)
+                                continue;
+                            auto& dst = (e.seen_at == ricoh_seg_tick_) ? fresh : echo;
+                            dst.insert(dst.end(), e.dets.begin(), e.dets.end());
+                        }
+
                         // pano is BGR; SegStage::compose is base-order-preserving and the popup viewer
                         // converts BGR→RGB on display, so keep everything BGR. (The old BGR2RGB pre-swap
                         // here double-converted once the producer began tagging its true RGB order.)
-                        auto* seg = dynamic_cast<rc::SegStage*>(ricoh_worker_->stage("seg"));
-                        ricoh_viewer_->update_image(seg ? seg->compose(pano, *rres->masks) : pano);
+                        cv::Mat shown = pano;
+                        if (not echo.empty())
+                        {
+                            // Blend the echo layer back toward the raw frame instead of drawing it at
+                            // full strength: a stale box must not look as authoritative as a live one.
+                            constexpr double kEchoAlpha = 0.45;
+                            cv::addWeighted(seg->compose(pano, echo), kEchoAlpha, pano, 1.0 - kEchoAlpha,
+                                            0.0, shown);
+                        }
+                        if (not fresh.empty())
+                            shown = seg->compose(shown, fresh);
+                        ricoh_viewer_->update_image(shown);
                     }
                     else
                         ricoh_viewer_->update_image(pano);
@@ -1012,6 +1085,10 @@ void SpecificWorker::compute()
         return;
     }
     stream_mon_.tick("rgb", zed_res->frame.stamp);   // input-rate telemetry / stall detection
+
+    // Detector accountability for THIS frame, keyed on the same stamp the masks node carries, so it
+    // joins directly to every agent's detect_probe.csv row for the same cycle.
+    log_detect_drops(zed_res->frame.stamp, /*is_360=*/false);
 
     static const std::vector<SegDetection> kNoSegDetections;
     static const std::vector<rc::human_pose::PoseDetection> kNoPoses;
@@ -2072,3 +2149,66 @@ void SpecificWorker::trigger_graph_layout_twopi()
 }
 
 
+
+// ─── Detector accountability (etc/detect_drops.csv) ───────────────────────────────────────────────
+//
+// One row per (frame, class) recording what the detector nearly did and what this component then threw
+// away. See the declaration in specificworker.h for why an agent cannot produce this itself: both the
+// sub-threshold detections and the min_area / YOLO-priority casualties are gone before the masks node
+// is written, so from a concept agent's side they are indistinguishable from the object not being there.
+//
+// Joined to <agent>/etc/detect_probe.csv on stamp_ms, this closes the attribution chain: the agent's row
+// says "no mask this cycle from this viewpoint", and this file says whether that was the detector
+// declining, the detector nearly firing, or us deleting a region the model had labelled correctly.
+void SpecificWorker::log_detect_drops(std::uint64_t stamp_ms, bool is_360)
+{
+    static std::string path = "etc/detect_drops.csv";
+    if (path.empty())
+        return;
+    if (not detect_drops_csv_.is_open())
+        if (not rc::diag::open_rotating(detect_drops_csv_, path,
+                "stamp_ms,source,kind,label,conf,cx,cy,n_comp,kept,drop_area,drop_yolo,"
+                "largest_dropped,class_skipped,min_area,inferred_px\n"))
+        { path.clear(); return; }
+
+    const char* src = is_360 ? "ricoh" : "zed";
+
+    // NEAR MISSES: rows the detector computed and rejected. Written per detection (not aggregated)
+    // because the question is always about ONE object at one place — an aggregate count cannot be
+    // joined back to the instance whose absence is being explained.
+    if (auto* seg = dynamic_cast<rc::SegStage*>(
+            is_360 ? (ricoh_worker_ ? ricoh_worker_->stage("seg") : nullptr)
+                   : (zed_worker_   ? zed_worker_->stage("seg")   : nullptr)))
+    {
+        const auto& yp = seg->processor();
+        const auto& names = yp.detector_class_names();
+        for (const auto& nm : yp.near_misses())
+        {
+            const std::string lab = (nm.class_id >= 0 and nm.class_id < static_cast<int>(names.size()))
+                ? names[static_cast<std::size_t>(nm.class_id)] : std::string{"?"};
+            detect_drops_csv_ << stamp_ms << ',' << src << ",near_miss," << lab << ','
+                              << nm.confidence << ',' << (nm.bbox.x + nm.bbox.width / 2) << ','
+                              << (nm.bbox.y + nm.bbox.height / 2)
+                              << ",0,0,0,0,0,0,0,0\n";
+        }
+    }
+
+    // SEMANTIC DROPS: per accepted class, where its components died. Only emitted for classes that
+    // actually produced something, so a quiet scene stays quiet in the file.
+    if (auto* sm = dynamic_cast<rc::SemanticMaskStage*>(
+            is_360 ? (ricoh_worker_ ? ricoh_worker_->stage("semantic_masks") : nullptr)
+                   : (zed_worker_   ? zed_worker_->stage("semantic_masks")   : nullptr)))
+    {
+        for (const auto& d : sm->last_drops())
+        {
+            if (d.label.empty() or (d.n_components == 0 and not d.class_skipped))
+                continue;
+            detect_drops_csv_ << stamp_ms << ',' << src << ",semantic," << d.label << ",0,0,0,"
+                              << d.n_components << ',' << d.kept << ',' << d.dropped_area << ','
+                              << d.dropped_yolo << ',' << d.largest_dropped_area << ','
+                              << (d.class_skipped ? 1 : 0) << ',' << sm->last_min_area() << ','
+                              << sm->last_inferred_px() << '\n';
+        }
+    }
+    detect_drops_csv_.flush();
+}

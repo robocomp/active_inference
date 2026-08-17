@@ -37,6 +37,7 @@ void SegStage::run(const PerceptionFrame& in, PerceptionResult& out)
             Detection360Config c = cfg360_;
             if (sched_)
                 c.strips = sched_->advance(c.n_strips, strips_per_frame_);
+                out.strips_looked = c.strips;   // snapshot for consumers off this thread (see PerceptionResult)
             return yolo_.detect_segmentation_360(rgb, c);
         }();
     }

@@ -368,6 +368,35 @@ std::vector<SegDetection> YoloSegDetector::detect(const cv::Mat& image, bool is_
 
     const bool is_end2end = (det_shape[2] == static_cast<int64_t>(4 + 1 + 1 + num_protos));
 
+    // ─── NEAR-MISS PROBE: the rows we are about to throw away ─────────────────────────────────────
+    // Collected BEFORE parsing so it sees the raw model output, and only for the end2end layout (the
+    // legacy layout's per-class scores would need the same argmax the parser does, and that path is
+    // not what runs). These are detections in [probe_floor_, conf_thresh_) — the ones that make a
+    // frame read as "the object is not there" when the truth is "the detector nearly fired".
+    near_misses_.clear();
+    if (probe_floor_ > 0.0f and is_end2end)
+    {
+        const int64_t N = det_shape[1], F = det_shape[2];
+        for (int64_t d = 0; d < N; ++d)
+        {
+            const float* row = det_data + d * F;
+            const float conf = row[4];
+            if (conf < probe_floor_ or conf >= conf_thresh_)
+                continue;
+            const auto unpad = [&](float v, float pad, int maxv)
+            { return std::clamp((v - pad) / scale, 0.0f, static_cast<float>(maxv - 1)); };
+            const float x1 = unpad(row[0], static_cast<float>(pad_l), orig_size.width);
+            const float y1 = unpad(row[1], static_cast<float>(pad_t), orig_size.height);
+            const float x2 = unpad(row[2], static_cast<float>(pad_l), orig_size.width);
+            const float y2 = unpad(row[3], static_cast<float>(pad_t), orig_size.height);
+            if (x2 <= x1 or y2 <= y1)
+                continue;
+            near_misses_.push_back({static_cast<int>(row[5]), conf,
+                                    cv::Rect(static_cast<int>(x1), static_cast<int>(y1),
+                                             static_cast<int>(x2 - x1), static_cast<int>(y2 - y1))});
+        }
+    }
+
     std::vector<RawDetection> raws;
     if (is_end2end)
         raws = parse_detections_end2end(det_data, det_shape, orig_size, scale, pad_l, pad_t, num_protos);

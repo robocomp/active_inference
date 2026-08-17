@@ -123,6 +123,7 @@ RetinaParams load_retina_params(const ConfigLoader& configLoader)
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Semantic.publish_min_interval_s", params.SEMANTIC_PUBLISH_MIN_INTERVAL_S);
     rc::ConfigLoaderUtils::load_optional(configLoader, "Semantic.publish_masks", params.SEMANTIC_PUBLISH_MASKS);
     rc::ConfigLoaderUtils::load_optional(configLoader, "Semantic.accepted_labels", params.SEMANTIC_ACCEPTED_LABELS);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Yolo.probe_floor", params.YOLO_PROBE_FLOOR);
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Semantic.mask_min_area_frac", params.SEMANTIC_MASK_MIN_AREA_FRAC);
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Semantic.mask_overlap_drop_frac", params.SEMANTIC_MASK_OVERLAP_DROP_FRAC);
     rc::ConfigLoaderUtils::load_optional(configLoader, "Semantic.mask_morph_kernel", params.SEMANTIC_MASK_MORPH_KERNEL);

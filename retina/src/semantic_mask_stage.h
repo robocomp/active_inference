@@ -35,7 +35,32 @@ public:
     bool ready() const override { return not accepted_.empty(); }
     void run(const PerceptionFrame& in, PerceptionResult& out) override;
 
+    // ─── DROP-STAGE ATTRIBUTION ───────────────────────────────────────────────────────────────────
+    // ★WHY. "YOLO missed it" is an inference, not an observation: a region can be correctly labelled by
+    // the model and still never reach a consumer because THIS stage dropped it. Measured 2026-08-16, that
+    // is exactly what happened to the hood — the ADE20K pass labelled it every time and min_area deleted
+    // it, because the threshold was being taken over a canvas 3× larger than the strip inferred. Nothing
+    // anywhere recorded that, so the loss was indistinguishable from a detector failure.
+    // Per class, per frame: how many components the labelling produced and where each one died.
+    struct ClassDrops
+    {
+        std::string label;
+        int  n_components   = 0;   // connected components found for this class
+        int  kept           = 0;
+        int  dropped_area   = 0;   // below min_area (the one that bit the hood)
+        int  dropped_yolo   = 0;   // ≥ overlap_drop_frac covered by a YOLO-seg mask (YOLO priority)
+        int  largest_dropped_area = 0;   // how CLOSE the biggest casualty was to surviving
+        bool class_skipped  = false;     // total class pixels < min_area ⇒ no CC pass at all
+    };
+    [[nodiscard]] const std::vector<ClassDrops>& last_drops() const noexcept { return drops_; }
+    [[nodiscard]] int last_min_area() const noexcept { return last_min_area_; }
+    [[nodiscard]] long long last_inferred_px() const noexcept { return last_inferred_px_; }
+
 private:
+    std::vector<ClassDrops> drops_;
+    int       last_min_area_    = 0;
+    long long last_inferred_px_ = 0;
+
     std::vector<std::pair<int, std::string>> accepted_;   // (ade_id, label)
     float          min_area_frac_    = 0.003f;
     float          overlap_drop_frac_= 0.5f;

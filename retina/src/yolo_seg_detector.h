@@ -50,12 +50,27 @@ public:
     void set_conf_threshold(float t) noexcept { conf_thresh_ = t; }
     void set_iou_threshold(float t) noexcept { iou_thresh_ = t; }
 
+    // ─── NEAR-MISS PROBE ──────────────────────────────────────────────────────────────────────────
+    // ★WHY. Everything below conf_thresh_ is discarded here and never reaches any consumer, so a
+    // detection that ALMOST fired is indistinguishable from the object not being there — and the
+    // removal channel then charges that frame as absence. The rows are already computed (the model
+    // emits a fixed 300 regardless of threshold), so capturing the ones in [probe_floor, conf_thresh)
+    // costs one comparison and no inference. Read it to answer "did YOLO nearly see it?", which no
+    // log in the fleet can answer today.
+    // Off unless probe_floor > 0. Not published anywhere: this is evidence ABOUT the detector.
+    struct NearMiss { int class_id; float confidence; cv::Rect bbox; };
+    void set_probe_floor(float f) noexcept { probe_floor_ = f; }
+    [[nodiscard]] const std::vector<NearMiss>& last_near_misses() const noexcept { return near_misses_; }
+
     [[nodiscard]] float conf_threshold() const noexcept { return conf_thresh_; }
     [[nodiscard]] float iou_threshold() const noexcept { return iou_thresh_; }
     [[nodiscard]] int input_size() const noexcept { return input_size_; }
     [[nodiscard]] const std::vector<std::string>& class_names() const noexcept { return class_names_; }
 
 private:
+    float probe_floor_ = 0.0f;                 // 0 ⇒ the near-miss probe is off
+    mutable std::vector<NearMiss> near_misses_;   // rebuilt per detect(); mutable because detect() is const
+
     std::unique_ptr<Ort::Env> env_;
     std::unique_ptr<Ort::Session> session_;
     Ort::SessionOptions session_opts_;

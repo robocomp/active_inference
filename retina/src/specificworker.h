@@ -241,6 +241,23 @@ class SpecificWorker : public GenericWorker
         // WHETHER it was segmenting and the labels were wrong, or not segmenting at all — the agents'
         // counters read zero either way. This makes the model's own output visible.
         bool ricoh_semantic_overlay_enabled_ = false;
+
+        // ── Ricoh "Seg" toggle + the round-robin FLICKER cure ───────────────────────────────────
+        // Only ONE strip of the panorama is segmented per frame (Ricoh.yolo_strips_per_frame = 1), so a
+        // detection is redrawn one frame in three and blinks at ~6 Hz. That is a DISPLAY artefact of the
+        // sampling policy, not of the scene — and the policy is right (a fixed rotation guarantees every
+        // direction a revisit; greedy starves the empty ones).
+        // ★THE CURE IS AN ECHO, AND IT LIVES ONLY HERE. Detections are cached per strip and redrawn until
+        // that strip is next visited, so the picture is continuous while the PUBLISHED masks stay strictly
+        // per-frame. Carrying them into the graph instead would be the bug SemanticStage360's header warns
+        // about: a component spanning "what I see now" and "what I saw 100 ms ago" belongs to neither
+        // observation. Echoes are drawn dimmed, and expire after one full revolution — the revisit period
+        // IS the correct staleness bound, so nothing here needs a tuned timeout.
+        bool ricoh_seg_overlay_enabled_ = true;    // Ricoh-window "Seg" toggle (starts ON = current behaviour)
+        struct RicohSegEcho { std::vector<SegDetection> dets; long long seen_at = -1; };
+        std::vector<RicohSegEcho> ricoh_seg_echo_;      // indexed by strip
+        long long                 ricoh_seg_tick_  = 0; // counts DISTINCT worker frames, not render ticks
+        std::uint64_t             ricoh_seg_stamp_ = 0; // last frame stamp folded into the echo
         // ZED-window depth overlay: 0=off, 1=aligned model depth, 2=difference vs the ZED's own depth.
         // The ZED MEASURES depth, so it is the one place the model can be scored densely over a whole
         // frame instead of on the LiDAR's horizon stripe — mode 2 is that comparison made visible.
@@ -272,6 +289,18 @@ class SpecificWorker : public GenericWorker
                                                const rc::depth::RoomGeometry& room_geom);
         std::ofstream ricoh_depth_csv_;
         bool          ricoh_depth_csv_open_attempted_ = false;
+
+        // ── Detector accountability log (etc/detect_drops.csv) ──────────────────────────────────
+        // ★The two things a concept agent CANNOT see, and therefore cannot log for itself:
+        //   · NEAR MISSES — detections under YOLO's confidence floor, discarded inside the detector.
+        //     Without them a frame where the detector nearly fired is indistinguishable from one
+        //     where the object was absent, and the removal channel charges absence for both.
+        //   · DROP-STAGE ATTRIBUTION — a region the model labelled correctly can still die in
+        //     SemanticMaskStage (min_area, YOLO-priority). Measured 2026-08-16: that is exactly how
+        //     the hood was being lost, and nothing recorded it, so it read as a detector failure.
+        // Joins to each agent's etc/detect_probe.csv on the frame stamp.
+        void log_detect_drops(std::uint64_t stamp_ms, bool is_360);
+        std::ofstream detect_drops_csv_;
 
         // ── Depth-correction dataset (Ricoh popup: "Collect" / "Rebuild map") ───────────────────
         // Collection is a DELIBERATE act, not background logging: the fit is only as good as its

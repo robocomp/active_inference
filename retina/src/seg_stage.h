@@ -26,6 +26,11 @@ public:
     cv::Mat compose(const cv::Mat& rgb, const std::vector<SegDetection>& dets) const
     { return yolo_.compose_detection_canvas(rgb, dets); }
 
+    // The detector behind this stage, for the near-miss probe (see YoloSegDetector::NearMiss). Exposed
+    // rather than wrapped because the probe is diagnostics: it must not grow an API of its own.
+    YoloProcessor&       processor()       noexcept { return yolo_; }
+    const YoloProcessor& processor() const noexcept { return yolo_; }
+
     // How many strips of the panorama to segment per frame. <=0 or >= n_strips = all (original
     // behaviour). 1 = pure round-robin: a third of the cost, full 360 coverage every n_strips frames.
     // `sched` is SHARED with the other panorama stages: seg runs first and ADVANCES it, everyone else

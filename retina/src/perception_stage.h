@@ -48,6 +48,13 @@ struct PerceptionResult
     bool                                                      poses_fresh = false;
     std::optional<rc::semantic::SemanticMap>                  semantic;
     bool                                                      semantic_fresh = false;
+    // Which panorama strips this frame actually looked at (empty = all of them, the Detection360Config
+    // convention). ★Carried HERE rather than read back from the shared StripSchedule, because that
+    // object is single-threaded by construction — every panorama stage runs in sequence on the one
+    // ricoh worker thread — and a main-thread viewer calling current() while the worker calls advance()
+    // is a plain data race on its std::vector. The result already crosses the thread boundary safely,
+    // so the window travels with it.
+    std::vector<int>                                          strips_looked;
     std::optional<std::vector<BearingDetection>>              bearings;   // ricoh: room-frame bearing per mask
     std::optional<std::vector<SegDetection>>                  refined_masks;   // SAM2-sharpened masks (subset of `masks`)
     bool                                                      refined_fresh = false;

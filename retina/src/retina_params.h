@@ -136,6 +136,11 @@ struct RetinaParams
     // semantic model (regardless of the viewer toggle) and enables its per-pixel score map.
     bool        SEMANTIC_PUBLISH_MASKS = false;                                 // Semantic.publish_masks
     std::vector<std::string> SEMANTIC_ACCEPTED_LABELS{"cabinet", "hood", "shelf", "door"};  // ADE20K names
+    // Near-miss probe floor: detections in [this, conf_thresh) are recorded to etc/detect_drops.csv
+    // instead of vanishing. 0 disables. This is DIAGNOSTIC ONLY — nothing below conf_thresh is ever
+    // published; the point is to be able to tell "the object was not there" from "the detector nearly
+    // fired", which no log in the fleet can distinguish today.
+    float       YOLO_PROBE_FLOOR                = 0.05f;
     float       SEMANTIC_MASK_MIN_AREA_FRAC     = 0.003f;  // drop components smaller than this fraction of the frame
     float       SEMANTIC_MASK_OVERLAP_DROP_FRAC = 0.5f;    // drop a component ≥this covered by a YOLO-seg mask (priority)
     int         SEMANTIC_MASK_MORPH_KERNEL      = 5;       // open+close kernel (px) to denoise the class field; ≤1 = off

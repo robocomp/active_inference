@@ -53,6 +53,9 @@ void SemanticMaskStage::run(const PerceptionFrame& in, PerceptionResult& out)
         ? out.semantic->inferred_area_px
         : static_cast<long long>(W) * H;
     const int min_area = std::max(1, static_cast<int>(min_area_frac_ * static_cast<double>(inferred)));
+    last_min_area_    = min_area;
+    last_inferred_px_ = inferred;
+    drops_.assign(accepted_.size(), ClassDrops{});
 
     // YOLO-seg priority mask: OR of every existing detection's mask (thresholded @127). A semantic component
     // mostly inside this region is a duplicate of an authoritative YOLO detection → dropped.
@@ -82,9 +85,13 @@ void SemanticMaskStage::run(const PerceptionFrame& in, PerceptionResult& out)
         const int         id    = accepted_[ci].first;
         const std::string& label = accepted_[ci].second;
 
+        drops_[ci].label = label;
         cv::Mat cls = (labels == id);   // fresh CV_8UC1 0/255
         if (cv::countNonZero(cls) < min_area)
+        {
+            drops_[ci].class_skipped = true;
             continue;                    // this class barely present → skip the (cheap) CC pass
+        }
         if (not kernel.empty())
         {
             cv::morphologyEx(cls, cls, cv::MORPH_OPEN, kernel);    // drop speckle
@@ -93,11 +100,19 @@ void SemanticMaskStage::run(const PerceptionFrame& in, PerceptionResult& out)
 
         cv::Mat lbls, stats, cents;
         const int n = cv::connectedComponentsWithStats(cls, lbls, stats, cents, 8, CV_32S);
+        drops_[ci].n_components = std::max(0, n - 1);
         for (int k = 1; k < n; ++k)   // 0 = background
         {
             const int area = stats.at<int>(k, cv::CC_STAT_AREA);
             if (area < min_area)
+            {
+                // Record the BIGGEST casualty, not just the count: a component at 95% of min_area says
+                // "the floor is set wrong", one at 5% says "that was speckle". The count alone conflates
+                // the two, and it was that distinction which identified the hood.
+                ++drops_[ci].dropped_area;
+                drops_[ci].largest_dropped_area = std::max(drops_[ci].largest_dropped_area, area);
                 continue;
+            }
             const cv::Rect bbox(stats.at<int>(k, cv::CC_STAT_LEFT), stats.at<int>(k, cv::CC_STAT_TOP),
                                 stats.at<int>(k, cv::CC_STAT_WIDTH), stats.at<int>(k, cv::CC_STAT_HEIGHT));
 
@@ -109,7 +124,10 @@ void SemanticMaskStage::run(const PerceptionFrame& in, PerceptionResult& out)
                 cv::Mat inter;
                 cv::bitwise_and(comp(bbox), yolo_union(bbox), inter);
                 if (static_cast<double>(cv::countNonZero(inter)) / area >= overlap_drop_frac_)
+                {
+                    ++drops_[ci].dropped_yolo;
                     continue;
+                }
             }
 
             // Score = mean per-pixel semantic confidence over the component (analogue of the YOLO max-softmax
@@ -132,11 +150,12 @@ void SemanticMaskStage::run(const PerceptionFrame& in, PerceptionResult& out)
             // class_id offset by 1000 keeps semantic ids clear of the COCO id range (consumers key on label).
             new_dets.push_back(SegDetection{bbox, 1000 + id, label, conf, comp});
             ++per_class[ci];
+            ++drops_[ci].kept;
         }
     }
 
     if (new_dets.empty())
-        return;
+        return;   // drops_ is already filled — a frame where EVERYTHING died is the interesting one
     if (not out.masks)
         out.masks = std::vector<SegDetection>{};
     for (auto& d : new_dets)
