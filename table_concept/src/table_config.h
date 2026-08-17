@@ -61,17 +61,17 @@ struct TableConfig
     int   shape_eval_min_points  = 300;
     float shape_evidence_clamp   = 8.0f;
     // Iterations each hypothesis gets on the accumulated cloud, and the point budget the test runs on. BOTH
-    // models get this same budget from the same cloud-derived seed — see TableFitter::evaluate_shape for why
-    // any asymmetry here is fatal to the comparison.
+    // models get this same budget from BOTH seeds — see TableFitter::evaluate_shape for why any asymmetry
+    // here is fatal to the comparison.
     //
     // These are a COST setting, not a tuning knob: the test is a batch refit on the agent's main thread, so
     // it is paid as a hitch in the belief loop (~107 ms/cycle live). Measured in tests/shape_asymmetry on a
     // 3350-point bank, the verdict is the SAME at every combination from 500 pts x 10 iters to 3350 x 40 —
     // rect -0.92, round +0.013 — because both hypotheses score the SAME points, so the comparison is PAIRED
-    // and the variance of the difference is far below that of either mean. Cost is not the same: 33 ms at
-    // 500x20 against 385 ms at 3350x40. 1500x20 is ~75 ms, under what the old (unfair) round-only fit cost.
+    // and the variance of the difference is far below that of either mean. Cost is not: 33 ms at 500x20
+    // against 385 ms at 3350x40. 1000x20 over two seeds lands near the old (unfair) round-only fit's cost.
     int   shape_fit_iters        = 20;
-    int   shape_fit_max_points   = 1500;
+    int   shape_fit_max_points   = 1000;
     // Low-pass rate for the shape log-Bayes-factor. 0 = the legacy SUM (kept for A/B).
     // >0 makes shape_evidence track the CURRENT evidence with a time constant instead of accumulating,
     // because the quantity being re-scored is the accumulated support-bank cloud — largely the SAME points

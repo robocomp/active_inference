@@ -393,11 +393,16 @@ ExistenceLegOccupancy = true
 # See TableFitter::evaluate_shape and tests/shape_asymmetry.
 ShapeEvalPeriod = 30       # cycles between evaluations
 ShapeEvalMinPoints = 300   # accumulated points before the test can run at all
-# Cost of one evaluation — a batch refit of BOTH models, on the main thread, so it is a hitch in the belief
-# loop (~107 ms/cycle live). The verdict is unchanged from 500x10 to 3350x40 (both models score the SAME
-# points, so the comparison is paired); the cost is not: 33 ms vs 385 ms. Measured in tests/shape_asymmetry.
+# Both models are also fitted from TWO seeds each (mean-radius and PCA-extent) and judged at their BEST fit.
+# That is not belt-and-braces: on the real 401-point bank this agent dumped off the 1.26 x 0.69 m table, the
+# box reaches 0.61x0.68 and LOSES from one seed and 1.12x0.10 and WINS from the other — same points, same
+# budget, opposite verdicts. Scoring each model at one arbitrary local optimum measures optimiser luck.
+#
+# Cost of one evaluation — a batch refit of BOTH models from BOTH seeds, on the main thread, so it is a hitch
+# in the belief loop (~107 ms/cycle live). The verdict is unchanged from 500x10 to 3350x40 (both models score
+# the SAME points, so the comparison is paired); the cost is not: 33 ms vs 385 ms. See tests/shape_asymmetry.
 ShapeFitIters = 20         # iterations EACH hypothesis gets (identical budgets, or the test is not a test)
-ShapeFitMaxPoints = 1500   # stride-subsample of the support bank the test runs on
+ShapeFitMaxPoints = 1000   # stride-subsample of the support bank the test runs on
 # Convergence / cadence + a couple of tuned constants promoted here from hardcoded values (defaults unchanged).
 # StateEps / KStable / DetectionAliveMaxFrames were read by getters with the keys ABSENT from config (silent
 # defaults) — now exposed; a NEW concept agent must expose its own. MatchedFramesBeforeAging / CentralRegionFrac

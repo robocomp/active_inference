@@ -23,6 +23,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <locale>
 #include <print>
 #include <unordered_map>
@@ -846,6 +847,38 @@ static TableBeliefState shape_seed_from_cloud(const std::vector<Eigen::Vector3f>
     return {cx, cy, H, 1.2f * rad, 0.8f * rad, 0.0f};
 }
 
+// SECOND seed: the top band's own principal axes and extent. The mean-radius hint above is a mean over a
+// FILLED top, so it under-seeds a large footprint by roughly half — and the box then settles into a local
+// optimum where the outlying points are written off as CLUTTER and never pull it open, while the
+// single-parameter disc escapes and wins. Measured on the live bank this agent dumped
+// (/tmp/round_table.xyz, 401 pts off the 1.26 x 0.69 m table): from the mean-radius seed the box reaches
+// 0.61 x 0.68 and LOSES (lbf +0.030 → round); from this one it reaches 1.12 x 0.10 and WINS (lbf −0.595 →
+// square). Same points, same budget, opposite verdicts — which is why evaluate_shape runs BOTH.
+static TableBeliefState shape_seed_from_extent(const std::vector<Eigen::Vector3f>& pts)
+{
+    const TableBeliefState c = shape_seed_from_cloud(pts);
+    const auto in_band = [&](const Eigen::Vector3f& p) { return std::abs(p.z() - c.H) < 0.08f; };
+    double mx = 0.0, my = 0.0; int n = 0;
+    for (const auto& p : pts) if (in_band(p)) { mx += p.x(); my += p.y(); ++n; }
+    if (n < 8) return c;
+    mx /= n; my /= n;
+    double sxx = 0.0, syy = 0.0, sxy = 0.0;
+    for (const auto& p : pts)
+        if (in_band(p))
+        {
+            const double dx = p.x() - mx, dy = p.y() - my;
+            sxx += dx * dx; syy += dy * dy; sxy += dx * dy;
+        }
+    sxx /= n; syy /= n; sxy /= n;
+    const double tr = sxx + syy, det = sxx * syy - sxy * sxy;
+    const double root = std::sqrt(std::max(0.0, 0.25 * tr * tr - det));
+    // A uniformly filled side of length L has variance L²/12 along that side ⇒ L = sqrt(12·var).
+    const float w = std::clamp(static_cast<float>(std::sqrt(12.0 * std::max(1e-6, 0.5 * tr + root))), 0.2f, 3.0f);
+    const float h = std::clamp(static_cast<float>(std::sqrt(12.0 * std::max(1e-6, 0.5 * tr - root))), 0.2f, 3.0f);
+    return {static_cast<float>(mx), static_cast<float>(my), c.H, w, h,
+            static_cast<float>(0.5 * std::atan2(2.0 * sxy, sxx - syy))};
+}
+
 // Round-vs-square shape hypothesis test by free energy / model evidence (CONCEPT_AGENT_RECIPE.md §6, the
 // "evidence over hypotheses, not a threshold" pattern; validated offline in tests/compare_models). Every
 // cfg_.shape_eval_period cycles, once the ownership-gated support bank has enough points, fit BOTH shape
@@ -896,11 +929,6 @@ void TableFitter::evaluate_shape(TableInstance& inst)
     const int   iters = std::max(1, cfg_.shape_fit_iters);
     TableFrame  f; f.points = cloud;
 
-    // Seed derived from the CLOUD, not from the tracker: xy centroid, a high-quantile top height, and the
-    // mean top-band radius as a size hint (tests/compare_models' init_from_cloud). Both hypotheses start
-    // from it, so neither inherits the tracker's transient error and neither gets a better starting point.
-    const auto seed = shape_seed_from_cloud(cloud);
-
     // Square hypothesis: a fresh belief with the PLAIN SDF-mixture parameters — the same mixture, clutter
     // floor and geometry constants the round model has, and none of the tracking-only factors (footprint
     // residual, coverage/free-space/moment precisions, process noise) that have no counterpart on the round
@@ -909,21 +937,34 @@ void TableFitter::evaluate_shape(TableInstance& inst)
     sp.sigma_base_m = cfg_.ai2_sigma_base_m; sp.clutter_frac = cfg_.ai2_clutter_frac;
     sp.clutter_scale_m = cfg_.ai2_clutter_scale_m; sp.prior_size_std = cfg_.ai2_prior_size_std;
     sp.top_thickness = TableModel::TOP_THICKNESS; sp.leg_radius = TableModel::LEG_RADIUS;
-    TableBelief square(seed, sp);
-    for (int it = 0; it < iters; ++it) { square.update(f); square.resolve_orientation(cloud, R); }
-    const float e_square = square.mean_energy(cloud, square.state(), R);
-
-    // Round hypothesis: same cloud, same seed, same budget.
     RoundTableParams rp; rp.sigma_base_m = cfg_.ai2_sigma_base_m; rp.clutter_frac = cfg_.ai2_clutter_frac;
     rp.clutter_scale_m = cfg_.ai2_clutter_scale_m; rp.prior_size_std = cfg_.ai2_prior_size_std;
-    RoundTableBelief round({seed.cx, seed.cy, seed.H, 0.25f * (seed.w + seed.h)}, rp, RoundBase::Ring);
-    for (int it = 0; it < iters; ++it) round.update(f);
-    const float e_round = round.mean_energy(cloud, round.state(), R);
 
-    // What each hypothesis actually claimed, so the verdict can be read back against the object.
-    inst.dbg_shape_sq_w  = square.state().w;
-    inst.dbg_shape_sq_h  = square.state().h;
-    inst.dbg_shape_rd_r  = round.state().radius;
+    // MULTI-START, both hypotheses, both seeds: each model is judged at its BEST (lowest-energy) fit. A
+    // model comparison is a comparison of the two models' best accounts of the data; score each side at
+    // whatever local optimum one arbitrary seed happened to reach and the verdict measures optimiser luck
+    // instead. On the live bank that failure alone flipped the answer (see shape_seed_from_extent).
+    float e_square = std::numeric_limits<float>::max(), e_round = std::numeric_limits<float>::max();
+    for (const auto& seed : {shape_seed_from_cloud(cloud), shape_seed_from_extent(cloud)})
+    {
+        TableBelief square(seed, sp);
+        for (int it = 0; it < iters; ++it) { square.update(f); square.resolve_orientation(cloud, R); }
+        if (const float e = square.mean_energy(cloud, square.state(), R); e < e_square)
+        {
+            e_square = e;
+            // What the hypothesis actually claimed, so the verdict can be read back against the object.
+            inst.dbg_shape_sq_w = square.state().w;
+            inst.dbg_shape_sq_h = square.state().h;
+        }
+
+        RoundTableBelief round({seed.cx, seed.cy, seed.H, 0.25f * (seed.w + seed.h)}, rp, RoundBase::Ring);
+        for (int it = 0; it < iters; ++it) round.update(f);
+        if (const float e = round.mean_energy(cloud, round.state(), R); e < e_round)
+        {
+            e_round = e;
+            inst.dbg_shape_rd_r = round.state().radius;
+        }
+    }
 
     // Bounded sequential accumulation of the per-evaluation log-Bayes-factor (>0 ⇒ round explains it better).
     // ★NOT A SUM WHEN THE ALPHA IS SET. What is being re-scored is the accumulated support-bank cloud —

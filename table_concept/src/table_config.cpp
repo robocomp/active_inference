@@ -66,7 +66,7 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.shape_eval_min_points    = geti("TableConcept.ShapeEvalMinPoints",     300);
     out.shape_evidence_clamp     = getf("TableConcept.ShapeEvidenceClamp",     8.0f);
     out.shape_fit_iters          = geti("TableConcept.ShapeFitIters",          20);
-    out.shape_fit_max_points     = geti("TableConcept.ShapeFitMaxPoints",      1500);
+    out.shape_fit_max_points     = geti("TableConcept.ShapeFitMaxPoints",      1000);
     out.shape_evidence_ema_alpha = getf("TableModel.ShapeEvidenceEmaAlpha", 0.0f);
     out.dump_cloud_path          = gets("TableConcept.DumpCloudPath",          "");
 
