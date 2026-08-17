@@ -6,11 +6,13 @@
  * ★WHY THIS EXISTS: three different behaviours had grown on ONE channel.
  *   table / cabinet / refrigerator / hood : a 94-line near-copy of process_ricoh_bearings in each,
  *                                          reading DEPTH-FILLED slices, attention targets only.
- *   bottle                                : common/bearing_confirm on BEARING-ONLY slices, confirm only.
+ *   bottle                                : the old common/bearing_confirm on BEARING-ONLY slices, confirm only.
  *   chair / door                          : the same, PLUS birthing an instance from an unmatched
  *                                          bearing at a guessed nominal range.
  * Same sensor, same question, three answers — and the divergence was invisible because the four copies
  * carried a comment naming a module (bearing_confirm) that none of them called. Fix one, audit all.
+ * ★That module is DELETED as of 2026-08-17 — the readiness sweep found it had no caller left at all,
+ *   only three vestigial #includes and comments pointing at it. This file is the whole channel now.
  *
  * ★WHICH SLICE KIND ARRIVES IS A SENSOR ACCIDENT, NOT A POLICY. A ricoh detection carries 3-D points
  * when the LiDAR depth-fill found returns inside its mask, and only an azimuth when it did not. That is

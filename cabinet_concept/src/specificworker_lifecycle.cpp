@@ -965,11 +965,13 @@ void SpecificWorker::run_instance_tracker()
             // unambiguously, and the retina has been publishing it all along. A ricoh slice may
             // still CONFIRM a live instance or raise a proto-object to go and look
                 // at; it may not move one. ★THE MECHANISM HERE IS THIS AGENT'S OWN
-                // process_ricoh_bearings, NOT common/bearing_confirm — that module is used by
+                // process_ricoh_bearings. (It used to say "NOT common/bearing_confirm"; that module was DELETED on
+                // 2026-08-17 with no caller left — the pointer itself had become the wild goose chase it warned
+                // about. The shared path is common/peripheral_channel.) The distinction that remains is
                 // bottle/chair/door, which consume BEARING-ONLY slices (has_depth=false, azimuth).
                 // This agent instead consumes ricoh slices that carry 3D points from the LiDAR
                 // depth-fill. Both are the same channel; naming the wrong one sent an audit
-                // looking for a bearing_confirm call that was never going to be here.
+                // which SLICE KIND each agent consumes — see peripheral_channel.h.
             // See MaskIngestor::MaskSlice::may_fit_geometry.
             // cabinet alone had this rule, via the depth_var > 0 PROXY — right in effect but indirect, and
             // it breaks the day a zed mask carries a range variance. Ask the source directly.

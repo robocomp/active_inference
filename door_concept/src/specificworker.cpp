@@ -962,7 +962,7 @@ void SpecificWorker::run_instance_tracker()
                 // robot passed every guard written as `if (has_depth)`. Reported live on bottle_concept —
                 // moving and cloning with the robot facing away, 3 m off. mask_source says which camera,
                 // unambiguously, and the retina has been publishing it all along. A ricoh slice may
-                // still CONFIRM a live instance (bearing_confirm) or raise a proto-object to go and look
+                // still CONFIRM a live instance (common/peripheral_channel) or raise a proto-object to go and look
                 // at; it may not move one. See MaskIngestor::MaskSlice::may_fit_geometry.
             if (sl.label != "door" or sl.support_end <= sl.support_begin
                 or not sl.may_fit_geometry()) continue;

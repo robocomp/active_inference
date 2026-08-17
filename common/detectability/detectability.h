@@ -125,23 +125,6 @@ inline float best_fill(const DetectorEnvelope& e)
     return best;
 }
 
-// Stand-off (m) that frames an object of circumscribed radius R at the most detectable fill, for a camera of
-// horizontal FoV `hfov_rad`. This is what a viewpoint proposal should use INSTEAD of a framing constant: it is
-// the distance at which this detector is most likely to fire.
-//
-// PINHOLE-EXACT inversion of fill = R / (d·tan(hfov/2)), which is how the agents actually MEASURE roi_fill
-// (bbox width / image width, with W/fx = 2·tan(hfov/2)). The small-angle form fill = 2·atan(R/d)/hfov that
-// this used to invert reads ~12 % high at fill≈0.4 and put the stand-off correspondingly short.
-//
-// ★A caller that knows its geometry should prefer common/nbv/viewpoint_score.h: this closed form is
-// HORIZONTAL-ONLY and point-estimate, so it cannot see the vertical axis (which binds for a low, wide
-// tabletop), the camera's mount height, or the belief's own σ. It remains the right thing for a caller that
-// has only a radius and an FoV — and it is the seed the numeric scan there starts from.
-inline float standoff_for(float R_circumscribed_m, float hfov_rad, const DetectorEnvelope& e)
-{
-    const float f = std::max(1e-3f, best_fill(e));
-    return R_circumscribed_m / (f * std::tan(0.5f * hfov_rad));
-}
 
 // The usable stand-off BAND: the range over which P(detect) stays above `frac` of its peak. The near end is
 // what stops a controller closing in until the object overflows; the far end is where the mask gets too small.
@@ -150,7 +133,7 @@ inline void standoff_band(float R_circumscribed_m, float hfov_rad, const Detecto
 {
     const float peak = p_detect(best_fill(e), 1.0f, e);
     const float want = std::clamp(frac, 0.0f, 0.99f) * peak;
-    const auto d_of = [&](float f)   // same pinhole inversion as standoff_for
+    const auto d_of = [&](float f)   // R / (fill * tan(hfov/2)) — the pinhole inversion
     { return R_circumscribed_m / (std::max(1e-3f, f) * std::tan(0.5f * hfov_rad)); };
     float lo = best_fill(e), hi = best_fill(e);
     for (int i = 0; i <= 200; ++i)   // widen outward while the envelope still clears `want`

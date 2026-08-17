@@ -63,7 +63,6 @@
 #include <QByteArray>
 #include <QDateTime>   // wall-clock ms for the primary-input stream gate (operating_since_ms_, stall grace)
 
-#include "../../common/bearing_confirm/bearing_confirm.h"   // Part C: RGB-360 bearing → live-instance confirm
 #include "../../common/instance_tracker/birth_evidence.h"   // rc::birth:: the shared CREATE policy
 
 #include <dsr/api/dsr_api.h>
@@ -856,7 +855,7 @@ void SpecificWorker::run_instance_tracker()
             // robot passed every guard written as `if (has_depth)`. Reported live on bottle_concept —
             // moving and cloning with the robot facing away, 3 m off. mask_source says which camera,
             // unambiguously, and the retina has been publishing it all along. A ricoh slice may
-            // still CONFIRM a live instance (bearing_confirm) or raise a proto-object to go and look
+            // still CONFIRM a live instance (common/peripheral_channel) or raise a proto-object to go and look
             // at; it may not move one. See MaskIngestor::MaskSlice::may_fit_geometry.
             if (pkt.slices[i].label == "bottle" and pkt.slices[i].may_fit_geometry())
             {

@@ -95,7 +95,7 @@ public:
         // COULD ask. Reported live: a bottle moving and cloning with the robot facing away, 3 m off.
         //
         // The rule this restores: AN OBJECT MAY ONLY BE CREATED OR UPDATED FROM THE FRONT RGB-D CAMERA.
-        // A ricoh slice may still CONFIRM a live instance (bearing_confirm, Part C) — that is evidence the
+        // A ricoh slice may still CONFIRM a live instance (common/peripheral_channel) — that is evidence the
         // thing is still there, not a licence to move it — and may raise a proto-object to go and look at.
         // Defaults to zed so a producer predating the field reads back exactly as before.
         MaskSource source = MaskSource::zed;

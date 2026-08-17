@@ -128,8 +128,8 @@ endfunction()
 # ai_common::core — header-only. Zero external deps beyond Eigen.
 #
 #   ai_belief/{dof_spec,lidar_ray_factor,recursive_laplace}.h   existence_belief/
-#   appearance_belief/  occlusion/  instance_tracker/  belief_stabilizer/  bearing_confirm/
-#   motion_filter/  motion_corruption/  sample_queue/  phantom_log/  depth_projection/
+#   appearance_belief/  occlusion/  instance_tracker/  belief_stabilizer/  support_parent/
+#   motion_filter/  motion_corruption/  stream_gate/  phantom_log/  depth_projection/
 #   object_anchor/  affordance_protocol/  graph3d/graph3d_scene.h
 #   agent_state_publisher/{agent_status.h,agent_state_publisher.h}
 #   kinematics/self_projection_capsules.h  self_tuner/self_tuner.h

@@ -62,7 +62,6 @@
 #include "../../common/dashboard/timeseries_plot.h"
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include "../../common/instance_tracker/instance_tracker.h"   // rc::InstanceTracker (birth/associate/death)
-#include "../../common/bearing_confirm/bearing_confirm.h"      // rc::confirm_tracks_by_bearing + BearingHypothesisStager (Part C)
 
 // ─── SpecificWorker ──────────────────────────────────────────────────────────
 

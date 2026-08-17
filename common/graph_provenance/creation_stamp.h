@@ -95,16 +95,5 @@ inline void stamp_creation(DSR::DSRGraph& G, DSR::Node& node)
     stamp_creation(G, node, now_ms());
 }
 
-// Age of an already-inserted node, in seconds; nullopt if it carries no stamp (a node created
-// before this existed, or by an agent outside this tree). Never negative — a clock step backwards
-// clamps to 0 rather than reporting a node born in the future.
-inline std::optional<double> age_s(DSR::DSRGraph& G, const DSR::Node& node)
-{
-    const auto t0 = G.get_attrib_by_name<timestamp_creation_att>(node);
-    if (not t0.has_value() or t0.value() == 0)
-        return {};
-    const std::uint64_t now = now_ms();
-    return now > t0.value() ? (now - t0.value()) / 1000.0 : 0.0;
-}
 
 }  // namespace rc::provenance
