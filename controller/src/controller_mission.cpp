@@ -967,7 +967,8 @@ bool MissionRunner::write_csv(const std::string &path) const
     // ONE ROW PER RUN. There is no segmentation left to make rows out of, and inventing one would put
     // back the artefact this change removed. The per-instant detail lives in the profile CSV.
     static constexpr const char *kHeader =
-        "mission,mode,run_start_ms,stop_reason,laps,control_mode,plain_L,duration_s,distance_m,route_length_m,progress_m,"
+        "mission,mode,run_start_ms,stop_reason,laps,control_mode,plain_L,"
+        "band_enabled,band_lead_m,band_window_m,duration_s,distance_m,route_length_m,progress_m,"
         "mean_speed_mps,max_speed_mps,cross_track_rms_m,cross_track_max_m,heading_err_rms_rad,"
         "rot_effort_rad,rot_energy,rot_reversals,lin_accel_effort,lin_accel_max,lin_jerk_effort,"
         "rot_accel_effort,smooth_lin,smooth_rot,dev_norm,clear_norm,mission_cost,"
@@ -1015,6 +1016,10 @@ bool MissionRunner::write_csv(const std::string &path) const
     out << active_.name << ',' << to_string(mode_) << ',' << run_start_ms_ << ','
         << (stop_reason_.empty() ? "?" : stop_reason_) << ',' << t.laps_completed << ','
         << (run_ctx_.control_mode.empty() ? "?" : run_ctx_.control_mode) << ',' << run_ctx_.plain_L << ','
+        // Written as 0/1 rather than true/false: the column is read by numeric tooling, and a bare
+        // `false` would parse as a string in one reader and as 0 in another.
+        << (run_ctx_.band_enabled ? 1 : 0) << ',' << run_ctx_.band_lead_m << ','
+        << run_ctx_.band_window_m << ','
         << t.duration_s << ',' << t.distance_m << ',' << t.route_length_m << ',' << t.progress_m << ','
         << t.mean_speed_mps << ',' << t.max_speed_mps << ','
         << t.cross_track_rms_m << ',' << t.cross_track_max_m << ',' << t.heading_err_rms_rad << ','
@@ -1061,6 +1066,7 @@ bool MissionRunner::write_run_json(const std::string &dir, const std::string &st
 
     o << "  \"params\": {\n"
       << "    \"build\": " << jstr(run_ctx_.build) << ",\n"
+      << "    \"reversed\": " << (run_ctx_.reversed ? "true" : "false") << ",\n"
       << "    \"max_adv_mps\": " << jnum(run_ctx_.max_adv_mps) << ",\n"
       << "    \"max_rot_rps\": " << jnum(run_ctx_.max_rot_rps) << ",\n"
       << "    \"comfort_standoff_m\": " << jnum(run_ctx_.comfort_standoff_m) << ",\n"

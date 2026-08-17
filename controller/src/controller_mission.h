@@ -243,6 +243,23 @@ struct MissionRunContext
     // T_lag, g_dc and W are identified constants and do not vary; L is the only thing anyone tunes.
     float plain_L = 0.f;
     std::string control_mode;
+    // ── THE ARM IDENTITY, for the controlled comparison of decision rules ──
+    // control_mode alone does NOT identify what drove a run: the same follower over a route whose head
+    // is re-optimised at control rate and over one optimised once at install are different decision
+    // rules, and that pair is the only thing separating "the route optimiser is good" from
+    // "re-optimising it at sensor rate is good". Without these columns the two arms are
+    // indistinguishable in the record and the comparison cannot be assembled after the fact.
+    // ★They are recorded because config is read ONCE AT STARTUP: a config edit made while the agent is
+    // running belongs to a LATER run than the file suggests, which is exactly how a BandLead change was
+    // once credited to laps that never saw it. What the run USED is the only thing worth writing down.
+    bool  band_enabled = false;
+    float band_lead_m = 0.f;
+    float band_window_m = 0.f;
+    // Was the tour driven in REVERSE waypoint order? Recorded because it changes the stimulus — every
+    // corner swaps handedness and every object is approached from the other side — so a reversed run and
+    // a forward run of the same mission are not comparable, and nothing else in the record says which is
+    // which. A benchmark whose stimulus differs silently is worse than no run.
+    bool reversed = false;
     // What THIS route makes unavoidable (rc::route_ideal). Zero/invalid when the mission is not running
     // a continuous route, in which case J_route is left at NaN rather than guessed.
     float ideal_tv_v = 0.f;

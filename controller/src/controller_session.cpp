@@ -897,10 +897,26 @@ bool ControllerSession::build_route(const ControllerRobotPose &robot_pose)
     raw_wps.reserve(m->waypoints.size());
     int repaired = 0, skipped = 0;
     const int n = static_cast<int>(m->waypoints.size());
+    // ── THE AUTHORED ORDER, POSSIBLY BACKWARDS ───────────────────────────────────────────────────
+    // A LOCAL copy, reversed here and nowhere else: the recorded mission must not change because a run
+    // was driven the other way round, or the reversal would be written back to missions.toml the next
+    // time the library is saved. Reversing the list rather than indexing backwards also means the yaw
+    // below — "face the NEXT waypoint" — keeps working with no second spelling: in a reversed tour the
+    // next waypoint IS the previous one, and that is what the robot will actually be driving toward.
+    std::vector<Eigen::Vector2f> authored;
+    authored.reserve(m->waypoints.size());
+    for (const auto &w : m->waypoints) authored.push_back(w.pos);
+    if (route_reverse_)
+    {
+        std::ranges::reverse(authored);
+        std::println("[route] REVERSED: driving '{}' in reverse waypoint order. This is a DIFFERENT "
+                     "stimulus from the forward tour — recorded as params.reversed in the run JSON so "
+                     "the two cannot be compared by accident.", mission_.selected_name());
+    }
     for (int i = 0; i < n; ++i)
     {
-        const Eigen::Vector2f raw = m->waypoints[i].pos;
-        const Eigen::Vector2f next = m->waypoints[(i + 1) % n].pos;
+        const Eigen::Vector2f raw = authored[i];
+        const Eigen::Vector2f next = authored[(i + 1) % n];
         const Eigen::Vector2f dir = next - raw;
         const float yaw = dir.squaredNorm() > 1e-9f ? std::atan2(dir.y(), dir.x()) : 0.f;
         const auto safe = grid_planner_.nearest_free(raw, yaw);
@@ -2981,6 +2997,16 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     {
         const auto ud = motion_commander.last_uncertainty_diag();
         mission_.note_uncertainty_limit(ud.valid, ud.xy_std_m, ud.theta_std_rad, ud.adv_scale, ud.rot_scale);
+        // ── AND ONTO THE VELOCITY PLOT, SO THE CAUSE SITS BESIDE THE EFFECT ──────────────────────
+        // Mapped HERE because this is where the knees are: sigma is scaled so PoseXYStdStop lands at
+        // max_adv, i.e. the line touching the top of the velocity band reads "at or past the stop knee,
+        // throttle floored". Clamped there so it can never blow the plot's auto-scale and squash the adv
+        // and rot traces it is meant to be compared against. Negative when no covariance reached the
+        // limiter — the plot breaks the line rather than drawing a confident zero.
+        const float v_max = params_ != nullptr ? params_->max_adv_speed_mps : 0.7f;
+        const float stop = params_ != nullptr ? params_->pose_xy_std_stop_m : 0.12f;
+        display.set_uncertainty_trace_value(
+            ud.valid and stop > 1e-6f ? std::min(v_max, ud.xy_std_m * v_max / stop) : -1.f);
     }
 
     // ARRIVAL ROTATION: position reached, the controller is rotating IN PLACE to the target facing yaw

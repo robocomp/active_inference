@@ -216,8 +216,9 @@ public:
         auto *j_layout = new QVBoxLayout(j_panel);
         j_layout->setContentsMargins(4, 2, 4, 2);
         j_layout->setSpacing(2);
-        j_layout->addWidget(new QLabel("commanded velocity — adv (m/s)  |  rot (rad/s)   "
-                                       "[smoothness: watch for steps and sign flips]", j_panel));
+        j_layout->addWidget(new QLabel("commanded velocity — adv (m/s)  |  rot (rad/s)  |  "
+                                       "σxy scaled: TOP = PoseXYStdStop (throttle floored)   "
+                                       "[watch for steps and sign flips]", j_panel));
         mission_j_plot = new rc::TimeSeriesPlot(j_panel);
         mission_j_plot->setMinimumHeight(80);
         // ~30 s: long enough to hold a whole approach and its arrival, short enough that individual
@@ -228,6 +229,15 @@ public:
         // from that thread would be the one unguarded moment.
         mission_j_plot->add_series("adv", QColor(55, 55, 55), 2.0f);
         mission_j_plot->add_series("rot", QColor(70, 130, 200), 2.0f);
+        // ── THE LOCALISATION UNCERTAINTY THAT IS THROTTLING THE BASE, ON THE SAME AXES ───────────
+        // sigma_xy is metres, so it is mapped onto the m/s axis before it gets here (stop knee -> max
+        // adv, clamped) — see ControllerDisplay::set_uncertainty_trace_value. Without that mapping it
+        // would either sit invisibly along the bottom or, once past the knee, blow the auto-scale and
+        // squash the two traces it exists to be read against.
+        // Thin and violet: it is a REFERENCE line, not a command, and neither the near-black adv nor the
+        // blue rot can be confused with it. The question it answers at a glance is the one that took a
+        // whole session to answer offline — when adv sags, is this line high?
+        mission_j_plot->add_series("sigma", QColor(170, 60, 175), 1.4f);
         j_layout->addWidget(mission_j_plot, 1);
         main_layout->addWidget(j_panel, 1);
     }

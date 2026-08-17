@@ -122,6 +122,15 @@ public:
     // adv in m/s, rot in rad/s. Thread-safe; the plot buffers under its own mutex and the series are
     // registered on the GUI thread at construction.
     void update_velocity_trace(float adv_mps, float rot_rps);
+    // ── THE UNCERTAINTY THAT IS SLOWING THE ROBOT, ON THE SAME AXES ──────────────────────────────
+    // sigma_xy is metres and the plot's axis is m/s, so it is handed over ALREADY MAPPED onto that axis
+    // by the control thread (which is where the knees live): the STOP knee maps to max_adv, so the line
+    // touching the top of the velocity band means "at or past PoseXYStdStop, throttle floored". Clamped
+    // there, because TimeSeriesPlot auto-scales Y and an out-of-range series would squash the velocity
+    // traces it exists to be compared against.
+    // NEGATIVE = the limiter saw no covariance at all. That is genuinely UNDEFINED rather than zero, so
+    // the trace breaks (add_point treats non-finite as a gap marker) instead of drawing a confident 0.
+    void set_uncertainty_trace_value(float sigma_on_speed_axis);
     // The camera frame with the YOLO silhouettes on it, for the affordance panel. Composed on the
     // control thread and handed over whole (see controller_camera_masks.h) — the QImage inside is
     // already private to this snapshot, so nothing shares a pixel buffer across the thread boundary.
@@ -141,6 +150,10 @@ private:
     std::atomic<bool>  affordance_panel_visible_{false};
     std::atomic<float> control_hz_{0.f};
     std::atomic<float> control_worst_ms_{0.f};
+    // Written by the control thread, read by the output thread that feeds the velocity plot. An atomic
+    // rather than a plain float because those are two different threads and the profile path next door
+    // already made exactly this handoff atomic for the same reason.
+    std::atomic<float> unc_trace_{-1.f};
 
     struct DisplaySnapshot
     {

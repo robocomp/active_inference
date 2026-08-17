@@ -190,6 +190,31 @@ MissionPanel::MissionPanel(QWidget *parent, Callbacks callbacks)
     laps_left_->display(QStringLiteral("--"));
     row->addWidget(laps_left_);
 
+    // ── DRIVE THE TOUR BACKWARDS ──────────────────────────────────────────────────────────────
+    // A recorded tour is a sequence, and the direction it is driven in is a real part of the stimulus:
+    // the same corners become the opposite handedness, the approach to every object arrives from the
+    // other side, and a route the optimiser found easy one way can be tight the other. Re-recording the
+    // tour backwards to test that would be a different route, not the same one reversed — which is
+    // exactly what makes this worth a toggle rather than a second mission.
+    // It reverses the WAYPOINT ORDER for the run only; the recorded mission on disk is untouched.
+    reverse_btn_ = new QPushButton("Reverse", frame);
+    reverse_btn_->setCheckable(true);
+    reverse_btn_->setToolTip(
+        QStringLiteral("Drive the selected tour in REVERSE waypoint order.\n"
+                       "Applies to the next Run; the recorded mission is not modified.\n"
+                       "The run's JSON records it (params.reversed), because a tour driven backwards is a\n"
+                       "different stimulus and two runs that differ silently are not comparable."));
+    QObject::connect(reverse_btn_, &QPushButton::toggled, this,
+                     [this](bool on)
+                     {
+                         // Amber when armed, so it is visible at a glance next to a green Run — an
+                         // unnoticed reverse would silently invalidate a comparison.
+                         reverse_btn_->setStyleSheet(
+                             on ? "QPushButton { background-color: #f39c12; color: white; font-weight: bold; }"
+                                : QString{});
+                     });
+    row->addWidget(reverse_btn_);
+
     // The ONE drive control. It replaces both the old toolbar Start/Stop toggle and the mission row's
     // separate Run and Stop: three buttons for two states, any two of which could disagree. It is NEVER
     // disabled — a halt that greys out in some modes is not a halt, which is exactly how the previous Stop
@@ -206,7 +231,9 @@ MissionPanel::MissionPanel(QWidget *parent, Callbacks callbacks)
                      [this]()
                      {
                          if (driving_) { if (cb_.on_stop) cb_.on_stop(); }
-                         else if (cb_.on_run) cb_.on_run(loops_ != nullptr ? loops_->value() : 1);
+                         else if (cb_.on_run)
+                             cb_.on_run(loops_ != nullptr ? loops_->value() : 1,
+                                        reverse_btn_ != nullptr and reverse_btn_->isChecked());
                      });
 
     // Pause: a hold, not an abort. Parentless for the same reason as the drive button — Custom_widget

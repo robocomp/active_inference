@@ -41,7 +41,10 @@ public:
         std::function<void(std::string)> on_record_finish;
         std::function<void(std::string)> on_delete;
         std::function<void()>            on_smooth;
-        std::function<void(int)>         on_run;           // laps
+        // laps, and whether to drive the tour BACKWARDS. Both are read at click time and passed
+        // together rather than latched separately, so the toggle and the run it applies to cannot
+        // disagree — which is the failure mode of every "mode you set beforehand" control.
+        std::function<void(int, bool)>   on_run;           // laps, reverse
         std::function<void()>            on_stop;
         // Pause is a HOLD on the current activity; Stop aborts it. Two controls because they are two
         // different intentions, and folding them into one button is what made Stop unresumable.
@@ -111,6 +114,8 @@ private:
     QLCDNumber  *laps_left_ = nullptr;
     int  laps_left_shown_ = -1;
     QPushButton *drive_btn_ = nullptr;
+    // Checkable, not momentary: it selects a property of the NEXT run, so it has to show its state.
+    QPushButton *reverse_btn_ = nullptr;
     QPushButton *pause_btn_ = nullptr;
     bool paused_ = false;
     QSlider     *plain_l_ = nullptr;

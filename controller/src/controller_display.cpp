@@ -247,6 +247,16 @@ void ControllerDisplay::update_velocity_trace(float adv_mps, float rot_rps)
     const auto ok = [](float v) { return std::isfinite(v) ? v : 0.f; };
     plot->add_point("adv", ok(adv_mps));
     plot->add_point("rot", ok(rot_rps));
+    // Already mapped onto the speed axis by the control thread — see set_uncertainty_trace_value.
+    // A negative value means "no covariance reached the limiter", which is undefined rather than zero:
+    // NaN makes the line BREAK there, which is what the plot's gap marker is for.
+    const float unc = unc_trace_.load(std::memory_order_relaxed);
+    plot->add_point("sigma", unc >= 0.f ? unc : std::numeric_limits<float>::quiet_NaN());
+}
+
+void ControllerDisplay::set_uncertainty_trace_value(float sigma_on_speed_axis)
+{
+    unc_trace_.store(sigma_on_speed_axis, std::memory_order_relaxed);
 }
 
 void ControllerDisplay::update_affordance_efe(const std::vector<AffordanceEfeSample> &samples)

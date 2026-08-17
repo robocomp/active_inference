@@ -127,6 +127,9 @@ public:
     void set_route_tracker(bool active, float rot_headroom)
     { route_tracker_active_ = active; rot_headroom_ = std::clamp(rot_headroom, 0.1f, 1.0f); }
 
+    void set_route_reverse(bool reverse) { route_reverse_ = reverse; }
+    [[nodiscard]] bool route_reverse() const { return route_reverse_; }
+
     rc::MissionRunner &mission() { return mission_; }
     // Smooth the selected mission against the SAME grid + footprint predicate the planner drives with,
     // so a smoothed route cannot contain a pose the planner would then refuse. Returns waypoints moved.
@@ -561,6 +564,11 @@ private:
                                         ControllerWorldModel &world_model,
                                         ControllerObstacleTracker &obstacle_tracker,
                                         std::uint64_t timestamp_ms);
+
+    // Drive the selected tour in REVERSE waypoint order. A property of the RUN, set when Run is
+    // pressed, honoured by build_route — which reverses a local copy, so the recorded mission on disk is
+    // never touched and the flag cannot leak into missions.toml.
+    bool route_reverse_ = false;
 
     rc::MissionRunner mission_;
     // CONTINUOUS ROUTE MODE. The whole mission as one arc-length curve; no per-waypoint target, no

@@ -386,9 +386,9 @@ void SpecificWorker::initialize()
 				session_.mission().save(missions_path_);
 		});
 	};
-	gui.mission.on_run = [this](int laps)
+	gui.mission.on_run = [this](int laps, bool reverse)
 	{
-		enqueue_command([this, laps]()
+		enqueue_command([this, laps, reverse]()
 		{
 			// Stamp the run with the configuration it was produced under. Comparing two runs is only
 			// meaningful if you can tell whether the ROBOT changed between them, and by the time the
@@ -407,7 +407,17 @@ void SpecificWorker::initialize()
 			    .plain_L = path_controller_.params.plain_L,
 			    .control_mode = path_controller_.control_mode() == rc::TrajectoryController::ControlMode::PLAIN ? "plain"
 			                  : path_controller_.control_mode() == rc::TrajectoryController::ControlMode::PD    ? "pd"
-			                                                                                                    : "mppi"});
+			                                                                                                    : "mppi",
+			    // The other half of the arm identity: which GEOMETRY the follower was handed. Taken from
+			    // the params the run is actually using, not re-read from config, so an edit made mid-run
+			    // cannot be credited to laps that never saw it.
+			    .band_enabled = params.band_enabled,
+			    .band_lead_m = params.band_lead_m,
+			    .band_window_m = params.band_window_m,
+			    .reversed = reverse});
+			// Applies from the next route BUILD, which is what starting a mission triggers. Set before
+			// start() so the first build already sees it.
+			session_.set_route_reverse(reverse);
 			// Without a mission there is nothing to start — Run just lets whatever is driving, drive.
 			// Run always re-arms: Stop disarmed the base output, and a Run that left it silent would
 			// look like a dead robot. It also clears a stale pause, so Run is unambiguously "go".
@@ -428,9 +438,10 @@ void SpecificWorker::initialize()
 			// Say what Run actually decided. Driving is only enabled when the mission starts, so a
 			// refused start leaves the robot halted — and without this line that is silent from the
 			// user's side, who sees a button that did nothing.
-			std::println("[mission] RUN: mode={} mission='{}' laps={} -> {}  (driving {})",
+			std::println("[mission] RUN: mode={} mission='{}' laps={}{} -> {}  (driving {})",
 			             rc::to_string(session_.mission().mode()),
 			             session_.mission().selected_name(), laps,
+			             reverse ? " REVERSED" : "",
 			             started ? "STARTED" : "REFUSED", driving_enabled_ ? "on" : "OFF");
 		});
 	};
