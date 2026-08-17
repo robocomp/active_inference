@@ -208,6 +208,13 @@ void SpecificWorker::initialize()
         return;
     }
 
+    // Ignore payload attributes in local graph updates: bottle reads pixels off the MEDIA PLANE, never out of
+    // the graph, so every cam_rgb/cam_depth/laser_* blob a peer publishes was being deserialised and stored
+    // here for nothing. ★Six of the seven agents did this and bottle did not — see the CRDT dot-cloud growth
+    // note in CLAUDE.md for what unused attribute traffic costs. Purely a filter on what we ACCEPT; it
+    // changes nothing this agent reads.
+    G->set_ignored_attributes<cam_rgb_att, cam_depth_att, laser_X_att, laser_Y_att, laser_Z_att>();
+
     // Agent-presence protocol wiring.
     presence_coordinator_.configure(configLoader, G, static_cast<std::uint32_t>(agent_id));
     // Colour this agent's node in the graph view by its live health: the coordinator already

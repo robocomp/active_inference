@@ -414,10 +414,16 @@ void SpecificWorker::initialize()
             operating_since_ms_   = QDateTime::currentMSecsSinceEpoch();
             masks_stall_reported_ = false;
             qInfo("[SM] -> Operating: all required peers present");
-            // Stale-node sweep on (re)entering Operating: remove any leftover affordance nodes from a
-            // previous run (e.g. after a crash that skipped cleanup) so a fresh create doesn't collide
-            // and get a DSR-generated name. Keyed on the parent object type, not the node name.
-            remove_stale_affordance_nodes();
+            // ONE-TIME startup sweep: remove leftover affordance nodes from a PREVIOUS run (e.g. a crash
+            // that skipped cleanup) so a fresh create doesn't collide and get a DSR-generated name.
+            // ★GUARDED, and the guard is the point — on a RE-entry to Operating (transient required-peer
+            // flap → Degraded → recover) the affordances in the graph are THIS run's live ones; wiping them
+            // every bounce makes them flicker. This ran unconditionally until 2026-08-17.
+            if (not startup_affordance_sweep_done_)
+            {
+                startup_affordance_sweep_done_ = true;
+                remove_stale_affordance_nodes();
+            }
         },
         .on_operating_loop = [this]()
         {

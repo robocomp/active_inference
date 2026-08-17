@@ -173,6 +173,11 @@ private:
     std::int64_t operating_since_ms_   = 0;      // wall ms at Operating entry — cold-start stall-grace baseline
     bool         masks_stall_reported_ = false;  // one-shot: emit presenceLost once per stall episode (reset on entry)
     bool         degraded_from_masks_  = false;  // Degraded reason: recoverable mask-stall vs a real peer loss
+    // One-shot: the startup stale-affordance sweep. ★NOT unguarded — on a RE-entry to Operating (a
+    // transient required-peer flap → Degraded → recover) the affordance nodes in the graph are THIS
+    // run's LIVE ones, so sweeping every bounce deletes and re-creates them and they flicker. Five
+    // agents had this flag; this one swept unconditionally.
+    bool         startup_affordance_sweep_done_ = false;
     std::int64_t last_wait_log_ms_     = 0;      // throttle for the "why still Waiting" line
 
     rc::ChairConfig                                         cfg_;
