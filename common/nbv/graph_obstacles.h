@@ -104,12 +104,22 @@ inline std::vector<IdentifiedObstacle> collect_graph_obstacles_identified(DSR::D
 
 // The geometry-only view every existing caller uses. ONE walk of the graph, two projections of it — adding a
 // second loop here is exactly the duplication this file was written to end.
+//
+// ★`with_height` DEFAULTS OFF, AND THAT DEFAULT IS THE WHOLE POINT. Leaving the band unset makes every
+// obstacle infinitely tall, which is what the sight test did before it could reason about z. That
+// over-occludes ⇒ visible_fraction too low ⇒ p_detect too low ⇒ absence charged too weakly ⇒ objects are
+// HELD. Held is the recoverable error; the honest 3-D answer raises p_detect and therefore REMOVES more,
+// and it would do so on top of a detector envelope that is still flagged UNCALIBRATED. So the geometry
+// lands correct and inert: pass true only where the result is being measured against detect_probe.
 inline std::vector<Obstacle> collect_graph_obstacles(DSR::DSRGraph& G, DSR::InnerEigenAPI* inner_eigen,
-                                                    std::uint64_t self_id)
+                                                    std::uint64_t self_id, bool with_height = false)
 {
     std::vector<Obstacle> obs;
     for (const auto& o : collect_graph_obstacles_identified(G, inner_eigen, self_id))
+    {
         obs.push_back(o.fp);
+        if (with_height) { obs.back().z0 = o.z0; obs.back().z1 = o.z1; }
+    }
     return obs;
 }
 

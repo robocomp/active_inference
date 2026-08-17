@@ -107,6 +107,13 @@ struct BottleConfig
     float existence_clutter_prob      = 0.05f;  // P(detect | ¬exists) — the false-positive rate
     float existence_sensor_sigma_m    = 0.03f;  // LiDAR carve surface blur σ (m)
     int   existence_remove_frames     = 15;     // debounce in IDEAL OBSERVATIONS (Σ p_detect), not cycles
+    // ★A/B ONLY, DEFAULT OFF — and the DIRECTION of the error is the reason. Occluders carry no height today,
+    // so every one is infinitely tall: the sight test over-occludes ⇒ visible_frac too low ⇒ p_detect too low
+    // ⇒ absence charged too weakly ⇒ bottles are HELD. Giving obstacles their published height is the
+    // physically honest answer, and it moves the error to the UNSAFE side (p_detect rises, absence bites,
+    // removal grows) on top of a detector envelope this agent's own log flags UNCALIBRATED. Turn it on to
+    // MEASURE it against detect_probe — not to fix anything.
+    bool  existence_occluder_heights  = false;
     float ai2_clutter_frac         = 0.10f;  // ε: prior weight of the uniform clutter mixture component
     float ai2_clutter_scale_m      = 0.08f;  // a point further than ~this from the surface is likely clutter
     float ai2_prior_pos_std        = 0.30f;  // broad position prior std (m) on cx,cy,cz

@@ -53,6 +53,7 @@
 #pragma once
 
 #include <algorithm>
+#include <ranges>
 #include <array>
 #include <cmath>
 #include <limits>
@@ -131,7 +132,19 @@ struct Target
 };
 
 // An oriented footprint that can be stood inside or looked through. Room frame.
-struct Obstacle { float cx = 0.0f, cy = 0.0f, w = 0.0f, h = 0.0f, yaw = 0.0f; };
+// ★z1 <= z0 MEANS "HEIGHT UNKNOWN", AND UNKNOWN MEANS INFINITELY TALL — which is exactly what this struct
+// has always assumed. Every obstacle was a floor footprint with no top, so a 0.75 m table occluded a fridge
+// standing behind it and an object STANDING ON a support was permanently occluded by the thing it rests on.
+// bottle_existence.cpp works around the second case locally ("you cannot be occluded by a footprint you are
+// STANDING INSIDE") and documents the first as unfixed, noting it errs toward "occluded" ⇒ toward HOLDING,
+// which is the SAFE direction. Populating z0/z1 makes the test truthful — and moves the error to the UNSAFE
+// side, because p_detect then rises and absence is charged harder. Default stays unknown for that reason.
+struct Obstacle
+{
+    float cx = 0.0f, cy = 0.0f, w = 0.0f, h = 0.0f, yaw = 0.0f;
+    float z0 = 0.0f, z1 = 0.0f;                     // base / top (room frame); z1 <= z0 ⇒ unknown
+    bool has_height() const { return z1 > z0; }
+};
 
 // ─── walls as obstacles ───────────────────────────────────────────────────────────────────────────────────
 //
@@ -241,7 +254,8 @@ inline constexpr std::array<float, 5> kGHx{-2.856970f, -1.355626f, 0.0f, 1.35562
 inline constexpr std::array<float, 5> kGHw{ 0.011257f,  0.222076f, 0.533333f, 0.222076f, 0.011257f};
 
 // Slab test: does the segment a→b cross the oriented rectangle `o`? (Shared by the sight test.)
-inline bool segment_hits_box(const Eigen::Vector2f& a, const Eigen::Vector2f& b, const Obstacle& o)
+inline bool segment_box_interval(const Eigen::Vector2f& a, const Eigen::Vector2f& b, const Obstacle& o,
+                                float& out_t0, float& out_t1)
 {
     const float c = std::cos(-o.yaw), s = std::sin(-o.yaw);
     const Eigen::Vector2f d = b - a;
@@ -264,7 +278,35 @@ inline bool segment_hits_box(const Eigen::Vector2f& a, const Eigen::Vector2f& b,
             t1 = std::min(t1, tb);
         }
     }
+    out_t0 = t0; out_t1 = t1;
     return t0 < t1 and t1 > 1e-3f and t0 < 1.0f - 1e-3f;
+}
+
+// The 2-D question, unchanged: does the segment cross the footprint at all?
+inline bool segment_hits_box(const Eigen::Vector2f& a, const Eigen::Vector2f& b, const Obstacle& o)
+{
+    float t0 = 0.0f, t1 = 0.0f;
+    return segment_box_interval(a, b, o, t0, t1);
+}
+
+// ★THE 3-D QUESTION, and the reason it is not just "do the z bands overlap": the ray is only inside the
+// obstacle's FOOTPRINT over the interval [t0,t1], and its height changes across that interval. A camera
+// looking down over a worktop at a bottle beyond it crosses the worktop's footprint high and clears it; the
+// same footprint crossed low is a genuine occluder. So the test is the ray's z range WHERE IT CROSSES,
+// against the obstacle's band.
+//
+// An obstacle with no declared height falls back to the 2-D answer — infinitely tall, today's behaviour.
+inline bool segment_blocked_3d(const Eigen::Vector3f& A, const Eigen::Vector3f& B, const Obstacle& o)
+{
+    if (not o.has_height())
+        return segment_hits_box(A.head<2>(), B.head<2>(), o);
+    float t0 = 0.0f, t1 = 0.0f;
+    if (not segment_box_interval(A.head<2>(), B.head<2>(), o, t0, t1))
+        return false;
+    const float cl0 = std::clamp(t0, 0.0f, 1.0f), cl1 = std::clamp(t1, 0.0f, 1.0f);
+    const float za = A.z() + cl0 * (B.z() - A.z());
+    const float zb = A.z() + cl1 * (B.z() - A.z());
+    return std::max(std::min(za, zb), o.z0) <= std::min(std::max(za, zb), o.z1);
 }
 // Even-odd ray-cast: is q strictly inside the polygon? (Shared by the reachability test.)
 inline bool point_in_polygon(const Eigen::Vector2f& q, std::span<const Eigen::Vector2f> poly)
@@ -453,6 +495,13 @@ inline float visible_fraction(const Target& t, const Eigen::Vector2f& from, floa
     const bool  do_vert = sensor.has_vertical() and t.has_vertical();
     const Eigen::Vector2f ex = t.axis_x(), ey = t.axis_y();
 
+    // ★THE OCCLUSION TEST IS PER-COLUMN ONLY WHILE OBSTACLES ARE INFINITELY TALL. Once any of them declares a
+    // height the answer depends on the sample's own z — the same footprint blocks the bottom of a fridge and
+    // not its top — so the test has to move INSIDE the vertical loop. Decided once, here, so the default path
+    // stays exactly as cheap (and exactly as it behaved) as before: one ray per perimeter column.
+    const bool z_aware = do_vert and std::ranges::any_of(obstacles,
+                                                         [](const Obstacle& o) { return o.has_height(); });
+
     int seen = 0, total = 0;
     for (int i = 0; i < kPerim; ++i)
     {
@@ -480,22 +529,35 @@ inline float visible_fraction(const Target& t, const Eigen::Vector2f& from, floa
         while (bearing < -std::numbers::pi_v<float>) bearing += 2.0f * std::numbers::pi_v<float>;
         const bool in_h = std::abs(bearing) <= half_h;
 
-        // Occlusion is height-independent here (obstacles are floor footprints), so test it once per column.
-        bool occluded = false;
-        for (const auto& o : obstacles)
-            if (detail::segment_hits_box(from, p, o)) { occluded = true; break; }
+        bool occluded_2d = false;
+        if (not z_aware)
+            for (const auto& o : obstacles)
+                if (detail::segment_hits_box(from, p, o)) { occluded_2d = true; break; }
 
         for (int k = 0; k < (do_vert ? kVert : 1); ++k)
         {
             ++total;
-            if (not in_h or occluded)
+            if (not in_h)
                 continue;
+            float z = 0.0f;
             if (do_vert)
             {
-                const float z = t.z0 + (t.z1 - t.z0) * static_cast<float>(k) / (kVert - 1);
+                z = t.z0 + (t.z1 - t.z0) * static_cast<float>(k) / (kVert - 1);
                 if (std::abs(std::atan2(z - sensor.height_m, range)) > half_v)
                     continue;
             }
+            if (z_aware)
+            {
+                const Eigen::Vector3f A(from.x(), from.y(), sensor.height_m);
+                const Eigen::Vector3f B(p.x(), p.y(), z);
+                bool blocked = false;
+                for (const auto& o : obstacles)
+                    if (detail::segment_blocked_3d(A, B, o)) { blocked = true; break; }
+                if (blocked)
+                    continue;
+            }
+            else if (occluded_2d)
+                continue;
             ++seen;
         }
     }

@@ -55,6 +55,12 @@ rc::nbv::Target target_of(const BottleInstance& inst)
 // ⚠What this does NOT fix: a DIFFERENT table between camera and bottle still blocks the ray, even though a
 // bottle at 0.85 m clears a 0.75 m tabletop. That is the shared obstacle model being 2-D; it errs toward
 // "occluded" ⇒ toward HOLDING, which is the safe direction. Noted here rather than worked around.
+//
+// ★rc::nbv::Obstacle can now CARRY a height, and `BottleModel.ExistenceOccluderHeights` turns it on — but the
+// drop below stays REQUIRED either way, because `collect_graph_obstacles` is called with self_id 0 and so
+// returns the bottle's own node. A body always intersects its own band; nothing but "I am standing inside it"
+// removes that. What the flag fixes is the OTHER table, and it is off by default: see the config comment for
+// why an honest sight test is the unsafe direction until the detector envelope is calibrated.
 bool footprint_contains(const rc::nbv::Obstacle& o, float x, float y)
 {
     const float dx = x - o.cx, dy = y - o.cy;
@@ -105,7 +111,8 @@ void BottleExistence::update_and_remove(BottleFitter& fitter, const Inputs& in,
     std::vector<rc::nbv::Obstacle> obstacles;
     if (camera_usable)
     {
-        obstacles = rc::nbv::collect_graph_obstacles(*in.G, in.inner_eigen, 0);
+        obstacles = rc::nbv::collect_graph_obstacles(*in.G, in.inner_eigen, 0,
+                                                     cfg_.existence_occluder_heights);
         if (in.room_polygon != nullptr and in.room_polygon->size() >= 3)
         {
             const auto walls = rc::nbv::wall_obstacles(std::span<const Eigen::Vector2f>(*in.room_polygon), 0.10f);

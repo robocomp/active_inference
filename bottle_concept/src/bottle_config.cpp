@@ -103,6 +103,7 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     out.existence_clutter_prob      = getf("BottleModel.ExistenceClutterProb",        0.05f);
     out.existence_sensor_sigma_m    = getf("BottleModel.ExistenceSensorSigmaM",       0.03f);
     out.existence_remove_frames     = geti("BottleModel.ExistenceRemoveFrames",       15);
+    out.existence_occluder_heights  = getb("BottleModel.ExistenceOccluderHeights",   false);
     out.ai2_clutter_frac         = getf("BottleModel.AI2ClutterFrac",         0.10f);
     out.ai2_clutter_scale_m      = getf("BottleModel.AI2ClutterScaleM",       0.08f);
     out.ai2_prior_pos_std        = getf("BottleModel.AI2PriorPosStd",         0.30f);
