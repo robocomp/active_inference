@@ -322,8 +322,13 @@ struct AdoptedSpan
     bool    from_manifest = false;   // false ⇒ the fallback anchoring was used (manifest absent/resolved)
 };
 
+// ★`z_base` IS NOT OPTIONAL FOR counter_top, and hardcoding it to 0 is how a microwave ends up on the floor.
+// The first version of this helper passed 0 unconditionally, which is invisible for floor_anchored (where
+// z_span ignores z_base) and for hangs (same) — i.e. invisible for every agent that exists today, and wrong
+// for the first counter_top object, which is exactly the next one anybody will write. Caught before shipping
+// only because the microwave was named out loud; the manifest's own comment says "(microwave, kettle)".
 inline AdoptedSpan adopt_span(const std::string& path, std::string_view who, Support fallback,
-                              float z_top, float extent)
+                              float z_top, float extent, float z_base = 0.0f)
 {
     AdoptedSpan out;
     out.support = fallback;
@@ -346,9 +351,14 @@ inline AdoptedSpan adopt_span(const std::string& path, std::string_view who, Sup
     Geometry span;
     span.support  = out.support;
     span.z_top_m  = z_top;
-    span.z_base_m = 0.0f;
+    span.z_base_m = z_base;      // counter_top reads THIS; the other supports ignore it
     span.extent_m = extent;
     span.z_span(out.z0, out.z1);
+    // A counter_top object with no base declared would silently span [0, extent] — the floor. Say so.
+    if (out.support == Support::counter_top and z_base <= 0.0f)
+        std::print("[manifest] ★{} declares support=counter_top but z_base is {:.3f} — the span would start at "
+                   "the FLOOR. Declare model.geometry.z_base_m (the worktop height it stands on).\n",
+                   who, z_base);
     std::print("[manifest] {} body span = [{:.2f},{:.2f}] m (support={}{})\n",
                who, out.z0, out.z1, support_name(out.support),
                out.from_manifest ? "" : ", AGENT FALLBACK — manifest silent");
