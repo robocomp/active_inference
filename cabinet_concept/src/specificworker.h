@@ -69,6 +69,7 @@
 #include "../../common/dashboard/evidence_monitor.h"
 #include "../../common/dashboard/timeseries_plot.h"
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
+#include "../../common/concept_presence/concept_presence.h"   // rc::presence::ConceptProtocol (SHARED)
 
 // ─── SpecificWorker ──────────────────────────────────────────────────────────────────────────────
 
@@ -205,7 +206,6 @@ private:
     // Crash-free exit (request_shutdown + DDS reset + _Exit), bypassing the Ice/static teardown abort.
     void terminal_shutdown();
     // Grace before a required-peer loss is treated as terminal (debounce transient presence flaps).
-    static constexpr int REQUIRED_LOSS_GRACE_MS = 3000;
     void on_optional_peer_lost(const std::string &name, std::uint32_t id);
     void on_optional_peer_ready(const std::string &name, std::uint32_t id);
 
@@ -213,7 +213,8 @@ private:
     // Admission probe (Waiting→Operating gate): the `masks` node is present and advertising a frame id.
     bool masks_stream_ready(std::string *detail = nullptr) const;
     // Operating stall predicate: no NEW masks frame for cfg_.masks_stall_timeout_ms, with a cold-start grace
-    // measured from operating_since_ms_ before the first frame ever arrives. false when the gate is disabled.
+    // measured from presence_protocol_.operating_since_ms() before the first frame arrives.
+    // false when the gate is disabled.
     bool masks_stream_stalled(std::int64_t *age_ms_out = nullptr) const;
     // Admission predicate: the producer is CURRENTLY publishing fresh frames (a frame within the timeout
     // window). Distinct from masks_stream_ready() (node-exists, which persists after the producer dies) —
@@ -223,16 +224,14 @@ private:
     // ── Members ──────────────────────────────────────────────────────────────
     bool startup_check_flag = false;
     bool owned_nodes_cleaned_ = false;
-    bool startup_affordance_sweep_done_ = false;   // one-time startup stale-affordance sweep; re-running
-                                                   // on every Operating re-entry would wipe live affordances.
     std::atomic<bool> shutting_down_{false};
+    // The presence protocol AND the gate state it owns (operating_since_ms / stall_reported /
+    // degraded_from_input / first_operating_done) — SHARED, common/concept_presence. The transitions set
+    // those, so they belong with the transitions; masks_stream_stalled() reads the baseline back.
+    rc::presence::ConceptProtocol presence_protocol_;
     AgentPresenceCoordinator presence_coordinator_;
 
     // Primary-input stream-gate bookkeeping (mirrors room_concept). All main-thread (FSM hooks).
-    std::int64_t operating_since_ms_   = 0;      // wall ms at Operating entry — cold-start stall-grace baseline
-    bool         masks_stall_reported_ = false;  // one-shot: emit presenceLost once per stall episode (reset on entry)
-    bool         degraded_from_masks_  = false;  // Degraded reason: recoverable mask-stall vs a real peer loss
-    std::int64_t last_wait_log_ms_     = 0;      // throttle for the "why still Waiting" line
 
     rc::CabinetConfig                                         cfg_;
     rc::EpistemicPlanner                                    epistemic_planner_;

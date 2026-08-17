@@ -65,7 +65,7 @@ bool SpecificWorker::masks_stream_stalled(std::int64_t *age_ms_out) const
     if (not mask_ingestor_) return false;
     const std::int64_t age = mask_ingestor_->ms_since_last_frame();
     if (age_ms_out) *age_ms_out = age;
-    return rc::stream::stalled(age, cfg_.masks_stall_timeout_ms, operating_since_ms_,
+    return rc::stream::stalled(age, cfg_.masks_stall_timeout_ms, presence_protocol_.operating_since_ms(),
                                QDateTime::currentMSecsSinceEpoch());
 }
 
