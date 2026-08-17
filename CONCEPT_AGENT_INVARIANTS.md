@@ -207,6 +207,19 @@ The belief unit is **not** necessarily an instance — cabinet's is a `(wall, ti
 that assumes "one row / one card / one affordance per instance" breaks there. Write the core against a
 *belief unit*, and let the agent say what one is.
 
+★**That is a FAMILY boundary, not an exception** (settled 2026-08-16). There are two families — INSTANCE
+(bottle · chair · door · hood · refrigerator · table) and RUN (cabinet, and `shelf` next) — over one core.
+So the question for anything you are tempted to share has a sharp form: **does it depend on the belief
+UNIT?** A covariance, a footprint, a z-band, a point cloud or a sample does not — that is core, and both
+families use it. Iterating the beliefs does — that is family-level. A `shelf` must be generated from
+cabinet, not from a box agent. See `CONCEPT_AGENT_RECIPE.md` §"TWO FAMILIES, ONE CORE".
+
+★**And the priors are only as real as the manifest that is READ.** `provenance_ok()` is armed in all 8
+agents (an `inherited` block refuses to start), but `load_geometry`/`z_span`/`resolve`/`band_contains_body`
+are called in **hood alone** — measured 2026-08-17 — and refrigerator and table declare no
+`[model.geometry]` block at all. A validated declaration nobody reads guards nothing; the four traps it
+exists to catch are guarded in one agent.
+
 Then: state σ\* from a real consumer or declare its absence; make every channel a symmetric ratio; make
 every accumulator answer "what makes this observation new?"; give the planner the room polygon, the
 adequacy bound, and whatever novelty term the belief itself uses; and check that every gate you write

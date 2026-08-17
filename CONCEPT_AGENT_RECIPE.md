@@ -14,6 +14,88 @@ mechanical copy + token-rename. The object spec is the only human input.
 > conforming row in that file's §6 audit table. The contract exists because the same defect class was found
 > and fixed three separate times in three agents that all had the right *structure*.
 
+
+---
+
+## ★ TWO FAMILIES, ONE CORE — pick the family BEFORE the skeleton (2026-08-16)
+
+This file used to read as though there were one pattern with one awkward member. There are **two**, and
+which one you are generating decides the skeleton, not a detail inside it:
+
+| family | belief unit | members | reference skeleton |
+|---|---|---|---|
+| **INSTANCE** | one belief per fitted instance, keyed by DSR node id | bottle · chair · door · hood · refrigerator · table | `refrigerator_concept` (box) / `chair_concept` (legged) / `bottle_concept` (cylinder) |
+| **RUN** | one belief per `(wall, tier)` CELL / run along a wall chart | cabinet · **shelf** (next) | `cabinet_concept` |
+
+A RUN agent is **not** an instance agent with a different SDF. Its beliefs live in a manager
+(`kitchen_mgr_.cells()`), not in `fitter_->instances()`; it has corner arbitration, a cell partition and
+retirement per cell; and `merge_overlapping_instances` is meaningless for it. A `shelf` is a run object and
+**must be generated from cabinet, not from a box agent** — cloning a box agent and bending it is how hood
+inherited a floor-anchored parent's assumptions and lost a week.
+
+★**THE TEST FOR "DOES THIS BELONG IN `common/`?" IS: does it depend on the belief UNIT?** If it takes a
+covariance, a footprint, a z-band, a point cloud or a sample — it is core, and both families use it
+(`rc::dash::fill_certainty` serves six instance agents AND three run-shaped call sites in cabinet). If it
+iterates the beliefs, it is family-level and belongs in the family layer.
+
+⚠**The RUN-family layer does not exist yet as `common/` code.** Cabinet's `KitchenManager` /
+`WallRunBelief` / corner-fill / cell-partition machinery **is** that layer, still living inside cabinet.
+When `shelf` is scaffolded, extract it (a `common/wall_run/`) rather than copying it — this is the one
+place where "clone the closest skeleton" is the wrong instruction.
+
+
+---
+
+## ★ THE MANIFEST IS THE AUTHORITY FOR PRIORS — and it is live in 1 of 8 agents (measured 2026-08-17)
+
+`common/concept_manifest/<obj>.concept.toml` is the **declarative half of this document**: what the object
+IS, as world fact, rather than as numbers spread through a config and a model header. `concept_manifest.h`
+gives four things, in increasing order of how much they cost to ignore:
+
+| call | what it buys |
+|---|---|
+| `provenance_ok(path, name)` | **refuses to start** the agent if any block declares `from = "inherited"`. A note stopped nothing for a week; this stops the process. |
+| `load_geometry()` + `Geometry::z_span()` | the ONE vertical span the SDF, the point-admission band, the NBV `Target` z0/z1 and the LiDAR carve must all agree on — derived once so those four cannot drift apart. |
+| `resolve(cfg, key, man, key, default, what)` | precedence: **manifest (world fact) → config.toml (explicit override, which PRINTS when it contradicts) → agent default**. The reverse order is what let hood run on the refrigerator's height while two corrected files said otherwise. |
+| `band_contains_body(who, band, z0, z1)` | the cheapest check in the fleet. A derived band that does not intersect the body is not a tuning question, it is a statement that cannot be true. Hood's LiDAR band came out `[−0.10, 0.85]` for a body at `[1.55, 2.05]` — disjoint, 109 returns/cycle selected off the floor, and every channel still reporting full coverage. |
+
+### Measured adoption — this is the gap, not the plan
+
+| agent | `[model.geometry]` declared | reads VALUES from it |
+|---|---|---|
+| **hood** | `hangs`, z_top 2.05, extent 0.50 | **YES** — `load_geometry` · `resolve` · `z_span` · `band_contains_body` |
+| chair | `floor_anchored`, z_top 0.90 | no — `provenance_ok` only |
+| door | `floor_anchored`, z_top 2.00 | no — `provenance_ok` only |
+| human | `floor_anchored`, z_top 1.70 | no — `provenance_ok` only |
+| bottle | `resolved` (per-instance) + extent 0.20 | no — `provenance_ok` only |
+| cabinet | `resolved` (per-instance) | no — `provenance_ok` only |
+| **refrigerator** | **no `[model.geometry]` block at all** | no |
+| **table** | **no `[model.geometry]` block at all** | no |
+
+★**The irony worth keeping**: `refrigerator` is the agent hood was CLONED FROM, and the machinery exists
+precisely because that clone inherited a floor-anchored parent's vertical assumptions — yet refrigerator
+still declares no geometry. So the guard that would have caught the original defect is not armed on the
+parent.
+
+`support = "resolved"` (bottle, cabinet) is a legitimate answer, not a gap: those objects resolve their
+support per instance, and declaring one class-level enum would be a **wrong statement**. `Geometry::z_span()`
+deliberately returns an EMPTY band for `resolved`/`unknown` rather than a plausible-looking wrong one.
+
+### For a NEW agent — required, not optional
+
+1. Author `common/concept_manifest/<obj>.concept.toml` **before** the code, including `[model.geometry]`
+   with `support`, the span, and an honest `from` (`measured` | `fitted` | `nominal` | `resolved`). Never
+   `inherited` — the agent will refuse to start, which is the point.
+2. Call `provenance_ok()` in `initialize()` and let it stop you.
+3. Take every world-fact number through `resolve()`, never by reading config directly. If config and
+   manifest disagree the override prints; that line is the review.
+4. Derive every vertical band from `z_span()` and pass each one through `band_contains_body()` at startup.
+
+⚠**Work item for the existing fleet (open):** give refrigerator and table a `[model.geometry]` block, then
+migrate the six `provenance_ok`-only agents onto `resolve()` + `z_span()` + `band_contains_body()`. Until
+then the manifest is a *validated declaration nobody reads* for 7 of 8 agents, and the four traps above are
+guarded in hood alone.
+
 ---
 
 ## The belief core — shared recursive-Laplace AI2 (the ONLY lineage)
@@ -230,7 +312,13 @@ are both that.
         two problems wearing one error message.
 
     5.  RUN tools/concept_audit.sh. The new agent should appear and be green on the mechanical columns
-        (room_poly, any_usable, contract, strip, poll, removal) because it inherited them.
+        (room_poly, any_usable, contract, strip, poll, removal, shared, csv_rot, manifest) because it
+        inherited them. ★The `shared` column asserts adoption BY SYMBOL for the 2026-08 core — a directory
+        grep would read green the moment you include any dashboard header — and `csv_rot` asserts a
+        NEGATIVE (no truncating CSV survives). Both exist because "extracted" was twice mistaken for
+        "adopted" while this matrix was green: `decide_removal` existed while door hand-wrote it in three
+        places, and `rc::birth::evidence` said "every agent must use it" while four ignored it.
+        ⚠If you add a shared module, add its assertion in the SAME commit.
 
     6.  THE OBJECT-SPECIFIC WORK — everything above is mechanical; this is the agent. Measured across the
         fleet, it is model.cpp / config / belief / fitter, which are only 8–31 % similar between agents for
@@ -447,6 +535,26 @@ shared (do NOT copy, #include + add to CMake):
     default (`Tracker.DeathEnabled=false`) for persistent furniture; removal is then MERGE-only.)
   common/dashboard/timeseries_plot.{h,cpp} + custom_widget.h   (if dashboard; pass the title to the
       Custom_widget ctor; list both headers in CMake for AUTOMOC)
+  ── the 2026-08-16 core (all family-agnostic; adoption is ASSERTED by tools/concept_audit.sh) ──
+  common/stream_gate/stream_gate.h                    (rc::stream::stalled / live / gate_enabled — the
+    primary-input staleness ARITHMETIC. Two traps it owns: a NEGATIVE age is not a stall (before the first
+    frame the grace runs from OPERATING ENTRY, else the agent demotes itself the moment it reaches
+    Operating), and `live` is NOT `not stalled` (re-admission needs real freshness; cold start is not live).
+    `ready` stays with the agent — the ingestor types have nothing in common.)
+  common/birth_surprise/residual_field_reader.h        (rc::read_residual_field — reads rc::GridField off the
+    `residual` node. SEPARATE from birth_surprise_probe.h so THAT header keeps its no-DSR purity.)
+  common/dashboard/belief_series.h                    (rc::dash::publish_belief_series — the four per-unit
+    traces. Seam is a SAMPLE, not an instance: reduce your belief to six numbers. The residual input is the
+    HELD count, never a fresh-frames-only one — the fresh-only variant is deliberately not expressible.)
+  common/dashboard/belief_certainty.h                 (rc::dash::fill_certainty — gap_nats + logdet_nats.
+    ★any_sigma_star() FIRST: adequacy_gap_nats returns 0 for a table with no σ*, and 0 means ADEQUATE.
+    Fallback is a CHOLESKY, not log(det()).)
+  common/obj/convergence.h                            (rc::converge::step — the settle rule. You supply
+    state_delta over YOUR DOFs; it owns the counter, the verdict and the graph writes.)
+  common/diag_log/rotating_csv.h                      (rc::diag::open_rotating — ★NEVER open a diagnostics
+    CSV with std::ios::trunc. A restart erases the run that produced the fault, and the restart is often
+    provoked BY the fault. The ONE exception is persisted STATE rewritten in full, which must declare itself
+    with a `DIAG-ROTATE: exempt` comment.)
 ```
 No `prior_store`, no `sample_queue_geometry.h`, no `belief_stabilizer`, no torch in CMake. (bottle was the
 last to carry those; they were removed when it moved to the shared engine.)
@@ -533,6 +641,12 @@ axis on top of presence (the coordinator has no notion of stream age — this is
   peers are intact, so set a `degraded_from_stream_` flag: `on_degraded_enter` logs "stall, peers intact"
   and the SHARED required-loss grace timer finds all peers present and declines to shut down. The gate then
   re-admits when the producer returns. Contrast a *real* peer loss (flag false) → shutdown after grace.
+- ★**THE ARITHMETIC IS SHARED — do not re-derive it** (`common/stream_gate/stream_gate.h`, 2026-08-16). The
+  three questions above reduce to `rc::stream::stalled(age, timeout, operating_since_ms, now)` and
+  `rc::stream::live(age, timeout)`, with `gate_enabled(timeout)` for the `<= 0 ⇒ off` convention. It was
+  seven copies carrying the same two traps (negative age ≠ stall; `live` ≠ `not stalled`). What stays with
+  the agent is `ready` and the gate-OFF branch of `live`, because both fall through to that agent's own
+  node-exists probe and the ingestor types have nothing in common.
 - **Ingestor bookkeeping (shared readers).** Stamp a wall-clock ms on the single fresh-frame success path
   only; expose `ms_since_last_frame()` (−1 = never) + `stream_ready()`. Stamp on the wall clock, NEVER the
   source stamp — a producer republishing an old frame must read as *not* live. **Key on an id that advances
@@ -586,6 +700,10 @@ adds to the published translation cov. The scene-graph write self-gates (geometr
 enables it — there is no longer an `RtCovAddChain` toggle). COV ONLY — masks stay room-frame.
 
 ### Dashboard (`publish_<obj>_diagnostics`, if `dashboard`) — stacked `TimeSeriesPlot` panels, per node:
+★**Do not hand-write the traces or the certainty channel.** `rc::dash::publish_belief_series` takes a
+6-number `BeliefSample`; `rc::dash::fill_certainty` fills `gap_nats`/`logdet_nats` from a covariance + a DOF
+table. Both are family-agnostic (a RUN agent calls them per cell). What you still write is the reduction —
+what `belief_uncertainty` means for YOUR object, and the loop that finds your belief units.
 FE → dimensions → **posterior σ(mm)** per DOF (from `sqrt(diag Σ)` — the honest calibrated uncertainty; this
 is what the old counter-evidence/CUSUM panel became once the stabiliser was removed). The gated AI2 CSV
 (`<Obj>Model.AI2CsvPath`) logs per cycle: `cycle,node,pts,R,energy,frames_converged[,extra]` — the belief
@@ -689,6 +807,15 @@ cortex, then switch to `<foo_att>`. Don't add new `runtime_checked_*` sites.
       collision SIGSEGVs both agents). Verify: `grep -rE '^\s*id\s*=' */etc/config.toml`.
 - [ ] Launches, presence reaches Operating (copy bottle's presence protocol verbatim; Degraded DEBOUNCE grace
       timer ~3000 ms, NOT immediate cleanup+exit).
+- [ ] **`cleanup_owned_nodes()` does NOT iterate instances.** Declare the wildcard in `[Owns].nodes`
+      (`"<obj>*"` — it must match every name this agent ever creates) and let the coordinator's sweep delete
+      them; call `remove_stale_affordance_nodes()` FIRST (affordances are the orphan-safe case `[Owns]` does
+      not name), then `presence_coordinator_.cleanup_owned_nodes()`. A per-instance loop is redundant with
+      the wildcard AND deletes while the presence MONITOR is still live. One `rc::owned::Spec` per file, at
+      file scope — not one inside each sweep function.
+- [ ] **No diagnostics CSV opens with `std::ios::trunc`** — `rc::diag::open_rotating` everywhere, including
+      the constructor form `std::ofstream f("p", trunc)`. Persisted STATE rewritten in full is the only
+      exception and must carry a `DIAG-ROTATE: exempt` comment. `tools/concept_audit.sh` asserts this.
 - [ ] Primary-input stream gate wired: admission probe AND-ed in + re-polled in `on_waiting_loop`; stall
       demotion in `on_operating_loop`; recoverable-Degraded branch. Kill the producer → demote to Waiting &
       stay alive; restart → re-admit. `<Stream>StallTimeoutMs` > producer HOLD; empty scene never trips it.

@@ -90,10 +90,12 @@ affordance node mechanics are object-agnostic but its parent + the planner's *ta
 ### (C) Object-agnostic — shared or copyable
 | Unit | State |
 |---|---|
-| **`common/belief_stabilizer/belief_stabilizer.h`** (`rc::BeliefStabilizer<N>`, `StabilizerState<N>`, `StabilizerLayout<N>`, `StabilizerParams`) | ✅ **HOISTED to `common/`, used by both** (table N=8, bottle N=5). Header-only template: Fisher info-filter + maturity stiffener + mask-confidence weighting + counter-evidence CUSUM gate. The hard shared logic is no longer copied. |
+| **`common/belief_stabilizer/belief_stabilizer.h`** | ⚠**SUPERSEDED — do NOT use in a new agent.** The seven object-concept agents moved to `common/ai_belief/recursive_laplace.h` (predict / MAP / Woodbury); the stabilizer, `sample_queue` and `prior_store` are not in any of them. It survives in **`human_concept` alone**, which is still on the pre-AI2 lineage — one more axis of that agent's 5/17 shared score. `common/sample_queue/` is dead code with no caller at all. |
 | **`common/dashboard/timeseries_plot.{h,cpp}`** (`rc::TimeSeriesPlot`) | ✅ **HOISTED (2026-06).** Pure Qt widget, identical between agents. |
 | **`common/dashboard/custom_widget.h`** (`Custom_widget`) | ✅ **HOISTED (2026-06).** Title passed via the constructor (`new Custom_widget("Bottle Model — …")`), so one shared widget. |
-| `specificworker_presence.cpp` | per-agent copy of the presence protocol (mirrored verbatim) |
+| `specificworker_presence.cpp` | ✅ **converged 2026-08-16.** The state hooks are 1-line delegators (generated boilerplate, not worth sharing); the stream-gate ARITHMETIC is `common/stream_gate/stream_gate.h`; the `rc::owned::Spec` is declared ONCE at file scope; and the per-instance cleanup loop is GONE in all seven (redundant with `[Owns]`, and it deleted while the monitor was live). 1198 → 984 lines. |
+| **`common/stream_gate/stream_gate.h`** · **`common/obj/convergence.h`** · **`common/dashboard/belief_series.h`** · **`common/dashboard/belief_certainty.h`** · **`common/birth_surprise/residual_field_reader.h`** | ✅ **HOISTED 2026-08-16 (Tier A).** All family-agnostic — they take a covariance / a sample / a z-band, never a belief unit, which is why `fill_certainty` serves the six instance agents AND cabinet's three run-shaped sites. Adoption is asserted BY SYMBOL in `tools/concept_audit.sh`, not by include path. |
+| `common/diag_log/rotating_csv.h` | ✅ **universal since 2026-08-16.** No diagnostics CSV may open with `std::ios::trunc` — a restart erases the run that produced the fault. Persisted state rewritten in full is the one exception and declares itself (`DIAG-ROTATE: exempt`). |
 
 ### Capabilities — object-specific shape, opt-in (both reference agents now carry these)
 | Capability | Unit(s) | bottle | table | cdsl impact |
