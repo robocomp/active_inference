@@ -125,7 +125,14 @@ struct Sample
     float obliquity_cos = 0.0f;
     float trunc_frac    = 0.0f;
     float p_detect      = 0.0f;   // what the CURRENT envelope predicted — the thing being tested
-    float p_exists      = 0.0f;   // fit_envelope's weight: a doubtful cycle must inform little
+    // ★THE PRIOR, NOT THE POSTERIOR — and the column is named for it. log_detect_probe() runs BEFORE
+    // this cycle's existence update (deliberately: an instance killed this cycle must still leave the row
+    // recording the look that killed it), so this is the belief as it stood BEFORE the outcome in the same
+    // row was integrated. Discovered 2026-08-17 by an audit that showed ex_p apparently FALLING on cycles
+    // logged as detected, which the ai2 log said never happens — the two columns were one cycle apart.
+    // ★It is also the CORRECT weight: weighting a trial by the posterior that this very trial produced is
+    // circular. So the offset is right and only the old name (`ex_p`) was wrong.
+    float p_exists_prior = 0.0f;
 
     // ── the outcome ──
     bool  fired = false;          // a slice of THIS agent's label was assigned this cycle
@@ -138,7 +145,7 @@ struct Sample
 inline std::string_view header()
 {
     return "cycle,node,stamp_ms,rx,ry,rtheta,cam_z,ocx,ocy,ocz,range,"
-           "roi_fill,roi_fill_h,roi_fill_v,roi_valid,obliquity_cos,trunc_frac,p_detect,ex_p,"
+           "roi_fill,roi_fill_h,roi_fill_v,roi_valid,obliquity_cos,trunc_frac,p_detect,ex_p_prior,"
            "fired,conf,n_my,n_all,other_label,other_dist,other_conf\n";
 }
 
@@ -166,7 +173,7 @@ inline void append(std::ofstream& out, const Sample& s)
         << s.ocx << ',' << s.ocy << ',' << s.ocz << ',' << s.range_m << ','
         << s.roi_fill << ',' << s.roi_fill_h << ',' << s.roi_fill_v << ','
         << (s.roi_valid ? 1 : 0) << ',' << s.obliquity_cos << ',' << s.trunc_frac << ','
-        << s.p_detect << ',' << s.p_exists << ','
+        << s.p_detect << ',' << s.p_exists_prior << ','
         << (s.fired ? 1 : 0) << ',' << s.conf << ',' << s.n_my << ',' << s.n_all << ','
         // an empty label is written as "-" so the column is never zero-width (a bare ",," is the one
         // thing a naive splitter gets wrong, and this file exists to be read by scripts)

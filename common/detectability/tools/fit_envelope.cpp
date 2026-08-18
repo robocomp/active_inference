@@ -342,7 +342,7 @@ int main(int argc, char** argv)
     if (c_fired >= 0) label = "fired";   // the probe file settles the label; say so in the report
     const int c_alive = (c_fired >= 0) ? opt("det_alive") : need("det_alive");
     const int c_fsd   = (c_fired >= 0) ? opt("frames_since_det") : need("frames_since_det");
-    const int c_exp = need("ex_p");
+    const int c_exp = (opt("ex_p_prior") >= 0) ? opt("ex_p_prior") : need("ex_p");   // probe files name it for the PRIOR it actually is
 
     std::vector<Trial> all;
     std::size_t lines = 0, dropped_invalid = 0, dropped_parse = 0;
