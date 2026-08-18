@@ -448,6 +448,31 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
                              "to reach that spot {}x. Skipping it without driving there.",
                              target->node_name, target->room_pos.x(), target->room_pos.y(), spot->hits);
             }
+            // ★ TELL THE PRODUCER. Skipping silently is what the comment above describes as the
+            // problem, and it deadlocks: the node stays Offered, we decline it every cycle,
+            // [aff-select] reports NONE ELIGIBLE, and the producer — never informed — keeps
+            // re-publishing the same handful of spots. Measured: 259 s motionless with the node
+            // Offered and the producer healthy (pub_ok 400/400, 34 completions).
+            // RETIRE it with an explicit refusal instead. Clearing epistemic_pending is the level the
+            // producer's monitor watches, so it sees the outcome, de-prioritises that cell
+            // (mark_target_finished) and offers a DIFFERENT one — which is the whole point of the
+            // two-way protocol and the half that was never wired.
+            if (graph_ != nullptr)
+                if (auto n = graph_->get_node(target->node_id); n.has_value())
+                {
+                    auto node = n.value();
+                    rc::affordance::write_outcome(*graph_, node, rc::affordance::Outcome::Refused);
+                    graph_->add_or_modify_attrib_local<epistemic_refused_att>(node, true);
+                    graph_->add_or_modify_attrib_local<epistemic_refused_x_m_att>(
+                        node, static_cast<float>(target->room_pos.x()));
+                    graph_->add_or_modify_attrib_local<epistemic_refused_y_m_att>(
+                        node, static_cast<float>(target->room_pos.y()));
+                    // The outcome goes on BEFORE pending comes off, in the same update_node: pending
+                    // is what the producer watches, so writing it first would race the outcome.
+                    graph_->add_or_modify_attrib_local<epistemic_pending_att>(node, false);
+                    graph_->add_or_modify_attrib_local<active_att>(node, false);
+                    graph_->update_node(node);
+                }
             affordance_manager.suppress_target(graph_, target->node_id, kUnreachableRounds);
             current_plan_.reset();
             plan_spline_valid_ = false;
@@ -1680,22 +1705,30 @@ void ControllerSession::feed_external_velocity_trace(const ControllerWorldModel 
                                                     ControllerDisplay &display,
                                                     std::uint64_t timestamp_ms)
 {
-    float adv = 0.f, rot = 0.f;
+    float ref_adv = 0.f, ref_rot = 0.f, meas_adv = 0.f, meas_rot = 0.f;
     bool fresh = false;
     if (graph_)
         if (const auto rid = world_model.graph_state().robot_id; rid != 0)
             if (const auto robot_node = graph_->get_node(rid); robot_node.has_value())
             {
-                adv = graph_->get_attrib_by_name<robot_ref_adv_speed_att>(*robot_node).value_or(0.f);
-                rot = graph_->get_attrib_by_name<robot_ref_rot_speed_att>(*robot_node).value_or(0.f);
+                ref_adv = graph_->get_attrib_by_name<robot_ref_adv_speed_att>(*robot_node).value_or(0.f);
+                ref_rot = graph_->get_attrib_by_name<robot_ref_rot_speed_att>(*robot_node).value_or(0.f);
+                // ★AND WHAT THE BASE ACTUALLY DID. robot_ref_* turns out to be written by THIS AGENT
+                // only — measured 2026-08-18, the robot drove at 0.640 m/s with the reference at exactly
+                // 0.000 — so a panel fed from the reference alone is blank for a whole manual drive.
+                // robot_current_* is written by robot_concept whoever is driving, and is the only
+                // universally available witness. The display keeps it on its own series because it is
+                // MEASURED, not commanded.
+                meas_adv = graph_->get_attrib_by_name<robot_current_advance_speed_att>(*robot_node).value_or(0.f);
+                meas_rot = graph_->get_attrib_by_name<robot_current_angular_speed_att>(*robot_node).value_or(0.f);
                 // The reference carries its own write time, so staleness is measured against WHEN IT WAS
-                // WRITTEN rather than against whether the value happens to be non-zero — a joystick
+                // WRITTEN rather than against whether the value happens to be non-zero — a commander
                 // holding still writes a legitimate 0, and that must not read the same as nobody driving.
                 if (const auto ts = graph_->get_attrib_by_name<robot_ref_speed_timestamp_att>(*robot_node);
                     ts.has_value() and timestamp_ms >= *ts)
                     fresh = timestamp_ms - *ts <= kRefSpeedStaleMs;
             }
-    display.update_velocity_trace_external(adv, rot, fresh);
+    display.update_velocity_trace_external(ref_adv, ref_rot, fresh, meas_adv, meas_rot);
 }
 
 // ── THE STANDPOINT, RE-ASKED IN THE LAST METRES AGAINST EVIDENCE THAT HAS NOT FADED ──────────────
