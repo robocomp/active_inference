@@ -901,3 +901,15 @@ overlay_csv_path = "overlay_lag_eval.csv"
 # producer's dedicated media domain (isolated from Agent.domain = 0). The
 # subscriber is created lazily, only once that node + descriptor exist.
 
+[Lidar]
+# Stream watchdog. No fresh sweep for this long while operating => LOCAL EMERGENCY HOLD: the robot is
+# stopped, Fsm=Emergency is published (a red agent node, visible without reading this process's
+# stdout), and it is logged on entry, every 5 s while stalled, and once on recovery.
+# ★ The watchdog's members, its param and its documentation had all been here for a long time with
+# NOTHING reading them, so a stalled consumer was completely silent. Measured 2026-08-18: 65 s of a
+# motionless robot with the affordance Offered and the PRODUCER reporting `media fresh=100 served=100`
+# on the same topic. The only hint was a throttled [ctrl-idle] line whose `fresh_lidar=false` also
+# fires on about half of all HEALTHY cycles (20 Hz control loop against a ~9.4 Hz sensor).
+# Loader key is Lidar.StallTimeoutMs — it was absent from every config, so the 2000 ms default was in
+# force and undiscoverable. Stated here so it can be found and changed.
+StallTimeoutMs = 2000

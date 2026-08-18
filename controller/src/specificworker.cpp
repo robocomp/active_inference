@@ -1164,11 +1164,64 @@ void SpecificWorker::control_loop()
 		// 2) Lidar decode off the GUI thread. LiDAR comes ONLY from the zero-copy media
 		//    plane (robot_concept no longer publishes the laser_* node to DSR). The shared
 		//    reader brings up its subscribers lazily and dedups by timestamp.
-		bool fresh_lidar = poll_lidar_media();
+		last_lidar_poll_ = poll_lidar_media();
+		const bool fresh_lidar = (last_lidar_poll_ == LidarPoll::Fresh);
 		if (fresh_lidar)
 		{
 			last_lidar_rx_ = std::chrono::steady_clock::now();
 			lidar_ever_received_ = true;
+		}
+
+		// ── STREAM WATCHDOG — publish the stall, do not just go quiet ─────────────────────────
+		// ★ Every part of this was already here except the trigger: last_lidar_rx_,
+		// lidar_ever_received_, lidar_stalled_ and params.lidar_stall_timeout_ms were all declared
+		// and documented, and NOTHING read them. So a stalled stream surfaced only as a robot that
+		// stopped moving. Measured 2026-08-18: the controller sat for 65 s with the affordance
+		// Offered and room_concept reporting `media fresh=100 served=100` on the SAME topic, and the
+		// only clue was a throttled [ctrl-idle] line whose `fresh_lidar=false` also fires on ~half of
+		// all healthy cycles (20 Hz loop, ~9.4 Hz sensor). Unmissable is the point of this block.
+		if (lidar_ever_received_)
+		{
+			const auto now = std::chrono::steady_clock::now();
+			const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+			                        now - last_lidar_rx_).count();
+			const bool stalled = age_ms > params.lidar_stall_timeout_ms;
+			const auto wall_ms = static_cast<std::int64_t>(
+			    std::chrono::duration_cast<std::chrono::milliseconds>(
+			        std::chrono::system_clock::now().time_since_epoch()).count());
+
+			if (stalled and not lidar_stalled_)
+			{
+				lidar_stalled_ = true;
+				lidar_stall_since_ = now;
+				last_stall_log_ms_ = wall_ms;
+				// Stop first, then report: never plan on stale perception (CLAUDE.md's stream rule).
+				motion_commander_.stop_robot();
+				// PUBLISH it, so an observer sees it without reading this process's stdout: the Fsm
+				// axis maps Emergency -> Bad -> a red agent node in the graph viewer/dashboard.
+				presence_coordinator_.publish_fsm(rc::agent_status::Fsm::Emergency);
+				qWarning().noquote()
+				    << QString("[LidarStall] STREAM STALLED — %1 ms with no fresh sweep (limit %2 ms). "
+				               "Last poll: %3. Robot HALTED; not planning on stale perception.")
+				           .arg(age_ms).arg(params.lidar_stall_timeout_ms)
+				           .arg(QString::fromUtf8(std::string(to_string(last_lidar_poll_)).c_str()));
+			}
+			else if (stalled and wall_ms - last_stall_log_ms_ >= 5000)
+			{
+				last_stall_log_ms_ = wall_ms;
+				qWarning().noquote()
+				    << QString("[LidarStall] still stalled: %1 s and counting. Last poll: %2")
+				           .arg(age_ms / 1000).arg(QString::fromUtf8(std::string(to_string(last_lidar_poll_)).c_str()));
+			}
+			else if (not stalled and lidar_stalled_)
+			{
+				lidar_stalled_ = false;
+				const auto held = std::chrono::duration_cast<std::chrono::seconds>(
+				                      now - lidar_stall_since_).count();
+				presence_coordinator_.publish_fsm(rc::agent_status::Fsm::Compute);
+				qWarning().noquote()
+				    << QString("[LidarStall] RECOVERED after %1 s — resuming.").arg(held);
+			}
 		}
 
 		// 3) Heavy pipeline (planning + MPPI + command emission), guarded by the LiDAR
@@ -1255,10 +1308,10 @@ void SpecificWorker::init_lidar_media()
 		params.lidar_name, "lidar");
 }
 
-bool SpecificWorker::poll_lidar_media()
+SpecificWorker::LidarPoll SpecificWorker::poll_lidar_media()
 {
 	if (!lidar_reader_)
-		return false;
+		return LidarPoll::NoReader;
 
 	// One shared call: newest helios + bpearl sweeps merged into the ROBOT frame (static mounts),
 	// or the fused lidar3D sweep while bridging. interpolate=false — device->robot only crosses the
@@ -1266,11 +1319,11 @@ bool SpecificWorker::poll_lidar_media()
 	// scan stamp. graph_state().robot_name is the frame the tracker treats as identity.
 	const std::string &robot_name = world_model_.graph_state().robot_name;
 	if (robot_name.empty())
-		return false;
+		return LidarPoll::NoRobotName;
 
 	auto sweep = lidar_reader_->poll(robot_name, /*interpolate=*/false);   // non-const: its tags are MOVED below
 	if (!sweep.has_value() || sweep->points.empty())
-		return false;
+		return LidarPoll::NoSweep;
 
 	std::vector<float> xs, ys, zs;
 	xs.reserve(sweep->points.size()); ys.reserve(sweep->points.size()); zs.reserve(sweep->points.size());
@@ -1284,7 +1337,8 @@ bool SpecificWorker::poll_lidar_media()
 	return obstacle_tracker_.handle_lidar_points(robot_name, std::move(xs), std::move(ys), std::move(zs),
 	                                             static_cast<std::uint64_t>(sweep->stamp_ms),
 	                                             std::move(sweep->plane_id),
-	                                             std::move(sweep->plane_stamp_ms));
+	                                             std::move(sweep->plane_stamp_ms))
+	           ? LidarPoll::Fresh : LidarPoll::Rejected;
 }
 
 void SpecificWorker::stop_control_thread()

@@ -78,6 +78,12 @@ public:
     // Presence transitions are published automatically — this only adds the FSM axis.
     void attach_state_machine(QStateMachine *sm) { state_publisher_.attach_state_machine(sm); }
 
+    // Publish an FSM state the state machine cannot express. Needed for a LOCAL hold: a stalled input
+    // stream must be visible fleet-wide (Emergency -> Bad -> red node) WITHOUT the teardown that a
+    // Degraded presence transition triggers — the stream may come back, and killing the agent for a
+    // transient media flap is the failure this codebase already learned to debounce.
+    void publish_fsm(rc::agent_status::Fsm f) { state_publisher_.set_fsm(f); }
+
     [[nodiscard]] AgentPresenceMonitor *monitor() const { return presence_monitor_.get(); }
     [[nodiscard]] bool all_required_ready() const;
     [[nodiscard]] std::vector<std::string> missing_required_names() const;

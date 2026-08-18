@@ -31,6 +31,7 @@
 #include <genericworker.h>
 #include <Eigen/Dense>
 #include <atomic>
+#include <string_view>
 #include <condition_variable>
 #include <functional>
 #include <mutex>
@@ -220,6 +221,27 @@ private:
 		void stop_control_thread();
 		void enqueue_command(std::function<void()> command);
 
+		// ★ WHY poll_lidar_media() returned nothing. It has FOUR distinct exits and they used to
+		// collapse into one bool, so `fresh_lidar=false` could mean "no subscriber", "the graph has
+		// not named the robot yet", "no sweep arrived" or "the tracker rejected this stamp" — which
+		// need completely different fixes. Rejected is the NORMAL one: a 20 Hz loop against a ~9.4 Hz
+		// LiDAR sees no new sweep on about half its cycles, so a bare false is not a fault at all.
+		// Conflating that with a dead subscriber cost a long diagnosis on 2026-08-18.
+		enum class LidarPoll { Fresh, NoReader, NoRobotName, NoSweep, Rejected };
+		[[nodiscard]] static std::string_view to_string(LidarPoll r)
+		{
+			switch (r)
+			{
+				case LidarPoll::Fresh:       return "fresh";
+				case LidarPoll::NoReader:    return "NO SUBSCRIBER (lidar_reader_ is null)";
+				case LidarPoll::NoRobotName: return "graph has not named the robot yet";
+				case LidarPoll::NoSweep:     return "no sweep from the media plane";
+				case LidarPoll::Rejected:    return "sweep rejected by the tracker (stamp not advanced)";
+			}
+			return "?";
+		}
+		LidarPoll last_lidar_poll_ = LidarPoll::NoReader;
+
 		// ─── LiDAR stream watchdog ────────────────────────────────────────────
 		// If the LiDAR media stream stops producing while operating,
 		// hold the robot in a local emergency state until it recovers — never plan on
@@ -227,6 +249,8 @@ private:
 		std::chrono::steady_clock::time_point last_lidar_rx_{};
 		bool lidar_ever_received_ = false;
 		bool lidar_stalled_ = false;
+		std::chrono::steady_clock::time_point lidar_stall_since_{};
+		std::int64_t last_stall_log_ms_ = 0;
 
 		// Grace period before a Degraded (required-peer-lost) state actually tears down.
 		// A transient flap during startup handshake / DSR churn must NOT delete our own
@@ -243,7 +267,7 @@ private:
 		// cycle to the obstacle tracker (which then applies the dynamic room<-robot pose).
 		std::unique_ptr<rc::media::LidarPlaneReader> lidar_reader_;
 		void init_lidar_media();
-		bool poll_lidar_media();
+		LidarPoll poll_lidar_media();
 
 signals:
         void presenceReady();
