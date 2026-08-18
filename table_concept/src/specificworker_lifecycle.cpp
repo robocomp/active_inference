@@ -302,21 +302,17 @@ void SpecificWorker::run_instance_tracker()
 // consuming the target (turn the ZED to the bearing) is step 4.
 void SpecificWorker::process_ricoh_bearings()
 {
-    // Peripheral (ricoh-360) channel. The 94-line copy that used to live here — in four agents, with
-    // three different behaviours across the seven — is now common/peripheral_channel. See that header
-    // for why: same sensor, same question, three answers, and a comment in each copy naming a module
-    // none of them called.
+    // Peripheral (ricoh-360) channel. gather → associate → confirm → what is left is ATTENTION: the whole
+    // sequence is SHARED (rc::peripheral::run_cycle). Only the track list and the confirm sink are table's.
     ricoh_attention_targets_.clear();
-    if (not inner_eigen_ or not mask_ingestor_)
+    if (not inner_eigen_ or not mask_ingestor_ or not fitter_)
         return;
     const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", 0);   // robot pose in room
     if (not rtb.has_value())
         return;
     const Eigen::Vector2f robot_xy{static_cast<float>(rtb.value()(0, 3)),
-                                  static_cast<float>(rtb.value()(1, 3))};
+                                   static_cast<float>(rtb.value()(1, 3))};
 
-    const auto dets = rc::peripheral::gather(mask_ingestor_->packet(), "table", robot_xy,
-                                             cfg_.ricoh_attention_conf);
     std::vector<rc::peripheral::TrackRef> tracks;
     tracks.reserve(fitter_->instances().size());
     for (const auto& [id, inst] : fitter_->instances())
@@ -325,17 +321,17 @@ void SpecificWorker::process_ricoh_bearings()
         tracks.push_back({id, {st.cx, st.cy}, 0.5f * std::sqrt(st.w * st.w + st.h * st.h)});
     }
 
-    rc::peripheral::Params pp;
-    pp.angular_margin_rad = cfg_.ricoh_attention_angle_margin_rad;
-    pp.range_band_m       = cfg_.ricoh_attention_range_band_m;
-    const auto res = rc::peripheral::associate(tracks, dets, robot_xy, pp);
-
-    // A MATCH IS EVIDENCE, not a no-op: confirm-only, e_free hard 0, so this channel can only push L up.
-    // A ricoh miss charges nothing — the 360 detector's p_detect at a given range is uncharacterised, and
-    // absence weighted by an unknown p_detect is the ratchet that has bitten this fleet before.
-    if (cfg_.ricoh_confirm_enabled)
-        for (const auto& cf : res.confirms)
+    const auto out = rc::peripheral::run_cycle(
+        mask_ingestor_->packet(), "table", robot_xy, tracks,
+        {.detect_conf        = cfg_.ricoh_attention_conf,
+         .angular_margin_rad = cfg_.ricoh_attention_angle_margin_rad,
+         .range_band_m       = cfg_.ricoh_attention_range_band_m},
+        [&](const rc::peripheral::Confirm& cf)
         {
+            // A MATCH IS EVIDENCE: confirm-only, e_free hard 0, so this channel can only push L up. A ricoh
+            // miss charges nothing — see the note on run_cycle for why there is no on_miss.
+            if (not cfg_.ricoh_confirm_enabled)
+                return;
             auto& insts = fitter_->instances();
             if (const auto it = insts.find(cf.track_id); it != insts.end())
             {
@@ -346,14 +342,13 @@ void SpecificWorker::process_ricoh_bearings()
                                                          /*e_free=*/0.0f, /*n_detectable=*/1, sm);
                 it->second.existence.integrate(ev, sm.detection_prob);
             }
-        }
+        });
 
-    for (const auto& at : res.attention)
-        ricoh_attention_targets_.push_back({at.azimuth_rad, at.range_m, at.confidence, {at.xy.x(), at.xy.y()}});
-    ev_g_.ricoh_attention = static_cast<int>(ricoh_attention_targets_.size());
-    // Both counts: gathered vs unassigned. Zero attention with non-zero dets means the channel
-    // is WORKING and everything it saw matched — the opposite conclusion from zero of both.
-    if (fitter_) fitter_->set_ricoh_counts(static_cast<int>(dets.size()), ev_g_.ricoh_attention);
+    ricoh_attention_targets_ = out.attention;
+    ev_g_.ricoh_attention    = static_cast<int>(ricoh_attention_targets_.size());
+    // Both counts: gathered vs unassigned. Zero attention with non-zero dets means the channel is WORKING
+    // and everything it saw matched — the opposite conclusion from zero of both.
+    fitter_->set_ricoh_counts(static_cast<int>(out.n_dets), ev_g_.ricoh_attention);
 }
 
 

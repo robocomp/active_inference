@@ -42,6 +42,8 @@
 #include <chrono>
 #include <fstream>
 
+#include "../../common/view_field/phantom_feed.h"   // rc::field — the learnt p_FA field (SHARED)
+
 #include <genericworker.h>
 #include <fps/fps.h>              // shared FPSCounter — logs "Period/Fps/cpu/mem" on std::cout each cycle
 #include <Eigen/Dense>
@@ -73,6 +75,7 @@
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include "../../common/concept_presence/concept_presence.h"   // rc::presence::ConceptProtocol (SHARED)
 #include "../../common/epistemic_step/epistemic_step.h"   // rc::epistemic::step (SHARED)
+#include "../../common/peripheral_channel/peripheral_channel.h"   // rc::peripheral:: (SHARED)
 
 // ─── SpecificWorker ──────────────────────────────────────────────────────────────────────────────
 
@@ -207,7 +210,13 @@ private:
     rc::HoodConfig                                         cfg_;
     rc::EpistemicPlanner                                    epistemic_planner_;
     std::unique_ptr<rc::HoodFitter>                        fitter_;    // active-inference fit core (owns instances)
-    rc::history::PhantomLog                             phantom_log_;   // shadow-mode birth/death record
+    rc::history::PhantomLog                             phantom_log_;
+    // LEARNT false-alarm field p_FA(world cell x view bearing x label). Fed by confident disconfirmations
+    // (a denial retro-labels the detections that gave birth to the object) and by verified instances.
+    // Consumed at ONE place: sm.clutter_prob in hood_existence. Persisted across runs — the value of the
+    // field is that it outlives the run that learnt it. Empty ⇒ every lookup returns the configured prior.
+    rc::field::ViewField p_fa_field_;
+    std::string          p_fa_path_ = "etc/p_fa_field.csv";   // shadow-mode birth/death record
     std::unique_ptr<rc::HoodExistence>                    existence_; // evidence-based removal (existence log-odds)
 
     // Live belief dashboard — its OWN top-level window (extracted from the DSR graph dock so it shows
@@ -223,9 +232,12 @@ private:
     // A ricoh detection has a reliable DIRECTION but a biased centroid/extent, so it never births/fits (that
     // caused duplicates + drift). Instead an UNASSIGNED ricoh bearing (no known hood lies along it) becomes an
     // attention target: "seek a ZED view in this direction to birth/confirm the hood" (peripheral→saccade→fovea).
-    struct RicohBearingTarget { float bearing_rad = 0.0f; float range_m = 0.0f; float confidence = 0.0f;
-                                Eigen::Vector2f xy = Eigen::Vector2f::Zero(); };
-    std::vector<RicohBearingTarget> ricoh_attention_targets_;   // unassigned ricoh bearings this cycle
+    // Unassigned ricoh bearings this cycle — the "go and check" candidates. ★The per-agent
+    // RicohBearingTarget that used to be declared here was a byte-identical copy of
+    // rc::peripheral::AttentionTarget in all four agents, and NOTHING reads its fields: only
+    // .size() is consumed, for the evidence counter. Kept (it is the hook the proto-object
+    // go-and-check work will consume) but on the shared type, so there is one definition.
+    std::vector<rc::peripheral::AttentionTarget> ricoh_attention_targets_;
     void process_ricoh_bearings();   // associate ricoh detections to hoods BY DIRECTION; collect the unassigned
     void log_detect_probe();         // rc::probe row per live instance: viewpoint + framing + detector outcome
     std::ofstream detect_probe_csv_;

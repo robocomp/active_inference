@@ -921,27 +921,11 @@ void SpecificWorker::modify_node_slot(std::uint64_t /*id*/, const std::string& /
 // whole point: the old path did work proportional to what every other agent was writing.
 void SpecificWorker::poll_affordance_protocol()
 {
-    if (not fitter_)
-        return;   // may be called before the fit core exists — same guard the slots carry
-
-    for (auto& [table_id, inst] : fitter_->instances())
-    {
-        // Affordance state machine: idle→pending→executing→satisfied, driven by the controller-owned
-        // active/pending flags on the affordance node. on_node_modified() re-reads them itself, so handing it
-        // the id every cycle is exactly what the signal used to do.
-        if (const auto aid = inst.affordance.node_id(); aid != 0)
-            inst.affordance.on_node_modified(aid);
-
-        // Mission controller clearing epistemic_pending on the table node itself. The signal carried the
-        // changed-attribute list so it could skip the read; polling just reads the flag, which is the same
-        // graph lookup the slot did once it decided to look.
-        if (auto node_opt = G->get_node(table_id); node_opt.has_value())
-        {
-            const auto v = G->get_attrib_by_name<epistemic_pending_att>(node_opt.value());
-            if (v.has_value() and not v.value())
-                inst.epistemic_pending = false;
-        }
-    }
+    if (not fitter_ or not G)
+        return;   // may be called before the fit core exists — the guard every graph reader here needs
+    // SHARED (common/object_affordance): see rc::poll_protocol for why this is POLLED and not driven by
+    // update_node_attr_signal, and for what happened to the one agent that had neither.
+    rc::poll_protocol(fitter_->instances(), *G);
 }
 
 void SpecificWorker::del_node_slot(std::uint64_t id)

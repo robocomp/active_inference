@@ -200,4 +200,46 @@ inline std::vector<Detection> gather(const MaskIngestor::MasksPacket& pkt,
     return out;
 }
 
+// ─── the whole per-cycle channel, in one call ─────────────────────────────────────────────────────────────
+//
+// gather → associate → hand each confirm to the agent → return what is left unassigned. Four agents ran
+// exactly this sequence around the two calls above and differed only in how they BUILD the track list (a
+// cabinet in kitchen mode associates against wall CELLS, not fitted instances, and its radius comes from
+// L/d where the box-shaped agents use w/h) and in where a confirm goes.
+//
+// ★A CONFIRM IS EVIDENCE, A MISS IS NOT. `on_confirm` is called per match and the agent integrates it
+// confirm-only (e_free hard 0), because the 360 detector's p_detect at a given range is UNCHARACTERISED and
+// absence weighted by an unknown p_detect is the ratchet that has bitten this fleet before. There is
+// deliberately no on_miss hook — the shape of the API is the argument.
+//
+// ★BOTH COUNTS COME BACK. Zero attention with non-zero dets means the channel is WORKING and everything it
+// saw matched — the opposite conclusion from zero of both, and a single number cannot tell them apart.
+struct CycleParams
+{
+    float detect_conf        = 0.0f;   // confidence floor for gather()
+    float angular_margin_rad = 0.0f;
+    float range_band_m       = 0.0f;
+};
+
+struct CycleOut
+{
+    std::vector<AttentionTarget> attention;    // unassigned bearings — "go and check" candidates
+    std::size_t n_dets = 0, n_tracks = 0, n_confirms = 0;
+};
+
+template <class OnConfirm>
+inline CycleOut run_cycle(const MaskIngestor::MasksPacket& pkt, std::string_view class_name,
+                          const Eigen::Vector2f& robot_xy, const std::vector<TrackRef>& tracks,
+                          const CycleParams& cp, OnConfirm&& on_confirm)
+{
+    const auto dets = gather(pkt, class_name, robot_xy, cp.detect_conf);
+    Params pp;
+    pp.angular_margin_rad = cp.angular_margin_rad;
+    pp.range_band_m       = cp.range_band_m;
+    const auto res = associate(tracks, dets, robot_xy, pp);
+    for (const auto& cf : res.confirms)
+        on_confirm(cf);
+    return {res.attention, dets.size(), tracks.size(), res.confirms.size()};
+}
+
 }   // namespace rc::peripheral

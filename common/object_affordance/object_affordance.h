@@ -150,4 +150,40 @@ private:
     void reset();
 };
 
+
+// ─── polling the controller-owned protocol flags ──────────────────────────────────────────────────────────
+//
+// ★POLLED, NOT PUSHED, AND THAT IS A DELIBERATE CHOICE. The obvious wiring is update_node_attr_signal →
+// on_node_modified. That signal fires for EVERY attribute change on EVERY node in the shared graph — the
+// robot pose, every LiDAR blob, every peer's diagnostics — and the agents that subscribed to it could starve
+// their own compute loop on the firehose. Reading the two flags we care about, once per cycle, is the same
+// graph lookup the slot performed once it decided to look, minus the traffic.
+//
+// ★bottle is the cautionary tale: it LOST the subscription and never gained the poll, so its
+// modify_node_attrs_slot sat implemented-and-connected-to-nothing and its affordance state machine never
+// advanced. Nothing failed loudly because everything safety-relevant re-reads the graph directly. Having one
+// definition of "how an agent learns the controller acted" is the point of this function existing.
+//
+// `Insts` is any map of object-node-id → instance exposing `.affordance` and `.epistemic_pending`.
+// MAIN-THREAD ONLY (graph reads).
+template <class Insts>
+inline void poll_protocol(Insts& instances, DSR::DSRGraph& G)
+{
+    for (auto& [object_id, inst] : instances)
+    {
+        // Affordance state machine: idle→pending→executing→satisfied, driven by the controller-owned
+        // active/pending flags ON THE AFFORDANCE NODE. on_node_modified() re-reads them itself, so handing it
+        // the id every cycle is exactly what the signal used to do.
+        if (const auto aid = inst.affordance.node_id(); aid != 0)
+            inst.affordance.on_node_modified(aid);
+
+        // The mission controller clearing epistemic_pending on the OBJECT node itself — a different node and
+        // a different flag from the pair above, which is why both reads are here rather than one.
+        if (auto node_opt = G.get_node(object_id); node_opt.has_value())
+            if (const auto v = G.get_attrib_by_name<epistemic_pending_att>(node_opt.value());
+                v.has_value() and not v.value())
+                inst.epistemic_pending = false;
+    }
+}
+
 }  // namespace rc

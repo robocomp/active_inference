@@ -138,6 +138,9 @@ void SpecificWorker::request_shutdown()
     save_dashboard_geometry();
     save_strip_geometry();       // …nor is the compact belief strip   // the standalone dashboard is not in `windows`, so save it explicitly
 
+    if (p_fa_field_.size() > 0 and p_fa_field_.save(p_fa_path_))
+        std::print("hood_concept: p_FA field saved ({} cells)\n", p_fa_field_.size());
+
     cleanup_owned_nodes();
 
     // Drop the LiDAR + RGB media subscribers BEFORE tearing down the graph/inner_eigen they read (each holds a
@@ -167,6 +170,10 @@ void SpecificWorker::terminal_shutdown()
 void SpecificWorker::initialize()
 {
     std::print("hood_concept: initialize()\n");
+    // The learnt p_FA field outlives the run. Absent file ⇒ empty field ⇒ estimate() returns the caller's
+    // prior for every cell ⇒ behaviour identical to before it existed.
+    if (p_fa_field_.load(p_fa_path_))
+        std::print("hood_concept: p_FA field loaded ({} cells)\n", p_fa_field_.size());
     GenericWorker::initialize();
 
     // One-shot belief self-check (pure Eigen; recovers a synthetic fridge pose+size from a box+clutter cloud,
@@ -264,7 +271,8 @@ void SpecificWorker::initialize()
     // Active-inference fit core. Owns the instance map; collaborates with the ingestor + scene graph.
     fitter_ = std::make_unique<rc::HoodFitter>(
         G, inner_eigen_.get(), cfg_, mask_ingestor_.get(), scene_graph_.get());
-    existence_ = std::make_unique<rc::HoodExistence>(G, cfg_);   // evidence-based removal (existence log-odds)
+    existence_ = std::make_unique<rc::HoodExistence>(G, cfg_);
+    existence_->set_p_fa_field(&p_fa_field_);   // consume the learnt field (see hood_existence.h)   // evidence-based removal (existence log-odds)
 
     // Part B: localization/chain covariance on the published RT edge (mirrors bottle_concept).
     gaussian_api_ = std::make_unique<DSR::InnerGaussianAPI>(G.get());
@@ -353,8 +361,15 @@ void SpecificWorker::log_phantom_event(std::string_view event, std::uint64_t id,
         e.in_fov_frac   = (inst->dbg_ex_sil_ntotal > 0)   // ★a FRACTION, not a probed/not-probed flag:
                         ? static_cast<float>(inst->dbg_ex_sil_ndet) / inst->dbg_ex_sil_ntotal : 0.0f;
         e.exist_logodds = inst->existence.logodds();
+        // Was it ever confirmed from a SECOND direction? If so this death is a departure, not a
+        // hallucination, and phantom_feed refuses to teach the p_FA field from it.
+        e.ever_verified = inst->ever_verified ? 1 : 0;
     }
     phantom_log_.write(e);
+    // ★THE SAME RECORD, NOW ALSO LEARNING. A confident denial retro-labels the detections at this
+    // (cell x bearing) as clutter; a death whose killing look could not resolve the object weighs 0 and
+    // teaches nothing. See common/view_field/phantom_feed.h for why that is a weight and not a threshold.
+    rc::field::note_phantom_event(p_fa_field_, "hood", e);
 }
 
 void SpecificWorker::compute()
@@ -922,27 +937,11 @@ void SpecificWorker::modify_node_slot(std::uint64_t /*id*/, const std::string& /
 // whole point: the old path did work proportional to what every other agent was writing.
 void SpecificWorker::poll_affordance_protocol()
 {
-    if (not fitter_)
-        return;   // may be called before the fit core exists — same guard the slots carry
-
-    for (auto& [hood_id, inst] : fitter_->instances())
-    {
-        // Affordance state machine: idle→pending→executing→satisfied, driven by the controller-owned
-        // active/pending flags on the affordance node. on_node_modified() re-reads them itself, so handing it
-        // the id every cycle is exactly what the signal used to do.
-        if (const auto aid = inst.affordance.node_id(); aid != 0)
-            inst.affordance.on_node_modified(aid);
-
-        // Mission controller clearing epistemic_pending on the hood node itself. The signal carried
-        // the changed-attribute list so it could skip the read; polling just reads the flag, which is the
-        // same graph lookup the slot did once it decided to look.
-        if (auto node_opt = G->get_node(hood_id); node_opt.has_value())
-        {
-            const auto v = G->get_attrib_by_name<epistemic_pending_att>(node_opt.value());
-            if (v.has_value() and not v.value())
-                inst.epistemic_pending = false;
-        }
-    }
+    if (not fitter_ or not G)
+        return;   // may be called before the fit core exists — the guard every graph reader here needs
+    // SHARED (common/object_affordance): see rc::poll_protocol for why this is POLLED and not driven by
+    // update_node_attr_signal, and for what happened to the one agent that had neither.
+    rc::poll_protocol(fitter_->instances(), *G);
 }
 
 void SpecificWorker::del_node_slot(std::uint64_t id)

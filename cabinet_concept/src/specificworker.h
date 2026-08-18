@@ -71,6 +71,7 @@
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include "../../common/concept_presence/concept_presence.h"   // rc::presence::ConceptProtocol (SHARED)
 #include "../../common/epistemic_step/epistemic_step.h"   // rc::epistemic::step (SHARED)
+#include "../../common/peripheral_channel/peripheral_channel.h"   // rc::peripheral:: (SHARED)
 
 // ─── SpecificWorker ──────────────────────────────────────────────────────────────────────────────
 
@@ -255,9 +256,12 @@ private:
     // A ricoh detection has a reliable DIRECTION but a biased centroid/extent, so it never births/fits (that
     // caused duplicates + drift). Instead an UNASSIGNED ricoh bearing (no known cabinet lies along it) becomes an
     // attention target: "seek a ZED view in this direction to birth/confirm the cabinet" (peripheral→saccade→fovea).
-    struct RicohBearingTarget { float bearing_rad = 0.0f; float range_m = 0.0f; float confidence = 0.0f;
-                                Eigen::Vector2f xy = Eigen::Vector2f::Zero(); };
-    std::vector<RicohBearingTarget> ricoh_attention_targets_;   // unassigned ricoh bearings this cycle
+    // Unassigned ricoh bearings this cycle — the "go and check" candidates. ★The per-agent
+    // RicohBearingTarget that used to be declared here was a byte-identical copy of
+    // rc::peripheral::AttentionTarget in all four agents, and NOTHING reads its fields: only
+    // .size() is consumed, for the evidence counter. Kept (it is the hook the proto-object
+    // go-and-check work will consume) but on the shared type, so there is one definition.
+    std::vector<rc::peripheral::AttentionTarget> ricoh_attention_targets_;
     void process_ricoh_bearings();   // associate ricoh detections to cabinets BY DIRECTION; collect the unassigned
     rc::TimeSeriesPlot*  ts_cov_plot_   = nullptr;   // belief uncertainty U(Σ) = Σ pos+size posterior std (m)
     rc::TimeSeriesPlot*  ts_res_plot_   = nullptr;   // residual point count
