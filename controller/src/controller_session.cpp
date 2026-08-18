@@ -603,6 +603,36 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     // the one the producer published.
     recheck_standpoint_on_approach(step, world_model, obstacle_tracker, timestamp_ms);
 
+    // ★ The re-check found the standpoint occupied and the only clear pose to be one the robot is
+    // already standing on. Report a REFUSAL rather than servicing the affordance from a viewpoint that
+    // shows nothing new. The producer de-prioritises that cell and offers another; the model check in
+    // formal/AffordanceProtocol.tla says a reporting consumer is sound for either value of the other
+    // two design choices, which is why this can be a refusal and not a silent skip.
+    if (approach_refuse_ and target.has_value())
+    {
+        if (graph_ != nullptr)
+            if (auto n = graph_->get_node(target->node_id); n.has_value())
+            {
+                auto node = n.value();
+                rc::affordance::write_outcome(*graph_, node, rc::affordance::Outcome::Refused);
+                graph_->add_or_modify_attrib_local<epistemic_refused_att>(node, true);
+                graph_->add_or_modify_attrib_local<epistemic_refused_x_m_att>(
+                    node, static_cast<float>(step.target.room_pos.x()));
+                graph_->add_or_modify_attrib_local<epistemic_refused_y_m_att>(
+                    node, static_cast<float>(step.target.room_pos.y()));
+                // Outcome BEFORE pending: pending is the level the producer watches, so the reverse
+                // order lets it read a completion whose outcome has not landed yet.
+                graph_->add_or_modify_attrib_local<epistemic_pending_att>(node, false);
+                graph_->add_or_modify_attrib_local<active_att>(node, false);
+                graph_->update_node(node);
+            }
+        affordance_manager.suppress_target(graph_, target->node_id, kUnreachableRounds);
+        current_plan_.reset();
+        plan_spline_valid_ = false;
+        stop(path_controller, motion_commander);
+        return std::nullopt;
+    }
+
     current_target_room_ = step.target.room_pos;
     step.target_changed = !last_target_info_.has_value()
                        || !ControllerWorldModel::same_target_instance(*last_target_info_, step.target);
@@ -1680,22 +1710,29 @@ void ControllerSession::feed_external_velocity_trace(const ControllerWorldModel 
                                                     ControllerDisplay &display,
                                                     std::uint64_t timestamp_ms)
 {
-    float adv = 0.f, rot = 0.f;
+    float ref_adv = 0.f, ref_rot = 0.f, meas_adv = 0.f, meas_rot = 0.f;
     bool fresh = false;
     if (graph_)
         if (const auto rid = world_model.graph_state().robot_id; rid != 0)
             if (const auto robot_node = graph_->get_node(rid); robot_node.has_value())
             {
-                adv = graph_->get_attrib_by_name<robot_ref_adv_speed_att>(*robot_node).value_or(0.f);
-                rot = graph_->get_attrib_by_name<robot_ref_rot_speed_att>(*robot_node).value_or(0.f);
-                // The reference carries its own write time, so staleness is measured against WHEN IT WAS
-                // WRITTEN rather than against whether the value happens to be non-zero — a joystick
-                // holding still writes a legitimate 0, and that must not read the same as nobody driving.
+                ref_adv = graph_->get_attrib_by_name<robot_ref_adv_speed_att>(*robot_node).value_or(0.f);
+                ref_rot = graph_->get_attrib_by_name<robot_ref_rot_speed_att>(*robot_node).value_or(0.f);
+                // ★AND WHAT THE BASE ACTUALLY DID. robot_ref_* turns out to be written by THIS AGENT
+                // only — measured 2026-08-18, the robot drove at 0.640 m/s with the reference at exactly
+                // 0.000 — so a panel fed from the reference alone is blank for a whole manual drive.
+                // robot_current_* is written by robot_concept whoever is driving, and is the only
+                // universally available witness. The display keeps it on its OWN series because it is
+                // MEASURED, not commanded, and folding it in would change what the panel means.
+                meas_adv = graph_->get_attrib_by_name<robot_current_advance_speed_att>(*robot_node).value_or(0.f);
+                meas_rot = graph_->get_attrib_by_name<robot_current_angular_speed_att>(*robot_node).value_or(0.f);
+                // Staleness against WHEN THE REFERENCE WAS WRITTEN, not against whether it is non-zero:
+                // a commander holding still writes a legitimate 0, and that must not read as nobody driving.
                 if (const auto ts = graph_->get_attrib_by_name<robot_ref_speed_timestamp_att>(*robot_node);
                     ts.has_value() and timestamp_ms >= *ts)
                     fresh = timestamp_ms - *ts <= kRefSpeedStaleMs;
             }
-    display.update_velocity_trace_external(adv, rot, fresh);
+    display.update_velocity_trace_external(ref_adv, ref_rot, fresh, meas_adv, meas_rot);
 }
 
 // ── THE STANDPOINT, RE-ASKED IN THE LAST METRES AGAINST EVIDENCE THAT HAS NOT FADED ──────────────
@@ -1725,6 +1762,7 @@ void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &s
                                                        ControllerObstacleTracker &obstacle_tracker,
                                                        std::uint64_t timestamp_ms)
 {
+    approach_refuse_ = false;
     const float window = params_ != nullptr ? params_->affordance_approach_recheck_m : 0.f;
     if (window <= 0.f or not step.target.from_affordance) { approach_fix_.reset(); return; }
     // Keyed by NAME, like the reachability repair: the name is the identity that survives every repair
@@ -1861,6 +1899,31 @@ void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &s
         return;
     }
     if ((*fix - anchor).squaredNorm() <= 1e-6f) return;   // the standpoint is clear; nothing to do
+
+    // ★★ A POSE THE ROBOT IS ALREADY STANDING ON IS NOT A VIEWPOINT. nearest_free_where searches
+    // outward from the anchor, and when the object itself is what occupies the standpoint the nearest
+    // clear pose is very often the patch of floor under the robot — the one place guaranteed free of
+    // returns, because the robot's own body was subtracted from the cloud above.
+    // Taking that as the repair destroys the affordance exactly as thoroughly as dragging it out of the
+    // window does, and the two are the same mistake in opposite directions: the parameter's own comment
+    // bounds the displacement from ABOVE ("a viewpoint dragged further than the distance at which its
+    // problem was noticed is no longer that affordance's viewpoint") and nothing bounded it from below.
+    // An affordance exists to gain information BY MOVING SOMEWHERE. A viewpoint 0.10 m away yields the
+    // image the robot already has, so the robot "arrives" the instant it is told, the affordance
+    // completes without an observation, and the pair loops at the dwell period while the robot stands
+    // still. Measured 2026-08-18: `satisfied` reported at 4.91 m from the PUBLISHED target, completions
+    // every 3.0 s, 699 cycles at one pose of which 33 carried any command at all.
+    // ★ The test is the robot's OWN FOOTPRINT — no new constant, and it states the fact exactly: the
+    // body already occupies that pose, so there is nothing to drive to.
+    if (body.contains_yaw(*fix, step.robot_pose.pos, robot_yaw))
+    {
+        approach_refuse_ = true;
+        std::println("[approach] ⚠ '{}' at ({:.2f},{:.2f}) is occupied, and the only pose clear of the "
+                     "live returns ({:.2f},{:.2f}) is one the robot already occupies — that is no "
+                     "viewpoint. REFUSING so the producer offers a different cell.",
+                     step.target.node_name, anchor.x(), anchor.y(), fix->x(), fix->y());
+        return;
+    }
 
     approach_fix_ = ApproachFix{.pos = *fix, .name = step.target.node_name, .anchor = anchor};
     std::println("[approach] '{}' — {:.2f} m out, the live LiDAR says ({:.2f},{:.2f}) is OCCUPIED by "
