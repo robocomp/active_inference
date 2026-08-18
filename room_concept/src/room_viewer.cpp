@@ -145,11 +145,19 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
     // because the integral over the window is wrong even when every sample in it was fine (a stale
     // window bound, a clipped segment, a dropped sample). This is the last quantity before the
     // prediction, so a bad prediction can be attributed here or to the optimiser, not left ambiguous.
-    // Plotted per prediction interval, in metres and radians: at ~0.19 s and 0.4 m/s both channels sit
-    // around 0.08, so one axis keeps them comparable.
+    // Plotted per prediction interval, in metres and radians, on ONE axis so the two stay comparable.
+    // ★RANGE IS MEASURED, NOT ASSUMED. It was ±0.20 on the estimate that both channels "sit around
+    // 0.08" at 0.19 s and 0.4 m/s, but the interval is shorter than that in practice, so the traces
+    // used ~12% of the half-height and were unreadable. Over 95k logged samples spanning the fastest
+    // tour to date (0.75 m/s peak):
+    //     d|xy|     med 0.0003  p90 0.0230  p99 0.0495  max 0.0704
+    //     dtheta    med 0.0001  p90 0.0180  p99 0.0356  max 0.0480
+    // ±0.10 doubles the trace and still leaves 42% headroom above the all-time max, so it magnifies
+    // without ever clipping — re-measure before tightening it further, because the increments scale
+    // with speed and a faster route would spend that headroom.
     ts_plot_odo_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
     ts_plot_odo_->set_visible_window(60.f);
-    ts_plot_odo_->set_y_range(-0.20f, 0.20f);
+    ts_plot_odo_->set_y_range(-0.10f, 0.10f);
     ts_plot_odo_->add_series("d|xy| (m)",  QColor(41, 128, 185), 1.8f, 0);
     ts_plot_odo_->add_series("dtheta (rad)", QColor(192, 57, 43), 1.6f, 0);
     ts_plot_odo_->set_reference_line(0.f, QColor(170, 170, 170), "");
