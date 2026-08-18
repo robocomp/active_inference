@@ -1160,27 +1160,15 @@ int SpecificWorker::startup_check()
 // this one.
 void SpecificWorker::refresh_belief_strip()
 {
-    if (not belief_strip_)
-        return;
-    std::vector<rc::BeliefStripRow> rows;
-    rows.reserve(fitter_->instances().size());
-    for (const auto& [id, inst] : fitter_->instances())
-    {
-        rc::BeliefStripRow r;
-        r.node        = inst.node_name;
-        r.surprise    = inst.fe_surprise;
-        r.initialized = inst.ai2_initialized;
-        // Only once SEEDED: before that L is still the prior, and a confident-looking 0.50 for an instance
-        // that has never been judged is worse than the honest dash.
-        if (inst.existence_seeded)
+    // The loop, the REPORTED covariance, the creation-stamp birth time and update_view() are SHARED
+    // (common/dashboard/belief_strip.h). What stays is what only this agent knows: where p_exists
+    // comes from and which DOF table describes the belief.
+    rc::dash::fill_strip(belief_strip_, fitter_->instances(), *G,
+        [](rc::BeliefStripRow& r, const auto& inst)
+        {
             r.p_exists = inst.existence.p_exists();
-        const auto S = inst.ai2_belief.covariance();
-        rc::dash::fill_certainty(r, S, rc::kBottleDofs);
-        if (const auto n = G->get_node(inst.node_id); n.has_value())
-            r.birth_ms = G->get_attrib_by_name<timestamp_creation_att>(n.value()).value_or(0);
-        rows.push_back(std::move(r));
-    }
-    belief_strip_->update_view(rows);
+            rc::dash::fill_certainty(r, inst.ai2_belief.covariance(), rc::kBottleDofs);   // bottle has no covariance_reported()
+        });
 }
 
 void SpecificWorker::restore_strip_geometry()

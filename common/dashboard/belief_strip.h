@@ -71,6 +71,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <dsr/api/dsr_api.h>   // fill_strip reads timestamp_creation off the node
 
 namespace rc
 {
@@ -493,5 +494,47 @@ private:
     std::uint64_t next_order_  = 0;
     int           height_hint_ = 0;
 };
+
+
+// ─── filling the strip from an agent's instances ──────────────────────────────────────────────────────────
+//
+// The loop every agent wrote around update_view(). What is genuinely per-object is passed as `per_row`:
+//   · which DOF TABLE describes this belief — and cabinet chooses BETWEEN TWO per instance (a box run vs a
+//     wall run), which is the INSTANCE/RUN family boundary showing up in the dashboard;
+//   · where p_exists comes from — `existence.p_exists()` for the agents with an rc::exist channel, a sigmoid
+//     over `exist_logodds` for the ones that carry the log-odds directly (leave it NaN when the channel has
+//     not initialised: the widget reads NaN as "no existence belief yet" and inventing 0.5 would be a claim);
+//   · the optional `model` label.
+//
+// ★BIRTH TIME COMES FROM THE NODE, NOT FROM THE WIDGET. Reading timestamp_creation off the graph means `age`
+// survives a dashboard opened long after the object was born, or one this agent adopted. Absent ⇒ 0 ⇒ the
+// widget falls back to when it first saw the row and SAYS SO by measuring from there. Getting that provenance
+// consistent across seven copies is most of the reason this is shared.
+//
+// MAIN-THREAD ONLY (Qt widgets + graph reads).
+namespace dash   // beside fill_certainty, which the per-row hook calls
+{
+template <class Insts, class PerRow>
+inline void fill_strip(BeliefStrip* strip, const Insts& instances, DSR::DSRGraph& G, PerRow&& per_row)
+{
+    if (not strip)
+        return;   // headless (show_dashboard=false): nothing was built
+
+    std::vector<BeliefStripRow> rows;
+    rows.reserve(instances.size());
+    for (const auto& [id, inst] : instances)
+    {
+        BeliefStripRow r;
+        r.node        = inst.node_name;
+        r.surprise    = inst.fe_surprise;
+        r.initialized = inst.ai2_initialized;
+        per_row(r, inst);          // p_exists, the DOF table via fill_certainty, and any model label
+        if (const auto n = G.get_node(inst.node_id); n.has_value())
+            r.birth_ms = G.get_attrib_by_name<timestamp_creation_att>(n.value()).value_or(0);
+        rows.push_back(std::move(r));
+    }
+    strip->update_view(rows);
+}
+}  // namespace dash
 
 }  // namespace rc

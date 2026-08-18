@@ -244,26 +244,16 @@ void SpecificWorker::refresh_belief_strip()
         return;
     }
 
-    // Per-instance model (kitchen_model off): one row per cabinet instance.
-    rows.reserve(fitter_->instances().size());
-    for (const auto& [id, inst] : fitter_->instances())
-    {
-        rc::BeliefStripRow r;
-        r.node        = inst.node_name;
-        r.p_exists    = inst.existence.p_exists();
-        r.surprise    = inst.fe_surprise;
-        r.initialized = inst.ai2_initialized;
-
-        // The same REPORTED covariance the inspector and the NBV planner use, so the strip cannot
-        // disagree with either.
-        const auto S = inst.ai2_belief.covariance_reported();
-        rc::dash::fill_certainty(r, S, rc::kCabinetDofs);
-        if (const auto n = G->get_node(inst.node_id); n.has_value())
-            r.birth_ms = G->get_attrib_by_name<timestamp_creation_att>(n.value()).value_or(0);
-
-        rows.push_back(std::move(r));
-    }
-    belief_strip_->update_view(rows);
+    // Per-instance model (kitchen_model off): one row per cabinet instance. THIS branch is the INSTANCE
+    // family and uses the shared filler; the kitchen branch above cannot, because its unit is a CELL — no
+    // node, no node_name, no fe_surprise, no creation stamp to read an age from. That is the family boundary,
+    // not an omission.
+    rc::dash::fill_strip(belief_strip_, fitter_->instances(), *G,
+        [](rc::BeliefStripRow& r, const auto& inst)
+        {
+            r.p_exists = inst.existence.p_exists();
+            rc::dash::fill_certainty(r, inst.ai2_belief.covariance_reported(), rc::kCabinetDofs);
+        });
 }
 
 // Geometry persistence is SHARED (common/dashboard/window_geometry.h). The strip passes a max size: a

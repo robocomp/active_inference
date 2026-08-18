@@ -61,35 +61,16 @@ void SpecificWorker::refresh_evidence_monitor()
 // only pushes the current instant, on the same ~5 Hz tick as the two panels above.
 void SpecificWorker::refresh_belief_strip()
 {
-    if (not belief_strip_)
-        return;   // headless (cfg_.show_dashboard=false): nothing was built
-
-    std::vector<rc::BeliefStripRow> rows;
-    rows.reserve(fitter_->instances().size());
-    for (const auto& [id, inst] : fitter_->instances())
-    {
-        rc::BeliefStripRow r;
-        r.node        = inst.node_name;
-        r.model       = inst.subtype;
-        r.p_exists    = inst.existence.p_exists();
-        r.surprise    = inst.fe_surprise;
-        r.initialized = inst.ai2_initialized;
-
-        // Same REPORTED covariance the inspector and the NBV planner use (its yaw entry carries the
-        // discrete-mode entropy), so the strip cannot disagree with either.
-        const auto S = inst.ai2_belief.covariance_reported();
-        // `adequacy_gap_nats` returns 0 for a DOF table with no σ* anywhere — an empty sum — and 0 is
-        // exactly the value that means "adequate". Ask first, and carry "no demand" as the -1 sentinel.
-        rc::dash::fill_certainty(r, S, rc::kTableDofs);
-        // Birth from the node's own creation stamp, so `age` survives a dashboard opened long after the
-        // table was born. Absent (an older node, or one this agent adopted) ⇒ 0 ⇒ the widget falls back
-        // to when it first saw the row and says so by measuring from there.
-        if (const auto n = G->get_node(inst.node_id); n.has_value())
-            r.birth_ms = G->get_attrib_by_name<timestamp_creation_att>(n.value()).value_or(0);
-
-        rows.push_back(std::move(r));
-    }
-    belief_strip_->update_view(rows);
+    // The loop, the REPORTED covariance, the creation-stamp birth time and update_view() are SHARED
+    // (common/dashboard/belief_strip.h). What stays is what only this agent knows: where p_exists
+    // comes from and which DOF table describes the belief.
+    rc::dash::fill_strip(belief_strip_, fitter_->instances(), *G,
+        [](rc::BeliefStripRow& r, const auto& inst)
+        {
+            r.model    = inst.subtype;
+            r.p_exists = inst.existence.p_exists();
+            rc::dash::fill_certainty(r, inst.ai2_belief.covariance_reported(), rc::kTableDofs);
+        });
 }
 
 // Geometry persistence is SHARED (common/dashboard/window_geometry.h). The strip passes a max size: a
