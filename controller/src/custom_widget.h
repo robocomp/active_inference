@@ -59,15 +59,22 @@ public:
         pose_panel->setFrameShadow(QFrame::Raised);
 
         auto *pose_row = new QHBoxLayout(pose_panel);
-        pose_row->setContentsMargins(8, 4, 8, 4);
-        pose_row->setSpacing(6);
+        pose_row->setContentsMargins(4, 3, 4, 3);
+        pose_row->setSpacing(3);
 
         const auto make_lcd = [&](QWidget *parent, int digits, const QString &tip)
         {
             auto *lcd = new QLCDNumber(digits, parent);
             lcd->setSegmentStyle(QLCDNumber::Flat);
             lcd->setFrameShape(QFrame::NoFrame);
-            lcd->setMinimumSize(58, 26);
+            // ★WIDTH FOLLOWS THE DIGIT COUNT. It was a flat 58 px for every LCD, so a 5-digit reading
+            // reserved as much room as an 8-digit one and the row's MINIMUM width — which is what the
+            // window can never be dragged below — carried that slack seven times over.
+            lcd->setMinimumSize(9 * digits + 4, 24);
+            // ...and it must not grow past what it needs either: the default policy is Expanding, so a
+            // wide window handed the surplus to the LCDs rather than to the plots below, which is the
+            // other half of why this row looked spread out.
+            lcd->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
             lcd->setToolTip(tip);
             lcd->display(QStringLiteral("---"));
             return lcd;
@@ -91,7 +98,12 @@ public:
                                     " border-radius: 4px; padding: 2px 8px; }");
         pose_row->addWidget(alert_label_);
 
-        pose_row->addStretch();
+        // ★A FIXED GAP, NOT A STRETCH. Two addStretch() calls used to float the session pair mid-row and
+        // push the goal pair to the far right, which reads as three widely separated islands and gives
+        // the window no reason to be narrow. A fixed gap keeps the groups legibly apart while letting
+        // the row pack to its natural width, and the single trailing stretch below takes up whatever
+        // slack is left rather than distributing it between the numbers.
+        pose_row->addSpacing(14);
 
         // ── SESSION TOTALS ──────────────────────────────────────────────────────────────────────
         // Distance driven and time elapsed since the agent started — every mission, click target and
@@ -113,7 +125,7 @@ public:
         pose_row->addWidget(session_time_lcd_);
         pose_row->addWidget(new QLabel("mins.", pose_panel));
 
-        pose_row->addStretch();
+        pose_row->addSpacing(14);
 
         // Right end: what the ARRIVAL test is waiting on — remaining distance and heading error.
         pose_row->addWidget(new QLabel("d", pose_panel));
@@ -125,6 +137,8 @@ public:
             QStringLiteral("Angular error to the commanded facing yaw (deg).\n"
                            "Blank when the target carries none. Amber = rotating in place to align."));
         pose_row->addWidget(goal_theta_lcd_);
+        // The ONE stretch, at the end: slack goes here rather than between the readings.
+        pose_row->addStretch();
 
         main_layout->addWidget(pose_panel);
 
