@@ -98,6 +98,46 @@ guarded in hood alone.
 
 ---
 
+## ★ WHAT IS SHARED, AND WHAT STAYS DUPLICATED ON PURPOSE (Tier B closed 2026-08-19)
+
+A new agent inherits these whole — do not write them, call them. Each carries its own reasoning in its header;
+read that before overriding anything.
+
+| module | what it owns |
+|---|---|
+| `common/concept_presence` | the ENTIRE presence protocol + the gate state the transitions own |
+| `common/epistemic_step` | the per-instance epistemic cycle (cooldown, completion hold, gain floor, publish) |
+| `common/track/merge_instances.h` | the pairwise merge sweep, and the merge counter |
+| `common/agent_exit/terminal_exit.h` | the crash-free terminal exit |
+| `common/object_affordance` (`rc::poll_protocol`) | how an agent learns the controller acted |
+| `common/peripheral_channel` (`run_cycle`) | the ricoh-360 gather → associate → confirm → attention cycle |
+| `common/birth_surprise/birth_surprise_log.h` | the residual birth-surprise / birth-fusion probe + its 4 state fields |
+| `common/dashboard/belief_strip.h` (`fill_strip`) | the belief-strip row loop and birth-time provenance |
+| `common/phantom_log/observer_pose.h` | the observer pose stamped on every phantom event |
+| `common/graph_layout` | re-running the graph-view layout |
+
+★★**AND THIS IS THE FLOOR — the following stay per-agent, deliberately. Do not "finish the job" on them.**
+Each was measured and rejected: a shared version would need as many callbacks as it saves lines, which buys
+indirection and no safety.
+
+- **`retire_instance`, `del_node_slot`** — three member calls each (`affordance.remove` / `forget_node` /
+  `G->delete_node`). Verified equivalent across the fleet: `forget_node(id)` IS `instances_.erase(id)`.
+- **`request_shutdown`** — the teardown ORDER and which subscribers exist are genuinely per-agent. Only the
+  first line is universal (sever the graph callbacks) and it is now present in all seven.
+- **`step_convergence`** — already shared as `rc::converge::step`. What is left is the per-object STATE DELTA,
+  which is that module's declared seam: a hood adds z_top, a refrigerator leg_inset, a chair its seat dims.
+- **`merge_overlapping_instances`, `log_phantom_event`, `refresh_belief_strip`, `process_ricoh_bearings`,
+  `step_epistemic`** — the spine is shared; the residue is the per-object decision, field mapping or track
+  construction each hands to it. That residue IS the object model.
+- **`specificworker_presence.cpp` (~310 lines)** — looks like a prize and is not: it already delegates. What
+  remains is virtual-override glue that only a base class could remove, and a base class here would couple the
+  generated skeleton to the shared core.
+- **`epistemic_planner.*`** — each agent's planner AND its `EpistemicProposal` genuinely differ (5 fields for
+  bottle/chair/door, 10 for cabinet, 13-14 for hood/refrigerator/table). A separate job, not this one.
+
+★**Measured floor: 25-34% of each agent's `.cpp` body is lines that 5+ agents share, and that number is now
+mostly the object model itself.** If a sweep shows a new hot spot, extract it; do not re-litigate the list above.
+
 ## The belief core — shared recursive-Laplace AI2 (the ONLY lineage)
 
 `table_concept`, `chair_concept`, and `bottle_concept` are now **all** the same pattern; the old
