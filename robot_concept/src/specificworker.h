@@ -117,6 +117,17 @@ private:
 		// producers (helios + bpearl). "auto" negotiate, "ice" always bridge, "dds" never bridge.
 		std::string LIDAR_SOURCE  = "auto";
 		bool        ENABLE_IMU    = true;   // IMU sample        (rc/imu/data)
+		// IMU source selector (Media.imu_source): mirror of the above for the IMU plane.
+		//   "auto"/"ice": robot_concept reads the IMU over its Ice proxy and publishes rc/imu/data.
+		//   "dds"        : an EXTERNAL IMU component owns that topic — do not publish over it, only
+		//                  relay/monitor. This is the real-robot arrangement, where the IMU component
+		//                  publishes to the topic directly and a consumer cannot tell the difference.
+		// ⚠ "auto" cannot yet NEGOTIATE for the IMU the way it does for zed/ricoh/lidar: negotiation
+		// asks the producer over a MediaPlaneDDS Ice proxy, and there is no such proxy generated for an
+		// IMU component. With no proxy the group simply never sees a producer, so "auto" behaves as
+		// "ice". Said plainly here rather than left to look like a bug: use "dds" explicitly when an
+		// external IMU owns the topic.
+		std::string IMU_SOURCE    = "auto";
 		// Zero-copy SHM data-sharing QoS (Media.data_sharing). Default OFF = churn-safe
 		// (one memcpy/frame over the SHM transport). Set true ONLY on a static, non-churning
 		// topology to test true zero-copy loans — see rc::media::PublisherConfig::data_sharing.
@@ -187,6 +198,9 @@ private:
 	// false once BOTH lidar3d_dds (helios+bpearl) are detected on DDS — robot_concept relays
 	// their descriptors to the 'helios'/'bpearl' nodes and stops bridging LiDAR. True = we bridge.
 	std::atomic<bool> bridge_lidar_{true};
+	// Same for the IMU plane. false ⇒ an external component publishes rc/imu/data and this agent must
+	// not publish over it. See Params::IMU_SOURCE for why "auto" cannot negotiate here yet.
+	std::atomic<bool> bridge_imu_{true};
 
 	// Media plane (zero-copy DDS); RGBD pixels leave the DSR graph here.
 	SensorMediaPublisher media_;

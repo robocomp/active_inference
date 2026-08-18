@@ -168,13 +168,16 @@ void SpecificWorker::initialize()
 	params.ZED_SOURCE   = read_media_source(configLoader, "Media.zed_source");
 	params.RICOH_SOURCE = read_media_source(configLoader, "Media.ricoh_source");
 	params.LIDAR_SOURCE = read_media_source(configLoader, "Media.lidar_source");
+	params.IMU_SOURCE   = read_media_source(configLoader, "Media.imu_source");
 	bridge_zed_.store(  params.ZED_SOURCE   != "dds", std::memory_order_relaxed);
 	bridge_ricoh_.store(params.RICOH_SOURCE != "dds", std::memory_order_relaxed);
 	bridge_lidar_.store(params.LIDAR_SOURCE != "dds", std::memory_order_relaxed);
 	qInfo() << "[Media] sources: zed =" << QString::fromStdString(params.ZED_SOURCE)
 	        << "| ricoh =" << QString::fromStdString(params.RICOH_SOURCE)
 	        << "| lidar =" << QString::fromStdString(params.LIDAR_SOURCE)
-	        << "(auto=negotiate, ice=always bridge, dds=always monitor external)";
+	        << "| imu =" << QString::fromStdString(params.IMU_SOURCE)
+	        << "(auto=negotiate, ice=always bridge, dds=always monitor external;"
+	        << "imu has no producer proxy yet, so auto == ice there)";
 
 	qInfo() << "[DSR Upload Rates] rgb=" << params.DSR_RGB_FPS
 	        << "depth=" << params.DSR_DEPTH_FPS
@@ -1030,7 +1033,7 @@ void SpecificWorker::build_media_groups()
 	};
 
 	media_groups_.clear();
-	media_groups_.reserve(3);
+	media_groups_.reserve(4);
 
 	auto& zed = media_groups_.emplace_back();
 	zed.tag = "ZED"; zed.bridge = &bridge_zed_; zed.source = &params.ZED_SOURCE;
@@ -1047,6 +1050,17 @@ void SpecificWorker::build_media_groups()
 	lidar.enabled = &params.ENABLE_LIDAR; lidar.advertise_node = "lidar3D"; lidar.advertise_streams = {"lidar"};
 	add_plane(lidar, "helios", &mediaplanedds2_proxy);
 	add_plane(lidar, "bpearl", &mediaplanedds3_proxy);
+
+	// IMU. No MediaPlaneDDS proxy exists for an IMU producer, and negotiate() already tolerates that:
+	// it only launches a query when the plane HAS a live proxy, so this plane never reports present,
+	// all_up stays false, and "auto" therefore keeps bridging — the correct reading of
+	// "no external producer was found". Forced "dds" still works, because that branch sets the bridge
+	// flag without consulting any proxy. So the table entry is honest as it stands and gains real
+	// negotiation the day an IMU component grows a MediaPlaneDDS endpoint.
+	auto& imu = media_groups_.emplace_back();
+	imu.tag = "IMU"; imu.bridge = &bridge_imu_; imu.source = &params.IMU_SOURCE;
+	imu.enabled = &params.ENABLE_IMU; imu.advertise_node = "imu"; imu.advertise_streams = {"imu"};
+	add_plane(imu, "imu", nullptr);
 
 	// Resolve each plane's MediaPlaneDDS ICE port from its proxy string ("… -p 12002 …") so the mind
 	// view can fuse the SHM producer node with its mediaplanedds:<port> endpoint. Parsed once here.
@@ -1553,7 +1567,10 @@ void SpecificWorker::read_imu_thread()
 		}
 
 		// --- Media plane: publish the IMU sample (tiny fixed payload), stamped per-frame ---
-		if (media_.imu_ready())
+		// bridge_imu_ false ⇒ an external component owns rc/imu/data (Media.imu_source = "dds").
+		// Publishing anyway would put two producers on one topic, and a consumer cannot tell which
+		// sample it got — the failure would look like an intermittently wrong IMU, not a duplicate.
+		if (media_.imu_ready() and bridge_imu_.load(std::memory_order_relaxed))
 		{
 			SensorMediaPublisher::ImuFrameView v;
 			// The acc substruct carries the freshest capture stamp; all substructs
