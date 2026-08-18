@@ -47,3 +47,10 @@ __pycache__/
 
 # Scratch / throwaway experiments
 caca/
+
+# Large non-source blobs. GitHub HARD-REJECTS any file over 100 MB, so one of these in a
+# commit blocks the whole push — retina/models.tar.gz is 1.3 GB. These are build/runtime
+# assets fetched or produced locally, not repository content.
+**/models.tar.gz
+# Captured frame dumps (retina/etc/depth_frames held 1108 jpgs).
+**/etc/depth_frames/
