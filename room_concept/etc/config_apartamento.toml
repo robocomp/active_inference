@@ -200,7 +200,27 @@ MotionPreintegration   = true   # 2026-08-13 LANDED ON. The controlled A/B (same
 # PreintOdomSigmaVLong = 0.0894
 # PreintOdomSigmaOmega = 0.0447   # rad/√s — derived from RotationNoiseBase/√0.05
 # PreintOdomScaleV     = 0.08     # = OdomNoiseTrans
-# PreintOdomScaleOmega = 0.0640   # = hypot(OdomNoiseRot 0.04, EncoderRotSlipK 0.05)
+# ★★ MEASURED 2026-08-18, and it is the ONLY Preint* value here that is no longer a translation of
+# the legacy constants. The derived default is hypot(OdomNoiseRot 0.04, EncoderRotSlipK 0.05) = 0.0640
+# — but both of those describe the WHEEL channel (EncoderRotSlipK is named for encoder slip), and the
+# pipeline has not taken heading from the wheels since the gyro path landed: imu_cover measures 0.98.
+#
+# TWO CLOSURE PIVOTS, four turns each, net travel 0.040 and 0.118 m, closing to within 0.049 turn
+# (17 deg on 1440, so the test resolves to ~1.2%):
+#     gyro/truth 1.0114 and 1.0172  ->  the gyro is ~1.4% high, i.e. accurate to within ~2%
+#     wheel/truth 1.2302 (with +0.06 injected) and 1.1450 (clean)
+# So the prior was ~4.5x looser than the channel it actually describes. 0.02 sits above the measured
+# 1.4% AND above the test's own 1.2% resolution, so it stays conservative while tightening 3.2x.
+#
+# WHY IT MATTERS BEYOND THE MOTION FACTOR: an over-loose rotation prior leaves the factor
+# under-confident in heading, which inflates sigma_theta — and since the RT covariance packing fix
+# (69cb5e3) sigma_theta actually REACHES the controller, where adv_scale <- rot_scale^(0.5*turning)
+# charges forward speed for heading uncertainty. A loose prior here costs tour time.
+#
+# ⚠ UNRUN. A/B on the same tour route: watch sigma_th (pose_theta_std_rad in the controller's
+# profile.csv), unc_adv_scale, and tour duration. Revert by commenting this line out — the derivation
+# in room_config.cpp then takes over again.
+PreintOdomScaleOmega = 0.02
 # PreintCmdSigmaVLat   = 0.2236   # = CmdNoiseBase 0.05 / √0.05
 # PreintCmdSigmaVLong  = 0.2236
 # PreintCmdSigmaOmega  = 0.0447
