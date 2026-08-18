@@ -1038,10 +1038,11 @@ void SpecificWorker::step_epistemic(rc::BottleInstance& inst)
         return prop;
     };
 
-    hooks.record = [&](const rc::EpistemicProposal& published, float /*raw_gain*/)
+    hooks.record = [&](const rc::EpistemicProposal& published, float raw_gain)
     {
         inst.last_epistemic_gain = published.epistemic_gain;   // expose to the dashboard
-        inst.dbg_nbv_gain        = published.epistemic_gain;   // the value actually published
+        inst.dbg_nbv_gain_raw    = raw_gain;                   // what the belief asked for
+        inst.dbg_nbv_gain_pub    = published.epistemic_gain;   // what the controller will see
     };
 
     hooks.on_affordance_created = [this] { trigger_graph_layout_twopi(); };

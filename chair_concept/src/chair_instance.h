@@ -77,7 +77,13 @@ struct ChairInstance
     // (efe_score = gain − lambda_cost*dist, lambda_cost = 0.2/m, switch_margin = 0.5). Logged because
     // cross-agent selection was UNAUDITABLE: door was the only agent recording its gain, so "why does the
     // robot never visit a door" could not be answered against what a table or a fridge actually offers.
-    float dbg_nbv_gain = 0.0f;
+    // ★TWO GAINS, TWO COLUMNS — the single `dbg_nbv_gain` that used to be here meant the RAW planner gain in
+    // hood/refrigerator/table and the PUBLISHED one in bottle/cabinet/chair, because the mirror sat on
+    // opposite sides of the cooldown suppression. The same column therefore answered two different questions
+    // depending on which log you opened, and during a cooldown hold the two differ by the whole gain.
+    float dbg_nbv_gain_raw = 0.0f;   // ΔH the planner computed — "how uncertain is the belief?"
+    float dbg_nbv_gain_pub = 0.0f;   // after the cooldown suppression and the verification floor: the number
+                                     // the controller actually ranks on — "why did/didn't the robot come?"
 
     int  last_frame_seen    = -1;     // last_sensing_frame_att value read
     int  matched_frames     = 0;      // frames with fresh sensing data

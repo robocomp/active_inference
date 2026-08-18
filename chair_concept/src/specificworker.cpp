@@ -1709,10 +1709,11 @@ void SpecificWorker::step_epistemic(rc::ChairInstance& inst, DSR::Node& node)
         return prop;
     };
 
-    hooks.record = [&](const rc::EpistemicProposal& published, float /*raw_gain*/)
+    hooks.record = [&](const rc::EpistemicProposal& published, float raw_gain)
     {
         scene_graph_->write_epistemic_proposal(node, published);
-        inst.dbg_nbv_gain = published.epistemic_gain;   // the value actually published
+        inst.dbg_nbv_gain_raw = raw_gain;                     // what the belief asked for
+        inst.dbg_nbv_gain_pub = published.epistemic_gain;     // what the controller will see
     };
 
     hooks.on_affordance_created = [this] { trigger_graph_layout_twopi(); };

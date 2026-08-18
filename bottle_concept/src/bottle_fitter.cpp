@@ -517,7 +517,7 @@ void BottleFitter::log_ai2_csv(const BottleInstance& inst, int point_count, floa
         ai2_csv_ << "cycle,node,pts,R,energy,fe_baseline,fe_surprise,clutter_frac,frames_converged,sil_rays";   // sil_rays = silhouette edge rays folded
         for (const auto& d : kDof) ai2_csv_ << ",state_" << d.name;
         for (const auto& d : kDof) ai2_csv_ << ",std_"   << d.name;   // posterior std (m) = sqrt(Σ_jj)
-        ai2_csv_ << ",chain_xx,chain_yy,lidar_rays,lidar_raw,lidar_resid_m,frames_diverged,nbv_gain,mover_p";
+        ai2_csv_ << ",chain_xx,chain_yy,lidar_rays,lidar_raw,lidar_resid_m,frames_diverged,nbv_gain_raw,nbv_gain_pub,mover_p";
         ai2_csv_ << '\n';
     }
 
@@ -530,7 +530,7 @@ void BottleFitter::log_ai2_csv(const BottleInstance& inst, int point_count, floa
     for (int j = 0; j < 5; ++j) ai2_csv_ << ',' << std::sqrt(std::max(0.0f, S(j, j)));
     ai2_csv_ << ',' << std::max(0.0f, inst.dbg_chain_cov_xx) << ',' << std::max(0.0f, inst.dbg_chain_cov_yy);
     ai2_csv_ << ',' << inst.dbg_lidar_rays << ',' << inst.dbg_lidar_raw << ',' << inst.dbg_lidar_resid_m << ',' << inst.frames_diverged;
-    ai2_csv_ << ',' << inst.dbg_nbv_gain;   // the PUBLISHED gain the controller ranks on
+    ai2_csv_ << ',' << inst.dbg_nbv_gain_raw << ',' << inst.dbg_nbv_gain_pub;
     // ★The CAUSE column. std_cx/std_cy rising with mover_p ~ 0 is not a moving bottle, it is a bug: the
     // position may only become volatile when something able to move it is in contact. Logged beside the
     // sigmas precisely so the two can never be read apart.

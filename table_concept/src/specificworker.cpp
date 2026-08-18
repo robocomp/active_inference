@@ -856,7 +856,8 @@ void SpecificWorker::step_epistemic(rc::TableInstance& inst, DSR::Node& node)
         // ⚠table logs the RAW gain (pre-suppression) where bottle/cabinet/chair log the published one — see
         // the divergence note in common/epistemic_step. Behaviour preserved here; resolve it deliberately.
         inst.dbg_nbv_standoff = published.chosen_standoff_m;
-        inst.dbg_nbv_gain     = raw_gain;
+        inst.dbg_nbv_gain_raw = raw_gain;                     // what the belief asked for
+        inst.dbg_nbv_gain_pub = published.epistemic_gain;     // what the controller will see
         inst.dbg_nbv_target_x = published.epistemic_target_x_m;
         inst.dbg_nbv_target_y = published.epistemic_target_y_m;
         inst.dbg_nbv_pdetect  = published.chosen_p_detect;

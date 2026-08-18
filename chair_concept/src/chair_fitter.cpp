@@ -604,7 +604,7 @@ void ChairFitter::log_ai2_csv(const ChairInstance& inst, int npts, float R, bool
                  // that were MISSING when the belief froze: which condition blocked, and whether the yaw cap
                  // was self-inflicted. oblq_eff is what actually feeds the yaw common-mode; obliquity_cos
                  // above is the (circular) point estimate, kept only for comparison.
-                 << "fixated,centroid_r,ego_lin,ego_ang,oblq_eff,nbv_gain,flip1,flip2,flip3,p_mode_max,view_spent_max\n";
+                 << "fixated,centroid_r,ego_lin,ego_ang,oblq_eff,nbv_gain_raw,nbv_gain_pub,flip1,flip2,flip3,p_mode_max,view_spent_max\n";
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
@@ -626,7 +626,7 @@ void ChairFitter::log_ai2_csv(const ChairInstance& inst, int npts, float R, bool
              << inst.ai2_belief.flip_acc()[3] << ','
              << (inst.dbg_fixated ? 1 : 0) << ',' << inst.last_centroid_radius << ','
              << ego_lin_mps_ << ',' << ego_ang_radps_ << ',' << inst.dbg_obliquity_eff << ','
-             << inst.dbg_nbv_gain << ','
+             << inst.dbg_nbv_gain_raw << ',' << inst.dbg_nbv_gain_pub << ','
              << inst.ai2_belief.flip_acc()[1] << ',' << inst.ai2_belief.flip_acc()[2] << ','
              << inst.ai2_belief.flip_acc()[3] << ','
              // ★BIND THE POSTERIOR. mode_posterior() returns std::array BY VALUE, so calling it twice —

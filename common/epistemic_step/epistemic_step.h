@@ -26,13 +26,16 @@
  * fields its planner actually computes — and no agent starts publishing a default-constructed stand-off band
  * it never calculated, which is what a uniform 11-field copy would have done to bottle, chair and door.
  *
- * ⚠KNOWN, DELIBERATELY PRESERVED DIVERGENCE — `record` receives BOTH gains. hood/refrigerator/table mirror
- * `dbg_nbv_gain` BEFORE the cooldown suppression and the verification pull (so their ai2_log column is the
- * RAW belief gain); bottle/cabinet/chair mirror it AFTER, and their comment says "the value actually
- * published". The same column therefore means two different things across the fleet, and during a cooldown
- * hold table logs a high gain while publishing 0. Both readings are defensible, so this extraction does NOT
- * pick one — it hands `record` the final proposal and the pre-adjustment gain and lets each agent keep its
- * present meaning. ★Resolve it deliberately (log both, in two columns) rather than by accident.
+ * ★★TWO GAINS, TWO COLUMNS — `record` receives BOTH, and both are logged. There USED to be one
+ * `dbg_nbv_gain` per agent, and it meant different things: hood/refrigerator/table mirrored it BEFORE the
+ * cooldown suppression and the verification floor (the RAW planner ΔH), bottle/cabinet/chair AFTER (the
+ * PUBLISHED value). The same `nbv_gain` column in ai2_log therefore answered two different questions
+ * depending on which agent's log you opened, and during a cooldown hold the two differ by the whole gain.
+ * Neither reading was wrong — they answer different questions, which is exactly why collapsing them into one
+ * column was. `record` now gets `published` and `raw_gain`, and every agent writes `nbv_gain_raw`
+ * (how uncertain is the belief?) beside `nbv_gain_pub` (what did the controller actually rank on?).
+ * ⚠The ambiguous `nbv_gain` column is GONE rather than kept as an alias — a name that meant two things must
+ * not survive the fix, or the ambiguity outlives the explanation.
  *
  * MAIN-THREAD ONLY: reads and writes the graph.
  */

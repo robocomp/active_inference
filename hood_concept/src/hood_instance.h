@@ -272,7 +272,13 @@ struct HoodInstance
     // cross-agent selection was UNAUDITABLE without it: door_concept was the only agent recording its gain,
     // so "why does the robot never visit a door" could not be answered — a door's 0.2 nats loses to 0.2/m
     // of travel within two metres, but nobody could compare that against what a table or a fridge offers.
-    float dbg_nbv_gain     = 0.0f;
+    // ★TWO GAINS, TWO COLUMNS — the single `dbg_nbv_gain` that used to be here meant the RAW planner gain in
+    // hood/refrigerator/table and the PUBLISHED one in bottle/cabinet/chair, because the mirror sat on
+    // opposite sides of the cooldown suppression. The same column therefore answered two different questions
+    // depending on which log you opened, and during a cooldown hold the two differ by the whole gain.
+    float dbg_nbv_gain_raw = 0.0f;   // ΔH the planner computed — "how uncertain is the belief?"
+    float dbg_nbv_gain_pub = 0.0f;   // after the cooldown suppression and the verification floor: the number
+                                     // the controller actually ranks on — "why did/didn't the robot come?"
     float dbg_nbv_vfov     = 0.0f;   // rad; 0 ⇒ the sensor model was incomplete and NO proposal was made
 };
 
