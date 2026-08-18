@@ -143,9 +143,14 @@ namespace rc::preint
         // R blows up with it, and the update fades out on its own. The crossover is not tuned — it
         // falls out where the two variances meet, at |v| ≈ sigma_v/√dt (~5 cm/s at 125 Hz), i.e. it
         // is set by the sensor's own noise density and sample rate.
+        // ★These are MEASURED, not assumed: the spread of the raw reported velocity over rows whose
+        // COMMAND is zero. On Shadow in sim, 83 791 such rows gave std 0.0202 m/s and 0.0323 rad/s.
+        // They were first set to 0.002 / 0.005 from a plausible-sounding "encoder quantisation"
+        // argument and were 10x and 6.5x too tight, which made the motion factor out-weigh the laser
+        // 7:1. Re-measure on any new platform; do not carry these over as if they were constants.
         bool  zupt_enabled   = true;
-        float zupt_sigma_v   = 0.002f;   // m/s   — residual linear velocity of a parked base
-        float zupt_sigma_omega = 0.005f; // rad/s — residual yaw rate of a parked base
+        float zupt_sigma_v   = 0.0202f;  // m/s   — residual linear velocity of a parked base
+        float zupt_sigma_omega = 0.0323f;// rad/s — residual yaw rate of a parked base
         // Lever arm converting between the two channels, so the rest hypothesis is about the WHOLE
         // BODY: a robot pivoting in place has v_lat = v_long = 0 yet is emphatically not at rest, and
         // its wheels are scrubbing. Without this, a pivot would be handed the parked translation noise.

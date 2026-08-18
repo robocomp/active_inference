@@ -283,8 +283,20 @@ PreintOdomScaleOmega = 0.02
 #   gn_selftest pins all four properties (bounded parked, fades out, a pivot is not rest, continuous
 #   under grid refinement).
 PreintZupt           = true
-PreintZuptSigmaV     = 0.002    # m/s   — residual linear velocity of a parked base (encoder quantisation)
-PreintZuptSigmaOmega = 0.005    # rad/s — residual yaw rate of a parked base (gyro output noise)
+# ★★MEASURED 2026-08-18, not guessed. Take every row whose COMMAND is exactly zero — 83 791 of
+# them across two runs — and the spread of the RAW reported velocity IS this sigma, by definition:
+#     odom_adv_raw   mean +0.000018   std 0.020200 m/s
+#     odom_rot_raw   mean -0.000106   std 0.032326 rad/s
+# The first values here were 0.002 / 0.005, guessed from "encoder quantisation" — 10.1x and 6.5x too
+# TIGHT, i.e. 100x and 42x over-confident in variance. The symptom was unmistakable once looked for:
+# loss_motion/loss_obs went from 0.30 (laser leading) to 7.19 (odometry leading it 7:1), the optimiser
+# started running 5.6% of frames instead of 0.3%, and the published parked sigma got WORSE, 62 -> 92 mm,
+# because a rigidly-welded newest pose inherits the window's uncertainty instead of being re-fixed by
+# the scan. A ZUPT that is too sure of itself replaces one bad prior with the opposite one.
+# ★Decide stillness from the COMMAND, never from the measurement — using the measurement to select
+# "parked" rows and then measuring their spread selects for small noise and biases sigma low.
+PreintZuptSigmaV     = 0.0202   # m/s   — measured residual linear velocity, commanded-zero rows
+PreintZuptSigmaOmega = 0.0323   # rad/s — measured residual yaw rate, commanded-zero rows
 # Lever arm coupling the two channels so a PIVOT cannot claim to be at rest: v_lat = v_long = 0 while
 # spinning, and the wheels are scrubbing. Shadow's wheel anchors are +-0.259 m (ShadowDiff.proto).
 PreintZuptLeverM     = 0.26

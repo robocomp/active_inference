@@ -499,10 +499,19 @@ int main()
             const float sx_free = std::sqrt(park_free.cov(0, 0));
             const float sx_zupt = std::sqrt(park_zupt.cov(0, 0));
             const float st_zupt = std::sqrt(park_zupt.cov(2, 2));
+            // ★Assert the MECHANISM, not a magic size. Parked, every sample's velocity variance
+            // collapses to the ZUPT's own, so the interval has a closed form: sigma = sigma_rest·√(dt·T).
+            // Checking against that pins the algebra and stays correct when sigma_rest is re-measured on
+            // another platform — an absolute bound would just re-encode today's number, which is exactly
+            // how the first version of this test came to enshrine a sigma_rest that was 10x too tight.
+            const float predicted = rc::preint::NoiseModel{}.zupt_sigma_v * std::sqrt(0.008f * 300.f);
+            const float rel_err   = std::abs(sx_zupt - predicted) / predicted;
             std::snprintf(buf, sizeof buf,
-                          "300 s parked: sigma_x %.3f m free-drift -> %.4f m with ZUPT, sigma_th %.4f rad",
-                          sx_free, sx_zupt, st_zupt);
-            check("ZUPT bounds the parked interval", sx_zupt < 0.01f and sx_free > 0.2f, buf);
+                          "300 s parked: sigma_x %.3f m free-drift -> %.4f m with ZUPT "
+                          "(closed form %.4f m, err %.1f%%), sigma_th %.4f rad",
+                          sx_free, sx_zupt, predicted, rel_err * 100.f, st_zupt);
+            check("ZUPT bounds the parked interval to sigma_rest*sqrt(dt*T)",
+                  rel_err < 0.05f and sx_zupt < 0.2f * sx_free, buf);
 
             // (b) Fades out with speed, on its own. No threshold: the gap closes because the rest
             // hypothesis' own variance grows with the observed motion.
@@ -524,7 +533,9 @@ int main()
             const float sx_still = std::sqrt(still.cov(0, 0));
             std::snprintf(buf, sizeof buf, "10 s: sigma_x %.4f m pivoting vs %.4f m truly still (%.0fx)",
                           sx_pivot, sx_still, sx_pivot / std::max(sx_still, 1e-9f));
-            check("a pivot is not mistaken for rest", sx_pivot > 20.f * sx_still, buf);
+            // The factor of separation is set by the lever arm against sigma_rest, so it moves whenever
+            // either is re-measured; what must hold is that a pivot is treated as MOTION, decisively.
+            check("a pivot is not mistaken for rest", sx_pivot > 5.f * sx_still, buf);
 
             // (d) Continuous in speed — the property that makes this a model term and not a switch.
             // ★A RELATIVE step size cannot test this: P⁺ rises quadratically off a tiny rest floor, so
