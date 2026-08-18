@@ -691,18 +691,87 @@ void SpecificWorker::on_render_tick()
                 if (rres and not rres->frame.rgbd.bgr.empty())
                 {
                     cv::Mat pano = rres->frame.rgbd.bgr;   // BGR panorama the worker processed
+
+                    // ★ONE clock for every echoed layer, advanced ONCE per distinct worker frame and
+                    // BEFORE any of them is drawn. The render timer and the ricoh worker run at different
+                    // rates, so keying on the stamp is what stops a slow render tick from ageing the
+                    // echoes several revolutions in place — or a fast one from never ageing them at all.
+                    // It must be advanced here, above the layers, because the semantic canvas is composed
+                    // before the detections are: deriving it inside the seg block left the semantic layer
+                    // testing last frame's stamp and never folding at all.
+                    const bool new_ricoh_frame = (rres->frame.stamp != ricoh_seg_stamp_);
+                    if (new_ricoh_frame)
+                    {
+                        ricoh_seg_stamp_ = rres->frame.stamp;
+                        ++ricoh_seg_tick_;
+                    }
                     // Dense ADE20K class map UNDER everything else, same order as the ZED window. This is
                     // the strip pass's own output: with it on you can see directly whether the model
                     // segments the hood and what it calls it — the agents' counters read zero whether the
                     // labels are wrong or the stage never ran, and could not tell those apart.
-                    // Only the scheduled strip is filled; the rest of the panorama is IGNORE and stays raw,
-                    // which also makes the round-robin window visible as it sweeps.
+                    // ★ECHOED PER STRIP, exactly like the detections above. The stage fills only the
+                    // scheduled strip and leaves the rest IGNORE, so drawing its output directly meant two
+                    // thirds of the panorama dropped back to raw pixels every frame — the same round-robin
+                    // flicker, over a much larger area. Accumulating each strip's labels into a persistent
+                    // canvas gives a complete, stable class image instead of a sweeping band.
+                    // DISPLAY ONLY: the map handed to SemanticMaskStage is still built fresh each frame,
+                    // which is the property SemanticStage360's header insists on — a component spanning
+                    // "what I see now" and "what I saw 100 ms ago" belongs to neither observation.
                     if (ricoh_semantic_overlay_enabled_ and rres->semantic
                         and not rres->semantic->labels.empty())
                         if (auto* s360 = dynamic_cast<rc::SemanticStage360*>(
                                 ricoh_worker_ ? ricoh_worker_->stage("semantic360") : nullptr);
                             s360 and s360->processor())
-                            pano = s360->processor()->compose_semantic_canvas(pano, *rres->semantic);
+                        {
+                            const cv::Mat& fresh_lab = rres->semantic->labels;
+                            const int ns = std::max(1, params.RICOH_YOLO_N_STRIPS);
+                            if (ricoh_sem_echo_.size() != fresh_lab.size()
+                                or ricoh_sem_echo_.type() != fresh_lab.type())
+                            {
+                                // Our OWN buffer (never the worker's) — see the cv::Mat rule in CLAUDE.md.
+                                ricoh_sem_echo_ = cv::Mat(fresh_lab.size(), fresh_lab.type(),
+                                                          cv::Scalar(rc::semantic::IGNORE_LABEL));
+                                ricoh_sem_seen_.assign(static_cast<std::size_t>(ns), -1);
+                            }
+                            if (static_cast<int>(ricoh_sem_seen_.size()) != ns)
+                                ricoh_sem_seen_.assign(static_cast<std::size_t>(ns), -1);
+
+                            // Fold on a NEW frame only — ricoh_seg_tick_ already advances once per
+                            // distinct worker stamp, so the two layers age on exactly the same clock.
+                            if (rres->semantic_fresh and new_ricoh_frame)
+                            {
+                                const int sw = std::max(1, fresh_lab.cols / ns);
+                                const std::vector<int>& looked = rres->strips_looked;
+                                const auto take = [&](int s)
+                                {
+                                    const int x0 = s * sw;
+                                    const int w  = (s == ns - 1) ? (fresh_lab.cols - x0) : sw;
+                                    if (w <= 0 or x0 + w > fresh_lab.cols) return;
+                                    const cv::Rect roi(x0, 0, w, fresh_lab.rows);
+                                    fresh_lab(roi).copyTo(ricoh_sem_echo_(roi));   // deep write into ours
+                                    ricoh_sem_seen_[static_cast<std::size_t>(s)] = ricoh_seg_tick_;
+                                };
+                                if (looked.empty())
+                                    for (int s = 0; s < ns; ++s) take(s);
+                                else
+                                    for (const int s : looked)
+                                        if (s >= 0 and s < ns) take(s);
+
+                                // Same staleness bound as the boxes: a strip unrefreshed for a full
+                                // revolution is cleared rather than left asserting an old class.
+                                for (int s = 0; s < ns; ++s)
+                                    if (ricoh_seg_tick_ - ricoh_sem_seen_[static_cast<std::size_t>(s)] >= ns)
+                                    {
+                                        const int x0 = s * sw;
+                                        const int w  = (s == ns - 1) ? (fresh_lab.cols - x0) : sw;
+                                        if (w > 0 and x0 + w <= fresh_lab.cols)
+                                            ricoh_sem_echo_(cv::Rect(x0, 0, w, fresh_lab.rows))
+                                                .setTo(rc::semantic::IGNORE_LABEL);
+                                    }
+                            }
+                            const rc::semantic::SemanticMap echoed{ricoh_sem_echo_, cv::Mat{}, 0};
+                            pano = s360->processor()->compose_semantic_canvas(pano, echoed);
+                        }
                     // Project the DSR scene (model boxes + room floor/ceiling/walls) onto the panorama
                     // when the Ricoh "Models" toggle is on. Draw on a clone (BGR) so we never mutate
                     // the worker's frame; the popup viewer converts BGR→RGB on display.
@@ -896,13 +965,9 @@ void SpecificWorker::on_render_tick()
                         if (static_cast<int>(ricoh_seg_echo_.size()) != n_strips)
                             ricoh_seg_echo_.assign(static_cast<std::size_t>(n_strips), {});
 
-                        // Fold a frame in ONCE. The render timer and the worker run at different rates,
-                        // so keying on the stamp is what stops a slow render tick from ageing the echo
-                        // several revolutions in place — or a fast one from never ageing it at all.
-                        if (rres->frame.stamp != ricoh_seg_stamp_)
+                        // Fold a frame in ONCE, on the shared clock advanced at the top of this block.
+                        if (new_ricoh_frame)
                         {
-                            ricoh_seg_stamp_ = rres->frame.stamp;
-                            ++ricoh_seg_tick_;
                             // ★Clear the strips that were LOOKED AT, not the ones that produced
                             // detections. A strip visited and found EMPTY must drop its echo, and only
                             // the schedule knows the difference between "nothing there now" and "not
@@ -926,35 +991,50 @@ void SpecificWorker::on_render_tick()
                             }
                         }
 
-                        std::vector<SegDetection> fresh, echo;
+                        std::vector<SegDetection> all;
                         for (const auto& e : ricoh_seg_echo_)
                         {
                             // One full revolution is the staleness bound, because that is exactly how
                             // long a direction can legitimately go unvisited. Nothing to tune.
                             if (ricoh_seg_tick_ - e.seen_at >= n_strips)
                                 continue;
-                            auto& dst = (e.seen_at == ricoh_seg_tick_) ? fresh : echo;
-                            dst.insert(dst.end(), e.dets.begin(), e.dets.end());
+                            all.insert(all.end(), e.dets.begin(), e.dets.end());
                         }
 
+                        // ★ONE compose over everything, at ONE strength. Splitting this into a dimmed
+                        // "echo" pass and a solid "fresh" pass is what made the first version still
+                        // flicker: each box then pulsed bright→dim→dim→bright at the strip period. A
+                        // detection now looks the same for its whole life and simply disappears when it
+                        // goes unrefreshed for a full revolution.
                         // pano is BGR; SegStage::compose is base-order-preserving and the popup viewer
                         // converts BGR→RGB on display, so keep everything BGR. (The old BGR2RGB pre-swap
                         // here double-converted once the producer began tagging its true RGB order.)
-                        cv::Mat shown = pano;
-                        if (not echo.empty())
-                        {
-                            // Blend the echo layer back toward the raw frame instead of drawing it at
-                            // full strength: a stale box must not look as authoritative as a live one.
-                            constexpr double kEchoAlpha = 0.45;
-                            cv::addWeighted(seg->compose(pano, echo), kEchoAlpha, pano, 1.0 - kEchoAlpha,
-                                            0.0, shown);
-                        }
-                        if (not fresh.empty())
-                            shown = seg->compose(shown, fresh);
-                        ricoh_viewer_->update_image(shown);
+                        pano = all.empty() ? pano : seg->compose(pano, all);
                     }
-                    else
-                        ricoh_viewer_->update_image(pano);
+
+                    // ── Which third is live, WITHOUT touching the objects ─────────────────────────
+                    // The echo above deliberately makes every detection look identical for its whole
+                    // life, which costs the one honest signal the old blinking carried: you could see
+                    // where the detector was actually looking. Put that back as a thin bar over the
+                    // scheduled strip. It sweeps, but it never modulates a detection, so it reads as
+                    // motion rather than as flicker — and a viewer must be able to tell a live region
+                    // from one being remembered.
+                    if (not rres->strips_looked.empty() and params.RICOH_YOLO_N_STRIPS > 1
+                        and not pano.empty())
+                    {
+                        pano = pano.clone();   // never draw into the worker's frame (CLAUDE.md cv::Mat rule)
+                        const int ns = params.RICOH_YOLO_N_STRIPS;
+                        const int sw = std::max(1, pano.cols / ns);
+                        for (const int st : rres->strips_looked)
+                        {
+                            if (st < 0 or st >= ns) continue;
+                            const int x0 = st * sw;
+                            const int w  = (st == ns - 1) ? (pano.cols - x0) : sw;
+                            if (w <= 0 or x0 + w > pano.cols) continue;
+                            cv::rectangle(pano, cv::Rect(x0, 0, w, 4), cv::Scalar(95, 211, 160), cv::FILLED);
+                        }
+                    }
+                    ricoh_viewer_->update_image(pano);
                 }
             }
         }
@@ -1280,6 +1360,12 @@ void SpecificWorker::compute()
             std::vector<SegDetection> ricoh_dets;
             if (auto rres = ricoh_worker_->latest_result(); rres and rres->masks and rres->bearings)
             {
+                // ★Log the 360 side too. The first run of detect_drops.csv came back with `source` = zed
+                // on all 34 832 semantic rows, because the only call sat on the ZED drain path — leaving
+                // the ONE camera whose drop behaviour we already know is defective (the min_area-over-the-
+                // full-canvas bug that was deleting the hood) unlogged. Placed on the PUBLISH path, not in
+                // the viewer block, so it records every frame rather than only while a popup is open.
+                log_detect_drops(rres->frame.stamp, /*is_360=*/true);
                 ricoh_dets   = std::move(*rres->masks);       // 1:1 with bearings (BearingStage order)
                 bearing_dets = std::move(*rres->bearings);
             }

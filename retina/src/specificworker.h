@@ -253,11 +253,25 @@ class SpecificWorker : public GenericWorker
         // about: a component spanning "what I see now" and "what I saw 100 ms ago" belongs to neither
         // observation. Echoes are drawn dimmed, and expire after one full revolution — the revisit period
         // IS the correct staleness bound, so nothing here needs a tuned timeout.
+        // ★★A DETECTION'S APPEARANCE MUST NOT CHANGE BETWEEN REFRESHES. The first cut of this drew the
+        // freshly-segmented strip solid and the echoed ones dimmed — which replaced an on/off blink with
+        // a bright/dim one at the SAME 6 Hz. Periodic modulation of the object is the flicker, whatever
+        // its amplitude. So everything within its staleness bound is drawn IDENTICALLY, and "which third
+        // is live right now" is shown by a separate sweeping marker that does not touch the detections.
         bool ricoh_seg_overlay_enabled_ = true;    // Ricoh-window "Seg" toggle (starts ON = current behaviour)
         struct RicohSegEcho { std::vector<SegDetection> dets; long long seen_at = -1; };
         std::vector<RicohSegEcho> ricoh_seg_echo_;      // indexed by strip
         long long                 ricoh_seg_tick_  = 0; // counts DISTINCT worker frames, not render ticks
         std::uint64_t             ricoh_seg_stamp_ = 0; // last frame stamp folded into the echo
+
+        // ── The SAME echo for the ADE20K canvas ────────────────────────────────────────────────
+        // The Sem360 overlay flickers for exactly the same reason and worse: only the scheduled strip is
+        // filled, so two thirds of the panorama drop back to raw pixels every frame. Persisting the label
+        // map per strip gives a complete, stable class image. DISPLAY ONLY — the map handed to
+        // SemanticMaskStage is still built fresh each frame, which is the property its header insists on
+        // (a component spanning two observations belongs to neither).
+        cv::Mat                ricoh_sem_echo_;    // CV_8UC1 panorama-sized, IGNORE where never seen
+        std::vector<long long> ricoh_sem_seen_;    // per strip, the tick its labels were written
         // ZED-window depth overlay: 0=off, 1=aligned model depth, 2=difference vs the ZED's own depth.
         // The ZED MEASURES depth, so it is the one place the model can be scored densely over a whole
         // frame instead of on the LiDAR's horizon stripe — mode 2 is that comparison made visible.
