@@ -281,6 +281,12 @@ void AffordanceManager::monitor_execution(const std::shared_ptr<DSR::DSRGraph> &
     {
         waiting_completion_ = false;
         completion_detected_ = true;
+        // Latch WHY it ended, at the same moment the completion is detected. Read here rather than
+        // when the caller gets round to consume_completion_event(): by then the producer may have
+        // re-published the affordance, which overwrites aff_outcome with the new attempt's value.
+        last_outcome_ = rc::affordance::Outcome::None;
+        if (const auto node = graph->get_node(managed_node_name_); node.has_value())
+            last_outcome_ = rc::affordance::read_outcome(node.value());
     }
     else if (!active)
         waiting_completion_ = false;
@@ -750,22 +756,31 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
     return std::nullopt;
 }
 
-void AffordanceManager::mark_reached(const std::shared_ptr<DSR::DSRGraph> &graph)
+void AffordanceManager::mark_reached(const std::shared_ptr<DSR::DSRGraph> &graph,
+                                     rc::affordance::Outcome outcome)
 {
     if (!graph || current_affordance_id_ == 0)
         return;
 
-    transition_to(State::Completing, "mark_reached called", current_affordance_id_, current_affordance_name_);
+    transition_to(State::Completing,
+                  std::string("mark_reached: ").append(rc::affordance::to_string(outcome)),
+                  current_affordance_id_, current_affordance_name_);
     // Remember it so the next selection cannot hand back the affordance that just finished.
     last_completed_id_ = current_affordance_id_;
 
     if (auto node_opt = graph->get_node(current_affordance_id_); node_opt.has_value())
     {
         auto node = node_opt.value();
+        // ★ THE OUTCOME GOES ON BEFORE THE FLAGS COME OFF, in the same update_node. Clearing
+        // epistemic_pending is what the producer's monitor watches for, so writing the outcome after
+        // it would race: the producer can observe the completion and read the PREVIOUS outcome (or
+        // none at all) in the window between two graph updates. One node write, no window.
+        rc::affordance::write_outcome(*graph, node, outcome);
         graph->add_or_modify_attrib_local<epistemic_pending_att>(node, false);
         graph->add_or_modify_attrib_local<active_att>(node, false);
         graph->update_node(node);
     }
+    last_outcome_ = outcome;
 
     current_affordance_id_ = 0;
     current_affordance_name_.clear();
@@ -773,10 +788,24 @@ void AffordanceManager::mark_reached(const std::shared_ptr<DSR::DSRGraph> &graph
     transition_to(State::Idle, "affordance completed and cleared");
 }
 
-void AffordanceManager::suppress_target(std::uint64_t node_id, int rounds)
+void AffordanceManager::suppress_target(const std::shared_ptr<DSR::DSRGraph> &graph,
+                                       std::uint64_t node_id, int rounds)
 {
     if (node_id == 0 or rounds <= 0)
         return;
+    // NOTE: this records the refusal, it does not RETIRE the offer — that is the refusal protocol's
+    // own step (REFUSAL_PLAN.md) and it changes what the producer must do. Recording is additive: a
+    // producer that ignores epistemic_refused behaves exactly as it does now.
+    // ★ A refusal is NOT a completion. Nothing was observed and nothing about the object changed —
+    // the only thing learned is that this STANDPOINT is not reachable, which is a fact about the
+    // approach, not about the belief.
+    if (graph)
+        if (auto node = graph->get_node(node_id); node.has_value())
+        {
+            auto n = node.value();
+            graph->add_or_modify_attrib_local<epistemic_refused_att>(n, true);
+            graph->update_node(n);
+        }
     // Take the LONGER of any existing suppression: two independent reports that this one is
     // unreachable should not shorten the wait.
     auto &r = unreachable_rounds_[node_id];

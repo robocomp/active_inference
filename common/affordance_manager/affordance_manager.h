@@ -11,6 +11,8 @@
 #include <string_view>
 #include <vector>
 
+#include "../affordance_protocol/affordance_protocol.h"   // rc::affordance::Outcome
+
 namespace DSR
 {
 class DSRGraph;
@@ -77,7 +79,10 @@ public:
     // Counted in selection ROUNDS rather than milliseconds so this stays clock-free — and it expires on
     // its own, because the world moves: an obstacle clears, the producer proposes a different viewpoint,
     // and the affordance deserves another chance without anyone having to remember to un-suppress it.
-    void suppress_target(std::uint64_t node_id, int rounds);
+    // graph may be null (the suppression still applies locally); when present the refusal is RECORDED
+    // on the node as epistemic_refused, which is a statement about the APPROACH — not a completion,
+    // and not a claim that anything was observed.
+    void suppress_target(const std::shared_ptr<DSR::DSRGraph> &graph, std::uint64_t node_id, int rounds);
 
     // Grounded EFE selection weights: G = λ_cost·nav_dist − epistemic_gain (nats). switch_margin is
     // the commitment hysteresis (a held affordance must be beaten by this many nats to be dropped).
@@ -103,7 +108,15 @@ public:
     // room origin (0,0), a real coordinate bias, not a disabled nav-cost.
     std::optional<Target> select_target(const std::shared_ptr<DSR::DSRGraph> &graph,
                                         std::optional<Eigen::Vector2f> robot_pos = std::nullopt);
-    void mark_reached(const std::shared_ptr<DSR::DSRGraph> &graph);
+    // ★ THE OUTCOME IS REQUIRED, NOT DEFAULTED. A default would let every existing call site keep
+    // compiling while silently claiming "satisfied", which is exactly the conflation this parameter
+    // exists to end — and it would be invisible, because the wrong value looks like a successful look.
+    // Making it explicit forces each terminal path to say what actually happened.
+    void mark_reached(const std::shared_ptr<DSR::DSRGraph> &graph, rc::affordance::Outcome outcome);
+
+    // Producer side: how the affordance this manager owns last ended. Valid after
+    // consume_completion_event() returns true; Outcome::None before any completion.
+    [[nodiscard]] rc::affordance::Outcome last_outcome() const { return last_outcome_; }
 
     // ── NO TWO IN A ROW ───────────────────────────────────────────────────────────────────────────
     // The affordance that was just completed is skipped by the next selection, however good its score.
@@ -153,6 +166,8 @@ private:
 
     std::optional<Target> read_target(const std::shared_ptr<DSR::DSRGraph> &graph, const DSR::Node &node) const;
     std::optional<DSR::Node> get_managed_node(const std::shared_ptr<DSR::DSRGraph> &graph);
+    rc::affordance::Outcome last_outcome_ = rc::affordance::Outcome::None;
+
     bool read_managed_flags(const std::shared_ptr<DSR::DSRGraph> &graph, bool &active, bool &pending);
 
     std::string managed_node_name_;

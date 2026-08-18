@@ -102,6 +102,27 @@ int main()
         check("a legitimate band on one attribute is NOT reported", validate_contract(sh, g).empty());
     }
 
+    std::printf("\noutcome vocabulary\n");
+    {
+        bool round_trip = true;
+        for (auto o : {Outcome::Satisfied, Outcome::Timeout, Outcome::Refused, Outcome::Abandoned})
+            round_trip = round_trip and outcome_from(to_string(o)) == o;
+        check("every outcome round-trips through its wire string", round_trip);
+    }
+    check("an absent outcome reads as None", outcome_from("") == Outcome::None);
+    // ★ The safe reading of "I do not understand what happened" is "nothing was observed": a producer
+    // built against an older protocol must not treat an outcome it cannot parse as evidence.
+    check("an UNKNOWN outcome reads as None, not as success",
+          outcome_from("some_future_value") == Outcome::None);
+    {
+        bool only_satisfied = observation_happened(Outcome::Satisfied)
+                          and not observation_happened(Outcome::Timeout)
+                          and not observation_happened(Outcome::Refused)
+                          and not observation_happened(Outcome::Abandoned)
+                          and not observation_happened(Outcome::None);
+        check("ONLY Satisfied counts as an observation", only_satisfied);
+    }
+
     std::printf("\n%s (%d failure%s)\n\n", failures == 0 ? "ALL PASS" : "FAILURES",
                 failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;

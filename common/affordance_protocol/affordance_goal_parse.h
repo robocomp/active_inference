@@ -174,4 +174,48 @@ validate_contract(const ContractShape& shape, const std::vector<GoalClause>& goa
     return problems;
 }
 
+
+// ─── how an affordance ENDED ──────────────────────────────────────────────────
+// Stamped by the executor at the terminal transition (aff_outcome), read by the producer.
+// ★ Completed alone conflates outcomes that mean OPPOSITE things to a producer: "I looked and saw"
+// against "I gave up". A producer that cannot tell them apart books an observation it never got and
+// retires the very affordance that would have gone back for it. Three agents made that conflation,
+// and they made it because the wire offered no way to distinguish the cases.
+enum class Outcome
+{
+    None,        // not terminal yet (attribute absent or empty)
+    Satisfied,   // the completion predicate held for stable_n cycles — an OBSERVATION happened
+    Timeout,     // the predicate never held within aff_timeout_ms — nothing was observed
+    Refused,     // the consumer could not get there (see epistemic_refused_*) — never attempted
+    Abandoned    // an operator or a higher-priority interrupt ended it
+};
+
+inline std::string_view to_string(Outcome o)
+{
+    switch (o)
+    {
+        case Outcome::Satisfied: return "satisfied";
+        case Outcome::Timeout:   return "timeout";
+        case Outcome::Refused:   return "refused";
+        case Outcome::Abandoned: return "abandoned";
+        default:                 return "";
+    }
+}
+inline Outcome outcome_from(std::string_view s)
+{
+    if (s == "satisfied") return Outcome::Satisfied;
+    if (s == "timeout")   return Outcome::Timeout;
+    if (s == "refused")   return Outcome::Refused;
+    if (s == "abandoned") return Outcome::Abandoned;
+    return Outcome::None;
+}
+
+/// Did anything get OBSERVED? The single question a producer asks, and the reason this enum exists.
+/// ★ Deliberately not "did it complete": every non-Satisfied outcome, INCLUDING an unrecognised one
+/// (Outcome::None from a future or malformed value), answers false. A producer running against a
+/// newer executor that stamps an outcome it does not know must not treat that as evidence — the safe
+/// reading of "I do not understand what happened" is "nothing was observed", which at worst sends the
+/// robot back to look again.
+[[nodiscard]] inline bool observation_happened(Outcome o) { return o == Outcome::Satisfied; }
+
 }  // namespace rc::affordance

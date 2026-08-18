@@ -457,6 +457,21 @@ inline Contract read_contract(const DSR::Node& node, std::string_view parent_typ
     return c;
 }
 
+// ─── outcome ⇄ affordance node (aff_outcome) ──────────────────────────────────
+// Written by the EXECUTOR at the terminal transition; read by the producer. Caller updates the node.
+inline void write_outcome(DSR::DSRGraph& G, DSR::Node& node, Outcome o)
+{
+    G.add_or_modify_attrib_local<aff_outcome_att>(node, std::string(to_string(o)));
+}
+
+inline Outcome read_outcome(const DSR::Node& node)
+{
+    const auto& attrs = node.attrs();
+    if (const auto it = attrs.find("aff_outcome"); it != attrs.end())
+        if (auto s = detail::attr_string(it->second)) return outcome_from(*s);
+    return Outcome::None;
+}
+
 // ─── viewpoint constraint ⇄ affordance node (aff_view_* attributes) ────────────
 // Producer stamps the object-relative viewpoint constraint; the controller reads it and resolves a
 // collision-free reachable pose. object_relative is wired as an int flag (0/1) so it rides the same

@@ -549,11 +549,24 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
 
     if (affordance_manager_.consume_completion_event())
     {
-        std::print("[planner] completion consumed -> target cleared, will re-select next cycle\n");
+        // ★ COMPLETED IS NOT NEUTRAL. refresh_belief() restarts the forget clock — it is this agent
+        // asserting "this region has just been observed, stop counting it as neglected". That is only
+        // true if the look SUCCEEDED. A contract that ran to timeout arrives at the standpoint and
+        // completes identically, and calling refresh_belief() on it marks a region fresh that nobody
+        // ever saw: the neglect drive is satisfied by the ATTEMPT, so the robot never returns and the
+        // one place it failed to observe becomes the one place it stops trying.
+        // clear_target() runs either way — the affordance is over regardless of how it ended, and
+        // holding a finished target would wedge the planner.
+        const auto outcome = affordance_manager_.last_outcome();
+        const bool observed = rc::affordance::observation_happened(outcome);
+        std::print("[planner] completion consumed (outcome={}) -> target cleared, {}\n",
+                   rc::affordance::to_string(outcome),
+                   observed ? "belief refreshed" : "belief NOT refreshed (nothing was observed)");
         std::fflush(stdout);
         planner.clear_target();
         planner.mark_and_refresh();   // keep path trail live in viewer
-        planner.refresh_belief();     // just finished exploring → belief fresh (restart forget clock)
+        if (observed)
+            planner.refresh_belief(); // just finished exploring → belief fresh (restart forget clock)
         return;
     }
 

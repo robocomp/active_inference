@@ -357,7 +357,7 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
                      "claim so another affordance can win. An affordance the body cannot reach advertises "
                      "gain it cannot deliver; grinding at it serves nothing.",
                      reject_affordance_name_, escapes_on_target_);
-        affordance_manager.suppress_target(reject_affordance_id_, kUnreachableRounds);
+        affordance_manager.suppress_target(graph_, reject_affordance_id_, kUnreachableRounds);
         affordance_manager.release_execution_claim(graph_);
         // Remember the spot as PUBLISHED, so the same proposal is recognised next time it arrives.
         if (last_raw_target_pos_.has_value())
@@ -448,7 +448,7 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
                              "to reach that spot {}x. Skipping it without driving there.",
                              target->node_name, target->room_pos.x(), target->room_pos.y(), spot->hits);
             }
-            affordance_manager.suppress_target(target->node_id, kUnreachableRounds);
+            affordance_manager.suppress_target(graph_, target->node_id, kUnreachableRounds);
             current_plan_.reset();
             plan_spline_valid_ = false;
             stop(path_controller, motion_commander);
@@ -3536,7 +3536,16 @@ void ControllerSession::finalize_reached(rc::AffordanceManager &affordance_manag
         dwell_last_log_ms_ = now_ms;
     }
     if (graph_)
-        affordance_manager.mark_reached(graph_);
+    {
+        // ★ WHAT ACTUALLY HAPPENED, not "we got here". last_look_succeeded_ is the contract's own
+        // verdict — the completion predicate held for stable_n cycles — and it is already what decides
+        // whether the dwell is worth arming just above. Arriving at the standpoint is not the same as
+        // observing anything: a contract that ran to timeout arrives too, and used to be reported to
+        // the producer identically to one that succeeded.
+        affordance_manager.mark_reached(graph_, was_affordance and last_look_succeeded_
+                                                    ? rc::affordance::Outcome::Satisfied
+                                                    : rc::affordance::Outcome::Timeout);
+    }
     lockon_.reset();
     orient_start_ms_.reset();
     orient_stable_ = 0;
