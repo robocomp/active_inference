@@ -2072,21 +2072,8 @@ void SpecificWorker::step_epistemic(rc::DoorInstance& inst, DSR::Node& node)
 
 void SpecificWorker::trigger_graph_layout_twopi()
 {
-    const auto it = graph_viewers.find("");
-    if (it == graph_viewers.end() || !it->second)
-        return;
-
-    QWidget* graph_widget = it->second->get_widget(DSR::DSRViewer::view::graph);
-    auto* graph_viewer = qobject_cast<DSR::GraphViewer*>(graph_widget);
-    if (!graph_viewer)
-        return;
-
-    // Run now and once queued, so layout also happens after pending node/edge
-    // update signals are processed by the viewer.
-    graph_viewer->compute_layout("twopi");
-    QMetaObject::invokeMethod(graph_viewer,
-                              [graph_viewer]() { graph_viewer->compute_layout("twopi"); },
-                              Qt::QueuedConnection);
+    // SHARED (common/graph_layout) — pure viewer plumbing. See the header for why the layout runs twice.
+    rc::gui::trigger_layout_twopi(graph_viewers);
 }
 // ─── DSR signal slots ────────────────────────────────────────────────────────
 

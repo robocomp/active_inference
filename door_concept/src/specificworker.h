@@ -65,6 +65,7 @@
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include "../../common/concept_presence/concept_presence.h"   // rc::presence::ConceptProtocol (SHARED)
 #include "../../common/epistemic_step/epistemic_step.h"   // rc::epistemic::step (SHARED)
+#include "../../common/graph_layout/graph_layout.h"   // rc::gui::trigger_layout_twopi (SHARED)
 #include "../../common/instance_tracker/instance_tracker.h"   // rc::InstanceTracker (birth/associate/death)
 
 // ─── SpecificWorker ──────────────────────────────────────────────────────────

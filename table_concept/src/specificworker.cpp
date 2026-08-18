@@ -510,103 +510,17 @@ bool SpecificWorker::read_residual_field()
 void SpecificWorker::log_birth_surprise()
 {
     if (not cfg_.birth_surprise_probe or not residual_field_.valid()) return;
-    const rc::GridField& gf = residual_field_;   // read at the compute() head by read_residual_field()
 
-    // Believed table footprints (room frame) — a region under one is already explained, NOT a birth.
-    std::vector<rc::FootprintBox> tables;
+    // Believed table footprints (room frame) — a region under one is already explained, NOT a birth. This is
+    // the one genuinely per-object step: a table's two footprint extents. Everything after it — both CSVs,
+    // the fusion probe, the throttled console line — is SHARED (common/birth_surprise/birth_surprise_log.h).
+    std::vector<rc::FootprintBox> footprints;
     for (const auto& [id, inst] : fitter_->instances())
         if (inst.ai2_initialized)
-        { const auto& s = inst.ai2_belief.state(); tables.push_back({s.cx, s.cy, s.w, s.h, s.yaw}); }
+        { const auto& s = inst.ai2_belief.state(); footprints.push_back({s.cx, s.cy, s.w, s.h, s.yaw}); }
 
-    const auto cands = rc::BirthSurpriseProbe::scan(gf, tables);
-    const long cyc = ++birth_surprise_cycle_;   // advances only on cycles where the grid field was actually read
-    int n_birth = 0;                       // uncovered high-surprise regions = birth candidates
-    for (const auto& c : cands) if (not c.covered_by_concept) ++n_birth;
-
-    // CSV: one row per region per cycle (covered flag distinguishes birth candidates from explained mass; the
-    // latter should be ~0 if residual_concept's concept-subtraction is working — a free sanity check).
-    if (not birth_surprise_csv_.is_open())
-    {
-        rc::diag::open_rotating(birth_surprise_csv_, "etc/birth_surprise.csv");
-        birth_surprise_csv_.imbue(std::locale::classic());   // ★Qt imbues the GLOBAL locale, so operator<< inserts THOUSANDS
-                                            // SEPARATORS into integers (pkt_ts 1785763853131 → "1,785,763,853,131"),
-                                            // splitting one CSV field into five. Field counts then vary per row and
-                                            // the whole log is unreadable by column name — every value past the
-                                            // first big integer is shifted, which silently invalidates any analysis.
-                                            // Pin "C" so the log is machine-readable regardless of the UI locale.
-        if (birth_surprise_csv_.is_open())
-            birth_surprise_csv_ << "cycle,region,cx,cy,cells,mass,ext_x,ext_y,mean_p,mean_var,covered,"
-                                << "n_tables,tracker_births,instances\n";
-    }
-    if (birth_surprise_csv_.is_open())
-    {
-        int r = 0;
-        for (const auto& c : cands)
-            birth_surprise_csv_ << cyc << ',' << r++ << ',' << c.cx << ',' << c.cy << ',' << c.cells << ','
-                                << c.mass << ',' << c.ext_x << ',' << c.ext_y << ',' << c.mean_p << ',' << c.mean_var
-                                << ',' << (c.covered_by_concept ? 1 : 0) << ',' << tables.size() << ','
-                                << ev_g_.births << ',' << fitter_->instances().size() << '\n';
-        birth_surprise_csv_.flush();
-    }
-
-    // ── FUSION readout: residual surprise MASS under each YOLO "table" detection (birth_fusion.csv). The measured
-    //    quantity: does a real detection land on high unexplained-occupancy (→ corroborated → birth fast/confident)
-    //    while a flicker/phantom detection lands on ~0? covered = the detection sits inside an already-believed
-    //    table footprint (associate, not birth). This is the signal that would let residual GATE/accelerate birth.
-    if (not birth_fusion_csv_.is_open())
-    {
-        rc::diag::open_rotating(birth_fusion_csv_, "etc/birth_fusion.csv");
-        birth_fusion_csv_.imbue(std::locale::classic());   // ★Qt imbues the GLOBAL locale, so operator<< inserts THOUSANDS
-                                            // SEPARATORS into integers (pkt_ts 1785763853131 → "1,785,763,853,131"),
-                                            // splitting one CSV field into five. Field counts then vary per row and
-                                            // the whole log is unreadable by column name — every value past the
-                                            // first big integer is shifted, which silently invalidates any analysis.
-                                            // Pin "C" so the log is machine-readable regardless of the UI locale.
-        if (birth_fusion_csv_.is_open())
-            birth_fusion_csv_ << "cycle,det,det_x,det_y,mass_r05,mass_r03,near_dist,near_mass,covered,"
-                              << "n_tables,tracker_births,instances\n";
-    }
-    if (birth_fusion_csv_.is_open())
-    {
-        // DIAGNOSTIC block only — the 0.50/0.30 m probe radii and the 0.30 m footprint margin below feed the
-        // birth_fusion.csv columns for offline analysis of residual-vs-birth fusion. None of these values touch
-        // the live belief or any birth decision, so they are hardcoded (a config key would imply they matter at
-        // runtime). If residual-gated birth is ever wired in, promote them then.
-        int di = 0;
-        for (const auto& d : last_table_dets_xy_)
-        {
-            const float m05 = rc::BirthSurpriseProbe::residual_mass_near(gf, d.x(), d.y(), 0.50f);
-            const float m03 = rc::BirthSurpriseProbe::residual_mass_near(gf, d.x(), d.y(), 0.30f);
-            float nd = 1e9f, nm = 0.f;                      // nearest region to this detection
-            for (const auto& c : cands)
-            { const float dd = std::hypot(c.cx - d.x(), c.cy - d.y()); if (dd < nd) { nd = dd; nm = c.mass; } }
-            bool covered = false;
-            for (const auto& t : tables)
-            { const float cc = std::cos(t.yaw), ss = std::sin(t.yaw), dx = d.x() - t.cx, dy = d.y() - t.cy;
-              if (std::abs(cc*dx + ss*dy) <= 0.5f*t.w + 0.30f and std::abs(-ss*dx + cc*dy) <= 0.5f*t.h + 0.30f)
-                  { covered = true; break; } }
-            birth_fusion_csv_ << cyc << ',' << di++ << ',' << d.x() << ',' << d.y() << ',' << m05 << ',' << m03 << ','
-                              << (nd > 1e8f ? -1.f : nd) << ',' << nm << ',' << (covered ? 1 : 0) << ','
-                              << tables.size() << ',' << ev_g_.births << ',' << fitter_->instances().size() << '\n';
-            if (ev_g_.births > 0 and not covered)          // a NEW table just born — print its corroboration
-                std::print("[birth-fusion] BIRTH det@({:.2f},{:.2f}) residual mass_r05={:.1f} mass_r03={:.1f} "
-                           "near_region_mass={:.1f} dist={:.2f}\n", d.x(), d.y(), m05, m03, nm, nd);
-        }
-        birth_fusion_csv_.flush();
-    }
-
-    // Console: throttled (every ~20 cycles) OR whenever the tracker actually births this cycle — so the surprise
-    // state at the birth instant is always printed for correlation.
-    if (n_birth > 0 and (ev_g_.births > 0 or (birth_surprise_log_ctr_++ % 20) == 0))
-    {
-        const rc::BirthCandidate* top = nullptr;   // strongest UNcovered region
-        for (const auto& c : cands) if (not c.covered_by_concept) { top = &c; break; }   // cands sorted by mass
-        if (top)
-            std::print("[birth-surprise] uncovered={} tables={} tracker_births={} | top: ({:.2f},{:.2f}) "
-                       "mass={:.1f} cells={} ext={:.2f}x{:.2f} mean_p={:.2f} var={:.3f}\n",
-                       n_birth, tables.size(), ev_g_.births, top->cx, top->cy, top->mass, top->cells,
-                       top->ext_x, top->ext_y, top->mean_p, top->mean_var);
-    }
+    birth_surprise_log_.write(residual_field_, footprints, last_table_dets_xy_,
+                              ev_g_.births, fitter_->instances().size());
 }
 
 
@@ -883,21 +797,8 @@ void SpecificWorker::step_epistemic(rc::TableInstance& inst, DSR::Node& node)
 // node/edge update signals are processed. No-op when Agent.graph is off (no viewer widget).
 void SpecificWorker::trigger_graph_layout_twopi()
 {
-    const auto it = graph_viewers.find("");
-    if (it == graph_viewers.end() or not it->second)
-        return;
-
-    QWidget* graph_widget = it->second->get_widget(DSR::DSRViewer::view::graph);
-    auto* graph_viewer = qobject_cast<DSR::GraphViewer*>(graph_widget);
-    if (not graph_viewer)
-        return;
-
-    // Run now and once queued, so layout also happens after pending node/edge
-    // update signals are processed by the viewer.
-    graph_viewer->compute_layout("twopi");
-    QMetaObject::invokeMethod(graph_viewer,
-                              [graph_viewer]() { graph_viewer->compute_layout("twopi"); },
-                              Qt::QueuedConnection);
+    // SHARED (common/graph_layout) — pure viewer plumbing. See the header for why the layout runs twice.
+    rc::gui::trigger_layout_twopi(graph_viewers);
 }
 // ─── DSR signal slots (QUEUED — never DirectConnection; see CLAUDE.md) ───────────────────────────
 

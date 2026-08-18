@@ -70,7 +70,9 @@
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include "../../common/concept_presence/concept_presence.h"   // rc::presence::ConceptProtocol (SHARED)
 #include "../../common/epistemic_step/epistemic_step.h"   // rc::epistemic::step (SHARED)
+#include "../../common/graph_layout/graph_layout.h"   // rc::gui::trigger_layout_twopi (SHARED)
 #include "../../common/peripheral_channel/peripheral_channel.h"   // rc::peripheral:: (SHARED)
+#include "../../common/birth_surprise/birth_surprise_log.h"   // rc::BirthSurpriseLog (SHARED)
 
 // ─── SpecificWorker ──────────────────────────────────────────────────────────────────────────────
 
@@ -254,10 +256,9 @@ private:
     bool read_residual_field();                         // snapshot residual_concept's `grid` node → residual_field_
     void log_birth_surprise();                          // EXPERIMENTAL read-only probe (cfg_.birth_surprise_probe)
     rc::GridField        residual_field_;               // this cycle's residual (surprise) field; read at compute head
-    std::ofstream        birth_surprise_csv_;           // etc/birth_surprise.csv (opened lazily when the probe is on)
-    std::ofstream        birth_fusion_csv_;             // etc/birth_fusion.csv (detection-conditioned residual mass)
-    int                  birth_surprise_log_ctr_ = 0;   // console-throttle counter
-    long                 birth_surprise_cycle_ = 0;     // probe cycle index (advances only when the grid was read)
+    // The birth-surprise / birth-fusion probe: two CSVs and two counters, bundled so a new agent cannot
+    // adopt the writer and forget a counter. SHARED — common/birth_surprise/birth_surprise_log.h.
+    rc::BirthSurpriseLog birth_surprise_log_;
     std::vector<Eigen::Vector2f> last_table_dets_xy_;   // this cycle's ZED "table" detection centroids (room frame)
     // Highest mask frame_id the tracker has already accrued birth evidence from. A repeat frame_id is a REPEAT
     // of one observation, not a second one (rc::birth rule 1) — see run_instance_tracker.
