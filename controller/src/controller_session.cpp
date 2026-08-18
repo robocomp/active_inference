@@ -608,6 +608,7 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
                        || !ControllerWorldModel::same_target_instance(*last_target_info_, step.target);
     last_target_info_ = step.target;
     active_target_id_ = target->node_id;
+    target_is_new_ = step.target_changed;   // consumed by the goal_reached branch, see target_is_new_
     return step;
 }
 
@@ -3001,6 +3002,39 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                              robot_pose.pos, time_source());
             return;
         }
+        // ★ REFUSE A TARGET WE WERE ALREADY STANDING ON. If the goal reads reached on the very first
+        // cycle after adopting it, no approach happened, so nothing was observed and there is nothing
+        // to report as done. Consuming it anyway is what produced the dwell loop: reach instantly,
+        // hold the 3 s dwell, get re-offered (the no-two-in-a-row guard yields when it would leave
+        // nothing on offer), reach instantly again — from outside, a hung robot. Measured 2026-08-18:
+        // about half of ALL completions were of this kind, in every run.
+        // A REFUSAL is the honest report, and it is the case epistemic_refused / Outcome::Refused
+        // already exist for: not attempted, nothing observed, the belief unchanged — the producer is
+        // simply told this standpoint is not worth offering from here, and picks another cell.
+        // ★No threshold: the question is whether an approach OCCURRED, and the first cycle answers it.
+        if (target_is_new_ and last_target_info_.has_value() and last_target_info_->from_affordance)
+        {
+            qInfo() << "[affordance]" << last_target_info_->node_name.c_str()
+                    << "REFUSED: already at this standpoint on the first cycle — no approach, nothing "
+                       "observed. Reporting refusal so the producer offers a different cell.";
+            if (graph_ and active_target_id_ != 0)
+                if (auto n = graph_->get_node(active_target_id_); n.has_value())
+                {
+                    auto node = n.value();
+                    rc::affordance::write_outcome(*graph_, node, rc::affordance::Outcome::Refused);
+                    graph_->add_or_modify_attrib_local<epistemic_refused_att>(node, true);
+                    graph_->add_or_modify_attrib_local<epistemic_refused_x_m_att>(
+                        node, static_cast<float>(robot_pose.pos.x()));
+                    graph_->add_or_modify_attrib_local<epistemic_refused_y_m_att>(
+                        node, static_cast<float>(robot_pose.pos.y()));
+                    graph_->update_node(node);
+                }
+            // Release WITHOUT the dwell: there is no acquisition to wait for.
+            finalize_reached(affordance_manager, path_controller, motion_commander, display,
+                             robot_pose.pos, time_source(), /*allow_dwell=*/false,
+                             rc::affordance::Outcome::Refused);
+            return;
+        }
         qInfo() << "[affordance]" << (last_target_info_.has_value() ? last_target_info_->node_name.c_str() : "?")
                 << "reached -> REACH (consume immediately)";
         finalize_reached(affordance_manager, path_controller, motion_commander, display,
@@ -3490,7 +3524,8 @@ void ControllerSession::finalize_reached(rc::AffordanceManager &affordance_manag
                                          ControllerDisplay &display,
                                          const Eigen::Vector2f &arrived_at,
                                          std::uint64_t now_ms,
-                                         bool allow_dwell)
+                                         bool allow_dwell,
+                                         std::optional<rc::affordance::Outcome> outcome_override)
 {
     // A mission waypoint is reached the same way any target is; stepping the mission here means arrival
     // logic exists in exactly one place and a mission cannot drift out of sync with what the robot did.
@@ -3549,10 +3584,13 @@ void ControllerSession::finalize_reached(rc::AffordanceManager &affordance_manag
         // the look flag for them reported `timeout` for four consecutive arrivals, one of them logged
         // at d=0.23 m. A contract with no predicate cannot fail one.
         const bool had_predicate = not active_contract_.goal.empty();
+        // outcome_override wins: a refusal is a statement about the APPROACH, and no reading of the
+        // contract's predicate can express it — there was no approach to judge.
         affordance_manager.mark_reached(graph_,
-                                        (not had_predicate or last_look_succeeded_)
-                                            ? rc::affordance::Outcome::Satisfied
-                                            : rc::affordance::Outcome::Timeout);
+                                        outcome_override.value_or(
+                                            (not had_predicate or last_look_succeeded_)
+                                                ? rc::affordance::Outcome::Satisfied
+                                                : rc::affordance::Outcome::Timeout));
     }
     lockon_.reset();
     orient_start_ms_.reset();

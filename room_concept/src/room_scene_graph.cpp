@@ -591,6 +591,20 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
                    rc::affordance::to_string(outcome),
                    observed ? "belief refreshed" : "belief NOT refreshed (nothing was observed)");
         std::fflush(stdout);
+        // ★ A REFUSAL MUST CHANGE THE NEXT CHOICE, or it is only a label. The consumer refuses when it
+        // was ALREADY standing on the proposed standpoint — no approach, nothing observed — and if we
+        // merely clear the target, the same cell wins the next selection and the pair loops: offer,
+        // instant refusal, offer. mark_target_finished() is the operator that exists for this: it
+        // stamps the cell into the visit grid so its neglect drops to ~0 and recovers over
+        // ior_decay_time, so the cell is de-prioritised for a while and then genuinely retried.
+        // ★No blacklist and no threshold: a cell refused only because the robot happened to be parked
+        // on it comes back into play on its own once the robot has moved on.
+        if (outcome == Outcome::Refused and pub_ok_ and not std::isnan(pub_tx_))
+        {
+            planner.mark_target_finished(Eigen::Vector2f(pub_tx_, pub_ty_));
+            std::print("[planner] refusal at ({:.2f},{:.2f}) — cell de-prioritised (IoR), selecting elsewhere\n",
+                       pub_tx_, pub_ty_);
+        }
         planner.clear_target();
         planner.mark_and_refresh();   // keep path trail live in viewer
         if (observed)

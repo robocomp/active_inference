@@ -197,7 +197,11 @@ private:
                           // arm the post-affordance dwell. Everything else about retiring the run is the
                           // same, which is why this is a flag rather than a second teardown path — two
                           // of those would drift apart and one of them would forget to clear something.
-                          bool allow_dwell = true);
+                          bool allow_dwell = true,
+                          // Overrides the outcome derived from the contract. Used by the
+                          // "already there" refusal, which is NOT an arrival and must not be
+                          // reported to the producer as one.
+                          std::optional<rc::affordance::Outcome> outcome_override = std::nullopt);
 
     // ── Physical-wedge recovery ──────────────────────────────────────────────────────
     // Debounce over a per-cycle wedge signal supplied by the caller. A wedge is a PREDICTION ERROR and
@@ -383,6 +387,12 @@ private:
     int last_display_wp_index_ = 0;
     bool manual_target_dirty_ = false;
     std::uint64_t active_target_id_ = 0;
+    // ★ "ALREADY THERE" IS NOT AN ARRIVAL. Set on the first cycle after adopting a target; if the
+    // goal already reads reached on that cycle, no approach happened and nothing was observed —
+    // consuming it as a completion is what produced the dwell loop (reach instantly, hold 3 s,
+    // get re-offered, repeat, indistinguishable from a hang). Needs no distance threshold: the
+    // question is whether an approach OCCURRED, which the first cycle answers exactly.
+    bool target_is_new_ = false;
     bool room_wait_logged_ = false;
     // Latched on the MODE, not a bool: the idle notice must speak again after a mode change, and once
     // per process is how a Target-mode idle stayed invisible.
