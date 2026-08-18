@@ -549,12 +549,18 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
 
     if (affordance_manager_.consume_completion_event())
     {
-        // ★ COMPLETED IS NOT NEUTRAL. refresh_belief() restarts the forget clock — it is this agent
-        // asserting "this region has just been observed, stop counting it as neglected". That is only
-        // true if the look SUCCEEDED. A contract that ran to timeout arrives at the standpoint and
-        // completes identically, and calling refresh_belief() on it marks a region fresh that nobody
-        // ever saw: the neglect drive is satisfied by the ATTEMPT, so the robot never returns and the
-        // one place it failed to observe becomes the one place it stops trying.
+        // ★ COMPLETED IS NOT NEUTRAL. refresh_belief() resets ONE GLOBAL clock, and that clock feeds
+        // exactly one thing: the exponential decay of the scoring prior's precision,
+        // Y_info *= exp(-dt / belief_forget_time) (epistemic_planner.cpp). It is this agent asserting
+        // "I have just explored, so my pose belief is sharp — stop inflating it". That is only true if
+        // the look SUCCEEDED. A contract that ran to timeout arrives at the standpoint and completes
+        // identically, and refreshing on it lets an attempt that observed NOTHING switch the
+        // exploration drive back off.
+        // ★ IT DOES NOT STEER THE ROBOT. Which cell comes next is the visit grid's job
+        // (mark_target_finished → IoR), which de-prioritises the just-attempted cell on BOTH outcomes
+        // by design — otherwise the planner re-proposes the cell the robot is standing on — and lets
+        // it back in after ior_decay_time either way. Do not read this gate as "go back and retry
+        // there"; it only keeps the drive alive instead of having it reset by a failure.
         // clear_target() runs either way — the affordance is over regardless of how it ended, and
         // holding a finished target would wedge the planner.
         const auto outcome = affordance_manager_.last_outcome();
