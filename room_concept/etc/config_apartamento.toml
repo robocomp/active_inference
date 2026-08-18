@@ -115,7 +115,7 @@ PreserveBootstrapRoom  = false  # static-room phase: adopt the pre-seeded room/t
 # Default "dsr" while both paths coexist, so the switch is one word to revert. Compare on one run:
 # imu_cover and wg_ratio in the debug log expose a mismatch immediately, and the startup line says
 # which is in force.
-ImuSource              = "dsr"    # "dsr" | "media"
+ImuSource              = "media"  # "dsr" | "media"   ← switched 2026-08-18
 
 PredictionEarlyExit    = true  # Skip optimization when prediction error < threshold
 SigmaSdf               = 0.15  # σ_obs del SDF para el umbral de early exit (m)
