@@ -335,6 +335,11 @@ int main()
         qn.sigma_v_lat = qn.sigma_v_long = 0.02f;
         qn.sigma_omega = 0.05f;
         qn.scale_v = qn.scale_omega = 0.f;
+        // The Monte Carlo below draws its perturbations as sigma·√dt — the FREE-DRIFT model — so these
+        // legs must be run against that model, not against the ZUPT-conditioned one. Leaving the
+        // default on would have quietly reduced iv.cov by ~8% at this trajectory's speed and turned a
+        // sharp agreement test into a loose one. The ZUPT gets its own section further down.
+        qn.zupt_enabled = false;
 
         rc::preint::Integrator ig(theta0);
         ig.set_noise(qn);
@@ -467,6 +472,94 @@ int main()
                           "sigma_th 20Hz %.5f vs 100Hz %.5f, cov rel %.4f, g rel %.4f",
                           std::sqrt(slow.cov(2, 2)), std::sqrt(fast.cov(2, 2)), rel, gr);
             check("covariance is invariant to sample rate", rel < 0.02f and gr < 0.02f, buf);
+        }
+
+        // ---- 5. ZUPT: the rest hypothesis as a factor ---------------------------------------------
+        // Measured 2026-08-18: parked, the free-drift model let the motion prior's sigma reach 82 cm
+        // over a 294 s stationary stretch, so it stopped constraining anything. These legs pin the
+        // three properties that make the fix a FACTOR rather than a clamp: it bites at rest, it fades
+        // out on its own in motion with no threshold, and it does not mistake a pivot for rest.
+        {
+            const auto run = [&](float v_lat, float v_long, float omega, float dt, float total_s,
+                                 bool zupt)
+            {
+                rc::preint::NoiseModel q = qn;
+                q.zupt_enabled = zupt;
+                rc::preint::Integrator g(theta0);
+                g.set_noise(q);
+                const int n = static_cast<int>(std::lround(total_s / dt));
+                for (int i = 0; i < n; ++i) g.add(v_lat, v_long, omega, dt);
+                return g.result();
+            };
+            char buf[224];
+
+            // (a) Parked for five minutes: bounded, and orders below free drift.
+            const auto park_free = run(0.f, 0.f, 0.f, 0.008f, 300.f, false);
+            const auto park_zupt = run(0.f, 0.f, 0.f, 0.008f, 300.f, true);
+            const float sx_free = std::sqrt(park_free.cov(0, 0));
+            const float sx_zupt = std::sqrt(park_zupt.cov(0, 0));
+            const float st_zupt = std::sqrt(park_zupt.cov(2, 2));
+            std::snprintf(buf, sizeof buf,
+                          "300 s parked: sigma_x %.3f m free-drift -> %.4f m with ZUPT, sigma_th %.4f rad",
+                          sx_free, sx_zupt, st_zupt);
+            check("ZUPT bounds the parked interval", sx_zupt < 0.01f and sx_free > 0.2f, buf);
+
+            // (b) Fades out with speed, on its own. No threshold: the gap closes because the rest
+            // hypothesis' own variance grows with the observed motion.
+            const auto slow_f = run(0.05f, 0.45f, 0.8f, 0.01f, 0.5f, false);
+            const auto slow_z = run(0.05f, 0.45f, 0.8f, 0.01f, 0.5f, true);
+            const auto fast_f = run(0.05f, 2.00f, 0.8f, 0.01f, 0.5f, false);
+            const auto fast_z = run(0.05f, 2.00f, 0.8f, 0.01f, 0.5f, true);
+            const float gap_slow = (slow_f.cov - slow_z.cov).norm() / slow_f.cov.norm();
+            const float gap_fast = (fast_f.cov - fast_z.cov).norm() / fast_f.cov.norm();
+            std::snprintf(buf, sizeof buf, "relative cov gap: %.1f%% at 0.45 m/s -> %.1f%% at 2.0 m/s",
+                          gap_slow * 100.f, gap_fast * 100.f);
+            check("ZUPT fades out as the robot moves", gap_fast < gap_slow and gap_fast < 0.02f, buf);
+
+            // (c) A pivot is NOT rest. v_lat = v_long = 0 while spinning, so a per-axis test would
+            // hand the pivot the parked translation noise; the lever arm is what prevents it.
+            const auto pivot = run(0.f, 0.f, 0.8f, 0.008f, 10.f, true);
+            const auto still = run(0.f, 0.f, 0.0f, 0.008f, 10.f, true);
+            const float sx_pivot = std::sqrt(pivot.cov(0, 0));
+            const float sx_still = std::sqrt(still.cov(0, 0));
+            std::snprintf(buf, sizeof buf, "10 s: sigma_x %.4f m pivoting vs %.4f m truly still (%.0fx)",
+                          sx_pivot, sx_still, sx_pivot / std::max(sx_still, 1e-9f));
+            check("a pivot is not mistaken for rest", sx_pivot > 20.f * sx_still, buf);
+
+            // (d) Continuous in speed — the property that makes this a model term and not a switch.
+            // ★A RELATIVE step size cannot test this: P⁺ rises quadratically off a tiny rest floor, so
+            // adjacent samples legitimately differ by hundreds of percent near v = 0 while the curve is
+            // perfectly smooth. The discriminator that actually separates a smooth rise from a hidden
+            // threshold is GRID REFINEMENT — a jump discontinuity keeps its size however fine the sweep,
+            // a continuous function's largest step shrinks in proportion to the spacing.
+            {
+                const auto max_step_frac = [&](int n)
+                {
+                    float prev = -1.f, worst = 0.f, lo = 1e30f, hi = -1e30f;
+                    bool monotonic = true;
+                    for (int i = 0; i <= n; ++i)
+                    {
+                        const float v = 0.30f * static_cast<float>(i) / static_cast<float>(n);
+                        const float c = run(0.f, v, 0.f, 0.008f, 1.f, true).cov(1, 1);
+                        lo = std::min(lo, c); hi = std::max(hi, c);
+                        if (prev >= 0.f)
+                        {
+                            if (c < prev * 0.999f) monotonic = false;
+                            worst = std::max(worst, c - prev);
+                        }
+                        prev = c;
+                    }
+                    return std::pair<float, bool>{worst / std::max(hi - lo, 1e-30f), monotonic};
+                };
+                const auto [step_coarse, mono_c] = max_step_frac(60);
+                const auto [step_fine,   mono_f] = max_step_frac(240);
+                const float shrink = step_coarse / std::max(step_fine, 1e-30f);
+                std::snprintf(buf, sizeof buf,
+                              "largest step %.4f of range at 60 pts -> %.4f at 240 pts (%.1fx smaller), monotonic %s",
+                              step_coarse, step_fine, shrink, (mono_c and mono_f) ? "yes" : "NO");
+                check("ZUPT is continuous in speed (no hidden threshold)",
+                      mono_c and mono_f and shrink > 3.f, buf);
+            }
         }
     }
 

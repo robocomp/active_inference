@@ -233,6 +233,23 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PreintCmdScaleV",      room_concept.params.cmd_preint_noise.scale_v);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PreintCmdScaleOmega",  room_concept.params.cmd_preint_noise.scale_omega);
 
+    // ── ZUPT: the rest hypothesis as a factor (see the NoiseModel block in se2_preintegration.h) ──
+    // One set of keys drives BOTH channels: "the body is at rest" is a statement about the robot, not
+    // about which stream happened to report it, and letting the two disagree would mean the prior's
+    // parked stiffness depended on which channel won selection that frame.
+    {
+        auto& po = room_concept.params.odom_preint_noise;
+        auto& pc = room_concept.params.cmd_preint_noise;
+        rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.PreintZupt", po.zupt_enabled);
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PreintZuptSigmaV",     po.zupt_sigma_v);
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PreintZuptSigmaOmega", po.zupt_sigma_omega);
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PreintZuptLeverM",     po.zupt_lever_m);
+        pc.zupt_enabled     = po.zupt_enabled;
+        pc.zupt_sigma_v     = po.zupt_sigma_v;
+        pc.zupt_sigma_omega = po.zupt_sigma_omega;
+        pc.zupt_lever_m     = po.zupt_lever_m;
+    }
+
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.LearnMotionModel", room_concept.params.learn_motion_model);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.MotionLearnAlpha", room_concept.params.motion_learn_alpha);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.MotionLearnBeta", room_concept.params.motion_learn_beta);

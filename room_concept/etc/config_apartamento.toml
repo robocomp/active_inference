@@ -267,6 +267,28 @@ PreintOdomScaleOmega = 0.02
 # PreintCmdScaleV      = 0.20     # = CmdNoiseTrans
 # PreintCmdScaleOmega  = 0.18     # = CmdNoiseRot
 
+# ── ZUPT: the rest hypothesis as a factor (see the NoiseModel block in se2_preintegration.h) ──
+# ★★MEASURED DEFECT it cures, 2026-08-18 (log_2026-08-18_11-57-49.csv, 12 261 rows, 24% moving):
+#       MOVING  preint_T  0.16 s med   motion sigma  3 cm
+#       STILL   preint_T 95.6 s med (p95 294 s)   motion sigma 82 cm
+#   The stride gate only resets the accumulator when a slot is ADMITTED, so a parked robot chains the
+#   interval for minutes and the free-drift densities grow it as sqrt(T) until the prior is vacuous.
+#   It was not corrupting the pose — published sigma_x was 61.6 mm parked vs 58.3 mm moving, and
+#   corr(preint_T, published sigma) was NEGATIVE (-0.291) — it was silently withdrawing a constraint.
+#   Note the legacy (non-preintegrated) path had a stationary clamp at room_concept.cpp:4307; turning
+#   preintegration on bypassed it and put nothing in its place.
+# ★NOT A CLAMP AND NOT A THRESHOLD. "The body is at rest" is an observation with its own precision:
+#   R = sigma_rest^2 + (observed motion)^2, so at rest it bites and in motion it fades out on its own.
+#   The crossover is not tuned — it falls where the two variances meet, |v| ~ sigma_v/sqrt(dt).
+#   gn_selftest pins all four properties (bounded parked, fades out, a pivot is not rest, continuous
+#   under grid refinement).
+PreintZupt           = true
+PreintZuptSigmaV     = 0.002    # m/s   — residual linear velocity of a parked base (encoder quantisation)
+PreintZuptSigmaOmega = 0.005    # rad/s — residual yaw rate of a parked base (gyro output noise)
+# Lever arm coupling the two channels so a PIVOT cannot claim to be at rest: v_lat = v_long = 0 while
+# spinning, and the wheels are scrubbing. Shadow's wheel anchors are +-0.259 m (ShadowDiff.proto).
+PreintZuptLeverM     = 0.26
+
 # ── Kinematic clamp on the published pose ─────────────────────────────────────
 # Bounds the pose delta between two published RT blocks to what the robot can physically do in the
 # elapsed time. Measured on this agent's own debug log: 92.8% of frames coast on the odometry

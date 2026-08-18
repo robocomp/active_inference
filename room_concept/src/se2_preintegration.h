@@ -124,6 +124,33 @@ namespace rc::preint
         float sigma_omega  = 0.0447f;   // rad/√s — yaw-rate noise floor          (0.010 rad / √0.05 s)
         float scale_v      = 0.08f;     // fraction of |Δp| that is a consistent scale error
         float scale_omega  = 0.155f;    // fraction of |Δθ| that is a consistent scale error
+
+        // ── Zero-velocity update (ZUPT) ────────────────────────────────────────────────────────────
+        // The densities above describe a body that is FREE TO DRIFT, so the interval covariance grows
+        // as √T whether or not the robot is moving. That is correct for an unaided IMU and wrong here:
+        // a parked differential base is not drifting, and its wheels and gyro are actively SAYING so.
+        // Measured 2026-08-18 without this term: parked, preint_T reached 95 s median / 294 s p95 and
+        // the motion prior's σ grew from 3 cm (moving) to 82 cm — vacuous, so the prior silently
+        // stopped constraining anything for three quarters of a tour.
+        //
+        // "The body is at rest" is an OBSERVATION (z = 0) with its own precision, not a special case,
+        // so it belongs in the generative model as a factor. zupt_sigma_* is the residual velocity
+        // noise of a genuinely stationary sensor — encoder quantisation, gyro output noise.
+        //
+        // ★NO THRESHOLD, and none is needed. The factor's own variance carries the measured motion:
+        // R = zupt_sigma² + (how fast the body is actually moving)². At rest that is tiny and the
+        // update bites; in motion the rest hypothesis is inconsistent by exactly the observed speed,
+        // R blows up with it, and the update fades out on its own. The crossover is not tuned — it
+        // falls out where the two variances meet, at |v| ≈ sigma_v/√dt (~5 cm/s at 125 Hz), i.e. it
+        // is set by the sensor's own noise density and sample rate.
+        bool  zupt_enabled   = true;
+        float zupt_sigma_v   = 0.002f;   // m/s   — residual linear velocity of a parked base
+        float zupt_sigma_omega = 0.005f; // rad/s — residual yaw rate of a parked base
+        // Lever arm converting between the two channels, so the rest hypothesis is about the WHOLE
+        // BODY: a robot pivoting in place has v_lat = v_long = 0 yet is emphatically not at rest, and
+        // its wheels are scrubbing. Without this, a pivot would be handed the parked translation noise.
+        // Set it to the wheel anchor offset (±0.259 m on Shadow, see ShadowDiff.proto).
+        float zupt_lever_m   = 0.26f;
     };
 
     /// A summarised interval. `delta` and `cov` share ONE frame: the global (room) frame, with the
@@ -202,10 +229,40 @@ namespace rc::preint
                  s,  c,  0.5f * dpx,
                  0.f, 0.f, 1.f;
 
+            // Q: the covariance of this step's DISPLACEMENT noise (B's inputs are metres and radians,
+            // not velocities). Density form: variance = sigma²·dt, i.e. a velocity variance of
+            // sigma²/dt carried for dt². Writing it through the velocity makes the ZUPT below a
+            // one-line Bayesian update instead of a special case.
+            float var_v_lat  = q_.sigma_v_lat  * q_.sigma_v_lat  / dt;   // (m/s)²
+            float var_v_long = q_.sigma_v_long * q_.sigma_v_long / dt;
+            float var_omega  = q_.sigma_omega  * q_.sigma_omega  / dt;   // (rad/s)²
+
+            if (q_.zupt_enabled)
+            {
+                // How inconsistent the measurement is with "the body is at rest", in each channel's
+                // own units, coupled through the lever arm so a pivot cannot claim to be parked.
+                const float speed = std::hypot(v_lat, v_long);
+                const float lever = std::max(q_.zupt_lever_m, 1e-3f);
+                const float m_v   = speed + lever * std::abs(omega);          // m/s
+                const float m_w   = std::abs(omega) + speed / lever;          // rad/s
+
+                // R = (rest sensor noise)² + (observed motion)². Scalar-Kalman update of the velocity
+                // variance: P⁺ = P·R/(P+R). At rest R→zupt_sigma² and P⁺ collapses to it; in motion
+                // R→∞ and P⁺→P, recovering the free-drift model exactly.
+                const auto zupt = [](float P, float sigma_rest, float motion)
+                {
+                    const float R = sigma_rest * sigma_rest + motion * motion;
+                    return (P * R) / (P + R);
+                };
+                var_v_lat  = zupt(var_v_lat,  q_.zupt_sigma_v,     m_v);
+                var_v_long = zupt(var_v_long, q_.zupt_sigma_v,     m_v);
+                var_omega  = zupt(var_omega,  q_.zupt_sigma_omega, m_w);
+            }
+
             Eigen::Matrix3f Q = Eigen::Matrix3f::Zero();
-            Q(0, 0) = q_.sigma_v_lat  * q_.sigma_v_lat  * dt;
-            Q(1, 1) = q_.sigma_v_long * q_.sigma_v_long * dt;
-            Q(2, 2) = q_.sigma_omega  * q_.sigma_omega  * dt;
+            Q(0, 0) = var_v_lat  * dt * dt;
+            Q(1, 1) = var_v_long * dt * dt;
+            Q(2, 2) = var_omega  * dt * dt;
 
             iv_.cov = A * iv_.cov * A.transpose() + B * Q * B.transpose();
 
