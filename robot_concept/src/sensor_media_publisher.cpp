@@ -199,6 +199,24 @@ rc::media::MediaDescriptor SensorMediaPublisher::make_descriptor(
     {
         desc.streams[imu_->key]      = imu_->topic;
         desc.stream_types[imu_->key] = "ImuFrame";
+        // Same treatment as the 360 stream below, and for the same reason: this is a per-node
+        // advertise on the "imu" node carrying only the IMU, so leaving the top-level default in
+        // place published a descriptor that read
+        //     "type_name":"ImageFrame","type_tag":"ImageFrame.v2" ... "imu_type":"ImuFrame"
+        // — self-contradictory, and wrong in the field a consumer's zero-copy schema guard reads.
+        // It happens not to break subscriber_config(), which uses only the per-stream topic, but a
+        // descriptor whose job is to be authoritative should not need a reader to know which half of
+        // it to believe.
+        const bool only_imu = (images_.empty() ||
+            std::none_of(images_.begin(), images_.end(),
+                         [&](const auto& kv){ return wanted(kv.first); }))
+            and not (lidar_ and wanted(lidar_->key))
+            and not (image360_ and wanted(image360_->key));
+        if (only_imu)
+        {
+            desc.type_name = "ImuFrame";
+            desc.type_tag  = rc::media::IMU_FRAME_TYPE_TAG;
+        }
     }
     if (image360_ and wanted(image360_->key))
     {
