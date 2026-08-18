@@ -222,7 +222,7 @@ private:
     // holding the base at 15%" is not a manoeuvre. See stall_judge.h for why the two must not be
     // conflated, and why judging on the post-throttle command alone made the second one invisible.
     bool detect_stuck(bool pursuing, float asked_lin_mps, float cmd_lin_mps, float pose_sigma_m,
-                      const Eigen::Vector2f &pos_room, std::uint64_t now_ms);
+                      const Eigen::Vector2f &pos_room, float heading_rad, float commanded_rot_rps, std::uint64_t now_ms);
     void reset_stuck_window();
     // Begin an escape: choose turn direction from side clearance, drop a temp obstacle at
     // the stuck spot, reset the plan, and record the start pose/time.
@@ -555,13 +555,6 @@ private:
     long yawfix_target_now_free_ = 0;
     std::uint64_t yawfix_log_ms_ = 0;
     void monitor_footprint_orientation(const ControllerPlanningStep &step, std::uint64_t timestamp_ms);
-
-    // ★ Set by recheck_standpoint_on_approach when the ONLY pose clear of the live returns is one the
-    // robot's own body already covers. That is not a repair — a viewpoint you are already standing on
-    // shows you nothing you have not seen, so servicing the affordance there is a silent cancellation
-    // wearing the shape of an arrival. Consumed by build_planning_step, which reports a REFUSAL so the
-    // producer offers a different cell.
-    bool approach_refuse_ = false;
 
     // ── FINAL-APPROACH RE-CHECK (see recheck_standpoint_on_approach) ─────────────────────────────
     // Where the live LiDAR moved the standpoint to, and which target it belongs to. HELD once taken,

@@ -603,35 +603,6 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     // the one the producer published.
     recheck_standpoint_on_approach(step, world_model, obstacle_tracker, timestamp_ms);
 
-    // ★ The re-check found the standpoint occupied and the only clear pose to be one the robot is
-    // already standing on. Report a REFUSAL rather than servicing the affordance from a viewpoint that
-    // shows nothing new. The producer de-prioritises that cell and offers another; the model check in
-    // formal/AffordanceProtocol.tla says a reporting consumer is sound for either value of the other
-    // two design choices, which is why this can be a refusal and not a silent skip.
-    if (approach_refuse_ and target.has_value())
-    {
-        if (graph_ != nullptr)
-            if (auto n = graph_->get_node(target->node_id); n.has_value())
-            {
-                auto node = n.value();
-                rc::affordance::write_outcome(*graph_, node, rc::affordance::Outcome::Refused);
-                graph_->add_or_modify_attrib_local<epistemic_refused_att>(node, true);
-                graph_->add_or_modify_attrib_local<epistemic_refused_x_m_att>(
-                    node, static_cast<float>(step.target.room_pos.x()));
-                graph_->add_or_modify_attrib_local<epistemic_refused_y_m_att>(
-                    node, static_cast<float>(step.target.room_pos.y()));
-                // Outcome BEFORE pending: pending is the level the producer watches, so the reverse
-                // order lets it read a completion whose outcome has not landed yet.
-                graph_->add_or_modify_attrib_local<epistemic_pending_att>(node, false);
-                graph_->add_or_modify_attrib_local<active_att>(node, false);
-                graph_->update_node(node);
-            }
-        affordance_manager.suppress_target(graph_, target->node_id, kUnreachableRounds);
-        current_plan_.reset();
-        plan_spline_valid_ = false;
-        stop(path_controller, motion_commander);
-        return std::nullopt;
-    }
 
     current_target_room_ = step.target.room_pos;
     step.target_changed = !last_target_info_.has_value()
@@ -1762,7 +1733,6 @@ void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &s
                                                        ControllerObstacleTracker &obstacle_tracker,
                                                        std::uint64_t timestamp_ms)
 {
-    approach_refuse_ = false;
     const float window = params_ != nullptr ? params_->affordance_approach_recheck_m : 0.f;
     if (window <= 0.f or not step.target.from_affordance) { approach_fix_.reset(); return; }
     // Keyed by NAME, like the reachability repair: the name is the identity that survives every repair
@@ -1900,30 +1870,6 @@ void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &s
     }
     if ((*fix - anchor).squaredNorm() <= 1e-6f) return;   // the standpoint is clear; nothing to do
 
-    // ★★ A POSE THE ROBOT IS ALREADY STANDING ON IS NOT A VIEWPOINT. nearest_free_where searches
-    // outward from the anchor, and when the object itself is what occupies the standpoint the nearest
-    // clear pose is very often the patch of floor under the robot — the one place guaranteed free of
-    // returns, because the robot's own body was subtracted from the cloud above.
-    // Taking that as the repair destroys the affordance exactly as thoroughly as dragging it out of the
-    // window does, and the two are the same mistake in opposite directions: the parameter's own comment
-    // bounds the displacement from ABOVE ("a viewpoint dragged further than the distance at which its
-    // problem was noticed is no longer that affordance's viewpoint") and nothing bounded it from below.
-    // An affordance exists to gain information BY MOVING SOMEWHERE. A viewpoint 0.10 m away yields the
-    // image the robot already has, so the robot "arrives" the instant it is told, the affordance
-    // completes without an observation, and the pair loops at the dwell period while the robot stands
-    // still. Measured 2026-08-18: `satisfied` reported at 4.91 m from the PUBLISHED target, completions
-    // every 3.0 s, 699 cycles at one pose of which 33 carried any command at all.
-    // ★ The test is the robot's OWN FOOTPRINT — no new constant, and it states the fact exactly: the
-    // body already occupies that pose, so there is nothing to drive to.
-    if (body.contains_yaw(*fix, step.robot_pose.pos, robot_yaw))
-    {
-        approach_refuse_ = true;
-        std::println("[approach] ⚠ '{}' at ({:.2f},{:.2f}) is occupied, and the only pose clear of the "
-                     "live returns ({:.2f},{:.2f}) is one the robot already occupies — that is no "
-                     "viewpoint. REFUSING so the producer offers a different cell.",
-                     step.target.node_name, anchor.x(), anchor.y(), fix->x(), fix->y());
-        return;
-    }
 
     approach_fix_ = ApproachFix{.pos = *fix, .name = step.target.node_name, .anchor = anchor};
     std::println("[approach] '{}' — {:.2f} m out, the live LiDAR says ({:.2f},{:.2f}) is OCCUPIED by "
@@ -3165,8 +3111,11 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // which is right because the branch that consults it is unreachable when nothing was throttled.
     const auto unc = motion_commander.last_uncertainty_diag();
     const float pose_sigma_m = unc.valid ? unc.xy_std_m : 0.f;
+    // ★ Heading and COMMANDED rotation, so the judge can see a robot that obeys every order and still
+    // arrives nowhere: adv 0, rot at its cap, heading sweeping. Passing zeros here would compile and
+    // silently leave the Spinning verdict unreachable — the detector would exist and never fire.
     if (detect_stuck(/*pursuing=*/true, asked_lin_mps, cmd_lin, pose_sigma_m,
-                     robot_pose.pos, time_source()))
+                     robot_pose.pos, robot_pose.theta, rot_rps, time_source()))
     {
         begin_escape(robot_pose, obstacle_tracker, path_controller, time_source());
         step_escape(robot_pose, path_controller, motion_commander, time_source());
@@ -3831,6 +3780,7 @@ void ControllerSession::reset_stuck_state()
 
 bool ControllerSession::detect_stuck(bool pursuing, float asked_lin_mps, float cmd_lin_mps,
                                     float pose_sigma_m, const Eigen::Vector2f &pos_room,
+                                    float heading_rad, float commanded_rot_rps,
                                     std::uint64_t now_ms)
 {
     if (!params_ || !params_->stuck_recovery_enabled) { reset_stuck_window(); return false; }
@@ -3843,7 +3793,7 @@ bool ControllerSession::detect_stuck(bool pursuing, float asked_lin_mps, float c
     const rc::StallJudge::Params jp{.slip_ratio = params_->stuck_slip_ratio,
                                     .confirm_ms = params_->stuck_confirm_ms};
     const auto r = stall_judge_.note(pursuing, asked_lin_mps, cmd_lin_mps, pose_sigma_m,
-                                     pos_room, now_ms, jp);
+                                     pos_room, heading_rad, commanded_rot_rps, now_ms, jp);
     if (r.verdict == rc::StallVerdict::None) return false;
 
     if (r.verdict == rc::StallVerdict::Wedge)
