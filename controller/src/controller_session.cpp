@@ -3542,9 +3542,17 @@ void ControllerSession::finalize_reached(rc::AffordanceManager &affordance_manag
         // whether the dwell is worth arming just above. Arriving at the standpoint is not the same as
         // observing anything: a contract that ran to timeout arrives too, and used to be reported to
         // the producer identically to one that succeeded.
-        affordance_manager.mark_reached(graph_, was_affordance and last_look_succeeded_
-                                                    ? rc::affordance::Outcome::Satisfied
-                                                    : rc::affordance::Outcome::Timeout);
+        // ★ ASK WHETHER THERE WAS A PREDICATE TO FAIL. last_look_succeeded_ is set ONLY by the servo
+        // lock-on and orient paths; a Reach contract never touches it, so it is false on every
+        // successful Reach arrival. Room affordances are policy=Reach with an EMPTY goal — arriving IS
+        // the completion, `evaluate_goal` returns true trivially for an empty clause set — and reading
+        // the look flag for them reported `timeout` for four consecutive arrivals, one of them logged
+        // at d=0.23 m. A contract with no predicate cannot fail one.
+        const bool had_predicate = not active_contract_.goal.empty();
+        affordance_manager.mark_reached(graph_,
+                                        (not had_predicate or last_look_succeeded_)
+                                            ? rc::affordance::Outcome::Satisfied
+                                            : rc::affordance::Outcome::Timeout);
     }
     lockon_.reset();
     orient_start_ms_.reset();

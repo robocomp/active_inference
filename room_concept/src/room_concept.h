@@ -813,8 +813,15 @@ public:
     /// the counter CHANGING, never on the outcome value.
     ///   outcome: 0 none · 1 satisfied · 2 timeout · 3 refused · 4 abandoned
     /// ⚠ Same ONE-FRAME LAG as note_published_covariance: written after this class's row.
-    void note_exploration_drive(float belief_age_s, float belief_decay, int outcome, long completions)
+    /// `tgt_x/tgt_y` = the affordance target currently published (NaN when none). ★ Without it the
+    /// log cannot answer the first question anyone asks of a repeating robot — "is it going back to
+    /// the SAME cell, or working through different ones?" — which is the difference between a stuck
+    /// planner and normal exploration, and is invisible in a completion count.
+    void note_exploration_drive(float belief_age_s, float belief_decay, int outcome, long completions,
+                                float tgt_x, float tgt_y)
     {
+        last_tgt_x_ = tgt_x;
+        last_tgt_y_ = tgt_y;
         last_belief_age_s_    = belief_age_s;
         last_belief_decay_    = belief_decay;
         last_aff_outcome_     = outcome;
@@ -1254,6 +1261,8 @@ private:
    // accumulated to make the quotient mean anything (see the [ImuInject] guard) — a column that
    // reports a number for a parked robot is the defect that guard exists to prevent.
    float           last_wheel_gyro_ratio_ = std::numeric_limits<float>::quiet_NaN();
+   float           last_tgt_x_ = std::numeric_limits<float>::quiet_NaN();  // published affordance target
+   float           last_tgt_y_ = std::numeric_limits<float>::quiet_NaN();
    float           last_belief_age_s_    = 0.f;   // s since the last refresh_belief()
    float           last_belief_decay_    = 1.f;   // exp(-age/belief_forget_time): the drive itself
    int             last_aff_outcome_     = 0;     // 0 none 1 satisfied 2 timeout 3 refused 4 abandoned

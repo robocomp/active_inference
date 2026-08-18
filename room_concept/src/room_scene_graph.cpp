@@ -554,8 +554,13 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
     // BOTH on the same time axis. Logging only at completion would sample the curve exactly where it
     // is discontinuous and nowhere else.
     if (room_concept_ != nullptr)
+    {
+        const auto tgt = planner.current_target();
         room_concept_->note_exploration_drive(planner.belief_age_s(), planner.belief_decay(),
-                                              last_outcome_code_, aff_completions_);
+                                              last_outcome_code_, aff_completions_,
+                                              tgt ? tgt->position.x() : std::numeric_limits<float>::quiet_NaN(),
+                                              tgt ? tgt->position.y() : std::numeric_limits<float>::quiet_NaN());
+    }
 
     if (affordance_manager_.consume_completion_event())
     {
