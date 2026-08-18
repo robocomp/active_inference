@@ -354,6 +354,8 @@ bool SensorMediaPublisher::publish_imu(const ImuFrameView& view)
     s->mag_x(view.mag[0]);   s->mag_y(view.mag[1]);   s->mag_z(view.mag[2]);
     s->roll(view.rpy[0]);    s->pitch(view.rpy[1]);   s->yaw(view.rpy[2]);
     s->temperature(view.temperature);
+    s->sim_stamp_ms(view.sim_stamp_ms);
+    s->gyro_var(view.gyro_var);
 
     if (st.pub.publish(s))
     {

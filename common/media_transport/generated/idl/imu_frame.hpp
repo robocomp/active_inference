@@ -87,6 +87,8 @@ public:
 
                     m_stamp_ms = x.m_stamp_ms;
 
+                    m_sim_stamp_ms = x.m_sim_stamp_ms;
+
                     m_stream_id = x.m_stream_id;
 
                     m_acc_x = x.m_acc_x;
@@ -115,6 +117,8 @@ public:
 
                     m_temperature = x.m_temperature;
 
+                    m_gyro_var = x.m_gyro_var;
+
     }
 
     /*!
@@ -126,6 +130,7 @@ public:
     {
         m_frame_id = x.m_frame_id;
         m_stamp_ms = x.m_stamp_ms;
+        m_sim_stamp_ms = x.m_sim_stamp_ms;
         m_stream_id = x.m_stream_id;
         m_acc_x = x.m_acc_x;
         m_acc_y = x.m_acc_y;
@@ -140,6 +145,7 @@ public:
         m_pitch = x.m_pitch;
         m_yaw = x.m_yaw;
         m_temperature = x.m_temperature;
+        m_gyro_var = x.m_gyro_var;
     }
 
     /*!
@@ -154,6 +160,8 @@ public:
 
                     m_stamp_ms = x.m_stamp_ms;
 
+                    m_sim_stamp_ms = x.m_sim_stamp_ms;
+
                     m_stream_id = x.m_stream_id;
 
                     m_acc_x = x.m_acc_x;
@@ -182,6 +190,8 @@ public:
 
                     m_temperature = x.m_temperature;
 
+                    m_gyro_var = x.m_gyro_var;
+
         return *this;
     }
 
@@ -195,6 +205,7 @@ public:
 
         m_frame_id = x.m_frame_id;
         m_stamp_ms = x.m_stamp_ms;
+        m_sim_stamp_ms = x.m_sim_stamp_ms;
         m_stream_id = x.m_stream_id;
         m_acc_x = x.m_acc_x;
         m_acc_y = x.m_acc_y;
@@ -209,6 +220,7 @@ public:
         m_pitch = x.m_pitch;
         m_yaw = x.m_yaw;
         m_temperature = x.m_temperature;
+        m_gyro_var = x.m_gyro_var;
         return *this;
     }
 
@@ -221,6 +233,7 @@ public:
     {
         return (m_frame_id == x.m_frame_id &&
            m_stamp_ms == x.m_stamp_ms &&
+           m_sim_stamp_ms == x.m_sim_stamp_ms &&
            m_stream_id == x.m_stream_id &&
            m_acc_x == x.m_acc_x &&
            m_acc_y == x.m_acc_y &&
@@ -234,7 +247,8 @@ public:
            m_roll == x.m_roll &&
            m_pitch == x.m_pitch &&
            m_yaw == x.m_yaw &&
-           m_temperature == x.m_temperature);
+           m_temperature == x.m_temperature &&
+           m_gyro_var == x.m_gyro_var);
     }
 
     /*!
@@ -302,6 +316,35 @@ public:
     eProsima_user_DllExport uint64_t& stamp_ms()
     {
         return m_stamp_ms;
+    }
+
+
+    /*!
+     * @brief This function sets a value in member sim_stamp_ms
+     * @param _sim_stamp_ms New value for member sim_stamp_ms
+     */
+    eProsima_user_DllExport void sim_stamp_ms(
+            uint64_t _sim_stamp_ms)
+    {
+        m_sim_stamp_ms = _sim_stamp_ms;
+    }
+
+    /*!
+     * @brief This function returns the value of member sim_stamp_ms
+     * @return Value of member sim_stamp_ms
+     */
+    eProsima_user_DllExport uint64_t sim_stamp_ms() const
+    {
+        return m_sim_stamp_ms;
+    }
+
+    /*!
+     * @brief This function returns a reference to member sim_stamp_ms
+     * @return Reference to member sim_stamp_ms
+     */
+    eProsima_user_DllExport uint64_t& sim_stamp_ms()
+    {
+        return m_sim_stamp_ms;
     }
 
 
@@ -711,11 +754,41 @@ public:
     }
 
 
+    /*!
+     * @brief This function sets a value in member gyro_var
+     * @param _gyro_var New value for member gyro_var
+     */
+    eProsima_user_DllExport void gyro_var(
+            float _gyro_var)
+    {
+        m_gyro_var = _gyro_var;
+    }
+
+    /*!
+     * @brief This function returns the value of member gyro_var
+     * @return Value of member gyro_var
+     */
+    eProsima_user_DllExport float gyro_var() const
+    {
+        return m_gyro_var;
+    }
+
+    /*!
+     * @brief This function returns a reference to member gyro_var
+     * @return Reference to member gyro_var
+     */
+    eProsima_user_DllExport float& gyro_var()
+    {
+        return m_gyro_var;
+    }
+
+
 
 private:
 
     uint64_t m_frame_id{0};
     uint64_t m_stamp_ms{0};
+    uint64_t m_sim_stamp_ms{0};
     uint32_t m_stream_id{0};
     float m_acc_x{0.0};
     float m_acc_y{0.0};
@@ -730,6 +803,7 @@ private:
     float m_pitch{0.0};
     float m_yaw{0.0};
     float m_temperature{0.0};
+    float m_gyro_var{0.0};
 
 };
 

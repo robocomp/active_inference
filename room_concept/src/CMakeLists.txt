@@ -86,6 +86,7 @@ LIST(APPEND SOURCES
   ../src/epistemic_controller.cpp
   ../src/room_scene_graph.cpp
   ../src/lidar_ingestor.cpp
+  ../src/imu_ingestor.cpp
   ../src/room_viewer.cpp
   ../src/room_config.cpp
   ../src/epistemic_planner.cpp

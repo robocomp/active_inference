@@ -128,6 +128,36 @@ void register_ImuFrame_type_identifier(
             TypeObjectUtils::add_complete_struct_member(member_seq_ImuFrame, member_stamp_ms);
         }
         {
+            TypeIdentifierPair type_ids_sim_stamp_ms;
+            ReturnCode_t return_code_sim_stamp_ms {eprosima::fastdds::dds::RETCODE_OK};
+            return_code_sim_stamp_ms =
+                eprosima::fastdds::dds::DomainParticipantFactory::get_instance()->type_object_registry().get_type_identifiers(
+                "_uint64_t", type_ids_sim_stamp_ms);
+
+            if (eprosima::fastdds::dds::RETCODE_OK != return_code_sim_stamp_ms)
+            {
+                EPROSIMA_LOG_ERROR(XTYPES_TYPE_REPRESENTATION,
+                        "sim_stamp_ms Structure member TypeIdentifier unknown to TypeObjectRegistry.");
+                return;
+            }
+            StructMemberFlag member_flags_sim_stamp_ms = TypeObjectUtils::build_struct_member_flag(eprosima::fastdds::dds::xtypes::TryConstructFailAction::DISCARD,
+                    false, false, false, false);
+            MemberId member_id_sim_stamp_ms = 0x00000002;
+            bool common_sim_stamp_ms_ec {false};
+            CommonStructMember common_sim_stamp_ms {TypeObjectUtils::build_common_struct_member(member_id_sim_stamp_ms, member_flags_sim_stamp_ms, TypeObjectUtils::retrieve_complete_type_identifier(type_ids_sim_stamp_ms, common_sim_stamp_ms_ec))};
+            if (!common_sim_stamp_ms_ec)
+            {
+                EPROSIMA_LOG_ERROR(XTYPES_TYPE_REPRESENTATION, "Structure sim_stamp_ms member TypeIdentifier inconsistent.");
+                return;
+            }
+            MemberName name_sim_stamp_ms = "sim_stamp_ms";
+            eprosima::fastcdr::optional<AppliedBuiltinMemberAnnotations> member_ann_builtin_sim_stamp_ms;
+            ann_custom_ImuFrame.reset();
+            CompleteMemberDetail detail_sim_stamp_ms = TypeObjectUtils::build_complete_member_detail(name_sim_stamp_ms, member_ann_builtin_sim_stamp_ms, ann_custom_ImuFrame);
+            CompleteStructMember member_sim_stamp_ms = TypeObjectUtils::build_complete_struct_member(common_sim_stamp_ms, detail_sim_stamp_ms);
+            TypeObjectUtils::add_complete_struct_member(member_seq_ImuFrame, member_sim_stamp_ms);
+        }
+        {
             TypeIdentifierPair type_ids_stream_id;
             ReturnCode_t return_code_stream_id {eprosima::fastdds::dds::RETCODE_OK};
             return_code_stream_id =
@@ -142,7 +172,7 @@ void register_ImuFrame_type_identifier(
             }
             StructMemberFlag member_flags_stream_id = TypeObjectUtils::build_struct_member_flag(eprosima::fastdds::dds::xtypes::TryConstructFailAction::DISCARD,
                     false, false, true, false);
-            MemberId member_id_stream_id = 0x00000002;
+            MemberId member_id_stream_id = 0x00000003;
             bool common_stream_id_ec {false};
             CommonStructMember common_stream_id {TypeObjectUtils::build_common_struct_member(member_id_stream_id, member_flags_stream_id, TypeObjectUtils::retrieve_complete_type_identifier(type_ids_stream_id, common_stream_id_ec))};
             if (!common_stream_id_ec)
@@ -185,7 +215,7 @@ void register_ImuFrame_type_identifier(
             }
             StructMemberFlag member_flags_acc_x = TypeObjectUtils::build_struct_member_flag(eprosima::fastdds::dds::xtypes::TryConstructFailAction::DISCARD,
                     false, false, false, false);
-            MemberId member_id_acc_x = 0x00000003;
+            MemberId member_id_acc_x = 0x00000004;
             bool common_acc_x_ec {false};
             CommonStructMember common_acc_x {TypeObjectUtils::build_common_struct_member(member_id_acc_x, member_flags_acc_x, TypeObjectUtils::retrieve_complete_type_identifier(type_ids_acc_x, common_acc_x_ec))};
             if (!common_acc_x_ec)
@@ -215,7 +245,7 @@ void register_ImuFrame_type_identifier(
             }
             StructMemberFlag member_flags_acc_y = TypeObjectUtils::build_struct_member_flag(eprosima::fastdds::dds::xtypes::TryConstructFailAction::DISCARD,
                     false, false, false, false);
-            MemberId member_id_acc_y = 0x00000004;
+            MemberId member_id_acc_y = 0x00000005;
             bool common_acc_y_ec {false};
             CommonStructMember common_acc_y {TypeObjectUtils::build_common_struct_member(member_id_acc_y, member_flags_acc_y, TypeObjectUtils::retrieve_complete_type_identifier(type_ids_acc_y, common_acc_y_ec))};
             if (!common_acc_y_ec)
@@ -245,7 +275,7 @@ void register_ImuFrame_type_identifier(
             }
             StructMemberFlag member_flags_acc_z = TypeObjectUtils::build_struct_member_flag(eprosima::fastdds::dds::xtypes::TryConstructFailAction::DISCARD,
                     false, false, false, false);
-            MemberId member_id_acc_z = 0x00000005;
+            MemberId member_id_acc_z = 0x00000006;
             bool common_acc_z_ec {false};
             CommonStructMember common_acc_z {TypeObjectUtils::build_common_struct_member(member_id_acc_z, member_flags_acc_z, TypeObjectUtils::retrieve_complete_type_identifier(type_ids_acc_z, common_acc_z_ec))};
             if (!common_acc_z_ec)
@@ -275,7 +305,7 @@ void register_ImuFrame_type_identifier(
             }
             StructMemberFlag member_flags_gyro_x = TypeObjectUtils::build_struct_member_flag(eprosima::fastdds::dds::xtypes::TryConstructFailAction::DISCARD,
                     false, false, false, false);
-            MemberId member_id_gyro_x = 0x00000006;
+            MemberId member_id_gyro_x = 0x00000007;
             bool common_gyro_x_ec {false};
             CommonStructMember common_gyro_x {TypeObjectUtils::build_common_struct_member(member_id_gyro_x, member_flags_gyro_x, TypeObjectUtils::retrieve_complete_type_identifier(type_ids_gyro_x, common_gyro_x_ec))};
             if (!common_gyro_x_ec)
@@ -305,7 +335,7 @@ void register_ImuFrame_type_identifier(
             }
             StructMemberFlag member_flags_gyro_y = TypeObjectUtils::build_struct_member_flag(eprosima::fastdds::dds::xtypes::TryConstructFailAction::DISCARD,
                     false, false, false, false);
-            MemberId member_id_gyro_y = 0x00000007;
+            MemberId member_id_gyro_y = 0x00000008;
             bool common_gyro_y_ec {false};
             CommonStructMember common_gyro_y {TypeObjectUtils::build_common_struct_member(member_id_gyro_y, member_flags_gyro_y, TypeObjectUtils::retrieve_complete_type_identifier(type_ids_gyro_y, common_gyro_y_ec))};
             if (!common_gyro_y_ec)
@@ -335,7 +365,7 @@ void register_ImuFrame_type_identifier(
             }
             StructMemberFlag member_flags_gyro_z = TypeObjectUtils::build_struct_member_flag(eprosima::fastdds::dds::xtypes::TryConstructFailAction::DISCARD,
                     false, false, false, false);
-            MemberId member_id_gyro_z = 0x00000008;
+            MemberId member_id_gyro_z = 0x00000009;
             bool common_gyro_z_ec {false};
             CommonStructMember common_gyro_z {TypeObjectUtils::build_common_struct_member(member_id_gyro_z, member_flags_gyro_z, TypeObjectUtils::retrieve_complete_type_identifier(type_ids_gyro_z, common_gyro_z_ec))};
             if (!common_gyro_z_ec)
@@ -365,7 +395,7 @@ void register_ImuFrame_type_identifier(
             }
             StructMemberFlag member_flags_mag_x = TypeObjectUtils::build_struct_member_flag(eprosima::fastdds::dds::xtypes::TryConstructFailAction::DISCARD,
                     false, false, false, false);
-            MemberId member_id_mag_x = 0x00000009;
+            MemberId member_id_mag_x = 0x0000000a;
             bool common_mag_x_ec {false};
             CommonStructMember common_mag_x {TypeObjectUtils::build_common_struct_member(member_id_mag_x, member_flags_mag_x, TypeObjectUtils::retrieve_complete_type_identifier(type_ids_mag_x, common_mag_x_ec))};
             if (!common_mag_x_ec)
@@ -395,7 +425,7 @@ void register_ImuFrame_type_identifier(
             }
             StructMemberFlag member_flags_mag_y = TypeObjectUtils::build_struct_member_flag(eprosima::fastdds::dds::xtypes::TryConstructFailAction::DISCARD,
                     false, false, false, false);
-            MemberId member_id_mag_y = 0x0000000a;
+            MemberId member_id_mag_y = 0x0000000b;
             bool common_mag_y_ec {false};
             CommonStructMember common_mag_y {TypeObjectUtils::build_common_struct_member(member_id_mag_y, member_flags_mag_y, TypeObjectUtils::retrieve_complete_type_identifier(type_ids_mag_y, common_mag_y_ec))};
             if (!common_mag_y_ec)
@@ -425,7 +455,7 @@ void register_ImuFrame_type_identifier(
             }
             StructMemberFlag member_flags_mag_z = TypeObjectUtils::build_struct_member_flag(eprosima::fastdds::dds::xtypes::TryConstructFailAction::DISCARD,
                     false, false, false, false);
-            MemberId member_id_mag_z = 0x0000000b;
+            MemberId member_id_mag_z = 0x0000000c;
             bool common_mag_z_ec {false};
             CommonStructMember common_mag_z {TypeObjectUtils::build_common_struct_member(member_id_mag_z, member_flags_mag_z, TypeObjectUtils::retrieve_complete_type_identifier(type_ids_mag_z, common_mag_z_ec))};
             if (!common_mag_z_ec)
@@ -455,7 +485,7 @@ void register_ImuFrame_type_identifier(
             }
             StructMemberFlag member_flags_roll = TypeObjectUtils::build_struct_member_flag(eprosima::fastdds::dds::xtypes::TryConstructFailAction::DISCARD,
                     false, false, false, false);
-            MemberId member_id_roll = 0x0000000c;
+            MemberId member_id_roll = 0x0000000d;
             bool common_roll_ec {false};
             CommonStructMember common_roll {TypeObjectUtils::build_common_struct_member(member_id_roll, member_flags_roll, TypeObjectUtils::retrieve_complete_type_identifier(type_ids_roll, common_roll_ec))};
             if (!common_roll_ec)
@@ -485,7 +515,7 @@ void register_ImuFrame_type_identifier(
             }
             StructMemberFlag member_flags_pitch = TypeObjectUtils::build_struct_member_flag(eprosima::fastdds::dds::xtypes::TryConstructFailAction::DISCARD,
                     false, false, false, false);
-            MemberId member_id_pitch = 0x0000000d;
+            MemberId member_id_pitch = 0x0000000e;
             bool common_pitch_ec {false};
             CommonStructMember common_pitch {TypeObjectUtils::build_common_struct_member(member_id_pitch, member_flags_pitch, TypeObjectUtils::retrieve_complete_type_identifier(type_ids_pitch, common_pitch_ec))};
             if (!common_pitch_ec)
@@ -515,7 +545,7 @@ void register_ImuFrame_type_identifier(
             }
             StructMemberFlag member_flags_yaw = TypeObjectUtils::build_struct_member_flag(eprosima::fastdds::dds::xtypes::TryConstructFailAction::DISCARD,
                     false, false, false, false);
-            MemberId member_id_yaw = 0x0000000e;
+            MemberId member_id_yaw = 0x0000000f;
             bool common_yaw_ec {false};
             CommonStructMember common_yaw {TypeObjectUtils::build_common_struct_member(member_id_yaw, member_flags_yaw, TypeObjectUtils::retrieve_complete_type_identifier(type_ids_yaw, common_yaw_ec))};
             if (!common_yaw_ec)
@@ -545,7 +575,7 @@ void register_ImuFrame_type_identifier(
             }
             StructMemberFlag member_flags_temperature = TypeObjectUtils::build_struct_member_flag(eprosima::fastdds::dds::xtypes::TryConstructFailAction::DISCARD,
                     false, false, false, false);
-            MemberId member_id_temperature = 0x0000000f;
+            MemberId member_id_temperature = 0x00000010;
             bool common_temperature_ec {false};
             CommonStructMember common_temperature {TypeObjectUtils::build_common_struct_member(member_id_temperature, member_flags_temperature, TypeObjectUtils::retrieve_complete_type_identifier(type_ids_temperature, common_temperature_ec))};
             if (!common_temperature_ec)
@@ -559,6 +589,36 @@ void register_ImuFrame_type_identifier(
             CompleteMemberDetail detail_temperature = TypeObjectUtils::build_complete_member_detail(name_temperature, member_ann_builtin_temperature, ann_custom_ImuFrame);
             CompleteStructMember member_temperature = TypeObjectUtils::build_complete_struct_member(common_temperature, detail_temperature);
             TypeObjectUtils::add_complete_struct_member(member_seq_ImuFrame, member_temperature);
+        }
+        {
+            TypeIdentifierPair type_ids_gyro_var;
+            ReturnCode_t return_code_gyro_var {eprosima::fastdds::dds::RETCODE_OK};
+            return_code_gyro_var =
+                eprosima::fastdds::dds::DomainParticipantFactory::get_instance()->type_object_registry().get_type_identifiers(
+                "_float", type_ids_gyro_var);
+
+            if (eprosima::fastdds::dds::RETCODE_OK != return_code_gyro_var)
+            {
+                EPROSIMA_LOG_ERROR(XTYPES_TYPE_REPRESENTATION,
+                        "gyro_var Structure member TypeIdentifier unknown to TypeObjectRegistry.");
+                return;
+            }
+            StructMemberFlag member_flags_gyro_var = TypeObjectUtils::build_struct_member_flag(eprosima::fastdds::dds::xtypes::TryConstructFailAction::DISCARD,
+                    false, false, false, false);
+            MemberId member_id_gyro_var = 0x00000011;
+            bool common_gyro_var_ec {false};
+            CommonStructMember common_gyro_var {TypeObjectUtils::build_common_struct_member(member_id_gyro_var, member_flags_gyro_var, TypeObjectUtils::retrieve_complete_type_identifier(type_ids_gyro_var, common_gyro_var_ec))};
+            if (!common_gyro_var_ec)
+            {
+                EPROSIMA_LOG_ERROR(XTYPES_TYPE_REPRESENTATION, "Structure gyro_var member TypeIdentifier inconsistent.");
+                return;
+            }
+            MemberName name_gyro_var = "gyro_var";
+            eprosima::fastcdr::optional<AppliedBuiltinMemberAnnotations> member_ann_builtin_gyro_var;
+            ann_custom_ImuFrame.reset();
+            CompleteMemberDetail detail_gyro_var = TypeObjectUtils::build_complete_member_detail(name_gyro_var, member_ann_builtin_gyro_var, ann_custom_ImuFrame);
+            CompleteStructMember member_gyro_var = TypeObjectUtils::build_complete_struct_member(common_gyro_var, detail_gyro_var);
+            TypeObjectUtils::add_complete_struct_member(member_seq_ImuFrame, member_gyro_var);
         }
         CompleteStructType struct_type_ImuFrame = TypeObjectUtils::build_complete_struct_type(struct_flags_ImuFrame, header_ImuFrame, member_seq_ImuFrame);
         if (eprosima::fastdds::dds::RETCODE_BAD_PARAMETER ==

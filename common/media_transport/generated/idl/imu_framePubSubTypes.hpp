@@ -63,7 +63,7 @@ struct ImuFrame_f
             ImuFrame_f);
 };
 
-template struct ImuFrame_rob<ImuFrame_f, &ImuFrame::m_temperature>;
+template struct ImuFrame_rob<ImuFrame_f, &ImuFrame::m_gyro_var>;
 
 template <typename T, typename Tag>
 inline size_t constexpr ImuFrame_offset_of()
@@ -165,14 +165,14 @@ private:
 
     static constexpr bool is_plain_xcdrv1_impl()
     {
-        return 72ULL ==
+        return 84ULL ==
                (detail::ImuFrame_offset_of<ImuFrame, detail::ImuFrame_f>() +
                sizeof(float));
     }
 
     static constexpr bool is_plain_xcdrv2_impl()
     {
-        return 72ULL ==
+        return 84ULL ==
                (detail::ImuFrame_offset_of<ImuFrame, detail::ImuFrame_f>() +
                sizeof(float));
     }

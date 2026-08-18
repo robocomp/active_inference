@@ -34,6 +34,7 @@
 #include "epistemic_controller.h"
 #include "room_scene_graph.h"
 #include "lidar_ingestor.h"
+#include "imu_ingestor.h"
 #include "room_viewer.h"
 #include "room_config.h"
 #include "../../common/affordance_manager/affordance_manager.h"
@@ -114,6 +115,9 @@ class SpecificWorker : public GenericWorker
 
         // ── LiDAR acquisition (decoupled ingest thread + buffer + health) ──────
         std::unique_ptr<rc::LidarIngestor> lidar_ingestor_;
+        // IMU on the MEDIA PLANE (RoomConfig::IMU_SOURCE == "media"). Null when the legacy DSR
+        // attribute path is selected, which is what modify_node_attrs_slot then keeps feeding.
+        std::unique_ptr<rc::ImuIngestor>   imu_ingestor_;
 
         // ── LiDAR stream gate on Waiting→Operating ─────────────────────────────
         // Without LiDAR the localizer can never stabilize, so Operating would be a lie. True when the

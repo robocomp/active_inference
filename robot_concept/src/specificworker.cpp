@@ -1564,6 +1564,11 @@ void SpecificWorker::read_imu_thread()
 			v.mag[0]  = data.mag.XMag;  v.mag[1]  = data.mag.YMag;  v.mag[2]  = data.mag.ZMag;
 			v.rpy[0]  = data.rot.Roll;  v.rpy[1]  = data.rot.Pitch; v.rpy[2]  = data.rot.Yaw;
 			v.temperature = data.temperature;
+			// The two fields a media-plane consumer cannot reconstruct and must not have to guess.
+			// simTimestamp is 0 on a real IMU, which is exactly the "not simulated" signal the
+			// consumer needs; the gyro covariance is diagonal and isotropic, so m22 is its variance.
+			v.sim_stamp_ms = static_cast<std::uint64_t>(std::max<long>(0, data.gyro.simTimestamp));
+			v.gyro_var     = data.gyro.cov.m22;
 			media_.publish_imu(v);
 		}
 		media_.maybe_report_stats(SensorMediaPublisher::StatsGroup::Imu, std::chrono::seconds(5));

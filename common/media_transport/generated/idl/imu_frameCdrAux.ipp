@@ -59,46 +59,52 @@ eProsima_user_DllExport size_t calculate_serialized_size(
                 data.stamp_ms(), current_alignment);
 
         calculated_size += calculator.calculate_member_serialized_size(eprosima::fastcdr::MemberId(2),
-                data.stream_id(), current_alignment);
+                data.sim_stamp_ms(), current_alignment);
 
         calculated_size += calculator.calculate_member_serialized_size(eprosima::fastcdr::MemberId(3),
-                data.acc_x(), current_alignment);
+                data.stream_id(), current_alignment);
 
         calculated_size += calculator.calculate_member_serialized_size(eprosima::fastcdr::MemberId(4),
-                data.acc_y(), current_alignment);
+                data.acc_x(), current_alignment);
 
         calculated_size += calculator.calculate_member_serialized_size(eprosima::fastcdr::MemberId(5),
-                data.acc_z(), current_alignment);
+                data.acc_y(), current_alignment);
 
         calculated_size += calculator.calculate_member_serialized_size(eprosima::fastcdr::MemberId(6),
-                data.gyro_x(), current_alignment);
+                data.acc_z(), current_alignment);
 
         calculated_size += calculator.calculate_member_serialized_size(eprosima::fastcdr::MemberId(7),
-                data.gyro_y(), current_alignment);
+                data.gyro_x(), current_alignment);
 
         calculated_size += calculator.calculate_member_serialized_size(eprosima::fastcdr::MemberId(8),
-                data.gyro_z(), current_alignment);
+                data.gyro_y(), current_alignment);
 
         calculated_size += calculator.calculate_member_serialized_size(eprosima::fastcdr::MemberId(9),
-                data.mag_x(), current_alignment);
+                data.gyro_z(), current_alignment);
 
         calculated_size += calculator.calculate_member_serialized_size(eprosima::fastcdr::MemberId(10),
-                data.mag_y(), current_alignment);
+                data.mag_x(), current_alignment);
 
         calculated_size += calculator.calculate_member_serialized_size(eprosima::fastcdr::MemberId(11),
-                data.mag_z(), current_alignment);
+                data.mag_y(), current_alignment);
 
         calculated_size += calculator.calculate_member_serialized_size(eprosima::fastcdr::MemberId(12),
-                data.roll(), current_alignment);
+                data.mag_z(), current_alignment);
 
         calculated_size += calculator.calculate_member_serialized_size(eprosima::fastcdr::MemberId(13),
-                data.pitch(), current_alignment);
+                data.roll(), current_alignment);
 
         calculated_size += calculator.calculate_member_serialized_size(eprosima::fastcdr::MemberId(14),
-                data.yaw(), current_alignment);
+                data.pitch(), current_alignment);
 
         calculated_size += calculator.calculate_member_serialized_size(eprosima::fastcdr::MemberId(15),
+                data.yaw(), current_alignment);
+
+        calculated_size += calculator.calculate_member_serialized_size(eprosima::fastcdr::MemberId(16),
                 data.temperature(), current_alignment);
+
+        calculated_size += calculator.calculate_member_serialized_size(eprosima::fastcdr::MemberId(17),
+                data.gyro_var(), current_alignment);
 
 
     calculated_size += calculator.end_calculate_type_serialized_size(previous_encoding, current_alignment);
@@ -122,20 +128,22 @@ eProsima_user_DllExport void serialize(
     scdr
         << eprosima::fastcdr::MemberId(0) << data.frame_id()
         << eprosima::fastcdr::MemberId(1) << data.stamp_ms()
-        << eprosima::fastcdr::MemberId(2) << data.stream_id()
-        << eprosima::fastcdr::MemberId(3) << data.acc_x()
-        << eprosima::fastcdr::MemberId(4) << data.acc_y()
-        << eprosima::fastcdr::MemberId(5) << data.acc_z()
-        << eprosima::fastcdr::MemberId(6) << data.gyro_x()
-        << eprosima::fastcdr::MemberId(7) << data.gyro_y()
-        << eprosima::fastcdr::MemberId(8) << data.gyro_z()
-        << eprosima::fastcdr::MemberId(9) << data.mag_x()
-        << eprosima::fastcdr::MemberId(10) << data.mag_y()
-        << eprosima::fastcdr::MemberId(11) << data.mag_z()
-        << eprosima::fastcdr::MemberId(12) << data.roll()
-        << eprosima::fastcdr::MemberId(13) << data.pitch()
-        << eprosima::fastcdr::MemberId(14) << data.yaw()
-        << eprosima::fastcdr::MemberId(15) << data.temperature()
+        << eprosima::fastcdr::MemberId(2) << data.sim_stamp_ms()
+        << eprosima::fastcdr::MemberId(3) << data.stream_id()
+        << eprosima::fastcdr::MemberId(4) << data.acc_x()
+        << eprosima::fastcdr::MemberId(5) << data.acc_y()
+        << eprosima::fastcdr::MemberId(6) << data.acc_z()
+        << eprosima::fastcdr::MemberId(7) << data.gyro_x()
+        << eprosima::fastcdr::MemberId(8) << data.gyro_y()
+        << eprosima::fastcdr::MemberId(9) << data.gyro_z()
+        << eprosima::fastcdr::MemberId(10) << data.mag_x()
+        << eprosima::fastcdr::MemberId(11) << data.mag_y()
+        << eprosima::fastcdr::MemberId(12) << data.mag_z()
+        << eprosima::fastcdr::MemberId(13) << data.roll()
+        << eprosima::fastcdr::MemberId(14) << data.pitch()
+        << eprosima::fastcdr::MemberId(15) << data.yaw()
+        << eprosima::fastcdr::MemberId(16) << data.temperature()
+        << eprosima::fastcdr::MemberId(17) << data.gyro_var()
 ;
     scdr.end_serialize_type(current_state);
 }
@@ -164,59 +172,67 @@ eProsima_user_DllExport void deserialize(
                                             break;
 
                                         case 2:
-                                                dcdr >> data.stream_id();
+                                                dcdr >> data.sim_stamp_ms();
                                             break;
 
                                         case 3:
-                                                dcdr >> data.acc_x();
+                                                dcdr >> data.stream_id();
                                             break;
 
                                         case 4:
-                                                dcdr >> data.acc_y();
+                                                dcdr >> data.acc_x();
                                             break;
 
                                         case 5:
-                                                dcdr >> data.acc_z();
+                                                dcdr >> data.acc_y();
                                             break;
 
                                         case 6:
-                                                dcdr >> data.gyro_x();
+                                                dcdr >> data.acc_z();
                                             break;
 
                                         case 7:
-                                                dcdr >> data.gyro_y();
+                                                dcdr >> data.gyro_x();
                                             break;
 
                                         case 8:
-                                                dcdr >> data.gyro_z();
+                                                dcdr >> data.gyro_y();
                                             break;
 
                                         case 9:
-                                                dcdr >> data.mag_x();
+                                                dcdr >> data.gyro_z();
                                             break;
 
                                         case 10:
-                                                dcdr >> data.mag_y();
+                                                dcdr >> data.mag_x();
                                             break;
 
                                         case 11:
-                                                dcdr >> data.mag_z();
+                                                dcdr >> data.mag_y();
                                             break;
 
                                         case 12:
-                                                dcdr >> data.roll();
+                                                dcdr >> data.mag_z();
                                             break;
 
                                         case 13:
-                                                dcdr >> data.pitch();
+                                                dcdr >> data.roll();
                                             break;
 
                                         case 14:
-                                                dcdr >> data.yaw();
+                                                dcdr >> data.pitch();
                                             break;
 
                                         case 15:
+                                                dcdr >> data.yaw();
+                                            break;
+
+                                        case 16:
                                                 dcdr >> data.temperature();
+                                            break;
+
+                                        case 17:
+                                                dcdr >> data.gyro_var();
                                             break;
 
                     default:
@@ -236,6 +252,7 @@ void serialize_key(
     static_cast<void>(scdr);
     static_cast<void>(data);
                         scdr << data.stream_id();
+
 
 
 

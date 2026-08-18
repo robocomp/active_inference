@@ -97,6 +97,7 @@ void SpecificWorker::request_shutdown()
 
     // Drop the lidar media subscriber BEFORE tearing down RoomConcept (pump() calls
     // room_concept_.notify_new_lidar) and while G is still alive.
+    imu_ingestor_.reset();   // stop the IMU reader before the graph goes
     lidar_ingestor_.reset();
 
     room_concept_.stop();
@@ -151,6 +152,14 @@ void SpecificWorker::initialize()
         G, rt_api_.get(), params, room_concept_, epistemic_controller_,
         [this] { trigger_graph_layout_twopi(); });
     lidar_ingestor_ = std::make_unique<rc::LidarIngestor>(G, room_concept_, params);
+    if (params.IMU_SOURCE == "media")
+    {
+        imu_ingestor_ = std::make_unique<rc::ImuIngestor>(G, imu_buffer_, sim_clock_);
+        qInfo() << "[IMU] source = MEDIA PLANE — the DSR imu_* attributes are ignored";
+    }
+    else
+        qInfo() << "[IMU] source = DSR attributes (legacy). Set RoomConcept.ImuSource = \"media\" to"
+                << "consume the topic the producer already advertises.";
 
     // ── Wire RoomConcept run context ───────────────────────────────────────
     rc::RoomConcept::RunContext run_ctx;
@@ -324,6 +333,7 @@ void SpecificWorker::initialize()
             // (subscriber discovery + inner_eigen transform), which is unsafe during the join. Idempotent.
             if (lidar_ingestor_)
                 lidar_ingestor_->start();
+                if (imu_ingestor_) imu_ingestor_->start();
         },
         .on_operating_loop = [this]()
         {
@@ -870,7 +880,10 @@ void SpecificWorker::modify_node_attrs_slot(std::uint64_t id, const std::vector<
     // its wheels, so it over-reports rotation -- measured at 8.2% on this robot, against translation
     // that is exact to 0.1%. Buffering these lets the motion prior integrate the gyro across the
     // interval between two lidar sweeps instead of holding one 10 Hz rot sample constant across it.
-    if (touches_imu)
+    // When the media plane owns the IMU, ignore these attributes entirely rather than filling the
+    // buffer twice: two sources keyed on the same integration stamp would have the dedup silently
+    // drop whichever arrived second, which is a race dressed up as a policy.
+    if (touches_imu and imu_ingestor_ == nullptr)
     {
         if (const auto gyro = G->get_attrib_by_name<imu_gyroscope_att>(robot_node);
             gyro.has_value() and gyro.value().get().size() >= 3)

@@ -99,6 +99,12 @@ public:
         float mag[3]  = {0, 0, 0};
         float rpy[3]  = {0, 0, 0};          // roll, pitch, yaw
         float temperature = 0.f;
+        // Producer's SIMULATION clock in ms, 0 when the source is real. A consumer integrating the
+        // gyro must key on the clock the RATE is measured against — a simulator reports per sim
+        // second while its stamps are wall — and 0 doubles as the "not simulated" flag.
+        std::uint64_t sim_stamp_ms = 0;
+        // Per-sample angular-rate variance, (rad/s)^2; negative = producer does not know.
+        float gyro_var = -1.f;
     };
 
     SensorMediaPublisher() = default;
