@@ -1,0 +1,177 @@
+/*
+ *  affordance_goal_parse.h — the parts of the affordance contract that are PURE.
+ *
+ *  Split out of affordance_protocol.h for one reason: everything here is a decision about the
+ *  contract's own consistency, it needs no DSR type to make that decision, and it was previously
+ *  unreachable by a test because it sat inline in a header that pulls in the whole graph API.
+ *
+ *  ─────────────────────────────────────────────────────────────────────────────────────────────
+ *  WHY REJECTION, NOT REPAIR
+ *
+ *  The completion predicate is what stops an affordance. Every way of silently mis-parsing it makes
+ *  it WEAKER or INVERTS it, and both mean the affordance reports success without the thing having
+ *  happened. Two live examples from the wire format as it stood:
+ *
+ *    · the clause zip ran `for (i < names.size() && i < vals.size())`, so a producer writing three
+ *      attribute names and two values silently lost the third CLAUSE. Fewer clauses = easier to
+ *      satisfy = completes early.
+ *    · a clause whose operator was missing fell back to GE. So `sigma LE 0.01` — "wait until the
+ *      uncertainty is SMALL" — silently became `sigma GE 0.01`, which is true exactly when the
+ *      uncertainty is LARGE. The predicate does not weaken there, it INVERTS, and the affordance
+ *      completes immediately on the condition it was written to wait out.
+ *
+ *  Neither announced itself. A truncated or inverted predicate looks identical to a satisfied one
+ *  from the outside — the affordance simply completes, and the producer books an observation it
+ *  never got. So the rule here is: a clause set that does not round-trip EXACTLY is refused whole,
+ *  the caller keeps the conservative type default, and the reason is reported. Refusing is safe
+ *  (nothing completes that should not); repairing is not.
+ */
+#pragma once
+
+#include <cmath>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace rc::affordance
+{
+
+enum class CompareOp { GE, LE, EQ, NE };
+
+struct GoalClause
+{
+    std::string attr;                 // attribute name on the feedback node
+    CompareOp   op    = CompareOp::GE;
+    float       value = 0.0f;
+};
+
+// The wire packs clauses as three parallel arrays joined by '|'. That is the format; this is the
+// only place allowed to interpret it.
+inline constexpr char kClauseDelim = '|';
+
+inline std::string_view to_string(CompareOp o)
+{
+    switch (o) { case CompareOp::LE: return "le"; case CompareOp::EQ: return "eq"; case CompareOp::NE: return "ne"; default: return "ge"; }
+}
+// Strict: an unrecognised operator is NOT silently GE — see the file header. Returns false on a
+// token this format does not define, so the caller can refuse the whole clause set.
+inline bool op_from_strict(std::string_view s, CompareOp& out)
+{
+    if (s == "ge") { out = CompareOp::GE; return true; }
+    if (s == "le") { out = CompareOp::LE; return true; }
+    if (s == "eq") { out = CompareOp::EQ; return true; }
+    if (s == "ne") { out = CompareOp::NE; return true; }
+    return false;
+}
+
+struct ClauseParse
+{
+    std::vector<GoalClause>  clauses;
+    std::vector<std::string> problems;   // empty ⇒ the set round-trips exactly
+    [[nodiscard]] bool ok() const { return problems.empty(); }
+};
+
+/// Zip the three wire arrays into clauses, refusing anything that does not correspond exactly.
+///
+/// `ops` may be EMPTY, meaning "every clause is GE" — that is a legal encoding and the only
+/// abbreviation allowed. A PARTIAL ops list is refused: there is no way to tell which clauses it was
+/// meant to cover, and guessing is what inverted the predicate above.
+[[nodiscard]] inline ClauseParse parse_goal_clauses(const std::vector<std::string>& names,
+                                                    const std::vector<std::string>& ops,
+                                                    const std::vector<float>&       values)
+{
+    ClauseParse out;
+    const auto n = names.size();
+
+    if (n != values.size())
+        out.problems.push_back("clause count mismatch: " + std::to_string(n) + " attribute name(s) but "
+                               + std::to_string(values.size()) + " value(s)");
+    if (not ops.empty() and ops.size() != n)
+        out.problems.push_back("operator count mismatch: " + std::to_string(ops.size()) + " operator(s) for "
+                               + std::to_string(n) + " clause(s) — a partial list cannot be assigned");
+    if (not out.ok())
+        return out;                      // sizes are wrong; indexing below would be meaningless
+
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        if (names[i].empty())
+            out.problems.push_back("clause " + std::to_string(i) + " has an empty attribute name");
+        else if (names[i].find(kClauseDelim) != std::string::npos)
+            out.problems.push_back("clause " + std::to_string(i) + " attribute '" + names[i] + "' contains '"
+                                   + kClauseDelim + "', the unescaped field delimiter — it would desynchronise "
+                                   "every clause after it");
+        if (not std::isfinite(values[i]))
+            out.problems.push_back("clause " + std::to_string(i) + " ('" + names[i] + "') has a non-finite value");
+
+        CompareOp op = CompareOp::GE;
+        if (not ops.empty() and not op_from_strict(ops[i], op))
+            out.problems.push_back("clause " + std::to_string(i) + " ('" + names[i] + "') has unknown operator '"
+                                   + ops[i] + "' — refusing rather than defaulting to 'ge', which would invert "
+                                   "an 'le' clause");
+        out.clauses.push_back({names[i], op, values[i]});
+    }
+    if (not out.ok())
+        out.clauses.clear();
+    return out;
+}
+
+/// Parity rule for any pair of arrays the wire carries as "parallel". Used for the viewpoint
+/// constraint's faces/face_gains, which a consumer zips to pick the best face: a length mismatch
+/// silently re-pairs every face with the WRONG gain, so the argmax names a face nobody scored.
+[[nodiscard]] inline bool parallel_ok(std::size_t a, std::size_t b) { return a == b or b == 0; }
+
+
+// ─── contract-level validation ────────────────────────────────────────────────
+// Structural mistakes that make a contract behave in a way the author did not intend, checked at
+// AUTHORING time. Reported, never fatal: this runs on the graph-publish path, where aborting costs
+// more than a bad contract. Kept pure (no Contract type) so it can be tested and so the protocol
+// header stays the only place that knows about DSR.
+struct ContractShape
+{
+    bool  is_reach          = false;   // Reach ignores the servo bindings entirely
+    bool  has_servo_binding = false;   // err_vec_attr or scalar_attr set
+    int   stable_n    = 1;
+    float timeout_ms  = 0.0f;
+    float max_observe_omega = 0.0f;
+    bool  is_orient   = false;
+};
+
+[[nodiscard]] inline std::vector<std::string>
+validate_contract(const ContractShape& shape, const std::vector<GoalClause>& goal)
+{
+    std::vector<std::string> problems;
+
+    if (not shape.is_reach and goal.empty())
+        problems.emplace_back("servo/orient contract has no completion clause — it can never complete");
+    if (shape.is_reach and shape.has_servo_binding)
+        problems.emplace_back("Reach contract carries servo bindings (center/advance) — the executor "
+                              "ignores them, so they are a silent no-op rather than the behaviour authored");
+    if (shape.stable_n < 1)
+        problems.emplace_back("stable_n < 1: the predicate is never required to hold, so the first "
+                              "cycle that happens to satisfy it completes the affordance");
+    if (shape.timeout_ms <= 0.0f)
+        problems.emplace_back("timeout_ms <= 0: nothing bounds the wait, so a predicate that can never "
+                              "be satisfied parks the robot on this affordance indefinitely");
+
+    // ★ Two clauses on the SAME attribute can be jointly unsatisfiable, and a contract that can never
+    // complete is indistinguishable at runtime from one that is merely slow — it just runs to timeout,
+    // every time, and the producer books a failure it cannot explain. Cheap to detect here.
+    for (std::size_t i = 0; i < goal.size(); ++i)
+        for (std::size_t j = i + 1; j < goal.size(); ++j)
+        {
+            if (goal[i].attr != goal[j].attr) continue;
+            const auto& a = goal[i]; const auto& b = goal[j];
+            const bool lo_hi = (a.op == CompareOp::GE and b.op == CompareOp::LE and b.value < a.value)
+                            or (a.op == CompareOp::LE and b.op == CompareOp::GE and a.value < b.value);
+            const bool eq_ne = (a.op == CompareOp::EQ and b.op == CompareOp::NE and a.value == b.value)
+                            or (a.op == CompareOp::NE and b.op == CompareOp::EQ and a.value == b.value);
+            const bool eq_eq = (a.op == CompareOp::EQ and b.op == CompareOp::EQ and a.value != b.value);
+            if (lo_hi or eq_ne or eq_eq)
+                problems.push_back("clauses " + std::to_string(i) + " and " + std::to_string(j)
+                                   + " on '" + a.attr + "' are jointly unsatisfiable — this contract "
+                                     "can only ever end in timeout");
+        }
+    return problems;
+}
+
+}  // namespace rc::affordance

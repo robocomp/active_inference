@@ -40,6 +40,8 @@
 #include <string_view>
 #include <vector>
 
+#include "affordance_goal_parse.h"   // GoalClause, CompareOp, parse_goal_clauses, validate_contract
+
 namespace rc::affordance
 {
 
@@ -47,15 +49,9 @@ namespace rc::affordance
 // micro-search to satisfy the completion predicate. Orient = do NOT navigate; rotate in place toward the
 // affordance's target yaw, then satisfy the predicate (a peripheral "glance" / saccade — no (x,y) target).
 enum class Policy    { Reach, Servo, Orient };
-enum class CompareOp { GE, LE, EQ, NE };
 enum class OnFail    { Consume, Abandon };   // Consume = give up & mark done; Abandon = release for retry
-
-struct GoalClause
-{
-    std::string attr;                 // attribute name on the feedback node
-    CompareOp   op    = CompareOp::GE;
-    float       value = 0.0f;
-};
+// CompareOp and GoalClause live in affordance_goal_parse.h — they are pure, and they are the part
+// that had to become testable (see that file's header for the two silent mis-parses it exists to stop).
 
 class ContractBuilder;   // fluent authoring builder (defined just below)
 
@@ -154,9 +150,15 @@ public:
     // reach — not per cycle.
     Contract build() const
     {
-        if ((c_.policy == Policy::Servo || c_.policy == Policy::Orient) && c_.goal.empty())
-            std::fprintf(stderr, "[affordance] WARNING: servo/orient contract has no completion clause "
-                                 "(.until/.and_) — it can never complete\n");
+        const ContractShape shape{
+            .is_reach          = (c_.policy == Policy::Reach),
+            .has_servo_binding = (not c_.err_vec_attr.empty() or not c_.scalar_attr.empty()),
+            .stable_n          = c_.stable_n,
+            .timeout_ms        = c_.timeout_ms,
+            .max_observe_omega = c_.max_observe_omega,
+            .is_orient         = (c_.policy == Policy::Orient)};
+        for (const auto& why : validate_contract(shape, c_.goal))
+            std::fprintf(stderr, "[affordance] WARNING: %s\n", why.c_str());
         return c_;
     }
     operator Contract() const { return build(); }   // pass a builder straight into write_contract(const Contract&)
@@ -180,17 +182,7 @@ inline Policy policy_from(std::string_view s)
     if (s == "orient") return Policy::Orient;
     return Policy::Reach;
 }
-inline std::string_view to_string(CompareOp o)
-{
-    switch (o) { case CompareOp::LE: return "le"; case CompareOp::EQ: return "eq"; case CompareOp::NE: return "ne"; default: return "ge"; }
-}
-inline CompareOp op_from(std::string_view s)
-{
-    if (s == "le") return CompareOp::LE;
-    if (s == "eq") return CompareOp::EQ;
-    if (s == "ne") return CompareOp::NE;
-    return CompareOp::GE;
-}
+// to_string(CompareOp) / op_from_strict: affordance_goal_parse.h.
 inline std::string_view to_string(OnFail f)     { return f == OnFail::Abandon ? "abandon" : "consume"; }
 inline OnFail           onfail_from(std::string_view s) { return s == "abandon" ? OnFail::Abandon : OnFail::Consume; }
 
@@ -382,6 +374,15 @@ inline void write_contract(DSR::DSRGraph& G, DSR::Node& node, const Contract& c)
     G.add_or_modify_attrib_local<aff_goal_attrs_att>  (node, detail::join(attrs, '|'));
     G.add_or_modify_attrib_local<aff_goal_ops_att>    (node, detail::join(ops, '|'));
     G.add_or_modify_attrib_local<aff_goal_values_att> (node, vals);
+    // Refuse-at-source: emitting a clause set our own reader would reject means the consumer silently
+    // runs the type default while the producer believes its contract is live. Checked here, once, at
+    // authoring — the same check the reader applies, so the two cannot drift.
+    if (const auto rt = parse_goal_clauses(attrs, ops, vals); not rt.ok())
+    {
+        std::fprintf(stderr, "[affordance] WARNING: this contract will NOT round-trip; the consumer "
+                             "will fall back to the type default:\n");
+        for (const auto& why : rt.problems) std::fprintf(stderr, "[affordance]   - %s\n", why.c_str());
+    }
     G.add_or_modify_attrib_local<aff_goal_stable_n_att>(node, c.stable_n);
     G.add_or_modify_attrib_local<aff_timeout_ms_att>  (node, c.timeout_ms);
     G.add_or_modify_attrib_local<aff_on_fail_att>     (node, std::string(to_string(c.on_fail)));
@@ -417,15 +418,28 @@ inline Contract read_contract(const DSR::Node& node, std::string_view parent_typ
     {
         if (auto names_s = detail::attr_string(ita->second))
         {
-            const auto names = detail::split(*names_s, '|');
+            const auto names = detail::split(*names_s, kClauseDelim);
             std::vector<std::string> ops;
             if (const auto io = attrs.find("aff_goal_ops"); io != attrs.end())
-                if (auto ops_s = detail::attr_string(io->second)) ops = detail::split(*ops_s, '|');
+                if (auto ops_s = detail::attr_string(io->second)) ops = detail::split(*ops_s, kClauseDelim);
             const auto& vals = itv->second.float_vec();
-            std::vector<GoalClause> g;
-            for (std::size_t i = 0; i < names.size() && i < vals.size(); ++i)
-                g.push_back({names[i], i < ops.size() ? op_from(ops[i]) : CompareOp::GE, vals[i]});
-            if (!g.empty()) c.goal = std::move(g);
+
+            // ★ ALL OR NOTHING. This used to zip to the SHORTER array and default a missing operator
+            // to GE, both silently. Dropping a clause weakens the predicate; defaulting an absent
+            // operator INVERTS an 'le' clause into 'ge' — either way the affordance completes without
+            // the thing having happened, and it looks exactly like success. A set that does not
+            // round-trip exactly is refused whole and the conservative type default stands.
+            const auto parsed = parse_goal_clauses(names, ops, vals);
+            if (not parsed.ok())
+            {
+                std::fprintf(stderr, "[affordance] REFUSED the goal clauses on this node; keeping the "
+                                     "'%.*s' type default (%zu clause(s)). Reasons:\n",
+                             static_cast<int>(parent_type.size()), parent_type.data(), c.goal.size());
+                for (const auto& why : parsed.problems)
+                    std::fprintf(stderr, "[affordance]   - %s\n", why.c_str());
+            }
+            else if (not parsed.clauses.empty())
+                c.goal = parsed.clauses;
         }
     }
     geti("aff_goal_stable_n", c.stable_n);
@@ -462,6 +476,18 @@ inline ViewpointConstraint read_viewpoint(const DSR::Node& node)
         if (auto s = detail::attr_string(it->second)) v.faces = detail::split(*s, '|');
     if (const auto it = attrs.find("aff_view_face_gains"); it != attrs.end())
         v.face_gains = it->second.float_vec();
+    // ★ faces and face_gains are PARALLEL, and the consumer zips them to pick the best face. A length
+    // mismatch re-pairs every face with the wrong gain, so the argmax names a face nobody scored — and
+    // the robot drives confidently to it. An empty gains list is the legal "unscored" encoding; any
+    // other mismatch drops the constraint back to the legacy hint pose rather than acting on a
+    // corrupted ranking.
+    if (not parallel_ok(v.faces.size(), v.face_gains.size()))
+    {
+        std::fprintf(stderr, "[affordance] viewpoint REFUSED: %zu face(s) but %zu gain(s) — the ranking "
+                             "cannot be zipped; falling back to the hint pose\n",
+                     v.faces.size(), v.face_gains.size());
+        v = ViewpointConstraint{};
+    }
     if (const auto it = attrs.find("aff_view_standoff_min"); it != attrs.end())
         if (auto s = detail::attr_scalar(it->second)) v.standoff_min_m = *s;
     if (const auto it = attrs.find("aff_view_standoff_max"); it != attrs.end())
