@@ -198,7 +198,26 @@ MotionPreintegration   = true   # 2026-08-13 LANDED ON. The controlled A/B (same
                                 # THE WAY BACK IS ONE WORD: false — no rebuild needed.
 # PreintOdomSigmaVLat  = 0.0894   # m/√s   — derived from max(StationaryMotionThreshold, OdomNoiseBase)/√0.05
 # PreintOdomSigmaVLong = 0.0894
-# PreintOdomSigmaOmega = 0.0447   # rad/√s — derived from RotationNoiseBase/√0.05
+# ★★ STAGED DOWN 2026-08-18, 0.0447 -> 0.010. The derived value comes from RotationNoiseBase/√0.05,
+# and RotationNoiseBase is a PRE-GYRO constant: the pipeline has taken heading from the gyro since that
+# path landed (imu_cover 0.98), and the gyro's own noise is 0.002 rad/√s — 22x quieter than the prior.
+#
+# WHY THIS IS THE TERM THAT MATTERS. Measured on a 4-turn pivot, the rotation variance splits as
+#     random  sigma_w^2 * T   = 3.80e-4   (94%)
+#     scale   (s * dtheta)^2  = 2.37e-5    (6%)
+# so lowering PreintOdomScaleOmega 0.064 -> 0.02 moved the total by 2.7% and read as NULL — motion
+# sigma_th 0.01569 -> 0.01649, inside run-to-run noise. The density is where 94% of it lives. Random
+# and scale are equal at T = (sigma/(s*w))^2 = 3.05 s against a 0.19 s strided interval, so the random
+# term dominates by ~16x; at 0.010 that crossover falls to ~0.15 s and the two become comparable.
+#
+# ⚠ STAGED, NOT TAKEN TO 0.002, ON PURPOSE. This term is currently the ONLY thing absorbing everything
+# else that makes heading prediction wrong — odometry/lidar window misalignment, the ~1.4% gyro scale
+# residual the closure tests measured, and the interval quantisation. None of those are modelled
+# anywhere else, so dropping straight to the raw sensor noise would assume they are zero. 0.010 is 4.5x
+# tighter and leaves headroom; go further only if nothing destabilises.
+# ⚠ AND THIS IS A SIM NUMBER. A real gyro has bias drift a Webots one does not — measure it on hardware
+# (SIM2REAL_CALIBRATION.md, Phase 1, applied to the gyro channel).
+PreintOdomSigmaOmega = 0.010
 # PreintOdomScaleV     = 0.08     # = OdomNoiseTrans
 # ★★ MEASURED 2026-08-18, and it is the ONLY Preint* value here that is no longer a translation of
 # the legacy constants. The derived default is hypot(OdomNoiseRot 0.04, EncoderRotSlipK 0.05) = 0.0640
