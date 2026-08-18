@@ -547,6 +547,16 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
     // Always update robot state so mark_and_refresh uses the correct position.
     epistemic_->set_robot_state(res.robot_pose, res.covariance);
 
+    // Mirror the exploration DRIVE into the localiser CSV every cycle, whether or not anything
+    // completed. The drive is a continuous quantity (the scoring prior's precision decaying as
+    // exp(-age/belief_forget_time)) and the completions are rare events punctuating it, so the only
+    // way to see whether gating refresh_belief on Satisfied actually keeps the drive alive is to have
+    // BOTH on the same time axis. Logging only at completion would sample the curve exactly where it
+    // is discontinuous and nowhere else.
+    if (room_concept_ != nullptr)
+        room_concept_->note_exploration_drive(planner.belief_age_s(), planner.belief_decay(),
+                                              last_outcome_code_, aff_completions_);
+
     if (affordance_manager_.consume_completion_event())
     {
         // ★ COMPLETED IS NOT NEUTRAL. refresh_belief() resets ONE GLOBAL clock, and that clock feeds
@@ -565,6 +575,12 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
         // holding a finished target would wedge the planner.
         const auto outcome = affordance_manager_.last_outcome();
         const bool observed = rc::affordance::observation_happened(outcome);
+        using rc::affordance::Outcome;
+        last_outcome_code_ = outcome == Outcome::Satisfied ? 1
+                           : outcome == Outcome::Timeout   ? 2
+                           : outcome == Outcome::Refused   ? 3
+                           : outcome == Outcome::Abandoned ? 4 : 0;
+        ++aff_completions_;
         std::print("[planner] completion consumed (outcome={}) -> target cleared, {}\n",
                    rc::affordance::to_string(outcome),
                    observed ? "belief refreshed" : "belief NOT refreshed (nothing was observed)");

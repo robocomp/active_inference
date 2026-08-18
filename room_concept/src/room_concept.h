@@ -803,6 +803,24 @@ public:
     void note_published_covariance(float pub_cov_xx, float pub_cov_tt, bool clamp_hit)
     { last_pub_cov_xx_ = pub_cov_xx; last_pub_cov_tt_ = pub_cov_tt; last_clamp_hit_ = clamp_hit; }
 
+    /// ── Exploration drive + affordance outcomes, for the CSV ────────────────────────────────────
+    /// `belief_age_s` / `belief_decay` ARE the exploration drive (EpistemicPlanner::belief_decay):
+    /// decay 1 = just refreshed, → 0 = long unexplored and the drive is maximal. `outcome` is the LAST
+    /// completed affordance's outcome, `completions` counts them.
+    /// ★ THE COUNTER IS WHAT MAKES THE OUTCOME USABLE. An outcome column alone is a LEVEL that
+    /// persists for thousands of rows after its one event, so any per-row statistic over it is
+    /// dominated by whichever outcome happened to last longest. A completion is an EVENT; segment on
+    /// the counter CHANGING, never on the outcome value.
+    ///   outcome: 0 none · 1 satisfied · 2 timeout · 3 refused · 4 abandoned
+    /// ⚠ Same ONE-FRAME LAG as note_published_covariance: written after this class's row.
+    void note_exploration_drive(float belief_age_s, float belief_decay, int outcome, long completions)
+    {
+        last_belief_age_s_    = belief_age_s;
+        last_belief_decay_    = belief_decay;
+        last_aff_outcome_     = outcome;
+        last_aff_completions_ = completions;
+    }
+
     /// The odometry increment the PREDICTOR used this frame: the selected motion prior's delta_pose,
     /// [dx, dy, dtheta] in the room frame, integrated over the interval the prediction spans.
     /// This is the quantity the predicted pose is built from — not a velocity sample, and not the raw
@@ -1236,6 +1254,10 @@ private:
    // accumulated to make the quotient mean anything (see the [ImuInject] guard) — a column that
    // reports a number for a parked robot is the defect that guard exists to prevent.
    float           last_wheel_gyro_ratio_ = std::numeric_limits<float>::quiet_NaN();
+   float           last_belief_age_s_    = 0.f;   // s since the last refresh_belief()
+   float           last_belief_decay_    = 1.f;   // exp(-age/belief_forget_time): the drive itself
+   int             last_aff_outcome_     = 0;     // 0 none 1 satisfied 2 timeout 3 refused 4 abandoned
+   long            last_aff_completions_ = 0;     // EVENT locator — segment on this changing
    float           last_pub_cov_xx_ = std::numeric_limits<float>::quiet_NaN();  // post-clamp, as published
    float           last_pub_cov_tt_ = std::numeric_limits<float>::quiet_NaN();
    bool            last_clamp_hit_  = false;

@@ -3,6 +3,7 @@
 #include <vector>
 #include <optional>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <random>
 #include <Eigen/Dense>
@@ -217,6 +218,24 @@ public:
     /// only decays (and exploration only re-activates) during genuine idle time. No-op unless
     /// Params::belief_forget_time > 0.
     void refresh_belief() { last_belief_refresh_ = std::chrono::steady_clock::now(); }
+
+    /// ── INSTRUMENTATION for the aff_outcome gate ────────────────────────────────────────────────
+    /// Seconds since the last refresh, and the multiplier it currently applies to the scoring prior's
+    /// precision: Y_info *= exp(-age / belief_forget_time). These two ARE the exploration drive — the
+    /// decay is what makes going anywhere look informative again — so logging them is what turns
+    /// "gating refresh_belief on Satisfied keeps the drive alive" from an argument into a measurement.
+    /// decay = 1 means "just refreshed, fully confident"; → 0 means "long unexplored, drive maximal".
+    /// Returns 1.0 when forgetting is disabled, which is also the honest reading: nothing decays.
+    [[nodiscard]] float belief_age_s() const
+    {
+        return std::chrono::duration<float>(std::chrono::steady_clock::now() - last_belief_refresh_).count();
+    }
+    [[nodiscard]] float belief_decay() const
+    {
+        return params.belief_forget_time > 0.f
+                   ? std::exp(-belief_age_s() / params.belief_forget_time)
+                   : 1.0f;
+    }
 
     /// Lightweight per-cycle update: stamps the current robot position in the
     /// visit grid and refreshes the IoR overlay. Call this when the full

@@ -135,6 +135,13 @@ private:
     rc::RoomConfig*           params_       = nullptr;   // shared config (read + body-dim write-back)
     rc::RoomConcept*               room_concept_ = nullptr;
     rc::EpistemicController*       epistemic_    = nullptr;
+
+    // Affordance-outcome instrumentation (mirrored into the localiser CSV each cycle).
+    // ★ The COUNTER, not the code, is what locates an event: the code is a LEVEL that persists for
+    // thousands of rows after its one completion, so segmenting on the code measures dwell time
+    // rather than events. Segment on aff_completions changing.
+    long aff_completions_   = 0;   // completed affordances this run
+    int  last_outcome_code_ = 0;   // 0 none · 1 satisfied · 2 timeout · 3 refused · 4 abandoned
     std::function<void()>          trigger_layout_;
 
     rc::AffordanceManager affordance_manager_{"afford_room"};
