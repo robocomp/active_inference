@@ -230,9 +230,19 @@ public:
         auto *j_layout = new QVBoxLayout(j_panel);
         j_layout->setContentsMargins(4, 2, 4, 2);
         j_layout->setSpacing(2);
-        j_layout->addWidget(new QLabel("commanded velocity (whoever is driving) — adv (m/s)  |  rot (rad/s)  |  "
-                                       "σxy scaled: TOP = PoseXYStdStop (throttle floored)   "
-                                       "[gap = nothing commanding]", j_panel));
+        // ★THE CAPTION IS A NAME, NOT A LEGEND. It read out every series, its units, what the top of the
+        // sigma line meant and what a gap meant — ~150 characters, which set a floor under the whole
+        // window's width for text nobody needs on the tenth glance. The panel is named here and
+        // EXPLAINED on hover, so none of it is lost and none of it costs width.
+        auto *j_caption = new QLabel("Commanded velocity  |  σxy", j_panel);
+        j_caption->setToolTip(
+            QStringLiteral("adv (m/s) and rot (rad/s), from whoever is driving — this controller's own\n"
+                           "output loop when it is commanding, otherwise the shared graph's robot_ref_*\n"
+                           "(a joystick, say). A GAP means nothing is commanding the base.\n\n"
+                           "σxy is the localisation sigma the speed limiter is reading, mapped onto the\n"
+                           "same axis: the TOP of the velocity band is PoseXYStdStop, i.e. the throttle\n"
+                           "is floored. It breaks when the limiter is not in the loop."));
+        j_layout->addWidget(j_caption);
         mission_j_plot = new rc::TimeSeriesPlot(j_panel);
         mission_j_plot->setMinimumHeight(80);
         // ~30 s: long enough to hold a whole approach and its arrival, short enough that individual
