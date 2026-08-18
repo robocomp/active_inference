@@ -217,6 +217,27 @@ MotionPreintegration   = true   # 2026-08-13 LANDED ON. The controlled A/B (same
 # tighter and leaves headroom; go further only if nothing destabilises.
 # ⚠ AND THIS IS A SIM NUMBER. A real gyro has bias drift a Webots one does not — measure it on hardware
 # (SIM2REAL_CALIBRATION.md, Phase 1, applied to the gyro channel).
+#
+# ★★ MEASURED, three matched 4-turn pivots, ~1000-1200 rotating frames each:
+#     sigma .0447 scale .064   motion sig_th 0.01569   pub sig_th 0.03647   EE 76.64%
+#     sigma .0447 scale .020   motion sig_th 0.01653   pub sig_th 0.03570   EE 81.29%
+#     sigma .0100 scale .020   motion sig_th 0.00460   pub sig_th 0.02867   EE 90.84%
+# The motion factor tightened 3.6x, published sigma_th fell 20%, and early exit DURING ROTATION rose
+# 9.5 points. sigma_xy is untouched (0.04587 -> 0.04573), so nothing coupled that should not have.
+# ★ The prediction genuinely improved rather than merely claiming to: |innov_theta| — how far the SDF
+# has to move the predicted HEADING — fell 0.0343 -> 0.0125 rad, and the optimizer ran on 9.2% of
+# rotating frames instead of 18.7%.
+# ★ sigma_th's p90 ROSE (0.0456 -> 0.0517) while its median fell. That is the adaptive covariance
+# working as designed, not a regression: a stiffer prior means the frames where the SDF does disagree
+# carry a larger innovation (innov_norm 0.0143 -> 0.0293), and sigma = max(laplace, EMA[innov^2]) lifts
+# sigma to match. More confident when it is right, honestly less when it is not.
+# ⚠ WATCH loss_motion: 3.72 -> 46.5, a 12x rise, which is just the 1/sigma^2 arithmetic of a 3.6x
+# tighter prior — but it is the term that once spiked to 6000 and caused StationaryMotionThreshold to
+# be raised as a stabiliser. loss_boundary 1.39 -> 5.1, still far under the 559 ratchet signature.
+# recovery_bad 0 in every run; nothing destabilised.
+# ⇒ STOP HERE rather than pushing toward 0.002: the motion factor is already at 0.0046 rad against a
+# gyro whose measured error is ~1.4%, so the remaining headroom is small and going further mostly buys
+# loss_motion while spending the margin that absorbs the window misalignment and scale residual.
 PreintOdomSigmaOmega = 0.010
 # PreintOdomScaleV     = 0.08     # = OdomNoiseTrans
 # ★★ MEASURED 2026-08-18, and it is the ONLY Preint* value here that is no longer a translation of
