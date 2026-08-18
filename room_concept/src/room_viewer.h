@@ -124,6 +124,8 @@ private:
     QPointer<rc::Viewer2D>       viewer_2d_;
     QPointer<rc::TimeSeriesPlot> ts_plot_fe_;
     QPointer<rc::TimeSeriesPlot> ts_plot_rates_;   // RT-publish + optimizer rates (Hz) over time
+    // Integrated odometry as the PREDICTOR consumes it — see get_predictor_delta().
+    rc::TimeSeriesPlot* ts_plot_odo_ = nullptr;
     QPointer<rc::TimeSeriesPlot> ts_plot_conf_;    // localization confidence (raw, 0..1) over time
     // Last state pushed to lbl_room_stable: -1 = never painted, 0 = red, 1 = green, 2 = amber (searching).
     // Tri-state so the very first update always applies a stylesheet, whichever state it reports.

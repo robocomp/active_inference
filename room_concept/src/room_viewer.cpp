@@ -139,6 +139,22 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
     ts_plot_rates_->add_series("optimizer Hz",  QColor(230, 126, 34), 1.6f, 0);   // loc-thread solve rate
     custom_widget_->frame_series->layout()->addWidget(ts_plot_rates_);
 
+    // Integrated odometry AT THE POINT THE PREDICTOR USES IT: the selected motion prior's delta_pose,
+    // i.e. the increment the predicted pose is actually built from. Deliberately not a velocity sample
+    // and not the raw stream — those are one and two steps upstream, and a prediction can be wrong
+    // because the integral over the window is wrong even when every sample in it was fine (a stale
+    // window bound, a clipped segment, a dropped sample). This is the last quantity before the
+    // prediction, so a bad prediction can be attributed here or to the optimiser, not left ambiguous.
+    // Plotted per prediction interval, in metres and radians: at ~0.19 s and 0.4 m/s both channels sit
+    // around 0.08, so one axis keeps them comparable.
+    ts_plot_odo_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
+    ts_plot_odo_->set_visible_window(60.f);
+    ts_plot_odo_->set_y_range(-0.20f, 0.20f);
+    ts_plot_odo_->add_series("d|xy| (m)",  QColor(41, 128, 185), 1.8f, 0);
+    ts_plot_odo_->add_series("dtheta (rad)", QColor(192, 57, 43), 1.6f, 0);
+    ts_plot_odo_->set_reference_line(0.f, QColor(170, 170, 170), "");
+    custom_widget_->frame_series->layout()->addWidget(ts_plot_odo_);
+
     // Horizontal split: the (roughly square) room canvas on the left takes the larger share, the
     // timeseries column on the right stays narrower. On resize the canvas absorbs most of the extra
     // width (stretch 3 vs 2) so the plots keep a readable-but-compact width. Thicken the handle and
@@ -341,6 +357,16 @@ void RoomViewer::update_ui(const std::optional<rc::RoomConcept::UpdateResult>& l
     const float conf = std::clamp(-std::log10(det_cov) / 12.f, 0.f, 1.f);
     if (ts_plot_conf_)
         ts_plot_conf_->add_point("confidence", conf);
+
+    if (ts_plot_odo_ != nullptr and room_concept_ != nullptr)
+    {
+        const Eigen::Vector3f d = room_concept_->get_predictor_delta();
+        // Signed along-track magnitude: the sign says which way the prediction is being carried, and
+        // an unsigned magnitude would hide a reversal — which is exactly the failure worth seeing.
+        const float dxy = std::hypot(d.x(), d.y()) * ((d.y() < 0.f) ? -1.f : 1.f);
+        ts_plot_odo_->add_point("d|xy| (m)", dxy);
+        ts_plot_odo_->add_point("dtheta (rad)", d.z());
+    }
 }
 
 void RoomViewer::show_camera()

@@ -803,6 +803,14 @@ public:
     void note_published_covariance(float pub_cov_xx, float pub_cov_tt, bool clamp_hit)
     { last_pub_cov_xx_ = pub_cov_xx; last_pub_cov_tt_ = pub_cov_tt; last_clamp_hit_ = clamp_hit; }
 
+    /// The odometry increment the PREDICTOR used this frame: the selected motion prior's delta_pose,
+    /// [dx, dy, dtheta] in the room frame, integrated over the interval the prediction spans.
+    /// This is the quantity the predicted pose is built from — not a velocity sample, and not the raw
+    /// stream — so it is the one place a bad prediction can be traced to a bad increment rather than
+    /// to the optimiser. Mirrored under the motion-ingress lock: written on the localiser thread,
+    /// read by the viewer on the main one.
+    Eigen::Vector3f get_predictor_delta() const;
+
     /// Thread-safe: record the latest measured odometry sample entering the motion pipeline.
     void record_odometry_ingress(const std::string& source,
                                  float raw_adv,
@@ -1374,6 +1382,7 @@ private:
    std::atomic<std::uint64_t> opt_update_us_sum_{0};
    OdometryPrior      last_measured_prior_; // saved by apply_dual_prior_fusion for logging
     OdometryPrior      last_selected_prior_;
+   Eigen::Vector3f    predictor_delta_ = Eigen::Vector3f::Zero();  // viewer mirror; see get_predictor_delta()
     MotionPriorSource  last_motion_prior_source_ = MotionPriorSource::None;
    Eigen::Matrix3f    last_cmd_cov_ = Eigen::Matrix3f::Identity();
     bool               last_command_prior_fresh_ = false;
@@ -1387,6 +1396,7 @@ private:
     MotionIngressDebug motion_ingress_debug_;
    void init_debug_log();
     MotionIngressDebug get_motion_ingress_debug() const;
+
 
    // ===== Online motion model learned state =====
    // Initialised to -1 (sentinel = "warmup not done; use static params").

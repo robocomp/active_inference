@@ -16,7 +16,12 @@ QString legend_label_for_series(const std::string& name)
 TimeSeriesPlot::TimeSeriesPlot(QWidget* parent)
     : QWidget(parent)
 {
-    setMinimumHeight(80);
+    // Four of these now stack in the series column. At a 80 px floor and no ceiling they expanded to
+    // fill whatever height was available and pushed the window taller with every panel added; a
+    // diagnostic that makes the window unusable stops being read. 56/110 keeps all four legible in the
+    // space three used to take, and lets the splitter give the room canvas the rest.
+    setMinimumHeight(56);
+    setMaximumHeight(110);
     setAutoFillBackground(true);
     QPalette pal = palette();
     pal.setColor(QPalette::Window, QColor(255, 255, 255));

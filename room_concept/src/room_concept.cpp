@@ -409,6 +409,12 @@ namespace rc
         return motion_ingress_debug_;
     }
 
+    Eigen::Vector3f RoomConcept::get_predictor_delta() const
+    {
+        std::lock_guard lock(motion_ingress_debug_mutex_);
+        return predictor_delta_;
+    }
+
     void RoomConcept::push_command(Command cmd)
     {
         {
@@ -3011,6 +3017,10 @@ namespace rc
         }
 
         last_selected_prior_ = selection.selected_prior;
+        {   // mirror for the viewer, same lock as the ingress debug
+            std::lock_guard lock(motion_ingress_debug_mutex_);
+            predictor_delta_ = selection.selected_prior.delta_pose;
+        }
         last_motion_prior_source_ = selection.source;
         return selection;
     }
