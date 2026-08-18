@@ -277,6 +277,13 @@ SilhouetteExistence TableProjection::compute_silhouette_existence(const TableIns
         { ++out.n_occluded; return; }                                 // nearer object hides it ⇒ HOLD
         ++out.n_detectable;
         const float f = central_region_frac_, g = 1.0f - central_region_frac_;   // central box [f,1-f]²
+        // Silhouette centroid over ALL detectable samples — the size-invariant input to
+        // central_frac(). Deliberately OUTSIDE the central-box test below: it must describe
+        // where the whole visible object sits, not only the part already inside the box.
+        out.sum_col += col;
+        out.sum_row += row;
+        out.img_w = static_cast<int>(W);
+        out.img_h = static_cast<int>(Himg);
         if (col > f * W and col < g * W and row > f * Himg and row < g * Himg)
             ++out.n_central;                                          // central image region ⇒ the robot is looking AT it
         range_sum += std::sqrt(X * X + Y * Y + Z * Z);                 // camera→sample distance (absence conf ∝ 1/range)

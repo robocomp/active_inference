@@ -827,6 +827,13 @@ DoorSilhouette DoorFitter::compute_silhouette_existence(const DoorInstance& inst
         ++out.n_detectable;
         covered_cells.insert(k);
         const float f = central_region_frac_, g = 1.0f - central_region_frac_;
+        // Silhouette centroid over ALL detectable samples — the size-invariant input to
+        // central_frac(). Deliberately OUTSIDE the central-box test below: it must describe
+        // where the whole visible object sits, not only the part already inside the box.
+        out.sum_col += col;
+        out.sum_row += row;
+        out.img_w = static_cast<int>(W);
+        out.img_h = static_cast<int>(Himg);
         if (col > f * W and col < g * W and row > f * Himg and row < g * Himg)
             ++out.n_central;                                            // the robot is looking AT it
         range_sum += std::sqrt(X * X + Y * Y + Z * Z);

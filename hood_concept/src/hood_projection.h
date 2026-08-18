@@ -11,6 +11,10 @@
 
 #pragma once
 
+#include <algorithm>
+
+#include <cmath>
+
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -43,6 +47,11 @@ struct SilhouetteExistence
     int   n_detectable = 0;    // samples that land in the real camera FRUSTUM and are un-occluded (0 ⇒ HOLD)
     int   n_central    = 0;    // detectable samples in the CENTRAL image region (the ZED resolves those; a
                                // peripheral hood is unreliable — the robot isn't really looking AT it)
+    // Silhouette centroid accumulators (image px) + the frame size, for the size-invariant central_frac
+    // below. Summed over the DETECTABLE samples only, so an occluded or off-frustum part of the object
+    // cannot drag the centroid toward a region the camera never saw.
+    double sum_col = 0.0, sum_row = 0.0;
+    int    img_w = 0, img_h = 0;
     int   n_occluded   = 0;    // in-frustum samples hidden by a nearer (non-hood) mask
     float mean_range_m = 0.0f; // mean camera→silhouette depth over the detectable samples (absence confidence ∝ 1/range)
     // Projected FILL: the silhouette's pixel span as a fraction of the image, max over the two axes. Measured
@@ -54,10 +63,31 @@ struct SilhouetteExistence
     // "Should be visible" fraction: n_detectable / n_total. Absence is only evidence of removal in
     // proportion to how much of the object the sensor could actually have seen from here (real FoV).
     float in_fov_frac() const { return n_total > 0 ? static_cast<float>(n_detectable) / n_total : 0.0f; }
-    // Fraction of detectable samples that fall CENTRALLY — how much the robot is actually LOOKING at the hood
-    // (vs it merely clipping the wide frustum edge). A verifying view is central; a peripheral one only warrants
-    // an epistemic "go look", not a removal vote. See the verification-gated removal in hood_existence.
-    float central_frac() const { return n_detectable > 0 ? static_cast<float>(n_central) / n_detectable : 0.0f; }
+    // ★★CENTRALITY IS ABOUT WHERE THE OBJECT IS, NOT HOW MUCH OF IT FITS IN A BOX.
+    // The old form counted the FRACTION of silhouette samples landing inside a 50%x50% central box, which
+    // is a SIZE measurement wearing an attention label: an object bigger than the box can never score well
+    // from ANY position. Measured on hood 2026-08-17 (n=22 323 in-view cycles):
+    //     roi_fill 0.00-0.25  central_frac med 0.441
+    //     roi_fill 0.25-0.50  central_frac med 0.080
+    //     roi_fill 0.50-0.75  central_frac med 0.000
+    // and p_detect = envelope(fill) * in_fov_frac * central_frac, where the envelope PEAKS around
+    // fill 0.3-0.6 — so the two factors pull against each other, and hardest exactly where the view is
+    // best. Net effect: median p_detect 0.078 while the detector actually fired on 38% of those cycles.
+    // Since absence AND confirmation are both scaled by p_detect, that silenced the camera in both
+    // directions and left the LiDAR carve to decide alone (ex_p 0.959 -> 0.053 on hood_1).
+    // ★The size-invariant question is where the silhouette's CENTROID sits relative to the principal
+    // point. chair_concept already scored it this way (1 - centroid_radius); this brings the rest into
+    // line with the one that had it right, rather than inventing a sixth variant.
+    // ★NOTE central_region_frac_ no longer participates: a normalised radius has no box to size.
+    float central_frac() const
+    {
+        if (n_detectable <= 0 or img_w <= 0 or img_h <= 0) return 0.0f;
+        const float cx = static_cast<float>(sum_col / n_detectable);
+        const float cy = static_cast<float>(sum_row / n_detectable);
+        const float xn = (cx - 0.5f * img_w) / (0.5f * img_w);   // [-1,1], 0 = principal point
+        const float yn = (cy - 0.5f * img_h) / (0.5f * img_h);
+        return std::clamp(1.0f - std::hypot(xn, yn), 0.0f, 1.0f);
+    }
 };
 
 class HoodProjection
