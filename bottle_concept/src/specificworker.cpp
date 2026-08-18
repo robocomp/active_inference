@@ -1007,25 +1007,9 @@ void SpecificWorker::refresh_belief_inspector()
 // selection won't pick a well-seen bottle (belief→knowledge governor without deleting the node).
 void SpecificWorker::step_epistemic(rc::BottleInstance& inst)
 {
-    if (inst.epistemic_cooldown > 0)
-        --inst.epistemic_cooldown;
-
-    // Controller-completion hold: when the controller completes (active=false, pending=false), keep the
-    // node but suppress its gain for a cooldown so it isn't immediately re-claimed before the belief settles.
-    if (const auto aid = inst.affordance.node_id(); aid != 0)
-        if (auto an = G->get_node(aid); an.has_value())
-        {
-            const bool a = G->get_attrib_by_name<active_att>(an.value()).value_or(false);
-            const bool p = G->get_attrib_by_name<epistemic_pending_att>(an.value()).value_or(true);
-            if (not a and not p and inst.epistemic_cooldown == 0)
-            {
-                inst.epistemic_cooldown = cfg_.epistemic_cooldown_cycles;
-                std::print("[{}] controller completed affordance → hold {} cycles (node kept, gain suppressed)\n",
-                           inst.node_name, cfg_.epistemic_cooldown_cycles);
-            }
-        }
-
-    // ZED origin in the room frame — defines which arc of the bottle is hidden from the camera.
+    // The ZED origin in the room frame — bottle's planner takes the camera position explicitly (its NBV is a
+    // hidden-face argument about which side of the cylinder has been seen), so it is computed here and
+    // captured, not derived inside the planner.
     Eigen::Vector2f camera_xy(std::numeric_limits<float>::quiet_NaN(),
                               std::numeric_limits<float>::quiet_NaN());
     if (inner_eigen_)
@@ -1033,39 +1017,41 @@ void SpecificWorker::step_epistemic(rc::BottleInstance& inst)
             c.has_value())
             camera_xy = Eigen::Vector2f(static_cast<float>(c->x()), static_cast<float>(c->y()));
 
-    if (not inst.ai2_initialized)
-        return;   // belief not yet seeded (no fresh frame) → no NBV this cycle
-    auto prop = epistemic_planner_.compute(inst.ai2_belief, camera_xy, cfg_.ai2_sigma_base_m,
-                                           rc::nbv::sensor_from_graph(*G, inner_eigen_.get()),
-                                           rc::nbv::collect_graph_obstacles(*G, inner_eigen_.get(), inst.node_id),
-                                           room_polygon_);
-    if (not prop.valid or not prop.is_finite())
-        return;   // no camera pose / degenerate ray this cycle → leave the existing affordance untouched
+    // The cycle around the planner call is SHARED (common/epistemic_step). ★For bottle the important part of
+    // that move is the bail path: this function used to `return` bare on BOTH refusals, leaving a
+    // just-completed affordance Completed for ever — the exact failure ObjectAffordance::hold_offered()
+    // was written for and documents. The shared step has one bail path and it always holds the offer.
+    // ★Bottle also has no object-node write: it publishes only the affordance, so `record` mirrors and stops.
+    rc::epistemic::StepHooks<rc::EpistemicProposal> hooks;
 
-    if (inst.epistemic_cooldown > 0)
-        prop.epistemic_gain = 0.0f;
+    hooks.compute = [&]() -> std::optional<rc::EpistemicProposal>
+    {
+        if (not inst.ai2_initialized)
+            return std::nullopt;   // belief not yet seeded (no fresh frame) → no NBV this cycle
+        auto prop = epistemic_planner_.compute(inst.ai2_belief, camera_xy, cfg_.ai2_sigma_base_m,
+                                               rc::nbv::sensor_from_graph(*G, inner_eigen_.get()),
+                                               rc::nbv::collect_graph_obstacles(*G, inner_eigen_.get(),
+                                                                                inst.node_id),
+                                               room_polygon_);
+        if (not prop.valid or not prop.is_finite())
+            return std::nullopt;   // no camera pose / degenerate ray this cycle
+        return prop;
+    };
 
-    inst.last_epistemic_gain = prop.epistemic_gain;   // expose to the dashboard
+    hooks.record = [&](const rc::EpistemicProposal& published, float /*raw_gain*/)
+    {
+        inst.last_epistemic_gain = published.epistemic_gain;   // expose to the dashboard
+        inst.dbg_nbv_gain        = published.epistemic_gain;   // the value actually published
+    };
 
-    const auto affordance_node_before = inst.affordance.node_id();
-    inst.dbg_nbv_gain = prop.epistemic_gain;   // the value actually published
-    // The agent's own EpistemicProposal carries planner internals; the producer needs only the eleven
-    // fields of the shared interface, so the conversion is the whole coupling — see AffordanceTarget.
-    rc::AffordanceTarget tgt;
-    tgt.x_m     = prop.epistemic_target_x_m;
-    tgt.y_m     = prop.epistemic_target_y_m;
-    tgt.yaw_rad = prop.epistemic_target_yaw_rad;
-    tgt.gain    = prop.epistemic_gain;
-    tgt.valid   = prop.valid;
-    // No face enumeration and no σ* band from bottle's single-candidate planner: it proposes ONE
-    // far-side viewpoint rather than scoring four faces, so publishing four zero gains would tell the
-    // controller it had four equally-bad options instead of one considered one.
-    inst.affordance.update(tgt);
-    if (affordance_node_before == 0 and inst.affordance.node_id() != 0)
-        trigger_graph_layout_twopi();
-    inst.epistemic_pending = true;
+    hooks.on_affordance_created = [this] { trigger_graph_layout_twopi(); };
 
-    log_epistemic_csv(inst, prop, camera_xy);   // gated CSV: ΔH + viewpoint + affordance state (fresh here)
+    // Gated CSV: ΔH + viewpoint + affordance state. Runs AFTER the affordance is refreshed, so the protocol
+    // state it records is this cycle's, not last cycle's.
+    hooks.on_published = [&](const rc::EpistemicProposal& published)
+    { log_epistemic_csv(inst, published, camera_xy); };
+
+    rc::epistemic::step(inst, *G, {.cooldown_cycles = cfg_.epistemic_cooldown_cycles}, hooks);
 }
 
 // Optional gated CSV of the epistemic/affordance evolution (no-op unless Epistemic.CsvPath is set).

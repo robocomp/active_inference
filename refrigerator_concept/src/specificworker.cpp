@@ -821,101 +821,59 @@ void SpecificWorker::step_convergence(rc::RefrigeratorInstance& inst,
 // with a post-completion cooldown that suppresses the published gain so a just-finished refrigerator isn't re-claimed.
 void SpecificWorker::step_epistemic(rc::RefrigeratorInstance& inst, DSR::Node& node)
 {
-    if (inst.epistemic_cooldown > 0)
-        --inst.epistemic_cooldown;
+    // The cycle around the planner call is SHARED (common/epistemic_step): the cooldown, the
+    // controller-completion hold, the gain suppression and verification floor, the affordance refresh, and —
+    // the reason it is shared rather than merely deduplicated — the single bail path that ALWAYS calls
+    // hold_offered(). Only the planner call and what this agent records are refrigerator's.
+    rc::epistemic::StepHooks<rc::EpistemicProposal> hooks;
 
-    // Controller-completion hold (anti-churn): the refrigerator affordance completes on a weak detection
-    // (contract goal conf≥0.20), which fires almost instantly — before ΔH has decayed. Start a short
-    // cooldown so we don't re-offer a just-completed refrigerator while its gain is still high. We do NOT
-    // delete the node (that is what made the affordance vanish from the graph): it stays and keeps
-    // refreshing; we only suppress its published gain during the hold so the controller's EFE selection
-    // won't immediately re-claim it.
-    if (const auto aid = inst.affordance.node_id(); aid != 0)
-        if (auto an = G->get_node(aid); an.has_value())
-        {
-            const bool a = G->get_attrib_by_name<active_att>(an.value()).value_or(false);
-            const bool p = G->get_attrib_by_name<epistemic_pending_att>(an.value()).value_or(true);
-            if (not a and not p and inst.epistemic_cooldown == 0)   // just completed by the controller
-            {
-                inst.epistemic_cooldown = cfg_.epistemic_cooldown_cycles;
-                std::print("[{}] controller completed affordance → hold {} cycles (node kept, gain suppressed)\n",
-                           inst.node_name, cfg_.epistemic_cooldown_cycles);
-            }
-        }
-
-    // Σ-based D-optimal NBV from the belief. Skip until the belief has seen its first frame (else Σ is
-    // the broad prior and the proposal is moot).
-    if (not inst.ai2_initialized)
+    hooks.compute = [&]() -> std::optional<rc::EpistemicProposal>
     {
-        inst.affordance.hold_offered();   // no proposal is not a withdrawal — see hold_offered()
-        return;
-    }
-    rc::EpistemicProposal prop =
-        epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m,
-                                   zed_sensor_model(),
-                                   rc::nbv::collect_graph_obstacles(*G, inner_eigen_.get(), inst.node_id),
-                                   // The reachable region. refresh_room_geometry() already loads this polygon
-                                   // for the fit's wall factor; the NBV never saw it, so every viewpoint —
-                                   // including the ones behind the wall the fridge is pushed against — read as
-                                   // reachable. Empty until room_concept publishes, and is_reachable then
-                                   // imposes no constraint, which is the pre-existing behaviour.
-                                   fitter_->room_polygon());
-    if (not prop.valid or not prop.is_finite())
+        // Σ-based D-optimal NBV from the belief. Skip until the belief has seen its first frame (else Σ is
+        // the broad prior and the proposal is moot).
+        if (not inst.ai2_initialized)
+            return std::nullopt;
+        rc::EpistemicProposal prop =
+            epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m,
+                                       zed_sensor_model(),
+                                       rc::nbv::collect_graph_obstacles(*G, inner_eigen_.get(), inst.node_id),
+                                       // The reachable region. refresh_room_geometry() already loads this
+                                       // polygon for the fit's wall factor; the NBV never saw it, so every
+                                       // viewpoint — including the ones behind the wall the refrigerator is pushed
+                                       // against — read as reachable. Empty until room_concept publishes, and
+                                       // is_reachable then imposes no constraint (the pre-existing behaviour).
+                                       fitter_->room_polygon());
+        // Degenerate fit, or no sensor model yet — retry next cycle.
+        if (not prop.valid or not prop.is_finite())
+            return std::nullopt;
+        return prop;
+    };
+
+    hooks.record = [&](const rc::EpistemicProposal& published, float raw_gain)
     {
-        // Degenerate fit, or no sensor model yet — retry next cycle. But "leave the affordance as-is"
-        // is not neutral: as-is is Completed, which the controller reads as a withdrawal and which
-        // never recovers on its own.
-        inst.affordance.hold_offered();
-        return;
-    }
+        // Mirror the proposal onto the instance so ai2_log records what was actually proposed. Without this
+        // the only record was stdout, and the affordance node carries the FROZEN pose during an executing
+        // claim — so "the target is too close" was unanswerable after the fact from either source.
+        // ⚠refrigerator logs the RAW gain (pre-suppression) where bottle/cabinet/chair log the published one — see
+        // the divergence note in common/epistemic_step. Behaviour preserved here; resolve it deliberately.
+        inst.dbg_nbv_standoff = published.chosen_standoff_m;
+        inst.dbg_nbv_gain     = raw_gain;
+        inst.dbg_nbv_target_x = published.epistemic_target_x_m;
+        inst.dbg_nbv_target_y = published.epistemic_target_y_m;
+        inst.dbg_nbv_pdetect  = published.chosen_p_detect;
+        inst.dbg_nbv_vfov     = published.sensor_vfov_rad;
+        // Write attributes to the refrigerator node (read by legacy consumers)
+        scene_graph_->write_epistemic_proposal(node, published);
+    };
 
-    // Mirror the proposal onto the instance so ai2_log records what was actually proposed. Without this the
-    // only record was stdout, and the affordance node carries the FROZEN pose during an executing claim — so
-    // "the target is too close" was unanswerable after the fact from either source.
-    inst.dbg_nbv_standoff = prop.chosen_standoff_m;
-    inst.dbg_nbv_gain     = prop.epistemic_gain;
-    inst.dbg_nbv_target_x = prop.epistemic_target_x_m;
-    inst.dbg_nbv_target_y = prop.epistemic_target_y_m;
-    inst.dbg_nbv_pdetect  = prop.chosen_p_detect;
-    inst.dbg_nbv_vfov     = prop.sensor_vfov_rad;
+    hooks.on_affordance_created = [this] { trigger_graph_layout_twopi(); };
 
-    // Belief→knowledge governor WITHOUT deleting the node: keep publishing the affordance every cycle
-    // with its TRUE expected information gain ΔH (nats). A low gain is published as-is so the controller's
-    // grounded EFE selection simply doesn't pick it (cost outweighs the small epistemic value), and it
-    // re-arms automatically when the belief degrades and ΔH climbs again — no satisfy-latch to get stuck
-    // in, no node churn. During the post-completion hold the gain is forced to 0 so a just-finished refrigerator
-    // isn't re-claimed before its belief has settled.
-    if (inst.epistemic_cooldown > 0)
-        prop.epistemic_gain = 0.0f;
-
-    // Verification pull (active inference): a refrigerator whose predicted absence could NOT be resolved from recent
-    // views (wants_verification — far/peripheral/edge-on "I don't see it") does NOT get deleted; it gets a strong
-    // epistemic gain so the controller drives to a good ZED viewpoint to CONFIRM-or-remove it. Absence never
-    // deletes a refrigerator the robot hasn't properly looked at — it sends the robot to look. Overrides the cooldown
-    // (a "might be gone" alarm is not anti-chatter-suppressible). Clears once a verifying view resolves it.
-    if (inst.wants_verification)
-        prop.epistemic_gain = std::max(prop.epistemic_gain, cfg_.existence_verify_gain);
-
-    // Write attributes to the refrigerator node (read by legacy consumers)
-    scene_graph_->write_epistemic_proposal(node, prop);
-    // Publish / refresh dedicated affordance node (persists; update_node refreshes target+gain)
-    const auto affordance_node_before = inst.affordance.node_id();
-    // Planner internals stay in EpistemicProposal; the producer takes the shared eleven-field view.
-    rc::AffordanceTarget tgt;
-    tgt.x_m     = prop.epistemic_target_x_m;
-    tgt.y_m     = prop.epistemic_target_y_m;
-    tgt.yaw_rad = prop.epistemic_target_yaw_rad;
-    tgt.gain    = prop.epistemic_gain;
-    tgt.valid   = prop.valid;
-    tgt.face_gains.assign(prop.face_gains.begin(), prop.face_gains.end());
-    tgt.sigma_star.assign(prop.sigma_star.begin(), prop.sigma_star.end());
-    tgt.standoff_min_m = prop.standoff_min_m;
-    tgt.standoff_max_m = prop.standoff_max_m;
-    tgt.framing_fill   = prop.framing_fill;
-    inst.affordance.update(tgt);
-    if (affordance_node_before == 0 and inst.affordance.node_id() != 0)
-        trigger_graph_layout_twopi();
-    inst.epistemic_pending = true;
+    rc::epistemic::step(inst, *G,
+                        {.cooldown_cycles   = cfg_.epistemic_cooldown_cycles,
+                         // Verification pull: absence never deletes a refrigerator the robot hasn't properly looked
+                         // at — it sends the robot to look.
+                         .verify_gain_floor = inst.wants_verification ? cfg_.existence_verify_gain : 0.0f},
+                        hooks);
 }
 
 // ─── DSR helpers ─────────────────────────────────────────────────────────────────────────────────

@@ -822,100 +822,58 @@ void SpecificWorker::step_convergence(rc::TableInstance& inst,
 // with a post-completion cooldown that suppresses the published gain so a just-finished table isn't re-claimed.
 void SpecificWorker::step_epistemic(rc::TableInstance& inst, DSR::Node& node)
 {
-    if (inst.epistemic_cooldown > 0)
-        --inst.epistemic_cooldown;
+    // The cycle around the planner call is SHARED (common/epistemic_step): the cooldown, the
+    // controller-completion hold, the gain suppression and verification floor, the affordance refresh, and —
+    // the reason it is shared rather than merely deduplicated — the single bail path that ALWAYS calls
+    // hold_offered(). Only the planner call and what this agent records are table's.
+    rc::epistemic::StepHooks<rc::EpistemicProposal> hooks;
 
-    // Controller-completion hold (anti-churn): the table affordance completes on a weak detection
-    // (contract goal conf≥0.20), which fires almost instantly — before ΔH has decayed. Start a short
-    // cooldown so we don't re-offer a just-completed table while its gain is still high. We do NOT
-    // delete the node (that is what made the affordance vanish from the graph): it stays and keeps
-    // refreshing; we only suppress its published gain during the hold so the controller's EFE selection
-    // won't immediately re-claim it.
-    if (const auto aid = inst.affordance.node_id(); aid != 0)
-        if (auto an = G->get_node(aid); an.has_value())
-        {
-            const bool a = G->get_attrib_by_name<active_att>(an.value()).value_or(false);
-            const bool p = G->get_attrib_by_name<epistemic_pending_att>(an.value()).value_or(true);
-            if (not a and not p and inst.epistemic_cooldown == 0)   // just completed by the controller
-            {
-                inst.epistemic_cooldown = cfg_.epistemic_cooldown_cycles;
-                std::print("[{}] controller completed affordance → hold {} cycles (node kept, gain suppressed)\n",
-                           inst.node_name, cfg_.epistemic_cooldown_cycles);
-            }
-        }
-
-    // Σ-based D-optimal NBV from the belief. Skip until the belief has seen its first frame (else Σ is
-    // the broad prior and the proposal is moot).
-    if (not inst.ai2_initialized)
+    hooks.compute = [&]() -> std::optional<rc::EpistemicProposal>
     {
-        inst.affordance.hold_offered();   // no proposal is not a withdrawal — see hold_offered()
-        return;
-    }
-    rc::EpistemicProposal prop =
-        epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m,
-                                   rc::nbv::sensor_from_graph(*G, inner_eigen_.get()),
-                                   collect_viewpoint_obstacles(inst.node_id),
-                                   // The reachable region — kills the through-the-wall faces the
-                                   // direction-blind gain cannot tell apart. Empty until room_concept
-                                   // publishes; is_reachable then imposes no constraint (prior behaviour).
-                                   room_polygon_);
-    if (not prop.valid or not prop.is_finite())
+        // Σ-based D-optimal NBV from the belief. Skip until the belief has seen its first frame (else Σ is
+        // the broad prior and the proposal is moot).
+        if (not inst.ai2_initialized)
+            return std::nullopt;
+        rc::EpistemicProposal prop =
+            epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m,
+                                       rc::nbv::sensor_from_graph(*G, inner_eigen_.get()),
+                                       collect_viewpoint_obstacles(inst.node_id),
+                                       // The reachable region — kills the through-the-wall faces the
+                                       // direction-blind gain cannot tell apart. Empty until room_concept
+                                       // publishes; is_reachable then imposes no constraint (prior behaviour).
+                                       room_polygon_);
+        // Degenerate fit, or the camera model is still incomplete — retry next cycle.
+        if (not prop.valid or not prop.is_finite())
+            return std::nullopt;
+        return prop;
+    };
+
+    hooks.record = [&](const rc::EpistemicProposal& published, float raw_gain)
     {
-        // Degenerate fit, or the camera model is still incomplete — retry next cycle. But do NOT leave
-        // the affordance retired while we retry: that is the state the controller reads as "the
-        // producer no longer wants this look", and it never recovers on its own.
-        inst.affordance.hold_offered();
-        return;
-    }
+        // Mirror the proposal onto the instance so ai2_log records what was actually proposed THIS cycle. The
+        // affordance node carries the FROZEN pose while the controller owns a claim, so neither the graph nor
+        // stdout could answer "what is it proposing now?" after the fact.
+        // ⚠table logs the RAW gain (pre-suppression) where bottle/cabinet/chair log the published one — see
+        // the divergence note in common/epistemic_step. Behaviour preserved here; resolve it deliberately.
+        inst.dbg_nbv_standoff = published.chosen_standoff_m;
+        inst.dbg_nbv_gain     = raw_gain;
+        inst.dbg_nbv_target_x = published.epistemic_target_x_m;
+        inst.dbg_nbv_target_y = published.epistemic_target_y_m;
+        inst.dbg_nbv_pdetect  = published.chosen_p_detect;
+        inst.dbg_nbv_fill     = published.chosen_fill;
+        inst.dbg_nbv_vfov     = published.sensor_vfov_rad;
+        // Write attributes to the table node (read by legacy consumers)
+        scene_graph_->write_epistemic_proposal(node, published);
+    };
 
-    // Mirror the proposal onto the instance so ai2_log records what was actually proposed THIS cycle. The
-    // affordance node carries the FROZEN pose while the controller owns a claim, so neither the graph nor
-    // stdout could answer "what is it proposing now?" after the fact.
-    inst.dbg_nbv_standoff = prop.chosen_standoff_m;
-    inst.dbg_nbv_gain     = prop.epistemic_gain;
-    inst.dbg_nbv_target_x = prop.epistemic_target_x_m;
-    inst.dbg_nbv_target_y = prop.epistemic_target_y_m;
-    inst.dbg_nbv_pdetect  = prop.chosen_p_detect;
-    inst.dbg_nbv_fill     = prop.chosen_fill;
-    inst.dbg_nbv_vfov     = prop.sensor_vfov_rad;
+    hooks.on_affordance_created = [this] { trigger_graph_layout_twopi(); };
 
-    // Belief→knowledge governor WITHOUT deleting the node: keep publishing the affordance every cycle
-    // with its TRUE expected information gain ΔH (nats). A low gain is published as-is so the controller's
-    // grounded EFE selection simply doesn't pick it (cost outweighs the small epistemic value), and it
-    // re-arms automatically when the belief degrades and ΔH climbs again — no satisfy-latch to get stuck
-    // in, no node churn. During the post-completion hold the gain is forced to 0 so a just-finished table
-    // isn't re-claimed before its belief has settled.
-    if (inst.epistemic_cooldown > 0)
-        prop.epistemic_gain = 0.0f;
-
-    // Verification pull (active inference): a table whose predicted absence could NOT be resolved from recent
-    // views (wants_verification — far/peripheral/edge-on "I don't see it") does NOT get deleted; it gets a strong
-    // epistemic gain so the controller drives to a good ZED viewpoint to CONFIRM-or-remove it. Absence never
-    // deletes a table the robot hasn't properly looked at — it sends the robot to look. Overrides the cooldown
-    // (a "might be gone" alarm is not anti-chatter-suppressible). Clears once a verifying view resolves it.
-    if (inst.wants_verification)
-        prop.epistemic_gain = std::max(prop.epistemic_gain, cfg_.existence_verify_gain);
-
-    // Write attributes to the table node (read by legacy consumers)
-    scene_graph_->write_epistemic_proposal(node, prop);
-    // Publish / refresh dedicated affordance node (persists; update_node refreshes target+gain)
-    const auto affordance_node_before = inst.affordance.node_id();
-    // Planner internals stay in EpistemicProposal; the producer takes the shared eleven-field view.
-    rc::AffordanceTarget tgt;
-    tgt.x_m     = prop.epistemic_target_x_m;
-    tgt.y_m     = prop.epistemic_target_y_m;
-    tgt.yaw_rad = prop.epistemic_target_yaw_rad;
-    tgt.gain    = prop.epistemic_gain;
-    tgt.valid   = prop.valid;
-    tgt.face_gains.assign(prop.face_gains.begin(), prop.face_gains.end());
-    tgt.sigma_star.assign(prop.sigma_star.begin(), prop.sigma_star.end());
-    tgt.standoff_min_m = prop.standoff_min_m;
-    tgt.standoff_max_m = prop.standoff_max_m;
-    tgt.framing_fill   = prop.framing_fill;
-    inst.affordance.update(tgt);
-    if (affordance_node_before == 0 and inst.affordance.node_id() != 0)
-        trigger_graph_layout_twopi();
-    inst.epistemic_pending = true;
+    rc::epistemic::step(inst, *G,
+                        {.cooldown_cycles   = cfg_.epistemic_cooldown_cycles,
+                         // Verification pull: absence never deletes a table the robot hasn't properly looked
+                         // at — it sends the robot to look.
+                         .verify_gain_floor = inst.wants_verification ? cfg_.existence_verify_gain : 0.0f},
+                        hooks);
 }
 
 // ─── DSR helpers ─────────────────────────────────────────────────────────────────────────────────

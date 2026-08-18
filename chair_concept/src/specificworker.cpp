@@ -1684,74 +1684,43 @@ void SpecificWorker::step_convergence(rc::ChairInstance& inst,
 
 void SpecificWorker::step_epistemic(rc::ChairInstance& inst, DSR::Node& node)
 {
-    if (inst.epistemic_cooldown > 0)
-        --inst.epistemic_cooldown;
+    // The cycle around the planner call is SHARED (common/epistemic_step). ★For chair the important part of
+    // that move is the bail path: this function used to `return` bare on BOTH refusals, leaving a
+    // just-completed affordance Completed for ever — the exact failure ObjectAffordance::hold_offered()
+    // was written for and documents. The shared step has one bail path and it always holds the offer.
+    rc::epistemic::StepHooks<rc::EpistemicProposal> hooks;
 
-    // Controller-completion hold (anti-churn): the chair affordance completes on a weak detection
-    // (contract goal conf≥0.20), which fires almost instantly — before ΔH has decayed. Start a short
-    // cooldown so we don't re-offer a just-completed chair while its gain is still high. We do NOT
-    // delete the node (that is what made the affordance vanish from the graph): it stays and keeps
-    // refreshing; we only suppress its published gain during the hold so the controller's EFE selection
-    // won't immediately re-claim it.
-    if (const auto aid = inst.affordance.node_id(); aid != 0)
-        if (auto an = G->get_node(aid); an.has_value())
-        {
-            const bool a = G->get_attrib_by_name<active_att>(an.value()).value_or(false);
-            const bool p = G->get_attrib_by_name<epistemic_pending_att>(an.value()).value_or(true);
-            if (not a and not p and inst.epistemic_cooldown == 0)   // just completed by the controller
-            {
-                inst.epistemic_cooldown = cfg_.epistemic_cooldown_cycles;
-                std::print("[{}] controller completed affordance → hold {} cycles (node kept, gain suppressed)\n",
-                           inst.node_name, cfg_.epistemic_cooldown_cycles);
-            }
-        }
+    hooks.compute = [&]() -> std::optional<rc::EpistemicProposal>
+    {
+        if (not inst.ai2_initialized)
+            return std::nullopt;
+        rc::EpistemicProposal prop =
+            epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m,
+                                       rc::nbv::sensor_from_graph(*G, inner_eigen_.get()),
+                                       rc::nbv::collect_graph_obstacles(*G, inner_eigen_.get(), inst.node_id),
+                                       fitter_->room_polygon());
+        // Degenerate (non-finite) fit — retry next cycle.
+        if (not prop.valid or not prop.is_finite())
+            return std::nullopt;
+        // A BEARING-ONLY hypothesis has no depth: the target is the bearing itself, and the contract below
+        // is Orient rather than Servo.
+        if (inst.is_bearing_hypothesis)
+            prop.epistemic_target_yaw_rad = inst.hypothesis_azimuth;
+        return prop;
+    };
 
-    // Σ-based D-optimal NBV from the belief. Skip until the belief has seen its first frame (else Σ is
-    // the broad prior and the proposal is moot).
-    if (not inst.ai2_initialized)
-        return;
-    rc::EpistemicProposal prop =
-        epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m,
-                                   rc::nbv::sensor_from_graph(*G, inner_eigen_.get()),
-                                   rc::nbv::collect_graph_obstacles(*G, inner_eigen_.get(), inst.node_id),
-                                   // The reachable region — kills the through-the-wall faces that the
-                                   // direction-blind gain cannot tell apart. Empty until room_concept publishes,
-                                   // and is_reachable then imposes no constraint (the pre-existing behaviour).
-                                   fitter_->room_polygon());
-    if (not prop.valid or not prop.is_finite())
-        return;   // degenerate (non-finite) fit — leave the existing affordance node as-is, retry next cycle
+    hooks.record = [&](const rc::EpistemicProposal& published, float /*raw_gain*/)
+    {
+        scene_graph_->write_epistemic_proposal(node, published);
+        inst.dbg_nbv_gain = published.epistemic_gain;   // the value actually published
+    };
 
-    // Belief→knowledge governor WITHOUT deleting the node: keep publishing the affordance every cycle
-    // with its TRUE expected information gain ΔH (nats). A low gain is published as-is so the controller's
-    // grounded EFE selection simply doesn't pick it (cost outweighs the small epistemic value), and it
-    // re-arms automatically when the belief degrades and ΔH climbs again — no satisfy-latch to get stuck
-    // in, no node churn. During the post-completion hold the gain is forced to 0 so a just-finished chair
-    // isn't re-claimed before its belief has settled.
-    if (inst.epistemic_cooldown > 0)
-        prop.epistemic_gain = 0.0f;
+    hooks.on_affordance_created = [this] { trigger_graph_layout_twopi(); };
 
-    // Bearing-only hypothesis (Part C-birth): author an ORIENT affordance whose target yaw IS the bearing,
-    // so the controller rotates to look down the ray (the broad along-ray Σ already makes prop's gain high).
-    const bool orient = inst.is_bearing_hypothesis;
-    if (orient)
-        prop.epistemic_target_yaw_rad = inst.hypothesis_azimuth;
-
-    // Write attributes to the chair node (read by legacy consumers)
-    scene_graph_->write_epistemic_proposal(node, prop);
-    // Publish / refresh dedicated affordance node (persists; update_node refreshes target+gain)
-    const auto affordance_node_before = inst.affordance.node_id();
-    inst.dbg_nbv_gain = prop.epistemic_gain;   // the value actually published
-    // Planner internals stay in EpistemicProposal; the producer takes the shared eleven-field view.
-    rc::AffordanceTarget tgt;
-    tgt.x_m     = prop.epistemic_target_x_m;
-    tgt.y_m     = prop.epistemic_target_y_m;
-    tgt.yaw_rad = prop.epistemic_target_yaw_rad;
-    tgt.gain    = prop.epistemic_gain;
-    tgt.valid   = prop.valid;
-    inst.affordance.update(tgt, orient);
-    if (affordance_node_before == 0 and inst.affordance.node_id() != 0)
-        trigger_graph_layout_twopi();
-    inst.epistemic_pending = true;
+    rc::epistemic::step(inst, *G,
+                        {.cooldown_cycles = cfg_.epistemic_cooldown_cycles,
+                         .orient_mode     = inst.is_bearing_hypothesis},
+                        hooks);
 }
 
 // ─── DSR helpers ─────────────────────────────────────────────────────────────

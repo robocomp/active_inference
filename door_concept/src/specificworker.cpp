@@ -1985,86 +1985,6 @@ void SpecificWorker::step_convergence(rc::DoorInstance& inst,
 
 void SpecificWorker::step_epistemic(rc::DoorInstance& inst, DSR::Node& node)
 {
-    if (inst.epistemic_cooldown > 0)
-        --inst.epistemic_cooldown;
-
-    // Controller-completion hold (anti-churn): the door affordance completes on a weak detection
-    // (contract goal conf≥0.20), which fires almost instantly — before ΔH has decayed. Start a short
-    // cooldown so we don't re-offer a just-completed door while its gain is still high. We do NOT
-    // delete the node (that is what made the affordance vanish from the graph): it stays and keeps
-    // refreshing; we only suppress its published gain during the hold so the controller's EFE selection
-    // won't immediately re-claim it.
-    if (const auto aid = inst.affordance.node_id(); aid != 0)
-        if (auto an = G->get_node(aid); an.has_value())
-        {
-            const bool a = G->get_attrib_by_name<active_att>(an.value()).value_or(false);
-            const bool p = G->get_attrib_by_name<epistemic_pending_att>(an.value()).value_or(true);
-            if (not a and not p and inst.epistemic_cooldown == 0)   // just completed by the controller
-            {
-                inst.epistemic_cooldown = cfg_.epistemic_cooldown_cycles;
-                std::print("[{}] controller completed affordance → hold {} cycles (node kept, gain suppressed)\n",
-                           inst.node_name, cfg_.epistemic_cooldown_cycles);
-            }
-        }
-
-    // Σ-based D-optimal NBV from the belief. Skip until the belief has seen its first frame (else Σ is
-    // the broad prior and the proposal is moot).
-    if (not inst.ai2_initialized)
-        return;
-    // Obstacles = the other fitted objects PLUS THE WALLS. The walls are what makes an edge-on view of a door
-    // impossible, and without them the planner sent the affordance to a point ON the wall: the leaf's ±x faces
-    // have normals lying in the wall plane, so their viewpoints sit several metres along it (live 2026-08-07:
-    // `face=-x d=3.67m`). Furniture alone could never say that — `collect_graph_obstacles` reads only
-    // `object`/`box` nodes. With the wall present, a grazing sightline has to traverse metres of it and
-    // `visible_fraction` collapses continuously, so "view the door from a cone about its normal" is a
-    // CONSEQUENCE of the geometry rather than an angular rule anyone had to write down.
-    //
-    // Every known aperture is punched out of the run, this door's included — otherwise the wall would block
-    // the honest head-on views too, since the leaf sits inside the wall's own footprint. Other doors are gaps
-    // as well: you really can see through a doorway across the room.
-    auto obstacles = rc::nbv::collect_graph_obstacles(*G, inner_eigen_.get(), inst.node_id);
-    if (fitter_->has_room_polygon())
-    {
-        std::vector<rc::nbv::WallGap> gaps;
-        gaps.reserve(fitter_->instances().size());
-        for (const auto& [oid, other] : fitter_->instances())
-        {
-            if (other.is_bearing_hypothesis or not other.ai2_initialized)
-                continue;   // no trustworthy aperture yet — punching a hole here would invent a sightline
-            const auto& os = other.model.state();
-            gaps.push_back({Eigen::Vector2f(os.ap_cx, os.ap_cy), 0.5f * os.w});
-        }
-        // Wall depth = the depth of material this aperture is cut through, i.e. the leaf's own fitted
-        // thickness. A derived physical quantity, not a new knob — and occlusion by a plane is insensitive
-        // to it anyway (a ray either crosses the plane or runs along it).
-        const auto walls = rc::nbv::wall_obstacles(fitter_->room_polygon(),
-                                                   std::max(1e-3f, inst.model.state().thickness), gaps);
-        obstacles.insert(obstacles.end(), walls.begin(), walls.end());
-    }
-    nbv_obstacle_count_ = static_cast<int>(obstacles.size());   // 0 walls ⇒ the room polygon never arrived
-    rc::nbv::Plan nbv_plan;
-    rc::EpistemicProposal prop =
-        epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m,
-                                   rc::nbv::sensor_from_graph(*G, inner_eigen_.get()), obstacles,
-                                   fitter_->room_polygon(), &nbv_plan);
-    log_nbv_decision(inst, nbv_plan, prop);
-    if (not prop.valid or not prop.is_finite())
-    {
-        // Degenerate (non-finite) fit — retry next cycle. But "leave the node as-is" is not neutral:
-        // as-is is Completed, which the controller reads as a withdrawal and which never recovers.
-        inst.affordance.hold_offered();
-        return;
-    }
-
-    // Belief→knowledge governor WITHOUT deleting the node: keep publishing the affordance every cycle
-    // with its TRUE expected information gain ΔH (nats). A low gain is published as-is so the controller's
-    // grounded EFE selection simply doesn't pick it (cost outweighs the small epistemic value), and it
-    // re-arms automatically when the belief degrades and ΔH climbs again — no satisfy-latch to get stuck
-    // in, no node churn. During the post-completion hold the gain is forced to 0 so a just-finished door
-    // isn't re-claimed before its belief has settled.
-    if (inst.epistemic_cooldown > 0)
-        prop.epistemic_gain = 0.0f;
-
     // Peripheral hypothesis (Part C-birth) — GLANCE or GO-AND-CHECK, decided by whether it has a RANGE.
     //
     //   · bearing only  → ORIENT: rotate in place down the ray. There is no trustworthy (x,y) to drive to,
@@ -2077,24 +1997,74 @@ void SpecificWorker::step_epistemic(rc::DoorInstance& inst, DSR::Node& node)
     // Note this reads `hypothesis_range_known`, not the σ, deliberately: how MUCH the range is trusted is
     // already carried by Σ into the planner's gain and stand-off, so a second σ test here would double-count.
     const bool orient = inst.is_bearing_hypothesis and not inst.hypothesis_range_known;
-    if (orient)
-        prop.epistemic_target_yaw_rad = inst.hypothesis_azimuth;
+
+    // The cycle around the planner call is SHARED (common/epistemic_step). ★For door the important part of
+    // that move is the FIRST bail path: the not-yet-initialised belief used to `return` bare, leaving a
+    // just-completed affordance Completed for ever. Only the is_finite path held the offer; now both do,
+    // because the shared step has exactly one bail path.
+    rc::epistemic::StepHooks<rc::EpistemicProposal> hooks;
+
+    hooks.compute = [&]() -> std::optional<rc::EpistemicProposal>
+    {
+        // Σ-based D-optimal NBV from the belief. Skip until the belief has seen its first frame (else Σ is
+        // the broad prior and the proposal is moot).
+        if (not inst.ai2_initialized)
+            return std::nullopt;
+        // Obstacles = the other fitted objects PLUS THE WALLS. The walls are what makes an edge-on view of a
+        // door impossible, and without them the planner sent the affordance to a point ON the wall: the leaf's
+        // ±x faces have normals lying in the wall plane, so their viewpoints sit several metres along it (live
+        // 2026-08-07: `face=-x d=3.67m`). Furniture alone could never say that — `collect_graph_obstacles`
+        // reads only `object`/`box` nodes. With the wall present, a grazing sightline has to traverse metres
+        // of it and `visible_fraction` collapses continuously, so "view the door from a cone about its normal"
+        // is a CONSEQUENCE of the geometry rather than an angular rule anyone had to write down.
+        //
+        // Every known aperture is punched out of the run, this door's included — otherwise the wall would
+        // block the honest head-on views too, since the leaf sits inside the wall's own footprint. Other doors
+        // are gaps as well: you really can see through a doorway across the room.
+        auto obstacles = rc::nbv::collect_graph_obstacles(*G, inner_eigen_.get(), inst.node_id);
+        if (fitter_->has_room_polygon())
+        {
+            std::vector<rc::nbv::WallGap> gaps;
+            gaps.reserve(fitter_->instances().size());
+            for (const auto& [oid, other] : fitter_->instances())
+            {
+                if (other.is_bearing_hypothesis or not other.ai2_initialized)
+                    continue;   // no trustworthy aperture yet — punching a hole here would invent a sightline
+                const auto& os = other.model.state();
+                gaps.push_back({Eigen::Vector2f(os.ap_cx, os.ap_cy), 0.5f * os.w});
+            }
+            // Wall depth = the depth of material this aperture is cut through, i.e. the leaf's own fitted
+            // thickness. A derived physical quantity, not a new knob — and occlusion by a plane is insensitive
+            // to it anyway (a ray either crosses the plane or runs along it).
+            const auto walls = rc::nbv::wall_obstacles(fitter_->room_polygon(),
+                                                       std::max(1e-3f, inst.model.state().thickness), gaps);
+            obstacles.insert(obstacles.end(), walls.begin(), walls.end());
+        }
+        nbv_obstacle_count_ = static_cast<int>(obstacles.size());   // 0 walls ⇒ the room polygon never arrived
+
+        rc::nbv::Plan nbv_plan;
+        rc::EpistemicProposal prop =
+            epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m,
+                                       rc::nbv::sensor_from_graph(*G, inner_eigen_.get()), obstacles,
+                                       fitter_->room_polygon(), &nbv_plan);
+        log_nbv_decision(inst, nbv_plan, prop);   // logs REFUSED proposals too — keep it before the check
+        // Degenerate (non-finite) fit — retry next cycle.
+        if (not prop.valid or not prop.is_finite())
+            return std::nullopt;
+        if (orient)
+            prop.epistemic_target_yaw_rad = inst.hypothesis_azimuth;
+        return prop;
+    };
 
     // Write attributes to the door node (read by legacy consumers)
-    scene_graph_->write_epistemic_proposal(node, prop);
-    // Publish / refresh dedicated affordance node (persists; update_node refreshes target+gain)
-    const auto affordance_node_before = inst.affordance.node_id();
-    // Planner internals stay in EpistemicProposal; the producer takes the shared eleven-field view.
-    rc::AffordanceTarget tgt;
-    tgt.x_m     = prop.epistemic_target_x_m;
-    tgt.y_m     = prop.epistemic_target_y_m;
-    tgt.yaw_rad = prop.epistemic_target_yaw_rad;
-    tgt.gain    = prop.epistemic_gain;
-    tgt.valid   = prop.valid;
-    inst.affordance.update(tgt, orient);
-    if (affordance_node_before == 0 and inst.affordance.node_id() != 0)
-        trigger_graph_layout_twopi();
-    inst.epistemic_pending = true;
+    hooks.record = [&](const rc::EpistemicProposal& published, float /*raw_gain*/)
+    { scene_graph_->write_epistemic_proposal(node, published); };
+
+    hooks.on_affordance_created = [this] { trigger_graph_layout_twopi(); };
+
+    rc::epistemic::step(inst, *G,
+                        {.cooldown_cycles = cfg_.epistemic_cooldown_cycles, .orient_mode = orient},
+                        hooks);
 }
 
 // ─── DSR helpers ─────────────────────────────────────────────────────────────
