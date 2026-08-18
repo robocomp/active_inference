@@ -611,7 +611,15 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
         // ior_decay_time, so the cell is de-prioritised for a while and then genuinely retried.
         // ★No blacklist and no threshold: a cell refused only because the robot happened to be parked
         // on it comes back into play on its own once the robot has moved on.
-        if (outcome == Outcome::Refused and pub_ok_ and not std::isnan(pub_tx_))
+        // ★ GUARD ON HAVING A TARGET, NOT ON pub_ok_. pub_ok_ answers "did the LAST publish call
+        // re-arm the node", and once the node IS armed every subsequent publish correctly declines as
+        // a no-op — so pub_ok_ reads false on ~97% of cycles, including the one where the refusal
+        // arrives. Guarding on it skipped the de-prioritisation exactly when it was needed: the
+        // planner kept re-choosing the refused cell, publish_target declined it as unchanged, nothing
+        // was ever Offered again, and the refusal protocol's second half — "so the producer sends a
+        // NEW one" — never happened. The condition that matters is simply that we know which cell was
+        // refused.
+        if (outcome == Outcome::Refused and not std::isnan(pub_tx_) and not std::isnan(pub_ty_))
         {
             planner.mark_target_finished(Eigen::Vector2f(pub_tx_, pub_ty_));
             std::print("[planner] refusal at ({:.2f},{:.2f}) — cell de-prioritised (IoR), selecting elsewhere\n",
