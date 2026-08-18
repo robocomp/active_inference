@@ -39,6 +39,9 @@ __pycache__/
 # (common/diag_log/rotating_csv.h): "<name>.csv.<YYYYmmdd_HHMMSS>". The rule above does NOT
 # cover these — the timestamp comes AFTER the extension, so the name does not end in .csv.
 **/etc/*.csv.*
+# ...and the same one level down: `**/etc/*.csv` does NOT match `etc/archive/foo.csv`,
+# which is how a 6.7 MB archived run log stayed tracked under a rule meant to cover it.
+**/etc/**/*.csv
 *.log
 *.bak
 *.back
