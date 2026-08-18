@@ -813,7 +813,7 @@ bool BottleFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_nod
     // fell through to the Contract::reach() fallback, which is valid-LOOKING: the robot would have
     // navigated to the stand-off, declared arrival, and never locked on — invariant 11 exactly.
     // Introduced by the affordance extraction and caught by the audit probe once THAT was repaired.
-    inst.affordance.init(G_, node.id(), node.name(), "cylinder");
+    inst.affordance.init(G_, node.id(), node.name(), "bottle");   // the SUBTYPE, as every sibling passes
 
     instances_.emplace(node.id(), std::move(inst));
     std::print("bottle_concept: created instance for node '{}' id={}\n", node.name(), node.id());

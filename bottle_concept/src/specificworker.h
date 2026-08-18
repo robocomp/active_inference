@@ -109,7 +109,9 @@ public slots:
     int  startup_check();
 
     void modify_node_slot(std::uint64_t, const std::string& type){};
-    void modify_node_attrs_slot(std::uint64_t id, const std::vector<std::string>& att_names);
+    // Controller-owned affordance protocol flags, read once per cycle (see the .cpp for why this
+    // replaces the update_node_attr_signal subscription bottle never had).
+    void poll_affordance_protocol();
     void modify_edge_slot(std::uint64_t from, std::uint64_t to, const std::string& type){};
     void modify_edge_attrs_slot(std::uint64_t from, std::uint64_t to,
                                 const std::string& type, const std::vector<std::string>& att_names){};

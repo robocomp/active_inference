@@ -208,7 +208,13 @@ inline Contract default_contract_for(std::string_view object_type)
             .still  (0.10f, 0.15f)   // a table fills the frame → base rotation smears it most; keep ω tight
             .stable(1).timeout_s(25).on_fail(Consume);
     }
-    if (object_type == "cylinder")   // bottle_concept's object node type
+    // ★"bottle", the SUBTYPE — not "cylinder", which was bottle's node TYPE before the fleet moved to
+    // type "object" + object_subtype. Every other agent already keys on its subtype ("table", "chair",
+    // "door", …); bottle alone still passed the retired type name. The key is matched by STRING, so the
+    // mismatch was invisible: this case simply stopped being reachable the day bottle's node became an
+    // "object", and default_contract_for fell through to the valid-LOOKING generic reach() the header
+    // warns about — the robot arriving with no detection goal to satisfy.
+    if (object_type == "bottle")
     {
         // Bottle: verify YOLO is firing on this bottle before completing. No ROI binding (bottle has
         // no projected-ROI feedback) → the controller's distance-sweep finds a stand-off where the
@@ -391,7 +397,7 @@ inline void write_contract(DSR::DSRGraph& G, DSR::Node& node, const Contract& c)
 }
 
 // ─── executor: type defaults + per-node overrides ─────────────────────────────
-// parent_type = the type of the affordance's parent object node (e.g. "table", "cylinder"); the
+// parent_type = the affordance's parent object SUBTYPE (e.g. "table", "bottle"); the
 // executor resolves it from the graph and passes it so the default base survives node-name renames.
 inline Contract read_contract(const DSR::Node& node, std::string_view parent_type = {})
 {

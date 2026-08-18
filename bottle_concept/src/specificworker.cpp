@@ -476,6 +476,10 @@ void SpecificWorker::compute()
         room_node_id_ = rooms.front().id();
     }
 
+    // Controller-owned affordance flags (claim / completion / epistemic_pending). Polled rather than pushed
+    // by update_node_attr_signal, which fires for every attribute change on every node in the shared graph.
+    poll_affordance_protocol();
+
     // One-shot: place the bottle on its arm-side spot BEFORE any fit, then let the scene settle so
     // the retina captures it there before the tracker births the node — a node created from a
     // pre-move camera frame would lock the XY ownership gate at the old pose.
@@ -1107,12 +1111,38 @@ void SpecificWorker::del_node_slot(std::uint64_t id)
     trigger_graph_layout_twopi();
 }
 
-void SpecificWorker::modify_node_attrs_slot(std::uint64_t id, const std::vector<std::string>&)
+// Poll the controller-owned protocol flags once per cycle. This REPLACES the update_node_attr_signal
+// subscription: that signal fires for EVERY attribute change on EVERY node in the shared graph, and the
+// agents that once subscribed to it could starve their own compute loop on the firehose.
+//
+// ★BOTTLE HAD NEITHER. Its modify_node_attrs_slot() was written, declared and never connected to anything —
+// dead code that LOOKED like the mechanism — so ObjectAffordance::on_node_modified() was never called and
+// bottle's affordance state machine never advanced past what bottle itself set. The controller taking the
+// claim (Offered→Executing) and completing it (→Completed) was invisible to this agent: `affordance.state()`
+// was stale for the life of every instance, and the epistemic CSV's `aff_state` column recorded that stale
+// value. The graph-side reads (the completion hold in step_epistemic, hold_offered) go straight to the node
+// and were unaffected, which is exactly why this stayed invisible.
+void SpecificWorker::poll_affordance_protocol()
 {
-    // Track controller-owned protocol transitions on each instance's affordance node (active/pending).
-    if (fitter_)
-        for (auto& [_, inst] : fitter_->instances())
-            inst.affordance.on_node_modified(id);
+    if (not fitter_)
+        return;   // may be called before the fit core exists — same guard the slots carry
+
+    for (auto& [bottle_id, inst] : fitter_->instances())
+    {
+        // Affordance state machine: idle→pending→executing→satisfied, driven by the controller-owned
+        // active/pending flags on the affordance node. on_node_modified() re-reads them itself, so handing it
+        // the id every cycle is exactly what the signal was supposed to do.
+        if (const auto aid = inst.affordance.node_id(); aid != 0)
+            inst.affordance.on_node_modified(aid);
+
+        // Mission controller clearing epistemic_pending on the bottle node itself.
+        if (auto node_opt = G->get_node(bottle_id); node_opt.has_value())
+        {
+            const auto v = G->get_attrib_by_name<epistemic_pending_att>(node_opt.value());
+            if (v.has_value() and not v.value())
+                inst.epistemic_pending = false;
+        }
+    }
 }
 
 void SpecificWorker::emergency()
