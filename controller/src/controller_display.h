@@ -131,6 +131,16 @@ public:
     // NEGATIVE = the limiter saw no covariance at all. That is genuinely UNDEFINED rather than zero, so
     // the trace breaks (add_point treats non-finite as a gap marker) instead of drawing a confident 0.
     void set_uncertainty_trace_value(float sigma_on_speed_axis);
+    // ── THE SAME TRACE, WHEN SOMEONE ELSE IS DRIVING ─────────────────────────────────────────────
+    // update_velocity_trace above is fed from OUR motion commander's output loop, so the panel went
+    // blank whenever anything else commanded the base — a joystick with this controller halted, most
+    // obviously. The shared graph's robot_ref_* IS the agreed channel for that ("the reference written
+    // by whoever commands (controller / joystick path)"), in the same m/s and rad/s, so it is read per
+    // control cycle and drawn HERE — but only when our own output loop is silent, because that one runs
+    // at ~40 Hz against the control loop's ~10-20 and replacing it would alias the jitter the panel
+    // exists to show. `fresh` false ⇒ the reference is a leftover from a commander that has stopped,
+    // which is not a command: the line breaks rather than flat-lining at whatever was left behind.
+    void update_velocity_trace_external(float adv_mps, float rot_rps, bool fresh);
     // The camera frame with the YOLO silhouettes on it, for the affordance panel. Composed on the
     // control thread and handed over whole (see controller_camera_masks.h) — the QImage inside is
     // already private to this snapshot, so nothing shares a pixel buffer across the thread boundary.
@@ -154,6 +164,10 @@ private:
     // rather than a plain float because those are two different threads and the profile path next door
     // already made exactly this handoff atomic for the same reason.
     std::atomic<float> unc_trace_{-1.f};
+    // Set by the output-thread feed, cleared by the per-cycle external feed: "did our own commander
+    // speak since the last control cycle". An own-source-wins arbitration with no tuned time constant —
+    // the window IS one control cycle, so it scales with whatever rate the loop happens to run at.
+    std::atomic<bool> vel_local_fed_{false};
 
     struct DisplaySnapshot
     {

@@ -216,9 +216,9 @@ public:
         auto *j_layout = new QVBoxLayout(j_panel);
         j_layout->setContentsMargins(4, 2, 4, 2);
         j_layout->setSpacing(2);
-        j_layout->addWidget(new QLabel("commanded velocity — adv (m/s)  |  rot (rad/s)  |  "
+        j_layout->addWidget(new QLabel("commanded velocity (whoever is driving) — adv (m/s)  |  rot (rad/s)  |  "
                                        "σxy scaled: TOP = PoseXYStdStop (throttle floored)   "
-                                       "[watch for steps and sign flips]", j_panel));
+                                       "[gap = nothing commanding]", j_panel));
         mission_j_plot = new rc::TimeSeriesPlot(j_panel);
         mission_j_plot->setMinimumHeight(80);
         // ~30 s: long enough to hold a whole approach and its arrival, short enough that individual

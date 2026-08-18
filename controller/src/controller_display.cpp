@@ -252,6 +252,24 @@ void ControllerDisplay::update_velocity_trace(float adv_mps, float rot_rps)
     // NaN makes the line BREAK there, which is what the plot's gap marker is for.
     const float unc = unc_trace_.load(std::memory_order_relaxed);
     plot->add_point("sigma", unc >= 0.f ? unc : std::numeric_limits<float>::quiet_NaN());
+    vel_local_fed_.store(true, std::memory_order_relaxed);
+}
+
+void ControllerDisplay::update_velocity_trace_external(float adv_mps, float rot_rps, bool fresh)
+{
+    auto *plot = custom_widget_ ? custom_widget_->mission_j_plot : nullptr;
+    if (plot == nullptr) return;
+    // Our own output loop spoke since the last control cycle — it is the higher-rate and more faithful
+    // source, so leave the trace to it. The exchange also arms the next window.
+    if (vel_local_fed_.exchange(false, std::memory_order_relaxed)) return;
+
+    const float gap = std::numeric_limits<float>::quiet_NaN();
+    const auto ok = [](float v) { return std::isfinite(v) ? v : 0.f; };
+    plot->add_point("adv", fresh ? ok(adv_mps) : gap);
+    plot->add_point("rot", fresh ? ok(rot_rps) : gap);
+    // Whoever is commanding, it is not through OUR uncertainty limiter, so the sigma line has nothing
+    // to say about this stretch. A gap, not a zero — zero would read as "perfectly localised".
+    plot->add_point("sigma", gap);
 }
 
 void ControllerDisplay::set_uncertainty_trace_value(float sigma_on_speed_axis)

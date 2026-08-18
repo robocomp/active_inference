@@ -254,6 +254,16 @@ private:
     std::uint64_t affordance_step_since_ms_ = 0;
     std::string affordance_prev_step_;
     float affordance_nav_total_m_ = 1.f;
+    // Draw whoever is commanding the base on the velocity panel, from the shared graph's robot_ref_*.
+    // Only takes effect when our own output loop is silent — see ControllerDisplay::
+    // update_velocity_trace_external. `kRefSpeedStaleMs` bounds how old a reference may be and still
+    // count as a command: a leftover from a commander that has stopped is not one, and drawing it would
+    // flat-line the panel at whatever was left behind instead of showing that nothing is driving.
+    static constexpr std::uint64_t kRefSpeedStaleMs = 500;
+    void feed_external_velocity_trace(const ControllerWorldModel &world_model,
+                                      ControllerDisplay &display,
+                                      std::uint64_t timestamp_ms);
+
     void update_affordance_view(const ControllerRobotPose &robot_pose,
                                 const rc::TrajectoryController::ControlOutput &o,
                                 bool output_enabled, float align_tol_rad, std::uint64_t now_ms);

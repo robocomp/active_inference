@@ -210,6 +210,15 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     update_overlay_extrapolation(world_model, *robot_pose, timestamp_ms, obstacle_tracker.rt_block_lead_ms(),
                                  obstacle_tracker.rt_twist_fix_dt_ms(), obstacle_tracker);
 
+    // ── THE VELOCITY PANEL MUST SHOW WHOEVER IS DRIVING, NOT ONLY US ─────────────────────────────
+    // The trace is fed from our motion commander's output loop, so it went blank the moment anything
+    // else commanded the base — a joystick with this controller halted being the obvious case, and the
+    // one that prompted this. robot_ref_* in the shared graph is the agreed channel for exactly that.
+    // Placed HERE rather than in update_overlay_extrapolation, which returns early when there is no
+    // fresh lidar stamp and so is not called every cycle — a diagnostic that reports intermittently is
+    // worse than one that reports not at all, because the gaps read as the robot having stopped.
+    feed_external_velocity_trace(world_model, display, timestamp_ms);
+
     ControllerPlanningStep step;
     step.robot_pose = *robot_pose;
     step.plan_origin = robot_pose->pos;
@@ -1661,6 +1670,31 @@ void ControllerSession::monitor_footprint_orientation(const ControllerPlanningSt
                      yawfix_cycles_, yawfix_robot_now_blocked_, yawfix_robot_now_free_,
                      yawfix_target_now_blocked_, yawfix_target_now_free_);
     }
+}
+
+// See the header. One get_node plus three attribute reads per cycle, all mutex-guarded; the display
+// decides whether the values are actually drawn, because only it knows whether our own higher-rate feed
+// has spoken since the last cycle.
+void ControllerSession::feed_external_velocity_trace(const ControllerWorldModel &world_model,
+                                                    ControllerDisplay &display,
+                                                    std::uint64_t timestamp_ms)
+{
+    float adv = 0.f, rot = 0.f;
+    bool fresh = false;
+    if (graph_)
+        if (const auto rid = world_model.graph_state().robot_id; rid != 0)
+            if (const auto robot_node = graph_->get_node(rid); robot_node.has_value())
+            {
+                adv = graph_->get_attrib_by_name<robot_ref_adv_speed_att>(*robot_node).value_or(0.f);
+                rot = graph_->get_attrib_by_name<robot_ref_rot_speed_att>(*robot_node).value_or(0.f);
+                // The reference carries its own write time, so staleness is measured against WHEN IT WAS
+                // WRITTEN rather than against whether the value happens to be non-zero — a joystick
+                // holding still writes a legitimate 0, and that must not read the same as nobody driving.
+                if (const auto ts = graph_->get_attrib_by_name<robot_ref_speed_timestamp_att>(*robot_node);
+                    ts.has_value() and timestamp_ms >= *ts)
+                    fresh = timestamp_ms - *ts <= kRefSpeedStaleMs;
+            }
+    display.update_velocity_trace_external(adv, rot, fresh);
 }
 
 // ── THE STANDPOINT, RE-ASKED IN THE LAST METRES AGAINST EVIDENCE THAT HAS NOT FADED ──────────────
