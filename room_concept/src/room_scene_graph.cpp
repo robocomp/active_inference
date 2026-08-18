@@ -559,7 +559,8 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
         room_concept_->note_exploration_drive(planner.belief_age_s(), planner.belief_decay(),
                                               last_outcome_code_, aff_completions_,
                                               tgt ? tgt->position.x() : std::numeric_limits<float>::quiet_NaN(),
-                                              tgt ? tgt->position.y() : std::numeric_limits<float>::quiet_NaN());
+                                              tgt ? tgt->position.y() : std::numeric_limits<float>::quiet_NaN(),
+                                              pub_tx_, pub_ty_, pub_ok_);
     }
 
     if (affordance_manager_.consume_completion_event())
@@ -745,6 +746,8 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
         gain,
         [this]() { trigger_layout_(); },
         [this]() { trigger_layout_(); });
+
+    pub_tx_ = tx; pub_ty_ = ty; pub_ok_ = published;
 
     // ---- Publish trace: the ONLY place that shows why exploration stops ----------------------
     // Everything upstream of here can look healthy while the affordance never returns to Offered:

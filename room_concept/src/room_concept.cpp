@@ -318,7 +318,7 @@ namespace rc
             //            that carries, and until now only the diagonal was logged, so the change's
             //            central claim was the one thing the log could not show.
             << ",preint_n,preint_T"
-            << ",belief_age_s,belief_decay,aff_outcome,aff_completions,tgt_x,tgt_y"
+            << ",belief_age_s,belief_decay,aff_outcome,aff_completions,tgt_x,tgt_y,pub_tx,pub_ty,pub_ok"
             << ",slot_mcov_xy,slot_mcov_xt,slot_mcov_yt"
             // imu_cover fraction of the interval's segments whose heading came from the GYRO rather
             //            than the wheels. -1 when no segments were integrated.
@@ -4272,6 +4272,9 @@ namespace rc
                    << ',' << last_aff_completions_
                    << ',' << last_tgt_x_
                    << ',' << last_tgt_y_
+                   << ',' << last_pub_tx_
+                   << ',' << last_pub_ty_
+                   << ',' << last_pub_ok_
                    << ',' << last_slot_motion_cov_(0, 1)
                    << ',' << last_slot_motion_cov_(0, 2)
                    << ',' << last_slot_motion_cov_(1, 2)

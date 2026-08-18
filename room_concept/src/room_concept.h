@@ -817,9 +817,15 @@ public:
     /// log cannot answer the first question anyone asks of a repeating robot — "is it going back to
     /// the SAME cell, or working through different ones?" — which is the difference between a stuck
     /// planner and normal exploration, and is invisible in a completion count.
+    /// `pub_x/pub_y` = the target actually WRITTEN to the affordance node, and `pub_ok` = whether the
+    /// last publish re-armed it. ★ These differ from tgt_x/tgt_y, and the difference is the failure
+    /// mode: publish_target declines silently when the node is Completed and the proposal is
+    /// unchanged, so the planner can be picking a fresh cell every cycle while the CONTROLLER still
+    /// holds the one the robot is standing on. Only the published pair explains the controller.
     void note_exploration_drive(float belief_age_s, float belief_decay, int outcome, long completions,
-                                float tgt_x, float tgt_y)
+                                float tgt_x, float tgt_y, float pub_x, float pub_y, bool pub_ok)
     {
+        last_pub_tx_ = pub_x; last_pub_ty_ = pub_y; last_pub_ok_ = pub_ok ? 1 : 0;
         last_tgt_x_ = tgt_x;
         last_tgt_y_ = tgt_y;
         last_belief_age_s_    = belief_age_s;
@@ -1261,7 +1267,10 @@ private:
    // accumulated to make the quotient mean anything (see the [ImuInject] guard) — a column that
    // reports a number for a parked robot is the defect that guard exists to prevent.
    float           last_wheel_gyro_ratio_ = std::numeric_limits<float>::quiet_NaN();
-   float           last_tgt_x_ = std::numeric_limits<float>::quiet_NaN();  // published affordance target
+   float           last_pub_tx_ = std::numeric_limits<float>::quiet_NaN();  // what went ON THE NODE
+   float           last_pub_ty_ = std::numeric_limits<float>::quiet_NaN();
+   int             last_pub_ok_ = 0;                                        // did publish re-arm it?
+   float           last_tgt_x_ = std::numeric_limits<float>::quiet_NaN();  // planner's internal choice
    float           last_tgt_y_ = std::numeric_limits<float>::quiet_NaN();
    float           last_belief_age_s_    = 0.f;   // s since the last refresh_belief()
    float           last_belief_decay_    = 1.f;   // exp(-age/belief_forget_time): the drive itself

@@ -140,6 +140,14 @@ private:
     // ★ The COUNTER, not the code, is what locates an event: the code is a LEVEL that persists for
     // thousands of rows after its one completion, so segmenting on the code measures dwell time
     // rather than events. Segment on aff_completions changing.
+    // ★ THE PUBLISHED target, not the planner's internal one. They are NOT the same and the
+    // difference is the whole bug: publish_target silently DECLINES when the node is Completed and
+    // the proposal is unchanged, so the planner can be selecting a new cell every cycle while the
+    // node still carries the one the robot is already standing on. Logging current_target() showed
+    // the planner busy and healthy and told us nothing about what the controller was handed.
+    float pub_tx_ = std::numeric_limits<float>::quiet_NaN();
+    float pub_ty_ = std::numeric_limits<float>::quiet_NaN();
+    bool  pub_ok_ = false;   // did the last publish_target actually re-arm the node?
     long aff_completions_   = 0;   // completed affordances this run
     int  last_outcome_code_ = 0;   // 0 none · 1 satisfied · 2 timeout · 3 refused · 4 abandoned
     std::function<void()>          trigger_layout_;
