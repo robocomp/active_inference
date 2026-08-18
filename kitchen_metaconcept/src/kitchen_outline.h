@@ -188,6 +188,65 @@ public:
         return pa + t * a.u;
     }
 
+    // ── ★DIAGNOSTIC ONLY (2026-08-17): which corner case is this joint in? ───────────────────────
+    // Ending BOTH runs at the vertex is correct in ONE arrangement and wrong in the other, and the
+    // difference is not a preference — it is whether the corner square is already swept by a run.
+    //
+    // The square is the depth_i x depth_j patch behind the vertex, where both carcasses could sit.
+    // Projected onto run i's own axis it is an interval of width depth_j starting at V and running
+    // along -n_j (a body extends BACK from its front face, and the front face passes through V).
+    //
+    //   · if exactly one run's CURRENT extent already contains that interval, that run fills the
+    //     corner for free, the other stops at V, and "both to V" is right (this is the self-test's
+    //     make_L: b spans y in [0,2] and the square is y in [0,0.6]);
+    //   · if NEITHER does, "both to V" leaves the square empty — and closing it means one run
+    //     ADVANCES past V by the other's depth to become the corner unit while the other RETRACTS
+    //     to V and butts against its side. Which is what the live kitchen needs and does not get.
+    //
+    // Reports, changes nothing. `advance` is how far past V that run would have to go to fill.
+    struct CornerCase
+    {
+        bool  fills_i = false, fills_j = false;
+        float advance_i = 0.0f, advance_j = 0.0f;   // 0 when it already fills
+        bool  either_fills() const { return fills_i or fills_j; }
+    };
+
+    CornerCase corner_case(const OutlineJoint& j) const
+    {
+        CornerCase cc;
+        if (j.i < 0 or j.j < 0) return cc;
+        const auto& si = segs_[static_cast<std::size_t>(j.i)];
+        const auto& sj = segs_[static_cast<std::size_t>(j.j)];
+
+        // Run `self`'s own extent, measured along its axis from the vertex.
+        const auto extent_from_v = [](const OutlineSeg& g, float gap, bool high)
+        {
+            return high ? std::pair<float, float>{-g.length - gap, -gap}
+                        : std::pair<float, float>{ gap, g.length + gap};
+        };
+        // The OTHER run's body, projected onto `self`'s axis, as an interval from the vertex.
+        const auto other_body = [](const OutlineSeg& self, const OutlineSeg& other)
+        {
+            const float k = other.n.dot(self.u);           // +-1 for perpendicular runs
+            const float e = -other.depth * k;              // body runs BACK from its own front face
+            return std::pair<float, float>{std::min(0.0f, e), std::max(0.0f, e)};
+        };
+        const auto eval = [&](const OutlineSeg& self, const OutlineSeg& other,
+                              float gap, bool high, bool& fills, float& advance)
+        {
+            const auto [s0, s1] = extent_from_v(self, gap, high);
+            const auto [b0, b1] = other_body(self, other);
+            fills = (s0 <= b0 + 1e-4f) and (s1 >= b1 - 1e-4f);
+            if (fills) { advance = 0.0f; return; }
+            // How far the end NEAREST the vertex must travel past V to sweep the square. A high end
+            // grows in +s and must reach b1; a low end grows in -s and must reach b0.
+            advance = high ? std::max(0.0f, b1 - s1) : std::max(0.0f, s0 - b0);
+        };
+        eval(si, sj, j.gap_i, j.end_i_high, cc.fills_i, cc.advance_i);
+        eval(sj, si, j.gap_j, j.end_j_high, cc.fills_j, cc.advance_j);
+        return cc;
+    }
+
     // What each end should be told, to make the shape continuous. Only ends that are free to move
     // and are not already at their vertex produce one.
     struct EndCorrection
@@ -647,6 +706,22 @@ inline bool kitchen_outline_self_test()
               "(l) a clean right-angled corner stays sharp (sigma a few cm)");
         check(var_thin > 25.0f * var_perp,
               "(l) ★a 5° corner's target is FAR less certain than a right-angled one");
+    }
+
+    // ── (m) ★DIAGNOSTIC CHECK: make_L is the benign corner case ──────────────────────────────────
+    // make_L is the arrangement where one run already sweeps the corner square (b spans y in [0,2],
+    // the square is y in [0,0.6]), so "both ends at V" is correct there. If corner_case cannot see
+    // that, the diagnostic is wrong and nothing measured with it can be trusted.
+    {
+        KitchenOutline o; o.set_segments(make_L(0.0f, 0.0f));
+        if (o.joints().size() == 1)
+        {
+            const auto cc = o.corner_case(o.joints().front());
+            check(cc.either_fills(),
+                  "(m) ★in make_L one run already sweeps the corner square");
+            check(not (cc.fills_i and cc.fills_j),
+                  "(m) and only one of them does — two would mean they interpenetrate");
+        }
     }
 
     if (ok) std::printf("[kitchen_outline::self_test] all checks passed\n");

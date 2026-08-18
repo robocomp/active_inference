@@ -274,7 +274,7 @@ void SpecificWorker::initialize()
     {
         if (rc::diag::open_rotating(outline_csv_, cfg_.outline_csv_path,
                 "cycle,tier,run_a,run_b,vertex_x,vertex_y,gap_a,gap_b,end_a_high,end_b_high,cross,"
-                "kind,passes_a,passes_b,penetration\n"))
+                "kind,passes_a,passes_b,penetration,fills_a,fills_b,adv_a,adv_b,corner_case\n"))
             outline_csv_.imbue(std::locale::classic());
         else qWarning() << "kitchen_metaconcept: cannot open outline CSV"
                         << QString::fromStdString(cfg_.outline_csv_path);
@@ -875,13 +875,18 @@ void SpecificWorker::log_outline_csv()
         {
             const auto& a = o.segments()[static_cast<std::size_t>(j.i)];
             const auto& b = o.segments()[static_cast<std::size_t>(j.j)];
+            const auto cc = o.corner_case(j);
             outline_csv_ << cycle_ << ',' << tier << ',' << a.name << ',' << b.name << ','
                          << j.vertex.x() << ',' << j.vertex.y() << ','
                          << j.gap_i << ',' << j.gap_j << ','
                          << (j.end_i_high ? 1 : 0) << ',' << (j.end_j_high ? 1 : 0) << ','
                          << j.cross << ',' << rc::KitchenOutline::kind_name(j.kind) << ','
                          << (j.passes_i ? 1 : 0) << ',' << (j.passes_j ? 1 : 0) << ','
-                         << j.penetration() << '\n';
+                         << j.penetration() << ','
+                         // ★diagnostic only — see KitchenOutline::corner_case
+                         << (cc.fills_i ? 1 : 0) << ',' << (cc.fills_j ? 1 : 0) << ','
+                         << cc.advance_i << ',' << cc.advance_j << ','
+                         << (cc.either_fills() ? "one_fills" : "NEITHER") << '\n';
         }
     };
     write_tier("floor", outline_floor_);
