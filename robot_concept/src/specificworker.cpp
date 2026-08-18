@@ -1545,26 +1545,15 @@ void SpecificWorker::read_imu_thread()
 			last_imu_stamp_ms = stamp_ms;
 		}
 
-		// --- DSR: mirror the sample into the graph, on arrival, off the timer ---
-		// The media plane is a one-way DDS stream; an agent that needs the IMU to propagate a pose
-		// between slower optimized estimates reads it from the graph instead. Both clocks and the
-		// simulated flag go with it: the gyro is rad per SIMULATION second when it comes from a
-		// simulator, so whoever integrates it must integrate over imu_sim_time_stamp, and reading the
-		// flag off the sample beats every consumer carrying its own SIM/REAL config switch.
-		if (auto imu_node = G->get_node(robot_name); imu_node.has_value())
-		{
-			const std::vector<float> acc {data.acc.XAcc,  data.acc.YAcc,  data.acc.ZAcc};
-			const std::vector<float> gyr {data.gyro.XGyr, data.gyro.YGyr, data.gyro.ZGyr};
-			const std::vector<float> rpy {data.rot.Roll,  data.rot.Pitch, data.rot.Yaw};
-			G->add_or_modify_attrib_local<imu_accelerometer_att>(imu_node.value(), acc);
-			G->add_or_modify_attrib_local<imu_gyroscope_att>(imu_node.value(), gyr);
-			G->add_or_modify_attrib_local<imu_angular_euler_xyz_pose_att>(imu_node.value(), rpy);
-			G->add_or_modify_attrib_local<imu_time_stamp_att>(imu_node.value(), stamp_ms);
-			G->add_or_modify_attrib_local<imu_sim_time_stamp_att>(imu_node.value(),
-				static_cast<std::uint64_t>(data.gyro.simTimestamp));
-			G->add_or_modify_attrib_local<imu_simulated_att>(imu_node.value(), data.gyro.simulated);
-			rc::safe_update_node(*G, std::move(imu_node.value()));
-		}
+		// The IMU is NOT mirrored into the graph. It used to be: six attribute writes per sample on one
+		// shared node at ~125 Hz, CRDT-replicated to every agent and waking every peer's attribute slot
+		// whether it wanted the IMU or not. It now rides the media plane only (rc/imu/data), which is
+		// what that plane exists for — a dedicated DDS domain isolated from the DSR domain precisely so
+		// high-rate churn cannot perturb cortex resync.
+		// ★ And it is what the real robot does: the IMU component publishes to that topic directly, so a
+		// consumer's code is now identical in simulation and on hardware.
+		// The two fields the graph carried that a naive frame would drop — the SIM clock and the gyro
+		// variance — are in ImuFrame, so nothing was lost with the attributes.
 
 		// --- Media plane: publish the IMU sample (tiny fixed payload), stamped per-frame ---
 		// bridge_imu_ false ⇒ an external component owns rc/imu/data (Media.imu_source = "dds").

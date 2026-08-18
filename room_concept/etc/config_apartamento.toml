@@ -98,25 +98,6 @@ RoomLayoutSvg          = "apartamento_layout.svg"  # apartamento layout; walls i
 RecenterRoomPolygon    = true
 RoomHeight             = 3.0   # m — real apartamento ceiling. Sets the room DSR node room_height (walls/ceiling overlay) and the expected ceiling for the LiDAR startup check. The LiDAR can't reach 3 m, so set it here rather than relying on detection.
 PreserveBootstrapRoom  = false  # static-room phase: adopt the pre-seeded room/table from the bootstrap graph; do NOT delete on start or overwrite robot->room. Set false to go dynamic (localize + create room).
-# ── Where the IMU comes from ──────────────────────────────────────────────────
-# "dsr"   the legacy imu_* node attributes, written by robot_concept at ~125 Hz. That is four CRDT
-#         attribute writes per sample on one shared node, replicated to every agent and waking every
-#         peer's attribute slot whether it wants the IMU or not.
-# "media" the DDS media-plane topic the producer ALREADY advertises (rc/imu/data on the dedicated
-#         media domain, isolated from the DSR domain precisely so high-rate churn cannot perturb
-#         cortex resync). Nothing new had to be built on the transport: ImuFrame, ImuPublisher,
-#         ImuSubscriber and make_imu_subscriber_from_graph all predate this switch.
-#
-# ★ The reason to prefer "media" is sim2real, not load. On hardware the IMU component publishes to
-# that topic directly, so with "media" this agent's consumer code is IDENTICAL in simulation and on
-# the robot and the only difference is which process fills the topic — invisible from here. "dsr"
-# keeps a sim-only path alive at exactly the point where a sim/real divergence is most expensive.
-#
-# Default "dsr" while both paths coexist, so the switch is one word to revert. Compare on one run:
-# imu_cover and wg_ratio in the debug log expose a mismatch immediately, and the startup line says
-# which is in force.
-ImuSource              = "media"  # "dsr" | "media"   ← switched 2026-08-18
-
 PredictionEarlyExit    = true  # Skip optimization when prediction error < threshold
 SigmaSdf               = 0.15  # σ_obs del SDF para el umbral de early exit (m)
 PredictionTrustFactor  = 0.7   # threshold = SigmaSdf × factor  → 12 cm

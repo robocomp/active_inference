@@ -115,8 +115,7 @@ class SpecificWorker : public GenericWorker
 
         // ── LiDAR acquisition (decoupled ingest thread + buffer + health) ──────
         std::unique_ptr<rc::LidarIngestor> lidar_ingestor_;
-        // IMU on the MEDIA PLANE (RoomConfig::IMU_SOURCE == "media"). Null when the legacy DSR
-        // attribute path is selected, which is what modify_node_attrs_slot then keeps feeding.
+        // IMU on the media plane. Always created: the graph no longer carries the IMU at all.
         std::unique_ptr<rc::ImuIngestor>   imu_ingestor_;
 
         // ── LiDAR stream gate on Waiting→Operating ─────────────────────────────

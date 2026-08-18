@@ -72,13 +72,6 @@ struct RoomConfig
     bool        RECENTER_ROOM_POLYGON = true;   // config: RoomConcept.RecenterRoomPolygon
     float       ODOMETRY_NOISE_FACTOR = 0.0f;
 
-    // Where the IMU comes from: "media" (the DDS media-plane topic the producer advertises) or "dsr"
-    // (the legacy imu_* node attributes). Default "dsr" so the switch is one word to revert and both
-    // paths can be compared on one run — imu_cover and wg_ratio in the debug log show a mismatch
-    // immediately. On hardware only "media" is meaningful: the real IMU component publishes to the
-    // topic directly and never writes those attributes, so the consumer code is then identical in
-    // both worlds and the sim/real divergence disappears at exactly the point being calibrated.
-    std::string IMU_SOURCE = "dsr";   // "dsr" | "media"
 
 
     // DSR stabilization: this many consecutive "stable" frames before creating the

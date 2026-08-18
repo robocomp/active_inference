@@ -152,14 +152,10 @@ void SpecificWorker::initialize()
         G, rt_api_.get(), params, room_concept_, epistemic_controller_,
         [this] { trigger_graph_layout_twopi(); });
     lidar_ingestor_ = std::make_unique<rc::LidarIngestor>(G, room_concept_, params);
-    if (params.IMU_SOURCE == "media")
-    {
-        imu_ingestor_ = std::make_unique<rc::ImuIngestor>(G, imu_buffer_, sim_clock_);
-        qInfo() << "[IMU] source = MEDIA PLANE — the DSR imu_* attributes are ignored";
-    }
-    else
-        qInfo() << "[IMU] source = DSR attributes (legacy). Set RoomConcept.ImuSource = \"media\" to"
-                << "consume the topic the producer already advertises.";
+    // No source switch any more: the producer no longer writes the imu_* attributes, so a "dsr"
+    // option would select a path with nothing on it — a dead config of exactly the kind this
+    // codebase keeps rediscovering. The escape hatch is git, not a flag that cannot work.
+    imu_ingestor_ = std::make_unique<rc::ImuIngestor>(G, imu_buffer_, sim_clock_);
 
     // ── Wire RoomConcept run context ───────────────────────────────────────
     rc::RoomConcept::RunContext run_ctx;
@@ -859,13 +855,7 @@ void SpecificWorker::modify_node_attrs_slot(std::uint64_t id, const std::vector<
         "robot_ref_rot_speed",
         "robot_ref_speed_timestamp"
     });
-    const bool touches_imu = touches_any({
-        "imu_gyroscope",
-        "imu_time_stamp",
-        "imu_sim_time_stamp"
-    });
-
-    if (not touches_current_speed and not touches_ref_speed and not touches_imu)
+    if (not touches_current_speed and not touches_ref_speed)
         return;
 
     const auto node_opt = G->get_node(id);
@@ -874,47 +864,9 @@ void SpecificWorker::modify_node_attrs_slot(std::uint64_t id, const std::vector<
 
     const auto &robot_node = node_opt.value();
 
-    // ── Inertial samples: the FAST channel ────────────────────────────────────────────────────────
-    // Arrives an order of magnitude faster than odometry (~125 Hz against 10 Hz) and matters because
-    // yaw is the one channel wheel odometry gets badly wrong: a differential base turns by scrubbing
-    // its wheels, so it over-reports rotation -- measured at 8.2% on this robot, against translation
-    // that is exact to 0.1%. Buffering these lets the motion prior integrate the gyro across the
-    // interval between two lidar sweeps instead of holding one 10 Hz rot sample constant across it.
-    // When the media plane owns the IMU, ignore these attributes entirely rather than filling the
-    // buffer twice: two sources keyed on the same integration stamp would have the dedup silently
-    // drop whichever arrived second, which is a race dressed up as a policy.
-    if (touches_imu and imu_ingestor_ == nullptr)
-    {
-        if (const auto gyro = G->get_attrib_by_name<imu_gyroscope_att>(robot_node);
-            gyro.has_value() and gyro.value().get().size() >= 3)
-        {
-            rc::ImuReading imu;
-            imu.gyro_z = gyro.value().get()[2];      // about robot +Z, CCW+, same convention as odom.rot
-
-            if (const auto ts = G->get_attrib_by_name<imu_time_stamp_att>(robot_node); ts.has_value())
-                imu.source_ts_ms = static_cast<std::int64_t>(ts.value());
-            if (const auto sts = G->get_attrib_by_name<imu_sim_time_stamp_att>(robot_node); sts.has_value())
-                imu.sim_ts_ms = static_cast<std::int64_t>(sts.value());
-            if (const auto sim_flag = G->get_attrib_by_name<imu_simulated_att>(robot_node); sim_flag.has_value())
-                imu.simulated = sim_flag.value();
-
-            // Dedup on the integration stamp. The graph re-signals this node for unrelated attribute
-            // writes, and re-buffering the same sample would make it count twice in the interval.
-            const std::int64_t key = imu.integration_ts_ms();
-            if (key > 0 and key != last_imu_sim_ts_)
-            {
-                last_imu_sim_ts_ = key;
-                imu.recv_ts_ms = static_cast<std::int64_t>(
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::system_clock::now().time_since_epoch()).count());
-                if (imu.simulated and imu.sim_ts_ms > 0)
-                    sim_clock_.observe(imu.source_ts_ms, imu.sim_ts_ms);
-                imu_buffer_.put<0>(std::move(imu), static_cast<std::uint64_t>(key));
-            }
-        }
-        if (not touches_current_speed and not touches_ref_speed)
-            return;
-    }
+    // No inertial branch here: the IMU rides the media plane (rc/imu/data) and never touches the
+    // graph, so this slot has nothing to do for it. ImuIngestor owns that channel; the commentary
+    // about why the gyro matters for yaw now lives with it, next to the code that uses it.
 
     if (touches_current_speed)
     {
