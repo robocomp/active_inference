@@ -275,9 +275,27 @@ void AffordanceManager::monitor_execution(const std::shared_ptr<DSR::DSRGraph> &
         last_managed_pending_ = pending;
     }
 
-    if (active && pending)
+    // ★★★ LEVEL-TRIGGERED, NOT EDGE-TRIGGERED. This used to require OBSERVING the node in
+    // (active && pending) before it would accept a later completion — an edge signal implemented by
+    // polling, which is a race by construction: it is correct only while the consumer is slow enough
+    // to still be in that state when the producer next looks. It also CLEARED the wait on `!active`,
+    // i.e. on the ordinary Offered state, so the flag survived only inside the claim window.
+    //
+    // Measured 2026-08-18: once the consumer began claiming and finishing inside ONE of its 50 ms
+    // cycles (a standpoint repaired onto the robot's own pose, refused immediately), the producer's
+    // 20 Hz poll never caught the window. Zero completions were detected in 549 s while the consumer
+    // was completing continuously — so the producer never cleared its target, kept re-proposing the
+    // same cell, publish_target declined it as unchanged-and-Completed, nothing was ever Offered
+    // again, and both agents wedged. The 3 s dwell had been hiding this for as long as it existed.
+    //
+    // `pending` is the LEVEL: the producer sets it when it arms the node, the consumer clears it when
+    // it finishes. Both sides own one edge of it and neither can miss the other's. `active` is the
+    // consumer's claim and is none of the producer's business — waiting on it is what created the
+    // race. publish_target() also sets waiting_completion_ directly, so a completion that happens
+    // entirely between two polls is still seen.
+    if (pending)
         waiting_completion_ = true;
-    else if (waiting_completion_ && !pending)
+    else if (waiting_completion_)
     {
         waiting_completion_ = false;
         completion_detected_ = true;
@@ -288,8 +306,6 @@ void AffordanceManager::monitor_execution(const std::shared_ptr<DSR::DSRGraph> &
         if (const auto node = graph->get_node(managed_node_name_); node.has_value())
             last_outcome_ = rc::affordance::read_outcome(node.value());
     }
-    else if (!active)
-        waiting_completion_ = false;
 }
 
 bool AffordanceManager::is_executing(const std::shared_ptr<DSR::DSRGraph> &graph)
@@ -344,6 +360,7 @@ bool AffordanceManager::publish_target(const std::shared_ptr<DSR::DSRGraph> &gra
         }
 
         managed_node_id_ = id_opt.value();
+        waiting_completion_ = true;   // armed on creation — see the note on the re-publish path
         node_opt = graph->get_node(managed_node_id_);
         if (!node_opt.has_value())
             return false;
@@ -399,6 +416,10 @@ bool AffordanceManager::publish_target(const std::shared_ptr<DSR::DSRGraph> &gra
     if (!current_pending)
         graph->add_or_modify_attrib_local<epistemic_pending_att>(node, true);
     graph->update_node(node);
+    // ★ WE ARMED IT, SO WE ARE WAITING — set synchronously rather than waiting to OBSERVE the node
+    // in some state. A consumer that claims and finishes between two of our polls would otherwise be
+    // invisible, which is precisely the race that wedged both agents (see monitor_execution).
+    waiting_completion_ = true;
 
     if (graph->get_edge(parent_id, managed_node_id_, "RT").has_value())
         graph->delete_edge(parent_id, managed_node_id_, "RT");

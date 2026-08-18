@@ -840,6 +840,14 @@ void SpecificWorker::modify_node_attrs_slot(std::uint64_t id, const std::vector<
 
     // LiDAR is read from the media plane (pumped in compute), not the DSR graph laser_* attrs.
 
+    // ★ OUR OWN AFFORDANCE NODE — handled BEFORE the robot-id filter below, which would otherwise
+    // discard it. The consumer clears epistemic_pending when it finishes; being told the moment that
+    // happens is what removes the missed-edge race that wedged both agents (549 s with zero
+    // completions detected while the consumer was completing continuously).
+    if (std::ranges::any_of(att_names, [](const std::string& n)
+                            { return n == "epistemic_pending" or n == "aff_outcome"; }))
+        scene_graph_->on_affordance_attr_changed(id);
+
     if (const auto robot_id = scene_graph_->robot_id(); robot_id != 0 && id != robot_id)
         return;
 

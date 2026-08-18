@@ -118,6 +118,11 @@ public:
     // consume_completion_event() returns true; Outcome::None before any completion.
     [[nodiscard]] rc::affordance::Outcome last_outcome() const { return last_outcome_; }
 
+    /// The affordance node this manager owns (0 until published). Lets an agent's graph-signal slot
+    /// recognise a change to ITS OWN affordance and latch the completion at the instant it happens,
+    /// instead of waiting for the next poll — see monitor_execution's note on the missed-edge race.
+    [[nodiscard]] std::uint64_t managed_node_id() const { return managed_node_id_; }
+
     // ── NO TWO IN A ROW ───────────────────────────────────────────────────────────────────────────
     // The affordance that was just completed is skipped by the next selection, however good its score.
     // Its producer re-offers it within a cycle or two (that is the protocol working as designed), and

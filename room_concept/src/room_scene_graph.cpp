@@ -538,6 +538,18 @@ void RoomSceneGraph::dsr_create_room_and_reparent(const rc::RoomConcept::UpdateR
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+// ★ SIGNAL AS THE WAKE-UP, LEVEL AS THE TRUTH. The graph tells us the instant epistemic_pending or
+// aff_outcome changes on our own affordance node, so a consumer that claims and finishes inside one of
+// its cycles can no longer slip between two of our polls. We still only LATCH here and let the compute
+// loop consume it: DSR updates can coalesce under CRDT churn, so an edge-only design would be racy in
+// the other direction — monitor_execution re-reads the node and decides from the level.
+void RoomSceneGraph::on_affordance_attr_changed(std::uint64_t node_id)
+{
+    if (G_ == nullptr or node_id == 0 or node_id != affordance_manager_.managed_node_id())
+        return;
+    affordance_manager_.monitor_execution(G_);
+}
+
 void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& res)
 {
     if (!G_ || !room_node_created_ || !epistemic_) return;

@@ -134,6 +134,12 @@ private:
     DSR::RT_API*                   rt_api_       = nullptr;   // worker-owned, injected
     rc::RoomConfig*           params_       = nullptr;   // shared config (read + body-dim write-back)
     rc::RoomConcept*               room_concept_ = nullptr;
+    // Graph-signal entry point: an attribute changed on our affordance node. Runs on the MAIN thread
+    // (the connection is Queued — never DirectConnection, see CLAUDE.md) and only latches; the
+    // compute loop still consumes the event, so ordering is unchanged.
+public:
+    void on_affordance_attr_changed(std::uint64_t node_id);
+private:
     rc::EpistemicController*       epistemic_    = nullptr;
 
     // Affordance-outcome instrumentation (mirrored into the localiser CSV each cycle).
