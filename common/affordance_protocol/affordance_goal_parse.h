@@ -187,7 +187,18 @@ enum class Outcome
     Satisfied,   // the completion predicate held for stable_n cycles — an OBSERVATION happened
     Timeout,     // the predicate never held within aff_timeout_ms — nothing was observed
     Refused,     // the consumer could not get there (see epistemic_refused_*) — never attempted
-    Abandoned    // an operator or a higher-priority interrupt ended it
+    Abandoned,   // an operator or a higher-priority interrupt ended it
+    // ── FACTS THE CONSUMER OWNS AND THE PRODUCER CANNOT SEE (added 2026-08-19) ───────────────────
+    // ★★★THE CELL IS THE PRODUCER'S DECISION VARIABLE. It chose that standpoint by maximising expected
+    // information gain over its own grid; the consumer knows nothing about that gain and everything
+    // about reachability. Before these existed the consumer had no way to say "I cannot", so when a
+    // standpoint was unreachable it silently MOVED the goal to somewhere it could reach and reported
+    // Satisfied — measured 2026-08-19: 140 of 163 accepted arrivals were a median 2.86 m from the
+    // published cell, each one telling room a place had been observed that nothing ever looked at.
+    // ★These are FACTS, not verdicts: mechanical statements about the approach that the consumer alone
+    // can make. Whether the epistemic goal was served remains the producer's to compute, privately.
+    Infeasible,  // the body does not fit at that pose (or cannot turn there) — nothing was observed
+    Unreachable  // the pose is fine but no route exists from where the robot is — never attempted
 };
 
 inline std::string_view to_string(Outcome o)
@@ -196,8 +207,10 @@ inline std::string_view to_string(Outcome o)
     {
         case Outcome::Satisfied: return "satisfied";
         case Outcome::Timeout:   return "timeout";
-        case Outcome::Refused:   return "refused";
-        case Outcome::Abandoned: return "abandoned";
+        case Outcome::Refused:     return "refused";
+        case Outcome::Abandoned:   return "abandoned";
+        case Outcome::Infeasible:  return "infeasible";
+        case Outcome::Unreachable: return "unreachable";
         default:                 return "";
     }
 }
@@ -207,6 +220,12 @@ inline Outcome outcome_from(std::string_view s)
     if (s == "timeout")   return Outcome::Timeout;
     if (s == "refused")   return Outcome::Refused;
     if (s == "abandoned") return Outcome::Abandoned;
+    if (s == "infeasible")  return Outcome::Infeasible;
+    if (s == "unreachable") return Outcome::Unreachable;
+    // ★An UNKNOWN word reads as None, and observation_happened(None) is false — a producer running
+    // against a newer consumer that reports a fact it has never heard of treats it as "nothing was
+    // observed", which at worst sends the robot back to look again. That is the safe direction, and it
+    // is why these words could be added without a lock-step upgrade of both agents.
     return Outcome::None;
 }
 

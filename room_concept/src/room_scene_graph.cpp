@@ -594,10 +594,12 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
         const auto outcome = affordance_manager_.last_outcome();
         const bool observed = rc::affordance::observation_happened(outcome);
         using rc::affordance::Outcome;
-        last_outcome_code_ = outcome == Outcome::Satisfied ? 1
-                           : outcome == Outcome::Timeout   ? 2
-                           : outcome == Outcome::Refused   ? 3
-                           : outcome == Outcome::Abandoned ? 4 : 0;
+        last_outcome_code_ = outcome == Outcome::Satisfied   ? 1
+                           : outcome == Outcome::Timeout     ? 2
+                           : outcome == Outcome::Refused     ? 3
+                           : outcome == Outcome::Abandoned   ? 4
+                           : outcome == Outcome::Infeasible  ? 5
+                           : outcome == Outcome::Unreachable ? 6 : 0;
         ++aff_completions_;
         std::print("[planner] completion consumed (outcome={}) -> target cleared, {}\n",
                    rc::affordance::to_string(outcome),
@@ -623,11 +625,27 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
         // included, so by the time a refusal is consumed they may name a cell the consumer was never
         // offered — de-prioritising the wrong one and leaving the refused cell at full score.
         // (5535c6f's point survives: the guard is on KNOWING the cell, never on pub_ok_.)
-        if (outcome == Outcome::Refused and not std::isnan(armed_tx_) and not std::isnan(armed_ty_))
+        // ★★★A FACT ABOUT THE APPROACH IS NOT A FACT ABOUT THE WORLD. Infeasible ("the body does not
+        // fit at that pose") and Unreachable ("no route from where I am") are the consumer's own
+        // measurements, added 2026-08-19 to replace the silent standpoint substitution that reported
+        // them as SATISFIED. They are handled exactly as a refusal here, and that is deliberate: the
+        // planner wants the same thing from all three — stop proposing this cell for a while — and
+        // NOTHING WAS OBSERVED in any of them, so `observed` stays false and refresh_belief() is not
+        // called. The cell keeps its neglect: it is still unexplored, because it still is.
+        // ★The de-prioritisation is note_attempt/attempt_suppressor — a decaying SCORE term, never a
+        // stamp in the visit grid and never a blacklist — so a cell that was unreachable only because
+        // a door was shut or the robot was parked badly returns on its own once the suppressor decays.
+        // ★A cost, not an information update: this is rule 5 of the protocol design. A reachability
+        // failure may change what is cheap to look at; it must never change what is believed to be seen.
+        const bool approach_failed = outcome == Outcome::Refused
+                                  or outcome == Outcome::Infeasible
+                                  or outcome == Outcome::Unreachable;
+        if (approach_failed and not std::isnan(armed_tx_) and not std::isnan(armed_ty_))
         {
             planner.mark_target_finished(Eigen::Vector2f(armed_tx_, armed_ty_));
-            std::print("[planner] refusal at ({:.2f},{:.2f}) — cell de-prioritised (IoR), selecting elsewhere\n",
-                       armed_tx_, armed_ty_);
+            std::print("[planner] {} at ({:.2f},{:.2f}) — nothing observed there; cell de-prioritised "
+                       "(decaying attempt suppressor, neglect untouched), selecting elsewhere\n",
+                       rc::affordance::to_string(outcome), armed_tx_, armed_ty_);
         }
         planner.clear_target();
         planner.mark_and_refresh();   // keep path trail live in viewer
