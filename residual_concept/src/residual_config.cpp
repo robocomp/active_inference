@@ -113,6 +113,12 @@ ResidualConfig load_residual_config(const ConfigLoader& cfg)
     out.grid_floor_responsibility = getb("Grid.FloorResponsibility", true); // floor in the per-return mixture
     out.grid_floor_return_clears  = getb("Grid.FloorReturnClears",   true); // a floor return frees its own cell
     out.grid_floor_sigma_min_m    = getf("Grid.FloorSigmaMinM",      0.03f);// sensor range noise (σ floor)
+    // ── Stage 1 (2026-08-19): separate the MARKING filter from the CLEARING filter — the costmap_2d rule ──
+    out.grid_floor_band_in_grid = getb("Grid.FloorBandInGrid", true);  // per-device band INTO the grid instead of
+                                                                       // deleting the returns before it sees them
+    out.grid_zed_infra_clears   = getb("Grid.ZedInfraClears",  true);  // ZED floor/ceiling/wall returns still
+                                                                       // raytrace; only their MARK is suppressed
+    out.grid_cell_dump_every_n  = geti("Grid.CellDumpEveryN",  600);   // per-cell residual geometry → CSV (0=off)
     // Robust ZED infrastructure subtraction (reuse the floor/ceiling heights; ZED depth-noise band σ0+q·r²).
     out.zed_infra.floor_z0      = out.cluster.floor_z0;
     out.zed_infra.ceil_z        = out.cluster.ceil_z;

@@ -62,31 +62,42 @@ float ResidualClusterer::dist_to_polygon_boundary(const std::vector<Eigen::Vecto
 }
 
 // ─── Robust infrastructure subtraction for a dense (ZED) cloud ──────────────────
-std::vector<Eigen::Vector3f> ResidualClusterer::subtract_infrastructure(
+std::vector<std::uint8_t> ResidualClusterer::infrastructure_mask(
     const std::vector<Eigen::Vector3f>& cloud_room, const Eigen::Vector3f& sensor_origin,
     const std::vector<Eigen::Vector2f>& room_polygon, const DepthInfraParams& p)
 {
-    std::vector<Eigen::Vector3f> keep;
-    keep.reserve(cloud_room.size());
+    std::vector<std::uint8_t> keep(cloud_room.size(), 1);
     const Eigen::Vector2f o = sensor_origin.head<2>();
     const bool have_poly = room_polygon.size() >= 3;
-    for (const auto& q : cloud_room)
+    for (std::size_t i = 0; i < cloud_room.size(); ++i)
     {
+        const auto& q = cloud_room[i];
         const float r = (q.head<2>() - o).norm();                 // horizontal range from the sensor
         const float sigma = p.sigma0_m + p.sigma_quad * r * r;    // stereo depth noise grows with range²
         const float band = p.k * sigma;
         const float floor_z = p.floor_a * q.x() + p.floor_b * q.y() + p.floor_c;   // fitted floor (0,0,0 ⇒ z=0)
-        if (q.z() < floor_z + p.floor_z0 + band) continue;        // floor (range-growing band, on the real floor)
-        if (q.z() > p.ceil_z - band)            continue;         // ceiling
+        if (q.z() < floor_z + p.floor_z0 + band) { keep[i] = 0; continue; }  // floor (range-growing band)
+        if (q.z() > p.ceil_z - band)             { keep[i] = 0; continue; }  // ceiling
         if (have_poly)
         {
             const Eigen::Vector2f xy = q.head<2>();
-            if (not point_in_polygon(room_polygon, xy))           continue;   // outside the room ⇒ wall/beyond
-            if (dist_to_polygon_boundary(room_polygon, xy) < p.wall_margin_m + band) continue;   // near a wall
+            if (not point_in_polygon(room_polygon, xy))           { keep[i] = 0; continue; }  // outside ⇒ wall
+            if (dist_to_polygon_boundary(room_polygon, xy) < p.wall_margin_m + band) { keep[i] = 0; continue; }
         }
-        keep.push_back(q);
     }
     return keep;
+}
+
+std::vector<Eigen::Vector3f> ResidualClusterer::subtract_infrastructure(
+    const std::vector<Eigen::Vector3f>& cloud_room, const Eigen::Vector3f& sensor_origin,
+    const std::vector<Eigen::Vector2f>& room_polygon, const DepthInfraParams& p)
+{
+    const auto keep = infrastructure_mask(cloud_room, sensor_origin, room_polygon, p);
+    std::vector<Eigen::Vector3f> out;
+    out.reserve(cloud_room.size());
+    for (std::size_t i = 0; i < cloud_room.size(); ++i)
+        if (keep[i]) out.push_back(cloud_room[i]);
+    return out;
 }
 
 // ─── Residual filter ────────────────────────────────────────────────────────────

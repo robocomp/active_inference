@@ -252,13 +252,23 @@ std::vector<rc::SpecialistSdf> SpecificWorker::build_specialist_sdfs() const
             // Soft-collapse descriptor: 2D footprint + top height + σ's from the object's OWN published position
             // covariance (rt_covariance, which already folds in the localisation chain → range-aware) ⊕ sensor.
             float var_xy = 0.0f, var_z = 0.0f;
+            bool have_cov = false;
             if (const auto e = G->get_edge(room_node_id_, n.id(), "RT"); e.has_value())
                 if (const auto cov = G->get_attrib_by_name<rt_covariance_att>(e.value());
                     cov.has_value() and cov->get().size() >= 15)
                 {
                     var_xy = 0.5f * (cov->get()[0] + cov->get()[7]);   // ½(σ²x+σ²y)
                     var_z  = cov->get()[14];                            // σ²z (6×6 diagonal index 2)
+                    have_cov = true;
                 }
+            // A MISSING covariance is not benign and used to be completely silent. var_xy stays 0, so σ collapses
+            // to the bare sensor term (3 cm) — the sharpest boundary this object can possibly have — and the
+            // object therefore explains LESS area than it should, leaving a rim of unexplained cells that ships as
+            // residual. The failure direction is straight into phantom production, so say so. Warn once per node.
+            if (not have_cov and cov_warned_.insert(n.id()).second)
+                std::println("residual_concept: [collapse] '{}' has NO rt_covariance on its room→object RT edge — "
+                             "σ falls back to the sensor floor ({:.2f} m), so it under-claims its own footprint "
+                             "and the rim will ship as residual", n.name(), std::sqrt(sensor_var));
             soft_objects_.push_back({centre.x(), centre.y(), yaw, hx, hy,
                                      static_cast<float>(M(2, 3)) + h,          // z_top (box top face)
                                      std::sqrt(std::max(0.0f, var_xy) + sensor_var),
@@ -822,6 +832,7 @@ void SpecificWorker::compute()
             };
         const auto comps = grid_.occupied_components(2, cell_explained, grid_.params().inflate_radius_m);
         log_floor_diag(cell_explained, comps);   // plane fit + the RESIDUAL set's height profile, jointly
+        dump_residual_cells(cell_explained);     // ...and WHERE they are, which a histogram cannot say
         static int gc = 0;
         if ((gc++ % 20) == 0)
         {
@@ -1047,10 +1058,27 @@ void SpecificWorker::integrate_zed_into_grid()
     auto infra = cfg_.zed_infra;                                  // reference the ZED floor band to the FITTED floor
     if (cfg_.floor_plane.enabled and floor_plane_.valid)
     { infra.floor_a = floor_plane_.a; infra.floor_b = floor_plane_.b; infra.floor_c = floor_plane_.c; }
-    pts = rc::ResidualClusterer::subtract_infrastructure(pts, cam_origin, read_room_polygon(), infra);
+    // MARK vs CLEAR. Removing the infrastructure points outright also removed their RAYS, and a ZED floor or wall
+    // return is the longest ray the camera casts — precisely the one carrying the most free-space evidence. With
+    // ZedInfraClears the classification becomes a mark_mask instead: the point is still raytraced, only its
+    // endpoint is forbidden to assert occupancy. Same classifier, same marking, strictly more clearing.
+    std::vector<std::uint8_t> mark_mask;
+    const std::vector<std::uint8_t>* mask_ptr = nullptr;
+    if (cfg_.grid_zed_infra_clears)
+    {
+        mark_mask = rc::ResidualClusterer::infrastructure_mask(pts, cam_origin, read_room_polygon(), infra);
+        mask_ptr = &mark_mask;
+    }
+    else
+        pts = rc::ResidualClusterer::subtract_infrastructure(pts, cam_origin, read_room_polygon(), infra);
     static int zc = 0;
     if ((zc++ % 40) == 0)
-        std::println("[zed-grid] fov={} → {} after infra-subtract (floor/ceiling/wall removed)", before, pts.size());
+    {
+        const std::size_t marking = mask_ptr
+            ? static_cast<std::size_t>(std::ranges::count(mark_mask, std::uint8_t{1})) : pts.size();
+        std::println("[zed-grid] fov={} → {} may mark, {} raytraced ({})", before, marking, pts.size(),
+                     mask_ptr ? "infra CLEARS (mask)" : "infra removed (old: rays lost)");
+    }
     if (pts.empty()) return;
 
     // RGB-SEMANTIC floor down-weighting (a second, uncorrelated cue vs the ZED floor phantoms that survive the
@@ -1077,7 +1105,7 @@ void SpecificWorker::integrate_zed_into_grid()
                          dw, hit_scale.size(), mn, age_s);
         }
     }
-    grid_.integrate_sweep(cam_origin, pts, /*begin_cycle=*/false, ego_reliability_, scale_ptr);   // same cycle+ego
+    grid_.integrate_sweep(cam_origin, pts, /*begin_cycle=*/false, ego_reliability_, scale_ptr, mask_ptr);
 }
 
 bool SpecificWorker::refresh_semantic_map()
@@ -1106,7 +1134,7 @@ bool SpecificWorker::refresh_semantic_map()
     return semantic_map_.valid();
 }
 
-const std::vector<Eigen::Vector3f>& SpecificWorker::device_sweep(std::uint8_t plane)
+const std::vector<Eigen::Vector3f>& SpecificWorker::device_sweep(std::uint8_t plane, bool keep_floor)
 {
     // One device's returns, with bpearl's own floor-grazing cut re-applied inline. Deliberately NOT built by
     // indexing filtered_lidar_sweep(): that function drops points, so plane_id (indexed on the RAW sweep) no
@@ -1133,13 +1161,18 @@ const std::vector<Eigen::Vector3f>& SpecificWorker::device_sweep(std::uint8_t pl
         const float z0 = (pid[i] == 1) ? bz0 : hz0;
         const float range = std::hypot(raw[i].x() - o.x(), raw[i].y() - o.y());
         const float floor_z = use_fit ? floor_plane_.z_at(raw[i].x(), raw[i].y()) : 0.0f;
-        if (raw[i].z() < floor_z + z0 + slope * range) { ++dropped; continue; }
+        // keep_floor: hand the near-floor returns on instead of deleting them. They are not obstacle evidence —
+        // the grid's own band (set_device_floor_z0, the SAME z0 used here) still refuses to mark them — but they
+        // ARE clearing evidence, and the longest rays in the sweep at that. Deleting a return does not only lose
+        // its mark, it loses the whole ray and every free cell along it.
+        if (raw[i].z() < floor_z + z0 + slope * range) { ++dropped; if (not keep_floor) continue; }
         device_pts_.push_back(raw[i]);
     }
     static int dsc = 0;
     if (plane == 0 and (dsc++ % 40) == 0)
-        std::println("[helios-floor] dropped {} near-floor pts (band z0={:.2f}); {} kept for the grid",
-                     dropped, hz0, device_pts_.size());
+        std::println("[helios-floor] {} {} near-floor pts (band z0={:.2f}); {} handed to the grid",
+                     keep_floor ? "kept" : "dropped", dropped, hz0, device_pts_.size());
+    last_device_floor_dropped_ = dropped;
     return device_pts_;
 }
 
@@ -1166,14 +1199,24 @@ bool SpecificWorker::integrate_lidar_per_device()
     if (pid.size() != lidar_ingestor_->sweep_room().size() or pid.empty())
         return false;                                            // fused plane, no per-device tag → caller falls back
 
-    const auto& bp = device_sweep(1);
-    std::vector<Eigen::Vector3f> bpearl_pts(bp.begin(), bp.end());   // device_sweep reuses one buffer
-    const auto& he = device_sweep(0);
-    if (bpearl_pts.empty() and he.empty()) return false;
+    // ── MARKING FILTER vs CLEARING FILTER (Stage 1, 2026-08-19) ──
+    // With grid_floor_band_in_grid the near-floor returns are no longer deleted here; the grid is told each
+    // device's band instead (set_device_floor_z0) and applies it inside the sensor model. Marking is unchanged by
+    // construction — the grid tests the SAME `z < floor_z + z0 + slope·r` that device_sweep tested — but the
+    // returns now also carry their rays, and a below-band return clears its own cell via
+    // mark_floor_endpoint_flag. That path had never executed once in the live pipeline (floor_clears == 0 on
+    // 9381/9381 cycles) because its input was being filtered away upstream.
+    const bool keep = cfg_.grid_floor_band_in_grid;
 
-    // helios-only floor fit — for its RMS only. Seeded from its own previous estimate so it converges
-    // independently of the datum fit.
-    floor_plane_helios_ = rc::estimate_floor_plane(he, lidar_ingestor_->origin_room(),
+    const auto& bp = device_sweep(1, keep);
+    std::vector<Eigen::Vector3f> bpearl_pts(bp.begin(), bp.end());   // device_sweep reuses one buffer
+
+    // The helios floor fit keeps its ORIGINAL (filtered) input, deliberately. Its rms feeds sig_he, which scales
+    // every helios hit through floor_obstacle_responsibility — so changing what it sees would change marking, and
+    // this stage is meant to be marking-neutral. Fit first, then re-derive the cloud we actually integrate.
+    const auto& he_fit = device_sweep(0, /*keep_floor=*/false);
+    if (bpearl_pts.empty() and he_fit.empty()) return false;
+    floor_plane_helios_ = rc::estimate_floor_plane(he_fit, lidar_ingestor_->origin_room(),
                                                    cfg_.cluster.floor_z0, cfg_.cluster.floor_slope,
                                                    cfg_.floor_plane, floor_plane_helios_);
     const float a = (cfg_.floor_plane.enabled and floor_plane_.valid) ? floor_plane_.a : 0.0f;
@@ -1185,16 +1228,21 @@ bool SpecificWorker::integrate_lidar_per_device()
     const float sig_he = floor_plane_helios_.valid ? std::max(floor_plane_helios_.rms, sig_bp) : sig_bp;
 
     grid_.set_floor_plane(a, b, c, sig_bp);
+    grid_.set_device_floor_z0(keep ? cfg_.cluster.bpearl_floor_z0 : -1.0f);
     grid_.integrate_sweep(lidar_ingestor_->origin_room(), bpearl_pts, /*begin_cycle=*/true, ego_reliability_);
+
+    const auto& he = device_sweep(0, keep);          // re-derive: unfiltered when the flag is on
     grid_.set_floor_plane(a, b, c, sig_he);
+    grid_.set_device_floor_z0(keep ? cfg_.cluster_helios_floor_z0 : -1.0f);
     grid_.integrate_sweep(lidar_ingestor_->origin_room(), he, /*begin_cycle=*/false, ego_reliability_);
     grid_.set_floor_plane(a, b, c, sig_bp);   // leave the datum's sigma in place for the ZED pass that follows
+    grid_.set_device_floor_z0(-1.0f);         // ...and the DEFAULT band: ZED is not one of these two devices
 
     static int dc = 0;
     if ((dc++ % 40) == 0)
         std::println("[floor-sigma] bpearl {} pts σ={:.3f} m | helios {} pts σ={:.3f} m (own fit, rms {:.3f}, "
-                     "valid={})", bpearl_pts.size(), sig_bp, he.size(), sig_he,
-                     floor_plane_helios_.rms, floor_plane_helios_.valid);
+                     "valid={}) | band-in-grid={}", bpearl_pts.size(), sig_bp, he.size(), sig_he,
+                     floor_plane_helios_.rms, floor_plane_helios_.valid, keep);
     return true;
 }
 
@@ -1294,6 +1342,52 @@ float SpecificWorker::compute_ego_reliability() const
     return 1.0f / (1.0f + v / v0 + w / w0);
 }
 
+void SpecificWorker::dump_residual_cells(const rc::OccupancyGrid::CellExplained& explained)
+{
+    // WHERE the residual cells are, not just how tall they are. The height histogram says 13% of the published
+    // mass sits above 1.20 m, which "must be walls" in an apartment — but a histogram cannot tell a wall from a
+    // wardrobe, and acting on that guess is how the floor_clears defect survived ten days. So dump the geometry
+    // and let it answer: dist_wall_m small ⇒ the room polygon is failing to claim its own wall; obj_sdf_m small
+    // ⇒ a specialist under-claims its footprint; both large ⇒ a genuinely free-standing object nobody models.
+    if (cfg_.grid_cell_dump_every_n <= 0 or not grid_ready_) return;
+    if ((grid_diag_cycle_ % cfg_.grid_cell_dump_every_n) != 0) return;
+
+    static std::ofstream f;
+    if (not f.is_open())
+    {
+        open_diag_csv(f, "etc/residual_cells.csv");
+        if (not f.is_open()) return;
+        f << "cycle,x,y,z,inside_poly,dist_wall_m,obj_sdf_m\n";
+    }
+    const auto xyz = grid_.residual_cell_centres_xyz(explained);
+    const auto poly = read_room_polygon();
+    const bool have_poly = poly.size() >= 3;
+    const float fitm = cfg_.cluster.explain_fit_margin_m;
+    for (std::size_t i = 0; i + 2 < xyz.size(); i += 3)
+    {
+        const float x = xyz[i], y = xyz[i + 1], z = xyz[i + 2];
+        const Eigen::Vector2f p2(x, y);
+        const int inside = have_poly ? (rc::ResidualClusterer::point_in_polygon(poly, p2) ? 1 : 0) : -1;
+        const float dw = have_poly ? rc::ResidualClusterer::dist_to_polygon_boundary(poly, p2) : -1.0f;
+        // Signed 2-D distance to the NEAREST modelled object footprint (negative inside), same construction the
+        // read-out explainer uses — so a small positive value means "just outside a specialist's claim".
+        float best = 1e9f;
+        for (const auto& o : soft_objects_)
+        {
+            const float c = std::cos(o.yaw), s = std::sin(o.yaw), dx = x - o.cx, dy = y - o.cy;
+            const float lx = c * dx + s * dy, ly = -s * dx + c * dy;
+            const float qx = std::abs(lx) - o.hx, qy = std::abs(ly) - o.hy;
+            best = std::min(best, std::hypot(std::max(qx, 0.0f), std::max(qy, 0.0f))
+                                  + std::min(std::max(qx, qy), 0.0f) - fitm);
+        }
+        f << grid_diag_cycle_ << ',' << x << ',' << y << ',' << z << ',' << inside << ',' << dw << ','
+          << (soft_objects_.empty() ? -1.0f : best) << '\n';   // -1 ⇒ NO object nodes exist to claim anything
+    }
+    f.flush();
+    std::println("[cell-dump] cycle {}: {} residual cells written (poly {} verts, {} objects)",
+                 grid_diag_cycle_, xyz.size() / 3, poly.size(), soft_objects_.size());
+}
+
 void SpecificWorker::log_grid_diag()
 {
     if (not grid_ready_) return;
@@ -1314,13 +1408,29 @@ void SpecificWorker::log_grid_diag()
         // evidence the old inverse sensor model discarded entirely. Zeros in either column mean the tightened
         // occupied condition is not engaging — check Grid.FloorResponsibility / Grid.FloorReturnClears and the
         // fit's rms in floor_diag.csv before believing a null result.
+        // ── Stage 1 columns (2026-08-19). floor_clears sat at 0 for 9381 consecutive cycles and the log could not
+        // say why, because one counter meant both "the gate refused it" and "nothing was ever offered". Now:
+        //   floor_rets     = below-band returns the grid was OFFERED. 0 ⇒ they are being deleted UPSTREAM
+        //                    (device_sweep) — check Grid.FloorBandInGrid. This is the defect that hid for weeks.
+        //   floor_blocked  = offered but refused by the SUPPORT gate (cell's lowest evidence is floating, so the
+        //                    beam passed underneath and refutes nothing). Healthy under a tabletop.
+        //   floor_clears   = offered, accepted, cell freed.  floor_rets = floor_clears + floor_blocked.
+        //   marks_suppr    = returns raytraced with marking suppressed (ZED infrastructure). 0 while
+        //                    ZedBoost.FeedGrid and Grid.ZedInfraClears are both on ⇒ the mask is not plumbed.
+        //   floor_dropped  = near-floor returns device_sweep saw last cycle; with FloorBandInGrid on they are
+        //                    handed to the grid rather than deleted, so this should track floor_rets.
+        // miss_blocked_zaware now counts ONLY the traverse gate (a beam passing at another height), never the
+        // support gate — the two were summed together and neither could be read.
         f << "cycle,occupied,hits,misses,miss_blocked_zaware,latched,released,hit_then_cleared,"
-             "forgotten,self_damped,floor_damped,floor_clears\n";
+             "forgotten,self_damped,floor_damped,floor_clears,"
+             "floor_rets,floor_blocked,marks_suppr,floor_dropped\n";
     }
     f << cyc << ',' << grid_.occupied_count() << ',' << d.hits << ',' << d.misses << ','
       << d.miss_blocked_zaware << ',' << d.cells_latched << ',' << d.cells_released << ','
       << d.hit_then_cleared << ',' << d.cells_forgotten << ',' << d.self_hits_damped << ','
-      << d.floor_damped_hits << ',' << d.floor_endpoint_clears << '\n';
+      << d.floor_damped_hits << ',' << d.floor_endpoint_clears << ','
+      << d.floor_endpoint_returns << ',' << d.floor_endpoint_blocked << ','
+      << d.marks_suppressed << ',' << last_device_floor_dropped_ << '\n';
     if ((cyc % 20) == 0)
     {
         f.flush();

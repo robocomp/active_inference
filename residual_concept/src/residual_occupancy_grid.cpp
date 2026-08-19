@@ -135,7 +135,10 @@ void OccupancyGrid::mark_floor_endpoint_flag(int ix, int iy, float band_top, flo
     // return ever seen here. So the gate is support, not overlap: clear the cell if its lowest evidence sits within
     // one z_band_margin_m of where the floor itself lives (⇒ floor-standing, refuted), hold it otherwise
     // (⇒ floating, the beam went under it — the tabletop half of the property).
-    if (hit_[i] and zmn_[i] > band_top + p_.z_band_margin_m) { ++sd_.miss_blocked_zaware; return; }
+    // Counted separately from mark_miss_flag's traverse gate: that one means "the beam went past at another
+    // height", this one means "the beam went UNDER a floating surface". Same cell, opposite conclusions, and while
+    // they shared one counter neither could be read.
+    if (hit_[i] and zmn_[i] > band_top + p_.z_band_margin_m) { ++sd_.floor_endpoint_blocked; return; }
     if (not smiss_[i]) { smiss_[i] = 1; smiss_w_[i] = w; }
     else smiss_w_[i] = std::max(smiss_w_[i], w);
     ++sd_.floor_endpoint_clears;
@@ -267,10 +270,12 @@ void OccupancyGrid::occupancy_fields(std::vector<float>& prob_out, std::vector<f
 
 void OccupancyGrid::integrate_sweep(const Eigen::Vector3f& origin, const std::vector<Eigen::Vector3f>& points_room,
                                     bool begin_cycle, float reliability,
-                                    const std::vector<float>* hit_weight_scale)
+                                    const std::vector<float>* hit_weight_scale,
+                                    const std::vector<std::uint8_t>* mark_mask)
 {
     if (not valid()) return;
     const bool use_scale = hit_weight_scale != nullptr and hit_weight_scale->size() == points_room.size();
+    const bool use_mask  = mark_mask != nullptr and mark_mask->size() == points_room.size();
     if (begin_cycle)                                       // first sensor of the cycle: reset diagnostics + scratch
     {
         sd_ = SweepDiag{};
@@ -308,7 +313,10 @@ void OccupancyGrid::integrate_sweep(const Eigen::Vector3f& origin, const std::ve
         // is an obstacle only if it rises above the local floor by more than the grazing band — so an offset/tilted
         // floor (new scenario) is explained away and never latches.
         const float floor_z = fp_a_ * px + fp_b_ * py + fp_c_;
-        const float band_top = floor_z + p_.floor_z0 + p_.floor_slope * range;   // where the floor lives here
+        // floor_z0 comes from the DEVICE when the caller set one (set_device_floor_z0): helios grazes and reads the
+        // floor 13-17 cm high, bpearl measures it head-on within ~12 cm, and one band for both is what forced the
+        // worker to delete each device's near-floor returns instead of integrating them.
+        const float band_top = floor_z + device_floor_z0() + p_.floor_slope * range;   // where the floor lives here
         const bool in_band = (pz > band_top) and (pz < p_.ceil_z);
         // BELOW the band = a FLOOR return. It is not neutral: the beam reached the floor here, so nothing RESTING
         // on the floor in this cell could have been in the way. It clears its own cell, gated on support rather
@@ -324,13 +332,21 @@ void OccupancyGrid::integrate_sweep(const Eigen::Vector3f& origin, const std::ve
         if (in_band and floor_w < 0.9f) ++sd_.floor_damped_hits;
         const float w = hit_w(range) * self_w * floor_w * (use_scale ? (*hit_weight_scale)[pi] : 1.0f);
 
+        // MARKING gate, separate from the clearing that follows (the costmap_2d rule). A masked-off return still
+        // gets its whole ray traced below — only its endpoint is forbidden to assert occupancy.
+        const bool may_mark = not use_mask or (*mark_mask)[pi] != 0;
+        if (not may_mark) ++sd_.marks_suppressed;
+
         int ex, ey; const bool endp_in = world_to_cell(px, py, ex, ey);
         // the endpoint's own evidence: an in-band return marks it occupied, a floor return marks it FREE.
         const auto place_endpoint = [&]
         {
             if (not endp_in) return;
-            if (in_band) mark_hit_flag(ex, ey, pz, pz, w);
-            else if (floor_return) mark_floor_endpoint_flag(ex, ey, band_top, hit_w(range));
+            // A floor return is CLEARING evidence, so the marking mask does not apply to it: the beam reached the
+            // floor either way, and that fact is exactly what we are trying to stop discarding.
+            if (in_band) { if (may_mark) mark_hit_flag(ex, ey, pz, pz, w); }
+            else if (floor_return) { ++sd_.floor_endpoint_returns;
+                                     mark_floor_endpoint_flag(ex, ey, band_top, hit_w(range)); }
         };
         if (L < 1e-4f) { place_endpoint(); continue; }          // degenerate: just the endpoint
 
@@ -978,6 +994,78 @@ bool OccupancyGrid::self_test()
                     tab_occ, g2.occupied(ix, iy));
         check(tab_occ, "the tabletop must be occupied first");
         check(g2.occupied(ix, iy), "a floor return passing UNDER a real obstacle must not erase it (z-aware gate)");
+    }
+
+    // ── (12) PER-DEVICE NAV BAND — marking must be UNCHANGED, clearing must be RECOVERED ──
+    // The worker used to delete each device's near-floor returns before integration, which also deleted the
+    // free-space evidence mark_floor_endpoint_flag exists to bank (measured: floor_clears == 0 on 9381 of 9381
+    // live cycles, while this very self_test passed — because the test feeds raw floor returns straight in).
+    // set_device_floor_z0 moves that band into the sensor model. The property that makes the change safe to ship
+    // is EQUIVALENCE of marking: a return the old filter would have deleted must still not mark, and a return it
+    // would have kept must still mark, at the SAME z0. Only the clearing is new.
+    {
+        OccGridParams PC = P; PC.forget_half_life_s = 0.0f;
+        const float hz0 = 0.20f;                                   // helios's band — well above PC.floor_z0 (0.06)
+        // (a) a return INSIDE the device band (0.15 m, i.e. above the default 0.06 band but below helios's 0.20)
+        //     must NOT mark, and must instead clear its own cell. Under the default band it WOULD have marked —
+        //     that is exactly the helios grazing bias the per-device band exists to absorb.
+        OccupancyGrid gd; gd.reset(-1, -1, 5, 5, PC);
+        int ix, iy; gd.world_to_cell(2.0f, 0.0f, ix, iy);
+        std::vector<Eigen::Vector3f> graze;
+        for (int i = 0; i < 12; ++i) graze.push_back({2.0f, -0.02f + 0.004f * i, 0.15f});
+        gd.set_device_floor_z0(hz0);
+        for (int k = 0; k < 6; ++k) { gd.integrate_sweep(sensor, graze); gd.commit_cycle(); }
+        const bool dev_marked = gd.occupied(ix, iy);
+        const long dev_clears = gd.last_sweep_diag().floor_endpoint_clears;
+        const long dev_rets   = gd.last_sweep_diag().floor_endpoint_returns;
+        // (b) the SAME returns with the band unset must mark — proving the band is what changed, not the data.
+        OccupancyGrid gu; gu.reset(-1, -1, 5, 5, PC);
+        gu.set_device_floor_z0(-1.0f);
+        for (int k = 0; k < 6; ++k) { gu.integrate_sweep(sensor, graze); gu.commit_cycle(); }
+        // (c) a return ABOVE the device band must still mark in one frame — completeness is not weakened.
+        // NB the band is z0 + floor_slope·range, so at range 2 m with z0=0.20 it sits at 0.28, not 0.20; and the
+        // floor RESPONSIBILITY still discounts anything close to it. 0.50 m is unambiguously an obstacle.
+        OccupancyGrid ga; ga.reset(-1, -1, 5, 5, PC);
+        std::vector<Eigen::Vector3f> real;
+        for (int i = 0; i < 12; ++i) real.push_back({2.0f, -0.02f + 0.004f * i, 0.50f});
+        ga.set_device_floor_z0(hz0);
+        ga.integrate_sweep(sensor, real); ga.commit_cycle();
+        std::printf("  device-band: graze@0.15 band=0.20 occupied=%d (rets=%ld clears=%ld) | same graze band=off "
+                    "occupied=%d | obstacle@0.50 band=0.20 occupied=%d\n",
+                    dev_marked, dev_rets, dev_clears, gu.occupied(ix, iy), ga.occupied(ix, iy));
+        check(dev_rets > 0, "a below-device-band return must REACH the grid as a floor return (not be deleted)");
+        check(dev_clears > 0, "...and must deliver its free evidence to its own cell");
+        check(not dev_marked, "a return inside the device's floor band must not latch it as an obstacle");
+        check(gu.occupied(ix, iy), "the same return under the DEFAULT band must latch — the band is the variable");
+        check(ga.occupied(ix, iy), "a return above the device band must still latch in one frame (completeness)");
+    }
+
+    // ── (13) MARK MASK — a masked return clears its ray but must leave NO trace at its endpoint ──
+    // The ZED path used to delete its floor/ceiling/wall points, losing the longest rays in the frame. Masking
+    // instead keeps the ray. The subtle requirement is that a masked endpoint must not install a z-band either:
+    // routing this through a zero HIT WEIGHT would still call mark_hit_flag, which sets hit_/zmn_/zmx_ and would
+    // manufacture a fresh clearing gate out of no evidence at all — the exact ratchet we are removing.
+    {
+        OccGridParams PD = P; PD.forget_half_life_s = 0.0f;
+        OccupancyGrid g; g.reset(-1, -1, 5, 5, PD);
+        int ix, iy; g.world_to_cell(2.0f, 0.0f, ix, iy);
+        int mx, my; g.world_to_cell(1.0f, 0.0f, mx, my);            // a cell the ray crosses on its way there
+        std::vector<Eigen::Vector3f> wall;
+        for (int i = 0; i < 12; ++i) wall.push_back({2.0f, -0.02f + 0.004f * i, 0.60f});
+        const std::vector<std::uint8_t> mask(wall.size(), 0);       // every return: trace, do not mark
+        for (int k = 0; k < 8; ++k)
+        { g.integrate_sweep(sensor, wall, true, 1.0f, nullptr, &mask); g.commit_cycle(); }
+        const long suppressed = g.last_sweep_diag().marks_suppressed;
+        std::printf("  mark-mask: endpoint occupied=%d (lo=%.2f) | traversed cell lo=%.2f | suppressed=%ld/sweep\n",
+                    g.occupied(ix, iy), g.logodds(ix, iy), g.logodds(mx, my), suppressed);
+        check(suppressed == static_cast<long>(wall.size()), "every masked return must be counted as suppressed");
+        check(not g.occupied(ix, iy), "a masked return must not mark its endpoint occupied");
+        check(g.logodds(ix, iy) <= 0.0f, "...and must not push its endpoint's log-odds up at all");
+        check(g.logodds(mx, my) < 0.0f, "...while its RAY must still clear the cells it traverses");
+        // And the unmasked control: the same returns must mark when the mask allows it.
+        OccupancyGrid gm; gm.reset(-1, -1, 5, 5, PD);
+        gm.integrate_sweep(sensor, wall); gm.commit_cycle();
+        check(gm.occupied(ix, iy), "the same returns must latch when marking is NOT masked");
     }
 
     std::printf("OccupancyGrid::self_test %s\n", ok ? "PASS" : "FAIL");

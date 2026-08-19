@@ -192,6 +192,19 @@ struct SweepDiag
     long floor_endpoint_clears = 0;// below-band (floor) returns that cleared THEIR OWN cell — the evidence the old
                                   // model discarded. Compare against miss_blocked_zaware: this is clearing that
                                   // no traversing beam could ever have delivered.
+    // ── Stage-1 instrumentation (2026-08-19). These exist because `floor_clears` sat at 0 for 9381 straight
+    //    cycles and nobody could tell whether the term was rejecting its input or never being offered any. A
+    //    counter that conflates "refused" with "never asked" cannot answer that, so the two are now separate. ──
+    long floor_endpoint_returns = 0;// below-band returns the grid was OFFERED. floor_endpoint_returns == 0 means
+                                  // the points are being filtered out UPSTREAM (the device_sweep defect); it is a
+                                  // completely different fault from floor_endpoint_returns > 0 with
+                                  // floor_endpoint_clears == 0, which means the support gate is refusing them.
+    long floor_endpoint_blocked = 0;// below-band returns REFUSED by the support gate (cell's lowest evidence sits
+                                  // above the floor ⇒ the thing is FLOATING and the beam merely passed under it).
+                                  // Split out of miss_blocked_zaware, which now counts only the traverse gate —
+                                  // the two were one counter and mean opposite things about the same cell.
+    long marks_suppressed = 0;    // returns whose ray was traced but whose endpoint was not allowed to mark
+                                  // (mark_mask==0). 0 while the ZED feed is on ⇒ the mask is not plumbed through.
 };
 
 // One connected occupied region → footprint + z-band, ready for the scene-graph publish (box + hull).
@@ -229,6 +242,21 @@ public:
     void set_floor_plane(float a, float b, float c, float rms = 0.0f)
     { fp_a_ = a; fp_b_ = b; fp_c_ = c; fp_rms_ = rms; }
 
+    // PER-DEVICE nav band. Two lidars do not see the floor the same way: bpearl is a downward dome measuring it
+    // head-on (reads it within ~12 cm), helios is upright at ~1.1 m and only ever GRAZES it, landing 13-17 cm high.
+    // The worker used to handle that by DELETING each device's near-floor returns before integration
+    // (SpecificWorker::device_sweep). That deletion also threw away the return's CLEARING meaning: a beam that
+    // reached the floor inside a cell proves nothing was STANDING there, and mark_floor_endpoint_flag exists
+    // precisely to bank that — but it can only fire on a return the grid actually receives. Measured 2026-08-19:
+    // `floor_clears` was 0 on 9381 of 9381 cycles, i.e. the mechanism had never run once in the live pipeline,
+    // while the self-test (which feeds raw floor returns straight in) passed the whole time.
+    // This is the same separation costmap_2d draws with min/max_obstacle_height: those gate MARKING, and the beam
+    // is still raytraced for CLEARING. So hand the device's band in here instead of pre-filtering its cloud.
+    // z0 < 0 ⇒ unset ⇒ fall back to OccGridParams::floor_z0. Set per device before that device's integrate_sweep,
+    // exactly like set_floor_plane; persists until changed.
+    void set_device_floor_z0(float z0) { dev_floor_z0_ = z0; }
+    float device_floor_z0() const { return dev_floor_z0_ >= 0.0f ? dev_floor_z0_ : p_.floor_z0; }
+
     // P(this return came from an OBSTACLE, not from the floor) for a return at height z over (x,y) seen at
     // horizontal range `range` — the obstacle component's responsibility in the {floor, obstacle} mixture. Public
     // because the READ-OUT floor explainer must score a cell with the SAME model that scored the returns that
@@ -265,9 +293,22 @@ public:
     // contributes a weaker hit, so a phantom floor obstacle needs more evidence to latch). It does NOT touch the
     // MISS/clearing weight — clearing free space is always safe, independent of a point's semantics. nullptr /
     // wrong-size ⇒ all hits keep their full range×ego weight.
+    //
+    // `mark_mask` (optional, parallel to points_room) is the MARKING gate, and it is deliberately NOT the same
+    // thing as a zero `hit_weight_scale`. Zero weight still calls mark_hit_flag, which sets shit_[cell] — that
+    // takes hit PRECEDENCE (suppressing this cycle's clearing for the cell) and installs hit_/zmn_/zmx_, i.e. it
+    // would create a brand-new z-band that blocks future clearing beams, on the strength of no evidence at all.
+    // mark_mask[i]==0 instead means "trace this beam, but do not let its endpoint mark": exactly costmap_2d's
+    // clearing-only observation. Use it for returns a model already owns (ZED floor/ceiling/wall points), which
+    // were previously DELETED from the cloud — and deleting a return does not just lose a mark, it loses the whole
+    // ray and every free cell along it. The dropped ones are the worst to lose: a grazing floor return and a wall
+    // return are the LONGEST rays in the sweep, so they carried the most clearing. nullptr / wrong-size ⇒ every
+    // return may mark (the previous behaviour). A masked-off return still clears its own cell when it is a floor
+    // return, since that is clearing evidence, not marking.
     void integrate_sweep(const Eigen::Vector3f& origin, const std::vector<Eigen::Vector3f>& points_room,
                          bool begin_cycle = true, float reliability = 1.0f,
-                         const std::vector<float>* hit_weight_scale = nullptr);
+                         const std::vector<float>* hit_weight_scale = nullptr,
+                         const std::vector<std::uint8_t>* mark_mask = nullptr);
     // Fold this cycle's accumulated per-cell hit/miss flags into the log-odds field: exactly one +l_hit or
     // −l_miss per cell (hit precedence), then update the hysteresis latch. Call once after all sensors' sweeps.
     // `dt_s` is the elapsed time since the previous commit and drives the FORGETTING term (see
@@ -381,6 +422,7 @@ private:
     float xmin_ = 0, ymin_ = 0, inv_cell_ = 0;
     float fp_a_ = 0, fp_b_ = 0, fp_c_ = 0;        // data-driven floor plane z=a·x+b·y+c (0 ⇒ fixed z=0 band)
     float fp_rms_ = 0;                            // that fit's own residual scatter (m) = σ of the floor component
+    float dev_floor_z0_ = -1.0f;                  // per-device nav band (m); <0 ⇒ unset ⇒ use p_.floor_z0
     float self_x_ = 0, self_y_ = 0, self_r_ = 0;  // robot body envelope this cycle (room frame); r<=0 ⇒ term off
     int   w_ = 0, h_ = 0;
     std::vector<float>        lo_;                 // log-odds (drives the hard occupied() latch — unchanged)

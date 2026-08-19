@@ -104,6 +104,20 @@ struct ResidualConfig
     bool  grid_floor_responsibility = true;   // hit weight ×= P(obstacle | z) in the {floor, obstacle} mixture
     bool  grid_floor_return_clears  = true;   // a below-band return marks its OWN cell free (breaks the ratchet)
     float grid_floor_sigma_min_m    = 0.03f;  // irreducible sensor range noise (m) — σ floor of the floor model
+    // ── MARKING filter ≠ CLEARING filter (costmap_2d's rule; Stage 1, 2026-08-19) ──
+    // Both paths used to DELETE returns from the cloud before the grid saw them, which does not merely suppress a
+    // mark — it discards the whole ray and every free cell along it, and the deleted ones (grazing floor returns,
+    // wall returns) are the LONGEST rays in the sweep. Measured consequence: floor_clears == 0 on 9381 of 9381
+    // cycles, i.e. mark_floor_endpoint_flag had never fired once in the live pipeline. Flags, so each half can be
+    // A/B'd separately against the old behaviour on a live safety layer.
+    bool  grid_floor_band_in_grid = true;     // hand device_sweep's near-floor returns to the grid and let the
+                                              // grid's own per-device band decide marking (set_device_floor_z0)
+    bool  grid_zed_infra_clears   = true;     // ZED floor/ceiling/wall returns are raytraced for clearing; only
+                                              // their endpoint MARK is suppressed (mark_mask)
+    // Per-cell geometry dump of the published residual set (etc/residual_cells.csv), every N cycles. 0 = off.
+    // A height histogram cannot distinguish an unclaimed WALL from an unmodelled WARDROBE, and those need
+    // opposite fixes; this writes each cell's distance to the room polygon and to the nearest object footprint.
+    int   grid_cell_dump_every_n = 600;
     // Robust infrastructure subtraction for the dense ZED cloud: floor/ceiling/wall removed with a band that
     // grows as the ZED's own depth noise (σ0 + q·range²), so a calibration offset / far-range blur can't leak.
     ResidualClusterer::DepthInfraParams zed_infra;

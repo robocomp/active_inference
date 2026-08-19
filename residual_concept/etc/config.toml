@@ -191,6 +191,11 @@ MotionOmega0 = 0.6    # yaw rate (rad/s) at which sweep trust halves
 # log2(l_clamp/occ_set) = 3.6 half-lives to un-latch, so 30 s meant ~109 s before stale mass cleared —
 # far too slow to matter. 10 s gives ~36 s, which is in the usual costmap range.
 ForgetHalfLifeS = 10.0   # ↓ = forgets faster; ↑ = stickier map
+# A/B 2026-08-18 (3000 cycles each, matched): 0.0 vs 10.0. Forgetting is NOT the phantom source. With it
+# OFF the latched set ratcheted +56% (occupied 3366 -> 5256, still climbing) while the RESIDUAL set that
+# actually ships to the planner moved only +8% (698 -> 754 cells) and its height mix was unchanged
+# (82% of residual mass at or above 0.70 m in BOTH arms, 1% below 0.25 m). The decay was shaving the
+# latched map, not the published obstacles. Left at 10.0; chase the read-out EXPLAINER coverage instead.
 # SELF-BODY term in the sensor model. A beam terminating on the robot's own surface says nothing about the
 # world. Modelling the robot only as a READ-OUT mask (Clusterer.RobotRadiusM) cannot stop that: the map is
 # latched, so self-returns are written in permanently, stay hidden while the robot stands over them, and
@@ -231,6 +236,28 @@ FloorResponsibility = true
 FloorReturnClears   = true
 FloorSigmaMinM = 0.03    # irreducible LiDAR range noise (m) — the σ floor of the floor model (same physical
                          # quantity as Clusterer.ExplainSensorSigmaM / Fitter.SensorSigmaM)
+# ── STAGE 1 (2026-08-19): the MARKING filter is not the CLEARING filter ──
+# Both sensor paths used to DELETE returns from the cloud before the grid ever saw them. That does not merely
+# suppress a mark — it discards the whole RAY and every free cell along it, and the deleted returns (grazing floor
+# returns, ZED wall returns) are the LONGEST rays in a sweep, so they carried the most clearing. Measured
+# consequence: `floor_clears` was 0 on 9381 of 9381 cycles, i.e. mark_floor_endpoint_flag — the mechanism added on
+# 2026-07-30 specifically to break the phantom ratchet — had never executed once in the live pipeline, while its
+# self-test passed the whole time (the test feeds raw floor returns straight in). costmap_2d draws exactly this
+# line: min/max_obstacle_height gate MARKING, and the beam is still raytraced for CLEARING.
+#
+# Both are ONE-DIRECTIONAL: they can only free cells, never occupy them. Marking is unchanged by construction —
+# the grid applies the SAME per-device band that device_sweep used to apply, just inside the sensor model instead
+# of on the cloud. Set either false to A/B against the old behaviour.
+# Read floor_rets / floor_blocked / floor_clears / marks_suppr in grid_diag.csv: floor_rets == 0 means the returns
+# are still being deleted upstream, floor_rets > 0 with floor_clears == 0 means the support gate is refusing them.
+FloorBandInGrid = true   # hand the near-floor returns to the grid; it applies each device's band itself
+ZedInfraClears  = true   # ZED floor/ceiling/wall returns raytrace for clearing; only their MARK is suppressed
+# Per-cell geometry of the PUBLISHED residual set → etc/residual_cells.csv, every N cycles (0 = off, ~1/min at 10 Hz).
+# floor_diag's height histogram says how TALL the blocking mass is; it cannot tell an unclaimed WALL from an
+# unmodelled WARDROBE, and those need opposite fixes (widen the wall model vs. make a specialist claim its
+# footprint). Columns: cycle,x,y,z,inside_poly,dist_wall_m,obj_sdf_m — distance to the room polygon boundary and
+# the signed distance to the nearest modelled object footprint, so each cell says which of the two it is.
+CellDumpEveryN = 600
 
 [ZedBoost]
 Enabled = true

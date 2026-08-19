@@ -172,6 +172,15 @@ public:
     static std::vector<Eigen::Vector3f> subtract_infrastructure(
         const std::vector<Eigen::Vector3f>& cloud_room, const Eigen::Vector3f& sensor_origin,
         const std::vector<Eigen::Vector2f>& room_polygon, const DepthInfraParams& p);
+    // Same classification, reported as a keep-mask parallel to cloud_room (1 = residual, 0 = infrastructure)
+    // instead of a filtered copy. subtract_infrastructure is implemented on top of this, so the two can never
+    // disagree. The mask form exists because a point that is infrastructure must still be RAYTRACED into the
+    // occupancy grid — dropping it discards the whole ray and every free cell along it, and floor/wall returns are
+    // the longest rays in a sweep. Feed it to OccupancyGrid::integrate_sweep as `mark_mask`: clearing keeps the
+    // beam, marking is suppressed. See the mark_mask note in residual_occupancy_grid.h.
+    static std::vector<std::uint8_t> infrastructure_mask(
+        const std::vector<Eigen::Vector3f>& cloud_room, const Eigen::Vector3f& sensor_origin,
+        const std::vector<Eigen::Vector2f>& room_polygon, const DepthInfraParams& p);
 
     // A convenience 3D oriented-box SDF the worker uses to build a SpecialistSdf from a published box node
     // (table/chair/generic). centre + half-extents (hx,hy,hz), yaw about z.
