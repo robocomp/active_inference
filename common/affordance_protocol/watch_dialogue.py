@@ -16,7 +16,7 @@ usage:
 import sys, json, math, glob, time, os
 
 ROOM_GLOB = "room_concept/tmp/sdf_localizer/log_*.csv"
-MPPI_CSV  = "controller/mppi_diag.csv"
+TRACK_CSV = "controller/tracker_diag.csv"   # the PLAIN tracker's per-cycle log (was mppi_diag)
 CTRL_JSON = "controller/affordance_select.jsonl"
 
 def read_room(path, since=0.0):
@@ -177,7 +177,7 @@ def diagnose(room, ctrl, window_s):
         v.append(f"⚠ TARGET CHURN: {len(cells)} distinct cells in {span_real:.0f}s — no target survives long "
                  f"enough to drive to.")
 
-    v += diagnose_path(read_path_tracking(MPPI_CSV))
+    v += diagnose_path(read_path_tracking(TRACK_CSV))
     if not any(x.startswith("✗") for x in v):
         v.append(f"✓ healthy: {dcompl} completions in {span:.0f}s ({rate:.1f}/min), moved {moved:.1f} m "
                  f"({moved/span:.3f} m/s), d_target now {d_tgt:.2f} m")

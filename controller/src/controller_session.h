@@ -187,6 +187,10 @@ private:
     bool robot_still() const;
     // `arrived_at` / `now_ms` let a running mission close out the leg it just finished and step to the
     // next waypoint. The affordance path ignores them.
+    // ★WHICH CALLER completed it. Six call sites reach finalize_reached; three are outside the
+    // arrival branch (lock-on, step_orient, teardown). mark_reached logs its own line, which is
+    // inside finalize_reached and therefore identical for all six — useless for telling them apart.
+
     void finalize_reached(rc::AffordanceManager &affordance_manager,
                           rc::TrajectoryController &path_controller,
                           ControllerMotionCommander &motion_commander,
@@ -201,7 +205,8 @@ private:
                           // Overrides the outcome derived from the contract. Used by the
                           // "already there" refusal, which is NOT an arrival and must not be
                           // reported to the producer as one.
-                          std::optional<rc::affordance::Outcome> outcome_override = std::nullopt);
+                          std::optional<rc::affordance::Outcome> outcome_override = std::nullopt,
+                          std::source_location floc = std::source_location::current());
 
     // ── Physical-wedge recovery ──────────────────────────────────────────────────────
     // Debounce over a per-cycle wedge signal supplied by the caller. A wedge is a PREDICTION ERROR and
@@ -754,6 +759,7 @@ private:
     // Written from build_planning_step, before any early return, so a freeze RECORDS ITSELF.
     void log_selection_json(std::uint64_t t_ms, const rc::AffordanceManager &affordance_manager,
                             const std::optional<Eigen::Vector2f> &robot_xy, const char *stage);
+    unsigned last_finalize_line_ = 0;   // which caller completed the affordance
     std::ofstream select_json_;            // per-cycle "why is nothing being executed" record
     bool          select_json_open_ = false;
     std::uint64_t last_select_json_ms_ = 0;

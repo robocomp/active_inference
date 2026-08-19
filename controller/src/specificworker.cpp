@@ -492,7 +492,7 @@ void SpecificWorker::initialize()
 	session_.mission().set_run_dir(params.mission_run_dir);
 	// Keep the per-cycle MPPI diagnostics with the run they describe. Written live to a fixed path and
 	// truncated by the next run, so without this a comparison destroys its own baseline.
-	session_.mission().archive_on_stop("mppi_diag.csv");
+	session_.mission().archive_on_stop("tracker_diag.csv");
 	session_.mission().archive_on_stop("band_diag.csv");
 	session_.mission().archive_on_stop("route_events.csv");
 	session_.mission().archive_on_stop("route_geometry.csv");

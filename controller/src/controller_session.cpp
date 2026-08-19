@@ -804,7 +804,13 @@ void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
 {
     if (!mppi_csv_open_)
     {
-        mppi_csv_.open("mppi_diag.csv", std::ios::out | std::ios::trunc);
+        // ★RENAMED 2026-08-19: this is the TRACKER's per-cycle log, and the tracker is PLAIN, not MPPI.
+        // The old name cost a real misdiagnosis — a 19 s off-path excursion with 39 rotation-cap
+        // sign-flips was attributed to "MPPI mode-flipping between two near-equal-cost rollouts" purely
+        // because the file said mppi. A filename is a claim like any column name, and this one was
+        // false. (Five columns misread the same way today: yaw_err_deg, min_esdf vs clear_now,
+        // rob_facing_deg, d_arrival vs the gate's operand, path_kappa's -999 sentinel.)
+        mppi_csv_.open("tracker_diag.csv", std::ios::out | std::ios::trunc);
         mppi_csv_.imbue(std::locale::classic());  // decimal POINT regardless of LANG (CLAUDE.md)
         if (mppi_csv_.is_open())
             mppi_csv_ << "# per-cycle control record. The ess/lambda/g_* columns describe the MPPI SAMPLER\n"
@@ -3815,8 +3821,31 @@ void ControllerSession::finalize_reached(rc::AffordanceManager &affordance_manag
                                          const Eigen::Vector2f &arrived_at,
                                          std::uint64_t now_ms,
                                          bool allow_dwell,
-                                         std::optional<rc::affordance::Outcome> outcome_override)
+                                         std::optional<rc::affordance::Outcome> outcome_override,
+                                         std::source_location floc)
 {
+    last_finalize_line_ = floc.line();
+    // ★★★WHO COMPLETED IT, AND FROM HOW FAR. Six callers reach here; three are outside the arrival
+    // branch. The starvation returns because something completes an affordance the robot never drove
+    // to, which then makes the (correct) just-completed suppression block the very cell it should
+    // take: 78% of cycles rejected, 92 s with no base command. This names the caller and the distance.
+    {
+        static std::ofstream fj;
+        static bool ok = false;
+        if (not ok) { fj.open("finalize_sites.jsonl", std::ios::out | std::ios::trunc);
+                      fj.imbue(std::locale::classic()); ok = fj.is_open(); }
+        if (ok)
+        {
+            // `arrived_at` is the pose the caller says the robot completed at — the honest source here.
+            const float d = last_target_info_.has_value()
+                ? (last_target_info_->room_pos - arrived_at).norm() : -1.f;
+            fj << std::format(R"({{"caller_line":{},"d_to_target":{:.3f},"target":"{}","dwell":{}}})" "\n",
+                              floc.line(), d,
+                              last_target_info_.has_value() ? last_target_info_->node_name : std::string{},
+                              allow_dwell ? 1 : 0);
+            fj.flush();
+        }
+    }
     // A mission waypoint is reached the same way any target is; stepping the mission here means arrival
     // logic exists in exactly one place and a mission cannot drift out of sync with what the robot did.
     const bool mission_continues = false;   // a mission is ended by arc length, never by an arrival
