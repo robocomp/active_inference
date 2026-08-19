@@ -73,6 +73,11 @@ public:
     // steering law can be measured independently of the projection. The agent never calls this.
     void seed_arc_length(float s) { s_hint_ = s; }
 
+    // Exercises the arc-length projection: that it is monotone within a traversal, that a reset is
+    // free to move it backwards, and that a near-zero command does not cost it. Run from
+    // `route_bench --self-test`. See the bottom of plain_tracker.cpp for what each case caught.
+    static bool self_test();
+
 private:
     const PathWorld& world_;
     // The monotone-forward arc-length projection. EMPTY means "re-acquire": one optional carries

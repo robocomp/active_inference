@@ -3157,9 +3157,21 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     }
 
     // MPPI produced no usable motion this cycle but we are not yet confirmed-wedged: hold the base.
+    // ★STOP THE BASE, DO NOT RETIRE THE PLAN. This called `path_controller.stop()` as well, and that is
+    // not a brake — it clears `path_room_`, drops `active_`, and calls `plain_tracker_.reset()`, which
+    // empties `s_hint_` and re-arms `start_align_` (trajectory_controller.cpp:200-220). A SINGLE cycle
+    // of near-zero command therefore destroyed the whole traversal, and PLAIN emits exactly that
+    // command in two perfectly ORDINARY states: holding a pivot at ~zero error (plain_tracker.cpp:364,
+    // 372) and the stop taper at zero. The loop closed on itself — reset ⇒ global re-acquire ⇒
+    // start-align ⇒ hold ⇒ zero command ⇒ stop() ⇒ reset — which is the second of the three mechanisms
+    // that kept the tracker's arc length pinned at 0 for 39% of a 282 s run.
+    // `stop()` is for the cases that genuinely RETIRE a path: arrival, abort, a new target, a repaired
+    // curve. "The optimiser had nothing to say this cycle" is none of those.
+    // ★What makes holding safe rather than a way to sit still for ever is that a genuine deadlock is now
+    // CAUGHT: the translation wedge already escaped, and StallVerdict::Spinning (fbd47b7) covers the
+    // rotate-forever case this branch used to mask by continually rebuilding the plan underneath it.
     if (std::abs(adv_mps) < 5e-4f && std::abs(side_mps) < 5e-4f && std::abs(rot_rps) < 1e-3f)
     {
-        path_controller.stop();
         motion_commander.stop_robot();
         return;
     }

@@ -54,8 +54,24 @@ ControlOutput& PlainTracker::compute(ControlOutput& out, const TrackerInput& in,
     // repair and on a curve change, and on nothing else. That is where the start-alignment below is
     // armed, so it needs no notion of its own for "new path".
     const bool reacquiring = not s_hint_.has_value();
-    s_hint_ = s_hint_ ? sp.project(pos, *s_hint_, std::max(0.05f, p.plain_proj_window))
-                      : sp.project(pos, 0.f, sp.length());
+    if (reacquiring)
+        s_hint_ = sp.project(pos, 0.f, sp.length());
+    else
+        // ★FORWARD-ONLY, THE SAME CLAMP RouteFollower::advance APPLIES (route_follower.cpp:481).
+        // `RouteSpline::project` seeds its search at `s_hint - spacing/2` (route_spline.cpp:309) — a
+        // deliberate half-cell of backward slack so a curve sampled at 5 cm can still find its own
+        // nearest point — so EVERY call may return LESS than it was given. RouteFollower has always
+        // clamped that away; this tracker never did, and at 20 Hz the leak is 0.025 m/cycle: ~20 s to
+        // walk 10 m of arc length back to 0.00 and pin there. Measured live: `track_s` sat at ~0 on
+        // 39% of rows and the longest unbroken advancing stretch in 282 s was 2.8 s, while the
+        // cross-track error stayed at p50 0.017 m — the tracker was following its curve beautifully and
+        // reporting that it had never left the start.
+        // ★The clamp belongs HERE and not inside project(): the half-cell is what makes the search
+        // correct, and the re-acquire branch above legitimately needs to move s BACKWARDS (a stop or a
+        // repaired curve must be free to land the robot at s = 0, or wherever it now stands). Monotone
+        // is a property of ONE traversal, which is exactly what the optional distinguishes.
+        s_hint_ = std::clamp(sp.project(pos, *s_hint_, std::max(0.05f, p.plain_proj_window)),
+                             *s_hint_, sp.length());
     const float s = *s_hint_;
     if (reacquiring) start_align_ = true;
 
@@ -421,6 +437,173 @@ ControlOutput& PlainTracker::compute(ControlOutput& out, const TrackerInput& in,
     out.gate_speed_scale = p.max_adv > 1e-3f ? v_cmd / p.max_adv : 1.f;
     out.safety_guard_triggered = false;           // nothing in this mode can trigger; keep it honest
     return out;
+}
+
+// ═══ SELF-TEST ═══════════════════════════════════════════════════════════════════════════════════
+// The arc-length projection is the one piece of state this tracker carries across cycles, and it was
+// silently leaking backwards for the whole life of the class while every OTHER measurement said the
+// tracker was healthy (cross-track p50 0.017 m). Nothing could have caught that from outside: a tracker
+// that follows its curve perfectly and reports it has not moved looks like a good tracker until you ask
+// it how far along it is. These cases ask.
+namespace
+{
+struct StubWorld : PathWorld
+{
+    const RouteSpline *sp = nullptr;
+    [[nodiscard]] const RouteSpline *route_spline() const override { return sp; }
+    // PlainTracker reads neither — same assertion tools/tracker_sim.cpp makes, for the same reason:
+    // if a future change makes one fire, fail loudly rather than measure a made-up robot.
+    float body_extent(const Eigen::Vector2f &, float) const override { std::abort(); }
+    float body_extent_max() const override { std::abort(); }
+};
+}   // namespace
+
+bool PlainTracker::self_test()
+{
+    bool ok = true;
+    auto check = [&](bool c, const char *m) { if (not c) { ok = false; std::printf("  FAIL: %s\n", m); } };
+
+    // A gentle S, sampled at 5 cm — the spacing matters, because the backward slack the projection
+    // seeds is half of it (route_spline.cpp:309) and that half-cell is the entire leak.
+    std::vector<Eigen::Vector2f> poly;
+    for (int i = 0; i <= 120; ++i)
+    {
+        const float x = 0.1f * static_cast<float>(i);
+        poly.emplace_back(x, 0.6f * std::sin(0.35f * x));
+    }
+    RouteSpline sp;
+    const auto free_everywhere = [](const Eigen::Vector2f &, float) { return true; };
+    if (not sp.build(poly, 0.05f, free_everywhere, 0.40f))
+    { std::printf("PlainTracker::self_test SKIPPED (spline build failed)\n"); return true; }
+
+    StubWorld world;
+    world.sp = &sp;
+    TrackerParams p;
+    const auto pose_at = [&](float s)
+    {
+        const Eigen::Vector2f r = sp.position_at(s);
+        Eigen::Affine2f a = Eigen::Affine2f::Identity();
+        // The tracker reads theta as the BODY angle and converts; heading_at is the forward tangent,
+        // so the body angle is that minus 90 degrees. Getting this wrong only changes the commands,
+        // not the projection, but a test that lies about the pose is worth nothing later.
+        a.linear() = Eigen::Rotation2Df(sp.heading_at(s) - static_cast<float>(M_PI_2)).matrix();
+        a.translation() = r;
+        return a;
+    };
+    const auto drive = [&](PlainTracker &t, float s)
+    {
+        ControlOutput out; TrackerInput in;
+        in.robot_pose = pose_at(s);
+        t.compute(out, in, p);
+        return out;
+    };
+
+    // (1) ★ORDINARY LOCALISER JITTER, WHICH IS THE LIVE SIGNATURE. The robot creeps forward while its
+    // reported pose wanders a few centimetres ALONG the curve — every localiser does this, and PLAIN
+    // drives at 20 Hz, so the wander per cycle is comparable to the advance per cycle.
+    // Unclamped, the projection follows the wander DOWN as readily as up, but only the down direction
+    // sticks: `project` searches [s_hint - spacing/2, s_hint + window], so a step back becomes the new
+    // origin and the ground is never recovered except by real motion. That asymmetry — not any single
+    // large event — is what pinned `track_s` at ~0 on 39% of a 282 s run while the cross-track error
+    // stayed at p50 0.017 m.
+    // ★What this case does NOT claim: an earlier version asserted the hint leaks while the robot stands
+    // perfectly still. It does not — a stationary pose re-projects to the same sample, and that version
+    // passed with and without the fix. The leak needs pose MOTION along the curve, so this drives.
+    {
+        PlainTracker t(world);
+        drive(t, 3.0f);
+        float s_true = 3.0f, prev = t.arc_length_hint().value_or(0.f);
+        float worst_back = 0.f;
+        const float s_start = prev;
+        for (int i = 0; i < 300; ++i)
+        {
+            s_true += 0.01f;                                          // 0.2 m/s at 20 Hz
+            // Deterministic wander, +-4 cm along the curve. No RNG: a test that fails one run in ten is
+            // worse than no test.
+            const float jitter = 0.04f * std::sin(static_cast<float>(i) * 2.399f);
+            drive(t, std::max(0.f, s_true + jitter));
+            const float now = t.arc_length_hint().value_or(0.f);
+            worst_back = std::min(worst_back, now - prev);
+            prev = now;
+        }
+        std::printf("  300 cycles driving with +-4 cm of along-track pose jitter: s %.3f -> %.3f m "
+                    "(true advance 3.00 m), worst single-cycle change %.4f m\n",
+                    s_start, prev, worst_back);
+        check(worst_back >= -1e-4f,
+              "★★the projection stepped BACKWARDS on ordinary pose jitter — every such step is kept, "
+              "and that ratchet is what walks the arc length to 0 and pins it there");
+        check(prev > s_start + 2.0f,
+              "and it must still ADVANCE: a clamp that froze the hint would pass the test above and "
+              "break the tracker completely");
+    }
+
+    // (2) MONOTONE UNDER A POSE THAT JUMPS BACKWARDS. A localiser correction, a replan, a bad frame —
+    // the pose can legitimately move backwards along the curve. The robot's PROGRESS through this
+    // traversal has not. RouteFollower::advance has always taken this position (route_follower.cpp:481);
+    // this tracker now takes the same one, so the two projections cannot drift apart.
+    {
+        PlainTracker t(world);
+        drive(t, 4.0f);
+        float worst_back = 0.f, prev = t.arc_length_hint().value_or(0.f);
+        for (int i = 0; i < 60; ++i)
+        {
+            // forward a little, then yanked back a lot, repeatedly
+            const float s = 4.0f + 0.05f * static_cast<float>(i) - ((i % 10 == 0) ? 1.5f : 0.f);
+            drive(t, std::max(0.f, s));
+            const float now = t.arc_length_hint().value_or(0.f);
+            worst_back = std::min(worst_back, now - prev);
+            prev = now;
+        }
+        std::printf("  pose yanked 1.5 m backwards every 10th cycle: worst single-cycle change %.4f m\n",
+                    worst_back);
+        check(worst_back >= -1e-4f, "★arc length is progress through ONE traversal and may not decrease; "
+                                    "a pose that jumps back is a pose event, not an un-driving");
+    }
+
+    // (3) ...BUT A RE-ACQUIRE MUST STILL BE FREE TO GO BACKWARDS, and this is why the clamp lives in the
+    // tracker and not inside project(). reset() means "new traversal": a mission stop puts the robot at
+    // the START, and a monotone rule that outlived the traversal would steer at the route's end point
+    // from thirty metres away — the "it drives into a wall after a restart" failure the header records.
+    {
+        PlainTracker t(world);
+        drive(t, 9.0f);
+        check(t.arc_length_hint().value_or(0.f) > 8.f, "precondition: the tracker is well along the curve");
+        t.reset();
+        drive(t, 0.2f);
+        const float after = t.arc_length_hint().value_or(-1.f);
+        std::printf("  reset at s ~ 9 m, robot back at the start: re-acquired at %.3f m\n", after);
+        check(after >= 0.f and after < 1.0f,
+              "★a reset is a NEW traversal — monotonicity must not survive it, or a restart steers at "
+              "the end of the route");
+    }
+
+    // (4) A NEAR-ZERO COMMAND MUST NOT COST THE PROJECTION. The tracker emits adv ~ 0 in two ordinary
+    // states — holding the start alignment, and the stop taper at the end — and the session used to
+    // read that as "nothing is happening" and call TrajectoryController::stop(), which reset() s
+    // this hint away. The loop closed on itself. This asserts the tracker's own half: whatever it
+    // commands, it keeps its place. Any loss of arc length is therefore an EXTERNAL reset(), which is
+    // where to look.
+    {
+        PlainTracker t(world);
+        // Start badly misaligned so the start-alignment hold fires and the command really is ~zero.
+        ControlOutput out; TrackerInput in;
+        Eigen::Affine2f a = pose_at(2.0f);
+        a.linear() = Eigen::Rotation2Df(sp.heading_at(2.0f) + static_cast<float>(M_PI_2)).matrix();
+        in.robot_pose = a;
+        t.compute(out, in, p);
+        const float s_before = t.arc_length_hint().value_or(-1.f);
+        for (int i = 0; i < 40; ++i) { ControlOutput o2; t.compute(o2, in, p); out = o2; }
+        const float s_after = t.arc_length_hint().value_or(-1.f);
+        std::printf("  40 cycles of a near-zero command (adv %.4f m/s): s %.3f -> %.3f m\n",
+                    out.adv, s_before, s_after);
+        check(s_before >= 0.f and s_after >= 0.f,
+              "★★the tracker must never discard its own projection: a zero command is a STATE it is "
+              "holding, not the absence of a traversal");
+        check(std::abs(s_after - s_before) < 0.2f, "and it must not drift while nothing moves");
+    }
+
+    std::printf("PlainTracker::self_test %s\n", ok ? "PASS" : "FAIL");
+    return ok;
 }
 
 }   // namespace rc

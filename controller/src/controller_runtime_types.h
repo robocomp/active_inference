@@ -495,6 +495,9 @@ struct ControllerTargetInfo
     std::string node_name;
     Eigen::Vector2f room_pos = Eigen::Vector2f::Zero();
     float yaw_rad = 0.f;
+    // Carried for diagnostics only. Selection reads the gain from the affordance layer
+    // (affordance_manager.cpp:490); this copy deliberately does NOT participate in target identity —
+    // see same_target_instance in controller_world_model.cpp for why a priority is not an identity.
     float epistemic_gain = 0.f;
     bool epistemic_pending = false;
     bool from_affordance = false;

@@ -46,6 +46,7 @@
 // Header-only, pure, and it guards a SAFETY reflex — so it belongs in the one command that runs every
 // self-test rather than in a scratch main that ages. See stall_judge.h for what it caught.
 #include "../src/stall_judge.h"
+#include "../src/trackers/plain_tracker.h"
 
 using Eigen::Vector2f;
 
@@ -370,6 +371,7 @@ int main(int argc, char **argv)
                           & rc::RouteSpline::self_test()
                           & rc::RouteFollower::self_test()
                           & rc::route_optimizer_self_test()
+                          & rc::PlainTracker::self_test()
                           & rc::StallJudge::self_test();
             std::printf("\n%s\n", ok ? "ALL SELF-TESTS PASS" : "SELF-TESTS FAILED");
             return ok ? 0 : 1;

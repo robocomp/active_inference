@@ -294,16 +294,34 @@ std::optional<ControllerTargetInfo> ControllerWorldModel::read_target_in_room(st
     return std::nullopt;
 }
 
+// ★WHAT MAKES A TARGET THE SAME TARGET — AND WHY GAIN IS NOT PART OF IT.
+// This predicate decides `target_changed`, and `target_changed` throws the plan away and replans. So
+// every field named here is a licence to replan, and a field that varies for reasons unrelated to WHERE
+// the robot must go is a licence to replan for no reason.
+// `epistemic_gain` was in this list, compared to 1e-3. It is the producer's estimate of a viewpoint's
+// VALUE, and room_concept confirmed (2026-08-19) that it rewrites the offered target every cycle, gain
+// included, for the whole Offered-but-not-yet-claimed window — `AffordanceManager::publish_target`
+// only refuses rewrites once the target is CLAIMED. So a live belief update read here as a brand-new
+// target instance, on a target whose pose had not moved a millimetre.
+// ★A GAIN IS A PRIORITY, NOT AN IDENTITY. A target is identified by WHERE IT IS. The producer's
+// opinion of how much it is worth belongs to selection — it decides which target to pursue — and must
+// not survive into "is this still the thing I am driving to". Room's own words, and they are right:
+// damping the gain upstream would degrade a real signal to satisfy an identity test.
+// ★THE SHARED LAYER ALREADY KNEW. `AffordanceManager`'s log dedup key carries the identical note —
+// "identity only (name + parent type) ... must NOT embed gain/shape/pending — those wobble every cycle"
+// (affordance_manager.cpp:27-28). The lesson was learned once, for a log line, and never reached the
+// predicate that throws away plans. Gain remains where it belongs: the EFE selection at
+// affordance_manager.cpp:490, G = lambda_cost*nav_dist - epistemic_gain, which is about WHICH target
+// to pursue, not about whether the one in hand is still the same one.
+// Everything left here is geometry or channel: which node, from which source, at what pose and facing.
 bool ControllerWorldModel::same_target_instance(const ControllerTargetInfo &lhs, const ControllerTargetInfo &rhs)
 {
     constexpr float pos_eps_m = 0.05f;
     constexpr float yaw_eps_rad = 0.05f;
-    constexpr float gain_eps = 1e-3f;
 
     return lhs.node_id == rhs.node_id
         && lhs.from_affordance == rhs.from_affordance
         && lhs.epistemic_pending == rhs.epistemic_pending
         && (lhs.room_pos - rhs.room_pos).cwiseAbs().maxCoeff() < pos_eps_m
-        && std::abs(lhs.yaw_rad - rhs.yaw_rad) < yaw_eps_rad
-        && std::abs(lhs.epistemic_gain - rhs.epistemic_gain) < gain_eps;
+        && std::abs(lhs.yaw_rad - rhs.yaw_rad) < yaw_eps_rad;
 }
