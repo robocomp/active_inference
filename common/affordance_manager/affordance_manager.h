@@ -52,6 +52,10 @@ public:
         std::string state;       // protocol state: Offered / Executing / Completed / … (diagnostic)
     };
     const std::vector<Candidate> &last_candidates() const { return last_candidates_; }
+    // ★WHY THE LAST SELECTION CHOSE NOTHING. Set on every select_target(); "" when one was chosen.
+    // Exists because a frozen robot with valid offers on the wire is indistinguishable, from outside,
+    // from a broken selector — and reading it out of stdout is not a diagnosis, it is a guess.
+    [[nodiscard]] const std::string &last_reject_reason() const { return last_reject_reason_; }
 
     explicit AffordanceManager(std::string managed_node_name = {});
 
@@ -188,12 +192,43 @@ private:
     float select_lambda_cost_ = 0.2f;
     float select_switch_margin_ = 0.5f;
     float select_room_gain_scale_ = 1.0f;   // see set_room_gain_scale
+    // ★★★THE NODE IS NOT THE AFFORDANCE. "Do not immediately re-take the one that just finished" is
+    // right for an object affordance, which owns its node. But room_concept publishes EVERY standpoint
+    // through the single `afford_room` node, so keying this on the NODE ID blacklists ALL room
+    // exploration from the first completion onwards. Measured live 2026-08-19 19:27: room held one
+    // offer 1.96 m away for 60 s straight while the consumer logged
+    //     tgt=0 plan=0 reject=just-completed elig=0
+    // every 200 ms, robot moved 0.47 m. The only thing that clears this is the yield, and the yield
+    // needs `suppressed_target`, which is assigned only inside the Offered branch the candidate never
+    // reaches — so it never cleared.
+    // ★So remember WHICH STANDPOINT finished, not merely which node. A different cell on the same node
+    // is a different affordance and must be selectable at once. Same category error as suppress_target
+    // (node-keyed, retires the whole channel) and as the first refusal-hold attempt.
     std::uint64_t last_completed_id_ = 0;   // skip this one on the next selection (see suppressed_name)
+    float last_completed_x_ = 0.f, last_completed_y_ = 0.f;
+    bool  last_completed_pose_known_ = false;
     // node id -> selection rounds still to skip. See suppress_target: the consumer could not reach it.
     std::map<std::uint64_t, int> unreachable_rounds_;
+    // ★★★WHEN EACH AFFORDANCE WAS LAST REFUSED. A refusal is a statement about the robot's CURRENT
+    // situation, so re-offering it to the executor on the very next cycle is guaranteed to be refused
+    // again — nothing can have changed in 50 ms. Without this the "yield rather than idle" rule below
+    // re-takes the affordance it just refused, and producer and consumer spin at loop rate:
+    //     REFUSED: already at this standpoint on the first cycle
+    //     NONE ELIGIBLE — [afford_room (JustCompleted)]
+    //     'afford_room' was the only affordance on offer — taking it again rather than idling
+    //     REFUSED: already at this standpoint ...            (measured: ~104 completions/min)
+    // ★The yield itself is RIGHT — a rule that can halt the agent for ever is a deadlock, not a
+    // preference. What it lacked was any notion of time: it is only safe to retry once something
+    // could have changed. So the yield still happens, just not before then.
+    // ★KEYED ON THE STANDPOINT, NOT THE NODE. room_concept publishes EVERY standpoint through the one
+    // `afford_room` node, so blocking the node would freeze all exploration for the hold; blocking the
+    // POSE blocks only the spot that was actually refused and lets a different cell through at once.
+    struct RefusedSpot { float x = 0.f, y = 0.f; std::uint64_t when_ms = 0; };
+    std::map<std::uint64_t, RefusedSpot> refused_at_ms_;
     std::string   suppressed_name_;         // what that skip cost, for the viewer
     std::uint64_t last_selected_id_ = 0;   // for commitment hysteresis across cycles
-    std::vector<Candidate> last_candidates_;   // all affordances evaluated in the last select_target()
+    std::vector<Candidate> last_candidates_;
+    std::string last_reject_reason_;   // all affordances evaluated in the last select_target()
     State state_ = State::Idle;
     std::optional<bool> last_observed_active_;
     std::optional<bool> last_observed_pending_;

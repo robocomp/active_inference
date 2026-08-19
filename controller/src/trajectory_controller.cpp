@@ -520,6 +520,11 @@ TrajectoryController::ControlOutput TrajectoryController::compute(
                                         ? room_to_robot(*arrival_point_room_, robot_pose)
                                         : goal_robot;
     out.dist_to_goal = arrival_robot.norm();
+    // Same number, into a field no tracker writes — see ControlOutput::dist_to_arrival_pt for why
+    // dist_to_goal cannot be trusted by anything that reads it after compute() returns.
+    out.dist_to_arrival_pt = out.dist_to_goal;
+    out.arrival_test_ran = true;
+    out.arrival_endpoint_on = endpoint_arrival_;
 
     // PASSED the arrival point? Once the path continues past it the robot cuts the corner by design and
     // may never enter the arrival radius, so proximity alone would leave the waypoint forever unreached.
@@ -580,6 +585,8 @@ TrajectoryController::ControlOutput TrajectoryController::compute(
     // ARC LENGTH — see set_endpoint_arrival). Skipping it, rather than ignoring its result, matters: this
     // branch also clears active_, so a caller that merely discarded goal_reached would find the follower
     // switched off and the base stopped for good.
+    out.arrival_passed_pt = passed_arrival;
+    out.arrival_by_recession = passed_by_recession;
     if (endpoint_arrival_
         and (out.dist_to_goal < active_params_.goal_threshold or passed_arrival or aligning_
              or passed_by_recession))

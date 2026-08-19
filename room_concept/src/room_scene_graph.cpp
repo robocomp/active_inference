@@ -619,11 +619,15 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
         // was ever Offered again, and the refusal protocol's second half — "so the producer sends a
         // NEW one" — never happened. The condition that matters is simply that we know which cell was
         // refused.
-        if (outcome == Outcome::Refused and not std::isnan(pub_tx_) and not std::isnan(pub_ty_))
+        // ★KEYED ON THE ARMED CELL. pub_tx_/pub_ty_ move on every publish ATTEMPT, declined ones
+        // included, so by the time a refusal is consumed they may name a cell the consumer was never
+        // offered — de-prioritising the wrong one and leaving the refused cell at full score.
+        // (5535c6f's point survives: the guard is on KNOWING the cell, never on pub_ok_.)
+        if (outcome == Outcome::Refused and not std::isnan(armed_tx_) and not std::isnan(armed_ty_))
         {
-            planner.mark_target_finished(Eigen::Vector2f(pub_tx_, pub_ty_));
+            planner.mark_target_finished(Eigen::Vector2f(armed_tx_, armed_ty_));
             std::print("[planner] refusal at ({:.2f},{:.2f}) — cell de-prioritised (IoR), selecting elsewhere\n",
-                       pub_tx_, pub_ty_);
+                       armed_tx_, armed_ty_);
         }
         planner.clear_target();
         planner.mark_and_refresh();   // keep path trail live in viewer
@@ -690,15 +694,52 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
         {
             const bool a = G_->get_attrib_by_name<active_att>(n.value()).value_or(false);
             const bool p = G_->get_attrib_by_name<epistemic_pending_att>(n.value()).value_or(true);
-            if (not a and not p)   // Completed
+            // ★UNCLAIMED-OFFER TIMEOUT. `a` is the consumer's claim; if the node is still merely pending
+            // after this long, nobody is coming. Retire it and let select_target choose elsewhere —
+            // otherwise room waits on a consumer that has already declined, for up to 100 s (measured).
+            constexpr std::uint64_t kOfferUnclaimedMs = 5000;
+            if (p and not a and armed_at_ms_ != 0)
+            {
+                const auto now_ms = static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count());
+                if (now_ms - armed_at_ms_ > kOfferUnclaimedMs and planner.current_target())
+                {
+                    std::print("[planner] afford_room OFFERED for {:.1f}s and never claimed — retiring "
+                               "({:.2f},{:.2f}) and selecting elsewhere\n",
+                               (now_ms - armed_at_ms_) / 1000.f, armed_tx_, armed_ty_);
+                    std::fflush(stdout);
+                    armed_at_ms_ = 0;
+                    planner.mark_target_finished(planner.current_target()->position);
+                }
+            }
+            if (a or p) armed_seen_live_ = true;   // the arming is real: a Completed reading now means it
+            if (not a and not p and armed_seen_live_)   // Completed, and we saw it live first
             {
                 const auto done = planner.current_target()->position;
-                std::print("[planner] afford_room COMPLETED (level-triggered) — retiring target "
-                           "({:.2f},{:.2f}) at d={:.2f}m; re-selecting\n",
-                           done.x(), done.y(), (done - planner.robot_pos()).norm());
-                std::fflush(stdout);
-                planner.mark_target_finished(done);
-                planner.refresh_belief();
+                // ★A COMPLETION IS EVIDENCE ABOUT THE CELL THAT WAS ARMED. This branch exists to catch
+                // a completion whose edge the 200 ms poll missed, but it reads a LEVEL, and the level
+                // says only "not pending" — it stays true until something re-arms. Retiring whatever
+                // the planner happens to hold on that basis charged a completion to a cell that was
+                // never offered, once per cycle. Measured 2026-08-19: (-1.50,-3.38) retired at ~20 Hz
+                // with the robot 1.32 m away.
+                // ★⚠DO NOT ADD AN `else clear_target()` HERE. I tried exactly that and it re-selected
+                // every cycle from candidates separated by less than the noise, flipping the published
+                // cell ~10x/s — 373 distinct cells in 97 s, far worse than the loop it replaced.
+                // Holding the target is correct; the publish path re-arms it when it differs.
+                const bool is_armed_target =
+                    not std::isnan(armed_tx_) and not std::isnan(armed_ty_)
+                    and (done - Eigen::Vector2f(armed_tx_, armed_ty_)).norm() < 0.05f;
+                if (is_armed_target and not armed_retired_)
+                {
+                    armed_retired_ = true;
+                    std::print("[planner] afford_room COMPLETED (level-triggered) — retiring target "
+                               "({:.2f},{:.2f}) at d={:.2f}m; re-selecting\n",
+                               done.x(), done.y(), (done - planner.robot_pos()).norm());
+                    std::fflush(stdout);
+                    planner.mark_target_finished(done);
+                    planner.refresh_belief();
+                }
             }
         }
     }
@@ -782,6 +823,14 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
         [this]() { trigger_layout_(); });
 
     pub_tx_ = tx; pub_ty_ = ty; pub_ok_ = published;
+    // A new arming is a new affordance instance: latch what is really on the node and re-open the
+    // right to retire it exactly once. `published` is the only signal a consumer will ever see it.
+    if (published)
+    {
+        armed_tx_ = tx; armed_ty_ = ty; armed_retired_ = false; armed_seen_live_ = false;
+        armed_at_ms_ = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
 
     // ---- Publish trace: the ONLY place that shows why exploration stops ----------------------
     // Everything upstream of here can look healthy while the affordance never returns to Offered:

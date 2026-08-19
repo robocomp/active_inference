@@ -1,3 +1,4 @@
+#include <chrono>
 #include "affordance_manager.h"
 
 #include <dsr/api/dsr_api.h>
@@ -404,10 +405,22 @@ bool AffordanceManager::publish_target(const std::shared_ptr<DSR::DSRGraph> &gra
         return true;
     }
 
-    if (same_target && !current_pending)
-    {
-        return false;
-    }
+    // ★★★RE-OFFERING AFTER A COMPLETION IS NEWS. This used to decline, on the reasoning that an
+    // unchanged proposal says nothing new — and that is true while the node is still OFFERED (handled
+    // above). Once it is COMPLETED the offer has been consumed, and declining leaves the pair deadlocked:
+    // the producer waits for the consumer to take an offer it never re-armed, and the consumer's
+    // selector rejects the node at its first test because it is not Offered — before the "just
+    // completed" branch that would have set the yield's fallback. Observed live 2026-08-19:
+    //     [aff-select] NONE ELIGIBLE — nothing is Offered or Executing. [afford_room (JustCompleted)]
+    // repeated indefinitely, robot frozen with cmd_adv = cmd_rot = 0.000 and valid cells on the wire.
+    // ★This is precisely the row AffordanceProtocol.tla calls DEADLOCK (RearmUnchanged = FALSE with a
+    // reporting consumer). It was dismissed because LevelTriggered was believed to cover it; the model
+    // could not see it because it has no notion of WHICH cell is proposed, so "the producer will pick a
+    // different one" was an assumption baked into the abstraction rather than a checked property.
+    // ★SAFE TO RE-ARM NOW, and only now, because the CONSUMER carries the rate limit: a standpoint it
+    // refused is un-offerable to it for kRefusalRetryMs, keyed on the POSE. So the producer may always
+    // re-offer, the consumer declines to re-take the same spot too soon, and the pair can neither
+    // deadlock nor busy-loop. Neither half is sufficient alone — that is why both exist.
     graph->add_or_modify_attrib_local<parent_att>(node, parent_id);
     graph->add_or_modify_attrib_local<epistemic_target_x_m_att>(node, tx);
     graph->add_or_modify_attrib_local<epistemic_target_y_m_att>(node, ty);
@@ -472,6 +485,9 @@ bool AffordanceManager::release_execution_claim(const std::shared_ptr<DSR::DSRGr
     return true;
 }
 
+// How long a refused STANDPOINT stays un-offerable. Long enough that the situation can change,
+// short enough that a genuine retry is not deferred noticeably.
+static constexpr std::uint64_t kRefusalRetryMs = 3000;
 std::optional<AffordanceManager::Target> AffordanceManager::select_target(const std::shared_ptr<DSR::DSRGraph> &graph,
                                                                           std::optional<Eigen::Vector2f> robot_pos)
 {
@@ -548,7 +564,10 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
         const auto active = graph->get_attrib_by_name<active_att>(node).value_or(false);
         const auto pending = graph->get_attrib_by_name<epistemic_pending_att>(node).value_or(true);
         const auto state = decode_protocol_state(active, pending);
-        const bool just_done = node.id() == last_completed_id_;
+        const bool just_done = node.id() == last_completed_id_
+            and last_completed_pose_known_ and target.has_value()
+            and std::hypot(target->room_pos.x() - last_completed_x_,
+                           target->room_pos.y() - last_completed_y_) < 0.30f;
         last_candidates_.push_back({target->node_name, target->parent_node_type,
                                     target->epistemic_gain, neg_efe(*target),
                                     (state == ProtocolState::Offered
@@ -653,14 +672,25 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
         const auto active = graph->get_attrib_by_name<active_att>(node).value_or(false);
         const auto pending = graph->get_attrib_by_name<epistemic_pending_att>(node).value_or(true);
         if (decode_protocol_state(active, pending) != ProtocolState::Offered)
-            continue;
+        { last_reject_reason_ = "not-offered"; continue; }
 
         // NOT THE ONE THAT JUST FINISHED. Its producer re-offers it immediately and its gain has not
         // had time to fall, so without this it wins again on the very next cycle and the robot works
         // one object forever. Reported rather than silent: an affordance that is Offered, top-scoring
         // and passed over is otherwise indistinguishable from a selector that is broken.
-        if (node.id() == last_completed_id_)
+        // ★FAIL OPEN, NOT CLOSED. This read `not last_completed_pose_known_ or ...`, so a standpoint
+        // whose pose could not be recovered suppressed EVERY candidate — reinstating the starvation it
+        // was written to remove (measured: 201 of 838 records back to reject=just-completed, robot
+        // parked with a valid offer 2.99 m away). The suppression is a POLITENESS rule; when in doubt
+        // it must yield. Re-taking one affordance too soon is bounded by the refusal hold and the
+        // yield; blacklisting the whole channel is not bounded by anything.
+        const bool same_standpoint =
+            last_completed_pose_known_
+            and (std::hypot(target->room_pos.x() - last_completed_x_,
+                            target->room_pos.y() - last_completed_y_) < 0.30f);
+        if (node.id() == last_completed_id_ and same_standpoint)
         {
+            last_reject_reason_ = "just-completed";
             suppressed_name_ = target->node_name;
             suppressed_target = target;      // kept: the rule YIELDS rather than deadlocks — see below
             continue;
@@ -674,8 +704,31 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
         if (const auto it = unreachable_rounds_.find(node.id());
             it != unreachable_rounds_.end() and it->second > 0)
         {
+            last_reject_reason_ = "unreachable-rounds";   // ★NODE-KEYED: suppresses EVERY standpoint
             suppressed_name_ = target->node_name;
             continue;
+        }
+
+        // ★★★DO NOT RE-TAKE A SPOT THAT WAS JUST REFUSED. A refusal says "not from here", and nothing
+        // can have changed in one 50 ms cycle — so taking it again is guaranteed to refuse again. This
+        // is the loop the run showed: refuse -> producer re-arms -> selected normally -> refuse, at
+        // ~104 completions per minute with the robot standing still. Keyed on the STANDPOINT so a
+        // genuinely different cell on the same node is unaffected, and it expires by itself.
+        if (const auto it = refused_at_ms_.find(node.id()); it != refused_at_ms_.end())
+        {
+            const auto now_ms = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
+            const float dx = target->room_pos.x() - it->second.x;
+            const float dy = target->room_pos.y() - it->second.y;
+            constexpr float kSameSpotM = 0.30f;
+            if (now_ms >= it->second.when_ms and now_ms - it->second.when_ms < kRefusalRetryMs
+                and (dx * dx + dy * dy) < kSameSpotM * kSameSpotM)
+            {
+                last_reject_reason_ = "refused-recently";
+                suppressed_name_ = target->node_name;
+                continue;                       // same spot, too soon: let the producer offer elsewhere
+            }
         }
 
         if (!best_target.has_value() || better(*target, *best_target))
@@ -688,7 +741,33 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
     // nothing to do FOREVER — which is exactly what happened: three object affordances sat Completed
     // (their producers were not re-offering them) and the one live candidate was the one suppressed.
     // A rule that can bring the whole agent to a permanent halt is not a preference, it is a deadlock.
-    if (!best_target.has_value() and suppressed_target.has_value())
+    // ★THE YIELD NEEDS A CLOCK. Retrying is right eventually and wrong immediately: if the only
+    // candidate was REFUSED moments ago, taking it again cannot end differently, and the pair spins at
+    // loop rate. Hold off until enough time has passed that the situation could have changed, then
+    // yield exactly as before — so this still cannot deadlock, it just cannot busy-loop either.
+    bool refused_too_recently = false;
+    if (suppressed_target.has_value())
+        if (const auto it = refused_at_ms_.find(suppressed_target->node_id); it != refused_at_ms_.end())
+        {
+            const auto now_ms = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
+            refused_too_recently = now_ms >= it->second.when_ms
+                                   and now_ms - it->second.when_ms < kRefusalRetryMs;
+        }
+    if (best_target.has_value()) last_reject_reason_.clear();
+    if (!best_target.has_value() and suppressed_target.has_value() and refused_too_recently)
+    {
+        // Say it once per refusal, not once per cycle: the point is that we are deliberately idling.
+        if (suppressed_name_ != suppressed_target->node_name)
+        {
+            std::print("[aff-select] '{}' was REFUSED moments ago — idling rather than re-offering it; "
+                       "nothing can have changed yet.\n", suppressed_target->node_name);
+            std::fflush(stdout);
+        }
+        suppressed_name_ = suppressed_target->node_name;
+    }
+    else if (!best_target.has_value() and suppressed_target.has_value())
     {
         std::print("[aff-select] '{}' was the only affordance on offer — taking it again rather than "
                    "idling (no-two-in-a-row yields when it would leave nothing)\n",
@@ -788,6 +867,26 @@ void AffordanceManager::mark_reached(const std::shared_ptr<DSR::DSRGraph> &graph
                   current_affordance_id_, current_affordance_name_);
     // Remember it so the next selection cannot hand back the affordance that just finished.
     last_completed_id_ = current_affordance_id_;
+    last_completed_pose_known_ = false;
+    if (auto n0 = graph->get_node(current_affordance_id_); n0.has_value())
+        if (const auto t0 = read_target(graph, n0.value()); t0.has_value())
+        {
+            last_completed_x_ = t0->room_pos.x();
+            last_completed_y_ = t0->room_pos.y();
+            last_completed_pose_known_ = true;
+        }
+    // A REFUSAL IS NOT A COMPLETION. Stamp it, so the yield below cannot retry it this instant.
+    if (outcome == rc::affordance::Outcome::Refused)
+    {
+        const auto now_ms = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+        RefusedSpot spot{.when_ms = now_ms};
+        if (auto n = graph->get_node(current_affordance_id_); n.has_value())
+            if (const auto tgt = read_target(graph, n.value()); tgt.has_value())
+            { spot.x = tgt->room_pos.x(); spot.y = tgt->room_pos.y(); }
+        refused_at_ms_[current_affordance_id_] = spot;
+    }
 
     if (auto node_opt = graph->get_node(current_affordance_id_); node_opt.has_value())
     {

@@ -252,11 +252,37 @@ public:
     ///     check leaves the target set forever, re-published on the spot the robot is already
     ///     standing on.
     ///   - ABANDONED: the executor could not get there (see the no-progress stall-breaker).
-    /// Folding both into the SAME neglect belief that drives selection is what stops the planner
-    /// re-proposing the identical cell: its neglect information drops to ~0 and recovers over
-    /// ior_decay_time, so the cell is de-prioritised for a while and then retried — no blacklist,
-    /// and a cell that only *looked* unreachable comes back into play on its own.
+    /// ★★★ IT RECORDS AN ATTEMPT, NOT AN OBSERVATION (changed 2026-08-19). It used to stamp `pos`
+    /// into the VISIT GRID — the record of where the robot has actually looked — which is a false
+    /// observation whenever the target was not reached, and this is called on the abandoned and
+    /// refused paths precisely when it was not. The visit grid feeds `neglect_nats`, so writing an
+    /// attempt into it told the agent "I have already looked here" about a place it never got to.
+    /// Measured live 2026-08-19: the level-triggered retire fired at loop rate on (-1.50,-3.38)
+    /// with the robot 1.32 m away, holding that cell at `age=0s neg=0.00`. Because `staleness` was
+    /// then 0, `ior_suppressor = staleness^w_ior` annihilated the pose-information term outright,
+    /// and the drive term was zero too — so `marg_fim` varying 0.15..0.32 across candidates moved
+    /// no score at all and every one of them landed inside 0.013..0.015. The argmax was decided by
+    /// a margin far below the noise, which is both the target churn the controller measured and the
+    /// reason a refusal could never change the next choice: de-prioritisation has no lever left
+    /// when everything is already pinned at zero.
+    /// ★The honest record of where the robot has BEEN is already kept by mark_and_refresh(), from
+    /// the robot's ACTUAL pose, every cycle — so this stamp was redundant when it was true and
+    /// corrupting when it was false.
+    /// De-prioritisation still happens, through `attempt_suppressor()` below: same decaying
+    /// no-blacklist behaviour, applied to the SCORE instead of forged into the BELIEF.
     void mark_target_finished(const Eigen::Vector2f& pos);
+
+    /// Record that a target was attempted (reached, abandoned or refused — the planner wants the
+    /// same thing from each: stop proposing it for a while). Decays over ior_decay_time.
+    void note_attempt(const Eigen::Vector2f& pos);
+
+    /// 0 immediately after an attempt at `pos`, returning to 1 over ior_decay_time. Multiplies the
+    /// REWARD terms of the score, never the travel cost — a cost is a cost whatever we last tried.
+    /// ★It must suppress the neglect drive as well as the information term: a cell the robot cannot
+    /// reach keeps a perfectly correct and permanently growing neglect, and suppressing only the
+    /// information term would leave it winning on that neglect for ever.
+    [[nodiscard]] float attempt_suppressor(const Eigen::Vector2f& pos,
+                                           std::chrono::steady_clock::time_point now) const;
 
     // ---- Cell score data for visualisation ----
     struct CellScore
@@ -499,6 +525,10 @@ private:
         }
     };
     VisitGrid visit_grid_;
+    // ★ATTEMPTS ARE NOT OBSERVATIONS, and they live in their own register so they cannot pollute the
+    // belief the exploration drive reads. Pruned to ior_decay_time, so it stays a handful of entries.
+    struct Attempt { Eigen::Vector2f pos; std::chrono::steady_clock::time_point when; };
+    std::vector<Attempt> attempts_;
 
     // Cell score cache (updated each evaluate_targets call)
     std::vector<CellScore> cell_scores_;

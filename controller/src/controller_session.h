@@ -731,10 +731,34 @@ private:
     // 0.31-0.38 m of clearance while the base achieved 2-19% of every commanded metre. pose_free() would
     // therefore call them fine and forget them instantly, and the robot would go back and wedge again.
     // The map is not the arbiter of a failure the map cannot see. They live for the session.
-    struct UselessSpot { Eigen::Vector2f pos = Eigen::Vector2f::Zero(); std::string name; int hits = 0; };
+    // ★A CONSUMER MEMORY MUST NOT OUTLIVE THE PRODUCER'S. Without `when_ms` this was a PERMANENT
+    // blacklist: each entry vetoes a 0.30 m disc for ever, coverage only grows, and the skip that reads
+    // it costs no physical time — so once enough discs accumulate, offer→instant-skip→re-offer closes
+    // into a loop at software speed. Measured 2026-08-19, completions per minute: +2,+2,+4,+2 for four
+    // minutes (the physical rate), then +103, then ~+150 sustained — 1694 in 15 min, all Refused, robot
+    // pinned, zero net closure. A phase transition, not a drift.
+    // ★The bound is the PRODUCER's recovery time (room IorDecayTime = 120 s): a consumer memory that
+    // outlives it permanently refuses what the producer legitimately re-offers, and the two can never
+    // settle. It also restores the rule stated everywhere else here — "no blacklist; a cell refused
+    // only because the robot happened to be parked on it comes back into play on its own".
+    struct UselessSpot
+    {
+        Eigen::Vector2f pos = Eigen::Vector2f::Zero();
+        std::string name;
+        int hits = 0;
+        std::uint64_t when_ms = 0;
+    };
     std::vector<UselessSpot> useless_spots_;
     std::optional<Eigen::Vector2f> last_raw_target_pos_;   // as PUBLISHED, before our repair moved it
     std::uint64_t last_useless_log_ms_ = 0;
-    [[nodiscard]] const UselessSpot *known_useless_spot(const Eigen::Vector2f &pos) const;
-    void remember_useless_spot(const Eigen::Vector2f &pos, const std::string &name);
+    // Written from build_planning_step, before any early return, so a freeze RECORDS ITSELF.
+    void log_selection_json(std::uint64_t t_ms, const rc::AffordanceManager &affordance_manager,
+                            const std::optional<Eigen::Vector2f> &robot_xy, const char *stage);
+    std::ofstream select_json_;            // per-cycle "why is nothing being executed" record
+    bool          select_json_open_ = false;
+    std::uint64_t last_select_json_ms_ = 0;
+    [[nodiscard]] const UselessSpot *known_useless_spot(const Eigen::Vector2f &pos,
+                                                       std::uint64_t now_ms) const;
+    void remember_useless_spot(const Eigen::Vector2f &pos, const std::string &name,
+                               std::uint64_t now_ms);
 };

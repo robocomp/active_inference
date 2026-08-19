@@ -154,6 +154,34 @@ private:
     float pub_tx_ = std::numeric_limits<float>::quiet_NaN();
     float pub_ty_ = std::numeric_limits<float>::quiet_NaN();
     bool  pub_ok_ = false;   // did the last publish_target actually re-arm the node?
+    // ★THE TARGET ACTUALLY ON THE NODE, as distinct from the last one PROPOSED: pub_tx_/pub_ty_ are
+    // written on every publish ATTEMPT, declined ones included, so they track what the planner wanted
+    // rather than what any consumer was offered. A completion is evidence about the ARMED cell only.
+    float armed_tx_ = std::numeric_limits<float>::quiet_NaN();
+    float armed_ty_ = std::numeric_limits<float>::quiet_NaN();
+    // ★ONE RETIREMENT PER ARMING. The level-triggered check reads a LEVEL ("not pending"), which stays
+    // true until something re-arms, so without this it fires every cycle at ~20 Hz. Cleared on arming.
+    bool  armed_retired_ = false;
+    // ★★★HAVE WE ACTUALLY SEEN THIS ARMING GO LIVE? The level-triggered check below reads a LEVEL
+    // ("not active and not pending" = Completed), and immediately after publish_target arms the node
+    // that read can still return the PRE-ARM value — which is indistinguishable from a completion.
+    // Live 2026-08-19: room armed the node to Offered and retired its own fresh offer on the next
+    // cycle, over and over, so the consumer never saw anything but JustCompleted and froze with
+    // cmd_adv = cmd_rot = 0.000 while valid cells sat on the wire.
+    // ★So require the node to have been OBSERVED live (Offered or Executing) since it was armed before
+    // a Completed reading may be believed. That turns a level into a genuine edge and costs nothing:
+    // a real completion is always preceded by the node having been live.
+    bool  armed_seen_live_ = false;
+    // ★★★AN OFFER NEEDS A CLOCK. Room had two ways to move on from a target: the consumer completes it,
+    // or break_execution_stall fires — and the latter only runs while the node is EXECUTING. So an offer
+    // the consumer never CLAIMS left room with no path to re-select at all, and it held one cell while
+    // the robot stood still. Measured 2026-08-19 over 44.6 min: interval between new targets p50 3.1 s,
+    // p90 22.3 s, MAX 100.6 s — and every gap over 30 s had outcome=Refused with the robot moving less
+    // than a metre. (Gaps with real travel, 7.6 m / 6.7 m, are a long drive and are fine.)
+    // ★This is the same defect as everything else today: a wait with no temporal term. An offer the
+    // consumer has not taken within a few seconds is one it is declining — it runs at 20 Hz, so seconds
+    // are hundreds of chances — and the right response is to offer somewhere else, not to wait.
+    std::uint64_t armed_at_ms_ = 0;
     long aff_completions_   = 0;   // completed affordances this run
     int  last_outcome_code_ = 0;   // 0 none · 1 satisfied · 2 timeout · 3 refused · 4 abandoned
     std::function<void()>          trigger_layout_;

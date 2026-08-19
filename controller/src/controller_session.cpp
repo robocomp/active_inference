@@ -45,6 +45,9 @@ namespace
 // with nothing to do at all. A few cycles breaks the immediate selection loop; the position memory does
 // the actual remembering.
 constexpr int kUnreachableRounds = 3;
+// How long a "the robot failed here" memory may veto a standpoint. Capped at the producer's recovery
+// time (room_concept IorDecayTime = 120 s); see UselessSpot in the header for the measurement.
+constexpr std::uint64_t kUselessSpotMemoryMs = 120000;
 
 // Contract-resolution key for an affordance's parent object node. Post graph-schema migration the
 // node type is the generic "object" and the class lives in the object_subtype attribute; prefer it
@@ -161,6 +164,54 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
     }
     grid_planner_.set_world(room_polygon_, obstacle_tracker.obstacle_polygons());
     return true;
+}
+
+
+// ★★★THE RECORD MUST SURVIVE THE FAILURE IT EXPLAINS. The first version of this logged from inside
+// execute_plan, so when the selector found nothing there was no plan, execute_plan never ran, and the
+// log went SILENT for the whole freeze — a 55 s hole where the evidence should have been. A diagnostic
+// that stops writing exactly when the thing goes wrong is worse than none, because the gap reads as
+// "nothing happened". So it is written from build_planning_step, before any early return can skip it.
+void ControllerSession::log_selection_json(std::uint64_t t_ms,
+                                           const rc::AffordanceManager &affordance_manager,
+                                           const std::optional<Eigen::Vector2f> &robot_xy,
+                                           const char *stage)
+{
+    if (not select_json_open_)
+    {
+        select_json_.open("affordance_select.jsonl", std::ios::out | std::ios::trunc);
+        select_json_open_ = select_json_.is_open();
+    }
+    if (not select_json_open_ or (t_ms - last_select_json_ms_) < 200) return;
+    last_select_json_ms_ = t_ms;
+    std::string cands;
+    for (const auto &c : affordance_manager.last_candidates())
+        cands += std::format(R"({}{{"name":"{}","state":"{}","eligible":{},"gain":{:.4f}}})",
+                             cands.empty() ? "" : ",", c.node_name, c.state, c.eligible ? 1 : 0, c.gain);
+    select_json_ << std::format(
+        R"({{"t_ms":{},"stage":"{}","rob_x":{:.3f},"rob_y":{:.3f},"has_target":{},"target":"{}",)"
+        R"("tgt_x":{:.3f},"tgt_y":{:.3f},"d_target":{:.3f},"raw_x":{:.3f},"raw_y":{:.3f},)"
+        R"("repair_m":{:.3f},"has_plan":{},"reject":"{}","suppressed":"{}","candidates":[{}]}})" "\n",
+        t_ms, stage,
+        robot_xy ? robot_xy->x() : 0.f, robot_xy ? robot_xy->y() : 0.f,
+        last_target_info_.has_value() ? 1 : 0,
+        last_target_info_.has_value() ? last_target_info_->node_name : std::string{},
+        // ★THE THREE POSES THAT MATTER, TOGETHER. `tgt` is what the controller is driving to, `raw` is
+        // what the PRODUCER published, and `repair_m` is how far our own standpoint repair moved it.
+        // Without these the log cannot answer "is the refusal about the producer's cell or ours?", which
+        // is exactly the question a refusal reading "already at this standpoint" raises when the
+        // published cell is 1.55 m away.
+        last_target_info_.has_value() ? last_target_info_->room_pos.x() : 0.f,
+        last_target_info_.has_value() ? last_target_info_->room_pos.y() : 0.f,
+        (last_target_info_.has_value() and robot_xy)
+            ? (last_target_info_->room_pos - *robot_xy).norm() : -1.f,
+        last_raw_target_pos_ ? last_raw_target_pos_->x() : 0.f,
+        last_raw_target_pos_ ? last_raw_target_pos_->y() : 0.f,
+        (last_target_info_.has_value() and last_raw_target_pos_)
+            ? (last_target_info_->room_pos - *last_raw_target_pos_).norm() : -1.f,
+        current_plan_.has_value() ? 1 : 0,
+        affordance_manager.last_reject_reason(), suppressed_affordance_, cands);
+    select_json_.flush();
 }
 
 std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std::uint64_t timestamp_ms,
@@ -361,7 +412,7 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         affordance_manager.release_execution_claim(graph_);
         // Remember the spot as PUBLISHED, so the same proposal is recognised next time it arrives.
         if (last_raw_target_pos_.has_value())
-            remember_useless_spot(*last_raw_target_pos_, reject_affordance_name_);
+            remember_useless_spot(*last_raw_target_pos_, reject_affordance_name_, timestamp_ms);
         reject_affordance_id_ = 0;
         reject_affordance_name_.clear();
         escapes_on_target_ = 0;
@@ -432,13 +483,18 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
 
     target_wait_logged_ = false;
 
+    // ★Record the selection outcome BEFORE any early return below can skip it.
+    log_selection_json(timestamp_ms, affordance_manager,
+                       std::optional<Eigen::Vector2f>{robot_pose->pos.head<2>().cast<float>()},
+                       target.has_value() ? "selected" : "no-target");
+
     // ── A SPOT WE ALREADY FAILED AT, RECOGNISED BEFORE DRIVING TO IT AGAIN ───────────────────────
     // The producer does not know the approach failed — nothing tells it — so it re-publishes the same
     // standpoint as soon as the suppression lapses, and without this we would re-learn it the expensive
     // way every time: drive over, wedge three times, abandon, repeat. Matched on the RAW published pose,
     // because that is what the producer will send again; the repaired pose is ours, not theirs.
     if (target->from_affordance)
-        if (const auto *spot = known_useless_spot(target->room_pos); spot != nullptr)
+        if (const auto *spot = known_useless_spot(target->room_pos, timestamp_ms); spot != nullptr)
         {
             // Rate-limited: the producer re-offers continuously, and one line per cycle would bury the run.
             if (timestamp_ms - last_useless_log_ms_ >= 5000)
@@ -1548,8 +1604,18 @@ void ControllerSession::log_approach_diagnostics(std::uint64_t t_ms,
                 << "# FINAL APPROACH to an affordance standpoint. One row per cycle inside 1 m, plus every\n"
                    "# cycle of the terminal rotation (which has NO obstacle check of its own).\n"
                    "# phase        = approach | ALIGN (rotating in place) | reached\n"
-                   "# d_target_m   = robot to the STANDPOINT.  d_arrival_m = what the arrival test compares\n"
-                   "#                against goal_threshold. They differ once the path is extended past it.\n"
+                   "# d_target_m   = robot to the STANDPOINT.  d_arrival_m = the EUCLIDEAN distance to the\n"
+                   "#                arrival point that the arrival test COMPARED against goal_thr, captured at\n"
+                   "#                the test itself. It used to be read back out of dist_to_goal, which the PLAIN\n"
+                   "#                tracker overwrites with REMAINING ARC LENGTH on every not-arrived cycle — so\n"
+                   "#                the column silently changed meaning between approach and reached rows, and a\n"
+                   "#                whole day of reading it against goal_thr compared two different quantities.\n"
+                   "# arr_ran      = the goal check was REACHED this cycle (0 = compute() early-returned before it,\n"
+                   "#                so end_arr/goal_thr describe a test that never ran). arr_end_on = endpoint_arrival_\n"
+                   "#                AS SEEN BY THE TEST; if it disagrees with end_arr (polled after compute) the\n"
+                   "#                flag moved during the cycle. arr_passed/arr_recede = the two non-proximity\n"
+                   "#                arrival routes. d_arrival_m < goal_thr with arr_ran=1 and goal_reached=0 is a\n"
+                   "#                CONTRADICTION — that is the thing to chase.\n"
                    "# clear_now/des_m = footprint slack at the CURRENT / DESIRED heading, at the robot's\n"
                    "#                actual pose. free_now/des = the same as the planner's yes/no predicate.\n"
                    "# sweep_min_m / sweep_ok = tightest slack over the headings the rotation passes through,\n"
@@ -1586,7 +1652,7 @@ void ControllerSession::log_approach_diagnostics(std::uint64_t t_ms,
                    "d_target_m,d_arrival_m,yaw_err_deg,cmd_adv,cmd_rot,"
                    "clear_now_m,clear_des_m,free_now,free_des,sweep_min_m,sweep_ok,sweep_worst_deg,"
                    "tgt_sweep_min_m,tgt_sweep_ok,min_esdf_m,goal_reached,raw_tgt_x,raw_tgt_y,fix_held,"
-                   "end_arr,goal_thr\n";
+                   "end_arr,goal_thr,arr_ran,arr_end_on,arr_passed,arr_recede\n";
     }
     if (not approach_csv_open_) return;
 
@@ -1595,7 +1661,7 @@ void ControllerSession::log_approach_diagnostics(std::uint64_t t_ms,
                   << (o.goal_reached ? "reached" : (o.aligning ? "ALIGN" : "approach")) << ','
                   << tgt.room_pos.x() << ',' << tgt.room_pos.y() << ',' << facing_des * kDeg << ','
                   << robot_pose.pos.x() << ',' << robot_pose.pos.y() << ',' << facing_now * kDeg << ','
-                  << d_target << ',' << o.dist_to_goal << ','
+                  << d_target << ',' << o.dist_to_arrival_pt << ','
                   << (o.goal_yaw_err_rad.has_value() ? *o.goal_yaw_err_rad * kDeg : 0.f) << ','
                   << o.adv << ',' << o.rot << ','
                   << clear_now << ',' << clear_des << ',' << (free_now ? 1 : 0) << ',' << (free_des ? 1 : 0) << ','
@@ -1612,7 +1678,9 @@ void ControllerSession::log_approach_diagnostics(std::uint64_t t_ms,
                                            : std::numeric_limits<float>::quiet_NaN()) << ','
                   << (approach_fix_.has_value() ? 1 : 0) << ','
                   << (path_controller.endpoint_arrival() ? 1 : 0) << ','
-                  << path_controller.goal_threshold() << '\n';
+                  << path_controller.goal_threshold() << ','
+                  << (o.arrival_test_ran ? 1 : 0) << ',' << (o.arrival_endpoint_on ? 1 : 0) << ','
+                  << (o.arrival_passed_pt ? 1 : 0) << ',' << (o.arrival_by_recession ? 1 : 0) << '\n';
 
     // On arrival, one console line that says how it actually went — the three quantities you would
     // otherwise reconstruct from the CSV by hand every time.
@@ -2028,20 +2096,30 @@ bool ControllerSession::wants_final_facing(const ControllerTargetInfo &target) c
 
 // Same spot, within the width of the robot: a standpoint half a body away from one that wedged is the
 // same approach through the same gap, not a new opportunity.
-const ControllerSession::UselessSpot *ControllerSession::known_useless_spot(const Eigen::Vector2f &pos) const
+const ControllerSession::UselessSpot *ControllerSession::known_useless_spot(const Eigen::Vector2f &pos,
+                                                                           const std::uint64_t now_ms) const
 {
     constexpr float kSameSpotM = 0.30f;
     for (const auto &s : useless_spots_)
+    {
+        // ★EXPIRED EVIDENCE IS NOT EVIDENCE. The failure was about a situation — an obstacle field, an
+        // approach bearing, a pose — and those change. Past the producer's recovery time the veto must
+        // be allowed to be wrong, or it outlives everything that justified it.
+        if (now_ms >= s.when_ms and now_ms - s.when_ms > kUselessSpotMemoryMs) continue;
         if ((s.pos - pos).norm() <= kSameSpotM)
             return &s;
+    }
     return nullptr;
 }
 
-void ControllerSession::remember_useless_spot(const Eigen::Vector2f &pos, const std::string &name)
+void ControllerSession::remember_useless_spot(const Eigen::Vector2f &pos, const std::string &name,
+                                             const std::uint64_t now_ms)
 {
+    std::erase_if(useless_spots_, [&](const UselessSpot &s)
+                  { return now_ms >= s.when_ms and now_ms - s.when_ms > kUselessSpotMemoryMs; });
     for (auto &s : useless_spots_)
-        if ((s.pos - pos).norm() <= 0.30f) { ++s.hits; return; }   // same spot, one more failure
-    useless_spots_.push_back({pos, name, 1});
+        if ((s.pos - pos).norm() <= 0.30f) { ++s.hits; s.when_ms = now_ms; return; }   // re-failed: restamp
+    useless_spots_.push_back({pos, name, 1, now_ms});
     std::println("[controller] remembering ({:.2f},{:.2f}) as unreachable — {} spot(s) now known bad. "
                  "The producer is not told, so it will offer this again; we will not drive there again.",
                  pos.x(), pos.y(), useless_spots_.size());
@@ -3147,37 +3225,28 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                              robot_pose.pos, time_source());
             return;
         }
-        // ★ REFUSE A TARGET WE WERE ALREADY STANDING ON. If the goal reads reached on the very first
-        // cycle after adopting it, no approach happened, so nothing was observed and there is nothing
-        // to report as done. Consuming it anyway is what produced the dwell loop: reach instantly,
-        // hold the 3 s dwell, get re-offered (the no-two-in-a-row guard yields when it would leave
-        // nothing on offer), reach instantly again — from outside, a hung robot. Measured 2026-08-18:
-        // about half of ALL completions were of this kind, in every run.
-        // A REFUSAL is the honest report, and it is the case epistemic_refused / Outcome::Refused
-        // already exist for: not attempted, nothing observed, the belief unchanged — the producer is
-        // simply told this standpoint is not worth offering from here, and picks another cell.
-        // ★No threshold: the question is whether an approach OCCURRED, and the first cycle answers it.
+        // ★★★THE "ALREADY THERE ⇒ REFUSE" RULE IS GONE (2026-08-19). Introduced by 9b3e5a4 for a real
+        // problem — a standpoint the robot already occupies yields no new image, so consuming it as an
+        // arrival and dwelling 3 s for an acquisition that cannot come was a loop — but reporting it as
+        // a REFUSAL made the producer and consumer livelock instead, and that turned out to be far
+        // worse. It was the proximate cause of every stall measured today:
+        //   · ~104 completions/min with the robot standing still (refuse → re-offer → refuse)
+        //   · the take→refuse cycle at exactly the retry period, target never held long enough to plan
+        //   · "REFUSED: already at this standpoint" logged with the published cell 1.55 m away
+        // ★A refusal is a statement to the PRODUCER that its cell is not standable. "I am already here"
+        // is not that: the cell was fine, the robot simply arrived early. Reporting it as SATISFIED is
+        // both true and terminating — room stamps the cell visited (mark_and_refresh writes the robot's
+        // own pose into the visit grid), its neglect drops, and the next selection goes elsewhere. That
+        // is the behaviour that ran for weeks before this rule existed.
+        // ★9b3e5a4's ACTUAL insight is kept: there is no acquisition to wait for, so skip the dwell.
+        // That removes the loop it was written to fix without inventing a refusal to do it.
         if (target_is_new_ and last_target_info_.has_value() and last_target_info_->from_affordance)
         {
             qInfo() << "[affordance]" << last_target_info_->node_name.c_str()
-                    << "REFUSED: already at this standpoint on the first cycle — no approach, nothing "
-                       "observed. Reporting refusal so the producer offers a different cell.";
-            if (graph_ and active_target_id_ != 0)
-                if (auto n = graph_->get_node(active_target_id_); n.has_value())
-                {
-                    auto node = n.value();
-                    rc::affordance::write_outcome(*graph_, node, rc::affordance::Outcome::Refused);
-                    graph_->add_or_modify_attrib_local<epistemic_refused_att>(node, true);
-                    graph_->add_or_modify_attrib_local<epistemic_refused_x_m_att>(
-                        node, static_cast<float>(robot_pose.pos.x()));
-                    graph_->add_or_modify_attrib_local<epistemic_refused_y_m_att>(
-                        node, static_cast<float>(robot_pose.pos.y()));
-                    graph_->update_node(node);
-                }
-            // Release WITHOUT the dwell: there is no acquisition to wait for.
+                    << "reached on the first cycle — already at this standpoint. Completing as "
+                       "SATISFIED without the dwell: the cell is visited, there is nothing to wait for.";
             finalize_reached(affordance_manager, path_controller, motion_commander, display,
-                             robot_pose.pos, time_source(), /*allow_dwell=*/false,
-                             rc::affordance::Outcome::Refused);
+                             robot_pose.pos, time_source(), /*allow_dwell=*/false);
             return;
         }
         qInfo() << "[affordance]" << (last_target_info_.has_value() ? last_target_info_->node_name.c_str() : "?")

@@ -1,4 +1,7 @@
 #include "epistemic_planner.h"
+#include <fstream>
+#include <locale>
+#include <format>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -496,8 +499,14 @@ std::vector<EpistemicPlanner::Target> EpistemicPlanner::evaluate_targets() const
         // no mode switch, no "info exhausted" flag and no gain floor. The third makes the choice
         // among equally-informative cells the CHEAPEST one, which is what turns the sweep into
         // contiguous coverage instead of an oscillation between extremes.
-        t.score = fim_gain * ior_suppressor
-                + params.w_ior_drive * route_neglect
+        // ★ATTEMPT-IoR MULTIPLIES THE REWARD, AND ONLY THE REWARD. This is the de-prioritisation
+        // that mark_target_finished used to obtain by forging a visit; it now acts here, where it
+        // belongs, leaving `neglect_nats` to report the TRUE observation age. A cell that was tried
+        // and not reached therefore keeps its (correct, growing) neglect and simply stops being
+        // proposed for a while — no blacklist, and it returns on its own as the attempt decays.
+        const float attempt_supp = attempt_suppressor(pos, now);
+        t.score = attempt_supp * (fim_gain * ior_suppressor
+                                  + params.w_ior_drive * route_neglect)
                 - params.w_travel_cost * (t.distance / room_diag);
         t.eigenvector_score = fim_gain;
         targets.push_back(t);
@@ -591,6 +600,53 @@ std::optional<EpistemicPlanner::Target> EpistemicPlanner::select_target()
         std::fflush(stdout);
     }
 
+    // ★★★THE SELECTION, AS DATA. Every scoring hypothesis tested on 2026-08-19 died because it was
+    // seeded with GUESSES about this state — I asserted travel cost dominated the argmax and a
+    // simulation over both a sparse field and a 348-cell dense grid refuted it twice. The rule is not
+    // the unknown; the per-cell ages and suppressor values are. So dump the top candidates with every
+    // term that entered their score, and let the bench replay a real selection instead of my model of
+    // one. Self-describing (each value carries its key) after four positional-CSV misreadings today.
+    // Throttled to one record per second: this is for offline replay, not per-cycle telemetry.
+    {
+        const auto now = std::chrono::steady_clock::now();   // the debug block above owns its own
+        static std::ofstream sel_json;
+        static bool sel_open = false;
+        static std::chrono::steady_clock::time_point sel_last{};
+        if (not sel_open)
+        {
+            sel_json.open("epistemic_select.jsonl", std::ios::out | std::ios::trunc);
+            sel_json.imbue(std::locale::classic());   // decimal POINT under LANG=es_ES (see CLAUDE.md)
+            sel_open = sel_json.is_open();
+        }
+        if (sel_open and std::chrono::duration<float>(now - sel_last).count() >= 1.0f)
+        {
+            sel_last = now;
+            const auto rp2 = robot_pos();
+            std::string cs;
+            const int m = std::min<int>(8, static_cast<int>(targets.size()));
+            for (int i = 0; i < m; ++i)
+            {
+                const auto& t = targets[i];
+                const float age = visit_grid_.age_seconds(t.position, now);
+                const float stale = visit_grid_.staleness(t.position, params.ior_decay_time, now);
+                cs += std::format(
+                    R"({}{{"x":{:.3f},"y":{:.3f},"score":{:.5f},"fim":{:.5f},"neg":{:.4f},)"
+                    R"("age_s":{:.1f},"stale":{:.4f},"attempt_supp":{:.4f},"d":{:.3f}}})",
+                    cs.empty() ? "" : ",", t.position.x(), t.position.y(), t.score,
+                    t.eigenvector_score, neglect_nats(t.position, now), age, stale,
+                    attempt_suppressor(t.position, now), t.distance);
+            }
+            sel_json << std::format(
+                R"({{"rob_x":{:.3f},"rob_y":{:.3f},"n_cand":{},"n_grid":{},"near_rejected":{},)"
+                R"("w_travel":{:.3f},"w_drive":{:.3f},"w_ior":{:.3f},"tau":{:.1f},"min_distance":{:.2f},)"
+                R"("cands":[{}]}})" "\n",
+                rp2.x(), rp2.y(), dbg_candidates_, dbg_grid_, dbg_near_,
+                params.w_travel_cost, params.w_ior_drive, params.w_ior, params.ior_decay_time,
+                params.min_distance, cs);
+            sel_json.flush();
+        }
+    }
+
     // Greedy argmax: targets are already sorted descending by score.
     // The highest-scored candidate maximises FIM gain under IoR suppression —
     // i.e. "the spot that reduces most uncertainty that we haven't visited recently".
@@ -613,10 +669,41 @@ void EpistemicPlanner::mark_and_refresh()
 void EpistemicPlanner::mark_target_finished(const Eigen::Vector2f& pos)
 {
     if (!visit_grid_.initialized) return;
-    visit_grid_.mark_visited_with_falloff(pos, params.ior_path_radius, params.ior_decay_time);
+    // ★NO visit-grid stamp here any more — see the header. An attempt is not an observation, and
+    // mark_and_refresh() already records, from the robot's real pose, everywhere it has actually been.
+    note_attempt(pos);
     current_target_.reset();
     dwelling_ = false;
     refresh_ior_overlay();
+}
+
+void EpistemicPlanner::note_attempt(const Eigen::Vector2f& pos)
+{
+    const auto now = std::chrono::steady_clock::now();
+    // Drop attempts that have fully decayed, and collapse a repeat at the same spot onto one entry
+    // (the receptive field is what "the same spot" means everywhere else in this file).
+    std::erase_if(attempts_, [&](const Attempt& a)
+    {
+        const bool expired = std::chrono::duration<float>(now - a.when).count()
+                             >= std::max(0.1f, params.ior_decay_time);
+        return expired or (a.pos - pos).norm() <= params.ior_path_radius;
+    });
+    attempts_.push_back({pos, now});
+}
+
+float EpistemicPlanner::attempt_suppressor(const Eigen::Vector2f& pos,
+                                           std::chrono::steady_clock::time_point now) const
+{
+    // The most recent attempt whose receptive field covers `pos` decides. Linear recovery over
+    // ior_decay_time, matching staleness()'s shape so the two IoR channels behave alike.
+    float supp = 1.f;
+    for (const auto& a : attempts_)
+    {
+        if ((a.pos - pos).norm() > params.ior_path_radius) continue;
+        const float elapsed = std::chrono::duration<float>(now - a.when).count();
+        supp = std::min(supp, std::min(1.f, elapsed / std::max(0.1f, params.ior_decay_time)));
+    }
+    return supp;
 }
 
 // refresh_ior_overlay — rebuilds ior_cells_ from the live visit grid.

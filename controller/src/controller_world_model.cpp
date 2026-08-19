@@ -319,9 +319,21 @@ bool ControllerWorldModel::same_target_instance(const ControllerTargetInfo &lhs,
     constexpr float pos_eps_m = 0.05f;
     constexpr float yaw_eps_rad = 0.05f;
 
+    // ★★★IDENTITY IS WHERE THE TARGET IS, NOT WHAT THE PROTOCOL IS DOING ABOUT IT.
+    // `epistemic_pending` used to be compared here, and it is a PROTOCOL STATE BIT: it flips from false
+    // to true every time the producer re-arms the node. So re-offering the SAME standpoint read as a
+    // different target instance, which set `target_is_new_`, which fed the rule "if the goal reads
+    // reached on the first cycle after adopting it, no approach happened — refuse it". The robot was
+    // standing on that standpoint because it had already driven there, so:
+    //     re-arm -> looks new -> already reached -> REFUSED: already at this standpoint on the first cycle
+    //     -> producer re-arms -> ... for ever, with the robot parked.
+    // ★It is the same defect as `epistemic_gain`, removed from this comparison in 7fb6a62 for the same
+    // reason: a value that changes for protocol reasons cannot be part of a target's identity. What
+    // identifies a standpoint is the node it belongs to, where it is, and which way it faces.
+    // ★Dropping it does not lose a replan that matters: a re-arm at an unchanged pose needs no new path,
+    // and any real move of the standpoint is still caught by the pose and yaw tests below.
     return lhs.node_id == rhs.node_id
         && lhs.from_affordance == rhs.from_affordance
-        && lhs.epistemic_pending == rhs.epistemic_pending
         && (lhs.room_pos - rhs.room_pos).cwiseAbs().maxCoeff() < pos_eps_m
         && std::abs(lhs.yaw_rad - rhs.yaw_rad) < yaw_eps_rad;
 }

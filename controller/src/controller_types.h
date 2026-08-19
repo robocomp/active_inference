@@ -424,6 +424,21 @@ struct ControlOutput
     // no waypoint progress by design.
     bool  aligning = false;
     float dist_to_goal = 0.f;
+    // ★★★THE VALUE THE ARRIVAL TEST ACTUALLY COMPARED — dist_to_goal is NOT it.
+    // compute() writes the Euclidean distance to the arrival point into dist_to_goal, tests it against
+    // goal_threshold, and RETURNS if it fires. If it does not fire, the PLAIN tracker runs afterwards
+    // and overwrites dist_to_goal with the REMAINING ARC LENGTH along the spline. So on every
+    // not-arrived cycle the field a log reads holds arc length, while the test compared a chord — two
+    // different quantities in one column, changing meaning between phases. approach_diag.csv was read
+    // against goal_threshold for a whole day on that basis. This field is written once, at the test,
+    // and no tracker touches it.
+    float dist_to_arrival_pt = 0.f;
+    // Why the arrival test did or did not run, recorded at the moment it was evaluated rather than
+    // inferred afterwards from follower state that later cycles may have changed.
+    bool  arrival_test_ran = false;   // execution reached the goal check at all (not an early return)
+    bool  arrival_endpoint_on = false;// endpoint_arrival_ as seen BY THE TEST, not as polled later
+    bool  arrival_passed_pt = false;  // fired via passed_arrival (path continues past the point)
+    bool  arrival_by_recession = false;// fired via passed_by_recession (receded from a close approach)
     // Signed angular error to the commanded facing yaw, when the target carries one. This is the exact
     // quantity the arrival test compares against align_yaw_tol_rad — surfaced so the UI can show what
     // arrival is actually waiting on, instead of it only being inferable from the robot's behaviour.
