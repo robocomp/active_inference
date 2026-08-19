@@ -820,8 +820,16 @@ StuckCmdLinEps = 0.05    # m/s — LEGACY (no longer gates detection; kept for c
 StuckCmdRotEps = 0.15    # rad/s — LEGACY (see above)
 StuckMeasLinEps = 0.02   # m/s — LEGACY (base-speed gate removed; detection now uses commanded-vs-measured motion)
 StuckMeasRotEps = 0.08   # rad/s — LEGACY (see above)
-StuckSlipRatio = 0.25    # wedge = measured base speed < this × commanded speed (prediction error)
-StuckConfirmMs = 1500    # sustained command-without-motion (ms) before escape fires
+# ★RELAXED 2026-08-19 — the detector was firing on marginal cases. Measured wedges were achieving
+# 23% of commanded travel against a 25% bar: right on the edge, which is what a false-alarm-prone
+# threshold looks like. An escape is expensive (it reverses, drops a virtual obstacle and replans), so
+# the cost of a false positive is much higher than of a late true positive: the robot leaves a good
+# path and poisons the local map for a wedge that was not there. Ratio 0.25 -> 0.12 (only call it
+# wedged when it achieves almost nothing) and window 1500 -> 3000 ms (a full second of real driving
+# cannot be mistaken for a wedge). Both were 0.25/1500 before; revert here if escapes stop firing on
+# genuine wedges.
+StuckSlipRatio = 0.12    # wedge = measured base speed < this × commanded speed (prediction error)
+StuckConfirmMs = 3000    # sustained command-without-motion (ms) before escape fires
 EscapeAdvSpeedMps = 0.15 # reverse speed (issued negative)
 EscapeRotSpeedRps = 0.35 # slight turn rate during escape
 EscapeDistanceM = 0.30   # back up at most this far …

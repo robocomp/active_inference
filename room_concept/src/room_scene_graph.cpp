@@ -694,6 +694,36 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
         {
             const bool a = G_->get_attrib_by_name<active_att>(n.value()).value_or(false);
             const bool p = G_->get_attrib_by_name<epistemic_pending_att>(n.value()).value_or(true);
+            // ★★★RULE 3: EVERY CLAIM IS A LEASE, AND A LEASE DOES NOT ASK PERMISSION.
+            // `break_execution_stall` already watches a claimed affordance — but it needs the planner
+            // to hold a target and it measures approach PROGRESS, so it cannot fire when the consumer
+            // has dropped its target and plan while still holding the claim. That is the measured
+            // failure: 12% of live records read `Executing` with the consumer holding no target at
+            // all, and the producer had no escape whatsoever. TLA+ agrees — with a stuttering consumer
+            // `ProducerLive` is VIOLATED even with the unclaimed-offer timeout, because that only
+            // covers Offered-and-unclaimed. An independent review named it before seeing either.
+            // ★So: an unconditional cap on how long a claim may be held, on OUR clock, regardless of
+            // what the consumer's internal state is or whether we can see it. Generous — well above
+            // any real approach and above EXEC_STALL_TIMEOUT_S, so it is a backstop for the case the
+            // progress watchdog structurally cannot see, never a competitor to it.
+            constexpr std::uint64_t kExecutionLeaseMs = 45000;
+            if (a and p and armed_at_ms_ != 0)
+            {
+                const auto now_ms = static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count());
+                if (now_ms - armed_at_ms_ > kExecutionLeaseMs)
+                {
+                    std::print("[planner] afford_room claim held {:.1f}s without completing — LEASE "
+                               "EXPIRED, reclaiming ({:.2f},{:.2f}) and selecting elsewhere\n",
+                               (now_ms - armed_at_ms_) / 1000.f, armed_tx_, armed_ty_);
+                    std::fflush(stdout);
+                    armed_at_ms_ = 0;
+                    if (planner.current_target())
+                        planner.mark_target_finished(planner.current_target()->position);
+                }
+            }
+
             // ★UNCLAIMED-OFFER TIMEOUT. `a` is the consumer's claim; if the node is still merely pending
             // after this long, nobody is coming. Retire it and let select_target choose elsewhere —
             // otherwise room waits on a consumer that has already declined, for up to 100 s (measured).

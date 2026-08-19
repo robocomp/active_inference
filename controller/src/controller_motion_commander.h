@@ -1,4 +1,5 @@
 #pragma once
+#include <source_location>
 
 #include <genericworker.h>
 
@@ -49,7 +50,15 @@ public:
         float rot_scale = 1.f;      // multiplier actually applied to rot
     };
     UncertaintyDiag last_uncertainty_diag() const { return uncertainty_diag_; }
-    void send_speed_command(float adv_mps, float side_mps, float rot_rps);
+    // ★★★WHO COMMANDED THE BASE. Measured 2026-08-19: 16 s in which cmd_rot alternated between
+    // -0.800 and +0.800 (the full cap) while track_s stayed frozen at 0.07 and cross-track error grew
+    // 0.46 -> 0.89 m. The alternation was perfectly correlated with adv: (0.106, -0.800) one cycle,
+    // (0.000, +0.800) the next. That is TWO command sources taking turns, neither ever winning — the
+    // robot pirouettes off its path while making no progress along it, and the stuck detector stays
+    // silent because it IS moving. std::source_location makes the code name its own caller, so both
+    // authorities are identified in one run instead of by reading the tracker.
+    void send_speed_command(float adv_mps, float side_mps, float rot_rps,
+                            std::source_location loc = std::source_location::current());
     void stop_robot();
 
     /// ARM / DISARM the base output entirely.

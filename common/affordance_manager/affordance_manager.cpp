@@ -1,4 +1,8 @@
 #include <chrono>
+#include <source_location>
+#include <locale>
+#include <format>
+#include <fstream>
 #include "affordance_manager.h"
 
 #include <dsr/api/dsr_api.h>
@@ -295,10 +299,23 @@ void AffordanceManager::monitor_execution(const std::shared_ptr<DSR::DSRGraph> &
     // race. publish_target() also sets waiting_completion_ directly, so a completion that happens
     // entirely between two polls is still seen.
     if (pending)
+    {
         waiting_completion_ = true;
+        pending_seen_ = true;          // the arming is real; a not-pending reading now means something
+    }
+    else if (waiting_completion_ and not pending_seen_)
+    {
+        // Armed, then read not-pending WITHOUT ever having been seen pending: that is a stale read of
+        // our own write, not a completion. Say so once rather than silently inventing an arrival.
+        std::print("[affordance] ignoring a not-pending reading on '{}' that was never seen pending — "
+                   "stale read of our own arming, not a completion\n", managed_node_name_);
+        std::fflush(stdout);
+        waiting_completion_ = false;
+    }
     else if (waiting_completion_)
     {
         waiting_completion_ = false;
+        pending_seen_ = false;
         completion_detected_ = true;
         // Latch WHY it ended, at the same moment the completion is detected. Read here rather than
         // when the caller gets round to consume_completion_event(): by then the producer may have
@@ -362,6 +379,7 @@ bool AffordanceManager::publish_target(const std::shared_ptr<DSR::DSRGraph> &gra
 
         managed_node_id_ = id_opt.value();
         waiting_completion_ = true;   // armed on creation — see the note on the re-publish path
+        pending_seen_ = false;        // not believed until observed pending
         node_opt = graph->get_node(managed_node_id_);
         if (!node_opt.has_value())
             return false;
@@ -433,6 +451,7 @@ bool AffordanceManager::publish_target(const std::shared_ptr<DSR::DSRGraph> &gra
     // in some state. A consumer that claims and finishes between two of our polls would otherwise be
     // invisible, which is precisely the race that wedged both agents (see monitor_execution).
     waiting_completion_ = true;
+    pending_seen_ = false;   // not believed until observed pending
 
     if (graph->get_edge(parent_id, managed_node_id_, "RT").has_value())
         graph->delete_edge(parent_id, managed_node_id_, "RT");
@@ -641,6 +660,9 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
     {
         current_affordance_id_ = resumed_target->node_id;
         current_affordance_name_ = resumed_target->node_name;
+        claimed_x_ = resumed_target->room_pos.x();
+        claimed_y_ = resumed_target->room_pos.y();
+        claimed_pose_known_ = true;
         if (const auto key = make_affordance_key(*resumed_target); key != selected_target_debug_report_)
         {
             selected_target_debug_report_ = key;
@@ -816,6 +838,9 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
         graph->update_node(node);
 
         current_affordance_id_ = best_target->node_id;
+        claimed_x_ = best_target->room_pos.x();
+        claimed_y_ = best_target->room_pos.y();
+        claimed_pose_known_ = true;
         current_affordance_name_ = best_target->node_name;
         // A DIFFERENT affordance has been chosen, so the previous one is no longer "in a row" — it may
         // win the next contest on its merits. This forbids repetition, not revisiting.
@@ -857,8 +882,26 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
 }
 
 void AffordanceManager::mark_reached(const std::shared_ptr<DSR::DSRGraph> &graph,
-                                     rc::affordance::Outcome outcome)
+                                     rc::affordance::Outcome outcome,
+                                     std::source_location loc)
 {
+    // ★EVERY completion, with its caller and how far the robot was from what it claimed. The phantom
+    // completions (robot 3.11 m from the cell, counter climbing while it stood still) have to come
+    // through here — this names which call site produces them.
+    {
+        static std::ofstream j;
+        static bool ok = false;
+        if (not ok) { j.open("completions.jsonl", std::ios::out | std::ios::trunc);
+                      j.imbue(std::locale::classic()); ok = j.is_open(); }
+        if (ok)
+        {
+            j << std::format(R"({{"outcome":"{}","line":{},"fn":"{}","claimed_x":{:.3f},)"
+                             R"("claimed_y":{:.3f},"known":{}}})" "\n",
+                             rc::affordance::to_string(outcome), loc.line(), loc.function_name(),
+                             claimed_x_, claimed_y_, claimed_pose_known_ ? 1 : 0);
+            j.flush();
+        }
+    }
     if (!graph || current_affordance_id_ == 0)
         return;
 
@@ -867,14 +910,11 @@ void AffordanceManager::mark_reached(const std::shared_ptr<DSR::DSRGraph> &graph
                   current_affordance_id_, current_affordance_name_);
     // Remember it so the next selection cannot hand back the affordance that just finished.
     last_completed_id_ = current_affordance_id_;
-    last_completed_pose_known_ = false;
-    if (auto n0 = graph->get_node(current_affordance_id_); n0.has_value())
-        if (const auto t0 = read_target(graph, n0.value()); t0.has_value())
-        {
-            last_completed_x_ = t0->room_pos.x();
-            last_completed_y_ = t0->room_pos.y();
-            last_completed_pose_known_ = true;
-        }
+    // ★FROM WHAT WE CLAIMED, not from the node — see claimed_x_ in the header.
+    last_completed_pose_known_ = claimed_pose_known_;
+    last_completed_x_ = claimed_x_;
+    last_completed_y_ = claimed_y_;
+    claimed_pose_known_ = false;
     // A REFUSAL IS NOT A COMPLETION. Stamp it, so the yield below cannot retry it this instant.
     if (outcome == rc::affordance::Outcome::Refused)
     {
@@ -882,9 +922,7 @@ void AffordanceManager::mark_reached(const std::shared_ptr<DSR::DSRGraph> &graph
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count());
         RefusedSpot spot{.when_ms = now_ms};
-        if (auto n = graph->get_node(current_affordance_id_); n.has_value())
-            if (const auto tgt = read_target(graph, n.value()); tgt.has_value())
-            { spot.x = tgt->room_pos.x(); spot.y = tgt->room_pos.y(); }
+        if (claimed_pose_known_) { spot.x = claimed_x_; spot.y = claimed_y_; }
         refused_at_ms_[current_affordance_id_] = spot;
     }
 

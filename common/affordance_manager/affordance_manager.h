@@ -1,4 +1,5 @@
 #pragma once
+#include <source_location>
 
 #include <Eigen/Dense>
 
@@ -116,7 +117,11 @@ public:
     // compiling while silently claiming "satisfied", which is exactly the conflation this parameter
     // exists to end — and it would be invisible, because the wrong value looks like a successful look.
     // Making it explicit forces each terminal path to say what actually happened.
-    void mark_reached(const std::shared_ptr<DSR::DSRGraph> &graph, rc::affordance::Outcome outcome);
+    // ★WHO COMPLETED IT. mark_reached is the ONLY writer that clears epistemic_pending, so every
+    // completion — including the phantom ones logged with the robot 3.11 m from the cell — passes
+    // through here. source_location names the caller in one run instead of reading every call site.
+    void mark_reached(const std::shared_ptr<DSR::DSRGraph> &graph, rc::affordance::Outcome outcome,
+                      std::source_location loc = std::source_location::current());
 
     // Producer side: how the affordance this manager owns last ended. Valid after
     // consume_completion_event() returns true; Outcome::None before any completion.
@@ -182,6 +187,16 @@ private:
     std::string managed_node_name_;
     std::uint64_t managed_node_id_ = 0;
     bool waiting_completion_ = false;
+    // ★★★HAVE WE ACTUALLY SEEN THIS ARMING PENDING? publish_target() sets waiting_completion_
+    // OPTIMISTICALLY, so if the next poll reads pending==false — a stale read of a node we just armed —
+    // the "pending -> not pending" edge fires and a completion is declared with NO consumer
+    // involvement at all. Measured 2026-08-19: completions climbing 389→392 while the robot sat still
+    // 2.3–3.1 m from the offered cell and the consumer held no target. The producer was completing its
+    // own offers, never marking the cell visited (the robot was not there), re-offering it, and the
+    // consumer answered "just-completed". Neither agent was driving the robot.
+    // ★Same defect, same cure as RoomSceneGraph::armed_seen_live_: a LEVEL may only be believed as an
+    // EDGE once the level has actually been observed on the other side first.
+    bool pending_seen_ = false;
     bool completion_detected_ = false;
     bool last_managed_active_ = false;
     bool last_managed_pending_ = true;
@@ -205,6 +220,16 @@ private:
     // is a different affordance and must be selectable at once. Same category error as suppress_target
     // (node-keyed, retires the whole channel) and as the first refusal-hold attempt.
     std::uint64_t last_completed_id_ = 0;   // skip this one on the next selection (see suppressed_name)
+    // ★★★THE STANDPOINT WE ARE ACTUALLY EXECUTING, captured when we CLAIM it. mark_reached used to
+    // recover it by RE-READING the node — but the producer overwrites that node with the NEXT cell as
+    // soon as it sees the completion, so the read returned the incoming cell and we recorded it as
+    // "just completed". We then suppressed exactly the cell we were supposed to take. Measured
+    // 2026-08-19: robot arrived at (-1.00,+3.62) to 0.11 m, room offered (-3.50,+1.62) — 3.2 m away —
+    // and the consumer rejected it as just-completed, 72% of cycles, robot issuing NO command for 48 s.
+    // ★Identity must be carried as DATA at the moment of the decision, never inferred later from
+    // mutable shared state. Reading a shared register to find out what you yourself just did is a race.
+    float claimed_x_ = 0.f, claimed_y_ = 0.f;
+    bool  claimed_pose_known_ = false;
     float last_completed_x_ = 0.f, last_completed_y_ = 0.f;
     bool  last_completed_pose_known_ = false;
     // node id -> selection rounds still to skip. See suppress_target: the consumer could not reach it.

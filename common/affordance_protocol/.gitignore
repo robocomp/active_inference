@@ -1,0 +1,10 @@
+# TLC leaves a trace module + a states/ dir per run; they are outputs, not sources.
+# Left untracked deliberately: `git add <dir>` would sweep them in, and that once put 1.5 GB into a
+# single commit and got the whole push rejected. Stage by PATH here, always.
+formal/states/
+formal/*_TTrace_*.tla
+formal/*_TTrace_*.bin
+formal/*.cfg
+# compiled benches — rebuild with the one-line g++ command in each file's header
+protocol_bench
+scoring_bench

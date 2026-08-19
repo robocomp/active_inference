@@ -1,4 +1,8 @@
 #include <print>
+#include <source_location>
+#include <locale>
+#include <format>
+#include <fstream>
 
 #include "controller_motion_commander.h"
 
@@ -184,8 +188,31 @@ void ControllerMotionCommander::publish_robot_reference_speed(float adv_mps,
         qWarning() << "Controller failed to publish robot reference speed attrs to DSR";
 }
 
-void ControllerMotionCommander::send_speed_command(float adv_mps, float side_mps, float rot_rps)
+void ControllerMotionCommander::send_speed_command(float adv_mps, float side_mps, float rot_rps,
+                                                   std::source_location loc)
 {
+    // One self-describing line per command, naming the caller. Append-only; a torn tail line fails to
+    // parse rather than being misread, unlike the four positional CSV columns misread earlier today.
+    {
+        static std::ofstream cmd_json;
+        static bool open_ok = false;
+        if (not open_ok)
+        {
+            cmd_json.open("base_commands.jsonl", std::ios::out | std::ios::trunc);
+            cmd_json.imbue(std::locale::classic());   // decimal POINT under LANG=es_ES (CLAUDE.md)
+            open_ok = cmd_json.is_open();
+        }
+        if (open_ok)
+        {
+            const auto now_ms = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
+            cmd_json << std::format(
+                R"({{"t_ms":{},"adv":{:.4f},"side":{:.4f},"rot":{:.4f},"line":{},"fn":"{}"}})" "\n",
+                now_ms, adv_mps, side_mps, rot_rps, loc.line(), loc.function_name());
+            cmd_json.flush();
+        }
+    }
     const float adv_mm_s = adv_mps * 1000.f;
     const float side_mm_s = side_mps * 1000.f;
 

@@ -3184,7 +3184,24 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         return;
     }
 
-    if (control_output.goal_reached)
+    // ★★★A "REACHED" WITH NO PATH IS NOT AN ARRIVAL. compute()'s FIRST line returns
+    //     if (!active_ || path_room_.empty()) { active_ = false; out.goal_reached = true; return out; }
+    // so a target adopted this cycle — before any path is installed — reports reached. Consuming that
+    // told the producer a cell was visited while the robot stood 3.11 m away: 383 completions, robot
+    // stationary, room re-offering an unvisited cell and the consumer answering "I just did that".
+    // ★THE DISCRIMINATOR IS WHERE THE ROBOT ACTUALLY IS. A genuine arrival has the body overlapping
+    // the standpoint (measured live: 0.18 m of a 6.85 m approach); the degenerate one had the robot
+    // 3.11 m away. The bound is the arrival band plus the body radius — both already in the system,
+    // so nothing new is introduced, and it is deliberately generous: it exists to reject a metres-away
+    // "arrival", not to re-judge a close one. Being slightly outside the band is still an arrival.
+    const float d_here =
+        last_target_info_.has_value()
+            ? (last_target_info_->room_pos - robot_pose.pos.head<2>().cast<float>()).norm()
+            : std::numeric_limits<float>::infinity();
+    const bool arrival_is_real =
+        not last_target_info_.has_value() or not last_target_info_->from_affordance
+        or d_here <= path_controller.goal_threshold() + approach_body_.circumscribed_radius();
+    if (control_output.goal_reached and arrival_is_real)
     {
         // Reached an affordance pose. Resolve its contract (type-level defaults + per-node
         // overrides). A Servo policy runs the lock-on micro-search to satisfy the contract's
@@ -3240,11 +3257,24 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         // is the behaviour that ran for weeks before this rule existed.
         // ★9b3e5a4's ACTUAL insight is kept: there is no acquisition to wait for, so skip the dwell.
         // That removes the loop it was written to fix without inventing a refusal to do it.
-        if (target_is_new_ and last_target_info_.has_value() and last_target_info_->from_affordance)
+        // ★★★AND IT MUST ACTUALLY BE THERE. `goal_reached` is ALSO returned true by the follower's
+        // first line when it has no path yet (`if (!active_ || path_room_.empty()) { goal_reached =
+        // true; return; }`), so a target adopted this cycle reads "reached" BEFORE any path exists.
+        // Reporting that as Satisfied told the producer a cell had been visited that the robot was
+        // 3.11 m away from: 383 completions, robot stationary, room re-offering the same unvisited
+        // cell and the consumer answering "I just did that" — both frozen for 40 s at a time.
+        // ★So require the robot to be within the arrival band of the standpoint. Same quantity the
+        // arrival gate itself compares; no new constant. A degenerate "reached" with no path fails it.
+        const float d_to_standpoint =
+            last_target_info_.has_value()
+                ? (last_target_info_->room_pos - robot_pose.pos.head<2>().cast<float>()).norm()
+                : std::numeric_limits<float>::infinity();
+        if (target_is_new_ and last_target_info_.has_value() and last_target_info_->from_affordance
+            and d_to_standpoint <= path_controller.goal_threshold())
         {
             qInfo() << "[affordance]" << last_target_info_->node_name.c_str()
-                    << "reached on the first cycle — already at this standpoint. Completing as "
-                       "SATISFIED without the dwell: the cell is visited, there is nothing to wait for.";
+                    << "reached on the first cycle at" << d_to_standpoint
+                    << "m — already at this standpoint. Completing as SATISFIED without the dwell.";
             finalize_reached(affordance_manager, path_controller, motion_commander, display,
                              robot_pose.pos, time_source(), /*allow_dwell=*/false);
             return;
