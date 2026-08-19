@@ -80,6 +80,12 @@ enum class Routable
 {
     Yes,          // a route exists from wherever the robot is
     CloserExists, // no route, but there is a reachable pose nearer the cell → approach
+    // ★THE APPROACH THAT IS NOT A DRIVE. The closest reachable pose is inside the arrival band of
+    // where the robot already stands, so "approaching" it covers no ground: the consumer would arrive
+    // on the cycle it set off. Live on 2026-08-19 this alternated with the arrival branch and stopped
+    // the base 47 times in one burst at controller_session.cpp:3725 (plan present, follower inactive).
+    // The consumer must recognise it as the sealed case and report at once rather than pretend to move.
+    CloserWithinBand,
     Sealed        // no route and no closer pose → the robot is in a pocket
 };
 
@@ -366,7 +372,7 @@ public:
             finish(w, world, Outcome::Infeasible, cycle, /*stood=*/false);
             return;
         }
-        if (c.routable == Routable::Sealed)
+        if (c.routable == Routable::Sealed or c.routable == Routable::CloserWithinBand)
         {
             if (p.substitute_and_claim_satisfied)
             {   // THE PHANTOM: relocate onto the robot, arrive instantly, call it the producer's cell

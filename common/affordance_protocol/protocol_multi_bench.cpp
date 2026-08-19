@@ -259,6 +259,15 @@ int main()
         report("12 silent 120 s local veto", r, standard_checks(r));
     }
 
+    // ── 12b. THE APPROACH THAT COVERS NO GROUND ─────────────────────────────────────────────────
+    {
+        auto f = make_fleet(ProducerPolicy{}, kTen);
+        for (auto &c : f.world.cells) if (c.id % 3 == 1) c.routable = Routable::CloserWithinBand;
+        Consumer cons{ConsumerPolicy{}};
+        auto r = run(f.producers, cons, f.world, kCycles);
+        report("12b approach pose inside the arrival band", r, standard_checks(r));
+    }
+
     // ── 13. EVERYTHING AT ONCE — the world the fleet actually runs in ───────────────────────────
     {
         auto f = make_fleet(ProducerPolicy{}, kTen);
@@ -268,6 +277,7 @@ int main()
             if (c.id % 11 == 3) c.standable = Standable::Never;
             if (c.id % 5 == 2) c.routable = Routable::CloserExists;
             if (c.id % 13 == 6) c.routable = Routable::Sealed;
+            if (c.id % 19 == 7) c.routable = Routable::CloserWithinBand;
             if (c.id % 9 == 5) c.detects = false;
             if (c.id % 17 == 8) c.wedges = true;
         }
