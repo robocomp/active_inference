@@ -252,10 +252,18 @@ void ControllerDisplay::update_velocity_trace(float adv_mps, float rot_rps)
     // NaN makes the line BREAK there, which is what the plot's gap marker is for.
     const float unc = unc_trace_.load(std::memory_order_relaxed);
     plot->add_point("sigma", unc >= 0.f ? unc : std::numeric_limits<float>::quiet_NaN());
+    // We are commanding, so the measured-fallback pair has nothing to say: gap it rather than let it
+    // hold its last value across the hand-over, which would draw a line through a stretch it did not
+    // describe.
+    const float gap = std::numeric_limits<float>::quiet_NaN();
+    plot->add_point("adv_meas", gap);
+    plot->add_point("rot_meas", gap);
     vel_local_fed_.store(true, std::memory_order_relaxed);
 }
 
-void ControllerDisplay::update_velocity_trace_external(float adv_mps, float rot_rps, bool fresh)
+void ControllerDisplay::update_velocity_trace_external(float ref_adv_mps, float ref_rot_rps,
+                                                      bool ref_fresh,
+                                                      float meas_adv_mps, float meas_rot_rps)
 {
     auto *plot = custom_widget_ ? custom_widget_->mission_j_plot : nullptr;
     if (plot == nullptr) return;
@@ -265,8 +273,15 @@ void ControllerDisplay::update_velocity_trace_external(float adv_mps, float rot_
 
     const float gap = std::numeric_limits<float>::quiet_NaN();
     const auto ok = [](float v) { return std::isfinite(v) ? v : 0.f; };
-    plot->add_point("adv", fresh ? ok(adv_mps) : gap);
-    plot->add_point("rot", fresh ? ok(rot_rps) : gap);
+
+    // A published command, from something that is not us. Drawn in the commanded series, because that
+    // is what it is.
+    plot->add_point("adv", ref_fresh ? ok(ref_adv_mps) : gap);
+    plot->add_point("rot", ref_fresh ? ok(ref_rot_rps) : gap);
+    // Nobody is publishing a command, so the only witness left is what the base actually DID. Its own
+    // series, so "measured" is never mistaken for "commanded".
+    plot->add_point("adv_meas", ref_fresh ? gap : ok(meas_adv_mps));
+    plot->add_point("rot_meas", ref_fresh ? gap : ok(meas_rot_rps));
     // Whoever is commanding, it is not through OUR uncertainty limiter, so the sigma line has nothing
     // to say about this stretch. A gap, not a zero — zero would read as "perfectly localised".
     plot->add_point("sigma", gap);

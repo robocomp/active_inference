@@ -241,7 +241,10 @@ public:
                            "(a joystick, say). A GAP means nothing is commanding the base.\n\n"
                            "σxy is the localisation sigma the speed limiter is reading, mapped onto the\n"
                            "same axis: the TOP of the velocity band is PoseXYStdStop, i.e. the throttle\n"
-                           "is floored. It breaks when the limiter is not in the loop."));
+                           "is floored. It breaks when the limiter is not in the loop.\n\n"
+                           "adv_meas / rot_meas (orange / teal) are MEASURED base motion, drawn only when\n"
+                           "nothing publishes a command at all — a joystick drive, where robot_ref_*\n"
+                           "stays at zero. They are what the robot DID, not what it was told."));
         j_layout->addWidget(j_caption);
         mission_j_plot = new rc::TimeSeriesPlot(j_panel);
         mission_j_plot->setMinimumHeight(80);
@@ -262,6 +265,14 @@ public:
         // blue rot can be confused with it. The question it answers at a glance is the one that took a
         // whole session to answer offline — when adv sags, is this line high?
         mission_j_plot->add_series("sigma", QColor(170, 60, 175), 1.4f);
+        // ── WHAT THE BASE ACTUALLY DID, WHEN NOBODY PUBLISHES WHAT IT WAS TOLD ───────────────────
+        // Only ever drawn while no command is available at all — a joystick drive, where robot_ref_*
+        // stays at zero (measured: 0.640 m/s of real motion against a 0.000 reference). Gaps the rest
+        // of the time, so they cost nothing whenever a command exists. Separate series because these
+        // are MEASURED: folding them into adv/rot would change what the panel means without saying so.
+        // Warm pair, clear of the near-black adv, the blue rot and the violet sigma.
+        mission_j_plot->add_series("adv_meas", QColor(200, 110, 20), 2.0f);
+        mission_j_plot->add_series("rot_meas", QColor(20, 150, 140), 2.0f);
         j_layout->addWidget(mission_j_plot, 1);
         main_layout->addWidget(j_panel, 1);
     }

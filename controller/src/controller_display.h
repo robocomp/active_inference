@@ -140,7 +140,18 @@ public:
     // at ~40 Hz against the control loop's ~10-20 and replacing it would alias the jitter the panel
     // exists to show. `fresh` false ⇒ the reference is a leftover from a commander that has stopped,
     // which is not a command: the line breaks rather than flat-lining at whatever was left behind.
-    void update_velocity_trace_external(float adv_mps, float rot_rps, bool fresh);
+    // ★MEASURED FALLBACK, ON ITS OWN SERIES. robot_ref_* turned out to be written by THIS CONTROLLER
+    // ONLY — the comment calling it "the reference written by whoever commands (controller / joystick
+    // path)" describes an intent the joystick component does not honour. Measured 2026-08-18: the robot
+    // drove at 0.640 m/s with the reference sitting at exactly 0.000, so a panel fed from the reference
+    // alone is blank for the whole of a manual drive, which is what was reported.
+    // robot_current_* IS written whoever drives (robot_concept, from the FullPose estimator), so it is
+    // the only universally available witness — but it is MEASURED, not commanded, and quietly drawing it
+    // in the commanded series would change what the panel means without saying so. It gets its own two
+    // series, which are gaps whenever a command IS available and therefore cost nothing the rest of the
+    // time.
+    void update_velocity_trace_external(float ref_adv_mps, float ref_rot_rps, bool ref_fresh,
+                                        float meas_adv_mps, float meas_rot_rps);
     // The camera frame with the YOLO silhouettes on it, for the affordance panel. Composed on the
     // control thread and handed over whole (see controller_camera_masks.h) — the QImage inside is
     // already private to this snapshot, so nothing shares a pixel buffer across the thread boundary.
