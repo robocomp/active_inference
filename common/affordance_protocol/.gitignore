@@ -8,3 +8,4 @@ formal/*.cfg
 # compiled benches — rebuild with the one-line g++ command in each file's header
 protocol_bench
 scoring_bench
+protocol_multi_bench
