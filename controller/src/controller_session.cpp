@@ -1515,6 +1515,17 @@ void ControllerSession::log_approach_diagnostics(std::uint64_t t_ms,
         approach_csv_.open("approach_diag.csv", std::ios::out | std::ios::trunc);
         approach_csv_.imbue(std::locale::classic());   // decimal POINT regardless of LANG (see CLAUDE.md)
         approach_csv_open_ = approach_csv_.is_open();
+        // ★ARCHIVE IT. This was the ONLY diagnostic in the controller that was truncated every run and
+        // never kept — and it is the one that settled who was at fault for the affordance stall, by
+        // aligning its `tgt_*` against room_concept's `pub_*` on one wall clock. Two runs in a row were
+        // compared against a file that no longer existed for the earlier one, and the 2026-08-19 09:05
+        // baseline was lost to the very next start.
+        // ★Registered HERE, at open, and not next to the others in specificworker.cpp — that is the
+        // stall_events.csv pattern (:3921) and it is the correct one for a file that only some runs
+        // write. Registering it up front would make archive_on_stop copy the PREVIOUS run's rows under
+        // THIS run's stamp on any run that never approaches an affordance, which is exactly the lie
+        // band_diag.csv told on 20260802-135917 (see ensure_band_csv).
+        if (approach_csv_open_) mission_.archive_on_stop("approach_diag.csv");
         if (approach_csv_open_)
             approach_csv_
                 << "# FINAL APPROACH to an affordance standpoint. One row per cycle inside 1 m, plus every\n"
@@ -1537,8 +1548,16 @@ void ControllerSession::log_approach_diagnostics(std::uint64_t t_ms,
                    "#                nan says 'not measured'. clear_now_m is the model-side answer instead.\n"
                    "t_ms,target,phase,tgt_x,tgt_y,tgt_facing_deg,rob_x,rob_y,rob_facing_deg,"
                    "d_target_m,d_arrival_m,yaw_err_deg,cmd_adv,cmd_rot,"
+                   "# raw_tgt_x/y = the standpoint AS PUBLISHED by the producer. tgt_x/y is what the\n"
+                   "#                controller is actually driving to. fix_held = 1 when a standpoint\n"
+                   "#                repair is in force, so the two differ BY OUR DOING.\n"
+                   "#                ★Added 2026-08-19: 'who moved the target' previously required\n"
+                   "#                aligning this file against room_concept's log on one wall clock,\n"
+                   "#                and the answer changed the whole diagnosis. It is a local question\n"
+                   "#                and it should read as one: raw moving = producer, tgt moving with\n"
+                   "#                raw still = us.\n"
                    "clear_now_m,clear_des_m,free_now,free_des,sweep_min_m,sweep_ok,sweep_worst_deg,"
-                   "tgt_sweep_min_m,tgt_sweep_ok,min_esdf_m,goal_reached\n";
+                   "tgt_sweep_min_m,tgt_sweep_ok,min_esdf_m,goal_reached,raw_tgt_x,raw_tgt_y,fix_held\n";
     }
     if (not approach_csv_open_) return;
 
@@ -1555,7 +1574,14 @@ void ControllerSession::log_approach_diagnostics(std::uint64_t t_ms,
                   << sweep.worst_heading_rad * kDeg << ','
                   << sweep_tgt.min_clearance_m << ',' << (sweep_tgt.feasible ? 1 : 0) << ','
                   << (o.aligning ? std::numeric_limits<float>::quiet_NaN() : o.min_esdf) << ','
-                  << (o.goal_reached ? 1 : 0) << '\n';
+                  << (o.goal_reached ? 1 : 0) << ','
+                  // The producer's own standpoint, before any repair of ours, and whether a repair is
+                  // in force. Attribution of every target move, without a second agent's clock.
+                  << (last_raw_target_pos_ ? last_raw_target_pos_->x()
+                                           : std::numeric_limits<float>::quiet_NaN()) << ','
+                  << (last_raw_target_pos_ ? last_raw_target_pos_->y()
+                                           : std::numeric_limits<float>::quiet_NaN()) << ','
+                  << (approach_fix_.has_value() ? 1 : 0) << '\n';
 
     // On arrival, one console line that says how it actually went — the three quantities you would
     // otherwise reconstruct from the CSV by hand every time.
@@ -1864,22 +1890,35 @@ void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &s
                                              obj->x() - step.target.room_pos.x());
     };
 
-    // A fix already taken is kept for as long as it is still admissible — the whole point of holding it.
+    // ★A FIX, ONCE TAKEN, IS STATIC FOR THE LIFE OF THE TARGET. Validated ONCE against the live LiDAR
+    // at the moment it is chosen (that is what `clear_of_returns` below does), and then held — no
+    // re-test, no re-solve.
+    // ★★WHY THE RE-TEST IS GONE (user, watching a live run, 2026-08-19: "you are moving the target
+    // before the robot can reach it" / "just leave it static in a place that the local lidar validates
+    // as reachable"). This block used to re-ask, every cycle, whether the held standpoint was still
+    // clear, and re-solve when the answer came back no. Freezing the arrival heading removed the
+    // systematic FLEE (measured: 77% of moves in the robot's own travel direction, down to 57% with
+    // 50% being no correlation at all) but not the MOTION: 197 target moves over 5 cm in one 120 s
+    // run, p50 0.30 m. A standpoint that is re-decided is not a standpoint.
+    // ★The re-test could never be a stable question, because its evidence is not stable. The LiDAR
+    // returns it judges against are re-gathered every cycle from a moving robot, at a viewpoint that
+    // is by construction getting CLOSER to the standpoint — so occlusion, incidence and density at
+    // that patch of floor all change under it, and a boundary case flickers. Holding a flickering
+    // predicate's FIRST answer is not worse than holding its latest one; it is merely honest about
+    // which answer it is holding.
+    // ★What replaces it is not nothing. If the held standpoint really is unstandable, the robot fails
+    // to arrive, the wedge or Spinning verdict fires, and after kMaxEscapesPerAffordance the affordance
+    // is given up and the claim released (begin_escape). That path reports the failure to the producer
+    // instead of silently re-siting its viewpoint — which is what room_concept asked for on 2026-08-19
+    // ("refuse, never move": a relocated-then-completed standpoint makes the producer record an
+    // observation that never happened, corrupting its exploration drive).
+    // The lifecycle guards above still drop the fix when it stops belonging to this target: a changed
+    // node name (:1751) and a producer that republishes its viewpoint elsewhere (:1759).
     if (approach_fix_.has_value())
     {
-        const Eigen::Vector2f held = approach_fix_->pos;
-        // ★AT THE FROZEN HEADING. Re-asking at the live one is the runaway itself.
-        if (grid_planner_.pose_free(held, step.target.yaw_rad)
-            and clear_of_returns_at(held, approach_fix_->arrival_yaw))
-        {
-            step.target.room_pos = held;
-            aim_at_object();
-            return;
-        }
-        std::println("[approach] '{}' — the moved standpoint ({:.2f},{:.2f}) is no longer clear either; "
-                     "re-solving against the live returns.",
-                     step.target.node_name, held.x(), held.y());
-        approach_fix_.reset();
+        step.target.room_pos = approach_fix_->pos;
+        aim_at_object();
+        return;
     }
 
     // One search, both questions: the grid (which knows about walls, and about obstacles no longer in
