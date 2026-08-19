@@ -1428,11 +1428,25 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
         path_controller.set_goal_facing_yaw(want_facing
                                                 ? std::optional<float>(step.target.yaw_rad)
                                                 : std::nullopt);
-        // A point target DOES end at its endpoint — restore the follower's own arrival test, which a
-        // continuous route switched off (it may have been the previous thing installed).
-        path_controller.set_endpoint_arrival(true);
     }
 
+    // ★★★WHO OWNS ARRIVAL IS A PROPERTY OF WHAT IS BEING DRIVEN, NOT OF WHEN A PATH WAS LAST INSTALLED.
+    // This line sat INSIDE the `target_changed or not is_active()` block above, so the follower's
+    // arrival test was only ever re-armed on a path (re)install. A continuous route switches it OFF
+    // (drive_mission_route, :1308 — a tour ends by arc length, and its euclidean endpoint test is true
+    // before the robot has moved). If a route ran first and the point target that followed never
+    // re-installed its path, the flag stayed FALSE and the arrival test was skipped for the WHOLE
+    // approach: the robot drives to its standpoint, comes inside goal_threshold, and nothing fires.
+    // ★THIS SESSION'S OWN CHURN FIXES UNMASKED IT. While `target_changed` fired every few seconds —
+    // epistemic_gain in the identity test, a standpoint re-derived every cycle — the path was
+    // re-installed constantly and re-armed this flag BY ACCIDENT. Now that the target is stable
+    // (7fb6a62 took gain out of the identity, b560737/df3809e froze the standpoint and its facing),
+    // nothing re-arms it. Measured 2026-08-19 on the run right after: 15 approach rows came inside the
+    // 0.25 m goal_threshold — d_arrival_m down to 0.181 m — with ZERO `reached` and ZERO `ALIGN` rows
+    // in 243. The robot was orbiting its standpoint with the arrival test switched off.
+    // ★★A fix that removes churn will expose everything the churn was accidentally driving. That is not
+    // an argument against removing it; it is an argument for looking at what got quieter.
+    path_controller.set_endpoint_arrival(true);
     return true;
 }
 
