@@ -696,6 +696,19 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
         if (decode_protocol_state(active, pending) != ProtocolState::Offered)
         { last_reject_reason_ = "not-offered"; continue; }
 
+        // ★ALREADY DECIDED AGAINST, FROM THIS POSE, ON THIS MAP. Taking it again cannot end
+        // differently: the two questions this side can answer — does the body fit, is there a route —
+        // are functions of exactly (cell, pose, map), and none of them has changed. Skipping here is
+        // what keeps the pair from completing standpoints at loop rate with the base at zero (21648
+        // reports in 30 minutes, live). The producer was TOLD the first time, so this is not a silent
+        // veto; and it lapses the instant the robot moves or the grid is rebuilt differently.
+        if (has_map_verdict(target->room_pos, robot_pos))
+        {
+            last_reject_reason_ = "map-verdict";
+            suppressed_name_ = target->node_name;
+            continue;
+        }
+
         // NOT THE ONE THAT JUST FINISHED. Its producer re-offers it immediately and its gain has not
         // had time to fall, so without this it wins again on the very next cycle and the robot works
         // one object forever. Reported rather than silent: an affordance that is Offered, top-scoring
@@ -944,6 +957,40 @@ void AffordanceManager::mark_reached(const std::shared_ptr<DSR::DSRGraph> &graph
     current_affordance_name_.clear();
     reset_observation();
     transition_to(State::Idle, "affordance completed and cleared");
+}
+
+// ── THE MAP-ONLY VERDICT CACHE (see the header for why it is not a timer) ───────────────────────
+// Quantised to 5 cm on both the cell and the pose: finer than the arrival band, coarser than the
+// jitter of a stationary robot's localisation, so standing still does not manufacture new poses and
+// therefore does not manufacture new questions.
+namespace
+{
+constexpr float kVerdictQuantM = 0.05f;
+std::pair<std::int64_t, std::int64_t> verdict_key(const Eigen::Vector2f &cell, const Eigen::Vector2f &robot)
+{
+    const auto q = [](float v) { return static_cast<std::int64_t>(std::llround(v / kVerdictQuantM)); };
+    // Two 2-D points packed into one pair: the cell in the high half, the pose in the low half.
+    return { (q(cell.x()) << 20) ^ q(cell.y()), (q(robot.x()) << 20) ^ q(robot.y()) };
+}
+}   // namespace
+
+void AffordanceManager::note_map_verdict(const Eigen::Vector2f &cell, const Eigen::Vector2f &robot)
+{
+    if (map_identity_ == 0) return;                  // no rasterised world: nothing to remember it by
+    if (map_identity_ != map_verdict_hash_)          // the world changed: every answer is unproven
+    {
+        map_verdicts_.clear();
+        map_verdict_hash_ = map_identity_;
+    }
+    map_verdicts_.insert(verdict_key(cell, robot));
+}
+
+bool AffordanceManager::has_map_verdict(const Eigen::Vector2f &cell,
+                                        const std::optional<Eigen::Vector2f> &robot) const
+{
+    if (map_identity_ == 0 or not robot.has_value()) return false;  // ★fails OPEN
+    if (map_identity_ != map_verdict_hash_) return false;           // answers belong to the old world
+    return map_verdicts_.contains(verdict_key(cell, *robot));
 }
 
 void AffordanceManager::suppress_target(const std::shared_ptr<DSR::DSRGraph> &graph,

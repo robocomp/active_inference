@@ -118,6 +118,18 @@ public:
     // one predicate shared by planning and target repair, so the two can no longer disagree.
     bool pose_free(const Eigen::Vector2f& pos_room, float theta) const;
 
+    // Is there a rasterised world at all yet? ★pose_free() answers FALSE for every pose before
+    // set_world() has run — world_to_cell fails on a zero-sized grid — so a caller that turns "not
+    // feasible" into a report to another agent would report an infeasible standpoint for the first
+    // cycles of every run, when the only true statement is "I do not know yet". Ask this first.
+    bool has_world() const { return w_ > 0 and h_ > 0; }
+
+    // Identity of the rasterised world (see set_world). Two calls returning the same value describe
+    // the same occupancy, so an answer derived from the grid can be cached against it instead of
+    // against a clock — a timer would either re-ask a question the world has not changed the answer
+    // to, or trust an answer after the world moved. This can do neither.
+    std::size_t world_hash() const { return world_hash_; }
+
     // ── MIGRATION MONITOR (temporary; delete once the yaw correction is trusted) ───────────────────
     // The same question answered with the body oriented as it WAS before the correction — turned 90 deg
     // from its direction of travel. A change of this kind is easy to argue about and hard to see, so it
@@ -258,6 +270,7 @@ private:
     mutable bool dist_valid_ = false;
     float xmin_ = 0, ymin_ = 0, cell_ = 0.1f;
     int   w_ = 0, h_ = 0;
+    std::size_t world_hash_ = 0;
     // Precomputed footprint coverage per heading bucket — the reason exact collision is affordable here.
     std::vector<std::vector<Eigen::Vector2i>> offsets_;
     // The SAME coverage as it was rasterised before the yaw correction, i.e. with the body turned 90 deg

@@ -172,6 +172,60 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
 // log went SILENT for the whole freeze — a 55 s hole where the evidence should have been. A diagnostic
 // that stops writing exactly when the thing goes wrong is worse than none, because the gap reads as
 // "nothing happened". So it is written from build_planning_step, before any early return can skip it.
+namespace
+{
+// ── STANDPOINT AUDIT ────────────────────────────────────────────────────────────────────────────
+// ★WRITTEN UNCONDITIONALLY, BECAUSE THE PRINT IT REPLACES IS DEDUPED. The repair's own [controller]
+// line only speaks when the ANSWER changes, so a repair that keeps returning the same point while the
+// robot stands still is silent for as long as the failure lasts — which is exactly the interval that
+// needs explaining (measured 2026-08-19: 112 completions, robot < 5 cm, not one repair line). This
+// row carries the three poses side by side — what the PRODUCER published, what we drive to after the
+// repair, and where the robot IS — so "arrived" can never again be read without seeing which target
+// it arrived at. Locale-pinned: this file is read back by tools (CLAUDE.md's from_chars rule).
+void audit_standpoint(std::string_view event, std::uint64_t t_ms,
+                      const Eigen::Vector2f &wire, const Eigen::Vector2f &tgt,
+                      const Eigen::Vector2f &rob, std::string_view branch, std::string_view detail,
+                      int target_new, int goal_reached, int arrival_real)
+{
+    static std::ofstream f;
+    static bool ok = false;
+    if (not ok)
+    {
+        f.open("standpoint_audit.jsonl", std::ios::out | std::ios::trunc);
+        f.imbue(std::locale::classic());
+        ok = f.is_open();
+    }
+    if (not ok) return;
+    f << std::format(R"({{"t_ms":{},"event":"{}","wire_x":{:.3f},"wire_y":{:.3f},)"
+                     R"("tgt_x":{:.3f},"tgt_y":{:.3f},"rob_x":{:.3f},"rob_y":{:.3f},)"
+                     R"("d_wire":{:.3f},"d_tgt":{:.3f},"repair_m":{:.3f},)"
+                     R"("branch":"{}","detail":"{}","target_new":{},"goal_reached":{},"arrival_real":{}}})" "\n",
+                     t_ms, event, wire.x(), wire.y(), tgt.x(), tgt.y(), rob.x(), rob.y(),
+                     (wire - rob).norm(), (tgt - rob).norm(), (tgt - wire).norm(),
+                     branch, detail, target_new, goal_reached, arrival_real);
+    f.flush();
+}
+}   // namespace
+
+// ── WHICH BRANCH STOPPED THE BASE ───────────────────────────────────────────────────────────────
+// ★"Stalled" has meant three different things in this run's diagnostics, and only one of them is a
+// zero command: the robot standing still because execute_plan returned before reaching the speed
+// funnel is invisible in base_commands.jsonl, which only records commands that were SENT. Ten
+// branches can end the cycle that way. source_location names the one that did, at 5 Hz, into the same
+// audit file the standpoint rows go to — so a freeze can be read off one file instead of inferred.
+void ControllerSession::note_no_command(std::source_location loc)
+{
+    static std::uint64_t last_ms = 0;
+    const auto now = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+    if (now - last_ms < 200) return;
+    last_ms = now;
+    const Eigen::Vector2f here = current_target_room_.value_or(Eigen::Vector2f::Zero());
+    audit_standpoint("no-command", now, here, here, here, "stopped",
+                     std::format("line {}", loc.line()), -1, -1, -1);
+}
+
 void ControllerSession::log_selection_json(std::uint64_t t_ms,
                                            const rc::AffordanceManager &affordance_manager,
                                            const std::optional<Eigen::Vector2f> &robot_xy,
@@ -431,6 +485,9 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
                             : world_model.read_target_in_room(timestamp_ms);
     // Read straight after the selection that produced it — it is a per-call report, and any later read
     // would be describing a different cycle's contest.
+    // The planner grid's identity, stamped before selection reads it: a verdict this side reached
+    // from the map is remembered against that map, and lapses when it is rebuilt differently.
+    affordance_manager.set_map_identity(grid_planner_.world_hash());
     suppressed_affordance_ = affordance_manager.suppressed_name();
     if (!target.has_value())
     {
@@ -521,7 +578,16 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
                              "to reach that spot {}x. Skipping it without driving there.",
                              target->node_name, target->room_pos.x(), target->room_pos.y(), spot->hits);
             }
-            affordance_manager.suppress_target(graph_, target->node_id, kUnreachableRounds);
+            // ★★★AND SAY SO ON THE WIRE. Skipping in silence is exactly the failure the fact channel
+            // was built to end: the producer offers, the consumer quietly declines, and both wait —
+            // "no affordance arriving", with the base stopped and nothing in any log to say why. The
+            // spot is remembered for kUselessSpotMemoryMs (120 s), so a silent skip could hold the pair
+            // for two minutes on a cell room believed was still on offer. Reporting it costs nothing
+            // and lets room de-prioritise this cell and pick another on its next cycle.
+            affordance_manager.mark_reached(graph_, rc::affordance::Outcome::Unreachable);
+            audit_standpoint("fact-unreachable", timestamp_ms, target->room_pos, target->room_pos,
+                             robot_pose->pos.head<2>().cast<float>(), "known-useless",
+                             std::format("failed here {}x before", spot->hits), -1, -1, 0);
             current_plan_.reset();
             plan_spline_valid_ = false;
             stop(path_controller, motion_commander);
@@ -611,6 +677,224 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     // no standpoint, and this is a preference for clearance, not a new precondition for servicing an
     // object. When facing yaw is off there is no terminal rotation, so the old question is the right one.
     const bool will_rotate_here = wants_final_facing(step.target);
+
+    // ── THE CELL IS THE PRODUCER'S, SO WE REPORT FACTS AND EDIT NOTHING ─────────────────────────
+    // ★★★NO REPAIR OF AN AFFORDANCE STANDPOINT (2026-08-19). room_concept chose that cell by
+    // maximising expected information gain over its own grid — visibility, yaw, what the vantage can
+    // see. This process knows none of that and cannot recompute it; all it knows is reachability. So
+    // moving the cell "a little" is not a small correction, it is answering a question we were not
+    // asked: half a metre can put a wall corner between the camera and the thing the gain was computed
+    // from, and the producer is never told the pose it reasoned about is not the pose that happened.
+    // ★The repair existed because the wire had no way to say "I cannot". It does now — Infeasible and
+    // Unreachable are FACTS this side alone can establish — so the honest answer replaces the edit.
+    // Measured on the loop this deletes: 208 nearest_reachable repairs, median displacement 1.80 m,
+    // 139 of them landing within 0.21 m of the ROBOT, and 140 of 163 accepted arrivals a median 2.86 m
+    // from the published cell, every one reported to room as SATISFIED.
+    // ★A CLICKED TARGET IS NOT A PRODUCER'S DECISION VARIABLE — it is this agent's own goal, so the
+    // repair below still applies to it. Ownership is the discriminator, not the geometry.
+    if (step.target.from_affordance and grid_planner_.has_world())
+    {
+        // ★has_world() FIRST. pose_free answers false for every pose before the grid is rasterised, so
+        // without it the first cycles of a run would report an infeasible standpoint when the only true
+        // statement is "I do not know yet" — a fact channel that lies on startup is worse than none.
+        // ── WHAT THE PRODUCER ACTUALLY DECIDED IS A CELL, NOT A POINT ───────────────────────────
+        // ★★★MEASURED IMMEDIATELY AFTER DELETING THE REPAIR OUTRIGHT (2026-08-19, 22:21): the pair
+        // went honest and IDLE — cell after cell reported infeasible, the base stopped for ~20 s at a
+        // time. Deleting the repair was half right. room's exploration grid has 0.5 m cells
+        // (EpistemicPlanner::ior_cell_size) and it publishes the cell CENTRE; the information gain was
+        // computed for the CELL. So moving inside that cell is not editing anyone's decision, it is
+        // resolving a cell into a pose the body fits in — which is this side's job and nobody else's.
+        // Moving OUTSIDE it picks a different cell, which is the producer's decision and not ours.
+        // ★THE BUDGET IS THE CELL, NOT A TUNING KNOB: half a cell diagonal is the furthest a point can
+        // be from the centre and still be in the same cell. Nothing to tune; if room changes its grid
+        // this must follow, which is why the number is derived here from the cell size and named.
+        target_is_approach_only_ = false;
+        const float producer_cell_m = params_ ? params_->producer_cell_size_m : 0.5f;
+        const float in_cell_m = 0.5f * std::numbers::sqrt2_v<float> * producer_cell_m;
+        std::optional<rc::affordance::Outcome> fact;
+        std::string why;
+        std::optional<Eigen::Vector2f> in_cell_pose;
+        if (will_rotate_here)
+        {
+            in_cell_pose = grid_planner_.nearest_rotatable(step.target.room_pos, in_cell_m);
+            if (not in_cell_pose.has_value())
+                in_cell_pose = grid_planner_.nearest_free(step.target.room_pos, step.target.yaw_rad, in_cell_m);
+        }
+        else
+            in_cell_pose = grid_planner_.nearest_free(step.target.room_pos, step.target.yaw_rad, in_cell_m);
+        // ★THE RING SEARCH IS QUANTISED TO THE PLANNER'S 0.10 m GRID, so `max_radius_m` bounds the
+        // search, not the answer: measured p50 0.403 m and max 0.455 m against a 0.354 m half-diagonal,
+        // i.e. up to one planner cell outside the producer's cell. A bound that is checked only inside
+        // the search is a bound in name; enforce it on the RESULT, which is the thing being claimed.
+        if (in_cell_pose.has_value()
+            and (*in_cell_pose - step.target.room_pos).norm() > in_cell_m)
+            in_cell_pose.reset();
+        if (not in_cell_pose.has_value())
+        { fact = rc::affordance::Outcome::Infeasible;
+          why = std::format("no pose the body fits in anywhere in the {:.2f} m cell", producer_cell_m); }
+        else if (routing_failed_here)
+        {
+            // ── GO AS CLOSE AS THE MAP ALLOWS — AND SAY THAT IS WHAT HAPPENED ───────────────────
+            // ★Driving to the closest reachable pose is RIGHT: it makes progress, it changes what the
+            // sensors can see, and a cell that is unroutable from here is often routable from there.
+            // What was wrong was never the drive — it was reporting the arrival as SATISFIED, which
+            // told room its cell had been observed when the robot had stopped metres short (140 of 163
+            // arrivals, median 2.86 m). So: still approach, but the target is flagged an APPROACH and
+            // the completion says `unreachable`, so nothing about room's cell is marked observed.
+            // ★If the closest reachable pose is where the robot already stands, there is no approach to
+            // make — that is the sealed-pocket case — and the fact goes out immediately instead of
+            // driving zero metres and calling it an attempt.
+            if (not unroutable_fix_.has_value())
+                unroutable_fix_ = grid_planner_.nearest_reachable(step.plan_origin, step.target.room_pos);
+            const float band = path_controller.goal_threshold() + approach_body_.circumscribed_radius();
+            const auto robot_xy = step.robot_pose.pos.head<2>().cast<float>();
+            if (unroutable_fix_.has_value()
+                and (*unroutable_fix_ - robot_xy).norm() > band
+                and (*unroutable_fix_ - step.target.room_pos).norm()
+                        < (robot_xy - step.target.room_pos).norm())
+            {
+                audit_standpoint("approach", timestamp_ms, last_raw_target_pos_.value_or(step.target.room_pos),
+                                 *unroutable_fix_, robot_xy, "nearest_reachable",
+                                 "closest reachable — will report unreachable on arrival", -1, -1, -1);
+                step.target.room_pos = *unroutable_fix_;
+                target_is_approach_only_ = true;
+                in_cell_pose = step.target.room_pos;     // already feasible by construction
+            }
+            else
+            {
+                fact = rc::affordance::Outcome::Unreachable;
+                why = "no route from here, and no closer pose the robot can reach ["
+                    + grid_planner_.last_failure() + "]";
+            }
+        }
+        if (fact.has_value())
+        {
+            const Eigen::Vector2f cell = step.target.room_pos;
+            if (timestamp_ms - last_repair_reject_log_ms_ >= 3000)
+            {
+                last_repair_reject_log_ms_ = timestamp_ms;
+                std::println("[controller] '{}' at ({:.2f},{:.2f}): {} — reporting {} to the producer. "
+                             "Not moving the standpoint: the cell is room's to choose.",
+                             step.target.node_name, cell.x(), cell.y(), why,
+                             rc::affordance::to_string(*fact));
+            }
+            // Remembered against (cell, pose, map) so it is decided ONCE from here — see
+            // AffordanceManager::note_map_verdict for the two rate limits this replaces.
+            affordance_manager.note_map_verdict(cell, step.robot_pose.pos.head<2>().cast<float>());
+            audit_standpoint(*fact == rc::affordance::Outcome::Infeasible ? "fact-infeasible"
+                                                                         : "fact-unreachable",
+                             timestamp_ms, last_raw_target_pos_.value_or(cell), cell,
+                             step.robot_pose.pos.head<2>().cast<float>(),
+                             "no-repair", why, -1, -1, 0);
+            // ★WHEN THE FREE SPACE IS DISCONNECTED, DUMP THE WORLD THAT DISCONNECTED IT. "no route:
+            // 78106 expansions over 16246 free cells" says the search exhausted a large free space and
+            // still could not reach a cell 1.60 m away — the robot is in a POCKET, and which polygon
+            // seals it is not something to guess at. One snapshot per 20 s: room polygon, every
+            // obstacle the planner rasterised, the live LiDAR points, and the start/goal pair.
+            if (*fact == rc::affordance::Outcome::Unreachable
+                and timestamp_ms - last_pocket_dump_ms_ >= 20000)
+            {
+                last_pocket_dump_ms_ = timestamp_ms;
+                std::ofstream f("unreachable_world.txt", std::ios::out | std::ios::trunc);
+                if (f.is_open())
+                {
+                    f.imbue(std::locale::classic());     // es_ES writes commas; tools read points
+                    f << std::setprecision(9);
+                    f << "# the world the planner could not cross. " << why << "\n";
+                    f << "t_ms " << timestamp_ms << '\n';
+                    const auto r = step.robot_pose.pos.head<2>().cast<float>();
+                    f << "start " << r.x() << ' ' << r.y() << '\n';
+                    f << "goal " << cell.x() << ' ' << cell.y() << '\n';
+                    for (const auto &p : room_polygon_) f << "room " << p.x() << ' ' << p.y() << '\n';
+                    int i = 0;
+                    for (const auto &o : obstacle_tracker.display_obstacle_polygons())
+                    {
+                        // The LABEL and the node name go with the polygon: "which polygon seals the
+                        // pocket" is only actionable if it says WHOSE it is (a table's box, a residual
+                        // hull, a temporary LiDAR blocker this agent dropped itself).
+                        for (const auto &p : o.polygon)
+                            f << "obs " << i << ' ' << p.x() << ' ' << p.y() << ' '
+                              << (o.label.empty() ? "-" : o.label) << ' '
+                              << (o.color_key.empty() ? "-" : o.color_key) << '\n';
+                        ++i;
+                    }
+                    // temporary_obstacle_rfe_points() returns POLYGONS (the virtual blockers this agent
+                    // drops when a path is blocked), not points — the name says points, the type says
+                    // otherwise, and the compiler is the only reason that did not become another
+                    // "a name is a claim" entry. Written as polygons, which is what they are.
+                    int k = 0;
+                    for (const auto &poly : obstacle_tracker.temporary_obstacle_rfe_points())
+                    {
+                        for (const auto &p : poly) f << "rfe " << k << ' ' << p.x() << ' ' << p.y() << '\n';
+                        ++k;
+                    }
+                }
+            }
+            // ★NOT REMEMBERED LOCALLY. The 120 s useless-spot memory exists for a DRIVE failure — the
+            // robot went there and wedged — where re-driving is expensive and the evidence is not
+            // otherwise recoverable. A PLANNING failure is not that: the planner re-answers it in a few
+            // milliseconds on every offer, so a local veto adds nothing except a second authority with
+            // its own clock, holding a cell for two minutes while room's own attempt suppressor is
+            // already decaying on a different one. That is the "two authorities, different timers"
+            // pattern that has caused most of the stalls in this pair; one guessed constant is enough.
+            // ★THE FACT GOES ON THE WIRE, AND THE CLAIM COMES OFF WITH IT. mark_reached writes the
+            // outcome and clears epistemic_pending/active in ONE node write, so the producer cannot
+            // observe the release and read the previous outcome. It then de-prioritises the cell
+            // itself through note_attempt/attempt_suppressor — a decaying score term, not a blacklist,
+            // and NOT a stamp in its visit grid: nothing was observed, so nothing about the belief
+            // may change. That is rule 5, and it is the producer's to apply, not ours.
+            // ★We deliberately do NOT call suppress_target here: writing epistemic_refused into the
+            // producer's node is the same ownership inversion in the opposite direction — the consumer
+            // deciding what the producer may offer.
+            affordance_manager.mark_reached(graph_, *fact);
+            current_plan_.reset();
+            plan_spline_valid_ = false;
+            last_repair_applied_m_ = 0.f;
+            stop(path_controller, motion_commander);
+            update_display(robot_pose, display, obstacle_tracker.display_obstacle_polygons(),
+                           obstacle_tracker.temporary_obstacle_rfe_points(),
+                           params_ ? params_->max_lidar_draw_points : 0);
+            return std::nullopt;
+        }
+        // Feasible somewhere in the producer's cell: take that pose and drive. Recorded as the repair
+        // it is, so the arrival test's allowance (last_repair_applied_m_) stays exact.
+        if (in_cell_pose.has_value())
+        {
+            last_repair_applied_m_ = (*in_cell_pose - step.target.room_pos).norm();
+            if (last_repair_applied_m_ > 1e-3f)
+            {
+                // ★ONE ROW WHEN THE ANSWER CHANGES, not one per cycle: the resolution is deterministic
+                // and the robot re-derives it at 20 Hz, which produced 692 identical rows in 40 s.
+                static std::uint64_t last_ic_ms = 0;
+                static Eigen::Vector2f last_ic{std::numeric_limits<float>::infinity(),
+                                               std::numeric_limits<float>::infinity()};
+                if (timestamp_ms - last_ic_ms >= 500 or (*in_cell_pose - last_ic).squaredNorm() > 1e-4f)
+                {
+                    last_ic_ms = timestamp_ms; last_ic = *in_cell_pose;
+                    audit_standpoint("in-cell", timestamp_ms, last_raw_target_pos_.value_or(step.target.room_pos),
+                                     *in_cell_pose, step.robot_pose.pos.head<2>().cast<float>(),
+                                     will_rotate_here ? "nearest_rotatable" : "nearest_free",
+                                     "within the producer's cell", -1, -1, -1);
+                }
+                step.target.room_pos = *in_cell_pose;
+                if (step.target.parent_node_id != 0)
+                    if (const auto obj = world_model.read_node_room_xy(step.target.parent_node_id, timestamp_ms);
+                        obj.has_value())
+                        step.target.yaw_rad = std::atan2(obj->y() - step.target.room_pos.y(),
+                                                         obj->x() - step.target.room_pos.x());
+            }
+            recheck_standpoint_on_approach(step, world_model, obstacle_tracker, path_controller, timestamp_ms);
+            current_target_room_ = step.target.room_pos;
+            step.target_changed = !last_target_info_.has_value()
+                               || !ControllerWorldModel::same_target_instance(*last_target_info_, step.target);
+            last_target_info_ = step.target;
+            active_target_id_ = target->node_id;
+            target_is_new_ = step.target_changed;
+            return step;
+        }
+    }
+    // From here down the repair applies to targets this agent owns (a click, a mission waypoint) and,
+    // until the grid exists, to an affordance too — with the budget below still bounding it.
     const auto safe = routing_failed_here
                     ? unroutable_fix_
                     : will_rotate_here
@@ -622,8 +906,75 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
                               return grid_planner_.nearest_free(step.target.room_pos, step.target.yaw_rad);
                           }()
                         : grid_planner_.nearest_free(step.target.room_pos, step.target.yaw_rad);
+    // ★AUDIT THE REPAIR EVERY TIME IT IS ASKED, not only when its answer changes. Throttled to 2 Hz
+    // and to real movement, so a steady state costs a row every half second instead of twenty.
+    {
+        static std::uint64_t last_audit_ms = 0;
+        static Eigen::Vector2f last_audit_tgt{std::numeric_limits<float>::infinity(),
+                                              std::numeric_limits<float>::infinity()};
+        const Eigen::Vector2f repaired = safe.value_or(step.target.room_pos);
+        if (timestamp_ms - last_audit_ms >= 500
+            or (repaired - last_audit_tgt).squaredNorm() > 1e-4f)
+        {
+            last_audit_ms = timestamp_ms;
+            last_audit_tgt = repaired;
+            audit_standpoint("repair", timestamp_ms,
+                             last_raw_target_pos_.value_or(step.target.room_pos),
+                             repaired, step.robot_pose.pos.head<2>().cast<float>(),
+                             routing_failed_here ? "nearest_reachable"
+                                                 : will_rotate_here ? "nearest_rotatable" : "nearest_free",
+                             safe.has_value() ? grid_planner_.last_failure() : std::string("no-repair-found"),
+                             -1, -1, -1);
+        }
+    }
+    // ── A REPAIR IS A CORRECTION, NOT A SUBSTITUTION ────────────────────────────────────────────
+    // ★★★MEASURED 2026-08-19: 208 repairs went through nearest_reachable with a MEDIAN displacement of
+    // 1.80 m (max 3.54 m), and 139 of them pulled the standpoint from a median 2.86 m away to within
+    // 0.21 m of the ROBOT. That is not repairing a viewpoint, it is answering a different question:
+    // "the cell you asked for is unreachable, so here is where you already are". The robot then passes
+    // the arrival test without moving, reports SATISFIED, and the producer stamps a cell visited that
+    // was never observed — 20 completions a minute with the base commanded to zero.
+    // ★THE BUDGET IS THE ARRIVAL BAND ITSELF, no new constant: a repair the robot could not tell apart
+    // from an arrival is one the PRODUCER cannot tell apart from its own cell. Beyond it the honest
+    // answer is the one this function already gives for a boxed-in target — say so, suppress it for a
+    // few rounds so the producer's next offer gets a turn, and drive nowhere.
+    // ★Suppression here FAILS OPEN by construction: unreachable_rounds_ expires on its own, and the
+    // no-two-in-a-row yield in AffordanceManager still hands the affordance back when it is the only
+    // one on offer. The rule may delay a standpoint; it can never silence the channel.
+    const float repair_budget = path_controller.goal_threshold() + approach_body_.circumscribed_radius();
+    const Eigen::Vector2f published = last_raw_target_pos_.value_or(step.target.room_pos);
+    last_repair_applied_m_ = 0.f;
+    if (safe.has_value() and (*safe - published).norm() > repair_budget)
+    {
+        if (timestamp_ms - last_repair_reject_log_ms_ >= 3000)
+        {
+            last_repair_reject_log_ms_ = timestamp_ms;
+            std::println("[controller] '{}' at ({:.2f},{:.2f}) is NOT REACHABLE — the closest reachable pose "
+                         "({:.2f},{:.2f}) is {:.2f} m away, past the {:.2f} m repair budget, and {:.2f} m from "
+                         "the robot. Driving there would be arriving somewhere else. Reporting unreachable.",
+                         step.target.node_name, published.x(), published.y(), safe->x(), safe->y(),
+                         (*safe - published).norm(), repair_budget,
+                         (*safe - step.robot_pose.pos.head<2>().cast<float>()).norm());
+        }
+        audit_standpoint("repair-rejected", timestamp_ms, published, *safe,
+                         step.robot_pose.pos.head<2>().cast<float>(),
+                         routing_failed_here ? "nearest_reachable"
+                                             : will_rotate_here ? "nearest_rotatable" : "nearest_free",
+                         "over-budget", -1, -1, -1);
+        // Remembered on the PUBLISHED pose, because that is what the producer will offer again.
+        remember_useless_spot(published, step.target.node_name, timestamp_ms);
+        affordance_manager.suppress_target(graph_, target->node_id, kUnreachableRounds);
+        current_plan_.reset();
+        plan_spline_valid_ = false;
+        stop(path_controller, motion_commander);
+        update_display(robot_pose, display, obstacle_tracker.display_obstacle_polygons(),
+                       obstacle_tracker.temporary_obstacle_rfe_points(),
+                       params_ ? params_->max_lidar_draw_points : 0);
+        return std::nullopt;
+    }
     if (safe.has_value() && (*safe - step.target.room_pos).squaredNorm() > 1e-6f)
     {
+        last_repair_applied_m_ = (*safe - step.target.room_pos).norm();
         // Logged only when the ANSWER changes. Repair is deterministic and runs every cycle, so an
         // unchanged repair printed an identical line at 20 Hz — which buried the one line that mattered
         // (the hold) and made a steady state look like thrashing.
@@ -2663,7 +3014,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         display.clear_robot_trajectory();
         clear_tracking_state();
         path_controller.stop();
-        motion_commander.stop_robot();
+        note_no_command(); motion_commander.stop_robot();
         return;
     }
 
@@ -2881,7 +3232,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
             mission_.stop("completed", time_source());
             route_active_ = false;
             path_controller.stop();
-            motion_commander.stop_robot();
+            note_no_command(); motion_commander.stop_robot();
             return;
         }
     }
@@ -3203,7 +3554,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         // curve and the robot drives at the blocker again.
         route_repair_pending_ = true;
         path_controller.stop();
-        motion_commander.stop_robot();
+        note_no_command(); motion_commander.stop_robot();
         return;
     }
 
@@ -3221,9 +3572,47 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         last_target_info_.has_value()
             ? (last_target_info_->room_pos - robot_pose.pos.head<2>().cast<float>()).norm()
             : std::numeric_limits<float>::infinity();
+    // ★★★AND IT MUST BE THE STANDPOINT THAT WAS ASKED FOR. d_here measures against OUR target — the
+    // pose after the repair — so a repair that relocated the goal onto the robot satisfies this test
+    // without the robot moving: 140 of 163 accepted arrivals were a median 2.86 m from the published
+    // cell (measured 2026-08-19, standpoint_audit.jsonl). The producer is then told a cell was visited
+    // that nothing ever looked at, its neglect drops, and the standpoint is never offered again — the
+    // one failure the whole protocol exists to prevent, reported as success.
+    // ★The allowance is the repair WE applied, so an honest few-centimetre correction still arrives and
+    // a substitution cannot. No new constant: the band is the arrival band, the slack is our own edit.
+    // ★DELIBERATELY NOT KEYED ON "a path was active". Measured: 163 of 163 arrivals — the genuine ones
+    // included — report no active path, because the follower deactivates itself on reaching the goal.
+    // The empty-path degenerate and a real arrival are indistinguishable there; only distance separates
+    // them, which is why this test is a distance and not a state.
+    const float d_published =
+        (last_target_info_.has_value() and last_raw_target_pos_.has_value())
+            ? (*last_raw_target_pos_ - robot_pose.pos.head<2>().cast<float>()).norm()
+            : d_here;
+    const float arrival_band = path_controller.goal_threshold() + approach_body_.circumscribed_radius();
+    // ★AN APPROACH IS JUDGED AGAINST THE APPROACH POSE, and completed as `unreachable`. Without the
+    // first half the robot would arrive at the closest reachable pose and the guard would reject it
+    // (the published cell is metres away, correctly), leaving the claim standing for ever; without the
+    // second half we would be back to reporting an arrival at a cell nothing ever looked at.
     const bool arrival_is_real =
         not last_target_info_.has_value() or not last_target_info_->from_affordance
-        or d_here <= path_controller.goal_threshold() + approach_body_.circumscribed_radius();
+        or (target_is_approach_only_ ? d_here <= arrival_band
+                                     : (d_here <= arrival_band
+                                        and d_published <= arrival_band + last_repair_applied_m_));
+    // ★AUDIT EVERY ARRIVAL DECISION, both verdicts. "Reached" is the claim the producer trusts, so the
+    // operands that produced it have to be on disk: which pose the test measured against (the REPAIRED
+    // target, not the published cell), how far the robot was from EACH, and whether a path existed at
+    // all — compute() reports goal_reached with an empty path, which is not an arrival.
+    if (control_output.goal_reached)
+        audit_standpoint("arrival", time_source(),
+                         last_raw_target_pos_.value_or(
+                             last_target_info_.has_value() ? last_target_info_->room_pos
+                                                           : robot_pose.pos.head<2>().cast<float>()),
+                         last_target_info_.has_value() ? last_target_info_->room_pos
+                                                       : robot_pose.pos.head<2>().cast<float>(),
+                         robot_pose.pos.head<2>().cast<float>(),
+                         path_controller.is_active() ? "path-active" : "no-path",
+                         current_plan_.has_value() ? "plan" : "no-plan",
+                         target_is_new_ ? 1 : 0, 1, arrival_is_real ? 1 : 0);
     if (control_output.goal_reached and arrival_is_real)
     {
         // Reached an affordance pose. Resolve its contract (type-level defaults + per-node
@@ -3314,16 +3703,26 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
             return;
         }
         qInfo() << "[affordance]" << (last_target_info_.has_value() ? last_target_info_->node_name.c_str() : "?")
-                << "reached -> REACH (consume immediately)";
+                << (target_is_approach_only_ ? "approach ended -> reporting UNREACHABLE (got as close as the map allows)"
+                                             : "reached -> REACH (consume immediately)");
+        audit_standpoint(target_is_approach_only_ ? "approach-end" : "arrival-end", time_source(),
+                         last_raw_target_pos_.value_or(robot_pose.pos.head<2>().cast<float>()),
+                         last_target_info_.has_value() ? last_target_info_->room_pos
+                                                       : robot_pose.pos.head<2>().cast<float>(),
+                         robot_pose.pos.head<2>().cast<float>(),
+                         target_is_approach_only_ ? "approach" : "standpoint", "", -1, 1, 1);
         finalize_reached(affordance_manager, path_controller, motion_commander, display,
-                             robot_pose.pos, time_source());
+                             robot_pose.pos, time_source(), /*allow_dwell=*/not target_is_approach_only_,
+                             target_is_approach_only_
+                                 ? std::optional<rc::affordance::Outcome>(rc::affordance::Outcome::Unreachable)
+                                 : std::nullopt);
         return;
     }
 
     if (!path_controller.is_active())
     {
         clear_tracking_state();
-        motion_commander.stop_robot();
+        note_no_command(); motion_commander.stop_robot();
         return;
     }
 
@@ -3438,7 +3837,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     if (std::abs(adv_mps) < 5e-4f && std::abs(side_mps) < 5e-4f && std::abs(rot_rps) < 1e-3f)
     {
         path_controller.stop();
-        motion_commander.stop_robot();
+        note_no_command(); motion_commander.stop_robot();
         return;
     }
 

@@ -171,6 +171,18 @@ void GridPlanner::set_world(const std::vector<Eigen::Vector2f>& room_polygon,
                     occ_[idx(ix, iy)] = 1;
     }
     rebuild_offsets();
+
+    // ── THE MAP'S IDENTITY ───────────────────────────────────────────────────────────────────────
+    // A verdict read off this grid — "the body does not fit there", "there is no route from here" —
+    // is a function of the grid, the pose it was asked from, and the cell. It stays true until the
+    // GRID changes, which is what this identifies. Cheap: one pass over the occupancy the rasteriser
+    // has just written, FNV-1a, no allocation. Without it a caller has no way to know whether the
+    // answer it remembers describes the world in front of it or one two seconds stale.
+    std::size_t h = 1469598103934665603ull;
+    for (const auto v : occ_) { h ^= static_cast<std::size_t>(v); h *= 1099511628211ull; }
+    h ^= static_cast<std::size_t>(w_) * 73856093ull;
+    h ^= static_cast<std::size_t>(h_) * 19349663ull;
+    world_hash_ = h;
 }
 
 bool GridPlanner::world_to_cell(const Eigen::Vector2f& p, int& ix, int& iy) const

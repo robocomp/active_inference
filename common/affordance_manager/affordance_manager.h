@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <set>
+#include <utility>
 #include <memory>
 #include <optional>
 #include <string>
@@ -88,6 +90,28 @@ public:
     // on the node as epistemic_refused, which is a statement about the APPROACH — not a completion,
     // and not a claim that anything was observed.
     void suppress_target(const std::shared_ptr<DSR::DSRGraph> &graph, std::uint64_t node_id, int rounds);
+
+    // ── A VERDICT READ OFF THE MAP, REMEMBERED AGAINST THE MAP ───────────────────────────────────
+    // "The body does not fit in that cell" and "there is no route to it and nowhere closer" are
+    // decided from the planner grid in a few milliseconds and cost the robot no motion at all. So the
+    // pair can complete standpoints at loop rate while the base never moves: measured live
+    // 2026-08-19, 21648 `unreachable` reports in 30 minutes — about twelve every second — and in
+    // simulation with ten producers, 922 completions for 108 observations.
+    // ★THE CACHE IS NOT A RATE LIMIT. Two rate limits were tried in protocol_multi_bench first: a
+    // per-producer backoff (insufficient — with ten agents the consumer just turns to the next one's
+    // offer, so a per-agent limit cannot bound a global resource) and a global quiet period on the
+    // consumer (bounded the churn and starved the useful work with it, 120 observations down to 42).
+    // What works has no duration in it: the verdict is a function of (cell, robot pose, map), so it
+    // is remembered against exactly those three and cannot outlive any of them. Each cell yields at
+    // most one such verdict per pose per map, and a new one requires the robot to drive — which costs
+    // physical time by construction, so no zero-cost cycle remains for a livelock to live in.
+    // ★FAILS OPEN: with no robot pose or no rasterised map, nothing is suppressed.
+    // The owner of the planner grid stamps its identity here once per cycle; selection then consults
+    // the cache against it without every caller having to carry the hash around.
+    void set_map_identity(std::size_t h) { map_identity_ = h; }
+    void note_map_verdict(const Eigen::Vector2f &cell, const Eigen::Vector2f &robot);
+    [[nodiscard]] bool has_map_verdict(const Eigen::Vector2f &cell,
+                                       const std::optional<Eigen::Vector2f> &robot) const;
 
     // Grounded EFE selection weights: G = λ_cost·nav_dist − epistemic_gain (nats). switch_margin is
     // the commitment hysteresis (a held affordance must be beaten by this many nats to be dropped).
@@ -250,6 +274,12 @@ private:
     // POSE blocks only the spot that was actually refused and lets a different cell through at once.
     struct RefusedSpot { float x = 0.f, y = 0.f; std::uint64_t when_ms = 0; };
     std::map<std::uint64_t, RefusedSpot> refused_at_ms_;
+    // ── MAP-ONLY VERDICTS, remembered against the map that produced them (see note_map_verdict) ──
+    // (cell, pose) pairs already decided against on the CURRENT grid. Dropped whole when the grid's
+    // identity moves: an answer cannot outlive the thing that made it true.
+    std::set<std::pair<std::int64_t, std::int64_t>> map_verdicts_;
+    std::size_t map_verdict_hash_ = 0;
+    std::size_t map_identity_ = 0;
     std::string   suppressed_name_;         // what that skip cost, for the viewer
     std::uint64_t last_selected_id_ = 0;   // for commitment hysteresis across cycles
     std::vector<Candidate> last_candidates_;

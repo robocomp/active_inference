@@ -490,8 +490,27 @@ private:
     // Mirror of AffordanceManager::suppressed_name(), pushed into the view. Held on the session because
     // the panel snapshot is assembled here and the manager is not reachable from the publish site.
     std::string suppressed_affordance_;
+    // Names the branch that ended a cycle without sending a speed command (see the .cpp).
+    void note_no_command(std::source_location loc = std::source_location::current());
+
     // Rate limit for the "target is boxed in" warning — the condition persists as long as the target does.
     std::uint64_t last_unreachable_log_ms_ = 0;
+
+    // ── HOW FAR OUR OWN REPAIR MOVED THE STANDPOINT, THIS CYCLE ──────────────────────────────────
+    // The arrival test measures against the REPAIRED target, so a repair that relocates the goal onto
+    // the robot satisfies it without the robot going anywhere: measured 2026-08-19, 140 of 163 accepted
+    // arrivals were a median 2.86 m from the cell the producer published, each one reported to room as
+    // SATISFIED. Carrying the displacement lets the arrival test ask the only question that matters —
+    // am I at the standpoint that was ASKED FOR — while still allowing the honest few-centimetre repair.
+    float last_repair_applied_m_ = 0.f;
+    // Rate limit for "the repair would have substituted a different standpoint".
+    std::uint64_t last_repair_reject_log_ms_ = 0;
+    std::uint64_t last_pocket_dump_ms_ = 0;   // rate limit for unreachable_world.txt
+    // ★THE CURRENT TARGET IS AN APPROACH, NOT THE STANDPOINT ROOM ASKED FOR. Set when the published
+    // cell is unroutable and we drive to the closest reachable pose instead: the drive is real work,
+    // but the completion must say `unreachable`, or room books an observation from a vantage the robot
+    // never stood at. It is the difference between "I could not get there" and "I was there".
+    bool target_is_approach_only_ = false;
 
     // Physical-stuck recovery state. The DECISION lives in rc::StallJudge (stall_judge.h) — pure, and
     // therefore testable without a graph or a robot, which is why the defect it now fixes could survive

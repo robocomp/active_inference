@@ -425,6 +425,16 @@ struct ControllerParams
     // past this the dwell ends regardless and the log says the acquisition failed, which is a result.
     float affordance_dwell_max_ms = 12000.0f;
 
+    // ── THE PRODUCER'S EXPLORATION CELL, IN METRES ───────────────────────────────────────────────
+    // room_concept picks a standpoint on a grid of this pitch (EpistemicPlanner::ior_cell_size) and
+    // publishes the cell CENTRE; the information gain it maximised belongs to the CELL, not to the
+    // point. So this side may move within the cell to find a pose the body fits in — that is resolving
+    // a cell into a pose — and may NOT move outside it, which would be choosing a different cell.
+    // ★It must match room's ior_cell_size. It is duplicated rather than published because a new DSR
+    // attribute needs a cortex reinstall; if the two ever disagree, the consumer is the one that
+    // silently starts editing the producer's choice, so change them together.
+    float producer_cell_size_m = 0.5f;
+
     // ── RE-ASK THE STANDPOINT IN THE LAST METRES, AGAINST EVIDENCE THAT HAS NOT FADED ─────────────
     // The standpoint IS re-tested every cycle — but only against the planner grid, whose occupancy comes
     // from beliefs that decay. When residual_concept's hull over a real object fades, the cells under it
