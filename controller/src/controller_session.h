@@ -760,6 +760,13 @@ private:
     void log_selection_json(std::uint64_t t_ms, const rc::AffordanceManager &affordance_manager,
                             const std::optional<Eigen::Vector2f> &robot_xy, const char *stage);
     unsigned last_finalize_line_ = 0;   // which caller completed the affordance
+    // ★★★THE STANDPOINT THE INSTANT-ARRIVAL BRANCH LAST COMPLETED. That branch fires on
+    // `target_is_new_ && d <= goal_threshold`, and finalize_reached CLEARS last_target_info_ — which
+    // is exactly what makes the next adoption look new. So completing re-arms the condition that
+    // completes: measured 4522 calls at an unchanging d = 0.18 m, at full loop rate, while room's
+    // actual offer sat 3.96 m away and the robot never moved. The completion is legitimate ONCE per
+    // standpoint; the loop is it firing for the same one for ever.
+    std::optional<Eigen::Vector2f> instant_completed_at_;
     std::ofstream select_json_;            // per-cycle "why is nothing being executed" record
     bool          select_json_open_ = false;
     std::uint64_t last_select_json_ms_ = 0;

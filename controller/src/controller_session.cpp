@@ -488,6 +488,23 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
                        std::optional<Eigen::Vector2f>{robot_pose->pos.head<2>().cast<float>()},
                        target.has_value() ? "selected" : "no-target");
 
+    // ★★★SAY SO WHEN WE STOP EXECUTING. The consumer owns the fact "am I executing this"; the producer
+    // must not have to INFER it from a timeout. Measured 2026-08-19: 39% of cycles read Executing on the
+    // wire while the consumer held no target and no plan — it had dropped both (no route) and left the
+    // claim standing, so room waited on an affordance nobody was driving. The execution lease does
+    // recover it, but at 45 s — a guessed constant that converts a stall into a shorter stall instead of
+    // preventing one. Releasing is free, immediate, and needs no timer, which puts the lease back to
+    // being a backstop for a CRASHED consumer rather than the primary recovery path.
+    // ★release_execution_claim is idempotent: it clears `active` only when the node really reads
+    // Executing, so calling it on any targetless cycle is safe and does nothing the rest of the time.
+    if (not target.has_value() and not current_plan_.has_value() and graph_)
+        if (affordance_manager.release_execution_claim(graph_))
+        {
+            std::println("[affordance] no target and no plan — releasing the execution claim so the "
+                         "producer can offer again (it should not have to wait out a lease).");
+            std::fflush(stdout);
+        }
+
     // ── A SPOT WE ALREADY FAILED AT, RECOGNISED BEFORE DRIVING TO IT AGAIN ───────────────────────
     // The producer does not know the approach failed — nothing tells it — so it re-publishes the same
     // standpoint as soon as the suppression lapses, and without this we would re-learn it the expensive
@@ -3275,9 +3292,20 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
             last_target_info_.has_value()
                 ? (last_target_info_->room_pos - robot_pose.pos.head<2>().cast<float>()).norm()
                 : std::numeric_limits<float>::infinity();
+        // ★ONCE PER STANDPOINT. Without this the branch re-fires every cycle (see instant_completed_at_).
+        // Cleared when the robot leaves, so a genuine later re-offer of the same cell still works.
+        const bool already_instant_done =
+            instant_completed_at_.has_value()
+            and (last_target_info_.has_value()
+                 and (last_target_info_->room_pos - *instant_completed_at_).norm() < 0.30f);
+        if (instant_completed_at_.has_value()
+            and (robot_pose.pos.head<2>().cast<float>() - *instant_completed_at_).norm() > 0.60f)
+            instant_completed_at_.reset();        // moved away: the cell may legitimately return
         if (target_is_new_ and last_target_info_.has_value() and last_target_info_->from_affordance
-            and d_to_standpoint <= path_controller.goal_threshold())
+            and d_to_standpoint <= path_controller.goal_threshold()
+            and not already_instant_done)
         {
+            instant_completed_at_ = last_target_info_->room_pos;
             qInfo() << "[affordance]" << last_target_info_->node_name.c_str()
                     << "reached on the first cycle at" << d_to_standpoint
                     << "m — already at this standpoint. Completing as SATISFIED without the dwell.";
