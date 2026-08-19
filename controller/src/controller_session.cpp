@@ -1546,16 +1546,18 @@ void ControllerSession::log_approach_diagnostics(std::uint64_t t_ms,
                    "#                before out.min_esdf is ever assigned, so the controller does not even\n"
                    "#                SAMPLE the field while turning. A 0 here would read as 'no clearance';\n"
                    "#                nan says 'not measured'. clear_now_m is the model-side answer instead.\n"
+                   "# raw_tgt_x/y  = the standpoint AS PUBLISHED by the producer; tgt_x/y is what the\n"
+                   "#                controller is actually driving to, and fix_held = 1 when a standpoint\n"
+                   "#                repair is in force — so the two differ BY OUR DOING.\n"
+                   "#                ★'Who moved the target' used to require aligning this file against\n"
+                   "#                room_concept's log on one wall clock, and the answer changed the whole\n"
+                   "#                diagnosis. It is a local question now: raw moving = producer, tgt\n"
+                   "#                moving while raw stands still = us.\n"
+                   "#                ⚠These three lines were first written INTO the column row itself,\n"
+                   "#                which split the header across two lines and made the file unreadable\n"
+                   "#                by its own header. Every legend line belongs above the column row.\n"
                    "t_ms,target,phase,tgt_x,tgt_y,tgt_facing_deg,rob_x,rob_y,rob_facing_deg,"
                    "d_target_m,d_arrival_m,yaw_err_deg,cmd_adv,cmd_rot,"
-                   "# raw_tgt_x/y = the standpoint AS PUBLISHED by the producer. tgt_x/y is what the\n"
-                   "#                controller is actually driving to. fix_held = 1 when a standpoint\n"
-                   "#                repair is in force, so the two differ BY OUR DOING.\n"
-                   "#                ★Added 2026-08-19: 'who moved the target' previously required\n"
-                   "#                aligning this file against room_concept's log on one wall clock,\n"
-                   "#                and the answer changed the whole diagnosis. It is a local question\n"
-                   "#                and it should read as one: raw moving = producer, tgt moving with\n"
-                   "#                raw still = us.\n"
                    "clear_now_m,clear_des_m,free_now,free_des,sweep_min_m,sweep_ok,sweep_worst_deg,"
                    "tgt_sweep_min_m,tgt_sweep_ok,min_esdf_m,goal_reached,raw_tgt_x,raw_tgt_y,fix_held\n";
     }
@@ -1917,7 +1919,9 @@ void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &s
     if (approach_fix_.has_value())
     {
         step.target.room_pos = approach_fix_->pos;
-        aim_at_object();
+        // ★THE FROZEN FACING, not a fresh aim. See ApproachFix::object_yaw: re-aiming every cycle at a
+        // live object estimate is a second moving target wearing the first one's clothes.
+        step.target.yaw_rad  = approach_fix_->object_yaw;
         return;
     }
 
@@ -1943,15 +1947,18 @@ void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &s
     if ((*fix - anchor).squaredNorm() <= 1e-6f) return;   // the standpoint is clear; nothing to do
 
 
+    step.target.room_pos = *fix;      // aim_at_object reads room_pos, so the move lands first
+    aim_at_object();                  // ONE aim, at the moment of the repair, and it is kept
     approach_fix_ = ApproachFix{.pos = *fix, .name = step.target.node_name, .anchor = anchor,
-                               .arrival_yaw = arrival_yaw_from(*fix)};
+                               .arrival_yaw = arrival_yaw_from(*fix),
+                               .object_yaw = step.target.yaw_rad};
     std::println("[approach] '{}' — {:.2f} m out, the live LiDAR says ({:.2f},{:.2f}) is OCCUPIED by "
                  "something the grid has forgotten (residual decays; returns do not). Standpoint moved to "
                  "({:.2f},{:.2f}), {:.2f} m away.",
                  step.target.node_name, (step.plan_origin - anchor).norm(),
                  anchor.x(), anchor.y(), fix->x(), fix->y(), (*fix - anchor).norm());
-    step.target.room_pos = *fix;
-    aim_at_object();
+    // (room_pos and yaw_rad were both set above, before the fix was recorded, so that the frozen
+    // object_yaw is exactly the heading this run of the function chose — not one re-derived later.)
 }
 
 bool ControllerSession::wants_final_facing(const ControllerTargetInfo &target) const
@@ -3165,7 +3172,34 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // else it reads as a wedge and drops a recovery disc right at the target. Just issue the rotation.
     if (control_output.aligning)
     {
-        reset_stuck_state();   // not stuck — clear any no-advance window carried over from the approach
+        // ★★THE ARRIVAL ROTATION IS NO LONGER EXEMPT FROM THE STALL DETECTOR — measured 2026-08-19.
+        // This used to call reset_stuck_state() every aligning cycle and return, so the detector was
+        // structurally blind for the whole of a manoeuvre that has no timeout of its own. Live: FIVE
+        // episodes in one 545 s run where the loop stopped reaching the MPPI stage for 19, 22, 39, 53
+        // and 54 seconds, each entered from healthy driving (adv ~0.6, track_s advancing) and each
+        // resuming with adv exactly 0.000, rot at the +-0.800 cap and track_s back at 0.00. From
+        // outside it is a robot that has stopped; from inside it was "turning around at a target",
+        // for the better part of a minute, with nothing able to contradict it.
+        // ★THE EXEMPTION WAS RIGHT ABOUT THE OLD QUESTION AND WRONG ABOUT THE NEW ONE. Its reason —
+        // "makes NO waypoint progress by design, so it reads as a wedge" — is entirely true of the
+        // TRANSLATION test, which is why the ask passed here is zero: a turn in place must never be
+        // called a wedge. But Spinning asks the other question, the one that IS meaningful during a
+        // rotation: you were told to sweep this much heading, did you end up anywhere new? A
+        // converging arrival rotation nets what it sweeps and stays silent. One that sweeps radians
+        // and nets nothing is not turning around at a target, it is stuck at one, and it needs exactly
+        // what a wedge needs — something to change the pose and force a replan.
+        // ★NO TIMEOUT, DELIBERATELY. A bound on the manoeuvre would be a threshold standing in for
+        // this question, and it would have to be loose enough for the slowest legitimate turn, which
+        // is most of the 19 s. The convergence test needs no such number.
+        if (detect_stuck(/*pursuing=*/true, /*asked_lin_mps=*/0.f, /*cmd_lin_mps=*/0.f,
+                         motion_commander.last_uncertainty_diag().valid
+                             ? motion_commander.last_uncertainty_diag().xy_std_m : 0.f,
+                         robot_pose.pos, robot_pose.theta, rot_rps, time_source()))
+        {
+            begin_escape(robot_pose, obstacle_tracker, path_controller, time_source());
+            step_escape(robot_pose, path_controller, motion_commander, time_source());
+            return;
+        }
         motion_commander.send_speed_command(adv_mps, side_mps, rot_rps);
         return;
     }
@@ -3196,21 +3230,25 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     }
 
     // MPPI produced no usable motion this cycle but we are not yet confirmed-wedged: hold the base.
-    // ★STOP THE BASE, DO NOT RETIRE THE PLAN. This called `path_controller.stop()` as well, and that is
-    // not a brake — it clears `path_room_`, drops `active_`, and calls `plain_tracker_.reset()`, which
-    // empties `s_hint_` and re-arms `start_align_` (trajectory_controller.cpp:200-220). A SINGLE cycle
-    // of near-zero command therefore destroyed the whole traversal, and PLAIN emits exactly that
-    // command in two perfectly ORDINARY states: holding a pivot at ~zero error (plain_tracker.cpp:364,
-    // 372) and the stop taper at zero. The loop closed on itself — reset ⇒ global re-acquire ⇒
-    // start-align ⇒ hold ⇒ zero command ⇒ stop() ⇒ reset — which is the second of the three mechanisms
-    // that kept the tracker's arc length pinned at 0 for 39% of a 282 s run.
-    // `stop()` is for the cases that genuinely RETIRE a path: arrival, abort, a new target, a repaired
-    // curve. "The optimiser had nothing to say this cycle" is none of those.
-    // ★What makes holding safe rather than a way to sit still for ever is that a genuine deadlock is now
-    // CAUGHT: the translation wedge already escaped, and StallVerdict::Spinning (fbd47b7) covers the
-    // rotate-forever case this branch used to mask by continually rebuilding the plan underneath it.
+    // ★★REVERTED 2026-08-19, SAME DAY, ON A LIVE STALL. Plan §1.2 removed the `path_controller.stop()`
+    // here, on the argument that a single quiet cycle should not destroy a whole traversal — which is
+    // true, and is still one of the three churn mechanisms. But the safety argument attached to it was
+    // WRONG, and this is the exact hole:
+    //   this branch fires when adv AND rot are BOTH ~0, and StallJudge opens no window in that case by
+    //   design — `not (asked_mps > 0 or |commanded_rot| > 0)` resets it and returns (stall_judge.h).
+    //   A robot commanded EXACTLY NOTHING is invisible to the stall detector, deliberately: nothing is
+    //   predicted, so nothing can be contradicted. So neither the wedge nor Spinning can fire here, and
+    //   the commit message claiming Spinning covers it was simply mistaken. Removing stop() removed the
+    //   ONLY thing that broke a zero-command state, and `epistemic_gain` leaving the identity test
+    //   (same commit) removed the accidental second rescue — a per-cycle replan.
+    // The user reports the robot stalled with zero velocities commanded on the first run with this
+    // build, on a controller that had run for weeks. Restored to the known-good behaviour.
+    // ★The churn this re-introduces is real and still wants fixing — but it wants a BOUNDED version
+    // (retire the plan after N consecutive quiet cycles, not after one), designed and benched offline,
+    // not a valve removed live. Do not re-remove this line without that.
     if (std::abs(adv_mps) < 5e-4f && std::abs(side_mps) < 5e-4f && std::abs(rot_rps) < 1e-3f)
     {
+        path_controller.stop();
         motion_commander.stop_robot();
         return;
     }

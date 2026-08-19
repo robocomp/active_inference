@@ -580,6 +580,14 @@ private:
         // and NOT ONE arrival in the whole run (d_target never below 0.60 m, 0 `reached` rows).
         // A carrot on a stick, manufactured entirely by re-judging a static pose from a moving eye.
         float arrival_yaw;
+        // ★AND THE FACING, FROZEN WITH IT. `aim_at_object` re-derives the commanded yaw from the
+        // object's LIVE position every cycle, so freezing only the standpoint's position left the
+        // pose half-static: the robot stood still and kept being told to face somewhere new.
+        // Measured 2026-08-19 on the first run with the static standpoint: 0.73 rad of commanded
+        // turning PER METRE travelled, |cmd_rot| at its cap on 70% of approach cycles, 6.3 whole
+        // revolutions over one file, and not one `ALIGN` or `reached` row in 1478.
+        // A pose is a position AND a heading. Freezing half of one is not freezing it.
+        float object_yaw;
     };
     // `anchor` is the standpoint the fix was derived FROM. A producer is free to republish its viewpoint
     // somewhere else under the same name, and a fix that outlived the pose it repaired would silently
