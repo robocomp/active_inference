@@ -601,7 +601,7 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     // it is re-tested. This asks the last metres against the live return cloud instead. It runs AFTER
     // the repair on purpose — the pose it must judge is the one the robot is actually driving to, not
     // the one the producer published.
-    recheck_standpoint_on_approach(step, world_model, obstacle_tracker, timestamp_ms);
+    recheck_standpoint_on_approach(step, world_model, obstacle_tracker, path_controller, timestamp_ms);
 
 
     current_target_room_ = step.target.room_pos;
@@ -1773,6 +1773,7 @@ void ControllerSession::feed_external_velocity_trace(const ControllerWorldModel 
 void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &step,
                                                        ControllerWorldModel &world_model,
                                                        ControllerObstacleTracker &obstacle_tracker,
+                                                       const rc::TrajectoryController &path_controller,
                                                        std::uint64_t timestamp_ms)
 {
     const float window = params_ != nullptr ? params_->affordance_approach_recheck_m : 0.f;
@@ -1789,6 +1790,32 @@ void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &s
     // allowed to move, it is a different standpoint and the old correction is about a problem elsewhere.
     if (approach_fix_.has_value() and (anchor - approach_fix_->anchor).squaredNorm() > window * window)
         approach_fix_.reset();
+
+    // ★★★ALREADY STANDING THERE ⇒ THERE IS NOTHING TO APPROACH, AND NOTHING TO REPAIR. Leave the target
+    // exactly as the producer published it and let the ordinary arrival path have it.
+    // ★THE LIVELOCK THIS BREAKS, from a live log 2026-08-19:
+    //     [approach] 'afford_room' — 0.09 m out, the live LiDAR says (-1.50,-3.88) is OCCUPIED ...
+    //                Standpoint moved to (-1.71,-3.64), 0.31 m away.
+    //     [affordance] afford_room REFUSED: already at this standpoint on the first cycle
+    //     [aff-select] 'afford_room' was the only affordance on offer — taking it again ...
+    // ...repeating forever, with the robot stationary and both agents busy.
+    // The evidence that condemned (-1.50,-3.88) is the robot's OWN blind spot: the self-return filter
+    // must delete every point inside the body, which leaves a body-shaped hole guaranteed to contain no
+    // returns whatever is really there. Standing 0.09 m away, the robot IS that hole.
+    // ★The existing guard below — reject a candidate that lands inside the body — was aimed at exactly
+    // this and does not reach it. It only stops the search landing ON the robot, so the search lands
+    // just OUTSIDE it instead (0.31 m, here), which is the same loop one step removed. Its comment
+    // claims "a normal approach relocates nothing and never reaches this line"; a robot already parked
+    // on the viewpoint reaches it every cycle. Rejecting candidates is the wrong altitude — the
+    // question is whether this function should be running at all.
+    // ★Threshold-free in the sense that matters: this is not a tuned margin, it is the SAME predicate
+    // the arrival test uses (goal_threshold). "Close enough to have arrived" and "close enough that
+    // there is nothing left to approach" are one question, so they must not be two numbers.
+    if ((step.robot_pose.pos - anchor).norm() <= path_controller.params.goal_threshold)
+    {
+        approach_fix_.reset();
+        return;
+    }
     // ★MEASURED TO WHAT WE ARE DRIVING TO, not to the anchor. Once a fix is taken the robot approaches
     // the MOVED pose, so a window measured against the anchor walks out of range exactly because the fix
     // worked — which would drop it and put the target straight back where the returns said it must not

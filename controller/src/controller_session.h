@@ -602,6 +602,7 @@ private:
     void recheck_standpoint_on_approach(ControllerPlanningStep &step,
                                         ControllerWorldModel &world_model,
                                         ControllerObstacleTracker &obstacle_tracker,
+                                        const rc::TrajectoryController &path_controller,
                                         std::uint64_t timestamp_ms);
 
     // Drive the selected tour in REVERSE waypoint order. A property of the RUN, set when Run is
