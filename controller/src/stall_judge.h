@@ -101,7 +101,15 @@ enum class StallVerdict
 {
     None,           // moving as intended, or nothing was asked of it
     Wedge,          // told to travel, did not — physical obstruction. Escape.
-    ThrottleStall   // our own speed limiter removed the travel. Report; do NOT escape.
+    ThrottleStall,  // our own speed limiter removed the travel. Report; do NOT escape.
+    // ★TURNING FOREVER AND ARRIVING NOWHERE (added 2026-08-18 from a live failure). The base obeys
+    // every command, so no "commanded vs achieved" test can see it: adv is 0, rot is at its cap, the
+    // heading sweeps back and forth and the robot does not move. Measured on the robot at (1.57,-2.75):
+    // cmd_adv 0.000 with cmd_rot alternating +0.800/-0.800 for 20+ s, track_s pinned at 0.00, while
+    // stuck_ms sat at 0 the whole time because the window only ever opened on TRANSLATION.
+    // It is a livelock, not an obstruction — but it needs the same thing a wedge does: something must
+    // change the pose and force a replan, which is what the escape does.
+    Spinning
 };
 
 class StallJudge
@@ -121,9 +129,11 @@ public:
         float commanded_m = 0.f;   // travel actually commanded to the base over the window
         float achieved_m = 0.f;    // NET displacement from the window's anchor — immune to jitter
         float delivered = 1.f;     // commanded_m / asked_m: how much of the ask survived the limiter
+        float asked_rot_rad = 0.f;     // heading the robot was TOLD to sweep over the window
+        float achieved_rot_rad = 0.f;  // NET heading change over it — near zero for a chatter
     };
 
-    void reset() { armed_ = false; since_ms_ = 0; asked_m_ = 0.f; commanded_m_ = 0.f; }
+    void reset() { armed_ = false; since_ms_ = 0; asked_m_ = 0.f; commanded_m_ = 0.f; asked_rot_ = 0.f; }
     [[nodiscard]] bool armed() const { return armed_; }
     // The window's start, or 0 when none is open. ★`armed_` is a separate flag rather than `since_ms_ != 0`
     // because a timestamp of 0 is a legal instant — it is what a bench, a replay or a monotonic clock
@@ -136,7 +146,8 @@ public:
     // localiser's position sigma — the resolution at which "did it move" can be answered at all; it is
     // consulted ONLY on the throttled branch (see the header), so 0 is a safe value everywhere else.
     Report note(bool pursuing, float asked_mps, float commanded_mps, float pose_sigma_m,
-                const Eigen::Vector2f &pos_room, std::uint64_t now_ms, const Params &p)
+                const Eigen::Vector2f &pos_room, float heading_rad, float commanded_rot_rps,
+                std::uint64_t now_ms, const Params &p)
     {
         Report r;
         // ★GATED ON THE ASK, NOT ON THE COMMAND. Nothing is being predicted unless the tracker wants to
@@ -144,7 +155,11 @@ public:
         // reason the sharp-curve pivot at the head of a stall is not itself reported. Gating on the
         // COMMAND, as this did before, also closes the window whenever a limiter zeroes it, which is
         // precisely when the robot is most stuck.
-        if (not pursuing or not (asked_mps > 0.f))
+        // ★ANY COMMANDED MOTION OPENS THE WINDOW, not translation alone. Gating on translation was
+        // what made the spin invisible: a robot ordered to rotate at its cap forever is being asked for
+        // something, and "nothing is predicted" was simply false. Rotation now carries its own
+        // prediction, tested the same way translation is.
+        if (not pursuing or not (asked_mps > 0.f or std::abs(commanded_rot_rps) > 0.f))
         {
             reset();
             return r;
@@ -155,8 +170,10 @@ public:
             since_ms_ = now_ms;
             last_ms_ = now_ms;
             anchor_ = pos_room;
+            anchor_heading_ = heading_rad;
             asked_m_ = 0.f;
             commanded_m_ = 0.f;
+            asked_rot_ = 0.f;
             return r;
         }
         const float dt = static_cast<float>(now_ms - last_ms_) * 1e-3f;
@@ -165,6 +182,8 @@ public:
         {
             asked_m_ += asked_mps * dt;
             commanded_m_ += std::max(0.f, commanded_mps) * dt;
+            // How much heading the robot was TOLD to sweep — the rotational twin of asked_m_.
+            asked_rot_ += std::abs(commanded_rot_rps) * dt;
         }
 
         // ★JUDGED AT THE END OF A FULL WINDOW, NEVER CONTINUOUSLY. Early on, the asked travel is a few
@@ -177,8 +196,22 @@ public:
         r.commanded_m = commanded_m_;
         r.achieved_m = (pos_room - anchor_).norm();
         r.delivered = asked_m_ > 1e-6f ? commanded_m_ / asked_m_ : 1.f;
+        r.asked_rot_rad = asked_rot_;
+        // NET heading change, the short way round. The discriminator for a spin is that this stays near
+        // zero while asked_rot_ grows: a converging turn nets what it swept, a chatter nets nothing.
+        r.achieved_rot_rad = std::abs(std::remainder(heading_rad - anchor_heading_,
+                                                     2.f * static_cast<float>(M_PI)));
 
-        if (r.achieved_m >= p.slip_ratio * asked_m_)
+        // ★THE ROTATIONAL TEST FIRST, because a spin asks for no translation and every test below is
+        // about translation. It is the SAME question the wedge test asks, on the other axis: you were
+        // told to sweep this much heading — did you end up anywhere new? A converging turn nets what it
+        // swept; a chatter sweeps radians and nets nothing, which is the whole signature.
+        // Requires the robot to be going nowhere as well, so a robot turning WHILE driving is untouched.
+        const bool going_nowhere = r.achieved_m < std::max(0.02f, p.slip_ratio * asked_m_);
+        if (asked_rot_ > 0.f and going_nowhere
+            and r.achieved_rot_rad < p.slip_ratio * asked_rot_)
+            r.verdict = StallVerdict::Spinning;
+        else if (r.achieved_m >= p.slip_ratio * asked_m_)
             r.verdict = StallVerdict::None;                    // going where it intended
         // A real command (the limiter left most of the ask alone) that the base then failed. BOTH halves
         // are required — see the header for the two live failures that each half alone produced.
@@ -193,8 +226,10 @@ public:
         // condition re-reports at the window cadence instead of latching or falling silent.
         since_ms_ = now_ms;
         anchor_ = pos_room;
+        anchor_heading_ = heading_rad;
         asked_m_ = 0.f;
         commanded_m_ = 0.f;
+        asked_rot_ = 0.f;
         return r;
     }
 
@@ -204,7 +239,8 @@ private:
     bool armed_ = false;
     std::uint64_t since_ms_ = 0, last_ms_ = 0;
     Eigen::Vector2f anchor_ = Eigen::Vector2f::Zero();
-    float asked_m_ = 0.f, commanded_m_ = 0.f;
+    float anchor_heading_ = 0.f;
+    float asked_m_ = 0.f, commanded_m_ = 0.f, asked_rot_ = 0.f;
 };
 
 // ── SELF TEST ────────────────────────────────────────────────────────────────────────────────────
@@ -240,7 +276,9 @@ inline bool StallJudge::self_test()
             const std::uint64_t t = static_cast<std::uint64_t>(i) * 50u;
             const Eigen::Vector2f reported{truth.x() + wander(i, jitter_m),
                                            truth.y() + wander(i + 7, jitter_m)};
-            const auto r = j.note(true, asked_mps, asked_mps * delivered, sigma, reported, t, p);
+            // Pure-translation cases: heading fixed, no rotation commanded.
+            const auto r = j.note(true, asked_mps, asked_mps * delivered, sigma, reported,
+                                  0.f, 0.f, t, p);
             if (r.verdict != StallVerdict::None and last.verdict == StallVerdict::None) last = r;
             truth.x() += real_mps * 0.05f;
         }
@@ -347,19 +385,67 @@ inline bool StallJudge::self_test()
               "reflex it was not aimed at");
     }
 
-    // (6) A PIVOT IS NOT A STALL. The sharp-curve law commands rotation with adv = 0, which is exactly
-    // what precedes the stall in the live trace. No ask ⇒ no window ⇒ no verdict, ever.
+    // (6) A PIVOT IS NOT A STALL — AND THE DISCRIMINATOR IS NET HEADING, NOT ABSENCE OF TRANSLATION.
+    // ★THE CONTRADICTION THIS TEST CARRIED, RESOLVED. The case was written as "adv = 0 ⇒ no ask ⇒ no
+    // window", and it passed only because it also passed commanded_rot_rps = 0 and a FROZEN heading —
+    // i.e. it was not a pivot at all, it was a robot being asked for nothing. The moment rotation
+    // became a first-class ask, the two claims ("a pivot must never fire" / "a spin must fire") were
+    // pointed at the same scenario and one had to give.
+    // ★WHAT SURVIVES: the pivot. What is withdrawn is the REASON — "it asks for no translation" was
+    // never why a pivot is healthy. A pivot is healthy because IT GETS SOMEWHERE: it nets the heading
+    // it sweeps. A spin sweeps the same radians and nets nothing. Those are distinguishable without
+    // ever consulting adv, so nothing has to be exempted by category, which is the whole point.
+    // (6a) A CONVERGING PIVOT: rotation at 0.8 rad/s, adv = 0, heading actually turning. Must NOT fire.
     {
         StallJudge j;
         bool fired = false;
         for (int i = 0; i < 200; ++i)
-            if (j.note(true, 0.f, 0.f, 0.20f, {0.f, 0.f}, static_cast<std::uint64_t>(i) * 50u, p).verdict
+        {
+            const float th = 0.8f * static_cast<float>(i) * 0.05f;   // the heading it was told to sweep
+            if (j.note(true, 0.f, 0.f, 0.20f, {0.f, 0.f}, th, 0.8f,
+                       static_cast<std::uint64_t>(i) * 50u, p).verdict
                 != StallVerdict::None) fired = true;
-        std::printf("  10 s pivot in place (adv=0): fired %s, window open %s\n",
-                    fired ? "YES" : "no", j.armed() ? "yes" : "no");
-        check(not fired, "★rotating in place asks for no translation, so nothing is predicted and nothing "
-                         "can be contradicted");
-        check(not j.armed(), "and no window may be left open behind it");
+        }
+        std::printf("  10 s converging pivot (adv=0, heading turning): fired %s\n", fired ? "YES" : "no");
+        check(not fired, "★a pivot that nets the heading it sweeps is doing its job — it is the sharp-curve "
+                         "law working, and reversing it would drop a phantom obstacle mid-corner");
+    }
+
+    // (6b) THE SAME COMMAND, GOING NOWHERE: rotation at its cap alternating sign, heading oscillating
+    // over a few degrees, net zero. This is the live signature — cmd_rot +0.800/-0.800 for 20 s at a
+    // fixed pose. It MUST fire, and it must not be reachable by any test that looks only at adv.
+    {
+        StallJudge j;
+        bool spun = false;
+        for (int i = 0; i < 200; ++i)
+        {
+            const float th = 0.05f * std::sin(static_cast<float>(i) * 1.5f);   // ±3 deg, nets nothing
+            const float rot = (i % 2 == 0) ? 0.8f : -0.8f;
+            if (j.note(true, 0.f, 0.f, 0.20f, {0.f, 0.f}, th, rot,
+                       static_cast<std::uint64_t>(i) * 50u, p).verdict
+                == StallVerdict::Spinning) spun = true;
+        }
+        std::printf("  10 s chatter in place (rot at cap, net heading ~0): spinning %s\n",
+                    spun ? "YES" : "no");
+        check(spun, "★★sweeping radians and arriving nowhere is the livelock the robot sat in for 74 s of "
+                    "a 144 s run; if this does not fire, nothing recovers it");
+    }
+
+    // (6c) TURNING WHILE DRIVING IS NEVER A SPIN, however little heading it nets — a robot covering
+    // ground is going somewhere by definition, and the translation tests below are the ones that own it.
+    {
+        StallJudge j;
+        bool spun = false;
+        Eigen::Vector2f pos{0.f, 0.f};
+        for (int i = 0; i < 200; ++i)
+        {
+            pos.x() += 0.4f * 0.05f;                                  // 0.4 m/s of real progress
+            const float th = 0.05f * std::sin(static_cast<float>(i) * 1.5f);
+            if (j.note(true, 0.4f, 0.4f, 0.20f, pos, th, (i % 2 == 0) ? 0.8f : -0.8f,
+                       static_cast<std::uint64_t>(i) * 50u, p).verdict
+                == StallVerdict::Spinning) spun = true;
+        }
+        check(not spun, "★a robot covering 0.4 m/s while its heading wanders is not spinning in place");
     }
 
     // (7) THE WINDOW MUST MATURE. A verdict before confirm_ms would be decided on a few centimetres of
@@ -378,7 +464,8 @@ inline bool StallJudge::self_test()
         for (int i = 0; i * 50 <= 15000; ++i)
         {
             const Eigen::Vector2f rep{pos.x() + 0.010f * std::sin(i * 2.399f), pos.y()};
-            if (j.note(true, 0.071f, 0.011f, 0.20f, rep, static_cast<std::uint64_t>(i) * 50u, p).verdict
+            if (j.note(true, 0.071f, 0.011f, 0.20f, rep, 0.f, 0.f,
+                       static_cast<std::uint64_t>(i) * 50u, p).verdict
                 == StallVerdict::ThrottleStall) ++stalls;
         }
         std::printf("  15 s frozen: %d throttle-stall verdicts (one per ~%.1f s window)\n",

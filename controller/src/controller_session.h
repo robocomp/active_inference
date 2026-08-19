@@ -569,6 +569,17 @@ private:
         Eigen::Vector2f pos;
         std::string name;      // the target it belongs to; the identity that survives a repair
         Eigen::Vector2f anchor;   // the standpoint it was derived FROM (see the anchor-moved guard)
+        // ★THE HEADING THE FIX WAS JUDGED AT, frozen when it was taken. The admissibility of a FIXED
+        // pose must not depend on where the observer currently stands, and it did: the re-test derived
+        // the arrival heading from `centre - plan_origin`, so every metre the robot advanced rotated
+        // the footprint at the held standpoint, swept a different rectangle, and pulled returns that
+        // were outside the body inside it. The pose was then declared "no longer clear" and re-solved
+        // FURTHER OUT, with nothing in the world having changed. Measured 2026-08-19 over 139 s:
+        // 57 relocations, the standpoint fleeing 0.084 m per cycle against 0.027 m of robot closure —
+        // 3.1x faster than the robot could close — 77% of them in the robot's own travel direction,
+        // and NOT ONE arrival in the whole run (d_target never below 0.60 m, 0 `reached` rows).
+        // A carrot on a stick, manufactured entirely by re-judging a static pose from a moving eye.
+        float arrival_yaw;
     };
     // `anchor` is the standpoint the fix was derived FROM. A producer is free to republish its viewpoint
     // somewhere else under the same name, and a fix that outlived the pose it repaired would silently

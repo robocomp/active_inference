@@ -1807,12 +1807,39 @@ void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &s
     // circumscribed disc; one that does not is tested at the two headings it really occupies — the
     // arrival heading (it drives in along the bearing from wherever it is) and the commanded facing.
     const bool rotates = wants_final_facing(step.target);
-    const auto clear_of_returns = [&](const Eigen::Vector2f &centre)
+    // ★THE ARRIVAL HEADING IS AN ARGUMENT NOW, NOT A RE-DERIVATION. Deriving it inside from
+    // `centre - plan_origin` made the admissibility of a FIXED pose a function of where the robot
+    // currently stands, which is what produced the fleeing standpoint (see ApproachFix::arrival_yaw).
+    // Choosing a NEW fix still asks the question from where the robot is — that is the heading it will
+    // really arrive on — but RE-TESTING a held one must ask it at the heading the fix was chosen for.
+    const auto arrival_yaw_from = [&](const Eigen::Vector2f &centre)
     {
         const Eigen::Vector2f approach_dir = centre - step.plan_origin;
-        const float arrival_yaw = approach_dir.squaredNorm() > 1e-8f
-                                ? std::atan2(approach_dir.y(), approach_dir.x())
-                                : step.target.yaw_rad;
+        return approach_dir.squaredNorm() > 1e-8f
+             ? std::atan2(approach_dir.y(), approach_dir.x())
+             : step.target.yaw_rad;
+    };
+    const auto clear_of_returns_at = [&](const Eigen::Vector2f &centre, const float arrival_yaw)
+    {
+        // ★★★ THE PATCH UNDER THE ROBOT IS A BLIND SPOT, NOT FREE SPACE. The self-return filter above
+        // deletes every point inside the robot's own body — it must, or the wheels at 0.25 m would
+        // condemn every standpoint the moment the robot got close enough to test it. But that leaves a
+        // body-shaped hole GUARANTEED to hold no returns whatever is really there, and
+        // nearest_free_where, searching outward from an anchor the object itself occupies, lands on it
+        // almost every time. Live 2026-08-19, robot at (-0.81,-2.26):
+        //     [approach] (-1.00,-2.38) is OCCUPIED ... Standpoint moved to (-0.81,-2.26)
+        //     [affordance] REFUSED: already at this standpoint on the first cycle
+        // — the standpoint relocated onto the robot ITSELF, was instantly refused as already-reached,
+        // and the pair looped there indefinitely.
+        // ★This file already states the rule, about an empty cloud: "no evidence is not the same as
+        // clear, and it licenses nothing". Same rule, applied to the hole we punch in the cloud
+        // ourselves. A viewpoint the robot already occupies also yields exactly the image it already
+        // has, so there is nothing to be gained by moving there even if it IS free.
+        // ★★NOT AN ARRIVAL TEST, and that is the whole point. This rejects a candidate RELOCATION and
+        // never a completion, so it cannot turn a legitimate arrival into a refusal — which is what
+        // forced the revert of 31faa35 (af7ba55). A normal approach relocates nothing and never
+        // reaches this line.
+        if (body.contains_yaw(centre, step.robot_pose.pos, robot_yaw)) return false;
         for (const auto &p : returns)
         {
             if ((p - centre).squaredNorm() > reach2) continue;     // cannot reach it at any heading
@@ -1822,6 +1849,10 @@ void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &s
         }
         return true;
     };
+    // The predicate nearest_free_where takes: a CANDIDATE is judged at the heading the robot would
+    // really arrive on, which is the honest question when choosing where to go.
+    const auto clear_of_returns = [&](const Eigen::Vector2f &centre)
+    { return clear_of_returns_at(centre, arrival_yaw_from(centre)); };
 
     const auto aim_at_object = [&]()
     {
@@ -1837,7 +1868,9 @@ void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &s
     if (approach_fix_.has_value())
     {
         const Eigen::Vector2f held = approach_fix_->pos;
-        if (grid_planner_.pose_free(held, step.target.yaw_rad) and clear_of_returns(held))
+        // ★AT THE FROZEN HEADING. Re-asking at the live one is the runaway itself.
+        if (grid_planner_.pose_free(held, step.target.yaw_rad)
+            and clear_of_returns_at(held, approach_fix_->arrival_yaw))
         {
             step.target.room_pos = held;
             aim_at_object();
@@ -1871,7 +1904,8 @@ void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &s
     if ((*fix - anchor).squaredNorm() <= 1e-6f) return;   // the standpoint is clear; nothing to do
 
 
-    approach_fix_ = ApproachFix{.pos = *fix, .name = step.target.node_name, .anchor = anchor};
+    approach_fix_ = ApproachFix{.pos = *fix, .name = step.target.node_name, .anchor = anchor,
+                               .arrival_yaw = arrival_yaw_from(*fix)};
     std::println("[approach] '{}' — {:.2f} m out, the live LiDAR says ({:.2f},{:.2f}) is OCCUPIED by "
                  "something the grid has forgotten (residual decays; returns do not). Standpoint moved to "
                  "({:.2f},{:.2f}), {:.2f} m away.",
@@ -3807,6 +3841,32 @@ bool ControllerSession::detect_stuck(bool pursuing, float asked_lin_mps, float c
         return true;
     }
 
+    // ── SPINNING: IT OBEYS EVERY ORDER, SWEEPS RADIANS, AND ARRIVES NOWHERE ──────────────────────
+    // ★MEASURED, and the reason this branch exists rather than the verdict merely being defined:
+    // without it a Spinning report FELL THROUGH to the throttle-stall block below and was written to
+    // stall_events.csv as `throttle_stall` — which by design never escapes, so nothing recovered it.
+    // Run 2026-08-19 09:05: 9 of the 12 logged "throttle_stall" events were this verdict wearing the
+    // wrong label (all of them at (-0.31,-2.38) over 20.3 s, every one with asked_m = 0 and
+    // delivered = 1 — a translation stall that asked for no translation is a contradiction on its
+    // face). They also inflated `stall_throttled_s_` to 18.5 s, of which ~14 s never happened.
+    // The robot sat there for 74 s of a 144 s run, commanded rotation at its cap on 80% of cycles,
+    // sweeping 3-6 rad per 6 s window and netting 0.07-0.87 of it (2-29%).
+    // It is a LIVELOCK, not an obstruction — but the response a wedge gets is the one it needs: change
+    // the pose and force a replan. And on an affordance the escape is already capped
+    // (kMaxEscapesPerAffordance = 3, see begin_escape), after which the standpoint is given up and the
+    // selector moves on — which is the correct end for a place the body cannot turn in.
+    if (r.verdict == rc::StallVerdict::Spinning)
+    {
+        std::println("[controller] SPINNING — commanded {:.2f} rad of heading over {:.1f} s and netted "
+                     "{:.2f} rad of it ({:.0f}%, floor {:.0f}%), while moving {:.3f} m. Obeying every "
+                     "order and arriving nowhere: escaping.",
+                     r.asked_rot_rad, r.window_s, r.achieved_rot_rad,
+                     r.asked_rot_rad > 1e-6f ? 100.f * r.achieved_rot_rad / r.asked_rot_rad : 0.f,
+                     100.f * params_->stuck_slip_ratio, r.achieved_m);
+        log_stall_event("spin", r, pos_room, pose_sigma_m, now_ms);
+        return true;
+    }
+
     // ── THROTTLE STALL: OUR OWN LIMITER STOPPED THE ROBOT ────────────────────────────────────────
     // Reported, never escaped. Reversing does not raise a speed limiter, so an escape here would fire,
     // end, find the limiter still floored and fire again — with a virtual obstacle dropped at every
@@ -3840,14 +3900,18 @@ void ControllerSession::log_stall_event(const char *verdict, const rc::StallJudg
         // anywhere in the process would start emitting decimal COMMAS into a file every reader parses as
         // points. Cheap insurance, applied to every data file this agent writes.
         stall_events_csv_.imbue(std::locale::classic());
+        // ★asked_rot/achieved_rot are what makes a `spin` row READABLE. Without them a spin logs as
+        // asked_m = 0, achieved_m ~ 0, delivered = 1 — numbers that carry no evidence at all, which is
+        // how 9 of these hid inside the throttle-stall rows of the 2026-08-19 run.
         stall_events_csv_ << "t_ms,verdict,window_s,asked_m,commanded_m,achieved_m,delivered,"
-                             "pose_sigma_m,x,y,total_throttled_s\n";
+                             "asked_rot_rad,achieved_rot_rad,pose_sigma_m,x,y,total_throttled_s\n";
         stall_events_csv_open_ = true;
         mission_.archive_on_stop("stall_events.csv");
     }
     if (not stall_events_csv_.is_open()) return;
     stall_events_csv_ << t_ms << ',' << verdict << ',' << r.window_s << ',' << r.asked_m << ','
                       << r.commanded_m << ',' << r.achieved_m << ',' << r.delivered << ','
+                      << r.asked_rot_rad << ',' << r.achieved_rot_rad << ','
                       << sigma << ',' << pos.x() << ',' << pos.y() << ',' << stall_throttled_s_ << '\n';
     stall_events_csv_.flush();
 }
