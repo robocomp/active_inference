@@ -1471,7 +1471,8 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
 // The columns below carry all three so a collision can be attributed to one of them.
 void ControllerSession::log_approach_diagnostics(std::uint64_t t_ms,
                                                  const rc::TrajectoryController::ControlOutput &o,
-                                                 const ControllerRobotPose &robot_pose)
+                                                 const ControllerRobotPose &robot_pose,
+                                                 const rc::TrajectoryController &path_controller)
 {
     if (not last_target_info_.has_value() or not last_target_info_->from_affordance) { approach_active_ = false; return; }
     const auto &tgt = *last_target_info_;
@@ -1573,7 +1574,12 @@ void ControllerSession::log_approach_diagnostics(std::uint64_t t_ms,
                    "t_ms,target,phase,tgt_x,tgt_y,tgt_facing_deg,rob_x,rob_y,rob_facing_deg,"
                    "d_target_m,d_arrival_m,yaw_err_deg,cmd_adv,cmd_rot,"
                    "clear_now_m,clear_des_m,free_now,free_des,sweep_min_m,sweep_ok,sweep_worst_deg,"
-                   "tgt_sweep_min_m,tgt_sweep_ok,min_esdf_m,goal_reached,raw_tgt_x,raw_tgt_y,fix_held\n";
+                   "# ★end_arr / goal_thr = whether the follower's ARRIVAL TEST IS RUNNING AT ALL, and\n"
+                   "#                the radius it uses. end_arr=0 means every arrival is being skipped:\n"
+                   "#                the robot drives past its goal and keeps going, which from outside\n"
+                   "#                looks like a tracking or planning fault and is neither.\n"
+                   "tgt_sweep_min_m,tgt_sweep_ok,min_esdf_m,goal_reached,raw_tgt_x,raw_tgt_y,fix_held,"
+                   "end_arr,goal_thr\n";
     }
     if (not approach_csv_open_) return;
 
@@ -1597,7 +1603,9 @@ void ControllerSession::log_approach_diagnostics(std::uint64_t t_ms,
                                            : std::numeric_limits<float>::quiet_NaN()) << ','
                   << (last_raw_target_pos_ ? last_raw_target_pos_->y()
                                            : std::numeric_limits<float>::quiet_NaN()) << ','
-                  << (approach_fix_.has_value() ? 1 : 0) << '\n';
+                  << (approach_fix_.has_value() ? 1 : 0) << ','
+                  << (path_controller.endpoint_arrival() ? 1 : 0) << ','
+                  << path_controller.goal_threshold() << '\n';
 
     // On arrival, one console line that says how it actually went — the three quantities you would
     // otherwise reconstruct from the CSV by hand every time.
@@ -2706,7 +2714,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         // s only because PlainTracker happens to put s_remaining in dist_to_goal; in PD/MPPI that field
         // is a EUCLIDEAN norm, so the same CSV column meant two different things by mode.
         const float track_s = path_controller.tracker_arc_length().value_or(-1.f);
-        log_approach_diagnostics(overlay_now_ms_, control_output, robot_pose);
+        log_approach_diagnostics(overlay_now_ms_, control_output, robot_pose, path_controller);
         log_mppi_diagnostics(overlay_now_ms_, control_output, control_output.adv, base_speed_lin_,
                              kappa_here, track_s, room_vel_.omega, ud.xy_std_m, ud.theta_std_rad, robot_pose,
                              motion_commander.last_output_rate_stats(),

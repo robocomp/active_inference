@@ -104,6 +104,11 @@ public:
     /// route judges its own completion and switches this test OFF. Two arrival definitions for one motion
     /// is the defect; this leaves exactly one in force at a time.
     void set_endpoint_arrival(bool on) { endpoint_arrival_ = on; }
+    // ★Readable so a diagnostic can say whether the arrival test was even RUNNING. It being off is
+    // invisible from outside — the robot simply drives past its goal and keeps going, which reads as a
+    // tracking or a planning fault. Inferring it from behaviour cost most of an afternoon on 2026-08-19.
+    [[nodiscard]] bool endpoint_arrival() const { return endpoint_arrival_; }
+    [[nodiscard]] float goal_threshold() const { return active_params_.goal_threshold; }
 
     // CURVATURE-LIMITED SPEED. A ceiling on max_adv for this cycle, supplied by whoever owns the
     // reference curve. The MPPI cannot derive it: its horizon is ~1.4 s of travel and its nominal seed

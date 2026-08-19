@@ -369,7 +369,8 @@ private:
     std::string approach_warned_;                  // standpoint we have already warned about
     void log_approach_diagnostics(std::uint64_t t_ms,
                                   const rc::TrajectoryController::ControlOutput &o,
-                                  const ControllerRobotPose &robot_pose);
+                                  const ControllerRobotPose &robot_pose,
+                                  const rc::TrajectoryController &path_controller);
     bool proximity_csv_open_ = false;
     std::uint64_t proximity_csv_last_ms_ = 0;      // throttle for proximity CSV rows
     std::optional<ControllerRobotPose> prev_robot_pose_;   // last pose at which the value actually changed
