@@ -1321,6 +1321,25 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
                                           ControllerDisplay &display,
                                           const TimeSource &time_source)
 {
+    // ★★★WHO OWNS ARRIVAL IS A PROPERTY OF WHAT IS BEING DRIVEN, NOT OF WHEN A PATH WAS LAST INSTALLED
+    // — AND NOT OF WHETHER THIS CYCLE HAPPENED TO SUCCEED. Set FIRST, before every early return.
+    // A continuous route switches this off on purpose (drive_mission_route: a tour ends by arc length,
+    // and its euclidean endpoint test is true before the robot has moved). It has to come back on for a
+    // point target, and the two places it was tried before were both too late:
+    //   1. inside `if (target_changed or not is_active())` — so it was re-armed only when a path was
+    //      RE-INSTALLED. While the target churned every few seconds that happened constantly and armed
+    //      the flag BY ACCIDENT; once this session made the target stable (gain out of the identity
+    //      test, standpoint and facing frozen), the accidental re-arm went with it. That was 13c8bc3.
+    //   2. at the END of the function — which the `HOLDING — no route to '<t>'` early return above
+    //      skips entirely. And that return is likeliest EXACTLY where it hurts: a few centimetres from
+    //      the goal, where plan_path has nothing left to plan. So the flag stayed off through the whole
+    //      terminal approach, which is the one stretch where it decides anything.
+    // Measured with (2) live, run of 11:42: 20 approach rows inside the 0.25 m goal_threshold —
+    // d_arrival down to 0.196 m at 0.63 m/s — with ZERO `reached` and ZERO `ALIGN` rows in 202.
+    // ★The lesson is the placement, not the line: a fact about WHAT WE ARE DOING must be asserted on
+    // entry, not as a side effect of a code path that can fail.
+    path_controller.set_endpoint_arrival(true);
+
     if (mission_.running() and params_ and not params_->route_continuous and not waypoint_mode_logged_)
     {
         waypoint_mode_logged_ = true;
@@ -1430,23 +1449,6 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
                                                 : std::nullopt);
     }
 
-    // ★★★WHO OWNS ARRIVAL IS A PROPERTY OF WHAT IS BEING DRIVEN, NOT OF WHEN A PATH WAS LAST INSTALLED.
-    // This line sat INSIDE the `target_changed or not is_active()` block above, so the follower's
-    // arrival test was only ever re-armed on a path (re)install. A continuous route switches it OFF
-    // (drive_mission_route, :1308 — a tour ends by arc length, and its euclidean endpoint test is true
-    // before the robot has moved). If a route ran first and the point target that followed never
-    // re-installed its path, the flag stayed FALSE and the arrival test was skipped for the WHOLE
-    // approach: the robot drives to its standpoint, comes inside goal_threshold, and nothing fires.
-    // ★THIS SESSION'S OWN CHURN FIXES UNMASKED IT. While `target_changed` fired every few seconds —
-    // epistemic_gain in the identity test, a standpoint re-derived every cycle — the path was
-    // re-installed constantly and re-armed this flag BY ACCIDENT. Now that the target is stable
-    // (7fb6a62 took gain out of the identity, b560737/df3809e froze the standpoint and its facing),
-    // nothing re-arms it. Measured 2026-08-19 on the run right after: 15 approach rows came inside the
-    // 0.25 m goal_threshold — d_arrival_m down to 0.181 m — with ZERO `reached` and ZERO `ALIGN` rows
-    // in 243. The robot was orbiting its standpoint with the arrival test switched off.
-    // ★★A fix that removes churn will expose everything the churn was accidentally driving. That is not
-    // an argument against removing it; it is an argument for looking at what got quieter.
-    path_controller.set_endpoint_arrival(true);
     return true;
 }
 
