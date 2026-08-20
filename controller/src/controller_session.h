@@ -594,6 +594,7 @@ private:
     // spans a path change and is not evidence of anything.
     std::uint32_t path_generation_ = 0;
     std::uint64_t last_carrot_collapse_log_ms_ = 0;   // rate limit for the collapse report
+
     std::optional<Eigen::Vector2f> resolved_standpoint_;
     Eigen::Vector2f                resolved_for_cell_ = Eigen::Vector2f::Zero();
     // The reachability repair, computed ONCE for a given raw standpoint and held. Recomputing it per

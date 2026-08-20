@@ -292,6 +292,22 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         return std::nullopt;
     }
 
+    // ── NO POSE-JUMP GATE HERE, DELIBERATELY ─────────────────────────────────────────────────────
+    // The measurement stands and is worth keeping: 2172 of 122841 localiser cycles in one run (1.77%)
+    // imply a speed above 1 m/s on a base that tops out near 0.6, 35 of them are steps over 0.30 m,
+    // the worst 11.63 m in 50 ms — and the covariance does not see it (sigma after the six worst:
+    // 1.023, 1.583, 7.164, 1.164, 0.086, 3.076). Everything downstream inherits it: cross-track of
+    // 4.98 m against a path built before the jump, `start was NOT footprint-feasible` storms, a
+    // ten-minute stall. See the memory note localiser-pose-jumps-sigma-blind.
+    // ★WHAT WAS TRIED AND REMOVED: a gate rejecting a step above `2*v_max*dt + 3*sigma + 0.10`. Three
+    // invented numbers, and a hard cutoff on a continuous quantity — the same shape as the carrot gate
+    // removed just below, which stopped the robot twice in one hour.
+    // ★THE FORM THIS SHOULD TAKE: the disagreement between the displacement the localiser reports and
+    // the one the robot's own motion predicts IS a standard deviation, in metres, of the pose estimate
+    // — and the speed limiter already consumes a pose sigma continuously. Feed it there and a robot
+    // whose pose is in doubt slows and stops through the mechanism that exists, with nothing to tune
+    // and no cliff to fall off. That is a real change, and it needs a bench and a watched run before
+    // it goes anywhere near the robot.
     // ── THE CONTROL LAW'S OWN POSE, RESOLVED HERE AND USED ONLY BY IT ────────────────────────────
     // `robot_pose` above is SCAN-ALIGNED: read_robot_pose_in_room pins the query to the last LiDAR
     // stamp so the pose goes with the observations the obstacle set was built from. That is right for
@@ -3846,56 +3862,22 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         return;
     }
 
-    // ── A CARROT TOO CLOSE TO STEER BY IS A BLOCKAGE, NOT A HEADING ──────────────────────────────
-    // ★★★clip_carrot_to_reachable pulls the carrot back to the last point of the route fragment the
-    // body still fits through, tested against the LIVE ESDF, and the pull-in is deliberately never
-    // rate-limited because pulling in is the safety direction. So one flickering cycle of that test
-    // drops the carrot onto the robot — measured, it collapses under 0.5 m on 15% of cycles — and the
-    // bearing to a carrot 4 cm away is not a heading, it is the localiser's noise: with σ_xy ≈ 3 cm,
-    // atan(σ/d) is tens of degrees, so the steering law saturates and flips sign every few cycles.
-    // Measured live 2026-08-20: 413 consecutive cycles, 84% at the rotation cap, 37 sign flips, the
-    // gate throttling speed to 15% so the robot CREPT rather than stopped — a 13 cm-radius corkscrew
-    // that carried it 0.73 m outside the corridor every safety layer is computed against, with 0.46 m
-    // of clearance left.
-    // ★THE BOUND IS THE POSE UNCERTAINTY, NOT A CHOSEN DISTANCE. A bearing carries information only
-    // while the carrot is far enough that pose noise does not dominate it, so the test is d < k·σ_xy —
-    // a precision statement, which shrinks when localisation is sharp and widens when it is not. The
-    // floor keeps it meaningful when the localiser reports a suspiciously tiny σ.
-    // ★AND THE HONEST RESPONSE IS THE ONE THIS FILE ALREADY HAS FOR A BLOCKED ROUTE: the clip has just
-    // said the fragment ahead is inadmissible. That is not something to steer around at 0.1 m/s; it is
-    // a replan. Stopping here costs one cycle; steering on noise cost 21 seconds and most of a metre.
-    if (path_controller.is_active() and not control_output.goal_reached)
-    {
-        const float sigma = motion_commander.last_uncertainty_diag().valid
-                              ? motion_commander.last_uncertainty_diag().xy_std_m : 0.f;
-        const float informative_m = std::max(3.f * sigma, 0.08f);
-        if (control_output.carrot_dist_m < informative_m)
-        {
-            if (time_source() - last_carrot_collapse_log_ms_ >= 3000)
-            {
-                last_carrot_collapse_log_ms_ = time_source();
-                std::println("[controller] carrot collapsed to {:.3f} m (below {:.3f} m = 3σ of a "
-                             "{:.3f} m pose): the route fragment ahead is inadmissible, so its bearing "
-                             "is noise. Replanning instead of steering by it.",
-                             control_output.carrot_dist_m, informative_m, sigma);
-            }
-            audit_standpoint("carrot-collapse", time_source(),
-                             last_raw_target_pos_.value_or(robot_pose.pos.head<2>().cast<float>()),
-                             last_target_info_.has_value() ? last_target_info_->room_pos
-                                                           : robot_pose.pos.head<2>().cast<float>(),
-                             robot_pose.pos.head<2>().cast<float>(), "carrot",
-                             std::format("{:.3f} m < {:.3f} m", control_output.carrot_dist_m, informative_m),
-                             -1, -1, -1);
-            clear_tracking_state();
-            current_plan_.reset();
-            plan_spline_valid_ = false;
-            route_repair_pending_ = true;
-            path_controller.stop();
-            note_no_command(); motion_commander.stop_robot();
-            return;
-        }
-    }
-
+    // ── THE CARROT GUARD WAS REMOVED, AND WHY IT SHOULD NOT COME BACK AS A GATE ──────────────────
+    // The observation behind it is real: clip_carrot_to_reachable can pull the carrot onto the robot,
+    // and the bearing to a 4 cm carrot is pose noise, which is what saturates the rotation and walks
+    // the robot 0.73 m off the corridor. The RESPONSE was wrong three times over, live, in one hour:
+    //   · `d < 3 sigma, floor 0.08 m` — sigma read invalid on this path, so only the floor survived
+    //     and it fired 7 times a second, stopping the robot outright ("not working now");
+    //   · `d > 0` added to exclude the never-computed carrot — still 3.3 times a second;
+    //   · with sigma valid at 0.072 m, 3 sigma = 0.217 m while carrots legitimately sit at 0.13 m,
+    //     so the gate condemns ordinary driving.
+    // ★THE LESSON IS THE HOUSE RULE, RELEARNED THE EXPENSIVE WAY: this is a continuous quantity and a
+    // hard cutoff on it is a threshold wearing a derivation. The AI-aligned form is a PRECISION — the
+    // disagreement between what the localiser says the robot moved and what its own motion predicts is
+    // itself a standard deviation, and it belongs in the pose uncertainty the speed limiter already
+    // consumes continuously. Inflate that, and a robot whose pose is in doubt slows and stops on the
+    // mechanism that already exists, with nothing new to tune. Until that is built, the tracker keeps
+    // its own behaviour: better an excursion that is measured than a gate that stops the robot.
     float adv_mps = control_output.adv;
     float side_mps = control_output.side;
     float rot_rps = -control_output.rot;
