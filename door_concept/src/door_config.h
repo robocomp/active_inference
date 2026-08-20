@@ -139,14 +139,9 @@ struct DoorConfig
     float tracker_gate_fallback_m  = 0.40f;   // metric XY gate (m) before an instance has a usable covariance
     float tracker_detection_noise_m = 0.20f;  // R in the association innovation cov S=P+R²I (≥ centroid-vs-fit offset)
     int   tracker_birth_frames     = 8;       // frames a mask must stay unexplained before spawning a door
-    int   tracker_death_frames     = 300;     // frames an instance may go unobserved before retirement
-    bool  tracker_death_enabled    = false;   // OFF: a door is persistent furniture — removed only by MERGE
     float tracker_birth_min_sep_m  = 0.70f;   // a birth must be ≥ this (m) from every existing door (anti-dup)
     float tracker_merge_overlap    = 0.20f;   // merge two instances whose seat footprints overlap ≥ this
                                               // fraction of the smaller, keeping the more-observed. 0 disables.
-    bool  tracker_prune_enabled        = true; // stillbirth prune of phantom duplicates born from churn
-    int   tracker_prune_maturity_cycles = 90;  // probation window; older instances are permanent furniture
-    int   tracker_prune_patience       = 30;   // consecutive tracker-unassigned cycles in probation → prune
     // ── Existence belief (shared rc::exist log-odds channel — the same one table/chair use) ─────────────
     // Evidence is the PIXEL-LEVEL silhouette (DoorFitter::compute_silhouette_existence): occupancy confirms,
     // absence removes, occlusion and out-of-frustum HOLD. The parameters below are physical sensor RATES and

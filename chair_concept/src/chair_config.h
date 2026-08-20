@@ -190,8 +190,6 @@ struct ChairConfig
     float tracker_gate_fallback_m  = 0.40f;   // metric XY gate (m) before an instance has a usable covariance
     float tracker_detection_noise_m = 0.20f;  // R in the association innovation cov S=P+R²I (≥ centroid-vs-fit offset)
     int   tracker_birth_frames     = 8;       // frames a mask must stay unexplained before spawning a chair
-    int   tracker_death_frames     = 300;     // frames an instance may go unobserved before retirement
-    bool  tracker_death_enabled    = false;   // OFF: a chair is persistent furniture — removed only by MERGE
     float tracker_birth_min_sep_m  = 0.70f;   // a birth must be ≥ this (m) from every existing chair (anti-dup)
     // A birth candidate carrying less than this FRACTION of a nearby, much larger same-label mask is a
     // FRAGMENT of it, not a new chair (YOLO splits one chair into backrest+seat routinely). Compared
@@ -201,9 +199,6 @@ struct ChairConfig
     float birth_fragment_reach_m = 1.00f;
     float tracker_merge_overlap    = 0.20f;   // merge two instances whose seat footprints overlap ≥ this
                                               // fraction of the smaller, keeping the more-observed. 0 disables.
-    bool  tracker_prune_enabled        = true; // stillbirth prune of phantom duplicates born from churn
-    int   tracker_prune_maturity_cycles = 90;  // probation window; older instances are permanent furniture
-    int   tracker_prune_patience       = 30;   // consecutive tracker-unassigned cycles in probation → prune
     // ── Existence belief (continuous log-odds removal; replaces the wall-clock stillbirth prune above) ──
     // A phantom accumulates NEGATIVE existence evidence every SENSOR frame it is expected-visible yet
     // under-supported (silhouette-contradiction / free-space), and is removed when its log-odds drops below

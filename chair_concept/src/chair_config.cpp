@@ -119,15 +119,10 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
     out.tracker_gate_fallback_m  = getf("Tracker.GateFallbackM",    0.40f);
     out.tracker_detection_noise_m = getf("Tracker.DetectionNoiseM", 0.20f);
     out.tracker_birth_frames     = geti("Tracker.BirthFrames",      8);
-    out.tracker_death_frames     = geti("Tracker.DeathFrames",      300);
-    out.tracker_death_enabled    = getb("Tracker.DeathEnabled",     false);
     out.tracker_birth_min_sep_m  = getf("Tracker.BirthMinSepM",     0.70f);
     out.birth_fragment_frac    = getf("Tracker.BirthFragmentFrac",   0.25f);
     out.birth_fragment_reach_m = getf("Tracker.BirthFragmentReachM", 1.00f);
     out.tracker_merge_overlap    = getf("Tracker.MergeOverlap",     0.20f);
-    out.tracker_prune_enabled         = getb("Tracker.PruneEnabled",        true);
-    out.tracker_prune_maturity_cycles = geti("Tracker.PruneMaturityCycles", 90);
-    out.tracker_prune_patience        = geti("Tracker.PrunePatience",       30);
     out.exist_enabled            = getb("Existence.Enabled",          true);
 
     // Level-2 arrangement prior (ring_metaconcept). Off ⇒ the belief is bit-for-bit pre-rig.

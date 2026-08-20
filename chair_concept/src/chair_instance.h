@@ -95,7 +95,6 @@ struct ChairInstance
     std::chrono::steady_clock::time_point last_belief_touch{};
     float chain_cov_xx = 0.0f, chain_cov_yy = 0.0f, chain_cov_yaw = 0.0f;  // localization/chain cov (m²,rad²)
     int  assigned_mask_idx  = -1;     // tracker's gated mask-slice assignment (-1 = use greedy nearest)
-    int  unassigned_streak  = 0;      // consecutive tracker cycles with no mask assignment (stillbirth prune)
     // ── Existence belief (continuous log-odds; supersedes the wall-clock stillbirth prune) ──────────
     // L = log P(exists)/P(¬exists). Integrated once per SENSOR frame while the instance is in the camera
     // frustum (roi_valid), via two channels: (1) WON a mask → POSITIVE/NEGATIVE by how much of the expected

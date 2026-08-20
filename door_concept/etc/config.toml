@@ -125,18 +125,13 @@ GateMahalanobis = 9.0     # χ²₂ gate (~3σ) for a mask↔instance match once
 GateFallbackM = 0.40     # metric XY gate (m) before an instance has a usable covariance
 DetectionNoiseM = 0.20   # R in the association innovation cov S=P+R²I (≥ centroid-vs-fit offset)
 BirthFrames = 8          # frames a mask must stay unexplained before spawning a door
-DeathFrames = 300        # frames an instance may go unobserved before retirement
-DeathEnabled = false     # OFF: a door is persistent furniture — removed only by MERGE
 BirthMinSepM = 0.70      # a birth must be ≥ this (m) from every existing door (anti-duplicate)
 MergeOverlap = 0.20      # collapse two instances whose seat footprints overlap ≥ this fraction of the smaller, keeping the more-observed. 0 disables.
 # Stillbirth prune — a phantom born from association churn starves once the real instance reclaims its
 # mask. Prune a YOUNG instance (still inside its probation window) left unassigned for a sustained streak.
-PruneEnabled = false     # OFF (2026-07-02): match table's proven merge-only lifecycle for STATIC furniture.
                          # With the §3.1 position gate now fixed (no far mis-claims), the stillbirth prune's
                          # phantom-killing job is redundant and was a prime suspect for "create-then-remove"
                          # churn (a glimpsed door pruned before it matures). Removal is by MERGE only.
-PruneMaturityCycles = 90 # probation window: an instance older than this is permanent furniture, never pruned
-PrunePatience = 30       # consecutive tracker-unassigned cycles within probation → prune as stillborn
 BirthSeatW = 0.45        # seed seat width/depth + seat/back heights for a freshly born door node
 BirthSeatD = 0.45
 BirthSeatH = 0.45

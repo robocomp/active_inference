@@ -780,8 +780,8 @@ void SpecificWorker::run_instance_tracker()
     //    reasoned removal from a timeout. Tying it to the existence flag makes the two mutually exclusive
     //    by construction, and keeps them A/B-able: turn the channel off and the counter comes back exactly.
     //    door removes on `existence.should_remove(exist_removal_prob)` (Existence.Enabled, default true).
-    tp.death_frames     = cfg_.exist_enabled ? std::numeric_limits<int>::max()
-                                            : cfg_.tracker_death_frames;
+    tp.death_frames     = std::numeric_limits<int>::max();   // never retire by occlusion:
+                                                            // removal is the existence channel's
     tp.birth_min_sep_m  = cfg_.tracker_birth_min_sep_m;
     tp.nll_cost         = cfg_.tracker_nll_cost;
     tracker_.set_params(tp);
@@ -795,9 +795,11 @@ void SpecificWorker::run_instance_tracker()
         t.id = id;
         const auto& s = inst.model.state();
         t.xy = {s.cx, s.cy};
-        // Negative-information for the tracker's death path (if DeathEnabled): a miss counts only when the
-        // door projects into the camera FoV. Out-of-view → HOLD (matches the prune gate above). roi_valid
-        // is a cycle stale (set in run_inference) but that's fine for a frustum test.
+        // Is this instance EXPECTED to be seen this cycle — its model projects into the camera FoV.
+        // Read by the tracker's association bookkeeping; out-of-view is a HOLD, never negative evidence.
+        // (It used to feed the miss-counter death path too; that path is gone — removal is the
+        // existence channel's, which weights absence by p_detect rather than by a frame count.)
+        // roi_valid is a cycle stale (set in run_inference) but that is fine for a frustum test.
         t.expected_visible = inst.roi_valid;
         if (inst.ai2_initialized)
         {
@@ -930,18 +932,6 @@ void SpecificWorker::run_instance_tracker()
                    tracks.size(), dets.size(), n_assigned,
                    static_cast<int>(dets.size()) - n_assigned, res.births.size(), res.deaths.size());
 
-    // DEATH: OFF by default — a door is persistent furniture; long occlusion is not absence. Enable
-    // Tracker.DeathEnabled to restore miss-timer retirement.
-    if (cfg_.tracker_death_enabled)
-        for (const std::uint64_t id : res.deaths)
-        {
-            std::print("door_concept: [tracker] DEATH id={} (unobserved {} frames)\n", id, cfg_.tracker_death_frames);
-            if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
-                it->second.affordance.remove();
-            fitter_->forget_node(id);
-            G->delete_node(id);
-        }
-
     // ASSOCIATE: route each detection's mask slice to its instance (read in observe()).
     {
         // §3.1 (Fable, PERCEPTION_ASSOCIATION_PLAN.md): associate by MODEL EVIDENCE, not centroid. The
@@ -1022,42 +1012,11 @@ void SpecificWorker::run_instance_tracker()
     // clutter (door_3: 8 points at 7.4 m) never reached patience AND aged into permanence. The existence belief
     // fixes both: it integrates SUPPORT-MASS-WEIGHTED evidence (8 pts where ~130 are expected → strong negative)
     // once per sensor frame, with no age immunity — a real door stays only by continuing to be explained.
+    // ★NO FALLBACK, deliberately — the five agents that retired their prune have none either.
+    // OFF means NO removal, which is an honest nothing; the alternative was a fallback this
+    // file's own comment documents as broken (see the note above).
     if (cfg_.exist_enabled)
         update_existence_beliefs();
-    else if (cfg_.tracker_prune_enabled)
-    {
-        std::vector<std::uint64_t> stillborn;
-        for (auto& [id, inst] : fitter_->instances())
-        {
-            if (inst.assigned_mask_idx >= 0) { inst.unassigned_streak = 0; continue; }
-            // Negative-information: an unassigned cycle is evidence of a PHANTOM only when the door SHOULD
-            // be seen — its model projects into the camera FoV (roi_valid) yet no mask associated. When the
-            // door is out of view (robot looked away) the streak is HELD, so a real door glimpsed once and
-            // left behind persists as furniture instead of being pruned within seconds (the flicker). A true
-            // phantom sits at a detected location → projects in-frame → still accrues the streak and is pruned.
-            if (not inst.roi_valid) continue;
-            ++inst.unassigned_streak;
-            const bool young = inst.processed_cycles < cfg_.tracker_prune_maturity_cycles;
-            if (young and inst.unassigned_streak >= cfg_.tracker_prune_patience)
-                stillborn.push_back(id);
-        }
-        for (const std::uint64_t id : stillborn)
-        {
-            const auto it = fitter_->instances().find(id);
-            std::print("door_concept: [tracker] PRUNE stillborn id={} (unassigned {} cycles, age {} < maturity {})\n",
-                       id, it != fitter_->instances().end() ? it->second.unassigned_streak : 0,
-                       it != fitter_->instances().end() ? it->second.processed_cycles : 0,
-                       cfg_.tracker_prune_maturity_cycles);
-            if (it != fitter_->instances().end())
-                log_tracker_event("PRUNE", id, it->second.model.state().cx, it->second.model.state().cy,
-                                  std::format("unassigned {} age {}", it->second.unassigned_streak, it->second.processed_cycles));
-            if (it != fitter_->instances().end())
-                it->second.affordance.remove();
-            fitter_->forget_node(id);
-            G->delete_node(id);
-        }
-    }
-
     // BIRTH: spawn an instance from each promoted (persistently-unexplained) detection, seeding the
     // fitter with the detection XY so the model starts AT the door (not the 0,0 RT-read default).
     for (const int d : res.births)

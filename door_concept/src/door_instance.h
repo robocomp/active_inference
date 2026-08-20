@@ -103,7 +103,6 @@ struct DoorInstance
     std::chrono::steady_clock::time_point last_belief_touch{};
     float chain_cov_xx = 0.0f, chain_cov_yy = 0.0f, chain_cov_yaw = 0.0f;  // localization/chain cov (m²,rad²)
     int  assigned_mask_idx  = -1;     // tracker's gated mask-slice assignment (-1 = use greedy nearest)
-    int  unassigned_streak  = 0;      // consecutive tracker cycles with no mask assignment (stillbirth prune)
     // ── Existence belief (shared rc::exist channel — same one table/chair use) ──────────────────────
     // L = log P(exists)/P(¬exists), integrated per SENSOR frame from the PIXEL-LEVEL silhouette evidence
     // (DoorFitter::compute_silhouette_existence): the model's panel silhouette is projected into the ZED and
