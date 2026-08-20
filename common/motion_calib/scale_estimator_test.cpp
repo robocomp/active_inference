@@ -65,9 +65,12 @@ int main()
             e.push_back(s_true * di + sigma_true * std::sqrt(Ti) * g(rng));
         }
         const auto b = batch_fit(d, e, T);
-        // ★Prior OFF for this comparison (a huge prior_std) — the batch fit has no prior, so leaving
-        // ours in would be comparing two different estimators and calling the difference an error.
-        ScaleEstimator on({.scale_walk_density = 0.0, .prior_std = 1e6});
+        // ★BOTH PRIORS OFF for this comparison — the batch fit has neither, so leaving ours in would
+        // be comparing two different estimators and calling the difference an error. (The density
+        // prior is worth one window out of 400 and shifted sigma by 0.13%: small enough to look like
+        // a rounding complaint and large enough to fail an exact test, which is precisely the kind of
+        // difference that gets explained away instead of understood.)
+        ScaleEstimator on({.scale_walk_density = 0.0, .prior_std = 1e6, .prior_density_windows = 0.0});
         for (std::size_t i = 0; i < d.size(); ++i) on.add(d[i], e[i], T[i]);
         const auto c = on.posterior();
         std::printf("  batch  s = %.5f  sigma = %.5f\n  online s = %.5f  sigma = %.5f  (s_std %.5f, %d windows)\n",
@@ -210,6 +213,24 @@ int main()
             check(tra_ok, "translation scale recovered within 3 sigma", c.name);
             check(sig_ok, "densities recovered to 10%", c.name);
         }
+    }
+
+    // ── A COLD ESTIMATOR MUST NOT UNDER-ADVERTISE ITSELF ────────────────────────────────────────
+    // The gain a calibration manoeuvre carries is scaled by the residual density, and before any
+    // window arrives there is no residual to estimate it from. With a placeholder of 1.0 rad/sqrt(s)
+    // standing in, a brand-new estimator promised LESS than the same estimator after a day's driving —
+    // so the robot that knew nothing about its own motion would have lost every arbitration it
+    // entered, on its first day, for exactly the reason it should have won them.
+    {
+        std::printf("\ncold vs warm: what the manoeuvre is worth when nothing is known\n");
+        ScaleEstimator cold;
+        const double g_cold = cold.expected_information_gain(8.0 * M_PI, 210.0);
+        ScaleEstimator warm;
+        for (int i = 0; i < 200; ++i) warm.add(0.02, 0.02 * 0.01, 1.0);   // small, uninformative turns
+        const double g_warm = warm.expected_information_gain(8.0 * M_PI, 210.0);
+        std::printf("  cold %.3f nats   after 200 tiny windows %.3f nats\n", g_cold, g_warm);
+        check(g_cold > 1.0, "a pivot is worth real nats to a robot that has never measured itself");
+        check(g_cold >= g_warm, "and worth no less than it is to one that has some evidence");
     }
 
     std::printf("\n%d check(s) FAILED\n", failures);

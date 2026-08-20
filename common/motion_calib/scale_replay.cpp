@@ -107,8 +107,8 @@ int main(int argc, char **argv)
     if (fr.size() < static_cast<std::size_t>(stride) * 4) { std::fprintf(stderr, "too few frames\n"); return 3; }
 
     // ── ONE PASS, TWO CONSUMERS ─────────────────────────────────────────────────────────────────
-    rc::calib::ScaleEstimator rot({.scale_walk_density = 0.0, .prior_std = 1e6});   // prior off: the
-    rc::calib::ScaleEstimator tra({.scale_walk_density = 0.0, .prior_std = 1e6});   // batch has none
+    rc::calib::ScaleEstimator rot({.scale_walk_density = 0.0, .prior_std = 1e6, .prior_density_windows = 0.0});
+    rc::calib::ScaleEstimator tra({.scale_walk_density = 0.0, .prior_std = 1e6, .prior_density_windows = 0.0});   // both priors off: the batch fit has neither
     std::vector<double> d_rot, e_rot, T_rot, d_tra, e_tra, T_tra;
     int rejected_gap = 0, rejected_jump = 0;
 

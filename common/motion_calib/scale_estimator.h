@@ -74,6 +74,21 @@ struct ScaleEstimatorParams
     /// constants in NoiseModel already claim (scale_omega 0.155, scale_v 0.08) so the estimator
     /// starts no more confident than the system was without it.
     double prior_std = 0.15;
+    /// ★THE NOISE DENSITY ALSO HAS A PRIOR, AND IT HAD TO. The density is estimated from the windows'
+    /// residuals, so before any windows arrive there is nothing to estimate it from — the first
+    /// version fell back to 1.0 rad/sqrt(s), an enormous placeholder, and a COLD estimator therefore
+    /// advertised the smallest expected gain of its whole life. That is backwards: a robot that knows
+    /// nothing about its own motion model is exactly the robot with most to gain from measuring it,
+    /// and with the placeholder in place a fresh estimator promised 0.03 nats where the same estimator
+    /// after 400 s of turning promised 3.7. It would have lost every arbitration on its first day.
+    /// ★MEASURED, NOT CHOSEN: 0.008181 rad/sqrt(s) is the rotation residual density from a live run
+    /// (2026-08-20, 209424 frames, 5234 windows, online and batch agreeing to 1e-9). Translation on
+    /// the same run is 0.024494 m/sqrt(s); a translation channel should be constructed with that.
+    double prior_density = 0.008181;
+    /// How many windows the density prior is worth. ONE — the weakest proper prior there is, so it
+    /// governs only while there is nothing else and is swamped by the second window onward. Set to 0
+    /// to recover the exact unregularised batch estimator (what the offline replay compares against).
+    double prior_density_windows = 1.0;
 };
 
 class ScaleEstimator
@@ -159,11 +174,16 @@ public:
         // the fourth decimal — small, but it means the online and offline estimators are answering
         // slightly different questions, and the whole point of this class is that they do not.
         const double rss = std::max(syy_ - s_ * sxy_, 0.0);
-        c.sigma   = (n_ > 1) ? std::sqrt(rss / static_cast<double>(n_ - 1)) : 0.0;
+        // ★ONE DEFINITION OF THE DENSITY, shared with everything that scales by it. Reporting
+        // rss/(n-1) here while the gain calculation used density_squared() meant the number on the
+        // dashboard and the number in the decision were not the same quantity.
+        c.sigma   = (p_.prior_density_windows > 0.0 or n_ > 1) ? std::sqrt(density_squared())
+                                                               : 0.0;
         // Posterior precision = data/sigma^2 + prior. Both terms in the same units, so an unexercised
         // channel falls back to the prior width instead of claiming certainty.
         const double prior_prec = 1.0 / (p_.prior_std * p_.prior_std);
         const double sig2 = (c.sigma > 0.0) ? c.sigma * c.sigma : density_squared();
+        (void)rss;
         c.data_precision  = (sig2 > 1e-18) ? sxx_ / sig2 : 0.0;
         c.prior_precision = prior_prec;
         c.s_std = std::sqrt(1.0 / (c.data_precision + prior_prec));
@@ -202,11 +222,20 @@ private:
         return (prec > 1e-18) ? (sxy_ / sig2) / prec : 0.0;
     }
     /// The current density estimate, squared; falls back to the residual-free case sensibly.
+    /// Conjugate prior on the variance: the measured residual sum, plus n0 windows' worth of the
+    /// prior density, over the matching count. n0 = 0 recovers the plain unregularised estimator.
+    /// ★This also removes a failure the 1e-12 floor left open: a channel fed windows with no motion
+    /// in them accumulates rss ~ 0 and used to conclude its measurements were near-perfect, which
+    /// made every future manoeuvre look infinitely informative. Zero motion is not evidence of a
+    /// quiet sensor; it is no evidence at all, and the prior is what says so.
     [[nodiscard]] double density_squared() const
     {
-        if (n_ < 2) return 1.0;                       // unit scaling until there are residuals
+        const double n0 = std::max(p_.prior_density_windows, 0.0);
+        const double d0 = p_.prior_density * p_.prior_density;
+        const double dof = static_cast<double>(n_ > 0 ? n_ - 1 : 0) + n0;
+        if (dof <= 0.0) return (n_ < 2) ? std::max(d0, 1e-12) : 1.0;
         const double rss = std::max(syy_ - s_ * sxy_, 0.0);
-        return std::max(rss / static_cast<double>(n_ - 1), 1e-12);
+        return std::max((rss + n0 * d0) / dof, 1e-12);
     }
 
     Params p_;

@@ -99,7 +99,7 @@ int main(int argc, char **argv)
 
     // Windows for the online estimator: one per second of the manoeuvre, so its answer can be scored
     // against the closure truth rather than against another estimate.
-    rc::calib::ScaleEstimator rot({.scale_walk_density = 0.0, .prior_std = 1e6});
+    rc::calib::ScaleEstimator rot({.scale_walk_density = 0.0, .prior_std = 1e6, .prior_density_windows = 0.0});
     double w_odo = 0, w_ref = 0, w_t0 = -1;
 
     while (std::getline(in, line))
