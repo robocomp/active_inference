@@ -36,6 +36,7 @@
 #include "room_config.h"             // rc::RoomConfig (shared config)
 #include "object_anchor_source.h"    // rc::ObjectAnchorSource (validated objects → SE(2) landmarks)
 #include "../../common/affordance_manager/affordance_manager.h"
+#include "calib_channel.h"           // rc::calib::CalibChannel (the afford_calib producer)
 
 namespace rc
 {
@@ -105,6 +106,16 @@ private:
                              std::uint64_t timestamp_ms);
     void dsr_create_room_and_reparent(const rc::RoomConcept::UpdateResult& res);
     void dsr_update_affordance(const rc::RoomConcept::UpdateResult& res);
+    // ── THE SECOND AFFORDANCE THIS AGENT PUBLISHES ──────────────────────────────────────────────
+    // afford_calib: an Orient contract asking the robot to turn 120 degrees on the spot, offered
+    // twelve times, which is four complete turns back to the heading it started from. That closure is
+    // the measurement — the robot turned exactly 8*pi radians, as a fact about turning, so comparing
+    // the odometry's own accumulation against it needs no map, no survey and no localiser.
+    // ★It never drives. The offer goes out at wherever the robot happens to be, and if the consumer
+    // says the body cannot sweep its diagonal there it is believed and the offer stops until ordinary
+    // work has carried the robot somewhere with room. That is the whole design: the calibration is a
+    // passenger on the day's driving, not a trip of its own.
+    void dsr_update_calibration(const rc::RoomConcept::UpdateResult& res);
     /// Liveness watchdog for a claimed-but-unreachable afford_room target. While the controller
     /// holds the execution claim the planner is deliberately idle, so if the controller can never
     /// get there (boxed in by an obstacle it cannot clear) NOTHING re-offers and the robot works
@@ -187,6 +198,18 @@ private:
     std::function<void()>          trigger_layout_;
 
     rc::AffordanceManager affordance_manager_{"afford_room"};
+    // ── afford_calib: same protocol, second register, its own state ─────────────────────────────
+    // ★A SEPARATE NODE, NOT A SECOND USE OF afford_room. Every standpoint this agent has ever offered
+    // rides one node, and the ABA hazard that comes with reusing a register is exactly what the epoch
+    // model exists to bound — putting a manoeuvre with completely different semantics on the same
+    // register would make "did the consumer answer THIS offer" undecidable from the wire.
+    rc::AffordanceManager calib_manager_{"afford_calib"};
+    rc::calib::CalibChannel calib_;
+    bool          calib_contract_written_ = false;
+    std::uint64_t calib_armed_at_ms_      = 0;
+    float         calib_bearing_rad_      = 0.f;
+    double        calib_last_t_s_         = 0.0;
+    int           calib_dbg_              = 0;
     rc::ObjectAnchorSource object_anchor_source_;
     // Chain-propagated pose+covariance reader for object anchors. Created lazily on the MAIN
     // thread (owns an RT_API whose ts==0 path uses the InnerEigen cache — see CLAUDE.md).

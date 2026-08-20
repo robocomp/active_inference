@@ -203,6 +203,11 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
             dsr_update_pose(res);   // robot->room RT (skipped when the odometry publisher owns it)
         if (params_->PUBLISH_AFFORDANCE)
             dsr_update_affordance(res); // publish epistemic target affordance (off ⇒ room never competes)
+        // ★NOT GATED ON PUBLISH_AFFORDANCE, and not gated on CalibPivotEnabled either. The PASSIVE
+        // half of this — watching how well the odometry's rotation scale is known — commands nothing
+        // and costs one window per second; free data is free whether or not anyone acts on it, and a
+        // run that never offers the manoeuvre still ends knowing whether it should have.
+        dsr_update_calibration(res);
     }
 }
 
@@ -545,9 +550,130 @@ void RoomSceneGraph::dsr_create_room_and_reparent(const rc::RoomConcept::UpdateR
 // the other direction — monitor_execution re-reads the node and decides from the level.
 void RoomSceneGraph::on_affordance_attr_changed(std::uint64_t node_id)
 {
-    if (G_ == nullptr or node_id == 0 or node_id != affordance_manager_.managed_node_id())
+    if (G_ == nullptr or node_id == 0) return;
+    if (node_id == affordance_manager_.managed_node_id()) affordance_manager_.monitor_execution(G_);
+    // ★THE SECOND NODE NEEDS THE SAME WAKE-UP. Without this the calibration channel would poll only,
+    // and a consumer that claims and finishes inside one of our cycles slips between two polls —
+    // which is the exact race that wedged the first pair.
+    else if (node_id == calib_manager_.managed_node_id()) calib_manager_.monitor_execution(G_);
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// afford_calib — the calibration pivot, offered as a sequence of ordinary Orient affordances.
+//
+// ★THE PASSIVE HALF RUNS UNCONDITIONALLY. Every tour the robot makes serving a standpoint turns, and
+// the estimator does not care WHY the robot moved, so ordinary exploration is free calibration data.
+// That half commands nothing; it exists so the agent can answer, at any moment, "how well does this
+// robot currently know its own motion model" — and so the deliberate manoeuvre can be priced against
+// the free data rather than offered blind.
+//
+// ★THE ACTIVE HALF IS OFF UNLESS ASKED FOR, and even then it is not triggered by a threshold. The
+// offer carries its expected information gain in nats and competes in the controller's EFE selection
+// with every exploration cell; it wins only when knowing the motion model better is worth more than
+// the next thing the robot could look at, and it extinguishes itself as the posterior sharpens
+// because the quantity it advertises genuinely falls to zero. Measured in the unit test: 3.46 nats
+// cold, 0.01 nats after 400 s of ordinary turning, 3.70 nats after 400 s of driving straight.
+void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult& res)
+{
+    if (G_ == nullptr or not room_node_created_ or params_ == nullptr or room_concept_ == nullptr)
         return;
-    affordance_manager_.monitor_execution(G_);
+
+    // ── 1. WATCH THE MOTION THE ROBOT IS ALREADY MAKING ─────────────────────────────────────────
+    const double t_s = static_cast<double>(res.timestamp_ms) * 1e-3;
+    const auto &odo = room_concept_->last_measured_prior();
+    const auto &R = res.robot_pose.linear();
+    const double theta = std::atan2(static_cast<double>(R(1, 0)), static_cast<double>(R(0, 0)));
+    calib_.note_motion(t_s, res.robot_pose.translation().x(), res.robot_pose.translation().y(),
+                       theta, static_cast<double>(odo.delta_pose.z()),
+                       odo.valid and odo.fresh and odo.is_measured);
+    calib_.note_robot_pos(res.robot_pose.translation().x(), res.robot_pose.translation().y());
+    calib_last_t_s_ = t_s;
+
+    // A throttled readout of what the passive half believes, so a run that never offers the manoeuvre
+    // still ends knowing whether it should have. This is the whole product of the passive half.
+    if (++calib_dbg_ % 1200 == 0)
+    {
+        const auto post = calib_.posterior();
+        std::print("[calib] rotation scale {:+.5f} +/- {:.5f} ({} windows, {} discarded, density "
+                   "{:.5f} rad/sqrt(s), {}) | diet {:.3f} rad/s | a pivot would be worth {:.3f} nats\n",
+                   post.s, post.s_std, post.windows, calib_.poisoned_windows(), post.sigma,
+                   post.identifiable() ? "MEASURED" : "still the prior",
+                   calib_.passive_rate_rad_s(), calib_.marginal_gain_nats());
+        std::fflush(stdout);
+    }
+
+    if (not params_->CALIB_PIVOT_ENABLED) return;
+
+    // ── 2. DID THE CONSUMER ANSWER THE STANDING OFFER? ──────────────────────────────────────────
+    calib_manager_.monitor_execution(G_);
+    if (calib_manager_.consume_completion_event())
+    {
+        const auto outcome = calib_manager_.last_outcome();
+        calib_.on_outcome(outcome, theta);
+        const auto cl = calib_.closure();
+        std::print("[calib] pivot step -> {} | {} step(s), {:.1f} deg accumulated\n",
+                   rc::affordance::to_string(outcome), calib_.pivot().steps_issued(),
+                   calib_.pivot().accumulated_rad() * 180.0 / M_PI);
+        if (cl.usable)
+            std::print("[calib] ★CLOSURE: odometry accumulated {:.1f} deg against {:.1f} deg of TRUTH "
+                       "=> s_omega {:+.4f} ({:+.2f}%), resolved to {:.2f}%. No map, no survey, no "
+                       "localiser in that number.\n",
+                       cl.turned_rad * 180.0 / M_PI, cl.truth_rad * 180.0 / M_PI, cl.s_omega,
+                       cl.s_omega * 100.0, cl.resolution * 100.0);
+        else if (calib_.pivot().state() == rc::calib::PivotAffordance::State::Closed)
+            std::print("[calib] the pivot closed but the scale it measured ({:+.4f}) is finer than "
+                       "the closure resolves ({:.2f}%) — not a measurement, and not quoted as one.\n",
+                       cl.s_omega, cl.resolution * 100.0);
+        std::fflush(stdout);
+        return;
+    }
+    if (calib_manager_.is_executing(G_)) return;   // the consumer owns it; do not rewrite the offer
+
+    // ── 3. IS THERE A STEP TO OFFER? ────────────────────────────────────────────────────────────
+    const auto bearing = calib_.offer(theta);
+    if (not bearing.has_value()) return;
+    calib_bearing_rad_ = static_cast<float>(*bearing);
+
+    // ★THE CONTRACT IS AUTHORED ONCE, ON THE NODE, AT BIRTH. Orient with NO completion predicate:
+    // "rotate in place to this bearing" is the whole affordance, and the executor completes it on
+    // reaching the bearing. The timeout is the only number here and it is derived, not chosen — the
+    // consumer turns at its own capped rate, so a 120-degree step takes step/rate seconds, and the
+    // producer waits twice that before calling the step failed. Nothing is lost by being wrong: a
+    // step that times out simply does not advance the sequence, because the pivot counts MEASURED
+    // heading and never the steps it issued.
+    const auto write_calib_contract = [this]
+    {
+        if (calib_contract_written_) return;
+        auto n = G_->get_node(calib_manager_.managed_node_id());
+        if (not n.has_value()) return;
+        const float step_s = static_cast<float>(2.0 * M_PI / 3.0 / 0.12);
+        rc::affordance::write_contract(*G_, n.value(),
+            rc::affordance::Contract::orient().stable(2).timeout_s(2.0f * step_s));
+        G_->update_node(n.value());
+        calib_contract_written_ = true;
+        std::print("[calib] afford_calib authored: orient, no predicate — the rotation IS the goal; "
+                   "timeout {:.0f}s (twice the {:.0f}s a 120 deg step takes at the consumer's own "
+                   "capped rate)\n", 2.0f * step_s, step_s);
+    };
+
+    const bool published = calib_manager_.publish_target(
+        G_, dsr_room_id_,
+        res.robot_pose.translation().x(),        // its own pose: an orient does not navigate, and
+        res.robot_pose.translation().y(),        // publishing somewhere else would be a claim we cannot make
+        calib_bearing_rad_,
+        static_cast<float>(calib_.marginal_gain_nats()),
+        [this, write_calib_contract]() { write_calib_contract(); trigger_layout_(); },
+        [this]() { trigger_layout_(); });
+    write_calib_contract();                      // also on the re-arm path, where no node is inserted
+
+    if (published)
+    {
+        calib_armed_at_ms_ = static_cast<std::uint64_t>(res.timestamp_ms);
+        std::print("[calib] offering step {} of {}: turn to {:.0f} deg, worth {:.3f} nats\n",
+                   calib_.pivot().steps_issued() + 1, 3 * 4 /* turns x steps-per-turn */,
+                   calib_bearing_rad_ * 180.0 / M_PI, calib_.marginal_gain_nats());
+        std::fflush(stdout);
+    }
 }
 
 void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& res)
@@ -1446,12 +1572,15 @@ void RoomSceneGraph::cleanup_room_graph_nodes()
         G_->delete_node(n);
     if (auto n = G_->get_node("floor"); n.has_value())
         G_->delete_node(n.value());
-    // Fallback: delete the affordance node by its known name in case it is orphaned.
-    if (auto n = G_->get_node("afford_room"); n.has_value())
-        G_->delete_node(n.value());
+    // Fallback: delete the affordance nodes by their known names in case they are orphaned.
+    for (const char *name : {"afford_room", "afford_calib"})
+        if (auto n = G_->get_node(name); n.has_value())
+            G_->delete_node(n.value());
     room_node_created_ = false;
     dsr_room_id_ = 0;
     affordance_manager_.reset();
+    calib_manager_.reset();
+    calib_contract_written_ = false;
     stable_frames_ = 0;
 }
 

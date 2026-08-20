@@ -99,6 +99,12 @@ struct RoomConfig
     float ROBOT_VEL_COV_SIDE           = 0.0025f; // (0.05 m/s)²
     float ROBOT_VEL_COV_ROT            = 0.01f;   // (0.1 rad/s)²
 
+    // ---- The calibration pivot (afford_calib) ----
+    // OFF. This affordance has never driven a robot: turning on the spot for four full turns is a real
+    // motion with a real footprint, and it goes live on a watched run or not at all. The PASSIVE half
+    // — watching how well the odometry's rotation scale is known — runs regardless and commands
+    // nothing, because free data is free whether or not anyone acts on it.
+    bool  CALIB_PIVOT_ENABLED          = false;   // RoomConcept.CalibPivotEnabled
     bool  PUBLISH_AFFORDANCE           = true;    // EpistemicController.PublishAffordance — publish the room
                                                   // exploration affordance. false ⇒ room never offers an
                                                   // affordance (so it can't out-compete object affordances in

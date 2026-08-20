@@ -841,6 +841,11 @@ public:
     /// to the optimiser. Mirrored under the motion-ingress lock: written on the localiser thread,
     /// read by the viewer on the main one.
     Eigen::Vector3f get_predictor_delta() const;
+    /// The MEASURED odometry increment used for the last fusion — [dx, dy, dtheta] in the body frame,
+    /// with `valid`/`fresh` saying whether there was one at all. Exposed for the calibration channel,
+    /// which regresses this against the localiser posterior over the same interval; it is the only
+    /// consumer that needs the raw increment rather than the fused prior.
+    [[nodiscard]] const OdometryPrior &last_measured_prior() const { return last_measured_prior_; }
 
     /// Thread-safe: record the latest measured odometry sample entering the motion pipeline.
     void record_odometry_ingress(const std::string& source,

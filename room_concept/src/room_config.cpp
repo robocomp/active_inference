@@ -355,6 +355,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     auto& ec = epistemic.params;
     auto& ep = epistemic.epistemic_planner().params;
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "EpistemicController.PublishAffordance", p.PUBLISH_AFFORDANCE);
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.CalibPivotEnabled", p.CALIB_PIVOT_ENABLED);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.ExecStallTimeout", p.EXEC_STALL_TIMEOUT_S);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.ExecStallProgress", p.EXEC_STALL_PROGRESS_M);
     rc::ConfigLoaderUtils::load_optional<int>(cl, "EpistemicController.NumArcCurvatures", ec.num_arc_curvatures);

@@ -79,20 +79,33 @@ public:
     /// ★CALLED WHATEVER THE ROBOT IS DOING, including during the pivot. The estimator is watching
     /// motion, not serving an affordance, and excluding the pivot's own turning would throw away the
     /// most informative windows of the day.
-    void note_motion(double t_s, double posterior_theta, double odom_dtheta, double ref_travel_m,
+    void note_motion(double t_s, double x, double y, double posterior_theta, double odom_dtheta,
                      bool odom_valid)
     {
         if (not std::isfinite(posterior_theta) or not std::isfinite(odom_dtheta)) return;
-        if (not have_prev_) { have_prev_ = true; prev_theta_ = posterior_theta; win_t0_ = t_s; return; }
+        if (not have_prev_)
+        { have_prev_ = true; prev_theta_ = posterior_theta; prev_x_ = x; prev_y_ = y;
+          prev_t_ = win_t0_ = t_s; return; }
 
+        const double dt    = t_s - prev_t_;
         const double d_ref = wrap(posterior_theta - prev_theta_);
-        prev_theta_ = posterior_theta;
+        const double step  = std::hypot(x - prev_x_, y - prev_y_);
+        prev_theta_ = posterior_theta; prev_x_ = x; prev_y_ = y; prev_t_ = t_s;
+
+        // ★A RELOCALISATION IS NOT ODOMETRY ERROR, AND IT IS JUDGED PER FRAME. The reference is the
+        // localiser's posterior and it jumps: measured 2026-08-20, 2172 of 122841 cycles imply a speed
+        // above 1 m/s on a 0.6 m/s base, the worst 11.63 m in 50 ms. Testing the jump against the
+        // WINDOW's length instead of the frame's would let a 3 m teleport through unnoticed, because
+        // 3 m in a second is not impossible — it is only impossible in 50 ms. One poisoned frame
+        // discards the whole window: a jump anywhere in it corrupts both ends of the difference.
+        if (not ScaleEstimator::window_is_physical(step, dt, p_.max_speed_mps)) win_poisoned_ = true;
+
         if (odom_valid)
         {
             win_ref_ += d_ref;
             win_odo_ += odom_dtheta;
-            win_travel_ = std::max(win_travel_, std::abs(ref_travel_m));
         }
+        else win_poisoned_ = true;   // a window missing part of its odometry is not a window
         // ★THE PIVOT'S OWN ACCUMULATOR RUNS ON THE SAME INCREMENT, not on a second one derived later.
         // Taking the difference again from state that has already advanced returns zero — which is
         // what a first version of the offline loop accumulated, silently, for a whole log.
@@ -101,8 +114,7 @@ public:
         const double T = t_s - win_t0_;
         if (T < p_.window_s) return;
 
-        // The kinematic bound can only ever reject a physical impossibility, never real driving.
-        if (ScaleEstimator::window_is_physical(win_travel_, T, p_.max_speed_mps))
+        if (not win_poisoned_)
         {
             rot_.predict(T);
             rot_.add(win_ref_, win_odo_ - win_ref_, T);
@@ -111,8 +123,11 @@ public:
             const double a = 1.0 - std::exp(-T / std::max(p_.passive_tau_s, 1e-3));
             passive_rate_ += a * (std::abs(win_ref_) / T - passive_rate_);
         }
-        win_ref_ = win_odo_ = 0.0; win_travel_ = 0.0; win_t0_ = t_s;
+        else ++poisoned_windows_;
+        win_ref_ = win_odo_ = 0.0; win_poisoned_ = false; win_t0_ = t_s;
     }
+
+    [[nodiscard]] long poisoned_windows() const { return poisoned_windows_; }
 
     /// How long a whole pivot would take, at the rate the consumer actually turns.
     [[nodiscard]] double pivot_duration_s() const
@@ -181,8 +196,10 @@ private:
     PivotAffordance    pivot_;
 
     bool   have_prev_ = false;
-    double prev_theta_ = 0.0, win_t0_ = 0.0;
-    double win_ref_ = 0.0, win_odo_ = 0.0, win_travel_ = 0.0;
+    double prev_theta_ = 0.0, prev_x_ = 0.0, prev_y_ = 0.0, prev_t_ = 0.0, win_t0_ = 0.0;
+    double win_ref_ = 0.0, win_odo_ = 0.0;
+    bool   win_poisoned_ = false;
+    long   poisoned_windows_ = 0;   ///< windows discarded for a pose jump or missing odometry
     double passive_rate_ = 0.0;      ///< rad/s of turning the ordinary tours deliver — MEASURED
     bool   offer_open_ = false;
     double step_odom_  = 0.0;        ///< odometry turn accumulated since this offer went out

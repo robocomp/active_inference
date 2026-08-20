@@ -90,6 +90,24 @@ nodes    = ["room_concept 5"]  # our own agent presence node (cleaned on shutdow
 lidar_high_max_height = 2.75
 
 [RoomConcept]
+
+# ---- The calibration pivot (afford_calib) ----
+# The robot turns 120 degrees on the spot, twelve times: four complete turns back to the heading it
+# started from. That closure is the measurement — it turned exactly 8*pi radians as a FACT about
+# turning, so comparing the odometry's own accumulation against it needs no map, no survey and no
+# localiser. Offered as ordinary Orient affordances, one step at a time; it never drives anywhere, and
+# if the controller says the body cannot sweep its diagonal where the robot stands it is believed and
+# the offer waits until the day's work has carried the robot somewhere with room.
+# ★OFF. This affordance has never driven a robot. The PASSIVE half — watching how well the rotation
+# scale is known, from the turning the robot does anyway — runs regardless and commands nothing; look
+# for the "[calib] rotation scale ..." line, once a minute.
+# ★NOT A THRESHOLD WHEN ON: the offer carries its expected information gain in nats and competes in
+# the controller's EFE selection like any exploration cell. It extinguishes itself as the posterior
+# sharpens. Measured cold 3.46 nats, after 400 s of ordinary turning 0.01, after 400 s of straight-line
+# driving 3.70. On 2026-08-20 this robot's rotation scale measured +0.00007 +/- 0.00039, so expect it
+# to lose almost every contest — which is the correct outcome, not a broken feature.
+CalibPivotEnabled      = false
+
 RoomLayoutSvg          = "apartamento_layout.svg"  # apartamento layout; walls in webots-piso/Piso.wbt regenerated to match (room frame = -x_svg, y_svg)
 # Put the room-frame origin on the layout's geometric (bbox) centre instead of wherever the SVG
 # author placed (0,0). Matters for plans traced from a corner (apartamento); layouts already

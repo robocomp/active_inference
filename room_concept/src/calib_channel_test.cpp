@@ -33,7 +33,7 @@ static void drive(CalibChannel &c, double &t, double &theta, double omega, doubl
         const double n = noise_rad * std::sin(1.7 * static_cast<double>(i));
         theta += d + n;
         t += dt;
-        c.note_motion(t, std::atan2(std::sin(theta), std::cos(theta)), d * (1.0 + s_true), 0.0, true);
+        c.note_motion(t, 0.0, 0.0, std::atan2(std::sin(theta), std::cos(theta)), d * (1.0 + s_true), true);
     }
 }
 
@@ -162,6 +162,28 @@ int main()
         CalibChannel c(p);
         check(c.offer(0.0).has_value(), "the offer goes out");
         check(not c.offer(0.0).has_value(), "and nothing else is offered until it is answered");
+    }
+
+    // 9. A TELEPORT IS NOT ODOMETRY ERROR. The reference is the localiser's posterior and it jumps —
+    //    on this robot 1.77% of cycles imply a speed above 1 m/s on a 0.6 m/s base, the worst 11.63 m
+    //    in 50 ms. Charging that to the odometry puts a metre-scale outlier into a fit whose typical
+    //    increment is a metre. Judged per FRAME: 3 m in a second is merely fast, 3 m in 50 ms is not
+    //    possible, and testing against the window's length would let the second one through.
+    {
+        CalibChannelParams p; p.enabled = true;
+        CalibChannel clean(p), jumped(p);
+        double t1 = 0, th1 = 0, t2 = 0, th2 = 0;
+        drive(clean, t1, th1, 0.4, 0.05, 60.0);
+        drive(jumped, t2, th2, 0.4, 0.05, 30.0);
+        // one 5 m relocalisation in a single 50 ms frame, then business as usual
+        t2 += 0.05; th2 += 0.4 * 0.05;
+        jumped.note_motion(t2, 5.0, 0.0, std::atan2(std::sin(th2), std::cos(th2)), 0.4 * 0.05 * 1.05, true);
+        drive(jumped, t2, th2, 0.4, 0.05, 30.0);
+        std::printf("  jump: %ld window(s) discarded; s clean %.4f vs jumped %.4f\n",
+                    jumped.poisoned_windows(), clean.posterior().s, jumped.posterior().s);
+        check(jumped.poisoned_windows() >= 1, "the frame carrying the teleport poisons its window");
+        check(std::abs(jumped.posterior().s - clean.posterior().s) < 0.01,
+              "and the scale is not dragged by it");
     }
 
     if (failures == 0) std::printf("\nALL PASS\n\n");
