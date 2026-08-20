@@ -153,6 +153,65 @@ int main()
               "it would keep asking for ever");
     }
 
+    // ── 6. THE OFFLINE TOOL'S OWN KNOWN-TRUTH CASES ─────────────────────────────────────────────
+    // motion_calib --selftest drives four synthetic robots whose scales and densities are known
+    // exactly, and scores the recovered slope against ITS OWN standard error — 3 sigma, because with
+    // a truth of 0 a relative tolerance is meaningless and a fixed absolute one just encodes how
+    // noisy that particular case happens to be. Same generator here, same bar, so the online
+    // estimator is held to the standard the offline one already passes rather than to one of my own
+    // choosing.
+    {
+        std::printf("\n  the offline tool's known-truth cases, through the ONLINE estimator:\n");
+        struct Case { const char *name; double s_w, sig_w, s_v, sig_v; };
+        const Case cases[] = {
+            {"scale only, no noise", 0.070, 0.0000, 0.050, 0.0000},
+            {"noise only, no scale", 0.000, 0.0300, 0.000, 0.0100},
+            {"both, realistic",      0.070, 0.0300, 0.050, 0.0100},
+            {"both, hardware-ish",   0.030, 0.0020, 0.020, 0.0010},
+        };
+        const double dt = 0.05;
+        const int N = 20000, stride = 16;
+        for (const auto &c : cases)
+        {
+            std::mt19937 r2(20260813);
+            std::normal_distribution<double> gg(0.0, 1.0);
+            // Accumulate the same windows the offline tool builds at stride 16, from the same track.
+            ScaleEstimator rot({.scale_walk_density = 0.0, .prior_std = 1e6});
+            ScaleEstimator tra({.scale_walk_density = 0.0, .prior_std = 1e6});
+            double pth = 0.3;
+            double w_dth_true = 0, w_dth_o = 0, w_along_true = 0, w_along_o = 0, w_T = 0;
+            int in_window = 0;
+            for (int k = 1; k < N; ++k)
+            {
+                const double phase = 2.0 * M_PI * k / 900.0;
+                const double v = 0.35 + 0.25 * std::sin(phase);
+                const double w = 0.60 * std::sin(0.7 * phase);
+                const double dth_true = w * dt;
+                pth += dth_true;
+                const double dth_o = dth_true * (1.0 + c.s_w) + c.sig_w * std::sqrt(dt) * gg(r2);
+                const double along = v * dt * (1.0 + c.s_v)   + c.sig_v * std::sqrt(dt) * gg(r2);
+                w_dth_true += dth_true; w_dth_o += dth_o;
+                w_along_true += v * dt; w_along_o += along; w_T += dt;
+                if (++in_window == stride)
+                {
+                    rot.add(w_dth_true, w_dth_o - w_dth_true, w_T);
+                    tra.add(w_along_true, w_along_o - w_along_true, w_T);
+                    w_dth_true = w_dth_o = w_along_true = w_along_o = w_T = 0; in_window = 0;
+                }
+            }
+            const auto cr = rot.posterior(), ct = tra.posterior();
+            const bool rot_ok = std::abs(cr.s - c.s_w) <= std::max(3.0 * cr.s_std, 1e-3);
+            const bool tra_ok = std::abs(ct.s - c.s_v) <= std::max(3.0 * ct.s_std, 1e-3);
+            const bool sig_ok = (c.sig_w == 0.0 or std::abs(cr.sigma - c.sig_w) < 0.1 * c.sig_w + 1e-4)
+                            and (c.sig_v == 0.0 or std::abs(ct.sigma - c.sig_v) < 0.1 * c.sig_v + 1e-4);
+            std::printf("    %-22s rot %.4f (truth %.3f, 3s=%.4f) | tra %.4f (truth %.3f) | sig %.4f/%.4f\n",
+                        c.name, cr.s, c.s_w, 3.0*cr.s_std, ct.s, c.s_v, cr.sigma, ct.sigma);
+            check(rot_ok, "rotation scale recovered within 3 sigma", c.name);
+            check(tra_ok, "translation scale recovered within 3 sigma", c.name);
+            check(sig_ok, "densities recovered to 10%", c.name);
+        }
+    }
+
     std::printf("\n%d check(s) FAILED\n", failures);
     return failures == 0 ? 0 : 1;
 }
