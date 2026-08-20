@@ -2403,6 +2403,20 @@ void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &s
     const float reach = body.circumscribed_radius();
     const float reach2 = reach * reach;
 
+    // ── THE STANDPOINT MUST BE CLEAR WITH THE ROOM THE ARRIVAL ITSELF NEEDS ──────────────────────
+    // ★★★A POSE VALIDATED AS CLEAR IS NOT WHERE THE ROBOT STOPS. Arrival completes anywhere within
+    // goal_threshold of the standpoint, in any direction, so a body that merely FITS at the validated
+    // pose can be a quarter of a metre deeper into the furniture when the robot actually halts — which
+    // is the reported behaviour: targets that drive the robot into contact with the table.
+    // ★THE MARGIN IS THE ARRIVAL BAND, not a comfort preference. ComfortStandoff (0.6 m) is the wrong
+    // instrument: a standpoint exists to SEE something, and holding it two thirds of a metre off every
+    // return would refuse most of the cells worth standing in. goal_threshold is the honest number
+    // because it is exactly how far the arrival test permits the robot to be from the pose we checked.
+    // Nothing new is introduced — the same quantity the arrival gate already compares.
+    rc::RobotFootprint standoff_body = approach_body_;
+    standoff_body.set_safety_margin(margin + path_controller.params.goal_threshold);
+    const float standoff_reach2 = standoff_body.circumscribed_radius() * standoff_body.circumscribed_radius();
+
     // Returns that could touch ANY candidate the search may return, with the robot's own body removed.
     // Self-returns must go first: the wheels sit at 0.25 m and the robot is by definition standing next
     // to the standpoint by the time this runs, so leaving them in would condemn every standpoint the
@@ -2463,10 +2477,13 @@ void ControllerSession::recheck_standpoint_on_approach(ControllerPlanningStep &s
         if (body.contains_yaw(centre, step.robot_pose.pos, robot_yaw)) return false;
         for (const auto &p : returns)
         {
-            if ((p - centre).squaredNorm() > reach2) continue;     // cannot reach it at any heading
-            if (rotates) return false;                            // ...and it turns through all of them
-            if (body.contains_yaw(p, centre, arrival_yaw)) return false;
-            if (body.contains_yaw(p, centre, step.target.yaw_rad)) return false;
+            // ★JUDGED WITH THE ARRIVAL BAND ADDED, so the pose stays clear wherever inside that band
+            // the robot actually stops. The self-return filter above still uses the TRUE body: growing
+            // it there would delete returns from the very furniture this is meant to keep away from.
+            if ((p - centre).squaredNorm() > standoff_reach2) continue;   // out of reach at any heading
+            if (rotates) return false;                                   // ...and it turns through all
+            if (standoff_body.contains_yaw(p, centre, arrival_yaw)) return false;
+            if (standoff_body.contains_yaw(p, centre, step.target.yaw_rad)) return false;
         }
         return true;
     };
