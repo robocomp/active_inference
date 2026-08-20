@@ -136,6 +136,17 @@ public:
         float distance = 0.0f;
         float eigenvector_score = 0.0f;
         bool  rotate_in_place = false;
+        // ── WHAT THE SCORE WAS ACTUALLY MADE OF ──────────────────────────────────────────────────
+        // ★The selection log recorded the target's OWN neglect and nothing about the path integral,
+        // which is the half where the known wall-poison artefact lives. Measured 2026-08-20: a cell
+        // with neglect 0.129 and staleness 0.138 — visited 40 s earlier — beat one with neglect 1.536
+        // and no suppression, repeatedly, and the pair ping-ponged 3.16 m apart for ten minutes while
+        // cells nine minutes stale went unvisited. The target's own numbers cannot explain a score of
+        // 0.748, so the explanation is in terms nobody was writing down.
+        float route_neglect = 0.0f;   // the blended term the score actually uses (nats)
+        float path_neglect  = 0.0f;   // its path half, sampled robot→target
+        int   path_sampled  = 0;      // samples that survived the observability mask
+        int   path_total    = 0;      // samples attempted; total-sampled = cells masked out as wall
     };
 
     EpistemicPlanner();

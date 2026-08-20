@@ -753,13 +753,27 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         std::optional<rc::affordance::Outcome> fact;
         std::string why;
         std::optional<Eigen::Vector2f> in_cell_pose;
-        if (will_rotate_here)
+
+        // ── REUSE THE STANDPOINT WE ALREADY RESOLVED FOR THIS CELL ──────────────────────────────
+        // Held for the life of the target and revalidated cheaply — see resolved_standpoint_. Without
+        // this the search re-answers every cycle against a grid that flickers, the target walks, and
+        // every step of it is a replan the tracker has to start over from.
+        const bool same_cell = (step.target.room_pos - resolved_for_cell_).squaredNorm() < 0.05f * 0.05f;
+        if (not same_cell) resolved_standpoint_.reset();
+        if (resolved_standpoint_.has_value())
+        {
+            const bool still_good = grid_planner_.pose_free(*resolved_standpoint_, step.target.yaw_rad)
+                and (not will_rotate_here or grid_planner_.can_turn_here(*resolved_standpoint_));
+            if (still_good) in_cell_pose = resolved_standpoint_;
+            else            resolved_standpoint_.reset();
+        }
+        if (not in_cell_pose.has_value() and will_rotate_here)
         {
             in_cell_pose = grid_planner_.nearest_rotatable(step.target.room_pos, in_cell_m);
             if (not in_cell_pose.has_value())
                 in_cell_pose = grid_planner_.nearest_free(step.target.room_pos, step.target.yaw_rad, in_cell_m);
         }
-        else
+        else if (not in_cell_pose.has_value())
             in_cell_pose = grid_planner_.nearest_free(step.target.room_pos, step.target.yaw_rad, in_cell_m);
         // ★THE RING SEARCH IS QUANTISED TO THE PLANNER'S 0.10 m GRID, so `max_radius_m` bounds the
         // search, not the answer: measured p50 0.403 m and max 0.455 m against a 0.354 m half-diagonal,
@@ -935,6 +949,8 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         // it is, so the arrival test's allowance (last_repair_applied_m_) stays exact.
         if (in_cell_pose.has_value())
         {
+            resolved_standpoint_ = in_cell_pose;          // hold it: the next cycle must not re-answer
+            resolved_for_cell_ = step.target.room_pos;
             last_repair_applied_m_ = (*in_cell_pose - step.target.room_pos).norm();
             if (last_repair_applied_m_ > 1e-3f)
             {

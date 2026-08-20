@@ -568,6 +568,24 @@ private:
         std::size_t     map   = 0;
     };
     std::optional<UnroutableAt> unroutable_at_;
+
+    // ── THE RESOLVED STANDPOINT, HELD FOR THE LIFE OF THE TARGET ─────────────────────────────────
+    // ★★★A TARGET THAT MOVES WHEN THE MAP MOVES IS NOT A TARGET (2026-08-20). The clearance search
+    // (in-cell, then widened to the closest clear spot) is deterministic given a grid — but the grid
+    // is rebuilt every cycle from a belief field that flickers, so re-running the searchevery cycle
+    // returned a different pose: measured, one published cell resolved 89 times to 14 DISTINCT
+    // standpoints spread over 0.99 m. same_target_instance calls a target changed at 5 cm, so every
+    // one of those was a replan: a fresh curve, arc length back to zero, and a tracker that never got
+    // past acquisition — 432 consecutive cycles with rotation saturated at the cap, alternating sign
+    // every half second, and track_s pinned at 0.07 m. That is the "repaired target chased the robot"
+    // failure this file already documents for unroutable_fix_, reintroduced by a newer search that
+    // was not given the same defence.
+    // ★HELD, BUT REVALIDATED: the cheap half of the question (is this pose still footprint-free, can
+    // the body still turn there) is a local lookup, so it is asked every cycle; failing it drops the
+    // hold and the search runs ONCE more. That is the difference between caching an answer and
+    // freezing it.
+    std::optional<Eigen::Vector2f> resolved_standpoint_;
+    Eigen::Vector2f                resolved_for_cell_ = Eigen::Vector2f::Zero();
     // The reachability repair, computed ONCE for a given raw standpoint and held. Recomputing it per
     // cycle makes the target follow the robot (nearest_reachable is measured FROM the robot).
     std::optional<Eigen::Vector2f> unroutable_fix_;

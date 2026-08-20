@@ -509,6 +509,11 @@ std::vector<EpistemicPlanner::Target> EpistemicPlanner::evaluate_targets() const
                                   + params.w_ior_drive * route_neglect)
                 - params.w_travel_cost * (t.distance / room_diag);
         t.eigenvector_score = fim_gain;
+        // The decomposition, carried so the log can say WHY this cell won — see Target's fields.
+        t.route_neglect = route_neglect;
+        t.path_neglect  = path_neglect;
+        t.path_sampled  = n_sampled;
+        t.path_total    = std::max(0, n_path - 1);
         targets.push_back(t);
     }
 
@@ -631,16 +636,21 @@ std::optional<EpistemicPlanner::Target> EpistemicPlanner::select_target()
                 const float stale = visit_grid_.staleness(t.position, params.ior_decay_time, now);
                 cs += std::format(
                     R"({}{{"x":{:.3f},"y":{:.3f},"score":{:.5f},"fim":{:.5f},"neg":{:.4f},)"
-                    R"("age_s":{:.1f},"stale":{:.4f},"attempt_supp":{:.4f},"d":{:.3f}}})",
+                    R"("age_s":{:.1f},"stale":{:.4f},"attempt_supp":{:.4f},"d":{:.3f},)"
+                    R"("route_neg":{:.4f},"path_neg":{:.4f},"path_n":{},"path_masked":{}}})",
                     cs.empty() ? "" : ",", t.position.x(), t.position.y(), t.score,
                     t.eigenvector_score, neglect_nats(t.position, now), age, stale,
-                    attempt_suppressor(t.position, now), t.distance);
+                    attempt_suppressor(t.position, now), t.distance,
+                    t.route_neglect, t.path_neglect, t.path_sampled,
+                    t.path_total - t.path_sampled);
             }
             sel_json << std::format(
                 R"({{"rob_x":{:.3f},"rob_y":{:.3f},"n_cand":{},"n_grid":{},"near_rejected":{},)"
+                R"("masked_cells":{},"w_path_interest":{:.3f},)"
                 R"("w_travel":{:.3f},"w_drive":{:.3f},"w_ior":{:.3f},"tau":{:.1f},"min_distance":{:.2f},)"
                 R"("cands":[{}]}})" "\n",
                 rp2.x(), rp2.y(), dbg_candidates_, dbg_grid_, dbg_near_,
+                dbg_unobservable_, params.w_path_interest,
                 params.w_travel_cost, params.w_ior_drive, params.w_ior, params.ior_decay_time,
                 params.min_distance, cs);
             sel_json.flush();
