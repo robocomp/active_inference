@@ -106,7 +106,7 @@ lidar_high_max_height = 2.75
 # sharpens. Measured cold 3.46 nats, after 400 s of ordinary turning 0.01, after 400 s of straight-line
 # driving 3.70. On 2026-08-20 this robot's rotation scale measured +0.00007 +/- 0.00039, so expect it
 # to lose almost every contest — which is the correct outcome, not a broken feature.
-CalibPivotEnabled      = false
+CalibPivotEnabled      = true
 
 RoomLayoutSvg          = "apartamento_layout.svg"  # apartamento layout; walls in webots-piso/Piso.wbt regenerated to match (room frame = -x_svg, y_svg)
 # Put the room-frame origin on the layout's geometric (bbox) centre instead of wherever the SVG

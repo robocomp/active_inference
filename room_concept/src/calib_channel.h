@@ -50,10 +50,14 @@ struct CalibChannelParams
     /// worst moved 11.63 m in 50 ms. Charging that to the odometry would put a metre-scale outlier
     /// into a fit whose typical increment is a metre.
     double max_speed_mps = 0.6;
-    /// How fast the base actually turns under the Orient policy — used ONLY to predict how long the
-    /// manoeuvre would take, which is what converts its excitation into a rate the marginal gain can
-    /// compare against the tours. Mirrors the controller's lockon_max_yaw_rps.
-    double pivot_rot_rate = 0.12;
+    /// How fast the base turns under the Orient policy — used ONLY to predict how long the manoeuvre
+    /// would take, which is what converts its excitation into a rate the marginal gain can compare
+    /// against the tours. It prices the offer; it does not command anything.
+    /// ★MIRRORS THE CONSUMER'S `LockOnMaxYawRps`, WHICH IS 0.06 AND NOT 0.12. The first version of
+    /// this file assumed 0.12 from the code default and the live config says half that — so a 120
+    /// degree step takes 35 s, not 17. The producer cannot read the consumer's config, so this is an
+    /// assumption and is named as one; when it is wrong the price is wrong, nothing else.
+    double pivot_rot_rate = 0.06;
     /// Time constant of the passive-excitation EMA. Long, because the question it answers is "what is
     /// this robot's diet", not "what is it doing right now".
     double passive_tau_s = 120.0;

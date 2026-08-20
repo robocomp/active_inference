@@ -636,24 +636,30 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
 
     // ★THE CONTRACT IS AUTHORED ONCE, ON THE NODE, AT BIRTH. Orient with NO completion predicate:
     // "rotate in place to this bearing" is the whole affordance, and the executor completes it on
-    // reaching the bearing. The timeout is the only number here and it is derived, not chosen — the
-    // consumer turns at its own capped rate, so a 120-degree step takes step/rate seconds, and the
-    // producer waits twice that before calling the step failed. Nothing is lost by being wrong: a
-    // step that times out simply does not advance the sequence, because the pivot counts MEASURED
-    // heading and never the steps it issued.
+    // reaching the bearing.
+    // ★★★THE TIMEOUT IS NOT DERIVED FROM THE TURN RATE, BECAUSE THE PRODUCER DOES NOT KNOW IT. The
+    // first version computed 2 x (120 deg / 0.12 rad/s) = 35 s, taking 0.12 from the code default —
+    // and the live config sets LockOnMaxYawRps = 0.06, at which one step takes 35 s exactly. Every
+    // step would have timed out at the instant it completed, and the pivot would never have advanced
+    // once. A number derived from an assumption about the other agent is not derived, it is guessed
+    // with extra steps.
+    // ★So state the assumption instead, at the only level the producer can honestly make it: a base
+    // that cannot turn 120 degrees within two minutes is failing in a way worth reporting. Being
+    // generous costs nothing here — the sequence advances on MEASURED heading, never on the steps it
+    // issued, so a step that times out simply leaves the pivot where it was.
     const auto write_calib_contract = [this]
     {
         if (calib_contract_written_) return;
         auto n = G_->get_node(calib_manager_.managed_node_id());
         if (not n.has_value()) return;
-        const float step_s = static_cast<float>(2.0 * M_PI / 3.0 / 0.12);
+        constexpr float kStepPatienceS = 120.0f;
         rc::affordance::write_contract(*G_, n.value(),
-            rc::affordance::Contract::orient().stable(2).timeout_s(2.0f * step_s));
+            rc::affordance::Contract::orient().stable(2).timeout_s(kStepPatienceS));
         G_->update_node(n.value());
         calib_contract_written_ = true;
         std::print("[calib] afford_calib authored: orient, no predicate — the rotation IS the goal; "
-                   "timeout {:.0f}s (twice the {:.0f}s a 120 deg step takes at the consumer's own "
-                   "capped rate)\n", 2.0f * step_s, step_s);
+                   "{:.0f}s per step, which is patience rather than a prediction (this side cannot "
+                   "know the consumer's turn rate)\n", kStepPatienceS);
     };
 
     const bool published = calib_manager_.publish_target(
