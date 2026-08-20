@@ -678,6 +678,7 @@ void SpecificWorker::compute()
             // model. Without these the grid accumulates monotonically (occluded cells immortal, z-band only ever
             // widens, self-returns latched permanently along the driven path).
             gp.forget_half_life_s  = cfg_.grid_forget_half_life_s;
+            gp.forget_occupied_only = cfg_.grid_forget_occupied_only;
             gp.self_body_sigma_m   = cfg_.grid_self_body_sigma_m;
             // NO C-SPACE INFLATION. The controller now collides its ACTUAL footprint polygon against the grid
             // (common/robot_footprint + controller/src/grid_planner), so inflating here is double-counted: a
@@ -830,7 +831,14 @@ void SpecificWorker::compute()
                 }
                 return pe;
             };
-        const auto comps = grid_.occupied_components(2, cell_explained, grid_.params().inflate_radius_m);
+        // ★NO C-SPACE INFLATION (2026-08-20). inflate_radius_m (0.25 m, half a robot width) existed to
+        // pre-clear the published component HULLS for the controller's planner. The controller now takes
+        // the occupancy grid directly and applies the robot's true footprint itself, so inflating here
+        // is a second copy of the same allowance: measured, one 5 cm residual cell became a no-go zone
+        // close to a metre across, and nothing downstream could tell the two inflations apart.
+        // Components are still computed — the logs, the height profile and the specialist subtraction
+        // all read them — just at their true extent.
+        const auto comps = grid_.occupied_components(2, cell_explained, 0.f);
         log_floor_diag(cell_explained, comps);   // plane fit + the RESIDUAL set's height profile, jointly
         dump_residual_cells(cell_explained);     // ...and WHERE they are, which a histogram cannot say
         static int gc = 0;
@@ -1423,14 +1431,15 @@ void SpecificWorker::log_grid_diag()
         // support gate — the two were summed together and neither could be read.
         f << "cycle,occupied,hits,misses,miss_blocked_zaware,latched,released,hit_then_cleared,"
              "forgotten,self_damped,floor_damped,floor_clears,"
-             "floor_rets,floor_blocked,marks_suppr,floor_dropped\n";
+             "floor_rets,floor_blocked,marks_suppr,floor_dropped,decayed,held\n";
     }
     f << cyc << ',' << grid_.occupied_count() << ',' << d.hits << ',' << d.misses << ','
       << d.miss_blocked_zaware << ',' << d.cells_latched << ',' << d.cells_released << ','
       << d.hit_then_cleared << ',' << d.cells_forgotten << ',' << d.self_hits_damped << ','
       << d.floor_damped_hits << ',' << d.floor_endpoint_clears << ','
       << d.floor_endpoint_returns << ',' << d.floor_endpoint_blocked << ','
-      << d.marks_suppressed << ',' << last_device_floor_dropped_ << '\n';
+      << d.marks_suppressed << ',' << last_device_floor_dropped_ << ','
+      << d.cells_decayed << ',' << d.cells_held << '\n';
     if ((cyc % 20) == 0)
     {
         f.flush();
@@ -1530,59 +1539,17 @@ void SpecificWorker::publish_grid_display(const rc::OccupancyGrid::CellExplained
     G->add_or_modify_attrib_local<grid_border_cells_att>  (gn, to_xyz(grid_.inflated_border_centres(explained, grid_.params().inflate_radius_m)));
     G->add_or_modify_attrib_local<grid_cell_size_att>     (gn, static_cast<float>(grid_.params().cell_size_m));
 
-    // Inflated component HULLS for the CONTROLLER's planner, encoded in grid_obstacle_hulls:
-    //   [ P, (V, x0,y0, …, x_{V-1},y_{V-1}) × P ]   — P polygons, each V vertices (room-frame footprint,
-    // already half-robot-width inflated). The controller decodes this and plans around each hull together
-    // with the known object boxes.
-    // Each component is published as an EXACT RECTANGULAR COVER of its occupied cells (see rect_decompose).
-    // The old boundary-loop trace dropped interior holes and fell back to a convex hull on a diagonal pinch,
-    // both of which published FREE space as occupied — that is what put obstacle polygons into never-observed
-    // areas and turned half a room solid. The convex hull remains only as a defensive fallback.
-    std::size_t n_poly = 0;
-    for (const auto& c : comps) n_poly += c.outline.empty() ? 1 : c.outline.size();
-    std::vector<float> poly; poly.push_back(static_cast<float>(n_poly));
-    const auto push_ring = [&](const std::vector<Eigen::Vector2f>& ring) {
-        poly.push_back(static_cast<float>(ring.size()));
-        for (const auto& v : ring) { poly.push_back(v.x()); poly.push_back(v.y()); }
-    };
-    for (const auto& c : comps)
-    {
-        if (c.outline.empty()) push_ring(c.hull);
-        else for (const auto& ring : c.outline) push_ring(ring);
-    }
-    // POLYGON BUDGET + coverage check. A rectangular cover means more, smaller polygons than one traced
-    // outline; the controller's visibility graph is O(N²) in total vertices, so a blow-up here shows up as
-    // planner latency (not as a wrong map) and is worth watching. The ratio is the real regression guard:
-    // published area should track the occupied-cell area at ≈1.00×; anything above 1 means free space is
-    // being published as occupied again.
-    {
-        static int pc = 0;
-        if ((pc++ % 20) == 0)
-        {
-            double pub_area = 0; std::size_t verts = 0;
-            for (const auto& c : comps)
-            {
-                const auto& rings = c.outline.empty()
-                    ? std::vector<std::vector<Eigen::Vector2f>>{c.hull} : c.outline;
-                for (const auto& ring : rings)
-                {
-                    verts += ring.size();
-                    double a2 = 0;
-                    for (std::size_t i = 0; i < ring.size(); ++i)
-                    { const auto& u = ring[i]; const auto& v = ring[(i + 1) % ring.size()];
-                      a2 += static_cast<double>(u.x()) * v.y() - static_cast<double>(v.x()) * u.y(); }
-                    pub_area += std::abs(a2) / 2.0;
-                }
-            }
-            const double cs = grid_.cell_size();
-            const double cell_area = static_cast<double>(grid_.occupied_count()) * cs * cs;
-            std::println("[grid-publish] {} comps → {} polys / {} verts | published {:.2f} m² vs occupied "
-                         "{:.2f} m² ({:.2f}× — >1 means free space published as occupied)",
-                         comps.size(), n_poly, verts, pub_area, cell_area,
-                         cell_area > 0.0 ? pub_area / cell_area : 0.0);
-        }
-    }
-    G->add_or_modify_attrib_local<grid_obstacle_hulls_att>(gn, std::move(poly));
+    // ── NO MORE COMPONENT HULLS ──────────────────────────────────────────────────────────────────
+    // ★★★grid_obstacle_hulls is GONE (2026-08-20). It published each connected component as an exact
+    // rectangular cover, C-space inflated by 0.25 m, which the controller decoded into polygons and
+    // rasterised back into a grid: grid → components → inflate → cover → decode → grid. The cover was
+    // exact by area but not by identity — a tiling of a blob is unstable frame to frame, and the
+    // planner's world churned at 20 Hz beneath a stationary robot. The inflation was also counted
+    // twice, here and again when the planner applied the robot's own footprint.
+    // ★The controller now reads `grid_occupied_cells` — which this agent already publishes, and which
+    // the 3-D viewers already use — and marks it directly. One representation, one inflation, no trip.
+    // The `[grid-publish]` area-ratio guard went with it; its job (published area must track occupied
+    // area at ~1.00x) is now true by construction, because there is no second representation to drift.
 
     // ── BELIEF FIELD for the planner (plan over belief, not geometry): dense row-major P (collision RISK) and
     //    Var[P] (EPISTEMIC), collapsed to zero wherever a modelled object explains the cell. grid_field_meta =

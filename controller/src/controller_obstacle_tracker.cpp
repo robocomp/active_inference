@@ -1162,39 +1162,43 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
         temporary_obstacles_ = std::move(surviving_obstacles);
     }
 
-    // ── residual_concept OCCUPANCY GRID obstacles ──
-    // residual_concept no longer publishes `obstacle` nodes; it publishes a `grid` node under room whose
-    // `vec_float` attribute encodes the inflated occupancy component HULLS (already half-robot-width inflated):
-    //   [ P, (V, x0,y0, …, x_{V-1},y_{V-1}) × P ].
-    // Decode each hull and add it to the planner obstacles — so the robot plans around the residual/unmodelled
-    // world (from the grid) AND the known object boxes (read above), one unified obstacle list.
-    if (const auto g = graph_->get_node("residual"); g.has_value())   // node renamed "grid"→"residual" (type kept)
+    // ── residual_concept OCCUPANCY GRID: TAKEN AS CELLS, NOT AS POLYGONS ─────────────────────────
+    // ★★★THE ROUND TRIP IS GONE (2026-08-20). residual used to publish `grid_obstacle_hulls`: each
+    // connected component of its occupancy, C-space inflated by 0.25 m, decomposed into an exact
+    // rectangular cover, which this function decoded back into polygons for the planner to rasterise
+    // into a grid again. Two faults lived in that trip. The inflation was counted TWICE — 0.25 m here
+    // plus the robot's own half-extent applied by GridPlanner at query time — so one 5 cm cell of
+    // residual became a no-go zone close to a metre across; and a cover of tiles is a lossy,
+    // unstable re-encoding of a grid, which churned the planner's world at 20 Hz under a stationary
+    // robot (measured: one (cell,pose) verdict re-decided 33 times in five minutes).
+    // ★So take what residual actually knows: `grid_occupied_cells`, its own resolution, marked
+    // directly. The robot's shape is then applied exactly once, where it belongs.
+    if (const auto g = graph_->get_node("residual"); g.has_value())
     {
-        if (const auto opt = graph_->get_attrib_by_name<grid_obstacle_hulls_att>(g.value()); opt.has_value())
+        residual_cells_.clear();
+        residual_cell_size_m_ = 0.f;
+        if (const auto cs = graph_->get_attrib_by_name<grid_cell_size_att>(g.value()); cs.has_value())
+            residual_cell_size_m_ = cs.value();
+        if (const auto opt = graph_->get_attrib_by_name<grid_occupied_cells_att>(g.value()); opt.has_value())
         {
             const auto &f = opt.value().get();
-            std::size_t i = 0;
-            const int P = (i < f.size()) ? static_cast<int>(f[i++]) : 0;
-            int added = 0;
-            for (int p = 0; p < P and i < f.size(); ++p)
+            residual_cells_.reserve(f.size() / 3);
+            for (std::size_t i = 0; i + 2 < f.size(); i += 3)      // [x,y,z] triplets; z is the cell's top
+                residual_cells_.emplace_back(f[i], f[i + 1]);
+            // Drawn as what they are — one square per occupied cell at residual's own resolution. The
+            // display used to show the inflated hulls, which over-stated the obstacle by a body width
+            // and hid exactly the discrepancy this change exists to remove.
+            if (residual_cell_size_m_ > 0.f)
             {
-                const int V = static_cast<int>(f[i++]);
-                ControllerPolygon poly;
-                poly.reserve(static_cast<std::size_t>(std::max(0, V)));
-                for (int v = 0; v < V and i + 1 < f.size(); ++v) { poly.emplace_back(f[i], f[i + 1]); i += 2; }
-                if (poly.size() >= 3)
-                {
-                    // residual now publishes CONCAVE outlines here (not convex hulls), so these few
-                    // polygons are BOTH what the planner avoids AND a faithful, cheap occupied/free
-                    // display — no need for the hundreds-of-squares per-cell overlay (UI-heavy).
+                const float h = 0.5f * residual_cell_size_m_;
+                for (const auto &c : residual_cells_)
                     display_obstacle_polygons_.push_back(ControllerObstacleVisual{
-                        .polygon = poly, .kind = ControllerObstacleKind::GridOccupancy, .label = {}});
-                    obstacles.push_back(std::move(poly));
-                    ++added;
-                }
+                        .polygon = ControllerPolygon{{c.x() - h, c.y() - h}, {c.x() + h, c.y() - h},
+                                                     {c.x() + h, c.y() + h}, {c.x() - h, c.y() + h}},
+                        .kind = ControllerObstacleKind::GridOccupancy, .label = {}});
             }
-            report << " | grid_poly=" << added;
         }
+        report << " | grid_cells=" << residual_cells_.size() << " @" << residual_cell_size_m_ << "m";
     }
 
     report << " | drawn=" << obstacles.size();

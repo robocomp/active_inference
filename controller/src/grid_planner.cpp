@@ -106,7 +106,8 @@ GridPlanner::OrientationCensus GridPlanner::orientation_census() const
 }
 
 void GridPlanner::set_world(const std::vector<Eigen::Vector2f>& room_polygon,
-                            const std::vector<std::vector<Eigen::Vector2f>>& obstacles)
+                            const std::vector<std::vector<Eigen::Vector2f>>& obstacles,
+                            const OccupiedCells& cells)
 {
     cell_ = std::max(0.02f, params.cell_size_m);
     dist_valid_ = false;          // the world changed; any cached distance field describes the old one
@@ -169,6 +170,23 @@ void GridPlanner::set_world(const std::vector<Eigen::Vector2f>& room_polygon,
             for (int ix = std::max(0, ix0); ix <= std::min(w_ - 1, ix1); ++ix)
                 if (not occ_[idx(ix, iy)] and point_in_polygon(poly, cell_to_world(ix, iy)))
                     occ_[idx(ix, iy)] = 1;
+    }
+    // ── RESIDUAL'S OCCUPANCY, MARKED DIRECTLY ────────────────────────────────────────────────────
+    // One cell of residual covers a square of its own resolution; mark every planner cell that square
+    // touches. Rounding is OUTWARD (a planner cell is marked if the squares overlap at all), which is
+    // the conservative direction for an obstacle and keeps this exact at any pair of resolutions.
+    if (cells.cell_size_m > 0.f and not cells.centres.empty())
+    {
+        const float h = 0.5f * cells.cell_size_m;
+        for (const auto& c : cells.centres)
+        {
+            int ix0, iy0, ix1, iy1;
+            world_to_cell({c.x() - h, c.y() - h}, ix0, iy0);
+            world_to_cell({c.x() + h, c.y() + h}, ix1, iy1);
+            for (int iy = std::max(0, iy0); iy <= std::min(h_ - 1, iy1); ++iy)
+                for (int ix = std::max(0, ix0); ix <= std::min(w_ - 1, ix1); ++ix)
+                    occ_[idx(ix, iy)] = 1;
+        }
     }
     rebuild_offsets();
 

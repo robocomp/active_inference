@@ -45,6 +45,15 @@
 namespace rc
 {
 
+// residual_concept's occupancy as the planner takes it: cell centres in the room frame at residual's
+// own resolution. At namespace scope because a nested type cannot serve as a default argument inside
+// its own enclosing class — its default member initialisers are not complete there yet.
+struct OccupiedCells
+{
+    std::vector<Eigen::Vector2f> centres;
+    float cell_size_m = 0.f;                    // 0 ⇒ no grid supplied, nothing marked
+};
+
 class GridPlanner
 {
 public:
@@ -94,8 +103,22 @@ public:
     // is occupied, which is how walls enter without needing a separate representation. `obstacles` are filled
     // polygons in room coordinates (residual hulls, concept-object boxes: whatever the controller is avoiding).
     // Obstacles are rasterised at their TRUE extent — no inflation. The robot's shape is applied at query time.
+    // ── THE OCCUPANCY THE PLANNER AVOIDS ─────────────────────────────────────────────────────────
+    // `obstacles` are polygons the world is genuinely made of — object footprints, temporary
+    // blockers. `cells` is residual_concept's occupancy grid, marked DIRECTLY.
+    // ★★★WHY DIRECTLY, AND NOT AS POLYGONS (2026-08-20). residual used to publish its grid as an
+    // exact rectangular cover of each connected component, C-space inflated by 0.25 m, which this
+    // class then rasterised back into a grid — grid → components → inflate → rect cover → decode →
+    // grid. Every stage can add or lose area, and the inflation was counted TWICE: 0.25 m from
+    // residual plus the robot's own half-extent applied here at query time, so a single 5 cm cell of
+    // residual became a no-go zone close to a metre across. The grid is what residual actually knows;
+    // a polygon cover of it is a lossy re-encoding of the same thing, and the round trip existed only
+    // because this class had no way to accept cells.
+    // ★The robot's shape is applied ONCE, here, at query time — which is what makes double inflation
+    // impossible to reintroduce by accident.
     void set_world(const std::vector<Eigen::Vector2f>& room_polygon,
-                   const std::vector<std::vector<Eigen::Vector2f>>& obstacles);
+                   const std::vector<std::vector<Eigen::Vector2f>>& obstacles,
+                   const OccupiedCells& cells = OccupiedCells{});
 
     // Shortest footprint-feasible path from start to goal, in room coordinates. Returns nullopt with
     // last_failure() set. The returned path is simplified to its turning points (a dense cell chain is useless

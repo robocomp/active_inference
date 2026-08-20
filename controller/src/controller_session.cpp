@@ -162,7 +162,9 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
         grid_planner_.params.clearance_weight = params_->planner_clearance_weight;
         grid_planner_.params.clearance_pref_m = params_->planner_clearance_pref_m;
     }
-    grid_planner_.set_world(room_polygon_, obstacle_tracker.obstacle_polygons());
+    grid_planner_.set_world(room_polygon_, obstacle_tracker.obstacle_polygons(),
+                            {.centres = obstacle_tracker.residual_cells(),
+                             .cell_size_m = obstacle_tracker.residual_cell_size_m()});
     return true;
 }
 

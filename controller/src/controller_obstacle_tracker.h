@@ -26,6 +26,10 @@ class ControllerObstacleTracker
         rc::LidarPointBuffer *lidar_buffer() { return &lidar_room_buffer_; }
         const ControllerPolygons &obstacle_polygons() const { return obstacle_polygons_; }
         const ControllerObstacleVisuals &display_obstacle_polygons() const { return display_obstacle_polygons_; }
+        // residual_concept's occupancy, as CELLS — what the planner marks directly (see the decode
+        // site for why the polygon round trip was removed).
+        const std::vector<Eigen::Vector2f> &residual_cells() const { return residual_cells_; }
+        float residual_cell_size_m() const { return residual_cell_size_m_; }
         ControllerPolygons temporary_obstacle_rfe_points() const;
 
         // Diagnostic breakdown of what the planner sees near a query point, split by SOURCE. Lets the
@@ -286,6 +290,8 @@ class ControllerObstacleTracker
         std::vector<GraphObstacleRecord> known_graph_obstacles_;
         ControllerPolygons obstacle_polygons_;
         ControllerObstacleVisuals display_obstacle_polygons_;
+        std::vector<Eigen::Vector2f> residual_cells_;
+        float residual_cell_size_m_ = 0.f;
         std::unordered_map<std::string, int> object_label_counts_;   // per-type object tag counter (t/c/b)
         int obstacle_label_count_ = 0;                               // shared o_N counter (graph + temp)
         std::vector<TemporaryObstacleInstance> temporary_obstacles_;
