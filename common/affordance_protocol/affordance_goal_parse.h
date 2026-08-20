@@ -141,8 +141,19 @@ validate_contract(const ContractShape& shape, const std::vector<GoalClause>& goa
 {
     std::vector<std::string> problems;
 
-    if (not shape.is_reach and goal.empty())
-        problems.emplace_back("servo/orient contract has no completion clause — it can never complete");
+    // ★AN ORIENT CONTRACT WITH NO CLAUSE IS LEGAL, AND THIS WARNING HAD ITS FAILURE BACKWARDS.
+    // Orient means "rotate in place toward the target yaw, then satisfy the predicate". Drop the
+    // predicate and the ROTATION is the whole affordance — which is the only reading an empty
+    // predicate can have, and exactly what a calibration pivot asks for.
+    // ★The warning said such a contract "can never complete". The opposite was true: evaluate_goal on
+    // an empty clause list returns TRUE, so a bearing-only Orient used to complete on its FIRST cycle,
+    // parked, having turned nothing — and the warning would have sent anyone reading it looking for a
+    // predicate that never fired. The executor now completes an empty-predicate Orient on reaching the
+    // bearing (see step_orient), which is what the policy word means.
+    // Servo keeps the warning, and keeps it for a real reason: its motion is a micro-search with no
+    // terminal condition of its own, so with no predicate there is genuinely nothing that can end it.
+    if (not shape.is_reach and not shape.is_orient and goal.empty())
+        problems.emplace_back("servo contract has no completion clause — it can never complete");
     if (shape.is_reach and shape.has_servo_binding)
         problems.emplace_back("Reach contract carries servo bindings (center/advance) — the executor "
                               "ignores them, so they are a silent no-op rather than the behaviour authored");

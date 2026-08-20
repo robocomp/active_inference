@@ -724,7 +724,52 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     // from the published cell, every one reported to room as SATISFIED.
     // ★A CLICKED TARGET IS NOT A PRODUCER'S DECISION VARIABLE — it is this agent's own goal, so the
     // repair below still applies to it. Ownership is the discriminator, not the geometry.
-    if (step.target.from_affordance and grid_planner_.has_world())
+    // ── AN ORIENT AFFORDANCE DOES NOT NAVIGATE, SO EVERY QUESTION BELOW IS ABOUT THE WRONG POSE ──
+    // Policy::Orient is "rotate in place toward the bearing": the executor stops the follower and turns
+    // where the robot STANDS (step_orient), and the published (x,y) is never driven to. So resolving
+    // that (x,y) into a standpoint, routing to it, and reporting outside_room / infeasible /
+    // unreachable about it describe a place the robot was never going — facts that are true of a point
+    // and false of the action.
+    // ★AND THE ONE QUESTION THAT DOES MATTER WAS NEVER ASKED. A rotation in place sweeps the body's
+    // DIAGONAL (0.796 m for this 0.46 x 0.65 base, against 0.46 m standing), and it runs with NO
+    // obstacle check of any kind — the align branch returns ahead of every safety stage. Whether that
+    // sweep fits is a fact about where the robot IS, this side is the only one that can establish it,
+    // and the answer is reported rather than repaired: there is nowhere to move the target TO, because
+    // the target is not a place. A producer told `infeasible` here knows to wait until the robot has
+    // been carried somewhere with room, which is the whole basis of an opportunistic manoeuvre.
+    const bool orient_in_place = step.target.from_affordance and target_contract_known_
+                             and target_contract_.policy == rc::affordance::Policy::Orient;
+    if (orient_in_place and grid_planner_.has_world())
+    {
+        const auto robot_xy = step.robot_pose.pos.head<2>().cast<float>();
+        if (not grid_planner_.can_turn_here(robot_xy))
+        {
+            if (timestamp_ms - last_repair_reject_log_ms_ >= 3000)
+            {
+                last_repair_reject_log_ms_ = timestamp_ms;
+                std::println("[controller] '{}' is an orient affordance and the body cannot turn "
+                             "all the way round at ({:.2f},{:.2f}), where the robot stands — "
+                             "reporting infeasible. Nothing to repair: an orient has no standpoint.",
+                             step.target.node_name, robot_xy.x(), robot_xy.y());
+            }
+            audit_standpoint("fact-orient-cannot-turn", timestamp_ms,
+                             last_raw_target_pos_.value_or(step.target.room_pos), robot_xy, robot_xy,
+                             "can_turn_here", "no room to sweep the body's diagonal here", -1, -1, 0);
+            affordance_manager.note_map_verdict(robot_xy, robot_xy);
+            affordance_manager.mark_reached(graph_, rc::affordance::Outcome::Infeasible);
+            current_plan_.reset();
+            plan_spline_valid_ = false;
+            last_repair_applied_m_ = 0.f;
+            stop(path_controller, motion_commander);
+            update_display(robot_pose, display, obstacle_tracker.display_obstacle_polygons(),
+                           obstacle_tracker.temporary_obstacle_rfe_points(),
+                           params_ ? params_->max_lidar_draw_points : 0);
+            return std::nullopt;
+        }
+        // Turnable here: there is no standpoint to resolve and no route worth repairing, so the whole
+        // block below is skipped rather than run against a pose nothing will drive to.
+    }
+    else if (step.target.from_affordance and grid_planner_.has_world())
     {
         // ★has_world() FIRST. pose_free answers false for every pose before the grid is rasterised, so
         // without it the first cycles of a run would report an infeasible standpoint when the only true
@@ -4363,9 +4408,26 @@ bool ControllerSession::step_orient(const ControllerRobotPose &robot_pose,
     if (!orient_start_ms_)
         orient_start_ms_ = now;
 
-    // Completion: the contract's goal predicate (e.g. chair_detection_alive) held stable_n measurements =
-    // the glance paid off; or the contract timed out = give up. Consume the affordance either way.
-    if (goal_met(feedback_node_id_)) ++orient_stable_; else orient_stable_ = 0;
+    // ★ONE DEFINITION OF "POINTING THERE", NOT TWO. This band already lived further down as the point
+    // where the base stops rotating and holds still so the capture is quiet; making it also the
+    // completion test for a bearing-only Orient keeps a single number instead of a second one free to
+    // drift away from it.
+    constexpr float kOrientAlignedRad = 0.05f;
+    const float yaw_err = std::atan2(std::sin(target_yaw - robot_pose.theta),
+                                     std::cos(target_yaw - robot_pose.theta));
+    const bool aligned = std::abs(yaw_err) < kOrientAlignedRad;
+
+    // ★WHAT COMPLETES AN ORIENT DEPENDS ON WHETHER IT ASKED FOR ANYTHING BEYOND THE ROTATION.
+    // With a predicate — a glance, "turn that way until the detector fires" — the predicate is the
+    // completion and the rotation merely serves it; that is the only Orient anyone has authored so far
+    // and its behaviour is unchanged.
+    // With NO predicate the rotation IS the affordance, and the completion is arriving at the bearing.
+    // ★This is a fix, not a new mode: evaluate_goal on an empty clause list returns true, so before
+    // this an empty-predicate Orient satisfied its goal on the FIRST cycle, standing still, and
+    // reported LOOKED without having turned. A producer sequencing turns off those completions would
+    // have counted a whole pivot in half a second and believed the odometry closed perfectly.
+    const bool bearing_is_the_goal = active_contract_.goal.empty();
+    if (bearing_is_the_goal ? aligned : goal_met(feedback_node_id_)) ++orient_stable_; else orient_stable_ = 0;
     const bool looked    = orient_stable_ >= std::max(1, active_contract_.stable_n);
     const bool timed_out = static_cast<double>(now - *orient_start_ms_) > active_contract_.timeout_ms;
     if (looked || timed_out)
@@ -4381,12 +4443,10 @@ bool ControllerSession::step_orient(const ControllerRobotPose &robot_pose,
 
     // Rotate the base toward the target bearing (capped). Once nearly aligned, HOLD STILL so the look is
     // motion-free (the Orient contract's .still asks for a quiet capture) and wait for the detection.
-    const float yaw_err = std::atan2(std::sin(target_yaw - robot_pose.theta),
-                                     std::cos(target_yaw - robot_pose.theta));
     const float k   = params_ ? params_->lockon_k_yaw       : 0.8f;
     const float cap = params_ ? params_->lockon_max_yaw_rps : 0.12f;
     float rot = std::clamp(k * yaw_err, -cap, cap);
-    if (std::abs(yaw_err) < 0.05f)
+    if (aligned)
         rot = 0.0f;
     if (rot != 0.0f) motion_commander.send_speed_command(0.0f, 0.0f, rot);
     else             motion_commander.stop_robot();

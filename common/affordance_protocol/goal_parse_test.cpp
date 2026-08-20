@@ -76,6 +76,21 @@ int main()
         check("servo with no clause is reported", validate_contract(sh, {}).size() == 1);
     }
     {
+        // ★A BEARING-ONLY ORIENT IS LEGAL. "Rotate in place to this yaw" is a complete instruction, and
+        // it is what a calibration pivot publishes. This used to be warned about as "can never
+        // complete" while the executor in fact completed it on cycle ONE, standing still — the warning
+        // and the behaviour were wrong in opposite directions, which is why neither exposed the other.
+        ContractShape sh{.is_reach = false, .stable_n = 1, .timeout_ms = 1000.f, .is_orient = true};
+        check("orient with no clause is LEGAL — the rotation is the goal",
+              validate_contract(sh, {}).empty());
+    }
+    {
+        // …and everything else still applies to it: legal is not exempt.
+        ContractShape sh{.is_reach = false, .stable_n = 1, .timeout_ms = 0.f, .is_orient = true};
+        check("a bearing-only orient with no timeout is still reported",
+              not validate_contract(sh, {}).empty());
+    }
+    {
         ContractShape sh{.is_reach = true, .has_servo_binding = true, .stable_n = 1, .timeout_ms = 1000.f};
         check("Reach carrying servo bindings is reported (silent no-op)",
               not validate_contract(sh, {{"a", CompareOp::GE, 1.f}}).empty());
