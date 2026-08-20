@@ -198,7 +198,13 @@ enum class Outcome
     // ★These are FACTS, not verdicts: mechanical statements about the approach that the consumer alone
     // can make. Whether the epistemic goal was served remains the producer's to compute, privately.
     Infeasible,  // the body does not fit at that pose (or cannot turn there) — nothing was observed
-    Unreachable  // the pose is fine but no route exists from where the robot is — never attempted
+    Unreachable, // the pose is fine but no route exists from where the robot is — never attempted
+    // ★A STANDPOINT OUTSIDE THE ROOM IS A DIFFERENT KIND OF FACT. The two above are about the robot
+    // meeting the world; this one says the producer proposed a place that is not in its own layout —
+    // a coordinate-frame or extent error upstream, not a navigation problem. It gets its own word so
+    // it can be COUNTED separately: a run with a hundred of these needs the producer fixed, not the
+    // planner, and a vocabulary that lumps it with "no route" hides exactly that.
+    OutsideRoom
 };
 
 inline std::string_view to_string(Outcome o)
@@ -211,6 +217,7 @@ inline std::string_view to_string(Outcome o)
         case Outcome::Abandoned:   return "abandoned";
         case Outcome::Infeasible:  return "infeasible";
         case Outcome::Unreachable: return "unreachable";
+        case Outcome::OutsideRoom: return "outside_room";
         default:                 return "";
     }
 }
@@ -222,6 +229,7 @@ inline Outcome outcome_from(std::string_view s)
     if (s == "abandoned") return Outcome::Abandoned;
     if (s == "infeasible")  return Outcome::Infeasible;
     if (s == "unreachable") return Outcome::Unreachable;
+    if (s == "outside_room") return Outcome::OutsideRoom;
     // ★An UNKNOWN word reads as None, and observation_happened(None) is false — a producer running
     // against a newer consumer that reports a fact it has never heard of treats it as "nothing was
     // observed", which at worst sends the robot back to look again. That is the safe direction, and it

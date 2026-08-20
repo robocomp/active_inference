@@ -1,5 +1,6 @@
 #include <numbers>
 #include "controller_session.h"
+#include "corner_visibility.h"   // point_in_polygon: is the standpoint in the room at all
 
 #include <algorithm>
 #include <ranges>
@@ -711,6 +712,37 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         // be from the centre and still be in the same cell. Nothing to tune; if room changes its grid
         // this must follow, which is why the number is derived here from the cell size and named.
         target_is_approach_only_ = false;
+        // ── 1. IS IT EVEN IN THE ROOM? ──────────────────────────────────────────────────────────
+        // ★THE FIRST QUESTION, BEFORE ANY GEOMETRY. A standpoint outside the room polygon cannot be
+        // stood at, cannot be routed to, and cannot be repaired into one that can — every later test
+        // would answer "no" for a reason that mis-describes what happened, and the producer would be
+        // told "the body does not fit" about a place that is not in its own layout. Rejected with its
+        // own word so a run full of these points at the exploration grid's extent, not at the planner.
+        if (room_polygon_.size() >= 3 and not rc::corner_visibility::point_in_polygon(step.target.room_pos, room_polygon_))
+        {
+            const Eigen::Vector2f cell = step.target.room_pos;
+            if (timestamp_ms - last_repair_reject_log_ms_ >= 3000)
+            {
+                last_repair_reject_log_ms_ = timestamp_ms;
+                std::println("[controller] '{}' at ({:.2f},{:.2f}) is OUTSIDE the room polygon — "
+                             "reporting outside_room. Not a navigation failure: that cell is not in "
+                             "the layout the producer itself published.",
+                             step.target.node_name, cell.x(), cell.y());
+            }
+            audit_standpoint("fact-outside-room", timestamp_ms, last_raw_target_pos_.value_or(cell),
+                             cell, step.robot_pose.pos.head<2>().cast<float>(), "room-polygon",
+                             "outside the room layout", -1, -1, 0);
+            affordance_manager.note_map_verdict(cell, step.robot_pose.pos.head<2>().cast<float>());
+            affordance_manager.mark_reached(graph_, rc::affordance::Outcome::OutsideRoom);
+            current_plan_.reset();
+            plan_spline_valid_ = false;
+            last_repair_applied_m_ = 0.f;
+            stop(path_controller, motion_commander);
+            update_display(robot_pose, display, obstacle_tracker.display_obstacle_polygons(),
+                           obstacle_tracker.temporary_obstacle_rfe_points(),
+                           params_ ? params_->max_lidar_draw_points : 0);
+            return std::nullopt;
+        }
         const float producer_cell_m = params_ ? params_->producer_cell_size_m : 0.5f;
         const float in_cell_m = 0.5f * std::numbers::sqrt2_v<float> * producer_cell_m;
         std::optional<rc::affordance::Outcome> fact;
@@ -731,9 +763,29 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         if (in_cell_pose.has_value()
             and (*in_cell_pose - step.target.room_pos).norm() > in_cell_m)
             in_cell_pose.reset();
+        // ── 2b. NOTHING IN THE CELL FITS → TAKE THE CLOSEST CLEAR SPOT ANYWHERE ─────────────────
+        // ★The cell is the producer's preference and is tried first, so a standpoint that merely needs
+        // a few centimetres keeps its gain intact. But refusing outright when the whole cell is
+        // occupied leaves the robot idle beside a perfectly good vantage half a metre further out, so
+        // widen the search rather than give up — and RECORD how far it went, because the arrival test
+        // and the audit both need to know this is no longer the cell that was asked for.
+        if (not in_cell_pose.has_value())
+        {
+            in_cell_pose = will_rotate_here
+                             ? grid_planner_.nearest_rotatable(step.target.room_pos)
+                             : grid_planner_.nearest_free(step.target.room_pos, step.target.yaw_rad);
+            if (in_cell_pose.has_value())
+                audit_standpoint("widened", timestamp_ms, last_raw_target_pos_.value_or(step.target.room_pos),
+                                 *in_cell_pose, step.robot_pose.pos.head<2>().cast<float>(),
+                                 will_rotate_here ? "nearest_rotatable" : "nearest_free",
+                                 std::format("whole {:.2f} m cell occupied; closest clear spot is {:.2f} m out",
+                                             producer_cell_m, (*in_cell_pose - step.target.room_pos).norm()),
+                                 -1, -1, -1);
+        }
         if (not in_cell_pose.has_value())
         { fact = rc::affordance::Outcome::Infeasible;
-          why = std::format("no pose the body fits in anywhere in the {:.2f} m cell", producer_cell_m); }
+          why = std::format("no pose the body fits in anywhere within reach of the {:.2f} m cell",
+                            producer_cell_m); }
         else if (routing_failed_here)
         {
             // ── GO AS CLOSE AS THE MAP ALLOWS — AND SAY THAT IS WHAT HAPPENED ───────────────────
@@ -830,6 +882,14 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
                         for (const auto &p : poly) f << "rfe " << k << ' ' << p.x() << ' ' << p.y() << '\n';
                         ++k;
                     }
+                    // ★AND THE RESIDUAL CELLS THEMSELVES — what the planner now marks directly, and
+                    // the only way tools/replay_world can tell a world that FLICKERS from one that is
+                    // genuinely blocked. Replaying the polygon-only dump found a clean 4.03 m route
+                    // through a world the live planner had just called unroutable, which says the two
+                    // were different frames, not different answers.
+                    f << "cell_size " << obstacle_tracker.residual_cell_size_m() << '\n';
+                    for (const auto &c : obstacle_tracker.residual_cells())
+                        f << "cell " << c.x() << ' ' << c.y() << '\n';
                 }
             }
             // ★NOT REMEMBERED LOCALLY. The 120 s useless-spot memory exists for a DRIVE failure — the

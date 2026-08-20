@@ -599,7 +599,8 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
                            : outcome == Outcome::Refused     ? 3
                            : outcome == Outcome::Abandoned   ? 4
                            : outcome == Outcome::Infeasible  ? 5
-                           : outcome == Outcome::Unreachable ? 6 : 0;
+                           : outcome == Outcome::Unreachable ? 6
+                           : outcome == Outcome::OutsideRoom ? 7 : 0;
         ++aff_completions_;
         std::print("[planner] completion consumed (outcome={}) -> target cleared, {}\n",
                    rc::affordance::to_string(outcome),
@@ -639,7 +640,16 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
         // failure may change what is cheap to look at; it must never change what is believed to be seen.
         const bool approach_failed = outcome == Outcome::Refused
                                   or outcome == Outcome::Infeasible
-                                  or outcome == Outcome::Unreachable;
+                                  or outcome == Outcome::Unreachable
+                                  or outcome == Outcome::OutsideRoom;
+        // ★OUTSIDE_ROOM IS OUR OWN BUG, AND IT SAYS SO. The consumer is reporting that this agent
+        // proposed a standpoint that is not inside the room polygon this agent published. It is
+        // handled like the others so the run continues, but it is worth its own line: no amount of
+        // driving fixes a cell that does not exist in the layout.
+        if (outcome == Outcome::OutsideRoom)
+            std::print("[planner] ★the consumer says ({:.2f},{:.2f}) is OUTSIDE the room layout — "
+                       "that cell should never have been offered; check the exploration grid extent "
+                       "against the room polygon\n", armed_tx_, armed_ty_);
         if (approach_failed and not std::isnan(armed_tx_) and not std::isnan(armed_ty_))
         {
             planner.mark_target_finished(Eigen::Vector2f(armed_tx_, armed_ty_));

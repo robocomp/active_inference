@@ -39,7 +39,8 @@ enum class NodeState { Offered, Executing, Completed };
 // The full vocabulary, as it now exists on the wire (affordance_goal_parse.h). Only Satisfied
 // licenses a belief update; every other word — including one a future consumer invents that this
 // producer has never heard of — must read as "nothing was observed".
-enum class Outcome { None, Satisfied, Timeout, Refused, Abandoned, Infeasible, Unreachable };
+enum class Outcome { None, Satisfied, Timeout, Refused, Abandoned, Infeasible, Unreachable,
+                     OutsideRoom };
 
 [[nodiscard]] inline bool observation_happened(Outcome o) { return o == Outcome::Satisfied; }
 
@@ -53,6 +54,7 @@ enum class Outcome { None, Satisfied, Timeout, Refused, Abandoned, Infeasible, U
         case Outcome::Abandoned:   return "abandoned";
         case Outcome::Infeasible:  return "infeasible";
         case Outcome::Unreachable: return "unreachable";
+        case Outcome::OutsideRoom: return "outside_room";
         default:                   return "none";
     }
 }
@@ -97,6 +99,10 @@ struct Cell
     Routable  routable  = Routable::Yes;
     bool      detects   = true;    // does the acquisition the contract asks for actually arrive?
     bool      wedges    = false;   // does the drive physically wedge on the way?
+    // ★NOT IN THE ROOM AT ALL. A producer bug, not a navigation one: the cell is outside the layout
+    // that same producer published. The consumer can see it and must say so in its own words, or a
+    // grid-extent error upstream reads downstream as "the body does not fit".
+    bool      outside_room = false;
 };
 
 struct World
@@ -366,6 +372,12 @@ public:
         approach_only_ = false;
 
         // ── The two questions only this side can answer ────────────────────────────────────────
+        if (c.outside_room)
+        {
+            note_map_only_verdict(w.cell, world.robot_x, world.map_version);
+            finish(w, world, Outcome::OutsideRoom, cycle, /*stood=*/false);
+            return;
+        }
         if (c.standable == Standable::Never)
         {
             note_map_only_verdict(w.cell, world.robot_x, world.map_version);
@@ -590,7 +602,7 @@ inline Result run(std::vector<Producer> &producers, Consumer &cons, World &world
             // it made "chair starved" a checker bug rather than a protocol failure. A property that
             // is wrong in the direction of alarm still costs a debugging round.
             if (cell.standable != Standable::Never and cell.routable == Routable::Yes
-                and not cell.wedges and cell.detects)
+                and not cell.wedges and cell.detects and not cell.outside_room)
                 has_servable = true;
         }
         if (has_servable and prod.served() == 0) r.starved.push_back(prod.label);

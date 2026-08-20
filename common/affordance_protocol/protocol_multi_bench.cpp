@@ -161,6 +161,15 @@ int main()
         report("3  a third of all cells are infeasible", r, standard_checks(r));
     }
 
+    // ── 3b. CELLS THE PRODUCER PLACED OUTSIDE ITS OWN ROOM ──────────────────────────────────────
+    {
+        auto f = make_fleet(ProducerPolicy{}, kTen);
+        for (auto &c : f.world.cells) if (c.id % 8 == 5) c.outside_room = true;
+        Consumer cons{ConsumerPolicy{}};
+        auto r = run(f.producers, cons, f.world, kCycles);
+        report("3b cells outside the room layout", r, standard_checks(r));
+    }
+
     // ── 4. NO ROUTE, BUT A CLOSER POSE EXISTS → approach, report unreachable ────────────────────
     {
         auto f = make_fleet(ProducerPolicy{}, kTen);
