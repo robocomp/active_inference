@@ -636,8 +636,13 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     // itself the product of this repair, so clearing re-enables nearest_free, which moves the target
     // back into the pocket, which fails again — a good plan and a failed plan on alternate cycles. It
     // costs nothing to hold: once the goal IS reachable, nearest_reachable returns it exactly.
-    const bool routing_failed_here = not unroutable_target_name_.empty()
-                                     and unroutable_target_name_ == step.target.node_name;
+    const auto same_5cm = [](const Eigen::Vector2f &a, const Eigen::Vector2f &b)
+    { return (a - b).squaredNorm() < 0.05f * 0.05f; };
+    const bool routing_failed_here =
+        unroutable_at_.has_value()
+        and same_5cm(unroutable_at_->goal, step.target.room_pos)
+        and same_5cm(unroutable_at_->robot, step.robot_pose.pos.head<2>().cast<float>())
+        and unroutable_at_->map == grid_planner_.world_hash();
     // ★COMPUTED ONCE AND HELD. nearest_reachable takes the ROBOT's position as its origin, so
     // re-running it every cycle returns a DIFFERENT point every cycle as the robot moves — and
     // same_target_instance calls a target "changed" once it shifts 5 cm. The repaired target therefore
@@ -774,7 +779,15 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
             in_cell_pose = will_rotate_here
                              ? grid_planner_.nearest_rotatable(step.target.room_pos)
                              : grid_planner_.nearest_free(step.target.room_pos, step.target.yaw_rad);
-            if (in_cell_pose.has_value())
+            // ★THROTTLED LIKE THE OTHERS: the resolution is deterministic and re-derived at 20 Hz, so
+            // one target produced 355 identical rows in 40 s. One row per changed answer.
+            static std::uint64_t last_widen_ms = 0;
+            static Eigen::Vector2f last_widen{std::numeric_limits<float>::infinity(),
+                                              std::numeric_limits<float>::infinity()};
+            const bool widen_is_news = in_cell_pose.has_value()
+                and (timestamp_ms - last_widen_ms >= 500 or (*in_cell_pose - last_widen).squaredNorm() > 1e-4f);
+            if (widen_is_news) { last_widen_ms = timestamp_ms; last_widen = *in_cell_pose; }
+            if (widen_is_news)
                 audit_standpoint("widened", timestamp_ms, last_raw_target_pos_.value_or(step.target.room_pos),
                                  *in_cell_pose, step.robot_pose.pos.head<2>().cast<float>(),
                                  will_rotate_here ? "nearest_rotatable" : "nearest_free",
@@ -1861,7 +1874,9 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
             // Tell the REPAIR stage that this exact target could not be routed. It cannot be discovered
             // there — reachability is global, and only the search knows it — so the next cycle's repair
             // asks for the nearest REACHABLE pose instead of merely the nearest free one.
-            unroutable_target_name_ = step.target.node_name;
+            unroutable_at_ = UnroutableAt{.goal = step.target.room_pos,
+                                          .robot = step.robot_pose.pos.head<2>().cast<float>(),
+                                          .map = grid_planner_.world_hash()};
         }
     }
 

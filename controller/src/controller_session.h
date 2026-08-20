@@ -548,7 +548,26 @@ private:
     std::string last_repair_name_;
     // The target ensure_current_plan could not route to. Reachability is GLOBAL, so the repair stage
     // cannot discover it on its own — this is how the search tells it to widen the question.
-    std::string unroutable_target_name_;
+    // ── WHERE ROUTING FAILED, NOT WHICH NODE ─────────────────────────────────────────────────────
+    // ★★★THIS WAS A std::string OF THE NODE NAME, SET ONCE AND NEVER CLEARED (fixed 2026-08-20).
+    // Every standpoint room publishes rides the same node, `afford_room`, so the first routing
+    // failure of the process latched "unroutable" onto the NODE and every later cell inherited it —
+    // for the life of the agent. Measured: the controller reported `unreachable` for a cell 0.62 m
+    // away that the same planner, replayed on the same captured world, routed to in 0.64 m with three
+    // turning points; and the failure string it quoted was EMPTY, because the plan that actually
+    // failed had happened minutes earlier and its message was long overwritten. Downstream this was
+    // the engine of the phantom arrivals: routing_failed_here sent every target through
+    // nearest_reachable, which relocated it onto the robot.
+    // ★A ROUTE FAILURE IS A FACT ABOUT (goal, robot pose, map) — the same triple the map-verdict cache
+    // is keyed on, and for the same reason: it cannot outlive any of the three. Quantised to 5 cm,
+    // which is finer than the arrival band and coarser than a stationary robot's jitter.
+    struct UnroutableAt
+    {
+        Eigen::Vector2f goal  = Eigen::Vector2f::Zero();
+        Eigen::Vector2f robot = Eigen::Vector2f::Zero();
+        std::size_t     map   = 0;
+    };
+    std::optional<UnroutableAt> unroutable_at_;
     // The reachability repair, computed ONCE for a given raw standpoint and held. Recomputing it per
     // cycle makes the target follow the robot (nearest_reachable is measured FROM the robot).
     std::optional<Eigen::Vector2f> unroutable_fix_;
