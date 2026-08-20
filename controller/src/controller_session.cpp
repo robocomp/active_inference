@@ -587,6 +587,14 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
             // spot is remembered for kUselessSpotMemoryMs (120 s), so a silent skip could hold the pair
             // for two minutes on a cell room believed was still on offer. Reporting it costs nothing
             // and lets room de-prioritise this cell and pick another on its next cycle.
+            // ★ONCE PER (cell, pose, map), like every other verdict this side reaches. Making the
+            // silent skip SPEAK was right; making it speak twelve times a second was not — measured
+            // 2026-08-20: 379 identical reports for one cell in five minutes, p50 0.1 s apart, each
+            // one a completion the producer consumed and re-offered. Recording the verdict makes the
+            // SELECTOR skip this candidate until the robot moves or the map changes, so the producer
+            // is told exactly once and nothing has to be re-decided. No timer: that would be the
+            // eleventh, and this file spent the day deleting them.
+            affordance_manager.note_map_verdict(target->room_pos, robot_pose->pos.head<2>().cast<float>());
             affordance_manager.mark_reached(graph_, rc::affordance::Outcome::Unreachable);
             audit_standpoint("fact-unreachable", timestamp_ms, target->room_pos, target->room_pos,
                              robot_pose->pos.head<2>().cast<float>(), "known-useless",
