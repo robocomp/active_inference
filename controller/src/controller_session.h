@@ -584,6 +584,16 @@ private:
     // the body still turn there) is a local lookup, so it is asked every cycle; failing it drops the
     // hold and the search runs ONCE more. That is the difference between caching an answer and
     // freezing it.
+    // ── WHICH CURVE IS THE ROBOT BEING MEASURED AGAINST? ─────────────────────────────────────────
+    // ★Cross-track is the quantity every safety layer is computed against, and it is meaningless
+    // across a REPLAN: the robot is on its new path and metres from the old one, which reads as an
+    // excursion it never made. Measured 2026-08-20: a 1.02 m "departure" with the carrot 14 cm ahead
+    // and DEAD AHEAD (bearing -0.2 deg), no rotation saturation, driving calmly at 0.33 m/s — a
+    // tracker following something faithfully, and nothing in the log to say the something had just
+    // been replaced. One counter settles it: a sample whose generation differs from its neighbour's
+    // spans a path change and is not evidence of anything.
+    std::uint32_t path_generation_ = 0;
+    std::uint64_t last_carrot_collapse_log_ms_ = 0;   // rate limit for the collapse report
     std::optional<Eigen::Vector2f> resolved_standpoint_;
     Eigen::Vector2f                resolved_for_cell_ = Eigen::Vector2f::Zero();
     // The reachability repair, computed ONCE for a given raw standpoint and held. Recomputing it per

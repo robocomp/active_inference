@@ -1339,7 +1339,7 @@ void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
                          "pd_cross_err_m,path_kappa,track_s,meas_rot,bump_push,gap_l,gap_r,pose_xy_std,"
                          "pose_theta_std,carrot_bear,carrot_dist,pose_x,pose_y,pose_th,model_dropped,"
                          "out_ticks,out_period_ms,out_period_max,ice_ms,ice_max,cmd_age_max,fresh_min,"
-                         "pose_stamp_age\n";
+                         "pose_stamp_age,path_gen\n";
         mppi_csv_open_ = true;
     }
     if (!mppi_csv_.is_open()) return;
@@ -1362,7 +1362,7 @@ void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
               << ors.ticks << ',' << ors.period_mean_ms << ',' << ors.period_max_ms << ','
               << ors.ice_mean_ms << ',' << ors.ice_max_ms << ','
               << ors.cmd_age_max_ms << ',' << ors.scale_min << ','
-              << pose_stamp_age << '\n';
+              << pose_stamp_age << ',' << path_generation_ << '\n';
 }
 
 void ControllerSession::log_route_event(const char *event, bool ok, std::uint64_t t_ms,
@@ -1786,6 +1786,7 @@ bool ControllerSession::drive_mission_route(const ControllerPlanningStep &step,
     {
         // set_path_presmoothed: the curve is already C2 and already footprint-checked, so the
         // elastic band and the C1 spline inside set_path would only undo both.
+        ++path_generation_;      // route re-authored — same reasoning as above
         path_controller.set_path_presmoothed(route_.path());
     // The ROUTE tracker reads s, psi(s) and kappa_avg(s) from the curve itself. Non-owning: the band
     // deforms this same spline in place just before compute, so the tracker sees the deformed curve
@@ -1933,6 +1934,7 @@ bool ControllerSession::drive_point_target(const ControllerPlanningStep &step,
     {
         // Presmoothed: smooth_plan already fitted the C2 curve AND checked every sample against the
         // footprint, so set_path's elastic band and C1 spline would only undo both.
+        ++path_generation_;      // a new curve: cross-track before and after are different questions
         if (params_ and params_->smooth_planned_path)
             path_controller.set_path_presmoothed(current_plan_->room_path);
         else
@@ -3817,6 +3819,56 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         clear_tracking_state();
         note_no_command(); motion_commander.stop_robot();
         return;
+    }
+
+    // ── A CARROT TOO CLOSE TO STEER BY IS A BLOCKAGE, NOT A HEADING ──────────────────────────────
+    // ★★★clip_carrot_to_reachable pulls the carrot back to the last point of the route fragment the
+    // body still fits through, tested against the LIVE ESDF, and the pull-in is deliberately never
+    // rate-limited because pulling in is the safety direction. So one flickering cycle of that test
+    // drops the carrot onto the robot — measured, it collapses under 0.5 m on 15% of cycles — and the
+    // bearing to a carrot 4 cm away is not a heading, it is the localiser's noise: with σ_xy ≈ 3 cm,
+    // atan(σ/d) is tens of degrees, so the steering law saturates and flips sign every few cycles.
+    // Measured live 2026-08-20: 413 consecutive cycles, 84% at the rotation cap, 37 sign flips, the
+    // gate throttling speed to 15% so the robot CREPT rather than stopped — a 13 cm-radius corkscrew
+    // that carried it 0.73 m outside the corridor every safety layer is computed against, with 0.46 m
+    // of clearance left.
+    // ★THE BOUND IS THE POSE UNCERTAINTY, NOT A CHOSEN DISTANCE. A bearing carries information only
+    // while the carrot is far enough that pose noise does not dominate it, so the test is d < k·σ_xy —
+    // a precision statement, which shrinks when localisation is sharp and widens when it is not. The
+    // floor keeps it meaningful when the localiser reports a suspiciously tiny σ.
+    // ★AND THE HONEST RESPONSE IS THE ONE THIS FILE ALREADY HAS FOR A BLOCKED ROUTE: the clip has just
+    // said the fragment ahead is inadmissible. That is not something to steer around at 0.1 m/s; it is
+    // a replan. Stopping here costs one cycle; steering on noise cost 21 seconds and most of a metre.
+    if (path_controller.is_active() and not control_output.goal_reached)
+    {
+        const float sigma = motion_commander.last_uncertainty_diag().valid
+                              ? motion_commander.last_uncertainty_diag().xy_std_m : 0.f;
+        const float informative_m = std::max(3.f * sigma, 0.08f);
+        if (control_output.carrot_dist_m < informative_m)
+        {
+            if (time_source() - last_carrot_collapse_log_ms_ >= 3000)
+            {
+                last_carrot_collapse_log_ms_ = time_source();
+                std::println("[controller] carrot collapsed to {:.3f} m (below {:.3f} m = 3σ of a "
+                             "{:.3f} m pose): the route fragment ahead is inadmissible, so its bearing "
+                             "is noise. Replanning instead of steering by it.",
+                             control_output.carrot_dist_m, informative_m, sigma);
+            }
+            audit_standpoint("carrot-collapse", time_source(),
+                             last_raw_target_pos_.value_or(robot_pose.pos.head<2>().cast<float>()),
+                             last_target_info_.has_value() ? last_target_info_->room_pos
+                                                           : robot_pose.pos.head<2>().cast<float>(),
+                             robot_pose.pos.head<2>().cast<float>(), "carrot",
+                             std::format("{:.3f} m < {:.3f} m", control_output.carrot_dist_m, informative_m),
+                             -1, -1, -1);
+            clear_tracking_state();
+            current_plan_.reset();
+            plan_spline_valid_ = false;
+            route_repair_pending_ = true;
+            path_controller.stop();
+            note_no_command(); motion_commander.stop_robot();
+            return;
+        }
     }
 
     float adv_mps = control_output.adv;
