@@ -12,6 +12,8 @@
 
 #include <atomic>
 #include <thread>
+#include <array>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -48,6 +50,13 @@ public:
     std::uint64_t get_frame_timestamp_ms() const;
     std::optional<RGBDData> get_rgbd_frame_from_dsr() const;
     bool rgb_valid() const { return latest_rgb_stamp_.load(std::memory_order_relaxed) != 0; }
+
+    // ★CHEAP PRE-CHECK for the pull worker: the newest rgb stamp the INGEST thread has seen, readable
+    // without assembling (and deep-copying) anything. get_frame_timestamp_ms() cannot serve this: it
+    // returns last_frame_ts_, which is SET BY the assemble call, so asking it first would always report
+    // the previous frame. One atomic load.
+    [[nodiscard]] std::uint64_t pending_rgb_stamp() const
+    { return latest_rgb_stamp_.load(std::memory_order_relaxed); }
     bool depth_valid() const { return latest_depth_stamp_.load(std::memory_order_relaxed) != 0; }
 
     // --- LiDAR plane (shared reader) --- inner_eigen backs the device->robot RT transform.
@@ -109,6 +118,11 @@ private:
     mutable std::vector<std::uint64_t> lidar_last_counted_;   // per-plane stamps at the last counted update
 
     mutable std::atomic<std::uint64_t> latest_rgb_stamp_{0};    // newest rgb stamp seen (rate telemetry / validity)
+    // Arrival-cadence probe (see the note in drain_media_plane). Ingest-thread only, no locking needed.
+    mutable std::chrono::steady_clock::time_point probe_prev_wall_{};
+    mutable std::uint64_t                         probe_prev_stamp_ = 0;
+    mutable std::array<int, 6>                    probe_stamp_hist_{};
+    mutable std::array<int, 6>                    probe_wall_hist_{};
     mutable std::atomic<std::uint64_t> latest_depth_stamp_{0};  // newest depth stamp seen
     mutable std::atomic<std::uint64_t> last_frame_ts_{0};       // stamp of the last assembled RGBD (get_frame_timestamp_ms)
 

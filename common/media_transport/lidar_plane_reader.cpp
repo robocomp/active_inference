@@ -21,16 +21,14 @@ namespace rc::media
 LidarPlaneReader::LidarPlaneReader(std::shared_ptr<DSR::DSRGraph> graph,
                                    DSR::InnerEigenAPI* inner_eigen,
                                    std::vector<std::string> preferred_planes,
-                                   std::string fused_fallback,
                                    std::string stream_key)
     : G_(std::move(graph)), inner_eigen_(inner_eigen),
-      preferred_(std::move(preferred_planes)), fallback_(std::move(fused_fallback)),
+      preferred_(std::move(preferred_planes)),
       stream_key_(std::move(stream_key))
 {
     preferred_planes_.reserve(preferred_.size());
     for (const auto& node : preferred_)
         preferred_planes_.push_back(Plane{node, nullptr, 0});
-    fallback_plane_.node = fallback_;
 }
 
 LidarPlaneReader::~LidarPlaneReader()
@@ -38,7 +36,6 @@ LidarPlaneReader::~LidarPlaneReader()
     // Subscribers hold DDS participants; drop them before the reader dies.
     for (auto& p : preferred_planes_)
         p.sub.reset();
-    fallback_plane_.sub.reset();
 }
 
 bool LidarPlaneReader::any_live() const noexcept
@@ -46,7 +43,7 @@ bool LidarPlaneReader::any_live() const noexcept
     for (const auto& p : preferred_planes_)
         if (p.sub)
             return true;
-    return fallback_plane_.sub != nullptr;
+    return false;
 }
 
 void LidarPlaneReader::ensure_subscribers()
@@ -62,9 +59,31 @@ void LidarPlaneReader::ensure_subscribers()
 
     // Bring up each preferred plane as soon as its node + media descriptor exist. The factory is the
     // same descriptor-driven init every agent uses; it returns nullptr until the plane is live.
-    bool any_preferred = false;
+    //
+    // A plane whose DSR NODE is absent is skipped before the factory is consulted. The graph loaded
+    // from the robot's configFile is what says which sensors this robot carries: shadow.json has
+    // helios + bpearl, p3bot.json has helios only. Consumers name the pair unconditionally, so
+    // without this the factory would be asked once a second, for ever, for a descriptor that cannot
+    // exist — and would print a "no descriptor" line every time. Note the two cases are NOT the same
+    // and must not be collapsed: node absent = "this robot has no such sensor"; node present but no
+    // descriptor = "the producer has not come up yet", which is worth saying and is left untouched.
+    // The plane is not dropped, only skipped this tick: a node that syncs in later is picked up on
+    // the next pass.
     for (auto& p : preferred_planes_)
     {
+        if (not p.sub and not G_->get_node(p.node).has_value())
+        {
+            // Grace before speaking: at t=0 the sensor nodes may not have synced from the persistent
+            // server yet, and a not-yet-synced node must not read as a missing sensor. A REPORTING
+            // grace only — nothing downstream branches on it.
+            if (not p.announced_absent and now - created_at_ > std::chrono::seconds(5))
+            {
+                p.announced_absent = true;
+                std::println("[Lidar] plane '{}': no such node in the graph — this robot does not "
+                             "carry that sensor; not subscribing (will pick it up if it appears)", p.node);
+            }
+            continue;
+        }
         if (not p.sub)
         {
             p.sub = make_lidar_subscriber_from_graph(*G_, p.node, stream_key_);
@@ -75,33 +94,8 @@ void LidarPlaneReader::ensure_subscribers()
                              " — waiting for the publisher", p.node);
             }
         }
-        any_preferred = any_preferred or (p.sub != nullptr);
         report_discovery(p);
     }
-
-    if (any_preferred)
-    {
-        // A per-device plane owns the data now — never double-ingest the fused fallback.
-        if (fallback_plane_.sub)
-        {
-            std::println("[Lidar] per-device planes live — dropping fused '{}' fallback", fallback_);
-            fallback_plane_.sub.reset();
-        }
-        return;
-    }
-
-    // No per-device plane yet: fall back to the fused (already-robot-frame) plane while robot_concept
-    // is bridging. Its node frame is identity vs. the robot base, so the RT transform is a near no-op.
-    if (not fallback_plane_.sub and not fallback_.empty())
-    {
-        fallback_plane_.sub = make_lidar_subscriber_from_graph(*G_, fallback_plane_.node, stream_key_);
-        if (fallback_plane_.sub)
-        {
-            fallback_plane_.sub_since = now;
-            std::println("[Lidar] using fused '{}' plane (robot frame)", fallback_);
-        }
-    }
-    report_discovery(fallback_plane_);
 }
 
 void LidarPlaneReader::report_discovery(Plane& p)
@@ -220,14 +214,8 @@ std::optional<LidarSweep> LidarPlaneReader::poll(const std::string& target_frame
         any_fresh   = true;
     };
 
-    bool any_preferred_live = false;
     for (auto& p : preferred_planes_)
-    {
-        if (p.sub) any_preferred_live = true;
         refresh(p);
-    }
-    if (not any_preferred_live)
-        refresh(fallback_plane_);
 
     // Nothing new this cycle → let the consumer keep its last sweep (no redundant reprocessing, no blink).
     if (not any_fresh)
@@ -240,7 +228,7 @@ std::optional<LidarSweep> LidarPlaneReader::poll(const std::string& target_frame
     bool any = false;
     // One slot per emitted plane id, so a consumer can recover WHEN each plane's points were taken
     // rather than only the merged maximum. 0 means "this plane contributed nothing this poll".
-    sweep.plane_stamp_ms.assign(any_preferred_live ? preferred_planes_.size() : 1u, 0);
+    sweep.plane_stamp_ms.assign(preferred_planes_.size(), 0);
     auto merge_plane = [&](const Plane& p, std::uint8_t pid)   // NOT 'emit' — that is a Qt macro
     {
         if (p.raw_cache.empty())
@@ -256,13 +244,8 @@ std::optional<LidarSweep> LidarPlaneReader::poll(const std::string& target_frame
         any = true;
     };
 
-    if (any_preferred_live)
-    {
-        std::uint8_t pid = 0;
-        for (const auto& p : preferred_planes_) merge_plane(p, pid++);
-    }
-    else
-        merge_plane(fallback_plane_, 0);
+    std::uint8_t pid = 0;
+    for (const auto& p : preferred_planes_) merge_plane(p, pid++);
 
     if (not any or sweep.points.empty())
         return std::nullopt;

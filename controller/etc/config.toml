@@ -905,7 +905,7 @@ overlay_csv_path = "overlay_lag_eval.csv"
 
 # NOTE: the zero-copy media plane (LiDAR) needs NO config here. The DDS domain +
 # topic are read from the media descriptor JSON attribute the producer
-# (robot_concept) writes on the lidar3D node, so the consumer always uses the
+# (robot_concept) writes on the helios node, so the consumer always uses the
 # producer's dedicated media domain (isolated from Agent.domain = 0). The
 # subscriber is created lazily, only once that node + descriptor exist.
 

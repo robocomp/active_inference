@@ -8,9 +8,9 @@
  *
  * Crash-safety (mirrors room_concept::LidarIngestor, the sanctioned pattern):
  *  - The subscriber is created LAZILY in pump() (called from the Operating compute/main thread), never in a
- *    ctor or a free-running thread, and only once the "lidar3D" node + media descriptor exist. Discovery is
+ *    ctor or a free-running thread, and only once the "helios" node + media descriptor exist. Discovery is
  *    self-throttled to ~1 Hz.
- *  - pump() reads the DSR graph (inner_eigen room←lidar3D) — it MUST be called on the main thread.
+ *  - pump() reads the DSR graph (inner_eigen room←helios) — it MUST be called on the main thread.
  *  - The owner (SpecificWorker) must reset this ingestor BEFORE tearing the graph down, while G is alive.
  */
 
@@ -54,7 +54,7 @@ private:
     DSR::InnerEigenAPI*                          inner_eigen_ = nullptr;
     const ResidualConfig*                        cfg_ = nullptr;
     // Shared media-plane reader (the same one every agent uses): the high "helios" plane (DEVICE
-    // frame) transformed straight to the ROOM frame, with the fused "lidar3D" plane as fallback. A
+    // frame) transformed straight to the ROOM frame. A
     // single plane keeps the first-hit ray factor's single-origin assumption (see lidar_ray_factor.h).
     std::unique_ptr<rc::media::LidarPlaneReader> reader_;
 

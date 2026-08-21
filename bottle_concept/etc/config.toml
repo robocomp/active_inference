@@ -182,8 +182,6 @@ AI2CsvPath = "etc/bottle_ai2_log.csv"   # per-cycle AI2 belief CSV (state + Σ d
 LidarPrecision = 2500.0       # load-bearing (= depth-point weight, 1/σ²@2cm). 0=OFF
 LidarRobustCM = 0.05          # Cauchy scale (m): returns this far off the surface fade out (continuous, no gate)
 LidarSelectMarginM = 0.06     # pre-select returns within radius+margin (horiz) and h/2+margin (vert)
-LidarFrameNode = "lidar3D"    # DSR node whose frame the raw sweep is in (room←this transform). If lidar_resid_m
-                              # is large/systematic, the producer already returns robot-frame pts → set to the body node.
 # ── Range-scaled precision: precise when CLOSE (manipulation), left UNTOUCHED when far ──────────────────────
 # Observation precision fades continuously with the camera→object distance (no gate): beyond RangeNearM, R
 # grows as (range/near)^power so distant/receding objects hold their last estimate (fixes the "one bottle

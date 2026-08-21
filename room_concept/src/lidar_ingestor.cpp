@@ -51,14 +51,13 @@ LidarIngestor::LidarIngestor(std::shared_ptr<DSR::DSRGraph> graph, rc::RoomConce
         return;
     }
     // Shared media-plane reader: the high "helios" plane (DEVICE frame) transformed to the robot base
-    // ("body"), with the fused "lidar3D" plane as fallback while robot_concept is bridging. The
+    // ("body"). The
     // subscribers themselves are brought up lazily inside reader_->poll() (throttled), once each
     // node + descriptor exists — nothing touches DDS here. inner_eigen_ backs the RT transform.
     inner_eigen_ = G_ ? G_->get_inner_eigen_api() : nullptr;
     reader_ = std::make_unique<rc::media::LidarPlaneReader>(
         G_, inner_eigen_.get(),
-        std::vector<std::string>{params_->LIDAR_HELIOS_NAME},
-        params_->LIDAR_NAME, "lidar");
+        std::vector<std::string>{params_->LIDAR_HELIOS_NAME}, "lidar");
 }
 
 LidarIngestor::~LidarIngestor()
@@ -117,8 +116,8 @@ bool LidarIngestor::pump()
     if (!reader_)
         return false;
 
-    // One shared reader call: newest "helios" (or fallback "lidar3D") sweep, transformed DEVICE->robot
-    // base ("body") via the DSR RT tree. interpolate=false — helios/lidar3D → body only crosses the
+    // One shared reader call: newest "helios" sweep, transformed DEVICE->robot
+    // base ("body") via the DSR RT tree. interpolate=false — helios → body only crosses the
     // static mount edge, so the sweep stamp is irrelevant. The height filter below is meaningful in
     // this robot-base frame (z = height above the base).
     const auto sweep = reader_->poll(params_->LIDAR_ROBOT_FRAME, /*interpolate=*/false);
@@ -139,7 +138,7 @@ bool LidarIngestor::pump()
             // so a small near-cut is enough; source floor cut is off, so the real floor is present.
             if (not geom_bpearl_reader_ and G_)
                 geom_bpearl_reader_ = std::make_unique<rc::media::LidarPlaneReader>(
-                    G_, inner_eigen_.get(), std::vector<std::string>{"bpearl"}, params_->LIDAR_NAME, "lidar");
+                    G_, inner_eigen_.get(), std::vector<std::string>{"bpearl"}, "lidar");
             if (geom_bpearl_reader_)
                 if (const auto bp = geom_bpearl_reader_->poll(params_->LIDAR_ROBOT_FRAME, /*interpolate=*/false);
                     bp.has_value() and not bp->points.empty())
@@ -217,8 +216,8 @@ bool LidarIngestor::stream_descriptor_available(std::string* detail) const
     // A plane is usable when its sensor node carries a media descriptor advertising a "lidar" stream.
     // Same lookup make_lidar_subscriber_from_graph() does, minus the DDS init — so a true answer here
     // means the subscriber WILL come up, and a false one names exactly what the producer hasn't
-    // published yet. Mirrors the reader's preference order: helios first, fused lidar3D as fallback.
-    for (const auto& node : {params_->LIDAR_HELIOS_NAME, params_->LIDAR_NAME})
+    // published yet. Mirrors the reader's preference order.
+    for (const auto& node : {params_->LIDAR_HELIOS_NAME})
     {
         const auto desc = rc::media::descriptor_from_graph(*G_, node);
         if (desc.has_value() and desc->subscriber_config("lidar").has_value())
@@ -228,9 +227,9 @@ bool LidarIngestor::stream_descriptor_available(std::string* detail) const
         }
     }
     if (detail)
-        *detail = std::format("no 'lidar' media descriptor on node '{}' nor fallback '{}' "
+        *detail = std::format("no 'lidar' media descriptor on node '{}' "
                               "(is robot_concept up and advertising?)",
-                              params_->LIDAR_HELIOS_NAME, params_->LIDAR_NAME);
+                              params_->LIDAR_HELIOS_NAME);
     return false;
 }
 

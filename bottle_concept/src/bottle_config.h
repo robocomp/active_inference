@@ -60,7 +60,6 @@ struct BottleConfig
     float lidar_precision      = 0.0f;   // per-ray range precision (1/m², ≈1/σ_range²); 0 = OFF
     float lidar_robust_c_m     = 0.05f;  // Cauchy scale (m): returns this far off the surface fade out
     float lidar_select_margin_m = 0.06f; // pre-select returns within radius+margin (horiz) and h/2+margin (vert)
-    std::string lidar_frame_node = "lidar3D"; // DSR node whose frame the raw sweep is in (room←this transform)
     // ── Range-scaled precision: perceive with precision when CLOSE (manipulation), leave UNTOUCHED when far ──
     // Observation precision fades continuously with the camera→object sensing distance (NOT a range gate): R
     // grows as (range/near)^power beyond `near`, so a distant/receding object's frames carry ~no information

@@ -93,7 +93,7 @@ MaxSize = 4.0
 # fragments from wandering as the robot advances). range = horizontal distance from the sensor origin.
 RangeNoiseCoeff = 0.01        # extra std (m) per m of range
 EgoMotionLagS = 0.05          # effective registration lag (s): rotation smear = lag·rot_rate·range
-LidarFrameNode = "lidar3D"
+LidarFrameNode = "helios"
 UseBpearl = true                # ON: bpearl (low) catches short obstacles the HIGH helios misses (safety). Its
                                # floor-grazing artefact (phantom floor ring round the robot) is removed by a
                                # device-specific higher floor band — see Clusterer.BpearlFloorZ0.
@@ -191,6 +191,43 @@ MotionOmega0 = 0.6    # yaw rate (rad/s) at which sweep trust halves
 # log2(l_clamp/occ_set) = 3.6 half-lives to un-latch, so 30 s meant ~109 s before stale mass cleared —
 # far too slow to matter. 10 s gives ~36 s, which is in the usual costmap range.
 ForgetHalfLifeS = 10.0   # ↓ = forgets faster; ↑ = stickier map
+# ...and forget OCCUPANCY ONLY. Symmetric decay also un-learns FREE space: a well-cleared cell sits at P≈0.012
+# (alpha=0.5, beta=39.5) and relaxing BOTH toward Jeffreys drags it back toward 0.5, so the map quietly forgets
+# free space it paid beams to establish. That is invisible in the polygon channel (lo_ decays toward 0 from below
+# and can never cross the positive occ_set, so a free cell cannot re-latch) but it IS published in the field
+# channel, which five concept agents read for birth-surprise gating. octomap's OcTreeStamped::degradeOutdatedNodes
+# makes exactly this distinction. Stale-mass removal is unchanged bit-for-bit: every cell the old rule could
+# un-latch has lo_ > occ_set > 0 and still decays. Measured 2026-08-19: decay was doing 42% of ALL un-latching,
+# so the term is load-bearing — the fix is to narrow WHAT it touches, not to lengthen the half-life.
+# Watch `decayed` and `held` in grid_diag.csv: held/(decayed+held) is the share of the unobserved map the old
+# symmetric rule was un-learning every cycle. false = the old behaviour, for A/B.
+ForgetOccupiedOnly = true
+# ...and forget only where a beam ACTUALLY REACHED this cycle. Measured live 2026-08-20: 750 of 2548 occupied
+# cells (29%) were decaying every cycle purely because nothing was looking at them, and at a 10 s half-life a
+# latched cell reaches occ_set after ~36 s unobserved — so an obstacle you drive away from vanishes from the
+# published map in half a minute, in an apartment where it has certainly not moved. The decay could not tell
+# "I stopped looking" from "it left", and treating those the same invents evidence we never collected.
+# The ray-DDA already knows the difference: slook_ marks every column a beam passed through, recorded BEFORE the
+# z-aware gate can reject that beam as free evidence, so it is a statement about VISIBILITY not occupancy.
+# Looked-at-and-not-confirmed decays; never-reached is held. This is what STVL does with a frustum test, but
+# derived from the real rays — which also repairs STVL's documented weakness (a point-in-cone test has no
+# occlusion model, so a voxel behind a wall gets punished as if it had been observed).
+# COST: a cell in a region the robot never revisits is now held indefinitely. That is the correct posterior for
+# "no information", and one return re-decides it the moment the robot goes back — but the time decay is no
+# longer a blanket garbage collector. Watch `unseen` vs `decayed` in grid_diag.csv. false = old behaviour.
+ForgetVisibleOnly = true
+# ...and erode at the PRECISION the failed observation actually had. Every hit and every miss in this grid is
+# already scaled by w(r)=r0^2/(r0^2+r^2) (r0 = Grid hit_reliable_range_m = 2.5 m) — deliberately, so a far
+# see-through barely clears and a distant obstacle PERSISTS until the robot closes on it. The decay was the one
+# term that ignored range: at 8 m everything defending a cell ran at 0.089 of full strength while the term
+# eroding it ran at 1.0, an 11x mismatch pointing at erasure. Same defect as a constant process noise — the rate
+# of forgetting must carry the covariate the rate of learning carries. "I looked from 8 m and did not confirm"
+# is weak evidence of absence (the beam may have passed BESIDE the obstacle) and must erode the posterior weakly.
+#   gamma_cell = 1 - (1 - gamma) * w(r),  r from the robot to the cell.
+# Near cells keep the configured half-life exactly; far cells forget proportionally slower. No new parameter.
+# Watch `decay_w` in grid_diag.csv: the mean w(r) of the cells being decayed. Well below 1 = the decaying
+# population is mostly distant and is now eroding slowly, which is the point. false = old range-blind behaviour.
+ForgetRangeWeighted = true
 # A/B 2026-08-18 (3000 cycles each, matched): 0.0 vs 10.0. Forgetting is NOT the phantom source. With it
 # OFF the latched set ratcheted +56% (occupied 3366 -> 5256, still climbing) while the RESIDUAL set that
 # actually ships to the planner moved only +8% (698 -> 754 cells) and its height mix was unchanged

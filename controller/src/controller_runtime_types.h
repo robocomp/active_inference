@@ -266,11 +266,10 @@ struct ControllerParams
     std::string proximity_csv_path = "proximity_obstacles.csv";
     float proximity_log_distance_m = 0.6f;
     int max_lidar_draw_points = 600;
-    std::string lidar_name = "lidar3D";
-    // Per-device high/low LiDAR planes (lidar3d_dds): points arrive in the DEVICE frame (metres) and
-    // are transformed to the robot frame via each sensor's static mount RT edge (robot<-helios /
-    // robot<-bpearl), then MERGED into one scan per cycle. Preferred over the fused lidar_name plane;
-    // the controller falls back to lidar_name (already robot-frame) only while neither is live.
+    // Per-device high/low LiDAR planes: points arrive in the DEVICE frame (metres) and are
+    // transformed to the robot frame via each sensor's static mount RT edge (robot<-helios /
+    // robot<-bpearl), then MERGED into one scan per cycle. robot_concept publishes onto these
+    // same nodes when it bridges from Ice, so there is one name either way.
     std::string lidar_helios_name = "helios";
     std::string lidar_bpearl_name = "bpearl";
     // The camera node whose rgb media descriptor backs the affordance panel's picture. DISPLAY ONLY —
@@ -279,7 +278,7 @@ struct ControllerParams
     // Zero-copy media plane (LiDAR). When lidar_use_media is true, the LiDAR point
     // cloud is drained from the DDS media plane instead of the DSR laser_* attrs.
     // The DDS domain + topic are NOT configured here: they are read from the media
-    // descriptor JSON attribute authored by the producer on the lidar_name node, so
+    // descriptor JSON attribute authored by the producer on the helios node, so
     // the consumer always uses the producer's actual (dedicated) domain. The
     // subscriber is created lazily, only once that node + descriptor exist.
     bool lidar_use_media = true;

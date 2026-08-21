@@ -70,6 +70,22 @@ struct ResidualConfig
     // an occluder was immortal) and the z-band could only widen (so clearing got progressively harder — measured
     // 85%→96% of see-throughs discarded over one run). These three give evidence a finite lifetime.
     float grid_forget_half_life_s = 10.0f;  // half-life of evidence in an UNOBSERVED cell (0 ⇒ never forget)
+    // ...applied to OCCUPANCY evidence only. Symmetric decay also un-learns FREE space (a cleared cell drifts
+    // back from P≈0.012 toward 0.5), which costs nothing in the polygon channel but IS published in the field
+    // channel that five concept agents read for birth gating. octomap's OcTreeStamped degrades occupied nodes
+    // only, for the same reason. Stale-mass removal is unchanged: every cell the old rule could un-latch has
+    // lo_ > occ_set > 0 and still decays. false ⇒ the old symmetric behaviour, for A/B.
+    bool  grid_forget_occupied_only = true;
+    // ...and only where a beam actually REACHED this cycle. Measured live: 29% of the occupied set was decaying
+    // every cycle purely because nothing was looking at it, and ~36 s unobserved un-latches a cell. slook_ (set
+    // by the ray-DDA before the z-gate) says which columns were visible; a cell no beam reached carries no
+    // information and must be held. STVL's frustum gating, but from the real rays, so occlusion is handled.
+    bool  grid_forget_visible_only  = true;
+    // ...and scaled by the precision that failed to confirm. Every hit and every miss is weighted w(r)=r0²/(r0²+r²)
+    // so a far see-through barely clears; the decay ignored range, so at 8 m everything defending a cell ran at
+    // 0.089 and the term eroding it ran at 1.0. gamma_cell = 1-(1-gamma)*w(r). No new parameter (r0 is the same
+    // hit_reliable_range_m every other term uses).
+    bool  grid_forget_range_weighted = true;
     // Robot body envelope used by the SENSOR model to discount returns off our own body at integration time.
     // Distinct from Clusterer.RobotRadiusM, which is only a READ-OUT mask around the current pose and therefore
     // cannot stop self-returns being latched into the map in the first place. Default matches the lidar3d_dds
@@ -175,7 +191,7 @@ struct ResidualConfig
     float dissolve_explained_frac = 0.60f;
 
     // ── LiDAR media plane ──
-    std::string lidar_frame_node = "lidar3D";   // DSR node whose frame the raw sweep arrives in
+    std::string lidar_frame_node = "helios";    // DSR node whose frame the raw sweep arrives in
     bool use_bpearl = true;   // fuse the low "bpearl" plane with "helios" (legs/low obstacles). Toggle off
                               // to A/B if bpearl injects floor/low-structure artefacts (its low grazing
                               // geometry differs from helios, so the range-floor band may not catch it).

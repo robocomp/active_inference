@@ -85,7 +85,6 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     out.lidar_precision      = getf("BottleModel.LidarPrecision",      0.0f);
     out.lidar_robust_c_m     = getf("BottleModel.LidarRobustCM",       0.05f);
     out.lidar_select_margin_m = getf("BottleModel.LidarSelectMarginM", 0.06f);
-    out.lidar_frame_node      = gets("BottleModel.LidarFrameNode",     "lidar3D");
     out.range_near_m          = getf("BottleModel.RangeNearM",          0.6f);
     out.range_precision_power = getf("BottleModel.RangePrecisionPower", 2.0f);
     out.lidar_coverage_n0     = getf("BottleModel.LidarCoverageN0",     25.0f);

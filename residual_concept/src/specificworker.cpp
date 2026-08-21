@@ -679,6 +679,8 @@ void SpecificWorker::compute()
             // widens, self-returns latched permanently along the driven path).
             gp.forget_half_life_s  = cfg_.grid_forget_half_life_s;
             gp.forget_occupied_only = cfg_.grid_forget_occupied_only;
+            gp.forget_visible_only  = cfg_.grid_forget_visible_only;
+            gp.forget_range_weighted = cfg_.grid_forget_range_weighted;
             gp.self_body_sigma_m   = cfg_.grid_self_body_sigma_m;
             // NO C-SPACE INFLATION. The controller now collides its ACTUAL footprint polygon against the grid
             // (common/robot_footprint + controller/src/grid_planner), so inflating here is double-counted: a
@@ -729,7 +731,7 @@ void SpecificWorker::compute()
                                 cfg_.grid_self_body_radius_m);
             // PER-DEVICE integration: each LiDAR carries its own floor sigma, taken from its own floor fit.
             // See integrate_lidar_per_device(). Falls back to one merged sweep when the per-device tag is
-            // unavailable (fused lidar3D plane) — in which case the single datum sigma applies to everything,
+            // unavailable — in which case the single datum sigma applies to everything,
             // which is the behaviour that let the floor latch, so the fallback warns.
             if (not integrate_lidar_per_device())
             {
@@ -1273,7 +1275,7 @@ const std::vector<Eigen::Vector3f>& SpecificWorker::floor_datum_sweep()
     // low obstacles stop latching, in a way that changes as the robot drives.
     //
     // bpearl is the head-on downward dome — dense, near, and the sensor the geometry check already trusts.
-    // Fall back to the merged sweep when the per-device tag is absent (fused lidar3D plane), because an empty
+    // Fall back to the merged sweep when the per-device tag is absent, because an empty
     // point set would silently HOLD the previous estimate and look like stability rather than a missing input.
     const auto& pts = lidar_ingestor_->sweep_room();
     const auto& pid = lidar_ingestor_->plane_id();
@@ -1301,10 +1303,10 @@ const std::vector<Eigen::Vector3f>& SpecificWorker::filtered_lidar_sweep()
 {
     // Drop the LOW bpearl lidar's FLOOR-GRAZING returns (device-specific higher floor band) while keeping helios
     // and bpearl's real (>band) low-obstacle returns — so bpearl still catches short obstacles helios misses,
-    // without ringing the robot with phantom floor cells. plane_id: helios=0, bpearl=1 (empty ⇒ fused → keep all).
+    // without ringing the robot with phantom floor cells. plane_id: helios=0, bpearl=1 (empty ⇒ keep all).
     const auto& pts = lidar_ingestor_->sweep_room();
     const auto& pid = lidar_ingestor_->plane_id();
-    if (pid.size() != pts.size()) return pts;                    // no per-device tag (fused lidar3D) → pass through
+    if (pid.size() != pts.size()) return pts;                    // no per-device tag → pass through
     const Eigen::Vector3f o = lidar_ingestor_->origin_room();
     const float bz0 = cfg_.cluster.bpearl_floor_z0, slope = cfg_.cluster.floor_slope;
     // Referenced to the FITTED floor plane, like the grid's own band. bpearl is the LOW dome sensor that grazes the
@@ -1431,7 +1433,7 @@ void SpecificWorker::log_grid_diag()
         // support gate — the two were summed together and neither could be read.
         f << "cycle,occupied,hits,misses,miss_blocked_zaware,latched,released,hit_then_cleared,"
              "forgotten,self_damped,floor_damped,floor_clears,"
-             "floor_rets,floor_blocked,marks_suppr,floor_dropped,decayed,held\n";
+             "floor_rets,floor_blocked,marks_suppr,floor_dropped,decayed,held,unseen,decay_w\n";
     }
     f << cyc << ',' << grid_.occupied_count() << ',' << d.hits << ',' << d.misses << ','
       << d.miss_blocked_zaware << ',' << d.cells_latched << ',' << d.cells_released << ','
@@ -1439,7 +1441,8 @@ void SpecificWorker::log_grid_diag()
       << d.floor_damped_hits << ',' << d.floor_endpoint_clears << ','
       << d.floor_endpoint_returns << ',' << d.floor_endpoint_blocked << ','
       << d.marks_suppressed << ',' << last_device_floor_dropped_ << ','
-      << d.cells_decayed << ',' << d.cells_held << '\n';
+      << d.cells_decayed << ',' << d.cells_held << ',' << d.cells_unseen << ','
+      << (d.cells_decayed > 0 ? d.decay_weight_sum / d.cells_decayed : 0.0) << '\n';
     if ((cyc % 20) == 0)
     {
         f.flush();

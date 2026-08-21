@@ -14,9 +14,9 @@
  *
  * Crash-safety (mirrors room_concept::LidarIngestor, the sanctioned pattern):
  *  - The subscribers are created LAZILY inside poll() (called from the Operating compute/main thread), never in a
- *    ctor or a free-running thread, and only once the "lidar3D" node + media descriptor exist. Discovery is
+ *    ctor or a free-running thread, and only once the "helios" node + media descriptor exist. Discovery is
  *    self-throttled to ~1 Hz.
- *  - pump() reads the DSR graph (inner_eigen room<-lidar3D) — it MUST be called on the main thread.
+ *  - pump() reads the DSR graph (inner_eigen room<-helios) — it MUST be called on the main thread.
  *  - The owner (SpecificWorker) must reset this ingestor BEFORE tearing the graph down, while G is alive.
  *  - It stays entirely dormant (no DDS participant) while the corresponding gate is 0, so each feature is a true
  *    no-op when off.

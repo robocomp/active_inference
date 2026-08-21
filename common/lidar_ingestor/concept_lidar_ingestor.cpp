@@ -19,12 +19,11 @@ ConceptLidarIngestor::ConceptLidarIngestor(std::shared_ptr<DSR::DSRGraph> graph,
     // Subscribers come up lazily inside reader_->poll() once each node + descriptor exists AND the feature is
     // enabled (the gate > 0); nothing touches DDS here.
     reader_ = std::make_unique<rc::media::LidarPlaneReader>(
-        G_, inner_eigen_, std::vector<std::string>{"helios"}, "lidar3D", "lidar");
-    // Low bpearl plane as a SEPARATE reader. Empty fused fallback so it NEVER reads the merged "lidar3D" cloud
-    // (that would double-count with helios's fallback); if the per-device bpearl plane is absent it simply
-    // stages nothing. Consumed as its own ray-set with its own origin (occlusion-aware first-hit).
+        G_, inner_eigen_, std::vector<std::string>{"helios"}, "lidar");
+    // Low bpearl plane as a SEPARATE reader: if that plane is absent it simply stages nothing.
+    // Consumed as its own ray-set with its own origin (occlusion-aware first-hit).
     reader_bpearl_ = std::make_unique<rc::media::LidarPlaneReader>(
-        G_, inner_eigen_, std::vector<std::string>{"bpearl"}, /*fused_fallback=*/"", "lidar");
+        G_, inner_eigen_, std::vector<std::string>{"bpearl"}, "lidar");
 }
 
 ConceptLidarIngestor::~ConceptLidarIngestor()
@@ -40,7 +39,7 @@ bool ConceptLidarIngestor::pump()
 
     const LidarGates g = gates_ ? gates_() : LidarGates{};
 
-    // Newest "helios" (or fallback "lidar3D") sweep, transformed into the ROOM frame at its capture stamp
+    // Newest "helios" sweep, transformed into the ROOM frame at its capture stamp
     // (interpolate=true — a rotating robot's room<-robot pose differs from the latest pose). enabled follows the
     // feature switches so the reader stays dormant while BOTH helios-side features are off.
     if (reader_)

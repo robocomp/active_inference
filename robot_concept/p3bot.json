@@ -1,0 +1,1901 @@
+{
+    "DSRModel": {
+        "symbols": {
+            "101": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 0
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -500
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -550
+                    }
+                },
+                "id": "101",
+                "links": [
+                    {
+                        "dst": "200",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0.0,
+                                    0.0,
+                                    0.04
+                                ]
+                            }
+                        },
+                        "src": "101"
+                    }
+                ],
+                "name": "root",
+                "type": "root"
+            },
+            "200": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 1
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "101"
+                    },
+                    "path": {
+                        "type": 0,
+                        "value": "meshes/p3bot.obj"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -500
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -500
+                    }
+                },
+                "id": "200",
+                "links": [
+                    {
+                        "dst": "250",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0
+                                ]
+                            }
+                        },
+                        "src": "200"
+                    },
+                    {
+                        "dst": "260",
+                        "label": "has",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0
+                                ]
+                            }
+                        },
+                        "src": "200"
+                    }
+                ],
+                "name": "P3Bot",
+                "type": "robot"
+            },
+            "102": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 3
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "250"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -950
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -450
+                    }
+                },
+                "id": "102",
+                "links": [
+                    {
+                        "dst": "103",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    3.1416,
+                                    0,
+                                    6.28316
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0.15643
+                                ]
+                            }
+                        },
+                        "src": "102"
+                    }
+                ],
+                "name": "left_base_link",
+                "type": "link"
+            },
+            "103": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 4
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "102"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -950
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -400
+                    }
+                },
+                "id": "103",
+                "links": [
+                    {
+                        "dst": "104",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    1.5708,
+                                    0,
+                                    5.93411
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0.005375,
+                                    -0.12838
+                                ]
+                            }
+                        },
+                        "src": "103"
+                    }
+                ],
+                "name": "left_shoulder_link",
+                "type": "link"
+            },
+            "104": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 5
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "103"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -950
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -350
+                    }
+                },
+                "id": "104",
+                "links": [
+                    {
+                        "dst": "105",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    -1.5708,
+                                    0,
+                                    3.14161
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    -0.21038,
+                                    -0.00638
+                                ]
+                            }
+                        },
+                        "src": "104"
+                    }
+                ],
+                "name": "left_half_arm_1_link",
+                "type": "link"
+            },
+            "105": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 6
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "104"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -950
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -300
+                    }
+                },
+                "id": "105",
+                "links": [
+                    {
+                        "dst": "106",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    1.5708,
+                                    0,
+                                    3.7349
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0.006375,
+                                    -0.21038
+                                ]
+                            }
+                        },
+                        "src": "105"
+                    }
+                ],
+                "name": "left_half_arm_2_link",
+                "type": "link"
+            },
+            "106": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 7
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "105"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -950
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -250
+                    }
+                },
+                "id": "106",
+                "links": [
+                    {
+                        "dst": "107",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    -1.57078,
+                                    0,
+                                    0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    -0.20843,
+                                    -0.00638
+                                ]
+                            }
+                        },
+                        "src": "106"
+                    }
+                ],
+                "name": "left_forearm_link",
+                "type": "link"
+            },
+            "107": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 8
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "106"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -950
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -200
+                    }
+                },
+                "id": "107",
+                "links": [
+                    {
+                        "dst": "108",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    1.5708,
+                                    0,
+                                    5.4105
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0.000175,
+                                    -0.10593
+                                ]
+                            }
+                        },
+                        "src": "107"
+                    }
+                ],
+                "name": "left_spherical_wrist_1_link",
+                "type": "link"
+            },
+            "108": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 9
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "107"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -950
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -150
+                    }
+                },
+                "id": "108",
+                "links": [
+                    {
+                        "dst": "109",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    -1.5708,
+                                    0,
+                                    1.57077
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    -0.10593,
+                                    -0.000175
+                                ]
+                            }
+                        },
+                        "src": "108"
+                    }
+                ],
+                "name": "left_spherical_wrist_2_link",
+                "type": "link"
+            },
+            "109": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 10
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "108"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -950
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -100
+                    }
+                },
+                "id": "109",
+                "links": [
+                    {
+                        "dst": "110",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    3.14159,
+                                    0,
+                                    0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    -0.061525
+                                ]
+                            }
+                        },
+                        "src": "109"
+                    }
+                ],
+                "name": "left_bracelet_link",
+                "type": "link"
+            },
+            "110": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 11
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "109"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -950
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -50
+                    }
+                },
+                "id": "110",
+                "links": [
+                    {
+                        "dst": "111",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    3.1416,
+                                    3.1416,
+                                    0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0.05639,
+                                    -0.00305
+                                ]
+                            }
+                        },
+                        "src": "110"
+                    },
+                    {
+                        "dst": "112",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    3.1416,
+                                    3.14162,
+                                    0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0.0275,
+                                    0.066,
+                                    -0.00305
+                                ]
+                            }
+                        },
+                        "src": "110"
+                    },
+                    {
+                        "dst": "113",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    3.1416,
+                                    3.1416,
+                                    0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0.05639,
+                                    -0.00305
+                                ]
+                            }
+                        },
+                        "src": "110"
+                    }
+                ],
+                "name": "left_end_effector_link",
+                "type": "link"
+            },
+            "111": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 12
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "110"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -950
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": 0
+                    }
+                },
+                "id": "111",
+                "name": "left_tool_point",
+                "type": "link"
+            },
+            "112": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 12
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "110"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -1100
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": 0
+                    }
+                },
+                "id": "112",
+                "links": [],
+                "name": "left_depth_camera",
+                "type": "link"
+            },
+            "113": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 12
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "110"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -800
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": 0
+                    }
+                },
+                "id": "113",
+                "links": [],
+                "name": "left_color_camera",
+                "type": "link"
+            },
+            "122": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 3
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "250"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -150
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -450
+                    }
+                },
+                "id": "122",
+                "links": [
+                    {
+                        "dst": "123",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    3.1416,
+                                    0,
+                                    6.28316
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0.15643
+                                ]
+                            }
+                        },
+                        "src": "122"
+                    }
+                ],
+                "name": "right_base_link",
+                "type": "link"
+            },
+            "123": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 4
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "122"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -150
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -400
+                    }
+                },
+                "id": "123",
+                "links": [
+                    {
+                        "dst": "124",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    1.5708,
+                                    0,
+                                    5.93411
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0.00538,
+                                    -0.12838
+                                ]
+                            }
+                        },
+                        "src": "123"
+                    }
+                ],
+                "name": "right_shoulder_link",
+                "type": "link"
+            },
+            "124": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 5
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "123"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -150
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -350
+                    }
+                },
+                "id": "124",
+                "links": [
+                    {
+                        "dst": "125",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    -1.5708,
+                                    0,
+                                    3.14161
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    -0.21038,
+                                    -0.00638
+                                ]
+                            }
+                        },
+                        "src": "124"
+                    }
+                ],
+                "name": "right_half_arm_1_link",
+                "type": "link"
+            },
+            "125": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 6
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "124"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -150
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -300
+                    }
+                },
+                "id": "125",
+                "links": [
+                    {
+                        "dst": "126",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    1.5708,
+                                    0,
+                                    3.7349
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0.00638,
+                                    -0.21038
+                                ]
+                            }
+                        },
+                        "src": "125"
+                    }
+                ],
+                "name": "right_half_arm_2_link",
+                "type": "link"
+            },
+            "126": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 7
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "125"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -150
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -250
+                    }
+                },
+                "id": "126",
+                "links": [
+                    {
+                        "dst": "127",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    -1.5708,
+                                    0,
+                                    0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    -0.20843,
+                                    -0.00638
+                                ]
+                            }
+                        },
+                        "src": "126"
+                    }
+                ],
+                "name": "right_forearm_link",
+                "type": "link"
+            },
+            "127": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 8
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "126"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -150
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -200
+                    }
+                },
+                "id": "127",
+                "links": [
+                    {
+                        "dst": "128",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    1.5708,
+                                    0,
+                                    5.4105
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0.00018,
+                                    -0.10593
+                                ]
+                            }
+                        },
+                        "src": "127"
+                    }
+                ],
+                "name": "right_spherical_wrist_1_link",
+                "type": "link"
+            },
+            "128": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 9
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "127"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -150
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -150
+                    }
+                },
+                "id": "128",
+                "links": [
+                    {
+                        "dst": "129",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    -1.5708,
+                                    0,
+                                    1.57077157497406
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    -0.10593,
+                                    -0.00018
+                                ]
+                            }
+                        },
+                        "src": "128"
+                    }
+                ],
+                "name": "right_spherical_wrist_2_link",
+                "type": "link"
+            },
+            "129": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 10
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "128"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -150
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -100
+                    }
+                },
+                "id": "129",
+                "links": [
+                    {
+                        "dst": "130",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    3.14159,
+                                    0,
+                                    0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    -0.06153
+                                ]
+                            }
+                        },
+                        "src": "129"
+                    }
+                ],
+                "name": "right_bracelet_link",
+                "type": "link"
+            },
+            "130": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 11
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "129"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -150
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -50
+                    }
+                },
+                "id": "130",
+                "links": [
+                    {
+                        "dst": "131",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    3.14159,
+                                    3.14159,
+                                    0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0.05639,
+                                    -0.00305
+                                ]
+                            }
+                        },
+                        "src": "130"
+                    },
+                    {
+                        "dst": "132",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    3.14159,
+                                    3.14159,
+                                    0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0.0275,
+                                    0.06595,
+                                    -0.00305
+                                ]
+                            }
+                        },
+                        "src": "130"
+                    },
+                    {
+                        "dst": "133",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    3.1416,
+                                    3.1416,
+                                    0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0.05639,
+                                    -0.00305
+                                ]
+                            }
+                        },
+                        "src": "130"
+                    }
+                ],
+                "name": "right_end_effector_link",
+                "type": "link"
+            },
+            "131": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 12
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "130"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -150
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": 0
+                    }
+                },
+                "id": "131",
+                "name": "right_tool_point",
+                "type": "link"
+            },
+            "132": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 12
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "130"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -300
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": 0
+                    }
+                },
+                "id": "132",
+                "links": [],
+                "name": "right_depth_camera",
+                "type": "link"
+            },
+            "133": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 12
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "130"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": 0
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": 0
+                    }
+                },
+                "id": "133",
+                "links": [],
+                "name": "right_color_camera",
+                "type": "link"
+            },
+            "140": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 3
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "250"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -450
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -400
+                    }
+                },
+                "id": "140",
+                "links": [],
+                "name": "helios",
+                "type": "laser"
+            },
+            "141": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 3
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "250"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -450
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -350
+                    }
+                },
+                "id": "141",
+                "links": [],
+                "name": "ricoh",
+                "type": "camera"
+            },
+            "142": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 3
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "250"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -550
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -400
+                    }
+                },
+                "id": "142",
+                "links": [],
+                "name": "zed",
+                "type": "rgbd"
+            },
+            "143": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 3
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "250"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -350
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -450
+                    }
+                },
+                "id": "143",
+                "links": [],
+                "name": "imu",
+                "type": "imu"
+            },
+            "144": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 3
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "250"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -650
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -450
+                    }
+                },
+                "id": "144",
+                "links": [],
+                "name": "powers",
+                "type": "battery"
+            },
+            "160": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 3
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "250"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -550
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -550
+                    }
+                },
+                "id": "160",
+                "links": [],
+                "name": "fl_wheel",
+                "type": "motor"
+            },
+            "161": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 3
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "250"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -450
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -550
+                    }
+                },
+                "id": "161",
+                "links": [],
+                "name": "fr_wheel",
+                "type": "motor"
+            },
+            "162": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 3
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "250"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -550
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -450
+                    }
+                },
+                "id": "162",
+                "links": [],
+                "name": "bl_wheel",
+                "type": "motor"
+            },
+            "163": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 3
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "250"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -450
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -450
+                    }
+                },
+                "id": "163",
+                "links": [],
+                "name": "br_wheel",
+                "type": "motor"
+            },
+            "250": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "SteelBlue"
+                    },
+                    "depth_m": {
+                        "type": 2,
+                        "value": 0.47
+                    },
+                    "height_m": {
+                        "type": 2,
+                        "value": 1.6
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 2
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "200"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -500
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -410.0
+                    },
+                    "width_m": {
+                        "type": 2,
+                        "value": 0.47
+                    }
+                },
+                "id": "250",
+                "links": [
+                    {
+                        "dst": "102",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    -2.01,
+                                    0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0.0,
+                                    -0.055176119999999995,
+                                    1.04883
+                                ]
+                            }
+                        },
+                        "src": "250"
+                    },
+                    {
+                        "dst": "122",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    2.01,
+                                    0,
+                                    0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0.0,
+                                    0.055176119999999995,
+                                    1.04883
+                                ]
+                            }
+                        },
+                        "src": "250"
+                    },
+                    {
+                        "dst": "140",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0.0,
+                                    -0.17,
+                                    1.2
+                                ]
+                            }
+                        },
+                        "src": "250"
+                    },
+                    {
+                        "dst": "142",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    -0.5236,
+                                    0,
+                                    0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    -0.06,
+                                    -0.015,
+                                    1.16
+                                ]
+                            }
+                        },
+                        "src": "250"
+                    },
+                    {
+                        "dst": "143",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0.0,
+                                    0.0,
+                                    -0.01
+                                ]
+                            }
+                        },
+                        "src": "250"
+                    },
+                    {
+                        "dst": "144",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0
+                                ]
+                            }
+                        },
+                        "src": "250"
+                    },
+                    {
+                        "dst": "160",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0
+                                ]
+                            }
+                        },
+                        "src": "250"
+                    },
+                    {
+                        "dst": "161",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0
+                                ]
+                            }
+                        },
+                        "src": "250"
+                    },
+                    {
+                        "dst": "162",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0
+                                ]
+                            }
+                        },
+                        "src": "250"
+                    },
+                    {
+                        "dst": "163",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0
+                                ]
+                            }
+                        },
+                        "src": "250"
+                    },
+                    {
+                        "dst": "141",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    -0.0,
+                                    0.0,
+                                    -0.0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0.0,
+                                    -0.17,
+                                    1.42
+                                ]
+                            }
+                        },
+                        "src": "250"
+                    }
+                ],
+                "name": "body",
+                "type": "body"
+            },
+            "260": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "MediumPurple"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 2
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "200"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -680.0
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -410.0
+                    }
+                },
+                "id": "260",
+                "links": [],
+                "name": "mind",
+                "type": "mind"
+            }
+        }
+    }
+}

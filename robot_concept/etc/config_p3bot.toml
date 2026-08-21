@@ -4,8 +4,8 @@ TopicManager = "IceStorm/TopicManager:default -p 9999"
 
 # Proxies for required interfaces
 CameraRGBDSimple = "camerargbdsimple:tcp -h localhost -p 12001" #ZED
-IMU = "imu:tcp -h localhost -p 10007"
-Lidar3D = "lidar3d:tcp -h localhost -p 11995"
+IMU = "imu:tcp -h localhost -p 15011"   # P3BotBridge Endpoints.IMU (identity "imu")
+Lidar3D = "lidar3d:tcp -h localhost -p 11990"   # lidar3d_dds helios (etc/config_helios_webots)
 Camera360RGBD = "camera360rgbd:tcp -h localhost -p 12003" # ricoh+lidar
 Camera360RGB = "camera360rgb:tcp -h localhost -p 10097" # Ricoh
 MediaPlaneDDS = "mediaplanedds:tcp -h localhost -p 12002" # zed_camera: query its DDS media descriptor
@@ -29,17 +29,17 @@ name = "robot_concept"
 # robot_name, and the identity check compares against robot_node_id. Point configFile at another
 # robot's JSON and change these two lines — no code change, no rebuild.
 # If robot_name is removed, the agent falls back to the single node of type "robot" in the graph.
-robot_name = "Shadow"
+robot_name = "P3Bot"
 robot_node_id = 200
 # Graphviz engine used to lay the DSR graph out in the viewer: twopi | sfdp | dot | neato | fdp | circo.
 # Which one reads best depends on the graph's SHAPE, which is a property of the robot: Shadow's single
 # RT chain suits the radial "twopi", while P3Bot — two 12-link arm chains, four wheels and the sensor
 # fan all hanging off `body` — is wide and reads better under the force-directed "sfdp".
-graph_layout = "twopi"
+graph_layout = "sfdp"
 
 # --- Single Instance Configuration ---
 # Use this if you only have one graph.
-configFile = "shadow.json"   
+configFile = "p3bot.json"
 domain = 0
 tree = false
 graph = true
@@ -49,7 +49,7 @@ graph = true
 # --- Multiple Instance Template ---
 # If you define multiple instances, the single instance config above will be ignored.
 # [Agent.instance_name]
-# configFile = "shadow.json"
+# configFile = "p3bot.json"
 # domain = 1
 # tree = true
 # graph = true
@@ -95,7 +95,7 @@ stale_display_ms = 3000
 
 [Owns]
 nodes = ["mind", "robot_concept 6"]
-subtrees = ["Shadow"]
+subtrees = ["P3Bot"]   # keep in sync with robot_name above
 
 [Camera]
 # DSR upload frame rates:
@@ -150,7 +150,7 @@ ricoh_source = "auto"
 #   auto: bridge via Ice RPC until BOTH lidar3d_dds (helios=MediaPlaneDDS2, bpearl=MediaPlaneDDS3)
 #         appear on DDS, then relay their descriptors to the 'helios'/'bpearl' nodes and stop bridging.
 #   ice : always bridge via Ice RPC.   dds: never bridge; only relay/monitor the lidar3d_dds planes.
-lidar_source = "dds"
+lidar_source = "auto"
 
 [Lidar]
 # Legacy DSR-graph lidar upload. <0 DISABLES it (default): lidar is published on the zero-copy

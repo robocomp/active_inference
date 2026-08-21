@@ -1,0 +1,16 @@
+# Peer-cleanup manifest for robot_concept.
+#
+# robot_concept launches from a config NOT named after the agent (config_beta.toml for Shadow,
+# config_p3bot.toml for P3Bot), so peers running with Presence.config_dir = "etc" could not find
+# robot_concept's [Owns] list to reap its nodes after an UNCLEAN exit (crash / kill -9) — leaving a
+# stale robot subtree that then collides with the fixed-id reseed on the next boot ("id and name
+# must be unique"). This file mirrors the [Owns] block so delete_peer_owned_nodes() can clean up a
+# crashed robot_concept. Keep it in sync with the [Owns] block of every config robot_concept runs from.
+#
+# BOTH robot subtrees are listed on purpose: this one file serves whichever robot is running, and
+# delete_subtree() returns silently when the root node does not exist, so naming the absent robot
+# costs nothing. Naming only ONE would strand the OTHER robot's whole subtree after a crash — which
+# is precisely the collision this file exists to prevent. Add a line per new robot.
+[Owns]
+nodes    = ["mind", "robot_concept 6"]
+subtrees = ["Shadow", "P3Bot"]

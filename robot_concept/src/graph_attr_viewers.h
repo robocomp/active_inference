@@ -279,7 +279,8 @@ private:
 		if(const auto o = g_->get_attrib_by_name<grid_border_cells_att>(n.value()); o.has_value())
 			border = read_pts(o->get());
 
-		// Robot mesh (shadow.obj) posed into the room frame, so the scene reads with the robot in place.
+		// Robot mesh (path read off the robot node) posed into the room frame, so the scene reads with
+		// the robot in place.
 		const std::vector<QVector3D> robot = robot_room_triangles();
 
 		// The occupied cells now carry the REAL obstacle top height in z (producer publishes it); the
@@ -297,16 +298,27 @@ private:
 	}
 
 	// Load + recentre the robot mesh once (xy-centre, z-min → base on the floor), mirroring the
-	// retina viewer. Empty on failure; retried never (the file is static).
+	// retina viewer. The mesh file is NOT hard-coded: it comes from the robot node's `path` attribute,
+	// which the agent seeds from Agent.configFile — so a different robot brings its own mesh along.
+	// Empty on failure; retried never (both the node attribute and the file are static).
 	void load_robot_mesh_once()
 	{
 		if(robot_loaded_)
 			return;
 		robot_loaded_ = true;
-		const auto p = rc::obj::resolve_robot_mesh_path("meshes/shadow.obj");
+		std::string mesh_rel;
+		if(const auto r = g_->get_nodes_by_type("robot"); not r.empty())
+			if(const auto a = g_->get_attrib_by_name<path_att>(r.front()); a.has_value())
+				mesh_rel = a->get();
+		if(mesh_rel.empty())
+		{
+			qWarning() << "[grid-view] robot node carries no 'path' mesh attribute — robot not drawn";
+			return;
+		}
+		const auto p = rc::obj::resolve_robot_mesh_path(mesh_rel);
 		if(not p.has_value())
 		{
-			qWarning() << "[grid-view] robot mesh meshes/shadow.obj not found";
+			qWarning() << "[grid-view] robot mesh not found:" << QString::fromStdString(mesh_rel);
 			return;
 		}
 		const auto mesh = rc::obj::load_obj_mesh_data(p.value());

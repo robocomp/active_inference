@@ -730,7 +730,7 @@ bool SceneFeed::init_lidar(const std::string& /*topic*/)
     if (not graph_ or inner_eigen_api_ == nullptr)
         return false;
     g_lidar_reader = std::make_unique<rc::media::LidarPlaneReader>(
-        graph_, inner_eigen_api_, std::vector<std::string>{"helios", "bpearl"}, "lidar3D", "lidar");
+        graph_, inner_eigen_api_, std::vector<std::string>{"helios", "bpearl"}, "lidar");
     return g_lidar_reader->any_live();
 }
 

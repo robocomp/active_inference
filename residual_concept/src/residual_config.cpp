@@ -106,6 +106,9 @@ ResidualConfig load_residual_config(const ConfigLoader& cfg)
     out.motion_vel0_mps         = getf("Grid.MotionVel0",        0.5f);    // linear speed (m/s) that halves sweep trust
     out.motion_omega0_rps       = getf("Grid.MotionOmega0",      0.6f);    // yaw rate (rad/s) that halves sweep trust
     out.grid_forget_half_life_s = getf("Grid.ForgetHalfLifeS",   10.0f);   // evidence half-life in an UNOBSERVED cell
+    out.grid_forget_occupied_only = getb("Grid.ForgetOccupiedOnly", true); // ...decay OCCUPANCY only
+    out.grid_forget_visible_only  = getb("Grid.ForgetVisibleOnly",  true); // ...and only where we LOOKED
+    out.grid_forget_range_weighted = getb("Grid.ForgetRangeWeighted", true); // ...at the precision we had
     out.cluster_helios_floor_z0 = getf("Clusterer.HeliosFloorZ0", 0.20f);   // helios grazes: unusable near floor
     out.grid_inflate_radius_m   = getf("Grid.InflateRadiusM",    0.0f);    // 0: controller does exact footprint
     out.grid_self_body_radius_m = getf("Grid.SelfBodyRadiusM",   0.55f);   // body envelope for the sensor-model term
@@ -174,7 +177,7 @@ ResidualConfig load_residual_config(const ConfigLoader& cfg)
     out.publish_safety_margin_m = getf("ResidualConcept.PublishSafetyMarginM", 0.05f);
 
     // ── media / cov ──
-    out.lidar_frame_node  = gets("ResidualModel.LidarFrameNode",  "lidar3D");
+    out.lidar_frame_node  = gets("ResidualModel.LidarFrameNode",  "helios");
     out.use_bpearl        = getb("ResidualModel.UseBpearl",       true);
     out.rt_cov_add_chain  = getb("ResidualConcept.RtCovAddChain", true);
     out.unobservable_var  = getf("ResidualConcept.UnobservableVar", 9.87f);

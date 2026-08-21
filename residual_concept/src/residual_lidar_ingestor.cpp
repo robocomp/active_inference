@@ -25,7 +25,7 @@ ResidualLidarIngestor::ResidualLidarIngestor(std::shared_ptr<DSR::DSRGraph> grap
     if (cfg.use_bpearl)
         planes.emplace_back("bpearl");
     reader_ = std::make_unique<rc::media::LidarPlaneReader>(
-        G_, inner_eigen_, std::move(planes), "lidar3D", "lidar");
+        G_, inner_eigen_, std::move(planes), "lidar");
 }
 
 ResidualLidarIngestor::~ResidualLidarIngestor()
@@ -38,7 +38,7 @@ bool ResidualLidarIngestor::pump()
     if (not reader_)
         return false;
 
-    // Newest "helios" (or fallback "lidar3D") sweep, transformed into the ROOM frame at its capture
+    // Newest "helios" sweep, transformed into the ROOM frame at its capture
     // stamp (interpolate=true — a rotating robot's room<-robot pose differs from the latest pose).
     const auto sweep = reader_->poll("room", /*interpolate=*/true);
     if (not sweep.has_value() or sweep->points.empty())

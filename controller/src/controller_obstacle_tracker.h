@@ -99,7 +99,7 @@ class ControllerObstacleTracker
 
         // Ingest a raw LiDAR point cloud (lidar frame, from the zero-copy media plane)
         // into the room buffer via the RT tree. lidar_node_name is the graph node the RT
-        // transforms are queried against (e.g. "lidar3D"). Dedups by timestamp.
+        // transforms are queried against (e.g. "helios"). Dedups by timestamp.
         // plane_ids/plane_stamps come from rc::media::LidarSweep: the cloud is a MERGE of several
         // LiDARs captured at different instants, so each plane is registered with the room←robot
         // pose at ITS OWN stamp instead of one pose at the merged maximum. Both may be empty, which

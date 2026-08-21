@@ -143,7 +143,10 @@ private:
 	Params params;
 
 	bool verbose_debug_ = false;
-	std::string robot_name = "Shadow";
+	// Name of the robot node in the shared graph. Loaded from Agent.robot_name (see etc/config_beta.toml),
+	// falling back to the single node of type "robot" already in the graph. Nothing here assumes a
+	// particular robot.
+	std::string robot_name;
 
 	// Lidar reader thread
 	void read_lidar_thread();
@@ -264,21 +267,28 @@ private:
 	void request_shutdown();
 
 	void cleanup_owned_nodes();
-	// Diagnostic (runs once): the robot node "Shadow" is seeded from shadow.json with the fixed id
-	// kCanonicalShadowId. After an unclean previous exit a stale "Shadow" can survive under a DIFFERENT
-	// id (no peer reaps it without etc/robot_concept.toml), which then collides on update_node. DSR name
-	// uniqueness means at most one "Shadow" exists, so we do NOT auto-delete (would drop the only robot
-	// node) — we log loudly so a mismatch is visible instead of silently fatal.
-	static constexpr std::uint64_t kCanonicalShadowId = 200;   // == shadow.json Shadow node id
-	bool shadow_checked_ = false;
-	void check_shadow_identity();
-	void trigger_graph_layout_twopi();   // twopi relayout of the DSR graph viewer (startup + on node add/remove)
+	// Diagnostic (runs once): the robot node (Agent.robot_name) is seeded from Agent.configFile with a
+	// fixed id — canonical_robot_id_. After an unclean previous exit a stale robot node can survive under
+	// a DIFFERENT id (no peer reaps it without etc/robot_concept.toml), which then collides on
+	// update_node. DSR name uniqueness means at most one node carries that name, so we do NOT auto-delete
+	// (would drop the only robot node) — we log loudly so a mismatch is visible instead of silently fatal.
+	// Both the name and the id come from config so no robot identity is hard-coded here; the default
+	// matches the robot node declared in the shipped Agent.configFile.
+	std::uint64_t canonical_robot_id_ = 200;   // Agent.robot_node_id
+	bool robot_identity_checked_ = false;
+	void check_robot_identity();
+	// Relayout the DSR graph viewer (startup + on node add/remove) with the Graphviz engine named by
+	// Agent.graph_layout. Which engine reads best depends on the graph's SHAPE, and that is a property
+	// of the robot, not of this code: a single deep RT chain suits the radial "twopi", a wide graph
+	// with two arm chains and four wheels suits the force-directed "sfdp". Hence config, not a constant.
+	void trigger_graph_layout();
+	std::string graph_layout_ = "twopi";   // Graphviz engine: twopi|sfdp|dot|neato|fdp|circo
 	void schedule_graph_relayout();      // debounced request → one twopi after a burst of structural changes
 
 	// "View data" on a media-plane sensor node (no inline blob in the graph) is forwarded by the
 	// dsr_gui GraphViewer as view_data_signal(id, type). robot_concept is the one agent with the graph
 	// up AND access to every stream, so it answers by opening a live media-plane viewer: an image
-	// window for zed/ricoh, a top-down point view for lidar3D/helios/bpearl. Each viewer owns its own
+	// window for zed/ricoh, a top-down point view for helios/bpearl. Each viewer owns its own
 	// media subscriber (built via the shared factory on the main thread) and polls it on a QTimer.
 	void wire_view_data_signal();                                          // connect once, main thread
 

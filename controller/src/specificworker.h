@@ -261,7 +261,7 @@ private:
 		// Shared multi-plane reader (the same one every agent uses). It prefers the two
 		// per-device planes — "helios" (high) + "bpearl" (low), published in the DEVICE
 		// frame — transforms each to the robot frame via the DSR RT tree and MERGES them
-		// into one scan; it falls back to the fused "lidar3D" plane while robot_concept is
+		// into one scan; robot_concept publishes onto those same nodes while it is
 		// bridging. Subscribers come up lazily inside poll() (throttled), so this is safe
 		// from the Operating control thread. The merged robot-frame scan is fed once per
 		// cycle to the obstacle tracker (which then applies the dynamic room<-robot pose).

@@ -13,15 +13,14 @@
 // LidarPlaneReader — the ONE way every cortex agent reads the zero-copy LiDAR media plane.
 //
 // robot_concept's lidar3d_dds producers publish each physical LiDAR on its OWN plane, in that
-// sensor's DEVICE frame (metres): "helios" (high 360) and "bpearl" (low). The legacy fused
-// "lidar3D" plane (already in the robot frame) is bridged by robot_concept only while the
-// per-device producers are absent. A DSR sensor node is BOTH the media-descriptor host and the
-// name of the frame its points live in, so the device->target transform is just an RT-tree query
-// keyed by the plane's node name.
+// sensor's DEVICE frame (metres): "helios" (high 360) and "bpearl" (low). While robot_concept
+// bridges from Ice instead, it publishes onto those SAME nodes. A DSR sensor node is BOTH the
+// media-descriptor host and the name of the frame its points live in, so the device->target
+// transform is just an RT-tree query keyed by the plane's node name.
 //
 // Every agent used to hand-roll the same discover->drain->transform dance against a single hard
-// coded "lidar3D" node. This class factors that out so all agents subscribe IDENTICALLY:
-//   - preference-ordered planes (e.g. {"helios","bpearl"}) with a fused fallback ("lidar3D"),
+// coded node. This class factors that out so all agents subscribe IDENTICALLY:
+//   - preference-ordered planes (e.g. {"helios","bpearl"}),
 //   - lazy, throttled, descriptor-driven discovery (rc::media::make_lidar_subscriber_from_graph),
 //   - drain the NEWEST frame per live plane (dedup by source stamp),
 //   - transform each plane's points from ITS node frame into `target_frame` via the DSR RT tree
@@ -72,12 +71,11 @@ struct LidarSweep
 class LidarPlaneReader
 {
 public:
-    // `preferred_planes` are DSR sensor node names in preference order; `fused_fallback` is used only
-    // while NONE of the preferred planes is live. graph + inner_eigen must outlive this reader.
+    // `preferred_planes` are DSR sensor node names in preference order.
+    // graph + inner_eigen must outlive this reader.
     LidarPlaneReader(std::shared_ptr<DSR::DSRGraph> graph,
                      DSR::InnerEigenAPI* inner_eigen,
                      std::vector<std::string> preferred_planes,
-                     std::string fused_fallback = "lidar3D",
                      std::string stream_key = "lidar");
     ~LidarPlaneReader();
     LidarPlaneReader(const LidarPlaneReader&) = delete;
@@ -92,7 +90,7 @@ public:
     std::optional<LidarSweep> poll(const std::string& target_frame,
                                    bool interpolate = true, bool enabled = true);
 
-    // True once at least one plane (preferred or fallback) has a live subscriber.
+    // True once at least one plane has a live subscriber.
     [[nodiscard]] bool any_live() const noexcept;
 
 private:
@@ -112,7 +110,6 @@ private:
     std::shared_ptr<DSR::DSRGraph> G_;
     DSR::InnerEigenAPI*            inner_eigen_ = nullptr;
     std::vector<std::string>      preferred_;
-    std::string                   fallback_;
     std::string                   stream_key_;
 
     struct Plane
@@ -133,10 +130,16 @@ private:
         std::chrono::steady_clock::time_point sub_since{};
         bool                                  ever_matched = false;
         bool                                  warned_unmatched = false;
+        // A plane whose DSR node does not exist is not this robot's sensor (p3bot.json has helios but
+        // no bpearl, shadow.json has both). Discovery skips it silently instead of asking the factory
+        // for a descriptor it can never have — otherwise every consumer that names the pair prints a
+        // "no descriptor" line once a second for the life of the run. Said ONCE, after a grace, so a
+        // node that simply has not synced in yet at t=0 does not read as a missing sensor.
+        bool                                  announced_absent = false;
     };
     std::vector<Plane> preferred_planes_;   // one entry per preferred node (sub filled lazily)
-    Plane              fallback_plane_;      // fused fallback (sub filled lazily, dropped once preferred live)
     std::chrono::steady_clock::time_point last_discovery_{};
+    std::chrono::steady_clock::time_point created_at_{std::chrono::steady_clock::now()};
 };
 
 }  // namespace rc::media

@@ -143,6 +143,31 @@ void SpecificWorker::initialize()
 	qInfo() << "initialize robot_concept worker";
 	GenericWorker::initialize();
 
+	// ── Robot identity (name + canonical node id) — config-driven, never hard-coded ──────────────
+	// Every robot-node lookup in this agent (mount dump, identity check, pose writes from
+	// FullPoseEstimationPub) keys off robot_name. It comes from Agent.robot_name in the live config
+	// (etc/config_beta.toml), so pointing the agent at a different Agent.configFile / different robot
+	// needs no code change. If the key is absent we fall back to the single node of type "robot"
+	// already in the graph rather than guessing a name.
+	rc::ConfigLoaderUtils::load_optional(configLoader, "Agent.robot_name", robot_name);
+	rc::ConfigLoaderUtils::load_optional<std::uint64_t, int>(configLoader, "Agent.robot_node_id", canonical_robot_id_);
+	rc::ConfigLoaderUtils::load_optional(configLoader, "Agent.graph_layout", graph_layout_);
+	if (robot_name.empty())
+	{
+		if (const auto robots = G->get_nodes_by_type("robot"); not robots.empty())
+		{
+			robot_name = robots.front().name();
+			qWarning() << "[Agent] robot_name absent from config — using the graph's robot node"
+			           << QString::fromStdString(robot_name);
+		}
+		else
+			qWarning() << "[Agent] robot_name absent from config and no node of type 'robot' in the graph"
+			              " — robot pose updates and the identity check have no node to address.";
+	}
+	else
+		qInfo() << "[Agent] robot node =" << QString::fromStdString(robot_name)
+		        << "(canonical id" << canonical_robot_id_ << ")";
+
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Camera.dsr_rgb_fps", params.DSR_RGB_FPS);
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Camera.dsr_depth_fps", params.DSR_DEPTH_FPS);
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Lidar.dsr_lidar_fps", params.DSR_LIDAR_FPS);
@@ -184,7 +209,7 @@ void SpecificWorker::initialize()
 	        << "lidar=" << params.DSR_LIDAR_FPS
 	        << "(Hz; 0=every frame, <0=disabled)";
 
-	// Seed body node dimensions (read from graph/shadow.json; write defaults if absent).
+	// Seed body node dimensions (read from the graph as loaded from Agent.configFile; write defaults if absent).
 	if (auto body_node = G->get_node("body"); body_node.has_value())
 	{
 		// Re-write pos_x / pos_y with their current values to force a full node update.
@@ -211,7 +236,7 @@ void SpecificWorker::initialize()
 		qWarning() << __FUNCTION__ << "Body node not found in DSR graph";
 
 	// ── One-shot dump of the static mount edges (both directions) ─────────────
-	// Prints Shadow->room and body->kinova_arm_r once at startup so they can be
+	// Prints <robot>->room and body->kinova_arm_r once at startup so they can be
 	// eyeballed against the Webots scene. get_RT_pose_from_parent(child) is the
 	// parent->child transform; the inverse (child->parent) is what the DSR viewer
 	// tends to display, so we print both. Planar mounts → translation + yaw is enough.
@@ -234,7 +259,7 @@ void SpecificWorker::initialize()
 				parent, child, t.x(), t.y(), t.z(), yaw_deg(T),
 				child, parent, ti.x(), ti.y(), ti.z(), yaw_deg(Ti));
 		};
-		dump("room", "Shadow");
+		dump("room", robot_name.c_str());
 		dump("kinova_arm_r", "body");
 	}
 
@@ -270,13 +295,13 @@ void SpecificWorker::initialize()
 	// Advertise the plane PER SENSOR NODE so ANY agent can discover and subscribe
 	// without hardcoding topic/domain/QoS — consumers read it generically via
 	// rc::media::descriptor_from_graph(G, "<node>"). Each node carries only its own
-	// stream(s): rgb+depth on "zed", lidar on "lidar3D", imu on "imu". Only these
+	// stream(s): rgb+depth on "zed", lidar on "helios", imu on "imu". Only these
 	// small JSON strings live in the graph; the heavy frames stay out-of-band on the
 	// zero-copy plane. (Registering a new stream = one more (node, keys) line here.)
 	struct { const char* node; std::vector<std::string> keys; bool enabled; } media_ads[] = {
 		{"zed",     {"rgb", "depth"}, params.ENABLE_ZED},
 		{"ricoh",   {"rgb360"},       params.ENABLE_RICOH},
-		{"lidar3D", {"lidar"},        params.ENABLE_LIDAR},
+		{"helios",  {"lidar"},        params.ENABLE_LIDAR},
 		{"imu",     {"imu"},          params.ENABLE_IMU},
 	};
 	for (const auto& ad : media_ads)
@@ -346,10 +371,10 @@ void SpecificWorker::initialize()
 		.on_operating_enter = [this]()
 		{
 			qInfo() << "[SM] -> Operating: all required constraints satisfied";
-			// Post-sync check (once): a stale "Shadow" from an unclean previous exit may have
+			// Post-sync check (once): a stale robot node from an unclean previous exit may have
 			// synced in AFTER initialize() ran; flag an unexpected id so a lingering illegal
 			// robot node is visible rather than silently colliding on the next update_node.
-			check_shadow_identity();
+			check_robot_identity();
 		},
 		.on_operating_loop = [this]()
 		{
@@ -375,7 +400,7 @@ void SpecificWorker::initialize()
 	QObject::connect(relayout_timer_, &QTimer::timeout, this, [this]()
 	{
 		if (not shutting_down_.load())
-			trigger_graph_layout_twopi();
+			trigger_graph_layout();
 	});
 
 	// Seed the known-node set with the graph as loaded, then relayout the DSR viewer whenever a NODE is
@@ -396,10 +421,10 @@ void SpecificWorker::initialize()
 	{
 		if (shutting_down_.load())
 			return;
-		trigger_graph_layout_twopi();
+		trigger_graph_layout();
 		wire_view_data_signal();   // enable right-click "View data" → live FPS viewer on media-plane nodes
 		wire_agent_status_overlay();   // colour every agent node by its live health (green/orange/red/grey)
-		check_shadow_identity();   // flag a stale/mismatched Shadow node ingested during bootstrap
+		check_robot_identity();   // flag a stale/mismatched robot node ingested during bootstrap
 	});
 }
 
@@ -429,18 +454,19 @@ void SpecificWorker::schedule_graph_relayout()
 		relayout_timer_->start(400);
 }
 
-// One-shot diagnostic: verify the robot node "Shadow" carries its canonical id from shadow.json. A stale
-// Shadow left by an unclean previous exit (which no peer reaps while etc/robot_concept.toml is absent)
-// surfaces here as an unexpected id — the same mismatch that makes update_node("Shadow") throw. We only
-// WARN: DSR keeps names unique, so this is the sole robot node and deleting it would be worse than the leak.
-void SpecificWorker::check_shadow_identity()
+// One-shot diagnostic: verify the robot node (Agent.robot_name) carries the canonical id declared in
+// Agent.configFile. A stale robot node left by an unclean previous exit (which no peer reaps while
+// etc/robot_concept.toml is absent) surfaces here as an unexpected id — the same mismatch that makes
+// update_node(robot_name) throw. We only WARN: DSR keeps names unique, so this is the sole robot node and
+// deleting it would be worse than the leak.
+void SpecificWorker::check_robot_identity()
 {
-	if (shadow_checked_ or shutting_down_.load())
+	if (robot_identity_checked_ or shutting_down_.load() or robot_name.empty())
 		return;
-	shadow_checked_ = true;
-	if (auto s = G->get_node(robot_name); s.has_value() and s->id() != kCanonicalShadowId)
+	robot_identity_checked_ = true;
+	if (auto s = G->get_node(robot_name); s.has_value() and s->id() != canonical_robot_id_)
 		qWarning() << "[graph] robot node" << QString::fromStdString(robot_name) << "has unexpected id"
-		           << s->id() << "(expected" << kCanonicalShadowId
+		           << s->id() << "(expected" << canonical_robot_id_
 		           << ") — likely a stale node from an unclean previous exit; stop agents with SIGTERM, "
 		              "not kill -9, and ensure etc/robot_concept.toml exists so peers reap it.";
 }
@@ -524,14 +550,14 @@ void SpecificWorker::compute()
 			// media_bps = LOCAL publish rate (SensorMediaPublisher, while robot_concept bridges) +
 			// EXTERNAL received rate (bytes summed by the DDS monitor, while a hardware producer owns
 			// the plane). Only one side is active per stream at a time, so the sum is the true rate
-			// either way. External-only nodes (helios/bpearl) carry no local publisher (keys empty).
+			// either way. External-only nodes (bpearl) carry no local publisher (keys empty). "helios" carries
+			// BOTH: our own publisher while bridging, the external producer otherwise.
 			const struct { const char* node; std::vector<std::string> keys;
 			               std::atomic<std::uint64_t>* ext; bool enabled; } media_nodes[] = {
 				{"zed",     {"rgb", "depth"}, &zed_bytes_,    params.ENABLE_ZED},
 				{"ricoh",   {"rgb360"},       &ricoh_bytes_,  params.ENABLE_RICOH},
-				{"helios",  {},               &helios_bytes_, params.ENABLE_LIDAR},
+				{"helios",  {"lidar"},        &helios_bytes_, params.ENABLE_LIDAR},
 				{"bpearl",  {},               &bpearl_bytes_, params.ENABLE_LIDAR},
-				{"lidar3D", {"lidar"},        nullptr,        params.ENABLE_LIDAR},
 				{"imu",     {"imu"},          nullptr,        params.ENABLE_IMU},
 			};
 			static std::map<std::string, std::uint64_t> last_ext_bytes;
@@ -633,14 +659,24 @@ void SpecificWorker::read_lidar_thread()
 	// DDS monitors for the two external lidar planes (created on demand once their
 	// descriptors are relayed onto the helios/bpearl nodes); reset when we bridge again.
 	std::unique_ptr<rc::media::LidarSubscriber> helios_sub, bpearl_sub;
+	// Retry cadence for bringing those monitors up. Once ONE of them is live this loop paces on its
+	// 100 ms wait_and_poll (~10 Hz), and the sleep below only fires when NEITHER exists — so an
+	// un-throttled retry re-asks the factory ten times a second for a plane whose producer simply is
+	// not up yet, and each miss speaks. Throttle to ~1 Hz, matching LidarPlaneReader's own discovery.
+	auto next_sub_attempt = std::chrono::steady_clock::time_point{};
 	while (!stop_lidar_thread && !shutting_down_.load())
 	{
 		if (not bridge_lidar_.load(std::memory_order_relaxed))
 		{
 			// lidar3d_dds owns the planes. Don't bridge — SUBSCRIBE to helios+bpearl only to
 			// report their FPS ([HeliosThread]/[BpearlThread] in compute()).
-			if (not helios_sub) helios_sub = rc::media::make_lidar_subscriber_from_graph(*G, "helios", "lidar");
-			if (not bpearl_sub) bpearl_sub = rc::media::make_lidar_subscriber_from_graph(*G, "bpearl", "lidar");
+			if (const auto now = std::chrono::steady_clock::now();
+			    (not helios_sub or not bpearl_sub) and now >= next_sub_attempt)
+			{
+				next_sub_attempt = now + std::chrono::seconds(1);
+				if (not helios_sub) helios_sub = rc::media::make_lidar_subscriber_from_graph(*G, "helios", "lidar");
+				if (not bpearl_sub) bpearl_sub = rc::media::make_lidar_subscriber_from_graph(*G, "bpearl", "lidar");
+			}
 			// Sum received bytes (count × stride × 4) so compute() can report each lidar's real SHM
 			// throughput as media_bps, not only its frame rate.
 			if (helios_sub)   // wait_and_poll paces the loop (blocks up to 100 ms)
@@ -750,7 +786,7 @@ void SpecificWorker::read_lidar_thread()
 				ys[i] = data.points[i].y * 0.001f;
 				zs[i] = data.points[i].z * 0.001f;
 			}
-			if (auto laser_node = G->get_node("lidar3D"); laser_node.has_value())
+			if (auto laser_node = G->get_node("helios"); laser_node.has_value())
 			{
 				G->add_or_modify_attrib_local<laser_X_att>(laser_node.value(), std::move(xs));
 				G->add_or_modify_attrib_local<laser_Y_att>(laser_node.value(), std::move(ys));
@@ -932,7 +968,7 @@ void SpecificWorker::read_rgbd_thread()
 					           : static_cast<std::uint64_t>(t);              // already ms
 				};
 				const auto &img = frame.image;
-				// Tag the TRUE channel order: the Webots-shadow bridge (our live CameraRGBDSimple source)
+				// Tag the TRUE channel order: the webots-bridge component (our live CameraRGBDSimple source)
 				// delivers RGB-ordered bytes, so publish them as FORMAT_RGB8. Consumers with an RGB8 path
 				// (retina RGB2BGR, the room/robot viewers no-swap) then get correct colours without the
 				// per-consumer BGR8 workaround. If a real ZED emitting true BGR is ever bridged here, tag
@@ -1018,15 +1054,30 @@ void SpecificWorker::build_media_groups()
 	//   mediaplanedds_proxy   Proxies.MediaPlaneDDS   zed_camera      port 12002
 	//   mediaplanedds1_proxy  Proxies.MediaPlaneDDS1  ricoh_omni_dds  port 10099
 	//   mediaplanedds2_proxy  Proxies.MediaPlaneDDS2  lidar3d_dds helios  port 11890
-	//   mediaplanedds3_proxy  Proxies.MediaPlaneDDS3  lidar3d_dds bpearl  port 11889
-	// The lidar group holds BOTH physical lidars under a single shared bridge_lidar_: it only
-	// stops bridging once BOTH relay a descriptor (see negotiate()). advertise_node/-streams is
-	// what robot_concept re-advertises as its own plane while it is the producer (bridging).
+	//   mediaplanedds3_proxy  Proxies.MediaPlaneDDS3  lidar3d_dds bpearl  port 11889 (Shadow only)
+	// The lidar group holds the physical lidars under a single shared bridge_lidar_: it only stops
+	// bridging once EVERY plane in the group relays a descriptor (see negotiate()). advertise_node/
+	// -streams is what robot_concept re-advertises as its own plane while it is the producer (bridging).
+	//
+	// A plane whose DSR node is ABSENT is not added at all. The graph loaded from Agent.configFile is
+	// what says which sensors this robot actually carries: shadow.json has helios + bpearl, p3bot.json
+	// has helios only. Registering a plane the robot does not have would leave `p.present` false for
+	// ever, so negotiate()'s all_up could never become true and "auto" would bridge over Ice for ever
+	// while the real helios DDS producer was ignored — a silent, permanent half-failure. Skipping it
+	// keeps the group honest: it waits for exactly the producers this robot has.
+	//
 	// Built imperatively (not a braced initializer_list): MediaPlane holds a std::future and is
 	// therefore move-only, which an initializer_list can't hold.
-	const auto add_plane = [](MediaGroup& g, std::string node,
-	                          const RoboCompMediaPlaneDDS::MediaPlaneDDSPrxPtr* prx)
+	const auto add_plane = [this](MediaGroup& g, std::string node,
+	                              const RoboCompMediaPlaneDDS::MediaPlaneDDSPrxPtr* prx)
 	{
+		if (not G->get_node(node).has_value())
+		{
+			qInfo() << "[MediaNeg]" << QString::fromStdString(g.tag) << ": no"
+			        << QString::fromStdString(node)
+			        << "node in the graph — this robot has no such sensor; plane not registered";
+			return;
+		}
 		auto& p = g.planes.emplace_back();
 		p.node = std::move(node);
 		p.proxy = prx;
@@ -1047,7 +1098,7 @@ void SpecificWorker::build_media_groups()
 
 	auto& lidar = media_groups_.emplace_back();
 	lidar.tag = "LiDAR"; lidar.bridge = &bridge_lidar_; lidar.source = &params.LIDAR_SOURCE;
-	lidar.enabled = &params.ENABLE_LIDAR; lidar.advertise_node = "lidar3D"; lidar.advertise_streams = {"lidar"};
+	lidar.enabled = &params.ENABLE_LIDAR; lidar.advertise_node = "helios"; lidar.advertise_streams = {"lidar"};
 	add_plane(lidar, "helios", &mediaplanedds2_proxy);
 	add_plane(lidar, "bpearl", &mediaplanedds3_proxy);
 
@@ -1109,9 +1160,13 @@ void SpecificWorker::negotiate(MediaGroup& g)
 
 	// Non-blocking per plane: harvest a completed async query (if ready), relay its descriptor,
 	// then relaunch. p.present carries the last completed result across ticks so the compute()
-	// thread never blocks on getMediaDescriptor(). all_up gates the group's bridge: a single-plane
-	// group needs its one producer up; the lidar group needs BOTH (helios+bpearl) up.
-	bool all_up = true;
+	// thread never blocks on getMediaDescriptor(). all_up gates the group's bridge: EVERY plane the
+	// group registered must have its producer up. build_media_groups() only registers planes whose
+	// DSR sensor node exists, so on a robot without a bpearl the lidar group is helios alone and
+	// all_up means exactly that. An EMPTY group registered nothing (the robot has none of these
+	// sensors) — treat that as "no external producer found" and keep bridging, rather than letting a
+	// vacuous all-of-nothing hand the plane to a DDS producer that does not exist.
+	bool all_up = not g.planes.empty();
 	for (auto& p : g.planes)
 	{
 		if (p.pending.valid() and p.pending.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
@@ -1178,11 +1233,11 @@ void SpecificWorker::relay_media_descriptor(const std::string& node_name, const 
 	rc::safe_update_node(*G, node.value());
 }
 
-void SpecificWorker::trigger_graph_layout_twopi()
+void SpecificWorker::trigger_graph_layout()
 {
-	// Re-run the DSR graph viewer's automatic layout with the "twopi" (radial tree) engine so the
-	// node/edge graph is legible at startup. No-op when the graph view is disabled (Agent.graph=false)
-	// or not yet created. Main-thread only (graph/GUI access).
+	// Re-run the DSR graph viewer's automatic layout with the Graphviz engine from Agent.graph_layout
+	// so the node/edge graph is legible at startup. No-op when the graph view is disabled
+	// (Agent.graph=false) or not yet created. Main-thread only (graph/GUI access).
 	const auto it = graph_viewers.find("");
 	if (it == graph_viewers.end() || !it->second)
 		return;
@@ -1194,9 +1249,10 @@ void SpecificWorker::trigger_graph_layout_twopi()
 
 	// Run now and once more queued, so the layout also happens after any pending node/edge
 	// update signals have been processed by the viewer.
-	graph_viewer->compute_layout("twopi");
+	const std::string alg = graph_layout_;
+	graph_viewer->compute_layout(alg.c_str());
 	QMetaObject::invokeMethod(graph_viewer,
-	                          [graph_viewer]() { graph_viewer->compute_layout("twopi"); },
+	                          [graph_viewer, alg]() { graph_viewer->compute_layout(alg.c_str()); },
 	                          Qt::QueuedConnection);
 }
 
@@ -1247,7 +1303,7 @@ void SpecificWorker::wire_agent_status_overlay()
 void SpecificWorker::open_stream_viewer(std::uint64_t node_id, const std::string &type)
 {
 	// Map the clicked DSR node to its media-plane stream and open the matching viewer. Names are the
-	// media descriptor node names authored in initialize() (zed/ricoh/lidar3D/imu) plus the per-device
+	// media descriptor node names authored in initialize() (zed/ricoh/helios/imu) plus the per-device
 	// lidar nodes (helios/bpearl). Each viewer builds its OWN subscriber via the shared factory here on
 	// the main thread (the required consumer pattern) and polls it itself.
 	std::string node_name;
@@ -1276,9 +1332,9 @@ void SpecificWorker::open_stream_viewer(std::uint64_t node_id, const std::string
 		if (auto sub = rc::media::make_image360_subscriber_from_graph(*G, "ricoh", "rgb360"))
 			viewer = new rc::viewers::Image360Viewer(std::move(sub), "ricoh — 360 panorama (media plane)");
 	}
-	else if (node_name == "lidar3D" or node_name == "helios" or node_name == "bpearl")
+	else if (node_name == "helios" or node_name == "bpearl")
 	{
-		// lidar3D aggregates both rings; a per-device node shows just that ring.
+		// each node shows its own ring.
 		std::unique_ptr<rc::media::LidarSubscriber> helios, bpearl;
 		if (node_name != "bpearl") helios = rc::media::make_lidar_subscriber_from_graph(*G, "helios", "lidar");
 		if (node_name != "helios") bpearl = rc::media::make_lidar_subscriber_from_graph(*G, "bpearl", "lidar");
@@ -1347,7 +1403,7 @@ void SpecificWorker::read_ricoh_thread()
 		return;
 	}
 	// Bridge Ice → media plane: pull the RAW stitched 360 panorama straight from the
-	// Camera360RGB source (the webots-shadow bridge) and republish it on the zero-copy
+	// Camera360RGB source (the webots-bridge component) and republish it on the zero-copy
 	// DDS plane (rc/ricoh/rgb). This bypasses RGBD_360's lidar-fusion hop, which caps the
 	// rate at ~12 Hz; the raw panorama runs at the bridge's full rate. RGB only (no depth).
 	bool empty_logged = false;

@@ -796,7 +796,6 @@ void SpecificWorker::load_params()
 	load_optional("Transforms.rt_twist_compensation", params.rt_twist_compensation);
 	load_optional("Transforms.overlay_csv_path", params.overlay_csv_path);
 	load_optional("Viewer2D.MaxLidarDrawPoints", params.max_lidar_draw_points);
-	load_optional("Lidar.Name", params.lidar_name);
 	load_optional("Lidar.HeliosName", params.lidar_helios_name);
 	load_optional("Lidar.BpearlName", params.lidar_bpearl_name);
 	load_optional("Lidar.StallTimeoutMs", params.lidar_stall_timeout_ms);
@@ -1298,14 +1297,13 @@ void SpecificWorker::init_lidar_media()
 	// Build the shared multi-plane reader on the main thread (graph already loaded). Its
 	// subscribers come up lazily inside poll() from the Operating control thread (throttled,
 	// descriptor-driven) — the sanctioned pattern; nothing touches DDS here. Prefers the two
-	// per-device planes (helios + bpearl, DEVICE frame) and falls back to the fused lidar3D
+	// per-device planes (helios + bpearl, DEVICE frame)
 	// plane; inner_eigen_api_ backs the device->robot RT transform + merge.
 	if (!params.lidar_use_media || lidar_reader_ || !G)
 		return;
 	lidar_reader_ = std::make_unique<rc::media::LidarPlaneReader>(
 		G, inner_eigen_api_.get(),
-		std::vector<std::string>{params.lidar_helios_name, params.lidar_bpearl_name},
-		params.lidar_name, "lidar");
+		std::vector<std::string>{params.lidar_helios_name, params.lidar_bpearl_name}, "lidar");
 }
 
 SpecificWorker::LidarPoll SpecificWorker::poll_lidar_media()
@@ -1314,7 +1312,7 @@ SpecificWorker::LidarPoll SpecificWorker::poll_lidar_media()
 		return LidarPoll::NoReader;
 
 	// One shared call: newest helios + bpearl sweeps merged into the ROBOT frame (static mounts),
-	// or the fused lidar3D sweep while bridging. interpolate=false — device->robot only crosses the
+	// sweep. interpolate=false — device->robot only crosses the
 	// static mount edges; the dynamic room<-robot leg is applied downstream by the tracker at the
 	// scan stamp. graph_state().robot_name is the frame the tracker treats as identity.
 	const std::string &robot_name = world_model_.graph_state().robot_name;

@@ -125,7 +125,7 @@ public:
     // Advertise the plane on a DSR node (templated to keep this header DSR-free).
     // `keys` selects which streams to write: empty ⇒ all (single-node bundle), or
     // a subset so each sensor node carries only its own stream(s) — e.g.
-    // {"rgb","depth"} on "zed", {"lidar"} on "lidar3D", {"imu"} on "imu".
+    // {"rgb","depth"} on "zed", {"lidar"} on "helios", {"imu"} on "imu".
     // Returns false if the node is absent (nothing written).
     template <class Graph>
     bool advertise(Graph& graph, const std::string& node_name,

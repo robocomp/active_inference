@@ -386,6 +386,18 @@ template <class Graph>
 make_lidar_subscriber_from_graph(Graph& graph, const std::string& node_name,
                                  const std::string& stream_key = "lidar")
 {
+    // Two DIFFERENT failures, and only one of them is news.
+    //   node ABSENT  → this robot does not carry that sensor (p3bot.json has helios but no bpearl,
+    //                  shadow.json has both). A permanent, expected state that no amount of waiting
+    //                  changes, so return nullptr SILENTLY and let the caller — which knows whether
+    //                  it needed that plane — say so once if it cares. Callers retry on a loop, so
+    //                  speaking here means speaking for ever: robot_concept's monitor thread paces on
+    //                  helios's 100 ms wait_and_poll and so re-asked for bpearl ~10×/s, swamping the
+    //                  log on P3Bot.
+    //   node PRESENT but no descriptor → the producer has not advertised yet. Transient and worth
+    //                  reporting, so this one still speaks.
+    if (not graph.get_node(node_name).has_value())
+        return nullptr;
     auto desc = descriptor_from_graph(graph, node_name);
     auto cfg  = desc.has_value() ? desc->subscriber_config(stream_key) : std::nullopt;
     if (not cfg.has_value())

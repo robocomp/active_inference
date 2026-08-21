@@ -1,0 +1,31 @@
+[[components]]
+name = "bridge"
+cwd = "~/robocomp/components/webots-p3bot/components/p3bot-bridge"
+cmd = "bin/P3BotBridge etc/config.toml"
+ice_name = "p3botbridge:tcp -h localhost -p 10006"
+
+[[components]]
+name = "zed"
+cwd = "~/robocomp/components/robocomp-robolab/components/hardware/camera/zed_camera"
+cmd = "bin/zed_camera etc/config_webots.toml"
+ice_name = "camerargbdsimple:tcp -h localhost -p 15009"
+
+
+[[components]]
+name = "camera360"
+cwd = "~/robocomp/components/robocomp-robolab/components/hardware/camera/ricoh_omni_dds"
+cmd = "bin/ricoh_omni_dds etc/config_webots.toml"
+ice_name = "camera360rgb:tcp -h localhost -p 10097"
+
+[[components]]
+name = "helios"
+cwd = "~/robocomp/components/robocomp-robolab/components/hardware/laser/lidar3d_dds"
+cmd = "bin/lidar3d_dds etc/config_helios_webots"
+ice_name = "lidar3d:tcp -h localhost -p 10098"
+
+
+[[components]]
+name = "joy"
+cwd = "~/robocomp/components/robocomp-robolab/components/hardware/external_control/python_xbox_controller"
+cmd = "bin/python_xbox_controller etc/config_shadow"
+ice_name = "python_xbox_controller:tcp -h localhost -p 11230"

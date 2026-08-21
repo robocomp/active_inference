@@ -171,7 +171,7 @@ rc::media::MediaDescriptor SensorMediaPublisher::make_descriptor(
 {
     // Empty `keys` ⇒ advertise EVERY configured stream (back-compat single-node
     // bundle). Otherwise emit only the requested keys, so each sensor node carries
-    // just its own stream(s): zed→rgb/depth, lidar3D→lidar, imu→imu.
+    // just its own stream(s): zed→rgb/depth, helios→lidar, imu→imu.
     const bool all = keys.empty();
     auto wanted = [&](const std::string& k)
     { return all or std::find(keys.begin(), keys.end(), k) != keys.end(); };

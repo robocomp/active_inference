@@ -85,14 +85,14 @@ nodes    = ["room_concept 5"]  # our own agent presence node (cleaned on shutdow
 
 # NOTE: the zero-copy media plane (RGB + LiDAR consumers) needs NO domain/topic
 # config. They are read from the media descriptor JSON the producer (robot_concept)
-# writes on the "zed"/"lidar3D" nodes, so the consumer always uses the producer's
+# writes on the "zed"/"helios" nodes, so the consumer always uses the producer's
 # dedicated media domain (isolated from Agent.domain = 0). Subscribers are created
 # lazily, only once those nodes + descriptors exist.
 #
 # LiDAR source: LidarIngestor prefers the per-device high plane published by lidar3d_dds
 # on the "helios" node (points in the DEVICE frame, metres), transforming them to the robot
-# base via the DSR RT tree (body->helios). It falls back to the fused "lidar3D" plane (already
-# robot-frame) when helios is not live. Override the node/destination-frame names if needed:
+# base via the DSR RT tree (body->helios). robot_concept publishes onto that same node while it
+# bridges from Ice, so there is one name either way. Override the node/destination-frame names if needed:
 # [Media]
 # lidar_helios_name = "helios"
 # lidar_robot_frame = "body"
@@ -276,6 +276,16 @@ WeightReductionFactor    = 0.5   # Multiplicador para ejes secundarios
 WeightSmoothingAlpha     = 0.3   # EMA de transición entre perfiles
 
 # ── Modelo de ruido de movimiento ────────────────────────────────────────────
+UseCommandVelocityPrior = true   # Master switch for the COMMAND (joystick / controller) motion prior.
+                        # true  = historical behaviour: fused (command + encoder) when both channels
+                        #         are fresh, else measured, else command, else fallback_zero.
+                        # false = the command channel is still computed and logged (cmd_* columns keep
+                        #         their real values) but never enters the prediction; the selection
+                        #         collapses to measured / fallback_zero. A command is a statement of
+                        #         INTENT, not of motion — the wheels may not have obeyed it. Check the
+                        #         flag took by reading `motion_prior_source` in ai2_log.csv, NOT the
+                        #         cmd_* columns, which deliberately keep reporting what the channel
+                        #         WOULD have said.
 OdomNoiseScale  = 1.0   # Sin inflado artificial (anterior 1.5 distorsionaba
                          # el balance boundary/obs/motion en la pérdida RFE)
 CmdNoiseTrans   = 0.20  # Fracción de ruido translacional del comando (m/m)

@@ -47,7 +47,7 @@ class LidarIngestor
 {
 public:
     // Lightweight: stores deps + creates the room-side buffer. The DDS subscriber is
-    // NOT created here — it is brought up lazily in pump() once the "lidar3D" node +
+    // NOT created here — it is brought up lazily in pump() once the "helios" node +
     // its media descriptor exist, reading the DDS domain/topic from that JSON (no config).
     LidarIngestor(std::shared_ptr<DSR::DSRGraph> graph, rc::RoomConcept& room_concept,
                   const rc::RoomConfig& params);
@@ -103,7 +103,7 @@ private:
     rc::RoomConcept*      room_concept_ = nullptr;
     const rc::RoomConfig* params_       = nullptr;
     // Shared media-plane consumer: prefers the "helios" high plane (DEVICE frame), transformed to the
-    // robot base ("body") via the DSR RT tree; falls back to the fused "lidar3D" plane. Same reader
+    // robot base ("body") via the DSR RT tree. Same reader
     // every agent uses. inner_eigen_ backs its RT queries and must outlive it.
     std::unique_ptr<DSR::InnerEigenAPI>          inner_eigen_;
     std::unique_ptr<rc::media::LidarPlaneReader> reader_;

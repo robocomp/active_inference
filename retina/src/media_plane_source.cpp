@@ -1,5 +1,8 @@
 #include "media_plane_source.h"
 
+#include <array>
+#include <format>
+
 #include "../../common/media_transport/media_transport.h"
 #include "../../common/media_transport/lidar_plane_reader.h"
 
@@ -99,6 +102,32 @@ void MediaPlaneSource::drain_media_plane() const
         rx_rgb += media_rgb_sub_->wait_and_poll([this](const rc::media::ImageFrame& f, std::int64_t)
         {
             rx_rgb_total_.fetch_add(1, std::memory_order_relaxed);   // EXACT source rate (see header)
+            // ★★ARRIVAL PROBE — measure the cadence HERE, before the aligner, because everything
+            // downstream is latest-wins and therefore cannot tell a bursty source from a slow consumer.
+            // Two clocks, and the pair is the whole point:
+            //   stamp gap  = the CAMERA's own spacing between consecutive grabs
+            //   wall gap   = when they actually landed at this subscriber
+            // uniform stamps + bursty wall  ⇒ DDS/wait_and_poll is batching; the source is fine
+            // bursty stamps                 ⇒ the producer really does grab irregularly
+            // Measured indirectly up to now and it kept misleading me: 596 of ~1500 PROCESSED jumps were
+            // SHORTER than one 37.5 ms grab period, which no uniform source can produce — but processed
+            // jumps are what SURVIVED the aligner, so they could not settle where the irregularity began.
+            {
+                const auto now = std::chrono::steady_clock::now();
+                const std::uint64_t st_now = f.stamp_ms();
+                if (probe_prev_wall_.time_since_epoch().count() != 0 and probe_prev_stamp_ != 0
+                    and st_now > probe_prev_stamp_)
+                {
+                    const double wall = std::chrono::duration<double, std::milli>(now - probe_prev_wall_).count();
+                    const double sgap = static_cast<double>(st_now - probe_prev_stamp_);
+                    const auto bucket = [](double ms) -> int
+                    { return ms < 15 ? 0 : ms < 30 ? 1 : ms < 45 ? 2 : ms < 60 ? 3 : ms < 90 ? 4 : 5; };
+                    ++probe_stamp_hist_[bucket(sgap)];
+                    ++probe_wall_hist_[bucket(wall)];
+                }
+                probe_prev_wall_ = now;
+                probe_prev_stamp_ = st_now;
+            }
             const int w = static_cast<int>(f.width());
             const int h = static_cast<int>(f.height());
             if (w <= 0 || h <= 0)
@@ -162,8 +191,16 @@ void MediaPlaneSource::drain_media_plane() const
         const bool ds = media_rgb_sub_ and media_depth_sub_
                         and media_rgb_sub_->data_sharing_active()
                         and media_depth_sub_->data_sharing_active();
-        std::println("[MediaRx] 5s stats rgb={} depth={} rgb_stamp={} depth_stamp={} data_sharing={}",
-                     rx_rgb, rx_depth, latest_rgb_stamp_.load(), latest_depth_stamp_.load(), ds ? 1 : 0);
+        // Buckets: <15 | <30 | <45 | <60 | <90 | >=90 ms. A uniform 26.6 Hz source puts EVERY sample in
+        // the <45 bucket on both rows; anything else localises the irregularity to one clock or the other.
+        const auto hist = [](const std::array<int, 6>& h)
+        { return std::format("{}/{}/{}/{}/{}/{}", h[0], h[1], h[2], h[3], h[4], h[5]); };
+        std::println("[MediaRx] 5s stats rgb={} depth={} rgb_stamp={} depth_stamp={} data_sharing={}\n"
+                     "          arrival gaps <15/<30/<45/<60/<90/90+  stamp={}  wall={}",
+                     rx_rgb, rx_depth, latest_rgb_stamp_.load(), latest_depth_stamp_.load(), ds ? 1 : 0,
+                     hist(probe_stamp_hist_), hist(probe_wall_hist_));
+        probe_stamp_hist_.fill(0);
+        probe_wall_hist_.fill(0);
         rx_rgb = rx_depth = 0;
         last_rx_report = now_rx;
     }
@@ -244,12 +281,12 @@ bool MediaPlaneSource::init_lidar_media_plane(DSR::InnerEigenAPI* inner_eigen, s
 
     // Shared multi-plane reader (the same one every agent uses): prefers the two per-device planes
     // helios+bpearl (DEVICE frame), transformed to the robot frame + merged; falls back to the fused
-    // "lidar3D" plane. Domain/topic come from each plane's media descriptor (no config). Subscribers
+    // "helios"/"bpearl" planes. Domain/topic come from each plane's media descriptor (no config). Subscribers
     // come up lazily inside get_lidar3D()->poll() — nothing touches DDS here. inner_eigen (passed by
     // SceneProcessor, whose configure() ran first) backs the device->robot RT transform.
     lidar_reader_ = std::make_unique<rc::media::LidarPlaneReader>(
-        graph_, inner_eigen, std::vector<std::string>{"helios", "bpearl"}, "lidar3D", "lidar");
-    std::print("[retina] lidar media plane ready (shared reader: helios+bpearl → robot, lidar3D fallback)\n");
+        graph_, inner_eigen, std::vector<std::string>{"helios", "bpearl"}, "lidar");
+    std::print("[retina] lidar media plane ready (shared reader: helios+bpearl → robot)\n");
     return true;
 }
 
@@ -263,7 +300,7 @@ std::optional<LidarData> MediaPlaneSource::get_lidar3D(const std::string& robot_
     static std::uint64_t fresh = 0, served = 0;
     static auto last_report = std::chrono::steady_clock::now();
 
-    // Merge helios+bpearl (or fused lidar3D) into the ROBOT frame; callers apply the dynamic
+    // Merge helios+bpearl into the ROBOT frame; callers apply the dynamic
     // room<-robot pose at the scan stamp (interpolate=false here — only static mount edges crossed).
     if (!robot_name.empty())
         if (auto sweep = lidar_reader_->poll(robot_name, /*interpolate=*/false);
@@ -293,10 +330,10 @@ std::optional<LidarData> MediaPlaneSource::get_lidar3D(const std::string& robot_
                     any_live = true;
                     if (v == lidar_last_counted_[i]) { all_advanced = false; break; }
                 }
-                // One-shot: say how many planes the reader is actually merging. If this prints 1 the reader
-                // fell back to the FUSED lidar3D topic and there is no per-plane structure to intersect —
-                // the rate then reflects whatever that single stream publishes, and a 20 Hz reading would
-                // have to come from the producer side, not from here.
+                // One-shot: say how many planes the reader is actually merging. If this prints 1 only one
+                // of helios/bpearl is live and there is no per-plane structure to intersect — the rate then
+                // reflects whatever that single stream publishes, and a 20 Hz reading would have to come
+                // from the producer side, not from here.
                 static bool np_logged = false;
                 if (not np_logged and any_live)
                 {

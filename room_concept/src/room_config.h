@@ -35,9 +35,9 @@ struct RoomConfig
     float ROBOT_HEIGHT = 1.6f;     // m, obstacle cloud ceiling
 
     // Lidar
-    std::string LIDAR_NAME            = "lidar3D";   // legacy fused plane (already robot-frame, bridged)
-    // Per-device high LiDAR plane (lidar3d_dds): points arrive in the DEVICE frame (metres) and
-    // must be transformed device->robot via the DSR RT tree. Preferred over LIDAR_NAME when live.
+    // Per-device high LiDAR plane: points arrive in the DEVICE frame (metres) and must be
+    // transformed device->robot via the DSR RT tree. robot_concept publishes onto this same
+    // node when it bridges from Ice, so there is one name either way.
     std::string LIDAR_HELIOS_NAME     = "helios";
     // Destination frame for the device->robot transform (the mount RT edge parent, e.g. body->helios).
     std::string LIDAR_ROBOT_FRAME     = "";   // empty ⇒ auto-derived from the type-"robot" node at init
@@ -168,7 +168,7 @@ struct RoomConfig
 
     // Media plane (zero-copy DDS) — RGB (camera window) + LiDAR (LidarIngestor).
     // DDS domain + topics are NOT configured: they are read from the media descriptor
-    // JSON the producer authors on the "zed"/"lidar3D" nodes, so the consumer always
+    // JSON the producer authors on the "zed"/"helios" nodes, so the consumer always
     // uses the producer's dedicated domain. Subscribers are created lazily once those
     // nodes + descriptors exist.
     bool        LIDAR_USE_MEDIA   = true;   // false ⇒ DSR graph laser_* only
