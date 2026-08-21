@@ -116,6 +116,9 @@ private:
     // work has carried the robot somewhere with room. That is the whole design: the calibration is a
     // passenger on the day's driving, not a trip of its own.
     void dsr_update_calibration(const rc::RoomConcept::UpdateResult& res);
+    /// Create afford_calib with its contract already on it and NOT on offer. See the definition: the
+    /// consumer latches a contract once per node id, and this node is reused for every step.
+    bool ensure_calib_node();
     /// Liveness watchdog for a claimed-but-unreachable afford_room target. While the controller
     /// holds the execution claim the planner is deliberately idle, so if the controller can never
     /// get there (boxed in by an obstacle it cannot clear) NOTHING re-offers and the robot works

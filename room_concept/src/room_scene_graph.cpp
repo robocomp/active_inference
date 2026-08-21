@@ -23,6 +23,7 @@
 #include <QString>
 #include <QtCore/qdebug.h>
 #include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
+#include "../../common/affordance_protocol/affordance_protocol.h"   // write_contract, Contract::orient
 
 namespace rc
 {
@@ -559,6 +560,50 @@ void RoomSceneGraph::on_affordance_attr_changed(std::uint64_t node_id)
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+// Create afford_calib QUIESCENT, with its contract already on it. Returns true once the node exists
+// and may be armed; false on the cycle that creates it, so the contract reaches the wire first.
+bool RoomSceneGraph::ensure_calib_node()
+{
+    if (G_ == nullptr or dsr_room_id_ == 0) return false;
+    if (G_->get_node("afford_calib").has_value()) return true;
+
+    DSR::Node n = DSR::Node::create<affordance_node_type>("afford_calib");
+    G_->add_or_modify_attrib_local<level_att>(n, 3);
+    G_->add_or_modify_attrib_local<parent_att>(n, dsr_room_id_);
+    G_->add_or_modify_attrib_local<pos_x_att>(n, 300.f);
+    G_->add_or_modify_attrib_local<pos_y_att>(n, 260.f);
+    G_->add_or_modify_attrib_local<active_att>(n, false);
+    // ★NOT PENDING. "Not active and not pending" reads as Completed, which every selector rejects —
+    // so the node is inert from the instant it appears until we arm it deliberately.
+    G_->add_or_modify_attrib_local<epistemic_pending_att>(n, false);
+    // ★THE CONTRACT GOES IN BEFORE THE INSERT, not in a second update after it. Orient with NO
+    // completion predicate: "rotate in place to this bearing" is the whole affordance, and the
+    // executor completes it on reaching the bearing.
+    // ★★★THE TIMEOUT IS NOT DERIVED FROM THE TURN RATE, BECAUSE THIS SIDE DOES NOT KNOW IT. A first
+    // version computed 2 x (120 deg / 0.12 rad/s) = 35 s, taking 0.12 from the controller's code
+    // default — and the live config sets LockOnMaxYawRps = 0.06, at which one step takes 35 s exactly.
+    // Every step would have timed out at the instant it completed. A number derived from an assumption
+    // about the other agent is not derived, it is guessed with extra steps. So state the assumption
+    // instead, at the only level a producer can honestly make it: a base that cannot turn 120 degrees
+    // within two minutes is failing in a way worth reporting. Being generous costs nothing, because
+    // the sequence advances on MEASURED heading and a step that times out leaves it where it was.
+    constexpr float kStepPatienceS = 120.0f;
+    rc::affordance::write_contract(*G_, n,
+        rc::affordance::Contract::orient().stable(2).timeout_s(kStepPatienceS));
+    rc::provenance::stamp_creation(*G_, n);   // birth stamp: epoch ms + local ISO-8601
+
+    const auto id = G_->insert_node(n);
+    if (not id.has_value())
+    { qWarning() << "[calib] failed to create afford_calib"; return false; }
+    trigger_layout_();
+    std::print("[calib] afford_calib created QUIESCENT with its contract: orient, no predicate — the "
+               "rotation IS the goal; {:.0f}s per step, which is patience rather than a prediction. "
+               "It will be armed next cycle, so the contract can never be read late.\n", kStepPatienceS);
+    std::fflush(stdout);
+    return false;                              // arm on the NEXT cycle
+}
+
+///////////////////////////////////////////////////////////////////////////////
 // afford_calib — the calibration pivot, offered as a sequence of ordinary Orient affordances.
 //
 // ★THE PASSIVE HALF RUNS UNCONDITIONALLY. Every tour the robot makes serving a standpoint turns, and
@@ -634,33 +679,17 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
     if (not bearing.has_value()) return;
     calib_bearing_rad_ = static_cast<float>(*bearing);
 
-    // ★THE CONTRACT IS AUTHORED ONCE, ON THE NODE, AT BIRTH. Orient with NO completion predicate:
-    // "rotate in place to this bearing" is the whole affordance, and the executor completes it on
-    // reaching the bearing.
-    // ★★★THE TIMEOUT IS NOT DERIVED FROM THE TURN RATE, BECAUSE THE PRODUCER DOES NOT KNOW IT. The
-    // first version computed 2 x (120 deg / 0.12 rad/s) = 35 s, taking 0.12 from the code default —
-    // and the live config sets LockOnMaxYawRps = 0.06, at which one step takes 35 s exactly. Every
-    // step would have timed out at the instant it completed, and the pivot would never have advanced
-    // once. A number derived from an assumption about the other agent is not derived, it is guessed
-    // with extra steps.
-    // ★So state the assumption instead, at the only level the producer can honestly make it: a base
-    // that cannot turn 120 degrees within two minutes is failing in a way worth reporting. Being
-    // generous costs nothing here — the sequence advances on MEASURED heading, never on the steps it
-    // issued, so a step that times out simply leaves the pivot where it was.
-    const auto write_calib_contract = [this]
-    {
-        if (calib_contract_written_) return;
-        auto n = G_->get_node(calib_manager_.managed_node_id());
-        if (not n.has_value()) return;
-        constexpr float kStepPatienceS = 120.0f;
-        rc::affordance::write_contract(*G_, n.value(),
-            rc::affordance::Contract::orient().stable(2).timeout_s(kStepPatienceS));
-        G_->update_node(n.value());
-        calib_contract_written_ = true;
-        std::print("[calib] afford_calib authored: orient, no predicate — the rotation IS the goal; "
-                   "{:.0f}s per step, which is patience rather than a prediction (this side cannot "
-                   "know the consumer's turn rate)\n", kStepPatienceS);
-    };
+    // ★★★A NODE MUST CARRY ITS CONTRACT BEFORE IT CAN BE CLAIMED, and getting this wrong would have
+    // been invisible. The consumer latches the contract ONCE PER node_id — resolve_target_contract
+    // early-returns when the id is unchanged — and afford_calib is ONE node reused for all twelve
+    // steps. So a first read that lands before the contract is on the wire leaves the consumer
+    // believing this is a Reach FOR THE WHOLE SESSION: it would treat the robot's own pose as a
+    // standpoint, arrive instantly, and report `satisfied` twelve times without turning at all.
+    // ★Writing the contract straight after publish_target makes that window small. Creating the node
+    // QUIESCENT removes it: born with `epistemic_pending = false`, which no selector will claim,
+    // carrying its contract in the SAME insert, and armed by the next cycle's publish_target. The
+    // offer is one cycle later; the contract can never be one cycle late.
+    if (not ensure_calib_node()) return;
 
     const bool published = calib_manager_.publish_target(
         G_, dsr_room_id_,
@@ -668,9 +697,8 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
         res.robot_pose.translation().y(),        // publishing somewhere else would be a claim we cannot make
         calib_bearing_rad_,
         static_cast<float>(calib_.marginal_gain_nats()),
-        [this, write_calib_contract]() { write_calib_contract(); trigger_layout_(); },
+        [this]() { trigger_layout_(); },
         [this]() { trigger_layout_(); });
-    write_calib_contract();                      // also on the re-arm path, where no node is inserted
 
     if (published)
     {

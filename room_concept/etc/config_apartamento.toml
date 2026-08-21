@@ -777,8 +777,17 @@ WEpistemic         = 0.1    # EFE weight: information gain
 WPragmatic         = 3.0    # EFE weight: goal proximity
 WHeading           = 2.0    # EFE weight: heading alignment
 WBoundary          = 10.0   # EFE weight: room boundary avoidance
-PublishAffordance  = true    # publish the room exploration affordance. Set false so the room never offers an
+PublishAffordance  = false   # publish the room exploration affordance. Set false so the room never offers an
                              # affordance and can't out-compete object affordances in the controller's EFE
+                             # ★OFF 2026-08-21 FOR THE CALIBRATION PIVOT RUN, and it has to be off for
+                             # that run to mean anything. afford_calib publishes at the robot's own pose
+                             # so its EFE score IS its gain, and it eats that gain as it turns — its own
+                             # rotation feeds the passive estimator that prices it. Against afford_room's
+                             # measured 0.70 (1.20 as incumbent) it wins steps 1-2, is marginal at 3, and
+                             # loses from 4 on: it would abandon HALF-CLOSED, and a partial turn closes
+                             # nothing, so the run would cost the motion and return no measurement.
+                             # ★TURN THIS BACK ON when the pivot run is done — with it off the robot does
+                             # not explore and room's pose belief stops being refreshed by exploration.
 
 # ---- Approach speed ----
 KRot               = 3.5    # proportional gain for heading correction
