@@ -241,6 +241,18 @@ struct HoodInstance
     // Verification-gated removal diagnostics: p_detect (how resolving this view is), central_frac, and the
     // decayed go-verify surprise. Show why an absence went to REMOVAL (high p_detect) vs VERIFICATION (low).
     float dbg_ex_pdetect = 1.0f, dbg_ex_central = 0.0f;
+    // ★★VERIFIED MEANS CONFIRMED FROM TWO DIFFERENT DIRECTIONS — not "confirmed a lot".
+    // The first cut of this accumulated Σ p_detect·in_fov_frac and called 1.0 "one whole look". That is
+    // wrong in the one case the field exists for: a PERSISTENT false alarm, stared at from the bearing
+    // that produces it, racks up that mass as fast as a real object and would be marked verified — which
+    // would then EXCLUDE from the p_FA field exactly the phantoms it is meant to learn from.
+    // What separates the two is not how much confirmation there is but from HOW MANY DIRECTIONS: an
+    // accidental alignment of features that fools the classifier from one bearing generally does not
+    // survive a move to another, and a real object does. That is the same premise the field is keyed on,
+    // so the criterion is expressed in the field's OWN bearing bins — no second angle constant.
+    int   first_confirm_bin = -1;   // field bearing bin of the first confirming observation
+    bool  ever_verified     = false;   // a later confirm arrived in a DIFFERENT bin
+
 
     // ── Predicted in-image hood ROI (current model projected through the camera extrinsic) ───────
     // Normalised so the controller is resolution-agnostic: drive offset→0 (centre the hood in the frame)

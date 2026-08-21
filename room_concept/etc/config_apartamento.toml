@@ -501,6 +501,16 @@ WeightReductionFactor    = 0.5   # Multiplicador para ejes secundarios
 WeightSmoothingAlpha     = 0.3   # EMA de transición entre perfiles
 
 # ── Modelo de ruido de movimiento ────────────────────────────────────────────
+UseCommandVelocityPrior = true   # Master switch for the COMMAND (joystick / controller) motion prior.
+                        # true  = historical behaviour: fused (command + encoder) when both channels
+                        #         are fresh, else measured, else command, else fallback_zero.
+                        # false = the command channel is still computed and logged (cmd_* columns keep
+                        #         their real values) but never enters the prediction; the selection
+                        #         collapses to measured / fallback_zero. A command is a statement of
+                        #         INTENT, not of motion — the wheels may not have obeyed it. Check the
+                        #         flag took by reading `motion_prior_source` in ai2_log.csv, NOT the
+                        #         cmd_* columns, which deliberately keep reporting what the channel
+                        #         WOULD have said.
 OdomNoiseScale  = 1.0   # Sin inflado artificial (anterior 1.5 distorsionaba
                          # el balance boundary/obs/motion en la pérdida RFE)
 CmdNoiseTrans   = 0.20  # Fracción de ruido translacional del comando (m/m)

@@ -55,7 +55,7 @@ void HoodExistence::update_and_remove(HoodFitter& fitter, ConceptLidarIngestor* 
     rc::exist::SensorModel sm;
     sm.sensor_sigma_m = cfg_.existence_sensor_sigma_m;
     sm.detection_prob = cfg_.existence_detection_prob;
-    sm.clutter_prob   = cfg_.existence_clutter_prob;
+    sm.clutter_prob   = cfg_.existence_clutter_prob;   // PRIOR; the per-place value is looked up below
 
     // Absence-confidence vs range: a miss at long range is weak evidence of removal (the sensor likely could
     // not resolve the object). c = (range_ref/range)^power capped at 1 → 1 up close, →0 far. Scales the FREE
@@ -99,6 +99,21 @@ void HoodExistence::update_and_remove(HoodFitter& fitter, ConceptLidarIngestor* 
         // which is the robot; the camera rides the same body, so one call covers both channels.
         inst.existence.note_viewpoint(origin.x(), origin.y(), bs.cx, bs.cy,
                                       0.5f * std::hypot(bs.w, bs.h));
+
+        // ★★THE p_FA LOOKUP — the false-alarm rate becomes a PROPERTY OF THE PLACE AND DIRECTION, not a
+        // constant. sm.clutter_prob was 0.05 everywhere, in every agent, never measured; here it is the
+        // posterior for THIS (cell x bearing x label), shrunk toward that same 0.05 so an unvisited cell
+        // is bit-for-bit the old behaviour. Where the robot has come back and denied an object before, a
+        // detection now confirms LESS: llr_occ = log(pd/pc) shrinks as pc rises.
+        // ★Re-read from the config prior every instance, every cycle — sm is reused around the loop and a
+        // stale lookup would leak one instance's place into the next one's likelihood.
+        // ★The bearing convention is instance->camera, matching PhantomEvent::view_bearing exactly; the
+        // field is only coherent if the writer and the reader agree, and they are 200 lines apart.
+        sm.clutter_prob = p_fa_
+            ? p_fa_->estimate("hood", bs.cx, bs.cy,
+                              std::atan2(origin.y() - bs.cy, origin.x() - bs.cx),
+                              cfg_.existence_clutter_prob)
+            : cfg_.existence_clutter_prob;
         bool integrated = false;
 
         // SILHOUETTE / MASK channel (pixel-level) — CAMERA clock: project the hoodtop silhouette and compare,
@@ -216,6 +231,24 @@ void HoodExistence::update_and_remove(HoodFitter& fitter, ConceptLidarIngestor* 
                 // that: `observed` requires a fresh mask OF THIS LABEL, which a phantom by definition does
                 // not get. False positives are already priced by clutter_prob inside the likelihood ratio,
                 // which is where that risk belongs — not in a geometric visibility term.
+                // ★★VERIFICATION = A SECOND DIRECTION. Recorded here because this is the one place that
+                // knows a mask of THIS label arrived this cycle. A confirm from a new bearing bin is what
+                // separates a real object from an accidental alignment that only fools the classifier
+                // from where it was born — and it is also the beta counterweight that stops the p_FA
+                // field being a one-way ratchet.
+                if (observed and p_fa_)
+                {
+                    const float vb = std::atan2(origin.y() - bs.cy, origin.x() - bs.cx);
+                    const int   bin = p_fa_->bearing_bin(vb);
+                    if (inst.first_confirm_bin < 0)
+                        inst.first_confirm_bin = bin;
+                    else if (bin != inst.first_confirm_bin and not inst.ever_verified)
+                    {
+                        inst.ever_verified = true;
+                        rc::field::note_verified(*p_fa_, "hood", bs.cx, bs.cy, vb,
+                                                 p_detect, sil.in_fov_frac());
+                    }
+                }
                 const float p_confirm = observed ? 1.0f : p_detect;
                 ev_sil.log_odds_delta = p_confirm * d_full;
                 inst.dbg_ex_sil_free_eff = raw_free * p_detect;   // diagnostic: absence mass actually admitted

@@ -172,6 +172,10 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.WeightReductionFactor", room_concept.params.weight_reduction_factor);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.WeightSmoothingAlpha", room_concept.params.weight_smoothing_alpha);
 
+    // Master switch for the command (joystick / controller) motion prior — see
+    // Params::use_command_velocity_prior. Off ⇒ the channel is still computed and logged but never
+    // enters the prediction, so motion_prior_source collapses to measured / fallback_zero.
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.UseCommandVelocityPrior", room_concept.params.use_command_velocity_prior);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.CmdNoiseTrans", room_concept.params.cmd_noise_trans);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.CmdNoiseRot", room_concept.params.cmd_noise_rot);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.CmdNoiseBase", room_concept.params.cmd_noise_base);

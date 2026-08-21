@@ -153,6 +153,51 @@ struct OccGridParams
     // reading as confidently occupied. Continuously-observed cells are unaffected (their evidence is renewed every
     // cycle). 0 ⇒ off (original never-forget behaviour).
     float forget_half_life_s = 10.0f;
+    // ── ...but forget OCCUPANCY only. ──
+    // The paragraph above is right about an unobserved OCCUPIED cell and wrong about an unobserved FREE one.
+    // Decaying (α,β) toward Jeffreys is symmetric, so a well-cleared cell (α≈0.5, β≈39.5, P≈0.012) also drifts
+    // back toward P=0.5 — the map quietly un-learns free space it paid beams to establish. That costs nothing in
+    // the POLYGON channel (lo_ decays toward 0 from below and can never cross the positive occ_set, so a free
+    // cell cannot re-latch) but it is published in the FIELD channel, which five concept agents consume for
+    // birth-surprise gating via common/birth_surprise/residual_field_reader.h.
+    // octomap::OcTreeStamped::degradeOutdatedNodes makes exactly this distinction — it degrades nodes for which
+    // isNodeOccupied() holds and leaves everything else alone. Free space that quietly reverts to unknown is what
+    // makes a planner refuse a corridor it cleared twenty seconds ago.
+    // So gate the decay on the cell holding NET OCCUPANCY evidence (lo_ > 0). Cells at or below zero — free, and
+    // never-observed — are left completely untouched. Stale-mass removal is unchanged bit-for-bit: every cell the
+    // old rule could un-latch had lo_ > occ_set > 0 and still decays identically.
+    // Measured 2026-08-19: the decay was doing 42% of ALL un-latching, so this term is load-bearing and the fix
+    // is to narrow WHAT it touches, not to lengthen the half-life (ForgetHalfLifeS=0 ratcheted occupied +56%).
+    bool forget_occupied_only = true;   // false ⇒ the old symmetric relax-everything behaviour
+    // ── ...and forget only what we could actually SEE. ──
+    // Measured 2026-08-20 on the live run: 750 of 2548 occupied cells (29%) were decaying every cycle purely
+    // because nothing was looking at them, and at a 10 s half-life a latched cell reaches occ_set after ~36 s
+    // unobserved. So an obstacle the robot drives away from vanishes from the published map in half a minute,
+    // in a static apartment where it certainly has not moved. The decay cannot distinguish "I stopped looking"
+    // from "it left", and treating the two the same is inventing evidence.
+    // The ray-DDA already knows the difference. slook_ marks every cell a beam passed through this cycle, set
+    // BEFORE the z-aware gate can reject that beam as free evidence — so it is a statement about VISIBILITY,
+    // not occupancy. Gate the decay on it: looked-at-and-not-confirmed decays, never-reached is held.
+    // This is what STVL achieves with a frustum test, but derived from the real rays, which also repairs STVL's
+    // documented weakness (it tests a point against an FOV cone with no occlusion model, so a voxel behind a
+    // wall is punished as if it had been observed).
+    // COST, stated plainly: a cell in a region the robot never revisits is now held indefinitely. That is the
+    // correct posterior for "no information", and one hit or one see-through re-decides it the moment the robot
+    // returns — but it does mean the time decay is no longer a blanket garbage collector.
+    bool forget_visible_only = true;    // false ⇒ decay every unobserved cell, wherever it is
+    // ── ...and at the precision the failed observation actually had. ──
+    // Every piece of EVIDENCE in this grid is scaled by w(r)=r0²/(r0²+r²) — hits AND misses, deliberately, so a
+    // far see-through barely clears and a distant obstacle PERSISTS until the robot closes on it. The decay was
+    // the one mechanism that ignored range entirely. So at 8 m every term that would defend a cell runs at 0.089
+    // of full strength while the term that erodes it runs at 1.0: an 11× mismatch, pointing at erasure.
+    // That is the same defect as a constant process noise (CONCEPT_AGENT_LIFECYCLE): the rate of forgetting must
+    // carry the same covariate as the rate of learning. "I looked from 8 m and did not confirm" is weak evidence
+    // of absence — the beam may simply have passed BESIDE the obstacle — and must erode the posterior weakly.
+    // So scale the per-cycle decay by the SAME w(r), r measured from the observer to the cell:
+    //     γ_cell = 1 − (1 − γ) · w(r)
+    // Near cells keep the configured half-life exactly; far cells forget proportionally slower, with no new
+    // parameter (r0 is hit_reliable_range_m, already the precision scale for every other term).
+    bool forget_range_weighted = true;  // false ⇒ one half-life everywhere, regardless of how well we saw it
     // (There was a z_band_relax knob here that made the remembered z-band CONTRACT. It was removed: the theory
     // behind it had the sign backwards and it caused a measured 3.0× clearing regression. See the long note at
     // the zmn_/zmx_ update in commit_cycle before considering anything like it again.)
@@ -205,6 +250,16 @@ struct SweepDiag
                                   // the two were one counter and mean opposite things about the same cell.
     long marks_suppressed = 0;    // returns whose ray was traced but whose endpoint was not allowed to mark
                                   // (mark_mask==0). 0 while the ZED feed is on ⇒ the mask is not plumbed through.
+    long cells_decayed = 0;       // unobserved cells the forgetting term actually touched this cycle
+    double decay_weight_sum = 0.0;// Σ w(r) over the cells decayed this cycle. decay_weight_sum/cells_decayed is
+                                  // the MEAN precision of the observations that failed to confirm — well below 1
+                                  // means the decaying population is mostly far away and is now eroding slowly,
+                                  // which is the whole point of forget_range_weighted.
+    long cells_unseen  = 0;       // unobserved cells SPARED because no beam reached them at all this cycle
+                                  // (occluded / out of range / behind the robot) — forget_visible_only
+    long cells_held    = 0;       // unobserved cells it SPARED because they carry free/no evidence
+                                  // (forget_occupied_only). decayed+held = the whole unobserved population, so
+                                  // the ratio says how much of the map the old symmetric rule was un-learning.
 };
 
 // One connected occupied region → footprint + z-band, ready for the scene-graph publish (box + hull).
@@ -269,7 +324,7 @@ public:
     // set_floor_plane; the value persists until changed. See OccGridParams self_body_* for why this belongs in
     // the sensor model rather than in a read-out mask.
     void set_self_body(float x, float y, float radius_m)
-    { self_x_ = x; self_y_ = y; self_r_ = radius_m; }
+    { self_x_ = x; self_y_ = y; self_r_ = radius_m; observer_valid_ = true; }
 
     // Integrate one sensor sweep (room frame). origin = sensor position (room). See the header comment.
     //
@@ -424,6 +479,9 @@ private:
     float fp_rms_ = 0;                            // that fit's own residual scatter (m) = σ of the floor component
     float dev_floor_z0_ = -1.0f;                  // per-device nav band (m); <0 ⇒ unset ⇒ use p_.floor_z0
     float self_x_ = 0, self_y_ = 0, self_r_ = 0;  // robot body envelope this cycle (room frame); r<=0 ⇒ term off
+    bool  observer_valid_ = false;                // set_self_body has been called ⇒ self_x_/self_y_ are a real
+                                                  // observer position (range-weighted decay needs it; without it
+                                                  // the origin would masquerade as the robot and skew the range)
     int   w_ = 0, h_ = 0;
     std::vector<float>        lo_;                 // log-odds (drives the hard occupied() latch — unchanged)
     std::vector<float>        a_, b_;              // Beta(α,β) posterior over occupancy probability (the belief field)
@@ -434,6 +492,8 @@ private:
     // Per-CYCLE scratch (reset on begin_cycle, folded once in commit_cycle) — the fix for miss over-counting.
     std::vector<std::uint8_t> shit_;               // this cycle: cell received an endpoint hit (any beam)
     std::vector<std::uint8_t> smiss_;              // this cycle: cell was seen-through (z-aware) by any beam
+    std::vector<std::uint8_t> slook_;              // this cycle: ANY beam reached this column (visibility, set
+                                                   // before the z-gate) — gates the forgetting term
     std::vector<float>        shz_lo_, shz_hi_;    // this cycle: accumulated hit z-band for shit_ cells
     std::vector<float>        shit_w_;             // this cycle: MAX precision weight of the hits on this cell (range×motion)
     std::vector<float>        smiss_w_;            // this cycle: MAX precision weight of the see-throughs on this cell

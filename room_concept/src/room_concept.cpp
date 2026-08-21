@@ -188,6 +188,13 @@ namespace rc
             }
         }
 
+        // Announce the non-default motion-prior configuration, so a run whose predictions came from
+        // the encoder alone says so in its own log rather than only in a config file nobody re-reads.
+        if (not params.use_command_velocity_prior)
+            qInfo() << "[RoomConcept] UseCommandVelocityPrior = false: the commanded (joystick/controller)"
+                    << "velocity is computed and logged but EXCLUDED from the motion prior;"
+                    << "motion_prior_source will read measured / fallback_zero, never fused / command.";
+
         loc_running_ = true;
         loc_thread_ = std::thread(&RoomConcept::run, this);
     }
@@ -2927,7 +2934,15 @@ namespace rc
             model_->set_prediction(pos, theta, precision);
         };
 
-        if (selection.command_prior.valid && selection.command_prior.fresh
+        // The command channel enters the prediction only when the config flag allows it
+        // (RoomConcept.UseCommandVelocityPrior, see Params::use_command_velocity_prior). The prior
+        // itself was computed above regardless — compute_odometry_prior() also advances
+        // last_lidar_timestamp, and the cmd_* CSV columns stay honest about what the channel WOULD
+        // have said. Gating here, not at the source, is what keeps those two facts true.
+        const bool command_usable = params.use_command_velocity_prior
+            and selection.command_prior.valid and selection.command_prior.fresh;
+
+        if (command_usable
             && selection.measured_prior.valid && selection.measured_prior.fresh
             && last_update_result.ok)
         {
@@ -2954,7 +2969,7 @@ namespace rc
             const Eigen::Vector3f predicted = predicted_mean_from_prior(selection.selected_prior);
             set_model_prediction(predicted.head<2>(), predicted[2], selection.selected_prior.covariance_eigen.inverse());
         }
-        else if (selection.command_prior.valid && selection.command_prior.fresh && last_update_result.ok)
+        else if (command_usable && last_update_result.ok)
         {
             selection.source = MotionPriorSource::Command;
             selection.selected_prior = selection.command_prior;

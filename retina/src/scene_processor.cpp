@@ -356,6 +356,11 @@ std::uint64_t SceneProcessor::get_frame_timestamp_ms() const
     return media_->get_frame_timestamp_ms();
 }
 
+std::uint64_t SceneProcessor::pending_rgb_stamp() const
+{
+    return media_ ? media_->pending_rgb_stamp() : 0;
+}
+
 std::optional<RGBDData> SceneProcessor::get_rgbd_frame_from_dsr() const
 {
     return media_->get_rgbd_frame_from_dsr();

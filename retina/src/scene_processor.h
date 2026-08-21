@@ -99,6 +99,9 @@ public:
                                                       std::uint64_t stamp) const;
     // DSR-native data accessors (no proxy needed)
     std::uint64_t get_frame_timestamp_ms() const;
+    // Cheap pre-check for the pull worker — see MediaPlaneSource::pending_rgb_stamp(). One atomic load,
+    // no assemble, no copy: it exists so the loop can reject an unchanged frame before paying for it.
+    std::uint64_t pending_rgb_stamp() const;
     // Latest LiDAR scan from the media plane (LidarFrame). std::nullopt if disabled or nothing received.
     std::optional<LidarData> get_lidar3D();
     std::optional<RGBDData> get_rgbd_frame_from_dsr() const;

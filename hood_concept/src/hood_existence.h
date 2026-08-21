@@ -14,6 +14,8 @@
 
 #pragma once
 
+#include "../../common/view_field/phantom_feed.h"   // rc::field:: — the learnt p_FA field (SHARED)
+
 #include "../../common/detectability/detectability.h"   // rc::detect::DetectorEnvelope
 
 #include <cstdint>
@@ -36,6 +38,13 @@ struct EvidenceGlobals;        // dashboard/evidence_monitor.h — removal count
 class HoodExistence
 {
 public:
+    // The LEARNT p_FA field, owned by SpecificWorker. Null ⇒ every lookup returns the configured prior, so
+    // an agent that never sets it behaves exactly as before.
+    // ★This class both READS the field (for clutter_prob) and writes the VERIFIED counterweight to it —
+    // and that is not the self-teaching loop the field's header warns about. Both credits are grounded in
+    // SENSOR observations (a resolving look; a confident denial), never in the field's own estimate, so
+    // nothing here can feed on its own output.
+    void set_p_fa_field(rc::field::ViewField* f) { p_fa_ = f; }
     // The other concepts' standing claims on room space, refreshed by the caller once per cycle
     // (one graph walk shared with the birth path). SHARED: a JUNIOR instance's occupancy is
     // discounted by how much of it a SENIOR object already explains — common/exclusion.
@@ -59,6 +68,7 @@ public:
                            const std::function<void(std::uint64_t, const HoodInstance&)>& on_remove = {});
 
 private:
+    rc::field::ViewField* p_fa_ = nullptr;
     const std::vector<rc::exclusion::Claim>* claims_ = nullptr;
     rc::detect::DetectorEnvelope det_env_{};
 

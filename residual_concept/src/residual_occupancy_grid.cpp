@@ -48,6 +48,7 @@ void OccupancyGrid::reset(float xmin, float ymin, float xmax, float ymax, const 
     zmn_.assign(lo_.size(), 0.0f);
     zmx_.assign(lo_.size(), 0.0f);
     dispz_.assign(lo_.size(), 0.0f);
+    slook_.assign(lo_.size(), 0);
     hit_.assign(lo_.size(), 0);
     occ_.assign(lo_.size(), 0);
     shit_.assign(lo_.size(), 0);
@@ -102,6 +103,7 @@ void OccupancyGrid::mark_hit_flag(int ix, int iy, float zlo, float zhi, float w)
 {
     if (not in_bounds(ix, iy)) return;
     const int i = idx(ix, iy);
+    slook_[i] = 1;                                       // hit ⇒ visible
     if (not shit_[i]) { shz_lo_[i] = zlo; shz_hi_[i] = zhi; shit_[i] = 1; shit_w_[i] = w; }
     else { shz_lo_[i] = std::min(shz_lo_[i], zlo); shz_hi_[i] = std::max(shz_hi_[i], zhi);
            shit_w_[i] = std::max(shit_w_[i], w); }   // the most RELIABLE (nearest/stillest) hit sets the weight
@@ -111,6 +113,9 @@ void OccupancyGrid::mark_miss_flag(int ix, int iy, float beam_z, float w)
 {
     if (not in_bounds(ix, iy)) return;
     const int i = idx(ix, iy);
+    // A beam reached this cell's column, whatever height it was at. That is a fact about VISIBILITY, not about
+    // occupancy, so it is recorded BEFORE the z-gate below can reject the beam as evidence — see slook_.
+    slook_[i] = 1;
     // Z-AWARE: a beam only carries FREE evidence for a cell if it passes THROUGH the cell's occupied z-band
     // (± margin), or the cell has never been hit (empty). A beam over/under a known obstacle carries none → skip.
     if (hit_[i] and (beam_z < zmn_[i] - p_.z_band_margin_m or beam_z > zmx_[i] + p_.z_band_margin_m))
@@ -138,6 +143,7 @@ void OccupancyGrid::mark_floor_endpoint_flag(int ix, int iy, float band_top, flo
     // Counted separately from mark_miss_flag's traverse gate: that one means "the beam went past at another
     // height", this one means "the beam went UNDER a floating surface". Same cell, opposite conclusions, and while
     // they shared one counter neither could be read.
+    slook_[i] = 1;                                       // the beam got here: this column was visible
     if (hit_[i] and zmn_[i] > band_top + p_.z_band_margin_m) { ++sd_.floor_endpoint_blocked; return; }
     if (not smiss_[i]) { smiss_[i] = 1; smiss_w_[i] = w; }
     else smiss_w_[i] = std::max(smiss_w_[i], w);
@@ -193,11 +199,44 @@ void OccupancyGrid::commit_cycle(float dt_s)
         }
         else if (gamma < 1.0f)
         {
+            // ASYMMETRY (see OccGridParams::forget_occupied_only): only a cell holding NET OCCUPANCY evidence
+            // forgets. A free cell has paid beams to establish that it is free and must not un-learn it just
+            // because we looked away; a never-observed cell is already at the prior and has nothing to relax.
+            // Narrowing the term this way removes zero stale-mass removal — every cell the old rule could
+            // un-latch had lo_ > occ_set > 0 and still decays below, identically.
+            // NB deliberately not `continue` — the concentration cap at the bottom of this loop must still run.
+            // VISIBILITY GATE (see OccGridParams::forget_visible_only). Decay is only meaningful for a cell we
+            // could actually have seen and did not confirm. If no beam reached this column at all this cycle —
+            // occluded, out of range, or simply behind us — then we have NO information about it, and relaxing
+            // its posterior toward the prior invents evidence we never collected. slook_ is set by the ray-DDA
+            // BEFORE the z-gate, so it means "a beam got here", independent of whether that beam could be used
+            // as free evidence. This is STVL's frustum gating derived from the actual rays instead of an
+            // analytic cone, which also fixes STVL's known weakness: a cell hidden BEHIND a wall is inside the
+            // FOV cone and would be punished by a cone test, but no ray reaches it, so it is correctly held.
+            if (p_.forget_visible_only and not slook_[i]) ++sd_.cells_unseen;
+            else if (p_.forget_occupied_only and lo_[i] <= 0.0f) ++sd_.cells_held;
+            else
+            {
+            ++sd_.cells_decayed;
+            // RANGE-WEIGHTED (see OccGridParams::forget_range_weighted): erode at the precision the failed
+            // observation actually had. w(r) is the same weight every hit and every miss already carries, so a
+            // cell we could only squint at from across the room forgets as slowly as it was learned. γ_cell
+            // interpolates between γ (perfect precision, w=1) and 1 (no decay at all, w=0).
+            float g = gamma;
+            if (p_.forget_range_weighted and observer_valid_ and p_.hit_reliable_range_m > 0.0f)
+            {
+                float wx, wy; cell_to_world(static_cast<int>(i % w_), static_cast<int>(i / w_), wx, wy);
+                const float r0 = p_.hit_reliable_range_m;
+                const float dx = wx - self_x_, dy = wy - self_y_;
+                const float wr = (r0 * r0) / (r0 * r0 + dx * dx + dy * dy);
+                g = 1.0f - (1.0f - gamma) * wr;
+                sd_.decay_weight_sum += wr;
+            }
             // UNOBSERVED this cycle → relax toward the prior. The log-odds decays toward 0 (no information) and
             // the Beta toward Jeffreys, so P → 0.5 and Var → max: "I no longer know what is there."
-            lo_[i] *= gamma;
-            a_[i] = p_.beta_prior_a + (a_[i] - p_.beta_prior_a) * gamma;
-            b_[i] = p_.beta_prior_b + (b_[i] - p_.beta_prior_b) * gamma;
+            lo_[i] *= g;
+            a_[i] = p_.beta_prior_a + (a_[i] - p_.beta_prior_a) * g;
+            b_[i] = p_.beta_prior_b + (b_[i] - p_.beta_prior_b) * g;
             // Release at occ_set, NOT at occ_clear. occ_clear is evidence of FREENESS ("I have seen through
             // here repeatedly"), which decay can never produce: lo relaxes toward 0 = NO information, so a
             // decaying cell would never cross a negative threshold and would stay latched forever — the very
@@ -213,6 +252,7 @@ void OccupancyGrid::commit_cycle(float dt_s)
                 // z-aware gate blocking future clearing beams on behalf of something no longer believed to exist,
                 // which is precisely the ratchet this change exists to break. Drop it: the cell is unknown again.
                 hit_[i] = 0; zmn_[i] = 0.0f; zmx_[i] = 0.0f;
+            }
             }
         }
         // Concentration cap: bound α+β ≤ κ_max (preserving the mean) → variance floor + bounded memory so old
@@ -281,6 +321,7 @@ void OccupancyGrid::integrate_sweep(const Eigen::Vector3f& origin, const std::ve
         sd_ = SweepDiag{};
         std::fill(shit_.begin(),  shit_.end(),  0);
         std::fill(smiss_.begin(), smiss_.end(), 0);
+        std::fill(slook_.begin(), slook_.end(), 0);
         std::fill(shit_w_.begin(), shit_w_.end(), 0.0f);
         std::fill(smiss_w_.begin(), smiss_w_.end(), 0.0f);
     }
@@ -806,7 +847,12 @@ bool OccupancyGrid::self_test()
     // This is the door_2 case: mass latched while visible, then permanently occluded. No clearing beam can ever
     // reach it, so the ONLY thing that can correct it is the passage of time.
     {
+        // Isolates the time-decay DYNAMICS. It simulates "unobserved" with an EMPTY sweep, which under the
+        // visibility gate means "sensor off" — no beam reaches anything, so the gate would (correctly) hold the
+        // whole map and this property could never fire. Property (15) owns the visibility axis; turn the gate
+        // off here so this one keeps testing exactly what it always tested.
         OccGridParams P6 = P; P6.forget_half_life_s = 1.0f;      // fast half-life so the test stays quick
+        P6.forget_visible_only = false;                          // see above — (15) owns this axis
         OccupancyGrid g; g.reset(-1, -1, 5, 5, P6);
         std::vector<Eigen::Vector3f> obst; face_returns(obst);
         for (int k = 0; k < 3; ++k) { g.integrate_sweep(sensor, obst); g.commit_cycle(0.05f); }
@@ -1068,6 +1114,135 @@ bool OccupancyGrid::self_test()
         check(gm.occupied(ix, iy), "the same returns must latch when marking is NOT masked");
     }
 
+    // ── (14) FORGETTING IS ASYMMETRIC — free space must NOT be un-learned ──
+    // Property (6) already proves an unobserved OCCUPIED cell relaxes toward unknown. Its counterpart is that an
+    // unobserved FREE cell must NOT: the robot paid beams to establish that free space, and a cell drifting back
+    // to P=0.5 because we looked away is the map un-learning its own work. Invisible to the polygon channel (a
+    // free cell cannot re-latch) but published in the FIELD, which five concept agents consume for birth gating.
+    // Both halves are asserted here so the asymmetry cannot be silently reverted from either side.
+    {
+        // Same reasoning as (6): this property isolates the OCCUPIED-vs-FREE axis and drives it with empty
+        // sweeps, so the visibility gate must be off or nothing decays at all and both halves pass vacuously.
+        OccGridParams PE = P; PE.forget_half_life_s = 1.0f;        // fast half-life so the test stays quick
+        PE.forget_visible_only = false;                            // (15) owns the visibility axis
+        OccupancyGrid g; g.reset(-1, -1, 5, 5, PE);
+        int fx, fy; g.world_to_cell(1.0f, 0.0f, fx, fy);           // a cell the beams pass THROUGH → free
+        int ox, oy; g.world_to_cell(3.0f, 0.0f, ox, oy);           // ...and the wall they end on → occupied
+        std::vector<Eigen::Vector3f> wall;
+        for (int i = 0; i < 12; ++i) wall.push_back({3.0f, -0.2f + 0.4f * (i / 11.0f), 0.60f});
+        for (int k = 0; k < 12; ++k) { g.integrate_sweep(sensor, wall); g.commit_cycle(0.05f); }
+        const float free_p0 = g.prob(fx, fy), free_v0 = g.prob_variance(fx, fy);
+        const bool occ0 = g.occupied(ox, oy);
+        // 200 cycles observing NOTHING at all.
+        const std::vector<Eigen::Vector3f> nothing;
+        long decayed = 0, held = 0;
+        for (int k = 0; k < 200; ++k)
+        { g.integrate_sweep(sensor, nothing); g.commit_cycle(0.05f);
+          decayed += g.last_sweep_diag().cells_decayed; held += g.last_sweep_diag().cells_held; }
+        const float free_p1 = g.prob(fx, fy), free_v1 = g.prob_variance(fx, fy);
+        std::printf("  forget-asym: FREE cell P %.4f→%.4f Var %.4f→%.4f | wall occ_before=%d after=%d | "
+                    "decayed=%ld held=%ld\n",
+                    free_p0, free_p1, free_v0, free_v1, occ0, g.occupied(ox, oy), decayed, held);
+        check(free_p0 < 0.10f, "the traversed cell must read as FREE before the idle period");
+        check(std::abs(free_p1 - free_p0) < 1e-4f, "an unobserved FREE cell must NOT drift back toward 0.5");
+        check(std::abs(free_v1 - free_v0) < 1e-4f, "...and must not lose confidence either");
+        check(occ0, "the wall must be occupied before the idle period");
+        check(not g.occupied(ox, oy), "an unobserved OCCUPIED cell must still be forgotten (property 6 holds)");
+        check(held > 0, "free/unknown cells must be COUNTED as held, not silently skipped");
+        // The control: with the asymmetry off, the same free cell DOES drift — proving the flag is the variable
+        // and this test is not passing for some unrelated reason.
+        OccGridParams PF = PE; PF.forget_occupied_only = false;
+        OccupancyGrid g2; g2.reset(-1, -1, 5, 5, PF);
+        for (int k = 0; k < 12; ++k) { g2.integrate_sweep(sensor, wall); g2.commit_cycle(0.05f); }
+        const float sym_p0 = g2.prob(fx, fy);
+        for (int k = 0; k < 200; ++k) { g2.integrate_sweep(sensor, nothing); g2.commit_cycle(0.05f); }
+        std::printf("  forget-asym: control (symmetric) FREE cell P %.4f→%.4f\n", sym_p0, g2.prob(fx, fy));
+        check(g2.prob(fx, fy) - sym_p0 > 0.05f, "the OLD symmetric rule must measurably un-learn free space");
+    }
+
+    // ── (15) FORGETTING IS VISIBILITY-GATED — an unseen obstacle must NOT decay ──
+    // Property (6) proves an occupied cell relaxes toward unknown when unobserved. That is right when we LOOKED
+    // and did not confirm, and wrong when no beam ever reached the cell: relaxing a posterior we collected no
+    // evidence about invents evidence. Measured live 2026-08-20: 29% of the occupied set was decaying every
+    // cycle purely because nothing was pointing at it, which is what makes a table vanish ~36 s after driving
+    // away. Both halves are asserted so the gate cannot be silently reverted from either side.
+    {
+        OccGridParams PG = P; PG.forget_half_life_s = 1.0f;   // fast half-life so the test stays quick
+        // (a) LOOKED-AT-BUT-NOT-CONFIRMED: an obstacle at 1 m, then beams that keep flying OVER it to a far wall.
+        //     Those beams DO reach its column (slook_ set) but are z-rejected as free evidence, so it must decay.
+        OccupancyGrid g; g.reset(-1, -1, 6, 6, PG);
+        int lx, ly; g.world_to_cell(1.0f, 0.0f, lx, ly);
+        std::vector<Eigen::Vector3f> low;
+        for (int i = 0; i < 12; ++i) low.push_back({1.0f, -0.1f + 0.2f * (i / 11.0f), 0.30f});
+        for (int k = 0; k < 6; ++k) { g.integrate_sweep(sensor, low); g.commit_cycle(0.05f); }
+        const bool looked_occ0 = g.occupied(lx, ly);
+        std::vector<Eigen::Vector3f> over;                     // same bearing, well above the obstacle's z-band
+        for (int i = 0; i < 12; ++i) over.push_back({5.0f, -0.5f + 1.0f * (i / 11.0f), 1.50f});
+        for (int k = 0; k < 200; ++k) { g.integrate_sweep(sensor, over); g.commit_cycle(0.05f); }
+
+        // (b) NEVER REACHED: the same obstacle, then 200 cycles of sweeps pointing the OTHER way entirely.
+        //     No beam touches its column, so it must be held — this is the case the live run was getting wrong.
+        OccupancyGrid g2; g2.reset(-1, -1, 6, 6, PG);
+        for (int k = 0; k < 6; ++k) { g2.integrate_sweep(sensor, low); g2.commit_cycle(0.05f); }
+        const bool unseen_occ0 = g2.occupied(lx, ly);
+        std::vector<Eigen::Vector3f> away;                     // opposite bearing: nothing near (1,0)
+        for (int i = 0; i < 12; ++i) away.push_back({-0.8f, -0.5f + 1.0f * (i / 11.0f), 0.60f});
+        long unseen = 0;
+        for (int k = 0; k < 200; ++k)
+        { g2.integrate_sweep(sensor, away); g2.commit_cycle(0.05f); unseen += g2.last_sweep_diag().cells_unseen; }
+
+        // (c) control: with the gate OFF, the never-reached obstacle DOES decay — the flag is the variable.
+        OccGridParams PH = PG; PH.forget_visible_only = false;
+        OccupancyGrid g3; g3.reset(-1, -1, 6, 6, PH);
+        for (int k = 0; k < 6; ++k) { g3.integrate_sweep(sensor, low); g3.commit_cycle(0.05f); }
+        for (int k = 0; k < 200; ++k) { g3.integrate_sweep(sensor, away); g3.commit_cycle(0.05f); }
+
+        std::printf("  forget-vis: looked-at occ %d->%d (lo=%.2f) | NEVER-SEEN occ %d->%d (lo=%.2f, unseen=%ld) | "
+                    "control gate-off occ->%d\n",
+                    looked_occ0, g.occupied(lx, ly), g.logodds(lx, ly),
+                    unseen_occ0, g2.occupied(lx, ly), g2.logodds(lx, ly), unseen, g3.occupied(lx, ly));
+        check(looked_occ0 and unseen_occ0, "the obstacle must be occupied before both idle periods");
+        check(not g.occupied(lx, ly), "a cell we LOOKED at and did not confirm must still be forgotten");
+        check(g2.occupied(lx, ly), "a cell NO beam reached must be HELD - no information is not evidence of absence");
+        check(unseen > 0, "never-reached cells must be COUNTED as unseen, not silently decayed");
+        check(not g3.occupied(lx, ly), "with the gate OFF the same cell must decay - the gate is the variable");
+    }
+    // ── (16) FORGETTING IS RANGE-WEIGHTED — a distant cell must erode as weakly as it was learned ──
+    // Every hit and every miss carries w(r)=r0^2/(r0^2+r^2), so a far see-through barely clears and a distant
+    // obstacle persists. The decay used to ignore range, so at 8 m every term defending a cell ran at 0.089 of
+    // full strength while the term eroding it ran at 1.0. Two identical cells, identical evidence, identical
+    // idle time, differing ONLY in how far the observer is: the near one must forget and the far one must not.
+    {
+        OccGridParams PI = P; PI.forget_half_life_s = 1.0f; PI.forget_visible_only = false;   // (15) owns that axis
+        std::vector<Eigen::Vector3f> obst;
+        for (int i = 0; i < 12; ++i) obst.push_back({1.0f, -0.1f + 0.2f * (i / 11.0f), 0.60f});
+        const std::vector<Eigen::Vector3f> nothing;
+        auto run = [&](bool weighted, float obs_x)
+        {
+            OccGridParams Q = PI; Q.forget_range_weighted = weighted;
+            OccupancyGrid g; g.reset(-1, -1, 6, 6, Q);
+            int cx, cy; g.world_to_cell(1.0f, 0.0f, cx, cy);
+            g.set_self_body(0.0f, 0.0f, 0.55f);                    // observe from the origin: range 1 m
+            for (int k = 0; k < 8; ++k) { g.integrate_sweep(sensor, obst); g.commit_cycle(0.05f); }
+            const float lo0 = g.logodds(cx, cy);
+            g.set_self_body(obs_x, 0.0f, 0.55f);                   // ...then the robot sits |obs_x - 1| m away
+            for (int k = 0; k < 60; ++k) { g.integrate_sweep(sensor, nothing); g.commit_cycle(0.05f); }
+            return std::pair{lo0, g.logodds(cx, cy)};
+        };
+        const auto [n0, n1] = run(true,  1.5f);    // observer 0.5 m from the cell  -> w ~ 0.96, decays normally
+        const auto [f0, f1] = run(true, 11.0f);    // observer  10 m from the cell  -> w ~ 0.059, must barely decay
+        const auto [u0, u1] = run(false, 11.0f);   // control: range-blind, same 10 m -> decays like the near one
+        std::printf("  forget-range: NEAR lo %.2f->%.2f | FAR lo %.2f->%.2f | FAR range-blind lo %.2f->%.2f\n",
+                    n0, n1, f0, f1, u0, u1);
+        check(n0 > 0.0f and f0 > 0.0f and u0 > 0.0f, "all three cells must start with occupancy evidence");
+        // Expected magnitudes, so the bar is derived rather than guessed: at 10 m w = r0^2/(r0^2+r^2) = 0.059,
+        // so gamma_cell = 1-(1-gamma)*w = 0.998 and 60 cycles retain 0.998^60 = 0.886 of the evidence. The near
+        // cell (w ~ 0.96) is at the configured half-life and keeps ~0.13. Bars set well inside both.
+        check(n1 < 0.2f * n0, "a NEAR cell must still forget at the configured half-life");
+        check(f1 > 0.8f * f0, "a FAR cell must erode only weakly - it was never confirmed at full precision");
+        check(f1 > n1, "the far cell must retain strictly more evidence than the near one, same idle time");
+        check(u1 < 0.5f * u0, "with the weighting OFF the far cell decays like the near one - it is the variable");
+    }
     std::printf("OccupancyGrid::self_test %s\n", ok ? "PASS" : "FAIL");
     return ok;
 }

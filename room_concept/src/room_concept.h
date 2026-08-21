@@ -190,6 +190,20 @@ public:
         float weight_smoothing_alpha = 0.3f;       // EMA smoothing for weight transitions
 
         // ===== Dual-Prior Fusion (command + odometry) =====
+        // Master switch for the COMMAND (joystick / controller) channel as a motion prior. On (the
+        // default) the selection is the historical one: Fused when both channels are fresh, else
+        // Measured, else Command, else FallbackZero. Off, the command channel is still COMPUTED and
+        // LOGGED (cmd_* columns, cmd_valid/cmd_fresh keep their real values) but never enters the
+        // prediction, so the selection collapses to Measured / FallbackZero and `motion_prior_source`
+        // in ai2_log.csv reads "measured" instead of "fused" — that column is how you check the flag
+        // actually took, since the cmd_* columns deliberately keep reporting what the channel WOULD
+        // have said. Computing it regardless is not waste: compute_odometry_prior() also advances
+        // last_lidar_timestamp, and skipping the call would break that bookkeeping.
+        // Purpose: an open-loop command is a statement of INTENT, not of motion — the wheels may not
+        // have obeyed it (slip, stall, a blocked robot). Turning it off asks what the encoder channel
+        // alone is worth, which is the A/B the fusion weights were never measured against.
+        bool use_command_velocity_prior = true;
+
         // ===== Prior covariance model =====
         // Process noise for commanded velocity prior (open-loop, less reliable)
         float cmd_noise_trans = 0.20f;   // Fractional position noise per meter of motion

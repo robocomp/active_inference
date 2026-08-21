@@ -67,6 +67,16 @@ struct PhantomEvent
     float in_fov_frac = 0.0f;
     float central_frac = 0.0f;
     int   fixated     = 0;           // was the killing observation an admissible (close/centred/still) view?
+    // ★★WAS THIS INSTANCE EVER VERIFIED IN ITS LIFE — the field that separates the two kinds of death.
+    // A DEATH is only evidence about the CLUTTER rate if the object was never really there. An instance
+    // that WAS confirmed under a resolving view and then died is a real object that LEFT (or one of our
+    // own removal defects); the detections that gave birth to it were CORRECT, and crediting them as
+    // false alarms teaches the p_FA field that real objects are hallucinations — exactly backwards.
+    // Measured 2026-08-17: of 26 fleet deaths the median age was 2129 cycles and the max 20210, with
+    // p_detect 0.85-0.95 — i.e. almost every death scored as a CONFIDENT false alarm under the weight
+    // alone, while being nothing of the kind. Only 2 rows were young enough to be classifier phantoms.
+    // Logged as well as consumed so an offline reader can filter exactly as the field does.
+    int   ever_verified = 0;
     float exist_logodds = 0.0f;      // existence L at the moment of the event
 
     std::string_view note;           // free-form ("logodds -3.04", "outside room", …)
@@ -96,7 +106,7 @@ public:
         // from files". Readers of this file must use std::from_chars for the same reason.
         f_.imbue(std::locale::classic());
         f_ << "seq,event,id,name,x,y,robot_x,robot_y,robot_yaw,view_bearing,range_m,age_cycles,"
-              "p_detect,in_fov_frac,central_frac,fixated,exist_logodds,note\n";
+              "p_detect,in_fov_frac,central_frac,fixated,ever_verified,exist_logodds,note\n";
         f_.flush();
     }
 
@@ -110,7 +120,7 @@ public:
            << e.robot_x << ',' << e.robot_y << ',' << e.robot_yaw << ','
            << e.view_bearing << ',' << e.range_m << ',' << e.age_cycles << ','
            << e.p_detect << ',' << e.in_fov_frac << ',' << e.central_frac << ','
-           << e.fixated << ',' << e.exist_logodds << ',' << e.note << '\n';
+           << e.fixated << ',' << e.ever_verified << ',' << e.exist_logodds << ',' << e.note << '\n';
         f_.flush();   // a crash mid-tour must not lose the tail; these are low-rate events
     }
 
