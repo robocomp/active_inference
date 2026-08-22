@@ -451,7 +451,21 @@ RerunMaxQueue     = 30
 # There is no learning-rate constant here on purpose. The gain is P*H/(H*P*H+R) with R taken from the
 # optimizer's posterior covariance, so an uninformative episode (parked robot: H->0) and a
 # low-confidence correction both teach ~nothing without any threshold saying so.
-MotionCalibEnabled  = true
+MotionCalibEnabled  = true   # A/B CONCLUDED 2026-08-22, restored to true.
+                        # Matched A/B, 262 m ON vs 105 m OFF, per-60s windows, bursts excluded:
+                        #   err/m  0.0263 -> 0.0303 when OFF  (+14.9%, t=2.67 z=2.31 SIGNIFICANT)
+                        #   floor  0.0179 -> 0.0220           (+23.3%, n.s. at n=6 windows)
+                        #   mm/m   6.90   -> 6.49             (unchanged, as predicted)
+                        # So it lowers the error FLOOR, it does not flatten the sawtooth: a ramp of
+                        # the same slope simply starts lower and takes longer to reach the gate.
+                        # What it found: a real body/mount yaw offset of -0.536 deg +/- 0.13,
+                        # reproducible across restarts from a cold zero and independently matching
+                        # straight-episode least squares (-0.532 deg). Forward scale converged to
+                        # 1.00004 +/- 0.003 -- i.e. there is NO forward scale error, and the earlier
+                        # -1% figure was an artifact of turns confounding the estimator.
+                        # NOT responsible for the large drop in optimizer firing seen between runs
+                        # (opt/m 0.34 vs 0.44 here, against 2.33 in an earlier run); that cause is
+                        # still unidentified, so do not credit this feature with it.
 MotionCalibYawP0    = 1.0e-4   # (rad)^2 initial uncertainty on the body/mount yaw offset (1σ ≈ 0.57°)
 MotionCalibYawQ     = 1.0e-7   # (rad)^2 per episode — see the note on Q below
 MotionCalibScaleP0  = 4.0e-4   # fractional² initial uncertainty on both scales (1σ ≈ 2%)
