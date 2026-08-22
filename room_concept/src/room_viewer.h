@@ -127,6 +127,12 @@ private:
     // Integrated odometry as the PREDICTOR consumes it — see get_predictor_delta().
     rc::TimeSeriesPlot* ts_plot_odo_ = nullptr;
     QPointer<rc::TimeSeriesPlot> ts_plot_conf_;    // localization confidence (raw, 0..1) over time
+    // Retained so the GT series can read robot_gt_* off the robot node each update.
+    std::shared_ptr<DSR::DSRGraph> graph_;
+    // Ground truth vs estimate, x / y / theta on one axis. SIMULATION ONLY: robot_concept writes
+    // robot_gt_* on the robot node just while the producer reports simulated, so on real hardware
+    // the attributes are absent, the series stay empty and the plot is simply flat.
+    QPointer<rc::TimeSeriesPlot> ts_plot_gt_;
     // Last state pushed to lbl_room_stable: -1 = never painted, 0 = red, 1 = green, 2 = amber (searching).
     // Tri-state so the very first update always applies a stylesheet, whichever state it reports.
     int room_stable_shown_ = -1;

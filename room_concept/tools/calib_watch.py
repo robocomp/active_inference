@@ -52,5 +52,34 @@ for i in range(len(t)):
     prev = it[i] > 0
 print(f"\nFINAL  k_v {kv[-1]:.5f} ({(kv[-1]-1)*100:+.2f}%)   k_w {kw[-1]:.5f} ({(kw[-1]-1)*100:+.2f}%)"
       f"   yaw {np.degrees(yaw[-1]):+.3f} deg   over {int(eps[-1])} episodes")
-print(f"pred error: first quarter p50 {np.median(mse[:len(mse)//4]):.4f}"
-      f"   last quarter p50 {np.median(mse[-len(mse)//4:]):.4f}   (should fall as the model learns)")
+# ── The metric ───────────────────────────────────────────────────────────────────────────────
+# Two figures of merit, both normalised by MOTION so they cannot be improved by standing still:
+#   * integral of the prediction error over distance driven -- the area under the sawtooth, which is
+#     what "the predictor is wrong between corrections" actually costs.
+#   * optimizations per metre -- how often the gate had to be rescued.
+# A p50 of the error is the wrong statistic: it is dominated by parked cycles, where the predictor
+# predicts nothing and therefore always looks accurate.
+dt = np.diff(t, prepend=t[0])
+dist = np.abs(dyl)
+tot_d = dist.sum()
+if tot_d > 1.0:
+    # PER WINDOW, never halves. A single pathological burst (the optimizer pinned near 100% for a
+    # few minutes, seen twice now) smeared across a half reads as a trend and is not one. Windows
+    # make a burst look like what it is: two bad rows among good ones.
+    print(f"\n{'window':>13} {'m driven':>9} {'opt/m':>8} {'err/m':>8} {'k_v':>9} {'k_w':>9} {'yaw deg':>8} {'eps':>5}")
+    W = 60.0
+    edges = np.arange(0, t[-1] + W, W)
+    for a_, b_ in zip(edges[:-1], edges[1:]):
+        m = (t >= a_) & (t < b_)
+        if m.sum() < 30: continue
+        dd = dist[m].sum()
+        if dd < 0.3:
+            print(f"{a_:6.0f}-{b_:5.0f}s {dd:9.2f}   (parked)                 "
+                  f"{kv[m][-1]:9.5f} {kw[m][-1]:9.5f} {np.degrees(yaw[m][-1]):+8.3f} {int(eps[m][-1]):5d}")
+            continue
+        print(f"{a_:6.0f}-{b_:5.0f}s {dd:9.2f} {(it[m]>0).sum()/dd:8.2f} "
+              f"{(mse[m]*dist[m]).sum()/dd:8.4f} {kv[m][-1]:9.5f} {kw[m][-1]:9.5f} "
+              f"{np.degrees(yaw[m][-1]):+8.3f} {int(eps[m][-1]):5d}")
+    print(f"  OVERALL {tot_d:8.2f} m   opt/m {(it>0).sum()/tot_d:.2f}"
+          f"   err/m {(mse*dist).sum()/tot_d:.4f}")
+

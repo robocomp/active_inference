@@ -69,7 +69,7 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
                                        rc::RoomConcept& room_concept,
                                        rc::EpistemicController& epistemic)
     : params_(&params), has_room_polygon_(has_room_polygon),
-      room_concept_(&room_concept), epistemic_(&epistemic)
+      room_concept_(&room_concept), epistemic_(&epistemic), graph_(graph)
 {
     // Own top-level window (parent == nullptr), NOT docked into the DSR graph viewer. This
     // decouples the layout GUI from Agent.graph, so the agent runs with graph=false (no
@@ -139,6 +139,29 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
     ts_plot_rates_->add_series("optimizer Hz",  QColor(230, 126, 34), 1.6f, 0);   // loc-thread solve rate
     custom_widget_->frame_series->layout()->addWidget(ts_plot_rates_);
 
+    // ── Ground truth vs estimate (SIMULATION ONLY) ────────────────────────────────────────────
+    // The localiser cannot be graded on its own residual: a confidently wrong pose scores like a
+    // right one (measured 2026-08-22, SDF 0.009 with the yaw 0.35 rad out). robot_concept publishes
+    // the Webots supervisor pose as robot_gt_* while the producer reports simulated; this plots it
+    // against what the localiser publishes, so the two are visible side by side rather than inferred.
+    // ★ x/y (metres) and theta (radians) share ONE axis on purpose: in an 8x6 room they span
+    // comparable ranges, and separating them would hide the thing worth seeing — whether GT and
+    // estimate move TOGETHER. A constant offset between the theta pair is EXPECTED and benign: the
+    // room frame's orientation is arbitrary, room_concept picks it from its own fit. Only a
+    // CHANGING gap is a defect.
+    ts_plot_gt_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
+    ts_plot_gt_->set_visible_window(60.f);
+    // GT solid/dark, estimate a CONTRASTING hue rather than a pale tint of the same one: the pale
+    // version of a colour is invisible against its own partner when the two coincide, which is the
+    // normal case for x and y. Distinct hues stay readable whether they overlap or diverge.
+    ts_plot_gt_->add_series("gt x",      QColor(200,  30,  30), 2.0f, 0);   // deep red
+    ts_plot_gt_->add_series("est x",     QColor(255, 140,   0), 1.4f, 0);   // orange
+    ts_plot_gt_->add_series("gt y",      QColor(  0, 140,  60), 2.0f, 0);   // deep green
+    ts_plot_gt_->add_series("est y",     QColor(190, 210,   0), 1.4f, 0);   // olive/yellow
+    ts_plot_gt_->add_series("gt theta",  QColor( 30,  90, 200), 2.0f, 0);   // deep blue
+    ts_plot_gt_->add_series("est theta", QColor(190,  90, 220), 1.4f, 0);   // violet
+    custom_widget_->frame_series->layout()->addWidget(ts_plot_gt_);
+
     // Integrated odometry AT THE POINT THE PREDICTOR USES IT: the selected motion prior's delta_pose,
     // i.e. the increment the predicted pose is actually built from. Deliberately not a velocity sample
     // and not the raw stream — those are one and two steps upstream, and a prediction can be wrong
@@ -157,9 +180,17 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
     // with speed and a faster route would spend that headroom.
     ts_plot_odo_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
     ts_plot_odo_->set_visible_window(60.f);
-    ts_plot_odo_->set_y_range(-0.10f, 0.10f);
-    ts_plot_odo_->add_series("d|xy| (m)",  QColor(41, 128, 185), 1.8f, 0);
-    ts_plot_odo_->add_series("dtheta (rad)", QColor(192, 57, 43), 1.6f, 0);
+    // The odometry increments that used to live here were diagnostic scaffolding for the frame
+    // work and are now uninteresting. What matters is whether the online motion calibration is
+    // actually learning, and the honest signal for that is the PRECISION of each parameter, not its
+    // value: a value that stops moving has either converged or simply not been asked, and only the
+    // precision tells those apart. Plotted as log10(1/sigma^2) because precision spans decades as a
+    // parameter goes from "unknown" to "pinned". The three curves are NOT comparable to each other
+    // (yaw is rad, the scales are dimensionless) -- read each against its own trend.
+    ts_plot_odo_->set_y_range(0.f, 12.f);
+    ts_plot_odo_->add_series("prec fwd scale", QColor(41, 128, 185), 1.8f, 0);
+    ts_plot_odo_->add_series("prec gyro scale", QColor(192, 57, 43), 1.6f, 0);
+    ts_plot_odo_->add_series("prec yaw offset", QColor(241, 196, 15), 1.6f, 0);
     ts_plot_odo_->set_reference_line(0.f, QColor(170, 170, 170), "");
     custom_widget_->frame_series->layout()->addWidget(ts_plot_odo_);
 
@@ -366,14 +397,38 @@ void RoomViewer::update_ui(const std::optional<rc::RoomConcept::UpdateResult>& l
     if (ts_plot_conf_)
         ts_plot_conf_->add_point("confidence", conf);
 
-    if (ts_plot_odo_ != nullptr and room_concept_ != nullptr)
+    // Ground truth beside the estimate. Absent attributes (real robot) => nothing plotted.
+    if (ts_plot_gt_ and graph_)
     {
-        const Eigen::Vector3f d = room_concept_->get_predictor_delta();
-        // Signed along-track magnitude: the sign says which way the prediction is being carried, and
-        // an unsigned magnitude would hide a reversal — which is exactly the failure worth seeing.
-        const float dxy = std::hypot(d.x(), d.y()) * ((d.y() < 0.f) ? -1.f : 1.f);
-        ts_plot_odo_->add_point("d|xy| (m)", dxy);
-        ts_plot_odo_->add_point("dtheta (rad)", d.z());
+        if (const auto robots = graph_->get_nodes_by_type("robot"); not robots.empty())
+        {
+            const auto &rn = robots.front();
+            const auto gx = graph_->get_attrib_by_name<robot_gt_x_att>(rn);
+            const auto gy = graph_->get_attrib_by_name<robot_gt_y_att>(rn);
+            const auto ga = graph_->get_attrib_by_name<robot_gt_angle_att>(rn);
+            if (gx.has_value() and gy.has_value() and ga.has_value())
+            {
+                const auto &pose = loc_res->robot_pose;
+                ts_plot_gt_->add_point("gt x",      gx.value());
+                ts_plot_gt_->add_point("est x",     pose.translation().x());
+                ts_plot_gt_->add_point("gt y",      gy.value());
+                ts_plot_gt_->add_point("est y",     pose.translation().y());
+                ts_plot_gt_->add_point("gt theta",  ga.value());
+                ts_plot_gt_->add_point("est theta",
+                                       std::atan2(pose.linear()(1, 0), pose.linear()(0, 0)));
+            }
+        }
+    }
+
+    if (ts_plot_odo_ != nullptr)   // loc_res is guaranteed by the early return above
+    {
+        // log10 precision. sigma == 0 means the calibrator has not been configured (feature off),
+        // which must read as "no information" rather than as infinite confidence.
+        const auto log_prec = [](float sigma) -> float
+        { return sigma > 1e-9f ? std::log10(1.f / (sigma * sigma)) : 0.f; };
+        ts_plot_odo_->add_point("prec fwd scale",  log_prec(loc_res->calib_sigma_k_v));
+        ts_plot_odo_->add_point("prec gyro scale", log_prec(loc_res->calib_sigma_k_w));
+        ts_plot_odo_->add_point("prec yaw offset", log_prec(loc_res->calib_sigma_yaw));
     }
 }
 

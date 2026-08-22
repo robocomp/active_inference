@@ -117,6 +117,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.MotionCalibYawQ", room_concept.params.motion_calib.yaw_q);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.MotionCalibScaleP0", room_concept.params.motion_calib.scale_p0);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.MotionCalibScaleQ", room_concept.params.motion_calib.scale_q);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.MotionCalibRotModelSigma", room_concept.params.motion_calib.rot_model_sigma);
 
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.SigmaSdf", room_concept.params.sigma_sdf);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PredictionTrustFactor", room_concept.params.prediction_trust_factor);

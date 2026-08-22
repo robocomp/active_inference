@@ -682,6 +682,12 @@ public:
         // Learned motion-model parameters at this cycle, so convergence can be watched in the CSV.
         float calib_k_v = 1.f, calib_k_w = 1.f, calib_yaw = 0.f;
         int   calib_episodes = 0;
+        // 1-sigma uncertainty of each learned parameter. These are what say whether a parameter has
+        // CONVERGED or merely stopped moving: a value that sits still with a wide sigma has not been
+        // taught anything, it just has not been asked. Units differ (yaw in rad, the scales
+        // dimensionless), so compare each against its own history, not against the others.
+        float calib_sigma_yaw = 0.f, calib_sigma_k_v = 0.f, calib_sigma_k_w = 0.f;
+        float calib_pos_var = 0.f;   // the R actually used for the position channel, for auditing
 
         float imu_dtheta          = 0.f;
         float wheel_dtheta        = 0.f;

@@ -102,6 +102,16 @@ namespace rc::calib
         float scale_p0     = 4.0e-4f;   // fractional^2 -> 1 sigma ~ 2%
         float scale_q      = 1.0e-9f;
         float min_obs_var  = 1.0e-6f;   // floor on R so a zero-covariance frame cannot dominate
+        // Model error, not sensor error: during a turn the pose correction contains a component the
+        // translation parameters cannot explain, and handing it to them anyway is what stops k_v
+        // converging. Rather than gate turns out (a threshold), let the observation covariance GROW
+        // with the covariate that predicts the model error, so a turning episode is believed less by
+        // exactly as much as it deserves. Measured on 29 live episodes: forward scale estimated from
+        // rotation-poor episodes is -1.01% (per-episode -1.49/-0.85/-1.09) and from rotation-heavy
+        // ones -0.20% with wild scatter (+4.57/+2.21/-1.02) -- the turns were cancelling the straights
+        // and k_v oscillated around 1.0 instead of converging. Order-of-magnitude value: it only sets
+        // the RELATIVE weight of turning against straight episodes.
+        float rot_model_sigma = 0.030f; // m per rad of turning, added in quadrature to the position R
     };
 
     /// Accumulates one ramp-plus-correction episode and folds it into the parameters.
@@ -167,7 +177,8 @@ namespace rc::calib
     private:
         void flush() noexcept
         {
-            const float r_pos = std::max(acc_pos_var_, cfg_.min_obs_var);
+            const float rot_model = cfg_.rot_model_sigma * std::abs(acc_th_);
+            const float r_pos = std::max(acc_pos_var_, cfg_.min_obs_var) + rot_model * rot_model;
             const float r_th  = std::max(acc_th_var_,  cfg_.min_obs_var);
             // Forward scale and yaw offset are BOTH driven by forward travel but read off orthogonal
             // components of the same correction, which is what makes them separable rather than a

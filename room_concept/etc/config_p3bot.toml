@@ -456,6 +456,7 @@ MotionCalibYawP0    = 1.0e-4   # (rad)^2 initial uncertainty on the body/mount y
 MotionCalibYawQ     = 1.0e-7   # (rad)^2 per episode — see the note on Q below
 MotionCalibScaleP0  = 4.0e-4   # fractional² initial uncertainty on both scales (1σ ≈ 2%)
 MotionCalibScaleQ   = 3.0e-7   # fractional² per episode
+MotionCalibRotModelSigma = 0.030  # m/rad — position-R growth during turns; see below
 #
 # Q IS THE RESPONSIVENESS KNOB, and it is not optional. Without it P collapses on the first episode
 # that has a long baseline (K*h -> 1 consumes almost all the uncertainty) and the filter freezes

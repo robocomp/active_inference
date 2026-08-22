@@ -28,6 +28,18 @@ for r in csv.DictReader(open(path)):
     if None in (t, g, e, m): continue
     R.append((t, math.degrees(wrap(wrap(e) - wrap(g))), m, it, cv))
 R.sort()
+
+# Converged frames only: a badly fitted pose is not evidence about the localiser's accuracy.
+MSE_MAX = float(os.environ.get('GT_MSE_MAX', '0.06'))
+
+# converged rows only, as (ts, gt_theta, est_theta) — used by the rotation-tracking section below.
+rot = []
+for _r in csv.DictReader(open(path)):
+    _t, _g, _e, _m = (num(_r, k) for k in ('ts_ms', 'gt_theta', 'est_theta', 'sdf_mse'))
+    if None in (_t, _g, _e, _m) or _m >= MSE_MAX:
+        continue
+    rot.append((_t, wrap(_g), wrap(_e)))
+rot.sort()
 if len(R) < 30: sys.exit("only %d rows -- drive around first" % len(R))
 t0 = R[0][0]
 print("rows %d over %.0f s" % (len(R), (R[-1][0]-t0)/1000))
@@ -77,16 +89,34 @@ else:
     print("  residual about it: p50 %.2f  p95 %.2f  max %.2f deg  <- the localiser's real yaw error"
           % (res[len(res)//2], res[int(0.95*len(res))], res[-1]))
 
-# --- static vs moving: separates a bias from lag/clamp transients -----------------------------
-mv = []
-for i in range(1, len(R)):
-    dt = (R[i][0]-R[i-1][0])/1000.0
-    if 0.005 < dt < 1.0:
-        mv.append((abs(wrap(math.radians(R[i][1]-R[i-1][1])))/dt, R[i][1]))
-still = [d for w, d in mv if w < 0.05]
-if still and centres:
-    c = min(centres, key=lambda c: abs(c - st.median(still)))
-    res = sorted(abs(d-c) for d in still if abs(d-c) <= 20)
-    if res:
-        print("\n  at rest (|w|<0.05 rad/s, n=%d): residual p50 %.2f  p95 %.2f deg"
-              % (len(res), res[len(res)//2], res[int(0.95*len(res))]))
+# --- rotation tracking, with the FRAME CONVENTION divided out ----------------------------------
+# ★ The room frame is built through the SVG loader's mirror_x (room = -x_svg, y_svg), so it is
+# LEFT-handed relative to the world and est_theta runs BACKWARDS against gt_theta BY CONVENTION.
+# A negative gain here is EXPECTED and is not a defect. What must hold is that the two TRACK:
+# cumulative rotations proportional, |gain| = 1.
+# ★ Do NOT judge this on per-frame increments. The kinematic clamp spreads each correction over
+# several frames, so the instantaneous slope sits well below 1 (measured 0.43) while the integral is
+# fine. Only the CUMULATIVE comparison means anything.
+cum_gt, cum_est = [0.0], [0.0]
+for i in range(1, len(rot)):
+    cum_gt.append(cum_gt[-1] + wrap(rot[i][1] - rot[i-1][1]))
+    cum_est.append(cum_est[-1] + wrap(rot[i][2] - rot[i-1][2]))
+
+print("\n--- rotation tracking (frame convention divided out) ---")
+print("  %d converged rows; net rotation: GT %+.1f deg, est %+.1f deg"
+      % (len(rot), math.degrees(cum_gt[-1]), math.degrees(cum_est[-1])))
+if abs(cum_gt[-1]) < math.radians(30):
+    print("  ⚠ only %.0f deg of net rotation — TURN THE ROBOT and re-run."
+          % math.degrees(abs(cum_gt[-1])))
+    print("    Below ~30 deg the gain is dominated by noise (a stationary run once read 4.17).")
+else:
+    n = len(cum_gt); mx = sum(cum_gt)/n; my = sum(cum_est)/n
+    sxx = sum((x-mx)**2 for x in cum_gt)
+    gain = sum((x-mx)*(y-my) for x, y in zip(cum_gt, cum_est))/sxx
+    res = [y - (gain*x + (my - gain*mx)) for x, y in zip(cum_gt, cum_est)]
+    rms = math.sqrt(sum(r*r for r in res)/n)
+    print("  handedness   %-5s   (mirror_x convention => LEFT expected, not a fault)"
+          % ("LEFT" if gain < 0 else "right"))
+    print("  |gain|       %.4f   (1.0 = the estimate turns exactly as much as truth)" % abs(gain))
+    print("  residual     rms %.2f deg, max %.2f deg   <- the real rotation error"
+          % (math.degrees(rms), math.degrees(max(abs(r) for r in res))))

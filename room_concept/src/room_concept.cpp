@@ -4456,10 +4456,14 @@ namespace rc
                 ? 0.5f * (res.covariance(0, 0) + res.covariance(1, 1)) : 0.f;
             const float th_var = res.covariance.rows() > 2 ? res.covariance(2, 2) : 0.f;
 
+            res.calib_pos_var = pos_var;
             motion_calib_.observe(res.dy_local, res.dx_local, res.imu_dtheta + res.wheel_dtheta,
                                   r_forward, r_lateral, r_theta,
                                   pos_var, th_var, res.iterations_used > 0);
         }
+        res.calib_sigma_yaw = motion_calib_.yaw_sigma();
+        res.calib_sigma_k_v = motion_calib_.k_v_sigma();
+        res.calib_sigma_k_w = motion_calib_.k_w_sigma();
         res.calib_k_v = motion_calib_.forward_scale();
         res.calib_k_w = motion_calib_.omega_scale();
         res.calib_yaw = motion_calib_.yaw_offset();
