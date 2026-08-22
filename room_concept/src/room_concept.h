@@ -55,6 +55,7 @@
 #include "object_anchor_types.h"
 #include "object_anchor_factor.h"
 #include "se2_preintegration.h"
+#include "motion_calibration.h"
 
 namespace rc
 {
@@ -535,6 +536,12 @@ public:
         // PoseXYStdSlow that a validated -11.2% lap-time tuning depends on — while a sustained run of
         // large innovations (p99 97 mm, i.e. the corridor) lifts sigma above it. Mean unchanged,
         // dynamic range restored, which is exactly the acceptance test.
+        // Online motion-model learning: slow parameters (forward scale, mount yaw, gyro scale)
+        // estimated from the optimizer's own corrections. See motion_calibration.h. Precision-only
+        // adaptation (adaptive_cov below, HierPrec*) cannot do this job: it widens the posterior but
+        // never moves the mean, so a biased channel still walks -- the tooth gets longer, not smaller.
+        rc::calib::Config motion_calib{};
+
         bool  adaptive_cov_enabled = false;
         // EMA rate for the innovation second moment. 0.02 ~= a 50-frame memory: long enough that one
         // bad frame cannot spike the published sigma (which would hit the speed governor), short enough
@@ -650,6 +657,36 @@ public:
         float early_exit_metric = std::numeric_limits<float>::quiet_NaN();
         /// Median |SDF| at the predicted pose — the median-valued twin of early_exit_metric.
         float pred_sdf_median = std::numeric_limits<float>::quiet_NaN();
+
+        // ── Heading-channel attribution for THIS cycle (radians) ───────────────────────────────
+        // The prediction's heading is a MIXTURE: the gyro on segments it fully brackets, the wheels
+        // on the rest. A scale error in the prediction can therefore belong to either channel, and
+        // the mixture weight moves with IMU coverage, so a single pooled dtheta cannot attribute it.
+        // imu_dtheta + wheel_dtheta is what actually entered the motion prior; wheel_shadow_dtheta is
+        // what the wheels claimed on the segments the gyro overrode, i.e. the direct wheel-vs-gyro
+        // comparison on identical intervals.
+        // The ODOMETRY-PREDICTED pose, before the optimizer touched it. (corrected - predicted) is the
+        // accumulated prediction error the optimizer just removed -- i.e. one tooth of the sawtooth,
+        // decomposed into x/y/theta in the ROOM frame. It needs no ground truth and no frame
+        // alignment, so it measures the same thing on the real robot as it does here. On early-exit
+        // cycles it equals robot_pose exactly; that identity is a free self-check on this plumbing.
+        float pred_x = 0.f, pred_y = 0.f, pred_theta = 0.f;
+
+        // Body-frame displacement the WHEELS claimed this cycle: dx_local = side*dt (lateral),
+        // dy_local = adv*dt (forward). Heading has a second opinion (the gyro) so its errors are
+        // catchable; translation has NONE -- the wheels are integrated unconditionally. On a mecanum
+        // base the lateral term is the one roller slip corrupts, and a lateral error is invisible to
+        // both an arc-length ratio and a rotation gain, so it has to be read directly.
+        float dx_local = 0.f, dy_local = 0.f;
+
+        // Learned motion-model parameters at this cycle, so convergence can be watched in the CSV.
+        float calib_k_v = 1.f, calib_k_w = 1.f, calib_yaw = 0.f;
+        int   calib_episodes = 0;
+
+        float imu_dtheta          = 0.f;
+        float wheel_dtheta        = 0.f;
+        float wheel_shadow_dtheta = 0.f;
+        int   imu_segs = 0, wheel_segs = 0;
         Eigen::Matrix<float,5,1> state = Eigen::Matrix<float,5,1>::Zero();
         Eigen::Affine2f robot_pose = Eigen::Affine2f::Identity();
         Eigen::Matrix3f covariance = Eigen::Matrix3f::Identity();
@@ -1315,12 +1352,24 @@ private:
    double       imu_dtheta_sum_ = 0.0, wheel_dtheta_sum_ = 0.0;  // rad, over IMU-covered segments only
    bool         imu_stats_sim_clock_ = false;
    std::int64_t imu_stats_last_log_ms_ = 0;
+   // Per-CYCLE twins of the rolling sums above, copied into UpdateResult. The rolling stats answer
+   // "is the injection still binding"; these answer "which channel produced THIS cycle's heading",
+   // which is the covariate an online scale estimate has to be regressed on.
+   Eigen::Vector2f last_pred_pos_ = Eigen::Vector2f::Zero();  // odometry prediction, pre-optimizer
+   float           last_pred_theta_ = 0.f;
+   rc::calib::MotionCalibrator motion_calib_;
+   float cyc_dx_local_ = 0.f, cyc_dy_local_ = 0.f;   // wheel-claimed body-frame displacement
+   float cyc_imu_dtheta_          = 0.f;
+   float cyc_wheel_dtheta_        = 0.f;
+   float cyc_wheel_shadow_dtheta_ = 0.f;
+   int   cyc_imu_segs_ = 0, cyc_wheel_segs_ = 0;
 
    // Running second moment of the innovation, per axis (x, y, theta). See Params::adaptive_cov_enabled.
    Eigen::Vector3f innov_m2_ = Eigen::Vector3f::Zero();
    /// Raise the published covariance to at least the error the innovations demonstrate. Call ONLY on
    /// frames that actually had a prediction — a zero innovation otherwise means "no information", not
    /// "perfect agreement", and folding those in would drag the estimate back down.
+   void feed_motion_calibrator(UpdateResult& res);
    void apply_adaptive_covariance(UpdateResult& res);
 
    /// Drop the strided-window bookkeeping. MUST accompany every window_mgr_.clear(): after a recovery

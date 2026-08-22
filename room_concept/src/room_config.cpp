@@ -112,6 +112,12 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             p.OVERLAY_OBJECT_TYPES = std::move(types);
     });
 
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.MotionCalibEnabled", room_concept.params.motion_calib.enabled);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.MotionCalibYawP0", room_concept.params.motion_calib.yaw_p0);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.MotionCalibYawQ", room_concept.params.motion_calib.yaw_q);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.MotionCalibScaleP0", room_concept.params.motion_calib.scale_p0);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.MotionCalibScaleQ", room_concept.params.motion_calib.scale_q);
+
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.SigmaSdf", room_concept.params.sigma_sdf);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PredictionTrustFactor", room_concept.params.prediction_trust_factor);
     rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.MinTrackingSteps", room_concept.params.min_tracking_steps);

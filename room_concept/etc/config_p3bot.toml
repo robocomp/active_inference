@@ -138,15 +138,66 @@ PreserveBootstrapRoom  = false  # DYNAMIC for P3Bot: localize and CREATE the roo
                        # (etc/optimizer_timing.csv: sdf_mse p50 0.028 vs a 0.06 limit, 100% of frames
                        # stable after t+120 s). A counter pinned at exactly 0 is not a threshold that is
                        # too tight; it is a code path that never runs.
-PredictionEarlyExit    = true  # Skip optimization when prediction error < threshold
+# ── Preintegrated motion covariance ───────────────────────────────────────────
+# The motion prior's covariance is PROPAGATED through the interval's samples instead of asserted
+# from per-frame constants. The MEAN is unchanged (same midpoint-theta integration), so this is a
+# covariance-only change and both optimizer backends pick it up with no factor edit.
+#
+# WHY, for the sawtooth: the prediction accumulates error fastest in a pivot because a heading error
+# ROTATES all subsequent translation. That coupling is real and the legacy covariance has no term
+# for it, so the motion prior stays over-confident exactly while turning — and an over-confident
+# prior is what lets error build before the SDF is allowed to pull it back. Propagation gives the
+# covariance its theta<->xy and x<->y cross terms, and puts dt where the physics puts it, so the
+# constants stop being update-rate dependent. This is the precision-shaped answer to the sawtooth,
+# as opposed to widening or narrowing a threshold.
+#
+# Measured side by side at the live constants (sigma in m and rad, legacy / propagated):
+#   parked, 50 ms            sigma_xy 0.0200 / 0.0200   sigma_th 0.0100 / 0.0100   <- IDENTICAL
+#   pivot 1.0 rad/s, 50 ms            0.0214 / 0.0200            0.0123 / 0.0105
+# i.e. it changes nothing at rest and only bites under rotation, which is the intent.
+#
+# The densities are DERIVED in room_config.cpp from the legacy constants just above, not hard-coded,
+# so this A/B tests the covariance's SHAPE and not a simultaneous re-tuning.
+# ⚠ Recorded blocker: a PARKED sigma floor can swamp the cross terms, so the benefit may be masked.
+# If it shows nothing, that floor is the thing to look at, not this flag.
+MotionPreintegration   = true
+
+PredictionEarlyExit    = true  # Skip optimization when prediction error < threshold.
+                       # ⚠ DO NOT SET false: room stabilisation is DEFINED in terms of early exit.
+                       # room_scene_graph.cpp:185 requires (res.iterations_used == 0) for a frame to
+                       # count as stable, i.e. "the optimiser did not need to run". With early exit
+                       # off the optimiser runs every frame, iterations_used is never 0, and the room
+                       # NEVER stabilises — measured 2026-08-22. The sawtooth in the prediction trace
+                       # is the price of that coupling: the stability test and the correction policy
+                       # are the same switch. Decoupling them means changing that gate to test the
+                       # RESIDUAL rather than whether the optimiser ran.
 SigmaSdf               = 0.15  # σ_obs del SDF para el umbral de early exit (m)
-PredictionTrustFactor  = 0.7   # threshold = SigmaSdf × factor  → 12 cm
+PredictionTrustFactor  = 0.40  # threshold = SigmaSdf × factor → 6.0 cm (the red "opt threshold" line
+                       # in the UI timeseries is exactly this product). Was 0.7 → 10.5 cm.
+                       # Lowered 2026-08-22 and CONFIRMED IN USE: noticeably less lag when the robot
+                       # rotates. Affordable because OptimizerType = "GN" made a correction 6x cheaper
+                       # (7.80 ms mean vs 47.2 on LBFGS; whole loop 0.69 ms of a 50 ms period).
+                       # ⚠ Do not judge this knob by the AGGREGATE early-exit rate: it barely moved
+                       # (97.9% -> 98.7%) because turns are a small share of all frames. The extra
+                       # corrections land where they matter, and the aggregate hides them.
 MinTrackingSteps       = 5     # Warm-up tras reset: 5 frames (default 20).
                                 # Con 20 se perdían 20 frames de Adam obligatorio
                                 # tras cada recovery antes de que early exit
                                 # pudiera actuar. Con 5 se alcanza steady-state
                                 # en cuanto la ventana está llena.
-RotationSdfCoupling    = 0.5   # Extra tolerancia SDF por rotación (m/rad)
+RotationSdfCoupling    = 0.2   # Extra SDF tolerance per radian of rotation (m/rad). Was 0.5; the
+                       # instance running on 2026-08-22 had 0.3, so this is a further step.
+                       # This term WIDENS the early-exit threshold in proportion to turn rate
+                       # (room_concept.cpp:3088): threshold = sigma_sdf*trust + coupling*|dtheta|.
+                       # It exists for a real geometric reason — a yaw error e at range R displaces
+                       # the SDF by ~R*e, so 0.02 rad at 5 m is already ~10 cm — but it is also the
+                       # term that makes the optimiser fire LEAST while turning, which is where the
+                       # lag is felt. Lowering it makes the threshold be reached EARLIER in a turn.
+                       # At 1 rad/s and 20 Hz (dtheta 0.05 rad) against the 6.0 cm base:
+                       #     0.5 -> +2.5 cm (8.5 cm, +42%)   0.3 -> +1.5 cm (7.5 cm, +25%)
+                       #     0.2 -> +1.0 cm (7.0 cm, +17%)   0.0 -> no widening at all
+                       # ⚠ Do NOT zero it: measured on Shadow, that doubled the stall rate during
+                       # motion (0.91 -> 1.8 per second). 0.2 keeps a margin against that.
 
 # ── 180° symmetry-flip guard (harden against spurious flips) ───────────────────
 # The optimizer periodically tests whether rotating the robot 180° fits the room
@@ -168,7 +219,10 @@ SymmetryDebugCsv = true
 # "ADAM"  — Adam adaptativo (default probado, robusto lejos del mínimo)
 # "LBFGS" — L-BFGS con line search Wolfe (convergencia más rápida, ~8-12 evals)
 # "CAVI"  — reservado para implementación futura
-OptimizerType          = "LBFGS"
+OptimizerType          = "GN"
+# GN is VALIDATED — including pivots (2026-08-22). Measured on this rig: 7.80 ms mean / 21.32 ms max
+# per correction against LBFGS's 47.2 / 84.9, i.e. 6x cheaper, whole loop 0.69 ms mean of a 50 ms
+# period. The old "UNTESTED: pivot" caveat is retired.
 
 # ── Gauss-Newton / Levenberg-Marquardt backend (room_gn_solver.h) ─────────────
 # Same objective as compute_rfe_loss, solved as a 15x15 normal-equation system with ANALYTIC
@@ -291,7 +345,17 @@ WeightReductionFactor    = 0.5   # Multiplicador para ejes secundarios
 WeightSmoothingAlpha     = 0.3   # EMA de transición entre perfiles
 
 # ── Modelo de ruido de movimiento ────────────────────────────────────────────
-UseCommandVelocityPrior = true   # Master switch for the COMMAND (joystick / controller) motion prior.
+UseCommandVelocityPrior = false  # A/B 2026-08-22: was true. MEASURED on 1245 deg of open-loop rotation
+                        # (gt_error.csv, iters==0 runs only, so the predictor runs with no optimizer
+                        # correction hiding it): the odometry prior tracks GT to +0.78%, but the
+                        # PUBLISHED pose over-rotates by +2.49%. The missing +1.70% is added between
+                        # the two — i.e. in fuse_priors(), by this channel. IMU coverage was 99.1%
+                        # (gyro 18.87 rad vs wheels 0.170), so neither sensor can account for it.
+                        # That +1.70% is what ramps the prediction error into the early-exit gate and
+                        # produces the sawtooth. Verify the flag took by the published/odometry gain
+                        # in gt_error.csv collapsing 1.0170 -> ~1.0000; do NOT read the cmd_* columns,
+                        # which deliberately keep reporting what the channel would have said.
+                        # Master switch for the COMMAND (joystick / controller) motion prior.
                         # true  = historical behaviour: fused (command + encoder) when both channels
                         #         are fresh, else measured, else command, else fallback_zero.
                         # false = the command channel is still computed and logged (cmd_* columns keep
@@ -463,3 +527,34 @@ Warn.Connections = "0"
 Trace.Network = "0"
 Trace.Protocol = "0"
 MessageSizeMax = "20004800"
+
+# ── Online motion-model learning (self-calibration) ──────────────────────────
+# Slow parameters estimated from the optimizer's OWN corrections, so the robot improves while it
+# drives instead of needing a calibration procedure. See src/motion_calibration.h.
+#
+# WHY, measured 2026-08-22 on P3Bot: between corrections the predictor over-rotates ~4% and over-runs
+# forward ~1.0-1.7%, while the CORRECTED output tracks ground truth to <1%. The optimizer removes the
+# same error every few seconds and never learns from it — that is the sawtooth. Precision-only
+# adaptation (AdaptiveCovEnabled, HierPrec*) cannot fix it: widening the posterior lengthens the tooth
+# but never moves the mean.
+#
+# There is no learning-rate constant here on purpose. The gain is P*H/(H*P*H+R) with R taken from the
+# optimizer's posterior covariance, so an uninformative episode (parked robot: H->0) and a
+# low-confidence correction both teach ~nothing without any threshold saying so.
+MotionCalibEnabled  = true
+MotionCalibYawP0    = 1.0e-4   # (rad)^2 initial uncertainty on the body/mount yaw offset (1σ ≈ 0.57°)
+MotionCalibYawQ     = 1.0e-7   # (rad)^2 per episode — see the note on Q below
+MotionCalibScaleP0  = 4.0e-4   # fractional² initial uncertainty on both scales (1σ ≈ 2%)
+MotionCalibScaleQ   = 3.0e-7   # fractional² per episode
+#
+# Q IS THE RESPONSIVENESS KNOB, and it is not optional. Without it P collapses on the first episode
+# that has a long baseline (K*h -> 1 consumes almost all the uncertainty) and the filter freezes
+# wherever that one sample put it — classic RLS windup. Verified offline against 6 recorded episodes:
+# Q=1e-9 removed 1.4% of the residual per episode (~70-episode time constant, i.e. dead), Q=3e-7
+# removes ~19% (~5 episodes), Q=1e-6 removes ~30% (~3 episodes). 3e-7 is the balance: fast enough to
+# be useful within one session, slow enough that a single bad correction cannot move the model.
+# It is also what lets the estimate TRACK a real change (a knocked mount, tyre wear) instead of
+# averaging it away with the whole history.
+#
+# Stability does not depend on this choice: the step is K*resid with K*h = h²P/(h²P+R) < 1 strictly,
+# so every episode is a contraction and the loop cannot overshoot however large Q is.

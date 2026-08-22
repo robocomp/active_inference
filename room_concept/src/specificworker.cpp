@@ -643,7 +643,10 @@ void SpecificWorker::log_ground_truth(const rc::RoomConcept::UpdateResult &res)
             // Written through the CLASSIC locale: these machines run es_ES, where a comma is the
             // decimal separator, and a CSV whose fields contain commas is unparseable.
             gt_csv_.imbue(std::locale::classic());
-            gt_csv_ << "ts_ms,gt_x,gt_y,gt_theta,est_x,est_y,est_theta,sdf_mse,iters,cov_tt\n";
+            gt_csv_ << "ts_ms,gt_x,gt_y,gt_theta,est_x,est_y,est_theta,sdf_mse,iters,cov_tt,"
+                       "imu_dtheta,wheel_dtheta,wheel_shadow_dtheta,imu_segs,wheel_segs,"
+                       "pred_x,pred_y,pred_theta,dx_local,dy_local,"
+                       "calib_k_v,calib_k_w,calib_yaw,calib_eps\n";
         }
         else
             qWarning() << "[gt] cannot open tmp/sdf_localizer/gt_error.csv";
@@ -658,6 +661,23 @@ void SpecificWorker::log_ground_truth(const rc::RoomConcept::UpdateResult &res)
             << ',' << p.translation().x() << ',' << p.translation().y() << ',' << est_th
             << ',' << res.sdf_mse << ',' << res.iterations_used
             << ',' << (res.covariance.rows() > 2 ? res.covariance(2, 2) : -1.f)
+            // Heading-channel attribution: which sensor produced this cycle's predicted rotation.
+            // imu_dtheta+wheel_dtheta is what entered the prior; wheel_shadow_dtheta is what the
+            // wheels claimed over the SAME intervals the gyro overrode. With gt_theta alongside,
+            // each channel's scale error can be regressed out separately instead of inferred from
+            // their pooled effect.
+            << ',' << res.imu_dtheta << ',' << res.wheel_dtheta << ',' << res.wheel_shadow_dtheta
+            << ',' << res.imu_segs << ',' << res.wheel_segs
+            // Pre-optimizer predicted pose: (est - pred) is the correction, i.e. one tooth measured
+            // in the room frame with no GT and no frame fit. Equals est exactly when iters==0.
+            << ',' << res.pred_x << ',' << res.pred_y << ',' << res.pred_theta
+            // What the wheels claimed in the BODY frame: dx_local is lateral. Driving straight it
+            // should be ~0; anything else is the predictor being told the robot slid sideways.
+            << ',' << res.dx_local << ',' << res.dy_local
+            // Learned motion-model parameters, so convergence is visible in the same file as the
+            // error they are supposed to remove.
+            << ',' << res.calib_k_v << ',' << res.calib_k_w << ',' << res.calib_yaw
+            << ',' << res.calib_episodes
             << '\n';
     gt_csv_.flush();
 }

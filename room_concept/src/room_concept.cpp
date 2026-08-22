@@ -2170,6 +2170,8 @@ namespace rc
 
         const auto pred_pos = motion_prior_selection.predicted_pos;
         const auto pred_theta = motion_prior_selection.predicted_theta;
+        last_pred_pos_ = pred_pos;      // kept for UpdateResult on BOTH return paths
+        last_pred_theta_ = pred_theta;
 
         // ===== BUILD NEW WINDOW SLOT =====
         const auto& all_points = lidar.first;
@@ -2850,6 +2852,17 @@ namespace rc
         // early-exit gate never evaluated it this frame — e.g. warmup / no odometry).
         res.early_exit_metric = last_early_exit_metric_;
         res.pred_sdf_median   = last_pred_sdf_median_;
+        res.pred_x = last_pred_pos_.x();
+        res.pred_y = last_pred_pos_.y();
+        res.pred_theta = last_pred_theta_;
+        feed_motion_calibrator(res);
+        res.dx_local = cyc_dx_local_;
+        res.dy_local = cyc_dy_local_;
+        res.imu_dtheta          = cyc_imu_dtheta_;
+        res.wheel_dtheta        = cyc_wheel_dtheta_;
+        res.wheel_shadow_dtheta = cyc_wheel_shadow_dtheta_;
+        res.imu_segs            = cyc_imu_segs_;
+        res.wheel_segs          = cyc_wheel_segs_;
         return res;
     }
 
@@ -3158,6 +3171,20 @@ namespace rc
         res.sdf_mse = torch::median(torch::abs(sdf_pred)).item<float>();
         res.pred_sdf_median = res.sdf_mse;   // on this path they are the same quantity
         res.early_exit_metric = mean_sdf_pred;   // the value that PASSED the threshold (optimizer skipped)
+        // Heading attribution must be set on BOTH return paths. This one carries >98% of frames, and
+        // it is the interesting one: between corrections the prediction runs open-loop, so these are
+        // the only cycles where an accumulating channel error is visible before the optimizer hides it.
+        res.pred_x = last_pred_pos_.x();
+        res.pred_y = last_pred_pos_.y();
+        res.pred_theta = last_pred_theta_;
+        feed_motion_calibrator(res);
+        res.dx_local = cyc_dx_local_;
+        res.dy_local = cyc_dy_local_;
+        res.imu_dtheta          = cyc_imu_dtheta_;
+        res.wheel_dtheta        = cyc_wheel_dtheta_;
+        res.wheel_shadow_dtheta = cyc_wheel_shadow_dtheta_;
+        res.imu_segs            = cyc_imu_segs_;
+        res.wheel_segs          = cyc_wheel_segs_;
         res.iterations_used = 0;
         {
             auto ext_cpu = model_->half_extents.to(torch::kCPU);
@@ -4397,6 +4424,44 @@ namespace rc
     // lower bound the published covariance must not undercut. Taking the max with the Laplace value
     // leaves good frames alone and lifts sigma only where the estimator is demonstrably disagreeing
     // with itself, which is what keeps the mean (and therefore the consumer's speed governor) intact.
+    // Hand the optimizer's own correction to the slow parameter learner. Called on BOTH return
+    // paths: the early-exit path contributes the RAMP (correction is identically zero there) and the
+    // optimized path contributes the correction that ends it. Feeding only the latter would show the
+    // learner an error with no record of the motion that produced it.
+    void RoomConcept::feed_motion_calibrator(UpdateResult &res)
+    {
+        // Params are assigned directly onto .params with no init hook, so bind on first use.
+        if (not motion_calib_.configured()) motion_calib_.configure(params.motion_calib);
+        if (motion_calib_.enabled())
+        {
+            const float th = std::atan2(res.robot_pose.linear()(1, 0), res.robot_pose.linear()(0, 0));
+            const float ex = res.robot_pose.translation().x() - res.pred_x;
+            const float ey = res.robot_pose.translation().y() - res.pred_y;
+            // FORWARD is th + 90 deg on this robot (see the frame note in motion_calibration.h):
+            // u_fwd = (-sin th, cos th), u_lat = (cos th, sin th). Measured, not assumed.
+            const float c = std::cos(th), sn = std::sin(th);
+            const float r_forward = -ex * sn + ey * c;
+            const float r_lateral =  ex * c  + ey * sn;
+            float r_theta = th - res.pred_theta;
+            while (r_theta >  static_cast<float>(M_PI)) r_theta -= 2.f * static_cast<float>(M_PI);
+            while (r_theta < -static_cast<float>(M_PI)) r_theta += 2.f * static_cast<float>(M_PI);
+
+            // The prediction increment in the SAME frame, and the posterior variance that says how
+            // much this correction should be believed.
+            const float pos_var = res.covariance.rows() > 1
+                ? 0.5f * (res.covariance(0, 0) + res.covariance(1, 1)) : 0.f;
+            const float th_var = res.covariance.rows() > 2 ? res.covariance(2, 2) : 0.f;
+
+            motion_calib_.observe(res.dy_local, res.dx_local, res.imu_dtheta + res.wheel_dtheta,
+                                  r_forward, r_lateral, r_theta,
+                                  pos_var, th_var, res.iterations_used > 0);
+        }
+        res.calib_k_v = motion_calib_.forward_scale();
+        res.calib_k_w = motion_calib_.omega_scale();
+        res.calib_yaw = motion_calib_.yaw_offset();
+        res.calib_episodes = motion_calib_.episodes();
+    }
+
     void RoomConcept::apply_adaptive_covariance(UpdateResult& res)
     {
         if (not params.adaptive_cov_enabled)
@@ -4664,6 +4729,9 @@ namespace rc
             return true;
         };
         int imu_segments = 0, wheel_segments = 0;
+        cyc_imu_dtheta_ = cyc_wheel_dtheta_ = cyc_wheel_shadow_dtheta_ = 0.f;
+        cyc_dx_local_ = cyc_dy_local_ = 0.f;
+        cyc_imu_segs_ = cyc_wheel_segs_ = 0;
 
         // Integrate over all odometry readings in [win_start_ms, win_end_ms], on the clock chosen above.
         for (size_t i = 0; i < odometry_history.size(); ++i)
@@ -4690,15 +4758,21 @@ namespace rc
             if (dt <= 0) continue;
 
             // Odometry velocities are in robot frame: adv=forward(Y), side=lateral(X), rot=angular
-            const float dx_local = odom.side * dt;   // lateral (X in robot frame)
-            const float dy_local = odom.adv * dt;    // forward (Y in robot frame)
+            // Learned scale from motion_calib_ (1.0 until it has seen anything, and exactly 1.0
+            // while the feature is off, so this line is a no-op in the default build).
+            const float k_v = motion_calib_.forward_scale();
+            const float dx_local = odom.side * dt * k_v;   // lateral (X in robot frame)
+            const float dy_local = odom.adv * dt * k_v;    // forward (Y in robot frame)
+            cyc_dx_local_ += dx_local;
+            cyc_dy_local_ += dy_local;
 
             // THE INJECTION. Heading change from the gyro when it brackets this segment, otherwise
             // the wheel-derived rate. Translation stays on the wheels either way -- an accelerometer
             // cannot supply it without a drifting double integration, and the wheels are already
             // exact there.
-            float dtheta = odom.rot * dt;            // odometry buffer is CCW+; use directly
-            float rot_eff = odom.rot;
+            const float k_w = motion_calib_.omega_scale();
+            float dtheta = odom.rot * dt * k_w;      // odometry buffer is CCW+; use directly
+            float rot_eff = odom.rot * k_w;
             if (float dth_imu = 0.f; imu_dtheta(effective_start_ms, effective_end_ms, dth_imu))
             {
                 // Keep BOTH on the covered segments: their ratio is how much heading the gyro is
@@ -4706,15 +4780,26 @@ namespace rc
                 // one number that says it is doing something rather than merely running.
                 wheel_dtheta_sum_ += dtheta;
                 imu_dtheta_sum_   += dth_imu;
-                dtheta = dth_imu;
-                rot_eff = dth_imu / dt;              // the mean rate the gyro actually saw
+                cyc_wheel_shadow_dtheta_ += dtheta;   // what the wheels said, before the override
+                cyc_imu_dtheta_          += dth_imu;  // what actually entered the prior
+                ++cyc_imu_segs_;
+                // The learned scale applies to whichever channel supplies the heading, and the gyro
+                // supplies ~99% of it -- applying it only to the wheel branch would leave it inert.
+                dtheta = dth_imu * k_w;
+                rot_eff = dtheta / dt;               // the mean rate the gyro actually saw
                 ++imu_segments;
             }
             else
+            {
+                cyc_wheel_dtheta_ += dtheta;          // wheel value that entered the prior unmodified
+                ++cyc_wheel_segs_;
                 ++wheel_segments;
+            }
 
             // Transform to global frame using MIDPOINT theta (reduces integration bias)
-            const float theta_mid = running_theta + 0.5f * dtheta;
+            // The learned yaw offset rotates the body->world mapping: it absorbs a mount or
+            // body-axis misalignment, which shows up as travel drifting off the fitted heading.
+            const float theta_mid = running_theta + 0.5f * dtheta + motion_calib_.yaw_offset();
             total_delta[0] += dx_local * std::cos(theta_mid) - dy_local * std::sin(theta_mid);
             total_delta[1] += dx_local * std::sin(theta_mid) + dy_local * std::cos(theta_mid);
             total_delta[2] += dtheta;
