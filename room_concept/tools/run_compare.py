@@ -14,6 +14,19 @@ look better for free. Reports:
 
 Windows where the optimizer was pinned (>50% of cycles) are excluded and reported separately:
 that pathological burst has recurred several times and smears any average it lands in.
+
+READ THIS BEFORE COMPARING TWO RUNS
+-----------------------------------
+opt/m IS NOT COMPARABLE ACROSS SESSIONS. Measured 2026-08-22: two runs with identical settings
+(command prior off, calibrator off) gave opt/m 2.33 and 0.44 -- a 5x spread from session
+conditions alone. A "7x improvement" read off two different sessions was entirely this, and it
+survived several rounds of reasoning before the identical-configuration pair exposed it. Trust
+opt/m only inside one session, or between an A and a B you actually ran back to back.
+
+The steepness columns ARE stable across sessions (6.5-8.7 mm/m over four separate runs), because
+they measure a RATE against motion inside each ramp rather than a count against a threshold. They
+are what isolated the command-velocity prior: 12.27 -> 6.66 mm/m and 15.06 -> 2.20 mm/rad at that
+one change. Prefer them for any cross-session claim.
 """
 import csv, sys, numpy as np
 
