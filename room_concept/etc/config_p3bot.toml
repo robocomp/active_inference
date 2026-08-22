@@ -438,6 +438,37 @@ RerunSdfResolution = 150
 RerunMaxQueue     = 30
 
 # ── Epistemic Controller ───────────────────────────────────────────────────────
+# ── Online motion-model learning (self-calibration) ──────────────────────────
+# Slow parameters estimated from the optimizer's OWN corrections, so the robot improves while it
+# drives instead of needing a calibration procedure. See src/motion_calibration.h.
+#
+# WHY, measured 2026-08-22 on P3Bot: between corrections the predictor over-rotates ~4% and over-runs
+# forward ~1.0-1.7%, while the CORRECTED output tracks ground truth to <1%. The optimizer removes the
+# same error every few seconds and never learns from it — that is the sawtooth. Precision-only
+# adaptation (AdaptiveCovEnabled, HierPrec*) cannot fix it: widening the posterior lengthens the tooth
+# but never moves the mean.
+#
+# There is no learning-rate constant here on purpose. The gain is P*H/(H*P*H+R) with R taken from the
+# optimizer's posterior covariance, so an uninformative episode (parked robot: H->0) and a
+# low-confidence correction both teach ~nothing without any threshold saying so.
+MotionCalibEnabled  = true
+MotionCalibYawP0    = 1.0e-4   # (rad)^2 initial uncertainty on the body/mount yaw offset (1σ ≈ 0.57°)
+MotionCalibYawQ     = 1.0e-7   # (rad)^2 per episode — see the note on Q below
+MotionCalibScaleP0  = 4.0e-4   # fractional² initial uncertainty on both scales (1σ ≈ 2%)
+MotionCalibScaleQ   = 3.0e-7   # fractional² per episode
+#
+# Q IS THE RESPONSIVENESS KNOB, and it is not optional. Without it P collapses on the first episode
+# that has a long baseline (K*h -> 1 consumes almost all the uncertainty) and the filter freezes
+# wherever that one sample put it — classic RLS windup. Verified offline against 6 recorded episodes:
+# Q=1e-9 removed 1.4% of the residual per episode (~70-episode time constant, i.e. dead), Q=3e-7
+# removes ~19% (~5 episodes), Q=1e-6 removes ~30% (~3 episodes). 3e-7 is the balance: fast enough to
+# be useful within one session, slow enough that a single bad correction cannot move the model.
+# It is also what lets the estimate TRACK a real change (a knocked mount, tyre wear) instead of
+# averaging it away with the whole history.
+#
+# Stability does not depend on this choice: the step is K*resid with K*h = h²P/(h²P+R) < 1 strictly,
+# so every episode is a contraction and the loop cannot overshoot however large Q is.
+
 [EpistemicController]
 PublishAffordance  = true   # publish the room exploration affordance. Set false so the room never offers an
                             # affordance and can't out-compete object affordances in the controller's EFE
@@ -527,34 +558,3 @@ Warn.Connections = "0"
 Trace.Network = "0"
 Trace.Protocol = "0"
 MessageSizeMax = "20004800"
-
-# ── Online motion-model learning (self-calibration) ──────────────────────────
-# Slow parameters estimated from the optimizer's OWN corrections, so the robot improves while it
-# drives instead of needing a calibration procedure. See src/motion_calibration.h.
-#
-# WHY, measured 2026-08-22 on P3Bot: between corrections the predictor over-rotates ~4% and over-runs
-# forward ~1.0-1.7%, while the CORRECTED output tracks ground truth to <1%. The optimizer removes the
-# same error every few seconds and never learns from it — that is the sawtooth. Precision-only
-# adaptation (AdaptiveCovEnabled, HierPrec*) cannot fix it: widening the posterior lengthens the tooth
-# but never moves the mean.
-#
-# There is no learning-rate constant here on purpose. The gain is P*H/(H*P*H+R) with R taken from the
-# optimizer's posterior covariance, so an uninformative episode (parked robot: H->0) and a
-# low-confidence correction both teach ~nothing without any threshold saying so.
-MotionCalibEnabled  = true
-MotionCalibYawP0    = 1.0e-4   # (rad)^2 initial uncertainty on the body/mount yaw offset (1σ ≈ 0.57°)
-MotionCalibYawQ     = 1.0e-7   # (rad)^2 per episode — see the note on Q below
-MotionCalibScaleP0  = 4.0e-4   # fractional² initial uncertainty on both scales (1σ ≈ 2%)
-MotionCalibScaleQ   = 3.0e-7   # fractional² per episode
-#
-# Q IS THE RESPONSIVENESS KNOB, and it is not optional. Without it P collapses on the first episode
-# that has a long baseline (K*h -> 1 consumes almost all the uncertainty) and the filter freezes
-# wherever that one sample put it — classic RLS windup. Verified offline against 6 recorded episodes:
-# Q=1e-9 removed 1.4% of the residual per episode (~70-episode time constant, i.e. dead), Q=3e-7
-# removes ~19% (~5 episodes), Q=1e-6 removes ~30% (~3 episodes). 3e-7 is the balance: fast enough to
-# be useful within one session, slow enough that a single bad correction cannot move the model.
-# It is also what lets the estimate TRACK a real change (a knocked mount, tyre wear) instead of
-# averaging it away with the whole history.
-#
-# Stability does not depend on this choice: the step is K*resid with K*h = h²P/(h²P+R) < 1 strictly,
-# so every episode is a contraction and the loop cannot overshoot however large Q is.

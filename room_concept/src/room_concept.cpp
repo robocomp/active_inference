@@ -2855,7 +2855,6 @@ namespace rc
         res.pred_x = last_pred_pos_.x();
         res.pred_y = last_pred_pos_.y();
         res.pred_theta = last_pred_theta_;
-        feed_motion_calibrator(res);
         res.dx_local = cyc_dx_local_;
         res.dy_local = cyc_dy_local_;
         res.imu_dtheta          = cyc_imu_dtheta_;
@@ -2863,6 +2862,9 @@ namespace rc
         res.wheel_shadow_dtheta = cyc_wheel_shadow_dtheta_;
         res.imu_segs            = cyc_imu_segs_;
         res.wheel_segs          = cyc_wheel_segs_;
+        // MUST come after the fields above: it reads dy_local/dx_local/imu_dtheta as the covariates
+        // H. Called earlier it sees zeros, H -> 0, and the learner silently never learns anything.
+        feed_motion_calibrator(res);
         return res;
     }
 
@@ -3177,7 +3179,6 @@ namespace rc
         res.pred_x = last_pred_pos_.x();
         res.pred_y = last_pred_pos_.y();
         res.pred_theta = last_pred_theta_;
-        feed_motion_calibrator(res);
         res.dx_local = cyc_dx_local_;
         res.dy_local = cyc_dy_local_;
         res.imu_dtheta          = cyc_imu_dtheta_;
@@ -3185,6 +3186,9 @@ namespace rc
         res.wheel_shadow_dtheta = cyc_wheel_shadow_dtheta_;
         res.imu_segs            = cyc_imu_segs_;
         res.wheel_segs          = cyc_wheel_segs_;
+        // MUST come after the fields above: it reads dy_local/dx_local/imu_dtheta as the covariates
+        // H. Called earlier it sees zeros, H -> 0, and the learner silently never learns anything.
+        feed_motion_calibrator(res);
         res.iterations_used = 0;
         {
             auto ext_cpu = model_->half_extents.to(torch::kCPU);
