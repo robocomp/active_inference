@@ -1896,9 +1896,10 @@ namespace rc
         float init_y = 0.0f;
         float init_phi = 0.0f;
 
-        if (model_ != nullptr)
+        if (model_ != nullptr and model_->has_state())
         {
-            // Preserve current robot pose
+            // Preserve current robot pose. has_state(), not just non-null: the previous model may
+            // have been allocated and never filled, and get_state() would throw here.
             const auto state = model_->get_state();
             init_x = state[2];
             init_y = state[3];

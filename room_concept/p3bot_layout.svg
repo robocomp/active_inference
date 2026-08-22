@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+     width="900" height="700"
+     viewBox="-4.5 -3.5 9 7">
+  <!-- Room layout polygon for the P3Bot WAF world (webots-p3bot/worlds/WAF.wbt). -->
+  <!-- Coordinates are in metres. Scale: 100 pixels/metre. -->
+  <!-- room_concept loads ONLY the polygon id="room_contour" (flip_y=false, mirror_x=true), then -->
+  <!-- recentres it on its own bounding-box centre. The notch is interior, so the bbox is still -->
+  <!-- the plain 8x6 rectangle and the centre is unchanged. -->
+  <!--                                                                                          -->
+  <!-- FRAME: room_concept applies mirror_x, so  room = (-x_svg, y_svg).  The SVG is the room's  -->
+  <!-- SHAPE in the ROOM frame; it does NOT share world coordinates with Webots (there the room  -->
+  <!-- is centred on (0.54, 0) with its floor at z=0.64). Only the shape has to agree.           -->
+  <!--                                                                                          -->
+  <!-- ASYMMETRY: an 8x6 rectangle is invariant under a 180-degree rotation, so a localiser       -->
+  <!-- fitting walls alone cannot tell one end of the room from the other. The 1.6x1.6 column     -->
+  <!-- breaks it. 0.7 m was MEASURED too weak on 2026-08-22 (rot180 scored 0.91-1.15x the correct
+  branch, i.e. indistinguishable, and the fit flipped 180 deg between restarts); 1.6 m puts
+  3.2 m of distinctive wall into a 28 m perimeter instead of 1.4 m. In the ROOM frame the
+  column occupies the +x +y corner; mirror_x puts that at   -->
+  <!-- x=-4..-2.4 HERE. It must stay identical to the "column_ne" Solid in WAF.wbt; if the two  -->
+  <!-- ever disagree, the localiser is being told about a feature that is not there.              -->
+
+  <g inkscape:groupmode="layer" inkscape:label="Grid" style="opacity:0.3">
+    <line x1="-4" y1="-3" x2="-4" y2="3" stroke="#cccccc" stroke-width="0.01"/>
+    <line x1="-3" y1="-3" x2="-3" y2="3" stroke="#cccccc" stroke-width="0.01"/>
+    <line x1="-2" y1="-3" x2="-2" y2="3" stroke="#cccccc" stroke-width="0.01"/>
+    <line x1="-1" y1="-3" x2="-1" y2="3" stroke="#cccccc" stroke-width="0.01"/>
+    <line x1="0"  y1="-3" x2="0"  y2="3" stroke="#cccccc" stroke-width="0.01"/>
+    <line x1="1"  y1="-3" x2="1"  y2="3" stroke="#cccccc" stroke-width="0.01"/>
+    <line x1="2"  y1="-3" x2="2"  y2="3" stroke="#cccccc" stroke-width="0.01"/>
+    <line x1="3"  y1="-3" x2="3"  y2="3" stroke="#cccccc" stroke-width="0.01"/>
+    <line x1="4"  y1="-3" x2="4"  y2="3" stroke="#cccccc" stroke-width="0.01"/>
+    <line x1="-4" y1="-3" x2="4" y2="-3" stroke="#cccccc" stroke-width="0.01"/>
+    <line x1="-4" y1="-2" x2="4" y2="-2" stroke="#cccccc" stroke-width="0.01"/>
+    <line x1="-4" y1="-1" x2="4" y2="-1" stroke="#cccccc" stroke-width="0.01"/>
+    <line x1="-4" y1="0"  x2="4" y2="0"  stroke="#cccccc" stroke-width="0.01"/>
+    <line x1="-4" y1="1"  x2="4" y2="1"  stroke="#cccccc" stroke-width="0.01"/>
+    <line x1="-4" y1="2"  x2="4" y2="2"  stroke="#cccccc" stroke-width="0.01"/>
+    <line x1="-4" y1="3"  x2="4" y2="3"  stroke="#cccccc" stroke-width="0.01"/>
+  </g>
+
+  <g inkscape:groupmode="layer" inkscape:label="Origin">
+    <circle cx="0" cy="0" r="0.1" fill="red" opacity="0.7"/>
+    <line x1="-0.3" y1="0" x2="0.3" y2="0" stroke="red" stroke-width="0.02"/>
+    <line x1="0" y1="-0.3" x2="0" y2="0.3" stroke="red" stroke-width="0.02"/>
+  </g>
+
+  <g inkscape:groupmode="layer" inkscape:label="Room Polygon">
+    <!-- 8x6 clear span with the 0.7x0.7 corner bitten out. Walk: bottom edge, up the right side, -->
+    <!-- back along the top to the column, around its two exposed faces, then down the left side. -->
+    <polygon
+      id="room_contour"
+      inkscape:label="Room Contour"
+      points="-4,-3 4,-3 4,3 -2.4,3 -2.4,1.4 -4,1.4"
+      style="fill:none;stroke:#ff00ff;stroke-width:0.05;stroke-linejoin:round"/>
+    <!-- Vertex markers -->
+    <circle cx="-4"   cy="-3"  r="0.08" fill="#ffff00" stroke="#000000" stroke-width="0.01" inkscape:label="Vertex 0"/>
+    <circle cx="4"    cy="-3"  r="0.08" fill="#ffff00" stroke="#000000" stroke-width="0.01" inkscape:label="Vertex 1"/>
+    <circle cx="4"    cy="3"   r="0.08" fill="#ffff00" stroke="#000000" stroke-width="0.01" inkscape:label="Vertex 2"/>
+    <circle cx="-2.4" cy="3"   r="0.08" fill="#ffff00" stroke="#000000" stroke-width="0.01" inkscape:label="Vertex 3"/>
+    <circle cx="-2.4" cy="1.4" r="0.08" fill="#ffff00" stroke="#000000" stroke-width="0.01" inkscape:label="Vertex 4 (column inner)"/>
+    <circle cx="-4"   cy="1.4" r="0.08" fill="#ffff00" stroke="#000000" stroke-width="0.01" inkscape:label="Vertex 5"/>
+  </g>
+
+  <g inkscape:groupmode="layer" inkscape:label="Column" style="opacity:0.35">
+    <!-- Not loaded by room_concept: the contour above already excludes this square. Drawn so the -->
+    <!-- file reads as the room it describes. -->
+    <rect x="-4" y="1.4" width="1.6" height="1.6"
+          style="fill:#b89880;stroke:#7a5c44;stroke-width:0.02"/>
+  </g>
+</svg>

@@ -900,7 +900,12 @@ public:
     void set_robot_pose(float x, float y, float theta, bool manual_reset = true);  // Set robot pose manually (e.g., from UI click)
     float evaluate_pose_fit(const std::vector<Eigen::Vector3f>& lidar_points,
                                      int max_samples = 300) const;
-    bool is_initialized() const { return model_ != nullptr; }
+    // A Model that EXISTS is not the same as a Model that can be read: allocation and
+    // init_from_state/init_from_polygon are two steps, and the seed-pose bootstrap can allocate
+    // before any scan arrives. Callers use this to decide whether get_current_state() is safe, so
+    // it has to mean exactly that -- reporting "initialised" for a model with undefined state made
+    // the viewer throw out of a Qt timer handler every tick.
+    bool is_initialized() const { return model_ != nullptr and model_->has_state(); }
 
     /// True while a global grid search is running, and for `hold_ms` after one finishes. The hold
     /// exists because the GUI polls at ~15-30 Hz from another thread: a search that completes between

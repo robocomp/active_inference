@@ -1664,6 +1664,28 @@ void SpecificWorker::FullPoseEstimationPub_newFullPose(RoboCompFullPoseEstimatio
 		// config setting means each consumer reads the answer off the sample itself.
 		G->add_or_modify_attrib_local<robot_current_speed_sim_timestamp_att>(pose_node.value(), static_cast<unsigned long>(pose.simTimestamp));
 		G->add_or_modify_attrib_local<robot_current_speed_simulated_att>(pose_node.value(), pose.simulated);
+
+		// ── GROUND TRUTH, SIMULATION ONLY ────────────────────────────────────────────────────────
+		// pose.x/y/rz come straight off the Webots supervisor node (robotNode->getPosition() /
+		// getOrientation() in the bridge), so in simulation they ARE the truth. Everything above is
+		// odometry; this is the only thing on this message that no estimator produced. Published so
+		// a localiser can be graded against a witness OUTSIDE itself: a wrong pose fitted well
+		// scores exactly like a right one on the residual, which is how a 0.35 rad yaw error sat
+		// behind an SDF of 0.009 for a whole session (2026-08-22).
+		//
+		// The GATE IS THE DATA, not a config key: written only while the producer says simulated.
+		// On the real robot these attributes are never written at all, so a consumer reads nothing
+		// rather than something plausible and stale — and there is no flag anyone can forget to
+		// flip. ⚠ For validation only. Feeding this back into an estimator would make every
+		// accuracy number self-fulfilling.
+		if (pose.simulated)
+		{
+			G->add_or_modify_attrib_local<robot_gt_x_att>(pose_node.value(), pose.x);
+			G->add_or_modify_attrib_local<robot_gt_y_att>(pose_node.value(), pose.y);
+			G->add_or_modify_attrib_local<robot_gt_angle_att>(pose_node.value(), pose.rz);
+			G->add_or_modify_attrib_local<robot_gt_timestamp_att>(pose_node.value(),
+			                                                     static_cast<std::uint64_t>(pose.timestamp));
+		}
 		// pose_node is not read after this; move it so update_node forwards
 		// the rvalue into the engine (no deep blob copy under the graph mutex).
 		rc::safe_update_node(*G, std::move(pose_node.value()));

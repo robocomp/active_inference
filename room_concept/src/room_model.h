@@ -103,6 +103,14 @@ public:
     void init_from_polygon(const std::vector<Eigen::Vector2f>& vertices,
                            float x, float y, float phi, float wall_height);
 
+    // True once the three state tensors actually hold something. A default-constructed
+    // torch::Tensor is UNDEFINED, not empty: it has no device, so .to() on it throws
+    // "tensor does not have a device" from deep inside ATen, naming nothing. Existence of a
+    // Model object is therefore NOT the same as the model being usable, and every caller that
+    // reads the state must ask this, not merely whether the shared_ptr is non-null.
+    [[nodiscard]] bool has_state() const noexcept
+    { return half_extents.defined() and robot_pos.defined() and robot_theta.defined(); }
+
     // Set prediction for Active Inference prior
     void set_prediction(const Eigen::Vector2f& pred_pos, float pred_theta,
                         const Eigen::Matrix3f& precision);

@@ -29,9 +29,9 @@
                             "rt_rotation_euler_xyz": {
                                 "type": 3,
                                 "value": [
-                                    0,
-                                    0,
-                                    0
+                                    0.0,
+                                    0.0,
+                                    0.0
                                 ]
                             },
                             "rt_translation": {
@@ -39,7 +39,7 @@
                                 "value": [
                                     0.0,
                                     0.0,
-                                    0.04
+                                    0.03
                                 ]
                             }
                         },
@@ -48,85 +48,6 @@
                 ],
                 "name": "root",
                 "type": "root"
-            },
-            "200": {
-                "attribute": {
-                    "color": {
-                        "type": 0,
-                        "value": "Khaki"
-                    },
-                    "level": {
-                        "type": 1,
-                        "value": 1
-                    },
-                    "parent": {
-                        "type": 7,
-                        "value": "101"
-                    },
-                    "path": {
-                        "type": 0,
-                        "value": "meshes/p3bot.obj"
-                    },
-                    "pos_x": {
-                        "type": 2,
-                        "value": -500
-                    },
-                    "pos_y": {
-                        "type": 2,
-                        "value": -500
-                    }
-                },
-                "id": "200",
-                "links": [
-                    {
-                        "dst": "250",
-                        "label": "RT",
-                        "linkAttribute": {
-                            "rt_rotation_euler_xyz": {
-                                "type": 3,
-                                "value": [
-                                    0,
-                                    0,
-                                    0
-                                ]
-                            },
-                            "rt_translation": {
-                                "type": 3,
-                                "value": [
-                                    0,
-                                    0,
-                                    0
-                                ]
-                            }
-                        },
-                        "src": "200"
-                    },
-                    {
-                        "dst": "260",
-                        "label": "has",
-                        "linkAttribute": {
-                            "rt_rotation_euler_xyz": {
-                                "type": 3,
-                                "value": [
-                                    0,
-                                    0,
-                                    0
-                                ]
-                            },
-                            "rt_translation": {
-                                "type": 3,
-                                "value": [
-                                    0,
-                                    0,
-                                    0
-                                ]
-                            }
-                        },
-                        "src": "200"
-                    }
-                ],
-                "name": "P3Bot",
-                "type": "robot"
             },
             "102": {
                 "attribute": {
@@ -1328,6 +1249,22 @@
                         "type": 0,
                         "value": "Khaki"
                     },
+                    "laser_X": {
+                        "type": 3,
+                        "value": []
+                    },
+                    "laser_Y": {
+                        "type": 3,
+                        "value": []
+                    },
+                    "laser_Z": {
+                        "type": 3,
+                        "value": []
+                    },
+                    "laser_timestamp": {
+                        "type": 7,
+                        "value": 0
+                    },
                     "level": {
                         "type": 1,
                         "value": 3
@@ -1352,6 +1289,50 @@
             },
             "141": {
                 "attribute": {
+                    "cam_depthFactor": {
+                        "type": 2,
+                        "value": 1.0
+                    },
+                    "cam_depth_channels": {
+                        "type": 1,
+                        "value": 3
+                    },
+                    "cam_depth_height": {
+                        "type": 1,
+                        "value": 960
+                    },
+                    "cam_depth_width": {
+                        "type": 1,
+                        "value": 1920
+                    },
+                    "cam_equirect_azimuth_offset": {
+                        "type": 2,
+                        "value": 0.0
+                    },
+                    "cam_equirect_azimuth_sign": {
+                        "type": 2,
+                        "value": 1.0
+                    },
+                    "cam_fov": {
+                        "type": 2,
+                        "value": 6.28
+                    },
+                    "cam_projection": {
+                        "type": 0,
+                        "value": "equirectangular"
+                    },
+                    "cam_rgb_depth": {
+                        "type": 1,
+                        "value": 3
+                    },
+                    "cam_rgb_height": {
+                        "type": 1,
+                        "value": 960
+                    },
+                    "cam_rgb_width": {
+                        "type": 1,
+                        "value": 1920
+                    },
                     "color": {
                         "type": 0,
                         "value": "Khaki"
@@ -1376,10 +1357,70 @@
                 "id": "141",
                 "links": [],
                 "name": "ricoh",
-                "type": "camera"
+                "type": "rgbd"
             },
             "142": {
                 "attribute": {
+                    "cam_depth": {
+                        "type": 5,
+                        "value": []
+                    },
+                    "cam_depthFactor": {
+                        "type": 2,
+                        "value": 1
+                    },
+                    "cam_depth_focalx": {
+                        "type": 1,
+                        "value": 448
+                    },
+                    "cam_depth_focaly": {
+                        "type": 1,
+                        "value": 448
+                    },
+                    "cam_depth_height": {
+                        "type": 1,
+                        "value": 720
+                    },
+                    "cam_depth_width": {
+                        "type": 1,
+                        "value": 1280
+                    },
+                    "cam_fov": {
+                        "type": 2,
+                        "value": 1.9198
+                    },
+                    "cam_rgb": {
+                        "type": 5,
+                        "value": []
+                    },
+                    "cam_rgb_alivetime": {
+                        "type": 7,
+                        "value": 0
+                    },
+                    "cam_rgb_cameraID": {
+                        "type": 1,
+                        "value": 0
+                    },
+                    "cam_rgb_depth": {
+                        "type": 1,
+                        "value": 3
+                    },
+                    "cam_rgb_focalx": {
+                        "type": 1,
+                        "value": 448
+                    },
+                    "cam_rgb_focaly": {
+                        "type": 1,
+                        "value": 448
+                    },
+                    "cam_rgb_height": {
+                        "type": 1,
+                        "value": 720
+                    },
+                    "cam_rgb_width": {
+                        "type": 1,
+                        "value": 1280
+                    },
                     "color": {
                         "type": 0,
                         "value": "Khaki"
@@ -1470,11 +1511,11 @@
                     },
                     "level": {
                         "type": 1,
-                        "value": 3
+                        "value": 4
                     },
                     "parent": {
                         "type": 7,
-                        "value": "250"
+                        "value": "251"
                     },
                     "pos_x": {
                         "type": 2,
@@ -1498,11 +1539,11 @@
                     },
                     "level": {
                         "type": 1,
-                        "value": 3
+                        "value": 4
                     },
                     "parent": {
                         "type": 7,
-                        "value": "250"
+                        "value": "251"
                     },
                     "pos_x": {
                         "type": 2,
@@ -1526,11 +1567,11 @@
                     },
                     "level": {
                         "type": 1,
-                        "value": 3
+                        "value": 4
                     },
                     "parent": {
                         "type": 7,
-                        "value": "250"
+                        "value": "251"
                     },
                     "pos_x": {
                         "type": 2,
@@ -1554,11 +1595,11 @@
                     },
                     "level": {
                         "type": 1,
-                        "value": 3
+                        "value": 4
                     },
                     "parent": {
                         "type": 7,
-                        "value": "250"
+                        "value": "251"
                     },
                     "pos_x": {
                         "type": 2,
@@ -1573,6 +1614,85 @@
                 "links": [],
                 "name": "br_wheel",
                 "type": "motor"
+            },
+            "200": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 1
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "101"
+                    },
+                    "path": {
+                        "type": 0,
+                        "value": "meshes/p3bot.obj"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -500
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -500
+                    }
+                },
+                "id": "200",
+                "links": [
+                    {
+                        "dst": "250",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0
+                                ]
+                            }
+                        },
+                        "src": "200"
+                    },
+                    {
+                        "dst": "260",
+                        "label": "has",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0
+                                ]
+                            }
+                        },
+                        "src": "200"
+                    }
+                ],
+                "name": "P3Bot",
+                "type": "robot"
             },
             "250": {
                 "attribute": {
@@ -1618,17 +1738,17 @@
                             "rt_rotation_euler_xyz": {
                                 "type": 3,
                                 "value": [
-                                    0,
-                                    -2.01,
-                                    0
+                                    0.0,
+                                    0.0,
+                                    0.0
                                 ]
                             },
                             "rt_translation": {
                                 "type": 3,
                                 "value": [
-                                    0.0,
-                                    -0.055176119999999995,
-                                    1.04883
+                                    -0.055,
+                                    0.002,
+                                    1.052
                                 ]
                             }
                         },
@@ -1641,16 +1761,16 @@
                             "rt_rotation_euler_xyz": {
                                 "type": 3,
                                 "value": [
-                                    2.01,
-                                    0,
-                                    0
+                                    0.0,
+                                    0.0,
+                                    0.0
                                 ]
                             },
                             "rt_translation": {
                                 "type": 3,
                                 "value": [
+                                    0.0517612,
                                     0.0,
-                                    0.055176119999999995,
                                     1.04883
                                 ]
                             }
@@ -1664,17 +1784,17 @@
                             "rt_rotation_euler_xyz": {
                                 "type": 3,
                                 "value": [
-                                    0,
-                                    0,
-                                    0
+                                    0.0,
+                                    0.0,
+                                    0.0
                                 ]
                             },
                             "rt_translation": {
                                 "type": 3,
                                 "value": [
-                                    0.0,
-                                    -0.17,
-                                    1.2
+                                    -0.00230873,
+                                    -0.0535264,
+                                    1.24
                                 ]
                             }
                         },
@@ -1687,17 +1807,17 @@
                             "rt_rotation_euler_xyz": {
                                 "type": 3,
                                 "value": [
-                                    -0.5236,
-                                    0,
-                                    0
+                                    0.0,
+                                    0.0,
+                                    0.0
                                 ]
                             },
                             "rt_translation": {
                                 "type": 3,
                                 "value": [
-                                    -0.06,
-                                    -0.015,
-                                    1.16
+                                    -0.0,
+                                    0.088,
+                                    1.08
                                 ]
                             }
                         },
@@ -1710,17 +1830,17 @@
                             "rt_rotation_euler_xyz": {
                                 "type": 3,
                                 "value": [
-                                    0,
-                                    0,
-                                    0
+                                    0.0,
+                                    0.0,
+                                    0.0
                                 ]
                             },
                             "rt_translation": {
                                 "type": 3,
                                 "value": [
+                                    -0.0,
                                     0.0,
-                                    0.0,
-                                    -0.01
+                                    0.0
                                 ]
                             }
                         },
@@ -1733,101 +1853,9 @@
                             "rt_rotation_euler_xyz": {
                                 "type": 3,
                                 "value": [
-                                    0,
-                                    0,
-                                    0
-                                ]
-                            },
-                            "rt_translation": {
-                                "type": 3,
-                                "value": [
-                                    0,
-                                    0,
-                                    0
-                                ]
-                            }
-                        },
-                        "src": "250"
-                    },
-                    {
-                        "dst": "160",
-                        "label": "RT",
-                        "linkAttribute": {
-                            "rt_rotation_euler_xyz": {
-                                "type": 3,
-                                "value": [
-                                    0,
-                                    0,
-                                    0
-                                ]
-                            },
-                            "rt_translation": {
-                                "type": 3,
-                                "value": [
-                                    0,
-                                    0,
-                                    0
-                                ]
-                            }
-                        },
-                        "src": "250"
-                    },
-                    {
-                        "dst": "161",
-                        "label": "RT",
-                        "linkAttribute": {
-                            "rt_rotation_euler_xyz": {
-                                "type": 3,
-                                "value": [
-                                    0,
-                                    0,
-                                    0
-                                ]
-                            },
-                            "rt_translation": {
-                                "type": 3,
-                                "value": [
-                                    0,
-                                    0,
-                                    0
-                                ]
-                            }
-                        },
-                        "src": "250"
-                    },
-                    {
-                        "dst": "162",
-                        "label": "RT",
-                        "linkAttribute": {
-                            "rt_rotation_euler_xyz": {
-                                "type": 3,
-                                "value": [
-                                    0,
-                                    0,
-                                    0
-                                ]
-                            },
-                            "rt_translation": {
-                                "type": 3,
-                                "value": [
-                                    0,
-                                    0,
-                                    0
-                                ]
-                            }
-                        },
-                        "src": "250"
-                    },
-                    {
-                        "dst": "163",
-                        "label": "RT",
-                        "linkAttribute": {
-                            "rt_rotation_euler_xyz": {
-                                "type": 3,
-                                "value": [
-                                    0,
-                                    0,
-                                    0
+                                    0.0,
+                                    0.0,
+                                    0.0
                                 ]
                             },
                             "rt_translation": {
@@ -1848,17 +1876,40 @@
                             "rt_rotation_euler_xyz": {
                                 "type": 3,
                                 "value": [
-                                    -0.0,
                                     0.0,
-                                    -0.0
+                                    0.0,
+                                    0.0
                                 ]
                             },
                             "rt_translation": {
                                 "type": 3,
                                 "value": [
-                                    0.0,
-                                    -0.17,
+                                    -0.0,
+                                    -0.05,
                                     1.42
+                                ]
+                            }
+                        },
+                        "src": "250"
+                    },
+                    {
+                        "dst": "251",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    0.0,
+                                    0.0,
+                                    0.0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    -0.0,
+                                    0.0,
+                                    0.0
                                 ]
                             }
                         },
@@ -1867,6 +1918,127 @@
                 ],
                 "name": "body",
                 "type": "body"
+            },
+            "251": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 3
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "250"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -550
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -310.0
+                    }
+                },
+                "id": "251",
+                "links": [
+                    {
+                        "dst": "160",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    0.0,
+                                    0.0,
+                                    3.1459
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0.125,
+                                    0.24,
+                                    0.08
+                                ]
+                            }
+                        },
+                        "src": "251"
+                    },
+                    {
+                        "dst": "161",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    0.0,
+                                    0.0,
+                                    0.0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0.125,
+                                    -0.24,
+                                    0.08
+                                ]
+                            }
+                        },
+                        "src": "251"
+                    },
+                    {
+                        "dst": "162",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    0.0,
+                                    0.0,
+                                    3.1459
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    -0.125,
+                                    0.24,
+                                    0.08
+                                ]
+                            }
+                        },
+                        "src": "251"
+                    },
+                    {
+                        "dst": "163",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    0.0,
+                                    0.0,
+                                    0.0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    -0.125,
+                                    -0.24,
+                                    0.08
+                                ]
+                            }
+                        },
+                        "src": "251"
+                    }
+                ],
+                "name": "base",
+                "type": "transform"
             },
             "260": {
                 "attribute": {

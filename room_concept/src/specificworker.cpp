@@ -18,6 +18,8 @@
  */
 #include "specificworker.h"
 
+#include <locale>
+
 #include <algorithm>
 #include <print>
 #include <sys/resource.h>   // getrusage — process CPU% readout
@@ -604,7 +606,60 @@ bool SpecificWorker::maybe_publish_corrected_pose()
     ++rt_corr_count_;
     log_pose_trace(/*type=corrected*/0, loc_res->timestamp_ms,
                    loc_res->robot_pose, loc_res->innovation_norm);
+    log_ground_truth(*loc_res);
     return true;
+}
+
+// Localiser pose beside the Webots supervisor pose, one row per published correction.
+// robot_concept writes robot_gt_* onto the robot node ONLY while the producer reports
+// simulated==true, so on real hardware the attributes are absent and this writes nothing and opens
+// no file. Absence is the gate; there is no switch to misconfigure.
+//
+// Both poses are logged RAW, in their own frames — GT in world, the estimate in the room frame.
+// They are deliberately NOT differenced here: the room frame's orientation is arbitrary, so a
+// constant offset is expected and only its VARIATION is a defect. Fit offset+gain across the file
+// and read the residual; a single pair of readings cannot tell those apart.
+void SpecificWorker::log_ground_truth(const rc::RoomConcept::UpdateResult &res)
+{
+    if (shutting_down_.load() or not G)
+        return;
+    const auto robots = G->get_nodes_by_type("robot");
+    if (robots.empty())
+        return;
+    const auto &rn = robots.front();
+    const auto gx = G->get_attrib_by_name<robot_gt_x_att>(rn);
+    const auto gy = G->get_attrib_by_name<robot_gt_y_att>(rn);
+    const auto ga = G->get_attrib_by_name<robot_gt_angle_att>(rn);
+    if (not gx.has_value() or not gy.has_value() or not ga.has_value())
+        return;                                  // no ground truth -> real robot -> nothing to do
+
+    if (not gt_csv_open_attempted_)
+    {
+        gt_csv_open_attempted_ = true;
+        QDir().mkpath("tmp/sdf_localizer");
+        gt_csv_.open("tmp/sdf_localizer/gt_error.csv", std::ios::out | std::ios::trunc);
+        if (gt_csv_.is_open())
+        {
+            // Written through the CLASSIC locale: these machines run es_ES, where a comma is the
+            // decimal separator, and a CSV whose fields contain commas is unparseable.
+            gt_csv_.imbue(std::locale::classic());
+            gt_csv_ << "ts_ms,gt_x,gt_y,gt_theta,est_x,est_y,est_theta,sdf_mse,iters,cov_tt\n";
+        }
+        else
+            qWarning() << "[gt] cannot open tmp/sdf_localizer/gt_error.csv";
+    }
+    if (not gt_csv_.is_open())
+        return;
+
+    const auto &p = res.robot_pose;
+    const float est_th = std::atan2(p.linear()(1, 0), p.linear()(0, 0));
+    gt_csv_ << res.timestamp_ms
+            << ',' << gx.value() << ',' << gy.value() << ',' << ga.value()
+            << ',' << p.translation().x() << ',' << p.translation().y() << ',' << est_th
+            << ',' << res.sdf_mse << ',' << res.iterations_used
+            << ',' << (res.covariance.rows() > 2 ? res.covariance(2, 2) : -1.f)
+            << '\n';
+    gt_csv_.flush();
 }
 
 void SpecificWorker::compute()

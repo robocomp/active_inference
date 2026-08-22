@@ -1,5 +1,7 @@
 #include "room_model.h"
 
+#include <stdexcept>
+
 namespace rc
 {
 
@@ -320,6 +322,17 @@ Model::SdfQueryResult Model::sdf_polygon_query(const torch::Tensor& points_room_
 
 Eigen::Matrix<float, 5, 1> Model::get_state() const
 {
+    // Say WHICH tensor is missing. Without this the caller gets ATen's
+    // "tensor does not have a device", which names neither the tensor nor this function and
+    // surfaces as an unhandled throw out of a Qt timer handler.
+    if (not has_state())
+        throw std::runtime_error(
+            std::string("Model::get_state() on an uninitialised model - undefined:") +
+            (half_extents.defined() ? "" : " half_extents") +
+            (robot_pos.defined()    ? "" : " robot_pos") +
+            (robot_theta.defined()  ? "" : " robot_theta") +
+            " (init_from_state/init_from_polygon has not run, or ran only partly)");
+
     // Must convert to CPU for accessor
     auto ext_cpu = half_extents.to(torch::kCPU);
     auto pos_cpu = robot_pos.to(torch::kCPU);

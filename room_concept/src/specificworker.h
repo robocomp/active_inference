@@ -204,6 +204,21 @@ class SpecificWorker : public GenericWorker
         std::ofstream compute_csv_;
         bool          compute_csv_open_attempted_ = false;
 
+        // ── Ground-truth comparison (SIMULATION ONLY) ────────────────────────────────────────────
+        // Logs the localiser's published pose beside the Webots supervisor pose that robot_concept
+        // writes onto the robot node as robot_gt_*. The point is a witness from OUTSIDE the
+        // estimator: a wrong pose fitted well scores exactly like a right one on the SDF residual,
+        // which is how a 0.35 rad yaw error hid behind an SDF of 0.009 for a whole session.
+        // ⚠ The two poses are in DIFFERENT FRAMES — GT is world, the estimate is room — so a
+        // CONSTANT offset between them is expected and benign (the room frame's own orientation).
+        // What matters is whether that offset stays constant: fit offset+gain over many rows and
+        // look at the RESIDUAL. Never compare two single readings; that is how three wrong
+        // conclusions got drawn by hand on 2026-08-22.
+        // Gated on the attributes EXISTING, so on the real robot nothing is written at all.
+        std::ofstream gt_csv_;
+        bool          gt_csv_open_attempted_ = false;
+        void          log_ground_truth(const rc::RoomConcept::UpdateResult &res);
+
         // RT publish-rate monitor (shown in the window title at ~1 Hz so it can be watched visually).
         int          rt_corr_count_           = 0;   // corrected RT publishes this window
         std::int64_t rt_rate_window_start_ms_ = 0;
