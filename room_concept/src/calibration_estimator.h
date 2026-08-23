@@ -108,11 +108,21 @@ namespace rc::calib
         bool  ok = false;
     };
 
-    /// Prior: mean 0 (the model is believed correct until shown otherwise) with a stated sigma.
+    /// Prior: a MEAN and a sigma per parameter.
+    ///
+    /// ★★★THE MEAN IS THE CURRENT BEST ESTIMATE, NOT ZERO, once anything has been learned. A sliding
+    /// window forgets: a turn-heavy window contains nothing about eps_yaw, so with a zero-mean prior
+    /// the solve would return eps_yaw ~ 0 and DISCARD what an earlier straight-heavy window taught.
+    /// Re-centring the prior on the running estimate makes an uninformed parameter stay exactly where
+    /// it was, with its uncertainty growing rather than its value collapsing -- which is the correct
+    /// response to "this window did not ask about you". It also makes the batch solve a proper
+    /// recursive estimator rather than a series of independent fits.
+    ///
     /// ★NOT optional — see THE COLD-START TRAP. It is also what keeps the solve well-posed when a
     /// window happens to contain no motion of the kind a given parameter needs.
     struct Prior
     {
+        Eigen::Matrix<float, P_COUNT, 1> mean = Eigen::Matrix<float, P_COUNT, 1>::Zero();
         float sigma_k_v     = 0.02f;    ///< 2% — a wheel radius is not wrong by more than this
         float sigma_eps_yaw = 0.0175f;  ///< 1 deg of mount/axis misalignment
         float sigma_k_omega = 0.02f;    ///< 2%
@@ -123,6 +133,10 @@ namespace rc::calib
     {
     public:
         void configure(const Prior &p, std::size_t window) { prior_ = p; window_ = std::max<std::size_t>(window, 8); }
+
+        /// Re-centre the prior on the current best estimate. Call after publishing a solve, so the
+        /// next window refines rather than restarts. See Prior::mean.
+        void set_prior_mean(const Eigen::Matrix<float, P_COUNT, 1> &m) { prior_.mean = m; }
 
         void add(const Episode &e)
         {
@@ -143,11 +157,15 @@ namespace rc::calib
             Eigen::Matrix<float, P_COUNT, P_COUNT> H = Eigen::Matrix<float, P_COUNT, P_COUNT>::Zero();
             Eigen::Matrix<float, P_COUNT, 1>       b = Eigen::Matrix<float, P_COUNT, 1>::Zero();
 
-            // Prior information. Mean 0, so it contributes to H only.
+            // Prior information, centred on the running estimate (see Prior::mean).
             Eigen::Matrix<float, P_COUNT, 1> p0;
             p0 << prior_.sigma_k_v, prior_.sigma_eps_yaw, prior_.sigma_k_omega, prior_.sigma_b_omega;
             for (int i = 0; i < P_COUNT; ++i)
-                H(i, i) += 1.f / std::max(p0[i] * p0[i], 1e-18f);
+            {
+                const float info = 1.f / std::max(p0[i] * p0[i], 1e-18f);
+                H(i, i) += info;
+                b[i]    += info * prior_.mean[i];
+            }
             const Eigen::Matrix<float, P_COUNT, P_COUNT> H_prior = H;
 
             for (const auto &e : eps_)

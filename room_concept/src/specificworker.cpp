@@ -648,6 +648,7 @@ void SpecificWorker::log_ground_truth(const rc::RoomConcept::UpdateResult &res)
                        "pred_x,pred_y,pred_theta,dx_local,dy_local,"
                        "calib_k_v,calib_k_w,calib_yaw,calib_eps,"
                        "calib_sig_kv,calib_sig_kw,calib_sig_yaw,calib_pos_var,"
+                       "calib_b_omega,calib_informed,calib_cond,"
                        "imu_dvx,imu_dvy,wheel_dvx,wheel_dvy,imu_dpx,imu_dpy,imu_lin_segs\n";
         }
         else
@@ -684,6 +685,9 @@ void SpecificWorker::log_ground_truth(const rc::RoomConcept::UpdateResult &res)
             // guesswork, and a parameter that stopped moving cannot be told from one never taught.
             << ',' << res.calib_sigma_k_v << ',' << res.calib_sigma_k_w
             << ',' << res.calib_sigma_yaw << ',' << res.calib_pos_var
+            // Joint-solve outputs: the gyro bias it can now separate, which parameters this window
+            // actually taught, and how collinear the window was.
+            << ',' << res.calib_b_omega << ',' << res.calib_informed << ',' << res.calib_condition
             // Linear IMU channel. imu_dv vs wheel_dv is translation's first independent cross-check;
             // logged before being fused, because a channel whose covariance is unknown (the ImuFrame
             // IDL has no acc_var) must be shown to agree with something before anything trusts it.

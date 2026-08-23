@@ -709,6 +709,12 @@ public:
         // CONVERGED or merely stopped moving: a value that sits still with a wide sigma has not been
         // taught anything, it just has not been asked. Units differ (yaw in rad, the scales
         // dimensionless), so compare each against its own history, not against the others.
+        float calib_b_omega = 0.f;      ///< rad/s, the gyro bias the joint solve can now separate
+        /// Bitmask over rc::calib::Param: which parameters this window actually TAUGHT (posterior
+        /// shrank against the prior). A parameter the driving never excited reads 0 here and sits at
+        /// its previous value -- which a bare value cannot be distinguished from convergence.
+        int   calib_informed = 0;
+        float calib_condition = 0.f;    ///< of the CORRELATION-normalised information matrix
         float calib_sigma_yaw = 0.f, calib_sigma_k_v = 0.f, calib_sigma_k_w = 0.f;
         float calib_pos_var = 0.f;   // the R actually used for the position channel, for auditing
 
@@ -1387,6 +1393,7 @@ private:
    Eigen::Vector2f last_pred_pos_ = Eigen::Vector2f::Zero();  // odometry prediction, pre-optimizer
    float           last_pred_theta_ = 0.f;
    rc::calib::MotionCalibrator motion_calib_;
+   float last_cycle_dt_s_ = 0.f;   // odometry window duration, for the calibrator's time covariate
    float cyc_dx_local_ = 0.f, cyc_dy_local_ = 0.f;   // wheel-claimed body-frame displacement
    float cyc_imu_dvx_ = 0.f, cyc_imu_dvy_ = 0.f, cyc_imu_dpx_ = 0.f, cyc_imu_dpy_ = 0.f;
    float cyc_wheel_dvx_ = 0.f, cyc_wheel_dvy_ = 0.f;

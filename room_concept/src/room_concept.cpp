@@ -4467,7 +4467,17 @@ namespace rc
             res.calib_pos_var = pos_var;
             motion_calib_.observe(res.dy_local, res.dx_local, res.imu_dtheta + res.wheel_dtheta,
                                   r_forward, r_lateral, r_theta,
-                                  pos_var, th_var, res.iterations_used > 0, res.sdf_mse);
+                                  pos_var, th_var, res.iterations_used > 0, res.sdf_mse,
+                                  last_cycle_dt_s_);
+        }
+        res.calib_b_omega = motion_calib_.omega_bias();
+        {
+            const auto &r = motion_calib_.last_solve();
+            res.calib_informed = (r.informed[rc::calib::P_K_V]     ? 1 : 0)
+                               | (r.informed[rc::calib::P_EPS_YAW] ? 2 : 0)
+                               | (r.informed[rc::calib::P_K_OMEGA] ? 4 : 0)
+                               | (r.informed[rc::calib::P_B_OMEGA] ? 8 : 0);
+            res.calib_condition = r.condition;
         }
         res.calib_sigma_yaw = motion_calib_.yaw_sigma();
         res.calib_sigma_k_v = motion_calib_.k_v_sigma();
@@ -4702,6 +4712,9 @@ namespace rc
 
         const std::int64_t win_start_ms = to_clock(t_start_ms);
         const std::int64_t win_end_ms   = to_clock(t_end_ms);
+        // The window's own duration, kept for the calibrator: elapsed time is the only covariate that
+        // separates a gyro bias from a gyro scale.
+        last_cycle_dt_s_ = static_cast<float>(win_end_ms - win_start_ms) * 1e-3f;
 
         // ── Heading change from the gyro, over an arbitrary sub-interval ───────────────────────────
         // Yaw is the channel wheel odometry gets worst: a differential base turns by scrubbing its
@@ -4893,8 +4906,11 @@ namespace rc
             // cannot supply it without a drifting double integration, and the wheels are already
             // exact there.
             const float k_w = motion_calib_.omega_scale();
-            float dtheta = odom.rot * dt * k_w;      // odometry buffer is CCW+; use directly
-            float rot_eff = odom.rot * k_w;
+            // A BIAS is subtracted per unit TIME, a scale multiplies the RATE. That difference is the
+            // only thing separating the two, and it is why the joint solve can find both at once.
+            const float b_w = motion_calib_.omega_bias();
+            float dtheta = odom.rot * dt * k_w - b_w * dt;
+            float rot_eff = odom.rot * k_w - b_w;
             if (float dth_imu = 0.f; imu_dtheta(effective_start_ms, effective_end_ms, dth_imu))
             {
                 // Keep BOTH on the covered segments: their ratio is how much heading the gyro is
@@ -4907,7 +4923,7 @@ namespace rc
                 ++cyc_imu_segs_;
                 // The learned scale applies to whichever channel supplies the heading, and the gyro
                 // supplies ~99% of it -- applying it only to the wheel branch would leave it inert.
-                dtheta = dth_imu * k_w;
+                dtheta = dth_imu * k_w - b_w * dt;
                 rot_eff = dtheta / dt;               // the mean rate the gyro actually saw
                 ++imu_segments;
             }

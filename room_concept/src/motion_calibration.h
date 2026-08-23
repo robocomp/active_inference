@@ -47,6 +47,8 @@
  */
 #pragma once
 
+#include "calibration_estimator.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -132,24 +134,34 @@ namespace rc::calib
         void configure(const Config &c)
         {
             cfg_ = c;
-            yaw_.init(0.f, c.yaw_p0, c.yaw_q);
-            k_v_.init(0.f, c.scale_p0, c.scale_q);      // stored as a DELTA from 1.0
-            k_w_.init(0.f, c.scale_p0, c.scale_q);
+            rc::calib::Prior pr;
+            pr.sigma_k_v     = std::sqrt(std::max(c.scale_p0, 1e-12f));
+            pr.sigma_k_omega = std::sqrt(std::max(c.scale_p0, 1e-12f));
+            pr.sigma_eps_yaw = std::sqrt(std::max(c.yaw_p0,   1e-12f));
+            batch_.configure(pr, 128);
             configured_ = true;
         }
 
         [[nodiscard]] bool  configured() const noexcept { return configured_; }
         [[nodiscard]] bool  enabled() const noexcept { return cfg_.enabled and configured_; }
         /// Applied to the body->world rotation of the odometry displacement.
-        [[nodiscard]] float yaw_offset() const noexcept { return enabled() ? yaw_.value() : 0.f; }
+        [[nodiscard]] float yaw_offset() const noexcept
+        { return enabled() ? last_.value[rc::calib::P_EPS_YAW] : 0.f; }
         /// Multiplies forward (and lateral) wheel displacement.
-        [[nodiscard]] float forward_scale() const noexcept { return enabled() ? 1.f + k_v_.value() : 1.f; }
+        [[nodiscard]] float forward_scale() const noexcept
+        { return enabled() ? 1.f + last_.value[rc::calib::P_K_V] : 1.f; }
         /// Multiplies the heading increment, whichever channel produced it.
-        [[nodiscard]] float omega_scale() const noexcept { return enabled() ? 1.f + k_w_.value() : 1.f; }
+        [[nodiscard]] float omega_scale() const noexcept
+        { return enabled() ? 1.f + last_.value[rc::calib::P_K_OMEGA] : 1.f; }
+        /// rad/s, subtracted from the measured rate. Separated from the SCALE only by the
+        /// time-vs-rotation covariate pair, which is why it needs the joint solve to exist at all.
+        [[nodiscard]] float omega_bias() const noexcept
+        { return enabled() ? last_.value[rc::calib::P_B_OMEGA] : 0.f; }
 
-        [[nodiscard]] float yaw_sigma() const noexcept { return yaw_.sigma(); }
-        [[nodiscard]] float k_v_sigma() const noexcept { return k_v_.sigma(); }
-        [[nodiscard]] float k_w_sigma() const noexcept { return k_w_.sigma(); }
+        [[nodiscard]] float yaw_sigma() const noexcept { return last_.sigma[rc::calib::P_EPS_YAW]; }
+        [[nodiscard]] float k_v_sigma() const noexcept { return last_.sigma[rc::calib::P_K_V]; }
+        [[nodiscard]] float k_w_sigma() const noexcept { return last_.sigma[rc::calib::P_K_OMEGA]; }
+        [[nodiscard]] const rc::calib::Result& last_solve() const noexcept { return last_; }
         [[nodiscard]] int   episodes() const noexcept { return episodes_; }
 
         /// Called once per localiser cycle, on BOTH the early-exit and the optimized path.
@@ -160,7 +172,7 @@ namespace rc::calib
         void observe(float d_forward, float d_lateral, float d_theta,
                      float r_forward, float r_lateral, float r_theta,
                      float pos_var, float theta_var, bool corrected,
-                     float fit_residual) noexcept
+                     float fit_residual, float dt) noexcept
         {
             if (not enabled()) return;
             const bool finite = std::isfinite(d_forward) and std::isfinite(d_theta)
@@ -169,6 +181,10 @@ namespace rc::calib
             if (not finite) { reset_episode(); prev_corrected_ = corrected; return; }
 
             acc_fwd_ += d_forward; acc_lat_ += d_lateral; acc_th_ += d_theta;
+            // Elapsed time: the covariate that separates a gyro BIAS from a gyro SCALE. Nothing else
+            // in the episode carries it, and without it the two are collinear whenever the robot
+            // turns at a steady rate -- which is most of the time.
+            if (std::isfinite(dt) and dt > 0.f) acc_dur_ += dt;
             // Worst fit seen in the episode, not the mean: one bad frame is enough to make the whole
             // accumulated correction untrustworthy, and averaging would let a long clean ramp hide it.
             if (std::isfinite(fit_residual)) acc_fit_ = std::max(acc_fit_, fit_residual);
@@ -197,28 +213,49 @@ namespace rc::calib
             const float r_pos = std::max(acc_pos_var_, cfg_.min_obs_var)
                               + rot_model * rot_model + fit_model * fit_model;
             const float r_th  = std::max(acc_th_var_,  cfg_.min_obs_var) + fit_model * fit_model;
-            // Forward scale and yaw offset are BOTH driven by forward travel but read off orthogonal
-            // components of the same correction, which is what makes them separable rather than a
-            // single blended gain. The gain vanishes on its own when acc_fwd_ is ~0.
-            k_v_.update(acc_fwd_,  acc_r_fwd_, r_pos);
-            yaw_.update(-acc_fwd_, acc_r_lat_, r_pos);
-            k_w_.update(acc_th_,   acc_r_th_,  r_th);
+            // ── ONE ESTIMATOR, NOT THREE ──────────────────────────────────────────────────────────
+            // These used to be three independent scalar Kalman filters. Independence cannot separate
+            // parameters that land on the SAME component of the correction and differ only in
+            // covariate -- gyro scale from gyro bias (rotation vs elapsed time), or a mount yaw from
+            // a sensor lever arm (distance vs rotation) -- and it is what made k_v oscillate around
+            // 1.0 for a whole session, every turn cancelling what the straights taught. The joint
+            // solve handles that by construction. The scalar path is REPLACED, not kept alongside:
+            // two estimators that can disagree is the shape of bug this work spent a day chasing.
+            rc::calib::Episode e;
+            e.d_forward = acc_fwd_;   e.d_lateral = acc_lat_;   e.d_theta = acc_th_;
+            e.duration  = acc_dur_;
+            e.r_forward = acc_r_fwd_; e.r_lateral = acc_r_lat_; e.r_theta = acc_r_th_;
+            e.pos_var = r_pos;        e.theta_var = r_th;
+            batch_.add(e);
             ++episodes_;
+
+            // Re-solving on every episode is deliberate and costs nothing measurable: a 4x4 LDLT over
+            // a bounded window is microseconds, at ~0.3 Hz. A separate thread was considered and
+            // rejected -- it would add synchronisation for no measured benefit at this size. Revisit
+            // if the parameter count or the window grows by an order of magnitude.
+            if (const auto r = batch_.solve(); r.ok)
+            {
+                last_ = r;
+                // Re-centre the prior on what we now believe, so the NEXT window refines instead of
+                // restarting and a window that asks nothing about a parameter leaves it alone.
+                batch_.set_prior_mean(r.value);
+            }
             reset_episode();
         }
         void reset_episode() noexcept
         {
             acc_fwd_ = acc_lat_ = acc_th_ = 0.f;
             acc_r_fwd_ = acc_r_lat_ = acc_r_th_ = 0.f;
-            acc_pos_var_ = acc_th_var_ = acc_fit_ = 0.f;
+            acc_pos_var_ = acc_th_var_ = acc_fit_ = acc_dur_ = 0.f;
         }
 
         Config cfg_{};
         bool configured_ = false, prev_corrected_ = false;
-        ScalarParam yaw_, k_v_, k_w_;
+        rc::calib::BatchEstimator batch_;
+        rc::calib::Result last_{};
         float acc_fwd_ = 0.f, acc_lat_ = 0.f, acc_th_ = 0.f;
         float acc_r_fwd_ = 0.f, acc_r_lat_ = 0.f, acc_r_th_ = 0.f;
-        float acc_pos_var_ = 0.f, acc_th_var_ = 0.f, acc_fit_ = 0.f;
+        float acc_pos_var_ = 0.f, acc_th_var_ = 0.f, acc_fit_ = 0.f, acc_dur_ = 0.f;
         int episodes_ = 0;
     };
 }
