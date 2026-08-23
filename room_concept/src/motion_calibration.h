@@ -138,7 +138,11 @@ namespace rc::calib
             pr.sigma_k_v     = std::sqrt(std::max(c.scale_p0, 1e-12f));
             pr.sigma_k_omega = std::sqrt(std::max(c.scale_p0, 1e-12f));
             pr.sigma_eps_yaw = std::sqrt(std::max(c.yaw_p0,   1e-12f));
-            batch_.configure(pr, 128);
+            // A LONG window is what replaces the re-centring: it must hold enough driving to
+            // contain each parameter's covariate at least sometimes. 512 episodes is roughly the
+            // last half hour at the observed ~0.3 Hz, so a stretch of pure turning no longer erases
+            // what the straights before it taught.
+            batch_.configure(pr, 512);
             configured_ = true;
         }
 
@@ -233,13 +237,12 @@ namespace rc::calib
             // a bounded window is microseconds, at ~0.3 Hz. A separate thread was considered and
             // rejected -- it would add synchronisation for no measured benefit at this size. Revisit
             // if the parameter count or the window grows by an order of magnitude.
+            // The prior stays at zero: an unexcited parameter returns to it and reads "I don't know",
+            // which Result::informed reports honestly. Re-centring it on the running estimate was
+            // tried and gives a weakly-excited parameter a ratchet -- see Prior in
+            // calibration_estimator.h for the nine minutes of live drift that killed it.
             if (const auto r = batch_.solve(); r.ok)
-            {
                 last_ = r;
-                // Re-centre the prior on what we now believe, so the NEXT window refines instead of
-                // restarting and a window that asks nothing about a parameter leaves it alone.
-                batch_.set_prior_mean(r.value);
-            }
             reset_episode();
         }
         void reset_episode() noexcept

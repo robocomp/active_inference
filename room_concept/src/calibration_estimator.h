@@ -108,21 +108,28 @@ namespace rc::calib
         bool  ok = false;
     };
 
-    /// Prior: a MEAN and a sigma per parameter.
+    /// Prior: ZERO mean, with a stated sigma per parameter.
     ///
-    /// ★★★THE MEAN IS THE CURRENT BEST ESTIMATE, NOT ZERO, once anything has been learned. A sliding
-    /// window forgets: a turn-heavy window contains nothing about eps_yaw, so with a zero-mean prior
-    /// the solve would return eps_yaw ~ 0 and DISCARD what an earlier straight-heavy window taught.
-    /// Re-centring the prior on the running estimate makes an uninformed parameter stay exactly where
-    /// it was, with its uncertainty growing rather than its value collapsing -- which is the correct
-    /// response to "this window did not ask about you". It also makes the batch solve a proper
-    /// recursive estimator rather than a series of independent fits.
+    /// ★★★THE MEAN STAYS AT ZERO, AND RE-CENTRING IT ON THE RUNNING ESTIMATE IS A TRAP. It was tried
+    /// (2026-08-23) to stop a sliding window forgetting what an earlier window taught. It does that,
+    /// and it also gives a weakly-excited parameter a RATCHET: the solve nudges the mean, the prior
+    /// follows it there, the next solve nudges again, and with no restoring force the value random-
+    /// walks. Measured live: the gyro bias walked from +0.0012 to -0.0140 deg/s over nine minutes
+    /// without a single window ever reporting it as informed, against a true injected value of
+    /// +0.0029 -- wrong sign, five times the magnitude, and quietly feeding into the prediction.
+    ///
+    /// With a fixed zero mean, an unexcited parameter simply returns to its prior: "I don't know",
+    /// which is the truth. Pair it with Result::informed so a consumer can tell that from a
+    /// measurement. The cost is real -- a turn-heavy window will read eps_yaw ~ 0 even though an
+    /// earlier window measured it -- and is accepted deliberately: a value that is honestly absent is
+    /// better than one that is silently wrong. Making this a proper recursive estimator means
+    /// carrying the posterior COVARIANCE forward too, which cannot be combined with re-solving a
+    /// sliding window because the same episodes would be counted repeatedly.
     ///
     /// ★NOT optional — see THE COLD-START TRAP. It is also what keeps the solve well-posed when a
     /// window happens to contain no motion of the kind a given parameter needs.
     struct Prior
     {
-        Eigen::Matrix<float, P_COUNT, 1> mean = Eigen::Matrix<float, P_COUNT, 1>::Zero();
         float sigma_k_v     = 0.02f;    ///< 2% — a wheel radius is not wrong by more than this
         float sigma_eps_yaw = 0.0175f;  ///< 1 deg of mount/axis misalignment
         float sigma_k_omega = 0.02f;    ///< 2%
@@ -133,10 +140,6 @@ namespace rc::calib
     {
     public:
         void configure(const Prior &p, std::size_t window) { prior_ = p; window_ = std::max<std::size_t>(window, 8); }
-
-        /// Re-centre the prior on the current best estimate. Call after publishing a solve, so the
-        /// next window refines rather than restarts. See Prior::mean.
-        void set_prior_mean(const Eigen::Matrix<float, P_COUNT, 1> &m) { prior_.mean = m; }
 
         void add(const Episode &e)
         {
@@ -157,15 +160,12 @@ namespace rc::calib
             Eigen::Matrix<float, P_COUNT, P_COUNT> H = Eigen::Matrix<float, P_COUNT, P_COUNT>::Zero();
             Eigen::Matrix<float, P_COUNT, 1>       b = Eigen::Matrix<float, P_COUNT, 1>::Zero();
 
-            // Prior information, centred on the running estimate (see Prior::mean).
+            // Prior information. Zero mean, so it contributes to H only -- see Prior for why
+            // re-centring it on the running estimate is a ratchet rather than a memory.
             Eigen::Matrix<float, P_COUNT, 1> p0;
             p0 << prior_.sigma_k_v, prior_.sigma_eps_yaw, prior_.sigma_k_omega, prior_.sigma_b_omega;
             for (int i = 0; i < P_COUNT; ++i)
-            {
-                const float info = 1.f / std::max(p0[i] * p0[i], 1e-18f);
-                H(i, i) += info;
-                b[i]    += info * prior_.mean[i];
-            }
+                H(i, i) += 1.f / std::max(p0[i] * p0[i], 1e-18f);
             const Eigen::Matrix<float, P_COUNT, P_COUNT> H_prior = H;
 
             for (const auto &e : eps_)
