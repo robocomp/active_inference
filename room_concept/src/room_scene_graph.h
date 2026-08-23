@@ -54,7 +54,19 @@ public:
                        std::function<void()>    trigger_layout)
         : G_(std::move(graph)), rt_api_(rt_api), params_(&params),
           room_concept_(&room_concept), epistemic_(&epistemic),
-          trigger_layout_(trigger_layout ? std::move(trigger_layout) : [] {}) {}
+          trigger_layout_(trigger_layout ? std::move(trigger_layout) : [] {})
+    {
+        // ★TWO SWITCHES GUARDED THIS FEATURE AND ONLY ONE WAS WIRED. RoomConcept.CalibPivotEnabled
+        // gates the active half here, but CalibChannel has its OWN `enabled` -- deliberately, as a
+        // second safety catch on something that had never driven a robot -- and nothing ever set it
+        // from the config. So flipping the TOML flag produced no offer, no afford_calib node, and no
+        // error: calib_.offer() simply returned nullopt for ever, which is indistinguishable from
+        // "the robot is well calibrated and the pivot lost every contest". Observed 2026-08-23: only
+        // afford_room in the graph with the flag on.
+        rc::calib::CalibChannelParams cp;
+        cp.enabled = params.CALIB_PIVOT_ENABLED;
+        calib_ = rc::calib::CalibChannel(cp);
+    }
 
     // Resolve root/robot ids and read body dimensions (updates the planner footprint).
     void check_init_graph_is_valid();

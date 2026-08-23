@@ -31,6 +31,18 @@ TimeSeriesPlot::TimeSeriesPlot(QWidget* parent)
     startTimer(100);  // repaint at ~10 Hz
 }
 
+
+namespace
+{
+    /// A series whose last sample is NaN is GAPPED, not broken. Several traces here use NaN
+    /// deliberately to mean "this channel has nothing to say about the current stretch" -- the
+    /// controller's adv_meas/rot_meas while it is commanding, sigma when the limiter is out of the
+    /// loop -- so the line breaks instead of holding a stale value across a hand-over. Printing that
+    /// as "nan" in the legend makes a deliberate gap look like a fault, which is exactly the wrong
+    /// reading: the value is absent, not wrong.
+    inline QString legend_value_text(float v)
+    { return std::isfinite(v) ? QString("%1").arg(v, 0, 'f', 4) : QString("--"); }
+}
 void TimeSeriesPlot::add_series(const std::string& name, QColor colour,
                                 float line_width, int avg_window)
 {
@@ -277,7 +289,7 @@ void TimeSeriesPlot::draw_legend(QPainter& p) const
     int max_text_w = 0;
     for (const auto& e : entries)
     {
-        QString txt = legend_label_for_series(e.label) + QString(": %1").arg(e.last_val, 0, 'f', 4);
+        QString txt = legend_label_for_series(e.label) + QString(": %1").arg(legend_value_text(e.last_val));
         max_text_w = std::max(max_text_w, fm.horizontalAdvance(txt));
     }
     const int box_w = swatch + pad * 3 + max_text_w;
@@ -305,7 +317,7 @@ void TimeSeriesPlot::draw_legend(QPainter& p) const
 
         // Label + value
         p.setPen(QColor(20, 20, 20));
-        QString txt = legend_label_for_series(e.label) + QString(": %1").arg(e.last_val, 0, 'f', 4);
+        QString txt = legend_label_for_series(e.label) + QString(": %1").arg(legend_value_text(e.last_val));
         p.drawText(bx + pad + swatch + pad, y, max_text_w, row_h,
                    Qt::AlignLeft | Qt::AlignVCenter, txt);
         y += row_h;
