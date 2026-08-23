@@ -86,20 +86,20 @@ namespace rc
         // per sample, so the increment is ~15x better than the wheels. Chained across intervals the
         // same 0.5 deg tilt gives 0.086 m/s after 1 s and 5.1 m/s after 60 s -- which is why this
         // codebase refused the double integration for absolute motion and still should.
-        // AXIS MAPPING, MEASURED 2026-08-23, and it is NOT what the body-frame convention suggests.
-        // Tested frame-independently against ground truth over 446 straight-driving cycles and the
-        // turning cycles beside them:
-        //     corr(acc_y integral, centripetal v*w*dt) = -0.796  => acc_y IS THE LATERAL axis
-        //     corr(acc_x integral, change in |v|)      = +0.168  => acc_x is forward (weakly
-        //         confirmed only because d|v| differentiates a 12.5 Hz GT staircase twice and is
-        //         mostly noise, which also attenuates its slope -- not evidence against)
-        // So the IMU device frame is rotated ~90 deg from the body frame the odometry uses. This
-        // header previously asserted the opposite; the assertion was wrong, which is precisely why
-        // this channel is logged before it is fused. Same class of error as "forward is theta+90".
-        // ⚠ The SIGN of the lateral axis is not yet pinned: a correlation of -0.796 fixes the axis
-        // but not the sign convention of v*w in this frame. Confirm before any fusion uses it.
-        float acc_x    = 0.0f;   // FORWARD (measured)
-        float acc_y    = 0.0f;   // LATERAL, sign unconfirmed (measured)
+        // BODY FRAME, guaranteed by the producer. The bridge rotates the device axes into the body
+        // frame before publishing (P3Bot.proto puts GROUP_SENSORS inside the same +90 deg wrapper
+        // that makes the body +Y-forward, so a Webots device reports 90 deg off from what the
+        // odometry means by x and y). That rotation is a fact about how the robot is built, so it
+        // belongs to the producer and not to every consumer.
+        //
+        // This was found the hard way: the header first ASSERTED this mapping from the convention,
+        // and measurement against ground truth said the opposite -- acc_y tracked centripetal v*w at
+        // corr -0.796 while acc_x tracked change in speed. Two independent lines then agreed on the
+        // same rotation: that correlation, and the proto's wrapper Pose. Same class of error as
+        // "the robot's forward axis is theta+90", and the reason this channel was logged before it
+        // was fused.
+        float acc_x    = 0.0f;   // lateral (body +X)
+        float acc_y    = 0.0f;   // FORWARD (body +Y)
         float acc_var  = -1.0f;  // (m/s^2)^2 per sample; <0 means the producer said "unknown".
         std::int64_t source_ts_ms = 0;   // WALL epoch-ms
         std::int64_t sim_ts_ms    = 0;   // producer's SIM clock; 0 when real
