@@ -471,6 +471,12 @@ MotionCalibYawQ     = 1.0e-7   # (rad)^2 per episode — see the note on Q below
 MotionCalibScaleP0  = 4.0e-4   # fractional² initial uncertainty on both scales (1σ ≈ 2%)
 MotionCalibScaleQ   = 3.0e-7   # fractional² per episode
 MotionCalibRotModelSigma = 0.030  # m/rad — position-R growth during turns; see below
+MotionCalibFitModelGain  = 2.0    # x mean|SDF| — R growth when the FIT itself is poor. Protects the
+                        # parameters from the pathological window where the localiser loses tracking
+                        # and the optimizer fires every cycle: on 2026-08-23 two such windows made 497
+                        # fragment "episodes" in 180 s and dragged k_v 1.0059 -> 0.8907 and yaw to
+                        # -1.78 deg, destroying 20 min of correct estimation. Residual there ran
+                        # 0.05-0.26 against a normal 0.027, so this collapses the gain, no threshold.
 #
 # Q IS THE RESPONSIVENESS KNOB, and it is not optional. Without it P collapses on the first episode
 # that has a long baseline (K*h -> 1 consumes almost all the uncertainty) and the filter freezes

@@ -4459,7 +4459,7 @@ namespace rc
             res.calib_pos_var = pos_var;
             motion_calib_.observe(res.dy_local, res.dx_local, res.imu_dtheta + res.wheel_dtheta,
                                   r_forward, r_lateral, r_theta,
-                                  pos_var, th_var, res.iterations_used > 0);
+                                  pos_var, th_var, res.iterations_used > 0, res.sdf_mse);
         }
         res.calib_sigma_yaw = motion_calib_.yaw_sigma();
         res.calib_sigma_k_v = motion_calib_.k_v_sigma();

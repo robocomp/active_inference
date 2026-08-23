@@ -112,6 +112,17 @@ namespace rc::calib
         // and k_v oscillated around 1.0 instead of converging. Order-of-magnitude value: it only sets
         // the RELATIVE weight of turning against straight episodes.
         float rot_model_sigma = 0.030f; // m per rad of turning, added in quadrature to the position R
+        // A correction can only be as good as the FIT that produced it. When the localiser is not
+        // tracking, the optimizer fires on nearly every cycle and the "episodes" that reach this
+        // filter are 1-2 cycle fragments whose corrections are recovery, not model error. Observed
+        // 2026-08-23: two 180 s windows produced 497 such episodes and dragged a healthy k_v from
+        // 1.0059 to 0.8907 and yaw to -1.78 deg, wiping 20 minutes of correct estimation.
+        // Rather than detect the regime and gate it out, let R carry the localiser's own residual:
+        // the SDF error during the episode is exactly the statement "this fit is untrustworthy", and
+        // during those windows it ran 0.05-0.26 against a normal 0.027, so the gain collapses on its
+        // own. Same rule as rot_model_sigma -- grow the covariance with the covariate that predicts
+        // the model error, never a threshold on it.
+        float fit_model_gain  = 2.0f;   // multiplies mean |SDF| over the episode, into the position R
     };
 
     /// Accumulates one ramp-plus-correction episode and folds it into the parameters.
@@ -148,7 +159,8 @@ namespace rc::calib
         ///   corrected                   : did the optimizer run this cycle
         void observe(float d_forward, float d_lateral, float d_theta,
                      float r_forward, float r_lateral, float r_theta,
-                     float pos_var, float theta_var, bool corrected) noexcept
+                     float pos_var, float theta_var, bool corrected,
+                     float fit_residual) noexcept
         {
             if (not enabled()) return;
             const bool finite = std::isfinite(d_forward) and std::isfinite(d_theta)
@@ -157,6 +169,9 @@ namespace rc::calib
             if (not finite) { reset_episode(); prev_corrected_ = corrected; return; }
 
             acc_fwd_ += d_forward; acc_lat_ += d_lateral; acc_th_ += d_theta;
+            // Worst fit seen in the episode, not the mean: one bad frame is enough to make the whole
+            // accumulated correction untrustworthy, and averaging would let a long clean ramp hide it.
+            if (std::isfinite(fit_residual)) acc_fit_ = std::max(acc_fit_, fit_residual);
             if (corrected)
             {
                 acc_r_fwd_ += r_forward; acc_r_lat_ += r_lateral; acc_r_th_ += r_theta;
@@ -178,8 +193,10 @@ namespace rc::calib
         void flush() noexcept
         {
             const float rot_model = cfg_.rot_model_sigma * std::abs(acc_th_);
-            const float r_pos = std::max(acc_pos_var_, cfg_.min_obs_var) + rot_model * rot_model;
-            const float r_th  = std::max(acc_th_var_,  cfg_.min_obs_var);
+            const float fit_model = cfg_.fit_model_gain * acc_fit_;
+            const float r_pos = std::max(acc_pos_var_, cfg_.min_obs_var)
+                              + rot_model * rot_model + fit_model * fit_model;
+            const float r_th  = std::max(acc_th_var_,  cfg_.min_obs_var) + fit_model * fit_model;
             // Forward scale and yaw offset are BOTH driven by forward travel but read off orthogonal
             // components of the same correction, which is what makes them separable rather than a
             // single blended gain. The gain vanishes on its own when acc_fwd_ is ~0.
@@ -193,7 +210,7 @@ namespace rc::calib
         {
             acc_fwd_ = acc_lat_ = acc_th_ = 0.f;
             acc_r_fwd_ = acc_r_lat_ = acc_r_th_ = 0.f;
-            acc_pos_var_ = acc_th_var_ = 0.f;
+            acc_pos_var_ = acc_th_var_ = acc_fit_ = 0.f;
         }
 
         Config cfg_{};
@@ -201,7 +218,7 @@ namespace rc::calib
         ScalarParam yaw_, k_v_, k_w_;
         float acc_fwd_ = 0.f, acc_lat_ = 0.f, acc_th_ = 0.f;
         float acc_r_fwd_ = 0.f, acc_r_lat_ = 0.f, acc_r_th_ = 0.f;
-        float acc_pos_var_ = 0.f, acc_th_var_ = 0.f;
+        float acc_pos_var_ = 0.f, acc_th_var_ = 0.f, acc_fit_ = 0.f;
         int episodes_ = 0;
     };
 }
