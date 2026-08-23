@@ -118,6 +118,8 @@ public:
                     m_temperature = x.m_temperature;
 
                     m_gyro_var = x.m_gyro_var;
+        m_acc_var = x.m_acc_var;
+                    m_acc_var = x.m_acc_var;
 
     }
 
@@ -146,6 +148,7 @@ public:
         m_yaw = x.m_yaw;
         m_temperature = x.m_temperature;
         m_gyro_var = x.m_gyro_var;
+        m_acc_var = x.m_acc_var;
     }
 
     /*!
@@ -191,6 +194,8 @@ public:
                     m_temperature = x.m_temperature;
 
                     m_gyro_var = x.m_gyro_var;
+        m_acc_var = x.m_acc_var;
+                    m_acc_var = x.m_acc_var;
 
         return *this;
     }
@@ -221,6 +226,7 @@ public:
         m_yaw = x.m_yaw;
         m_temperature = x.m_temperature;
         m_gyro_var = x.m_gyro_var;
+        m_acc_var = x.m_acc_var;
         return *this;
     }
 
@@ -248,7 +254,8 @@ public:
            m_pitch == x.m_pitch &&
            m_yaw == x.m_yaw &&
            m_temperature == x.m_temperature &&
-           m_gyro_var == x.m_gyro_var);
+           m_gyro_var == x.m_gyro_var &&
+           m_acc_var == x.m_acc_var);
     }
 
     /*!
@@ -782,6 +789,35 @@ public:
         return m_gyro_var;
     }
 
+    /*!
+     * @brief This function sets a value in member acc_var
+     * @param _acc_var New value for member acc_var
+     */
+    eProsima_user_DllExport void acc_var(
+            float _acc_var)
+    {
+        m_acc_var = _acc_var;
+    }
+
+    /*!
+     * @brief This function returns the value of member acc_var
+     * @return Value of member acc_var
+     */
+    eProsima_user_DllExport float acc_var() const
+    {
+        return m_acc_var;
+    }
+
+    /*!
+     * @brief This function returns a reference to member acc_var
+     * @return Reference to member acc_var
+     */
+    eProsima_user_DllExport float& acc_var()
+    {
+        return m_acc_var;
+    }
+
+
 
 
 private:
@@ -804,6 +840,7 @@ private:
     float m_yaw{0.0};
     float m_temperature{0.0};
     float m_gyro_var{0.0};
+    float m_acc_var{0.0};
 
 };
 

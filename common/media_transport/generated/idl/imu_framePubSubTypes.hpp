@@ -63,7 +63,7 @@ struct ImuFrame_f
             ImuFrame_f);
 };
 
-template struct ImuFrame_rob<ImuFrame_f, &ImuFrame::m_gyro_var>;
+template struct ImuFrame_rob<ImuFrame_f, &ImuFrame::m_acc_var>;
 
 template <typename T, typename Tag>
 inline size_t constexpr ImuFrame_offset_of()
@@ -165,14 +165,20 @@ private:
 
     static constexpr bool is_plain_xcdrv1_impl()
     {
-        return 84ULL ==
+        // 24 (three u64) + 4 (stream_id) + 15 floats * 4 = 88. Was 84 with 14 floats; acc_var is
+        // the fifteenth. If this constant and the real layout ever disagree, is_plain() goes false
+        // and every sample is serialized instead of loaned -- silently, as a throughput loss.
+        return 88ULL ==
                (detail::ImuFrame_offset_of<ImuFrame, detail::ImuFrame_f>() +
                sizeof(float));
     }
 
     static constexpr bool is_plain_xcdrv2_impl()
     {
-        return 84ULL ==
+        // 24 (three u64) + 4 (stream_id) + 15 floats * 4 = 88. Was 84 with 14 floats; acc_var is
+        // the fifteenth. If this constant and the real layout ever disagree, is_plain() goes false
+        // and every sample is serialized instead of loaned -- silently, as a throughput loss.
+        return 88ULL ==
                (detail::ImuFrame_offset_of<ImuFrame, detail::ImuFrame_f>() +
                sizeof(float));
     }

@@ -71,7 +71,7 @@ bool ImuIngestor::pump()
         r.gyro_var     = f.gyro_var();
         r.acc_x        = f.acc_x();
         r.acc_y        = f.acc_y();
-        r.acc_var      = -1.f;        // the ImuFrame IDL has no acc_var field; see ImuReading.
+        r.acc_var      = f.acc_var();
         r.source_ts_ms = static_cast<std::int64_t>(f.stamp_ms());
         r.sim_ts_ms    = static_cast<std::int64_t>(f.sim_stamp_ms());
         // 0 IS the "not simulated" signal — the producer sends the sim clock or nothing, so no

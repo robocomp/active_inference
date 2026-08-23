@@ -1631,6 +1631,9 @@ void SpecificWorker::read_imu_thread()
 			// consumer needs; the gyro covariance is diagonal and isotropic, so m22 is its variance.
 			v.sim_stamp_ms = static_cast<std::uint64_t>(std::max<long>(0, data.gyro.simTimestamp));
 			v.gyro_var     = data.gyro.cov.m22;
+			// The accelerometer covariance is diagonal and isotropic like the gyro's; m00 is the
+			// horizontal variance, which is the pair a consumer integrates for a velocity change.
+			v.acc_var      = data.acc.cov.m00;
 			media_.publish_imu(v);
 		}
 		media_.maybe_report_stats(SensorMediaPublisher::StatsGroup::Imu, std::chrono::seconds(5));

@@ -36,6 +36,12 @@ module rc { module media {
         // noise level is handed a covariance that lies, and every downstream precision is wrong the
         // same way -- so the producer states it alongside the sample rather than out of band.
         float gyro_var;
+        // Per-sample linear-acceleration variance, (m/s^2)^2; negative means the producer does not
+        // know. Same contract as gyro_var: the producer states the variance of the data it is
+        // ACTUALLY sending, so a consumer never weights a sample by a figure unrelated to it. Added
+        // because the linear channel is the one translation depends on and it had no covariance at
+        // all -- heading could be weighted honestly and translation could not.
+        float acc_var;
     };
 
 }; };

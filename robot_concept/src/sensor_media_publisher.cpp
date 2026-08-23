@@ -374,6 +374,7 @@ bool SensorMediaPublisher::publish_imu(const ImuFrameView& view)
     s->temperature(view.temperature);
     s->sim_stamp_ms(view.sim_stamp_ms);
     s->gyro_var(view.gyro_var);
+    s->acc_var(view.acc_var);
 
     if (st.pub.publish(s))
     {

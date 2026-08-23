@@ -620,6 +620,36 @@ void register_ImuFrame_type_identifier(
             CompleteStructMember member_gyro_var = TypeObjectUtils::build_complete_struct_member(common_gyro_var, detail_gyro_var);
             TypeObjectUtils::add_complete_struct_member(member_seq_ImuFrame, member_gyro_var);
         }
+        {
+            TypeIdentifierPair type_ids_acc_var;
+            ReturnCode_t return_code_acc_var {eprosima::fastdds::dds::RETCODE_OK};
+            return_code_acc_var =
+                eprosima::fastdds::dds::DomainParticipantFactory::get_instance()->type_object_registry().get_type_identifiers(
+                "_float", type_ids_acc_var);
+
+            if (eprosima::fastdds::dds::RETCODE_OK != return_code_acc_var)
+            {
+                EPROSIMA_LOG_ERROR(XTYPES_TYPE_REPRESENTATION,
+                        "acc_var Structure member TypeIdentifier unknown to TypeObjectRegistry.");
+                return;
+            }
+            StructMemberFlag member_flags_acc_var = TypeObjectUtils::build_struct_member_flag(eprosima::fastdds::dds::xtypes::TryConstructFailAction::DISCARD,
+                    false, false, false, false);
+            MemberId member_id_acc_var = 0x00000012;
+            bool common_acc_var_ec {false};
+            CommonStructMember common_acc_var {TypeObjectUtils::build_common_struct_member(member_id_acc_var, member_flags_acc_var, TypeObjectUtils::retrieve_complete_type_identifier(type_ids_acc_var, common_acc_var_ec))};
+            if (!common_acc_var_ec)
+            {
+                EPROSIMA_LOG_ERROR(XTYPES_TYPE_REPRESENTATION, "Structure acc_var member TypeIdentifier inconsistent.");
+                return;
+            }
+            MemberName name_acc_var = "acc_var";
+            eprosima::fastcdr::optional<AppliedBuiltinMemberAnnotations> member_ann_builtin_acc_var;
+            ann_custom_ImuFrame.reset();
+            CompleteMemberDetail detail_acc_var = TypeObjectUtils::build_complete_member_detail(name_acc_var, member_ann_builtin_acc_var, ann_custom_ImuFrame);
+            CompleteStructMember member_acc_var = TypeObjectUtils::build_complete_struct_member(common_acc_var, detail_acc_var);
+            TypeObjectUtils::add_complete_struct_member(member_seq_ImuFrame, member_acc_var);
+        }
         CompleteStructType struct_type_ImuFrame = TypeObjectUtils::build_complete_struct_type(struct_flags_ImuFrame, header_ImuFrame, member_seq_ImuFrame);
         if (eprosima::fastdds::dds::RETCODE_BAD_PARAMETER ==
                 TypeObjectUtils::build_and_register_struct_type_object(struct_type_ImuFrame, type_name_ImuFrame.to_string(), type_ids_ImuFrame))

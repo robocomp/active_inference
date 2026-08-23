@@ -105,6 +105,10 @@ public:
         std::uint64_t sim_stamp_ms = 0;
         // Per-sample angular-rate variance, (rad/s)^2; negative = producer does not know.
         float gyro_var = -1.f;
+        // Per-sample linear-acceleration variance, (m/s^2)^2; negative = producer does not know.
+        // Heading could be weighted honestly and translation could not: the linear channel is the one
+        // translation depends on and it had no covariance on the media plane at all.
+        float acc_var = -1.f;
     };
 
     SensorMediaPublisher() = default;

@@ -82,9 +82,7 @@ namespace rc
         // codebase refused the double integration for absolute motion and still should.
         float acc_x    = 0.0f;   // lateral  (body +X)  -- VERIFY the axis mapping empirically
         float acc_y    = 0.0f;   // forward  (body +Y)
-        float acc_var  = -1.0f;  // (m/s^2)^2; <0 = unknown. The media-plane ImuFrame IDL carries NO
-                                 // acc_var field (only gyro_var), so this is unknown until the IDL
-                                 // gains one -- a real gap for any precision-weighted use.
+        float acc_var  = -1.0f;  // (m/s^2)^2 per sample; <0 means the producer said "unknown".
         std::int64_t source_ts_ms = 0;   // WALL epoch-ms
         std::int64_t sim_ts_ms    = 0;   // producer's SIM clock; 0 when real
         bool         simulated    = false;
