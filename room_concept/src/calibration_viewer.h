@@ -15,7 +15,6 @@
 #include "timeseries_plot.h"
 
 #include <QDialog>
-#include <QGridLayout>
 #include <QLabel>
 #include <array>
 

@@ -143,56 +143,10 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
     // The localiser cannot be graded on its own residual: a confidently wrong pose scores like a
     // right one (measured 2026-08-22, SDF 0.009 with the yaw 0.35 rad out). robot_concept publishes
     // the Webots supervisor pose as robot_gt_* while the producer reports simulated; this plots it
-    // against what the localiser publishes, so the two are visible side by side rather than inferred.
-    // ★ x/y (metres) and theta (radians) share ONE axis on purpose: in an 8x6 room they span
-    // comparable ranges, and separating them would hide the thing worth seeing — whether GT and
-    // estimate move TOGETHER. A constant offset between the theta pair is EXPECTED and benign: the
-    // room frame's orientation is arbitrary, room_concept picks it from its own fit. Only a
-    // CHANGING gap is a defect.
-    ts_plot_gt_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
-    ts_plot_gt_->set_visible_window(60.f);
-    // GT solid/dark, estimate a CONTRASTING hue rather than a pale tint of the same one: the pale
-    // version of a colour is invisible against its own partner when the two coincide, which is the
-    // normal case for x and y. Distinct hues stay readable whether they overlap or diverge.
-    ts_plot_gt_->add_series("gt x",      QColor(200,  30,  30), 2.0f, 0);   // deep red
-    ts_plot_gt_->add_series("est x",     QColor(255, 140,   0), 1.4f, 0);   // orange
-    ts_plot_gt_->add_series("gt y",      QColor(  0, 140,  60), 2.0f, 0);   // deep green
-    ts_plot_gt_->add_series("est y",     QColor(190, 210,   0), 1.4f, 0);   // olive/yellow
-    ts_plot_gt_->add_series("gt theta",  QColor( 30,  90, 200), 2.0f, 0);   // deep blue
-    ts_plot_gt_->add_series("est theta", QColor(190,  90, 220), 1.4f, 0);   // violet
-    custom_widget_->frame_series->layout()->addWidget(ts_plot_gt_);
-
-    // Integrated odometry AT THE POINT THE PREDICTOR USES IT: the selected motion prior's delta_pose,
-    // i.e. the increment the predicted pose is actually built from. Deliberately not a velocity sample
-    // and not the raw stream — those are one and two steps upstream, and a prediction can be wrong
-    // because the integral over the window is wrong even when every sample in it was fine (a stale
-    // window bound, a clipped segment, a dropped sample). This is the last quantity before the
-    // prediction, so a bad prediction can be attributed here or to the optimiser, not left ambiguous.
-    // Plotted per prediction interval, in metres and radians, on ONE axis so the two stay comparable.
-    // ★RANGE IS MEASURED, NOT ASSUMED. It was ±0.20 on the estimate that both channels "sit around
-    // 0.08" at 0.19 s and 0.4 m/s, but the interval is shorter than that in practice, so the traces
-    // used ~12% of the half-height and were unreadable. Over 95k logged samples spanning the fastest
-    // tour to date (0.75 m/s peak):
-    //     d|xy|     med 0.0003  p90 0.0230  p99 0.0495  max 0.0704
-    //     dtheta    med 0.0001  p90 0.0180  p99 0.0356  max 0.0480
-    // ±0.10 doubles the trace and still leaves 42% headroom above the all-time max, so it magnifies
-    // without ever clipping — re-measure before tightening it further, because the increments scale
-    // with speed and a faster route would spend that headroom.
-    ts_plot_odo_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
-    ts_plot_odo_->set_visible_window(60.f);
-    // The odometry increments that used to live here were diagnostic scaffolding for the frame
-    // work and are now uninteresting. What matters is whether the online motion calibration is
-    // actually learning, and the honest signal for that is the PRECISION of each parameter, not its
-    // value: a value that stops moving has either converged or simply not been asked, and only the
-    // precision tells those apart. Plotted as log10(1/sigma^2) because precision spans decades as a
-    // parameter goes from "unknown" to "pinned". The three curves are NOT comparable to each other
-    // (yaw is rad, the scales are dimensionless) -- read each against its own trend.
-    ts_plot_odo_->set_y_range(0.f, 12.f);
-    ts_plot_odo_->add_series("prec fwd scale", QColor(41, 128, 185), 1.8f, 0);
-    ts_plot_odo_->add_series("prec gyro scale", QColor(192, 57, 43), 1.6f, 0);
-    ts_plot_odo_->add_series("prec yaw offset", QColor(241, 196, 15), 1.6f, 0);
-    ts_plot_odo_->set_reference_line(0.f, QColor(170, 170, 170), "");
-    custom_widget_->frame_series->layout()->addWidget(ts_plot_odo_);
+    // The odometry-increment panel that used to sit here is gone: it was scaffolding for the frame
+    // work, and the calibration parameters that replaced it now live in their own window behind the
+    // Calib button, where each one gets a full-width trace, its uncertainty and an "is this being
+    // taught" lamp. Four cramped traces sharing one strip could show none of that.
 
     // Horizontal split: the (roughly square) room canvas on the left takes the larger share, the
     // timeseries column on the right stays narrower. On resize the canvas absorbs most of the extra
@@ -431,16 +385,6 @@ void RoomViewer::update_ui(const std::optional<rc::RoomConcept::UpdateResult>& l
                                      loc_res->calib_condition, loc_res->calib_episodes);
     }
 
-    if (ts_plot_odo_ != nullptr)   // loc_res is guaranteed by the early return above
-    {
-        // log10 precision. sigma == 0 means the calibrator has not been configured (feature off),
-        // which must read as "no information" rather than as infinite confidence.
-        const auto log_prec = [](float sigma) -> float
-        { return sigma > 1e-9f ? std::log10(1.f / (sigma * sigma)) : 0.f; };
-        ts_plot_odo_->add_point("prec fwd scale",  log_prec(loc_res->calib_sigma_k_v));
-        ts_plot_odo_->add_point("prec gyro scale", log_prec(loc_res->calib_sigma_k_w));
-        ts_plot_odo_->add_point("prec yaw offset", log_prec(loc_res->calib_sigma_yaw));
-    }
 }
 
 void RoomViewer::show_calibration()

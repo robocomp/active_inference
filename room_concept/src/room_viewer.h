@@ -128,7 +128,6 @@ private:
     QPointer<rc::TimeSeriesPlot> ts_plot_fe_;
     QPointer<rc::TimeSeriesPlot> ts_plot_rates_;   // RT-publish + optimizer rates (Hz) over time
     // Integrated odometry as the PREDICTOR consumes it — see get_predictor_delta().
-    rc::TimeSeriesPlot* ts_plot_odo_ = nullptr;
     QPointer<rc::TimeSeriesPlot> ts_plot_conf_;    // localization confidence (raw, 0..1) over time
     // Retained so the GT series can read robot_gt_* off the robot node each update.
     std::shared_ptr<DSR::DSRGraph> graph_;

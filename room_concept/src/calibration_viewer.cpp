@@ -1,5 +1,7 @@
 #include "calibration_viewer.h"
 
+#include <QHBoxLayout>
+#include <QSizePolicy>
 #include <QVBoxLayout>
 #include <cmath>
 
@@ -8,26 +10,25 @@ namespace rc
     CalibrationViewer::CalibrationViewer(QWidget* parent) : QDialog(parent)
     {
         setWindowTitle("Self-calibration");
-        resize(760, 520);
+        resize(900, 620);   // tall enough that four full-width traces are each readable
         auto* outer = new QVBoxLayout(this);
 
         summary_ = new QLabel(this);
         summary_->setStyleSheet("font-family: monospace; font-size: 11px; color: #cfd3d6;");
         outer->addWidget(summary_);
 
-        auto* grid = new QGridLayout();
-        grid->setColumnStretch(3, 1);
-        outer->addLayout(grid, 1);
-
-        // Display units chosen so a human can judge the number at a glance: a mount angle in degrees,
-        // a scale as a percentage error, a rate bias in deg/s. The estimator's internal units
-        // (fraction, rad, rad/s) are not the ones anyone reasons in.
+        // ── LAYOUT: THE TRACE GETS THE WHOLE WIDTH ────────────────────────────────────────────────
+        // A grid with the labels in their own columns leaves the plot only whatever is left over on
+        // the right, which is the narrowest part of the window and the part carrying the actual
+        // information. So each parameter is a SECTION instead: a thin header row of labels, then a
+        // full-width trace under it that takes all the vertical stretch. Four traces reading edge to
+        // edge is the whole reason this window exists rather than another strip in the side panel.
         const struct { const char* name; float scale; const char* unit; QColor col; }
         spec[rc::calib::P_COUNT] = {
-            { "translation scale", 100.f,                        "%",     QColor(41, 128, 185) },
-            { "mount yaw",         float(180.0 / M_PI),          "deg",   QColor(241, 196, 15) },
-            { "gyro scale",        100.f,                        "%",     QColor(192, 57, 43)  },
-            { "gyro bias",         float(180.0 / M_PI),          "deg/s", QColor(39, 174, 96)  },
+            { "translation scale", 100.f,               "%",     QColor(41, 128, 185) },
+            { "mount yaw",         float(180.0 / M_PI), "deg",   QColor(241, 196, 15) },
+            { "gyro scale",        100.f,               "%",     QColor(192, 57, 43)  },
+            { "gyro bias",         float(180.0 / M_PI), "deg/s", QColor(39, 174, 96)  },
         };
 
         for (int i = 0; i < rc::calib::P_COUNT; ++i)
@@ -36,24 +37,27 @@ namespace rc
             r.scale = spec[i].scale;
             r.unit  = spec[i].unit;
 
+            auto* header = new QHBoxLayout();
             r.name = new QLabel(spec[i].name, this);
-            r.name->setStyleSheet("font-size: 12px; color: #e6e9ea;");
+            r.name->setStyleSheet(QString("font-size: 12px; font-weight: bold; color: %1;")
+                                      .arg(spec[i].col.name()));
             r.value = new QLabel("--", this);
             r.value->setStyleSheet("font-family: monospace; font-size: 12px; color: #e6e9ea;");
-            r.value->setMinimumWidth(190);
             r.lamp = new QLabel(this);
-            r.lamp->setMinimumWidth(96);
+            header->addWidget(r.name);
+            header->addSpacing(12);
+            header->addWidget(r.value);
+            header->addStretch(1);          // pushes the lamp to the right edge, labels stay left
+            header->addWidget(r.lamp);
+            outer->addLayout(header);
 
             r.plot = new TimeSeriesPlot(this);
-            r.plot->set_visible_window(600.f);          // ten minutes: this moves slowly on purpose
+            r.plot->set_visible_window(600.f);   // ten minutes: this moves slowly on purpose
             r.plot->add_series(spec[i].name, spec[i].col, 1.8f, 0);
             r.plot->set_reference_line(0.f, QColor(120, 120, 120), "");
-            r.plot->setMinimumHeight(84);
-
-            grid->addWidget(r.name,  i, 0);
-            grid->addWidget(r.value, i, 1);
-            grid->addWidget(r.lamp,  i, 2);
-            grid->addWidget(r.plot,  i, 3);
+            r.plot->setMinimumHeight(90);
+            r.plot->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+            outer->addWidget(r.plot, 1);    // stretch 1: the traces absorb the window's height
         }
     }
 
