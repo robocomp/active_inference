@@ -27,19 +27,6 @@
       </widget>
      </item>
      <item>
-      <widget class="QPushButton" name="btn_calib_viz">
-       <property name="text">
-        <string>Calib</string>
-       </property>
-       <property name="toolTip">
-        <string>Self-calibration: parameter values, their uncertainty, and whether the driving is currently teaching each one</string>
-       </property>
-       <property name="maximumHeight">
-        <number>35</number>
-       </property>
-      </widget>
-     </item>
-     <item>
       <widget class="QPushButton" name="btn_lidar_points_viz">
        <property name="text">
         <string>Lidar</string>
@@ -49,6 +36,19 @@
        </property>
        <property name="checked">
         <bool>false</bool>
+       </property>
+       <property name="maximumHeight">
+        <number>35</number>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="btn_calib_viz">
+       <property name="text">
+        <string>Calib</string>
+       </property>
+       <property name="toolTip">
+        <string>Self-calibration: parameter values, their uncertainty, and whether the driving is currently teaching each one</string>
        </property>
        <property name="maximumHeight">
         <number>35</number>
