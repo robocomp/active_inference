@@ -75,6 +75,7 @@ public:
     [[nodiscard]] ChannelPosterior       posterior() const { return rot_.posterior(); }
     [[nodiscard]] double passive_rate_rad_s() const { return passive_rate_; }
     [[nodiscard]] bool   offering() const { return offer_open_; }
+    [[nodiscard]] double authoritative_information() const noexcept { return authoritative_info_; }
 
     /// One cycle of ordinary life. `posterior_theta` is the localiser's fused heading, `odom_dtheta`
     /// the measured odometry increment for THIS frame, `ref_travel_m` the reference displacement over
@@ -141,10 +142,24 @@ public:
 
     /// What the manoeuvre is worth BEYOND the free data, in nats — the number that goes on the wire
     /// and competes with every exploration cell.
+    /// Supply the information (1/sigma^2) that the AUTHORITATIVE estimator currently holds on the
+    /// rotation scale — room_concept's joint BatchEstimator, whose parameters actually correct the
+    /// prediction. <=0 or non-finite means "not available", and the channel falls back to its own
+    /// passive posterior.
+    ///
+    /// ★Without this the offer prices a posterior that nothing consumes. This channel observes and
+    /// feeds nothing back by design, so a robot could correctly decide a pivot was worthless while
+    /// the estimator steering it still had an uninformed parameter.
+    void set_authoritative_information(double info) noexcept { authoritative_info_ = info; }
+
     [[nodiscard]] double marginal_gain_nats() const
     {
         const double T = pivot_duration_s();
-        return rot_.expected_information_gain(2.0 * M_PI * p_.pivot.turns, T, passive_rate_ * T);
+        const double excite = 2.0 * M_PI * p_.pivot.turns;
+        if (authoritative_info_ > 0.0 and std::isfinite(authoritative_info_))
+            return rot_.expected_information_gain_from(authoritative_info_, excite, T,
+                                                       passive_rate_ * T);
+        return rot_.expected_information_gain(excite, T, passive_rate_ * T);
     }
 
     /// Should an offer go out, and at what bearing? nullopt is the normal state of a calibrated robot.
@@ -204,6 +219,7 @@ private:
     double win_ref_ = 0.0, win_odo_ = 0.0;
     bool   win_poisoned_ = false;
     long   poisoned_windows_ = 0;   ///< windows discarded for a pose jump or missing odometry
+    double authoritative_info_ = 0.0;   // 1/sigma^2 from the estimator that steers; 0 = unset
     double passive_rate_ = 0.0;      ///< rad/s of turning the ordinary tours deliver — MEASURED
     bool   offer_open_ = false;
     double step_odom_  = 0.0;        ///< odometry turn accumulated since this offer went out

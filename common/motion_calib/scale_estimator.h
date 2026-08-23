@@ -202,10 +202,31 @@ public:
     [[nodiscard]] double expected_information_gain(double delta, double T_s,
                                                    double passive_delta = 0.0) const
     {
+        const double own = sxx_ / std::max(density_squared(), 1e-12)
+                         + 1.0 / (p_.prior_std * p_.prior_std);
+        return expected_information_gain_from(own, delta, T_s, passive_delta);
+    }
+
+    /// Same arithmetic, but priced against a posterior held ELSEWHERE.
+    ///
+    /// ★★★A CALIBRATION AFFORDANCE MUST PRICE THE POSTERIOR THAT ACTUALLY STEERS THE ROBOT. This
+    /// class observes and feeds nothing back; the parameters that correct the prediction live in
+    /// room_concept's joint BatchEstimator. Pricing a manoeuvre against THIS posterior would let the
+    /// robot conclude "my tours already taught me, a pivot is worthless" about a quantity nothing
+    /// consumes, while the estimator that does steer still has an uninformed parameter. Pass
+    /// `1/sigma^2` of the authoritative parameter and the offer prices what it is actually worth.
+    ///
+    /// The rest is unchanged and deliberately so: the marginal rule, the 1/2 log ratio and the units
+    /// are the tested part, and the live numbers (3.46 nats cold, 0.01 after turning, 3.70 after
+    /// straights) were measured with them.
+    [[nodiscard]] double expected_information_gain_from(double base_information, double delta,
+                                                       double T_s, double passive_delta = 0.0) const
+    {
         if (not (T_s > 0.0)) return 0.0;
+        if (not (base_information > 0.0) or not std::isfinite(base_information)) return 0.0;
         const double w = 1.0 / T_s;
         const double sig2 = std::max(density_squared(), 1e-12);
-        const double base = sxx_ / sig2 + 1.0 / (p_.prior_std * p_.prior_std);
+        const double base = base_information;
         const double i_passive = base + w * passive_delta * passive_delta / sig2;
         const double i_active  = base + w * (passive_delta * passive_delta + delta * delta) / sig2;
         if (i_passive <= 0.0 or i_active <= i_passive) return 0.0;

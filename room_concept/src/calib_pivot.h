@@ -41,6 +41,13 @@ namespace rc::calib
 
 struct PivotParams
 {
+    // ★A CONSTANT-RATE PIVOT CANNOT TEACH A GYRO BIAS. Scale and bias land on the same component of
+    // the correction and are separated ONLY by rotation-vs-time; at a fixed rate the two columns are
+    // collinear and no estimator can tell them apart. The joint solve reports this honestly (its
+    // normalised condition number went 14.5 -> 216.4 on exactly that case in the self-test), but the
+    // manoeuvre still buys nothing for the bias. A pivot that VARIED its rate would. Not built:
+    // the affordance offers one Orient contract with a fixed policy, and a varying-rate manoeuvre is
+    // a different contract, not a parameter of this one.
     /// A third of a turn per step: same direction every time, three steps to the turn.
     double step_rad = 2.0 * M_PI / 3.0;
     /// Complete turns per pivot. Four is what the hand-run measurement used, and it sets the

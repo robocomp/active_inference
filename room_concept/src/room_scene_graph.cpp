@@ -628,6 +628,18 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
     const auto &odo = room_concept_->last_measured_prior();
     const auto &R = res.robot_pose.linear();
     const double theta = std::atan2(static_cast<double>(R(1, 0)), static_cast<double>(R(0, 0)));
+    // ── PRICE THE POSTERIOR THAT ACTUALLY STEERS ─────────────────────────────────────────────────
+    // The channel's own ScaleEstimator observes and feeds nothing back; the parameters that correct
+    // the prediction are room_concept's joint BatchEstimator. Pricing the manoeuvre against the
+    // channel's posterior would let the robot decide a pivot is worthless about a quantity nothing
+    // consumes, while the estimator steering it still has an uninformed parameter. Hand it the
+    // authoritative information on the rotation scale, 1/sigma^2, and let it price what the manoeuvre
+    // is really worth. A sigma of 0 means "not solved yet" and must not read as infinite confidence.
+    calib_.set_authoritative_information(
+        res.calib_sigma_k_w > 0.f
+            ? 1.0 / (static_cast<double>(res.calib_sigma_k_w) * res.calib_sigma_k_w)
+            : 0.0);
+
     calib_.note_motion(t_s, res.robot_pose.translation().x(), res.robot_pose.translation().y(),
                        theta, static_cast<double>(odo.delta_pose.z()),
                        odo.valid and odo.fresh and odo.is_measured);
@@ -644,6 +656,10 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
                    post.s, post.s_std, post.windows, calib_.poisoned_windows(), post.sigma,
                    post.identifiable() ? "MEASURED" : "still the prior",
                    calib_.passive_rate_rad_s(), calib_.marginal_gain_nats());
+        std::print("[calib] pricing {} posterior (k_omega sigma {:.4f})\n",
+                   calib_.authoritative_information() > 0.0 ? "the STEERING" : "its OWN passive",
+                   calib_.authoritative_information() > 0.0
+                       ? 1.0 / std::sqrt(calib_.authoritative_information()) : 0.0);
         std::fflush(stdout);
     }
 
