@@ -175,6 +175,7 @@ private:
 	std::atomic<std::uint64_t> ricoh_bytes_{0};
 	std::atomic<std::uint64_t> helios_bytes_{0};
 	std::atomic<std::uint64_t> bpearl_bytes_{0};
+	std::atomic<std::uint64_t> imu_bytes_{0};
 
 	// RGBD camera reader thread
 	void read_rgbd_thread();
@@ -201,8 +202,9 @@ private:
 	// false once BOTH lidar3d_dds (helios+bpearl) are detected on DDS — robot_concept relays
 	// their descriptors to the 'helios'/'bpearl' nodes and stops bridging LiDAR. True = we bridge.
 	std::atomic<bool> bridge_lidar_{true};
-	// Same for the IMU plane. false ⇒ an external component publishes rc/imu/data and this agent must
-	// not publish over it. See Params::IMU_SOURCE for why "auto" cannot negotiate here yet.
+	// Same for the IMU plane. false ⇒ an external component (imu_dds) publishes rc/imu/data and this
+	// agent must not publish over it — it subscribes instead, purely to report the observed rate on the
+	// [IMUThread] heartbeat. Negotiated like the others through mediaplanedds4_proxy.
 	std::atomic<bool> bridge_imu_{true};
 
 	// Media plane (zero-copy DDS); RGBD pixels leave the DSR graph here.

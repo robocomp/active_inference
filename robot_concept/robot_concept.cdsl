@@ -10,7 +10,7 @@ Component robot_concept
 {
     Communications
     {
-        requires Lidar3D, CameraRGBDSimple, Camera360RGBD, IMU, Camera360RGB, MediaPlaneDDS, MediaPlaneDDS, MediaPlaneDDS, MediaPlaneDDS;
+        requires Lidar3D, CameraRGBDSimple, Camera360RGBD, IMU, Camera360RGB, MediaPlaneDDS, MediaPlaneDDS, MediaPlaneDDS, MediaPlaneDDS, MediaPlaneDDS;
         subscribesTo FullPoseEstimationPub;
     };
     language Cpp11;

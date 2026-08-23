@@ -45,6 +45,7 @@ GenericWorker::GenericWorker(const ConfigLoader& configLoader, TuplePrx tprx) : 
 	mediaplanedds1_proxy = std::get<6>(tprx);
 	mediaplanedds2_proxy = std::get<7>(tprx);
 	mediaplanedds3_proxy = std::get<8>(tprx);
+	mediaplanedds4_proxy = std::get<9>(tprx);
 
 	states["Initialize"] = std::make_unique<GRAFCETStep>("Initialize", BASIC_PERIOD, nullptr, std::bind(&GenericWorker::initialize, this));
 	states["Compute"] = std::make_unique<GRAFCETStep>("Compute", configLoader.get<int>("Period.Compute"), std::bind(&GenericWorker::compute, this));

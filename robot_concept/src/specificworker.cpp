@@ -197,12 +197,12 @@ void SpecificWorker::initialize()
 	bridge_zed_.store(  params.ZED_SOURCE   != "dds", std::memory_order_relaxed);
 	bridge_ricoh_.store(params.RICOH_SOURCE != "dds", std::memory_order_relaxed);
 	bridge_lidar_.store(params.LIDAR_SOURCE != "dds", std::memory_order_relaxed);
+	bridge_imu_.store(  params.IMU_SOURCE   != "dds", std::memory_order_relaxed);
 	qInfo() << "[Media] sources: zed =" << QString::fromStdString(params.ZED_SOURCE)
 	        << "| ricoh =" << QString::fromStdString(params.RICOH_SOURCE)
 	        << "| lidar =" << QString::fromStdString(params.LIDAR_SOURCE)
 	        << "| imu =" << QString::fromStdString(params.IMU_SOURCE)
-	        << "(auto=negotiate, ice=always bridge, dds=always monitor external;"
-	        << "imu has no producer proxy yet, so auto == ice there)";
+	        << "(auto=negotiate, ice=always bridge, dds=always monitor external)";
 
 	qInfo() << "[DSR Upload Rates] rgb=" << params.DSR_RGB_FPS
 	        << "depth=" << params.DSR_DEPTH_FPS
@@ -511,10 +511,10 @@ void SpecificWorker::compute()
 		const double f_bpearl = ewma(ema_bpearl, static_cast<double>(bp - last_bpearl) / dt);
 		// Per-thread heartbeat, one table row each. src label: "off" when the whole path is
 		// gated out (no reader thread), "local" while robot_concept bridges Ice→media itself,
-		// "ext-DDS" once negotiation hands the plane to the external producer (bridge off). IMU
-		// has no external producer (nullptr bridge) → always "local"/"off". Adding a sensor is
-		// one row here. Print only when a rate moves >= kHzPrintDelta or a src label flips, so
-		// steady-state jitter doesn't reprint every sample.
+		// "ext-DDS" once negotiation hands the plane to the external producer (bridge off) — which
+		// now includes the IMU, whose producer is imu_dds. Adding a sensor is one row here. Print
+		// only when a rate moves >= kHzPrintDelta or a src label flips, so steady-state jitter
+		// doesn't reprint every sample.
 		const auto src_label = [](bool enabled, const std::atomic<bool>* bridge) -> const char*
 		{
 			if (not enabled)         return "off";
@@ -526,7 +526,7 @@ void SpecificWorker::compute()
 			{ "ZEDThread",      f_rgbd,   src_label(params.ENABLE_ZED,   &bridge_zed_)   },
 			{ "HeliosThread",   f_helios, src_label(params.ENABLE_LIDAR, &bridge_lidar_) },
 			{ "BpearlThread",   f_bpearl, src_label(params.ENABLE_LIDAR, &bridge_lidar_) },
-			{ "IMUThread",      f_imu,    src_label(params.ENABLE_IMU,   nullptr)        },
+			{ "IMUThread",      f_imu,    src_label(params.ENABLE_IMU,   &bridge_imu_)   },
 			{ "Ricoh360Thread", f_ricoh,  src_label(params.ENABLE_RICOH, &bridge_ricoh_) },
 		};
 		constexpr int NFIELDS = static_cast<int>(std::size(fields));
@@ -558,7 +558,7 @@ void SpecificWorker::compute()
 				{"ricoh",   {"rgb360"},       &ricoh_bytes_,  params.ENABLE_RICOH},
 				{"helios",  {"lidar"},        &helios_bytes_, params.ENABLE_LIDAR},
 				{"bpearl",  {},               &bpearl_bytes_, params.ENABLE_LIDAR},
-				{"imu",     {"imu"},          nullptr,        params.ENABLE_IMU},
+				{"imu",     {"imu"},          &imu_bytes_,    params.ENABLE_IMU},
 			};
 			static std::map<std::string, std::uint64_t> last_ext_bytes;
 			for (const auto& mn : media_nodes)
@@ -1102,16 +1102,14 @@ void SpecificWorker::build_media_groups()
 	add_plane(lidar, "helios", &mediaplanedds2_proxy);
 	add_plane(lidar, "bpearl", &mediaplanedds3_proxy);
 
-	// IMU. No MediaPlaneDDS proxy exists for an IMU producer, and negotiate() already tolerates that:
-	// it only launches a query when the plane HAS a live proxy, so this plane never reports present,
-	// all_up stays false, and "auto" therefore keeps bridging — the correct reading of
-	// "no external producer was found". Forced "dds" still works, because that branch sets the bridge
-	// flag without consulting any proxy. So the table entry is honest as it stands and gains real
-	// negotiation the day an IMU component grows a MediaPlaneDDS endpoint.
+	// IMU. That day came: imu_dds (Proxies.MediaPlaneDDS4, port 11891) is the external producer, so
+	// this plane negotiates exactly like the others — "auto" adopts it as soon as it relays a
+	// descriptor, and read_imu_thread then stops pulling over Ice and only subscribes to report the
+	// observed rate. Point MediaPlaneDDS4 at a dead port (or force "ice") to go back to bridging.
 	auto& imu = media_groups_.emplace_back();
 	imu.tag = "IMU"; imu.bridge = &bridge_imu_; imu.source = &params.IMU_SOURCE;
 	imu.enabled = &params.ENABLE_IMU; imu.advertise_node = "imu"; imu.advertise_streams = {"imu"};
-	add_plane(imu, "imu", nullptr);
+	add_plane(imu, "imu", &mediaplanedds4_proxy);
 
 	// Resolve each plane's MediaPlaneDDS ICE port from its proxy string ("… -p 12002 …") so the mind
 	// view can fuse the SHM producer node with its mediaplanedds:<port> endpoint. Parsed once here.
@@ -1174,7 +1172,16 @@ void SpecificWorker::negotiate(MediaGroup& g)
 			std::string desc;
 			try { desc = p.pending.get(); }
 			catch (const Ice::Exception&) { desc.clear(); }   // peer down/hung -> absent
-			p.present = not desc.empty();
+			// A descriptor only counts as an adoption signal when the producer says its stream is
+			// actually LIVE. ready=false means "plane advertised, no data flowing" — adopting that
+			// stops our bridge and hands the sensor to a silent producer, taking it dark. Seen for
+			// real: an imu_dds pointed at the wrong IMU port had its DDS writer up (so it answered
+			// with a descriptor) while every getDataImu() was refused. Unparseable JSON is treated
+			// the same as absent, which keeps us bridging — the safe side.
+			p.present = false;
+			if (not desc.empty())
+				if (const auto d = rc::media::MediaDescriptor::from_json(desc); d.has_value())
+					p.present = d->ready;
 			if (p.present and desc != p.last_relayed)
 			{
 				relay_media_descriptor(p.node, desc);
@@ -1536,11 +1543,11 @@ void SpecificWorker::read_ricoh_thread()
 
 void SpecificWorker::read_imu_thread()
 {
+	// A null IMU proxy no longer kills this thread — it only rules out BRIDGING. When imu_dds owns
+	// the plane the monitor branch below needs no proxy at all, and reporting that external rate is
+	// precisely what this thread is for then.
 	if (imu_proxy == nullptr)
-	{
-		qWarning() << "[read_imu] no IMU proxy configured — IMU media stream disabled";
-		return;
-	}
+		qWarning() << "[read_imu] no IMU proxy configured — Ice bridging disabled (external DDS producer only)";
 	bool error_logged = false;
 	// Pace by the measured IMU interval (NOT the Compute period, which hard-capped it). Start small
 	// so it ramps up to the source rate rather than down from a slow 10 Hz.
@@ -1554,8 +1561,50 @@ void SpecificWorker::read_imu_thread()
 		           ? static_cast<std::uint64_t>(t / 1'000'000)   // ns -> ms
 		           : static_cast<std::uint64_t>(t);              // already ms
 	};
+	// External-publisher monitor (only used while imu_dds owns the plane).
+	std::unique_ptr<rc::media::ImuSubscriber> ext_imu_sub;
+	// Throttle the discovery retry to ~1 Hz. Once the subscriber is live the loop paces on its
+	// wait_and_poll; the sleep below only fires while it does NOT exist, so an un-throttled retry
+	// would re-ask the factory five times a second and each miss speaks. Mirrors the lidar monitor.
+	auto next_imu_sub_attempt = std::chrono::steady_clock::time_point{};
 	while (!stop_imu_thread && !shutting_down_.load())
 	{
+		if (not bridge_imu_.load(std::memory_order_relaxed))
+		{
+			// imu_dds is the external DDS producer (its descriptor was relayed onto the "imu" node by
+			// negotiate()). Don't pull over Ice and don't publish — the samples pass straight through
+			// from imu_dds to the consumers. SUBSCRIBE only to note the observed frequency, so the
+			// [IMUThread] heartbeat reads the live topic instead of a misleading 0.0 Hz.
+			if (const auto now = std::chrono::steady_clock::now();
+			    not ext_imu_sub and now >= next_imu_sub_attempt)
+			{
+				next_imu_sub_attempt = now + std::chrono::seconds(1);
+				ext_imu_sub = rc::media::make_imu_subscriber_from_graph(*G, "imu", "imu");
+			}
+			if (ext_imu_sub)   // wait_and_poll paces the loop (blocks up to 100 ms)
+				imu_frames_.fetch_add(
+					ext_imu_sub->wait_and_poll([this](const rc::media::ImuFrame&, std::int64_t)
+						{
+							// ImuFrame is bounded+plain (is_plain()==true), so its sizeof IS the
+							// per-sample wire cost — no length field to read like the image/lidar planes.
+							imu_bytes_.fetch_add(sizeof(rc::media::ImuFrame), std::memory_order_relaxed);
+						}, 100),
+					std::memory_order_relaxed);
+			else
+				std::this_thread::sleep_for(std::chrono::milliseconds(200));   // descriptor not ready yet
+			continue;
+		}
+		if (ext_imu_sub)
+		{
+			ext_imu_sub.reset();       // we are bridging again -> stop monitoring
+			last_imu_stamp_ms = 0;     // the monitoring gap is not a source period; don't feed the EMA
+			imu_src_period_ms = -1.0;
+		}
+		if (imu_proxy == nullptr)
+		{
+			std::this_thread::sleep_for(std::chrono::milliseconds(500));   // nothing to bridge from
+			continue;
+		}
 		RoboCompIMU::DataImu data;
 		try
 		{

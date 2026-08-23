@@ -12,6 +12,7 @@ MediaPlaneDDS = "mediaplanedds:tcp -h localhost -p 12002" # zed_camera: query it
 MediaPlaneDDS1 = "mediaplanedds:tcp -h localhost -p 10099" # ricoh_omni_dds: query its DDS media descriptor
 MediaPlaneDDS2 = "mediaplanedds:tcp -h localhost -p 11890" # lidar3d_dds helios: query its DDS media descriptor
 MediaPlaneDDS3 = "mediaplanedds:tcp -h localhost -p 11889" # lidar3d_dds bpearl: query its DDS media descriptor
+MediaPlaneDDS4 = "mediaplanedds:tcp -h localhost -p 11891" # imu_dds: query its DDS media descriptor
 
 [Endpoints]
 # Endpoints for subscriptions interfaces
@@ -151,6 +152,13 @@ ricoh_source = "auto"
 #         appear on DDS, then relay their descriptors to the 'helios'/'bpearl' nodes and stop bridging.
 #   ice : always bridge via Ice RPC.   dds: never bridge; only relay/monitor the lidar3d_dds planes.
 lidar_source = "auto"
+
+# IMU source selector (only effective when enable_imu = true): auto | ice | dds.
+#   auto: bridge via Ice RPC until imu_dds appears on DDS (Proxies.MediaPlaneDDS4), then relay its
+#         descriptor to the 'imu' node and stop bridging — samples pass straight through from
+#         imu_dds to the consumers and this agent only notes the observed rate on [IMUThread].
+#   ice : always bridge via Ice RPC.   dds: never bridge; only relay/monitor the imu_dds plane.
+imu_source   = "auto"
 
 [Lidar]
 # Legacy DSR-graph lidar upload. <0 DISABLES it (default): lidar is published on the zero-copy

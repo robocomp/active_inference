@@ -23,9 +23,18 @@ cwd = "~/robocomp/components/robocomp-robolab/components/hardware/laser/lidar3d_
 cmd = "bin/lidar3d_dds etc/config_helios_webots"
 ice_name = "lidar3d:tcp -h localhost -p 10098"
 
+# Bridges the Webots IMU (bridge's Endpoints.IMU = 10007) onto the DDS media plane
+# (domain 7, rc/imu/data). robot_concept adopts it via Proxies.MediaPlaneDDS4 and then
+# stops bridging the IMU itself. ice_name pings its MediaPlaneDDS descriptor endpoint.
+[[components]]
+name = "imu"
+cwd = "~/robocomp/components/robocomp-robolab/components/hardware/imu/imu_dds"
+cmd = "bin/imu_dds etc/config.toml"
+ice_name = "mediaplanedds:tcp -h localhost -p 11891"
+
 
 [[components]]
 name = "joy"
 cwd = "~/robocomp/components/robocomp-robolab/components/hardware/external_control/python_xbox_controller"
-cmd = "bin/python_xbox_controller etc/config_shadow"
+cmd = "bin/python_xbox_controller etc/config"
 ice_name = "python_xbox_controller:tcp -h localhost -p 11230"
