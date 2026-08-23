@@ -210,17 +210,15 @@ namespace rc::preint
             add(v_lat, v_long, omega, dt, -1.f, -1.f, -1.f);
         }
 
-        /// Same, but with MEASURED per-sample noise densities for this segment, overriding the
-        /// NoiseModel's asserted constants. Units are the model's: m/√s and rad/√s, i.e. the variance
+        /// Same, but with MEASURED per-sample noise densities for this segment, ADDED IN QUADRATURE
+        /// to the NoiseModel's constants (which are model error, not sensor noise -- see below). Units are the model's: m/√s and rad/√s, i.e. the variance
         /// contributed over an interval T is sigma²·T. Pass a negative value for any channel the
         /// producer did not state, and that channel falls back to the model.
         ///
-        /// WHY: the densities in NoiseModel are asserted constants, and the header above already
-        /// warns "re-measure on any new platform; do not carry these over as if they were constants".
-        /// The sensors now state their own per-sample variance (ImuFrame.gyro_var / acc_var, and the
-        /// FullPose velCov), so the covariance can be DERIVED from what the producer actually sent
-        /// instead of from a config figure that no longer describes it. That is the same reason the
-        /// mean is derived rather than asserted, applied to the second moment.
+        /// WHY: the sensors state their own per-sample variance (ImuFrame.gyro_var / acc_var, and
+        /// the FullPose velCov), and a channel that degrades should be believed less without anyone
+        /// editing a config file. But the model constants are a DIFFERENT quantity -- lumped model
+        /// error, not sensor noise -- so the two add rather than one replacing the other.
         ///
         /// CONVERSION, and it is the easy thing to get wrong: a producer reports a PER-SAMPLE
         /// variance at ITS OWN rate. The density is that variance times the producer's sample period
@@ -261,9 +259,21 @@ namespace rc::preint
             // not velocities). Density form: variance = sigma²·dt, i.e. a velocity variance of
             // sigma²/dt carried for dt². Writing it through the velocity makes the ZUPT below a
             // one-line Bayesian update instead of a special case.
-            const float s_lat  = sigma_v_lat_meas  >= 0.f ? sigma_v_lat_meas  : q_.sigma_v_lat;
-            const float s_long = sigma_v_long_meas >= 0.f ? sigma_v_long_meas : q_.sigma_v_long;
-            const float s_om   = sigma_omega_meas  >= 0.f ? sigma_omega_meas  : q_.sigma_omega;
+            // ADD IN QUADRATURE, NEVER REPLACE. The model constants are NOT the sensors' noise --
+            // they are a lumped term covering everything the motion model does not capture: wheel
+            // slip, timing, unmodelled dynamics. A sensor's own noise is a SEPARATE, additional
+            // contribution. Replacing one with the other was tried on 2026-08-23 and made the prior
+            // 135x too confident in heading (the gyro's density is 0.00033 rad/sqrt(s) against the
+            // model's 0.0447): the prior then out-argued the SDF, the pose rigidly followed odometry,
+            // the prediction error went 0.026 -> 0.080 and the optimizer fired on 68% of cycles
+            // instead of 2%. A measured sensor variance can therefore only ever LOOSEN this prior,
+            // which is the honest asymmetry -- it tells us when a sensor degrades, and it cannot
+            // claim the MODEL is better than we know it to be.
+            const auto combine = [](float model, float meas)
+            { return meas >= 0.f ? std::sqrt(model * model + meas * meas) : model; };
+            const float s_lat  = combine(q_.sigma_v_lat,  sigma_v_lat_meas);
+            const float s_long = combine(q_.sigma_v_long, sigma_v_long_meas);
+            const float s_om   = combine(q_.sigma_omega,  sigma_omega_meas);
             float var_v_lat  = s_lat  * s_lat  / dt;   // (m/s)²
             float var_v_long = s_long * s_long / dt;
             float var_omega  = s_om   * s_om   / dt;   // (rad/s)²
