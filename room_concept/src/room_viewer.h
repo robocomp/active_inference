@@ -35,6 +35,7 @@
 #include "room_config.h"       // rc::RoomConfig (shared config)
 #include "viewer_2d.h"
 #include "timeseries_plot.h"
+#include "calibration_viewer.h"
 #include "custom_widget.h"
 
 namespace rc { class EpistemicController; class CameraVisualizer; }
@@ -100,6 +101,8 @@ public:
 
     // Button actions.
     void show_camera();
+    /// Open (or raise) the self-calibration window.
+    void show_calibration();
     void toggle_lidar_points(bool checked);
 
     // Mouse-driven pose reset (Shift+Left = translate, Ctrl+Left = rotate); both
@@ -133,6 +136,7 @@ private:
     // robot_gt_* on the robot node just while the producer reports simulated, so on real hardware
     // the attributes are absent, the series stay empty and the plot is simply flat.
     QPointer<rc::TimeSeriesPlot> ts_plot_gt_;
+    QPointer<rc::CalibrationViewer> calib_viewer_;
     // Last state pushed to lbl_room_stable: -1 = never painted, 0 = red, 1 = green, 2 = amber (searching).
     // Tri-state so the very first update always applies a stylesheet, whichever state it reports.
     int room_stable_shown_ = -1;

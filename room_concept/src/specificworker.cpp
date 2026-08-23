@@ -192,6 +192,7 @@ void SpecificWorker::initialize()
     if (auto* w = viewer_->widget())
     {
         connect(w->btn_camera_viz, &QPushButton::clicked, this, [this] { viewer_->show_camera(); });
+        connect(w->btn_calib_viz, &QPushButton::clicked, this, [this] { viewer_->show_calibration(); });
         connect(w->btn_lidar_points_viz, &QPushButton::toggled, this, [this](bool on) { viewer_->toggle_lidar_points(on); });
         if (auto* v = viewer_->viewer())
             v->set_lidar_points_visible(w->btn_lidar_points_viz->isChecked());

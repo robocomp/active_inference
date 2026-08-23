@@ -4479,6 +4479,7 @@ namespace rc
                                | (r.informed[rc::calib::P_B_OMEGA] ? 8 : 0);
             res.calib_condition = r.condition;
         }
+        res.calib_sigma_b_omega = motion_calib_.last_solve().sigma[rc::calib::P_B_OMEGA];
         res.calib_sigma_yaw = motion_calib_.yaw_sigma();
         res.calib_sigma_k_v = motion_calib_.k_v_sigma();
         res.calib_sigma_k_w = motion_calib_.k_w_sigma();

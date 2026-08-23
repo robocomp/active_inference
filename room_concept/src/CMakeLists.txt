@@ -91,6 +91,7 @@ LIST(APPEND SOURCES
   ../src/room_config.cpp
   ../src/epistemic_planner.cpp
   ../src/timeseries_plot.cpp
+  ../src/calibration_viewer.cpp
   ../src/corner_detector.cpp
   ../src/object_anchor_factor.cpp
   ../src/object_anchor_source.cpp

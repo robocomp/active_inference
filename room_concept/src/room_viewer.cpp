@@ -420,6 +420,17 @@ void RoomViewer::update_ui(const std::optional<rc::RoomConcept::UpdateResult>& l
         }
     }
 
+    if (not calib_viewer_.isNull())
+    {
+        Eigen::Matrix<float, rc::calib::P_COUNT, 1> v, sg;
+        v  << loc_res->calib_k_v - 1.f, loc_res->calib_yaw,
+              loc_res->calib_k_w - 1.f, loc_res->calib_b_omega;
+        sg << loc_res->calib_sigma_k_v, loc_res->calib_sigma_yaw,
+              loc_res->calib_sigma_k_w, loc_res->calib_sigma_b_omega;
+        calib_viewer_->update_values(v, sg, loc_res->calib_informed,
+                                     loc_res->calib_condition, loc_res->calib_episodes);
+    }
+
     if (ts_plot_odo_ != nullptr)   // loc_res is guaranteed by the early return above
     {
         // log10 precision. sigma == 0 means the calibrator has not been configured (feature off),
@@ -430,6 +441,15 @@ void RoomViewer::update_ui(const std::optional<rc::RoomConcept::UpdateResult>& l
         ts_plot_odo_->add_point("prec gyro scale", log_prec(loc_res->calib_sigma_k_w));
         ts_plot_odo_->add_point("prec yaw offset", log_prec(loc_res->calib_sigma_yaw));
     }
+}
+
+void RoomViewer::show_calibration()
+{
+    if (calib_viewer_.isNull())
+        calib_viewer_ = new rc::CalibrationViewer(custom_widget_);
+    calib_viewer_->show();
+    calib_viewer_->raise();
+    calib_viewer_->activateWindow();
 }
 
 void RoomViewer::show_camera()
