@@ -451,7 +451,7 @@ RerunMaxQueue     = 30
 # There is no learning-rate constant here on purpose. The gain is P*H/(H*P*H+R) with R taken from the
 # optimizer's posterior covariance, so an uninformative episode (parked robot: H->0) and a
 # low-confidence correction both teach ~nothing without any threshold saying so.
-ImuLinearInjection  = false  # Add the accelerometer's within-segment double integration to the
+ImuLinearInjection  = true   # Add the accelerometer's within-segment double integration to the
                         # wheel displacement. The integrator holds a 10 Hz wheel velocity flat across
                         # each segment; the true displacement is v0*dt + the double integral, and
                         # odom.adv IS v0, so this supplies the term the zero-order hold drops -- zero
