@@ -110,7 +110,20 @@ nodes    = ["room_concept 5"]  # our own agent presence node (cleaned on shutdow
 # localiser. Offered as ordinary Orient affordances, one step at a time; it never drives anywhere, and
 # if the controller says the body cannot sweep its diagonal where the robot stands it is believed and
 # the offer waits until the day's work has carried the robot somewhere with room.
-# ★OFF. This affordance has never driven a robot. The PASSIVE half — watching how well the rotation
+# ★ON as of 2026-08-23 — FIRST RUN THAT CAN DRIVE THE ROBOT. Until now this affordance had never
+# commanded anything. Two things changed that make the test meaningful and also make it more likely
+# to actually fire than the numbers below suggest:
+#   · the offer now prices the posterior that STEERS (room_concept's joint BatchEstimator), not the
+#     passive ScaleEstimator that feeds nothing back. k_omega's sigma there is ~0.75%, far wider than
+#     the 0.00039 quoted below, so the advertised gain is correspondingly larger.
+#   · the manoeuvre is 4 turns in 120-degree steps at the consumer's ~0.06 rad/s, i.e. of order
+#     minutes of robot time. It is Orient-only and never navigates, but it does occupy the robot.
+# WATCH FOR: an Orient that reports Completed on cycle one having turned NOTHING. That exact defect
+# existed here (evaluate_goal({}) returns true for a predicate-less Orient) and was fixed, but has
+# never been exercised with a live pivot. If steps complete instantly and the accumulated degrees do
+# not move, stop and say so -- a producer sequencing off those completions would book a whole 4-turn
+# pivot in half a second and report a perfect closure.
+# ★The PASSIVE half ran regardless of this flag and still does. The PASSIVE half — watching how well the rotation
 # scale is known, from the turning the robot does anyway — runs regardless and commands nothing; look
 # for the "[calib] rotation scale ..." line, once a minute.
 # ★NOT A THRESHOLD WHEN ON: the offer carries its expected information gain in nats and competes in
@@ -118,7 +131,7 @@ nodes    = ["room_concept 5"]  # our own agent presence node (cleaned on shutdow
 # sharpens. Measured cold 3.46 nats, after 400 s of ordinary turning 0.01, after 400 s of straight-line
 # driving 3.70. On 2026-08-20 this robot's rotation scale measured +0.00007 +/- 0.00039, so expect it
 # to lose almost every contest — which is the correct outcome, not a broken feature.
-CalibPivotEnabled      = false
+CalibPivotEnabled      = true 
 
 RoomLayoutSvg          = "p3bot_layout.svg"  # 8x6 room of webots-p3bot/worlds/WAF.wbt, with the
                        # 0.7x0.7 corner column that breaks the rectangle's 180-degree symmetry.
