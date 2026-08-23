@@ -1,6 +1,7 @@
 #include "calibration_viewer.h"
 
 #include <QHBoxLayout>
+#include <iterator>
 #include <QSizePolicy>
 #include <QVBoxLayout>
 #include <cmath>
@@ -10,7 +11,7 @@ namespace rc
     CalibrationViewer::CalibrationViewer(QWidget* parent) : QDialog(parent)
     {
         setWindowTitle("Self-calibration");
-        resize(900, 620);   // tall enough that four full-width traces are each readable
+        resize(900, 760);   // tall enough that four full-width traces are each readable
         auto* outer = new QVBoxLayout(this);
 
         summary_ = new QLabel(this);
@@ -23,13 +24,23 @@ namespace rc
         // information. So each parameter is a SECTION instead: a thin header row of labels, then a
         // full-width trace under it that takes all the vertical stretch. Four traces reading edge to
         // edge is the whole reason this window exists rather than another strip in the side panel.
+        // ★ SIZE IS DEDUCED AND THEN CHECKED, never declared as [P_COUNT]. Declaring the size lets
+        // too-few initialisers compile: the rest are value-initialised, so `name` becomes a null
+        // char* and the loop below constructs a std::string from it. That is not hypothetical --
+        // P_COUNT went 4 -> 6 and this array was updated one build later, and the binary in between
+        // segfaulted with "basic_string: construction from null". The static_assert turns that into
+        // a compile error the next time a parameter is added.
         const struct { const char* name; float scale; const char* unit; QColor col; }
-        spec[rc::calib::P_COUNT] = {
+        spec[] = {
             { "translation scale", 100.f,               "%",     QColor(41, 128, 185) },
             { "mount yaw",         float(180.0 / M_PI), "deg",   QColor(241, 196, 15) },
             { "gyro scale",        100.f,               "%",     QColor(192, 57, 43)  },
             { "gyro bias",         float(180.0 / M_PI), "deg/s", QColor(39, 174, 96)  },
+            { "lateral scale",     100.f,               "%",     QColor(155, 89, 182) },
+            { "wheel mismatch",    1000.f,              "mrad/m",QColor(230, 126, 34) },
         };
+        static_assert(std::size(spec) == static_cast<std::size_t>(rc::calib::P_COUNT),
+                      "add a row here whenever rc::calib::Param gains a parameter");
 
         for (int i = 0; i < rc::calib::P_COUNT; ++i)
         {
@@ -55,7 +66,7 @@ namespace rc
             r.plot->set_visible_window(600.f);   // ten minutes: this moves slowly on purpose
             r.plot->add_series(spec[i].name, spec[i].col, 1.8f, 0);
             r.plot->set_reference_line(0.f, QColor(120, 120, 120), "");
-            r.plot->setMinimumHeight(90);
+            r.plot->setMinimumHeight(64);   // six rows now; still readable, still full width
             r.plot->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
             outer->addWidget(r.plot, 1);    // stretch 1: the traces absorb the window's height
         }

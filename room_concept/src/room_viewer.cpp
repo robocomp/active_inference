@@ -376,12 +376,12 @@ void RoomViewer::update_ui(const std::optional<rc::RoomConcept::UpdateResult>& l
 
     if (not calib_viewer_.isNull())
     {
-        Eigen::Matrix<float, rc::calib::P_COUNT, 1> v, sg;
-        v  << loc_res->calib_k_v - 1.f, loc_res->calib_yaw,
-              loc_res->calib_k_w - 1.f, loc_res->calib_b_omega;
-        sg << loc_res->calib_sigma_k_v, loc_res->calib_sigma_yaw,
-              loc_res->calib_sigma_k_w, loc_res->calib_sigma_b_omega;
-        calib_viewer_->update_values(v, sg, loc_res->calib_informed,
+        // The whole vector, straight from the solve. Copying parameter by parameter into
+        // UpdateResult fields was already awkward at four and would not survive six -- and every
+        // hand-copied field is a chance to pass a literal 0 for a sigma, which once rendered the one
+        // parameter we had never measured as the most certain thing on the screen.
+        calib_viewer_->update_values(loc_res->calib_value, loc_res->calib_sigma,
+                                     loc_res->calib_informed,
                                      loc_res->calib_condition, loc_res->calib_episodes);
     }
 

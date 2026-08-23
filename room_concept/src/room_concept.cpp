@@ -4470,6 +4470,8 @@ namespace rc
                                   pos_var, th_var, res.iterations_used > 0, res.sdf_mse,
                                   last_cycle_dt_s_);
         }
+        res.calib_value = motion_calib_.last_solve().value;
+        res.calib_sigma = motion_calib_.last_solve().sigma;
         res.calib_b_omega = motion_calib_.omega_bias();
         {
             const auto &r = motion_calib_.last_solve();
@@ -4870,9 +4872,13 @@ namespace rc
             // Odometry velocities are in robot frame: adv=forward(Y), side=lateral(X), rot=angular
             // Learned scale from motion_calib_ (1.0 until it has seen anything, and exactly 1.0
             // while the feature is off, so this line is a no-op in the default build).
-            const float k_v = motion_calib_.forward_scale();
-            const float dx_local = odom.side * dt * k_v;   // lateral (X in robot frame)
-            const float dy_local = odom.adv * dt * k_v;    // forward (Y in robot frame)
+            // Forward and lateral carry SEPARATE scales. They used to share one, which was harmless
+            // only because lateral travel is usually ~0; on a mecanum the lateral channel is the one
+            // roller slip corrupts and it is physically a different error.
+            const float k_v   = motion_calib_.forward_scale();
+            const float k_lat = motion_calib_.lateral_scale();
+            const float dx_local = odom.side * dt * k_lat;  // lateral (X in robot frame)
+            const float dy_local = odom.adv  * dt * k_v;    // forward (Y in robot frame)
             cyc_dx_local_ += dx_local;
             cyc_dy_local_ += dy_local;
             // The wheels' own velocity CHANGE across this segment, so the two channels are compared
@@ -4910,8 +4916,12 @@ namespace rc
             // A BIAS is subtracted per unit TIME, a scale multiplies the RATE. That difference is the
             // only thing separating the two, and it is why the joint solve can find both at once.
             const float b_w = motion_calib_.omega_bias();
-            float dtheta = odom.rot * dt * k_w - b_w * dt;
-            float rot_eff = odom.rot * k_w - b_w;
+            // Per-wheel mismatch: unequal effective radii make a commanded straight line curve, so
+            // it adds heading in proportion to DISTANCE driven, not to rotation or to time.
+            const float dk_wheel = motion_calib_.wheel_mismatch();
+            const float curve = dk_wheel * dy_local;
+            float dtheta = odom.rot * dt * k_w - b_w * dt + curve;
+            float rot_eff = dt > 0.f ? dtheta / dt : (odom.rot * k_w - b_w);
             if (float dth_imu = 0.f; imu_dtheta(effective_start_ms, effective_end_ms, dth_imu))
             {
                 // Keep BOTH on the covered segments: their ratio is how much heading the gyro is
@@ -4924,7 +4934,7 @@ namespace rc
                 ++cyc_imu_segs_;
                 // The learned scale applies to whichever channel supplies the heading, and the gyro
                 // supplies ~99% of it -- applying it only to the wheel branch would leave it inert.
-                dtheta = dth_imu * k_w - b_w * dt;
+                dtheta = dth_imu * k_w - b_w * dt + curve;
                 rot_eff = dtheta / dt;               // the mean rate the gyro actually saw
                 ++imu_segments;
             }

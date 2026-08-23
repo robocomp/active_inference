@@ -138,6 +138,10 @@ namespace rc::calib
             pr.sigma_k_v     = std::sqrt(std::max(c.scale_p0, 1e-12f));
             pr.sigma_k_omega = std::sqrt(std::max(c.scale_p0, 1e-12f));
             pr.sigma_eps_yaw = std::sqrt(std::max(c.yaw_p0,   1e-12f));
+            // The two newest channels keep the estimator's own defaults: they have never been
+            // measured on this robot, and inventing a config knob for a prior nobody has data for
+            // would dress an assumption up as a setting.
+
             // A LONG window is what replaces the prior re-centring: it must hold enough driving to
             // contain each parameter's covariate at least sometimes. 512 episodes is roughly the
             // last half hour at the observed ~0.3 Hz, so a stretch of pure turning no longer erases
@@ -163,6 +167,15 @@ namespace rc::calib
         /// time-vs-rotation covariate pair, which is why it needs the joint solve to exist at all.
         [[nodiscard]] float omega_bias() const noexcept
         { return enabled() ? last_.value[rc::calib::P_B_OMEGA] : 0.f; }
+        /// Multiplies LATERAL wheel displacement. Separate from forward_scale(): a mecanum's lateral
+        /// channel is the one roller slip corrupts, so the two are physically different errors.
+        [[nodiscard]] float lateral_scale() const noexcept
+        { return enabled() ? 1.f + last_.value[rc::calib::P_K_LAT] : 1.f; }
+        /// rad per metre driven forward: unequal effective wheel radii make a commanded straight
+        /// line curve. Added to the heading increment in proportion to DISTANCE, which is what
+        /// distinguishes it from a gyro scale (rotation) or a gyro bias (time).
+        [[nodiscard]] float wheel_mismatch() const noexcept
+        { return enabled() ? last_.value[rc::calib::P_DK_WHEEL] : 0.f; }
 
         [[nodiscard]] float yaw_sigma() const noexcept { return last_.sigma[rc::calib::P_EPS_YAW]; }
         [[nodiscard]] float k_v_sigma() const noexcept { return last_.sigma[rc::calib::P_K_V]; }

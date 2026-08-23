@@ -709,6 +709,13 @@ public:
         // CONVERGED or merely stopped moving: a value that sits still with a wide sigma has not been
         // taught anything, it just has not been asked. Units differ (yaw in rad, the scales
         // dimensionless), so compare each against its own history, not against the others.
+        /// The joint solve's full parameter vector and its 1-sigma, carried whole rather than
+        /// unpacked field by field -- see the note at the viewer's call site. Six parameters was
+        /// where hand-copying stopped being tenable.
+        Eigen::Matrix<float, rc::calib::P_COUNT, 1> calib_value =
+            Eigen::Matrix<float, rc::calib::P_COUNT, 1>::Zero();
+        Eigen::Matrix<float, rc::calib::P_COUNT, 1> calib_sigma =
+            Eigen::Matrix<float, rc::calib::P_COUNT, 1>::Zero();
         float calib_b_omega = 0.f;      ///< rad/s, the gyro bias the joint solve can now separate
         /// Bitmask over rc::calib::Param: which parameters this window actually TAUGHT (posterior
         /// shrank against the prior). A parameter the driving never excited reads 0 here and sits at

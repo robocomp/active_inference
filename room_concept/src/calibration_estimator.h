@@ -55,6 +55,14 @@ namespace rc::calib
         P_EPS_YAW,      ///< body/mount yaw offset (rad)
         P_K_OMEGA,      ///< gyro scale (fractional)
         P_B_OMEGA,      ///< gyro bias (rad/s) — separated from scale ONLY by time-vs-rotation
+        P_K_LAT,        ///< wheel LATERAL scale (fractional). Excitable only on a base that can
+                        ///< strafe; on a differential base its covariate is identically zero and it
+                        ///< correctly stays at its prior for ever.
+        P_DK_WHEEL,     ///< per-wheel mismatch (rad per metre travelled). Unequal effective wheel
+                        ///< radii make a commanded straight line CURVE, so it lands on the heading
+                        ///< component but is driven by DISTANCE — which is the only thing separating
+                        ///< it from the gyro scale (rotation) and the gyro bias (time). Three
+                        ///< parameters, one component, three covariates.
         P_COUNT
     };
 
@@ -66,6 +74,8 @@ namespace rc::calib
             case P_EPS_YAW: return "eps_yaw";
             case P_K_OMEGA: return "k_omega";
             case P_B_OMEGA: return "b_omega";
+            case P_K_LAT:    return "k_lat";
+            case P_DK_WHEEL: return "dk_wheel";
             default:        return "?";
         }
     }
@@ -134,6 +144,9 @@ namespace rc::calib
         float sigma_eps_yaw = 0.0175f;  ///< 1 deg of mount/axis misalignment
         float sigma_k_omega = 0.02f;    ///< 2%
         float sigma_b_omega = 5.0e-4f;  ///< rad/s ~ 0.03 deg/s, a plausible post-calibration residual
+        float sigma_k_lat   = 0.05f;    ///< 5% — roller slip makes a mecanum's lateral channel much
+                                        ///< worse than its forward one, so the prior is looser
+        float sigma_dk_wheel = 0.02f;   ///< rad/m — 2 cm of lateral drift per metre driven straight
     };
 
     class BatchEstimator
@@ -163,7 +176,8 @@ namespace rc::calib
             // Prior information. Zero mean, so it contributes to H only -- see Prior for why
             // re-centring it on the running estimate is a ratchet rather than a memory.
             Eigen::Matrix<float, P_COUNT, 1> p0;
-            p0 << prior_.sigma_k_v, prior_.sigma_eps_yaw, prior_.sigma_k_omega, prior_.sigma_b_omega;
+            p0 << prior_.sigma_k_v, prior_.sigma_eps_yaw, prior_.sigma_k_omega, prior_.sigma_b_omega,
+                  prior_.sigma_k_lat, prior_.sigma_dk_wheel;
             for (int i = 0; i < P_COUNT; ++i)
                 H(i, i) += 1.f / std::max(p0[i] * p0[i], 1e-18f);
             const Eigen::Matrix<float, P_COUNT, P_COUNT> H_prior = H;
@@ -179,19 +193,25 @@ namespace rc::calib
                 H += wp * j_along * j_along.transpose();
                 b += wp * j_along * e.r_forward;
 
-                // CROSS-track row: a yaw offset rotates forward travel off-axis. The sign follows the
-                // integrator's body->world mapping, where +eps moves the step by -d_forward laterally.
+                // CROSS-track row: a yaw offset rotates FORWARD travel off-axis, while a lateral
+                // scale error mis-measures LATERAL travel. Same component, different covariates —
+                // which is exactly what lets them be told apart, and only while the robot does both.
+                // The sign on eps follows the integrator's body->world mapping, where +eps moves the
+                // step by -d_forward laterally.
                 Eigen::Matrix<float, P_COUNT, 1> j_cross = Eigen::Matrix<float, P_COUNT, 1>::Zero();
                 j_cross[P_EPS_YAW] = -e.d_forward;
+                j_cross[P_K_LAT]   =  e.d_lateral;
                 H += wp * j_cross * j_cross.transpose();
                 b += wp * j_cross * e.r_lateral;
 
-                // HEADING row: scale scales the ROTATION, bias accumulates with TIME. Both land on
-                // the same component, and this pair of covariates is the only thing separating them —
-                // which is why they must be solved together and not as two filters.
+                // THREE parameters share this component and are separated only by covariate:
+                // a SCALE by rotation, a BIAS by elapsed time, and a per-wheel mismatch by DISTANCE
+                // (unequal wheel radii make a commanded straight curve). No pair of scalar filters
+                // could do this; it is the clearest case for solving jointly.
                 Eigen::Matrix<float, P_COUNT, 1> j_th = Eigen::Matrix<float, P_COUNT, 1>::Zero();
-                j_th[P_K_OMEGA] = e.d_theta;
-                j_th[P_B_OMEGA] = e.duration;
+                j_th[P_K_OMEGA]  = e.d_theta;
+                j_th[P_B_OMEGA]  = e.duration;
+                j_th[P_DK_WHEEL] = e.d_forward;
                 H += wt * j_th * j_th.transpose();
                 b += wt * j_th * e.r_theta;
             }
