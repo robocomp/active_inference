@@ -47,7 +47,7 @@
  */
 #pragma once
 
-#include "calibration_estimator.h"
+#include "calibration_intake.h"
 
 #include <algorithm>
 #include <cmath>
@@ -138,11 +138,13 @@ namespace rc::calib
             pr.sigma_k_v     = std::sqrt(std::max(c.scale_p0, 1e-12f));
             pr.sigma_k_omega = std::sqrt(std::max(c.scale_p0, 1e-12f));
             pr.sigma_eps_yaw = std::sqrt(std::max(c.yaw_p0,   1e-12f));
-            // A LONG window is what replaces the re-centring: it must hold enough driving to
+            // A LONG window is what replaces the prior re-centring: it must hold enough driving to
             // contain each parameter's covariate at least sometimes. 512 episodes is roughly the
             // last half hour at the observed ~0.3 Hz, so a stretch of pure turning no longer erases
             // what the straights before it taught.
-            batch_.configure(pr, 512);
+            rc::calib::IntakeParams ip;
+            ip.window = 512;
+            intake_.configure(ip, pr);
             configured_ = true;
         }
 
@@ -166,6 +168,10 @@ namespace rc::calib
         [[nodiscard]] float k_v_sigma() const noexcept { return last_.sigma[rc::calib::P_K_V]; }
         [[nodiscard]] float k_w_sigma() const noexcept { return last_.sigma[rc::calib::P_K_OMEGA]; }
         [[nodiscard]] const rc::calib::Result& last_solve() const noexcept { return last_; }
+        [[nodiscard]] const rc::calib::CalibrationIntake& intake() const noexcept { return intake_; }
+        /// Tag episodes that follow as coming from a deliberate manoeuvre. Reporting only -- it
+        /// cannot change how an episode is weighted, and must not: see calibration_intake.h.
+        void set_source(rc::calib::Source s) noexcept { source_hint_ = s; }
         [[nodiscard]] int   episodes() const noexcept { return episodes_; }
 
         /// Called once per localiser cycle, on BOTH the early-exit and the optimized path.
@@ -230,19 +236,14 @@ namespace rc::calib
             e.duration  = acc_dur_;
             e.r_forward = acc_r_fwd_; e.r_lateral = acc_r_lat_; e.r_theta = acc_r_th_;
             e.pos_var = r_pos;        e.theta_var = r_th;
-            batch_.add(e);
             ++episodes_;
 
-            // Re-solving on every episode is deliberate and costs nothing measurable: a 4x4 LDLT over
-            // a bounded window is microseconds, at ~0.3 Hz. A separate thread was considered and
-            // rejected -- it would add synchronisation for no measured benefit at this size. Revisit
-            // if the parameter count or the window grows by an order of magnitude.
-            // The prior stays at zero: an unexcited parameter returns to it and reads "I don't know",
-            // which Result::informed reports honestly. Re-centring it on the running estimate was
-            // tried and gives a weakly-excited parameter a ratchet -- see Prior in
-            // calibration_estimator.h for the nine minutes of live drift that killed it.
-            if (const auto r = batch_.solve(); r.ok)
-                last_ = r;
+            // OFFER it -- do not assume it will be taken. The intake owns the admission policy and
+            // the estimator; this class only BUILDS episodes from whatever the robot happened to do.
+            // Source is Passive because this path is ordinary driving; a manoeuvre offers through the
+            // same door with a different tag, which changes the reporting and nothing else.
+            last_verdict_ = intake_.offer(e, source_hint_, acc_fit_);
+            last_ = intake_.estimate();
             reset_episode();
         }
         void reset_episode() noexcept
@@ -254,8 +255,10 @@ namespace rc::calib
 
         Config cfg_{};
         bool configured_ = false, prev_corrected_ = false;
-        rc::calib::BatchEstimator batch_;
+        rc::calib::CalibrationIntake intake_;
         rc::calib::Result last_{};
+        rc::calib::Verdict last_verdict_ = rc::calib::Verdict::Accepted;
+        rc::calib::Source  source_hint_  = rc::calib::Source::Passive;
         float acc_fwd_ = 0.f, acc_lat_ = 0.f, acc_th_ = 0.f;
         float acc_r_fwd_ = 0.f, acc_r_lat_ = 0.f, acc_r_th_ = 0.f;
         float acc_pos_var_ = 0.f, acc_th_var_ = 0.f, acc_fit_ = 0.f, acc_dur_ = 0.f;
