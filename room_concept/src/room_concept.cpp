@@ -2857,6 +2857,10 @@ namespace rc
         res.pred_theta = last_pred_theta_;
         res.dx_local = cyc_dx_local_;
         res.dy_local = cyc_dy_local_;
+        res.imu_dvx = cyc_imu_dvx_; res.imu_dvy = cyc_imu_dvy_;
+        res.imu_dpx = cyc_imu_dpx_; res.imu_dpy = cyc_imu_dpy_;
+        res.wheel_dvx = cyc_wheel_dvx_; res.wheel_dvy = cyc_wheel_dvy_;
+        res.imu_lin_segs = cyc_imu_lin_segs_;
         res.imu_dtheta          = cyc_imu_dtheta_;
         res.wheel_dtheta        = cyc_wheel_dtheta_;
         res.wheel_shadow_dtheta = cyc_wheel_shadow_dtheta_;
@@ -3181,6 +3185,10 @@ namespace rc
         res.pred_theta = last_pred_theta_;
         res.dx_local = cyc_dx_local_;
         res.dy_local = cyc_dy_local_;
+        res.imu_dvx = cyc_imu_dvx_; res.imu_dvy = cyc_imu_dvy_;
+        res.imu_dpx = cyc_imu_dpx_; res.imu_dpy = cyc_imu_dpy_;
+        res.wheel_dvx = cyc_wheel_dvx_; res.wheel_dvy = cyc_wheel_dvy_;
+        res.imu_lin_segs = cyc_imu_lin_segs_;
         res.imu_dtheta          = cyc_imu_dtheta_;
         res.wheel_dtheta        = cyc_wheel_dtheta_;
         res.wheel_shadow_dtheta = cyc_wheel_shadow_dtheta_;
@@ -4707,6 +4715,57 @@ namespace rc
         // than a consistent wheel estimate.
         const auto imu_stamp = [&](const ImuReading &s) -> std::int64_t
         { return use_sim_clock ? s.integration_ts_ms() : s.effective_ts_ms(); };
+        // ── Linear channel from the accelerometer ──────────────────────────────────────────────────
+        // Returns the velocity CHANGE over [seg_start, seg_end] in the body frame, and the
+        // displacement that change contributes within the same interval (the double integration).
+        //
+        // Both are INCREMENTS confined to one interval and are never chained. That distinction is the
+        // whole design: over ~50 ms the accelerometer estimates dv ~15x more precisely than the
+        // wheels (0.1-0.4 mm/s of noise against their 67 mm/s per sample), but an accelerometer
+        // cannot observe velocity itself, only its change, and chaining the same 0.5 deg tilt error
+        // reaches 0.086 m/s after 1 s and 5.1 m/s after 60 s. So this supplies dv; the wheels supply
+        // the absolute v that dv is a change TO.
+        //
+        // dp here is the correction to the constant-velocity assumption inside the interval
+        // (0.5*a*T^2), not a position estimate. At 50 ms it is sub-millimetre and its only job is to
+        // stop a hard acceleration being modelled as if the velocity had been constant throughout.
+        //
+        // GRAVITY IS NOT REMOVED. The samples carry it, and the horizontal components are honest
+        // horizontal acceleration only insofar as the mount is level; the residual is a slowly
+        // varying bias, which is why this is logged and cross-checked before it is ever fused.
+        const auto imu_dvel = [&](std::int64_t seg_start, std::int64_t seg_end,
+                                  float &dvx_out, float &dvy_out,
+                                  float &dpx_out, float &dpy_out) -> bool
+        {
+            if (imu_history == nullptr or imu_history->size() < 2) return false;
+            if (imu_stamp(imu_history->front()) > seg_start or imu_stamp(imu_history->back()) < seg_end)
+                return false;                       // partial coverage refused, as for imu_dtheta
+            double vx = 0, vy = 0, px = 0, py = 0;
+            bool any = false;
+            for (size_t k = 0; k + 1 < imu_history->size(); ++k)
+            {
+                const auto &a0 = (*imu_history)[k];
+                const auto &a1 = (*imu_history)[k + 1];
+                const std::int64_t t0 = std::max(imu_stamp(a0), seg_start);
+                const std::int64_t t1 = std::min(imu_stamp(a1), seg_end);
+                if (t1 <= t0) continue;
+                const double h = static_cast<double>(t1 - t0) * 1e-3;
+                // Trapezoid on acceleration: the sample rate is ~5x the interval, so the ramp between
+                // samples is real information and a zero-order hold would systematically lag it.
+                const double ax = 0.5 * (a0.acc_x + a1.acc_x);
+                const double ay = 0.5 * (a0.acc_y + a1.acc_y);
+                px += vx * h + 0.5 * ax * h * h;    // v already accumulated within THIS interval only
+                py += vy * h + 0.5 * ay * h * h;
+                vx += ax * h;
+                vy += ay * h;
+                any = true;
+            }
+            if (not any) return false;
+            dvx_out = static_cast<float>(vx); dvy_out = static_cast<float>(vy);
+            dpx_out = static_cast<float>(px); dpy_out = static_cast<float>(py);
+            return true;
+        };
+
         const auto imu_dtheta = [&](std::int64_t seg_start, std::int64_t seg_end, float &dtheta_out) -> bool
         {
             if (imu_history == nullptr or imu_history->size() < 2) return false;
@@ -4739,6 +4798,8 @@ namespace rc
         int imu_segments = 0, wheel_segments = 0;
         cyc_imu_dtheta_ = cyc_wheel_dtheta_ = cyc_wheel_shadow_dtheta_ = 0.f;
         cyc_dx_local_ = cyc_dy_local_ = 0.f;
+        cyc_imu_dvx_ = cyc_imu_dvy_ = cyc_imu_dpx_ = cyc_imu_dpy_ = 0.f;
+        cyc_wheel_dvx_ = cyc_wheel_dvy_ = 0.f; cyc_imu_lin_segs_ = 0;
         cyc_imu_segs_ = cyc_wheel_segs_ = 0;
 
         // Integrate over all odometry readings in [win_start_ms, win_end_ms], on the clock chosen above.
@@ -4773,6 +4834,24 @@ namespace rc
             const float dy_local = odom.adv * dt * k_v;    // forward (Y in robot frame)
             cyc_dx_local_ += dx_local;
             cyc_dy_local_ += dy_local;
+            // The wheels' own velocity CHANGE across this segment, so the two channels are compared
+            // as like for like: an accelerometer gives dv, never v. A disagreement here is the first
+            // thing translation has ever had that can see wheel slip -- during slip the wheels report
+            // a dv that did not happen while the accelerometer sees the truth. Heading has had this
+            // cross-check since the gyro went in; translation has had NO second opinion at all.
+            if (i + 1 < odometry_history.size())
+            {
+                const auto &nx = odometry_history[i + 1];
+                cyc_wheel_dvx_ += nx.side - odom.side;
+                cyc_wheel_dvy_ += nx.adv  - odom.adv;
+            }
+            if (float dvx = 0.f, dvy = 0.f, dpx = 0.f, dpy = 0.f;
+                imu_dvel(effective_start_ms, effective_end_ms, dvx, dvy, dpx, dpy))
+            {
+                cyc_imu_dvx_ += dvx; cyc_imu_dvy_ += dvy;
+                cyc_imu_dpx_ += dpx; cyc_imu_dpy_ += dpy;
+                ++cyc_imu_lin_segs_;
+            }
 
             // THE INJECTION. Heading change from the gyro when it brackets this segment, otherwise
             // the wheel-derived rate. Translation stays on the wheels either way -- an accelerometer

@@ -647,7 +647,8 @@ void SpecificWorker::log_ground_truth(const rc::RoomConcept::UpdateResult &res)
                        "imu_dtheta,wheel_dtheta,wheel_shadow_dtheta,imu_segs,wheel_segs,"
                        "pred_x,pred_y,pred_theta,dx_local,dy_local,"
                        "calib_k_v,calib_k_w,calib_yaw,calib_eps,"
-                       "calib_sig_kv,calib_sig_kw,calib_sig_yaw,calib_pos_var\n";
+                       "calib_sig_kv,calib_sig_kw,calib_sig_yaw,calib_pos_var,"
+                       "imu_dvx,imu_dvy,wheel_dvx,wheel_dvy,imu_dpx,imu_dpy,imu_lin_segs\n";
         }
         else
             qWarning() << "[gt] cannot open tmp/sdf_localizer/gt_error.csv";
@@ -683,6 +684,12 @@ void SpecificWorker::log_ground_truth(const rc::RoomConcept::UpdateResult &res)
             // guesswork, and a parameter that stopped moving cannot be told from one never taught.
             << ',' << res.calib_sigma_k_v << ',' << res.calib_sigma_k_w
             << ',' << res.calib_sigma_yaw << ',' << res.calib_pos_var
+            // Linear IMU channel. imu_dv vs wheel_dv is translation's first independent cross-check;
+            // logged before being fused, because a channel whose covariance is unknown (the ImuFrame
+            // IDL has no acc_var) must be shown to agree with something before anything trusts it.
+            << ',' << res.imu_dvx << ',' << res.imu_dvy
+            << ',' << res.wheel_dvx << ',' << res.wheel_dvy
+            << ',' << res.imu_dpx << ',' << res.imu_dpy << ',' << res.imu_lin_segs
             << '\n';
     gt_csv_.flush();
 }

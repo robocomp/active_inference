@@ -678,6 +678,16 @@ public:
         // base the lateral term is the one roller slip corrupts, and a lateral error is invisible to
         // both an arc-length ratio and a rotation gain, so it has to be read directly.
         float dx_local = 0.f, dy_local = 0.f;
+        // Linear channel from the accelerometer, per cycle. imu_dv* is the velocity CHANGE the IMU
+        // saw; wheel_dv* is the change the WHEELS claim over the same segments. Their disagreement is
+        // translation's first independent witness -- the analogue of imu_dtheta vs
+        // wheel_shadow_dtheta, which is what exonerated the wheels for heading. imu_dp* is the
+        // within-interval double integration (the 0.5*a*T^2 correction to constant velocity), which
+        // is sub-millimetre at 50 ms and must never be chained across intervals.
+        float imu_dvx = 0.f, imu_dvy = 0.f;
+        float imu_dpx = 0.f, imu_dpy = 0.f;
+        float wheel_dvx = 0.f, wheel_dvy = 0.f;
+        int   imu_lin_segs = 0;
 
         // Learned motion-model parameters at this cycle, so convergence can be watched in the CSV.
         float calib_k_v = 1.f, calib_k_w = 1.f, calib_yaw = 0.f;
@@ -1365,6 +1375,9 @@ private:
    float           last_pred_theta_ = 0.f;
    rc::calib::MotionCalibrator motion_calib_;
    float cyc_dx_local_ = 0.f, cyc_dy_local_ = 0.f;   // wheel-claimed body-frame displacement
+   float cyc_imu_dvx_ = 0.f, cyc_imu_dvy_ = 0.f, cyc_imu_dpx_ = 0.f, cyc_imu_dpy_ = 0.f;
+   float cyc_wheel_dvx_ = 0.f, cyc_wheel_dvy_ = 0.f;
+   int   cyc_imu_lin_segs_ = 0;
    float cyc_imu_dtheta_          = 0.f;
    float cyc_wheel_dtheta_        = 0.f;
    float cyc_wheel_shadow_dtheta_ = 0.f;
