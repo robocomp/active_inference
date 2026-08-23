@@ -451,6 +451,18 @@ RerunMaxQueue     = 30
 # There is no learning-rate constant here on purpose. The gain is P*H/(H*P*H+R) with R taken from the
 # optimizer's posterior covariance, so an uninformative episode (parked robot: H->0) and a
 # low-confidence correction both teach ~nothing without any threshold saying so.
+ImuLinearInjection  = false  # Add the accelerometer's within-segment double integration to the
+                        # wheel displacement. The integrator holds a 10 Hz wheel velocity flat across
+                        # each segment; the true displacement is v0*dt + the double integral, and
+                        # odom.adv IS v0, so this supplies the term the zero-order hold drops -- zero
+                        # at constant speed, largest under acceleration. Bounded by construction:
+                        # confined to one segment, never chained, so it cannot drift however wrong
+                        # the accelerometer is.
+                        # Measured before enabling (2026-08-23): no static tilt (6326 parked cycles
+                        # at -0.0013/-0.0024 m/s^2), no speed-dependent term (0.04 deg of pitch at
+                        # 0.5 m/s), integrated dv tracks GT with slope 0.8-0.95 and no bias.
+                        # Expect a SMALL effect: the double integral was ~69 um per cycle.
+                        # A/B on err/m and ramp steepness, NOT on opt/m (not comparable across runs).
 MotionCalibEnabled  = true   # A/B CONCLUDED 2026-08-22, restored to true.
                         # Matched A/B, 262 m ON vs 105 m OFF, per-60s windows, bursts excluded:
                         #   err/m  0.0263 -> 0.0303 when OFF  (+14.9%, t=2.67 z=2.31 SIGNIFICANT)

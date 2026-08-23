@@ -207,6 +207,29 @@ namespace rc::preint
         /// omega CCW+) held for dt seconds. Mirrors the legacy midpoint-θ integration exactly.
         void add(float v_lat, float v_long, float omega, float dt)
         {
+            add(v_lat, v_long, omega, dt, -1.f, -1.f, -1.f);
+        }
+
+        /// Same, but with MEASURED per-sample noise densities for this segment, overriding the
+        /// NoiseModel's asserted constants. Units are the model's: m/√s and rad/√s, i.e. the variance
+        /// contributed over an interval T is sigma²·T. Pass a negative value for any channel the
+        /// producer did not state, and that channel falls back to the model.
+        ///
+        /// WHY: the densities in NoiseModel are asserted constants, and the header above already
+        /// warns "re-measure on any new platform; do not carry these over as if they were constants".
+        /// The sensors now state their own per-sample variance (ImuFrame.gyro_var / acc_var, and the
+        /// FullPose velCov), so the covariance can be DERIVED from what the producer actually sent
+        /// instead of from a config figure that no longer describes it. That is the same reason the
+        /// mean is derived rather than asserted, applied to the second moment.
+        ///
+        /// CONVERSION, and it is the easy thing to get wrong: a producer reports a PER-SAMPLE
+        /// variance at ITS OWN rate. The density is that variance times the producer's sample period
+        /// (sigma² = var_sample · dt_sample), NOT the variance itself. Handing this a raw per-sample
+        /// variance over-states the noise by dt_sample/dt whenever a segment spans several samples,
+        /// which at 100 Hz across a 50 ms segment is a factor of five.
+        void add(float v_lat, float v_long, float omega, float dt,
+                 float sigma_v_lat_meas, float sigma_v_long_meas, float sigma_omega_meas)
+        {
             if (dt <= 0.f)
                 return;
 
@@ -238,9 +261,12 @@ namespace rc::preint
             // not velocities). Density form: variance = sigma²·dt, i.e. a velocity variance of
             // sigma²/dt carried for dt². Writing it through the velocity makes the ZUPT below a
             // one-line Bayesian update instead of a special case.
-            float var_v_lat  = q_.sigma_v_lat  * q_.sigma_v_lat  / dt;   // (m/s)²
-            float var_v_long = q_.sigma_v_long * q_.sigma_v_long / dt;
-            float var_omega  = q_.sigma_omega  * q_.sigma_omega  / dt;   // (rad/s)²
+            const float s_lat  = sigma_v_lat_meas  >= 0.f ? sigma_v_lat_meas  : q_.sigma_v_lat;
+            const float s_long = sigma_v_long_meas >= 0.f ? sigma_v_long_meas : q_.sigma_v_long;
+            const float s_om   = sigma_omega_meas  >= 0.f ? sigma_omega_meas  : q_.sigma_omega;
+            float var_v_lat  = s_lat  * s_lat  / dt;   // (m/s)²
+            float var_v_long = s_long * s_long / dt;
+            float var_omega  = s_om   * s_om   / dt;   // (rad/s)²
 
             if (q_.zupt_enabled)
             {

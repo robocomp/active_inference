@@ -4766,6 +4766,33 @@ namespace rc
             return true;
         };
 
+        // Mean per-sample variance a channel reported over [seg_start, seg_end], converted to the
+        // NOISE DENSITY the preintegrator wants: sigma = sqrt(var_sample * dt_sample). Returns <0
+        // when the producer said "unknown" (negative variance) or the segment is not bracketed, and
+        // the caller then falls back to the asserted constant. See the conversion note in
+        // se2_preintegration.h: handing it the raw per-sample variance over-states the noise by
+        // dt_sample/dt, a factor of five at 100 Hz across a 50 ms segment.
+        const auto imu_sigma = [&](std::int64_t seg_start, std::int64_t seg_end,
+                                   bool want_gyro) -> float
+        {
+            if (imu_history == nullptr or imu_history->size() < 2) return -1.f;
+            double var_sum = 0.0; int n = 0;
+            std::int64_t first = 0, last = 0;
+            for (const auto &sm : *imu_history)
+            {
+                const std::int64_t st = imu_stamp(sm);
+                if (st < seg_start or st > seg_end) continue;
+                const float v = want_gyro ? sm.gyro_var : sm.acc_var;
+                if (not (v >= 0.f)) return -1.f;      // producer does not know -> use the model
+                var_sum += v; ++n;
+                if (first == 0) first = st;
+                last = st;
+            }
+            if (n < 2 or last <= first) return -1.f;
+            const double dt_sample = static_cast<double>(last - first) * 1e-3 / (n - 1);
+            return static_cast<float>(std::sqrt(var_sum / n * dt_sample));
+        };
+
         const auto imu_dtheta = [&](std::int64_t seg_start, std::int64_t seg_end, float &dtheta_out) -> bool
         {
             if (imu_history == nullptr or imu_history->size() < 2) return false;
@@ -4845,13 +4872,21 @@ namespace rc
                 cyc_wheel_dvx_ += nx.side - odom.side;
                 cyc_wheel_dvy_ += nx.adv  - odom.adv;
             }
+            float imu_dpx_seg = 0.f, imu_dpy_seg = 0.f;
             if (float dvx = 0.f, dvy = 0.f, dpx = 0.f, dpy = 0.f;
                 imu_dvel(effective_start_ms, effective_end_ms, dvx, dvy, dpx, dpy))
             {
                 cyc_imu_dvx_ += dvx; cyc_imu_dvy_ += dvy;
                 cyc_imu_dpx_ += dpx; cyc_imu_dpy_ += dpy;
                 ++cyc_imu_lin_segs_;
+                imu_dpx_seg = dpx; imu_dpy_seg = dpy;
             }
+            // THE INJECTION, linear half. Body-frame axes line up one-for-one now that the producer
+            // rotates the device frame: dx_local is lateral (+X), dy_local forward (+Y), and so are
+            // dpx/dpy. Refused unless the IMU brackets the WHOLE segment, exactly as for dtheta -- a
+            // partial integral silently under-reports rather than degrading gracefully.
+            const float dx_use = dx_local + (params.imu_linear_injection ? imu_dpx_seg : 0.f);
+            const float dy_use = dy_local + (params.imu_linear_injection ? imu_dpy_seg : 0.f);
 
             // THE INJECTION. Heading change from the gyro when it brackets this segment, otherwise
             // the wheel-derived rate. Translation stays on the wheels either way -- an accelerometer
@@ -4887,14 +4922,30 @@ namespace rc
             // The learned yaw offset rotates the body->world mapping: it absorbs a mount or
             // body-axis misalignment, which shows up as travel drifting off the fitted heading.
             const float theta_mid = running_theta + 0.5f * dtheta + motion_calib_.yaw_offset();
-            total_delta[0] += dx_local * std::cos(theta_mid) - dy_local * std::sin(theta_mid);
-            total_delta[1] += dx_local * std::sin(theta_mid) + dy_local * std::cos(theta_mid);
+            total_delta[0] += dx_use * std::cos(theta_mid) - dy_use * std::sin(theta_mid);
+            total_delta[1] += dx_use * std::sin(theta_mid) + dy_use * std::cos(theta_mid);
             total_delta[2] += dtheta;
 
             // Preintegration sees the SAME rate the mean used, or its covariance would describe a
             // trajectory that was not integrated.
             if (preint_out != nullptr)
-                preint.add(odom.side, odom.adv, rot_eff, dt);
+            {
+                // Densities from what the producers actually stated this segment, falling back to
+                // the asserted constants per channel. The gyro's covers the heading it supplied; the
+                // accelerometer's covers the translation only when its correction is actually being
+                // used, because otherwise the displacement came from the wheels and it is the wheels'
+                // noise that describes it.
+                const float sig_om  = imu_sigma(effective_start_ms, effective_end_ms, true);
+                const float sig_lin = params.imu_linear_injection
+                                    ? imu_sigma(effective_start_ms, effective_end_ms, false) : -1.f;
+                // The accelerometer's within-segment correction enters as an EFFECTIVE mean velocity,
+                // so the preintegrator's constant-velocity step reproduces the corrected displacement
+                // without changing its structure -- and the correction is then covered by Q and by
+                // the transport term A, which it would not be if it were added to the mean afterwards.
+                const float v_lat_eff  = odom.side + (params.imu_linear_injection ? imu_dpx_seg / dt : 0.f);
+                const float v_long_eff = odom.adv  + (params.imu_linear_injection ? imu_dpy_seg / dt : 0.f);
+                preint.add(v_lat_eff, v_long_eff, rot_eff, dt, sig_lin, sig_lin, sig_om);
+            }
 
             running_theta += dtheta;
         }

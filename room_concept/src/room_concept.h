@@ -542,6 +542,19 @@ public:
         // never moves the mean, so a biased channel still walks -- the tooth gets longer, not smaller.
         rc::calib::Config motion_calib{};
 
+                // Add the accelerometer's within-segment double integration to the wheel displacement.
+        // integrate_odometry_over_window holds a 10 Hz wheel velocity FLAT across each segment; the
+        // true displacement is v0*dt + integral(integral(a)), and odom.adv IS v0 (the sample's stamp
+        // opens the segment), so the IMU supplies exactly the term the zero-order hold drops. Zero at
+        // constant speed, largest under acceleration -- which is when the prediction error grows.
+        //
+        // It CANNOT replace the wheels the way the gyro replaced them for heading: an accelerometer
+        // observes only the CHANGE in velocity, never velocity itself, so the wheels still supply the
+        // absolute v this is a change to. It also cannot fix wheel scale (k_v does that) or wheel
+        // noise. Bounded by construction: the term is confined to one segment and never chained, so
+        // it cannot drift however wrong the accelerometer is.
+        bool imu_linear_injection = false;
+
         bool  adaptive_cov_enabled = false;
         // EMA rate for the innovation second moment. 0.02 ~= a 50-frame memory: long enough that one
         // bad frame cannot spike the published sigma (which would hit the speed governor), short enough
