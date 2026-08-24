@@ -718,6 +718,11 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
 
     if (published)
     {
+        // Only NOW is an offer live on the wire — see CalibChannel::mark_offered. Latching inside
+        // offer() instead deadlocked the channel: the node's creation cycle deliberately skips the
+        // publish, so the latch was set on an offer that never reached the graph and nothing could
+        // ever clear it.
+        calib_.mark_offered();
         calib_armed_at_ms_ = static_cast<std::uint64_t>(res.timestamp_ms);
         std::print("[calib] offering step {} of {}: turn to {:.0f} deg, worth {:.3f} nats\n",
                    calib_.pivot().steps_issued() + 1, 3 * 4 /* turns x steps-per-turn */,
@@ -1101,6 +1106,13 @@ bool RoomSceneGraph::break_execution_stall(const Eigen::Vector2f& robot_pos)
     auto& planner = epistemic_->epistemic_planner();
     const auto  now = std::chrono::steady_clock::now();
     const auto& target_opt = planner.current_target();
+    // The affordance we publish through. Resolved here rather than cached: the node can be recreated
+    // (a producer restart, a stale-sweep), and a cached id that outlives its node is a lookup that
+    // silently answers about nothing.
+    const std::uint64_t aff_id = [&]() -> std::uint64_t {
+        const auto n = G_ ? G_->get_node("afford_room") : std::nullopt;
+        return n.has_value() ? n->id() : 0;
+    }();
 
     // A claim held while the planner has NO target of its own is already inconsistent: nothing is
     // being driven toward, so no amount of waiting can produce a completion. This is reachable right
@@ -1138,13 +1150,64 @@ bool RoomSceneGraph::break_execution_stall(const Eigen::Vector2f& robot_pos)
         return false;
     }
 
-    const float dist = (target_opt->position - robot_pos).norm();
+    // ── INV-2: MEASURE PROGRESS AGAINST WHAT THE CONSUMER SAYS IT IS DRIVING TO ─────────────────
+    // ★★★THIS WATCHDOG WAS THE WRONG END OF A BROKEN PROTOCOL (2026-08-23). It measured
+    // distance-to-OUR-latest-publication, and we are free to republish whenever the next-best-view
+    // moves — which, for a viewpoint scored by information gain, is precisely when the robot arrives.
+    // So the sequence was: robot closes on proposal n; gain there collapses; we publish n+1 somewhere
+    // else; the consumer is mid-approach and holds n; the distance we are watching now GROWS; we call
+    // it "no approach progress" and abandon a target the robot was three millimetres from reaching.
+    // Measured that day, one 11.4 min run: 74 target moves, ALL with the robot inside 1 m, median
+    // 0.318 m; d_target bottomed at 0.253 m against the consumer's 0.25 m threshold; ZERO arrivals.
+    // ★The consumer now publishes the pose it is actually driving to — AFTER its own repairs, which we
+    // never used to see either — on an `executing` edge it owns. That is the only pose about which
+    // "is it making progress" is a meaningful question, so it is the one this clock watches.
+    // ★DEGRADATION: `claimed && !claim` means a consumer that has not been rebuilt against the new
+    // cortex header. It cannot tell us what it is doing, so we fall back to our own target exactly as
+    // before — worse, but honest, and it ends when that agent is rebuilt. Distinguishing this from
+    // "nobody is driving" is the whole reason read_executing reports the two separately.
+    bool someone_claims = false;
+    const auto claim = rc::AffordanceManager::read_executing(G_, aff_id, &someone_claims);
+    const Eigen::Vector2f watched = claim.has_value() ? Eigen::Vector2f(claim->x, claim->y)
+                                                      : target_opt->position;
+    // ── INV-4: A STALE EPOCH IS A DISAGREEMENT, AND IT IS OURS TO SETTLE ────────────────────────
+    // The consumer is executing an older proposal than the one we are offering. That is NOT a fault on
+    // either side — a proposal it accepted was legitimately superseded — and it is exactly the state
+    // that used to be invisible. We own the decision. We WAIT, because a viewpoint the robot is about
+    // to reach is worth more than a marginally better one it would have to drive to; the clock below
+    // still runs, against the right pose, so a consumer that genuinely cannot get there is still
+    // released. To preempt instead, publish a withdrawal — do not simply keep republishing and hope.
+    if (claim.has_value())
+    {
+        const int ours = rc::AffordanceManager::producer_epoch(G_, aff_id).value_or(claim->epoch);
+        if (claim->epoch < ours and ++exec_stale_epoch_reports_ % 90 == 1)
+        {
+            std::print("[planner] afford_room — the consumer is executing epoch {} at ({:.2f},{:.2f}) "
+                       "while we are offering epoch {} at ({:.2f},{:.2f}). WAITING: it is closer to "
+                       "finishing than to restarting, and the no-progress clock now watches ITS pose. "
+                       "Withdraw explicitly if this proposal must be preempted.\n",
+                       claim->epoch, claim->x, claim->y, ours,
+                       target_opt->position.x(), target_opt->position.y());
+            std::fflush(stdout);
+        }
+    }
+    else if (someone_claims and ++exec_stale_epoch_reports_ % 900 == 1)
+    {
+        std::print("[planner] afford_room is claimed by a consumer that publishes no executing pose "
+                   "(pre-rollout). Falling back to measuring against our own target — rebuild it to "
+                   "close this gap.\n");
+        std::fflush(stdout);
+    }
 
-    // (Re)arm on a fresh claim or a target that moved.
-    if (!stall_tracking_ || (target_opt->position - stall_target_).squaredNorm() > 1e-6f)
+    const float dist = (watched - robot_pos).norm();
+
+    // (Re)arm on a fresh claim or on the WATCHED pose moving — which is now the consumer changing what
+    // it drives to, not us changing our mind. Re-arming on our own republish is what let this clock be
+    // reset by the very event it should have been immune to.
+    if (!stall_tracking_ || (watched - stall_target_).squaredNorm() > 1e-6f)
     {
         stall_tracking_      = true;
-        stall_target_        = target_opt->position;
+        stall_target_        = watched;
         stall_best_dist_     = dist;
         stall_last_progress_ = now;
         return false;

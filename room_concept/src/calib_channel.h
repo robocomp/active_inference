@@ -57,7 +57,15 @@ struct CalibChannelParams
     /// this file assumed 0.12 from the code default and the live config says half that — so a 120
     /// degree step takes 35 s, not 17. The producer cannot read the consumer's config, so this is an
     /// assumption and is named as one; when it is wrong the price is wrong, nothing else.
-    double pivot_rot_rate = 0.06;
+    /// ★RAISED 0.06 -> 0.5 on 2026-08-24. At 0.06 a four-turn pivot takes SEVEN MINUTES, which is
+    /// not a detour a robot serving standpoints could reasonably be asked to take, and it also made
+    /// the price nearly meaningless: over a 7-minute horizon the ordinary tours deliver more turning
+    /// (28.1 rad) than the manoeuvre itself (25.1), so the marginal gain was dominated by the diet
+    /// rather than by the manoeuvre. At 0.5 rad/s the pivot is ~50 s and the comparison is real.
+    /// ★It still PRICES the offer and commands nothing; the consumer's own yaw limit is what actually
+    /// governs, so if that stays at 0.06 the steps will simply take longer than this predicts and the
+    /// generous per-step timeout absorbs it.
+    double pivot_rot_rate = 0.5;
     /// Time constant of the passive-excitation EMA. Long, because the question it answers is "what is
     /// this robot's diet", not "what is it doing right now".
     double passive_tau_s = 120.0;
@@ -167,10 +175,20 @@ public:
     {
         if (not p_.enabled) return std::nullopt;
         if (offer_open_) return std::nullopt;          // one live offer at a time
-        const auto b = pivot_.next_bearing(robot_heading_rad, marginal_gain_nats());
-        if (b.has_value()) { offer_open_ = true; step_odom_ = 0.0; }
-        return b;
+        // ★DO NOT LATCH HERE. offer_open_ means "an offer is LIVE ON THE WIRE", and that is only
+        // true once the producer has actually published it. Latching on the mere intention deadlocked
+        // the channel permanently: ensure_calib_node() deliberately returns false on the cycle it
+        // CREATES the node ("arm on the next cycle"), so publish_target was skipped, no has_intention
+        // edge was written, and the next cycle's offer() refused because offer_open_ was already set.
+        // Nothing could clear it, because only an outcome does and no consumer could ever see an
+        // affordance that was never published. Observed live 2026-08-24: afford_calib present in the
+        // graph with no edge to room, for ever. The caller calls mark_offered() once the publish has
+        // succeeded.
+        return pivot_.next_bearing(robot_heading_rad, marginal_gain_nats());
     }
+
+    /// The offer reached the graph. Only now is one live.
+    void mark_offered() noexcept { offer_open_ = true; step_odom_ = 0.0; }
 
     /// The consumer answered. The heading is the robot's MEASURED one now — the sequence advances on
     /// that and never on the count of steps issued.

@@ -113,6 +113,7 @@ int main()
         for (int i = 0; i < 12; ++i)
         {
             const auto b = c.offer(h);
+            if (b.has_value()) c.mark_offered();   // the producer latches only once published
             if (not b.has_value()) { std::printf("  offer %d declined\n", i); break; }
             // The robot really turns a third of a turn; the odometry over-reports it. note_motion is
             // called throughout, exactly as it would be live — the pivot's windows are ordinary
@@ -134,25 +135,28 @@ int main()
     {
         CalibChannelParams p; p.enabled = true;
         CalibChannel c(p);
-        check(c.offer(0.0).has_value(), "the first offer goes out");
+        check([&]{ const auto b = c.offer(0.0); if (b) c.mark_offered(); return b.has_value(); }(),
+               "the first offer goes out");
         c.on_outcome(O::Infeasible, 0.0);
         c.note_robot_pos(0.0, 0.0);
         check(not c.offer(0.0).has_value(), "an infeasible spot silences the offer");
         c.note_robot_pos(0.20, 0.0);
         check(not c.offer(0.0).has_value(), "a shuffle of 20 cm is the SAME spot, not a new chance");
         c.note_robot_pos(1.50, 0.0);
-        check(c.offer(0.0).has_value(), "a body-width and more away, it may ask again");
+        check([&]{ const auto b = c.offer(0.0); if (b) c.mark_offered(); return b.has_value(); }(),
+               "a body-width and more away, it may ask again");
     }
 
     // 7. EVERY OTHER FAILURE LEAVES THE SEQUENCE WHERE IT WAS. A timeout is not a turn.
     {
         CalibChannelParams p; p.enabled = true;
         CalibChannel c(p);
-        (void)c.offer(0.0);
+        if (c.offer(0.0).has_value()) c.mark_offered();
         c.on_outcome(O::Timeout, 0.0);
         const int after_timeout = c.pivot().steps_issued();
         check(after_timeout == 0, "a step that timed out does not advance the pivot");
-        check(c.offer(0.0).has_value(), "and the next offer still goes out");
+        check([&]{ const auto b = c.offer(0.0); if (b) c.mark_offered(); return b.has_value(); }(),
+               "and the next offer still goes out");
     }
 
     // 8. ONE LIVE OFFER AT A TIME. The node is a single register; a second offer before the first is
@@ -160,7 +164,8 @@ int main()
     {
         CalibChannelParams p; p.enabled = true;
         CalibChannel c(p);
-        check(c.offer(0.0).has_value(), "the offer goes out");
+        check([&]{ const auto b = c.offer(0.0); if (b) c.mark_offered(); return b.has_value(); }(),
+               "the offer goes out");
         check(not c.offer(0.0).has_value(), "and nothing else is offered until it is answered");
     }
 
