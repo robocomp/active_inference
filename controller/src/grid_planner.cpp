@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <format>
 #include <istream>
+#include <set>
 #include <limits>
 #include <ostream>
 #include <queue>
@@ -488,6 +489,45 @@ bool GridPlanner::can_turn_here(const Eigen::Vector2f& pos_room) const
     for (int h = 0; h < kHeadings; ++h)
         if (not cell_free_at(pos_room, h)) return false;
     return true;
+}
+
+GridPlanner::TurnBlock GridPlanner::why_cannot_turn(const Eigen::Vector2f& pos_room) const
+{
+    TurnBlock b;
+    int ix, iy;
+    if (not world_to_cell(pos_room, ix, iy)) { b.blocked = true; b.off_map = true; return b; }
+    const_cast<GridPlanner*>(this)->rebuild_offsets();
+    if (offsets_.size() != kHeadings) { b.blocked = true; return b; }
+
+    float best = std::numeric_limits<float>::max();
+    // A cell can sit under several headings' footprints; count it once so "cells_blocked" reads as the
+    // size of the obstruction and not as how thoroughly we looked at it.
+    std::set<std::pair<int, int>> seen;
+    for (int h = 0; h < kHeadings; ++h)
+    {
+        bool this_heading = false;
+        for (const auto& o : offsets_[h])
+        {
+            const int nx = ix + o.x(), ny = iy + o.y();
+            if (not in_bounds(nx, ny)) { this_heading = true; b.off_map = true; continue; }
+            if (not occ_[idx(nx, ny)]) continue;
+            this_heading = true;
+            seen.insert({nx, ny});
+            const auto w = cell_to_world(nx, ny);
+            if (const float d = (w - pos_room).norm(); d < best)
+            {
+                best = d;
+                b.nearest_cell = w;
+                b.nearest_m = d;
+                b.nearest_bearing_deg = std::atan2(w.y() - pos_room.y(), w.x() - pos_room.x())
+                                      * 180.f / static_cast<float>(M_PI);
+            }
+        }
+        if (this_heading) ++b.headings_blocked;
+    }
+    b.cells_blocked = static_cast<int>(seen.size());
+    b.blocked = b.headings_blocked > 0;
+    return b;
 }
 
 std::optional<Eigen::Vector2f> GridPlanner::nearest_rotatable(const Eigen::Vector2f& pos_room,

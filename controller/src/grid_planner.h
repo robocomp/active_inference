@@ -229,6 +229,25 @@ public:
     // something two files should each know.
     bool can_turn_here(const Eigen::Vector2f& pos_room) const;
 
+    // ── WHY NOT, WHEN IT SAYS NO ────────────────────────────────────────────────────────────────
+    // can_turn_here returns a bare bool, and the one place it is consulted turns that into a refusal
+    // the other agent must believe and act on. A refusal with no reason is the failure this codebase
+    // keeps paying for: from outside, "a wall is in the way" and "one stray cell 15 cm from the body
+    // centre" are the same word, and they call for opposite responses. This reports the shape of the
+    // obstruction — how many of the eight headings it blocks, and the nearest offending cell — so the
+    // two can be told apart from a log.
+    struct TurnBlock
+    {
+        bool  blocked = false;
+        int   headings_blocked = 0;          ///< of kHeadings; 8 = boxed in, 1 = a notch
+        int   cells_blocked = 0;             ///< distinct occupied cells found under any heading
+        bool  off_map = false;               ///< the footprint left the grid rather than hit anything
+        Eigen::Vector2f nearest_cell = Eigen::Vector2f::Zero();   ///< world position of the closest one
+        float nearest_m = 0.f;               ///< its distance from pos_room
+        float nearest_bearing_deg = 0.f;     ///< and its bearing, room frame
+    };
+    [[nodiscard]] TurnBlock why_cannot_turn(const Eigen::Vector2f& pos_room) const;
+
     // ── DISTANCE FIELD ────────────────────────────────────────────────────────────────────────────
     // Metres from `p` to the nearest occupied cell (outside-the-room counts as occupied, so walls are
     // included). Zero inside an obstacle. Returns a large positive value if there is no world yet, so a

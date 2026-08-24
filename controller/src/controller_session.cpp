@@ -801,7 +801,7 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     if (orient_in_place and grid_planner_.has_world())
     {
         const auto robot_xy = step.robot_pose.pos.head<2>().cast<float>();
-        if (not grid_planner_.can_turn_here(robot_xy))
+        if (const auto blk = grid_planner_.why_cannot_turn(robot_xy); blk.blocked)
         {
             if (timestamp_ms - last_repair_reject_log_ms_ >= 3000)
             {
@@ -810,10 +810,27 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
                              "all the way round at ({:.2f},{:.2f}), where the robot stands — "
                              "reporting infeasible. Nothing to repair: an orient has no standpoint.",
                              step.target.node_name, robot_xy.x(), robot_xy.y());
+                std::println("[controller]   because: {}/{} headings blocked by {} cell(s){}; nearest "
+                             "at ({:.2f},{:.2f}) = {:.2f} m, bearing {:.0f} deg",
+                             blk.headings_blocked, 8, blk.cells_blocked,
+                             blk.off_map ? ", footprint leaves the map" : "",
+                             blk.nearest_cell.x(), blk.nearest_cell.y(), blk.nearest_m,
+                             blk.nearest_bearing_deg);
             }
+            // ★THE SHAPE OF THE OBSTRUCTION, NOT JUST ITS EXISTENCE. A refusal the producer must
+            // believe and wait on deserves better than a verdict: one stray cell 15 cm from the body
+            // centre and a wall across three headings are the same word from outside and call for
+            // opposite responses. Recorded on the audit line so it survives the terminal.
             audit_standpoint("fact-orient-cannot-turn", timestamp_ms,
                              last_raw_target_pos_.value_or(step.target.room_pos), robot_xy, robot_xy,
-                             "can_turn_here", "no room to sweep the body's diagonal here", -1, -1, 0);
+                             "can_turn_here",
+                             std::format("{}/8 headings blocked by {} cell(s){}; nearest {:.2f} m at "
+                                         "bearing {:.0f} deg, cell ({:.2f},{:.2f})",
+                                         blk.headings_blocked, blk.cells_blocked,
+                                         blk.off_map ? ", off-map" : "", blk.nearest_m,
+                                         blk.nearest_bearing_deg, blk.nearest_cell.x(),
+                                         blk.nearest_cell.y()),
+                             -1, -1, 0);
             affordance_manager.note_map_verdict(robot_xy, robot_xy);
             note_protocol(rc::AffordanceExecution::ProtocolLine::Side::Consumer, timestamp_ms,
                           "-> Infeasible: the body cannot sweep its diagonal where it stands");
