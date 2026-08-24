@@ -117,7 +117,18 @@ public:
             ref_turn_ = odom_turn_ = 0.0;
             steps_ = 0;
         }
-        return wrap(robot_heading_rad + p_.step_rad);
+        // ★★★ANCHORED TO THE STARTING HEADING, NOT TO WHERE THE LAST STEP HAPPENED TO STOP.
+        // This returned `robot_heading + step`, and that quietly made closure impossible. The executor
+        // completes an Orient when it is within its aligned band (0.05 rad = 2.9 deg), so every step
+        // lands a couple of degrees short — and asking for "120 more from wherever you are" bakes each
+        // shortfall in for ever. Measured live 2026-08-24, thirteen consecutive steps: 117.4 deg each,
+        // never 120. Twelve of those is 1409 deg, so the robot ends 31 deg from where it started and
+        // the heading test can never pass. The pivot ran and ran and could not finish.
+        // Absolute bearings make the error self-correcting: step k asks for start + k*120 whatever the
+        // last step achieved, so a step that fell short is made up by the next one, and step twelve
+        // asks for start + 1440 deg — which IS the starting heading. The closure is built into the
+        // sequence instead of being hoped for at the end of it.
+        return wrap(start_heading_ + static_cast<double>(steps_ + 1) * p_.step_rad);
     }
 
     /// The consumer answered. `heading_rad` is the robot's measured heading NOW, and it is what the
@@ -143,10 +154,12 @@ public:
         ++steps_;
         state_ = State::Offering;
 
-        // Closed when the MEASURED turn has reached a whole number of turns and the heading has come
-        // back. Both conditions, because either alone is satisfiable by standing still.
-        const double target = 2.0 * M_PI * p_.turns;
-        if (std::abs(ref_turn_) >= std::abs(target) - p_.closure_tolerance_rad
+        // Closed when the robot has been round at least the requested number of times AND the heading
+        // has come back. Both conditions, because either alone is satisfiable by standing still.
+        // ★COUNT THE TURNS, DO NOT COMPARE AGAINST AN ASSERTED TOTAL. The old test asked whether
+        // |ref_turn_| had reached 2*pi*turns minus a tolerance, which pairs badly with the closure()
+        // below asserting the same constant as the TRUTH — see there.
+        if (std::abs(whole_turns()) >= p_.turns
             and std::abs(wrap(heading_rad - start_heading_)) <= p_.closure_tolerance_rad)
             state_ = State::Closed;
     }
@@ -158,7 +171,16 @@ public:
     {
         PivotClosure c;
         if (state_ != State::Closed or steps_ == 0) return c;
-        c.truth_rad  = 2.0 * M_PI * p_.turns * (ref_turn_ < 0 ? -1.0 : 1.0);
+        // ★★★THE TRUTH IS HOW MANY TURNS THE ROBOT ACTUALLY MADE, NOT HOW MANY WERE ASKED FOR.
+        // This asserted 2*pi*turns — the CONFIGURED count — as the denominator of the scale. The whole
+        // argument of a closure pivot is "the heading came back, therefore the robot turned a whole
+        // number of turns"; WHICH whole number is a fact to be counted, not a parameter. With steps
+        // falling short (see next_bearing) the sequence closes after thirteen turns, not four, and
+        // dividing thirteen turns of odometry by four asserted ones reports s_omega = +226% — a
+        // confident, catastrophically wrong calibration, which is far worse than a pivot that never
+        // finishes. Rounding ref_turn_ to the nearest whole turn is exact here: the localiser's
+        // heading error is degrees and the spacing is 360.
+        c.truth_rad  = 2.0 * M_PI * whole_turns();
         c.turned_rad = odom_turn_;
         c.s_omega    = odom_turn_ / c.truth_rad - 1.0;
         c.resolution = std::abs(wrap(last_heading_ - start_heading_)) / std::abs(c.truth_rad);
@@ -169,6 +191,9 @@ public:
     }
 
     void reset() { state_ = State::Idle; steps_ = 0; ref_turn_ = odom_turn_ = 0.0; }
+
+    /// Whole turns the reference heading says were made, signed. The closure's own count.
+    [[nodiscard]] double whole_turns() const { return std::round(ref_turn_ / (2.0 * M_PI)); }
 
 private:
     static double wrap(double a) { while (a > M_PI) a -= 2*M_PI; while (a < -M_PI) a += 2*M_PI; return a; }

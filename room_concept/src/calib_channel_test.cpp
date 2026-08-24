@@ -134,6 +134,47 @@ int main()
         check(std::abs(cl.s_omega - s_true) < 1e-6, "and recovers the injected scale");
     }
 
+    // 5c. A STEP THAT FALLS SHORT MUST NOT POISON THE SEQUENCE. The executor completes an Orient
+    //     inside its aligned band, so every step lands a couple of degrees short of what was asked.
+    //     Measured live 2026-08-24: thirteen consecutive steps of 117.4 deg, never 120. With bearings
+    //     asked relative to where the last step stopped, twelve of those total 1409 deg and the robot
+    //     ends 31 deg from its start — closure impossible, for ever. Anchored bearings make each step
+    //     absorb the previous shortfall.
+    {
+        CalibChannelParams p; p.enabled = true;
+        CalibChannel c(p);
+        double t = 0.0, th = 0.0;
+        const double s_true = 0.05, step = 2.0*M_PI/3.0;
+        const double shortfall = 0.045;            // ~2.6 deg, the executor's band
+        drive(c, t, th, 0.0, s_true, 0.5);
+        double h = 0.0;
+        for (int i = 0; i < 200 and c.pivot().state() != PivotAffordance::State::Closed; ++i)
+        {
+            const auto b = c.offer(h);
+            if (not b.has_value()) break;
+            c.mark_offered();
+            c.set_claim_held(true);
+            // Turn to the ASKED bearing but stop short of it, exactly as the executor does.
+            const double err = std::atan2(std::sin(*b - th), std::cos(*b - th));
+            const double turn = err - (err > 0 ? shortfall : -shortfall);
+            drive(c, t, th, turn / 5.0, s_true, 5.0);
+            h = std::atan2(std::sin(th), std::cos(th));
+            c.on_outcome(O::Satisfied, h);
+            c.set_claim_held(false);
+        }
+        const auto cl = c.closure();
+        std::printf("  short steps: closed=%d after %d step(s), turned %.1f deg, truth %.1f deg, "
+                    "s_omega %.4f (injected %.3f)\n",
+                    (int)(c.pivot().state() == PivotAffordance::State::Closed),
+                    c.pivot().steps_issued(), cl.turned_rad*180/M_PI, cl.truth_rad*180/M_PI,
+                    cl.s_omega, s_true);
+        check(c.pivot().state() == PivotAffordance::State::Closed,
+              "a sequence of short steps still closes");
+        check(c.pivot().steps_issued() <= 13, "and closes in about twelve, not forty");
+        check(std::abs(cl.s_omega - s_true) < 5e-3,
+              "and the scale it reports is the injected one, not a ratio against an asserted total");
+    }
+
     // 5b. A STANDING OFFER IS NOT A RUNNING MANOEUVRE. Between the moment a step is published and the
     //     moment somebody claims it, the selector is free to send the robot across the room — and it
     //     does: measured live 2026-08-24, a completed pivot step re-offered at 0.163 nats, lost to an
