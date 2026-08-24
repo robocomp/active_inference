@@ -226,21 +226,25 @@ public:
         {
             // Producer and consumer get different colours and different indents, because the one
             // question the transcript answers is WHICH SIDE spoke.
-            const char *col = "#8b9198";
-            const char *pad = "";
+            // ★NAME THE SPEAKER ON EVERY LINE. Colour and indent alone need a legend and a memory;
+            // the one question a transcript answers is WHICH SIDE said this, so it is written out.
+            // Fixed-width so the three names form a column the eye can skip down.
+            const char *col  = "#8b9198";
+            const char *who  = "selector";
             switch (l.side)
             {
                 case AffordanceExecution::ProtocolLine::Side::Producer:
-                    col = "#7fa9d6"; break;
+                    col = "#7fa9d6"; who = "producer"; break;
                 case AffordanceExecution::ProtocolLine::Side::Consumer:
-                    col = "#d68c74"; pad = "&nbsp;&nbsp;&nbsp;&nbsp;"; break;
+                    col = "#d68c74"; who = "consumer"; break;
                 default: break;
             }
             html += QStringLiteral("<div style='color:%1;white-space:pre'>"
-                                   "<span style='color:#5f666d'>%2</span> %3%4</div>")
+                                   "<span style='color:#5f666d'>%2</span> "
+                                   "<b>%3</b>  %4</div>")
                         .arg(QString::fromLatin1(col))
                         .arg(QString::asprintf("%7.1f", (l.t_ms - t0) / 1000.0))
-                        .arg(QString::fromLatin1(pad))
+                        .arg(QString::asprintf("%-8s", who))
                         .arg(QString::fromStdString(l.text).toHtmlEscaped());
         }
         transcript_->setHtml(html);
