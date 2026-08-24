@@ -5055,8 +5055,16 @@ bool ControllerSession::skip_current_affordance(rc::AffordanceManager &affordanc
     // Same teardown a finished affordance gets — including mark_reached, which is what stops the
     // selector handing the identical affordance straight back — but WITHOUT the dwell: a skip means
     // "there is nothing here worth looking at", so holding still to look at it would invert the intent.
+    // ★AND SAY WHAT IT WAS. Without an explicit outcome this falls through to the predicate reading,
+    // which for an affordance whose predicate never ran reports whatever the LAST one left behind.
+    // `afford_calib` is one node reused for every step of its pivot, so resolve_target_contract's
+    // reset (keyed on node id) does not fire between steps: a skipped step would have inherited the
+    // previous step's `true` and been reported SATISFIED, advancing a twelve-step sequence by a step
+    // that never happened. Abandoned is the word for this and it already exists — "an operator or a
+    // higher-priority interrupt ended it".
     finalize_reached(affordance_manager, path_controller, motion_commander, display,
-                     Eigen::Vector2f::Zero(), time_source(), /*allow_dwell=*/false);
+                     Eigen::Vector2f::Zero(), time_source(), /*allow_dwell=*/false,
+                     rc::affordance::Outcome::Abandoned);
     return true;
 }
 

@@ -725,10 +725,17 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
     // is the other half and the half that has been guessed at. Every early return below is a reason
     // the pivot went quiet, and from outside they are indistinguishable -- the node simply sits there.
     // Deduplicated on the text, so this is one line per change of reason, not per cycle.
-    const auto say = [this](std::string text)
+    // ★DEDUP ON A KEY, NOT ON THE TEXT, AND ONE KEY PER CHANNEL. Holding a single "last line" while
+    // TWO lines alternate defeats the dedup completely -- each one differs from the other, so both
+    // print every cycle. Measured: 18690 lines and 1.3 MB in eight minutes, 40 lines/s, for a trace
+    // whose whole purpose is to be one line per CHANGE. And the key must exclude quantities that
+    // merely drift: the state line carries the gain for reading, but a true gain moving in the third
+    // decimal is not a decision and must not re-print the line.
+    const auto say = [this](const std::string &channel, const std::string &key, std::string text)
     {
-        if (text == calib_last_reason_) return;
-        calib_last_reason_ = text;
+        auto &last = calib_last_reason_[channel];
+        if (key == last) return;
+        last = key;
         if (not calib_log_open_)
         {
             calib_log_.open("tmp/calib_producer.log", std::ios::out | std::ios::trunc);
@@ -741,7 +748,12 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
             calib_log_.flush();
         }
     };
-    say(std::format("state={} gain={:.3f}{} offer_open={} refused={}",
+    // The KEY is the decision state; the gain rides along in the text for reading but never triggers
+    // a line by itself.
+    say("state",
+        std::format("{}|{}|{}", rc::calib::PivotAffordance::to_string(calib_.pivot().state()),
+                    calib_.offering() ? 1 : 0, calib_.refused_here() ? 1 : 0),
+        std::format("state={} gain={:.3f}{} offer_open={} refused={}",
                     rc::calib::PivotAffordance::to_string(calib_.pivot().state()),
                     calib_.marginal_gain_nats(),
                     calib_.gain_is_forced()
@@ -751,7 +763,7 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
 
     if (calib_manager_.is_executing(G_))
     {
-        say("no offer: the consumer holds the claim");
+        say("offer", "claimed", "no offer: the consumer holds the claim");
         return;                                    // the consumer owns it; do not rewrite the offer
     }
 
@@ -759,7 +771,7 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
     const auto bearing = calib_.offer(theta);
     if (not bearing.has_value())
     {
-        say(std::format("no offer: {}",
+        say("offer", "none", std::format("no offer: {}",
                         calib_.offering()            ? "one is already live"
                       : not calib_.enabled_public()         ? "the channel is disabled"
                       : calib_.pivot().state() == rc::calib::PivotAffordance::State::SpotRefused
@@ -769,7 +781,10 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
                       : "the marginal gain is not positive"));
         return;
     }
-    say(std::format("offering step {}, bearing {:.0f} deg, {:.3f} nats",
+    // Keyed on the step number so each step announces itself exactly once, however many cycles the
+    // offer stands for.
+    say("offer", std::format("step{}", calib_.pivot().steps_issued() + 1),
+        std::format("offering step {}, bearing {:.0f} deg, {:.3f} nats",
                     calib_.pivot().steps_issued() + 1, *bearing * 180.0 / M_PI,
                     calib_.marginal_gain_nats()));
     calib_bearing_rad_ = static_cast<float>(*bearing);

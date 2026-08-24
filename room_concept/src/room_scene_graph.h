@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <fstream>
 #include <functional>
+#include <map>
 #include <limits>
 #include <print>
 #include <memory>
@@ -236,7 +237,9 @@ private:
     int           calib_dbg_              = 0;
     std::ofstream calib_log_;
     bool          calib_log_open_ = false;
-    std::string   calib_last_reason_;
+    // Last logged KEY per trace channel ("state", "offer"). One key each: two alternating lines
+    // sharing a single last-line string defeat the dedup entirely and print every cycle.
+    std::map<std::string, std::string> calib_last_reason_;
     rc::ObjectAnchorSource object_anchor_source_;
     // Chain-propagated pose+covariance reader for object anchors. Created lazily on the MAIN
     // thread (owns an RT_API whose ts==0 path uses the InnerEigen cache — see CLAUDE.md).
