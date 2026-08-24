@@ -704,6 +704,40 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
             std::print("[calib] the pivot closed but the scale it measured ({:+.4f}) is finer than "
                        "the closure resolves ({:.2f}%) — not a measurement, and not quoted as one.\n",
                        cl.s_omega, cl.resolution * 100.0);
+
+        // ★★★AND ON DISK, BECAUSE THIS IS THE PRODUCT. Everything else in this file is a diagnostic;
+        // the closure is the MEASUREMENT the robot spent a two-minute detour to make, and it existed
+        // only as a terminal print — gone with the scrollback, unreadable by anyone not watching at
+        // the moment it happened, and impossible to compare across runs. Written whether or not it is
+        // `usable`, because "the pivot closed and resolved nothing" is a result about this robot too.
+        // Beside it goes the ONLINE estimator's own answer for the same quantity: the closure is
+        // map-free and survey-free, the estimator is neither, and the whole value of having both is
+        // the comparison. Reading one without the other was never the point.
+        if (calib_.pivot().state() == rc::calib::PivotAffordance::State::Closed)
+        {
+            if (not calib_csv_open_)
+            {
+                calib_csv_.open("tmp/calib_closures.csv", std::ios::out | std::ios::app);
+                calib_csv_.imbue(std::locale::classic());   // decimal POINT under es_ES — see CLAUDE.md
+                calib_csv_open_ = calib_csv_.is_open();
+                if (calib_csv_open_ and calib_csv_.tellp() == 0)
+                    calib_csv_ << "t_ms,steps,turned_deg,truth_deg,turns,s_omega,resolution,usable,"
+                                  "est_s,est_s_std,est_windows,est_identifiable,auth_sigma\n";
+            }
+            if (calib_csv_open_)
+            {
+                const auto post = calib_.posterior();
+                const double auth = calib_.authoritative_information();
+                calib_csv_ << std::format(
+                    "{},{},{:.3f},{:.3f},{:.0f},{:.6f},{:.6f},{},{:.6f},{:.6f},{},{},{:.6f}\n",
+                    static_cast<std::uint64_t>(res.timestamp_ms), calib_.pivot().steps_issued(),
+                    cl.turned_rad * 180.0 / M_PI, cl.truth_rad * 180.0 / M_PI,
+                    cl.truth_rad / (2.0 * M_PI), cl.s_omega, cl.resolution, cl.usable ? 1 : 0,
+                    post.s, post.s_std, post.windows, post.identifiable() ? 1 : 0,
+                    auth > 0.0 ? 1.0 / std::sqrt(auth) : 0.0);
+                calib_csv_.flush();
+            }
+        }
         std::fflush(stdout);
         // ★FALL THROUGH AND RE-ARM IN THIS SAME CYCLE. Returning here left the node in
         // JustCompleted for one cycle, and JustCompleted is not claimable -- so the selector fell

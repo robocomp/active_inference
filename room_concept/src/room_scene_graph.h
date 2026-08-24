@@ -237,6 +237,11 @@ private:
     int           calib_dbg_              = 0;
     std::ofstream calib_log_;
     bool          calib_log_open_ = false;
+    // The closure MEASUREMENTS, appended across runs — the product of the manoeuvre, which existed
+    // only as a terminal print until 2026-08-24. Appended, not truncated: comparing a robot's scale
+    // over weeks is the entire point of calibrating it opportunistically.
+    std::ofstream calib_csv_;
+    bool          calib_csv_open_ = false;
     // Last logged KEY per trace channel ("state", "offer"). One key each: two alternating lines
     // sharing a single last-line string defeat the dedup entirely and print every cycle.
     std::map<std::string, std::string> calib_last_reason_;
