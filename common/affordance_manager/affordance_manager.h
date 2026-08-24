@@ -42,6 +42,11 @@ public:
         float shape_width_m = 0.f;
         float shape_depth_m = 0.f;
         bool has_shape = false;
+        // What the producer asked for, read from the node's own contract. The selector needs it because
+        // two of its rules ask "is this the same request as the last one" and "is this a background
+        // errand" -- and both questions have different answers for a Reach and an Orient. Defaults to
+        // Reach, which is what a node with no contract has always been treated as.
+        rc::affordance::Policy policy = rc::affordance::Policy::Reach;
     };
 
     // One evaluated affordance per select_target() call (for the controller's EFE plot/log).
@@ -345,8 +350,10 @@ private:
     // ★Identity must be carried as DATA at the moment of the decision, never inferred later from
     // mutable shared state. Reading a shared register to find out what you yourself just did is a race.
     float claimed_x_ = 0.f, claimed_y_ = 0.f;
+    float claimed_yaw_ = 0.f;   // the BEARING claimed — for an Orient this, not the pose, is the request
     bool  claimed_pose_known_ = false;
     float last_completed_x_ = 0.f, last_completed_y_ = 0.f;
+    float last_completed_yaw_ = 0.f;
     bool  last_completed_pose_known_ = false;
     // node id -> selection rounds still to skip. See suppress_target: the consumer could not reach it.
     std::map<std::uint64_t, int> unreachable_rounds_;

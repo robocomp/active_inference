@@ -4862,7 +4862,15 @@ void ControllerSession::finalize_reached(rc::AffordanceManager &affordance_manag
         // the completion, `evaluate_goal` returns true trivially for an empty clause set — and reading
         // the look flag for them reported `timeout` for four consecutive arrivals, one of them logged
         // at d=0.23 m. A contract with no predicate cannot fail one.
-        const bool had_predicate = not active_contract_.goal.empty();
+        // ★AN ORIENT ALWAYS HAS A PREDICATE: THE BEARING. The empty-goal exemption above is right for a
+        // Reach -- arriving IS the completion and there is nothing that could have failed. An Orient
+        // with no goal clause is NOT that case: step_orient evaluates `aligned` as its predicate and
+        // writes last_look_succeeded_ from it, so it can and does fail -- it can run out of patience
+        // short of the bearing. Falling into `not had_predicate` reported those as `satisfied`, which
+        // is the one thing the producer must not be told: the calibration pivot advances its sequence
+        // on that word, and a step that never turned would be logged as a step that did.
+        const bool had_predicate = not active_contract_.goal.empty()
+                                or active_contract_.policy == rc::affordance::Policy::Orient;
         // outcome_override wins: a refusal is a statement about the APPROACH, and no reading of the
         // contract's predicate can express it — there was no approach to judge.
         {

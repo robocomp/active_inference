@@ -196,6 +196,10 @@ std::optional<AffordanceManager::Target> AffordanceManager::read_target(const st
     target.yaw_rad = yaw.value();
     target.epistemic_gain = gain.value();
     target.epistemic_pending = pending.value();
+    // The contract's policy, straight off the node. Absent ⇒ Reach, which is how a contract-less node
+    // has always been executed, so this changes nothing for anyone who never writes one.
+    if (const auto pol = graph->get_attrib_by_name<aff_policy_att>(node); pol.has_value())
+        target.policy = rc::affordance::policy_from(pol.value());
     const auto parent_id = graph->get_attrib_by_name<parent_att>(node);
     if (parent_id.has_value())
     {
@@ -670,6 +674,33 @@ bool AffordanceManager::release_execution_claim(const std::shared_ptr<DSR::DSRGr
     return true;
 }
 
+// ── IS THIS THE SAME REQUEST THE ROBOT JUST FINISHED? ────────────────────────────────────────────
+// The no-two-in-a-row rule forbids REPEATING a request, and what a request IS depends on the policy.
+// For a Reach it is a place: go and stand there. Comparing standpoints is exactly right, and two
+// offers of the same cell are the repetition the rule exists to stop.
+//
+// ★FOR AN ORIENT IT IS A BEARING, AND COMPARING PLACES IS THE WRONG QUESTION ENTIRELY. An Orient is
+// published AT THE ROBOT'S OWN POSE and turns in place, so its standpoint is unchanged by
+// construction -- every step of a sequence looks like a repeat of the one before, for ever. The
+// calibration pivot is twelve consecutive 120-degree steps from one spot: measured 2026-08-24, it
+// completed a step, was suppressed as "just-completed" on the very next cycle, and afford_room was
+// claimed and committed the robot to a 5.4 m traversal. That is why the pivot has never once got past
+// its opening steps, and why forcing its gain did not help -- it was excluded before it was scored.
+// Two Orients from one spot asking for bearings 120 degrees apart are DIFFERENT REQUESTS, and the
+// bearing is what has to be compared. The band is the executor's own "aligned": inside it the robot is
+// already pointing there, so re-issuing really would be the repetition the rule forbids.
+static bool is_same_request(const rc::AffordanceManager::Target &t, float last_x, float last_y,
+                            float last_yaw, bool pose_known)
+{
+    if (not pose_known) return false;                       // fail OPEN: when in doubt the rule yields
+    constexpr float kSameSpotM   = 0.30f;
+    constexpr float kSameYawRad  = 0.05f;                   // ControllerSession::step_orient's band
+    if (std::hypot(t.room_pos.x() - last_x, t.room_pos.y() - last_y) >= kSameSpotM) return false;
+    if (t.policy != rc::affordance::Policy::Orient) return true;
+    const float d = std::atan2(std::sin(t.yaw_rad - last_yaw), std::cos(t.yaw_rad - last_yaw));
+    return std::abs(d) < kSameYawRad;
+}
+
 // How long a refused STANDPOINT stays un-offerable. Long enough that the situation can change,
 // short enough that a genuine retry is not deferred noticeably.
 static constexpr std::uint64_t kRefusalRetryMs = 3000;
@@ -723,7 +754,16 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
         // The room's gain is discounted only while an object is actually competing for the robot —
         // see set_room_gain_scale. Applied to the GAIN, not to the final score, so the nav-cost stays
         // in metres-of-driving and the discount stays in units of information.
-        const float gain = (t.parent_node_type == "room" and object_competing)
+        // ★AND IT IS ABOUT RELOCALISATION TOURS, NOT ABOUT PARENTAGE. The preference above is argued
+        // from one property: re-localising is a standing background need that recovers on its own and
+        // can be paid at any time, so it must not starve the opportunistic looks. An in-place
+        // manoeuvre published on the room node is not that -- afford_calib is parented to `room` only
+        // because room_concept is the agent that produces it, and its chance is as perishable as an
+        // object's (the robot has space to turn HERE, and will drive away). Discounting it by 0.35
+        // charged it for a property it does not have.
+        const bool relocalisation_tour = t.parent_node_type == "room"
+                                     and t.policy != rc::affordance::Policy::Orient;
+        const float gain = (relocalisation_tour and object_competing)
                                ? t.epistemic_gain * select_room_gain_scale_
                                : t.epistemic_gain;
         float score = gain - select_lambda_cost_ * nav_dist;
@@ -750,9 +790,8 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
         const auto pending = graph->get_attrib_by_name<epistemic_pending_att>(node).value_or(true);
         const auto state = decode_protocol_state(active, pending);
         const bool just_done = node.id() == last_completed_id_
-            and last_completed_pose_known_ and target.has_value()
-            and std::hypot(target->room_pos.x() - last_completed_x_,
-                           target->room_pos.y() - last_completed_y_) < 0.30f;
+            and is_same_request(*target, last_completed_x_, last_completed_y_, last_completed_yaw_,
+                                last_completed_pose_known_);
         last_candidates_.push_back({target->node_name, target->parent_node_type,
                                     target->epistemic_gain, neg_efe(*target),
                                     (state == ProtocolState::Offered
@@ -828,6 +867,7 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
         current_affordance_name_ = resumed_target->node_name;
         claimed_x_ = resumed_target->room_pos.x();
         claimed_y_ = resumed_target->room_pos.y();
+        claimed_yaw_ = resumed_target->yaw_rad;
         claimed_pose_known_ = true;
         if (const auto key = make_affordance_key(*resumed_target); key != selected_target_debug_report_)
         {
@@ -885,10 +925,8 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
         // parked with a valid offer 2.99 m away). The suppression is a POLITENESS rule; when in doubt
         // it must yield. Re-taking one affordance too soon is bounded by the refusal hold and the
         // yield; blacklisting the whole channel is not bounded by anything.
-        const bool same_standpoint =
-            last_completed_pose_known_
-            and (std::hypot(target->room_pos.x() - last_completed_x_,
-                            target->room_pos.y() - last_completed_y_) < 0.30f);
+        const bool same_standpoint = is_same_request(*target, last_completed_x_, last_completed_y_,
+                                                    last_completed_yaw_, last_completed_pose_known_);
         if (node.id() == last_completed_id_ and same_standpoint)
         {
             last_reject_reason_ = "just-completed";
@@ -1019,6 +1057,7 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
         current_affordance_id_ = best_target->node_id;
         claimed_x_ = best_target->room_pos.x();
         claimed_y_ = best_target->room_pos.y();
+        claimed_yaw_ = best_target->yaw_rad;
         claimed_pose_known_ = true;
         current_affordance_name_ = best_target->node_name;
         // A DIFFERENT affordance has been chosen, so the previous one is no longer "in a row" — it may
@@ -1095,6 +1134,7 @@ void AffordanceManager::mark_reached(const std::shared_ptr<DSR::DSRGraph> &graph
     last_completed_id_ = current_affordance_id_;
     // ★FROM WHAT WE CLAIMED, not from the node — see claimed_x_ in the header.
     last_completed_pose_known_ = claimed_pose_known_;
+    last_completed_yaw_ = claimed_yaw_;
     last_completed_x_ = claimed_x_;
     last_completed_y_ = claimed_y_;
     claimed_pose_known_ = false;
