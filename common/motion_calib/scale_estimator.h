@@ -169,11 +169,6 @@ public:
         c.windows = n_;
         c.info    = sxx_;
         c.s       = s_;
-        // dF/dsigma = 0, with the residual sum in closed form: Sum w*r^2 = Syy - s*Sxy for the fitted
-        // s. Accumulating residuals against the RUNNING slope instead disagreed with the batch fit in
-        // the fourth decimal — small, but it means the online and offline estimators are answering
-        // slightly different questions, and the whole point of this class is that they do not.
-        const double rss = std::max(syy_ - s_ * sxy_, 0.0);
         // ★ONE DEFINITION OF THE DENSITY, shared with everything that scales by it. Reporting
         // rss/(n-1) here while the gain calculation used density_squared() meant the number on the
         // dashboard and the number in the decision were not the same quantity.
@@ -183,7 +178,6 @@ public:
         // channel falls back to the prior width instead of claiming certainty.
         const double prior_prec = 1.0 / (p_.prior_std * p_.prior_std);
         const double sig2 = (c.sigma > 0.0) ? c.sigma * c.sigma : density_squared();
-        (void)rss;
         c.data_precision  = (sig2 > 1e-18) ? sxx_ / sig2 : 0.0;
         c.prior_precision = prior_prec;
         c.s_std = std::sqrt(1.0 / (c.data_precision + prior_prec));
@@ -254,7 +248,13 @@ private:
         const double n0 = std::max(p_.prior_density_windows, 0.0);
         const double d0 = p_.prior_density * p_.prior_density;
         const double dof = static_cast<double>(n_ > 0 ? n_ - 1 : 0) + n0;
-        if (dof <= 0.0) return (n_ < 2) ? std::max(d0, 1e-12) : 1.0;
+        // Both terms are non-negative, so dof reaches 0 only when n0 == 0 AND n_ <= 1 — no windows to
+        // estimate from and no prior asked for. There is nothing but the prior density to return then.
+        if (dof <= 0.0) return std::max(d0, 1e-12);
+        // dF/dsigma = 0, with the residual sum in closed form: Sum w*r^2 = Syy - s*Sxy for the fitted
+        // s. Accumulating residuals against the RUNNING slope instead disagreed with the batch fit in
+        // the fourth decimal — small, but it means the online and offline estimators are answering
+        // slightly different questions, and the whole point of this class is that they do not.
         const double rss = std::max(syy_ - s_ * sxy_, 0.0);
         return std::max((rss + n0 * d0) / dof, 1e-12);
     }
