@@ -627,6 +627,10 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     step.target = *target;
     // Remembered for the rejection path: what the PRODUCER published, before our repair moves it.
     last_raw_target_pos_ = target->room_pos;
+    // ★HOLD THE STANDPOINT WE COMMITTED TO. Runs HERE — on the raw published pose, before the
+    // reachability repair, the boxed-in search and the close-in re-check — so those still act on
+    // whatever we are actually driving to. See ApproachCommitment in the header for the measurement.
+    hold_approach_commitment(step, timestamp_ms);
     // The contract has to be known HERE, before the repair below, because the policy now decides both
     // whether there will be a terminal rotation and therefore whether the standpoint needs room for
     // one. active_contract_ is resolved at ARRIVAL and stays that way — it is what the servo executor
@@ -1189,6 +1193,26 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
 
 
     current_target_room_ = step.target.room_pos;
+    // ── INV-3: SAY WHAT WE ARE DRIVING TO, AFTER EVERY REPAIR, BEFORE WE DRIVE ───────────────────
+    // HERE and not at the commitment, because this is the first line at which step.target.room_pos is
+    // FINAL — the reachability repair, the boxed-in search and recheck_standpoint_on_approach have all
+    // had their say. Those moved the standpoint by up to 0.3 m in ordinary running and 5.5 m in the
+    // no-path cases, and the producer has never once been told. Publishing the producer's pose here
+    // instead of ours would restore the whole defect one level down: a claim that names a pose nobody
+    // is driving to is the same lie as a claim that names none.
+    // ★Idempotent (publish_executing compares first), so the 20 Hz call rate costs no wire traffic.
+    if (step.target.from_affordance and step.target.node_id != 0 and graph_)
+    {
+        const int claimed_epoch = approach_commit_.has_value()
+                                ? approach_commit_->epoch
+                                : rc::AffordanceManager::producer_epoch(graph_, step.target.node_id).value_or(0);
+        // epoch 0 = a pre-rollout producer. We still drive; we just cannot name a proposal, and saying
+        // nothing is honest where saying "epoch 0" would look like a real claim to a rebuilt peer.
+        if (claimed_epoch != 0)
+            affordance_manager.publish_executing(graph_, step.target.node_id, claimed_epoch,
+                                                 step.target.room_pos.x(), step.target.room_pos.y(),
+                                                 step.target.yaw_rad);
+    }
     step.target_changed = !last_target_info_.has_value()
                        || !ControllerWorldModel::same_target_instance(*last_target_info_, step.target);
     last_target_info_ = step.target;
@@ -2367,6 +2391,103 @@ void ControllerSession::feed_external_velocity_trace(const ControllerWorldModel 
                     fresh = timestamp_ms - *ts <= kRefSpeedStaleMs;
             }
     display.update_velocity_trace_external(ref_adv, ref_rot, fresh, meas_adv, meas_rot);
+}
+
+// ── AN APPROACH IS A COMMITMENT ──────────────────────────────────────────────────────────────────
+// The producer may republish an affordance's standpoint whenever it likes, and for a viewpoint chosen
+// by information gain it WILL: arriving is what satisfies the gain, so arriving is what moves the next
+// best view. Following each republish makes the target a carrot on a stick — measured, 39 republishes
+// over a metre in 11.4 minutes, the robot never once closing the last 3 mm to its own goal threshold.
+// So the standpoint is latched for the duration of ONE approach. The newest offer is not discarded, it
+// is simply what the next approach will start from.
+// ★Released by the target's own lifetime, with no timer: `last_target_info_` is cleared at every place
+// an approach concludes (finalize_reached, the unreachable/useless-spot refusal, a manual take-over),
+// and a different affordance carries a different node_id. Both are checked here, so there is no second
+// notion of "the approach is over" to fall out of step with the first.
+// ★Deliberately NOT applied to a manual click target: a click IS the operator moving the goal, and
+// refusing to follow it would be the controller ignoring the person driving it.
+void ControllerSession::hold_approach_commitment(ControllerPlanningStep &step, std::uint64_t timestamp_ms)
+{
+    if (not step.target.from_affordance or step.target.node_id == 0)
+    { approach_commit_.reset(); return; }
+
+    // ── THE EPOCH IS WHAT MAKES THIS A POSITION RATHER THAN A UNILATERAL ACT ─────────────────────
+    // ★★★DEGRADATION FIRST, because it is the half that is easy to forget and it breaks the fleet if
+    // it is wrong. nullopt means the producer has not been rebuilt against the new cortex header yet,
+    // so it cannot publish an epoch and CANNOT SEE our executing edge either. Holding a commitment it
+    // has no way to observe is exactly the silent divergence this whole change exists to abolish — so
+    // with no epoch we do what the controller did before any of this: follow every republish.
+    // Worse behaviour, honestly arrived at, and it disappears the moment that agent is rebuilt.
+    const auto epoch = rc::AffordanceManager::producer_epoch(graph_, step.target.node_id);
+    if (not epoch.has_value())
+    {
+        if (approach_commit_.has_value())
+        {
+            std::println("[approach] '{}' publishes no proposal epoch — a pre-rollout producer cannot see "
+                         "our claim, so deferring would be invisible to it. Following its republishes "
+                         "until it is rebuilt.", step.target.node_name);
+            std::fflush(stdout);
+        }
+        approach_commit_.reset();
+        return;
+    }
+
+    // A different affordance, or an approach that concluded since the last cycle, is a new epoch.
+    if (approach_commit_.has_value()
+        and (approach_commit_->node_id != step.target.node_id or not last_target_info_.has_value()))
+        approach_commit_.reset();
+
+    // A newer proposal than the one we hold is not a reason to reset the commitment — it is exactly the
+    // case the commitment exists for. But an OLDER or equal epoch with a moved pose would mean the
+    // producer rewrote content without bumping, which is a producer bug; take the new pose in that case
+    // rather than pin the robot to something nobody is offering.
+    if (approach_commit_.has_value() and approach_commit_->epoch > epoch.value())
+        approach_commit_.reset();
+
+    if (not approach_commit_.has_value())
+    {
+        approach_commit_ = ApproachCommitment{.node_id = step.target.node_id,
+                                              .epoch = epoch.value(),
+                                              .room_pos = step.target.room_pos,
+                                              .yaw_rad = step.target.yaw_rad,
+                                              .last_offer = step.target.room_pos,
+                                              .deferred = 0};
+        return;                                   // the first offer IS the commitment
+    }
+
+    // ★THE SAME EPSILON same_target_instance USES, and for the same reason: below it the two poses are
+    // the same standpoint and there is nothing to defer. A second number here would let a move be
+    // "different enough to replan" and "not different enough to defer" at once.
+    constexpr float pos_eps_m = 0.05f;
+    const Eigen::Vector2f offered = step.target.room_pos;
+    const bool moved = (offered - approach_commit_->room_pos).cwiseAbs().maxCoeff() >= pos_eps_m;
+    approach_commit_->last_offer = offered;
+    if (not moved) return;
+
+    // ★COUNT REPUBLISHES, NOT CYCLES. The first version incremented every cycle the offer differed, so
+    // ONE republish held for two minutes at 20 Hz printed "DEFERRED (2407x)" and read as 2407 separate
+    // events. A counter that conflates a duration with a count is not a measurement.
+    if ((offered - approach_commit_->last_offer_counted).cwiseAbs().maxCoeff() >= pos_eps_m)
+    {
+        ++approach_commit_->deferred;
+        approach_commit_->last_offer_counted = offered;
+    }
+    step.target.room_pos = approach_commit_->room_pos;
+    step.target.yaw_rad  = approach_commit_->yaw_rad;
+    // Rate-limited: the producer re-offers continuously and one line per cycle would bury the run.
+    if (timestamp_ms - approach_commit_log_ms_ >= 3000)
+    {
+        approach_commit_log_ms_ = timestamp_ms;
+        std::println("[approach] '{}' is offering epoch {} at ({:.2f},{:.2f}), {:.2f} m from epoch {} which "
+                     "this approach is executing ({:.2f},{:.2f}) — HOLDING ({} republishes). We publish what "
+                     "we are driving to on the `executing` edge, so the producer can see the disagreement "
+                     "and decide: wait, or withdraw. It is no longer ours to settle alone.",
+                     step.target.node_name, epoch.value(), offered.x(), offered.y(),
+                     (offered - approach_commit_->room_pos).norm(), approach_commit_->epoch,
+                     approach_commit_->room_pos.x(), approach_commit_->room_pos.y(),
+                     approach_commit_->deferred);
+        std::fflush(stdout);
+    }
 }
 
 // ── THE STANDPOINT, RE-ASKED IN THE LAST METRES AGAINST EVIDENCE THAT HAS NOT FADED ──────────────
@@ -4443,8 +4564,22 @@ bool ControllerSession::step_orient(const ControllerRobotPose &robot_pose,
 
     // Rotate the base toward the target bearing (capped). Once nearly aligned, HOLD STILL so the look is
     // motion-free (the Orient contract's .still asks for a quiet capture) and wait for the detection.
-    const float k   = params_ ? params_->lockon_k_yaw       : 0.8f;
-    const float cap = params_ ? params_->lockon_max_yaw_rps : 0.12f;
+    const float k = params_ ? params_->lockon_k_yaw : 0.8f;
+    // ★THE PRODUCER MAY DECLARE THE RATE, because it knows what the manoeuvre is FOR and we do not.
+    // Our own lockon_max_yaw_rps was tuned for the LockOn micro-search, where creeping protects the
+    // masks being collected; a calibration pivot observes nothing while it turns, so the same cap is
+    // pure cost there. Both manoeuvres used to share this constant, and the pivot's producer -- with
+    // no way to say otherwise -- priced a 50 s detour that actually took 7 minutes.
+    // ★THE CEILING IS THE BASE'S LIMIT, NOT THE SERVO'S TUNING -- and that distinction is the actual
+    // bug. lockon_max_yaw_rps is a CHOICE (creep so the masks stay sharp); max_rot_speed_rps is what
+    // the machine can safely do. Clamping a producer's request to the servo tuning would keep every
+    // manoeuvre at 0.06 and change nothing; clamping it to nothing at all would let a contract
+    // command a base past its limits. So: the producer names a rate, we clamp it to the HARDWARE
+    // ceiling, and our servo tuning applies only when no rate was asked for.
+    const float servo_cap = params_ ? params_->lockon_max_yaw_rps : 0.12f;
+    const float base_cap  = params_ ? params_->max_rot_speed_rps  : 0.8f;
+    const float asked     = active_contract_.max_yaw_rate;
+    const float cap       = (asked > 0.f) ? std::min(asked, base_cap) : servo_cap;
     float rot = std::clamp(k * yaw_err, -cap, cap);
     if (aligned)
         rot = 0.0f;

@@ -587,9 +587,20 @@ bool RoomSceneGraph::ensure_calib_node()
     // instead, at the only level a producer can honestly make it: a base that cannot turn 120 degrees
     // within two minutes is failing in a way worth reporting. Being generous costs nothing, because
     // the sequence advances on MEASURED heading and a step that times out leaves it where it was.
-    constexpr float kStepPatienceS = 120.0f;
+    // ★THE TIMEOUT CAN NOW BE DERIVED, BECAUSE THE RATE IS NO LONGER AN ASSUMPTION. The note that
+    // used to stand here said a number derived from a guess about the other agent "is not derived, it
+    // is guessed with extra steps" -- and it was right, while the producer had no way to state the
+    // rate. It states it now, through the contract, so the step time follows from a number both sides
+    // agree on. Four times the nominal step, floored at 30 s: generous, because a base has to
+    // accelerate into the turn and the sequence advances on MEASURED heading, so a step that times
+    // out simply leaves it where it was.
+    const float step_s = static_cast<float>(calib_.pivot_step_rad() / calib_.pivot_rate_rps());
+    const float kStepPatienceS = std::max(30.0f, 4.0f * step_s);
     rc::affordance::write_contract(*G_, n,
-        rc::affordance::Contract::orient().stable(2).timeout_s(kStepPatienceS));
+        rc::affordance::Contract::orient()
+            .stable(2)
+            .timeout_s(kStepPatienceS)
+            .yaw_rate(static_cast<float>(calib_.pivot_rate_rps())));
     rc::provenance::stamp_creation(*G_, n);   // birth stamp: epoch ms + local ISO-8601
 
     const auto id = G_->insert_node(n);

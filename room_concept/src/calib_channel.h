@@ -57,14 +57,20 @@ struct CalibChannelParams
     /// this file assumed 0.12 from the code default and the live config says half that — so a 120
     /// degree step takes 35 s, not 17. The producer cannot read the consumer's config, so this is an
     /// assumption and is named as one; when it is wrong the price is wrong, nothing else.
-    /// ★RAISED 0.06 -> 0.5 on 2026-08-24. At 0.06 a four-turn pivot takes SEVEN MINUTES, which is
-    /// not a detour a robot serving standpoints could reasonably be asked to take, and it also made
-    /// the price nearly meaningless: over a 7-minute horizon the ordinary tours deliver more turning
-    /// (28.1 rad) than the manoeuvre itself (25.1), so the marginal gain was dominated by the diet
-    /// rather than by the manoeuvre. At 0.5 rad/s the pivot is ~50 s and the comparison is real.
-    /// ★It still PRICES the offer and commands nothing; the consumer's own yaw limit is what actually
-    /// governs, so if that stays at 0.06 the steps will simply take longer than this predicts and the
-    /// generous per-step timeout absorbs it.
+    /// The rate the pivot is BOTH priced at and executed at -- one number, declared to the consumer
+    /// through Contract::yaw_rate rather than assumed about it.
+    ///
+    /// ★IT WAS TWO NUMBERS AND THEY DISAGREED. This constant only ever priced the offer; execution
+    /// was capped by the consumer's Controller.LockOnMaxYawRps = 0.06, tuned for the LockOn
+    /// micro-search where creeping protects the masks being collected. A calibration pivot observes
+    /// nothing while it turns, so slow is pure cost there -- two different manoeuvres sharing one
+    /// cap. Raising the price alone made the offer advertise a 50 s detour that still took 7 minutes,
+    /// which lets it win contests it does not deserve; reverting the price alone made it honestly
+    /// expensive and permanently uncompetitive. Neither is the fix. The producer knows what the
+    /// manoeuvre is FOR, so the producer states the rate and the consumer clamps it to the BASE's
+    /// limit (MaxRotSpeed), not to its own servo tuning.
+    /// ★Measured live at the old cap: 0.056 rad/s, 16 deg per 5 s, 2 mm of translation -- correct
+    /// behaviour, and slow enough that it looked stopped to someone watching.
     double pivot_rot_rate = 0.5;
     /// Time constant of the passive-excitation EMA. Long, because the question it answers is "what is
     /// this robot's diet", not "what is it doing right now".
@@ -82,6 +88,10 @@ public:
     [[nodiscard]] const PivotAffordance &pivot() const { return pivot_; }
     [[nodiscard]] ChannelPosterior       posterior() const { return rot_.posterior(); }
     [[nodiscard]] double passive_rate_rad_s() const { return passive_rate_; }
+    /// The rate this channel prices AND asks the consumer to execute at — one number, so the offer
+    /// cannot advertise a cost the manoeuvre will not have.
+    [[nodiscard]] double pivot_rate_rps() const { return p_.pivot_rot_rate; }
+    [[nodiscard]] double pivot_step_rad() const { return p_.pivot.step_rad; }
     [[nodiscard]] bool   offering() const { return offer_open_; }
     [[nodiscard]] double authoritative_information() const noexcept { return authoritative_info_; }
 

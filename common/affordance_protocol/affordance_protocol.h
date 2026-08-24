@@ -84,6 +84,19 @@ struct Contract
     // matters most. ANDed into completion by the executor, which knows the base velocity it commands.
     float max_observe_vel   = 0.0f;   // m/s
     float max_observe_omega = 0.0f;   // rad/s
+
+    // Execution rate for the manoeuvre ITSELF, rad/s. 0 = the consumer's own default.
+    // ★NOT max_observe_omega, which is an OBSERVATION precondition -- "hold below this while the look
+    // is taken". This one governs the motion, and the producer is the one who can state it: it knows
+    // what the manoeuvre is FOR. A calibration pivot turns to excite a gyro and observes nothing while
+    // it turns, so slow is pure cost; the LockOn servo creeps because every centimetre degrades the
+    // masks it is collecting. Both were capped by one consumer-side constant tuned for the second
+    // case, so the pivot inherited the opposite of what it needed -- and its producer, unable to
+    // declare a rate, priced a 50 s detour that in fact took 7 minutes. A price the offer cannot
+    // deliver lets it win contests it does not deserve.
+    // ★It is a CAP, not a demand: the consumer still applies its own limits on top, so a producer
+    // cannot ask a base to exceed what it can safely do.
+    float max_yaw_rate = 0.0f;        // rad/s
 };
 
 // ─── object-relative viewpoint constraint (the epistemic "where to look") ───────
@@ -161,6 +174,9 @@ public:
             std::fprintf(stderr, "[affordance] WARNING: %s\n", why.c_str());
         return c_;
     }
+    /// Cap the manoeuvre's own rotation rate, rad/s. See Contract::max_yaw_rate.
+    ContractBuilder& yaw_rate(float rps) { c_.max_yaw_rate = rps; return *this; }
+
     operator Contract() const { return build(); }   // pass a builder straight into write_contract(const Contract&)
 
 private:
@@ -391,6 +407,7 @@ inline void write_contract(DSR::DSRGraph& G, DSR::Node& node, const Contract& c)
     }
     G.add_or_modify_attrib_local<aff_goal_stable_n_att>(node, c.stable_n);
     G.add_or_modify_attrib_local<aff_timeout_ms_att>  (node, c.timeout_ms);
+    G.add_or_modify_attrib_local<aff_max_yaw_rate_att>(node, c.max_yaw_rate);
     G.add_or_modify_attrib_local<aff_on_fail_att>     (node, std::string(to_string(c.on_fail)));
     G.add_or_modify_attrib_local<aff_max_vel_att>     (node, c.max_observe_vel);
     G.add_or_modify_attrib_local<aff_max_omega_att>   (node, c.max_observe_omega);
@@ -450,6 +467,7 @@ inline Contract read_contract(const DSR::Node& node, std::string_view parent_typ
     }
     geti("aff_goal_stable_n", c.stable_n);
     getf("aff_timeout_ms", c.timeout_ms);
+    getf("aff_max_yaw_rate", c.max_yaw_rate);
     getf("aff_max_vel",   c.max_observe_vel);
     getf("aff_max_omega", c.max_observe_omega);
     if (const auto it = attrs.find("aff_on_fail"); it != attrs.end())
