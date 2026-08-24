@@ -264,6 +264,8 @@ private:
     std::vector<rc::AffordanceExecution::ProtocolLine> affordance_transcript_;
     std::string affordance_last_state_;      // to emit a line only when the exchange actually moves
     std::string affordance_last_target_;
+    std::ofstream protocol_log_;
+    bool          protocol_log_open_ = false;
     void note_protocol(rc::AffordanceExecution::ProtocolLine::Side side, std::uint64_t t_ms,
                        std::string text);
     std::uint64_t affordance_started_ms_ = 0;

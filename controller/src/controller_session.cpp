@@ -2918,6 +2918,23 @@ void ControllerSession::note_protocol(rc::AffordanceExecution::ProtocolLine::Sid
 {
     if (text.empty()) return;
     if (not affordance_transcript_.empty() and affordance_transcript_.back().text == text) return;
+    // ★ALSO TO DISK. A transcript that exists only behind a window dies with the window, and these
+    // exchanges are seconds long -- by the time anyone opens the panel the interesting part is over.
+    // It is also the only way to read the conversation when the panel says nothing, which is exactly
+    // the case that needs explaining.
+    if (not protocol_log_open_)
+    {
+        protocol_log_.open("affordance_protocol.log", std::ios::out | std::ios::trunc);
+        protocol_log_open_ = protocol_log_.is_open();
+    }
+    if (protocol_log_open_)
+    {
+        using Side = rc::AffordanceExecution::ProtocolLine::Side;
+        protocol_log_ << std::format("{} {:<9} {}\n", t_ms,
+            side == Side::Producer ? "producer" : side == Side::Consumer ? "consumer" : "selector",
+            text);
+        protocol_log_.flush();
+    }
     affordance_transcript_.push_back({t_ms, side, std::move(text)});
     // ★BOUNDED. This lives for the life of the agent; an unbounded vector behind a GUI is a leak that
     // only shows after an hour of driving. 200 lines is several minutes of a busy exchange.
