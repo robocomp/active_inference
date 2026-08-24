@@ -697,7 +697,14 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
                        "the closure resolves ({:.2f}%) — not a measurement, and not quoted as one.\n",
                        cl.s_omega, cl.resolution * 100.0);
         std::fflush(stdout);
-        return;
+        // ★FALL THROUGH AND RE-ARM IN THIS SAME CYCLE. Returning here left the node in
+        // JustCompleted for one cycle, and JustCompleted is not claimable -- so the selector fell
+        // straight to the next candidate and the controller claimed IT. That candidate is a
+        // standpoint several metres away, so a ONE-CYCLE GAP IN THE OFFER COSTS AN ENTIRE COMPETING
+        // TRAVERSAL. Observed live 2026-08-24:
+        //   afford_calib (JustCompleted) gain 0.949 score  1.434   <- higher score, not claimable
+        //   afford_room  (Offered)       gain 0.181 score -0.278   <- selected
+        // The robot then drove 8.1 m and turned 269 deg before the pivot could offer its next step.
     }
     if (calib_manager_.is_executing(G_)) return;   // the consumer owns it; do not rewrite the offer
 

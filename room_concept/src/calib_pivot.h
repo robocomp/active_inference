@@ -109,7 +109,11 @@ public:
 
     /// The consumer answered. `heading_rad` is the robot's measured heading NOW, and it is what the
     /// sequence advances on — never the step that was asked for.
-    void on_outcome(bool satisfied, bool spot_infeasible, double heading_rad, double odom_turn_rad)
+    /// `ref_turn_rad` is the reference turn measured DURING this step, not differenced across the
+    /// gap since the last one -- see the note in calib_channel.h::note_motion. `heading_rad` is still
+    /// the measured heading now, because the closure test asks where the robot ENDED UP.
+    void on_outcome(bool satisfied, bool spot_infeasible, double heading_rad, double odom_turn_rad,
+                    double ref_turn_rad)
     {
         if (spot_infeasible)
         {
@@ -120,7 +124,7 @@ public:
         }
         if (not satisfied) return;                 // timeout, preemption, anything else: nothing moved on
 
-        ref_turn_ += wrap(heading_rad - last_heading_);
+        ref_turn_ += ref_turn_rad;
         odom_turn_ += odom_turn_rad;
         last_heading_ = heading_rad;
         ++steps_;

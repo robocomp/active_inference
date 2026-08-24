@@ -29,7 +29,7 @@ int main()
             (void)turned;
             const double step = 2.0*M_PI/3.0;
             h += step;                        // the robot really turns a third of a turn
-            p.on_outcome(true, false, std::atan2(std::sin(h), std::cos(h)), step * (1.0 + s_true));
+            p.on_outcome(true, false, std::atan2(std::sin(h), std::cos(h)), step * (1.0 + s_true), step);
         }
         const auto c = p.closure();
         std::printf("  after %d steps: state=%d  accumulated %.1f deg  s_omega %.4f (truth %.3f) res %.4f\n",
@@ -43,9 +43,9 @@ int main()
     {
         PivotAffordance p;
         double h = 0.0;
-        p.on_outcome(true, false, h, 0.0);                       // step 1 lands
+        p.on_outcome(true, false, h, 0.0, 0.0);                  // step 1 lands
         const int after_one = p.steps_issued();
-        p.on_outcome(false, false, h, 0.0);                      // refused / timed out
+        p.on_outcome(false, false, h, 0.0, 0.0);                 // refused / timed out
         check(p.steps_issued() == after_one, "a step that did not complete does not advance the pivot",
               "the closure would then be a fiction");
     }
@@ -53,7 +53,7 @@ int main()
     // 4. The consumer says the body cannot turn here: stop asking, resume when the robot has moved.
     {
         PivotAffordance p;
-        p.on_outcome(false, true, 0.0, 0.0);
+        p.on_outcome(false, true, 0.0, 0.0, 0.0);
         check(not p.next_bearing(0.0, 5.0).has_value(), "an infeasible spot silences the offer",
               "it would hammer a place the body does not fit");
         p.robot_moved();
@@ -63,7 +63,7 @@ int main()
     // 5. Standing still does not close a pivot, however many outcomes arrive.
     {
         PivotAffordance p;
-        for (int i = 0; i < 30; ++i) p.on_outcome(true, false, 0.0, 0.0);
+        for (int i = 0; i < 30; ++i) p.on_outcome(true, false, 0.0, 0.0, 0.0);
         check(p.state() != PivotAffordance::State::Closed,
               "no turn, no closure — the heading came back because it never left",
               "a stationary robot would report a scale");
@@ -83,7 +83,7 @@ int main()
             double step = 2.0*M_PI/3.0;
             if (i == 2) step -= 0.05;                    // stop 0.05 rad short of the mark
             h += step;
-            p.on_outcome(true, false, std::atan2(std::sin(h), std::cos(h)), step * 1.0001);
+            p.on_outcome(true, false, std::atan2(std::sin(h), std::cos(h)), step * 1.0001, step);
         }
         const auto c = p.closure();
         std::printf("  imperfect closure: s_omega %.5f vs resolution %.5f -> usable=%d\n",

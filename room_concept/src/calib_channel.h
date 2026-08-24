@@ -133,6 +133,13 @@ public:
         // Taking the difference again from state that has already advanced returns zero — which is
         // what a first version of the offline loop accumulated, silently, for a whole log.
         if (offer_open_ and odom_valid) step_odom_ += odom_dtheta;
+        // ★AND THE REFERENCE SIDE THE SAME WAY. The pivot used to take the reference turn as
+        // wrap(heading_now - heading_at_the_last_step), which spans the GAP between steps -- so any
+        // driving the robot did in between was counted as pivot rotation, and wrap() capped a 200 deg
+        // excursion at -160. Measured live: 932 deg of in-place turning summed to only -662 signed,
+        // with 269 deg of rotation-while-driving in between. Both sides of the comparison are now
+        // accumulated over the SAME interval, which is the only way the ratio means anything.
+        if (offer_open_) step_ref_ += d_ref;
 
         const double T = t_s - win_t0_;
         if (T < p_.window_s) return;
@@ -198,7 +205,7 @@ public:
     }
 
     /// The offer reached the graph. Only now is one live.
-    void mark_offered() noexcept { offer_open_ = true; step_odom_ = 0.0; }
+    void mark_offered() noexcept { offer_open_ = true; step_odom_ = step_ref_ = 0.0; }
 
     /// The consumer answered. The heading is the robot's MEASURED one now — the sequence advances on
     /// that and never on the count of steps issued.
@@ -212,8 +219,8 @@ public:
         if (not offer_open_) return;
         offer_open_ = false;
         using O = rc::affordance::Outcome;
-        pivot_.on_outcome(o == O::Satisfied, o == O::Infeasible, heading_rad, step_odom_);
-        step_odom_ = 0.0;
+        pivot_.on_outcome(o == O::Satisfied, o == O::Infeasible, heading_rad, step_odom_, step_ref_);
+        step_odom_ = step_ref_ = 0.0;
     }
 
     /// The robot has been carried elsewhere by its ordinary work; a spot that would not do no longer
@@ -251,6 +258,7 @@ private:
     double passive_rate_ = 0.0;      ///< rad/s of turning the ordinary tours deliver — MEASURED
     bool   offer_open_ = false;
     double step_odom_  = 0.0;        ///< odometry turn accumulated since this offer went out
+    double step_ref_   = 0.0;        ///< reference (localiser) turn over the SAME interval
     std::optional<std::pair<double,double>> refused_at_;
 };
 
