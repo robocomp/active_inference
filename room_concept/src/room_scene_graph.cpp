@@ -712,11 +712,56 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
     // 4.1745 nats while its true marginal value had fallen to 0.356, and the selector choosing on it.
     calib_manager_.refresh_gain(G_, static_cast<float>(calib_.marginal_gain_nats()));
 
-    if (calib_manager_.is_executing(G_)) return;   // the consumer owns it; do not rewrite the offer
+    // ── WHY THERE IS (OR IS NOT) AN OFFER ─────────────────────────────────────────────────────────
+    // The consumer's transcript records what it was told; this records what this side DECIDED, which
+    // is the other half and the half that has been guessed at. Every early return below is a reason
+    // the pivot went quiet, and from outside they are indistinguishable -- the node simply sits there.
+    // Deduplicated on the text, so this is one line per change of reason, not per cycle.
+    const auto say = [this](std::string text)
+    {
+        if (text == calib_last_reason_) return;
+        calib_last_reason_ = text;
+        if (not calib_log_open_)
+        {
+            calib_log_.open("tmp/calib_producer.log", std::ios::out | std::ios::trunc);
+            calib_log_.imbue(std::locale::classic());
+            calib_log_open_ = calib_log_.is_open();
+        }
+        if (calib_log_open_)
+        {
+            calib_log_ << QDateTime::currentMSecsSinceEpoch() << ' ' << text << '\n';
+            calib_log_.flush();
+        }
+    };
+    say(std::format("state={} gain={:.3f} offer_open={} refused={}",
+                    rc::calib::PivotAffordance::to_string(calib_.pivot().state()),
+                    calib_.marginal_gain_nats(),
+                    calib_.offering() ? 1 : 0,
+                    calib_.refused_here() ? 1 : 0));
+
+    if (calib_manager_.is_executing(G_))
+    {
+        say("no offer: the consumer holds the claim");
+        return;                                    // the consumer owns it; do not rewrite the offer
+    }
 
     // ── 3. IS THERE A STEP TO OFFER? ────────────────────────────────────────────────────────────
     const auto bearing = calib_.offer(theta);
-    if (not bearing.has_value()) return;
+    if (not bearing.has_value())
+    {
+        say(std::format("no offer: {}",
+                        calib_.offering()            ? "one is already live"
+                      : not calib_.enabled_public()         ? "the channel is disabled"
+                      : calib_.pivot().state() == rc::calib::PivotAffordance::State::SpotRefused
+                                                     ? "the consumer said the body cannot turn here, waiting to be carried elsewhere"
+                      : calib_.pivot().state() == rc::calib::PivotAffordance::State::Closed
+                                                     ? "the pivot has closed"
+                      : "the marginal gain is not positive"));
+        return;
+    }
+    say(std::format("offering step {}, bearing {:.0f} deg, {:.3f} nats",
+                    calib_.pivot().steps_issued() + 1, *bearing * 180.0 / M_PI,
+                    calib_.marginal_gain_nats()));
     calib_bearing_rad_ = static_cast<float>(*bearing);
 
     // ★★★A NODE MUST CARRY ITS CONTRACT BEFORE IT CAN BE CLAIMED, and getting this wrong would have

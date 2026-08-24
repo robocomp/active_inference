@@ -93,6 +93,9 @@ public:
     [[nodiscard]] double pivot_rate_rps() const { return p_.pivot_rot_rate; }
     [[nodiscard]] double pivot_step_rad() const { return p_.pivot.step_rad; }
     [[nodiscard]] bool   offering() const { return offer_open_; }
+    [[nodiscard]] bool   enabled_public() const { return p_.enabled; }
+    /// True while this side is holding a refusal, i.e. waiting to be carried somewhere with room.
+    [[nodiscard]] bool   refused_here() const { return refused_at_.has_value(); }
     [[nodiscard]] double authoritative_information() const noexcept { return authoritative_info_; }
 
     /// One cycle of ordinary life. `posterior_theta` is the localiser's fused heading, `odom_dtheta`

@@ -74,6 +74,19 @@ class PivotAffordance
 public:
     enum class State { Idle, Offering, Closed, SpotRefused };
 
+    /// For logs. A state a human can read is the difference between a trace and a puzzle.
+    [[nodiscard]] static constexpr const char* to_string(State s)
+    {
+        switch (s)
+        {
+            case State::Idle:        return "Idle";
+            case State::Offering:    return "Offering";
+            case State::Closed:      return "Closed";
+            case State::SpotRefused: return "SpotRefused";
+        }
+        return "?";
+    }
+
     explicit PivotAffordance(PivotParams p = PivotParams{}) : p_(p) {}
 
     [[nodiscard]] State state() const { return state_; }

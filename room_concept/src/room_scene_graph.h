@@ -225,6 +225,9 @@ private:
     float         calib_bearing_rad_      = 0.f;
     double        calib_last_t_s_         = 0.0;
     int           calib_dbg_              = 0;
+    std::ofstream calib_log_;
+    bool          calib_log_open_ = false;
+    std::string   calib_last_reason_;
     rc::ObjectAnchorSource object_anchor_source_;
     // Chain-propagated pose+covariance reader for object anchors. Created lazily on the MAIN
     // thread (owns an RT_API whose ts==0 path uses the InnerEigen cache — see CLAUDE.md).
@@ -236,6 +239,9 @@ private:
     float                                 stall_best_dist_    = std::numeric_limits<float>::infinity();
     Eigen::Vector2f                       stall_target_{0.f, 0.f};
     bool                                  stall_tracking_     = false;
+    // Throttle for the epoch-disagreement report. Counts cycles, and says so — the last counter on
+    // this pair conflated a duration with a count and read as 2407 separate events.
+    int exec_stale_epoch_reports_ = 0;
     std::chrono::steady_clock::time_point stall_last_progress_{};
     int                                   exec_hold_cycles_   = 0;   // THIS episode only
     int                                   publish_dbg_        = 0;   // throttle for the publish trace
