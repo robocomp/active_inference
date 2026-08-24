@@ -75,7 +75,99 @@ public:
                         float gain,
                         const std::function<void()> &on_node_inserted = {},
                         const std::function<void()> &on_edge_inserted = {});
+    /// Rewrite ONLY the advertised gain of a standing offer. No epoch bump, no re-arm, no edge work.
+    ///
+    /// ★A STANDING OFFER'S PRICE GOES STALE, AND THE SELECTOR CHOOSES ON IT. The gain is computed when
+    /// the producer publishes, but a producer holding "one live offer at a time" does not publish
+    /// again while its offer stands -- so the number on the wire is frozen while the posterior it
+    /// describes keeps sharpening underneath it. Measured 2026-08-24: afford_calib advertised 4.1745
+    /// nats for minutes while its producer's own marginal gain had fallen to 0.356, a 12x
+    /// over-valuation, and the selector was choosing against it.
+    /// ★Deliberately NOT a republish. publish_target already records why: the epoch bumps on a CONTENT
+    /// change and only on a content change, because "a value that changes for PROTOCOL reasons (a
+    /// re-arm, a gain refresh) is not a new proposal". This is that gain refresh, made possible.
+    bool refresh_gain(const std::shared_ptr<DSR::DSRGraph> &graph, float gain);
+
     bool release_execution_claim(const std::shared_ptr<DSR::DSRGraph> &graph);
+
+    // ══ THE EXECUTION CLAIM CARRIES WHAT IS BEING EXECUTED ═══════════════════════════════════════
+    // ★★★THE PROTOCOL WAS INCOMPLETE AND THE PAIR DEADLOCKED ON IT (2026-08-23). Content flowed one
+    // way — producer writes epistemic_target_x_m/_y_m/_yaw_rad — and what came back was `active`, a
+    // BOOLEAN. So the consumer could say THAT it was executing and never WHAT. The moment the producer
+    // was free to rewrite the proposal after acceptance, "accepted" identified nothing, and both agents
+    // held a variable called "the target" whose values differed with NO TERM IN EITHER STATE that could
+    // reveal it. Measured, both logs on one wall clock:
+    //     room:       afford_room EXECUTING (controller-claimed) — target (2.25,-1.75) d=4.92m
+    //                 best=4.86m no_progress=8.9s/25s
+    //     controller: 'afford_room' republished its standpoint at (-1.25,-0.75), 2.55 m from the one
+    //                 this approach committed to (-0.75,1.75) — DEFERRED
+    // Both correct, both blind. Room's only instrument was "distance to MY latest is not shrinking",
+    // which is equally consistent with a wedged robot, a dead planner, a stale localiser, or a consumer
+    // doing exactly what it was told. It picked the wrong one and it had no way not to.
+    //
+    // ── WHY THIS IS AN EDGE AND NOT ATTRIBUTES ON THE AFFORDANCE NODE ────────────────────────────
+    // ★★★BECAUSE `update_node` IS A WHOLE-NODE REPLACE, ON BOTH SYNC ENGINES. Verified in cortex:
+    //   LWW  (core/types/lww_io.h): every attribute in `before` and not in `after` is published as
+    //        `.deleted = true` — to every peer, not just locally.
+    //   CRDT (api/dsr_crdt_sync_engine.cpp): `!node.attrs.contains(k)` ⇒ `reset()` the register,
+    //        publish the reset, erase.
+    // So a read-modify-write of a SHARED node races: get_node at t, peer writes at t+e, you write your
+    // stale copy back at t+2e, and you either revert the peer's value (your timestamp is newer) or —
+    // if the attribute was new — DESTROY IT GRAPH-WIDE. One writer per ATTRIBUTE is therefore NOT
+    // sufficient on this engine; it takes one writer per NODE.
+    // ★So the consumer's half of the protocol lives on an edge the CONSUMER OWNS:
+    //       <our agent node> --[executing]--> <affordance node>
+    // The producer writes only its node; the consumer writes only its edge. Safe by construction rather
+    // than by timing, which is the only kind of safe worth having here.
+    // ★AND IT SELF-CLEANS ON A CRASH, for free: cortex deletes an agent's node when its DDS participant
+    // drops (dsr_api.cpp, participant `removed`/`dropped`), and delete_node erases the related edges. A
+    // consumer that dies cannot leave a claim standing — which the `active` bool could and did.
+    //
+    // ── THE INVARIANTS. This is what makes the protocol COMPLETE ─────────────────────────────────
+    //   1. edge exists  ⇒  its four attributes describe the pose actually being driven to.
+    //   2. the producer measures progress against executing_target_*, NEVER against its own latest
+    //      publication. (This alone retires the false no_progress above.)
+    //   3. the consumer writes the edge BEFORE it starts driving, and updates it on EVERY change of
+    //      what it drives to — INCLUDING its own repairs, which today the producer never learns about.
+    //   4. executing_epoch < epistemic_target_epoch  ⇒  the consumer is on a stale proposal, and this
+    //      is DETECTABLE BY BOTH SIDES. That is the term the old protocol lacked.
+    //   5. no edge ⇒ nobody is driving; the producer may re-decide freely.
+    // Each decision has an owner: the PRODUCER owns preemption (on 4 it either waits — now measuring
+    // correctly — or withdraws), the CONSUMER owns switching (it may adopt a newer epoch at an approach
+    // boundary, never silently). Two clocks running blind is what we are replacing.
+    //
+    // ── DEGRADATION DURING THE ROLLOUT, WHICH IS NOT OPTIONAL ────────────────────────────────────
+    // The cortex header lands before the last agent is rebuilt, so for a while some peers write none of
+    // this. Every reader below returns std::nullopt on a missing attribute and EVERY CALLER MUST FALL
+    // BACK TO THE OLD BEHAVIOUR on nullopt. A protocol that half-breaks in the rebuild window is worse
+    // than the one it replaces.
+    struct ExecutingClaim
+    {
+        int   epoch = 0;          // the producer proposal this consumer accepted
+        float x = 0.f, y = 0.f;   // the pose it is ACTUALLY driving to, after its own repairs
+        float yaw = 0.f;
+        std::uint64_t agent_node_id = 0;   // who is claiming it
+    };
+
+    // CONSUMER SIDE. Writes/updates the edge in ONE insert_or_assign_edge, so the four attributes can
+    // never be seen apart. Call it with the FINAL pose — after every repair — on every cycle the target
+    // decision is made; it is idempotent and only publishes when something actually changed.
+    bool publish_executing(const std::shared_ptr<DSR::DSRGraph> &graph, std::uint64_t affordance_id,
+                           int epoch, float x, float y, float yaw);
+    // CONSUMER SIDE. Withdraw the claim. Called wherever the approach concludes.
+    bool clear_executing(const std::shared_ptr<DSR::DSRGraph> &graph, std::uint64_t affordance_id);
+    // CONSUMER SIDE. The epoch the producer is currently offering. nullopt = pre-rollout peer.
+    [[nodiscard]] static std::optional<int> producer_epoch(const std::shared_ptr<DSR::DSRGraph> &graph,
+                                                           std::uint64_t affordance_id);
+    // PRODUCER SIDE. What the consumer says it is doing. nullopt = nobody claims it, or a pre-rollout
+    // consumer — and those two are NOT the same, so the caller is told which by `claimed`.
+    [[nodiscard]] static std::optional<ExecutingClaim> read_executing(
+        const std::shared_ptr<DSR::DSRGraph> &graph, std::uint64_t affordance_id, bool *claimed = nullptr);
+    // Our own agent node, found the way cortex itself finds an agent node: by type "agent" and the
+    // agent_id attribute. NOT by name — the node is named "<agent_name> <id>" and reconstructing that
+    // string is a second source of truth that can drift.
+    [[nodiscard]] static std::optional<std::uint64_t> own_agent_node_id(
+        const std::shared_ptr<DSR::DSRGraph> &graph);
 
     // ── TAKE AN AFFORDANCE OUT OF CONTENTION FOR A WHILE ─────────────────────────────────────────
     // The CONSUMER could not physically get there — repeated wedges, no footprint-feasible standpoint,

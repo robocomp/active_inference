@@ -368,6 +368,10 @@ bool AffordanceManager::publish_target(const std::shared_ptr<DSR::DSRGraph> &gra
         graph->add_or_modify_attrib_local<epistemic_target_yaw_rad_att>(aff_node, yaw);
         graph->add_or_modify_attrib_local<epistemic_gain_att>(aff_node, gain);
         graph->add_or_modify_attrib_local<epistemic_pending_att>(aff_node, true);
+        // ★THE PROPOSAL EPOCH. A brand-new node is proposal 1. It identifies WHICH proposal a consumer
+        // accepted, and it is the only thing that lets either side notice they have diverged — see
+        // ExecutingClaim in the header for the deadlock this exists to end.
+        graph->add_or_modify_attrib_local<epistemic_target_epoch_att>(aff_node, 1);
 
         rc::provenance::stamp_creation(*graph, aff_node);   // birth stamp: epoch ms + local ISO-8601
         const auto id_opt = graph->insert_node(aff_node);
@@ -439,6 +443,28 @@ bool AffordanceManager::publish_target(const std::shared_ptr<DSR::DSRGraph> &gra
     // refused is un-offerable to it for kRefusalRetryMs, keyed on the POSE. So the producer may always
     // re-offer, the consumer declines to re-take the same spot too soon, and the pair can neither
     // deadlock nor busy-loop. Neither half is sufficient alone — that is why both exist.
+    // ★★BUMP THE EPOCH ON A CONTENT CHANGE, AND ONLY ON A CONTENT CHANGE. This is the same distinction
+    // ControllerWorldModel::same_target_instance had to learn the hard way: a value that changes for
+    // PROTOCOL reasons (a re-arm, a gain refresh) is not a new proposal, and treating it as one made a
+    // re-offered standpoint look new, which made an already-reached goal look like an approach that
+    // never happened, which refused it — for ever, with the robot parked on it.
+    // ★Compared against what is ON THE NODE, not against a member: the node is the shared truth, a
+    // member is this process's memory of it, and after a restart the two disagree.
+    // ★A missing epoch (pre-rollout node) starts at 1 rather than 0, so "has an epoch" and "epoch is
+    // the default" are never the same reading.
+    {
+        const auto ox = graph->get_attrib_by_name<epistemic_target_x_m_att>(node);
+        const auto oy = graph->get_attrib_by_name<epistemic_target_y_m_att>(node);
+        const auto ow = graph->get_attrib_by_name<epistemic_target_yaw_rad_att>(node);
+        const int  oe = graph->get_attrib_by_name<epistemic_target_epoch_att>(node).value_or(0);
+        const bool content_changed =
+            not ox.has_value() or not oy.has_value() or not ow.has_value()
+            or std::abs(ox.value() - tx)  > 1e-4f
+            or std::abs(oy.value() - ty)  > 1e-4f
+            or std::abs(ow.value() - yaw) > 1e-4f;
+        graph->add_or_modify_attrib_local<epistemic_target_epoch_att>(node,
+            content_changed ? std::max(1, oe + 1) : std::max(1, oe));
+    }
     graph->add_or_modify_attrib_local<parent_att>(node, parent_id);
     graph->add_or_modify_attrib_local<epistemic_target_x_m_att>(node, tx);
     graph->add_or_modify_attrib_local<epistemic_target_y_m_att>(node, ty);
@@ -471,6 +497,139 @@ bool AffordanceManager::publish_target(const std::shared_ptr<DSR::DSRGraph> &gra
     return true;
 }
 
+// ══ THE EXECUTION CLAIM, AND WHAT IT IS A CLAIM TO ═══════════════════════════════════════════════
+// See ExecutingClaim in the header for why this is an edge the consumer owns rather than attributes on
+// the producer's node: `update_node` is a whole-node replace on BOTH cortex sync engines, so two agents
+// read-modify-writing one node race, and the loser's attribute is deleted graph-wide. One writer per
+// attribute is not enough on this engine; it takes one writer per node.
+
+std::optional<std::uint64_t> AffordanceManager::own_agent_node_id(
+    const std::shared_ptr<DSR::DSRGraph> &graph)
+{
+    if (!graph) return std::nullopt;
+    // The same lookup cortex performs on participant loss (dsr_api.cpp): type "agent" + agent_id_att.
+    // Deliberately NOT get_node("<agent_name> <id>") — that reconstructs a name the API already owns,
+    // and a second spelling of an identity is how a cleanup misses the agent that spelled it differently.
+    const auto want = graph->get_agent_id();
+    for (auto &n : graph->get_nodes_by_type("agent"))
+        if (const auto id = graph->get_attrib_by_name<agent_id_att>(n); id.has_value() and id.value() == want)
+            return n.id();
+    return std::nullopt;
+}
+
+std::optional<int> AffordanceManager::producer_epoch(const std::shared_ptr<DSR::DSRGraph> &graph,
+                                                     std::uint64_t affordance_id)
+{
+    if (!graph or affordance_id == 0) return std::nullopt;
+    const auto n = graph->get_node(affordance_id);
+    if (!n.has_value()) return std::nullopt;
+    // nullopt here means a PRE-ROLLOUT producer, not epoch 0. The caller must fall back, not assume.
+    return graph->get_attrib_by_name<epistemic_target_epoch_att>(n.value());
+}
+
+bool AffordanceManager::publish_executing(const std::shared_ptr<DSR::DSRGraph> &graph,
+                                          std::uint64_t affordance_id,
+                                          int epoch, float x, float y, float yaw)
+{
+    if (!graph or affordance_id == 0) return false;
+    const auto from = own_agent_node_id(graph);
+    if (!from.has_value()) return false;          // no agent node yet (cold start) — say nothing false
+
+    // ★IDEMPOTENT. This is called every cycle the target decision is made, at 20 Hz. Publishing an
+    // unchanged edge would put a delta on the wire per cycle per consumer, which is exactly the kind of
+    // per-cycle chatter that has bitten this graph before. Compare first; write only on change.
+    if (const auto cur = graph->get_edge(from.value(), affordance_id, "executing"); cur.has_value())
+    {
+        const auto e  = graph->get_attrib_by_name<executing_epoch_att>(cur.value());
+        const auto cx = graph->get_attrib_by_name<executing_target_x_m_att>(cur.value());
+        const auto cy = graph->get_attrib_by_name<executing_target_y_m_att>(cur.value());
+        const auto cw = graph->get_attrib_by_name<executing_target_yaw_rad_att>(cur.value());
+        if (e.has_value() and cx.has_value() and cy.has_value() and cw.has_value()
+            and e.value() == epoch
+            and std::abs(cx.value() - x) < 1e-4f and std::abs(cy.value() - y) < 1e-4f
+            and std::abs(cw.value() - yaw) < 1e-4f)
+            return true;                          // nothing changed; the standing claim is still true
+    }
+
+    // ── INV-6: A CONSUMER CLAIMS AT MOST ONE AFFORDANCE, AND THAT IS STRUCTURAL ──────────────────
+    // Selection can move from affordance A to B without either a completion or an explicit release —
+    // A simply stops winning. Nothing then tore A's claim down, and A's producer would go on measuring
+    // its watchdog against a pose this robot walked away from. Clearing every OTHER claim of ours here
+    // makes "one claim per consumer" a property of the write rather than an assumption about callers,
+    // which is the only version of it that survives a new call site.
+    // get_edges(id) returns this node's OUTGOING edges keyed by (to, type) — our own fano, so the scan
+    // is over edges we wrote and nobody else's.
+    if (const auto self = from.value(); const auto fano = graph->get_edges(self))
+    {
+        std::vector<std::uint64_t> stale;
+        for (const auto &[key, e] : fano.value())
+            if (key.second == "executing" and key.first != affordance_id) stale.push_back(key.first);
+        for (const auto to : stale) graph->delete_edge(self, to, "executing");
+    }
+
+    // ★ONE insert_or_assign_edge, so the four attributes can never be observed apart. INV-1 says the
+    // edge's existence implies its contents; splitting this into two writes would make that false for
+    // one cycle, and one cycle is all the producer needs to draw the wrong conclusion.
+    auto edge = DSR::Edge::create<executing_edge_type>(from.value(), affordance_id);
+    graph->add_or_modify_attrib_local<executing_epoch_att>(edge, epoch);
+    graph->add_or_modify_attrib_local<executing_target_x_m_att>(edge, x);
+    graph->add_or_modify_attrib_local<executing_target_y_m_att>(edge, y);
+    graph->add_or_modify_attrib_local<executing_target_yaw_rad_att>(edge, yaw);
+    return graph->insert_or_assign_edge(std::move(edge));
+}
+
+bool AffordanceManager::clear_executing(const std::shared_ptr<DSR::DSRGraph> &graph,
+                                        std::uint64_t affordance_id)
+{
+    if (!graph or affordance_id == 0) return false;
+    const auto from = own_agent_node_id(graph);
+    if (!from.has_value()) return false;
+    if (!graph->get_edge(from.value(), affordance_id, "executing").has_value()) return false;
+    return graph->delete_edge(from.value(), affordance_id, "executing");
+}
+
+std::optional<AffordanceManager::ExecutingClaim> AffordanceManager::read_executing(
+    const std::shared_ptr<DSR::DSRGraph> &graph, std::uint64_t affordance_id, bool *claimed)
+{
+    if (claimed) *claimed = false;
+    if (!graph or affordance_id == 0) return std::nullopt;
+    // Scanned by INCOMING edge, so the producer never has to know which agent is driving — it asks the
+    // affordance who is holding it, which is the question it actually has.
+    for (auto &e : graph->get_edges_to_id(affordance_id))
+    {
+        if (e.type() != "executing") continue;
+        if (claimed) *claimed = true;             // somebody claims it...
+        const auto ep = graph->get_attrib_by_name<executing_epoch_att>(e);
+        const auto x  = graph->get_attrib_by_name<executing_target_x_m_att>(e);
+        const auto y  = graph->get_attrib_by_name<executing_target_y_m_att>(e);
+        const auto w  = graph->get_attrib_by_name<executing_target_yaw_rad_att>(e);
+        // ...but a PRE-ROLLOUT consumer cannot say what. `claimed` true with nullopt returned is that
+        // case, and it is NOT the same as "nobody is driving" — the caller must keep its old behaviour.
+        if (!ep.has_value() or !x.has_value() or !y.has_value() or !w.has_value()) return std::nullopt;
+        return ExecutingClaim{.epoch = ep.value(), .x = x.value(), .y = y.value(), .yaw = w.value(),
+                              .agent_node_id = e.from()};
+    }
+    return std::nullopt;
+}
+
+bool AffordanceManager::refresh_gain(const std::shared_ptr<DSR::DSRGraph> &graph, float gain)
+{
+    if (graph == nullptr or managed_node_id_ == 0 or not std::isfinite(gain)) return false;
+    auto node = graph->get_node(managed_node_id_);
+    if (not node.has_value()) return false;
+    // Only while the offer is actually STANDING. Rewriting the gain of a node the consumer has
+    // claimed would change the price of something already being executed, and rewriting a Completed
+    // node's gain would resurrect a number nobody is offering.
+    const bool pending = graph->get_attrib_by_name<epistemic_pending_att>(node.value()).value_or(false);
+    const bool active  = graph->get_attrib_by_name<active_att>(node.value()).value_or(false);
+    if (not pending or active) return false;
+    const auto cur = graph->get_attrib_by_name<epistemic_gain_att>(node.value());
+    if (cur.has_value() and std::fabs(cur.value() - gain) <= 1e-4f) return false;   // no news
+    graph->add_or_modify_attrib_local<epistemic_gain_att>(node.value(), gain);
+    graph->update_node(node.value());
+    return true;
+}
+
 bool AffordanceManager::release_execution_claim(const std::shared_ptr<DSR::DSRGraph> &graph)
 {
     if (!graph)
@@ -481,6 +640,13 @@ bool AffordanceManager::release_execution_claim(const std::shared_ptr<DSR::DSRGr
         return false;
 
     auto node = node_opt.value();
+    // ★DROP THE EDGE FIRST, AND UNCONDITIONALLY. The state check below early-returns whenever the node
+    // does not READ Executing — a producer that flipped `pending`, a poll that raced the transition —
+    // and on that path the claim edge used to survive a release. A leaked claim is worse than no claim:
+    // it tells the producer we are driving to a pose we have abandoned, and its watchdog now BELIEVES
+    // that pose (INV-2), so it would wait out the full timeout on a fiction. "Release" means "we are
+    // not driving this", and that is true regardless of what the node currently reads.
+    clear_executing(graph, node.id());
     const bool active = graph->get_attrib_by_name<active_att>(node).value_or(false);
     const bool pending = graph->get_attrib_by_name<epistemic_pending_att>(node).value_or(true);
     if (decode_protocol_state(active, pending) != ProtocolState::Executing)
@@ -921,6 +1087,10 @@ void AffordanceManager::mark_reached(const std::shared_ptr<DSR::DSRGraph> &graph
     transition_to(State::Completing,
                   std::string("mark_reached: ").append(rc::affordance::to_string(outcome)),
                   current_affordance_id_, current_affordance_name_);
+    // The approach is over, whatever the outcome word says. INV-5 again: an outcome and a standing
+    // claim cannot both be true, and leaving the edge up would tell the producer we are still driving
+    // to a pose we have just finished with — or refused.
+    clear_executing(graph, current_affordance_id_);
     // Remember it so the next selection cannot hand back the affordance that just finished.
     last_completed_id_ = current_affordance_id_;
     // ★FROM WHAT WE CLAIMED, not from the node — see claimed_x_ in the header.

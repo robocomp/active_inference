@@ -706,6 +706,12 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
         //   afford_room  (Offered)       gain 0.181 score -0.278   <- selected
         // The robot then drove 8.1 m and turned 269 deg before the pivot could offer its next step.
     }
+    // ★KEEP THE PRICE OF A STANDING OFFER CURRENT. The offer itself must not be republished while it
+    // stands -- one live offer at a time -- but its advertised gain is a valuation, and this producer
+    // recomputes it every cycle. Leaving the stale figure on the wire had afford_calib advertising
+    // 4.1745 nats while its true marginal value had fallen to 0.356, and the selector choosing on it.
+    calib_manager_.refresh_gain(G_, static_cast<float>(calib_.marginal_gain_nats()));
+
     if (calib_manager_.is_executing(G_)) return;   // the consumer owns it; do not rewrite the offer
 
     // ── 3. IS THERE A STEP TO OFFER? ────────────────────────────────────────────────────────────
