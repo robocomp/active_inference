@@ -228,73 +228,98 @@ ForgetVisibleOnly = true
 # Watch `decay_w` in grid_diag.csv: the mean w(r) of the cells being decayed. Well below 1 = the decaying
 # population is mostly distant and is now eroding slowly, which is the point. false = old range-blind behaviour.
 ForgetRangeWeighted = true
-# A/B 2026-08-18 (3000 cycles each, matched): 0.0 vs 10.0. Forgetting is NOT the phantom source. With it
-# OFF the latched set ratcheted +56% (occupied 3366 -> 5256, still climbing) while the RESIDUAL set that
-# actually ships to the planner moved only +8% (698 -> 754 cells) and its height mix was unchanged
-# (82% of residual mass at or above 0.70 m in BOTH arms, 1% below 0.25 m). The decay was shaving the
-# latched map, not the published obstacles. Left at 10.0; chase the read-out EXPLAINER coverage instead.
-# SELF-BODY term in the sensor model. A beam terminating on the robot's own surface says nothing about the
-# world. Modelling the robot only as a READ-OUT mask (Clusterer.RobotRadiusM) cannot stop that: the map is
-# latched, so self-returns are written in permanently, stay hidden while the robot stands over them, and
-# re-emerge as residual the moment it drives away — a trail of phantoms along the driven path. This scales the
-# HIT weight by P(came from the world) = Φ(s/σ), s = signed distance to the body envelope. Not a cutoff: it is
-# 0.5 exactly on the surface and fades to ~1 within 2σ, so a clearly-external obstacle is never suppressed.
-# Clearing is untouched (freeing space is always safe). The radius matches the lidar3d_dds driver's own
-# [Footprint] radius so both agree on ONE body model — and since that driver already deletes returns inside the
-# disc, this is mainly a safety net for what leaks just outside it. Widen both together if the real envelope
-# turns out to be larger. 0 = off.
-SelfBodyRadiusM = 0.55
-SelfBodySigmaM  = 0.08   # positional uncertainty of the body surface (probit width)
-# ── TIGHTENING THE OCCUPIED CONDITION (false floor obstacles) ──────────────────────────────────────────────
-# Two defects in the inverse sensor model, both about the FLOOR, both of which made a floor phantom permanent:
-#
-# 1. The nav band was a hard STEP. A return one millimetre above floor_z0 + FloorSlope·range was a FULL-weight
-#    obstacle, and since l_hit·w(r) > occ_set at every range under ~2.7 m, ONE such return latched its cell.
-#    Meanwhile the floor-plane fit MEASURES its own residual scatter — 6.9 cm RMS in this apartment, larger than
-#    FloorZ0 itself — and the band threw that measurement away. FloorResponsibility puts the floor back into the
-#    per-return mixture: hit weight ×= P(obstacle | z) = u / (u + N(z; floor_z(x,y), σ_f)) with u = 1/(CeilZ −
-#    floor_z) and σ_f² = rms² + (FloorSlope·range)² + FloorSigmaMinM². Same construction as the refrigerator's
-#    wall explain-away — a competing explanation belongs in the mixture, not in a gate. It self-calibrates: over
-#    a crisp floor a 6 cm obstacle keeps nearly full weight, over a rough one it must stand ~3σ clear. It only
-#    ever REDUCES a weight (the hard band stays as the term's support), so it is a strict tightening.
-#
-# 2. A floor return carried NO evidence at all. Below-band ⇒ no hit (right) and no miss either: the ray-DDA marks
-#    the cells it TRAVERSES and breaks at the endpoint cell. So the thousands of clean floor returns landing in a
-#    phantom cell every second — each one direct proof the floor, not an obstacle, is there — were recorded as
-#    nothing, and the phantom's only clearing route was a traversing beam that also passed inside its remembered
-#    z-band (that is the 95%+ of clearing evidence miss_blocked_zaware reports being discarded). A RATCHET:
-#    `occupied` grew monotonically and then never changed again. FloorReturnClears marks a below-band return's own
-#    cell free at the return's height; the z-aware gate is what keeps that safe and is already there (a floor
-#    return passing under a tabletop falls outside that cell's z-band and is discarded, as today).
-#
-# Both default true. They are flags only so the pair can be A/B'd against the old behaviour on a live safety
-# layer — watch floor_damped/floor_clears in grid_diag.csv and `resid` in floor_diag.csv.
-FloorResponsibility = true
-FloorReturnClears   = true
-FloorSigmaMinM = 0.03    # irreducible LiDAR range noise (m) — the σ floor of the floor model (same physical
-                         # quantity as Clusterer.ExplainSensorSigmaM / Fitter.SensorSigmaM)
-# ── STAGE 1 (2026-08-19): the MARKING filter is not the CLEARING filter ──
-# Both sensor paths used to DELETE returns from the cloud before the grid ever saw them. That does not merely
-# suppress a mark — it discards the whole RAY and every free cell along it, and the deleted returns (grazing floor
-# returns, ZED wall returns) are the LONGEST rays in a sweep, so they carried the most clearing. Measured
-# consequence: `floor_clears` was 0 on 9381 of 9381 cycles, i.e. mark_floor_endpoint_flag — the mechanism added on
-# 2026-07-30 specifically to break the phantom ratchet — had never executed once in the live pipeline, while its
-# self-test passed the whole time (the test feeds raw floor returns straight in). costmap_2d draws exactly this
-# line: min/max_obstacle_height gate MARKING, and the beam is still raytraced for CLEARING.
-#
-# Both are ONE-DIRECTIONAL: they can only free cells, never occupy them. Marking is unchanged by construction —
-# the grid applies the SAME per-device band that device_sweep used to apply, just inside the sensor model instead
-# of on the cloud. Set either false to A/B against the old behaviour.
-# Read floor_rets / floor_blocked / floor_clears / marks_suppr in grid_diag.csv: floor_rets == 0 means the returns
-# are still being deleted upstream, floor_rets > 0 with floor_clears == 0 means the support gate is refusing them.
-FloorBandInGrid = true   # hand the near-floor returns to the grid; it applies each device's band itself
-ZedInfraClears  = true   # ZED floor/ceiling/wall returns raytrace for clearing; only their MARK is suppressed
-# Per-cell geometry of the PUBLISHED residual set → etc/residual_cells.csv, every N cycles (0 = off, ~1/min at 10 Hz).
-# floor_diag's height histogram says how TALL the blocking mass is; it cannot tell an unclaimed WALL from an
-# unmodelled WARDROBE, and those need opposite fixes (widen the wall model vs. make a specialist claim its
-# footprint). Columns: cycle,x,y,z,inside_poly,dist_wall_m,obj_sdf_m — distance to the room polygon boundary and
-# the signed distance to the nearest modelled object footprint, so each cell says which of the two it is.
-CellDumpEveryN = 600
+# ...and the decay may NEVER remove a cell on its own. Measured 2026-08-22 on the live run: while the robot was
+# parked the map was rock stable (35 latch/release events per 200 cycles); the moment it started driving the whole
+# ~1200-cell map turned over 17 times in 4 minutes (21010 latched / 20782 released), and the published residual
+# set collapsed from a solid 193-cell obstacle at z=0.73 m, stable for 5000 cycles, to 0-45 flickering cells.
+# The decay released a latched cell as soon as lo fell back below occ_set (+0.40) — three times easier than the
+# occ_clear (-1.20) that free-space EVIDENCE has to clear, and reached without one beam ever contradicting the
+# obstacle — and that release ALSO wiped the cell's z-band, which is the only thing stopping the 94% of clearing
+# traffic that flies over and under an elevated obstacle from counting as see-through. So one forgetting release
+# flipped those beams from "carries no information" to "clears at full weight" and drove the cell to the -5 clamp.
+# Now: an occupied cell is released ONLY by accumulated evidence of FREENESS — see-through beams that actually
+# passed through its own z-band, each weighted by the precision w(r) it was collected at, summed against
+# everything the cell has banked (up to l_clamp) until lo < occ_clear. The decay keeps its other job, the belief
+# FIELD: P -> 0.5 and Var[P] -> max, so a stale cell becomes epistemically attractive and the robot is sent to
+# LOOK at it. Going to look is what should retire it.
+# COST, stated plainly: a cell nothing can ever observe again — mass latched behind a door that then closed — is
+# now immortal in the polygon channel. Deliberate: a safety layer under maximum uncertainty must call a cell
+# occupied. Watch `zheld` (new column in grid_diag.csv) = occupied cells whose only beams this cycle flew over or
+# under them; and `forgotten`, which must now stay 0 — nonzero means someone re-enabled the coupling.
+ForgetCanUnlatch = false   # true = the pre-2026-08-22 coupling (decay erodes lo_ and may release), for A/B
+# ── A GRAZING BEAM IS NOT A REFUTATION ────────────────────────────────────────────────────────────────────────
+# The table in the middle of the room cannot be removed unless it flies (it does not) or a table_concept claims
+# it (none is running). Measured on a simulated table driven through this exact grid with the real mounts
+# (helios upright 1.075 m, plate 0.75 m, robot circling at 1.6 m): the footprint was destroyed 2799 times in 900
+# cycles and held only 284 of its 384 cells; cells that had stood 402 cycles died in a handful. The release trace
+# named the killer exactly — band[0.75,0.75], clear_z = 0.76-0.82: beams skimming 1-7 cm ABOVE the plate they
+# were about to hit, inside the 0.10 m z_band_margin, each counted as a full-weight see-through. At 1 m range the
+# beam descends only 18 deg, so it crosses four or five plate cells within 2 cm of the surface before terminating
+# ON that surface. A flat surface at grazing incidence therefore erases itself.
+# Two terms replace the binary gate with P(this beam would have been BLOCKED), the same construction as
+# FloorResponsibility and the refrigerator's wall explain-away:
+#   1. p_block  - the material remembered here spans [zmn - k*sigma, zmx + k*sigma]; a beam outside it could not
+#                 have been stopped, so it refutes nothing. sigma is measured (range noise + the localisation
+#                 lever arm), not a tolerance.
+#   2. p_surface - if this cell's remembered top lies between the beam's height here and where the beam ENDED,
+#                 one continuous surface explains both the skim and the return, and the crossing carries nothing.
+# The hard z-gate is KEPT as the support of both, so they can only ever REDUCE a clearing weight: a strict
+# tightening, no new false-frees on a live safety layer.
+# A/B, 900 matched cycles: releases inside the footprint 2423 -> 36, cells held 284 -> 382 of 384, and open-floor
+# phantoms (21) and wall coverage (117) IDENTICAL in both arms. Control: a table CARRIED AWAY at cycle 500 still
+# cleared completely within ~100 cycles, so this is not a leak. Watch clear_surf in grid_diag.csv — with a table
+# in the room it must be NONZERO, and zero means grazing beams are still erasing flat surfaces.
+# ── 3-D VOXEL SENSOR MODEL (costmap_2d::VoxelLayer / STVL / OctoMap, with grid2d's log-odds rule) ──────────────
+# REWRITTEN 2026-08-22 after the robot drove into a table. The root error was running the inverse sensor model in
+# 2-D and reintroducing height as a per-cell z-band with compensating terms bolted on. EVERY failure of the last
+# three sessions — grazing beams erasing a tabletop, hollow objects, columns polluted by one stray return, the
+# blind near cone read as free, floor returns carrying no evidence — was an artifact of collapsing to 2-D BEFORE
+# the sensor model. The ray is now traced in 3-D over voxels and the 2-D cell is a PROJECTION of its column.
+# Deleted as unnecessary, not patched around: the z-band clearing gate and its margin, the soft blocking
+# probability, the sensor-envelope model and its whole [LidarField] block, the floor-return special case and its
+# support gate, and the running zmn/zmx hull. All of it falls out of the geometry.
+BinSpanM = 2.0        # height covered by the 64 voxel bins ⇒ 3.125 cm voxels. Matched to the ~3 cm registration
+                      # sigma: finer buys nothing, because below that the beam is genuinely within noise of the
+                      # surface. Measured: 6.25 cm → 2530 releases on a standing table, 3.125 cm → 1337.
+# DO NOT CLEAR CLOSE TO THE HIT. A voxel is 3 cm tall and a tabletop is 2 cm thick, so a beam grazing just over a
+# plate can still be inside the plate's own voxel — the documented VoxelLayer weakness. costmap_2d guards it by
+# not clearing the endpoint cell. Two guards, both parameter-light: this metric margin, and the rule that a voxel
+# holding material at the SAME height (±1 bin) as the voxel the beam stopped in is plausibly the very surface
+# that stopped it, so the crossing refutes nothing. A beam ending on a wall is untouched (those voxels hold no
+# material); a table that has GONE is untouched (its beams now end on the floor, a different bin).
+# A/B on the probe: 1337 → 442 releases inside the footprint at 3.125 cm. 0 disables BOTH (textbook VoxelLayer).
+ClearStopMaxM = 0.10
+# A cell may only be called FREE on the strength of the column the sensors actually resolved — but only over the
+# height where an unseen obstacle would be HIT. helios at 1.075 m cannot see below 0.65 m at 0.3 m range, so
+# sweeping past a chair leg there is not evidence it is absent. Scored in 4 sub-bands, not voxel by voxel: a
+# 32-layer lidar has ~10 cm beam spacing at 2.5 m and can never touch every 3 cm voxel, and demanding that
+# reported most of the map as unknown. 0 = no discount (the blind cone reads free, as costmap_2d does).
+CollisionBandTopM = 0.50
+# ── NOTHING INSIDE THE LIDAR CLEARANCE RADIUS MAY BE CLEARED ──────────────────────────────────────────────────
+# Every ray starts inside the disc the lidar3d driver self-filters and marks its way out — weighted by w(r),
+# which is LARGEST at r = 0. So the ring of cells the robot is standing in was being cleared at the highest
+# weight in the grid, in the one place no sensor can see. That is what deleted a table the moment the robot
+# closed on it. The rule is about the ROBOT, not one sensor's minimum range: it holds for the forward-mounted
+# ZED exactly as for the two lidars, and it is measured from the robot to the cell, not along the ray.
+# Match it to the lidar3d driver's [Footprint] radius, the same number SelfBodyRadiusM uses, so both agree on
+# one body model. Watch `blind_shell` in grid_diag.csv — it must be NONZERO whenever the robot is moving.
+LidarClearanceM = 0.55
+
+# Per-released-cell trace: which residual went, and what killed it. A standing table must produce NO rows inside
+# its footprint. Empty = off.
+ReleaseCsvPath = "etc/residual_releases.csv"
+
+# ── EACH DEVICE'S DEAD SHELL: a beam cannot refute what the sensor could not have seen ────────────────────────
+# Every ray starts AT the sensor, so the raytrace marks the voxels around the robot free — weighted by w(r),
+# which is LARGEST at r = 0. The near field, where the lidar is blind, was therefore being cleared hardest of
+# all. Below its minimum range a device returns nothing whatever is standing there, so a ray "passing through"
+# that shell is not an observation and must carry no free evidence. This is what deletes a table the moment the
+# robot closes on it. Going to 3-D did not fix it on its own — the rays still pass through those voxels.
+# Watch `blind_shell` in grid_diag.csv: working close to furniture it must be NONZERO.
+[LidarModel]
+HeliosMinRangeM = 0.40   # RS-Helios datasheet minimum
+BpearlMinRangeM = 0.10   # RS-Bpearl is a near-field dome
+ZedMinRangeM    = 0.30   # matches ZedBoost.MinDepthM
 
 [ZedBoost]
 Enabled = true

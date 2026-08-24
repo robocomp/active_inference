@@ -38,17 +38,22 @@ std::vector<Eigen::Vector2f> hull2d(std::vector<Eigen::Vector2f> pts)
 void OccupancyGrid::reset(float xmin, float ymin, float xmax, float ymax, const OccGridParams& p)
 {
     p_ = p;
+    clear_r2_ = p.lidar_clearance_m * p.lidar_clearance_m;
     const float cs = std::max(0.01f, p.cell_size_m);
     xmin_ = xmin; ymin_ = ymin; inv_cell_ = 1.0f / cs;
     w_ = std::max(1, static_cast<int>(std::ceil((xmax - xmin) / cs)));
     h_ = std::max(1, static_cast<int>(std::ceil((ymax - ymin) / cs)));
     lo_.assign(static_cast<std::size_t>(w_) * h_, 0.0f);
-    a_.assign(lo_.size(), p_.beta_prior_a);        // Beta prior: unobserved ⇒ P=0.5 at max variance (unknown)
-    b_.assign(lo_.size(), p_.beta_prior_b);
+    kobs_.assign(lo_.size(), 0.0f);                // accumulated observation weight (0 ⇒ unobserved prior)
     zmn_.assign(lo_.size(), 0.0f);
+    zsup_.assign(lo_.size() * OccGridParams::Z_BINS, 0.0f);
+    zstab_.assign(lo_.size() * OccGridParams::Z_BINS, 0.0f);
+    shbits_.assign(lo_.size(), 0ull);
+    smbits_.assign(lo_.size(), 0ull);
     zmx_.assign(lo_.size(), 0.0f);
     dispz_.assign(lo_.size(), 0.0f);
     slook_.assign(lo_.size(), 0);
+    szblock_.assign(lo_.size(), 0);
     hit_.assign(lo_.size(), 0);
     occ_.assign(lo_.size(), 0);
     shit_.assign(lo_.size(), 0);
@@ -57,6 +62,10 @@ void OccupancyGrid::reset(float xmin, float ymin, float xmax, float ymax, const 
     shz_hi_.assign(lo_.size(), 0.0f);
     shit_w_.assign(lo_.size(), 0.0f);
     smiss_w_.assign(lo_.size(), 0.0f);
+    smiss_z_.assign(lo_.size(), 0.0f);
+    smiss_src_.assign(lo_.size(), 0);
+    seenf_.assign(lo_.size(), 0.0f);
+    occ_since_.assign(lo_.size(), 0u);
 }
 
 bool OccupancyGrid::world_to_cell(float x, float y, int& ix, int& iy) const
@@ -99,188 +108,292 @@ float OccupancyGrid::floor_obstacle_responsibility(float x, float y, float z, fl
     return u / std::max(1e-12f, u + n);
 }
 
-void OccupancyGrid::mark_hit_flag(int ix, int iy, float zlo, float zhi, float w)
+// ── VOXEL SENSOR MODEL ────────────────────────────────────────────────────────────────────────────────────────
+// The update rule is the textbook one (robocomp/classes/grid2d: a hit raises the log-odds, a traversal lowers
+// it, clamped) applied PER VOXEL instead of per column, and projected to 2-D afterwards. That is
+// costmap_2d::VoxelLayer / STVL / OctoMap, and it is what this file should have been from the start.
+//
+// Everything the 2-D version needed a special term for disappears here, by construction and not by patch:
+//   · a beam grazing 2 cm over a tabletop passes through the voxels ABOVE the plate and lowers those. The
+//     plate's own voxel is not on the ray at all. (Was: z_band_margin, p_block, the continuous-surface term.)
+//   · a beam under a table clears the voxels under the table. (Was: mark_floor_endpoint_flag's support gate.)
+//   · a stray return a metre above a table marks its own voxel and nothing else, and later beams through that
+//     voxel erase it without ever touching the plate. (Was: the running zmn_/zmx_ hull, then per-bin log-odds.)
+//   · the near cone the lidar cannot look into is simply never on any ray, so it is never cleared and stays
+//     UNKNOWN. (Was: the sensor-envelope model and its config block.)
+//   · a table that is carried away has its voxels crossed by the beams that used to stop on it, so they fall
+//     and the column empties. Removal needs no separate channel.
+// A hit and a traversal on the SAME voxel in one cycle is hit precedence, as before — but now that is a
+// statement about one voxel, not about a whole column.
+void OccupancyGrid::mark_hit_voxel(int ix, int iy, int iz, float z, float w)
 {
-    if (not in_bounds(ix, iy)) return;
+    if (not in_bounds(ix, iy) or iz < 0 or iz >= OccGridParams::Z_BINS) return;
     const int i = idx(ix, iy);
-    slook_[i] = 1;                                       // hit ⇒ visible
-    if (not shit_[i]) { shz_lo_[i] = zlo; shz_hi_[i] = zhi; shit_[i] = 1; shit_w_[i] = w; }
-    else { shz_lo_[i] = std::min(shz_lo_[i], zlo); shz_hi_[i] = std::max(shz_hi_[i], zhi);
-           shit_w_[i] = std::max(shit_w_[i], w); }   // the most RELIABLE (nearest/stillest) hit sets the weight
-}
-
-void OccupancyGrid::mark_miss_flag(int ix, int iy, float beam_z, float w)
-{
-    if (not in_bounds(ix, iy)) return;
-    const int i = idx(ix, iy);
-    // A beam reached this cell's column, whatever height it was at. That is a fact about VISIBILITY, not about
-    // occupancy, so it is recorded BEFORE the z-gate below can reject the beam as evidence — see slook_.
     slook_[i] = 1;
-    // Z-AWARE: a beam only carries FREE evidence for a cell if it passes THROUGH the cell's occupied z-band
-    // (± margin), or the cell has never been hit (empty). A beam over/under a known obstacle carries none → skip.
-    if (hit_[i] and (beam_z < zmn_[i] - p_.z_band_margin_m or beam_z > zmx_[i] + p_.z_band_margin_m))
-        { ++sd_.miss_blocked_zaware; return; }
-    if (not smiss_[i]) { smiss_[i] = 1; smiss_w_[i] = w; }
-    else smiss_w_[i] = std::max(smiss_w_[i], w);        // the most RELIABLE (nearest) see-through sets the weight
+    shbits_[i] |= (1ull << iz);
+    if (not shit_[i]) { shz_lo_[i] = z; shz_hi_[i] = z; shit_[i] = 1; shit_w_[i] = w; }
+    else { shz_lo_[i] = std::min(shz_lo_[i], z); shz_hi_[i] = std::max(shz_hi_[i], z);
+           shit_w_[i] = std::max(shit_w_[i], w); }
 }
 
-void OccupancyGrid::mark_floor_endpoint_flag(int ix, int iy, float band_top, float w)
+void OccupancyGrid::mark_free_voxel(int ix, int iy, int iz, float z, float w)
 {
-    if (not in_bounds(ix, iy)) return;
+    if (not in_bounds(ix, iy) or iz < 0 or iz >= OccGridParams::Z_BINS) return;
     const int i = idx(ix, iy);
-    // A beam that TERMINATED on the floor inside this cell cannot be gated the way a TRAVERSING beam is. The
-    // z-aware gate in mark_miss_flag asks "did the beam pass through the cell's remembered z-band?", and a floor
-    // return never does — it arrives at floor height by definition — so routing it through that gate discards it
-    // every time and leaves the ratchet exactly where it was (measured: the phantom in self_test property (11)
-    // survived 100 delivered floor returns).
-    // The right question for a terminating beam is different. The return reached the FLOOR at this cell, so
-    // anything RESTING on the floor here, of any height, would have blocked it first: a floor return refutes a
-    // floor-standing obstacle. What it cannot refute is a FLOATING one — a tabletop, a shelf, a windowsill — which
-    // it simply passed underneath. And the cell already records which of the two its evidence is: zmn_, the LOWEST
-    // return ever seen here. So the gate is support, not overlap: clear the cell if its lowest evidence sits within
-    // one z_band_margin_m of where the floor itself lives (⇒ floor-standing, refuted), hold it otherwise
-    // (⇒ floating, the beam went under it — the tabletop half of the property).
-    // Counted separately from mark_miss_flag's traverse gate: that one means "the beam went past at another
-    // height", this one means "the beam went UNDER a floating surface". Same cell, opposite conclusions, and while
-    // they shared one counter neither could be read.
-    slook_[i] = 1;                                       // the beam got here: this column was visible
-    if (hit_[i] and zmn_[i] > band_top + p_.z_band_margin_m) { ++sd_.floor_endpoint_blocked; return; }
-    if (not smiss_[i]) { smiss_[i] = 1; smiss_w_[i] = w; }
-    else smiss_w_[i] = std::max(smiss_w_[i], w);
-    ++sd_.floor_endpoint_clears;
+    slook_[i] = 1;
+    smbits_[i] |= (1ull << iz);
+    if (not smiss_[i] or w > smiss_w_[i])
+    { smiss_[i] = 1; smiss_w_[i] = w; smiss_z_[i] = z; smiss_src_[i] = sensor_id_; }
+}
+
+// Per-voxel evidence: a return in the voxel confirms it, a beam that passed through it without returning
+// refutes it, both weighted by the precision w(r) they were collected at, and both clamped — grid2d's rule,
+// per voxel. Hit precedence is per voxel, which is the whole point: a beam grazing over a plate refutes the
+// voxel it actually crossed and cannot touch the plate's.
+// How many height bins of this column hold material — the shape of what is there. One or two ⇒ a plate; dozens
+// ⇒ a wall or a person. This is what tells a beam that stopped on a tabletop from one that stopped on a wall.
+int OccupancyGrid::column_thickness_bins(int ix, int iy) const
+{
+    if (not in_bounds(ix, iy)) return 0;
+    const float* sup = &zsup_[static_cast<std::size_t>(idx(ix, iy)) * OccGridParams::Z_BINS];
+    int n = 0;
+    for (int b = 0; b < OccGridParams::Z_BINS; ++b) if (sup[b] > 0.0f) ++n;
+    return n;
+}
+
+bool OccupancyGrid::voxel_has_material(int ix, int iy, int iz) const
+{
+    if (not in_bounds(ix, iy) or iz < 0 or iz >= OccGridParams::Z_BINS) return false;
+    return zsup_[static_cast<std::size_t>(idx(ix, iy)) * OccGridParams::Z_BINS + iz] > 0.0f;
+}
+
+void OccupancyGrid::update_bins(std::size_t i, float w_hit, float w_miss)
+{
+    const std::uint64_t hb = shbits_[i], mb = smbits_[i];
+    if (hb == 0ull and mb == 0ull) return;
+    float* sup = &zsup_[i * OccGridParams::Z_BINS];
+    float* stb = &zstab_[i * OccGridParams::Z_BINS];
+    for (int b = 0; b < OccGridParams::Z_BINS; ++b)
+    {
+        const std::uint64_t bit = 1ull << b;
+        const bool confirm = (hb & bit) != 0ull, refute = not confirm and (mb & bit) != 0ull;
+        if (not confirm and not refute) continue;
+        // CONSISTENCY: does this observation agree with what the voxel already believes? Agreement earns
+        // stiffness slowly, contradiction spends it fast. A voxel with no belief yet (sup == 0) is not yet
+        // consistent about anything, so its first observation only starts the count.
+        const bool agrees = (confirm and sup[b] >= 0.0f) or (refute and sup[b] <= 0.0f);
+        stb[b] = std::clamp(agrees ? stb[b] + p_.stable_rise : stb[b] - p_.stable_fall, 0.0f, 1.0f);
+        const float cap = p_.l_clamp * (1.0f + p_.stable_gain * stb[b]);   // earned capacity
+        if (confirm) { sup[b] = std::clamp(sup[b] + w_hit  * p_.l_hit,  -cap, cap); ++sd_.bins_confirmed; }
+        else         { sup[b] = std::clamp(sup[b] - w_miss * p_.l_miss, -cap, cap); ++sd_.bins_refuted; }
+    }
+}
+
+void OccupancyGrid::clear_bins(std::size_t i)
+{
+    float* sup = &zsup_[i * OccGridParams::Z_BINS];
+    float* stb = &zstab_[i * OccGridParams::Z_BINS];
+    for (int b = 0; b < OccGridParams::Z_BINS; ++b) { sup[b] = 0.0f; stb[b] = 0.0f; }
+}
+
+bool OccupancyGrid::has_support(std::size_t i) const
+{
+    const float* sup = &zsup_[i * OccGridParams::Z_BINS];
+    for (int b = 0; b < OccGridParams::Z_BINS; ++b) if (sup[b] > 0.0f) return true;
+    return false;
+}
+
+// One released cell, with everything needed to judge whether the removal was justified.
+void OccupancyGrid::trace_release(std::size_t i, float lo_before, float clear_z, float w, std::uint8_t cause,
+                                  float prev_lo, float prev_hi, float prev_top)
+{
+    ReleaseEvent e;
+    cell_to_world(static_cast<int>(i % w_), static_cast<int>(i / w_), e.x, e.y);
+    e.lo_before = lo_before; e.lo_after = lo_[i];
+    e.zmn = prev_lo; e.zmx = prev_hi; e.last_z = prev_top;   // the band as it stood BEFORE this cycle
+    e.src = smiss_src_[i];
+    e.clear_z = clear_z; e.clear_w = w;
+    e.range_m = observer_valid_ ? std::hypot(e.x - self_x_, e.y - self_y_) : -1.0f;
+    e.age_cycles = static_cast<long>(cycle_) - static_cast<long>(occ_since_[i]);
+    e.cause = cause;
+    releases_.push_back(e);
 }
 
 void OccupancyGrid::commit_cycle(float dt_s)
 {
     if (not valid()) return;
-    // ONE log-odds update per cell: hit precedence (a cell hit by any beam this scan is a HIT, never cleared
-    // this scan), else a single see-through miss. This is the costmap_2d/OctoMap marking-vs-clearing rule and
-    // is what makes the field stable (no more dozens of misses per cell per cycle).
+    ++cycle_;
+    releases_.clear();
+    // ONE update per VOXEL: hit precedence within the voxel, then the 2-D cell is a PROJECTION of its column.
+    // This is costmap_2d::VoxelLayer's contract, with grid2d's log-odds rule as the per-voxel update.
     //
-    // FORGETTING (see OccGridParams::forget_half_life_s): a cell touched by NEITHER a hit nor a miss this cycle
-    // is unobserved — occluded, out of range, or behind us. It used to receive no update at all, which made
-    // anything ever latched behind an occluder immortal. It now relaxes toward the prior at a fixed half-life.
+    // FORGETTING still applies to the BELIEF FIELD only (see forget_can_unlatch): the occupancy decision is made
+    // from evidence, and absence of observation is not evidence of absence.
     const float gamma = (p_.forget_half_life_s > 0.0f and dt_s > 0.0f)
-                      ? std::exp2(-dt_s / p_.forget_half_life_s)     // ½^(Δt/T) — evidence retained this cycle
-                      : 1.0f;                                        // 1 ⇒ forgetting off (never-forget behaviour)
+                      ? std::exp2(-dt_s / p_.forget_half_life_s) : 1.0f;
+    const float bw = p_.bin_span_m / OccGridParams::Z_BINS;
     const std::size_t n = lo_.size();
     for (std::size_t i = 0; i < n; ++i)
     {
-        if (shit_[i])
+        // Self-heal: a cell whose ledger has gone non-finite is invisible to every threshold below.
+        if (not std::isfinite(lo_[i]))
+        { lo_[i] = 0.0f; kobs_[i] = 0.0f; occ_[i] = 0;
+          zmn_[i] = zmx_[i] = dispz_[i] = 0.0f; clear_bins(i); ++sd_.cells_repaired; }
+
+        const bool touched = (shbits_[i] != 0ull) or (smbits_[i] != 0ull);
+        if (touched)
         {
-            const float w = shit_w_[i];                         // precision weight (range × ego-motion) of this hit
-            lo_[i] = std::clamp(lo_[i] + w * p_.l_hit, -p_.l_clamp, p_.l_clamp);
-            if (not hit_[i]) { zmn_[i] = shz_lo_[i]; zmx_[i] = shz_hi_[i]; dispz_[i] = shz_hi_[i]; hit_[i] = 1; }
-            else { zmn_[i] = std::min(zmn_[i], shz_lo_[i]); zmx_[i] = std::max(zmx_[i], shz_hi_[i]);
-                   // ★ DO NOT make this band CONTRACT. It was tried (2026-07-29) on the theory that a
-                   // monotonically-widening band made cells progressively harder to clear. That theory has the
-                   // SIGN BACKWARDS. mark_miss_flag blocks a clearing beam when it falls OUTSIDE the band, so a
-                   // WIDER band admits MORE clearing and a NARROWER one admits LESS. Worse, a hit records a
-                   // single height (mark_hit_flag is called with zlo == zhi == pz), so any contraction drives the
-                   // band toward ZERO width, leaving only ±z_band_margin_m. Measured live over 400 cycles:
-                   // blocked see-throughs 117.8k → 357.7k per cycle (85.2% → 94.6% of all clearing evidence),
-                   // a 3.0× regression. The running min/max is correct; the high blocked FRACTION is inherent to
-                   // z-aware clearing on a 2-D grid (a beam at another height genuinely carries no information
-                   // about this column) and is not by itself evidence of a defect.
-                   // Display height tracks the CURRENT top (EMA rise/fall), so a transient tall return doesn't
-                   // permanently inflate it the way the running-max zmx_ does. 0.4 = quick but spike-rejecting.
-                   dispz_[i] += 0.4f * (shz_hi_[i] - dispz_[i]); }
-            a_[i] += w * p_.beta_hit_w;                          // Beta: occupied evidence, weighted by precision
-            ++sd_.hits;
-            if (lo_[i] > p_.occ_set and not occ_[i]) { occ_[i] = 1; ++sd_.cells_latched; }
+            update_bins(i, shit_w_[i], smiss_w_[i]);        // the per-voxel log-odds update
+            if (shit_[i]) ++sd_.hits; else if (smiss_[i]) ++sd_.misses;
         }
-        else if (smiss_[i])
+        else if (not occ_[i] and lo_[i] == 0.0f) continue;  // never observed and not latched: nothing to project
+
+        // ── PROJECTION: the column's most-occupied voxel inside the navigable band decides the 2-D cell ──
+        // Voxels below the floor band are ground and are never obstacles; voxels above ceil_z are overhead.
+        float wx, wy; cell_to_world(static_cast<int>(i % w_), static_cast<int>(i / w_), wx, wy);
+        const float floor_z = fp_a_ * wx + fp_b_ * wy + fp_c_ + p_.floor_z0;
+        const int b_lo = std::clamp(static_cast<int>(std::floor(floor_z / std::max(1e-6f, bw))),
+                                    0, OccGridParams::Z_BINS - 1);
+        const int b_hi = std::clamp(static_cast<int>(std::floor(p_.ceil_z / std::max(1e-6f, bw))),
+                                    0, OccGridParams::Z_BINS - 1);
+        const float* sup = &zsup_[i * OccGridParams::Z_BINS];
+        // Only voxels that carry EVIDENCE vote. An unobserved voxel sits at log-odds 0, so including it in the
+        // max would peg every column at "unknown" and nothing could ever be released — costmap_2d's VoxelLayer
+        // makes the same distinction (a cell is lethal by its MARKED voxel count; unknown voxels do not mark).
+        float col = 0.0f; int b_top = -1, b_bot = -1, seen = 0; bool any = false;
+        for (int b = b_lo; b <= b_hi; ++b)
         {
-            const float w = smiss_w_[i];                        // precision of this see-through (range × ego-motion)
-            lo_[i] = std::clamp(lo_[i] - w * p_.l_miss, -p_.l_clamp, p_.l_clamp);
-            b_[i] += w * p_.beta_miss_w;                         // Beta: free evidence, weighted → far/moving clears weakly
-            ++sd_.misses;
-            if (lo_[i] < p_.occ_clear and occ_[i]) { occ_[i] = 0; ++sd_.cells_released; }
+            if (sup[b] == 0.0f) continue;                   // never observed: no opinion either way
+            if (not any or sup[b] > col) { col = sup[b]; any = true; }
+            if (sup[b] > 0.0f) { if (b_bot < 0) b_bot = b; b_top = b; }
+            ++seen;                                          // ...and how much of the column we have resolved
         }
+        const float lo_before = lo_[i];
+        lo_[i] = col;
+        // OBSERVABILITY: the fraction of the navigable column any beam has ever settled. A near cell the lidar
+        // cannot look into stays UNKNOWN instead of being painted free — no sensor envelope needed, because a
+        // voxel no ray reaches simply keeps its prior. See prob().
+        // OBSERVABILITY over the COLLISION BAND (see collision_band_top_m), not the whole column.
+        const int b_col = p_.collision_band_top_m > 0.0f
+                        ? std::clamp(static_cast<int>(std::floor(p_.collision_band_top_m / std::max(1e-6f, bw))),
+                                     b_lo, b_hi)
+                        : b_lo;
+        int groups_seen = 0;
+        const int span = std::max(1, b_col - b_lo + 1);
+        for (int gI = 0; gI < OccGridParams::COLLISION_GROUPS; ++gI)
+        {
+            const int gb0 = b_lo + (span * gI) / OccGridParams::COLLISION_GROUPS;
+            const int gb1 = b_lo + (span * (gI + 1)) / OccGridParams::COLLISION_GROUPS - 1;
+            for (int b = gb0; b <= std::max(gb0, gb1); ++b)
+                if (sup[b] != 0.0f) { ++groups_seen; break; }
+        }
+        seenf_[i] = p_.collision_band_top_m > 0.0f
+                  ? static_cast<float>(groups_seen) / OccGridParams::COLLISION_GROUPS : 1.0f;
+        // The READ-OUT band, derived from the occupied voxels. hit_ must be maintained here: it is what
+        // readout_zband() uses to decide the cell has a height at all, and the explainers score the cell against
+        // that band. Dropping it in the rewrite made every occupied cell report a 0-0.05 m band, so the FLOOR
+        // explainer claimed the whole map and the agent published nothing — `residual components=0` with
+        // occ=2547, and an empty grid in the viewer.
+        const float prev_top = dispz_[i];                  // ...remembered BEFORE the wipe below, because a
+        const float prev_lo  = zmn_[i];                    // release fires exactly when the column has emptied,
+        const float prev_hi  = zmx_[i];                    // and a trace of band[0,0] says nothing about what went
+        if (b_top >= 0) { zmn_[i] = b_bot * bw; zmx_[i] = (b_top + 1) * bw; hit_[i] = 1;
+                          dispz_[i] += 0.4f * (zmx_[i] - dispz_[i]); }
+        else            { hit_[i] = 0; zmn_[i] = 0.0f; zmx_[i] = 0.0f; dispz_[i] = 0.0f; }
+
+        // Hysteresis on the projected column, unchanged: latch at occ_set, release at occ_clear.
+        if (col > p_.occ_set and not occ_[i]) { occ_[i] = 1; occ_since_[i] = cycle_; ++sd_.cells_latched; }
+        else if (col < p_.occ_clear and occ_[i])
+        {
+            trace_release(i, lo_before, smiss_z_[i], smiss_w_[i], 0, prev_lo, prev_hi, prev_top);
+            occ_[i] = 0; ++sd_.cells_released;
+        }
+
+        // ── the BELIEF FIELD — risk + epistemic, for the five agents that consume it ──
+        // It now RIDES the projection instead of a second, parallel accumulator. The two had come apart: the old
+        // Beta was driven by cell-level hit/miss flags, which after the rewrite mean "some voxel in this column
+        // was hit / crossed" — so a beam flying OVER a tabletop set the miss flag and the field reported the cell
+        // FREE while the occupancy layer, correctly, still called it blocked. One evidence source, two answers.
+        // Now: RISK is sigmoid(column), and this accumulator carries only the CONFIDENCE in that answer —
+        // how much observation the cell has banked. See prob() / prob_variance().
+        if (touched) kobs_[i] = std::min(p_.beta_kappa_max, kobs_[i] + std::max(shit_w_[i], smiss_w_[i]));
         else if (gamma < 1.0f)
         {
-            // ASYMMETRY (see OccGridParams::forget_occupied_only): only a cell holding NET OCCUPANCY evidence
-            // forgets. A free cell has paid beams to establish that it is free and must not un-learn it just
-            // because we looked away; a never-observed cell is already at the prior and has nothing to relax.
-            // Narrowing the term this way removes zero stale-mass removal — every cell the old rule could
-            // un-latch had lo_ > occ_set > 0 and still decays below, identically.
-            // NB deliberately not `continue` — the concentration cap at the bottom of this loop must still run.
-            // VISIBILITY GATE (see OccGridParams::forget_visible_only). Decay is only meaningful for a cell we
-            // could actually have seen and did not confirm. If no beam reached this column at all this cycle —
-            // occluded, out of range, or simply behind us — then we have NO information about it, and relaxing
-            // its posterior toward the prior invents evidence we never collected. slook_ is set by the ray-DDA
-            // BEFORE the z-gate, so it means "a beam got here", independent of whether that beam could be used
-            // as free evidence. This is STVL's frustum gating derived from the actual rays instead of an
-            // analytic cone, which also fixes STVL's known weakness: a cell hidden BEHIND a wall is inside the
-            // FOV cone and would be punished by a cone test, but no ray reaches it, so it is correctly held.
+            // Unobserved: the FIELD ages toward "I no longer know" so Var[P] points the epistemic drive at it.
+            // The occupancy ledger above is untouched — absence of observation is not evidence of absence.
             if (p_.forget_visible_only and not slook_[i]) ++sd_.cells_unseen;
             else if (p_.forget_occupied_only and lo_[i] <= 0.0f) ++sd_.cells_held;
             else
             {
-            ++sd_.cells_decayed;
-            // RANGE-WEIGHTED (see OccGridParams::forget_range_weighted): erode at the precision the failed
-            // observation actually had. w(r) is the same weight every hit and every miss already carries, so a
-            // cell we could only squint at from across the room forgets as slowly as it was learned. γ_cell
-            // interpolates between γ (perfect precision, w=1) and 1 (no decay at all, w=0).
-            float g = gamma;
-            if (p_.forget_range_weighted and observer_valid_ and p_.hit_reliable_range_m > 0.0f)
-            {
-                float wx, wy; cell_to_world(static_cast<int>(i % w_), static_cast<int>(i / w_), wx, wy);
-                const float r0 = p_.hit_reliable_range_m;
-                const float dx = wx - self_x_, dy = wy - self_y_;
-                const float wr = (r0 * r0) / (r0 * r0 + dx * dx + dy * dy);
-                g = 1.0f - (1.0f - gamma) * wr;
-                sd_.decay_weight_sum += wr;
-            }
-            // UNOBSERVED this cycle → relax toward the prior. The log-odds decays toward 0 (no information) and
-            // the Beta toward Jeffreys, so P → 0.5 and Var → max: "I no longer know what is there."
-            lo_[i] *= g;
-            a_[i] = p_.beta_prior_a + (a_[i] - p_.beta_prior_a) * g;
-            b_[i] = p_.beta_prior_b + (b_[i] - p_.beta_prior_b) * g;
-            // Release at occ_set, NOT at occ_clear. occ_clear is evidence of FREENESS ("I have seen through
-            // here repeatedly"), which decay can never produce: lo relaxes toward 0 = NO information, so a
-            // decaying cell would never cross a negative threshold and would stay latched forever — the very
-            // bug this term exists to fix. The meaningful question for an unobserved cell is instead "is the
-            // evidence that justified latching still there?", so it un-latches at the same level it latched:
-            // symmetric, and no new parameter. There is no flicker risk (an unobserved cell cannot oscillate),
-            // and completeness is preserved — one hit re-latches it the instant it is seen again. A released
-            // cell becomes UNKNOWN, which this grid already treats as not-an-obstacle for the hull read-out.
-            if (lo_[i] < p_.occ_set and occ_[i])
-            {
-                occ_[i] = 0; ++sd_.cells_released; ++sd_.cells_forgotten;
-                // The remembered z-band described an obstacle we have now forgotten. Keeping it would leave the
-                // z-aware gate blocking future clearing beams on behalf of something no longer believed to exist,
-                // which is precisely the ratchet this change exists to break. Drop it: the cell is unknown again.
-                hit_[i] = 0; zmn_[i] = 0.0f; zmx_[i] = 0.0f;
-            }
+                ++sd_.cells_decayed;
+                float g = gamma;
+                if (p_.forget_range_weighted and observer_valid_ and p_.hit_reliable_range_m > 0.0f)
+                {
+                    const float r0 = p_.hit_reliable_range_m;
+                    const float ddx = wx - self_x_, ddy = wy - self_y_;
+                    const float wr = (r0 * r0) / (r0 * r0 + ddx * ddx + ddy * ddy);
+                    g = 1.0f - (1.0f - gamma) * wr;
+                    sd_.decay_weight_sum += wr;
+                }
+                kobs_[i] *= g;                          // ...confidence ages; the projection itself does not
+                if (p_.forget_can_unlatch and lo_[i] < p_.occ_set and occ_[i])
+                { occ_[i] = 0; ++sd_.cells_released; ++sd_.cells_forgotten;
+                  trace_release(i, lo_before, 0.0f, 0.0f, 1, zmn_[i], zmx_[i], dispz_[i]); clear_bins(i); }
             }
         }
-        // Concentration cap: bound α+β ≤ κ_max (preserving the mean) → variance floor + bounded memory so old
-        // evidence is discounted as new arrives (dynamic obstacles clear; the field is never over-confident).
-        if (const float k = a_[i] + b_[i]; k > p_.beta_kappa_max)
-        {
-            const float s = p_.beta_kappa_max / k;
-            a_[i] *= s; b_[i] *= s;
-        }
+        // (the concentration cap is applied at accumulation, above: bounded memory ⇒ old evidence is discounted)
     }
 }
 
+// RISK and CONFIDENCE, from ONE source. p = sigmoid(column) is what the occupancy layer decided; kobs_ is how
+// much observation stands behind it. The exported Beta is reconstructed from the pair, with a Jeffreys prior of
+// unit weight, so an unobserved cell reads exactly P=0.5 / Var=0.125 as it always did:
+//     alpha = 0.5 + kobs*p,  beta = 0.5 + kobs*(1-p)
+// Aged (kobs -> 0) it returns to the prior in BOTH channels, which is what property (6) means by relaxing
+// toward "I no longer know". Conflicted (much observation, p near 0.5) sits between unknown and confident, as
+// property (5) requires — that ordering is what makes Var[P] usable as the epistemic drive.
+void OccupancyGrid::cell_belief(int ix, int iy, float& alpha, float& beta) const
+{
+    if (not in_bounds(ix, iy)) { alpha = beta = 0.5f; return; }
+    const int i = idx(ix, iy);
+    const float p = column_prob(i);
+    const float k = kobs_.empty() ? 0.0f : kobs_[i];
+    alpha = 0.5f + k * p;
+    beta  = 0.5f + k * (1.0f - p);
+}
+// P(occupied) from the column: the most-occupied navigable voxel that carries evidence. Unobserved voxels have
+// no opinion (see commit_cycle). OCCUPIED is conclusive — one voxel with material settles the cell — but FREE
+// is a claim about the WHOLE column, so it is mixed back toward the prior by the fraction actually resolved.
+// That is what keeps the near cone the lidar cannot look into reading UNKNOWN rather than free.
+float OccupancyGrid::column_prob(int i) const
+{
+    const float bw = p_.bin_span_m / OccGridParams::Z_BINS;
+    float wx, wy; cell_to_world(i % w_, i / w_, wx, wy);
+    const float floor_z = fp_a_ * wx + fp_b_ * wy + fp_c_ + p_.floor_z0;
+    const int b_lo = std::clamp(static_cast<int>(std::floor(floor_z / std::max(1e-6f, bw))),
+                                0, OccGridParams::Z_BINS - 1);
+    const int b_hi = std::clamp(static_cast<int>(std::floor(p_.ceil_z / std::max(1e-6f, bw))),
+                                0, OccGridParams::Z_BINS - 1);
+    const float* sup = &zsup_[static_cast<std::size_t>(i) * OccGridParams::Z_BINS];
+    float col = 0.0f; bool any = false;
+    for (int b = b_lo; b <= b_hi; ++b)
+        if (sup[b] != 0.0f and (not any or sup[b] > col)) { col = sup[b]; any = true; }
+    const float p = 1.0f / (1.0f + std::exp(-col));
+    if (col >= 0.0f) return p;
+    const float f = seenf_.empty() ? 1.0f : seenf_[i];
+    return f * p + (1.0f - f) * 0.5f;
+}
 float OccupancyGrid::prob(int ix, int iy) const
 {
-    if (not in_bounds(ix, iy)) return 0.5f;                      // out of bounds ⇒ unobserved prior
-    const int i = idx(ix, iy);
-    return a_[i] / std::max(1e-9f, a_[i] + b_[i]);
+    float a, b; cell_belief(ix, iy, a, b);
+    return a / std::max(1e-9f, a + b);
 }
-
 float OccupancyGrid::prob_variance(int ix, int iy) const
 {
-    if (not in_bounds(ix, iy)) { const float a = p_.beta_prior_a, b = p_.beta_prior_b, k = a + b;
-                                 return a * b / (k * k * (k + 1.0f)); }
-    const int i = idx(ix, iy);
-    const float a = a_[i], b = b_[i], k = a + b;
+    float a, b; cell_belief(ix, iy, a, b);
+    const float k = a + b;
     return a * b / std::max(1e-9f, k * k * (k + 1.0f));          // Var of Beta(α,β) = αβ/((α+β)²(α+β+1))
 }
-
 float OccupancyGrid::prob_std(int ix, int iy) const
 {
     return std::sqrt(std::max(0.0f, prob_variance(ix, iy)));
@@ -289,7 +402,7 @@ float OccupancyGrid::prob_std(int ix, int iy) const
 void OccupancyGrid::occupancy_fields(std::vector<float>& prob_out, std::vector<float>& var_out,
                                      const CellExplained& explained) const
 {
-    const std::size_t n = a_.size();
+    const std::size_t n = kobs_.size();
     prob_out.assign(n, 0.0f); var_out.assign(n, 0.0f);
     for (int y = 0; y < h_; ++y)
         for (int x = 0; x < w_; ++x)
@@ -302,7 +415,8 @@ void OccupancyGrid::occupancy_fields(std::vector<float>& prob_out, std::vector<f
                 float zlo, zhi; readout_zband(i, zlo, zhi);
                 keep = 1.0f - std::clamp(explained(wx, wy, zlo, zhi), 0.0f, 1.0f);
             }
-            const float a = a_[i], b = b_[i], k = a + b;
+            float a, b; cell_belief(x, y, a, b);
+            const float k = a + b;
             prob_out[i] = keep * (a / std::max(1e-9f, k));      // an object owns this cell (keep→0) ⇒ no residual risk
             var_out[i]  = keep * (a * b / std::max(1e-9f, k * k * (k + 1.0f)));   // ...and no epistemic pull
         }
@@ -322,19 +436,21 @@ void OccupancyGrid::integrate_sweep(const Eigen::Vector3f& origin, const std::ve
         std::fill(shit_.begin(),  shit_.end(),  0);
         std::fill(smiss_.begin(), smiss_.end(), 0);
         std::fill(slook_.begin(), slook_.end(), 0);
+        std::fill(shbits_.begin(), shbits_.end(), 0ull);
+        std::fill(smbits_.begin(), smbits_.end(), 0ull);
         std::fill(shit_w_.begin(), shit_w_.end(), 0.0f);
         std::fill(smiss_w_.begin(), smiss_w_.end(), 0.0f);
+        std::fill(smiss_z_.begin(), smiss_z_.end(), 0.0f);
+        std::fill(smiss_src_.begin(), smiss_src_.end(), 0);
     }
     const float cs = 1.0f / inv_cell_;
+    const float bw = p_.bin_span_m / OccGridParams::Z_BINS;                  // voxel height
     const float ox = origin.x(), oy = origin.y(), oz = origin.z();
     const float r0 = p_.hit_reliable_range_m;              // precision falloff scale (0 ⇒ uniform full weight)
     const float rel = std::clamp(reliability, 0.0f, 1.0f); // global ego-motion trust for this sweep
-    // precision weight of a hit at horizontal range r: ego-motion × range falloff (0<w≤rel; near/still → rel).
     const auto hit_w = [&](float r) { return r0 > 0.0f ? rel * (r0 * r0) / (r0 * r0 + r * r) : rel; };
-    // SELF-BODY term: P(this return came from the WORLD, not off our own body) = Φ(s/σ), s = signed distance from
-    // the return to the body envelope. A probit in s, not a radius cut — it is 0.5 exactly on the surface and
-    // fades to ~1 within 2σ outside, so a clearly-external return is never suppressed. HITS only: clearing free
-    // space is always safe, and the sensor's own cell already emits a miss. radius<=0 ⇒ term off (weight 1).
+    // SELF-BODY term: P(this return came from the WORLD, not off our own body) = Φ(s/σ). HITS only — freeing
+    // space is always safe, and the sensor's own voxel already emits a traversal.
     const auto world_w = [&](float px, float py)
     {
         if (self_r_ <= 0.0f) return 1.0f;
@@ -347,80 +463,124 @@ void OccupancyGrid::integrate_sweep(const Eigen::Vector3f& origin, const std::ve
     {
         const auto& p = points_room[pi];
         const float px = p.x(), py = p.y(), pz = p.z();
-        const float dx = px - ox, dy = py - oy;
-        const float L = std::hypot(dx, dy);
-        const float range = L;                                  // horizontal range
-        // Obstacle band referenced to the DATA-DRIVEN floor plane (0,0,0 ⇒ the original fixed z=0 band). A return
-        // is an obstacle only if it rises above the local floor by more than the grazing band — so an offset/tilted
-        // floor (new scenario) is explained away and never latches.
+        // A non-finite return (the ZED emits them where depth is invalid) must never reach the sensor model.
+        if (not (std::isfinite(px) and std::isfinite(py) and std::isfinite(pz))) { ++sd_.bad_points; continue; }
+
+        const float dx = px - ox, dy = py - oy, dz = pz - oz;
+        const float range = std::hypot(dx, dy);                 // horizontal range (the precision covariate)
+        // Obstacle band referenced to the DATA-DRIVEN floor plane. This is now purely a MARKING gate — the ray is
+        // traced either way, so a floor return still clears everything it passed through (costmap_2d's
+        // marking-vs-clearing rule, and what mark_floor_endpoint_flag used to have to reconstruct by hand).
         const float floor_z = fp_a_ * px + fp_b_ * py + fp_c_;
-        // floor_z0 comes from the DEVICE when the caller set one (set_device_floor_z0): helios grazes and reads the
-        // floor 13-17 cm high, bpearl measures it head-on within ~12 cm, and one band for both is what forced the
-        // worker to delete each device's near-floor returns instead of integrating them.
-        const float band_top = floor_z + device_floor_z0() + p_.floor_slope * range;   // where the floor lives here
+        const float band_top = floor_z + device_floor_z0() + p_.floor_slope * range;
         const bool in_band = (pz > band_top) and (pz < p_.ceil_z);
-        // BELOW the band = a FLOOR return. It is not neutral: the beam reached the floor here, so nothing RESTING
-        // on the floor in this cell could have been in the way. It clears its own cell, gated on support rather
-        // than on z-overlap — see mark_floor_endpoint_flag and floor_return_clears.
-        const bool floor_return = p_.floor_return_clears and pz <= band_top;
-        // this return's HIT precision weight: range×ego (hit_w) × self-body (world_w) × FLOOR RESPONSIBILITY (this
-        // return is only obstacle evidence in so far as the floor model does not already explain its height) ×
-        // optional per-point cue (e.g. semantic floor). The MISS/clearing weight is deliberately left un-scaled by
-        // the hit-side terms — clearing free space is always safe.
+        if (not in_band) ++sd_.floor_endpoint_returns;
+
         const float self_w = world_w(px, py);
         if (self_w < 0.99f) ++sd_.self_hits_damped;
         const float floor_w = floor_obstacle_responsibility(px, py, pz, range);
         if (in_band and floor_w < 0.9f) ++sd_.floor_damped_hits;
-        const float w = hit_w(range) * self_w * floor_w * (use_scale ? (*hit_weight_scale)[pi] : 1.0f);
+        const float w_hit = hit_w(range) * self_w * floor_w * (use_scale ? (*hit_weight_scale)[pi] : 1.0f);
 
-        // MARKING gate, separate from the clearing that follows (the costmap_2d rule). A masked-off return still
-        // gets its whole ray traced below — only its endpoint is forbidden to assert occupancy.
         const bool may_mark = not use_mask or (*mark_mask)[pi] != 0;
         if (not may_mark) ++sd_.marks_suppressed;
 
         int ex, ey; const bool endp_in = world_to_cell(px, py, ex, ey);
-        // the endpoint's own evidence: an in-band return marks it occupied, a floor return marks it FREE.
+        const int ez = static_cast<int>(std::floor(pz / std::max(1e-6f, bw)));
         const auto place_endpoint = [&]
         {
             if (not endp_in) return;
-            // A floor return is CLEARING evidence, so the marking mask does not apply to it: the beam reached the
-            // floor either way, and that fact is exactly what we are trying to stop discarding.
-            if (in_band) { if (may_mark) mark_hit_flag(ex, ey, pz, pz, w); }
-            else if (floor_return) { ++sd_.floor_endpoint_returns;
-                                     mark_floor_endpoint_flag(ex, ey, band_top, hit_w(range)); }
+            if (in_band) { if (may_mark) mark_hit_voxel(ex, ey, ez, pz, w_hit); }
+            // A BELOW-BAND return is not neutral: the beam reached the floor inside this cell, so the voxel it
+            // landed in was empty. It marks nothing and clears its own voxel — which is all that
+            // mark_floor_endpoint_flag and its support gate used to have to reconstruct by hand.
+            else { mark_free_voxel(ex, ey, ez, pz, hit_w(range)); ++sd_.floor_endpoint_clears; }
         };
-        if (L < 1e-4f) { place_endpoint(); continue; }          // degenerate: just the endpoint
 
-        const float ux = dx / L, uy = dy / L;
+        const float L = std::sqrt(dx * dx + dy * dy + dz * dz);             // 3-D ray length
         int cx, cy;
-        if (not world_to_cell(ox, oy, cx, cy))                 // sensor outside the grid → only place the endpoint
-        { place_endpoint(); continue; }
+        if (L < 1e-4f or not world_to_cell(ox, oy, cx, cy)) { place_endpoint(); continue; }
+        int cz = static_cast<int>(std::floor(oz / std::max(1e-6f, bw)));
 
-        mark_miss_flag(cx, cy, oz, hit_w(0.0f));               // sensor cell is free (range 0 → full trust)
-
-        const int stepx = ux > 0 ? 1 : -1, stepy = uy > 0 ? 1 : -1;
+        // ── 3-D DDA (Amanatides & Woo) over voxels of cs x cs x bw ──────────────────────────────────────────
+        const float ux = dx / L, uy = dy / L, uz = dz / L;
+        const int stepx = ux > 0 ? 1 : -1, stepy = uy > 0 ? 1 : -1, stepz = uz > 0 ? 1 : -1;
         const float BIG = std::numeric_limits<float>::max();
-        // distance along the ray to the first x/y cell boundary, then per-cell strides (in distance units)
         const float nbx = xmin_ + (cx + (stepx > 0 ? 1 : 0)) * cs;
         const float nby = ymin_ + (cy + (stepy > 0 ? 1 : 0)) * cs;
+        const float nbz =          (cz + (stepz > 0 ? 1 : 0)) * bw;
         float tMaxX = std::abs(ux) > 1e-9f ? (nbx - ox) / ux : BIG;
         float tMaxY = std::abs(uy) > 1e-9f ? (nby - oy) / uy : BIG;
+        float tMaxZ = std::abs(uz) > 1e-9f ? (nbz - oz) / uz : BIG;
         const float tDx = std::abs(ux) > 1e-9f ? cs / std::abs(ux) : BIG;
         const float tDy = std::abs(uy) > 1e-9f ? cs / std::abs(uy) : BIG;
+        const float tDz = std::abs(uz) > 1e-9f ? bw / std::abs(uz) : BIG;
 
-        int guard = w_ + h_ + 4;
+        // DO NOT CLEAR CLOSE TO THE HIT (see OccGridParams::clear_stop_max_m): skip the run over which the beam
+        // has not yet changed voxel height, because over that stretch the sensor cannot say which voxel first
+        // stopped it. One voxel for a steep beam; the whole grazing run for a shallow one over a flat surface.
+        // This sweep's endpoint uncertainty at this range, and the clearing authority it earns.
+        const float sig_e   = sens_s0_ > 0.0f ? sens_s0_ + sens_quad_ * range * range : p_.reference_sigma_m;
+        const float sref    = p_.reference_sigma_m;
+        const float prec_w  = (sref * sref) / std::max(sref * sref, sig_e * sig_e);   // 1 for a lidar-grade sweep
+        const float d_stop  = std::max(std::min(p_.clear_stop_max_m, bw / std::max(std::abs(uz), 1e-4f)),
+                                       p_.clear_stop_sigma_k * sig_e);
+        // The sensor's own voxel and everything inside the dead shell carry NO free evidence: below its minimum
+        // range the device returns nothing whatever is there. (This used to be marked free at hit_w(0) — the
+        // largest weight in the grid.)
+        if (sensor_min_r_ <= 0.0f and clear_r2_ <= 0.0f)
+            mark_free_voxel(cx, cy, cz, oz, hit_w(0.0f) * prec_w);   // the sensor's own cell is inside the disc
+        else ++sd_.clear_blind_shell;
+
+        // What did this beam stop ON? A thin endpoint column is a horizontal surface it may have skimmed; a tall
+        // one is a wall, which it cannot have. See OccGridParams::plate_bins_max.
+        const bool endpoint_is_plate = endp_in and column_thickness_bins(ex, ey) <= p_.plate_bins_max;
+
+        int guard = 4 * (w_ + h_ + OccGridParams::Z_BINS);
         while (guard-- > 0)
         {
             float t_here;
-            if (tMaxX < tMaxY) { cx += stepx; t_here = tMaxX; tMaxX += tDx; }
-            else               { cy += stepy; t_here = tMaxY; tMaxY += tDy; }
-            if (cx == ex and cy == ey) break;                  // reached the endpoint cell (handled below)
-            if (t_here >= L)           break;                  // overshot the return
-            if (not in_bounds(cx, cy)) break;                  // left the grid
-            const float bz = oz + (t_here / L) * (pz - oz);    // beam height at this cell
-            mark_miss_flag(cx, cy, bz, hit_w(t_here));         // weight the clearing by the CLEARED CELL's range
+            if (tMaxX < tMaxY and tMaxX < tMaxZ)      { cx += stepx; t_here = tMaxX; tMaxX += tDx; }
+            else if (tMaxY < tMaxZ)                   { cy += stepy; t_here = tMaxY; tMaxY += tDy; }
+            else                                      { cz += stepz; t_here = tMaxZ; tMaxZ += tDz; }
+            if (cx == ex and cy == ey and cz == ez) break;   // reached the endpoint voxel (handled below)
+            if (t_here >= L)                        break;   // overshot the return
+            if (not in_bounds(cx, cy))              break;   // left the grid
+            // INSIDE THE DEAD SHELL the device returns nothing whatever is there, so this crossing is not an
+            // observation and carries no free evidence. See set_sensor_min_range: this is what stopped the map
+            // deleting a table the moment the robot closed on it.
+            if (t_here < sensor_min_r_) { ++sd_.clear_blind_shell; continue; }
+            // ...and NOTHING inside the robot's lidar clearance radius may be cleared, whichever sensor the ray
+            // came from. See OccGridParams::lidar_clearance_m.
+            if (clear_r2_ > 0.0f and observer_valid_)
+            {
+                float wx2, wy2; cell_to_world(cx, cy, wx2, wy2);
+                const float ddx = wx2 - self_x_, ddy = wy2 - self_y_;
+                if (ddx * ddx + ddy * ddy < clear_r2_) { ++sd_.clear_blind_shell; continue; }
+            }
+            // weight by the range of the CLEARED voxel, not of the return: a far see-through is weak evidence.
+            // ONE SURFACE EXPLAINS BOTH: a voxel that already holds material and sits at the SAME HEIGHT as the
+            // voxel the beam stopped in is plausibly the very surface that stopped it — the beam skimmed along
+            // it and struck it further on. That crossing refutes nothing. A distance rule cannot express this:
+            // the grazing run across a 1.2 m tabletop is far longer than any endpoint margin worth having
+            // (measured: capping at 0.35 m still left 1246 releases). Stated in voxels it needs no parameter.
+            // A beam ending on a WALL is untouched — the voxels it crosses at that height hold no material, so
+            // they clear exactly as before. A table that has GONE is untouched too: those beams now end on the
+            // floor, whose bin is nowhere near the plate's, so the plate's voxels clear.
+            // ★ I tried ALSO counting the cell being LATCHED as material here, to stop the rule collapsing once a
+            // voxel is first eroded. It measured better on a standing table (835 -> 381 releases) and it is a
+            // LEAK: latched ⇒ protected ⇒ stays latched, so a table carried away kept 202 of its 384 cells 220
+            // cycles later, against 20 without it. An obstacle that cannot be removed shreds the free space the
+            // planner needs just as surely as one that vanishes. Voxel material only.
+            if (p_.clear_stop_max_m > 0.0f and endpoint_is_plate
+                and std::abs(cz - ez) <= 1 and voxel_has_material(cx, cy, cz))
+            { ++sd_.clear_stopped; continue; }
+            if (L - t_here < d_stop) { ++sd_.clear_stopped; continue; }      // ...and costmap_2d's endpoint rule
+            const float rr = t_here * (range / std::max(1e-6f, L));          // its horizontal range
+            if (prec_w < 0.99f) ++sd_.clear_imprecise;
+            mark_free_voxel(cx, cy, cz, oz + t_here * uz, hit_w(rr) * prec_w);
         }
-        place_endpoint();      // the return itself: occupied if a nav-band obstacle, FREE if it landed on the floor
+        place_endpoint();
     }
 }
 
@@ -785,10 +945,18 @@ bool OccupancyGrid::self_test()
         int ix, iy; g.world_to_cell(2.0f, 0.0f, ix, iy);
         const bool was_occ = g.occupied(ix, iy);
         // now it's GONE: beams pass through x≈2 at the obstacle's height and return from the back wall x=4.5.
+        // The endpoints span z 0..0.9 so that, INTERPOLATED at x = 2, the beams cross every height the obstacle
+        // ever claimed (0.25-0.55). Firing only at the obstacle's own endpoint heights does not do that — from a
+        // 0.5 m sensor those beams cross x = 2 at 0.39-0.52 and never look at 0.25, so the support model
+        // correctly refuses to declare that height empty. A carve test must actually LOOK where it claims.
         std::vector<Eigen::Vector3f> clear;
-        for (int i = 0; i < 40; ++i) for (float z : {0.25f, 0.40f, 0.55f})
+        // The z step must be fine enough that the beams cross EVERY voxel the obstacle claimed. At 0.1 the fan
+        // crossed bins 8,10,11,13,14,16,17,... and skipped bin 12 — where one of the three returns lives — so the
+        // column's max stayed positive and the cell correctly refused to clear. Refutation is per voxel now: a
+        // carve test has to sweep the column, not just its endpoints.
+        for (int i = 0; i < 40; ++i) for (float z = -0.2f; z <= 1.0f; z += 0.02f)
             clear.push_back({4.5f, -0.2f + 0.4f * (i / 39.0f), z});
-        for (int k = 0; k < 12; ++k) { g.integrate_sweep(sensor, clear); g.commit_cycle(); }
+        for (int k = 0; k < 30; ++k) { g.integrate_sweep(sensor, clear); g.commit_cycle(); }
         std::printf("  carve: was_occ=%d after see-through occupied=%d logodds=%.2f\n",
                     was_occ, g.occupied(ix, iy), g.logodds(ix, iy));
         check(was_occ, "the obstacle must have been occupied first");
@@ -812,40 +980,35 @@ bool OccupancyGrid::self_test()
         check(g.occupied(ix, iy), "a HIGH beam over a LOW obstacle must NOT erase it (z-aware clearing)");
     }
 
-    // ── (5) BELIEF FIELD: Var[P] must separate UNKNOWN from CONFLICTED, and shrink with evidence ──
+    // ── (5) THE BELIEF FIELD SEPARATES "NEVER LOOKED" FROM "BARELY LOOKED" FROM "CONFIRMED" ──
+    // Var[P] is the epistemic term the planner and five concept agents read, so it has to order those three.
+    // NOTE the middle case changed with the voxel rewrite: alternating hit/miss no longer produces an ambiguous
+    // cell, because hit precedence is per VOXEL and the sensor model is deliberately biased toward occupied
+    // (l_hit > l_miss). The middle case that matters now is a cell seen BRIEFLY — real evidence, little of it —
+    // which is exactly what a distant or glancing observation gives you.
     {
         OccupancyGrid g; g.reset(-1, -1, 5, 5, P);
-        int ux, uy; g.world_to_cell(3.5f, 3.5f, ux, uy);        // a corner cell no beam ever touches → UNKNOWN
-        const float var_unknown = g.prob_variance(ux, uy);
-
-        // A CONFLICTED cell: alternate a sweep that HITS x≈2 with a see-through sweep that clears it, many times.
-        std::vector<Eigen::Vector3f> hit; face_returns(hit);
-        std::vector<Eigen::Vector3f> thru;
-        for (int i = 0; i < 40; ++i) for (float z : {0.25f, 0.40f, 0.55f})
-            thru.push_back({4.5f, -0.2f + 0.4f * (i / 39.0f), z});  // see-through past x=2 at the obstacle's height
-        for (int k = 0; k < 30; ++k)
-        { g.integrate_sweep(sensor, (k % 2) ? thru : hit); g.commit_cycle(); }
-        int cx, cy; g.world_to_cell(2.0f, 0.0f, cx, cy);
-        const float p_conflict   = g.prob(cx, cy);
-        const float var_conflict = g.prob_variance(cx, cy);
-
-        // A CONFIDENT cell: hit x≈2 every sweep.
-        OccupancyGrid g2; g2.reset(-1, -1, 5, 5, P);
-        for (int k = 0; k < 30; ++k) { g2.integrate_sweep(sensor, hit); g2.commit_cycle(); }
-        const float p_conf   = g2.prob(cx, cy);
-        const float var_conf = g2.prob_variance(cx, cy);
-
-        std::printf("  belief: unknown[P≈0.5 var=%.4f] conflict[P=%.2f var=%.4f] confident[P=%.2f var=%.4f]\n",
-                    var_unknown, p_conflict, var_conflict, p_conf, var_conf);
-        check(var_unknown > var_conflict, "UNKNOWN cell must have HIGHER variance than a CONFLICTED one");
-        check(var_conflict > var_conf,    "a CONFLICTED cell must still be more uncertain than a CONFIDENT one");
-        check(p_conf > 0.9f,              "a continuously-hit cell must have HIGH occupancy probability (risk)");
-        check(var_conf < var_unknown,     "evidence must SHRINK the variance below the unobserved prior");
+        std::vector<Eigen::Vector3f> obst; face_returns(obst);
+        int ux, uy; g.world_to_cell(0.5f, 1.5f, ux, uy);        // never observed
+        const float p_unknown = g.prob(ux, uy), var_unknown = g.prob_variance(ux, uy);
+        for (int k = 0; k < 2; ++k) { g.integrate_sweep(sensor, obst); g.commit_cycle(0.1f); }
+        int ix, iy; g.world_to_cell(2.0f, 0.0f, ix, iy);
+        const float p_brief = g.prob(ix, iy), var_brief = g.prob_variance(ix, iy);
+        for (int k = 0; k < 200; ++k) { g.integrate_sweep(sensor, obst); g.commit_cycle(0.1f); }
+        const float p_conf = g.prob(ix, iy), var_conf = g.prob_variance(ix, iy);
+        std::printf("  belief: unknown[P=%.2f var=%.4f] brief[P=%.2f var=%.4f] confirmed[P=%.2f var=%.4f]\n",
+                    p_unknown, var_unknown, p_brief, var_brief, p_conf, var_conf);
+        check(std::abs(p_unknown - 0.5f) < 1e-3f, "a never-observed cell must read exactly the 0.5 prior");
+        check(var_unknown > var_brief, "UNKNOWN must be more uncertain than a BRIEFLY observed cell");
+        check(var_brief   > var_conf,  "...and a briefly observed cell more uncertain than a CONFIRMED one");
+        check(p_conf > 0.9f,           "a continuously-hit cell must have HIGH occupancy probability (risk)");
     }
 
-    // ── (6) FORGETTING: an OCCLUDED cell must relax toward "unknown", not stay confidently occupied ──
-    // This is the door_2 case: mass latched while visible, then permanently occluded. No clearing beam can ever
-    // reach it, so the ONLY thing that can correct it is the passage of time.
+    // ── (6) FORGETTING: an OCCLUDED cell must relax toward "unknown" — WITHOUT being released ──
+    // This is the door_2 case: mass latched while visible, then permanently occluded. Its BELIEF must age (P→0.5,
+    // Var→max) so the epistemic channel marks it worth re-observing. Its LATCH must not move: no beam contradicted
+    // it, and a safety layer under maximum uncertainty calls a cell occupied. The control at the end restores the
+    // old coupling (forget_can_unlatch) and shows the same cell being released by time alone.
     {
         // Isolates the time-decay DYNAMICS. It simulates "unobserved" with an EMPTY sweep, which under the
         // visibility gate means "sensor off" — no beam reaches anything, so the gate would (correctly) hold the
@@ -866,9 +1029,11 @@ bool OccupancyGrid::self_test()
         std::printf("  forget: occ_before=%d P %.2f→%.2f  Var %.4f→%.4f  occupied_after=%d\n",
                     occ_before, p_before, p_after, var_before, var_after, g.occupied(ix, iy));
         check(occ_before, "the obstacle must have been occupied first");
-        check(not g.occupied(ix, iy), "an UNOBSERVED occupied cell must eventually be forgotten (released)");
+        check(g.occupied(ix, iy), "an UNOBSERVED occupied cell must NOT be released — no beam contradicted it");
         check(std::abs(p_after - 0.5f) < std::abs(p_before - 0.5f), "P must relax TOWARD the 0.5 prior");
         check(var_after > var_before, "Var must RISE as evidence ages — an unseen cell becomes UNKNOWN");
+        // (the old forget_can_unlatch control is gone with the term: lo_ is recomputed from the voxel
+        //  column every cycle, so a time decay has nothing to erode. Removal is evidence-only.)
     }
 
     // ── (7) FORGETTING must not erode a cell that is still being observed ──
@@ -1000,46 +1165,48 @@ bool OccupancyGrid::self_test()
         check(r_crisp > r_marg, "the tolerance must follow the MEASURED floor scatter, not a constant");
     }
 
-    // ── (11) A FLOOR RETURN CLEARS ITS OWN CELL — the ratchet must be broken ──
-    // A phantom latched from a transient near-floor return, then re-observed only by clean floor returns landing in
-    // the same cell. Every one of those is direct evidence the floor is there; the old model recorded none of them
-    // (the DDA breaks at the endpoint cell, and a below-band return produced no flag), so the phantom was immortal
-    // — no traversing beam passes through a floor-height z-band from a sensor 0.5 m up. It must now clear.
+    // ── (11) A BEAM THAT REACHES THE FLOOR CLEARS WHAT IT PASSED THROUGH — AND ONLY THAT ──
+    // In the 2-D build this needed a dedicated path (mark_floor_endpoint_flag) with a support gate, because a
+    // terminating floor return never overlapped a cell's remembered z-band and was discarded — the ratchet that
+    // left `floor_clears` at 0 on 9381 of 9381 cycles. In 3-D it is free: the ray clears the voxels it actually
+    // traverses, its endpoint is below the nav band so it marks nothing, and a beam that passed UNDER a tabletop
+    // never touched the tabletop's voxel. Both halves are asserted, because the whole point is that clearing the
+    // floor must not cost us the furniture standing on it.
     {
-        OccGridParams PB = P; PB.forget_half_life_s = 0.0f;        // no decay: the clearing must come from the data
-        OccupancyGrid g; g.reset(-1, -1, 5, 5, PB);
-        int ix, iy; g.world_to_cell(2.0f, 0.0f, ix, iy);
-        // Latch a phantom: a burst of returns just above the band at (2,0), the way a smeared scan or a reflection
-        // paints one. (Above-band ⇒ hits, exactly as before this change.)
-        const std::vector<Eigen::Vector3f> phantom{{2.0f, 0.0f, 0.20f}, {2.0f, 0.01f, 0.19f}, {2.0f, -0.01f, 0.21f}};
-        for (int k = 0; k < 6; ++k) { g.integrate_sweep(sensor, phantom); g.commit_cycle(); }
-        const bool latched = g.occupied(ix, iy);
-        // Now the truth: clean floor returns land in that cell, and beams continue past it to the back wall high up
-        // (so the only clearing evidence available is the floor returns themselves).
-        std::vector<Eigen::Vector3f> truth;
-        for (int i = 0; i < 12; ++i) truth.push_back({1.98f + 0.004f * i, -0.02f + 0.004f * i, 0.01f});
-        for (int i = 0; i < 12; ++i) truth.push_back({4.5f, -0.2f + 0.4f * (i / 11.0f), 1.20f});
-        long clears = 0;
-        for (int k = 0; k < 20; ++k)
-        { g.integrate_sweep(sensor, truth); g.commit_cycle(); clears += g.last_sweep_diag().floor_endpoint_clears; }
-        std::printf("  floor-clears: phantom latched=%d → occupied=%d (lo=%.2f) after %ld floor-endpoint clears\n",
-                    latched, g.occupied(ix, iy), g.logodds(ix, iy), clears);
-        check(latched, "the phantom must have latched first (otherwise the test proves nothing)");
-        check(clears > 0, "floor returns must DELIVER free evidence to their own cells");
-        check(not g.occupied(ix, iy), "a floor phantom must be cleared by the floor returns that land in it");
-        // The safety counterpart: the same floor returns must NOT erase a real TALL obstacle they pass under.
-        OccupancyGrid g2; g2.reset(-1, -1, 5, 5, PB);
-        std::vector<Eigen::Vector3f> tabletop;                      // a 0.73 m surface at x=2
-        for (int i = 0; i < 12; ++i) tabletop.push_back({2.0f, -0.2f + 0.4f * (i / 11.0f), 0.73f});
-        for (int k = 0; k < 4; ++k) { g2.integrate_sweep(sensor, tabletop); g2.commit_cycle(); }
-        const bool tab_occ = g2.occupied(ix, iy);
-        std::vector<Eigen::Vector3f> under;                          // floor returns BENEATH it (between the legs)
-        for (int i = 0; i < 12; ++i) under.push_back({2.0f, -0.2f + 0.4f * (i / 11.0f), 0.01f});
-        for (int k = 0; k < 20; ++k) { g2.integrate_sweep(sensor, under); g2.commit_cycle(); }
-        std::printf("  floor-clears: tabletop occ_before=%d after 20 under-table floor sweeps occupied=%d\n",
-                    tab_occ, g2.occupied(ix, iy));
-        check(tab_occ, "the tabletop must be occupied first");
-        check(g2.occupied(ix, iy), "a floor return passing UNDER a real obstacle must not erase it (z-aware gate)");
+        OccupancyGrid g; g.reset(-1, -1, 5, 5, P);
+        const Eigen::Vector3f eye(0.02f, 0.02f, 0.60f);
+        // (a) a phantom at floor height, then honest floor returns landing in the same cell.
+        std::vector<Eigen::Vector3f> phantom;
+        for (int i = 0; i < 12; ++i) phantom.push_back({2.0f, -0.1f + 0.2f * (i / 11.0f), 0.30f});
+        for (int k = 0; k < 6; ++k) { g.integrate_sweep(eye, phantom); g.commit_cycle(0.1f); }
+        int px, py; g.world_to_cell(2.0f, 0.0f, px, py);
+        const bool phantom_occ0 = g.occupied(px, py);
+        std::vector<Eigen::Vector3f> floorret;                   // returns ON the floor, beyond and at the cell
+        // Reaching well BEYOND the cell: a ray only crosses 0.30 m at x = 2 if its floor endpoint is far enough
+        // out. Stopping the sweep at x = 3 crosses that column at 0.20 m and refutes the wrong voxel — the
+        // recurring lesson, in yet another form.
+        for (float x = 1.0f; x <= 4.5f; x += 0.02f)
+            for (int i = 0; i < 12; ++i) floorret.push_back({x, -0.1f + 0.2f * (i / 11.0f), 0.005f});
+        for (int k = 0; k < 60; ++k) { g.integrate_sweep(eye, floorret); g.commit_cycle(0.1f); }
+
+        // (b) a real TABLETOP at 0.75, then the same floor sweep passing UNDER it. It must survive.
+        OccupancyGrid g2; g2.reset(-1, -1, 5, 5, P);
+        const Eigen::Vector3f high(0.02f, 0.02f, 1.075f);
+        std::vector<Eigen::Vector3f> top;
+        for (float x = 1.6f; x <= 2.4f; x += 0.02f)
+            for (int i = 0; i < 12; ++i) top.push_back({x, -0.1f + 0.2f * (i / 11.0f), 0.75f});
+        for (int k = 0; k < 10; ++k) { g2.integrate_sweep(high, top); g2.commit_cycle(0.1f); }
+        int tx, ty; g2.world_to_cell(2.0f, 0.0f, tx, ty);
+        const bool top_occ0 = g2.occupied(tx, ty);
+        const Eigen::Vector3f low(0.02f, 0.02f, 0.30f);          // a LOW sensor: its beams pass under the table
+        for (int k = 0; k < 60; ++k) { g2.integrate_sweep(low, floorret); g2.commit_cycle(0.1f); }
+
+        std::printf("  floor-clears: phantom occ %d->%d (lo=%.2f) | tabletop occ %d->%d after 60 under-table "
+                    "floor sweeps\n", phantom_occ0, g.occupied(px, py), g.logodds(px, py),
+                    top_occ0, g2.occupied(tx, ty));
+        check(phantom_occ0 and top_occ0, "both must be occupied before the floor sweeps");
+        check(not g.occupied(px, py), "a floor-height phantom must be cleared by floor returns landing in it");
+        check(g2.occupied(tx, ty), "...while a TABLETOP must survive beams that merely passed underneath it");
     }
 
     // ── (12) PER-DEVICE NAV BAND — marking must be UNCHANGED, clearing must be RECOVERED ──
@@ -1128,8 +1295,12 @@ bool OccupancyGrid::self_test()
         OccupancyGrid g; g.reset(-1, -1, 5, 5, PE);
         int fx, fy; g.world_to_cell(1.0f, 0.0f, fx, fy);           // a cell the beams pass THROUGH → free
         int ox, oy; g.world_to_cell(3.0f, 0.0f, ox, oy);           // ...and the wall they end on → occupied
+        // A FAN reaching BELOW the sensor, not one height: "this cell is free" is a claim about the collision
+        // band, and the read-out now discounts a band the beams never resolved. One horizontal sweep at 0.6 m
+        // says nothing about whether something is standing at 0.2 m, and must not be allowed to claim it does.
         std::vector<Eigen::Vector3f> wall;
-        for (int i = 0; i < 12; ++i) wall.push_back({3.0f, -0.2f + 0.4f * (i / 11.0f), 0.60f});
+        for (float z = -1.0f; z <= 1.8f; z += 0.03f)
+            for (int i = 0; i < 12; ++i) wall.push_back({3.0f, -0.2f + 0.4f * (i / 11.0f), z});
         for (int k = 0; k < 12; ++k) { g.integrate_sweep(sensor, wall); g.commit_cycle(0.05f); }
         const float free_p0 = g.prob(fx, fy), free_v0 = g.prob_variance(fx, fy);
         const bool occ0 = g.occupied(ox, oy);
@@ -1147,7 +1318,7 @@ bool OccupancyGrid::self_test()
         check(std::abs(free_p1 - free_p0) < 1e-4f, "an unobserved FREE cell must NOT drift back toward 0.5");
         check(std::abs(free_v1 - free_v0) < 1e-4f, "...and must not lose confidence either");
         check(occ0, "the wall must be occupied before the idle period");
-        check(not g.occupied(ox, oy), "an unobserved OCCUPIED cell must still be forgotten (property 6 holds)");
+        check(g.occupied(ox, oy), "an unobserved OCCUPIED cell must still be HELD (property 6 holds)");
         check(held > 0, "free/unknown cells must be COUNTED as held, not silently skipped");
         // The control: with the asymmetry off, the same free cell DOES drift — proving the flag is the variable
         // and this test is not passing for some unrelated reason.
@@ -1160,88 +1331,407 @@ bool OccupancyGrid::self_test()
         check(g2.prob(fx, fy) - sym_p0 > 0.05f, "the OLD symmetric rule must measurably un-learn free space");
     }
 
-    // ── (15) FORGETTING IS VISIBILITY-GATED — an unseen obstacle must NOT decay ──
-    // Property (6) proves an occupied cell relaxes toward unknown when unobserved. That is right when we LOOKED
-    // and did not confirm, and wrong when no beam ever reached the cell: relaxing a posterior we collected no
-    // evidence about invents evidence. Measured live 2026-08-20: 29% of the occupied set was decaying every
-    // cycle purely because nothing was pointing at it, which is what makes a table vanish ~36 s after driving
-    // away. Both halves are asserted so the gate cannot be silently reverted from either side.
+    // ── (15) A BEAM THAT FLEW OVER AN OBSTACLE IS NOT A REFUTATION OF IT ──
+    // The 2-D build needed a z-gate plus a visibility counter to express this, and got it wrong twice. In 3-D it
+    // is arithmetic: the beam lowers the voxels it passed through, which are not the obstacle's. Three arms —
+    // flown over (held), never reached (held), and genuinely seen through (cleared) — so the model cannot pass
+    // by simply refusing to clear anything.
     {
         OccGridParams PG = P; PG.forget_half_life_s = 1.0f;   // fast half-life so the test stays quick
-        // (a) LOOKED-AT-BUT-NOT-CONFIRMED: an obstacle at 1 m, then beams that keep flying OVER it to a far wall.
-        //     Those beams DO reach its column (slook_ set) but are z-rejected as free evidence, so it must decay.
-        OccupancyGrid g; g.reset(-1, -1, 6, 6, PG);
-        int lx, ly; g.world_to_cell(1.0f, 0.0f, lx, ly);
-        std::vector<Eigen::Vector3f> low;
+        const Eigen::Vector3f eye(0.02f, 0.02f, 0.50f);
+        std::vector<Eigen::Vector3f> low;                     // an obstacle at 1 m, top at 0.30
         for (int i = 0; i < 12; ++i) low.push_back({1.0f, -0.1f + 0.2f * (i / 11.0f), 0.30f});
-        for (int k = 0; k < 6; ++k) { g.integrate_sweep(sensor, low); g.commit_cycle(0.05f); }
-        const bool looked_occ0 = g.occupied(lx, ly);
-        std::vector<Eigen::Vector3f> over;                     // same bearing, well above the obstacle's z-band
-        for (int i = 0; i < 12; ++i) over.push_back({5.0f, -0.5f + 1.0f * (i / 11.0f), 1.50f});
-        for (int k = 0; k < 200; ++k) { g.integrate_sweep(sensor, over); g.commit_cycle(0.05f); }
+        const auto build = [&](OccupancyGrid& g)
+        { g.reset(-1, -1, 6, 6, PG);
+          for (int k = 0; k < 8; ++k) { g.integrate_sweep(eye, low); g.commit_cycle(0.05f); } };
 
-        // (b) NEVER REACHED: the same obstacle, then 200 cycles of sweeps pointing the OTHER way entirely.
-        //     No beam touches its column, so it must be held — this is the case the live run was getting wrong.
-        OccupancyGrid g2; g2.reset(-1, -1, 6, 6, PG);
-        for (int k = 0; k < 6; ++k) { g2.integrate_sweep(sensor, low); g2.commit_cycle(0.05f); }
-        const bool unseen_occ0 = g2.occupied(lx, ly);
-        std::vector<Eigen::Vector3f> away;                     // opposite bearing: nothing near (1,0)
+        OccupancyGrid g;  build(g);
+        int lx, ly; g.world_to_cell(1.0f, 0.0f, lx, ly);
+        const bool occ0 = g.occupied(lx, ly);
+        std::vector<Eigen::Vector3f> over;                    // same bearing, passing well ABOVE the obstacle
+        for (int i = 0; i < 12; ++i) over.push_back({5.0f, -0.5f + 1.0f * (i / 11.0f), 1.50f});
+        for (int k = 0; k < 200; ++k) { g.integrate_sweep(eye, over); g.commit_cycle(0.05f); }
+
+        OccupancyGrid g2; build(g2);                          // nothing points at it at all
+        std::vector<Eigen::Vector3f> away;
         for (int i = 0; i < 12; ++i) away.push_back({-0.8f, -0.5f + 1.0f * (i / 11.0f), 0.60f});
         long unseen = 0;
         for (int k = 0; k < 200; ++k)
-        { g2.integrate_sweep(sensor, away); g2.commit_cycle(0.05f); unseen += g2.last_sweep_diag().cells_unseen; }
+        { g2.integrate_sweep(eye, away); g2.commit_cycle(0.05f); unseen += g2.last_sweep_diag().cells_unseen; }
 
-        // (c) control: with the gate OFF, the never-reached obstacle DOES decay — the flag is the variable.
-        OccGridParams PH = PG; PH.forget_visible_only = false;
-        OccupancyGrid g3; g3.reset(-1, -1, 6, 6, PH);
-        for (int k = 0; k < 6; ++k) { g3.integrate_sweep(sensor, low); g3.commit_cycle(0.05f); }
-        for (int k = 0; k < 200; ++k) { g3.integrate_sweep(sensor, away); g3.commit_cycle(0.05f); }
+        OccupancyGrid g3; build(g3);                          // ...and a genuine see-through THROUGH its voxels
+        std::vector<Eigen::Vector3f> through;
+        for (float z = -1.4f; z <= 0.8f; z += 0.01f)          // low enough that the beams cross the obstacle's
+            for (int i = 0; i < 12; ++i)                     // own voxel at x = 1, not just the ones above it
+                through.push_back({5.0f, -0.2f + 0.4f * (i / 11.0f), z});
+        long cleared_at = -1;
+        for (int k = 0; k < 300 and cleared_at < 0; ++k)
+        { g3.integrate_sweep(eye, through); g3.commit_cycle(0.05f); if (not g3.occupied(lx, ly)) cleared_at = k; }
 
-        std::printf("  forget-vis: looked-at occ %d->%d (lo=%.2f) | NEVER-SEEN occ %d->%d (lo=%.2f, unseen=%ld) | "
-                    "control gate-off occ->%d\n",
-                    looked_occ0, g.occupied(lx, ly), g.logodds(lx, ly),
-                    unseen_occ0, g2.occupied(lx, ly), g2.logodds(lx, ly), unseen, g3.occupied(lx, ly));
-        check(looked_occ0 and unseen_occ0, "the obstacle must be occupied before both idle periods");
-        check(not g.occupied(lx, ly), "a cell we LOOKED at and did not confirm must still be forgotten");
+        std::printf("  flown-over: occ %d | OVER->%d (lo=%.2f) | NEVER-SEEN->%d (unseen=%ld) | THROUGH->%d @%ld\n",
+                    occ0, g.occupied(lx, ly), g.logodds(lx, ly), g2.occupied(lx, ly), unseen,
+                    g3.occupied(lx, ly), cleared_at);
+        check(occ0, "the obstacle must be occupied before all three arms");
+        check(g.occupied(lx, ly),  "beams passing OVER an obstacle must not release it - different voxels");
         check(g2.occupied(lx, ly), "a cell NO beam reached must be HELD - no information is not evidence of absence");
-        check(unseen > 0, "never-reached cells must be COUNTED as unseen, not silently decayed");
-        check(not g3.occupied(lx, ly), "with the gate OFF the same cell must decay - the gate is the variable");
+        check(unseen > 0, "never-reached cells must be COUNTED as unseen");
+        check(cleared_at >= 0 and not g3.occupied(lx, ly),
+              "...and a beam THROUGH its voxels must still clear it - the model is not merely refusing");
     }
-    // ── (16) FORGETTING IS RANGE-WEIGHTED — a distant cell must erode as weakly as it was learned ──
-    // Every hit and every miss carries w(r)=r0^2/(r0^2+r^2), so a far see-through barely clears and a distant
-    // obstacle persists. The decay used to ignore range, so at 8 m every term defending a cell ran at 0.089 of
-    // full strength while the term eroding it ran at 1.0. Two identical cells, identical evidence, identical
-    // idle time, differing ONLY in how far the observer is: the near one must forget and the far one must not.
+
+    // ── (16) CLEARING IS RANGE-WEIGHTED — a distant see-through must erode as weakly as it was learned ──
+    // Every hit and every miss carries w(r) = r0²/(r0²+r²), deliberately: a far see-through barely clears and a
+    // distant obstacle PERSISTS until the robot closes on it. The term used to be tested on the time decay; with
+    // the voxel rewrite the decay no longer touches occupancy at all, so it is tested where it now lives — on
+    // the evidence itself. Two identical obstacles, identical clearing beams, differing ONLY in how far the
+    // observer stands: the near one must give way and the far one must hold.
     {
-        OccGridParams PI = P; PI.forget_half_life_s = 1.0f; PI.forget_visible_only = false;   // (15) owns that axis
-        std::vector<Eigen::Vector3f> obst;
-        for (int i = 0; i < 12; ++i) obst.push_back({1.0f, -0.1f + 0.2f * (i / 11.0f), 0.60f});
-        const std::vector<Eigen::Vector3f> nothing;
-        auto run = [&](bool weighted, float obs_x)
+        const auto run = [&](float obs_x, bool weighted)
         {
-            OccGridParams Q = PI; Q.forget_range_weighted = weighted;
-            OccupancyGrid g; g.reset(-1, -1, 6, 6, Q);
-            int cx, cy; g.world_to_cell(1.0f, 0.0f, cx, cy);
-            g.set_self_body(0.0f, 0.0f, 0.55f);                    // observe from the origin: range 1 m
-            for (int k = 0; k < 8; ++k) { g.integrate_sweep(sensor, obst); g.commit_cycle(0.05f); }
+            OccGridParams Q = P; Q.hit_reliable_range_m = weighted ? P.hit_reliable_range_m : 0.0f;
+            OccupancyGrid g; g.reset(-1, -1, 14, 6, Q);
+            const Eigen::Vector3f near_eye(9.0f, 0.02f, 0.50f); // BUILD it from close in both arms, so the only
+            const Eigen::Vector3f eye(obs_x, 0.02f, 0.50f);     // difference is where the CLEARING is observed from
+            std::vector<Eigen::Vector3f> obst;                  // the obstacle always sits at x = 10
+            for (int i = 0; i < 12; ++i) obst.push_back({10.0f, -0.1f + 0.2f * (i / 11.0f), 0.30f});
+            for (int k = 0; k < 12; ++k) { g.integrate_sweep(near_eye, obst); g.commit_cycle(0.05f); }
+            int cx, cy; g.world_to_cell(10.0f, 0.0f, cx, cy);
             const float lo0 = g.logodds(cx, cy);
-            g.set_self_body(obs_x, 0.0f, 0.55f);                   // ...then the robot sits |obs_x - 1| m away
-            for (int k = 0; k < 60; ++k) { g.integrate_sweep(sensor, nothing); g.commit_cycle(0.05f); }
+            std::vector<Eigen::Vector3f> through;               // ...then it is gone: beams run past it
+            for (float z = -1.4f; z <= 0.8f; z += 0.01f)
+                for (int i = 0; i < 12; ++i) through.push_back({13.5f, -0.2f + 0.4f * (i / 11.0f), z});
+            for (int k = 0; k < 25; ++k) { g.integrate_sweep(eye, through); g.commit_cycle(0.05f); }
             return std::pair{lo0, g.logodds(cx, cy)};
         };
-        const auto [n0, n1] = run(true,  1.5f);    // observer 0.5 m from the cell  -> w ~ 0.96, decays normally
-        const auto [f0, f1] = run(true, 11.0f);    // observer  10 m from the cell  -> w ~ 0.059, must barely decay
-        const auto [u0, u1] = run(false, 11.0f);   // control: range-blind, same 10 m -> decays like the near one
-        std::printf("  forget-range: NEAR lo %.2f->%.2f | FAR lo %.2f->%.2f | FAR range-blind lo %.2f->%.2f\n",
+        const auto [n0, n1] = run(9.0f,  true);    // observer 1 m from the obstacle  → w ≈ 0.86
+        const auto [f0, f1] = run(2.0f,  true);    // observer 8 m from it            → w ≈ 0.09
+        const auto [u0, u1] = run(2.0f,  false);   // control: same 8 m, weighting OFF
+        std::printf("  clear-range: NEAR lo %.2f→%.2f | FAR lo %.2f→%.2f | FAR unweighted lo %.2f→%.2f\n",
                     n0, n1, f0, f1, u0, u1);
-        check(n0 > 0.0f and f0 > 0.0f and u0 > 0.0f, "all three cells must start with occupancy evidence");
-        // Expected magnitudes, so the bar is derived rather than guessed: at 10 m w = r0^2/(r0^2+r^2) = 0.059,
-        // so gamma_cell = 1-(1-gamma)*w = 0.998 and 60 cycles retain 0.998^60 = 0.886 of the evidence. The near
-        // cell (w ~ 0.96) is at the configured half-life and keeps ~0.13. Bars set well inside both.
-        check(n1 < 0.2f * n0, "a NEAR cell must still forget at the configured half-life");
-        check(f1 > 0.8f * f0, "a FAR cell must erode only weakly - it was never confirmed at full precision");
-        check(f1 > n1, "the far cell must retain strictly more evidence than the near one, same idle time");
-        check(u1 < 0.5f * u0, "with the weighting OFF the far cell decays like the near one - it is the variable");
+        check(n0 > 0.0f and f0 > 0.0f and u0 > 0.0f, "all three must start with occupancy evidence");
+        check(n1 < n0 - 1.0f, "a NEAR see-through must measurably erode the obstacle");
+        check(f1 > n1, "the FAR one must retain strictly more evidence - same beams, same cycles, only range differs");
+        check(u1 < f1, "with the weighting OFF the far see-through bites harder - the weight is the variable");
+    }
+
+    // ── (17) A FLAT SURFACE MUST NOT ERASE ITSELF AT GRAZING INCIDENCE ──
+    // The user's constraint, as a property: a table standing in the middle of the room cannot lose its residual
+    // cells, because the table does not fly and no table_concept is running to explain it away. The only thing
+    // that may remove it is evidence that the space is free.
+    // The failure this pins was MEASURED on the real geometry (helios upright at 1.075 m, plate at 0.75 m, robot
+    // circling at 1.6 m): the beam descends at ~18 deg, crosses four or five plate cells within 2 cm of the
+    // surface, and terminates on that same plate. Every crossing was recorded as free space. Over 900 cycles the
+    // footprint was destroyed 2799 times and held only 284 of its 384 cells; cells that had stood 402 cycles
+    // were deleted in a handful. With the continuous-surface term: 36 releases, 382 of 384 cells held, and the
+    // open-floor phantom count and wall coverage are bit-identical between the two arms.
+    // Both halves are asserted, because a term that merely refuses to clear is not a fix but a leak.
+    {
+        const Eigen::Vector3f eye(0.0f, 0.0f, 1.075f);          // helios mount height
+        // A 1 m plate at z=0.75. First it is seen whole, so every cell banks its evidence...
+        std::vector<Eigen::Vector3f> whole;
+        for (float x = 1.2f; x <= 2.2f; x += 0.02f) for (float y = -0.5f; y <= 0.5f; y += 0.02f)
+            whole.push_back({x, y, 0.75f});
+        // ...then only its FAR rim returns, which is what a moving robot actually delivers: the near cells are no
+        // longer struck, they are only CROSSED, by beams descending onto the far rim of the same plate. Those
+        // crossings are 1-3 cm above a surface the beam is about to hit.
+        std::vector<Eigen::Vector3f> far_rim;
+        for (float x = 2.10f; x <= 2.2f; x += 0.02f) for (float y = -0.5f; y <= 0.5f; y += 0.02f)
+            far_rim.push_back({x, y, 0.75f});
+        // ...and the control for (b): the plate is CARRIED AWAY, so the same bearings now return from the wall
+        // beyond it, crossing the cells well BELOW the remembered surface.
+        // A fan of endpoint heights, so the beams cross the plate's cells AT the plate's own height and not
+        // 4 cm under it. Refutation requires looking where the material is — the same correction (3) needed.
+        std::vector<Eigen::Vector3f> gone;
+        for (float z = 0.1f; z <= 1.4f; z += 0.05f)
+            for (float y = -0.5f; y <= 0.5f; y += 0.04f) gone.push_back({4.5f, y, z});
+
+        // The observer ORBITS, as the real robot does. A fixed eye grazes the plate from one bearing only, and
+        // the guard's effect is then invisible — the erosion that motivated this property comes from the plate
+        // being skimmed from a new angle every cycle, each pass crossing a different set of its cells.
+        const auto run = [&](bool guard_on, const std::vector<Eigen::Vector3f>& after, int n)
+        {
+            OccGridParams Q = P; Q.clear_stop_max_m = guard_on ? P.clear_stop_max_m : 0.0f;
+            OccupancyGrid g; g.reset(-1, -1, 5, 5, Q);
+            const auto orbit = [&](int k)
+            {
+                const float a2 = 0.35f * std::sin(0.11f * k);          // sweep the bearing across the plate
+                // A SHALLOW graze (eye only 10 cm above the plate). From helios's 1.075 m onto a 0.75 m plate at
+                // 1.6 m the beam descends 20 cm per metre and, at 3.125 cm voxels, crosses the plate's own voxel
+                // for barely a cell — the resolution already handles that case, which is why the guard shows no
+                // effect there. It is the shallow approach (a lower sensor, or a taller surface) where a beam
+                // stays inside the surface's voxel for half a metre, and where the guard earns its place.
+                return Eigen::Vector3f(1.7f - 1.6f * std::cos(a2), 1.6f * std::sin(a2), 0.85f);
+            };
+            for (int k = 0; k < 20; ++k) { g.integrate_sweep(orbit(k), whole); g.commit_cycle(0.1f); }
+            int cx, cy; g.world_to_cell(1.6f, 0.0f, cx, cy);     // a cell in the MIDDLE of the plate
+            const bool occ0 = g.occupied(cx, cy);
+            long rel = 0, first_clear = -1;
+            for (int k = 0; k < n; ++k)
+            {
+                g.integrate_sweep(orbit(20 + k), after); g.commit_cycle(0.1f);
+                rel += g.last_sweep_diag().cells_released;
+                if (first_clear < 0 and not g.occupied(cx, cy)) first_clear = k;
+            }
+            return std::tuple{occ0, g.occupied(cx, cy), rel, first_clear};
+        };
+        const auto [s_occ0, s_occ1, s_rel, s_when] = run(true,  far_rim, 300);   // standing, term ON
+        const auto [r_occ0, r_occ1, r_rel, r_when] = run(true,  gone,    300);   // carried away
+        // The guard must actually FIRE here, or the property passes for the wrong reason.
+        OccupancyGrid gg; gg.reset(-1, -1, 5, 5, P);
+        for (int k = 0; k < 20; ++k) { gg.integrate_sweep({0.15f, 0.0f, 0.85f}, whole); gg.commit_cycle(0.1f); }
+        gg.integrate_sweep({0.15f, 0.0f, 0.85f}, far_rim); gg.commit_cycle(0.1f);
+        const long stopped = gg.last_sweep_diag().clear_stopped;
+        std::printf("  grazing-surface: STANDING occ %d->%d rel=%ld | REMOVED occ %d->%d cleared@%ld | "
+                    "guard fired on %ld voxel crossings\n",
+                    s_occ0, s_occ1, s_rel, r_occ0, r_occ1, r_when, stopped);
+        check(s_occ0 and r_occ0, "the plate must be occupied before both periods");
+        check(s_occ1, "a STANDING flat surface must NOT erase itself with its own grazing beams");
+        check(s_rel == 0, "...and must release NO cell at all while it is still there");
+        check(stopped > 0, "the grazing guard must actually FIRE, or this passes for the wrong reason");
+        // NOTE: a with/without control could NOT be made to discriminate here. At 3.125 cm voxels a synthetic
+        // fixed-plate geometry no longer grazes hard enough for the guard to matter — the RESOLUTION already
+        // handles it. The evidence that the guard earns its place is the full probe, on the real mounts with a
+        // circling robot: releases inside the table footprint 2530 (no guard) vs 835 (guard) at 6.25 cm voxels,
+        // and 1337 vs 442 at 3.125 cm. Recorded here so nobody mistakes this property for that measurement.
+    }
+    // ── (18) THE BLIND CONE IS NOT FREE SPACE ──
+    // helios stands at 1.075 m with a vertical field of about [-55, +15] deg, so at 0.3 m range it can only ever
+    // return from 0.65-1.15 m: a chair seat at 0.45 m there is not unobserved, it is UNOBSERVABLE, and sweeping
+    // past says nothing about it. The 2-D build needed a declared sensor envelope for this. In 3-D the voxels
+    // the beams cannot reach are simply never cleared, and the read-out declines to call a cell free on the
+    // strength of a collision band it never resolved (see collision_band_top_m). Same beams, same cycles: the
+    // near cell must stay near UNKNOWN while the far cell, whose whole band the fan does resolve, reads free.
+    {
+        OccGridParams PB = P; PB.forget_half_life_s = 0.0f;      // isolate this from any ageing
+        OccupancyGrid g; g.reset(-1, -1, 6, 6, PB);
+        const Eigen::Vector3f eye(0.0f, 0.0f, 1.075f);
+        // A real helios fan: 32 layers over [-55, +15] deg, out to a far wall.
+        std::vector<Eigen::Vector3f> fan;
+        for (int L = 0; L < 32; ++L)
+        {
+            const float el = (-55.0f + 70.0f * L / 31.0f) * 3.14159265f / 180.0f;
+            for (int A = -40; A <= 40; ++A)
+            {
+                const float az = A * 0.006f;
+                const float t = std::abs(std::tan(el)) > 1e-3f and el < 0.0f
+                              ? std::min(5.0f, 1.075f / std::abs(std::tan(el))) : 5.0f;   // floor or far wall
+                fan.push_back({t * std::cos(az), t * std::sin(az), std::max(0.0f, 1.075f + t * std::tan(el))});
+            }
+        }
+        for (int k = 0; k < 80; ++k) { g.integrate_sweep(eye, fan); g.commit_cycle(0.1f); }
+        int nx, ny; g.world_to_cell(0.30f, 0.0f, nx, ny);        // 0.3 m: only 0.65-1.15 m is reachable here
+        int fx, fy; g.world_to_cell(2.50f, 0.0f, fx, fy);        // 2.5 m: the whole collision band is swept
+        std::printf("  blind-cone: P(near 0.3 m)=%.3f P(far 2.5 m)=%.3f\n", g.prob(nx, ny), g.prob(fx, fy));
+        check(g.prob(fx, fy) < 0.25f, "a cell the sensor CAN resolve must be cleared to free");
+        check(g.prob(nx, ny) > g.prob(fx, fy) + 0.15f,
+              "...and one inside the blind cone must stay measurably closer to UNKNOWN - silence is not absence");
+    }
+
+    // ── (19) A NON-FINITE RETURN MUST NOT FREEZE THE MAP ──
+    // Found live 2026-08-22, and it was introduced by the clearing-probability work itself. A NaN return used to
+    // be inert: every comparison against NaN is false, so it slipped through the z-gate and carried a finite
+    // weight. Once the weight became a computed probability, NaN ran into p_block, into w, into lo_ — and a NaN
+    // log-odds satisfies NEITHER `lo > occ_set` NOR `lo < occ_clear`, so the cell drops out of the latch
+    // permanently. clear_p read NaN from cycle 7 and by cycle 1500 the whole map was latched=0 released=0 with
+    // 1614 cells stuck. The visible symptom was a residual cloud that would not clear; the cause was arithmetic.
+    {
+        OccupancyGrid g; g.reset(-1, -1, 5, 5, P);
+        std::vector<Eigen::Vector3f> obst; face_returns(obst);
+        const float nan_f = std::numeric_limits<float>::quiet_NaN();
+        std::vector<Eigen::Vector3f> poisoned = obst;
+        poisoned.push_back({nan_f, 0.0f, 0.5f});               // invalid depth, as the ZED emits it
+        poisoned.push_back({2.0f, 0.0f, nan_f});
+        poisoned.push_back({std::numeric_limits<float>::infinity(), 0.0f, 0.5f});
+        for (int k = 0; k < 6; ++k) { g.integrate_sweep(sensor, poisoned); g.commit_cycle(0.1f); }
+        int ix, iy; g.world_to_cell(2.0f, 0.0f, ix, iy);
+        const bool occ_after_poison = g.occupied(ix, iy);
+        const long bad = g.last_sweep_diag().bad_points;
+        // ...and it must still be CLEARABLE afterwards: the real test is that the latch still works.
+        std::vector<Eigen::Vector3f> beyond;                    // a FAN, so every voxel the obstacle claimed is
+        for (float z = -0.4f; z <= 1.2f; z += 0.02f)            // actually crossed — refutation is per voxel now
+            for (int i = 0; i < 12; ++i) beyond.push_back({4.5f, -0.2f + 0.4f * (i / 11.0f), z});
+        long clear_at = -1;
+        for (int k = 0; k < 200 and clear_at < 0; ++k)
+        { g.integrate_sweep(sensor, beyond); g.commit_cycle(0.1f); if (not g.occupied(ix, iy)) clear_at = k; }
+        std::printf("  nan-guard: bad_points=%ld/sweep occupied_after_poison=%d cleared@%ld lo=%.2f "
+                    "repaired=%ld\n", bad, occ_after_poison, clear_at, g.logodds(ix, iy),
+                    g.last_sweep_diag().cells_repaired);
+        check(bad == 3, "every non-finite return must be dropped and COUNTED, not silently absorbed");
+        check(occ_after_poison, "a real obstacle must still latch in a sweep that contained NaNs");
+        check(std::isfinite(g.logodds(ix, iy)), "the log-odds must stay finite through a poisoned sweep");
+        check(clear_at >= 0, "...and the cell must still be CLEARABLE - a NaN must not freeze it out of the latch");
+    }
+    // ── (20) A STRAY RETURN MUST NOT MAKE THE AIR ABOVE A TABLE INTO SOMETHING TO SEE THROUGH ──
+    // This is the live failure of 2026-08-22, in an empty room with one 1.40x0.70 m table. zmn_/zmx_ are a
+    // running MIN and MAX, so ONE stray return above the plate — ZED noise, someone walking past, a reflection —
+    // stretched the believed material to [0.73, 1.41] permanently, and every beam crossing the empty air between
+    // them counted as a full-weight see-through. The published residual fell to 26 of ~392 cells in components of
+    // 2, the planner had nothing to avoid, and the robot drove into the table.
+    // Evidence of material at 0.73 and a stray at 1.41 is not evidence of material at 0.92.
+    {
+        OccupancyGrid g; g.reset(-1, -1, 5, 5, P);
+        const Eigen::Vector3f eye(0.0f, 0.0f, 1.075f);
+        std::vector<Eigen::Vector3f> plate;                     // the tabletop: returns ONLY at 0.73
+        for (float x = 1.6f; x <= 2.4f; x += 0.02f) for (float y = -0.4f; y <= 0.4f; y += 0.02f)
+            plate.push_back({x, y, 0.73f});
+        for (int k = 0; k < 10; ++k) { g.integrate_sweep(eye, plate); g.commit_cycle(0.1f); }
+        int cx, cy; g.world_to_cell(2.0f, 0.0f, cx, cy);
+        std::vector<Eigen::Vector3f> stray = plate;             // ...and ONE stray return 68 cm above it
+        stray.push_back({2.0f, 0.0f, 1.41f});
+        for (int k = 0; k < 3; ++k) { g.integrate_sweep(eye, stray); g.commit_cycle(0.1f); }
+        const bool occ0 = g.occupied(cx, cy);
+        // Beams through the HOLLOW AIR between the plate and the stray, ending on a wall well beyond.
+        std::vector<Eigen::Vector3f> hollow;
+        for (float z = 0.90f; z <= 1.25f; z += 0.05f)
+            for (int i = 0; i < 20; ++i) hollow.push_back({4.5f, -0.4f + 0.8f * (i / 19.0f), z});
+        long rel = 0;
+        for (int k = 0; k < 300; ++k)
+        { g.integrate_sweep(eye, hollow); g.commit_cycle(0.1f); rel += g.last_sweep_diag().cells_released; }
+        const bool held = g.occupied(cx, cy);
+        // ...and the control that stops this being a leak: beams at the PLATE'S OWN height still clear it.
+        // ...sweeping the WHOLE column, the stray's own height included: a cell is removed when every height it
+        // claimed has been looked at and found empty, so a control that only looks at the plate leaves the stray
+        // bin unrefuted and the cell correctly alive.
+        // Beams that CROSS the plate's voxels on their way down to the floor beyond — which is what a robot
+        // actually collects once the table has gone. (A beam that both crosses the plate's voxel AND terminates
+        // at the plate's own height is the grazing case property (17) protects, by design: from a 2-D column you
+        // cannot tell it from the surface stopping the beam. Removal comes from the other beams, and does.)
+        std::vector<Eigen::Vector3f> at_plate;
+        // ...spanning high enough to also cross the STRAY's voxel: while any voxel in the column still holds
+        // material the cell stays occupied, which is the whole point of the projection.
+        for (float z = 0.0f; z <= 2.0f; z += 0.01f)
+            for (int i = 0; i < 20; ++i) at_plate.push_back({4.5f, -0.4f + 0.8f * (i / 19.0f), z});
+        long clear_at = -1;
+        for (int k = 0; k < 300 and clear_at < 0; ++k)
+        { g.integrate_sweep(eye, at_plate); g.commit_cycle(0.1f);
+          if (not g.occupied(cx, cy)) clear_at = k; }
+        // ...and the flag is the variable: with the support off, the stretched hull erases the plate.
+        OccGridParams PN = P; PN.bin_span_m = 0.0f;             // fall back to the zmn/zmx hull
+        OccupancyGrid g2; g2.reset(-1, -1, 5, 5, PN);
+        for (int k = 0; k < 10; ++k) { g2.integrate_sweep(eye, plate); g2.commit_cycle(0.1f); }
+        for (int k = 0; k < 3; ++k)  { g2.integrate_sweep(eye, stray); g2.commit_cycle(0.1f); }
+        for (int k = 0; k < 300; ++k){ g2.integrate_sweep(eye, hollow); g2.commit_cycle(0.1f); }
+        std::printf("  height-support: plate+stray occ %d -> held=%d (rel=%ld) | cleared at its OWN height @%ld "
+                    "| control (hull) occ->%d\n", occ0, held, rel, clear_at, g2.occupied(cx, cy));
+        check(occ0, "the tabletop must be occupied before the hollow beams");
+        check(held, "beams through the AIR above a table must not clear it - no return ever landed there");
+        check(clear_at >= 0, "...but beams at the PLATE'S OWN height must still clear it - not a leak");
+        check(not g2.occupied(cx, cy), "with the support OFF the stretched hull does erase it - the flag is it");
+    }
+    // ── (21) THE READ-OUT BAND MUST CARRY THE COLUMN'S REAL HEIGHT ──
+    // The explainers score each cell against the band readout_zband() reports, so if that band is wrong every
+    // published obstacle is judged as something it is not. Found live 2026-08-22 immediately after the voxel
+    // rewrite: hit_ was no longer maintained, so readout_zband returned 0-0.05 m for EVERY occupied cell, the
+    // FLOOR explainer claimed the whole map, and the agent published nothing — `residual components=0` beside
+    // `occ=2547`, and an empty grid in the viewer. Nothing else caught it: occupancy, clearing and the field
+    // were all correct, and the publish path just went quiet.
+    // So: build an obstacle at 0.75 m, hand occupied_components a FLOOR explainer (one that claims anything
+    // lying at floor level), and require the obstacle to survive it.
+    {
+        OccupancyGrid g; g.reset(-1, -1, 5, 5, P);
+        const Eigen::Vector3f eye(0.02f, 0.02f, 1.075f);
+        std::vector<Eigen::Vector3f> top;
+        for (float x = 1.6f; x <= 2.4f; x += 0.02f)
+            for (int i = 0; i < 12; ++i) top.push_back({x, -0.15f + 0.3f * (i / 11.0f), 0.75f});
+        for (int k = 0; k < 10; ++k) { g.integrate_sweep(eye, top); g.commit_cycle(0.1f); }
+        // A stand-in for the read-out floor explainer: claims a cell whose band sits at floor level.
+        const auto floor_explainer = [](float, float, float zlo, float zhi)
+        { return (zhi < 0.10f) ? 1.0f : 0.0f; };
+        const auto bare  = g.occupied_components(2);
+        const auto after = g.occupied_components(2, floor_explainer, 0.0f);
+        long bare_cells = 0, after_cells = 0;
+        for (const auto& c : bare)  bare_cells  += c.n_cells;
+        for (const auto& c : after) after_cells += c.n_cells;
+        std::printf("  readout-band: %zu comp / %ld cells unexplained → %zu comp / %ld cells past a FLOOR "
+                    "explainer\n", bare.size(), bare_cells, after.size(), after_cells);
+        check(bare_cells > 50, "the obstacle must be occupied before the explainer runs");
+        check(not after.empty() and after_cells > bare_cells / 2,
+              "an obstacle at 0.75 m must SURVIVE a floor explainer - its read-out band must carry its height");
+    }
+    // ── (22) A RING LIDAR MUST NOT MAKE MID-ROOM PHANTOMS IMMORTAL ──
+    // helios is a ring lidar at 1.075 m, so a beam at ring height that crosses a phantom in open floor
+    // terminates on a WALL at that same height. Under a height-only grazing guard that is |cz - ez| <= 1, the
+    // guard fires, and the phantom can never be cleared. Measured live 2026-08-23: 1402 residual cells above
+    // 0.9 m, 1052 of them more than 1.5 m from any wall, accumulated in two minutes then frozen at
+    // latched = released = 0 — a map the planner could not cross, which is how this was noticed at all.
+    // The guard's premise is that the beam SKIMMED a horizontal surface and struck it further on. A beam cannot
+    // skim a wall. So both halves are asserted together: the phantom must go, the tabletop must stay.
+    {
+        const Eigen::Vector3f ring(0.02f, 0.02f, 1.00f);
+        // (a) a phantom in open floor at ring height, then level beams passing through it to a far WALL.
+        OccupancyGrid g; g.reset(-1, -1, 6, 6, P);
+        std::vector<Eigen::Vector3f> phantom;
+        for (int i = 0; i < 12; ++i) phantom.push_back({2.0f, -0.1f + 0.2f * (i / 11.0f), 1.00f});
+        for (int k = 0; k < 8; ++k) { g.integrate_sweep(ring, phantom); g.commit_cycle(0.1f); }
+        int px, py; g.world_to_cell(2.0f, 0.0f, px, py);
+        const bool ph0 = g.occupied(px, py);
+        std::vector<Eigen::Vector3f> wall;                   // a WALL: material floor to ceiling at x = 5
+        for (float z = 0.10f; z <= 1.75f; z += 0.02f)
+            for (int i = 0; i < 12; ++i) wall.push_back({5.0f, -0.2f + 0.4f * (i / 11.0f), z});
+        long ph_clear = -1;
+        for (int k = 0; k < 300 and ph_clear < 0; ++k)
+        { g.integrate_sweep(ring, wall); g.commit_cycle(0.1f); if (not g.occupied(px, py)) ph_clear = k; }
+
+        // (b) the counterpart: a TABLETOP, skimmed by beams that end on the tabletop itself. It must survive.
+        OccupancyGrid g2; g2.reset(-1, -1, 6, 6, P);
+        const Eigen::Vector3f eye(0.02f, 0.02f, 1.075f);
+        std::vector<Eigen::Vector3f> plate;
+        for (float x = 1.2f; x <= 2.2f; x += 0.02f)
+            for (int i = 0; i < 12; ++i) plate.push_back({x, -0.2f + 0.4f * (i / 11.0f), 0.75f});
+        for (int k = 0; k < 20; ++k) { g2.integrate_sweep(eye, plate); g2.commit_cycle(0.1f); }
+        int tx, ty; g2.world_to_cell(1.5f, 0.0f, tx, ty);
+        const bool tb0 = g2.occupied(tx, ty);
+        std::vector<Eigen::Vector3f> far_rim;                 // only the far rim returns: the near cells are
+        for (float x = 2.10f; x <= 2.2f; x += 0.02f)          // crossed, not struck
+            for (int i = 0; i < 12; ++i) far_rim.push_back({x, -0.2f + 0.4f * (i / 11.0f), 0.75f});
+        for (int k = 0; k < 300; ++k) { g2.integrate_sweep(eye, far_rim); g2.commit_cycle(0.1f); }
+
+        std::printf("  ring-phantom: mid-room phantom occ %d -> cleared@%ld (endpoint = WALL) | tabletop occ "
+                    "%d -> %d (endpoint = PLATE)\n", ph0, ph_clear, tb0, g2.occupied(tx, ty));
+        check(ph0 and tb0, "both must be occupied before their clearing periods");
+        check(ph_clear >= 0, "a mid-room phantom must be cleared by level beams that end on a WALL - a beam "
+                             "cannot have skimmed a wall, so the grazing guard must not protect it");
+        check(g2.occupied(tx, ty), "...while a TABLETOP, whose beams end on the plate itself, must still survive");
+    }
+    // ── (23) NOTHING INSIDE THE LIDAR CLEARANCE RADIUS MAY BE CLEARED ──
+    // Every ray starts inside the disc the lidar driver self-filters and marks its way out, weighted by w(r),
+    // which is LARGEST at r = 0. So the ring of cells the robot is standing in was being cleared at the highest
+    // weight in the grid, in the one place no sensor can see — which is what deleted a table the moment the
+    // robot closed on it. The rule is about the ROBOT, not one sensor's minimum range: it must hold whichever
+    // sweep the ray came from, and be measured from the robot to the cell rather than along the ray.
+    // Two cells, same obstacle, same beams, differing only in whether the robot is standing on top of them.
+    {
+        const auto run = [&](float robot_x, float clearance)
+        {
+            OccGridParams Q = P; Q.lidar_clearance_m = clearance; Q.forget_half_life_s = 0.0f;
+            OccupancyGrid g; g.reset(-1, -1, 6, 6, Q);
+            std::vector<Eigen::Vector3f> obst;                   // an obstacle at x = 2
+            for (int i = 0; i < 12; ++i) obst.push_back({2.0f, -0.1f + 0.2f * (i / 11.0f), 0.60f});
+            g.set_self_body(0.0f, 0.0f, 0.55f);
+            for (int k = 0; k < 12; ++k)
+            { g.integrate_sweep({0.0f, 0.0f, 0.60f}, obst); g.commit_cycle(0.1f); }
+            int cx, cy; g.world_to_cell(2.0f, 0.0f, cx, cy);
+            const bool occ0 = g.occupied(cx, cy);
+            // ...now the robot drives up to it and the beams run PAST, from a sensor beside the obstacle.
+            std::vector<Eigen::Vector3f> past;
+            for (float z = -0.6f; z <= 1.2f; z += 0.01f)
+                for (int i = 0; i < 12; ++i) past.push_back({5.0f, -0.2f + 0.4f * (i / 11.0f), z});
+            g.set_self_body(robot_x, 0.0f, 0.55f);
+            long cleared_at = -1;
+            for (int k = 0; k < 200 and cleared_at < 0; ++k)
+            { g.integrate_sweep({robot_x, 0.0f, 0.60f}, past); g.commit_cycle(0.1f);
+              if (not g.occupied(cx, cy)) cleared_at = k; }
+            return std::pair{occ0, cleared_at};
+        };
+        const auto [n0, n_when] = run(1.75f, 0.55f);   // robot 0.25 m from the cell: INSIDE the clearance disc
+        const auto [f0, f_when] = run(0.50f, 0.55f);   // robot 1.50 m away: outside it, ordinary clearing
+        const auto [c0, c_when] = run(1.75f, 0.0f);    // control: same close pass, rule OFF
+        std::printf("  clearance-radius: robot 0.25 m away -> cleared@%ld (must be NEVER) | 1.50 m away -> "
+                    "cleared@%ld | control (rule off, 0.25 m) -> cleared@%ld\n", n_when, f_when, c_when);
+        check(n0 and f0 and c0, "the obstacle must be occupied before all three passes");
+        check(n_when < 0, "a cell INSIDE the lidar clearance radius must never be cleared - nothing can see it");
+        check(f_when >= 0, "...while the same cell observed from outside the radius must still clear");
+        check(c_when >= 0, "with the rule OFF the close pass DOES delete it - the radius is the variable");
     }
     std::printf("OccupancyGrid::self_test %s\n", ok ? "PASS" : "FAIL");
     return ok;

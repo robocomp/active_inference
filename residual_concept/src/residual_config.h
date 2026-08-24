@@ -86,6 +86,22 @@ struct ResidualConfig
     // 0.089 and the term eroding it ran at 1.0. gamma_cell = 1-(1-gamma)*w(r). No new parameter (r0 is the same
     // hit_reliable_range_m every other term uses).
     bool  grid_forget_range_weighted = true;
+    // ...and the decay may never un-latch on its own: removal needs evidence of FREENESS, not absence of
+    // observation. See OccGridParams::forget_can_unlatch. true ⇒ the pre-2026-08-22 behaviour.
+    bool  grid_forget_can_unlatch   = false;
+    // ── clearing: P(this beam would have been blocked) instead of a binary z-gate ──
+    float grid_bin_span_m           = 2.0f;
+    float grid_clear_stop_max_m     = 0.10f;
+    float grid_collision_band_top_m = 0.50f;
+    float grid_lidar_clearance_m    = 0.55f;   // no cell inside this radius of the robot may be cleared
+    // Each device's DEAD SHELL — below this it returns nothing, so its rays carry no free evidence there.
+    float helios_min_range_m = 0.40f;   // RS-Helios datasheet minimum
+    float bpearl_min_range_m = 0.10f;   // RS-Bpearl is a near-field dome
+    float zed_min_range_m    = 0.30f;   // matches ZedBoost.MinDepthM
+    // ── the LiDAR field: where each device can physically see, so its silence there is not absence ──
+    // Mount z comes from the frame tree, NOT from here (ROBOT_GEOMETRY.md: helios 1.075, bpearl 0.670); these
+    // are the device's own optical limits, which the graph does not publish yet. `enabled=false` ⇒ term inert.
+    std::string release_csv_path;   // per-released-cell trace; empty = off
     // Robot body envelope used by the SENSOR model to discount returns off our own body at integration time.
     // Distinct from Clusterer.RobotRadiusM, which is only a READ-OUT mask around the current pose and therefore
     // cannot stop self-returns being latched into the map in the first place. Default matches the lidar3d_dds

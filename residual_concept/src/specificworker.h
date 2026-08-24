@@ -140,6 +140,7 @@ private:
     // Takes the read-out predicate because `occupied` alone cannot answer the phantom question: in an apartment
     // the walls are ~80% of the latched cells, so a histogram of every latched cell reports a healthy-looking
     // mass of tall wall cells and says nothing about the handful of floor phantoms that block navigation.
+    void  log_releases();                    // per-released-cell trace → residual_releases.csv (WHY it went)
     void  log_floor_diag(const rc::OccupancyGrid::CellExplained& explained,
                          const std::vector<rc::OccComponent>& comps);
 

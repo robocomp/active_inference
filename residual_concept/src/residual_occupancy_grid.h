@@ -47,6 +47,24 @@ struct OccGridParams
     float l_hit       = 0.85f;      // += on a hit  (≈ log(pd/pc))
     float l_miss      = 0.40f;      // −= on a traversed (see-through) cell
     float l_clamp     = 5.0f;       // |log-odds| clamp — bounded memory (dynamic obstacles clear in seconds)
+    // ── ...but a STATIC structure must get HARDER to remove the longer it has stood ──
+    // With one fixed clamp, a voxel confirmed for 3000 cycles banks exactly as much evidence as one confirmed
+    // for 12, so the outcome is decided by the instantaneous hit:miss ratio and not by history. Measured live
+    // 2026-08-23 with two static tables in the room: their cells hovered at the release threshold (mean
+    // lo_before = -1.11) and churned for thousands of cycles — 322 kills on one table, 270 on the other. A map
+    // that cannot become more certain about a thing that never moves is the wrong map.
+    // So the CAPACITY is per voxel and grows with CONSISTENCY: every observation that agrees with the voxel's
+    // current belief raises its stability, every one that contradicts it drops it sharply (asymmetric — trust is
+    // slow to earn and quick to lose). The clamp becomes l_clamp·(1 + stable_gain·s), s in [0,1].
+    // This is the essential part of the per-cell learned dynamics in the literature (Saarinen et al., IROS 2012,
+    // "Independent Markov Chain Occupancy Grid Maps"; Meyer-Delius et al., AAAI 2012): a cell that never changes
+    // learns it is static and becomes stiff; a cell that flickers stays responsive. It REPLACES an arbitrary
+    // constant with a measured property of the cell, rather than adding another rule on top of it.
+    // The gain is bounded on purpose: removal must stay possible in tens of seconds, not minutes. A table
+    // carried away still clears — the probe measures it — because clearing scales with the same capacity.
+    float stable_gain = 3.0f;       // a fully consistent voxel may bank (1+gain)× the base evidence. 0 ⇒ off
+    float stable_rise = 0.02f;      // per agreeing observation (≈50 to earn full stiffness)
+    float stable_fall = 0.30f;      // ...per contradicting one: earned slowly, lost fast
     // HYSTERESIS (two thresholds) → stable blobs. A cell LATCHES occupied when lo rises above occ_set and only
     // clears when lo falls below occ_clear (occ_clear ≪ occ_set). So a marginal cell oscillating hit/miss near
     // the boundary can't flicker; only sustained see-through (lo → occ_clear) clears it. occ_set is low enough
@@ -67,7 +85,116 @@ struct OccGridParams
     float floor_z0    = 0.06f;      // floor height at the sensor
     float floor_slope = 0.04f;      // + per metre of horizontal range (grazing)
     float ceil_z      = 1.80f;
-    float z_band_margin_m = 0.10f;  // z-aware clearing tolerance
+    float z_band_margin_m = 0.10f;  // z-aware clearing tolerance (the SUPPORT of the soft term below)
+    static constexpr int Z_BINS = 64;   // height-support resolution (see bin_span_m)
+    // ── DO NOT CLEAR CLOSE TO THE HIT (costmap_2d's rule, made adaptive) ──
+    // A voxel is 6.25 cm tall and a tabletop is 2 cm thick, so a beam grazing just over a plate is INSIDE the
+    // plate's own voxel and raytraces straight through it. This is the documented weakness of a voxel costmap,
+    // and it is why the pure 3-D model measured 2530 releases on a standing table (vs 25) even though its
+    // removal behaviour was excellent. costmap_2d guards it by not clearing the endpoint cell; the same idea
+    // has to reach further when the beam is shallow, because then it stays inside one voxel height for a long
+    // way. So skip the clearing run over which the beam has not yet changed voxel height:
+    //     d_stop = voxel_height / |uz|,  capped
+    // Steep beam ⇒ ~one voxel, exactly costmap_2d's rule. Shallow beam onto a flat surface ⇒ the whole grazing
+    // run, which is precisely the stretch where the sensor cannot say which cell it first touched. The cap is
+    // what keeps a near-horizontal beam from refusing to clear along its whole length; it is the one number
+    // here that is a judgement rather than a measurement, and it is bounded by the fact that clearing resumes
+    // beyond it. A surface that has genuinely gone is still cleared by the beams that now pass THROUGH its
+    // voxels — measured: a table carried away is gone within ~100 cycles.
+    // ── A BEAM CANNOT REFUTE WHAT THE SENSOR COULD NOT HAVE SEEN ──
+    // Every ray starts AT the sensor, so the DDA marks the voxels around the robot free — and it weights them by
+    // w(r), which is largest at r = 0. The near field, where the lidar is blind, is therefore cleared HARDEST of
+    // all. Below its minimum range a lidar returns nothing whatever is there, so a ray "passing through" that
+    // shell is not an observation at all and must carry no free evidence.
+    // This is what removes a table the moment the robot closes on it: the cells fall inside the dead shell, get
+    // cleared at full weight, and the map deletes a table the robot is about to touch. Going to 3-D did NOT fix
+    // it — I deleted the envelope term in the rewrite on the argument that the geometry made it unnecessary, and
+    // that was wrong: the rays still pass through those voxels.
+    // Set per sweep, like set_device_floor_z0, from the device's own datasheet minimum. 0 ⇒ no dead shell.
+    // ── CLEARING AUTHORITY IS PROPORTIONAL TO MEASUREMENT PRECISION ──
+    // Measured live 2026-08-23 with the new `sensor` column on the release trace: of 3028 removals, **2780 were
+    // the ZED and 248 helios**, and the ZED's kill hotspots land exactly on the two tables (402 at (0,0), 277 at
+    // (2,0), 151 at (2.5,0)) at a mean range of 2.1 m. The ZED raytraces ~8000 rays a cycle and is allowed to
+    // MARK about 250 of them, so it is almost purely a clearing sensor — and its depth noise grows as range²
+    // (sigma = 0.03 + 0.006·r²): at 4 m its endpoint is uncertain by 13 cm. A ray that cannot say where it
+    // stopped to better than 13 cm cannot certify the space in front of it, and an OVERESTIMATED depth sends it
+    // straight through the tabletop it actually hit.
+    // So a sweep declares its own noise model (set_sensor_noise) and gets clearing authority in proportion:
+    //     scale = sigma_ref² / max(sigma_ref², sigma(r)²)
+    // A sensor as precise as the reference clears at full weight (helios: unchanged, scale 1.0); the ZED at 4 m
+    // clears at 0.06 of that. No threshold, no on/off switch — the same precision-weighting the range term
+    // already applies, extended across sensors instead of only across range within one.
+    // The endpoint margin follows the same quantity: do not clear within k·sigma(r) of where the beam stopped.
+    float reference_sigma_m   = 0.03f;  // the LiDAR's range noise — the yardstick for "full authority"
+    float clear_stop_sigma_k  = 2.0f;   // endpoint margin, in sigmas of the sweep's own noise
+    float clear_stop_max_m    = 0.10f;
+    // ── ...and the guard may only fire when the beam stopped on a THIN HORIZONTAL surface ──
+    // The height test alone has a systematic failure with a ring lidar. helios stands at 1.075 m, so a beam at
+    // ring height that crosses a phantom in mid-room terminates on a WALL at that same height: |cz-ez| <= 1, the
+    // guard fires, and the phantom is protected FOR EVER. Measured live 2026-08-23: 1402 residual cells above
+    // 0.9 m, 1052 of them more than 1.5 m from any wall, accumulated over two minutes and then frozen at
+    // latched = released = 0. A map the planner cannot cross.
+    // The premise of the guard is "the surface that stopped the beam extends back to here", and that is a claim
+    // about a HORIZONTAL surface — a plate the beam skimmed and then struck. A beam cannot skim a wall: a wall is
+    // perpendicular to it, and its endpoint column is material from floor to ceiling. So look at what the beam
+    // actually stopped on. A tabletop's endpoint column holds material in one or two bins; a wall's holds it in
+    // dozens. Fire the guard only for the thin one.
+    int   plate_bins_max      = 4;      // an endpoint column this thin (≈12 cm) is a horizontal surface, not a wall
+    // ── THE LIDAR CLEARANCE RADIUS: nothing inside it may be cleared, by any sensor ──
+    // The plain statement of the rule, and the right one. A lidar sees nothing within the disc the driver
+    // self-filters, and every ray in this grid STARTS inside that disc and marks its way out — weighted by w(r),
+    // which is largest at r = 0. So the ring of cells the robot is standing in was being cleared at the highest
+    // weight the grid awards, in the one place no sensor can see. That is what deletes a table the moment the
+    // robot closes on it, and it is a statement about the ROBOT, not about one sensor's minimum range: it holds
+    // for the forward-mounted ZED exactly as it does for the two lidars, and it is measured from the robot to
+    // the cell rather than along the ray.
+    // Match it to the lidar3d driver's own [Footprint] radius, the same number self_body_radius_m uses, so both
+    // agree on one body model. 0 ⇒ off.
+    float lidar_clearance_m   = 0.55f;  // 0 ⇒ textbook VoxelLayer (endpoint voxel only, no grazing guard)
+    // A cell may only be called FREE on the strength of the column the sensors actually resolved — but only the
+    // part where an unseen obstacle would actually be HIT matters. Mixing over the whole 1.8 m column made every
+    // cell read ~0.5 (no fan from a point sensor ever resolves a whole column), which would hand the planner a
+    // map of pure risk. Restricting it to the collision band is what makes the term about the hazard: helios at
+    // 1.075 m cannot see below 0.65 m at 0.3 m range, and that is precisely where a chair leg would be.
+    float collision_band_top_m = 0.50f;  // 0 ⇒ no observability discount on the free side
+    // ...and the band is scored in a few SUB-BANDS, not voxel by voxel. A 32-layer lidar spans 70 deg, so at
+    // 2.5 m its beams are ~10 cm apart and can never touch every 3 cm voxel — demanding that would report most
+    // of the map as unknown and hand the planner a wall of risk. The question the discount asks is "did we look
+    // at this height REGION", which a sub-band answers and a voxel does not.
+    static constexpr int COLLISION_GROUPS = 4;  // cap on the no-clear run before the endpoint (0 ⇒ endpoint voxel only)
+    float bin_span_m          = 2.0f;   // height covered by the 32 support bins (0 ⇒ fall back to the zmn/zmx hull)
+    // ── ...and ONE CONTINUOUS SURFACE may explain both the skim and the return ──
+    // p_block alone did not save the table: it cut the killing weight from 0.87 to 0.48 for beams 5 cm over the
+    // plate, but the beams that actually finished the cells were at 0.75-0.77 against a band of [0.75, 0.75] —
+    // AT the surface, where p_block is ~0.95 and clearing is at full strength. The geometry is the reason. Helios
+    // stands at 1.075 m and the plate is at 0.75, so at 1 m range the beam descends at only 18 deg: it crosses
+    // four or five tabletop cells within 2 cm of the plate before terminating ON that same plate. Every one of
+    // those crossings is recorded as free space, and the cell that stopped the beam is the only one that is not.
+    // A flat surface at grazing incidence therefore erases itself, and the sensor cannot say which cell it first
+    // touched: that is a real ambiguity, not a bug to gate away.
+    // The evidence is what resolves it. The beam terminated on material at height end_z. If the material this
+    // cell remembers (its top, zmx) lies BETWEEN the beam's height here and where the beam ended, then a single
+    // continuous surface explains both facts at once — the beam skimmed this cell's surface and struck it a
+    // little further along — and the crossing refutes nothing:
+    //     p_surface = Phi((zmx - min(bz,end_z))/sigma) * Phi((max(bz,end_z) - zmx)/sigma),   w *= (1 - p_surface)
+    // A horizontal beam ending on a far WALL is untouched: the traversed cell's material top is nowhere near the
+    // narrow interval between two equal heights, so p_surface collapses to 0 and free space clears exactly as
+    // before. And a table that has genuinely GONE still clears: the beams that used to stop on it now run down
+    // to the floor, crossing its cells at heights well below the remembered plate, where no continuous surface
+    // reaches the return and p_surface is 0 again.
+    // ★ I ALSO TRIED AND REVERTED requiring the surface to be CONTIGUOUS along the ray — walking back from the
+    // endpoint and firing the term only on the unbroken run of cells whose remembered top still matched the
+    // return height. It reads better than the plain height test and it measured WORSE, twice, on the same probe:
+    // releases inside the table footprint 36 -> 1084 breaking the run at un-hit cells, and 36 -> 1485 breaking it
+    // instead at cells positively known free. The second is the instructive one. A tabletop's interior is mostly
+    // cells a horizontal LiDAR never strikes, so any chain rule has to pass through unknown cells; and once ONE
+    // plate cell is cleared, every later ray's run breaks there and exposes all the cells nearer than it. That is
+    // positive feedback — the rule erases the surface faster the more of it has already been erased.
+    // What survives from that attempt is the honest statement of the limitation: the plain height test also
+    // protects a cell whose remembered top happens to match a return arriving from much further away at the same
+    // height (a horizontal ring beam grazing a low box, returning from a wall beyond). That case is genuinely
+    // ambiguous to a 2-D grid, it errs toward HOLDING an obstacle, and the removal control below shows it does
+    // not become a leak: a table carried away still clears completely within ~10 s.
     // ── FLOOR EXPLAIN-AWAY AS A MIXTURE RESPONSIBILITY, not a hard band ──
     // The nav band above is a STEP: a return one millimetre over floor_z0+floor_slope·r is a FULL-weight obstacle,
     // and since l_hit·w(r) > occ_set for every range under ~2.7 m, it LATCHES its cell in a single frame. The floor
@@ -164,8 +291,9 @@ struct OccGridParams
     // isNodeOccupied() holds and leaves everything else alone. Free space that quietly reverts to unknown is what
     // makes a planner refuse a corridor it cleared twenty seconds ago.
     // So gate the decay on the cell holding NET OCCUPANCY evidence (lo_ > 0). Cells at or below zero — free, and
-    // never-observed — are left completely untouched. Stale-mass removal is unchanged bit-for-bit: every cell the
-    // old rule could un-latch had lo_ > occ_set > 0 and still decays identically.
+    // never-observed — are left completely untouched. (Since 2026-08-22 the decay no longer touches lo_ at all
+    // by default, so this gate now selects which cells' FIELD ages; it still selects the lo_ decay under
+    // forget_can_unlatch.)
     // Measured 2026-08-19: the decay was doing 42% of ALL un-latching, so this term is load-bearing and the fix
     // is to narrow WHAT it touches, not to lengthen the half-life (ForgetHalfLifeS=0 ratcheted occupied +56%).
     bool forget_occupied_only = true;   // false ⇒ the old symmetric relax-everything behaviour
@@ -198,6 +326,34 @@ struct OccGridParams
     // Near cells keep the configured half-life exactly; far cells forget proportionally slower, with no new
     // parameter (r0 is hit_reliable_range_m, already the precision scale for every other term).
     bool forget_range_weighted = true;  // false ⇒ one half-life everywhere, regardless of how well we saw it
+    // ── ...and it may touch the BELIEF FIELD only, never the evidence ledger and never the latch. ──
+    // The three gates above narrow WHICH cells the decay touches. This one settles what it is allowed to DECIDE.
+    // Until 2026-08-22 the decay released a latched cell as soon as lo fell back below occ_set (+0.40) — a bar
+    // three times easier than the occ_clear (−1.20) that free-space EVIDENCE has to clear, and reached without a
+    // single beam ever contradicting the obstacle. Worse, that release also wiped the cell's z-band (hit_=0), and
+    // the z-band is the only thing stopping every beam that passes over or under the obstacle from counting as a
+    // see-through. So one forgetting release flipped ~94% of this grid's clearing traffic from "carries no
+    // information about this column" to "clears it at full weight", drove lo to the −5 clamp, and left a real
+    // obstacle unable to re-latch until it was directly struck several more times. A ratchet toward erasure, the
+    // exact mirror of the marking ratchet that mark_floor_endpoint_flag exists to break.
+    // The rule now: an occupied cell is released ONLY by accumulated evidence that it is FREE — see-through beams
+    // that actually passed through its own z-band, each weighted by the precision w(r) it was collected at, summed
+    // until lo < occ_clear against everything the cell has accumulated (up to l_clamp). Absence of observation is
+    // not evidence of absence: the decay still relaxes lo toward 0 and the Beta toward Jeffreys, so a stale cell
+    // reads as UNKNOWN with rising Var[P] in the field channel (the epistemic "go and look" signal is preserved,
+    // and it is what should retire the cell — by sending the robot to observe it, not by assuming).
+    // COST, stated plainly: a cell nothing can ever observe again — mass latched behind a door that then closed —
+    // is now immortal in the polygon channel. That is the deliberate trade: a safety layer under maximum
+    // uncertainty must call a cell occupied. Set true to restore the old behaviour for an A/B.
+    // What the term still does, and why it is not simply deleted: (α,β) relax to Jeffreys, so P → 0.5 and
+    // Var[P] → max. A stale cell reads as UNKNOWN in the field five concept agents consume, and — since Var[P]
+    // IS the epistemic term — it becomes attractive to go and re-observe. That is the Active-Inference route to
+    // retiring it: send the robot to LOOK, and let the beams decide. The log-odds is left untouched, because it
+    // is the ledger of what was actually measured and no measurement arrived; eroding it spends the cell's
+    // accumulated defence on the passage of time, so a single later see-through clears a cell that should have
+    // needed the whole l_clamp → occ_clear span. "How sure am I" ages; "what have I measured" does not.
+    bool forget_can_unlatch = false;    // true ⇒ the decay also erodes lo_ and may release a latched cell
+                                        //        (the coupled pre-2026-08-22 behaviour, kept for A/B)
     // (There was a z_band_relax knob here that made the remembered z-band CONTRACT. It was removed: the theory
     // behind it had the sign backwards and it caused a measured 3.0× clearing regression. See the long note at
     // the zmn_/zmx_ update in commit_cycle before considering anything like it again.)
@@ -218,6 +374,31 @@ struct OccGridParams
 
 // Per-sweep integration counters — a DIAGNOSTIC of the sensor-model dynamics (esp. the tabletop-clearing bug:
 // grazing beams that skim a horizontal surface ray-trace THROUGH its cells and clear them). Reset each sweep.
+// ── WHY WAS THIS CELL REMOVED? ────────────────────────────────────────────────────────────────────────────────
+// The counters below say HOW MANY cells were released; they cannot say why any particular one was, and "the
+// residual under the table disappeared" is a question about one particular obstacle. Every release is therefore
+// traced: the cell, what it had banked, what the beam that finished it looked like, and how long it had stood.
+// Cheap by construction — only RELEASED cells are recorded, and a healthy run releases a handful per cycle.
+struct ReleaseEvent
+{
+    float x = 0.0f, y = 0.0f;      // cell centre, room frame
+    float lo_before = 0.0f;        // the evidence ledger before this cycle's update...
+    float lo_after  = 0.0f;        // ...and after it crossed occ_clear
+    float zmn = 0.0f, zmx = 0.0f;  // the cell's remembered occupied z-band (what we believed was there)
+    float clear_z = 0.0f;          // height at which the see-through beam crossed this column
+    float clear_w = 0.0f;          // precision weight that beam carried (range x ego-motion)
+    float range_m = 0.0f;          // horizontal range from the observer to this cell
+    long  age_cycles = 0;          // how many cycles it had been continuously latched. A LARGE age is the alarm:
+                                   // a structure that stood for minutes was deleted by seconds of see-through.
+    std::uint8_t cause = 0;        // 0 = see-through evidence (miss), 1 = time decay (forget_can_unlatch)
+    std::uint8_t src = 0;          // which SWEEP delivered the see-through that finished it (set_sensor_id).
+                                   // Without this "the table is being eroded" cannot be attributed to a sensor,
+                                   // and this grid is fed by helios, bpearl and a ZED with very different
+                                   // failure modes — the ZED raytraces ~8000 rays a cycle while only ~250 of
+                                   // them are allowed to mark, so it is overwhelmingly a CLEARING sensor.
+    float last_z = 0.0f;           // the cell's TOP before this cycle wiped it (see trace_release)
+};
+
 struct SweepDiag
 {
     long hits = 0;               // CELLS given a +l_hit this cycle (one per cell, hit precedence — not per ray)
@@ -248,6 +429,39 @@ struct SweepDiag
                                   // above the floor ⇒ the thing is FLOATING and the beam merely passed under it).
                                   // Split out of miss_blocked_zaware, which now counts only the traverse gate —
                                   // the two were one counter and mean opposite things about the same cell.
+    long bad_points = 0;          // returns dropped as non-finite before the sensor model saw them. NONZERO is
+                                  // normal for the ZED (invalid depth); a nonzero count on a LiDAR-only cycle
+                                  // means the sweep itself is corrupt.
+    long cells_repaired = 0;      // cells whose log-odds had gone non-finite and were reset to unknown. Must be
+                                  // 0 on a healthy run: anything else means a NaN is still reaching the model.
+    long cells_unsupported = 0;   // cells released because EVERY height bin they claimed has been refuted —
+                                  // "no lidar hits there". The removal channel once the support model is on.
+    long clear_imprecise = 0;     // voxel clearings whose weight was cut because the sweep's own depth noise at
+                                  // that range is worse than the reference sensor's. Large for a stereo camera
+                                  // at range, ~0 for a lidar. Zero with the ZED feeding ⇒ the term is not wired.
+    long clear_blind_shell = 0;   // voxel clearings REFUSED because they lay inside the sensor's dead shell —
+                                  // the near zone it cannot return from. With the robot working close to
+                                  // furniture this must be NONZERO; zero means the dead shell is not configured
+                                  // and the map is deleting obstacles it is about to drive into.
+    long clear_stopped = 0;       // voxel clearings skipped because they fell inside the no-clear run before the
+                                  // hit. With a flat surface in view this must be NONZERO; zero means grazing
+                                  // beams are raytracing straight through the surfaces they are about to strike.
+    long bins_confirmed = 0;      // height bins a return confirmed this cycle
+    long bins_refuted = 0;        // height bins a beam crossed without returning from. Its ratio to
+                                  // bins_confirmed is how fast pollution is being cleaned out of the columns.
+    long clear_blind = 0;         // see-throughs on never-hit cells whose weight the sensor envelope cut (the
+                                  // near-field cone the device is physically unable to look into). ZERO while a
+                                  // sensor envelope is configured means the term is not reaching the blind zone.
+    long clear_surface_damped = 0;// see-throughs refused because one continuous surface explained both the skim
+                                  // and the return (p_surface > 0.5). With a table in the room this must be
+                                  // NONZERO; a zero here means grazing beams are still erasing flat surfaces.
+    long clear_damped = 0;        // see-throughs whose weight the soft blocking probability actually reduced
+                                  // (p_block < 0.9). ZERO here with a live table in the room means the term is
+                                  // not engaging and grazing beams are still deleting surfaces at full weight.
+    double clear_p_sum = 0.0;     // Sum of p_block over every admitted see-through on a cell that believes it
+                                  // holds material. clear_p_sum / (misses on such cells) is the mean fraction of
+                                  // a refutation those beams were actually worth.
+    long clear_on_material = 0;   // ...the denominator: admitted see-throughs on cells that have a z-band
     long marks_suppressed = 0;    // returns whose ray was traced but whose endpoint was not allowed to mark
                                   // (mark_mask==0). 0 while the ZED feed is on ⇒ the mask is not plumbed through.
     long cells_decayed = 0;       // unobserved cells the forgetting term actually touched this cycle
@@ -257,6 +471,13 @@ struct SweepDiag
                                   // which is the whole point of forget_range_weighted.
     long cells_unseen  = 0;       // unobserved cells SPARED because no beam reached them at all this cycle
                                   // (occluded / out of range / behind the robot) — forget_visible_only
+    long cells_zheld   = 0;       // occupied cells SPARED because every beam that reached their column this
+                                  // cycle passed OUTSIDE their z-band (over or under the obstacle). Those beams
+                                  // are already counted in miss_blocked_zaware as carrying no free evidence; a
+                                  // beam cannot be uninformative for the latch and informative for the decay at
+                                  // the same time. Split out of cells_decayed 2026-08-22 — while they shared one
+                                  // counter, "we looked and it was not there" and "we looked straight past it"
+                                  // were indistinguishable, and this grid is 94% the second one.
     long cells_held    = 0;       // unobserved cells it SPARED because they carry free/no evidence
                                   // (forget_occupied_only). decayed+held = the whole unobserved population, so
                                   // the ratio says how much of the map the old symmetric rule was un-learning.
@@ -310,6 +531,14 @@ public:
     // z0 < 0 ⇒ unset ⇒ fall back to OccGridParams::floor_z0. Set per device before that device's integrate_sweep,
     // exactly like set_floor_plane; persists until changed.
     void set_device_floor_z0(float z0) { dev_floor_z0_ = z0; }
+    // The DEAD SHELL of the device about to be integrated: inside this range it returns nothing, so its rays
+    // carry no free evidence there. See OccGridParams::clear_stop_max_m's neighbour note above.
+    void set_sensor_min_range(float r) { sensor_min_r_ = std::max(0.0f, r); }
+    // The sweep's own range-noise model, sigma(r) = s0 + quad·r². Governs how much clearing authority it gets
+    // and how far short of its endpoint it must stop. See OccGridParams::reference_sigma_m.
+    void set_sensor_noise(float s0, float quad) { sens_s0_ = s0; sens_quad_ = quad; }
+    // Tag the sweep about to be integrated, so a release can name the sensor that finished the cell.
+    void set_sensor_id(std::uint8_t id) { sensor_id_ = id; }
     float device_floor_z0() const { return dev_floor_z0_ >= 0.0f ? dev_floor_z0_ : p_.floor_z0; }
 
     // P(this return came from an OBSTACLE, not from the floor) for a return at height z over (x,y) seen at
@@ -371,6 +600,13 @@ public:
     // prior. Pass 0 (the default) to disable forgetting entirely — the original never-forget behaviour, which is
     // what the self_test's older properties assume.
     void commit_cycle(float dt_s = 0.0f);
+    void trace_release(std::size_t i, float lo_before, float clear_z, float w, std::uint8_t cause,
+                       float prev_lo, float prev_hi, float prev_top);
+    void update_bins(std::size_t i, float w_hit, float w_miss);   // per-height confirm / refute
+    void clear_bins(std::size_t i);
+    bool has_support(std::size_t i) const;
+    bool voxel_has_material(int ix, int iy, int iz) const;   // does this voxel hold material?
+    int  column_thickness_bins(int ix, int iy) const;        // plate (1-2) or wall (dozens)?                        // any height bin still holding material?
 
     // A read-out predicate: the PROBABILITY (0..1) that this cell (world xy, hit z-band) is EXPLAINED by a known
     // model — hard for walls/floor/robot (0 or 1), SOFT for objects (Φ(−sdf/σ) marginalised over the object's
@@ -403,6 +639,8 @@ public:
     float zband_hi(int ix, int iy) const { return in_bounds(ix, iy) and hit_[idx(ix, iy)] ? zmx_[idx(ix, iy)] : 0.0f; }
     // Beta–Bernoulli belief the planner consumes. prob = mean occupancy P (RISK). prob_variance = Var[P] (the
     // EPISTEMIC term). prob_std = √Var. Out-of-bounds ⇒ the unobserved prior (P=0.5, max variance) = "unknown".
+    void  cell_belief  (int ix, int iy, float& alpha, float& beta) const;  // the exported Beta, reconstructed
+    float column_prob  (int i) const;                                      // P(occupied) from the voxel column
     float prob         (int ix, int iy) const;
     float prob_variance(int ix, int iy) const;
     float prob_std     (int ix, int iy) const;
@@ -445,6 +683,10 @@ public:
                                            const CellExplained& explained = {}) const;
 
     const SweepDiag& last_sweep_diag() const { return sd_; }
+    // Every cell released by the cycle just committed, with the evidence that finished it. The instrument for
+    // "the table's residual vanished": a release with a large age_cycles and a clear_z outside [zmn, zmx] — or a
+    // range small enough that the sensor could not have seen that height at all — is a wrongful removal.
+    const std::vector<ReleaseEvent>& last_releases() const { return releases_; }
 
     static bool self_test();
 
@@ -464,12 +706,15 @@ private:
         zhi = dispz_[i];
         zlo = std::min(zmn_[i], zhi);
     }
-    void mark_hit_flag (int ix, int iy, float zlo, float zhi, float w);   // accumulate a hit + its precision weight
-    void mark_miss_flag(int ix, int iy, float beam_z, float w);           // accumulate a see-through + its weight
+    void mark_hit_voxel (int ix, int iy, int iz, float z, float w);   // a return landed IN this voxel
+    void mark_free_voxel(int ix, int iy, int iz, float z, float w);   // a beam passed THROUGH this voxel
+    // Height-support bin of z, clamped into [0, OccGridParams::Z_BINS). See OccGridParams::bin_span_m.
+    int z_bin(float z) const
+    { const float bw = p_.bin_span_m / OccGridParams::Z_BINS;
+      return std::clamp(static_cast<int>(z / std::max(1e-6f, bw)), 0, OccGridParams::Z_BINS - 1); }           // accumulate a see-through + its weight
     // A beam that TERMINATED on the floor in this cell: free evidence gated on SUPPORT (is the cell's own lowest
     // evidence floor-standing, hence refuted, or floating, hence merely passed under?) rather than on z-overlap,
     // which a floor return can never satisfy. See the long note at the definition.
-    void mark_floor_endpoint_flag(int ix, int iy, float band_top, float w);
     std::vector<std::uint8_t> residual_mask(const CellExplained& explained) const;   // occupied ∧ ¬explained
     std::vector<std::uint8_t> dilate_mask(const std::vector<std::uint8_t>& m, int radius_cells) const;
 
@@ -484,19 +729,48 @@ private:
                                                   // the origin would masquerade as the robot and skew the range)
     int   w_ = 0, h_ = 0;
     std::vector<float>        lo_;                 // log-odds (drives the hard occupied() latch — unchanged)
-    std::vector<float>        a_, b_;              // Beta(α,β) posterior over occupancy probability (the belief field)
-    std::vector<float>        zmn_, zmx_;          // per-cell hit z-band (zmx_ is a running MAX — for miss gating)
+    std::vector<float>        kobs_;              // accumulated OBSERVATION weight per cell (the confidence behind
+                                                   // the projection's answer). Risk comes from the column; this
+                                                   // carries only how much evidence stands behind it.              // Beta(α,β) posterior over occupancy probability (the belief field)
+    std::vector<float>        zmn_, zmx_;          // per-cell hit z-band (zmx_ is a running MAX — trace + display)
+    std::vector<float>        zstab_;             // per-voxel CONSISTENCY in [0,1] — how reliably this voxel's
+                                                   // observations have agreed with its own belief. Scales the
+                                                   // evidence capacity: see OccGridParams::stable_gain.
+    std::vector<float>        zsup_;              // per-cell HEIGHT SUPPORT, Z_BINS per cell: the log-odds that
+                                                   // material sits in that height bin. > 0 ⇒ material. This is the
+                                                   // test the clearing weight is measured against; see bin_span_m.
+    std::vector<std::uint64_t> shbits_;            // this cycle: bins a return landed in (per cell)
+    std::vector<std::uint64_t> smbits_;            // this cycle: bins a beam crossed without returning from
     std::vector<float>        dispz_;              // per-cell CURRENT top height (EMA of this cycle's hits) for display
     std::vector<std::uint8_t> hit_;                // 1 once a cell has received any hit (z-band valid)
     std::vector<std::uint8_t> occ_;                // LATCHED occupied state (hysteresis: set at occ_set, clear at occ_clear)
     // Per-CYCLE scratch (reset on begin_cycle, folded once in commit_cycle) — the fix for miss over-counting.
     std::vector<std::uint8_t> shit_;               // this cycle: cell received an endpoint hit (any beam)
     std::vector<std::uint8_t> smiss_;              // this cycle: cell was seen-through (z-aware) by any beam
-    std::vector<std::uint8_t> slook_;              // this cycle: ANY beam reached this column (visibility, set
-                                                   // before the z-gate) — gates the forgetting term
+    std::vector<std::uint8_t> slook_;              // this cycle: a beam reached this cell AND could have observed
+                                                   // its obstacle (it passed through the z-band, or the cell holds
+                                                   // no band yet) — a real observation OPPORTUNITY. Gates the
+                                                   // forgetting term. NOT set by a beam the z-gate rejected: see
+                                                   // szblock_.
+    std::vector<std::uint8_t> szblock_;            // this cycle: a beam reached this column but passed OUTSIDE the
+                                                   // cell's z-band, so it observed the space over/under the
+                                                   // obstacle and nothing about the obstacle itself
     std::vector<float>        shz_lo_, shz_hi_;    // this cycle: accumulated hit z-band for shit_ cells
     std::vector<float>        shit_w_;             // this cycle: MAX precision weight of the hits on this cell (range×motion)
     std::vector<float>        smiss_w_;            // this cycle: MAX precision weight of the see-throughs on this cell
+    std::vector<std::uint8_t> smiss_src_;           // which sweep set smiss_w_ (for the release trace)
+    std::uint8_t              sensor_id_ = 0;      // the sweep currently being integrated
+    float                     sensor_min_r_ = 0.0f; // ...and its dead shell (no returns closer than this)
+    float                     sens_s0_ = 0.0f, sens_quad_ = 0.0f;   // its range-noise model (0 ⇒ the reference)
+    float                     clear_r2_ = 0.0f;      // lidar clearance radius, squared (see lidar_clearance_m)
+    std::vector<float>        smiss_z_;            // this cycle: height of the see-through beam that set smiss_w_
+    std::vector<std::uint32_t> occ_since_;         // cycle index at which this cell latched (release age, for the trace)
+    std::uint32_t             cycle_ = 0;          // committed-cycle counter (ages the release trace)
+    std::vector<ReleaseEvent> releases_;           // this cycle's releases, with the reason for each
+    // The BEST observable fraction with which this cell has ever been cleared — the union over sensors and over
+    // time, since driving past from a new range genuinely does buy more. It bounds what clearing can establish
+    // here: see OccGridParams::sensor_min_range_m. 0 until the first see-through; 1 when no envelope is declared.
+    std::vector<float>        seenf_;
     SweepDiag sd_;                                 // counters for the cycle just committed
 };
 

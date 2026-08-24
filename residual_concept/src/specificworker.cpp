@@ -681,6 +681,11 @@ void SpecificWorker::compute()
             gp.forget_occupied_only = cfg_.grid_forget_occupied_only;
             gp.forget_visible_only  = cfg_.grid_forget_visible_only;
             gp.forget_range_weighted = cfg_.grid_forget_range_weighted;
+            gp.forget_can_unlatch   = cfg_.grid_forget_can_unlatch;
+            gp.bin_span_m           = cfg_.grid_bin_span_m;
+            gp.clear_stop_max_m     = cfg_.grid_clear_stop_max_m;
+            gp.collision_band_top_m = cfg_.grid_collision_band_top_m;
+            gp.lidar_clearance_m    = cfg_.grid_lidar_clearance_m;
             gp.self_body_sigma_m   = cfg_.grid_self_body_sigma_m;
             // NO C-SPACE INFLATION. The controller now collides its ACTUAL footprint polygon against the grid
             // (common/robot_footprint + controller/src/grid_planner), so inflating here is double-counted: a
@@ -842,6 +847,7 @@ void SpecificWorker::compute()
         // all read them — just at their true extent.
         const auto comps = grid_.occupied_components(2, cell_explained, 0.f);
         log_floor_diag(cell_explained, comps);   // plane fit + the RESIDUAL set's height profile, jointly
+        log_releases();                          // ...and WHY each cell removed this cycle was removed
         dump_residual_cells(cell_explained);     // ...and WHERE they are, which a histogram cannot say
         static int gc = 0;
         if ((gc++ % 20) == 0)
@@ -1232,21 +1238,46 @@ bool SpecificWorker::integrate_lidar_per_device()
     const float a = (cfg_.floor_plane.enabled and floor_plane_.valid) ? floor_plane_.a : 0.0f;
     const float b = (cfg_.floor_plane.enabled and floor_plane_.valid) ? floor_plane_.b : 0.0f;
     const float c = (cfg_.floor_plane.enabled and floor_plane_.valid) ? floor_plane_.c : 0.0f;
-    const float sig_bp = floor_plane_.valid ? floor_plane_.rms : 0.0f;
-    // If the helios fit has not converged, fall back to the datum's sigma rather than to zero — zero would
-    // reinstate exactly the over-confidence this function exists to remove.
+    // ★★★AN UNFITTED FLOOR IS AN UNKNOWN FLOOR, NOT A PERFECT ONE.
+    // When no fit converges these both used to fall back to sigma = 0, which tells the marking model that the
+    // floor's height is known EXACTLY — the opposite of the truth. Measured live 2026-08-23 on this robot:
+    // `bpearl 0 / 11948 pts feed the floor fit ... rms 0.000, valid=false` — bpearl contributes NO points, so
+    // there is no floor datum at all, the plane stays at z=0 and sigma at 0. A helios grazing return landing
+    // 25 cm high at 4 m then scored 0.43 obstacle-responsibility and latched in a few frames: floor phantoms
+    // born at range, refuted only once the robot drove close enough to see the floor properly. That is exactly
+    // the "noise on the floor that disappears when the robot comes close" — and it must not be CREATED.
+    // With no datum the honest sigma is the scale of the disagreement we cannot rule out: how far the floor
+    // could plausibly sit from the assumed z=0. FloorPlane.MaxOffsetM is precisely that bound, already declared.
+    const float sig_unknown = cfg_.floor_plane.max_offset_m;
+    const float sig_bp = floor_plane_.valid ? floor_plane_.rms : sig_unknown;
+    // If the helios fit has not converged either, fall back to the datum's sigma rather than to zero — zero
+    // would reinstate exactly the over-confidence this function exists to remove.
     const float sig_he = floor_plane_helios_.valid ? std::max(floor_plane_helios_.rms, sig_bp) : sig_bp;
 
     grid_.set_floor_plane(a, b, c, sig_bp);
     grid_.set_device_floor_z0(keep ? cfg_.cluster.bpearl_floor_z0 : -1.0f);
+    grid_.set_sensor_min_range(cfg_.bpearl_min_range_m);   // its dead shell: no free evidence inside it
+    grid_.set_sensor_noise(0.0f, 0.0f);                    // lidar-grade: full clearing authority
+    grid_.set_sensor_id(1);
     grid_.integrate_sweep(lidar_ingestor_->origin_room(), bpearl_pts, /*begin_cycle=*/true, ego_reliability_);
 
     const auto& he = device_sweep(0, keep);          // re-derive: unfiltered when the flag is on
     grid_.set_floor_plane(a, b, c, sig_he);
     grid_.set_device_floor_z0(keep ? cfg_.cluster_helios_floor_z0 : -1.0f);
+    grid_.set_sensor_min_range(cfg_.helios_min_range_m);
+    grid_.set_sensor_noise(0.0f, 0.0f);
+    grid_.set_sensor_id(2);
     grid_.integrate_sweep(lidar_ingestor_->origin_room(), he, /*begin_cycle=*/false, ego_reliability_);
     grid_.set_floor_plane(a, b, c, sig_bp);   // leave the datum's sigma in place for the ZED pass that follows
     grid_.set_device_floor_z0(-1.0f);         // ...and the DEFAULT band: ZED is not one of these two devices
+    grid_.set_sensor_min_range(cfg_.zed_min_range_m);
+    // The ZED declares its OWN depth noise, sigma(r) = Sigma0M + SigmaQuad·r². It raytraces ~8000 rays a cycle
+    // while only ~250 may mark, so it is almost purely a clearing sensor — and measured 2026-08-23 it was doing
+    // 92% of all removals, its hotspots landing exactly on the two tables. Its clearing now carries the
+    // precision it actually has: full weight up close, a few percent at 4 m, where its endpoint is uncertain by
+    // 13 cm and an overestimated depth would send the ray through the tabletop it really hit.
+    grid_.set_sensor_noise(cfg_.zed_infra.sigma0_m, cfg_.zed_infra.sigma_quad);
+    grid_.set_sensor_id(3);
 
     static int dc = 0;
     if ((dc++ % 40) == 0)
@@ -1433,7 +1464,8 @@ void SpecificWorker::log_grid_diag()
         // support gate — the two were summed together and neither could be read.
         f << "cycle,occupied,hits,misses,miss_blocked_zaware,latched,released,hit_then_cleared,"
              "forgotten,self_damped,floor_damped,floor_clears,"
-             "floor_rets,floor_blocked,marks_suppr,floor_dropped,decayed,held,unseen,decay_w\n";
+             "floor_rets,floor_blocked,marks_suppr,floor_dropped,decayed,zheld,held,unseen,decay_w,"
+             "clear_damped,clear_surf,clear_blind,clear_p,bad_pts,repaired,bins_conf,bins_refut,unsupported\n";
     }
     f << cyc << ',' << grid_.occupied_count() << ',' << d.hits << ',' << d.misses << ','
       << d.miss_blocked_zaware << ',' << d.cells_latched << ',' << d.cells_released << ','
@@ -1441,8 +1473,12 @@ void SpecificWorker::log_grid_diag()
       << d.floor_damped_hits << ',' << d.floor_endpoint_clears << ','
       << d.floor_endpoint_returns << ',' << d.floor_endpoint_blocked << ','
       << d.marks_suppressed << ',' << last_device_floor_dropped_ << ','
-      << d.cells_decayed << ',' << d.cells_held << ',' << d.cells_unseen << ','
-      << (d.cells_decayed > 0 ? d.decay_weight_sum / d.cells_decayed : 0.0) << '\n';
+      << d.cells_decayed << ',' << d.cells_zheld << ',' << d.cells_held << ',' << d.cells_unseen << ','
+      << (d.cells_decayed > 0 ? d.decay_weight_sum / d.cells_decayed : 0.0) << ','
+      << d.clear_damped << ',' << d.clear_surface_damped << ',' << d.clear_blind << ','
+      << d.clear_stopped << ',' << d.clear_blind_shell << ','
+      << d.bad_points << ',' << d.cells_repaired << ','
+      << d.bins_confirmed << ',' << d.bins_refuted << '\n';
     if ((cyc % 20) == 0)
     {
         f.flush();
@@ -1468,6 +1504,37 @@ void SpecificWorker::log_grid_diag()
 // working with, and `off_cm`/`tilt_deg` whether the plane itself is the mismatch. Residual mass in the 0.25–0.70 m
 // bins instead means real furniture the object agents are failing to claim — an explainer problem, not a floor one.
 // The height used for binning is each cell's CURRENT top (dispz_), not the never-contracting running max.
+// ── WHY WAS THIS RESIDUAL REMOVED? ───────────────────────────────────────────────────────────────────────────
+// grid_diag.csv counts releases; it cannot say why any PARTICULAR obstacle went, and "the table in the middle of
+// the room disappeared" is a question about one particular obstacle. One row per released cell, with the evidence
+// that finished it. Read it like this:
+//   age_cycles LARGE + cause=see-through  -> a structure that stood for minutes was deleted by seconds of beams.
+//   clear_z just OUTSIDE [zmn, zmx]       -> a grazing beam, the one that used to erase flat surfaces.
+//   range_m small                         -> the robot was on top of it, where the lidar can see least.
+// A table standing in the room must produce NO rows at all inside its footprint: it does not fly, and with no
+// table_concept running nothing may explain it away.
+void SpecificWorker::log_releases()
+{
+    if (cfg_.release_csv_path.empty()) return;
+    const auto& ev = grid_.last_releases();
+    if (ev.empty()) return;
+    static bool first = true;
+    std::ofstream f(cfg_.release_csv_path, first ? std::ios::trunc : std::ios::app);
+    if (not f) return;
+    f.imbue(std::locale::classic());       // decimal POINT regardless of LANG — see CLAUDE.md
+    if (first) { f << "cycle,x,y,lo_before,lo_after,zmn,zmx,top_z,clear_z,clear_w,range_m,age_cycles,"
+                     "cause,sensor\n";
+                 first = false; }
+    for (const auto& e : ev)
+        f << grid_diag_cycle_ << ',' << e.x << ',' << e.y << ',' << e.lo_before << ',' << e.lo_after << ','
+          << e.zmn << ',' << e.zmx << ',' << e.last_z << ',' << e.clear_z << ',' << e.clear_w << ','
+          << e.range_m << ',' << e.age_cycles << ','
+          << (e.cause == 0 ? "see-through" : e.cause == 1 ? "decay" : "no-support") << ','
+          // WHICH SENSOR finished the cell. helios, bpearl and the ZED fail in completely different ways, and
+          // "the table is being eroded" cannot be acted on until this column says which one is doing it.
+          << (e.src == 1 ? "bpearl" : e.src == 2 ? "helios" : e.src == 3 ? "zed" : "?") << '\n';
+}
+
 void SpecificWorker::log_floor_diag(const rc::OccupancyGrid::CellExplained& explained,
                                     const std::vector<rc::OccComponent>& comps)
 {

@@ -109,6 +109,15 @@ ResidualConfig load_residual_config(const ConfigLoader& cfg)
     out.grid_forget_occupied_only = getb("Grid.ForgetOccupiedOnly", true); // ...decay OCCUPANCY only
     out.grid_forget_visible_only  = getb("Grid.ForgetVisibleOnly",  true); // ...and only where we LOOKED
     out.grid_forget_range_weighted = getb("Grid.ForgetRangeWeighted", true); // ...at the precision we had
+    out.grid_forget_can_unlatch   = getb("Grid.ForgetCanUnlatch",   false); // ...and never un-latches by itself
+    out.grid_bin_span_m           = getf("Grid.BinSpanM",           2.0f);  // ⇒ 64 voxels of 3.125 cm
+    out.grid_clear_stop_max_m     = getf("Grid.ClearStopMaxM",      0.10f); // do not clear close to the hit
+    out.grid_collision_band_top_m = getf("Grid.CollisionBandTopM",  0.50f); // free needs the collision band seen
+    out.grid_lidar_clearance_m    = getf("Grid.LidarClearanceM",    0.55f); // nothing inside this radius is cleared
+    out.helios_min_range_m        = getf("LidarModel.HeliosMinRangeM", 0.40f); // dead shells: no returns closer
+    out.bpearl_min_range_m        = getf("LidarModel.BpearlMinRangeM", 0.10f);
+    out.zed_min_range_m           = getf("LidarModel.ZedMinRangeM",    0.30f);
+    out.release_csv_path      = gets("Grid.ReleaseCsvPath", "etc/residual_releases.csv");
     out.cluster_helios_floor_z0 = getf("Clusterer.HeliosFloorZ0", 0.20f);   // helios grazes: unusable near floor
     out.grid_inflate_radius_m   = getf("Grid.InflateRadiusM",    0.0f);    // 0: controller does exact footprint
     out.grid_self_body_radius_m = getf("Grid.SelfBodyRadiusM",   0.55f);   // body envelope for the sensor-model term
