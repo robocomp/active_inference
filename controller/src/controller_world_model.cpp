@@ -245,6 +245,7 @@ std::optional<ControllerTargetInfo> ControllerWorldModel::read_target_in_room(st
             info.epistemic_gain = affordance_target->epistemic_gain;
             info.epistemic_pending = affordance_target->epistemic_pending;
             info.from_affordance = true;
+            info.epoch = affordance_target->epoch;
             info.parent_node_id = affordance_target->parent_node_id;
             if (!finite_target_info(info))
                 return std::nullopt;

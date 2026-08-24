@@ -173,6 +173,8 @@ private:
     // pushed to the display beside the rest of the overlay.
     float orient_overlay_yaw_ = 0.f;
     bool  orient_overlay_visible_ = false;
+    int  contract_for_epoch_ = -1;   // proposal the latched contract belongs to (see resolve_target_contract)
+    int  affordance_epoch_ = -1;     // proposal the running view belongs to
     std::optional<std::uint64_t> orient_start_ms_;
     // The heading error the current turn STARTED from, so the chart can show a fraction rather than a
     // raw angle. Reset with orient_start_ms_, i.e. once per turn, not once per cycle.

@@ -200,6 +200,7 @@ std::optional<AffordanceManager::Target> AffordanceManager::read_target(const st
     // has always been executed, so this changes nothing for anyone who never writes one.
     if (const auto pol = graph->get_attrib_by_name<aff_policy_att>(node); pol.has_value())
         target.policy = rc::affordance::policy_from(pol.value());
+    target.epoch = graph->get_attrib_by_name<epistemic_target_epoch_att>(node).value_or(0);
     const auto parent_id = graph->get_attrib_by_name<parent_att>(node);
     if (parent_id.has_value())
     {

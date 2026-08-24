@@ -2908,8 +2908,14 @@ std::optional<ControllerStandpoint> ControllerSession::current_standpoint() cons
 // early because the policy now decides behaviour before the robot gets there.
 void ControllerSession::resolve_target_contract(const ControllerTargetInfo &target)
 {
-    if (target.node_id == contract_for_node_id_) return;
+    // ★KEYED ON THE PROPOSAL, NOT THE NODE. `afford_calib` is ONE node re-armed for every step of a
+    // twelve-step pivot, so a node-id key made this whole function run ONCE for the entire sequence:
+    // the contract was never re-read (a producer that changed it mid-sequence would be ignored), and
+    // last_look_succeeded_ — reset here precisely so a new affordance cannot inherit the last one's
+    // verdict — was never reset between steps, leaving step N holding step N-1's answer.
+    if (target.node_id == contract_for_node_id_ and target.epoch == contract_for_epoch_) return;
     contract_for_node_id_ = target.node_id;
+    contract_for_epoch_ = target.epoch;
     target_contract_ = {};
     target_contract_known_ = false;
     // ★A NEW AFFORDANCE HAS NOT LOOKED AT ANYTHING YET. Reset here, at the ONE place a new affordance
@@ -3020,10 +3026,18 @@ void ControllerSession::update_affordance_view(const ControllerRobotPose &robot_
         return;
     }
 
-    if (affordance_view_.affordance != last_target_info_->node_name)
+    // ★A NEW CLAIM OF THE SAME NODE IS STILL A NEW CLAIM. Keyed on the name alone, every step of a
+    // pivot after the first read as "the same affordance still running": the elapsed clock kept
+    // counting from the FIRST step, so the panel showed a 90 s step, and the transcript logged
+    // "claimed 'afford_calib'" once for twelve claims — in the one record built to show who claimed
+    // what and when.
+    if (affordance_view_.affordance != last_target_info_->node_name
+        or affordance_epoch_ != last_target_info_->epoch)
     {
+        affordance_epoch_ = last_target_info_->epoch;
         note_protocol(rc::AffordanceExecution::ProtocolLine::Side::Consumer, now_ms,
-                      std::format("claimed '{}'", last_target_info_->node_name));
+                      std::format("claimed '{}' (proposal {})", last_target_info_->node_name,
+                                  last_target_info_->epoch));
         affordance_started_ms_ = now_ms;
         affordance_step_since_ms_ = now_ms;
         affordance_prev_step_.clear();

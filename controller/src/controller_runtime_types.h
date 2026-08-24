@@ -510,6 +510,11 @@ struct ControllerTargetInfo
     float epistemic_gain = 0.f;
     bool epistemic_pending = false;
     bool from_affordance = false;
+    // The producer's proposal counter for this node — see AffordanceManager::Target::epoch. Carried so
+    // per-affordance state can be reset per PROPOSAL rather than per node. Deliberately NOT part of
+    // same_target_instance: a re-arm bumps nothing, and a real move of the standpoint is already caught
+    // by the pose and yaw tests there.
+    int epoch = 0;
     std::uint64_t parent_node_id = 0;   // object the affordance hangs from (carries feedback attrs)
 };
 

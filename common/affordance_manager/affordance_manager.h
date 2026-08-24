@@ -47,6 +47,12 @@ public:
         // errand" -- and both questions have different answers for a Reach and an Orient. Defaults to
         // Reach, which is what a node with no contract has always been treated as.
         rc::affordance::Policy policy = rc::affordance::Policy::Reach;
+        // ★WHICH PROPOSAL THIS IS, on a node that is reused. epistemic_target_epoch bumps whenever the
+        // producer changes the CONTENT (pose or bearing) and not when it merely re-arms — so it is the
+        // one field that distinguishes step 4 of a pivot from step 3 on the single node they share.
+        // Consumers that key per-affordance state on the node id or name alone reset that state once
+        // per NODE, which for a twelve-step sequence means once in twelve.
+        int epoch = 0;
     };
 
     // One evaluated affordance per select_target() call (for the controller's EFE plot/log).
