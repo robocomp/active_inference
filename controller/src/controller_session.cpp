@@ -324,6 +324,8 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
                        obstacle_tracker.temporary_obstacle_rfe_points(),
                        params_ ? params_->max_lidar_draw_points : 0);
         stop(path_controller, motion_commander);
+        note_protocol(rc::AffordanceExecution::ProtocolLine::Side::Consumer, timestamp_ms,
+                      std::format("no planning step (line {})", 327));
         return std::nullopt;
     }
 
@@ -502,6 +504,8 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         affordance_view_.suppressed = suppressed_affordance_;
         display.set_affordance_execution(affordance_view_);
         stop(path_controller, motion_commander);
+        note_protocol(rc::AffordanceExecution::ProtocolLine::Side::Consumer, timestamp_ms,
+                      std::format("no planning step (line {})", 505));
         return std::nullopt;
     }
     dwell_logged_ = false;
@@ -589,6 +593,8 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
                        obstacle_tracker.temporary_obstacle_rfe_points(),
                        params_ ? params_->max_lidar_draw_points : 0);
         stop(path_controller, motion_commander);
+        note_protocol(rc::AffordanceExecution::ProtocolLine::Side::Consumer, timestamp_ms,
+                      std::format("no planning step (line {})", 592));
         return std::nullopt;
     }
 
@@ -780,6 +786,18 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     // been carried somewhere with room, which is the whole basis of an opportunistic manoeuvre.
     const bool orient_in_place = step.target.from_affordance and target_contract_known_
                              and target_contract_.policy == rc::affordance::Policy::Orient;
+    // ★THE CONSUMER'S READING OF THE CONTRACT, ON DISK. Whether it knows this is an Orient decides
+    // every branch below, and from outside the two failures look identical: a robot that will not
+    // turn. Deduplicated by note_protocol, so this is one line per change of reading, not per cycle.
+    if (step.target.from_affordance)
+        note_protocol(rc::AffordanceExecution::ProtocolLine::Side::Consumer, timestamp_ms,
+            std::format("reading '{}': contract {}, policy {}", step.target.node_name,
+                        target_contract_known_ ? "known" : "NOT KNOWN",
+                        target_contract_known_
+                            ? (target_contract_.policy == rc::affordance::Policy::Orient  ? "Orient"
+                             : target_contract_.policy == rc::affordance::Policy::Servo   ? "Servo"
+                                                                                          : "Reach")
+                            : "-"));
     if (orient_in_place and grid_planner_.has_world())
     {
         const auto robot_xy = step.robot_pose.pos.head<2>().cast<float>();
@@ -807,6 +825,8 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
             update_display(robot_pose, display, obstacle_tracker.display_obstacle_polygons(),
                            obstacle_tracker.temporary_obstacle_rfe_points(),
                            params_ ? params_->max_lidar_draw_points : 0);
+            note_protocol(rc::AffordanceExecution::ProtocolLine::Side::Consumer, timestamp_ms,
+                          std::format("no planning step (line {})", 822));
             return std::nullopt;
         }
         // Turnable here: there is no standpoint to resolve and no route worth repairing, so the whole
@@ -860,6 +880,8 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
             update_display(robot_pose, display, obstacle_tracker.display_obstacle_polygons(),
                            obstacle_tracker.temporary_obstacle_rfe_points(),
                            params_ ? params_->max_lidar_draw_points : 0);
+            note_protocol(rc::AffordanceExecution::ProtocolLine::Side::Consumer, timestamp_ms,
+                          std::format("no planning step (line {})", 875));
             return std::nullopt;
         }
         const float producer_cell_m = params_ ? params_->producer_cell_size_m : 0.5f;
@@ -1059,6 +1081,8 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
             update_display(robot_pose, display, obstacle_tracker.display_obstacle_polygons(),
                            obstacle_tracker.temporary_obstacle_rfe_points(),
                            params_ ? params_->max_lidar_draw_points : 0);
+            note_protocol(rc::AffordanceExecution::ProtocolLine::Side::Consumer, timestamp_ms,
+                          std::format("no planning step (line {})", 1074));
             return std::nullopt;
         }
         // Feasible somewhere in the producer's cell: take that pose and drive. Recorded as the repair
@@ -1177,6 +1201,8 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         update_display(robot_pose, display, obstacle_tracker.display_obstacle_polygons(),
                        obstacle_tracker.temporary_obstacle_rfe_points(),
                        params_ ? params_->max_lidar_draw_points : 0);
+        note_protocol(rc::AffordanceExecution::ProtocolLine::Side::Consumer, timestamp_ms,
+                      std::format("no planning step (line {})", 1192));
         return std::nullopt;
     }
     if (safe.has_value() && (*safe - step.target.room_pos).squaredNorm() > 1e-6f)
@@ -1258,6 +1284,9 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     }
     step.target_changed = !last_target_info_.has_value()
                        || !ControllerWorldModel::same_target_instance(*last_target_info_, step.target);
+    if (step.target.from_affordance and step.target_changed)
+        note_protocol(rc::AffordanceExecution::ProtocolLine::Side::Consumer, timestamp_ms,
+                      std::format("planning step built for '{}'", step.target.node_name));
     last_target_info_ = step.target;
     active_target_id_ = target->node_id;
     target_is_new_ = step.target_changed;   // consumed by the goal_reached branch, see target_is_new_
