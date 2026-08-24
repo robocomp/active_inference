@@ -878,4 +878,50 @@ void Viewer2D::update_target_marker(float x, float y, bool visible)
     target_marker_->setVisible(visible);
 }
 
+void Viewer2D::update_orient_overlay(float x, float y, float target_yaw, float current_yaw,
+                                     bool visible)
+{
+    // Long enough to read against the room, short enough not to reach across it. The ray is a
+    // DIRECTION, not a distance — nothing about an Orient says how far away anything is.
+    constexpr float kRayM = 1.20f;
+    constexpr float kArcM = 0.85f;
+
+    if (orient_ray_ == nullptr)
+    {
+        orient_ray_ = agv_->scene.addLine(0, 0, 0, 0, QPen(QColor(0, 170, 255), 0.04,
+                                                           Qt::SolidLine, Qt::RoundCap));
+        orient_ray_->setZValue(23);
+        orient_arc_ = agv_->scene.addPath(QPainterPath(), QPen(QColor(0, 170, 255, 170), 0.05),
+                                          QBrush(Qt::NoBrush));
+        orient_arc_->setZValue(23);
+    }
+
+    orient_ray_->setVisible(visible);
+    orient_arc_->setVisible(visible);
+    if (not visible) return;
+
+    orient_ray_->setLine(x, y, x + kRayM * std::cos(target_yaw), y + kRayM * std::sin(target_yaw));
+
+    // The arc runs from where the robot points NOW to where it was asked to point, the short way —
+    // which is the way the executor turns, so the drawing and the motion cannot disagree about which
+    // direction the robot is about to go. It shrinks to nothing as the turn completes, so the picture
+    // empties out exactly when the affordance is satisfied.
+    const double sweep = std::atan2(std::sin(target_yaw - current_yaw),
+                                    std::cos(target_yaw - current_yaw));
+    QPainterPath arc;
+    const QRectF box(x - kArcM, y - kArcM, 2.0 * kArcM, 2.0 * kArcM);
+    // ★QT'S ARC ANGLES ARE THE NEGATION OF A WORLD YAW, AND THE VIEW'S FLIP DOES NOT UNDO IT. QPainterPath
+    // places an angle θ at (cx + r·cosθ, cy − r·sinθ): the minus is Qt assuming a y-DOWN painter and
+    // wanting positive angles to LOOK counter-clockwise there. Our scene coordinates are world metres
+    // with y up (AbstractGraphicViewer's scale(1,-1) is applied by the VIEW, after the path is built),
+    // so a world yaw ψ has to be handed over as −ψ, and the sweep with it. Passing them through
+    // unnegated draws the arc mirrored about the x axis and sweeping away from the target.
+    const double start_qt = -current_yaw * 180.0 / M_PI;
+    const double sweep_qt = -sweep * 180.0 / M_PI;
+    // arcMoveTo first: arcTo alone would draw a straight line in from wherever the path currently is.
+    arc.arcMoveTo(box, start_qt);
+    arc.arcTo(box, start_qt, sweep_qt);
+    orient_arc_->setPath(arc);
+}
+
 } // namespace rc

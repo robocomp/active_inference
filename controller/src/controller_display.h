@@ -99,6 +99,10 @@ public:
     void set_goal_distance(std::optional<float> dist_m, std::optional<float> yaw_err_rad, bool aligning);
     void set_session_totals(float metres, float seconds);   // top row: metres and time since startup
     void set_affordance_execution(const rc::AffordanceExecution &v);   // the affordance-program window
+    // Stage the Orient bearing overlay for the 2D view (thread-safe; applied in present()).
+    // Pass visible=false whenever the running affordance is not an Orient, so a finished turn cannot
+    // leave a ray pointing at a bearing nobody is asking for any more.
+    void set_orient_overlay(float x, float y, float target_yaw, float current_yaw, bool visible);
     // One sample per evaluated affordance for the EFE panel below the 2D view. Plots TWO lines per
     // affordance: the selection score (gain − λ·dist, solid) and the raw gain (ΔH, lighter) — so the
     // vertical gap between them is λ·dist. Thread-safe (the plot buffers under its own mutex).
@@ -212,6 +216,9 @@ private:
         float session_distance_m = 0.f;
         float session_elapsed_s = 0.f;
         rc::AffordanceExecution affordance;
+        // The Orient overlay: where the body is, the bearing asked for, and where it points now.
+        float orient_x = 0.f, orient_y = 0.f, orient_target_yaw = 0.f, orient_current_yaw = 0.f;
+        bool  orient_visible = false;
         rc::CameraMasksView camera_masks;
         bool camera_masks_pending = false;
         // Mission overlay + readout.

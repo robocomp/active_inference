@@ -191,6 +191,17 @@ void ControllerDisplay::set_command_text(const QString &text)
     snapshot_.command_text_pending = true;
 }
 
+void ControllerDisplay::set_orient_overlay(float x, float y, float target_yaw, float current_yaw,
+                                          bool visible)
+{
+    std::scoped_lock lock(snapshot_mutex_);
+    snapshot_.orient_x = x;
+    snapshot_.orient_y = y;
+    snapshot_.orient_target_yaw = target_yaw;
+    snapshot_.orient_current_yaw = current_yaw;
+    snapshot_.orient_visible = visible;
+}
+
 void ControllerDisplay::set_affordance_execution(const rc::AffordanceExecution &v)
 {
     std::lock_guard<std::mutex> lock(snapshot_mutex_);
@@ -448,6 +459,9 @@ void ControllerDisplay::present()
         viewer_2d_->update_target_marker(snap.current_target_room->x(), snap.current_target_room->y(), true);
     else
         viewer_2d_->update_target_marker(0.f, 0.f, false);
+
+    viewer_2d_->update_orient_overlay(snap.orient_x, snap.orient_y, snap.orient_target_yaw,
+                                      snap.orient_current_yaw, snap.orient_visible);
 
     if (snap.robot_pose.has_value())
         viewer_2d_->update_robot(snap.robot_pose->as_transform());

@@ -168,6 +168,11 @@ private:
     // true once finished (LOOKED or GIVE_UP); drives the base rotation directly. Owns the base while active.
     bool step_orient(const ControllerRobotPose &robot_pose, ControllerMotionCommander &motion_commander,
                      const TimeSource &time_source, float target_yaw);
+    // What the 2D view draws for a running Orient: the bearing asked for, and whether to draw it at
+    // all. Latched where the program is built (which is the only place that knows the policy) and
+    // pushed to the display beside the rest of the overlay.
+    float orient_overlay_yaw_ = 0.f;
+    bool  orient_overlay_visible_ = false;
     std::optional<std::uint64_t> orient_start_ms_;
     // The heading error the current turn STARTED from, so the chart can show a fraction rather than a
     // raw angle. Reset with orient_start_ms_, i.e. once per turn, not once per cycle.

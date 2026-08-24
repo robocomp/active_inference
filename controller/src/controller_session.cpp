@@ -2997,6 +2997,7 @@ void ControllerSession::update_affordance_view(const ControllerRobotPose &robot_
             if (affordance_recent_.size() > 4) affordance_recent_.resize(4);
         }
         affordance_view_.active = false;
+        orient_overlay_visible_ = false;   // nothing is turning; do not leave a bearing on the map
         affordance_view_.recent = affordance_recent_;
         affordance_view_.transcript = affordance_transcript_;
         return;
@@ -3014,6 +3015,7 @@ void ControllerSession::update_affordance_view(const ControllerRobotPose &robot_
         // because the policy decides real behaviour now and not just what this window draws.
     }
 
+    orient_overlay_visible_ = false;   // re-armed below only while an Orient is the running policy
     v.active = true;
     v.affordance = last_target_info_->node_name;
     v.contract_known = target_contract_known_;
@@ -3069,6 +3071,8 @@ void ControllerSession::update_affordance_view(const ControllerRobotPose &robot_
                                          std::cos(target_yaw - robot_pose.theta));
         constexpr float kAligned = 0.05f;                  // the executor's own band
         const bool aligned = std::abs(yaw_err) < kAligned;
+        orient_overlay_yaw_ = target_yaw;
+        orient_overlay_visible_ = true;
 
         v.steps.push_back({.label = "claim affordance", .kind = Step::Kind::Pipeline,
                            .state = S::Done, .progress = -1.f,
@@ -3606,6 +3610,8 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     affordance_view_.dwell_mask_hits = dwell_mask_hits_;
     affordance_view_.suppressed = suppressed_affordance_;
     display.set_affordance_execution(affordance_view_);
+    display.set_orient_overlay(robot_pose.pos.x(), robot_pose.pos.y(), orient_overlay_yaw_,
+                               robot_pose.theta, orient_overlay_visible_);
     display.set_session_totals(session_distance_m_, session_elapsed_s());
     display.set_goal_distance(control_output.dist_to_goal, control_output.goal_yaw_err_rad,
                               control_output.aligning);

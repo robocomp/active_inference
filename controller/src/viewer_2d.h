@@ -6,6 +6,7 @@
 #include <QGraphicsEllipseItem>
 #include <QGraphicsLineItem>
 #include <QGraphicsPolygonItem>
+#include <QGraphicsPathItem>
 #include <QGraphicsItem>
 #include <QPointF>
 #include <QRectF>
@@ -67,6 +68,14 @@ class Viewer2D : public QObject
     void clear_mission_items();
     void clear_robot_trajectory();
     void update_target_marker(float x, float y, bool visible);
+    // ── AN ORIENT HAS NOTHING TO DRAW AS A PLACE ────────────────────────────────────────────────
+    // A Reach shows up on this view as a marker somewhere else and a path leading to it. An Orient is
+    // published AT the robot's own pose and turns on the spot, so the marker lands under the body and
+    // there is no path: the view shows nothing at all, which is exactly what it looked like while the
+    // calibration pivot was running. What an Orient asks for is a BEARING, so that is what gets drawn
+    // -- the asked heading as a ray from the body, and the arc still to be turned between where the
+    // robot points now and where it was asked to point.
+    void update_orient_overlay(float x, float y, float target_yaw, float current_yaw, bool visible);
 
 Q_SIGNALS:
     void new_mouse_coordinates(QPointF);
@@ -96,6 +105,8 @@ private:
     bool mission_recording_ = false;
     int  drag_index_ = -1;
     QGraphicsEllipseItem *target_marker_ = nullptr;
+    QGraphicsLineItem    *orient_ray_ = nullptr;      // the bearing the producer asked for
+    QGraphicsPathItem    *orient_arc_ = nullptr;      // what is still to be turned
     std::vector<QGraphicsLineItem *> robot_traj_items_;
     std::optional<Eigen::Vector2f> last_robot_pos_;
 
