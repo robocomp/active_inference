@@ -133,6 +133,17 @@ nodes    = ["room_concept 5"]  # our own agent presence node (cleaned on shutdow
 # to lose almost every contest — which is the correct outcome, not a broken feature.
 CalibPivotEnabled      = true 
 
+# ★TESTING SCAFFOLD, NOT A TUNING KNOB. >0 replaces the advertised gain with this constant so
+# afford_calib wins the EFE contest on demand. It exists because the four-turn closure has never once
+# run end to end: priced honestly this robot's pivot is worth fractions of a nat, it loses to every
+# exploration cell, and everything downstream of selection -- the claim, the Orient contract, the
+# per-step turn measurement, the closure -- has therefore never been exercised. Forcing the price
+# forces only the CONTEST; the manoeuvre itself runs exactly as it would in earnest.
+# The true valuation is still computed and printed beside the forced one on the "[calib] ★TESTING"
+# line. Nothing measured while this is set may be quoted as a valuation. Back to 0.0 when the pivot
+# closes on its own merit.
+CalibForcedGainNats    = 50.0
+
 RoomLayoutSvg          = "p3bot_layout.svg"  # 8x6 room of webots-p3bot/worlds/WAF.wbt, with the
                        # 0.7x0.7 corner column that breaks the rectangle's 180-degree symmetry.
                        # The contour and the WAF.wbt walls must stay identical; room frame = (-x_svg, y_svg).
@@ -604,3 +615,67 @@ Warn.Connections = "0"
 Trace.Network = "0"
 Trace.Protocol = "0"
 MessageSizeMax = "20004800"
+
+# ═══ RGB edge alignment — structural contours vs the image gradient ══════════════════════════════
+# The localizer's only exteroceptive term is the LiDAR SDF. This adds a second, independent view of
+# the SAME room geometry from a sensor with completely different failure modes: where the model's
+# wall-wall corner lines and floor-wall junction project into the RGB image, the image should show
+# an intensity edge, and the signed pixel displacement is a measurement with a real precision.
+#
+# ── Staging: OFF at three independent levels (mirrors how GnShadow / OptimizerType were staged) ──
+#   enable = false  -> nothing is constructed: no subscriber, no thread, no extraction. ZERO cost.
+#   shadow = true   -> the term is extracted, evaluated and logged, and the pose is UNTOUCHED.
+#   drive  = true   -> the factor enters build_factors() and moves the published pose.
+# Reversion is one word: enable = false.
+#
+# ★ There is deliberately NO weight key. If this term needs a hand-set scalar to behave, its
+#   covariance model is wrong — the per-sample precision is DERIVED (Cramer-Rao from the measured
+#   gradient profile, with the frame's own noise sigma measured per frame) and the shared-nuisance
+#   cap is physical. Do not add a weight; fix the covariance.
+#
+# ── WHY CORNERS FIRST AND THE FLOOR JUNCTION SECOND ──
+# A vertical wall-wall corner has a HORIZONTAL image normal, so it measures BEARING and the mount
+# pitch/height errors barely project onto it. 1 px at fx=448 is 2.2 mrad, against ~10 mrad for a
+# LiDAR corner at 3 m -- roughly 4.5x, and it is the DOF the image genuinely adds.
+# The floor-wall junction measures RANGE (v = cy + fy*h/d, so d = fy*h/(v-cy)) and is far more
+# informative per pixel -- at 3 m one pixel is 1.9 cm against the LiDAR's ObsSigma of 0.05 m -- but
+# it is exposed to the mount: delta_d = theta_pitch * d^2 / h, i.e. 1 degree of pitch error is 14 cm
+# at 3 m, and 0.1 degree is 1.4 cm. Because the image term is PRECISE, a mis-calibrated pitch does
+# not merely add noise, it WINS and drags the pose. So the junction stays off until the
+# systematic-residual monitor shows pitch is trusted (bias_const_px ~ 0).
+[ImageEdge]
+enable = false
+shadow = false
+drive  = false
+camera = "zed"            # DSR node name. "ricoh" selects the 360 equirect model; no code changes.
+
+useWallCorners   = true   # bearing; nearly immune to mount pitch/height
+useFloorJunction = false  # range; ENABLE ONLY AFTER the pitch bias is checked (see above)
+useWallCeiling   = false  # cluttered by lamps/ducts, and off the ZED's FoV at close range
+
+# Arc-length spacing along each contour, in 3-D metres -- NOT in pixels. Uniform-in-pixels would
+# concentrate samples at the near end, which is exactly where the height nuisance is weakest, and
+# would silently reweight the estimator toward the least informative geometry.
+sampleSpacingM = 0.10
+
+# The normal search half-length is DERIVED per sample: sqrt(J*Sigma_pose*J' + shared nuisances +
+# edge sigma), times this. It is a Gaussian truncation point, not a pixel constant, and it is
+# TESTABLE as such: sweep 2/3/4 in shadow mode and the residual distribution and chi2_per_dof must
+# not move. If they do, the inlier/outlier mixture is mis-specified -- fix that, not this number.
+searchSigmas = 3.0
+maxSearchPx  = 64         # a COMPUTE bound only; n_clamped in the CSV shows if it ever binds
+maxSlots     = 1          # newest window slot only, like corners
+
+# ── Shared-nuisance priors: how well the mount is known ──
+# ★ THIS IS THE ONE THING THAT STOPS THE TERM SWAMPING THE LIDAR. N samples along one straight
+#   junction are NOT N measurements: a line has 2 DOF and every sample on it shares camera pitch,
+#   height, boresight yaw and the image/LiDAR time offset. Summed naively the term claims ~sqrt(N)
+#   times the precision it has. These sigmas define the common-mode covariance that a Woodbury
+#   marginalisation uses to cap ONE contour segment at roughly ONE nuisance-limited observation --
+#   while leaving its internal near-vs-far contrast at full weight, which is real information.
+#   They are PHYSICAL quantities, not tuning knobs. Widen them if the mount is less well known.
+mountPitchSigma  = 0.0035   # rad (~0.2 deg)
+mountHeightSigma = 0.010    # m
+mountYawSigma    = 0.0035   # rad
+
+csv = "etc/image_edge.csv"

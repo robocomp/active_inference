@@ -54,6 +54,8 @@
 #include "rerun_logger.h"
 #include "object_anchor_types.h"
 #include "object_anchor_factor.h"
+#include "image_edge_types.h"
+#include "image_edge_factor.h"
 #include "se2_preintegration.h"
 #include "motion_calibration.h"
 
@@ -618,6 +620,15 @@ public:
         // become interior factors that tighten the robot↔room link.  Precision-weighted by
         // each object's own belief covariance — no threshold (see object_anchor_source.h).
         ObjectAnchorFactor::Params object_anchor;      // .enable defaults false (OFF)
+
+        // RGB edge alignment: structural contours (wall-wall corners, floor-wall junction) against
+        // the image gradient. OFF by default at three levels — see room_config.h. The precision is
+        // DERIVED (Cramer-Rao from the measured gradient profile) and the shared-nuisance cap is
+        // physical, so there is deliberately no weight knob here either.
+        ImageEdgeFactor::Params image_edge;            // .enable / .drive default false (OFF)
+        int         image_edge_max_slots = 1;          // newest slot only, like corners
+        bool        image_edge_shadow    = false;      // evaluate + log, do NOT move the pose
+        std::string image_edge_csv       = "etc/image_edge.csv";
         int   object_anchor_max_slots = 3;             // Only apply object factors to the newest N slots
         float object_anchor_early_exit_sigma = 2.0f;   // prediction early-exit gate: whitened anchor-residual
                                                        // σ-cutoff above which the optimizer is forced to run
@@ -1084,6 +1095,10 @@ public:
 
         // Object-anchor observations for this slot (validated modelled objects as SE(2) landmarks).
         std::vector<ObjectAnchorObs> object_anchors;
+        // RGB edge evidence for this slot. The normal search already happened ONCE, on the compute
+        // thread at the pre-solve pose, so uv_meas is a CONSTANT of the solve — required, or LM's
+        // accept/reject test tracks a moving target (see image_edge_source.h).
+        ImageEdgeObs                 image_edges;
     };
 
     struct BoundaryPrior
@@ -1128,6 +1143,18 @@ public:
         return latest_object_anchors_;
     }
 
+    /// Latest RGB edge evidence (compute thread produces, solve consumes). Thread-safe copy.
+    ImageEdgeObs image_edges() const
+    {
+        std::scoped_lock lk(image_edges_mutex_);
+        return latest_image_edges_;
+    }
+    void set_image_edges(ImageEdgeObs obs)
+    {
+        std::scoped_lock lk(image_edges_mutex_);
+        latest_image_edges_ = std::move(obs);
+    }
+
     void set_object_anchors(std::vector<ObjectAnchorObs> anchors)
     {
         std::scoped_lock lk(object_anchors_mutex_);
@@ -1156,6 +1183,8 @@ private:
    std::optional<UpdateResult> last_result_;
 
    // Latest object anchors from the graph (set on main thread, consumed by the localizer thread).
+   mutable std::mutex image_edges_mutex_;
+   ImageEdgeObs       latest_image_edges_;
    mutable std::mutex object_anchors_mutex_;
    std::vector<ObjectAnchorObs> latest_object_anchors_;
 
@@ -1326,6 +1355,7 @@ private:
            float motion   = 0.f;
            float corner   = 0.f;
            float object   = 0.f;
+           float image    = 0.f;   ///< RGB structural-contour term (0 unless ImageEdge.enable)
        };
        LossBreakdown compute_rfe_loss_breakdown(const Model& model, const Params& params,
                                                  torch::Device device) const;
@@ -1697,6 +1727,16 @@ private:
     /// Run the GN backend on the CURRENT window WITHOUT keeping its answer, and log it beside the
     /// authoritative backend's. Call after the authority has run; poses_before is the state both
     /// started from, poses_after the authority's solution (restored on return).
+    /// RGB edge shadow: solve TWICE from the same start — with and without the image term — and log
+    /// both answers. Two questions, kept in SEPARATE column groups because conflating them is how a
+    /// term that carries no information gets shipped: "does it carry information?" (counts, sigmas,
+    /// trace_raw vs trace_eff) and "who won?" (the pose difference and the covariance both ways).
+    /// Also fits the systematic-residual monitor, which is what catches a mis-calibrated mount
+    /// BEFORE it biases the pose.
+    void run_image_edge_shadow(const std::vector<Eigen::Vector3f>& poses_after,
+                               float boundary_weight, std::int64_t timestamp_ms);
+    std::ofstream image_edge_csv_;
+
     void run_gn_shadow(const std::vector<Eigen::Vector3f>& poses_before,
                        const std::vector<Eigen::Vector3f>& poses_after,
                        float authority_loss, int authority_iters, float authority_ms,

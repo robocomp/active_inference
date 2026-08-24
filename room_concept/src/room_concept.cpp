@@ -2,6 +2,9 @@
 #include "pointcloud_center_estimator.h"
 #include "room_gn_solver.h"
 #include "room_obs_weights.h"
+#include "room_gn_solver.h"
+#include "image_edge_accumulate.h"
+#include "image_edge_ops.h"
 #include <algorithm>
 #include <ranges>
 #include <fstream>
@@ -2430,6 +2433,11 @@ namespace rc
             if (gn_shadow_this_frame)
                 run_gn_shadow(poses_before, read_window_poses(), last_loss, iterations,
                               last_t_adam_ms_, lidar.second);
+
+            // RGB edge shadow: evaluated + logged, pose untouched. Inert unless enable && shadow,
+            // and skipped entirely once the term is DRIVING (there would be nothing to compare to).
+            if (params.image_edge.enable and params.image_edge_shadow and not params.image_edge.drive)
+                run_image_edge_shadow(read_window_poses(), boundary_weight_now(), lidar.second);
             res.final_loss     = last_loss;
             res.iterations_used = iterations;
 
@@ -3698,6 +3706,164 @@ namespace rc
         return {r.loss, r.iterations};
     }
 
+
+    // ── RGB edge shadow + systematic-residual monitor ────────────────────────────────────────────
+    void RoomConcept::run_image_edge_shadow(const std::vector<Eigen::Vector3f>& poses_after,
+                                            float boundary_weight, std::int64_t timestamp_ms)
+    {
+        if (window_mgr_.window.empty()) return;
+        const auto& slot = window_mgr_.window.back();
+        const auto& obs  = slot.image_edges;
+        if (obs.empty() or not obs.cam.valid) return;
+
+        const Eigen::Vector3f pose = poses_after.back();
+        const float cth = std::cos(pose.z()), sth = std::sin(pose.z());
+        Eigen::Matrix3f Rm; Rm << cth, sth, 0.f, -sth, cth, 0.f, 0.f, 0.f, 1.f;
+
+        // ── Pass 1: the term's own numbers at the authority's pose ───────────────────────────────
+        float trace_raw = 0.f, trace_eff = 0.f, sum_gamma = 0.f, chi2 = 0.f, loss_img = 0.f;
+        int   n_used = 0;
+        std::vector<float> abs_r;
+        // Systematic-residual monitor: fit  r_k ~ b_const + b_invd * (fy / d_k).
+        // Range SEPARATES the two mount errors, exactly as rotation-vs-time separates gyro scale
+        // from gyro bias in calibration_estimator.h: a PITCH error is constant in pixels
+        // (delta_psi = b_const / fy) while a HEIGHT error scales as fy/d (delta_h = b_invd). A
+        // persistent, pose-independent, significant b is miscalibration; a fluctuating one is noise.
+        double S11 = 0, S12 = 0, S22 = 0, Sy1 = 0, Sy2 = 0, Syy = 0, Sw = 0;
+
+        for (const auto& seg : obs.segments)
+        {
+            const auto acc = rc::img::accumulate_segment(seg,
+                [&](std::size_t k, Eigen::Matrix<float, 1, 3>& J) -> float
+                {
+                    const auto& smp = seg.samples[k];
+                    const Eigen::Vector3f e(smp.p_room.x() - pose.x(), smp.p_room.y() - pose.y(), smp.p_room.z());
+                    const Eigen::Vector3f p_robot = Rm * e;
+                    const Eigen::Vector3f p_cam   = obs.cam_R_robot * p_robot + obs.cam_t_robot;
+                    Eigen::Vector2d uv;
+                    if (not rc::img::project_with_model(obs.cam, p_cam.cast<double>(), uv))
+                        return std::numeric_limits<float>::quiet_NaN();
+                    double du = uv.x() - static_cast<double>(smp.uv_meas.x());
+                    if (obs.cam.kind != CameraModel::Kind::Pinhole)
+                    {
+                        while (du >  0.5 * obs.cam.width) du -= obs.cam.width;
+                        while (du <= -0.5 * obs.cam.width) du += obs.cam.width;
+                    }
+                    const double dv = uv.y() - static_cast<double>(smp.uv_meas.y());
+                    Eigen::Matrix<double, 2, 3> P;
+                    if (not rc::img::project_jacobian_model(obs.cam, p_cam.cast<double>(), P))
+                        return std::numeric_limits<float>::quiet_NaN();
+                    Eigen::Matrix3f Jx;
+                    Jx.col(0) = obs.cam_R_robot * (-Rm.col(0));
+                    Jx.col(1) = obs.cam_R_robot * (-Rm.col(1));
+                    Jx.col(2) = obs.cam_R_robot * Eigen::Vector3f(p_robot.y(), -p_robot.x(), 0.f);
+                    J = smp.n_hat.transpose() * (P.cast<float>() * Jx);
+                    const float r = smp.n_hat.x() * static_cast<float>(du)
+                                  + smp.n_hat.y() * static_cast<float>(dv);
+                    // Monitor uses FLOOR-JUNCTION samples only: the fy/d signature is what makes
+                    // pitch and height separable, and a vertical corner does not carry it.
+                    if (seg.class_id == ContourClass::FloorWall and smp.sigma_px > 0.f)
+                    {
+                        const float d = p_cam.norm();
+                        if (d > 0.3f)
+                        {
+                            const double w  = 1.0 / (smp.sigma_px * smp.sigma_px);
+                            const double x2 = obs.cam.fy / d;
+                            S11 += w;        S12 += w * x2;   S22 += w * x2 * x2;
+                            Sy1 += w * r;    Sy2 += w * x2 * r; Syy += w * r * r; Sw += w;
+                        }
+                    }
+                    abs_r.push_back(std::fabs(r));
+                    return r;
+                },
+                [](std::size_t) { return 0.0f; });
+            trace_raw += acc.trace_raw;
+            trace_eff += acc.trace_eff;
+            sum_gamma += acc.sum_gamma;
+            chi2      += acc.chi2;
+            loss_img  += acc.loss;
+            n_used    += acc.n_used;
+        }
+        if (n_used == 0) return;
+
+        float r_rms = 0.f;
+        for (float a : abs_r) r_rms += a * a;
+        r_rms = std::sqrt(r_rms / static_cast<float>(std::max<std::size_t>(1, abs_r.size())));
+
+        // Solve the 2x2 weighted normal equations for the monitor.
+        float b_const = 0.f, b_invd = 0.f, se_const = 0.f, se_invd = 0.f;
+        {
+            const double det = S11 * S22 - S12 * S12;
+            if (std::abs(det) > 1e-12 and Sw > 0)
+            {
+                b_const = static_cast<float>(( S22 * Sy1 - S12 * Sy2) / det);
+                b_invd  = static_cast<float>((-S12 * Sy1 + S11 * Sy2) / det);
+                se_const = static_cast<float>(std::sqrt(std::max(0.0,  S22 / det)));
+                se_invd  = static_cast<float>(std::sqrt(std::max(0.0,  S11 / det)));
+            }
+        }
+
+        // ── Pass 2: who won? Solve twice from the SAME start, exactly the run_gn_shadow pattern.
+        //    Shadow mode must not be able to change the published pose, so the window poses are
+        //    restored afterwards by the caller (poses_after is what the authority produced).
+        float dx = 0.f, dy = 0.f, dth = 0.f;
+        {
+            rc::gn::Input in;
+            in.model = model_.get();
+            in.params = &params;
+            in.window = &window_mgr_.window;
+            in.boundary_prior = &window_mgr_.boundary_prior;
+            in.boundary_weight = boundary_weight;
+            in.device = get_device();
+
+            Params p_on  = params;  p_on.image_edge.enable = true;  p_on.image_edge.drive = true;
+            rc::gn::Input in_on = in; in_on.params = &p_on;
+            auto poses_on = poses_after;
+            rc::gn::Options opts;
+            const auto r_on = rc::gn::solve(in_on, poses_on, opts);
+            if (r_on.ok)
+            {
+                const auto& a = poses_after.back();
+                const auto& b = poses_on.back();
+                dx = b.x() - a.x(); dy = b.y() - a.y();
+                dth = std::atan2(std::sin(b.z() - a.z()), std::cos(b.z() - a.z()));
+            }
+        }
+
+        if (not image_edge_csv_.is_open())
+        {
+            image_edge_csv_.open(params.image_edge_csv, std::ios::out | std::ios::trunc);
+            if (image_edge_csv_.is_open())
+            {
+                image_edge_csv_.imbue(std::locale::classic());   // CLAUDE.md: never a comma decimal
+                image_edge_csv_
+                    // does it carry information?
+                    << "ts_ms,frame_stamp,dt_img_lidar_ms,n_segments,n_used,sum_gamma,sigma_i,"
+                       "r_rms_px,chi2_per_dof,trace_raw,trace_eff,info_ratio,loss_img,"
+                    // who won?
+                       "dpose_x,dpose_y,dpose_th,"
+                    // is the mount calibrated?
+                       "bias_const_px,se_const_px,bias_invd_m,se_invd_m,implied_dpitch_rad,implied_dheight_m\n";
+            }
+        }
+        if (image_edge_csv_.is_open())
+        {
+            const float chi2_dof = chi2 / std::max(1.f, sum_gamma);
+            image_edge_csv_
+                << timestamp_ms << ',' << obs.frame_stamp << ',' << obs.dt_to_slot_ms
+                << ',' << obs.segments.size() << ',' << n_used << ',' << sum_gamma
+                << ',' << obs.sigma_i << ',' << r_rms << ',' << chi2_dof
+                << ',' << trace_raw << ',' << trace_eff
+                << ',' << (trace_raw / std::max(1e-9f, trace_eff))
+                << ',' << loss_img
+                << ',' << dx << ',' << dy << ',' << dth
+                << ',' << b_const << ',' << se_const << ',' << b_invd << ',' << se_invd
+                << ',' << (obs.cam.fy > 0.f ? b_const / obs.cam.fy : 0.f) << ',' << b_invd
+                << '\n';
+            image_edge_csv_.flush();
+        }
+    }
+
     void RoomConcept::run_gn_shadow(const std::vector<Eigen::Vector3f>& poses_before,
                                     const std::vector<Eigen::Vector3f>& poses_after,
                                     float authority_loss, int authority_iters, float authority_ms,
@@ -3985,8 +4151,17 @@ namespace rc
             auto pose_xy = pose_for_hess.index({torch::indexing::Slice(0, 2)});
             auto pose_theta_h = pose_for_hess.index({torch::indexing::Slice(2, 3)});
 
-            const torch::Tensor likelihood_loss =
+            torch::Tensor likelihood_loss =
                 compute_observation_loss(*model_, params, points_tensor, pose_xy, pose_theta_h);
+
+            // The RGB edge term is a LIKELIHOOD, so once it drives the pose it must also inform the
+            // reported covariance — otherwise the agent would act on evidence it does not admit to
+            // having, and sigma_theta (the pre-registered success criterion, and what feeds the
+            // controller's speed governor and every concept agent's precision) could never move.
+            // ★ Gated on DRIVE, not merely enable: shadow mode must not change any published number.
+            if (params.image_edge.enable and params.image_edge.drive and not newest.image_edges.empty())
+                likelihood_loss = likelihood_loss + ImageEdgeFactor::loss(
+                    newest.image_edges, pose_xy, pose_theta_h, params.image_edge, get_device());
 
             Eigen::Matrix3f H_likelihood = autograd_hessian_3x3(likelihood_loss, pose_for_hess);
 
@@ -5441,6 +5616,30 @@ namespace rc
             }
         }
 
+        // --- 6. RGB structural-contour factors (image gradient vs projected model contours) ---
+        // MUST mirror rc::gn::ImageEdgeFactorGn term for term. Two things break if it does not:
+        // GnShadow stops measuring solver agreement and starts measuring objective divergence, and
+        // — the one that matters more — compute_posterior_covariance() takes an AUTOGRAD Hessian of
+        // this function, so a term missing here is a term missing from the reported sigma, which is
+        // the pre-registered success criterion for the whole feature.
+        // Gated on enable AND drive, the SAME condition rc::gn::build_factors uses. If the two gates
+        // differed, then in shadow mode the torch objective would carry the term and the GN objective
+        // would not, and GnShadow's cross-scoring would report a backend disagreement that is really
+        // just two different objectives.
+        if (params.image_edge.enable and params.image_edge.drive)
+        {
+            const int img_start = std::max(0, static_cast<int>(window.size()) - std::max(1, params.image_edge_max_slots));
+            for (size_t si = img_start; si < window.size(); si++)
+            {
+                const auto& slot = window[si];
+                if (slot.image_edges.empty()) continue;
+                auto pose_xy    = slot.pose.index({torch::indexing::Slice(0, 2)});
+                auto pose_theta = slot.pose.index({torch::indexing::Slice(2, 3)});
+                total_loss = total_loss + ImageEdgeFactor::loss(
+                    slot.image_edges, pose_xy, pose_theta, params.image_edge, device);
+            }
+        }
+
         return total_loss;
     }
 
@@ -5549,6 +5748,21 @@ namespace rc
                     slot.object_anchors, pose_xy, pose_theta, params.object_anchor, device).item<float>();
             }
             bd.object = obj_acc;
+        }
+
+        // 6. RGB structural contours — same order and same terms as compute_rfe_loss.
+        if (params.image_edge.enable and params.image_edge.drive) {
+            const int img_start = std::max(0, static_cast<int>(window.size()) - std::max(1, params.image_edge_max_slots));
+            float img_acc = 0.f;
+            for (size_t si = img_start; si < window.size(); si++) {
+                const auto& slot = window[si];
+                if (slot.image_edges.empty()) continue;
+                auto pose_xy    = slot.pose.detach().index({torch::indexing::Slice(0, 2)});
+                auto pose_theta = slot.pose.detach().index({torch::indexing::Slice(2, 3)});
+                img_acc += ImageEdgeFactor::loss(
+                    slot.image_edges, pose_xy, pose_theta, params.image_edge, device).item<float>();
+            }
+            bd.image = img_acc;
         }
 
         return bd;

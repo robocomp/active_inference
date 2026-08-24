@@ -105,6 +105,13 @@ struct RoomConfig
     // — watching how well the odometry's rotation scale is known — runs regardless and commands
     // nothing, because free data is free whether or not anyone acts on it.
     bool  CALIB_PIVOT_ENABLED          = false;   // RoomConcept.CalibPivotEnabled
+    // ★TESTING SCAFFOLD. >0 forces the advertised gain of afford_calib to this many nats so it wins
+    // the controller's EFE selection on demand. The manoeuvre has never run to closure because a
+    // calibrated robot prices it honestly at fractions of a nat and it loses every contest — so the
+    // four-turn sequence downstream of selection is untested. This buys those tests and nothing else:
+    // the true valuation is still computed and logged beside the forced one, and no result obtained
+    // with this set may be quoted as a valuation. Back to 0 when the pivot works.
+    float CALIB_FORCED_GAIN_NATS       = 0.f;     // RoomConcept.CalibForcedGainNats
     bool  PUBLISH_AFFORDANCE           = true;    // EpistemicController.PublishAffordance — publish the room
                                                   // exploration affordance. false ⇒ room never offers an
                                                   // affordance (so it can't out-compete object affordances in
@@ -205,6 +212,43 @@ struct RoomConfig
                                                   // room PINS the table's world pose (breaks the circularity)
     bool  OBJECT_ANCHOR_FRESHNESS_ENABLE    = true;  // ObjectAnchor.freshnessEnable — grow R_o with obs age
     float OBJECT_ANCHOR_FRESHNESS_AGE_SCALE = 3.0f;  // ObjectAnchor.freshnessAgeScale — frames→σ doubles
+
+    // ── RGB edge alignment (structural contours vs image gradient) ─────────────────────────────
+    // OFF by default, at THREE independent levels, mirroring how GnShadow/OptimizerType were staged:
+    //   ENABLE  — nothing constructed: no subscriber, no ingest thread, no factor. ZERO cost.
+    //   SHADOW  — extract + evaluate the term into a DISCARDED system and log it. Pose UNTOUCHED.
+    //   DRIVE   — the factor enters build_factors() and moves the published pose.
+    // There is deliberately NO weight key: if the term needs a hand-set scalar to behave, its
+    // covariance model is wrong, which is the whole point of the common-mode cap and the CRB-derived
+    // per-sample precision. Do not add one.
+    bool  IMAGE_EDGE_ENABLE = false;   // ImageEdge.enable
+    bool  IMAGE_EDGE_SHADOW = false;   // ImageEdge.shadow
+    bool  IMAGE_EDGE_DRIVE  = false;   // ImageEdge.drive   (refused unless OptimizerType == "GN")
+    std::string IMAGE_EDGE_CAMERA = "zed";   // ImageEdge.camera — DSR node name ("zed" | "ricoh")
+    // Which structural contours are measured. Vertical wall-wall corners carry BEARING on a
+    // horizontal normal and are nearly immune to the mount pitch/height nuisances; the floor-wall
+    // junction carries RANGE and is exposed to them (δd = θ_pitch·d²/h ⇒ 1° ≈ 14 cm at 3 m).
+    // That asymmetry is why they are separately switchable and why corners come first.
+    bool  IMAGE_EDGE_USE_WALL_CORNERS  = true;   // ImageEdge.useWallCorners
+    bool  IMAGE_EDGE_USE_FLOOR_JUNCTION = false; // ImageEdge.useFloorJunction
+    bool  IMAGE_EDGE_USE_WALL_CEILING  = false;  // ImageEdge.useWallCeiling
+    float IMAGE_EDGE_SAMPLE_SPACING_M  = 0.10f;  // ImageEdge.sampleSpacingM — arc-length in 3-D, NOT
+                                                 // in pixels (uniform-in-pixels biases density to the
+                                                 // near end, silently reweighting the estimator)
+    float IMAGE_EDGE_SEARCH_SIGMAS     = 3.0f;   // ImageEdge.searchSigmas — Gaussian truncation point of
+                                                 // a DERIVED window, not a pixel constant. Testable as
+                                                 // such: sweep 2/3/4, the residual distribution and
+                                                 // chi2_per_dof must not move. If they do, the mixture
+                                                 // is mis-specified.
+    int   IMAGE_EDGE_MAX_SEARCH_PX     = 64;     // ImageEdge.maxSearchPx — a COMPUTE bound only; the CSV
+                                                 // logs n_clamped so it is visible if it ever binds
+    int   IMAGE_EDGE_MAX_SLOTS         = 1;      // ImageEdge.maxSlots — newest slot only, like corners
+    // Common-mode (shared-nuisance) priors. These are PHYSICAL: how well the mount is known. They are
+    // what stops N correlated samples on one wall from claiming √N precision and out-voting the LiDAR.
+    float IMAGE_EDGE_MOUNT_PITCH_SIGMA = 0.0035f; // ImageEdge.mountPitchSigma (rad, ~0.2°)
+    float IMAGE_EDGE_MOUNT_HEIGHT_SIGMA= 0.010f;  // ImageEdge.mountHeightSigma (m)
+    float IMAGE_EDGE_MOUNT_YAW_SIGMA   = 0.0035f; // ImageEdge.mountYawSigma (rad)
+    std::string IMAGE_EDGE_CSV = "etc/image_edge.csv";  // ImageEdge.csv
 };
 
 // Load the agent params + RoomConcept params + EpistemicController/planner params,

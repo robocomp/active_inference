@@ -320,12 +320,37 @@ ControlOutput& PlainTracker::compute(ControlOutput& out, const TrackerInput& in,
         pivoting_ = true;
     else if (pivoting_ and not route_ahead)
     { pivoting_ = false; released_now = true; }
-    // ★THE MID-ROUTE RELEASE STAYS AT THE QUARTER TURN — the boundary above, untouched. It was the
-    // release that LOOKED guilty of the chatter and it is not: what made the pair oscillate is that
-    // release handed the robot to a law aiming somewhere else. Fix that (the adopt below) and the
-    // quarter turn is sound again, which is worth more than a tighter number — moving it to align_tol
-    // was measured on route_world.txt and costs rms 40.4 -> 47.4 mm for nothing.
-    else if (pivoting_ and std::abs(align_err) < kQuarterTurn)
+    // ── THE MID-ROUTE RELEASE IS THE ALIGNMENT BOUND, NOT THE QUARTER TURN ──────────────────────
+    // ★THE PREVIOUS NOTE HERE WAS WRONG, AND THE ROBOT FALSIFIED IT (2026-08-23). It read: "the
+    // release only LOOKED guilty of the chatter; what made the pair oscillate is that release handed
+    // the robot to a law aiming somewhere else. Fix that (the adopt below) and the quarter turn is
+    // sound again" — and it priced the alternative at "rms 40.4 -> 47.4 mm for nothing". The adopt is
+    // in and the pair still chatters, so that "nothing" was the whole of the benefit.
+    // MEASURED, live, on the shipped build: 14.6 s in one 78 min run with cmd_rot alternating between
+    // the two caps — HOLD cycles at +0.800 (pivot, wheels at zero) and released cycles at -0.800
+    // (Frenet feedback) — in blocks of 8-11 cycles, e_psi oscillating in 0.84..1.04 rad and never
+    // converging, s frozen at 3.25 m, and the CROSS-TRACK ERROR GROWING MONOTONICALLY 0.23 -> 0.93 m.
+    // The robot walked 0.8 m off a path nothing had certified it to be on, at 0.106 m/s, for 15 s.
+    // ★WHY THE ADOPT CANNOT CLOSE THIS. It searches [s, s+W] for the arc length whose heading matches
+    // the one the robot achieved. Released at the quarter turn the robot has achieved NOTHING — it is
+    // still 90 deg off the outgoing tangent — so no such arc length exists, `best` stays at `s`, and
+    // e_psi survives the release at ~1 rad. The feedback then spends the released cycles turning the
+    // other way (-(2/L)*e_psi alone is -4 rad/m here) until align_err climbs back over the quarter
+    // turn and the entry test, which is the EXACT COMPLEMENT of this one while turn_ahead >= 90 deg,
+    // fires again. Zero hysteresis, two laws saturated in opposite directions, 0.62 s of plant dead
+    // time so neither command is ever finished: a limit cycle, not a handover.
+    // ★AND THE CROSS-TRACK TERM ALONE WOULD STILL REVERSE IT. Even with a perfect adopt (e_psi = 0),
+    // (1/L^2)*e_y at e_y = 0.79 m is 3.16 1/m — four times what the base can deliver. So the release
+    // cannot be made safe by making the two laws agree; it has to happen where the turn is DONE.
+    // ★SO RELEASE ON THE ALIGNMENT BOUND, WHICH IS THIS FILE'S OWN DERIVED CONSTANT (align_tol =
+    // e*spacing/L, the heading residual whose cross-track excursion peaks inside one sample spacing).
+    // Entry asks the quarter turn, release asks the alignment bound: the hysteresis is now wide and
+    // both ends are derived rather than picked. It also REPAIRS the adopt instead of competing with
+    // it — a robot released facing the outgoing tangent has an arc length in [s, s+W] that matches,
+    // so `best` moves, e_psi starts near zero, and entry cannot re-fire because align_err is small.
+    // ★THE COST IS THE ONE ALREADY MEASURED and it is worth paying: rms 40.4 -> 47.4 mm of tracking
+    // error, against a 0.93 m departure from the certified curve. See the bench numbers in the commit.
+    else if (pivoting_ and std::abs(align_err) <= align_tol)
     { pivoting_ = false; released_now = true; }
     // One heading loop, two targets: the tangent the robot is starting from, or the tangent it must
     // leave a turn on. Captured before the flag is cleared so the release cycle still commands the

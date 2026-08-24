@@ -18,8 +18,6 @@
  */
 #include "specificworker.h"
 
-#include <locale>
-
 #include <algorithm>
 #include <print>
 #include <sys/resource.h>   // getrusage — process CPU% readout
@@ -99,7 +97,6 @@ void SpecificWorker::request_shutdown()
 
     // Drop the lidar media subscriber BEFORE tearing down RoomConcept (pump() calls
     // room_concept_.notify_new_lidar) and while G is still alive.
-    camera_ingestor_.reset();  // stop the RGB reader before the graph goes
     imu_ingestor_.reset();   // stop the IMU reader before the graph goes
     lidar_ingestor_.reset();
 
@@ -159,26 +156,6 @@ void SpecificWorker::initialize()
     // option would select a path with nothing on it — a dead config of exactly the kind this
     // codebase keeps rediscovering. The escape hatch is git, not a flag that cannot work.
     imu_ingestor_ = std::make_unique<rc::ImuIngestor>(G, imu_buffer_, sim_clock_);
-    // RGB edge alignment. Constructed ONLY when enabled: with ImageEdge.enable = false there is no
-    // subscriber, no thread and no extraction, so the feature is exactly free when off.
-    if (params.IMAGE_EDGE_ENABLE)
-    {
-        camera_ingestor_ = std::make_unique<rc::CameraIngestor>(
-            G, params.IMAGE_EDGE_CAMERA, params.LIDAR_ROBOT_FRAME);
-        image_edge_source_ = std::make_unique<rc::ImageEdgeSource>();
-        rc::ImageEdgeSource::Config ic;
-        ic.use_wall_corners    = params.IMAGE_EDGE_USE_WALL_CORNERS;
-        ic.use_floor_junction  = params.IMAGE_EDGE_USE_FLOOR_JUNCTION;
-        ic.use_wall_ceiling    = params.IMAGE_EDGE_USE_WALL_CEILING;
-        ic.sample_spacing_m    = params.IMAGE_EDGE_SAMPLE_SPACING_M;
-        ic.search_sigmas       = params.IMAGE_EDGE_SEARCH_SIGMAS;
-        ic.max_search_px       = params.IMAGE_EDGE_MAX_SEARCH_PX;
-        ic.mount_pitch_sigma   = params.IMAGE_EDGE_MOUNT_PITCH_SIGMA;
-        ic.mount_height_sigma  = params.IMAGE_EDGE_MOUNT_HEIGHT_SIGMA;
-        ic.mount_yaw_sigma     = params.IMAGE_EDGE_MOUNT_YAW_SIGMA;
-        ic.room_height         = params.room_height;
-        image_edge_source_->set_config(ic);
-    }
 
     // ── Wire RoomConcept run context ───────────────────────────────────────
     rc::RoomConcept::RunContext run_ctx;
@@ -213,7 +190,6 @@ void SpecificWorker::initialize()
     if (auto* w = viewer_->widget())
     {
         connect(w->btn_camera_viz, &QPushButton::clicked, this, [this] { viewer_->show_camera(); });
-        connect(w->btn_calib_viz, &QPushButton::clicked, this, [this] { viewer_->show_calibration(); });
         connect(w->btn_lidar_points_viz, &QPushButton::toggled, this, [this](bool on) { viewer_->toggle_lidar_points(on); });
         if (auto* v = viewer_->viewer())
             v->set_lidar_points_visible(w->btn_lidar_points_viz->isChecked());
@@ -354,8 +330,6 @@ void SpecificWorker::initialize()
             if (lidar_ingestor_)
                 lidar_ingestor_->start();
                 if (imu_ingestor_) imu_ingestor_->start();
-                // Same rule as the LiDAR thread: only post graph-join, because bring-up reads the graph.
-                if (camera_ingestor_) camera_ingestor_->start();
         },
         .on_operating_loop = [this]()
         {
@@ -630,178 +604,7 @@ bool SpecificWorker::maybe_publish_corrected_pose()
     ++rt_corr_count_;
     log_pose_trace(/*type=corrected*/0, loc_res->timestamp_ms,
                    loc_res->robot_pose, loc_res->innovation_norm);
-    log_ground_truth(*loc_res);
     return true;
-}
-
-// Localiser pose beside the Webots supervisor pose, one row per published correction.
-// robot_concept writes robot_gt_* onto the robot node ONLY while the producer reports
-// simulated==true, so on real hardware the attributes are absent and this writes nothing and opens
-// no file. Absence is the gate; there is no switch to misconfigure.
-//
-// Both poses are logged RAW, in their own frames — GT in world, the estimate in the room frame.
-// They are deliberately NOT differenced here: the room frame's orientation is arbitrary, so a
-// constant offset is expected and only its VARIATION is a defect. Fit offset+gain across the file
-// and read the residual; a single pair of readings cannot tell those apart.
-void SpecificWorker::log_ground_truth(const rc::RoomConcept::UpdateResult &res)
-{
-    if (shutting_down_.load() or not G)
-        return;
-    const auto robots = G->get_nodes_by_type("robot");
-    if (robots.empty())
-        return;
-    const auto &rn = robots.front();
-    const auto gx = G->get_attrib_by_name<robot_gt_x_att>(rn);
-    const auto gy = G->get_attrib_by_name<robot_gt_y_att>(rn);
-    const auto ga = G->get_attrib_by_name<robot_gt_angle_att>(rn);
-    if (not gx.has_value() or not gy.has_value() or not ga.has_value())
-        return;                                  // no ground truth -> real robot -> nothing to do
-
-    if (not gt_csv_open_attempted_)
-    {
-        gt_csv_open_attempted_ = true;
-        QDir().mkpath("tmp/sdf_localizer");
-        gt_csv_.open("tmp/sdf_localizer/gt_error.csv", std::ios::out | std::ios::trunc);
-        if (gt_csv_.is_open())
-        {
-            // Written through the CLASSIC locale: these machines run es_ES, where a comma is the
-            // decimal separator, and a CSV whose fields contain commas is unparseable.
-            gt_csv_.imbue(std::locale::classic());
-            gt_csv_ << "ts_ms,gt_x,gt_y,gt_theta,est_x,est_y,est_theta,sdf_mse,iters,cov_tt,"
-                       "imu_dtheta,wheel_dtheta,wheel_shadow_dtheta,imu_segs,wheel_segs,"
-                       "pred_x,pred_y,pred_theta,dx_local,dy_local,"
-                       "calib_k_v,calib_k_w,calib_yaw,calib_eps,"
-                       "calib_sig_kv,calib_sig_kw,calib_sig_yaw,calib_pos_var,"
-                       "calib_b_omega,calib_informed,calib_cond,"
-                       "imu_dvx,imu_dvy,wheel_dvx,wheel_dvy,imu_dpx,imu_dpy,imu_lin_segs\n";
-        }
-        else
-            qWarning() << "[gt] cannot open tmp/sdf_localizer/gt_error.csv";
-    }
-    if (not gt_csv_.is_open())
-        return;
-
-    const auto &p = res.robot_pose;
-    const float est_th = std::atan2(p.linear()(1, 0), p.linear()(0, 0));
-    gt_csv_ << res.timestamp_ms
-            << ',' << gx.value() << ',' << gy.value() << ',' << ga.value()
-            << ',' << p.translation().x() << ',' << p.translation().y() << ',' << est_th
-            << ',' << res.sdf_mse << ',' << res.iterations_used
-            << ',' << (res.covariance.rows() > 2 ? res.covariance(2, 2) : -1.f)
-            // Heading-channel attribution: which sensor produced this cycle's predicted rotation.
-            // imu_dtheta+wheel_dtheta is what entered the prior; wheel_shadow_dtheta is what the
-            // wheels claimed over the SAME intervals the gyro overrode. With gt_theta alongside,
-            // each channel's scale error can be regressed out separately instead of inferred from
-            // their pooled effect.
-            << ',' << res.imu_dtheta << ',' << res.wheel_dtheta << ',' << res.wheel_shadow_dtheta
-            << ',' << res.imu_segs << ',' << res.wheel_segs
-            // Pre-optimizer predicted pose: (est - pred) is the correction, i.e. one tooth measured
-            // in the room frame with no GT and no frame fit. Equals est exactly when iters==0.
-            << ',' << res.pred_x << ',' << res.pred_y << ',' << res.pred_theta
-            // What the wheels claimed in the BODY frame: dx_local is lateral. Driving straight it
-            // should be ~0; anything else is the predictor being told the robot slid sideways.
-            << ',' << res.dx_local << ',' << res.dy_local
-            // Learned motion-model parameters, so convergence is visible in the same file as the
-            // error they are supposed to remove.
-            << ',' << res.calib_k_v << ',' << res.calib_k_w << ',' << res.calib_yaw
-            << ',' << res.calib_episodes
-            // Sigmas + the R actually used: without these a replay of the filter from this file is
-            // guesswork, and a parameter that stopped moving cannot be told from one never taught.
-            << ',' << res.calib_sigma_k_v << ',' << res.calib_sigma_k_w
-            << ',' << res.calib_sigma_yaw << ',' << res.calib_pos_var
-            // Joint-solve outputs: the gyro bias it can now separate, which parameters this window
-            // actually taught, and how collinear the window was.
-            << ',' << res.calib_b_omega << ',' << res.calib_informed << ',' << res.calib_condition
-            // Linear IMU channel. imu_dv vs wheel_dv is translation's first independent cross-check;
-            // logged before being fused, because a channel whose covariance is unknown (the ImuFrame
-            // IDL has no acc_var) must be shown to agree with something before anything trusts it.
-            << ',' << res.imu_dvx << ',' << res.imu_dvy
-            << ',' << res.wheel_dvx << ',' << res.wheel_dvy
-            << ',' << res.imu_dpx << ',' << res.imu_dpy << ',' << res.imu_lin_segs
-            << '\n';
-    gt_csv_.flush();
-}
-
-
-// ── RGB edge alignment: one extraction per compute() tick ────────────────────────────────────────
-//
-// Runs on the MAIN thread. That is safe and deliberate: everything it touches is plain data (a
-// grayscale vector, the reduced CameraModel, the cached static extrinsic, the room polygon), so it
-// makes no DSR call at all — in particular no room<-robot lookup, which is the circularity trap the
-// whole design is built to avoid (see image_edge_source.h). The only graph access in this subsystem
-// is CameraIngestor::bind_camera(), which is main-thread by construction because of the ts==0 cache.
-void SpecificWorker::pump_image_edges()
-{
-    if (not camera_ingestor_ or not image_edge_source_) return;
-
-    // Bind lazily and keep retrying: the camera node, its media descriptor and the RT chain all come
-    // up asynchronously, and a miss here is normal for the first few seconds.
-    if (not image_edge_bound_)
-    {
-        if (not camera_ingestor_->bind_camera()) return;
-        image_edge_bound_ = true;
-        image_edge_source_->set_room_polygon(room_polygon_);
-    }
-
-    rc::GrayFrame frame;
-    if (not camera_ingestor_->take_latest(frame)) return;    // no fresh image this tick
-
-    const auto res = room_concept_.get_last_result();
-    if (not res.has_value()) return;
-
-    // The pose at which to PREDICT and SEARCH. This is the localizer's own current estimate, which is
-    // correct and is NOT the circularity: the search only decides WHICH image edge each model contour
-    // is matched to. The residual the factor then minimises is a function of the state VARIABLE, and
-    // uv_meas is held fixed while it does — which is also what LM's accept/reject test requires.
-    const Eigen::Affine2f& rp = res->robot_pose;
-    const Eigen::Vector3f pose(rp.translation().x(), rp.translation().y(),
-                               std::atan2(rp.linear()(1, 0), rp.linear()(0, 0)));
-
-    const std::int64_t dt_ms = static_cast<std::int64_t>(frame.stamp) - res->timestamp_ms;
-
-    // Body twist, for the image/LiDAR dt nuisance column. A VARIANCE, never a correction: dead-
-    // reckoning the pose forward here would reintroduce exactly the graph-pose dependency we removed.
-    // Measured by differencing two published localizer results, so it needs no graph read and no
-    // command channel (the commanded velocity is not what the robot did).
-    Eigen::Vector3f twist = Eigen::Vector3f::Zero();
-    if (image_edge_prev_ts_ > 0 and res->timestamp_ms > image_edge_prev_ts_)
-    {
-        const float dt_s = 1e-3f * static_cast<float>(res->timestamp_ms - image_edge_prev_ts_);
-        if (dt_s > 1e-3f and dt_s < 1.0f)
-        {
-            const Eigen::Vector3f d = pose - image_edge_prev_pose_;
-            const float dth = std::atan2(std::sin(d.z()), std::cos(d.z()));
-            // Rotate the room-frame displacement into the robot frame: the nuisance is expressed
-            // there, because that is where the lever arm to the camera lives.
-            const float c = std::cos(pose.z()), sn = std::sin(pose.z());
-            twist = Eigen::Vector3f(( c * d.x() + sn * d.y()) / dt_s,
-                                    (-sn * d.x() +  c * d.y()) / dt_s,
-                                    dth / dt_s);
-        }
-    }
-    image_edge_prev_pose_ = pose;
-    image_edge_prev_ts_   = res->timestamp_ms;
-
-    rc::ImageEdgeSource::Stats st;
-    auto obs = image_edge_source_->extract(frame, camera_ingestor_->model(),
-                                           camera_ingestor_->cam_R_robot(),
-                                           camera_ingestor_->cam_t_robot(),
-                                           pose, res->covariance, twist, dt_ms, &st);
-    room_concept_.set_image_edges(std::move(obs));
-
-    // ~1/s liveness line. n_searched == 0 with n_projected > 0 means the contours project but carry
-    // no gradient — a real answer (blank walls), not a plumbing failure, and the two are worth being
-    // able to tell apart from the log alone.
-    const auto now = QDateTime::currentMSecsSinceEpoch();
-    if (now - last_image_edge_log_ms_ > 1000)
-    {
-        last_image_edge_log_ms_ = now;
-        qInfo() << "[imgedge] contours" << st.n_contours << "projected" << st.n_projected
-                << "visible" << st.n_visible << "searched" << st.n_searched
-                << "occluded" << st.n_occluded << "| med sigma" << st.med_sigma_px << "px"
-                << "med L" << st.med_search_px << "px sigma_i" << st.sigma_i
-                << "| dt_img_lidar" << dt_ms << "ms";
-    }
 }
 
 void SpecificWorker::compute()
@@ -830,8 +633,6 @@ void SpecificWorker::compute()
     // LiDAR is drained by lidar_ingestor_'s dedicated ingest thread (started at Operating-enter), which
     // pumps a fresh scan to the localizer with ~0-2 ms latency instead of this ~16 ms tick. compute()
     // only reads the resulting buffer/result below.
-
-    pump_image_edges();   // no-op unless ImageEdge.enable
 
     QElapsedTimer section_timer;
     section_timer.start();

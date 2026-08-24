@@ -4,6 +4,8 @@
 #include <cmath>
 
 #include "room_obs_weights.h"
+#include "image_edge_accumulate.h"
+#include "image_edge_ops.h"
 
 namespace rc::gn
 {
@@ -136,6 +138,108 @@ namespace rc::gn
             int off_ = 0;
             torch::Tensor points_;
             Eigen::MatrixX2f pts_;
+        };
+
+        // =====================================================================================
+        //  ImageEdgeFactor — RGB structural contours against the image gradient.
+        //
+        //  r_k = n_hat^T ( pi(p_cam,k(x)) - uv_meas,k )        [pixels, SIGNED, 1-D]
+        //
+        //  1-D on purpose: only the component along the contour NORMAL is observable (aperture
+        //  problem). A 2-D residual would fabricate a tangential constraint the image does not carry.
+        //
+        //  The chain is  p_robot = R(-th)(p_room - t) -> p_cam = C p_robot + d -> (u,v) = pi(p_cam),
+        //  where C,d are the STATIC camera<-robot extrinsic. room<-robot is x, the VARIABLE.
+        //  ★ Nothing here may read room<-robot from the graph: that is this agent's own output, and
+        //    a factor built on it has r == 0 by construction, carrying zero information while every
+        //    diagnostic looks perfect. See image_edge_source.h.
+        //
+        //  All the accumulation, including the shared-nuisance Woodbury cap that stops N correlated
+        //  samples out-voting the LiDAR, lives in image_edge_accumulate.h so this backend and the
+        //  torch mirror cannot drift apart.
+        // =====================================================================================
+        class ImageEdgeFactorGn final : public IFactor
+        {
+        public:
+            ImageEdgeFactorGn(int offset, const ::rc::ImageEdgeObs& obs)
+                : off_(offset), obs_(obs), cam_(obs.cam) {}
+
+            float evaluate(const State& x) const override { return accumulate(x, nullptr); }
+
+            float linearize(const State& x, LinearSystem& sys) const override
+            {
+                Eigen::Matrix3f H = Eigen::Matrix3f::Zero();
+                Eigen::Vector3f b = Eigen::Vector3f::Zero();
+                const float loss = accumulate(x, &H, &b);
+                sys.add_H(off_, off_, Eigen::MatrixXf(H));
+                sys.add_b(off_, Eigen::VectorXf(b));
+                return loss;
+            }
+
+        private:
+            /// Shared by evaluate() and linearize() so they cannot disagree — the loss returned is
+            /// exactly the one whose normal equations are accumulated (IFactor's contract).
+            float accumulate(const State& x, Eigen::Matrix3f* Hout, Eigen::Vector3f* bout = nullptr) const
+            {
+                const Eigen::Vector3f pose(x(off_), x(off_ + 1), x(off_ + 2));
+                const float cth = std::cos(pose.z()), sth = std::sin(pose.z());
+                Eigen::Matrix3f Rm;                     // R(-theta)
+                Rm <<  cth,  sth, 0.f,
+                      -sth,  cth, 0.f,
+                       0.f,  0.f, 1.f;
+
+                float loss = 0.f;
+                for (const auto& seg : obs_.segments)
+                {
+                    const auto acc = ::rc::img::accumulate_segment(seg,
+                        [&](std::size_t k, Eigen::Matrix<float, 1, 3>& J) -> float
+                        {
+                            const auto& smp = seg.samples[k];
+                            const Eigen::Vector3f e(smp.p_room.x() - pose.x(),
+                                                    smp.p_room.y() - pose.y(), smp.p_room.z());
+                            const Eigen::Vector3f p_robot = Rm * e;
+                            const Eigen::Vector3f p_cam   = obs_.cam_R_robot * p_robot + obs_.cam_t_robot;
+
+                            Eigen::Vector2d uv;
+                            if (not ::rc::img::project_with_model(cam_, p_cam.cast<double>(), uv))
+                                return std::numeric_limits<float>::quiet_NaN();
+
+                            double du = uv.x() - static_cast<double>(smp.uv_meas.x());
+                            if (cam_.kind != ::rc::CameraModel::Kind::Pinhole)
+                            {   // the panorama wraps; fold before differencing
+                                while (du >  0.5 * cam_.width) du -= cam_.width;
+                                while (du <= -0.5 * cam_.width) du += cam_.width;
+                            }
+                            const double dv = uv.y() - static_cast<double>(smp.uv_meas.y());
+
+                            Eigen::Matrix<double, 2, 3> P;
+                            if (not ::rc::img::project_jacobian_model(cam_, p_cam.cast<double>(), P))
+                                return std::numeric_limits<float>::quiet_NaN();
+
+                            Eigen::Matrix3f Jx;
+                            Jx.col(0) = obs_.cam_R_robot * (-Rm.col(0));
+                            Jx.col(1) = obs_.cam_R_robot * (-Rm.col(1));
+                            // d/dtheta of R(-theta)e = (+p_robot.y, -p_robot.x, 0). Verified
+                            // symbolically; the opposite sign converges just as prettily on the
+                            // wrong answer, which is why it is spelled out here.
+                            Jx.col(2) = obs_.cam_R_robot *
+                                        Eigen::Vector3f(p_robot.y(), -p_robot.x(), 0.f);
+
+                            J = smp.n_hat.transpose() * (P.cast<float>() * Jx);
+                            return smp.n_hat.x() * static_cast<float>(du)
+                                 + smp.n_hat.y() * static_cast<float>(dv);
+                        },
+                        [](std::size_t) { return 0.0f; });
+
+                    loss += acc.loss;
+                    if (Hout) { *Hout += acc.H; if (bout) *bout += acc.b; }
+                }
+                return loss;
+            }
+
+            int off_ = 0;
+            const ::rc::ImageEdgeObs& obs_;
+            ::rc::CameraModel         cam_;
         };
 
         // =====================================================================================
@@ -483,6 +587,21 @@ namespace rc::gn
                 fs.push_back(std::make_unique<LandmarkPriorFactor>(
                     idx.offset(n + static_cast<int>(k)), lm.prior_mean, lm.prior_information));
             }
+
+        // --- 7. RGB structural-contour factors (OFF unless ImageEdge.enable AND .drive)
+        //     Newest slots only (image_edge_max_slots), exactly like corners: the evidence is one
+        //     frame's normal search, and older slots' searches were done at poses the window has
+        //     since moved away from.
+        if (P.image_edge.enable and P.image_edge.drive)
+        {
+            const int first = std::max(0, n - std::max(1, P.image_edge_max_slots));
+            for (int i = first; i < n; ++i)
+            {
+                const auto& slot = W[static_cast<size_t>(i)];
+                if (slot.image_edges.empty() or not slot.image_edges.cam.valid) continue;
+                fs.push_back(std::make_unique<ImageEdgeFactorGn>(idx.offset(i), slot.image_edges));
+            }
+        }
 
         return fs;
     }

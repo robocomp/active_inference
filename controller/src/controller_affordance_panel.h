@@ -189,6 +189,17 @@ public:
     void update_view(const AffordanceExecution &v)
     {
         header_->setText(header_text(v));
+        // Also in the WINDOW's own bar, so the answer survives the panel being partly covered or one of
+        // several windows on screen -- which is how it is actually used. Only rewritten when it changes:
+        // this runs at the control rate and setWindowTitle goes out to the window manager.
+        if (const QString id = QStringLiteral("Affordance — %1%2")
+                                   .arg(v.affordance.empty() ? QStringLiteral("none")
+                                                             : QString::fromStdString(v.affordance))
+                                   .arg(v.policy.empty() ? QString{}
+                                                         : QStringLiteral(" (%1)")
+                                                               .arg(QString::fromStdString(v.policy)));
+            id != windowTitle())
+            setWindowTitle(id);
         // Armed while an affordance is running AND through the dwell. Disabling it during the dwell was
         // wrong in the way that matters: the dwell is precisely where the robot can get stuck waiting
         // for a confirmation that is not coming, and that is the moment an operator most needs a way
@@ -266,13 +277,42 @@ private:
                    .arg(QString::fromStdString(v.suppressed).toHtmlEscaped());
     }
 
+    // WHICH AFFORDANCE THIS PANEL IS ABOUT, on every line, in every state. It used to appear only
+    // while one was executing, so the two states you most want to identify it in -- idle and dwell --
+    // named nothing, and a panel showing the last run's steps under the word "idle" gives you no way
+    // to tell WHICH run those steps were. With two producers offering (afford_room and afford_calib)
+    // and one of them under test, "is calib the thing on screen?" was being answered by reading the
+    // step rows and guessing.
+    // The POLICY rides along because it is the type in the sense that matters here: it is what decides
+    // the program below -- Reach navigates, Orient turns in place -- and a name alone does not say
+    // which. It comes from the contract, so it is also the first place a mis-read contract shows.
+    static QString identity(const AffordanceExecution &v)
+    {
+        if (v.affordance.empty())
+            return QStringLiteral("<span style='color:#c4c8cc'>no affordance yet</span>");
+        QString s = QStringLiteral("<b>%1</b>").arg(QString::fromStdString(v.affordance).toHtmlEscaped());
+        if (not v.object.empty())
+            s += QStringLiteral(" <span style='color:#c4c8cc'>on</span> %1")
+                     .arg(QString::fromStdString(v.object).toHtmlEscaped());
+        if (not v.policy.empty())
+            s += QStringLiteral(" <span style='color:#c4c8cc'>·</span> <b style='color:#4aa3e0'>%1</b>")
+                     .arg(QString::fromStdString(v.policy).toHtmlEscaped());
+        // An unresolved contract means the policy shown is a DEFAULT, not something the producer said.
+        // Reading Reach when the producer meant Orient is the exact failure that had the pivot report
+        // twelve satisfied steps without turning, so the uncertainty belongs next to the word itself.
+        if (not v.contract_known)
+            s += QStringLiteral(" <span style='color:#e6a23c'>(contract not read yet)</span>");
+        return s;
+    }
+
     static QString header_text(const AffordanceExecution &v)
     {
         // A DWELL IS NOT IDLE. The robot is deliberately standing still so the acquisition above can be
         // read, and a panel that says "idle" for three seconds of that trains you to distrust it.
         if (v.dwell_left_s > 0.f)
         {
-            QString s = QStringLiteral("<span style='color:#4aa3e0'><b>DWELL %1 s</b></span>")
+            QString s = identity(v) + QStringLiteral(" &nbsp; ")
+                      + QStringLiteral("<span style='color:#4aa3e0'><b>DWELL %1 s</b></span>")
                             .arg(static_cast<double>(v.dwell_left_s), 0, 'f', 1);
             // The confirming-look count is the REASON the robot is still standing there once the clock
             // has run out, so it belongs in the same line as the countdown, not somewhere else.
@@ -285,14 +325,11 @@ private:
                                       "acquisition is confirmed. The rows below are that affordance.</span>");
         }
         if (not v.active)
-            return QStringLiteral("<b>idle</b> <span style='color:#c4c8cc'>— no affordance is executing. "
-                                  "The rows below are the last one.</span>") + suppressed_line(v);
-        QString s = QStringLiteral("<b>%1</b>").arg(QString::fromStdString(v.affordance).toHtmlEscaped());
-        if (not v.object.empty())
-            s += QStringLiteral(" <span style='color:#c4c8cc'>on</span> %1")
-                     .arg(QString::fromStdString(v.object).toHtmlEscaped());
-        s += QStringLiteral(" &nbsp; <span style='color:#c4c8cc'>policy</span> %1")
-                 .arg(QString::fromStdString(v.policy).toHtmlEscaped());
+            return identity(v)
+                 + QStringLiteral(" &nbsp; <b>idle</b> <span style='color:#c4c8cc'>— nothing is "
+                                  "executing; the name above and the rows below are the LAST run.</span>")
+                 + suppressed_line(v);
+        QString s = identity(v);
         if (not v.phase.empty())
             s += QStringLiteral(" &nbsp; <span style='color:#c4c8cc'>phase</span> %1")
                      .arg(QString::fromStdString(v.phase).toHtmlEscaped());
@@ -309,9 +346,10 @@ private:
         else
             s += QStringLiteral(" &nbsp; <span style='color:#c4c8cc'>%1 s</span>")
                      .arg(static_cast<double>(v.elapsed_s), 0, 'f', 1);
+        // The identity line already flags an unread contract; this says what it COSTS the rows below.
         if (not v.contract_known)
-            s += QStringLiteral("<br><span style='color:#c4c8cc'>contract not resolved yet — pipeline "
-                                "steps only, no completion clauses</span>");
+            s += QStringLiteral("<br><span style='color:#c4c8cc'>pipeline steps only, no completion "
+                                "clauses, until it resolves</span>");
         s += suppressed_line(v);
         return s;
     }

@@ -1,0 +1,128 @@
+/*
+ *    Copyright (C) 2026 by RoboLab at the University of Extremadura
+ *    This file is part of RoboComp
+ *
+ *    RoboComp is free software: you can redistribute it and/or modify it under
+ *    the terms of the GNU General Public License as published by the Free
+ *    Software Foundation, either version 3 of the License, or (at your option)
+ *    any later version. See <http://www.gnu.org/licenses/>.
+ */
+
+#pragma once
+
+/*
+ *  image_edge_types.h — plain data exchanged between the RGB edge subsystem and the localizer.
+ *
+ *  Deliberately free of <torch/torch.h>, DSR and Qt, for the same reason object_anchor_types.h is:
+ *  this struct crosses a thread boundary (ingest -> compute) and enters both solver backends, so it
+ *  must be cheap to copy, have value semantics, and drag no framework state behind it.
+ *
+ *  ★ The frame payload is std::vector<uint8_t>, NOT cv::Mat. A cv::Mat copy is a refcounted shallow
+ *    handle; sharing one buffer across threads where either side writes is a heap smash whose victim
+ *    surfaces later as an unrelated crash (CLAUDE.md). A vector has value semantics, so the hazard
+ *    cannot arise by construction.
+ */
+
+#include <cstdint>
+#include <vector>
+
+#include <Eigen/Dense>
+
+namespace rc
+{
+    /// One grayscale frame plus everything the measurement needs that only the producer knows.
+    /// `sigma_i` is MEASURED per frame (Immerkaer), never configured — see image_edge_ops.h.
+    struct GrayFrame
+    {
+        std::vector<std::uint8_t> gray;      ///< row-major, `width * height` bytes
+        int           width   = 0;
+        int           height  = 0;
+        std::uint64_t stamp   = 0;           ///< producer capture stamp (ms)
+        float         sigma_i = 0.f;         ///< per-frame intensity noise sigma (grey levels)
+        bool          valid   = false;
+
+        [[nodiscard]] bool ok() const noexcept
+        { return valid and width > 0 and height > 0
+                 and gray.size() == static_cast<std::size_t>(width) * static_cast<std::size_t>(height); }
+    };
+
+    /// A projection model reduced to plain numbers, so the torch mirror can reproject WITHOUT DSR.
+    ///
+    /// ★ Filled by calibrating against DSR::CameraAPI::project() itself, never by copying constants
+    ///   out of a config. For the 360 models `azimuth_sign` / `azimuth_offset` are PRIVATE in
+    ///   CameraAPI with no getters, so they are RECOVERED by probing project() with known directions
+    ///   and then VERIFIED against it on a test set. Guessing the sign would flip the yaw Jacobian
+    ///   and produce a solver that converges on the ZED and diverges only on the Ricoh.
+    struct CameraModel
+    {
+        enum class Kind : std::uint8_t { Pinhole = 0, Equirect = 1, Cylindrical = 2 };
+        Kind  kind = Kind::Pinhole;
+        float fx = 0.f, fy = 0.f;      ///< pinhole focal lengths (px)
+        float cx = 0.f, cy = 0.f;      ///< principal point (px) — image centre, everywhere in this codebase
+        float width = 0.f, height = 0.f;
+        float azimuth_sign = 1.f;      ///< 360 column convention (mirror)
+        float azimuth_offset = 0.f;    ///< 360 seam zero (rad)
+        bool  valid = false;
+    };
+
+    /// Which structural line a sample came from. The distinction is not cosmetic: a FloorWall sample
+    /// carries RANGE and is exposed to the camera pitch/height nuisances (delta_d = theta_p * d^2 / h),
+    /// while a WallCorner sample carries BEARING on a horizontal normal and is nearly immune to both.
+    /// They are staged separately for exactly that reason.
+    enum class ContourClass : std::uint8_t { FloorWall = 0, WallCorner = 1, WallCeiling = 2 };
+
+    /// Number of shared (common-mode) nuisances modelled per contour segment.
+    /// Columns: [0] mount pitch, [1] mount height, [2] mount yaw, [3] image/lidar dt.
+    inline constexpr int IMAGE_EDGE_NUISANCES = 4;
+
+    /// One normal-search measurement on one projected contour sample.
+    ///
+    /// The residual is SCALAR and along the image-space contour normal. Only the normal component is
+    /// observable (aperture problem); a 2-D residual would fabricate a tangential constraint that the
+    /// image does not contain.
+    struct ImageEdgeSample
+    {
+        Eigen::Vector3f p_room  = Eigen::Vector3f::Zero();  ///< model point, ROOM frame (a constant of the solve)
+        Eigen::Vector2f n_hat   = Eigen::Vector2f::Zero();  ///< unit image-space contour normal at the prediction
+        Eigen::Vector2f uv_meas = Eigen::Vector2f::Zero();  ///< sub-pixel edge found by the normal search
+        float sigma_px  = 0.f;      ///< Cramer-Rao sigma of the edge location (px). Flat wall -> huge -> self-mutes.
+        float pi_vis    = 1.f;      ///< predicted-visibility prior in [0,1] (occlusion enters HERE, not as a cull)
+        float search_L  = 0.f;      ///< half-length actually searched (px) — the uniform outlier component's width
+        /// Per-nuisance sensitivity, ALREADY contracted as n_hat^T * P * (.) — i.e. px per unit nuisance.
+        Eigen::Matrix<float, IMAGE_EDGE_NUISANCES, 1> h = Eigen::Matrix<float, IMAGE_EDGE_NUISANCES, 1>::Zero();
+    };
+
+    /// All samples belonging to ONE contour segment. The grouping is what makes the common-mode
+    /// marginalisation correct: the nuisances are shared WITHIN a segment, so the Woodbury correction
+    /// is applied per segment, not globally and not per sample.
+    struct ImageEdgeSegment
+    {
+        ContourClass class_id = ContourClass::WallCorner;
+        std::vector<ImageEdgeSample> samples;
+    };
+
+    /// One frame's worth of edge evidence, attached to the window slot whose stamp is nearest.
+    struct ImageEdgeObs
+    {
+        std::vector<ImageEdgeSegment> segments;
+        std::uint64_t frame_stamp = 0;      ///< image capture stamp (ms)
+        std::int64_t  dt_to_slot_ms = 0;    ///< image stamp - slot stamp; feeds nuisance column [3]
+        float         sigma_i = 0.f;        ///< carried through for the CSV
+        /// zed_T_robot, read ONCE on the main thread at bring-up. This is the ONLY transform the
+        /// factor may take from the graph — room<-robot is the STATE VARIABLE. See image_edge_source.h.
+        Eigen::Matrix3f cam_R_robot = Eigen::Matrix3f::Identity();
+        Eigen::Vector3f cam_t_robot = Eigen::Vector3f::Zero();
+        /// The projection model, carried WITH the evidence so the factor needs no DSR and no Input
+        /// plumbing. Plain numbers, verified against CameraAPI::project() at bring-up.
+        CameraModel     cam;
+
+        [[nodiscard]] std::size_t sample_count() const noexcept
+        {
+            std::size_t n = 0;
+            for (const auto& s : segments) n += s.samples.size();
+            return n;
+        }
+        [[nodiscard]] bool empty() const noexcept { return sample_count() == 0; }
+    };
+
+}  // namespace rc

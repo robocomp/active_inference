@@ -118,9 +118,13 @@ int main()
             // The robot really turns a third of a turn; the odometry over-reports it. note_motion is
             // called throughout, exactly as it would be live — the pivot's windows are ordinary
             // windows, and excluding them would throw away the most informative motion of the day.
+            // The claim is taken before the turn and released after it: only motion inside that
+            // bracket is motion the pivot asked for.
+            c.set_claim_held(true);
             drive(c, t, th, step / 5.0, s_true, 5.0);
             h += step;
             c.on_outcome(O::Satisfied, std::atan2(std::sin(h), std::cos(h)));
+            c.set_claim_held(false);
         }
         const auto cl = c.closure();
         std::printf("  pivot: state=%d  turned %.1f deg  s_omega %.4f (truth %.3f) res %.4f usable=%d\n",
@@ -128,6 +132,32 @@ int main()
                     cl.resolution, (int)cl.usable);
         check(c.pivot().state() == PivotAffordance::State::Closed, "the sequence closes");
         check(std::abs(cl.s_omega - s_true) < 1e-6, "and recovers the injected scale");
+    }
+
+    // 5b. A STANDING OFFER IS NOT A RUNNING MANOEUVRE. Between the moment a step is published and the
+    //     moment somebody claims it, the selector is free to send the robot across the room — and it
+    //     does: measured live 2026-08-24, a completed pivot step re-offered at 0.163 nats, lost to an
+    //     exploration standpoint at 0.847, and the robot drove 5.4 m before calib was claimed again.
+    //     If that traversal's rotation is banked into the step, the pivot can reach "four turns
+    //     accumulated" without ever pivoting, and closure becomes a statement about the errands.
+    {
+        CalibChannelParams p; p.enabled = true;
+        CalibChannel c(p);
+        double t = 0.0, th = 0.0;
+        drive(c, t, th, 0.0, 0.0, 0.5);                    // warm, as above
+        const auto b = c.offer(0.0);
+        check(b.has_value(), "a step is offered");
+        c.mark_offered();
+        // Nobody has claimed it. The robot goes about its business and turns a full circle doing so.
+        drive(c, t, th, 2.0*M_PI / 20.0, 0.0, 20.0);       // a full circle's worth, over 20 s
+        c.set_claim_held(true);                            // NOW the consumer takes it
+        drive(c, t, th, (2.0*M_PI/3.0) / 5.0, 0.0, 5.0);   // and turns the one third it was asked for
+        c.on_outcome(O::Satisfied, std::atan2(std::sin(th), std::cos(th)));
+        c.set_claim_held(false);
+        const double got = c.pivot().accumulated_rad() * 180.0 / M_PI;
+        std::printf("  unclaimed traversal: pivot banked %.1f deg (asked for 120)\n", got);
+        check(std::abs(got - 120.0) < 5.0,
+              "only the turn made under the claim is credited to the step");
     }
 
     // 6. INFEASIBLE IS BELIEVED, AND IT IS NOT FOREVER. The consumer alone can say the body cannot

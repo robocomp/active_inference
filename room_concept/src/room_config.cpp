@@ -335,6 +335,48 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     room_concept.params.object_anchor.huber_delta = p.OBJECT_ANCHOR_HUBER;
     room_concept.params.object_anchor_max_slots   = p.OBJECT_ANCHOR_MAX_SLOTS;
     room_concept.params.object_anchor_early_exit_sigma = p.OBJECT_ANCHOR_EARLY_EXIT_SIGMA;
+
+    // ── RGB edge alignment ────────────────────────────────────────────────────────────────────
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "ImageEdge.enable", p.IMAGE_EDGE_ENABLE);
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "ImageEdge.shadow", p.IMAGE_EDGE_SHADOW);
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "ImageEdge.drive",  p.IMAGE_EDGE_DRIVE);
+    rc::ConfigLoaderUtils::load_optional<std::string>(cl, "ImageEdge.camera", p.IMAGE_EDGE_CAMERA);
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "ImageEdge.useWallCorners", p.IMAGE_EDGE_USE_WALL_CORNERS);
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "ImageEdge.useFloorJunction", p.IMAGE_EDGE_USE_FLOOR_JUNCTION);
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "ImageEdge.useWallCeiling", p.IMAGE_EDGE_USE_WALL_CEILING);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ImageEdge.sampleSpacingM", p.IMAGE_EDGE_SAMPLE_SPACING_M);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ImageEdge.searchSigmas", p.IMAGE_EDGE_SEARCH_SIGMAS);
+    rc::ConfigLoaderUtils::load_optional<int>(cl, "ImageEdge.maxSearchPx", p.IMAGE_EDGE_MAX_SEARCH_PX);
+    rc::ConfigLoaderUtils::load_optional<int>(cl, "ImageEdge.maxSlots", p.IMAGE_EDGE_MAX_SLOTS);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ImageEdge.mountPitchSigma", p.IMAGE_EDGE_MOUNT_PITCH_SIGMA);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ImageEdge.mountHeightSigma", p.IMAGE_EDGE_MOUNT_HEIGHT_SIGMA);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ImageEdge.mountYawSigma", p.IMAGE_EDGE_MOUNT_YAW_SIGMA);
+    rc::ConfigLoaderUtils::load_optional<std::string>(cl, "ImageEdge.csv", p.IMAGE_EDGE_CSV);
+
+    room_concept.params.image_edge.enable             = p.IMAGE_EDGE_ENABLE;
+    room_concept.params.image_edge.drive              = p.IMAGE_EDGE_DRIVE;
+    room_concept.params.image_edge.search_sigmas      = p.IMAGE_EDGE_SEARCH_SIGMAS;
+    room_concept.params.image_edge.mount_pitch_sigma  = p.IMAGE_EDGE_MOUNT_PITCH_SIGMA;
+    room_concept.params.image_edge.mount_height_sigma = p.IMAGE_EDGE_MOUNT_HEIGHT_SIGMA;
+    room_concept.params.image_edge.mount_yaw_sigma    = p.IMAGE_EDGE_MOUNT_YAW_SIGMA;
+    room_concept.params.image_edge_max_slots          = p.IMAGE_EDGE_MAX_SLOTS;
+    room_concept.params.image_edge_shadow             = p.IMAGE_EDGE_SHADOW;
+    room_concept.params.image_edge_csv                = p.IMAGE_EDGE_CSV;
+    // GN-only, and refused LOUDLY rather than honoured silently: the autograd backends evaluate the
+    // term (the torch mirror exists) but only the GN factor list can be driven by it, so under
+    // LBFGS/ADAM the flag would read true while nothing moved. Same rule, same reason, as
+    // ObjectAnchor.optimizeLandmark above.
+    if (p.IMAGE_EDGE_DRIVE and room_concept.params.optimizer_type != "GN")
+    {
+        qWarning() << "[room] ImageEdge.drive needs OptimizerType = \"GN\" (have"
+                   << QString::fromStdString(room_concept.params.optimizer_type)
+                   << ") — RGB edge term DEMOTED to shadow (evaluated + logged, does not move the pose)";
+        room_concept.params.image_edge.drive  = false;
+        room_concept.params.image_edge_shadow = true;
+    }
+    if (p.IMAGE_EDGE_DRIVE and not p.IMAGE_EDGE_ENABLE)
+        qWarning() << "[room] ImageEdge.drive = true but ImageEdge.enable = false — nothing is built, "
+                      "the term is INERT. Set enable = true.";
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.FarPointsWeight", room_concept.params.far_points_weight);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.FarPointsExponent", room_concept.params.far_points_exponent);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.FarPointsMinWeight", room_concept.params.far_points_min_weight);
@@ -369,6 +411,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     auto& ep = epistemic.epistemic_planner().params;
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "EpistemicController.PublishAffordance", p.PUBLISH_AFFORDANCE);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.CalibPivotEnabled", p.CALIB_PIVOT_ENABLED);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.CalibForcedGainNats", p.CALIB_FORCED_GAIN_NATS);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.ExecStallTimeout", p.EXEC_STALL_TIMEOUT_S);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.ExecStallProgress", p.EXEC_STALL_PROGRESS_M);
     rc::ConfigLoaderUtils::load_optional<int>(cl, "EpistemicController.NumArcCurvatures", ec.num_arc_curvatures);

@@ -24,6 +24,7 @@
 #include <fstream>
 #include <functional>
 #include <limits>
+#include <print>
 #include <memory>
 #include <vector>
 
@@ -65,7 +66,15 @@ public:
         // afford_room in the graph with the flag on.
         rc::calib::CalibChannelParams cp;
         cp.enabled = params.CALIB_PIVOT_ENABLED;
+        cp.forced_gain_nats = params.CALIB_FORCED_GAIN_NATS;
         calib_ = rc::calib::CalibChannel(cp);
+        // Say it once, loudly, at construction. A forced price is invisible from every other vantage
+        // point -- the offer looks like any other offer -- and the one thing that must not happen is
+        // a run being graded on it weeks later because nobody remembered the flag was on.
+        if (cp.forced_gain_nats > 0.0)
+            std::print("[calib] ★TESTING: the advertised gain is FORCED to {:.3f} nats. afford_calib "
+                       "will win contests it has not earned; the true valuation is logged beside it "
+                       "and is the only one that means anything.\n", cp.forced_gain_nats);
     }
 
     // Resolve root/robot ids and read body dimensions (updates the planner footprint).

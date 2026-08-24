@@ -75,6 +75,16 @@ struct CalibChannelParams
     /// Time constant of the passive-excitation EMA. Long, because the question it answers is "what is
     /// this robot's diet", not "what is it doing right now".
     double passive_tau_s = 120.0;
+    /// ★TESTING ONLY, AND IT LIES ON PURPOSE. >0 replaces the advertised gain with this constant so
+    /// the pivot wins the EFE contest on demand while the manoeuvre itself is still being debugged.
+    /// A well-calibrated robot correctly prices this offer near zero (measured +0.00007 +/- 0.00039
+    /// on P3Bot => fractions of a nat), so it loses every contest to an exploration cell and the
+    /// four-turn closure has never once been exercised end to end. This forces the contest, not the
+    /// manoeuvre: everything downstream of selection runs exactly as it would in earnest.
+    /// ★NOTHING MEASURED WHILE THIS IS SET MAY BE QUOTED AS A VALUATION. The true figure is still
+    /// computed and still logged beside the forced one, precisely so a run cannot be graded on the
+    /// number we invented. Leave at 0 outside a debugging session.
+    double forced_gain_nats = 0.0;
     PivotParams          pivot;
     ScaleEstimatorParams estimator;
 };
@@ -135,14 +145,25 @@ public:
         // ★THE PIVOT'S OWN ACCUMULATOR RUNS ON THE SAME INCREMENT, not on a second one derived later.
         // Taking the difference again from state that has already advanced returns zero — which is
         // what a first version of the offline loop accumulated, silently, for a whole log.
-        if (offer_open_ and odom_valid) step_odom_ += odom_dtheta;
+        // ★AND ONLY WHILE THE CONSUMER IS ACTUALLY TURNING FOR US. `offer_open_` means the offer is on
+        // the wire, which is NOT the same as the manoeuvre running: the offer stands from the moment
+        // it is published until somebody answers it, and in between the selector is free to claim
+        // something else entirely. Measured live 2026-08-24: after one pivot step completed, calib
+        // re-offered at 0.163 nats, afford_room won at 0.847, and the robot drove 5.4 m across the
+        // room -- every degree of which was being added to THIS pivot step's accumulators.
+        // The ratio survived that (both sides collected the same interval) but the CLOSURE TEST did
+        // not: it asks whether |ref_turn_| has reached four whole turns, and a robot doing its
+        // ordinary rounds delivers four turns' worth of heading change without pivoting at all. The
+        // pivot could therefore declare closure having turned a fraction of a turn on the spot, and
+        // quote a scale measured over a traversal as if it came from a closure.
+        if (offer_open_ and claim_held_ and odom_valid) step_odom_ += odom_dtheta;
         // ★AND THE REFERENCE SIDE THE SAME WAY. The pivot used to take the reference turn as
         // wrap(heading_now - heading_at_the_last_step), which spans the GAP between steps -- so any
         // driving the robot did in between was counted as pivot rotation, and wrap() capped a 200 deg
         // excursion at -160. Measured live: 932 deg of in-place turning summed to only -662 signed,
         // with 269 deg of rotation-while-driving in between. Both sides of the comparison are now
         // accumulated over the SAME interval, which is the only way the ratio means anything.
-        if (offer_open_) step_ref_ += d_ref;
+        if (offer_open_ and claim_held_) step_ref_ += d_ref;
 
         const double T = t_s - win_t0_;
         if (T < p_.window_s) return;
@@ -180,7 +201,19 @@ public:
     /// the estimator steering it still had an uninformed parameter.
     void set_authoritative_information(double info) noexcept { authoritative_info_ = info; }
 
+    /// What the offer ADVERTISES — the true valuation, unless a debugging session has forced it.
     [[nodiscard]] double marginal_gain_nats() const
+    {
+        if (p_.forced_gain_nats > 0.0) return p_.forced_gain_nats;
+        return true_marginal_gain_nats();
+    }
+
+    /// True while the advertised gain is a fabrication. Anything reporting a valuation must say so.
+    [[nodiscard]] bool gain_is_forced() const noexcept { return p_.forced_gain_nats > 0.0; }
+
+    /// What the manoeuvre is ACTUALLY worth, always computed, never overridden — the number a run is
+    /// graded on even when the wire carries the forced one.
+    [[nodiscard]] double true_marginal_gain_nats() const
     {
         const double T = pivot_duration_s();
         const double excite = 2.0 * M_PI * p_.pivot.turns;
@@ -209,6 +242,18 @@ public:
 
     /// The offer reached the graph. Only now is one live.
     void mark_offered() noexcept { offer_open_ = true; step_odom_ = step_ref_ = 0.0; }
+
+    /// Is the consumer executing OUR affordance right now? Only motion collected while this holds is
+    /// motion the pivot asked for; everything else is the robot's own business happening around a
+    /// standing offer. Set once per cycle before note_motion().
+    void set_claim_held(bool held) noexcept
+    {
+        // Clear the step on the EDGE, not on the level: the step begins when the claim is taken, and
+        // a step that started counting at publish time has already banked whatever the robot did
+        // while the offer merely stood there.
+        if (held and not claim_held_) step_odom_ = step_ref_ = 0.0;
+        claim_held_ = held;
+    }
 
     /// The consumer answered. The heading is the robot's MEASURED one now — the sequence advances on
     /// that and never on the count of steps issued.
@@ -257,6 +302,7 @@ private:
     double win_ref_ = 0.0, win_odo_ = 0.0;
     bool   win_poisoned_ = false;
     long   poisoned_windows_ = 0;   ///< windows discarded for a pose jump or missing odometry
+    bool   claim_held_ = false;         // the consumer is executing this affordance right now
     double authoritative_info_ = 0.0;   // 1/sigma^2 from the estimator that steers; 0 = unset
     double passive_rate_ = 0.0;      ///< rad/s of turning the ordinary tours deliver — MEASURED
     bool   offer_open_ = false;

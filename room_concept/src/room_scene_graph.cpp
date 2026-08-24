@@ -651,6 +651,9 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
             ? 1.0 / (static_cast<double>(res.calib_sigma_k_w) * res.calib_sigma_k_w)
             : 0.0);
 
+    // Does the consumer hold OUR claim this cycle? Asked before the motion is folded in, because it
+    // decides whether this frame's rotation belongs to the pivot step or to the robot's own errands.
+    calib_.set_claim_held(params_->CALIB_PIVOT_ENABLED and calib_manager_.is_executing(G_));
     calib_.note_motion(t_s, res.robot_pose.translation().x(), res.robot_pose.translation().y(),
                        theta, static_cast<double>(odo.delta_pose.z()),
                        odo.valid and odo.fresh and odo.is_measured);
@@ -666,7 +669,12 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
                    "{:.5f} rad/sqrt(s), {}) | diet {:.3f} rad/s | a pivot would be worth {:.3f} nats\n",
                    post.s, post.s_std, post.windows, calib_.poisoned_windows(), post.sigma,
                    post.identifiable() ? "MEASURED" : "still the prior",
-                   calib_.passive_rate_rad_s(), calib_.marginal_gain_nats());
+                   calib_.passive_rate_rad_s(), calib_.true_marginal_gain_nats());
+        // The true figure above is what the run is graded on; this is what the wire carries. They are
+        // printed apart, on purpose, so no later reader can mistake one for the other.
+        if (calib_.gain_is_forced())
+            std::print("[calib] ★TESTING: advertising {:.3f} nats instead of the {:.3f} it is worth\n",
+                       calib_.marginal_gain_nats(), calib_.true_marginal_gain_nats());
         std::print("[calib] pricing {} posterior (k_omega sigma {:.4f})\n",
                    calib_.authoritative_information() > 0.0 ? "the STEERING" : "its OWN passive",
                    calib_.authoritative_information() > 0.0
@@ -733,9 +741,11 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
             calib_log_.flush();
         }
     };
-    say(std::format("state={} gain={:.3f} offer_open={} refused={}",
+    say(std::format("state={} gain={:.3f}{} offer_open={} refused={}",
                     rc::calib::PivotAffordance::to_string(calib_.pivot().state()),
                     calib_.marginal_gain_nats(),
+                    calib_.gain_is_forced()
+                        ? std::format(" (FORCED, true {:.3f})", calib_.true_marginal_gain_nats()) : "",
                     calib_.offering() ? 1 : 0,
                     calib_.refused_here() ? 1 : 0));
 

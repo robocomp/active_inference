@@ -95,6 +95,9 @@ LIST(APPEND SOURCES
   ../src/corner_detector.cpp
   ../src/object_anchor_factor.cpp
   ../src/object_anchor_source.cpp
+  ../src/camera_ingestor.cpp
+  ../src/image_edge_source.cpp
+  ../src/image_edge_factor.cpp
   ../src/rerun_logger.cpp
   ../src/camera_visualizer.cpp
   ../src/custom_widget.h
@@ -132,6 +135,8 @@ add_executable(gn_selftest EXCLUDE_FROM_ALL
   ../src/room_model.cpp
   ../src/room_concept.cpp
   ../src/object_anchor_factor.cpp
+  ../src/image_edge_factor.cpp
+  ../src/image_edge_source.cpp
   ../src/corner_detector.cpp
   ../src/pointcloud_center_estimator.cpp
   ../src/rerun_logger.cpp
