@@ -894,6 +894,9 @@ private:
     std::optional<Eigen::Vector2f> last_raw_target_pos_;   // as PUBLISHED, before our repair moved it
     std::uint64_t last_useless_log_ms_ = 0;
     // Written from build_planning_step, before any early return, so a freeze RECORDS ITSELF.
+    // The candidates as CONVERSATION — producer offers and the selector's choice. Separate from the
+    // JSONL dump below and deliberately unthrottled: see the note at its definition.
+    void note_selection_protocol(std::uint64_t t_ms, const rc::AffordanceManager &affordance_manager);
     void log_selection_json(std::uint64_t t_ms, const rc::AffordanceManager &affordance_manager,
                             const std::optional<Eigen::Vector2f> &robot_xy, const char *stage);
     unsigned last_finalize_line_ = 0;   // which caller completed the affordance

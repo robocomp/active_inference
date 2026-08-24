@@ -229,23 +229,18 @@ void ControllerSession::note_no_command(std::source_location loc)
                      std::format("line {}", loc.line()), -1, -1, -1);
 }
 
-void ControllerSession::log_selection_json(std::uint64_t t_ms,
-                                           const rc::AffordanceManager &affordance_manager,
-                                           const std::optional<Eigen::Vector2f> &robot_xy,
-                                           const char *stage)
+// ── THE PROTOCOL CONVERSATION, ON ITS OWN CLOCK ──────────────────────────────────────────────────
+// ★★★THIS USED TO LIVE INSIDE log_selection_json, BELOW ITS 200 ms THROTTLE. That function exists to
+// rate-limit a JSONL dump, and the producer's only voice in the transcript was riding on it as a
+// passenger. A pivot step is OFFERED for exactly one cycle — the producer re-arms and the selector
+// claims it on the next — so three times in four the throttle swallowed the very cycle the offer
+// existed in. Measured 2026-08-24: 175 consumer lines, 2 producer lines, for a sequence of 38 offers.
+// The transcript then reads as one side talking to itself, which is the opposite of what it is for.
+// A protocol transition is not a diagnostic sample and must not share a sampling gate with one. The
+// per-candidate dedup is what keeps this quiet; a clock never was.
+void ControllerSession::note_selection_protocol(std::uint64_t t_ms,
+                                                const rc::AffordanceManager &affordance_manager)
 {
-    if (not select_json_open_)
-    {
-        select_json_.open("affordance_select.jsonl", std::ios::out | std::ios::trunc);
-        select_json_open_ = select_json_.is_open();
-    }
-    if (not select_json_open_ or (t_ms - last_select_json_ms_) < 200) return;
-    last_select_json_ms_ = t_ms;
-    std::string cands;
-    for (const auto &c : affordance_manager.last_candidates())
-        cands += std::format(R"({}{{"name":"{}","state":"{}","eligible":{},"gain":{:.4f}}})",
-                             cands.empty() ? "" : ",", c.node_name, c.state, c.eligible ? 1 : 0, c.gain);
-
     // ── THE SAME CANDIDATES, AS CONVERSATION ──────────────────────────────────────────────────────
     // A producer speaks by putting a node on offer; that is the only voice it has here. So an offer
     // appearing IS the producer's line, and the selector's choice among the offers is its own.
@@ -280,6 +275,25 @@ void ControllerSession::log_selection_json(std::uint64_t t_ms,
                 note_protocol(rc::AffordanceExecution::ProtocolLine::Side::Selector, t_ms, std::format("chose '{}'", chosen));
         }
     }
+}
+
+void ControllerSession::log_selection_json(std::uint64_t t_ms,
+                                           const rc::AffordanceManager &affordance_manager,
+                                           const std::optional<Eigen::Vector2f> &robot_xy,
+                                           const char *stage)
+{
+    if (not select_json_open_)
+    {
+        select_json_.open("affordance_select.jsonl", std::ios::out | std::ios::trunc);
+        select_json_open_ = select_json_.is_open();
+    }
+    if (not select_json_open_ or (t_ms - last_select_json_ms_) < 200) return;
+    last_select_json_ms_ = t_ms;
+    std::string cands;
+    for (const auto &c : affordance_manager.last_candidates())
+        cands += std::format(R"({}{{"name":"{}","state":"{}","eligible":{},"gain":{:.4f}}})",
+                             cands.empty() ? "" : ",", c.node_name, c.state, c.eligible ? 1 : 0, c.gain);
+
     select_json_ << std::format(
         R"({{"t_ms":{},"stage":"{}","rob_x":{:.3f},"rob_y":{:.3f},"has_target":{},"target":"{}",)"
         R"("tgt_x":{:.3f},"tgt_y":{:.3f},"d_target":{:.3f},"raw_x":{:.3f},"raw_y":{:.3f},)"
@@ -601,6 +615,8 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     target_wait_logged_ = false;
 
     // ★Record the selection outcome BEFORE any early return below can skip it.
+    // Every cycle, unthrottled: an offer that exists for one cycle must still be heard.
+    note_selection_protocol(timestamp_ms, affordance_manager);
     log_selection_json(timestamp_ms, affordance_manager,
                        std::optional<Eigen::Vector2f>{robot_pose->pos.head<2>().cast<float>()},
                        target.has_value() ? "selected" : "no-target");
