@@ -254,8 +254,9 @@ void ControllerSession::log_selection_json(std::uint64_t t_ms,
     // status readout, and it is what cost an entire competing traversal per pivot step.
     for (const auto &c : affordance_manager.last_candidates())
     {
-        const std::string key = c.node_name + "/" + c.state;
-        if (key == affordance_last_state_) continue;
+        auto &last = affordance_last_state_[c.node_name];
+        if (c.state == last) continue;                 // this candidate has not moved
+        last = c.state;
         if (c.state == "Offered")
             note_protocol(rc::AffordanceExecution::ProtocolLine::Side::Producer, t_ms,
                           std::format("'{}' on offer, {:.3f} nats", c.node_name, c.gain));
@@ -263,7 +264,6 @@ void ControllerSession::log_selection_json(std::uint64_t t_ms,
     if (not affordance_manager.last_candidates().empty())
     {
         const auto &cs = affordance_manager.last_candidates();
-        affordance_last_state_ = cs.front().node_name + "/" + cs.front().state;
         const std::string chosen = last_target_info_.has_value() ? last_target_info_->node_name
                                                                  : std::string{};
         if (not chosen.empty() and chosen != affordance_last_target_)
@@ -2969,7 +2969,14 @@ void ControllerSession::note_protocol(rc::AffordanceExecution::ProtocolLine::Sid
                                       std::uint64_t t_ms, std::string text)
 {
     if (text.empty()) return;
-    if (not affordance_transcript_.empty() and affordance_transcript_.back().text == text) return;
+    // ★DEDUP PER SPEAKER, NOT AGAINST THE LAST LINE. Comparing only with the immediately previous
+    // entry is defeated by any two speakers alternating: each line differs from the one before it, so
+    // both pass, every cycle. That is what filled this transcript with a producer offer and a consumer
+    // contract-reading at 5 Hz and pushed every claim and outcome out of the 200-line ring within
+    // seconds -- the panel was not empty, it was full of the one thing nobody needs.
+    auto &last_for_side = protocol_last_by_side_[static_cast<int>(side)];
+    if (last_for_side == text) return;
+    last_for_side = text;
     // ★ALSO TO DISK. A transcript that exists only behind a window dies with the window, and these
     // exchanges are seconds long -- by the time anyone opens the panel the interesting part is over.
     // It is also the only way to read the conversation when the panel says nothing, which is exactly

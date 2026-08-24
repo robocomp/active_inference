@@ -272,7 +272,15 @@ private:
     // The protocol conversation. Bounded: this runs for the life of the agent, and an unbounded log
     // in a GUI struct is a slow leak that only shows up after an hour of driving.
     std::vector<rc::AffordanceExecution::ProtocolLine> affordance_transcript_;
-    std::string affordance_last_state_;      // to emit a line only when the exchange actually moves
+    // ★ONE KEY PER CANDIDATE. A single string here was compared against EVERY candidate in the loop
+    // below and then overwritten from the FIRST one, so any candidate that was not first mismatched
+    // on every cycle and spoke on every cycle. Measured: 'afford_room on offer' at 5 Hz for the whole
+    // run, which flushed the 200-line ring in ~20 s and buried every real transition in it.
+    std::map<std::string, std::string> affordance_last_state_;   // node name -> last protocol state
+    // Last line said by each SIDE. note_protocol used to dedup against the immediately previous entry
+    // only, which two alternating speakers defeat completely — each differs from the other, so both
+    // pass every cycle.
+    std::map<int, std::string> protocol_last_by_side_;
     std::string affordance_last_target_;
     std::ofstream protocol_log_;
     bool          protocol_log_open_ = false;
