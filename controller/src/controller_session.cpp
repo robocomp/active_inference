@@ -245,6 +245,41 @@ void ControllerSession::log_selection_json(std::uint64_t t_ms,
     for (const auto &c : affordance_manager.last_candidates())
         cands += std::format(R"({}{{"name":"{}","state":"{}","eligible":{},"gain":{:.4f}}})",
                              cands.empty() ? "" : ",", c.node_name, c.state, c.eligible ? 1 : 0, c.gain);
+
+    // ── THE SAME CANDIDATES, AS CONVERSATION ──────────────────────────────────────────────────────
+    // A producer speaks by putting a node on offer; that is the only voice it has here. So an offer
+    // appearing IS the producer's line, and the selector's choice among the offers is its own.
+    // ★THE LINE WORTH HAVING IS THE ONE WHERE THE HIGHEST-SCORING CANDIDATE IS NOT TAKEN. That is
+    // never wrong on its own -- JustCompleted is deliberately unclaimable -- but it is invisible in a
+    // status readout, and it is what cost an entire competing traversal per pivot step.
+    for (const auto &c : affordance_manager.last_candidates())
+    {
+        const std::string key = c.node_name + "/" + c.state;
+        if (key == affordance_last_state_) continue;
+        if (c.state == "Offered")
+            note_protocol(rc::AffordanceExecution::ProtocolLine::Side::Producer, t_ms,
+                          std::format("'{}' on offer, {:.3f} nats", c.node_name, c.gain));
+    }
+    if (not affordance_manager.last_candidates().empty())
+    {
+        const auto &cs = affordance_manager.last_candidates();
+        affordance_last_state_ = cs.front().node_name + "/" + cs.front().state;
+        const std::string chosen = last_target_info_.has_value() ? last_target_info_->node_name
+                                                                 : std::string{};
+        if (not chosen.empty() and chosen != affordance_last_target_)
+        {
+            affordance_last_target_ = chosen;
+            // Was anything scored higher and passed over? Say so, and say why.
+            const auto *best = &cs.front();
+            for (const auto &c : cs) if (c.gain > best->gain) best = &c;
+            if (best->node_name != chosen and not best->eligible)
+                note_protocol(rc::AffordanceExecution::ProtocolLine::Side::Selector, t_ms,
+                    std::format("chose '{}' -- '{}' scored higher ({:.3f}) but is {} and cannot be claimed",
+                                chosen, best->node_name, best->gain, best->state));
+            else
+                note_protocol(rc::AffordanceExecution::ProtocolLine::Side::Selector, t_ms, std::format("chose '{}'", chosen));
+        }
+    }
     select_json_ << std::format(
         R"({{"t_ms":{},"stage":"{}","rob_x":{:.3f},"rob_y":{:.3f},"has_target":{},"target":"{}",)"
         R"("tgt_x":{:.3f},"tgt_y":{:.3f},"d_target":{:.3f},"raw_x":{:.3f},"raw_y":{:.3f},)"
@@ -611,6 +646,8 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
             // is told exactly once and nothing has to be re-decided. No timer: that would be the
             // eleventh, and this file spent the day deleting them.
             affordance_manager.note_map_verdict(target->room_pos, robot_pose->pos.head<2>().cast<float>());
+            note_protocol(rc::AffordanceExecution::ProtocolLine::Side::Consumer, timestamp_ms,
+                          "-> Unreachable: no route from here to that pose");
             affordance_manager.mark_reached(graph_, rc::affordance::Outcome::Unreachable);
             audit_standpoint("fact-unreachable", timestamp_ms, target->room_pos, target->room_pos,
                              robot_pose->pos.head<2>().cast<float>(), "known-useless",
@@ -760,6 +797,8 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
                              last_raw_target_pos_.value_or(step.target.room_pos), robot_xy, robot_xy,
                              "can_turn_here", "no room to sweep the body's diagonal here", -1, -1, 0);
             affordance_manager.note_map_verdict(robot_xy, robot_xy);
+            note_protocol(rc::AffordanceExecution::ProtocolLine::Side::Consumer, timestamp_ms,
+                          "-> Infeasible: the body cannot sweep its diagonal where it stands");
             affordance_manager.mark_reached(graph_, rc::affordance::Outcome::Infeasible);
             current_plan_.reset();
             plan_spline_valid_ = false;
@@ -811,6 +850,8 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
                              cell, step.robot_pose.pos.head<2>().cast<float>(), "room-polygon",
                              "outside the room layout", -1, -1, 0);
             affordance_manager.note_map_verdict(cell, step.robot_pose.pos.head<2>().cast<float>());
+            note_protocol(rc::AffordanceExecution::ProtocolLine::Side::Consumer, timestamp_ms,
+                          "-> OutsideRoom: that pose is not inside the producer's own layout");
             affordance_manager.mark_reached(graph_, rc::affordance::Outcome::OutsideRoom);
             current_plan_.reset();
             plan_spline_valid_ = false;
@@ -1008,6 +1049,8 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
             // ★We deliberately do NOT call suppress_target here: writing epistemic_refused into the
             // producer's node is the same ownership inversion in the opposite direction — the consumer
             // deciding what the producer may offer.
+            note_protocol(rc::AffordanceExecution::ProtocolLine::Side::Consumer, timestamp_ms,
+                          std::format("-> {}", rc::affordance::to_string(*fact)));
             affordance_manager.mark_reached(graph_, *fact);
             current_plan_.reset();
             plan_spline_valid_ = false;
@@ -2867,6 +2910,22 @@ const char *compare_symbol(rc::affordance::CompareOp op)
 // still resolved exactly where it always was (on arrival, in execute_plan), because moving that would
 // change when a policy takes effect. The panel just wants to show the program BEFORE it starts, so it
 // reads the same node itself.
+// Append one protocol line, bounded. Deduplicated on the text itself: the caller runs every cycle
+// and most cycles say nothing new, so a transcript that recorded them all would bury the transitions
+// it exists to show.
+void ControllerSession::note_protocol(rc::AffordanceExecution::ProtocolLine::Side side,
+                                      std::uint64_t t_ms, std::string text)
+{
+    if (text.empty()) return;
+    if (not affordance_transcript_.empty() and affordance_transcript_.back().text == text) return;
+    affordance_transcript_.push_back({t_ms, side, std::move(text)});
+    // ★BOUNDED. This lives for the life of the agent; an unbounded vector behind a GUI is a leak that
+    // only shows after an hour of driving. 200 lines is several minutes of a busy exchange.
+    if (affordance_transcript_.size() > 200)
+        affordance_transcript_.erase(affordance_transcript_.begin(),
+                                     affordance_transcript_.begin() + 100);
+}
+
 void ControllerSession::update_affordance_view(const ControllerRobotPose &robot_pose,
                                                const rc::TrajectoryController::ControlOutput &o,
                                                bool output_enabled, float align_tol_rad,
@@ -2876,6 +2935,7 @@ void ControllerSession::update_affordance_view(const ControllerRobotPose &robot_
     using S = rc::AffordanceStepView::State;
     rc::AffordanceExecution v;
     v.recent = affordance_recent_;
+    v.transcript = affordance_transcript_;
 
     const bool on_affordance = last_target_info_.has_value() and last_target_info_->from_affordance;
     if (not on_affordance)
@@ -2892,11 +2952,14 @@ void ControllerSession::update_affordance_view(const ControllerRobotPose &robot_
         }
         affordance_view_.active = false;
         affordance_view_.recent = affordance_recent_;
+        affordance_view_.transcript = affordance_transcript_;
         return;
     }
 
     if (affordance_view_.affordance != last_target_info_->node_name)
     {
+        note_protocol(rc::AffordanceExecution::ProtocolLine::Side::Consumer, now_ms,
+                      std::format("claimed '{}'", last_target_info_->node_name));
         affordance_started_ms_ = now_ms;
         affordance_step_since_ms_ = now_ms;
         affordance_prev_step_.clear();
@@ -4679,6 +4742,15 @@ void ControllerSession::finalize_reached(rc::AffordanceManager &affordance_manag
         const bool had_predicate = not active_contract_.goal.empty();
         // outcome_override wins: a refusal is a statement about the APPROACH, and no reading of the
         // contract's predicate can express it — there was no approach to judge.
+        {
+            const auto oc = outcome_override.value_or(
+                (not had_predicate or last_look_succeeded_) ? rc::affordance::Outcome::Satisfied
+                                                            : rc::affordance::Outcome::Timeout);
+            note_protocol(rc::AffordanceExecution::ProtocolLine::Side::Consumer, now_ms,
+                          std::format("-> {} after {:.1f} s{}", rc::affordance::to_string(oc),
+                                      (now_ms - affordance_started_ms_) / 1000.0,
+                                      had_predicate ? "" : " (no predicate: arriving IS the goal)"));
+        }
         affordance_manager.mark_reached(graph_,
                                         outcome_override.value_or(
                                             (not had_predicate or last_look_succeeded_)

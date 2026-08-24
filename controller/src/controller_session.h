@@ -259,6 +259,13 @@ private:
     [[nodiscard]] bool fix_still_good(const Eigen::Vector2f &pos, const ControllerTargetInfo &target) const;
     void resolve_target_contract(const ControllerTargetInfo &target);
     std::vector<std::string> affordance_recent_;
+    // The protocol conversation. Bounded: this runs for the life of the agent, and an unbounded log
+    // in a GUI struct is a slow leak that only shows up after an hour of driving.
+    std::vector<rc::AffordanceExecution::ProtocolLine> affordance_transcript_;
+    std::string affordance_last_state_;      // to emit a line only when the exchange actually moves
+    std::string affordance_last_target_;
+    void note_protocol(rc::AffordanceExecution::ProtocolLine::Side side, std::uint64_t t_ms,
+                       std::string text);
     std::uint64_t affordance_started_ms_ = 0;
     std::uint64_t affordance_step_since_ms_ = 0;
     std::string affordance_prev_step_;
@@ -666,6 +673,49 @@ private:
     // somewhere else under the same name, and a fix that outlived the pose it repaired would silently
     // ignore that — the robot driving to a correction for a problem that has moved.
     std::optional<ApproachFix> approach_fix_;
+
+    // ── AN APPROACH IS A COMMITMENT, AND THE PRODUCER DOES NOT GET TO REVOKE IT MID-FLIGHT ───────
+    // ★★★MEASURED 2026-08-23, one 11.4 min affordance run: `afford_room`'s standpoint was republished
+    // MORE THAN A METRE AWAY 39 times — a republish every 9.4 s, the closest pair 3.0 s apart, single
+    // jumps of 2.2, 3.1, 4.0 and 4.5 m — and 36 of the 39 forced a whole new path generation. Every one
+    // of the 74 target moves in that file happened with the robot INSIDE 1 m of the target, median
+    // 0.318 m. `d_target_m` bottomed out at 0.253 m against a 0.25 m goal_threshold: the robot was
+    // walked to within THREE MILLIMETRES of arrival and the goalposts moved, over and over.
+    // ZERO of 2235 rows were inside the threshold and `goal_reached` was never once true.
+    // ★THIS IS THE PRODUCER, NOT US, and approach_diag.csv's raw/tgt pair is what proves it — the
+    // discriminator that file was built for. All 41 of the >1 m moves moved `raw_tgt` as well, so they
+    // came down the wire; our own repair (fix_held) accounts only for the small ones.
+    // ★SAME DISEASE AS ApproachFix ABOVE, ONE AGENT OVER. That comment records a standpoint fleeing
+    // 0.084 m/cycle against 0.027 m of robot closure with not one arrival in 139 s, and the cure was to
+    // FREEZE the pose being approached. It froze the half we author. This freezes the half we are told.
+    // ★WHY A LATCH AND NOT A BETTER STANDPOINT. A viewpoint chosen for information gain is SATISFIED by
+    // the robot arriving, so arriving is exactly what destroys it and the next-best-view legitimately
+    // moves. Chasing it is a carrot on a stick: the sequence never terminates and the affordance is
+    // never actually executed. A republish is not wrong — it is EARLY. It belongs to the next approach.
+    // ★NOT A TIMER AND NOT A DISTANCE GATE. The commitment lasts exactly one approach: taken when a
+    // standpoint is first accepted for an affordance node, released when that approach concludes
+    // (arrival, refusal, unreachable, or the target being dropped — all of which clear
+    // last_target_info_). The producer's newest offer is simply the one the NEXT epoch starts from.
+    // ★IT DOES NOT BLOCK OUR OWN REPAIRS. It is applied where the raw pose lands, BEFORE the
+    // reachability repair, the boxed-in search and recheck_standpoint_on_approach — so a committed
+    // standpoint that turns out to be occupied or unroutable is still moved by the machinery that
+    // exists for that, which reads the world rather than the wire.
+    struct ApproachCommitment
+    {
+        std::uint64_t node_id = 0;          // the affordance this commitment belongs to
+        int epoch = 0;                      // WHICH producer proposal this is — echoed on the wire
+        Eigen::Vector2f room_pos{0.f, 0.f}; // the standpoint we accepted and will drive to
+        float yaw_rad = 0.f;                // and the facing that came with it — a pose is both
+        Eigen::Vector2f last_offer{0.f, 0.f};          // the most recent thing the producer published
+        Eigen::Vector2f last_offer_counted{0.f, 0.f};  // the last offer the counter below has counted
+        int deferred = 0;                   // republishes held off — REPUBLISHES, not cycles
+    };
+    std::optional<ApproachCommitment> approach_commit_;
+    std::uint64_t approach_commit_log_ms_ = 0;   // rate limit for the deferral line
+    // Applied where the producer's pose lands, before every repair. Returns nothing: it edits
+    // `step.target` in place, which is the only way a caller can be sure it cannot be forgotten.
+    void hold_approach_commitment(ControllerPlanningStep &step, std::uint64_t timestamp_ms);
+
     std::uint64_t approach_blocked_log_ms_ = 0;   // rate limit for "found nowhere better"
     // The body used by the approach re-check, held rather than rebuilt per call (shadow() allocates).
     rc::RobotFootprint approach_body_ = rc::RobotFootprint::shadow();

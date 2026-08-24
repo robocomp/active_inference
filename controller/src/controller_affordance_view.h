@@ -76,6 +76,24 @@ struct AffordanceExecution
     // A short history of finished executions, newest first: "<name>  12.4 s  locked / gave up / reached".
     // Kept because these runs last seconds — by the time a window is opened the interesting one is over.
     std::vector<std::string> recent;
+
+    // ── THE PROTOCOL CONVERSATION, IN ORDER ───────────────────────────────────────────────────────
+    // One line per protocol EVENT, oldest first: an offer appearing, this side claiming it, the
+    // outcome it stamped, an offer passed over and why. The flow chart shows the step a run is ON;
+    // this shows the exchange BETWEEN the two agents, which is a different question and the one that
+    // has been hard to answer — the pair's failures have all been about who was waiting for whom.
+    //
+    // ★RECORDED AT THE EVENT, NOT DERIVED IN THE VIEW. A transcript rebuilt from the current snapshot
+    // could only ever show what the snapshot already shows; the point is to keep the transitions the
+    // snapshot has thrown away. It is also why a one-cycle state — JustCompleted — appears here at all:
+    // sampling at the redraw rate misses it, and it is exactly the state that cost a whole traversal.
+    struct ProtocolLine
+    {
+        std::uint64_t t_ms = 0;
+        enum class Side { Producer, Consumer, Selector } side = Side::Selector;
+        std::string   text;
+    };
+    std::vector<ProtocolLine> transcript;
 };
 
 }   // namespace rc

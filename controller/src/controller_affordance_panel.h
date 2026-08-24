@@ -29,6 +29,8 @@
 #include <QLabel>
 #include <QPixmap>
 #include <QPushButton>
+#include <QScrollBar>
+#include <QTextEdit>
 #include <QScrollArea>
 #include <QSplitter>
 #include <QString>
@@ -55,7 +57,7 @@ public:
         // driving, not clicked through.
         setModal(false);
         setWindowFlag(Qt::Tool, true);
-        resize(660, 500);
+        resize(980, 560);   // wider: the chart keeps its width and the transcript sits beside it
         // ★THE WHOLE WINDOW COMMITS TO THE DARK GROUND the flow chart's palette was drawn for. It used
         // to inherit the desktop theme, so light-grey text landed on a light fill and the panel read as
         // shaded rather than as a readout. Set here rather than per-widget: the header, the chart and
@@ -117,7 +119,41 @@ public:
         split->setStretchFactor(0, 0);
         split->setStretchFactor(1, 1);
         split->setSizes({195, 520});
-        root->addWidget(split, 1);
+
+        // ── THE CONVERSATION, ON THE RIGHT ────────────────────────────────────────────────────────
+        // The chart on the left says which STEP a run is on. This says what the two agents SAID to
+        // each other, in order, and they are different questions: every failure this pair has had was
+        // about who was waiting for whom, and none of them were visible in a step. A one-cycle state
+        // that the redraw rate cannot sample — JustCompleted, which once cost a whole competing
+        // traversal — appears here because the line is written when the event happens, not when the
+        // window repaints.
+        // ★HORIZONTAL SPLITTER, so an operator can give the transcript the whole window when reading
+        // an exchange and collapse it to nothing when watching a servo.
+        auto *hsplit = new QSplitter(Qt::Horizontal, this);
+        hsplit->setChildrenCollapsible(true);
+        hsplit->setHandleWidth(6);
+        hsplit->addWidget(split);
+
+        auto *tpanel = new QWidget(hsplit);
+        auto *tlay = new QVBoxLayout(tpanel);
+        tlay->setContentsMargins(0, 0, 0, 0);
+        tlay->setSpacing(3);
+        auto *tcap = new QLabel(QStringLiteral("protocol"), tpanel);
+        tcap->setStyleSheet(QStringLiteral(
+            "color:#8b9198; font-size:9pt; font-weight:600; letter-spacing:1px;"));
+        tlay->addWidget(tcap);
+        transcript_ = new QTextEdit(tpanel);
+        transcript_->setReadOnly(true);
+        transcript_->setLineWrapMode(QTextEdit::NoWrap);
+        transcript_->setStyleSheet(QStringLiteral(
+            "QTextEdit { background-color:#1b1d20; color:#d7dbdf; border:1px solid #33373b;"
+            " font-family:monospace; font-size:9pt; font-weight:400; }"));
+        tlay->addWidget(transcript_, 1);
+        hsplit->addWidget(tpanel);
+        hsplit->setStretchFactor(0, 3);
+        hsplit->setStretchFactor(1, 2);
+        hsplit->setSizes({400, 300});
+        root->addWidget(hsplit, 1);
 
         // ── SKIP ──────────────────────────────────────────────────────────────────────────────────
         // The operator's override on the epistemic policy. The selector maximises expected information
@@ -171,6 +207,47 @@ public:
                    + QString::fromStdString(v.recent[i]).toHtmlEscaped();
             recent_->setText(s + QStringLiteral("</span>"));
         }
+
+        render_transcript(v);
+    }
+
+    /// Repaint only when the conversation actually moved. Rebuilding every frame would also reset the
+    /// scrollbar every frame, so an operator could never read back through it while a run continued.
+    void render_transcript(const AffordanceExecution &v)
+    {
+        if (v.transcript.size() == transcript_shown_) return;
+        transcript_shown_ = v.transcript.size();
+
+        const bool at_end = transcript_->verticalScrollBar()->value()
+                         >= transcript_->verticalScrollBar()->maximum() - 4;
+        QString html;
+        const std::uint64_t t0 = v.transcript.empty() ? 0 : v.transcript.front().t_ms;
+        for (const auto &l : v.transcript)
+        {
+            // Producer and consumer get different colours and different indents, because the one
+            // question the transcript answers is WHICH SIDE spoke.
+            const char *col = "#8b9198";
+            const char *pad = "";
+            switch (l.side)
+            {
+                case AffordanceExecution::ProtocolLine::Side::Producer:
+                    col = "#7fa9d6"; break;
+                case AffordanceExecution::ProtocolLine::Side::Consumer:
+                    col = "#d68c74"; pad = "&nbsp;&nbsp;&nbsp;&nbsp;"; break;
+                default: break;
+            }
+            html += QStringLiteral("<div style='color:%1;white-space:pre'>"
+                                   "<span style='color:#5f666d'>%2</span> %3%4</div>")
+                        .arg(QString::fromLatin1(col))
+                        .arg(QString::asprintf("%7.1f", (l.t_ms - t0) / 1000.0))
+                        .arg(QString::fromLatin1(pad))
+                        .arg(QString::fromStdString(l.text).toHtmlEscaped());
+        }
+        transcript_->setHtml(html);
+        // Follow the tail only if the operator was already at the tail. Yanking the view back while
+        // someone is reading history is the fastest way to make a live log useless.
+        if (at_end)
+            transcript_->verticalScrollBar()->setValue(transcript_->verticalScrollBar()->maximum());
     }
 
 private:
@@ -262,6 +339,8 @@ private:
     SkipCallback on_skip_;
     QPushButton *skip_btn_ = nullptr;
     QLabel *header_ = nullptr;
+    QTextEdit *transcript_ = nullptr;
+    std::size_t transcript_shown_ = 0;
     QLabel *recent_ = nullptr;
     QLabel *camera_ = nullptr;
     qint64  last_image_key_ = 0;
