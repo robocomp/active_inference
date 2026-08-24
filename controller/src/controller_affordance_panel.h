@@ -277,32 +277,18 @@ private:
                    .arg(QString::fromStdString(v.suppressed).toHtmlEscaped());
     }
 
-    // WHICH AFFORDANCE THIS PANEL IS ABOUT, on every line, in every state. It used to appear only
-    // while one was executing, so the two states you most want to identify it in -- idle and dwell --
-    // named nothing, and a panel showing the last run's steps under the word "idle" gives you no way
-    // to tell WHICH run those steps were. With two producers offering (afford_room and afford_calib)
-    // and one of them under test, "is calib the thing on screen?" was being answered by reading the
-    // step rows and guessing.
-    // The POLICY rides along because it is the type in the sense that matters here: it is what decides
-    // the program below -- Reach navigates, Orient turns in place -- and a name alone does not say
-    // which. It comes from the contract, so it is also the first place a mis-read contract shows.
+    // WHICH AFFORDANCE THIS PANEL IS ABOUT — the NAME, and nothing else.
+    // ★Reduced to the bare name on request (2026-08-24). It previously carried the object, the policy
+    // and a "(contract not read yet)" marker on the same line. Those facts still exist and are still
+    // worth having; they simply do not belong in the identity row, which is read at a glance to answer
+    // one question: which affordance is this panel about. Anything else on that line competes with the
+    // answer. If the policy or the contract state needs to be visible again, give it its own row
+    // rather than putting it back here.
     static QString identity(const AffordanceExecution &v)
     {
         if (v.affordance.empty())
             return QStringLiteral("<span style='color:#c4c8cc'>no affordance yet</span>");
-        QString s = QStringLiteral("<b>%1</b>").arg(QString::fromStdString(v.affordance).toHtmlEscaped());
-        if (not v.object.empty())
-            s += QStringLiteral(" <span style='color:#c4c8cc'>on</span> %1")
-                     .arg(QString::fromStdString(v.object).toHtmlEscaped());
-        if (not v.policy.empty())
-            s += QStringLiteral(" <span style='color:#c4c8cc'>·</span> <b style='color:#4aa3e0'>%1</b>")
-                     .arg(QString::fromStdString(v.policy).toHtmlEscaped());
-        // An unresolved contract means the policy shown is a DEFAULT, not something the producer said.
-        // Reading Reach when the producer meant Orient is the exact failure that had the pivot report
-        // twelve satisfied steps without turning, so the uncertainty belongs next to the word itself.
-        if (not v.contract_known)
-            s += QStringLiteral(" <span style='color:#e6a23c'>(contract not read yet)</span>");
-        return s;
+        return QStringLiteral("<b>%1</b>").arg(QString::fromStdString(v.affordance).toHtmlEscaped());
     }
 
     static QString header_text(const AffordanceExecution &v)

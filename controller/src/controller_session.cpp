@@ -3487,12 +3487,50 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // by uncommenting the call if residual_concept is not running.
     // obstacle_tracker.scan_for_unmodelled_obstacles(time_source(), robot_pose, path_controller);
 
+    // ── THE PANEL MUST NAME THE AFFORDANCE IN EVERY STATE, INCLUDING THE ONES THAT RETURN EARLY ──
+    // ★★★MEASURED 2026-08-24: the window's first row read "no affordance yet" for the whole of an
+    // `afford_calib` run, while affordance_select.jsonl showed it selected on 404 of 407 cycles,
+    // state Executing, gain 50.0, zero rejections. The view was not wrong about its data — it was
+    // never reached.
+    // ★ROOT CAUSE IS ORDERING, NOT DATA. update_affordance_view sits ~100 lines below, and its own
+    // comment says it "runs EVERY cycle an affordance is live, not only while the window is open".
+    // Three returns above it break that, and one of them is fatal for an ORIENT affordance
+    // specifically: `afford_calib` publishes THE ROBOT'S OWN POSE as its standpoint (an orient does
+    // not navigate — room_scene_graph.cpp), so there is no plan, `!current_plan_` fires, and both the
+    // Orient branch below AND the panel are skipped. The one affordance whose whole behaviour is
+    // "turn in place" was structurally invisible to the window built to watch it.
+    // ★A ZEROED ControlOutput IS HONEST HERE. These three states own the base and are not tracking a
+    // curve, so there is no dist_to_goal to report; the fields that describe navigation are absent
+    // because navigation is absent, which is exactly what the panel should convey. What must NOT be
+    // absent is the identity — which affordance this is — and that comes from last_target_info_.
+    // ★★★AND IT HAS TO REACH THE DISPLAY, NOT JUST THE MEMBER. This lambda recomputed
+    // affordance_view_ and stopped there. The only push to the panel is at the END of execute_plan,
+    // and every branch that uses this lambda RETURNS before reaching it — so the four states that OWN
+    // the base (escape, no-plan, lock-on, orient) were precisely the four the window could not see.
+    // What it showed instead was whatever the last full cycle had left in it: the previous Reach, or
+    // at startup the empty view that reads "no affordance yet". Recomputing a view and not delivering
+    // it is indistinguishable from not recomputing it, and worse, because the code reads as if it had
+    // been handled. The bearing overlay goes out here for the same reason.
+    const auto refresh_view_only = [&]
+    {
+        const rc::TrajectoryController::ControlOutput idle{};
+        update_affordance_view(robot_pose, idle, motion_commander.output_enabled(),
+                               path_controller.params.align_yaw_tol_rad, overlay_now_ms_);
+        affordance_view_.dwell_left_s = dwell_left_s(overlay_now_ms_);
+        affordance_view_.dwell_mask_hits = dwell_mask_hits_;
+        affordance_view_.suppressed = suppressed_affordance_;
+        display.set_affordance_execution(affordance_view_);
+        display.set_orient_overlay(robot_pose.pos.x(), robot_pose.pos.y(), orient_overlay_yaw_,
+                                   robot_pose.theta, orient_overlay_visible_);
+    };
+
     // An escape maneuver (physical-stuck recovery) owns the base until it finishes backing
     // out — bypass the planner/follower entirely, just like the lock-on micro-search below.
     // It survives the current_plan_ reset done in begin_escape(), so it's gated FIRST.
     if (escape_active_)
     {
         step_escape(robot_pose, path_controller, motion_commander, time_source());
+        refresh_view_only();
         return;
     }
 
@@ -3502,6 +3540,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         clear_tracking_state();
         path_controller.stop();
         note_no_command(); motion_commander.stop_robot();
+        refresh_view_only();
         return;
     }
 
@@ -3512,6 +3551,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         if (step_lockon(motion_commander, time_source))
             finalize_reached(affordance_manager, path_controller, motion_commander, display,
                              robot_pose.pos, time_source());
+        refresh_view_only();
         return;
     }
 
@@ -3534,6 +3574,10 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                 feedback_node_id_ = contract.feedback_node_id != 0 ? contract.feedback_node_id
                                                                    : last_target_info_->parent_node_id;
                 path_controller.stop();
+                // BEFORE the step, so the view describes the state being acted on — the same ordering
+                // the full cycle uses — and the final cycle of a turn is shown as a turn rather than
+                // as the idle that finalize_reached leaves behind.
+                refresh_view_only();
                 if (step_orient(robot_pose, motion_commander, time_source, last_target_info_->yaw_rad))
                     finalize_reached(affordance_manager, path_controller, motion_commander, display,
                              robot_pose.pos, time_source());
