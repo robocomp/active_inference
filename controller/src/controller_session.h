@@ -168,7 +168,10 @@ private:
     // true once finished (LOOKED or GIVE_UP); drives the base rotation directly. Owns the base while active.
     bool step_orient(const ControllerRobotPose &robot_pose, ControllerMotionCommander &motion_commander,
                      const TimeSource &time_source, float target_yaw);
-    std::optional<std::uint64_t> orient_start_ms_;   // rotate-to-look start stamp (for the contract timeout)
+    std::optional<std::uint64_t> orient_start_ms_;
+    // The heading error the current turn STARTED from, so the chart can show a fraction rather than a
+    // raw angle. Reset with orient_start_ms_, i.e. once per turn, not once per cycle.
+    float orient_start_err_rad_ = 0.f;   // rotate-to-look start stamp (for the contract timeout)
     int                          orient_stable_ = 0;  // consecutive goal-met measurements (→ stable_n = looked)
     // Contract observation-stillness gate: track the base speed (finite-difference of the room-frame
     // robot pose → m/s, rad/s) and test it against the active contract's max_observe_vel/omega.

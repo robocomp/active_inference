@@ -3052,6 +3052,78 @@ void ControllerSession::update_affordance_view(const ControllerRobotPose &robot_
     // The yaw is only worth showing when something ACTS on it. A Reach carries a yaw in the target
     // struct like every other target does, but nothing consumes it — printing "facing 156 deg" for a
     // room waypoint states a requirement that does not exist.
+    // ── AN ORIENT IS A DIFFERENT PROGRAM, NOT A REACH WITH HOLES IN IT ────────────────────────────
+    // The pipeline below is a Reach: claim, navigate, align, arrive. An Orient never navigates and has
+    // no standpoint, so rendering it there produced a chart that was mostly Skipped boxes and said
+    // almost nothing about what the affordance actually does. The steps a program shows should come
+    // from the CONTRACT, since that is where the producer wrote down what it wants done.
+    //
+    // What an Orient actually is: turn to a bearing, at a rate the producer may have named, and hold
+    // there long enough to count. The completion is the arrival at the bearing when there is no
+    // predicate -- which is exactly the case the calibration pivot uses, and the case that once
+    // completed on cycle one having turned nothing.
+    if (orient)
+    {
+        const float target_yaw = last_target_info_->yaw_rad;
+        const float yaw_err = std::atan2(std::sin(target_yaw - robot_pose.theta),
+                                         std::cos(target_yaw - robot_pose.theta));
+        constexpr float kAligned = 0.05f;                  // the executor's own band
+        const bool aligned = std::abs(yaw_err) < kAligned;
+
+        v.steps.push_back({.label = "claim affordance", .kind = Step::Kind::Pipeline,
+                           .state = S::Done, .progress = -1.f,
+                           .detail = std::format("rotate in place to {:.0f} deg",
+                                                 target_yaw * 180.f / static_cast<float>(M_PI))});
+
+        {
+            // The rate is the producer's if it named one, ours otherwise -- and which of those it is
+            // matters, because a manoeuvre capped by a servo tuning it was never meant for is the
+            // defect this field was added to fix.
+            const float asked = target_contract_.max_yaw_rate;
+            const float cap   = asked > 0.f ? asked
+                                            : (params_ ? params_->lockon_max_yaw_rps : 0.12f);
+            Step st{.label = "turn to bearing", .kind = Step::Kind::Pipeline};
+            st.state = aligned ? S::Done : S::Active;
+            // Fraction of the way there, from wherever the turn started.
+            st.progress = orient_start_err_rad_ > 1e-3f
+                        ? std::clamp(1.f - std::abs(yaw_err) / orient_start_err_rad_, 0.f, 1.f) : -1.f;
+            st.detail = std::format("{:+.0f} deg to go, {:.2f} rad/s cap ({})",
+                                    yaw_err * 180.f / static_cast<float>(M_PI), cap,
+                                    asked > 0.f ? "producer's rate" : "our servo cap");
+            v.steps.push_back(std::move(st));
+        }
+
+        {
+            Step st{.label = "hold aligned", .kind = Step::Kind::Stable};
+            const int need = std::max(1, target_contract_.stable_n);
+            st.state = not aligned ? S::Pending
+                     : orient_stable_ >= need ? S::Done : S::Active;
+            st.progress = std::clamp(static_cast<float>(orient_stable_) / static_cast<float>(need),
+                                     0.f, 1.f);
+            st.detail = std::format("{}/{} cycles inside {:.0f} deg", orient_stable_, need,
+                                    kAligned * 180.f / static_cast<float>(M_PI));
+            v.steps.push_back(std::move(st));
+        }
+
+        {
+            // ★NAMED, because an Orient with NO predicate is the case that silently completed on the
+            // first cycle standing still. A chart that does not say which rule is deciding cannot show
+            // the difference between "arrived" and "never had to".
+            Step st{.label = target_contract_.goal.empty() ? "complete: the bearing IS the goal"
+                                                           : "complete: predicate holds",
+                    .kind = Step::Kind::Terminal};
+            st.state = S::Pending;
+            st.detail = target_contract_.goal.empty()
+                      ? "no completion predicate — arriving at the bearing completes it"
+                      : std::format("{} clause(s) on the feedback node", target_contract_.goal.size());
+            v.steps.push_back(std::move(st));
+        }
+
+        v.transcript = affordance_transcript_;
+        affordance_view_ = v;
+        return;
+    }
+
     v.steps.push_back({.label = "claim affordance", .state = S::Done, .progress = -1.f,
                        .detail = wants_final_facing(*last_target_info_)
                            ? std::format("({:.2f},{:.2f}) facing {:.0f} deg",
@@ -4636,7 +4708,12 @@ bool ControllerSession::step_orient(const ControllerRobotPose &robot_pose,
 {
     const std::uint64_t now = time_source();
     if (!orient_start_ms_)
-        orient_start_ms_ = now;
+        {
+            orient_start_ms_ = now;
+            const float e0 = std::atan2(std::sin(target_yaw - robot_pose.theta),
+                                        std::cos(target_yaw - robot_pose.theta));
+            orient_start_err_rad_ = std::abs(e0);
+        }
 
     // ★ONE DEFINITION OF "POINTING THERE", NOT TWO. This band already lived further down as the point
     // where the base stops rotating and holds still so the capture is quiet; making it also the
