@@ -106,6 +106,32 @@ std::pair<std::string, std::string> SceneProcessor::get_room_robot_names_for_com
         robot_name_snapshot = robot_node_name_;
     }
 
+    // ★THE MEMO IS DROPPED WHEN THE NODE BEHIND IT LEAVES THE GRAPH. It used to be write-once, so
+    // after a room_concept restart every cycle went on handing back the dead name, and everything
+    // downstream kept asking cortex for a transform between nodes that no longer exist — answered
+    // with `get_transformation_matrix … origen or dest nodes do not exist`, once per call, at the
+    // compute rate. An unresolvable name is a STATE (ensure_room_and_robot_ready() already pauses on
+    // it and says so once) and not a line to print forty times a second. Clearing it also lets a
+    // re-created — or renamed — room be picked up, which the write-once version could never do
+    // without restarting the agent.
+    //
+    // ★get_id_from_name, NOT get_node: this runs every compute cycle. get_node COPIES the whole node
+    // with its attributes; get_id_from_name is a shared_lock and one map lookup (verified against
+    // cortex's dsr_api.cpp). Both are thread-safe, which matters — this is read off the ZED worker
+    // as well as the main tick.
+    const bool room_gone  = not room_name_snapshot.empty()
+                            and not graph_->get_id_from_name(room_name_snapshot).has_value();
+    const bool robot_gone = not robot_name_snapshot.empty()
+                            and not graph_->get_id_from_name(robot_name_snapshot).has_value();
+    if (room_gone)  room_name_snapshot.clear();
+    if (robot_gone) robot_name_snapshot.clear();
+    if (room_gone or robot_gone)
+    {
+        std::scoped_lock lk(node_names_mutex_);
+        if (room_gone)  room_node_name_.clear();
+        if (robot_gone) robot_node_name_.clear();
+    }
+
     if (room_name_snapshot.empty())
     {
         if (const auto room_nodes = graph_->get_nodes_by_type("room"); !room_nodes.empty())
@@ -133,11 +159,16 @@ bool SceneProcessor::ensure_room_and_robot_ready(FPSCounter& compute_fps,
                                                  const std::string& room_name,
                                                  const std::string& robot_name)
 {
+    // ★ONE LATCH PER NODE, AND BOTH ARE RELEASED WHEN THE FRAMES COME BACK. A single shared latch
+    // that was only ever set meant the SECOND outage was silent — and with the name memo now dropping
+    // a dead name (see get_room_robot_names_for_compute), a second outage is exactly what a peer
+    // restart produces. The reset lives in the ready branch, which is the only place both names are
+    // known good.
     if (room_name.empty())
     {
         if (!room_wait_logged_)
         {
-            qWarning() << "Room node not found in DSR graph. Voxelization paused until a room exists.";
+            qWarning() << "Room node not found in DSR graph. Perception paused until a room exists.";
             room_wait_logged_ = true;
             room_ready_logged_ = false;
         }
@@ -148,10 +179,10 @@ bool SceneProcessor::ensure_room_and_robot_ready(FPSCounter& compute_fps,
 
     if (robot_name.empty())
     {
-        if (!room_wait_logged_)
+        if (!robot_wait_logged_)
         {
-            qWarning() << "Robot node not found in DSR graph. Voxelization paused until a robot exists.";
-            room_wait_logged_ = true;
+            qWarning() << "Robot node not found in DSR graph. Perception paused until a robot exists.";
+            robot_wait_logged_ = true;
             room_ready_logged_ = false;
         }
         if (verbose_debug_)
@@ -161,8 +192,10 @@ bool SceneProcessor::ensure_room_and_robot_ready(FPSCounter& compute_fps,
 
     if (!room_ready_logged_)
     {
-        qInfo() << "Room node found in DSR graph. Voxelization enabled.";
+        qInfo() << "Room and robot nodes present in DSR graph. Perception enabled.";
         room_ready_logged_ = true;
+        room_wait_logged_  = false;   // armed again, so the NEXT disappearance is reported too
+        robot_wait_logged_ = false;
     }
     return true;
 }
@@ -176,7 +209,7 @@ std::optional<Mat::RTMat> SceneProcessor::get_room_robot_transform(FPSCounter& c
     {
         if (!room_rt_wait_logged_)
         {
-            qWarning() << "InnerEigen API is not available. Voxelization paused.";
+            qWarning() << "InnerEigen API is not available. Perception paused.";
             room_rt_wait_logged_ = true;
             room_rt_ready_logged_ = false;
         }
@@ -313,7 +346,7 @@ std::optional<Mat::RTMat> SceneProcessor::get_room_zed_transform(FPSCounter& com
     {
         if (!room_rt_wait_logged_)
         {
-            qWarning() << "InnerEigen API is not available. Voxelization paused.";
+            qWarning() << "InnerEigen API is not available. Perception paused.";
             room_rt_wait_logged_ = true;
             room_rt_ready_logged_ = false;
         }

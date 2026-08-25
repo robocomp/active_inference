@@ -156,7 +156,10 @@ private:
     std::ofstream pose_extrap_csv_;
     bool          pose_extrap_csv_open_attempted_ = false;
     bool room_ready_logged_ = false;
+    // One "already said it" latch PER NODE, both released on the ready edge. Sharing one latch across
+    // the two made the second outage silent; see ensure_room_and_robot_ready.
     bool room_wait_logged_ = false;
+    bool robot_wait_logged_ = false;
     bool room_rt_ready_logged_ = false;
     bool room_rt_wait_logged_ = false;
     int polygon_check_count_ = 0;
