@@ -145,25 +145,32 @@ public:
         // ★THE PIVOT'S OWN ACCUMULATOR RUNS ON THE SAME INCREMENT, not on a second one derived later.
         // Taking the difference again from state that has already advanced returns zero — which is
         // what a first version of the offline loop accumulated, silently, for a whole log.
-        // ★AND ONLY WHILE THE CONSUMER IS ACTUALLY TURNING FOR US. `offer_open_` means the offer is on
-        // the wire, which is NOT the same as the manoeuvre running: the offer stands from the moment
-        // it is published until somebody answers it, and in between the selector is free to claim
-        // something else entirely. Measured live 2026-08-24: after one pivot step completed, calib
-        // re-offered at 0.163 nats, afford_room won at 0.847, and the robot drove 5.4 m across the
-        // room -- every degree of which was being added to THIS pivot step's accumulators.
-        // The ratio survived that (both sides collected the same interval) but the CLOSURE TEST did
-        // not: it asks whether |ref_turn_| has reached four whole turns, and a robot doing its
-        // ordinary rounds delivers four turns' worth of heading change without pivoting at all. The
-        // pivot could therefore declare closure having turned a fraction of a turn on the spot, and
-        // quote a scale measured over a traversal as if it came from a closure.
-        if (offer_open_ and claim_held_ and odom_valid) step_odom_ += odom_dtheta;
+        // ★★★A CLOSURE IS A TOTAL, SO IT COUNTS EVERYTHING BETWEEN ITS TWO ENDS.
+        // These were gated on `offer_open_ and claim_held_` -- only motion made while the consumer
+        // demonstrably held our claim. That was written to stop a competing traversal being credited
+        // to a pivot step, and it broke the measurement it was protecting. The closure's argument is
+        // "the heading left `start` and came back, therefore the robot turned a whole number of
+        // turns", and that is a statement about EVERY radian in between: the claim latency, the
+        // deceleration tail after the consumer clears its flag, the seconds between one step
+        // completing and the next being claimed. Measured live 2026-08-25: fifteen anchored steps,
+        // five complete turns (1800 deg), and ref_turn_ credited only 1440 -- a whole turn lost to
+        // poll and DDS latency on the two claim edges. whole_turns() then read 4, the odometry's
+        // 1502 deg was divided by four turns instead of five, and the pivot reported +4.34% against
+        // an online estimator reading +0.34% on the same robot from the same odometry.
+        // ★AND THE GATE IS NOW UNNECESSARY, which is the part worth keeping. It existed because
+        // closure() ASSERTED four turns as the truth, so stray rotation could fake the total. The
+        // truth is COUNTED now: a traversal in the middle raises ref_turn_, raises whole_turns(),
+        // raises truth_rad, and is counted in odom_turn_ as well -- the ratio is unharmed and the
+        // closure stays exact. Counting instead of asserting is what removed the need to gate.
+        if (pivot_.state() == PivotAffordance::State::Offering and odom_valid)
+            step_odom_ += odom_dtheta;
         // ★AND THE REFERENCE SIDE THE SAME WAY. The pivot used to take the reference turn as
         // wrap(heading_now - heading_at_the_last_step), which spans the GAP between steps -- so any
         // driving the robot did in between was counted as pivot rotation, and wrap() capped a 200 deg
         // excursion at -160. Measured live: 932 deg of in-place turning summed to only -662 signed,
         // with 269 deg of rotation-while-driving in between. Both sides of the comparison are now
         // accumulated over the SAME interval, which is the only way the ratio means anything.
-        if (offer_open_ and claim_held_) step_ref_ += d_ref;
+        if (pivot_.state() == PivotAffordance::State::Offering) step_ref_ += d_ref;
 
         const double T = t_s - win_t0_;
         if (T < p_.window_s) return;
@@ -241,19 +248,10 @@ public:
     }
 
     /// The offer reached the graph. Only now is one live.
-    void mark_offered() noexcept { offer_open_ = true; step_odom_ = step_ref_ = 0.0; }
-
-    /// Is the consumer executing OUR affordance right now? Only motion collected while this holds is
-    /// motion the pivot asked for; everything else is the robot's own business happening around a
-    /// standing offer. Set once per cycle before note_motion().
-    void set_claim_held(bool held) noexcept
-    {
-        // Clear the step on the EDGE, not on the level: the step begins when the claim is taken, and
-        // a step that started counting at publish time has already banked whatever the robot did
-        // while the offer merely stood there.
-        if (held and not claim_held_) step_odom_ = step_ref_ = 0.0;
-        claim_held_ = held;
-    }
+    /// ★DOES NOT RESET THE ACCUMULATORS. They run from the pivot's first offer to its closure and are
+    /// banked at each outcome; zeroing them here would drop whatever the robot did between one step
+    /// finishing and the next going out, which the closure's total must include.
+    void mark_offered() noexcept { offer_open_ = true; }
 
     /// The consumer answered. The heading is the robot's MEASURED one now — the sequence advances on
     /// that and never on the count of steps issued.
@@ -289,6 +287,25 @@ public:
 
     [[nodiscard]] PivotClosure closure() const { return pivot_.closure(); }
 
+    /// The closure has been read and recorded; make the channel available again.
+    ///
+    /// ★★★`Closed` MEANT "NEVER AGAIN", AND IT SHOULD MEAN "THAT ONE IS FINISHED". A closed pivot
+    /// returned nullopt from every future offer, so the manoeuvre was once per process: afford_calib
+    /// simply vanished from the graph and nothing said why. That contradicts the premise the whole
+    /// channel is built on -- the scale is a slowly varying quantity (tyres wear, payloads shift,
+    /// which is why ScaleEstimator carries a random-walk density at all), so a measurement made once
+    /// at boot cannot stay true, and a robot that improves by itself in time must be able to ask
+    /// again.
+    /// ★AND NOTHING NEEDS A SCHEDULE OR A THRESHOLD TO DECIDE WHEN. The marginal gain already governs
+    /// it: next_bearing refuses to offer unless there is gain to advertise, and the gain falls as the
+    /// posterior sharpens (measured across this pivot, 5.204 -> 1.092 nats) and widens again on its
+    /// own as the random walk ages the evidence. Re-arming just returns that decision to the rule
+    /// that was always supposed to make it.
+    void restart_after_closure()
+    {
+        if (pivot_.state() == PivotAffordance::State::Closed) pivot_.reset();
+    }
+
 private:
     static constexpr double kBodyWidthM = 0.543;   // Shadow's measured across-body extent
     static double wrap(double a) { while (a > M_PI) a -= 2*M_PI; while (a < -M_PI) a += 2*M_PI; return a; }
@@ -302,7 +319,6 @@ private:
     double win_ref_ = 0.0, win_odo_ = 0.0;
     bool   win_poisoned_ = false;
     long   poisoned_windows_ = 0;   ///< windows discarded for a pose jump or missing odometry
-    bool   claim_held_ = false;         // the consumer is executing this affordance right now
     double authoritative_info_ = 0.0;   // 1/sigma^2 from the estimator that steers; 0 = unset
     double passive_rate_ = 0.0;      ///< rad/s of turning the ordinary tours deliver — MEASURED
     bool   offer_open_ = false;

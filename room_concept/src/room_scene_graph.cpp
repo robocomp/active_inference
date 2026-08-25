@@ -651,9 +651,6 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
             ? 1.0 / (static_cast<double>(res.calib_sigma_k_w) * res.calib_sigma_k_w)
             : 0.0);
 
-    // Does the consumer hold OUR claim this cycle? Asked before the motion is folded in, because it
-    // decides whether this frame's rotation belongs to the pivot step or to the robot's own errands.
-    calib_.set_claim_held(params_->CALIB_PIVOT_ENABLED and calib_manager_.is_executing(G_));
     calib_.note_motion(t_s, res.robot_pose.translation().x(), res.robot_pose.translation().y(),
                        theta, static_cast<double>(odo.delta_pose.z()),
                        odo.valid and odo.fresh and odo.is_measured);
@@ -737,6 +734,9 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
                     auth > 0.0 ? 1.0 / std::sqrt(auth) : 0.0);
                 calib_csv_.flush();
             }
+            // Recorded — so the channel may ask again when it is worth asking. See
+            // CalibChannel::restart_after_closure: the marginal gain decides when, not a schedule.
+            calib_.restart_after_closure();
         }
         std::fflush(stdout);
         // ★FALL THROUGH AND RE-ARM IN THIS SAME CYCLE. Returning here left the node in

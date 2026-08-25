@@ -120,11 +120,9 @@ int main()
             // windows, and excluding them would throw away the most informative motion of the day.
             // The claim is taken before the turn and released after it: only motion inside that
             // bracket is motion the pivot asked for.
-            c.set_claim_held(true);
             drive(c, t, th, step / 5.0, s_true, 5.0);
             h += step;
             c.on_outcome(O::Satisfied, std::atan2(std::sin(h), std::cos(h)));
-            c.set_claim_held(false);
         }
         const auto cl = c.closure();
         std::printf("  pivot: state=%d  turned %.1f deg  s_omega %.4f (truth %.3f) res %.4f usable=%d\n",
@@ -153,14 +151,12 @@ int main()
             const auto b = c.offer(h);
             if (not b.has_value()) break;
             c.mark_offered();
-            c.set_claim_held(true);
             // Turn to the ASKED bearing but stop short of it, exactly as the executor does.
             const double err = std::atan2(std::sin(*b - th), std::cos(*b - th));
             const double turn = err - (err > 0 ? shortfall : -shortfall);
             drive(c, t, th, turn / 5.0, s_true, 5.0);
             h = std::atan2(std::sin(th), std::cos(th));
             c.on_outcome(O::Satisfied, h);
-            c.set_claim_held(false);
         }
         const auto cl = c.closure();
         std::printf("  short steps: closed=%d after %d step(s), turned %.1f deg, truth %.1f deg, "
@@ -175,30 +171,42 @@ int main()
               "and the scale it reports is the injected one, not a ratio against an asserted total");
     }
 
-    // 5b. A STANDING OFFER IS NOT A RUNNING MANOEUVRE. Between the moment a step is published and the
-    //     moment somebody claims it, the selector is free to send the robot across the room — and it
-    //     does: measured live 2026-08-24, a completed pivot step re-offered at 0.163 nats, lost to an
-    //     exploration standpoint at 0.847, and the robot drove 5.4 m before calib was claimed again.
-    //     If that traversal's rotation is banked into the step, the pivot can reach "four turns
-    //     accumulated" without ever pivoting, and closure becomes a statement about the errands.
+    // 5b. A DETOUR IN THE MIDDLE DOES NOT CORRUPT THE CLOSURE — because the truth is COUNTED.
+    //     Between publishing a step and somebody claiming it, the selector may send the robot across
+    //     the room, and it does. An earlier version GATED the accumulators on the consumer holding
+    //     the claim so that rotation could not be credited to a step. That was the wrong cure and it
+    //     broke the measurement: a closure is a TOTAL between two headings, so every radian in
+    //     between belongs to it — including claim latency and the tail after the consumer lets go.
+    //     Live 2026-08-25: fifteen steps, five real turns, only four counted, +4.34% reported against
+    //     an estimator reading +0.34%. With truth = round(ref/2pi) a detour simply raises the turn
+    //     count on BOTH sides and the ratio is untouched, which is what this checks.
     {
         CalibChannelParams p; p.enabled = true;
         CalibChannel c(p);
         double t = 0.0, th = 0.0;
-        drive(c, t, th, 0.0, 0.0, 0.5);                    // warm, as above
-        const auto b = c.offer(0.0);
-        check(b.has_value(), "a step is offered");
-        c.mark_offered();
-        // Nobody has claimed it. The robot goes about its business and turns a full circle doing so.
-        drive(c, t, th, 2.0*M_PI / 20.0, 0.0, 20.0);       // a full circle's worth, over 20 s
-        c.set_claim_held(true);                            // NOW the consumer takes it
-        drive(c, t, th, (2.0*M_PI/3.0) / 5.0, 0.0, 5.0);   // and turns the one third it was asked for
-        c.on_outcome(O::Satisfied, std::atan2(std::sin(th), std::cos(th)));
-        c.set_claim_held(false);
-        const double got = c.pivot().accumulated_rad() * 180.0 / M_PI;
-        std::printf("  unclaimed traversal: pivot banked %.1f deg (asked for 120)\n", got);
-        check(std::abs(got - 120.0) < 5.0,
-              "only the turn made under the claim is credited to the step");
+        const double s_true = 0.05, step = 2.0*M_PI/3.0;
+        drive(c, t, th, 0.0, s_true, 0.5);
+        double h = 0.0;
+        for (int i = 0; i < 60 and c.pivot().state() != PivotAffordance::State::Closed; ++i)
+        {
+            const auto b = c.offer(h);
+            if (not b.has_value()) break;
+            c.mark_offered();
+            // Halfway through the sequence the robot is sent off on an errand and turns a whole extra
+            // circle before anyone claims the step that is standing on the wire.
+            if (i == 6) drive(c, t, th, 2.0*M_PI / 20.0, s_true, 20.0);
+            const double err = std::atan2(std::sin(*b - th), std::cos(*b - th));
+            drive(c, t, th, err / 5.0, s_true, 5.0);
+            h = std::atan2(std::sin(th), std::cos(th));
+            c.on_outcome(O::Satisfied, h);
+        }
+        const auto cl = c.closure();
+        std::printf("  detour mid-pivot: closed=%d, truth %.0f deg (%.0f turns), s_omega %.4f\n",
+                    (int)(c.pivot().state() == PivotAffordance::State::Closed),
+                    cl.truth_rad*180/M_PI, cl.truth_rad/(2*M_PI), cl.s_omega);
+        check(c.pivot().state() == PivotAffordance::State::Closed, "a pivot with a detour still closes");
+        check(std::abs(cl.s_omega - s_true) < 5e-3,
+              "and the detour's turning does not bias the scale, because the truth counts it too");
     }
 
     // 6. INFEASIBLE IS BELIEVED, AND IT IS NOT FOREVER. The consumer alone can say the body cannot
