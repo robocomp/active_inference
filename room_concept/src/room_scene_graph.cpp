@@ -718,21 +718,51 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
                 calib_csv_.imbue(std::locale::classic());   // decimal POINT under es_ES — see CLAUDE.md
                 calib_csv_open_ = calib_csv_.is_open();
                 if (calib_csv_open_ and calib_csv_.tellp() == 0)
-                    calib_csv_ << "t_ms,steps,turned_deg,truth_deg,turns,s_omega,resolution,usable,"
-                                  "est_s,est_s_std,est_windows,est_identifiable,auth_sigma\n";
+                    calib_csv_ << "t_ms,block,rate_rps,steps,turned_deg,truth_deg,turns,s_omega,"
+                                  "resolution,usable,sep_k,sep_k_sigma,sep_k_usable,sep_b,"
+                                  "sep_b_sigma,sep_b_usable,est_s,est_s_std,est_windows,"
+                                  "est_identifiable,auth_sigma\n";
             }
             if (calib_csv_open_)
             {
                 const auto post = calib_.posterior();
                 const double auth = calib_.authoritative_information();
-                calib_csv_ << std::format(
-                    "{},{},{:.3f},{:.3f},{:.0f},{:.6f},{:.6f},{},{:.6f},{:.6f},{},{},{:.6f}\n",
-                    static_cast<std::uint64_t>(res.timestamp_ms), calib_.pivot().steps_issued(),
-                    cl.turned_rad * 180.0 / M_PI, cl.truth_rad * 180.0 / M_PI,
-                    cl.truth_rad / (2.0 * M_PI), cl.s_omega, cl.resolution, cl.usable ? 1 : 0,
-                    post.s, post.s_std, post.windows, post.identifiable() ? 1 : 0,
-                    auth > 0.0 ? 1.0 / std::sqrt(auth) : 0.0);
+                // ★ONE ROW PER BLOCK, plus the separation the blocks jointly support. Recording
+                // only the combined answer would throw away the two closures it rests on, and those
+                // are exactly what a reader needs to judge whether the separation is a solve or a
+                // subtraction of two indistinguishable numbers. The sep_* columns repeat on each
+                // block's row.
+                const auto sep = calib_.separate_scale_and_bias();
+                const auto &blocks = calib_.pivot().closures();
+                for (std::size_t bi = 0; bi < blocks.size(); ++bi)
+                {
+                    const auto &b = blocks[bi];
+                    calib_csv_ << std::format(
+                        "{},{},{:.4f},{},{:.3f},{:.3f},{:.0f},{:.6f},{:.6f},{},"
+                        "{:.6f},{:.6f},{},{:.6f},{:.6f},{},"
+                        "{:.6f},{:.6f},{},{},{:.6f}\n",
+                        static_cast<std::uint64_t>(res.timestamp_ms), bi,
+                        calib_.rate_for_block(static_cast<int>(bi)),
+                        calib_.pivot().steps_issued(),
+                        b.turned_rad * 180.0 / M_PI, b.truth_rad * 180.0 / M_PI,
+                        b.truth_rad / (2.0 * M_PI), b.s_omega, b.resolution, b.usable ? 1 : 0,
+                        sep.k_omega, sep.sigma_k, sep.usable_k ? 1 : 0,
+                        sep.b_omega, sep.sigma_b, sep.usable_b ? 1 : 0,
+                        post.s, post.s_std, post.windows, post.identifiable() ? 1 : 0,
+                        auth > 0.0 ? 1.0 / std::sqrt(auth) : 0.0);
+                }
                 calib_csv_.flush();
+                if (sep.solved)
+                {
+                    std::print("[calib] ★SEPARATED BY RATE: scale {:+.4f} +/- {:.4f}{} | bias "
+                               "{:+.5f} +/- {:.5f} rad/s{}. Two closures at {:.2f} and {:.2f} rad/s "
+                               "— neither alone can tell these apart.\n",
+                               sep.k_omega, sep.sigma_k, sep.usable_k ? "" : " (below resolution)",
+                               sep.b_omega, sep.sigma_b, sep.usable_b ? "" : " (below resolution)",
+                               calib_.rate_for_block(0),
+                               calib_.rate_for_block(static_cast<int>(blocks.size()) - 1));
+                    std::fflush(stdout);
+                }
             }
             // Recorded — so the channel may ask again when it is worth asking. See
             // CalibChannel::restart_after_closure: the marginal gain decides when, not a schedule.
@@ -834,6 +864,30 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
     // carrying its contract in the SAME insert, and armed by the next cycle's publish_target. The
     // offer is one cycle later; the contract can never be one cycle late.
     if (not ensure_calib_node()) return;
+
+    // ★★★THE CONTRACT IS REWRITTEN BEFORE EVERY OFFER, BECAUSE THE RATE IS NOT CONSTANT ANY MORE.
+    // The manoeuvre runs its blocks at different angular rates on purpose — a closure at rate w
+    // measures k + b/w, so one rate cannot separate the scale from the bias — which means the rate
+    // the consumer is asked to turn at CHANGES partway through, and so does the patience that rate
+    // implies. Writing the contract once at node creation would have left every block after the
+    // first executing at the FIRST block's rate, silently collapsing the two closures into one and
+    // making the separation a subtraction of two identical numbers, while every log still read
+    // correctly.
+    // ★It is safe to rewrite now, and was not before: the consumer latches the contract per
+    // (node_id, PROPOSAL) since 71a8c10, so it re-reads on every new bearing. Under the old node-id
+    // latch this write would have been ignored for the whole sequence.
+    if (const auto n = G_->get_node("afford_calib"); n.has_value())
+    {
+        auto node = n.value();
+        const double rate   = calib_.pivot_rate_rps();
+        const float  step_s = static_cast<float>(calib_.pivot_step_rad() / std::max(rate, 1e-3));
+        rc::affordance::write_contract(*G_, node,
+            rc::affordance::Contract::orient()
+                .stable(2)
+                .timeout_s(std::max(30.0f, 4.0f * step_s))
+                .yaw_rate(static_cast<float>(rate)));
+        G_->update_node(node);
+    }
 
     const bool published = calib_manager_.publish_target(
         G_, dsr_room_id_,

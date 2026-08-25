@@ -35,6 +35,7 @@
 
 #include <cmath>
 #include <optional>
+#include <vector>
 
 namespace rc::calib
 {
@@ -57,6 +58,25 @@ struct PivotParams
     /// setting — it is the localiser's own heading accuracy, and it becomes the measurement's
     /// resolution, reported with the answer rather than hidden in it.
     double closure_tolerance_rad = 0.05;
+    /// ★★★HOW MANY RATE BLOCKS, AND WHY MORE THAN ONE IS THE WHOLE POINT.
+    /// A closure at angular rate w does not measure the rotation scale. Over N turns the odometry
+    /// accumulates k*(N*2pi) + b*T with T = N*2pi/w, so what comes out is
+    ///
+    ///     s_closure = k + b/w
+    ///
+    /// — the scale PLUS the bias divided by the rate. Every single-rate closure ever taken here has
+    /// been reporting that sum and calling it the scale. One rate cannot do better: at fixed w the
+    /// two unknowns enter through one number.
+    /// Run the same closure twice at two different rates and they separate exactly:
+    ///     b = (s1 - s2) / (1/w1 - 1/w2)          k = (u1*s2 - u2*s1) / (u1 - u2),  u = 1/w
+    /// Both terms then rest on headings returning to where they left — no map, no survey, no
+    /// localiser anywhere in the arithmetic. That is a stronger instrument than the batch estimator's
+    /// separation, which needs the localiser for its reference.
+    /// ★EACH BLOCK IS A FULL `turns` CLOSURE, not half of one. Splitting four turns into two blocks
+    /// of two would halve each block's resolution (it goes as tolerance / total angle) and then take
+    /// a DIFFERENCE of the two, which is where the noise lands. Keeping four turns per block costs
+    /// wall-clock and keeps the answer.
+    int blocks = 2;
 };
 
 /// What the pivot measured, once it closed.
@@ -92,6 +112,11 @@ public:
     [[nodiscard]] State state() const { return state_; }
     [[nodiscard]] int   steps_issued() const { return steps_; }
     [[nodiscard]] double accumulated_rad() const { return ref_turn_; }
+    /// Which rate block is running (0-based). The caller turns this into the rate it asks for and
+    /// prices — see CalibChannel::pivot_rate_rps.
+    [[nodiscard]] int    block() const { return block_; }
+    /// One entry per block that has closed, in order. Empty until the first closes.
+    [[nodiscard]] const std::vector<PivotClosure>& closures() const { return closures_; }
 
     /// Should an offer go out this cycle, and at what bearing?
     ///
@@ -154,23 +179,47 @@ public:
         ++steps_;
         state_ = State::Offering;
 
-        // Closed when the robot has been round at least the requested number of times AND the heading
-        // has come back. Both conditions, because either alone is satisfiable by standing still.
+        // A BLOCK closes when the robot has been round at least the requested number of times AND the
+        // heading has come back. Both conditions, because either alone is satisfiable by standing
+        // still.
         // ★COUNT THE TURNS, DO NOT COMPARE AGAINST AN ASSERTED TOTAL. The old test asked whether
         // |ref_turn_| had reached 2*pi*turns minus a tolerance, which pairs badly with the closure()
         // below asserting the same constant as the TRUTH — see there.
         if (std::abs(whole_turns()) >= p_.turns
             and std::abs(wrap(heading_rad - start_heading_)) <= p_.closure_tolerance_rad)
-            state_ = State::Closed;
+        {
+            closures_.push_back(make_closure());
+            ++block_;
+            if (block_ >= std::max(1, p_.blocks))
+                state_ = State::Closed;
+            else
+            {
+                // Start the next block WHERE THIS ONE ENDED. The bearings are anchored to
+                // start_heading_, so resetting it here keeps step k of the new block asking for
+                // start + k*120 and keeps its closure independent of the block before it.
+                start_heading_ = last_heading_ = heading_rad;
+                ref_turn_ = odom_turn_ = 0.0;
+                steps_ = 0;
+            }
+        }
     }
 
     /// The robot has moved somewhere else; a spot that would not do no longer applies.
     void robot_moved() { if (state_ == State::SpotRefused) state_ = State::Idle; }
 
+    /// The last block's closure. `closures()` has them all; this is what a single-rate caller wants.
     [[nodiscard]] PivotClosure closure() const
     {
+        if (not closures_.empty()) return closures_.back();
+        return PivotClosure{};
+    }
+
+private:
+    /// The closure of the block that has just finished, from its own accumulators.
+    [[nodiscard]] PivotClosure make_closure() const
+    {
         PivotClosure c;
-        if (state_ != State::Closed or steps_ == 0) return c;
+        if (steps_ == 0) return c;
         // ★★★THE TRUTH IS HOW MANY TURNS THE ROBOT ACTUALLY MADE, NOT HOW MANY WERE ASKED FOR.
         // This asserted 2*pi*turns — the CONFIGURED count — as the denominator of the scale. The whole
         // argument of a closure pivot is "the heading came back, therefore the robot turned a whole
@@ -190,7 +239,12 @@ public:
         return c;
     }
 
-    void reset() { state_ = State::Idle; steps_ = 0; ref_turn_ = odom_turn_ = 0.0; }
+public:
+    void reset()
+    {
+        state_ = State::Idle; steps_ = 0; ref_turn_ = odom_turn_ = 0.0;
+        block_ = 0; closures_.clear();
+    }
 
     /// Whole turns the reference heading says were made, signed. The closure's own count.
     [[nodiscard]] double whole_turns() const { return std::round(ref_turn_ / (2.0 * M_PI)); }
@@ -204,6 +258,8 @@ private:
     double start_heading_ = 0.0, last_heading_ = 0.0;
     double ref_turn_ = 0.0;     ///< measured turn, accumulated from the heading — never from the count
     double odom_turn_ = 0.0;    ///< the odometry's own accumulation over the same manoeuvre
+    int    block_ = 0;          ///< which rate block is running
+    std::vector<PivotClosure> closures_;   ///< one per closed block, in order
 };
 
 }   // namespace rc::calib

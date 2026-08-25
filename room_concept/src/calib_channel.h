@@ -31,8 +31,10 @@
 #include "../../common/affordance_protocol/affordance_goal_parse.h"   // rc::affordance::Outcome — the PURE half; the full protocol header pulls in DSR/Qt
 #include "../../common/motion_calib/scale_estimator.h"
 
+#include <algorithm>
 #include <cmath>
 #include <optional>
+#include <vector>
 
 namespace rc::calib
 {
@@ -72,6 +74,15 @@ struct CalibChannelParams
     /// ★Measured live at the old cap: 0.056 rad/s, 16 deg per 5 s, 2 mm of translation -- correct
     /// behaviour, and slow enough that it looked stopped to someone watching.
     double pivot_rot_rate = 0.5;
+    /// ★THE RATES, ONE PER BLOCK. A closure at rate w measures k + b/w, so a single rate reports the
+    /// scale and the bias fused into one number and cannot say which is which — see PivotParams.
+    /// Two blocks at two rates separate them exactly, on headings alone.
+    /// ★THEY MUST DIFFER ENOUGH TO MATTER. The bias falls out of a difference divided by
+    /// (1/w1 - 1/w2), so rates that are close divide a small difference by a small number and
+    /// amplify the noise. 0.5 and 0.25 give 1/w spread of 2 s/rad, which is the widest this base
+    /// usefully offers: slower than 0.25 makes a four-turn block take over three minutes.
+    /// A single-element list restores the old single-rate manoeuvre exactly.
+    std::vector<double> pivot_rates = {0.5, 0.25};
     /// Time constant of the passive-excitation EMA. Long, because the question it answers is "what is
     /// this robot's diet", not "what is it doing right now".
     double passive_tau_s = 120.0;
@@ -99,8 +110,59 @@ public:
     [[nodiscard]] ChannelPosterior       posterior() const { return rot_.posterior(); }
     [[nodiscard]] double passive_rate_rad_s() const { return passive_rate_; }
     /// The rate this channel prices AND asks the consumer to execute at — one number, so the offer
-    /// cannot advertise a cost the manoeuvre will not have.
-    [[nodiscard]] double pivot_rate_rps() const { return p_.pivot_rot_rate; }
+    /// cannot advertise a cost the manoeuvre will not have. Per BLOCK: the manoeuvre deliberately
+    /// runs its blocks at different rates so the closure can separate scale from bias.
+    [[nodiscard]] double pivot_rate_rps() const { return rate_for_block(pivot_.block()); }
+
+    /// The rate block `b` runs at. Falls back to the single configured rate when no list is given.
+    [[nodiscard]] double rate_for_block(int b) const
+    {
+        if (p_.pivot_rates.empty()) return p_.pivot_rot_rate;
+        return p_.pivot_rates[static_cast<std::size_t>(
+            std::clamp(b, 0, static_cast<int>(p_.pivot_rates.size()) - 1))];
+    }
+
+    /// ── SCALE AND BIAS, SEPARATED BY THE RATES ALONE ────────────────────────────────────────────
+    /// Each closed block gives s_i = k + b/w_i. With two or more distinct rates that is a straight
+    /// line in u = 1/w, and k is its intercept while b is its slope. Solved in closed form for the
+    /// two-block case, which is the one the manoeuvre runs.
+    /// ★THE UNCERTAINTIES ARE THE CLOSURES' OWN RESOLUTIONS, PROPAGATED — not a confidence invented
+    /// here. A block that resolves 0.2% cannot contribute better than 0.2% to either term, and the
+    /// bias divides a DIFFERENCE of two such numbers by (u1-u2), so it is always the coarser of the
+    /// two. Saying so is the difference between an instrument and a number.
+    struct RateSeparation
+    {
+        bool   solved = false;      ///< two or more blocks closed at DISTINCT rates
+        double k_omega = 0.0;       ///< rotation scale, fractional — free of the bias at last
+        double sigma_k = 0.0;
+        double b_omega = 0.0;       ///< gyro bias, rad/s
+        double sigma_b = 0.0;
+        bool   usable_k = false;    ///< the term exceeds what the closures can resolve
+        bool   usable_b = false;
+    };
+
+    [[nodiscard]] RateSeparation separate_scale_and_bias() const
+    {
+        RateSeparation r;
+        const auto &cs = pivot_.closures();
+        if (cs.size() < 2) return r;
+        // Two blocks is what the manoeuvre runs; with more, the first and last give the widest
+        // lever in u and therefore the best-conditioned solve.
+        const double u1 = 1.0 / std::max(rate_for_block(0), 1e-6);
+        const double u2 = 1.0 / std::max(rate_for_block(static_cast<int>(cs.size()) - 1), 1e-6);
+        const double du = u1 - u2;
+        if (std::abs(du) < 1e-6) return r;      // same rate twice separates nothing
+        const double s1 = cs.front().s_omega,  s2 = cs.back().s_omega;
+        const double r1 = cs.front().resolution, r2 = cs.back().resolution;
+        r.b_omega = (s1 - s2) / du;
+        r.sigma_b = std::hypot(r1, r2) / std::abs(du);
+        r.k_omega = (u1 * s2 - u2 * s1) / du;
+        r.sigma_k = std::hypot(u1 * r2, u2 * r1) / std::abs(du);
+        r.usable_k = std::abs(r.k_omega) > r.sigma_k;
+        r.usable_b = std::abs(r.b_omega) > r.sigma_b;
+        r.solved = true;
+        return r;
+    }
     [[nodiscard]] double pivot_step_rad() const { return p_.pivot.step_rad; }
     [[nodiscard]] bool   offering() const { return offer_open_; }
     [[nodiscard]] bool   enabled_public() const { return p_.enabled; }
@@ -191,9 +253,15 @@ public:
     [[nodiscard]] long poisoned_windows() const { return poisoned_windows_; }
 
     /// How long a whole pivot would take, at the rate the consumer actually turns.
+    /// ★THE WHOLE MANOEUVRE, ALL BLOCKS. Pricing only the current block would understate the detour
+    /// by however many blocks are still to come, and the offer must cost what it will actually cost.
     [[nodiscard]] double pivot_duration_s() const
     {
-        return std::abs(2.0 * M_PI * p_.pivot.turns) / std::max(p_.pivot_rot_rate, 1e-3);
+        const int n = std::max(1, p_.pivot.blocks);
+        double t = 0.0;
+        for (int b = 0; b < n; ++b)
+            t += std::abs(2.0 * M_PI * p_.pivot.turns) / std::max(rate_for_block(b), 1e-3);
+        return t;
     }
 
     /// What the manoeuvre is worth BEYOND the free data, in nats — the number that goes on the wire
@@ -223,7 +291,7 @@ public:
     [[nodiscard]] double true_marginal_gain_nats() const
     {
         const double T = pivot_duration_s();
-        const double excite = 2.0 * M_PI * p_.pivot.turns;
+        const double excite = 2.0 * M_PI * p_.pivot.turns * std::max(1, p_.pivot.blocks);
         if (authoritative_info_ > 0.0 and std::isfinite(authoritative_info_))
             return rot_.expected_information_gain_from(authoritative_info_, excite, T,
                                                        passive_rate_ * T);

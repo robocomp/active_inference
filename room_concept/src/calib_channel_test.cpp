@@ -37,6 +37,24 @@ static void drive(CalibChannel &c, double &t, double &theta, double omega, doubl
     }
 }
 
+// Like drive(), but the odometry ALSO carries a constant bias: it reports b_true radians per second
+// of rotation that never happened. That is what a gyro bias is, and it is invisible to a single-rate
+// closure because over one manoeuvre it is indistinguishable from a scale error.
+static void drive_biased(CalibChannel &c, double &t, double &theta, double omega, double s_true,
+                         double b_true, double secs)
+{
+    const double dt = 0.05;
+    const int frames = static_cast<int>(std::lround(secs / dt));
+    for (int i = 0; i < frames; ++i)
+    {
+        const double d = omega * dt;
+        theta += d;
+        t += dt;
+        c.note_motion(t, 0.0, 0.0, std::atan2(std::sin(theta), std::cos(theta)),
+                      d * (1.0 + s_true) + b_true * dt, true);
+    }
+}
+
 int main()
 {
     std::printf("── the calibration channel ──\n\n");
@@ -46,6 +64,9 @@ int main()
     //    optimisation, it is the only source of data.
     {
         CalibChannelParams p; p.enabled = true;
+        // ONE block: this case is about a single closure recovering a single scale. The manoeuvre's
+        // default is two blocks at two rates (see 5d), which is a different question.
+        p.pivot.blocks = 1;
         CalibChannel c(p);
         double t = 0.0, th = 0.0;
         drive(c, t, th, 0.5, 0.06, 400.0);          // a busy day: turning most of the time
@@ -63,6 +84,9 @@ int main()
     //    what replaces a threshold on the posterior width.
     {
         CalibChannelParams p; p.enabled = true;
+        // ONE block: this case is about a single closure recovering a single scale. The manoeuvre's
+        // default is two blocks at two rates (see 5d), which is a different question.
+        p.pivot.blocks = 1;
         CalibChannel c(p);
         const double before = c.marginal_gain_nats();
         double t = 0.0, th = 0.0;
@@ -77,6 +101,9 @@ int main()
     //    deliberate manoeuvre stays worth making. The two cases together are the rule.
     {
         CalibChannelParams p; p.enabled = true;
+        // ONE block: this case is about a single closure recovering a single scale. The manoeuvre's
+        // default is two blocks at two rates (see 5d), which is a different question.
+        p.pivot.blocks = 1;
         CalibChannel c(p);
         const double cold = c.marginal_gain_nats();
         double t = 0.0, th = 0.0;
@@ -100,6 +127,9 @@ int main()
     //    an injected 5% odometry error must close and recover it.
     {
         CalibChannelParams p; p.enabled = true;
+        // ONE block: this case is about a single closure recovering a single scale. The manoeuvre's
+        // default is two blocks at two rates (see 5d), which is a different question.
+        p.pivot.blocks = 1;
         CalibChannel c(p);
         double h = 0.4;
         const double s_true = 0.05, step = 2.0*M_PI/3.0;
@@ -140,6 +170,9 @@ int main()
     //     absorb the previous shortfall.
     {
         CalibChannelParams p; p.enabled = true;
+        // ONE block: this case is about a single closure recovering a single scale. The manoeuvre's
+        // default is two blocks at two rates (see 5d), which is a different question.
+        p.pivot.blocks = 1;
         CalibChannel c(p);
         double t = 0.0, th = 0.0;
         const double s_true = 0.05, step = 2.0*M_PI/3.0;
@@ -182,6 +215,9 @@ int main()
     //     count on BOTH sides and the ratio is untouched, which is what this checks.
     {
         CalibChannelParams p; p.enabled = true;
+        // ONE block: this case is about a single closure recovering a single scale. The manoeuvre's
+        // default is two blocks at two rates (see 5d), which is a different question.
+        p.pivot.blocks = 1;
         CalibChannel c(p);
         double t = 0.0, th = 0.0;
         const double s_true = 0.05, step = 2.0*M_PI/3.0;
@@ -209,10 +245,53 @@ int main()
               "and the detour's turning does not bias the scale, because the truth counts it too");
     }
 
+    // 5d. TWO RATES SEPARATE SCALE FROM BIAS, ON HEADINGS ALONE. A closure at rate w measures
+    //     k + b/w, so any single-rate pivot reports the two fused and cannot say which is which.
+    //     Run the same closure at two rates and they come apart in closed form. This injects BOTH a
+    //     scale error and a gyro bias and checks each is recovered — the bias in particular could not
+    //     have been seen at all before, at any rate, by any amount of turning.
+    {
+        CalibChannelParams p; p.enabled = true;
+        p.pivot_rates = {0.5, 0.25};
+        p.pivot.blocks = 2;
+        CalibChannel c(p);
+        const double k_true = 0.03;          // 3% rotation scale
+        const double b_true = 0.004;         // rad/s of phantom rotation while turning
+        const double step = 2.0*M_PI/3.0;
+        double t = 0.0, th = 0.0, h = 0.0;
+        // Warm, with the robot still: a bias shows even here, which is the point of it.
+        drive_biased(c, t, th, 0.0, k_true, b_true, 0.5);
+        for (int i = 0; i < 200 and c.pivot().state() != PivotAffordance::State::Closed; ++i)
+        {
+            const auto b = c.offer(h);
+            if (not b.has_value()) break;
+            c.mark_offered();
+            const double w = c.pivot_rate_rps();                  // the rate THIS block runs at
+            const double err = std::atan2(std::sin(*b - th), std::cos(*b - th));
+            drive_biased(c, t, th, (err < 0 ? -w : w), k_true, b_true, std::abs(err) / w);
+            h = std::atan2(std::sin(th), std::cos(th));
+            c.on_outcome(O::Satisfied, h);
+        }
+        const auto sep = c.separate_scale_and_bias();
+        const auto &cs = c.pivot().closures();
+        std::printf("  two-rate: %zu block(s) closed", cs.size());
+        for (std::size_t i = 0; i < cs.size(); ++i)
+            std::printf(" | s%zu %+.5f (res %.5f)", i + 1, cs[i].s_omega, cs[i].resolution);
+        std::printf("\n  separated: k %+.5f +/- %.5f (true %+.3f), b %+.5f +/- %.5f rad/s (true %+.4f)\n",
+                    sep.k_omega, sep.sigma_k, k_true, sep.b_omega, sep.sigma_b, b_true);
+        check(cs.size() == 2, "both rate blocks close");
+        check(sep.solved, "and the two closures separate");
+        check(std::abs(sep.k_omega - k_true) < 5e-3, "the rotation scale comes back free of the bias");
+        check(std::abs(sep.b_omega - b_true) < 1e-3, "and the BIAS comes back, which one rate cannot see");
+    }
+
     // 6. INFEASIBLE IS BELIEVED, AND IT IS NOT FOREVER. The consumer alone can say the body cannot
     //    sweep its diagonal here; the producer stops asking and waits to be carried elsewhere.
     {
         CalibChannelParams p; p.enabled = true;
+        // ONE block: this case is about a single closure recovering a single scale. The manoeuvre's
+        // default is two blocks at two rates (see 5d), which is a different question.
+        p.pivot.blocks = 1;
         CalibChannel c(p);
         check([&]{ const auto b = c.offer(0.0); if (b) c.mark_offered(); return b.has_value(); }(),
                "the first offer goes out");
@@ -229,6 +308,9 @@ int main()
     // 7. EVERY OTHER FAILURE LEAVES THE SEQUENCE WHERE IT WAS. A timeout is not a turn.
     {
         CalibChannelParams p; p.enabled = true;
+        // ONE block: this case is about a single closure recovering a single scale. The manoeuvre's
+        // default is two blocks at two rates (see 5d), which is a different question.
+        p.pivot.blocks = 1;
         CalibChannel c(p);
         if (c.offer(0.0).has_value()) c.mark_offered();
         c.on_outcome(O::Timeout, 0.0);
@@ -242,6 +324,9 @@ int main()
     //    answered would be the same ABA hazard the epoch model exists to stop.
     {
         CalibChannelParams p; p.enabled = true;
+        // ONE block: this case is about a single closure recovering a single scale. The manoeuvre's
+        // default is two blocks at two rates (see 5d), which is a different question.
+        p.pivot.blocks = 1;
         CalibChannel c(p);
         check([&]{ const auto b = c.offer(0.0); if (b) c.mark_offered(); return b.has_value(); }(),
                "the offer goes out");
