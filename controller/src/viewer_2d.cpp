@@ -900,7 +900,19 @@ void Viewer2D::update_orient_overlay(float x, float y, float target_yaw, float c
     orient_arc_->setVisible(visible);
     if (not visible) return;
 
-    orient_ray_->setLine(x, y, x + kRayM * std::cos(target_yaw), y + kRayM * std::sin(target_yaw));
+    // ★★★THE BODY'S NOSE IS AT +Y, AND A YAW OF ZERO POINTS AT +X. The overlay's job is to show where
+    // the ROBOT will be pointing, and the robot on this scene is drawn nose-forward along +y --
+    // AbstractGraphicViewer builds the silhouette with its rounded front at +sl. So a ray laid down at
+    // the raw yaw is geometrically correct about the angle and wrong about the thing being drawn: it
+    // sits 90 degrees off the direction the body will actually face, and the picture disagrees with
+    // the robot beside it. Both the ray and the arc take the same offset, so the sweep between "where
+    // it points now" and "where it was asked to point" is unchanged -- the whole figure rotates with
+    // the body it describes.
+    constexpr double kNoseOffset = M_PI / 2.0;
+    const double target_fwd  = target_yaw  + kNoseOffset;
+    const double current_fwd = current_yaw + kNoseOffset;
+
+    orient_ray_->setLine(x, y, x + kRayM * std::cos(target_fwd), y + kRayM * std::sin(target_fwd));
 
     // The arc runs from where the robot points NOW to where it was asked to point, the short way —
     // which is the way the executor turns, so the drawing and the motion cannot disagree about which
@@ -916,7 +928,7 @@ void Viewer2D::update_orient_overlay(float x, float y, float target_yaw, float c
     // with y up (AbstractGraphicViewer's scale(1,-1) is applied by the VIEW, after the path is built),
     // so a world yaw ψ has to be handed over as −ψ, and the sweep with it. Passing them through
     // unnegated draws the arc mirrored about the x axis and sweeping away from the target.
-    const double start_qt = -current_yaw * 180.0 / M_PI;
+    const double start_qt = -current_fwd * 180.0 / M_PI;
     const double sweep_qt = -sweep * 180.0 / M_PI;
     // arcMoveTo first: arcTo alone would draw a straight line in from wherever the path currently is.
     arc.arcMoveTo(box, start_qt);
