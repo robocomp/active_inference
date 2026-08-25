@@ -41,6 +41,9 @@ namespace rc
             TimeSeriesPlot* plot = nullptr;
             float scale = 1.f;          // display scaling (rad -> deg, fraction -> %)
             const char* unit = "";
+            // What this parameter is and what motion identifies it — shown on hover over the name,
+            // the value and the lamp. Static string literals from the spec table; not owned.
+            const char* why = "";
         };
         std::array<Row, rc::calib::P_COUNT> rows_{};
         QLabel* summary_ = nullptr;

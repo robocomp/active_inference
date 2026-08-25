@@ -30,14 +30,69 @@ namespace rc
         // P_COUNT went 4 -> 6 and this array was updated one build later, and the binary in between
         // segfaulted with "basic_string: construction from null". The static_assert turns that into
         // a compile error the next time a parameter is added.
-        const struct { const char* name; float scale; const char* unit; QColor col; }
+        // ★EACH PARAMETER CARRIES ITS OWN EXPLANATION. A label reading "wheel mismatch" and a trace in
+        // mrad/m tell you a number is moving; they do not tell you what the robot is doing wrong when
+        // it moves, what motion would pin it down, or why it may sit at its prior for ever. That last
+        // one matters most: five of these six are UNOBSERVABLE on a diet the robot happens not to be
+        // eating, and a flat trace then means "never asked", not "measured to be zero". The `why`
+        // text says which covariate each one loads on, because that is the whole of the answer to
+        // "why is this one not learning?".
+        const struct { const char* name; float scale; const char* unit; QColor col; const char* why; }
         spec[] = {
-            { "translation scale", 100.f,               "%",     QColor(41, 128, 185) },
-            { "mount yaw",         float(180.0 / M_PI), "deg",   QColor(241, 196, 15) },
-            { "gyro scale",        100.f,               "%",     QColor(192, 57, 43)  },
-            { "gyro bias",         float(180.0 / M_PI), "deg/s", QColor(39, 174, 96)  },
-            { "lateral scale",     100.f,               "%",     QColor(155, 89, 182) },
-            { "wheel mismatch",    1000.f,              "mrad/m",QColor(230, 126, 34) },
+            { "translation scale", 100.f,               "%",     QColor(41, 128, 185),
+              "<b>k_v — translation odometry scale</b><br>"
+              "How much further (or less far) the wheels say the robot went than it really did, as a "
+              "fraction. +1% means a commanded 10 m reads as 10.1 m.<br><br>"
+              "<b>Learns from:</b> forward travel — it loads on <i>d_forward</i> in the along-track "
+              "residual. Every traversal to an affordance feeds it, so it is usually the best-known "
+              "of the six.<br>"
+              "<b>Stays at its prior when:</b> the robot only turns." },
+            { "mount yaw",         float(180.0 / M_PI), "deg",   QColor(241, 196, 15),
+              "<b>eps_yaw — body/sensor mount yaw offset</b><br>"
+              "A fixed angular error between the frame the odometry reports in and the frame the "
+              "robot actually drives in. It makes straight-line driving curve away sideways, "
+              "steadily, without any turning being commanded.<br><br>"
+              "<b>Learns from:</b> forward travel seen in the CROSS-track residual — it loads on "
+              "<i>-d_forward</i> there. Driving straight is what reveals it; a pivot cannot.<br>"
+              "<b>Distinguished from lateral scale by:</b> which component of the motion it rides on "
+              "— this one on forward travel, that one on sideways travel." },
+            { "gyro scale",        100.f,               "%",     QColor(192, 57, 43),
+              "<b>k_omega — gyro / rotation scale</b><br>"
+              "How much more (or less) rotation the odometry reports than actually happened, as a "
+              "fraction. This is the parameter the calibration pivot exists to measure, and the only "
+              "one a closure can check without a map.<br><br>"
+              "<b>Learns from:</b> turning — it loads on <i>d_theta</i>.<br>"
+              "<b>★Confounded with gyro bias</b> whenever the robot turns at a steady rate: at fixed "
+              "omega, d_theta and elapsed time are proportional, so the two columns are collinear and "
+              "no estimator can separate them. Turning at DIFFERENT rates is what breaks the tie." },
+            { "gyro bias",         float(180.0 / M_PI), "deg/s", QColor(39, 174, 96),
+              "<b>b_omega — gyro bias</b><br>"
+              "A constant phantom rotation rate the gyro reports while the robot is perfectly still. "
+              "It integrates with TIME rather than with motion, so it is what makes a parked robot's "
+              "heading drift.<br><br>"
+              "<b>Learns from:</b> elapsed time in the heading residual — it loads on "
+              "<i>duration</i>.<br>"
+              "<b>★Confounded with gyro scale</b> at any single rotation rate (see above). It is "
+              "separable only across motion at different angular speeds, which is why a "
+              "constant-rate pivot buys this parameter nothing." },
+            { "lateral scale",     100.f,               "%",     QColor(155, 89, 182),
+              "<b>k_lat — lateral (sideways) odometry scale</b><br>"
+              "The same error as translation scale, but on sideways motion. Only meaningful on a base "
+              "that can actually move sideways — on a differential-drive robot there is no such "
+              "motion and this can never be excited.<br><br>"
+              "<b>Learns from:</b> sideways travel — it loads on <i>d_lateral</i> in the cross-track "
+              "residual.<br>"
+              "<b>Stays at its prior when:</b> the base never strafes, which for most of this robot's "
+              "day it does not." },
+            { "wheel mismatch",    1000.f,              "mrad/m",QColor(230, 126, 34),
+              "<b>dk_wheel — per-wheel effective-radius mismatch</b><br>"
+              "Unequal wheels, so driving straight quietly turns the robot. Measured as radians of "
+              "unintended heading change per metre travelled — a physical asymmetry (tyre wear, "
+              "pressure, load), not a sensing error.<br><br>"
+              "<b>Learns from:</b> forward travel seen in the HEADING residual — it loads on "
+              "<i>d_forward</i> there.<br>"
+              "<b>Distinguished from gyro scale by:</b> gyro scale rides on rotation, this rides on "
+              "distance. Driving straight separates them; turning on the spot does not." },
         };
         static_assert(std::size(spec) == static_cast<std::size_t>(rc::calib::P_COUNT),
                       "add a row here whenever rc::calib::Param gains a parameter");
@@ -52,9 +107,16 @@ namespace rc
             r.name = new QLabel(spec[i].name, this);
             r.name->setStyleSheet(QString("font-size: 12px; font-weight: bold; color: %1;")
                                       .arg(spec[i].col.name()));
+            // Rich text so the tooltip can carry structure; a fixed width so a paragraph does not
+            // become one unreadable line across the desktop.
+            r.name->setToolTip(QString("<div style='width: 380px'>%1</div>").arg(spec[i].why));
+            // The lamp beside it says LEARNING or NOT ASKED, and the tooltip is where "not asked
+            // about what?" is answered — so give it the same explanation rather than a bare word.
+            r.why = spec[i].why;
             r.value = new QLabel("--", this);
             r.value->setStyleSheet("font-family: monospace; font-size: 12px; color: #e6e9ea;");
             r.lamp = new QLabel(this);
+            r.value->setToolTip(QString("<div style='width: 380px'>%1</div>").arg(spec[i].why));
             header->addWidget(r.name);
             header->addSpacing(12);
             header->addWidget(r.value);
@@ -95,6 +157,19 @@ namespace rc
             // none of the covariate this parameter needs, so the value is the previous one held,
             // NOT a measurement. Naming it that way is the whole reason the lamp exists.
             r.lamp->setText(informed ? "learning" : "not asked");
+            // ★"NOT ASKED" IS A QUESTION, SO ANSWER IT WHERE IT IS ASKED. The lamp says the data has
+            // not outweighed the prior; the useful next thing to know is what motion WOULD, and that
+            // is exactly what the parameter's own note says. Prepending the verdict keeps the two
+            // together instead of leaving the reader to pair them up.
+            r.lamp->setToolTip(QString("<div style='width: 380px'>%1%2</div>")
+                                   .arg(informed
+                                            ? QStringLiteral("<b>Learning:</b> the motion has "
+                                                             "outweighed the prior.<br><br>")
+                                            : QStringLiteral("<b>Not asked:</b> the robot has not "
+                                                             "made the motion that identifies this, "
+                                                             "so the value shown is still the prior "
+                                                             "— not a measurement of zero.<br><br>"))
+                                   .arg(QString::fromUtf8(r.why)));
             r.lamp->setStyleSheet(informed
                 ? "font-size: 11px; color: #2ecc71; font-weight: bold;"
                 : "font-size: 11px; color: #7f8c8d;");
