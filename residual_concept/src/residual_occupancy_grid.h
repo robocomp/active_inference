@@ -399,6 +399,24 @@ struct ReleaseEvent
     float last_z = 0.0f;           // the cell's TOP before this cycle wiped it (see trace_release)
 };
 
+// ── WHAT CREATED THIS CELL? ───────────────────────────────────────────────────────────────────────────────────
+// The release trace answers "what removed it". With an empty room every latched cell is by definition a phantom,
+// so the question that matters is the opposite one, and nothing recorded it. One row per cell the moment it
+// crosses occ_set: where, at what height, from how far, and WHICH SENSOR delivered the confirming return.
+struct LatchEvent
+{
+    float x = 0.0f, y = 0.0f;      // cell centre, room frame
+    float z = 0.0f;                // height of the voxel that crossed the threshold — WHAT was "seen"
+    float lo = 0.0f;               // the column's log-odds at the moment it latched
+    float range_m = 0.0f;          // how far the robot was from it
+    float w = 0.0f;                // precision weight of the confirming return
+    int   bins = 0;                // how many height bins of the column hold material (1-2 = a thin sliver)
+    std::uint8_t src = 0;          // 1 bpearl, 2 helios, 3 zed
+    float robot_x = 0.0f, robot_y = 0.0f;   // WHERE THE ROBOT STOOD when it created this cell. A phantom field
+                                   // that is really displaced wall returns correlates with the pose, not with
+                                   // the sensor — and that cannot be seen without logging the pose beside it.
+};
+
 struct SweepDiag
 {
     long hits = 0;               // CELLS given a +l_hit this cycle (one per cell, hit precedence — not per ray)
@@ -687,6 +705,8 @@ public:
     // "the table's residual vanished": a release with a large age_cycles and a clear_z outside [zmn, zmx] — or a
     // range small enough that the sensor could not have seen that height at all — is a wrongful removal.
     const std::vector<ReleaseEvent>& last_releases() const { return releases_; }
+    // Every cell the cycle just committed LATCHED, with what created it. See LatchEvent.
+    const std::vector<LatchEvent>& last_latches() const { return latches_; }
 
     static bool self_test();
 
@@ -758,6 +778,7 @@ private:
     std::vector<float>        shz_lo_, shz_hi_;    // this cycle: accumulated hit z-band for shit_ cells
     std::vector<float>        shit_w_;             // this cycle: MAX precision weight of the hits on this cell (range×motion)
     std::vector<float>        smiss_w_;            // this cycle: MAX precision weight of the see-throughs on this cell
+    std::vector<std::uint8_t> shit_src_;            // which sweep delivered this cycle's hit (birth trace)
     std::vector<std::uint8_t> smiss_src_;           // which sweep set smiss_w_ (for the release trace)
     std::uint8_t              sensor_id_ = 0;      // the sweep currently being integrated
     float                     sensor_min_r_ = 0.0f; // ...and its dead shell (no returns closer than this)
@@ -766,6 +787,7 @@ private:
     std::vector<float>        smiss_z_;            // this cycle: height of the see-through beam that set smiss_w_
     std::vector<std::uint32_t> occ_since_;         // cycle index at which this cell latched (release age, for the trace)
     std::uint32_t             cycle_ = 0;          // committed-cycle counter (ages the release trace)
+    std::vector<LatchEvent>   latches_;            // this cycle's births, with the reason for each
     std::vector<ReleaseEvent> releases_;           // this cycle's releases, with the reason for each
     // The BEST observable fraction with which this cell has ever been cleared — the union over sensors and over
     // time, since driving past from a new range genuinely does buy more. It bounds what clearing can establish

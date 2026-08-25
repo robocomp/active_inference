@@ -848,6 +848,7 @@ void SpecificWorker::compute()
         const auto comps = grid_.occupied_components(2, cell_explained, 0.f);
         log_floor_diag(cell_explained, comps);   // plane fit + the RESIDUAL set's height profile, jointly
         log_releases();                          // ...and WHY each cell removed this cycle was removed
+        log_births();                            // ...and WHAT CREATED each cell that appeared
         dump_residual_cells(cell_explained);     // ...and WHERE they are, which a histogram cannot say
         static int gc = 0;
         if ((gc++ % 20) == 0)
@@ -1268,6 +1269,7 @@ bool SpecificWorker::integrate_lidar_per_device()
     grid_.set_sensor_noise(0.0f, 0.0f);
     grid_.set_sensor_id(2);
     grid_.integrate_sweep(lidar_ingestor_->origin_room(), he, /*begin_cycle=*/false, ego_reliability_);
+    log_sweep(he, "helios");   // the returns themselves, in the frame the grid works in
     grid_.set_floor_plane(a, b, c, sig_bp);   // leave the datum's sigma in place for the ZED pass that follows
     grid_.set_device_floor_z0(-1.0f);         // ...and the DEFAULT band: ZED is not one of these two devices
     grid_.set_sensor_min_range(cfg_.zed_min_range_m);
@@ -1465,7 +1467,11 @@ void SpecificWorker::log_grid_diag()
         f << "cycle,occupied,hits,misses,miss_blocked_zaware,latched,released,hit_then_cleared,"
              "forgotten,self_damped,floor_damped,floor_clears,"
              "floor_rets,floor_blocked,marks_suppr,floor_dropped,decayed,zheld,held,unseen,decay_w,"
-             "clear_damped,clear_surf,clear_blind,clear_p,bad_pts,repaired,bins_conf,bins_refut,unsupported\n";
+        // ★ This header MUST match the write below field for field. It drifted once (two columns were added to
+        //   the row and not to the header) and every column after decay_w was then read as its neighbour —
+        //   including by me, while diagnosing. Count them if you touch either.
+             "clear_damped,clear_surf,clear_blind,clear_stopped,blind_shell,bad_pts,repaired,"
+             "bins_conf,bins_refut\n";
     }
     f << cyc << ',' << grid_.occupied_count() << ',' << d.hits << ',' << d.misses << ','
       << d.miss_blocked_zaware << ',' << d.cells_latched << ',' << d.cells_released << ','
@@ -1513,6 +1519,47 @@ void SpecificWorker::log_grid_diag()
 //   range_m small                         -> the robot was on top of it, where the lidar can see least.
 // A table standing in the room must produce NO rows at all inside its footprint: it does not fly, and with no
 // table_concept running nothing may explain it away.
+// ── WHAT CREATED THIS CELL? ──────────────────────────────────────────────────────────────────────────────────
+// One row per cell the moment it latches. In an EMPTY room every row is a phantom, so this file is the whole
+// diagnosis: `sensor` names the culprit, `z` says what height it thought it saw, `range_m` how far away, and
+// `bins` whether the column is a one-voxel sliver (noise) or a real vertical extent (a thing).
+// ── THE RAW SWEEP, IN ROOM COORDINATES ───────────────────────────────────────────────────────────────────────
+// Every diagnostic so far describes the GRID's opinion. When the grid reports a 6 m vertical plane that the room
+// model does not contain, the only way to tell "the lidar really sees a wall there" from "the grid invented it"
+// is to look at the returns themselves, already transformed into the room frame the grid works in. Subsampled
+// and periodic, so it costs nothing between dumps.
+void SpecificWorker::log_sweep(const std::vector<Eigen::Vector3f>& sweep, const char* device)
+{
+    if (cfg_.sweep_csv_path.empty() or cfg_.sweep_dump_every_n <= 0) return;
+    if ((grid_diag_cycle_ % cfg_.sweep_dump_every_n) != 0) return;
+    static bool first = true;
+    std::ofstream f(cfg_.sweep_csv_path, first ? std::ios::trunc : std::ios::app);
+    if (not f) return;
+    f.imbue(std::locale::classic());
+    if (first) { f << "cycle,device,x,y,z,robot_x,robot_y\n"; first = false; }
+    const auto o = lidar_ingestor_ ? lidar_ingestor_->origin_room() : Eigen::Vector3f::Zero();
+    for (std::size_t i = 0; i < sweep.size(); i += 7)            // subsample: shape, not volume
+        f << grid_diag_cycle_ << ',' << device << ',' << sweep[i].x() << ',' << sweep[i].y() << ','
+          << sweep[i].z() << ',' << o.x() << ',' << o.y() << '\n';
+}
+
+void SpecificWorker::log_births()
+{
+    if (cfg_.birth_csv_path.empty()) return;
+    const auto& ev = grid_.last_latches();
+    if (ev.empty()) return;
+    static bool first = true;
+    std::ofstream f(cfg_.birth_csv_path, first ? std::ios::trunc : std::ios::app);
+    if (not f) return;
+    f.imbue(std::locale::classic());       // decimal POINT regardless of LANG — see CLAUDE.md
+    if (first) { f << "cycle,x,y,z,lo,w,range_m,bins,sensor,robot_x,robot_y\n"; first = false; }
+    for (const auto& e : ev)
+        f << grid_diag_cycle_ << ',' << e.x << ',' << e.y << ',' << e.z << ',' << e.lo << ',' << e.w << ','
+          << e.range_m << ',' << e.bins << ','
+          << (e.src == 1 ? "bpearl" : e.src == 2 ? "helios" : e.src == 3 ? "zed" : "?") << ','
+          << e.robot_x << ',' << e.robot_y << '\n';
+}
+
 void SpecificWorker::log_releases()
 {
     if (cfg_.release_csv_path.empty()) return;
@@ -1546,7 +1593,11 @@ void SpecificWorker::log_floor_diag(const rc::OccupancyGrid::CellExplained& expl
     {
         open_diag_csv(f, "etc/floor_diag.csv");
         f << "cycle,applied,a,b,c,off_cm,tilt_deg,n_cand,rms_m,occupied,resid,ncomp,max_cells,"
-             "r_le10,r_le15,r_le25,r_le40,r_le70,r_le120,r_gt120\n";
+             "r_le10,r_le15,r_le25,r_le40,r_le70,r_le120,r_gt120,"
+             // ...and the same profile over the OCCUPIED set, before any explainer subtracts. Until now only
+             // the RESIDUAL was histogrammed — what SHIPS — so a phantom population the explainers happen to
+             // mask could fill the map without leaving a trace in any log. o_le* is what is actually THERE.
+             "o_le10,o_le15,o_le25,o_le40,o_le70,o_le120,o_gt120\n";
     }
     const auto bins = grid_.residual_height_hist(edges, explained);
     std::size_t maxc = 0; for (const auto& c : comps) maxc = std::max<std::size_t>(maxc, c.n_cells);
@@ -1557,6 +1608,7 @@ void SpecificWorker::log_floor_diag(const rc::OccupancyGrid::CellExplained& expl
       << floor_plane_.n_candidates << ',' << floor_plane_.rms << ',' << grid_.occupied_count() << ','
       << grid_.residual_count(explained) << ',' << comps.size() << ',' << maxc;
     for (const long b : bins) f << ',' << b;
+    for (const long b : grid_.occupied_height_hist(edges)) f << ',' << b;
     f << '\n';
     if ((cyc % 20) == 0) f.flush();
     ++cyc;

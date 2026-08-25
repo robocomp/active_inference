@@ -118,6 +118,9 @@ ResidualConfig load_residual_config(const ConfigLoader& cfg)
     out.bpearl_min_range_m        = getf("LidarModel.BpearlMinRangeM", 0.10f);
     out.zed_min_range_m           = getf("LidarModel.ZedMinRangeM",    0.30f);
     out.release_csv_path      = gets("Grid.ReleaseCsvPath", "etc/residual_releases.csv");
+    out.birth_csv_path        = gets("Grid.BirthCsvPath",   "etc/residual_births.csv");
+    out.sweep_csv_path        = gets("Grid.SweepCsvPath",   "etc/residual_sweep.csv");
+    out.sweep_dump_every_n    = static_cast<int>(getf("Grid.SweepDumpEveryN", 300.0f));
     out.cluster_helios_floor_z0 = getf("Clusterer.HeliosFloorZ0", 0.20f);   // helios grazes: unusable near floor
     out.grid_inflate_radius_m   = getf("Grid.InflateRadiusM",    0.0f);    // 0: controller does exact footprint
     out.grid_self_body_radius_m = getf("Grid.SelfBodyRadiusM",   0.55f);   // body envelope for the sensor-model term

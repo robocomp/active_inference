@@ -64,6 +64,7 @@ void OccupancyGrid::reset(float xmin, float ymin, float xmax, float ymax, const 
     smiss_w_.assign(lo_.size(), 0.0f);
     smiss_z_.assign(lo_.size(), 0.0f);
     smiss_src_.assign(lo_.size(), 0);
+    shit_src_.assign(lo_.size(), 0);
     seenf_.assign(lo_.size(), 0.0f);
     occ_since_.assign(lo_.size(), 0u);
 }
@@ -131,7 +132,7 @@ void OccupancyGrid::mark_hit_voxel(int ix, int iy, int iz, float z, float w)
     const int i = idx(ix, iy);
     slook_[i] = 1;
     shbits_[i] |= (1ull << iz);
-    if (not shit_[i]) { shz_lo_[i] = z; shz_hi_[i] = z; shit_[i] = 1; shit_w_[i] = w; }
+    if (not shit_[i]) { shz_lo_[i] = z; shz_hi_[i] = z; shit_[i] = 1; shit_w_[i] = w; shit_src_[i] = sensor_id_; }
     else { shz_lo_[i] = std::min(shz_lo_[i], z); shz_hi_[i] = std::max(shz_hi_[i], z);
            shit_w_[i] = std::max(shit_w_[i], w); }
 }
@@ -224,6 +225,7 @@ void OccupancyGrid::commit_cycle(float dt_s)
     if (not valid()) return;
     ++cycle_;
     releases_.clear();
+    latches_.clear();
     // ONE update per VOXEL: hit precedence within the voxel, then the 2-D cell is a PROJECTION of its column.
     // This is costmap_2d::VoxelLayer's contract, with grid2d's log-odds rule as the per-voxel update.
     //
@@ -302,7 +304,17 @@ void OccupancyGrid::commit_cycle(float dt_s)
         else            { hit_[i] = 0; zmn_[i] = 0.0f; zmx_[i] = 0.0f; dispz_[i] = 0.0f; }
 
         // Hysteresis on the projected column, unchanged: latch at occ_set, release at occ_clear.
-        if (col > p_.occ_set and not occ_[i]) { occ_[i] = 1; occ_since_[i] = cycle_; ++sd_.cells_latched; }
+        if (col > p_.occ_set and not occ_[i])
+        {
+            occ_[i] = 1; occ_since_[i] = cycle_; ++sd_.cells_latched;
+            LatchEvent le;
+            cell_to_world(static_cast<int>(i % w_), static_cast<int>(i / w_), le.x, le.y);
+            le.z = (b_top >= 0) ? (b_top + 0.5f) * bw : 0.0f;
+            le.lo = col; le.w = shit_w_[i]; le.bins = seen; le.src = shit_src_[i];
+            le.range_m = observer_valid_ ? std::hypot(le.x - self_x_, le.y - self_y_) : -1.0f;
+            le.robot_x = self_x_; le.robot_y = self_y_;
+            latches_.push_back(le);
+        }
         else if (col < p_.occ_clear and occ_[i])
         {
             trace_release(i, lo_before, smiss_z_[i], smiss_w_[i], 0, prev_lo, prev_hi, prev_top);
@@ -442,6 +454,7 @@ void OccupancyGrid::integrate_sweep(const Eigen::Vector3f& origin, const std::ve
         std::fill(smiss_w_.begin(), smiss_w_.end(), 0.0f);
         std::fill(smiss_z_.begin(), smiss_z_.end(), 0.0f);
         std::fill(smiss_src_.begin(), smiss_src_.end(), 0);
+        std::fill(shit_src_.begin(), shit_src_.end(), 0);
     }
     const float cs = 1.0f / inv_cell_;
     const float bw = p_.bin_span_m / OccGridParams::Z_BINS;                  // voxel height
@@ -534,7 +547,14 @@ void OccupancyGrid::integrate_sweep(const Eigen::Vector3f& origin, const std::ve
 
         // What did this beam stop ON? A thin endpoint column is a horizontal surface it may have skimmed; a tall
         // one is a wall, which it cannot have. See OccGridParams::plate_bins_max.
-        const bool endpoint_is_plate = endp_in and column_thickness_bins(ex, ey) <= p_.plate_bins_max;
+        // ...and the endpoint column must actually HOLD material. A beam ending on the FLOOR terminates in a
+        // column with no recorded material at all — thickness 0 — which sailed through a "<= plate_bins_max"
+        // test and made every floor return look like a beam that had stopped on a thin plate. Floor returns are
+        // the majority of a downward-looking sweep (floor_rets ~11000 a cycle live), so that one missing lower
+        // bound handed the grazing guard to exactly the rays that should never trigger it, and protected
+        // floor-height phantoms from the beams best placed to refute them.
+        const int endp_thick = endp_in ? column_thickness_bins(ex, ey) : 0;
+        const bool endpoint_is_plate = endp_thick >= 1 and endp_thick <= p_.plate_bins_max;
 
         int guard = 4 * (w_ + h_ + OccGridParams::Z_BINS);
         while (guard-- > 0)
@@ -1692,6 +1712,28 @@ bool OccupancyGrid::self_test()
         check(ph_clear >= 0, "a mid-room phantom must be cleared by level beams that end on a WALL - a beam "
                              "cannot have skimmed a wall, so the grazing guard must not protect it");
         check(g2.occupied(tx, ty), "...while a TABLETOP, whose beams end on the plate itself, must still survive");
+
+        // (c) a beam ending on the FLOOR must not count as having stopped on a plate. Its endpoint column holds
+        //     no material at all, and without a lower bound on the thickness test every floor return triggered
+        //     the grazing guard — protecting floor-height phantoms from the very rays that refute them.
+        OccupancyGrid g3; g3.reset(-1, -1, 6, 6, P);
+        std::vector<Eigen::Vector3f> low_ph;                  // a phantom sitting at 0.30 m
+        for (int i = 0; i < 12; ++i) low_ph.push_back({2.0f, -0.1f + 0.2f * (i / 11.0f), 0.30f});
+        for (int k = 0; k < 8; ++k) { g3.integrate_sweep(ring, low_ph); g3.commit_cycle(0.1f); }
+        int lx, ly; g3.world_to_cell(2.0f, 0.0f, lx, ly);
+        const bool lp0 = g3.occupied(lx, ly);
+        std::vector<Eigen::Vector3f> floorret;                // honest floor returns, well beyond it
+        for (float x = 1.0f; x <= 5.0f; x += 0.02f)
+            for (int i = 0; i < 12; ++i) floorret.push_back({x, -0.1f + 0.2f * (i / 11.0f), 0.005f});
+        long lp_clear = -1;
+        for (int k = 0; k < 300 and lp_clear < 0; ++k)
+        { g3.integrate_sweep({0.02f, 0.02f, 0.60f}, floorret); g3.commit_cycle(0.1f);
+          if (not g3.occupied(lx, ly)) lp_clear = k; }
+        std::printf("  floor-endpoint: phantom at 0.30 m occ %d -> cleared@%ld by floor returns\n",
+                    lp0, lp_clear);
+        check(lp0, "the low phantom must be occupied first");
+        check(lp_clear >= 0, "a beam ending on the FLOOR must not count as stopping on a plate - floor returns "
+                             "must be free to refute a floor-height phantom");
     }
     // ── (23) NOTHING INSIDE THE LIDAR CLEARANCE RADIUS MAY BE CLEARED ──
     // Every ray starts inside the disc the lidar driver self-filters and marks its way out, weighted by w(r),

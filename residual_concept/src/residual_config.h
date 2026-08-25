@@ -101,6 +101,9 @@ struct ResidualConfig
     // ── the LiDAR field: where each device can physically see, so its silence there is not absence ──
     // Mount z comes from the frame tree, NOT from here (ROBOT_GEOMETRY.md: helios 1.075, bpearl 0.670); these
     // are the device's own optical limits, which the graph does not publish yet. `enabled=false` ⇒ term inert.
+    std::string sweep_csv_path;     // periodic RAW helios sweep dump (room frame); empty = off
+    int   sweep_dump_every_n = 300;
+    std::string birth_csv_path;     // per-latched-cell trace; empty = off
     std::string release_csv_path;   // per-released-cell trace; empty = off
     // Robot body envelope used by the SENSOR model to discount returns off our own body at integration time.
     // Distinct from Clusterer.RobotRadiusM, which is only a READ-OUT mask around the current pose and therefore
