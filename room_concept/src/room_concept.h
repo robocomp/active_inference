@@ -1265,6 +1265,7 @@ private:
    /// Position variance accumulated since the last real solve, used ONLY to decide whether the
    /// early-exit gate may still be trusted. Never published, never handed to the solver.
    float unopt_pos_var_ = 0.f;
+   bool  forced_solve_last_cycle_ = false;
    bool  sdf_polished_this_cycle_ = false;
    std::atomic<bool> calib_reset_pending_{false};
    bool calib_state_loaded_ = false;

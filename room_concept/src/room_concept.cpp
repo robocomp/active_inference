@@ -2141,14 +2141,6 @@ namespace rc
             res.robot_pose.translation() = Eigen::Vector2f(state[2], state[3]);
             res.robot_pose.linear() = Eigen::Rotation2Df(state[4]).toRotationMatrix();
             res.covariance = current_covariance;
-            // A real solve re-determines the pose, so the "how much uncertainty has accumulated
-            // SINCE the last solve" accumulator starts again at zero. It must NOT be seeded from
-            // current_covariance: that matrix's xy block is still a placeholder (measured at exactly
-            // 1.0, i.e. sigma of one metre), so seeding from it started the accumulator far above the
-            // trigger and the criterion fired on every single cycle — early exit went to 0.0%.
-            // Zero is also the honest reading: no time has passed since the solve, so nothing has
-            // accumulated. What the solve itself is worth belongs in the residual test, not here.
-            unopt_pos_var_ = 0.f;
             res.timestamp_ms = lidar.second;
             last_update_result = res;
             last_lidar_timestamp = lidar.second;
@@ -3183,6 +3175,19 @@ namespace rc
         last_early_exit_metric_ = std::numeric_limits<float>::quiet_NaN();
         last_pred_sdf_median_   = std::numeric_limits<float>::quiet_NaN();
         sdf_polished_this_cycle_ = false;
+        // ── The accumulator resets HERE, in the function that owns it ─────────────────────────────
+        // Returning nullopt from anywhere in this function means the caller is about to optimise, so
+        // the pose is about to be re-determined and "uncertainty accumulated since the last solve"
+        // starts again at zero.
+        // ★ It lives here because the two previous attempts to reset it elsewhere both went wrong:
+        // once seeded from current_covariance, whose xy block is still the 1.0 placeholder, and once
+        // anchored on `res.covariance = current_covariance` — a line that appears THREE times, so it
+        // landed in the manual-reset settle branch and never ran at all. Both produced 0% early exit,
+        // and neither was visible from the flag that switched the feature on. State that belongs to
+        // one decision belongs in the function that makes it.
+        if (forced_solve_last_cycle_) { unopt_pos_var_ = 0.f; forced_solve_last_cycle_ = false; }
+        const auto give_up_to_optimizer = [this]() -> std::optional<UpdateResult>
+        { forced_solve_last_cycle_ = true; return std::nullopt; };
         // ── THE PREDICTION STEP OF THE POSE COVARIANCE ────────────────────────────────────────────
         // ★ current_covariance was ONLY ever assigned on the optimized path, and the optimizer runs on
         // ~0.2% of cycles. So on every other cycle it carried whatever the last solve left, or its
@@ -3212,7 +3217,7 @@ namespace rc
             !last_update_result.ok ||
             !odometry_prior.valid ||
             tracking_step_count_ <= params.min_tracking_steps)
-            return std::nullopt;
+            return give_up_to_optimizer();
 
         torch::NoGradGuard no_grad;
         const auto& newest = window_mgr_.newest();
@@ -3234,7 +3239,7 @@ namespace rc
         const float rot_boost = params.rotation_sdf_coupling * std::abs(odometry_prior.delta_pose[2]);
         const float prediction_trust_threshold = params.sigma_sdf * params.prediction_trust_factor + rot_boost;
         if (mean_sdf_pred >= prediction_trust_threshold)
-            return std::nullopt;
+            return give_up_to_optimizer();
 
         // ── AND THE OTHER HALF OF THE STOPPING CRITERION: HOW UNCERTAIN HAS THE POSE BECOME? ──────
         // The residual test above asks "is the fit good?". It cannot ask "could the pose be wrong in
@@ -3257,12 +3262,26 @@ namespace rc
         // ★ NOT PUBLISHED AND NOT FED TO THE SOLVER. It is a decision variable only, which is the
         // difference from the covariance recursion reverted earlier today: that one inflated a value
         // consumers read, and it lost the track. This cannot reach anything but this `if`.
-        if (odometry_prior.valid and odometry_prior.covariance_eigen.allFinite())
+        // ★ THE INCREMENT MUST BE AN INCREMENT. covariance_eigen is the PRIOR's covariance, and it
+        // carries a fixed floor — StationaryMotionThreshold, 2 cm, which exists so a parked robot's
+        // motion factor cannot claim absurd precision. Accumulating that treats a FLOOR as a
+        // per-cycle growth: nine cycles of a 2 cm floor "reach" 6 cm without the robot having moved
+        // at all, and if the floor is larger it reaches it in one. Measured: 0% early exit with the
+        // residual sitting at 0.007, far inside its own threshold — the gate was being forced by an
+        // accumulator counting a constant.
+        // The preintegrated interval covariance IS the increment, by construction: it is what the
+        // sensors say accumulated over THIS interval, with no floor in it. If preintegration is off
+        // there is no honest increment available, so nothing accumulates and this half of the
+        // criterion simply does not participate.
+        if (odometry_prior.valid and odometry_prior.has_preint)
         {
-            unopt_pos_var_ += 0.5f * (odometry_prior.covariance_eigen(0, 0)
-                                    + odometry_prior.covariance_eigen(1, 1));
-            if (std::sqrt(std::max(0.f, unopt_pos_var_)) >= prediction_trust_threshold)
-                return std::nullopt;      // uncertain enough that the map should be consulted
+            const Eigen::Matrix3f dP = odometry_prior.preint.covariance();
+            if (dP.allFinite())
+            {
+                unopt_pos_var_ += 0.5f * (dP(0, 0) + dP(1, 1));
+                if (std::sqrt(std::max(0.f, unopt_pos_var_)) >= prediction_trust_threshold)
+                    return give_up_to_optimizer();      // uncertain enough that the map should be consulted
+            }
         }
 
         // ── Corner-consistency gate ─────────────────────────────────────────────────────────────
@@ -3296,7 +3315,7 @@ namespace rc
                 // CONSENSUS: force Adam only when enough corners disagree — a lone outlier is outvoted by
                 // the corroborating majority, but a rot180 flip (ALL corners disagree) still trips it.
                 if (n_bad >= params.corner_early_exit_min_bad)
-                    return std::nullopt;
+                    return give_up_to_optimizer();
             }
         }
 
@@ -4224,6 +4243,31 @@ namespace rc
 
         const double det = mnt_S11_ * mnt_S22_ - mnt_S12_ * mnt_S12_;
         if (not (det > 0.0) or not std::isfinite(det)) return;
+
+        // ── COULD THIS WINDOW SEPARATE PITCH FROM HEIGHT AT ALL? ─────────────────────────────────
+        // The two parameters are told apart ONLY by how their covariates scale with range: pitch is
+        // constant in pixels, height goes as fy/d. If every sample in the window sat at the same
+        // distance, x2 = fy/d would be constant, S12 would equal S11*x2 exactly, and the normal
+        // matrix would be singular — the fit would still return two numbers, and they would be
+        // meaningless, trading off along the degenerate direction. That is what was happening: the
+        // per-window pitch estimate wandered -0.087..+0.565 deg while its own standard error shrank
+        // to +/-0.0044, and the worst rows were exactly the sparse, narrow-range ones.
+        //
+        // ★ CORRELATION-NORMALISED, following calibration_estimator.h, and for the same reason it
+        // records: on the RAW matrix the units span orders of magnitude regardless of geometry, and
+        // the raw number once ranked a separable window as WORSE than a deliberately collinear one.
+        // Normalising by the diagonal leaves a 2x2 with 1s on it and the correlation off it, whose
+        // eigenvalues are 1 +/- |rho|. So for this fit the whole diagnostic is one number:
+        //     rho  = S12 / sqrt(S11*S22)        how collinear the two covariates were
+        //     cond = (1+|rho|) / (1-|rho|)
+        // rho -> 1 means the window saw one range and cannot answer; it is a direct readout of the
+        // RANGE DIVERSITY the trajectory happened to supply.
+        // ★ It is REPORTED, not gated. "The estimate wanders" and "this window was never able to
+        // answer" are different facts, and a filter that silently dropped the second would leave the
+        // first looking like noise.
+        const double rho  = mnt_S12_ / std::sqrt(std::max(1e-300, mnt_S11_ * mnt_S22_));
+        const double arho = std::min(std::abs(rho), 1.0 - 1e-12);
+        const double cond = (1.0 + arho) / (1.0 - arho);
         const double b_const = ( mnt_S22_ * mnt_Sy1_ - mnt_S12_ * mnt_Sy2_) / det;
         const double b_invd  = (-mnt_S12_ * mnt_Sy1_ + mnt_S11_ * mnt_Sy2_) / det;
         // Weighted residual sum of squares of the FITTED model, so chi2/dof is a statement about the
@@ -4246,7 +4290,7 @@ namespace rc
                 mount_csv_.imbue(std::locale::classic());   // CLAUDE.md: never a comma decimal
                 mount_csv_ << "ts_ms,window_ms,n_samples,chi2_per_dof,b_const_px,se_const_px,"
                               "b_invd_m,se_invd_m,dpitch_deg,se_pitch_deg,"
-                              "pose_x,pose_y,pose_theta\n";
+                              "pose_x,pose_y,pose_theta,rho,cond\n";
             }
         }
         if (mount_csv_.is_open())
@@ -4254,7 +4298,8 @@ namespace rc
             mount_csv_ << timestamp_ms << ',' << win_ms << ',' << mnt_n_ << ',' << c2d << ','
                        << b_const << ',' << se_const << ',' << b_invd << ',' << se_invd << ','
                        << dpitch_deg << ',' << se_pitch_deg << ','
-                       << mnt_pose_x_ << ',' << mnt_pose_y_ << ',' << mnt_pose_th_ << '\n';
+                       << mnt_pose_x_ << ',' << mnt_pose_y_ << ',' << mnt_pose_th_ << ','
+                       << rho << ',' << cond << '\n';
             mount_csv_.flush();
         }
         // ── RESET: every row is an independent window ────────────────────────────────────────────
@@ -4287,6 +4332,12 @@ namespace rc
                               : QString())
                           << " | height " << QString::number(b_invd, 'f', 4)
                           << " | chi2/dof " << QString::number(c2d, 'f', 2)
+                          << " | rho " << QString::number(rho, 'f', 4)
+                          << " cond " << QString::number(cond, 'f', 0)
+                          << (cond > 50.0
+                                  ? "  <- DEGENERATE: one range in view, pitch and height are not"
+                                    " separable here and these two numbers only trade off"
+                                  : "")
                           << " | pose " << QString::number(mnt_pose_x_, 'f', 2) << ","
                           << QString::number(mnt_pose_y_, 'f', 2)
                           << (c2d > 4.0 ? "  <- residual model is WRONG; the estimate inherits it"
