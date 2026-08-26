@@ -587,7 +587,27 @@ PreintZuptAsFactor   = false   # ★ TRIED AND MEASURED, 2026-08-26: it does not
 # ★ ON 2026-08-26 as the first thing tried that attacks the CAUSE rather than the step size. If it
 # works the parked wander should stop growing with sqrt(N) altogether — bounded rather than slower —
 # which is the property to look for, not a smaller number at one particular duration.
-SdfPolishOnEarlyExit = true
+SdfPolishOnEarlyExit = false   # ★ TRIED AND MEASURED 2026-08-26, and it is NOT viable at one
+                       # iteration with either regulariser. The idea stands — 99% of cycles publish
+                       # with no absolute reference and the pose random-walks 210 mm over 4000 parked
+                       # cycles — but a single slot's SDF cannot supply the information to fix it.
+                       #
+                       # ★ BOTH EXTREMES WERE MEASURED. With the single-INTERVAL motion prior as the
+                       # regulariser, Lambda ~ 45000 against H_sdf ~ 20: the step was crushed and the
+                       # growth exponent stayed at 0.522, a pure random walk. With the POSE covariance,
+                       # Lambda ~ 22 against H ~ 20: nearly a full Gauss-Newton step, which overshoots
+                       # a curved residual, so the next prediction starts worse. Measured: sdf_mse
+                       # 0.026 -> 0.031-0.037 with a p90 of 0.26-0.44 that was not there before, and
+                       # EARLY EXIT 99% -> 60%, i.e. 40x the optimizer load for a worse fit.
+                       #
+                       # ★ WHY, and it is the useful part: at equilibrium P = (H_sdf + P^-1)^-1, so
+                       # with one slot's SDF as the only information the pose settles at sigma ~ 21 cm.
+                       # That is what ONE scan against the field is worth. The full optimizer's
+                       # confidence comes from the WINDOW — many slots, motion factors between them,
+                       # corners, boundary — none of which a single-slot polish has.
+                       # The candidate that remains is to run the OPTIMIZER at a low fixed rate
+                       # regardless of the gate, so the pose gets a proper multi-slot solve every N
+                       # cycles instead of only once it has already drifted past 6 cm.
 
 OdomSampleLog = true    # One CSV line per ARRIVING odometry sample -> etc/odom_samples.csv.
                         # An INSTRUMENT, not telemetry: turn it off when the measurement is done.
@@ -598,7 +618,16 @@ OdomSampleLog = true    # One CSV line per ARRIVING odometry sample -> etc/odom_
                         # Purpose: measure the per-sample std and lag-1 autocorrelation of reported
                         # velocity on ZERO-COMMAND rows, which decides whether the ZUPT's per-sample
                         # application earns its sqrt(N) or double-counts one fact.
-OdomVarianceInjection = true   # Use the WHEELS' OWN per-sample velocity variance for the motion
+OdomVarianceInjection = true   # ★ AND NOW IT CARRIES INFORMATION. Written 2026-08-26 and documented
+                       # then as "wired but inert, because the producer publishes one nominal
+                       # constant". p3bot-bridge now makes its wheel noise SPEED-DEPENDENT —
+                       # sigma(v) = hypot(floor, k_slip*|v|) — and advertises the same sigma it
+                       # injected, so velCov finally varies. That is the condition this channel was
+                       # explicitly waiting for: "it earns its keep when the producer reports a
+                       # variance that actually varies."
+                       # At rest the consumer now recovers ~0.0005 m/sqrt(s) instead of 0.015, so
+                       # there is essentially nothing to integrate when the wheels report nothing.
+                       # Use the WHEELS' OWN per-sample velocity variance for the motion
                         # prior, instead of only the asserted PreintOdomSigma* constants. The producer
                         # states it in FullPoseEuler::velCov; robot_concept forwards it onto the robot
                         # node as robot_current_speed_variance; here it becomes a density,

@@ -1262,6 +1262,9 @@ private:
    // Latest object anchors from the graph (set on main thread, consumed by the localizer thread).
    float zupt_pred_gain_tr_ = 1.f, zupt_pred_gain_ro_ = 1.f;
    float last_sdf_polish_mm_ = 0.f;
+   /// Position variance accumulated since the last real solve, used ONLY to decide whether the
+   /// early-exit gate may still be trusted. Never published, never handed to the solver.
+   float unopt_pos_var_ = 0.f;
    bool  sdf_polished_this_cycle_ = false;
    std::atomic<bool> calib_reset_pending_{false};
    bool calib_state_loaded_ = false;

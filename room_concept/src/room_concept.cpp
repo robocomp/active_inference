@@ -2141,6 +2141,14 @@ namespace rc
             res.robot_pose.translation() = Eigen::Vector2f(state[2], state[3]);
             res.robot_pose.linear() = Eigen::Rotation2Df(state[4]).toRotationMatrix();
             res.covariance = current_covariance;
+            // A real solve re-determines the pose, so the "how much uncertainty has accumulated
+            // SINCE the last solve" accumulator starts again at zero. It must NOT be seeded from
+            // current_covariance: that matrix's xy block is still a placeholder (measured at exactly
+            // 1.0, i.e. sigma of one metre), so seeding from it started the accumulator far above the
+            // trigger and the criterion fired on every single cycle — early exit went to 0.0%.
+            // Zero is also the honest reading: no time has passed since the solve, so nothing has
+            // accumulated. What the solve itself is worth belongs in the residual test, not here.
+            unopt_pos_var_ = 0.f;
             res.timestamp_ms = lidar.second;
             last_update_result = res;
             last_lidar_timestamp = lidar.second;
@@ -3175,6 +3183,30 @@ namespace rc
         last_early_exit_metric_ = std::numeric_limits<float>::quiet_NaN();
         last_pred_sdf_median_   = std::numeric_limits<float>::quiet_NaN();
         sdf_polished_this_cycle_ = false;
+        // ── THE PREDICTION STEP OF THE POSE COVARIANCE ────────────────────────────────────────────
+        // ★ current_covariance was ONLY ever assigned on the optimized path, and the optimizer runs on
+        // ~0.2% of cycles. So on every other cycle it carried whatever the last solve left, or its
+        // Identity*0.1 initialiser, and two consumers were reading that placeholder as a measurement:
+        // the calibrator's episode weight (measured at pos_var = 1.000000 m^2 exactly — sigma of one
+        // METRE — which made 2994 episodes weigh 1 while 6 optimized ones weighed 1269, so 9408
+        // episodes or ~2.4 km of driving would have been needed to reach `informed`), and now the
+        // polish's own regulariser.
+        // A pose that runs open-loop gets LESS certain with every cycle, and saying so is the whole
+        // point: this is the ordinary Kalman prediction step, with the motion prior's covariance as
+        // the process noise it already computes for the motion factor.
+        // ⚠ GATED ON THE POLISH 2026-08-26, after this was left running with the polish OFF and the
+        // TRACK WAS LOST: sdf_mse 0.026 -> 0.4611, early exit down to 21%, cov_tt peaking at 7.1 rad^2.
+        // The SHRINK half of this recursion lives inside the polish block, so with the polish
+        // disabled only the GROWTH half ran — and current_covariance is not a private diagnostic, the
+        // early-exit path publishes it as res.covariance. An inflating covariance loosens everything
+        // that depends on it and the window went with it.
+        // A one-sided recursion is not a recursion: growth and shrink ship together or not at all.
+        if (params.sdf_polish_enabled
+            and odometry_prior.valid and odometry_prior.covariance_eigen.allFinite())
+        {
+            const Eigen::Matrix3f P_grown = current_covariance + odometry_prior.covariance_eigen;
+            if (P_grown.allFinite()) current_covariance = P_grown;
+        }
 
         if (!params.prediction_early_exit ||
             !last_update_result.ok ||
@@ -3203,6 +3235,35 @@ namespace rc
         const float prediction_trust_threshold = params.sigma_sdf * params.prediction_trust_factor + rot_boost;
         if (mean_sdf_pred >= prediction_trust_threshold)
             return std::nullopt;
+
+        // ── AND THE OTHER HALF OF THE STOPPING CRITERION: HOW UNCERTAIN HAS THE POSE BECOME? ──────
+        // The residual test above asks "is the fit good?". It cannot ask "could the pose be wrong in
+        // a direction this residual does not see?" — and a scalar mean |SDF| genuinely cannot see
+        // one. Sliding along a wall barely changes that wall's point distances; the constraint comes
+        // from the perpendicular geometry, so drift down an under-constrained direction is nearly
+        // invisible to it. MEASURED: parked with ground truth motionless for 3963 cycles, the pose
+        // wandered 210 mm in x and 193 in y while this gate passed on all but 12 of them. The
+        // criterion was not wrong about the residual; it was answering a different question.
+        //
+        // So accumulate how much the pose COULD have moved since the last real solve — the motion
+        // prior's own covariance, summed — and verify once that reaches the same distance the
+        // residual test already tolerates. Past that point "the residual is small" stops being
+        // evidence the pose is right, because the pose is no longer determined to that accuracy.
+        //
+        // ★ NO NEW CONSTANT. The bound IS prediction_trust_threshold, the tolerance already in force
+        // one line above: once the pose's own uncertainty reaches what the gate is willing to forgive
+        // in residual, forgiving it further is unfounded. The two halves therefore move together —
+        // widen the gate for rotation and this widens with it.
+        // ★ NOT PUBLISHED AND NOT FED TO THE SOLVER. It is a decision variable only, which is the
+        // difference from the covariance recursion reverted earlier today: that one inflated a value
+        // consumers read, and it lost the track. This cannot reach anything but this `if`.
+        if (odometry_prior.valid and odometry_prior.covariance_eigen.allFinite())
+        {
+            unopt_pos_var_ += 0.5f * (odometry_prior.covariance_eigen(0, 0)
+                                    + odometry_prior.covariance_eigen(1, 1));
+            if (std::sqrt(std::max(0.f, unopt_pos_var_)) >= prediction_trust_threshold)
+                return std::nullopt;      // uncertain enough that the map should be consulted
+        }
 
         // ── Corner-consistency gate ─────────────────────────────────────────────────────────────
         // The SDF gate above cannot see a 180° flip (a rot180 pose is SDF-ambiguous), so it would let a
@@ -3328,7 +3389,17 @@ namespace rc
                         H.noalias()  += a * J * J.transpose();
                         bb.noalias() += (a * dv) * J;
                     }
-                    const Eigen::Matrix3f Lam = odometry_prior.covariance_eigen.inverse();
+                    // ★ THE REGULARISER IS THE POSE'S OWN ACCUMULATED UNCERTAINTY, not one
+                    // interval's motion prior. This step corrects error built up over HUNDREDS of
+                    // free-running cycles, so "how far could the robot have moved in the last 50 ms"
+                    // is the wrong question — "how uncertain has this pose become since the map last
+                    // constrained it" is the right one.
+                    // Measured with the interval prior here: parked, the ZUPT tightens it to ~4.7 mm
+                    // so Lambda ~ 45000 against H_sdf ~ 20 — two thousand times stiffer, the step is
+                    // crushed to nothing, and the growth exponent went back to 0.522, a pure random
+                    // walk. The ZUPT's covariance-tightening was suppressing the very correction that
+                    // fixes what it makes the estimator confidently wrong about.
+                    const Eigen::Matrix3f Lam = current_covariance.inverse();
                     const Eigen::Matrix3f A = H + Lam;
                     Eigen::Vector3f d = -A.ldlt().solve(bb);
                     if (d.allFinite())
@@ -3340,6 +3411,12 @@ namespace rc
                                                         .detach();
                         last_sdf_polish_mm_ = d.head<2>().norm() * 1000.f;
                         sdf_polished_this_cycle_ = true;
+                        // ── AND THE POSTERIOR COVARIANCE OF THE STEP WE JUST TOOK ────────────────
+                        // A = H_sdf + Lambda is the information after this correction, so A^-1 is
+                        // the covariance. Free: it is already factorised for the solve above.
+                        const Eigen::Matrix3f P_post = A.inverse();
+                        if (P_post.allFinite() and P_post(0, 0) > 0.f and P_post(2, 2) > 0.f)
+                            current_covariance = P_post;
                     }
                 }
             }
@@ -3364,6 +3441,9 @@ namespace rc
         res.pred_sdf_median = res.sdf_mse;   // on this path they are the same quantity
         res.early_exit_metric = mean_sdf_pred;   // the value that PASSED the threshold (optimizer skipped)
         res.sdf_polished = sdf_polished_this_cycle_;   // the calibrator counts this as a correction
+        // (No res.covariance assignment here: this path already publishes current_covariance further
+        //  down. Adding a second one was redundant — and it was how the growth step below reached
+        //  every consumer.)
         // Heading attribution must be set on BOTH return paths. This one carries >98% of frames, and
         // it is the interesting one: between corrections the prediction runs open-loop, so these are
         // the only cycles where an accumulating channel error is visible before the optimizer hides it.
@@ -4884,7 +4964,18 @@ namespace rc
             // now the thing correcting the pose, and its corrections were being discarded.
             // The variances handed over stay the localiser's own: a polish step is bounded by the
             // motion prior, so it cannot contribute a correction the prior called implausible.
-            const bool corrected_this_cycle = res.iterations_used > 0 or res.sdf_polished;
+            // ★ REVERTED 2026-08-26: the polish is NOT a corrector the calibrator may learn from.
+            // Its steps remove NOISE-driven drift, and the estimator has no way to know that — it
+            // explains the accumulated correction as a systematic scale. Live, with the weights
+            // finally real, that drove the raw solve far outside its priors (the forward scale and
+            // the wheel mismatch both many sigmas out) while `informed` stayed false. The `informed`
+            // gate is the only reason none of it reached the wheels.
+            // The original trigger is viable again anyway: the optimizer now fires on ~40% of cycles,
+            // not 0.3%, so learning from full windowed solves is no longer starved. Those corrections
+            // are dominated by systematic model error accumulated over a ramp, which is the quantity
+            // a scale parameter is entitled to explain.
+            // ⚠ The MOTION-based episode close stays — that part is independent and sound.
+            const bool corrected_this_cycle = res.iterations_used > 0;
             motion_calib_.observe(res.dy_local, res.dx_local, res.imu_dtheta + res.wheel_dtheta,
                                   r_forward, r_lateral, r_theta,
                                   pos_var, th_var, corrected_this_cycle, res.sdf_mse,
