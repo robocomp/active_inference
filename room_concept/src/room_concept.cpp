@@ -870,14 +870,14 @@ namespace rc
                 rf.t_cov_ms = last_t_cov_ms_;
                 rf.t_breakdown_ms = last_t_breakdown_ms_;
 
-                // Online motion model learning state (NaN-safe: -1 sentinel is
-                // passed as-is; the bridge converts negative values to NaN)
-                rf.learned_slip_k           = learned_slip_k_;
-                rf.learned_odom_noise_trans = learned_odom_noise_trans_;
-                rf.learned_bias_x           = learned_odom_bias_.x();
-                rf.learned_bias_y           = learned_odom_bias_.y();
-                rf.learned_bias_theta       = learned_odom_bias_.z();
-                rf.motion_learn_frames      = motion_learn_good_frames_;
+                // The EMA learner these carried was deleted 2026-08-26; the fields stay at their
+                // "no value" sentinel so the bridge keeps drawing NaN rather than a stale number.
+                rf.learned_slip_k           = -1.f;
+                rf.learned_odom_noise_trans = -1.f;
+                rf.learned_bias_x           = 0.f;
+                rf.learned_bias_y           = 0.f;
+                rf.learned_bias_theta       = 0.f;
+                rf.motion_learn_frames      = 0;
 
                 // Send real room polygon once so the bridge can draw corner-to-corner contour.
                 if (!rerun_room_polygon_sent_ && model_ != nullptr && model_->use_polygon && model_->polygon_vertices.defined())
@@ -2417,8 +2417,7 @@ namespace rc
             // Store quality for future boundary prior gate (early exit = good pose).
             window_mgr_.newest().sdf_mse_final = early->sdf_mse;
             // Motion-model adaptation runs here too so prediction-mode frames count.
-            if (params.learn_motion_model && window_mgr_.size() > 1)
-                adapt_motion_model();
+            service_calibration();
             early->corners_in_fov = res.corners_in_fov;
             early->corner_matches = std::move(res.corner_matches);
             early->lidar_scan = std::move(res.lidar_scan);
@@ -2594,8 +2593,7 @@ namespace rc
 
             // ===== ONLINE MOTION MODEL ADAPTATION =====
             // Runs here so the newest slot's sdf_mse_final is valid for the quality gate.
-            if (params.learn_motion_model && window_mgr_.size() > 1)
-                adapt_motion_model();
+            service_calibration();
 
             // Build state vector without calling get_state() (avoids 3 GPU→CPU transfers)
             {
@@ -2869,8 +2867,7 @@ namespace rc
 
             debug_log_ << ',' << last_lbfgs_grad_norm_
                        << ',' << losses_str
-                       << ',' << learned_slip_k_
-                       << ',' << learned_odom_noise_trans_
+                       << ",," 
                        << ',' << learned_odom_bias_.x()
                        << ',' << learned_odom_bias_.y()
                        << ',' << learned_odom_bias_.z();
@@ -3095,6 +3092,60 @@ namespace rc
             selection.selected_prior.has_preint = true;
         }
 
+        // ── THE REST HYPOTHESIS, WHERE IT CAN ACTUALLY REACH THE POSE ────────────────────────────
+        // Applied to the MEAN, here, at prior selection — not inside the solver and not inside the
+        // preintegrator.
+        //
+        // ★ WHY HERE AND NOWHERE ELSE. The covariance-shaping form never touches the mean by design.
+        // The zero-delta factor form does touch it, but factors are only evaluated when Gauss-Newton
+        // RUNS, and it runs on ~1% of cycles: on the other 99% the published pose is the raw
+        // prediction x_prev (+) Delta and nothing constrains it at all. Measured with the factor on:
+        // the per-cycle step was 3.54 mm against 3.49 mm before — unchanged, because the factor never
+        // saw those cycles. The prediction is what gets published, so the prediction is where a
+        // hypothesis about the prediction has to act.
+        // The preintegrator's invariant survives: it still never writes its own mean. This is the
+        // prior SELECTOR combining two priors, which is what it already does for the command channel.
+        //
+        // ★ IT IS A MIXTURE RESPONSIBILITY, not a gate — the same device rc::img::responsibility uses
+        // to decide whether an image sample is an inlier. Two hypotheses for this interval: at rest,
+        // in which case Delta is pure odometry noise, N(Delta; 0, sigma_odom^2); or moving, for which
+        // any displacement up to what the base can do in T is about equally likely, a uniform of width
+        // 2*v_max*T. The published increment is Delta scaled by the posterior probability of MOVING.
+        // sigma_odom is the odometry's OWN noise over the interval, d_rest^2 * T — a density times a
+        // time, so this is rate-invariant like everything else here.
+        // At rest Delta sits at ~1 sigma, the rest hypothesis is far more likely than a uniform, and
+        // the increment collapses. At 0.25 m/s over 50 ms Delta is ~3.7 sigma, the rest hypothesis is
+        // e^-6.8 down, and the increment passes through untouched. No threshold: the crossover falls
+        // where the two densities meet and moves with the odometry's own noise.
+        if (params.zupt_on_prediction and selection.selected_prior.valid)
+        {
+            auto& d = selection.selected_prior.delta_pose;
+            const float T = std::max(1e-3f, selection.selected_prior.dt * 1e-3f);
+            const auto& nm = params.odom_preint_noise;
+            const float sig_p = std::sqrt(nm.zupt_density_v * nm.zupt_density_v * T);      // m
+            const float sig_r = std::sqrt(nm.zupt_density_omega * nm.zupt_density_omega * T);
+            const float L     = std::max(nm.zupt_lever_m, 1e-3f);
+            // Coupled, so a pivot cannot be read as rest: a robot turning on the spot has |dp| ~ 0
+            // and must still be recognised as moving.
+            const float m_tr = d.head<2>().norm() + L * std::abs(d[2]);
+            const float m_ro = std::abs(d[2]) + d.head<2>().norm() / L;
+            const auto moving_p = [](float m, float sigma, float span) -> float
+            {
+                if (not (sigma > 0.f) or not (span > 0.f)) return 1.f;
+                const float rest   = std::exp(-0.5f * m * m / (sigma * sigma))
+                                   / std::sqrt(2.f * static_cast<float>(M_PI)) / sigma;
+                const float moving = 1.f / (2.f * span);
+                const float den = rest + moving;
+                return den > 0.f ? moving / den : 1.f;
+            };
+            // Span of the "moving" uniform: what this base could plausibly have done in T.
+            const float w_tr = moving_p(m_tr, sig_p, params.zupt_pred_v_max * T);
+            const float w_ro = moving_p(m_ro, sig_r, params.zupt_pred_w_max * T);
+            zupt_pred_gain_tr_ = w_tr; zupt_pred_gain_ro_ = w_ro;   // for the viewer / debug row
+            d.head<2>() *= w_tr;
+            d[2]        *= w_ro;
+        }
+
         last_selected_prior_ = selection.selected_prior;
         {   // mirror for the viewer, same lock as the ingress debug
             std::lock_guard lock(motion_ingress_debug_mutex_);
@@ -3123,6 +3174,7 @@ namespace rc
         // report NaN (⇒ not plotted) for frames where the gate never ran, rather than a stale value.
         last_early_exit_metric_ = std::numeric_limits<float>::quiet_NaN();
         last_pred_sdf_median_   = std::numeric_limits<float>::quiet_NaN();
+        sdf_polished_this_cycle_ = false;
 
         if (!params.prediction_early_exit ||
             !last_update_result.ok ||
@@ -3202,7 +3254,98 @@ namespace rc
         // rotation can't silently evade the collapse trigger. No-op unless the reloc feature is enabled.
         nudge_map_trust_early_exit(mean_sdf_pred, odometry_prior.delta_pose[2]);
 
-        auto pose_cpu = newest.pose.detach().to(torch::kCPU);
+        // ── ONE DAMPED SDF STEP, on the cycle that is about to publish without the optimizer ──────
+        // This is where the drift lives. The gate's verdict is "good enough not to need a full
+        // solve", and it has been implemented as "do nothing" — so on ~99% of cycles the published
+        // pose is dead reckoning with no absolute reference at all, and it random-walks: measured
+        // 3.49 mm per cycle, 210 mm over 3963 parked cycles with ground truth motionless.
+        //
+        // ★ SHRINKING THE STEP CANNOT FIX THIS, which is why the two earlier attempts did not. A
+        // random walk with a smaller step is still a random walk: halve it and the drift only grows
+        // more slowly, still without bound, still as sqrt(N). What removes drift is an ABSOLUTE
+        // reference applied every cycle, which turns the walk into a mean-reverting process. The map
+        // is that reference and it is already being evaluated here for the gate.
+        //
+        // ★ HOW FAR IT MAY MOVE IS SET BY THE MOTION PRIOR, not by a step size. The steepest-descent
+        // step for a scalar residual is exactly L/|g|^2 — no constant — and it is then scaled to lie
+        // inside the prior's own 1-sigma ellipsoid: delta' Lambda delta <= 1. So the correction may
+        // go anywhere the prior considers a plausible amount of motion for this interval and no
+        // further. It cannot overrule a confident prediction, and it can undo a wander the prior
+        // admits could not have happened. Nothing here is tuned; both bounds come from quantities the
+        // estimator already states.
+        if (params.sdf_polish_enabled and odometry_prior.valid)
+        {
+            // ★ A GAUSS-NEWTON STEP, not steepest descent. The scalar form — step L/|g|^2 on the
+            // MEAN residual — was tried first and left a shiver: it is the step that would zero a
+            // LINEAR residual in one go, the residual is not linear, so it over-shoots and corrects
+            // back every cycle. Measured, that showed as a growth exponent of 0.167 instead of 0 and
+            // as heading barely improving at all, because translation dominates the mean's gradient
+            // and the yaw direction is averaged away inside a single scalar.
+            // Using the per-point Jacobian fixes both: yaw gets its own column instead of a share of
+            // one number, and the curvature the scalar form ignores is what stops the over-shoot.
+            // ★ This is ONE ITERATION of the optimizer's own SdfFactor, against the newest slot only
+            // — same query, same observation weights, same IRLS Huber, same J = [gx, gy, -gx*qy +
+            // gy*qx]. Sharing room_obs_weights.h is the point: a polish weighting its points
+            // differently from the solver would be a second estimator that can disagree with the
+            // first, which is the shape of bug this codebase has paid for before.
+            // ★ AND THE PRIOR IS THE DAMPING. delta = -(H_sdf + Lambda_prior)^-1 b. At the prediction
+            // the prior's own residual is zero, so it contributes to H alone and acts as a
+            // Levenberg term with physical units: the step is limited by how much motion the prior
+            // says was plausible for this interval. No lambda to tune, and the units are metres and
+            // radians rather than a bare number.
+            {
+                const auto q = model_->sdf_query_at_pose(points_tensor, pose_xy, pose_th, true);
+                if (q.sdf.defined() and q.sdf.size(0) > 0 and q.grad.defined())
+                {
+                    const auto w = build_observation_weights(*model_, params, points_tensor,
+                                                             pose_th, q);
+                    const auto d_cpu = q.sdf.detach().to(torch::kCPU).contiguous();
+                    const auto g_cpu = q.grad.detach().to(torch::kCPU).contiguous();
+                    const auto w_cpu = w.detach().to(torch::kCPU).contiguous();
+                    const auto p_cpu = points_tensor.detach().to(torch::kCPU).contiguous();
+                    const auto da = d_cpu.accessor<float, 1>();
+                    const auto ga = g_cpu.accessor<float, 2>();
+                    const auto wa = w_cpu.accessor<float, 1>();
+                    const auto pa = p_cpu.accessor<float, 2>();
+                    const int n = static_cast<int>(d_cpu.size(0));
+                    const float inv_var = 1.0f / (params.rfe_obs_sigma * params.rfe_obs_sigma);
+                    const float delta_h = params.rfe_huber_delta;
+                    const float th_now = last_pred_theta_;
+                    const float c = std::cos(th_now), sn = std::sin(th_now);
+                    Eigen::Matrix3f H = Eigen::Matrix3f::Zero();
+                    Eigen::Vector3f bb = Eigen::Vector3f::Zero();
+                    for (int i = 0; i < n; ++i)
+                    {
+                        const float dv = da[i];
+                        if (not std::isfinite(dv)) continue;
+                        const float ad = std::abs(dv);
+                        const float u = (ad <= delta_h or ad < 1e-9f) ? 1.0f : delta_h / ad;
+                        const float a = 0.5f * inv_var * wa[i] * u / static_cast<float>(n);
+                        const float px = pa[i][0], py = pa[i][1];
+                        const float qx = c * px - sn * py, qy = sn * px + c * py;
+                        Eigen::Vector3f J;
+                        J << ga[i][0], ga[i][1], -ga[i][0] * qy + ga[i][1] * qx;
+                        H.noalias()  += a * J * J.transpose();
+                        bb.noalias() += (a * dv) * J;
+                    }
+                    const Eigen::Matrix3f Lam = odometry_prior.covariance_eigen.inverse();
+                    const Eigen::Matrix3f A = H + Lam;
+                    Eigen::Vector3f d = -A.ldlt().solve(bb);
+                    if (d.allFinite())
+                    {
+                        auto upd = torch::zeros({3}, torch::kFloat32);
+                        auto ua = upd.accessor<float, 1>();
+                        ua[0] = d.x(); ua[1] = d.y(); ua[2] = d.z();
+                        window_mgr_.newest().pose = (newest.pose.detach() + upd.to(get_device()))
+                                                        .detach();
+                        last_sdf_polish_mm_ = d.head<2>().norm() * 1000.f;
+                        sdf_polished_this_cycle_ = true;
+                    }
+                }
+            }
+        }
+
+        auto pose_cpu = window_mgr_.newest().pose.detach().to(torch::kCPU);
         auto p_acc = pose_cpu.accessor<float, 1>();
         const float x = p_acc[0], y = p_acc[1], phi = p_acc[2];
 
@@ -3220,6 +3363,7 @@ namespace rc
         res.sdf_mse = torch::median(torch::abs(sdf_pred)).item<float>();
         res.pred_sdf_median = res.sdf_mse;   // on this path they are the same quantity
         res.early_exit_metric = mean_sdf_pred;   // the value that PASSED the threshold (optimizer skipped)
+        res.sdf_polished = sdf_polished_this_cycle_;   // the calibrator counts this as a correction
         // Heading attribution must be set on BOTH return paths. This one carries >98% of frames, and
         // it is the interesting one: between corrections the prediction runs open-loop, so these are
         // the only cycles where an accumulating channel error is visible before the optimizer hides it.
@@ -3401,8 +3545,7 @@ namespace rc
             }
             debug_log_ << ',' << 0.f   // lbfgs_grad_norm (no optimization ran)
                        << ',' << "na"  // loss_curve
-                       << ',' << learned_slip_k_
-                       << ',' << learned_odom_noise_trans_
+                       << ",," 
                        << ',' << learned_odom_bias_.x()
                        << ',' << learned_odom_bias_.y()
                        << ',' << learned_odom_bias_.z();
@@ -4501,36 +4644,15 @@ namespace rc
         return prior;
     }
 
-    /**
-     * @brief adapt_motion_model
-     *
-     * Online EMA adaptation of three motion-model parameters using the
-     * post-optimisation pose residuals stored in the current window:
-     *
-     *   r_k = (pose_k - pose_{k-1}) – odom_delta_k        [3-vector, meters / rad]
-     *
-     * Three estimators, all gated on localization quality of both bracket slots:
-     *
-     *   1. Slip-k  (learned_slip_k_):
-     *      angular residual std divided by angular speed estimates how much
-     *      extra rotation uncertainty the encoder mis-reports per rad/s.
-     *      Updated only when |ω_k| >= motion_learn_min_omega.
-     *
-     *   2. Trans-noise fraction (learned_odom_noise_trans_):
-     *      translational residual magnitude divided by translation magnitude.
-     *      Tracks odom_noise_trans (a scale factor, not absolute noise).
-     *
-     *   3. Bias (learned_odom_bias_):
-     *      mean residual per slot – systematic drift that a fixed scale factor
-     *      cannot absorb.  Subtracted from each slot's odom_delta before
-     *      computing the motion factor contribution at the call site.
-     *
-     * Both learned_slip_k_ and learned_odom_noise_trans_ use -1 as "warmup not
-     * done" sentinel.  Actual replacement of static Params values inside
-     * compute_motion_covariance() only happens after motion_learn_min_frames
-     * good frames have been accumulated.
-     */
-    void RoomConcept::adapt_motion_model()
+    /// Calibration bookkeeping, run every cycle: apply a pending reset, restore the window once,
+    /// drain any closed pivots into the estimator, and keep the window persisted.
+    ///
+    /// ★ UNGATED, and that matters. All of this used to live inside adapt_motion_model(), which was
+    /// gated by LearnMotionModel — a flag switched off in 2026-08 to disable a DIFFERENT learner (the
+    /// EMA slip-k path, A/B'd and rejected, now deleted). One switch was therefore turning off two
+    /// unrelated things, and the batch estimator's whole bookkeeping went with it: closures reached
+    /// nothing, the state file was never written, and nothing said so.
+    void RoomConcept::service_calibration()
     {
         // ── Reset, if the calibration window asked for one ────────────────────────────────────────
         if (calib_reset_pending_.exchange(false))
@@ -4570,6 +4692,10 @@ namespace rc
             for (const auto& c : pending)
             {
                 motion_calib_.observe_closure(c.truth_rad, c.turned_rad, c.rate_rad_s, c.sigma_s);
+                // Say whether the closure actually TAUGHT k_omega, not just that it arrived. A
+                // parameter's value cannot distinguish "measured" from "left where the prior put
+                // it", and the accessors now apply it only once it is taught — so this is the line
+                // that says whether the pivot changed the robot's behaviour or only its logs.
                 qInfo().nospace() << "[calib] CLOSURE -> batch estimator | truth "
                                   << QString::number(c.truth_rad * 180.0 / M_PI, 'f', 1) << " deg, odometry "
                                   << QString::number(c.turned_rad * 180.0 / M_PI, 'f', 1) << " deg, rate "
@@ -4577,7 +4703,10 @@ namespace rc
                                   << QString::number(c.sigma_s * 100.0, 'f', 3) << "% | k_omega now "
                                   << QString::number((motion_calib_.omega_scale() - 1.f) * 100.f, 'f', 4)
                                   << "% +/- " << QString::number(motion_calib_.k_w_sigma() * 100.f, 'f', 4)
-                                  << "% over " << motion_calib_.closures() << " closure(s)";
+                                  << "% over " << motion_calib_.closures() << " closure(s), "
+                                  << (motion_calib_.taught(rc::calib::P_K_OMEGA)
+                                          ? "TAUGHT — the scale is now applied"
+                                          : "still UNTAUGHT — nominal is applied, the value is only reported");
             }
             // A closure is minutes of robot time; persist immediately rather than waiting for the
             // periodic save, so a crash between here and then cannot throw it away.
@@ -4598,183 +4727,8 @@ namespace rc
             }
         }
 
-        const auto& window = window_mgr_.window;
-        if (window.size() < 2) return;
-
-        // Use the dedicated motion-learning quality gate (typically more permissive
-        // than boundary_hessian_quality_threshold so learning isn't starved of data).
-        const float quality_threshold = params.motion_learn_quality_threshold;
-        const float alpha = params.motion_learn_alpha;
-        const float beta  = params.motion_learn_beta;
-
-        int    n_pairs        = 0;
-        int    slip_k_count   = 0;
-        float  slip_k_sum     = 0.f;
-        
-        Eigen::Vector3f bias_sum = Eigen::Vector3f::Zero();
-
-        // ── 1. Per-pair loop: slip-k (newest pair only) + bias (all pairs) ────
-        //
-        // Trans-noise is NOT estimated here — a window-span approach below gives
-        // 4× better SNR because the per-slot distance (~0.02-0.05 m at 18 Hz) is
-        // comparable to the localization uncertainty from SDF, making per-slot
-        // fraction samples extremely noisy.
-        //
-        // Slip-k IS kept per-pair (newest only) because it relates to *instantaneous*
-        // angular speed: k = |r_θ| / |ω|, which would be diluted by accumulation.
-        //
-        // When SdfCurrentSlotOnly=true only the newest slot is SDF-anchored;
-        // internal pairs are only motion-constrained and have near-zero residuals
-        // by construction → restrict slip-k to the newest consecutive pair.
-        const bool noise_on_newest_pair_only = params.sdf_current_slot_only;
-
-        for (size_t i = 1; i < window.size(); ++i)
-        {
-            const auto& prev_slot = window[i - 1];
-            const auto& curr_slot = window[i];
-
-            // Gate: both slots must have good SDF quality
-            if (prev_slot.sdf_mse_final > quality_threshold ||
-                curr_slot.sdf_mse_final > quality_threshold)
-                continue;
-
-            // Extract optimised poses from tensors (CPU)
-            const auto pv = prev_slot.pose.detach().to(torch::kCPU);
-            const auto pc = curr_slot.pose.detach().to(torch::kCPU);
-            const auto pv_a = pv.accessor<float,1>();
-            const auto pc_a = pc.accessor<float,1>();
-
-            const Eigen::Vector3f pose_prev(pv_a[0], pv_a[1], pv_a[2]);
-            const Eigen::Vector3f pose_curr(pc_a[0], pc_a[1], pc_a[2]);
-
-            // Actual delta from optimised poses
-            Eigen::Vector3f actual_delta = pose_curr - pose_prev;
-            while (actual_delta[2] >  static_cast<float>(M_PI)) actual_delta[2] -= 2.f * static_cast<float>(M_PI);
-            while (actual_delta[2] < -static_cast<float>(M_PI)) actual_delta[2] += 2.f * static_cast<float>(M_PI);
-
-            // Residual: actual minus odometry prediction
-            Eigen::Vector3f r = actual_delta - curr_slot.odometry_delta;
-            while (r[2] >  static_cast<float>(M_PI)) r[2] -= 2.f * static_cast<float>(M_PI);
-            while (r[2] < -static_cast<float>(M_PI)) r[2] += 2.f * static_cast<float>(M_PI);
-
-            const bool use_for_noise = !noise_on_newest_pair_only || (i == window.size() - 1);
-
-            // ── Slip-k (newest pair only, angular-speed-dependent) ────
-            const float dt_s = std::max(
-                static_cast<float>(curr_slot.timestamp_ms - prev_slot.timestamp_ms) * 1e-3f,
-                0.001f);
-            const float ang_speed = std::abs(curr_slot.odometry_delta[2]) / dt_s;
-            if (use_for_noise && ang_speed >= params.motion_learn_min_omega)
-            {
-                // Same units fix as the slip term in build_motion_covariance: k is a FRACTION of the
-                // rotation increment, so the residual is normalised by the increment, not by the
-                // rate. The gate stays on angular SPEED (motion_learn_min_omega is a rad/s floor,
-                // which is what it should be — it asks "is the robot turning fast enough for this
-                // sample to be informative"), but what is learned must match what is applied, or the
-                // learned k silently absorbs a factor of dt and stops meaning anything.
-                slip_k_sum += std::abs(r[2]) /
-                              std::max(std::abs(curr_slot.odometry_delta[2]), 1e-3f);
-                ++slip_k_count;
-            }
-
-            // ── Bias: use all pairs (systematic drift is per-step) ────
-            bias_sum += r;
-            ++n_pairs;
-        }
-
-        if (n_pairs == 0) return;
-
-        // ── 2. Window-span trans-noise estimation ─────────────────────────────
-        // Accumulate true displacement and odometry prediction over the full window
-        // (oldest ← boundary-prior-anchored, newest ← SDF-anchored).
-        //
-        // Rotation gate: when the robot rotates significantly, the SDF has poor
-        // lateral position constraint, making pos_new noisy. Gate on total window
-        // rotation to only sample during near-straight motion.
-        {
-            const auto& oldest = window.front();
-            const auto& newest = window.back();
-
-            if (oldest.sdf_mse_final < quality_threshold &&
-                newest.sdf_mse_final < quality_threshold)
-            {
-                Eigen::Vector3f accumulated_odom = Eigen::Vector3f::Zero();
-                for (size_t i = 1; i < window.size(); ++i)
-                    accumulated_odom += window[i].odometry_delta;
-
-                const float total_rot_mag   = std::abs(accumulated_odom[2]);
-                const float total_trans_mag = accumulated_odom.head<2>().norm();
-
-                // Skip when the window contains significant rotation: SDF position
-                // uncertainty during turning is comparable to the odometry error
-                // being estimated, giving very noisy fractional samples.
-                constexpr float max_window_rotation = 0.15f; // rad
-                if (total_rot_mag < max_window_rotation && total_trans_mag >= params.motion_learn_min_trans)
-                {
-                    const auto po = oldest.pose.detach().to(torch::kCPU);
-                    const auto pn = newest.pose.detach().to(torch::kCPU);
-                    const auto po_a = po.accessor<float,1>();
-                    const auto pn_a = pn.accessor<float,1>();
-
-                    const Eigen::Vector2f pos_old(po_a[0], po_a[1]);
-                    const Eigen::Vector2f pos_new(pn_a[0], pn_a[1]);
-                    const float span_residual = (pos_new - pos_old - accumulated_odom.head<2>()).norm();
-
-                    // Store VARIANCE sample (r²/d²) rather than the ratio |r|/d.
-                    // The mean-absolute estimator E[|r|/d] = σ·√(2/π) ≈ 0.80·σ for
-                    // Gaussian innovations — biased low by ~25%.
-                    // The variance estimator E[r²/d²] = σ² is unbiased; we take
-                    // √(median(r²/d²)) at flush time to recover σ.
-                    const float var_sample = (span_residual / total_trans_mag) *
-                                             (span_residual / total_trans_mag);
-                    trans_noise_sample_buf_.push_back(var_sample);
-                }
-            }
-        }
-
-        // ── EMA updates ──────────────────────────────────────────────────────
-        if (slip_k_count > 0)
-        {
-            const float k_batch = slip_k_sum / static_cast<float>(slip_k_count);
-            if (learned_slip_k_ < 0.f)
-                learned_slip_k_ = k_batch;
-            else
-                learned_slip_k_ = (1.f - alpha) * learned_slip_k_ + alpha * k_batch;
-            learned_slip_k_ = std::clamp(learned_slip_k_, 0.f, 1.f);
-        }
-
-        // Trans-noise: median of 10 variance samples per EMA step, then sqrt → σ.
-        // Using median variance (not median std) gives a proper robust estimator
-        // of the innovation variance; sqrt converts to the fraction used by the
-        // motion covariance model (position_std = base + noise_trans * d).
-        constexpr int trans_buf_size = 10;
-        if (static_cast<int>(trans_noise_sample_buf_.size()) >= trans_buf_size)
-        {
-            auto& buf = trans_noise_sample_buf_;
-            std::nth_element(buf.begin(), buf.begin() + buf.size() / 2, buf.end());
-            const float median_var  = buf[buf.size() / 2];
-            const float sigma_est   = std::sqrt(median_var);
-            buf.clear();
-
-            if (learned_odom_noise_trans_ < 0.f)
-                learned_odom_noise_trans_ = sigma_est;
-            else
-                learned_odom_noise_trans_ = (1.f - alpha) * learned_odom_noise_trans_ + alpha * sigma_est;
-            learned_odom_noise_trans_ = std::clamp(learned_odom_noise_trans_, 0.001f, 1.f);
-        }
-
-        // Bias (slower EMA to avoid over-correcting on transient disturbances)
-        const Eigen::Vector3f bias_batch = bias_sum / static_cast<float>(n_pairs);
-        learned_odom_bias_ = (1.f - beta) * learned_odom_bias_ + beta * bias_batch;
-
-        ++motion_learn_good_frames_;
     }
 
-    // ===== HELPER METHOD: Compute motion-based covariance =====
-    /**
-     * Compute motion-based covariance consistently
-     * σ = base + k * distance
-     */
     void RoomConcept::write_debug_tail()
     {
         if (not debug_log_.is_open())
@@ -4803,24 +4757,23 @@ namespace rc
     Eigen::Matrix3f RoomConcept::compute_motion_covariance(const OdometryPrior &odometry_prior,
                                                              bool is_measured_odometry)
     {
-        // Whether the learned values are past warmup and available to use
-        const bool use_learned = params.learn_motion_model &&
-                                 motion_learn_good_frames_ >= params.motion_learn_min_frames;
-
-        // Select noise model: odometry (encoder/IMU) is tighter than commanded velocity
-        // For trans noise: use learned fraction if available and this is a measured prior
-        const float raw_noise_trans = is_measured_odometry ? params.odom_noise_trans * params.odom_noise_scale : params.cmd_noise_trans;
-        const float noise_trans = (use_learned && is_measured_odometry && learned_odom_noise_trans_ >= 0.f)
-                                  ? learned_odom_noise_trans_ * params.odom_noise_scale
-                                  : raw_noise_trans;
+        // ★ The EMA learner that used to override these was DELETED on 2026-08-26. It was A/B'd and
+        // rejected in 2026-08: it learned slip_k ~= 0.81 against a true 0.036 rad increment, collapsed
+        // the measured prior's weight to 0.04 during fast turns so the prior fell back on the command
+        // channel, took early exit during rotation from 91.6% to 68.5%, and was the only one of four
+        // configurations to LOSE THE TRACK. The defect was the residual it learned from — a
+        // post-optimisation window-pair residual carrying the optimiser's own correction — which is
+        // code, not a simulation artefact. The batch estimator (MotionCalibEnabled) is the learner
+        // that replaced it, and it learns from a different quantity.
+        const float noise_trans = is_measured_odometry
+                                ? params.odom_noise_trans * params.odom_noise_scale
+                                : params.cmd_noise_trans;
         const float noise_rot   = is_measured_odometry ? params.odom_noise_rot   * params.odom_noise_scale : params.cmd_noise_rot;
         const float noise_base  = is_measured_odometry ? params.odom_noise_base  * params.odom_noise_scale : params.cmd_noise_base;
 
         // Apply learned bias: subtract systematic odometry drift from the effective delta.
         // This makes the motion factor mean correct; the covariance still covers residual noise.
-        const Eigen::Vector3f effective_delta = (use_learned && is_measured_odometry)
-            ? odometry_prior.delta_pose - learned_odom_bias_
-            : odometry_prior.delta_pose;
+        const Eigen::Vector3f effective_delta = odometry_prior.delta_pose;
 
         float motion_magnitude = std::sqrt(
             effective_delta[0] * effective_delta[0] +
@@ -4843,11 +4796,10 @@ namespace rc
         float rot_induced_pos = params.rotation_position_coupling * std::abs(effective_delta[2]);
         position_std = std::sqrt(position_std * position_std + rot_induced_pos * rot_induced_pos);
 
-        // Encoder angular slip model (measured odometry only):
-        // Uses the online-learned slip-k when past warmup, otherwise the static param.
-        const float effective_slip_k = (use_learned && is_measured_odometry && learned_slip_k_ >= 0.f)
-                                       ? learned_slip_k_
-                                       : params.encoder_rot_slip_k;
+        // Encoder angular slip model (measured odometry only). The static param is authoritative:
+        // the EMA path that used to override it here is deleted, and the batch estimator corrects the
+        // MEAN through k_omega rather than re-writing this covariance term.
+        const float effective_slip_k = params.encoder_rot_slip_k;
         if (is_measured_odometry && effective_slip_k > 0.f)
         {
             // UNITS (fixed 08-09). rotation_std is the std of the rotation INCREMENT over this
@@ -4925,9 +4877,17 @@ namespace rc
             const float th_var = res.covariance.rows() > 2 ? res.covariance(2, 2) : 0.f;
 
             res.calib_pos_var = pos_var;
+            // ★ THE POLISH IS A CORRECTOR TOO. r_forward/r_lateral/r_theta already carry it without
+            // any extra plumbing — they are res.robot_pose (read AFTER the polish moved it) minus
+            // pred_* (captured BEFORE) — but they are only ACCUMULATED when `corrected` is true, and
+            // that was "the optimizer ran". On the ~99% of cycles the optimizer skips, the polish is
+            // now the thing correcting the pose, and its corrections were being discarded.
+            // The variances handed over stay the localiser's own: a polish step is bounded by the
+            // motion prior, so it cannot contribute a correction the prior called implausible.
+            const bool corrected_this_cycle = res.iterations_used > 0 or res.sdf_polished;
             motion_calib_.observe(res.dy_local, res.dx_local, res.imu_dtheta + res.wheel_dtheta,
                                   r_forward, r_lateral, r_theta,
-                                  pos_var, th_var, res.iterations_used > 0, res.sdf_mse,
+                                  pos_var, th_var, corrected_this_cycle, res.sdf_mse,
                                   last_cycle_dt_s_);
         }
         res.calib_value = motion_calib_.last_solve().value;

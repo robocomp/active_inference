@@ -262,6 +262,14 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
         // The two forms are EXCLUSIVE: running both counts one hypothesis twice, once shaping the
         // prior's covariance and once as its own factor. The flag therefore turns the per-sample
         // shaping off rather than leaving the caller to remember.
+        rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.SdfPolishOnEarlyExit",
+                                                   room_concept.params.sdf_polish_enabled);
+        rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.PreintZuptOnPrediction",
+                                                   room_concept.params.zupt_on_prediction);
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PreintZuptPredVMax",
+                                                            room_concept.params.zupt_pred_v_max);
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PreintZuptPredWMax",
+                                                            room_concept.params.zupt_pred_w_max);
         po.zupt_as_factor = room_concept.params.zupt_as_factor;
         pc.zupt_as_factor = room_concept.params.zupt_as_factor;
         // ★ The keys were RENAMED with their units on 2026-08-26 (per-sample sigma -> density). The
@@ -290,13 +298,6 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
         pc.zupt_lever_m     = po.zupt_lever_m;
     }
 
-    rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.LearnMotionModel", room_concept.params.learn_motion_model);
-    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.MotionLearnAlpha", room_concept.params.motion_learn_alpha);
-    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.MotionLearnBeta", room_concept.params.motion_learn_beta);
-    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.MotionLearnMinOmega", room_concept.params.motion_learn_min_omega);
-    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.MotionLearnMinTrans", room_concept.params.motion_learn_min_trans);
-    rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.MotionLearnMinFrames", room_concept.params.motion_learn_min_frames);
-    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.MotionLearnQualityThreshold", room_concept.params.motion_learn_quality_threshold);
 
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.EnableCornerTracking", room_concept.params.enable_corner_tracking);
     // Graded-covariance corner factor (replaces the old hard rej_angle/rej_orient gates).

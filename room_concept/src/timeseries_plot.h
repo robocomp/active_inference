@@ -1,4 +1,6 @@
 #pragma once
+#include <map>
+#include <QEvent>
 
 #include <QWidget>
 #include <QPainter>
@@ -40,6 +42,12 @@ public:
     /** Append a sample to the named series (call from any thread).
      *  If a running-average companion exists it is updated automatically. */
     void add_point(const std::string& name, float value);
+
+    /** What a legend entry MEANS, shown on hover over that entry. A series name is a label, not an
+     *  explanation: "pred |SDF|" says nothing about whether large is good, what units it is in, or
+     *  what a reader should do about a value. Set one per series; entries without one fall back to
+     *  the plot-wide tooltip. */
+    void set_series_tooltip(const std::string& name, const QString& text);
 
     /** How many seconds of history to display (default 30). */
     void set_visible_window(float seconds);
@@ -98,6 +106,9 @@ private:
 
     void draw_axes(QPainter& p, float t_min, float t_max, float v_min, float v_max) const;
     void draw_legend(QPainter& p) const;
+    bool event(QEvent* e) override;                      // QEvent::ToolTip -> hit-test the legend
+    std::map<std::string, QString> tips_;                // series name -> explanation
+    mutable std::vector<std::pair<QRect, std::string>> legend_hits_;   // filled while painting
 };
 
 } // namespace rc

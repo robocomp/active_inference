@@ -3,6 +3,10 @@
 #include <cmath>
 #include <limits>
 
+#include <QToolTip>
+
+#include <QHelpEvent>
+
 namespace rc {
 
 namespace
@@ -308,8 +312,11 @@ void TimeSeriesPlot::draw_legend(QPainter& p) const
     p.drawRoundedRect(bx, by, box_w, box_h, 3, 3);
 
     int y = by + pad;
+    legend_hits_.clear();
     for (const auto& e : entries)
     {
+        // Remember where this entry landed, so a hover can be resolved back to the series it names.
+        legend_hits_.emplace_back(QRect(bx, y, box_w, row_h), e.label);
         // Colour swatch
         p.setPen(Qt::NoPen);
         p.setBrush(e.colour);
@@ -322,6 +329,40 @@ void TimeSeriesPlot::draw_legend(QPainter& p) const
                    Qt::AlignLeft | Qt::AlignVCenter, txt);
         y += row_h;
     }
+}
+
+void TimeSeriesPlot::set_series_tooltip(const std::string& name, const QString& text)
+{
+    tips_[name] = text;
+}
+
+/// A legend entry explains itself on hover. The plot-wide tooltip is the fallback, so a series with
+/// nothing specific to say still gets whatever the owner set on the widget.
+bool TimeSeriesPlot::event(QEvent* e)
+{
+    if (e->type() == QEvent::ToolTip)
+    {
+        const auto* he = static_cast<QHelpEvent*>(e);
+        for (const auto& [rect, name] : legend_hits_)
+            if (rect.contains(he->pos()))
+            {
+                // A running-average companion explains the series it averages, plus why it exists.
+                std::string key = name;
+                QString suffix;
+                if (key.size() > 4 and key.compare(key.size() - 4, 4, "_avg") == 0)
+                {
+                    key = key.substr(0, key.size() - 4);
+                    suffix = QStringLiteral("\n\nRunning average of the raw series above it. Read this "
+                                            "one when the raw line is dominated by sampling noise.");
+                }
+                if (const auto it = tips_.find(key); it != tips_.end())
+                {
+                    QToolTip::showText(he->globalPos(), it->second + suffix, this);
+                    return true;
+                }
+            }
+    }
+    return QWidget::event(e);
 }
 
 } // namespace rc

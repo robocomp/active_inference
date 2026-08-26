@@ -161,6 +161,48 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
     ts_plot_imgedge_->add_series("img r_rms px", QColor(120, 120, 140), 1.2f, 0);
     ts_plot_imgedge_->set_reference_line(1.f, QColor(200, 60, 60), "chi2/dof = 1");
     custom_widget_->frame_series->layout()->addWidget(ts_plot_imgedge_);
+    // ── What each legend entry MEANS, on hover ───────────────────────────────────────────────────
+    // A series name is a label, not an explanation. None of these say what units they are in, which
+    // direction is good, or what a reader should do about a value — and the plots are read by people
+    // who did not write the estimator.
+    ts_plot_fe_->set_series_tooltip("pred |SDF|", QStringLiteral(
+        "Mean |signed distance| of this sweep's laser points, placed at the PREDICTED pose, in metres.\n"
+        "If the prediction is right the points lie on walls and this is near zero.\n\n"
+        "The dashed line is the trust threshold: below it the optimizer is SKIPPED and the prediction\n"
+        "is published as-is — which is the large majority of cycles. Above it the map argues with the\n"
+        "prediction inside Gauss-Newton.\n\n"
+        "The threshold widens while turning (0.2 m per radian) because a heading error pivots the whole\n"
+        "scan: 0.02 rad at 5 m already displaces the points 10 cm on a prediction that is perfectly good."));
+    ts_plot_conf_->set_series_tooltip("confidence", QStringLiteral(
+        "Localisation confidence, 0..1, raw and unsmoothed.\n\n"
+        "Read it as a trend, not a value: what matters is whether it is recovering or decaying, and\n"
+        "how it moves when the robot turns or enters a corridor. A high number is not a guarantee —\n"
+        "the localiser has been measured jumping several metres while reporting a tight sigma."));
+    ts_plot_rates_->set_series_tooltip("RT publish Hz", QStringLiteral(
+        "How often a CORRECTED pose is published to the graph, in Hz.\n\n"
+        "This is the rate consumers actually see. It should track the laser sweep rate; a drop means\n"
+        "the localiser is not keeping up, not that the robot stopped."));
+    ts_plot_rates_->set_series_tooltip("optimizer Hz", QStringLiteral(
+        "How often Gauss-Newton actually RUNS, in Hz — not how often a pose is published.\n\n"
+        "Normally a small fraction of the publish rate, because the prediction usually passes the SDF\n"
+        "check and the optimizer is skipped. That gap is the point: between firings the pose runs\n"
+        "open-loop on dead reckoning, and those are the only cycles where an accumulating channel\n"
+        "error is visible before a correction wipes it.\n\n"
+        "A SUSTAINED rise means the prediction has stopped being good enough — either the motion model\n"
+        "drifted or the prior loosened."));
+    ts_plot_imgedge_->set_series_tooltip("img chi2/dof", QStringLiteral(
+        "How well the predicted image contours match the edges actually found — the RGB projection\n"
+        "likelihood, as a weighted residual per degree of freedom.\n\n"
+        "1.0 (the dashed line) means the residuals are exactly the size the per-sample sigmas claim.\n"
+        "Sitting ABOVE it is not noise: the projection disagrees with the map by more than the sensor\n"
+        "model admits, which points at the camera mount, the map, or the edge matching.\n\n"
+        "The raw line is bumpy by construction — with ~3 effective samples per cycle its spread is\n"
+        "sqrt(2/nu), about +/-80%. Read the _avg companion, not this."));
+    ts_plot_imgedge_->set_series_tooltip("img r_rms px", QStringLiteral(
+        "The same disagreement in raw pixels, RMS.\n\n"
+        "Kept beside chi2/dof because a chi2 can be moved by changing the sigmas while pixels cannot.\n"
+        "If chi2/dof falls while this does not, the noise model got looser rather than the fit better."));
+
 
     // ── The calibration window exists from startup, hidden ───────────────────────────────────────
     // It used to be constructed on the first press of the Calib button, so its traces began at that

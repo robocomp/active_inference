@@ -256,13 +256,8 @@ public:
         //   • learned_odom_noise_trans — replaces odom_noise_trans (translational noise fraction)
         //   • odom_bias            — systematic odometry bias subtracted per step
         // All updates are gated on localization quality < boundary_hessian_quality_threshold.
-        bool  learn_motion_model           = false;   // Master switch
-        float motion_learn_alpha           = 0.05f;   // EMA rate for slip-k and trans noise
-        float motion_learn_beta            = 0.02f;   // EMA rate for bias vector (slower)
-        float motion_learn_min_omega       = 0.05f;   // Min angular speed (rad/s) to update slip-k
-        float motion_learn_min_trans       = 0.05f;   // Min translation (m) per slot to update trans-noise
-        int   motion_learn_min_frames      = 50;      // Warmup frames before using learned values
-        float motion_learn_quality_threshold = 0.12f; // Per-slot SDF MSE gate for motion learning
+        // (LearnMotionModel and the MotionLearn* EMA knobs were deleted 2026-08-26 with the
+        //  learner they configured — A/B'd and rejected, see compute_motion_covariance.)
                                                       // (more permissive than boundary_hessian_quality_threshold)
 
         // ===== Recovery =====
@@ -481,6 +476,16 @@ public:
         /// it can arrest a parked robot's drift rather than only shrinking the covariance around it.
         /// Mutually exclusive with the per-sample form; see NoiseModel::zupt_as_factor.
         bool zupt_as_factor = false;
+        /// Apply the rest hypothesis to the PREDICTED INCREMENT, at prior selection — the only place
+        /// it reaches the ~99% of cycles that publish without the solver running. See the block in
+        /// select_motion_prior(). Independent of the two covariance forms above; it acts on the mean,
+        /// they act on the covariance.
+        /// One damped SDF gradient step on cycles that early-exit — the only thing tried so far that
+        /// attacks the CAUSE of parked drift rather than its step size. See try_prediction_early_exit.
+        bool  sdf_polish_enabled = false;
+        bool  zupt_on_prediction = false;
+        float zupt_pred_v_max    = 1.0f;   ///< m/s   — width of the "moving" hypothesis, not a limit
+        float zupt_pred_w_max    = 2.0f;   ///< rad/s — the base's plausible range, not a clamp
         /// Where the calibration WINDOW (evidence, never parameters) is kept between runs.
         std::string calib_state_file = "etc/motion_calib_state.csv";
         bool motion_preintegration = false;
@@ -698,6 +703,9 @@ public:
         // boost). NaN when the early-exit gate wasn't evaluated this frame (warmup / no odometry /
         // prior not ok / manual-reset settle). See try_prediction_early_exit().
         float early_exit_metric = std::numeric_limits<float>::quiet_NaN();
+        /// True when the SDF polish moved the pose on this cycle. The calibrator reads it as "a
+        /// correction happened", which on early-exit cycles it now is.
+        bool  sdf_polished = false;
         /// Median |SDF| at the predicted pose — the median-valued twin of early_exit_metric.
         float pred_sdf_median = std::numeric_limits<float>::quiet_NaN();
 
@@ -981,7 +989,7 @@ public:
 
     /// Thread-safe: push a command to be executed on the localization thread.
     /// A closed pivot, handed over from the scene-graph/main thread. NOT applied here: the estimator
-    /// is touched only from the localiser thread, so this queues and adapt_motion_model() drains it.
+    /// is touched only from the localiser thread, so this queues and service_calibration() drains it.
     /// Same pattern as push_command, and for the same reason.
     struct ClosureObs { double truth_rad, turned_rad, rate_rad_s, sigma_s; };
     void push_calibration_closure(const ClosureObs& c)
@@ -1252,6 +1260,9 @@ private:
    std::optional<UpdateResult> last_result_;
 
    // Latest object anchors from the graph (set on main thread, consumed by the localizer thread).
+   float zupt_pred_gain_tr_ = 1.f, zupt_pred_gain_ro_ = 1.f;
+   float last_sdf_polish_mm_ = 0.f;
+   bool  sdf_polished_this_cycle_ = false;
    std::atomic<bool> calib_reset_pending_{false};
    bool calib_state_loaded_ = false;
    std::int64_t calib_state_last_save_ms_ = 0;
@@ -1671,14 +1682,10 @@ private:
 
    // ===== Online motion model learned state =====
    // Initialised to -1 (sentinel = "warmup not done; use static params").
-   // After motion_learn_min_frames quality updates they replace the static Params values.
-   float           learned_slip_k_              = -1.f;  // learned encoder_rot_slip_k
-   float           learned_odom_noise_trans_    = -1.f;  // learned odom_noise_trans fraction
    Eigen::Vector3f learned_odom_bias_           = Eigen::Vector3f::Zero(); // [dx,dy,dtheta] bias
-   int             motion_learn_good_frames_    = 0;     // quality frames accumulated
    // Robust buffer for trans-noise samples: collect N then take median for one EMA step.
    std::vector<float> trans_noise_sample_buf_;
-   void            adapt_motion_model();
+   void            service_calibration();
 
    // ===== Differential test: RFE vs single-step =====
    struct DiffTestStats

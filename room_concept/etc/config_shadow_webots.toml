@@ -679,41 +679,18 @@ StationaryMotionThreshold = 0.02  # FIX 1: de 0.001 a 0.02 m. Cuando el robot
 #   MotionLearnMinOmega   — min |ω| (rad/s) for slip-k sample to be used
 #   MotionLearnMinFrames  — warmup: static params used until this many quality
 #                           frames have been accumulated (default 50 ≈ 10 s @ 5 Hz)
-LearnMotionModel            = false   # A/B'd 08-09 and REJECTED — do not turn this on again without
-                                      # first fixing what update_motion_model() measures.
-                                      # It learns slip_k ≈ 0.81 (clamped at 1.0 on 5% of frames), i.e.
-                                      # σ_meas = 0.039 rad against a true increment of 0.036 rad: it
-                                      # declares the encoder's per-update rotation uninformative. The
-                                      # measured-prior weight then collapses to 0.04 during fast turns,
-                                      # the prior falls back onto the ~18%-short command channel, and
-                                      # everything the units fix bought is undone — early exit while
-                                      # rotating 91.6% → 68.5%, over-gate frames 3.6% → 26.7%.
-                                      # ★ 0.814 × dt(42 ms) = 0.034, the same value as the old static
-                                      # 0.05/0.25 in the PRE-fix units: the learner normalises by the
-                                      # same quantity build_motion_covariance multiplies by, so the loop
-                                      # closes in either convention and the units fix is a NO-OP here.
-                                      # The defect is the residual it learns from — r[2] is a
-                                      # post-optimisation window-pair residual carrying the optimiser's
-                                      # own correction and the marginalisation, so attributing all of it
-                                      # to odometry double-counts. Corroboration: every learned
-                                      # parameter came out implausibly large in the same direction
-                                      # (ml_odom_noise_trans 0.538 vs static 0.08; ml_bias_theta
-                                      # 3.66e-02 rad = 2.1°). Decisive: a covariance that makes
-                                      # predictions WORSE when you trust it is mis-estimated.
-                                      # It is also the only one of three runs that LOST THE TRACK — 7
-                                      # recovery episodes in 6.2 min, against 0 in a static-k run that
-                                      # drove twice as much rotation above 1.4 rad/s.
-MotionLearnAlpha            = 0.05    # slip-k and trans-noise EMA rate
-MotionLearnBeta             = 0.02    # bias EMA rate
-MotionLearnMinOmega         = 0.05    # rad/s — min angular speed per slot to update slip-k
-MotionLearnMinTrans         = 0.02    # m  — min *accumulated* translation over the full window
-MotionLearnMinFrames        = 50      # warmup frames
-MotionLearnQualityThreshold = 0.12    # Per-slot SDF MSE gate for motion learning.
-                                      # Independent from BoundaryHessianQualityThreshold;
-                                      # set higher so learning is not starved of data
-                                      # (typical sdf_mse while moving is 0.06-0.09).
+# ── The EMA motion learner was DELETED on 2026-08-26, with its six knobs ────────────────────────
+# LearnMotionModel / MotionLearnAlpha / Beta / MinOmega / MinTrans / MinFrames / QualityThreshold no
+# longer exist in the code. A/B'd and rejected in 2026-08: it learned slip_k ~= 0.81 against a true
+# 0.036 rad increment, collapsed the measured prior's weight to 0.04 during fast turns so the prior
+# fell back on the command channel, took early exit while rotating from 91.6% to 68.5%, and was the
+# only one of four configurations to LOSE THE TRACK. The defect was the residual it learned from — a
+# post-optimisation window-pair residual carrying the optimiser's own correction — i.e. code, not a
+# simulation artefact.
+# ★★ Turning it off had also been turning off the batch estimator's whole bookkeeping, which lived
+# in the same function: closures never reached the solve, the state file was never written. One
+# switch, two unrelated features. MotionCalibEnabled below is the learner that replaced this one.
 
-# ── Feature flags ─────────────────────────────────────────────────────────────
 DifferentialTest     = false  # Sin overhead A/B: experimento limpio
 SdfCurrentSlotOnly   = true   # SDF obs solo en el slot actual; slots antiguos aportan
                               # solo via motion factors + corners. ~67% menos SDF evals.

@@ -422,23 +422,23 @@ StationaryMotionThreshold = 0.02  # FIX 1: de 0.001 a 0.02 m. Cuando el robot
 #   MotionLearnMinOmega   — min |ω| (rad/s) for slip-k sample to be used
 #   MotionLearnMinFrames  — warmup: static params used until this many quality
 #                           frames have been accumulated (default 50 ≈ 10 s @ 5 Hz)
-LearnMotionModel            = false   # static params are authoritative -- see below
-# 08-09: A/B'd and REJECTED, do not turn on again without first fixing what update_motion_model
-# measures. It learns slip_k ~= 0.81 (sigma_meas 0.039 rad against a true increment of 0.036), the
-# measured prior collapses to weight 0.04 during fast turns, the prior falls back onto the command
-# channel, and early exit while rotating went 91.6% -> 68.5%. It was also the only configuration of
-# four that LOST THE TRACK (7 recovery episodes in 6.2 min against 0). The defect is the residual it
-# learns from -- a post-optimisation window-pair residual carrying the optimiser's own correction --
-# so it is CODE, not a simulation artefact, and it will fail the same way on the real robot.
-MotionLearnAlpha            = 0.05    # slip-k and trans-noise EMA rate
-MotionLearnBeta             = 0.02    # bias EMA rate
-MotionLearnMinOmega         = 0.05    # rad/s — min angular speed per slot to update slip-k
-MotionLearnMinTrans         = 0.02    # m  — min *accumulated* translation over the full window
-MotionLearnMinFrames        = 50      # warmup frames
-MotionLearnQualityThreshold = 0.12    # Per-slot SDF MSE gate for motion learning.
-                                      # Independent from BoundaryHessianQualityThreshold;
-                                      # set higher so learning is not starved of data
-                                      # (typical sdf_mse while moving is 0.06-0.09).
+# ── The EMA motion learner was DELETED on 2026-08-26, with its six knobs ────────────────────────
+# LearnMotionModel / MotionLearnAlpha / Beta / MinOmega / MinTrans / MinFrames / QualityThreshold are
+# gone from the code, so leaving them here would document an intent nothing implements.
+#
+# ★ IT WAS A/B'd AND REJECTED IN 2026-08 and the reason is worth keeping: it learned slip_k ~= 0.81
+# (sigma_meas 0.039 rad against a true increment of 0.036), the measured prior collapsed to weight
+# 0.04 during fast turns so the prior fell back on the command channel, early exit while rotating
+# went 91.6% -> 68.5%, and it was the only one of four configurations that LOST THE TRACK. The defect
+# was the residual it learned from — a post-optimisation window-pair residual carrying the
+# optimiser's own correction — i.e. code, not a simulation artefact.
+#
+# ★★ AND TURNING IT OFF TURNED OFF SOMETHING ELSE. `LearnMotionModel` also gated the batch
+# estimator's entire bookkeeping — closures reaching the solve, the state file, the reset — because
+# all of it lived in the same function. One switch, two unrelated features, and nothing said so.
+# The batch estimator (MotionCalibEnabled, below) is the learner that replaced this one; it learns
+# from a different quantity and is now serviced unconditionally.
+
 
 # ── Feature flags ─────────────────────────────────────────────────────────────
 DifferentialTest     = false  # Sin overhead A/B: experimento limpio
@@ -536,7 +536,58 @@ PreintZuptDensityOmega = 0.03001
 # ★ THE A/B IS PRE-REGISTERED: park with the controller idle and measure the published pose's wander
 # over a few thousand cycles against the 210 mm above. It should also remove the residual m^2*dt
 # rate dependence the per-sample form still carries at speed (1.47x across a 3x rate change).
-PreintZuptAsFactor   = false
+PreintZuptAsFactor   = false   # ★ TRIED AND MEASURED, 2026-08-26: it does not work, and the reason is
+                       # placement, not the mechanism. The factor lives in the Gauss-Newton problem,
+                       # and Gauss-Newton runs on ~1% of cycles — on the other 99% the published pose
+                       # is the raw prediction and no factor is evaluated at all. Measured with it on:
+                       # per-cycle step 3.54 mm against 3.49 mm before, i.e. UNCHANGED, while the
+                       # optimizer rate went 0.30% -> 1.03% because switching it on disables the
+                       # per-sample shaping and the prior reverts to free drift. So it cost a looser
+                       # prior and 3x the solver load for no drift benefit.
+                       # The mechanism itself is sound and the self-test still covers it; the cure for
+                       # drift is SdfPolishOnEarlyExit below, which acts where the pose is published.
+                       # ⚠ Compare NORMALISED, span/sqrt(cycles): raw spans of stretches of different
+                       # length are not comparable, and 108 mm over 484 cycles is WORSE than 210 mm
+                       # over 3963 (4.91 vs 3.34 mm/sqrt(cycle)), not better.
+                       # (original A/B note follows) The number to beat is: 210 mm of
+                       # wander in x and 193 mm in y over 3963 cycles with ground truth motionless.
+                       # ★ Judge it PARKED, on the published pose, not on err/m — err/m is dominated
+                       # by the cycles where the map corrects, and this term acts precisely on the
+                       # ones where it does not. And check the MOVING case too: this replaces the
+                       # per-sample shaping, so if it is too weak the prior loosens everywhere, and
+                       # if it is too strong it will fight real motion at low speed.
+
+# ── One damped SDF step on the cycles that skip the optimizer ───────────────────────────────────
+# OFF. It moves the published pose on ~99% of cycles, so it is measured before it is believed.
+#
+# ★ WHY IT EXISTS. The gate's verdict is "good enough not to need a full solve", and that has been
+# implemented as "do nothing" — so on the cycles it passes, the published pose is dead reckoning
+# with no absolute reference at all. MEASURED with ground truth motionless for 3963 cycles: 210 mm
+# of wander in x, 193 in y, 3.49 mm per cycle, optimizer firing on 12 of them. The cause is entirely
+# the odometry noise: WheelSigmaV 0.015 m/sqrt(s) is 0.118 m/s per sample, ~0.068 m/s averaged over
+# a cycle, 3.4 mm integrated — against 3.49 measured, and 3.49*sqrt(3963) = 220 mm against 210.
+#
+# ★ WHY SHRINKING THE INCREMENT IS NOT THE FIX, having tried it twice. A random walk with a smaller
+# step is still a random walk: it grows without bound, just more slowly, still as sqrt(N). Only an
+# ABSOLUTE reference applied every cycle turns it into a mean-reverting process. The map is that
+# reference, and the gate is already evaluating it here.
+#
+# ★ NOTHING IS TUNED. The steepest-descent step for a scalar residual is exactly L/|g|^2 — there is
+# no step size to choose — and it is then scaled to lie inside the MOTION PRIOR's own 1-sigma
+# ellipsoid, delta' Lambda delta <= 1. So the correction may go anywhere the prior considers a
+# plausible amount of motion for this interval and no further: it cannot overrule a confident
+# prediction, and it can undo a wander the prior says could not have happened. Both bounds come from
+# quantities the estimator already states.
+#
+# ★ THE A/B: park with the controller idle and compare the published pose's wander against the
+# 210 mm above, NORMALISED as span/sqrt(cycles) since a walk's span grows with duration — the raw
+# spans of two different stretches are not comparable. Watch the optimizer rate too: if the polish
+# is doing its job the prediction should stay good and the rate should not rise.
+#
+# ★ ON 2026-08-26 as the first thing tried that attacks the CAUSE rather than the step size. If it
+# works the parked wander should stop growing with sqrt(N) altogether — bounded rather than slower —
+# which is the property to look for, not a smaller number at one particular duration.
+SdfPolishOnEarlyExit = true
 
 OdomSampleLog = true    # One CSV line per ARRIVING odometry sample -> etc/odom_samples.csv.
                         # An INSTRUMENT, not telemetry: turn it off when the measurement is done.

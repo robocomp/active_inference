@@ -115,6 +115,11 @@ namespace rc::calib
         // ones -0.20% with wild scatter (+4.57/+2.21/-1.02) -- the turns were cancelling the straights
         // and k_v oscillated around 1.0 instead of converging. Order-of-magnitude value: it only sets
         // the RELATIVE weight of turning against straight episodes.
+        /// How much motion closes an episode. NOT sensitivity knobs: below these the Jacobian rows
+        /// are ~0 and the episode cannot identify anything, so closing one would add a row that only
+        /// dilutes the window. A parked robot must never close an episode.
+        float episode_min_trans = 0.25f;  ///< m of accumulated forward travel
+        float episode_min_rot   = 0.20f;  ///< rad of accumulated rotation (~11 deg)
         float rot_model_sigma = 0.030f; // m per rad of turning, added in quadrature to the position R
         // A correction can only be as good as the FIT that produced it. When the localiser is not
         // tracking, the optimizer fires on nearly every cycle and the "episodes" that reach this
@@ -156,28 +161,49 @@ namespace rc::calib
 
         [[nodiscard]] bool  configured() const noexcept { return configured_; }
         [[nodiscard]] bool  enabled() const noexcept { return cfg_.enabled and configured_; }
+
+        /// ── A PARAMETER IS APPLIED ONLY ONCE IT HAS BEEN TAUGHT ──────────────────────────────────
+        /// `informed` means the posterior sigma shrank below 0.9x the prior's: this window actually
+        /// measured something, as opposed to leaving the parameter where the prior put it.
+        ///
+        /// ★ WHY THE ACCESSORS GATE ON IT, since 2026-08-26. A solve always returns a NUMBER, and an
+        /// unexcited parameter's number is wherever the normal equations happened to leave it — not
+        /// zero, just unsupported. Measured live the hour this gate was added: k_v read 0.935209 and
+        /// k_omega 0.957712 — a 6.5% and 4.2% correction being applied to every wheel increment —
+        /// with sigma still at 0.0200 against a prior of 0.02 and `informed` false for both. The
+        /// estimator was saying it had learned nothing while its output steered the odometry.
+        /// A value 3.3 prior-sigmas from nominal that its own precision does not support is exactly
+        /// the case this project already decided: a value that is honestly absent beats one that is
+        /// silently wrong. Untaught therefore returns EXACTLY nominal — 1.0 for a scale, 0.0 for an
+        /// offset — and the parameter starts acting the moment, and only the moment, it is measured.
+        ///
+        /// ★ This does NOT make the estimator quieter about itself. The value and sigma are still
+        /// reported and plotted unchanged; what is gated is only whether the number is allowed to
+        /// move the robot's odometry. Diagnosis and authority are different questions.
+        [[nodiscard]] bool taught(int p) const noexcept
+        { return enabled() and last_.informed[p]; }
         /// Applied to the body->world rotation of the odometry displacement.
         [[nodiscard]] float yaw_offset() const noexcept
-        { return enabled() ? last_.value[rc::calib::P_EPS_YAW] : 0.f; }
+        { return taught(rc::calib::P_EPS_YAW) ? last_.value[rc::calib::P_EPS_YAW] : 0.f; }
         /// Multiplies forward (and lateral) wheel displacement.
         [[nodiscard]] float forward_scale() const noexcept
-        { return enabled() ? 1.f + last_.value[rc::calib::P_K_V] : 1.f; }
+        { return taught(rc::calib::P_K_V) ? 1.f + last_.value[rc::calib::P_K_V] : 1.f; }
         /// Multiplies the heading increment, whichever channel produced it.
         [[nodiscard]] float omega_scale() const noexcept
-        { return enabled() ? 1.f + last_.value[rc::calib::P_K_OMEGA] : 1.f; }
+        { return taught(rc::calib::P_K_OMEGA) ? 1.f + last_.value[rc::calib::P_K_OMEGA] : 1.f; }
         /// rad/s, subtracted from the measured rate. Separated from the SCALE only by the
         /// time-vs-rotation covariate pair, which is why it needs the joint solve to exist at all.
         [[nodiscard]] float omega_bias() const noexcept
-        { return enabled() ? last_.value[rc::calib::P_B_OMEGA] : 0.f; }
+        { return taught(rc::calib::P_B_OMEGA) ? last_.value[rc::calib::P_B_OMEGA] : 0.f; }
         /// Multiplies LATERAL wheel displacement. Separate from forward_scale(): a mecanum's lateral
         /// channel is the one roller slip corrupts, so the two are physically different errors.
         [[nodiscard]] float lateral_scale() const noexcept
-        { return enabled() ? 1.f + last_.value[rc::calib::P_K_LAT] : 1.f; }
+        { return taught(rc::calib::P_K_LAT) ? 1.f + last_.value[rc::calib::P_K_LAT] : 1.f; }
         /// rad per metre driven forward: unequal effective wheel radii make a commanded straight
         /// line curve. Added to the heading increment in proportion to DISTANCE, which is what
         /// distinguishes it from a gyro scale (rotation) or a gyro bias (time).
         [[nodiscard]] float wheel_mismatch() const noexcept
-        { return enabled() ? last_.value[rc::calib::P_DK_WHEEL] : 0.f; }
+        { return taught(rc::calib::P_DK_WHEEL) ? last_.value[rc::calib::P_DK_WHEEL] : 0.f; }
 
         [[nodiscard]] float yaw_sigma() const noexcept { return last_.sigma[rc::calib::P_EPS_YAW]; }
         [[nodiscard]] float k_v_sigma() const noexcept { return last_.sigma[rc::calib::P_K_V]; }
@@ -251,9 +277,30 @@ namespace rc::calib
                 acc_th_var_  = std::max(acc_th_var_,  theta_var);
             }
 
-            // An episode is one ramp plus the correction that ended it. Flush on the falling edge:
-            // that is the moment the whole accumulated error has been observed exactly once.
-            if (prev_corrected_ and not corrected) flush();
+            // ── WHEN AN EPISODE ENDS ─────────────────────────────────────────────────────────────
+            // Originally: one ramp plus the correction that ended it, flushed on the falling edge of
+            // "the optimizer ran" — the moment the whole accumulated error had been observed exactly
+            // once. That is correct WHEN the optimizer is the only thing that corrects the pose.
+            //
+            // ★ IT STOPPED BEING TRUE. The optimizer fires on ~0.3-3% of cycles, and the SDF polish
+            // now corrects a little on EVERY cycle, so there is no longer a ramp waiting for a single
+            // large correction to end it. Measured 2026-08-26: with the calibrator enabled and being
+            // fed on every cycle, not one episode had ever been ACCEPTED — every parameter read
+            // exactly 0.000 with sigma exactly 0.000, which is "never solved", not "solved and
+            // untaught" (that would show the prior's 0.02). The teacher had gone quiet without
+            // anything reporting it.
+            //
+            // ★ SO THE TRIGGER IS THE MOTION, NOT THE CORRECTOR. An episode closes once the robot has
+            // done enough to identify something — distance driven or angle turned — and it carries
+            // whatever correction accumulated over that span, from the optimizer or the polish or
+            // both. The falling edge still closes an episode, so a large correction is never split
+            // across two.
+            // ★ The two thresholds are IDENTIFIABILITY, not tuning: below them the Jacobian rows are
+            // ~0 and the episode teaches nothing whatever its residual says. A parked robot must
+            // never close an episode, or the window fills with rows that only dilute.
+            const bool moved_enough = std::abs(acc_fwd_) >= cfg_.episode_min_trans
+                                   or std::abs(acc_th_)  >= cfg_.episode_min_rot;
+            if ((prev_corrected_ and not corrected) or moved_enough) flush();
             prev_corrected_ = corrected;
 
             // Numerical guard only (not a model threshold): a robot that drives for ever without a
