@@ -142,7 +142,12 @@ CalibPivotEnabled      = true
 # The true valuation is still computed and printed beside the forced one on the "[calib] ★TESTING"
 # line. Nothing measured while this is set may be quoted as a valuation. Back to 0.0 when the pivot
 # closes on its own merit.
-CalibForcedGainNats    = 50.0
+CalibForcedGainNats    = 0.0    # Back to honest pricing 2026-08-26. The pivot now competes at its
+                       # true valuation, which on this robot is fractions of a nat, so expect it to
+                       # lose essentially every contest and effectively never fire. That is the
+                       # correct outcome and not a regression — but it does mean the four-turn
+                       # closure goes back to never being exercised end to end, which is what the
+                       # forcing existed to work around. Set it back above 0 to test that path.
 
 RoomLayoutSvg          = "p3bot_layout.svg"  # 8x6 room of webots-p3bot/worlds/WAF.wbt, with the
                        # 0.7x0.7 corner column that breaks the rectangle's 180-degree symmetry.
@@ -696,12 +701,44 @@ MessageSizeMax = "20004800"
 # systematic-residual monitor shows pitch is trusted (bias_const_px ~ 0).
 [ImageEdge]
 enable = true    # build the subscriber + ingest thread and run the extraction each tick
-shadow = false   # <- set true to ALSO log etc/image_edge.csv (solves twice, pose untouched)
+shadow = true    # ON 2026-08-26 to MEASURE THE MOUNT, not to use the factor. Solves twice and
+                 # logs etc/image_edge.csv; the published pose is untouched, so this is free of
+                 # risk to the run and costs one extra solve per cycle.
+                 # ★ WHAT TO READ, and why this is not circular: the pose comes from LiDAR + SDF,
+                 # which do not depend on camera pitch at all, so the camera's residual against
+                 # that pose is a clean target-free observation of the camera's own extrinsic —
+                 # the same trick the motion calibrator uses one tier down, where the optimizer's
+                 # correction is the free teacher. bias_const_px is a constant row offset =>
+                 # PITCH (implied_dpitch_rad = bias_const_px / fy); bias_invd_m scales as 1/d =>
+                 # HEIGHT. Those two covariates are what separate them, and the code already knows
+                 # it: height sensitivity h_k ~ fy/d_k varies ~3x along a single wall.
+                 # ⚠ Judge it on se_const_px and on STABILITY across the run, not on one row. And
+                 # ⚠ pitch trades against the FLOOR DATUM — a floor plane at the wrong height
+                 # produces a similar range bias on floor junctions. useWallCorners is what breaks
+                 # that: a vertical corner's image normal is horizontal, so pitch and height barely
+                 # project onto it (h ~ 0) while bearing is unaffected.
+                 # Set back to false once the mount is characterised; drive stays false until then.
 drive  = false   # <- the factor moves the published pose. Only after the CSV says it should.
 camera = "zed"            # DSR node name. "ricoh" selects the 360 equirect model; no code changes.
 
 useWallCorners   = true   # bearing; nearly immune to mount pitch/height
-useFloorJunction = false  # range; ENABLE ONLY AFTER the pitch bias is checked (see above)
+useFloorJunction = true   # ON 2026-08-26, and ONLY because shadow = true and drive = false.
+                          # ★ THE MONITOR NEEDS IT. run_image_edge_shadow accumulates its
+                          # r ~ b_const + b_invd·(fy/d) fit from FloorWall samples ONLY
+                          # (room_concept.cpp:3789) — "a vertical corner does not carry the fy/d
+                          # signature", which is the same property that makes wall corners nearly
+                          # immune to pitch. So with only corners enabled the normal equations stay
+                          # empty and the monitor reports bias_const_px = 0.00000 with zero spread:
+                          # not "the mount is perfect", but "nothing was ever asked".
+                          # ★ That made the old gate circular in practice — the junction was held off
+                          # until the monitor cleared the pitch, and the monitor could not see pitch
+                          # without the junction. The way out is that the DANGER and the MEASUREMENT
+                          # are different modes: delta_d = theta_pitch·d²/h (14 cm at 3 m per degree)
+                          # only harms a pose the term is allowed to MOVE. In shadow it writes a CSV
+                          # row and nothing else, and the pose it is measured against comes from
+                          # LiDAR + SDF, which do not depend on camera pitch at all.
+                          # ⚠ Do not set drive = true until bias_const_px has been read and is small
+                          # and stable. That gate is still real; only the ordering was wrong.
 useWallCeiling   = false  # cluttered by lamps/ducts, and off the ZED's FoV at close range
 
 # Arc-length spacing along each contour, in 3-D metres -- NOT in pixels. Uniform-in-pixels would
