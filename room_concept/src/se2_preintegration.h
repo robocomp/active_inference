@@ -175,6 +175,36 @@ namespace rc::preint
         // and is also strictly more conservative at speed (it is falsified by the whole interval's
         // motion, not by each segment's). That is the next step, not this one.
         bool  zupt_enabled   = true;
+        /// ★ THE REST HYPOTHESIS AS A FACTOR ON THE STATE, instead of as covariance shaping.
+        /// The per-sample form (zupt_enabled, above) collapses the velocity VARIANCE and never
+        /// touches the mean, because the preintegrator is a pure observer. That leaves the estimator
+        /// saying, of a parked robot, "the increment is 3.5 mm of noise and I am very confident" —
+        /// confidently wrong rather than correctly still. Measured 2026-08-26: parked with ground
+        /// truth motionless for 3963 cycles, the published pose wandered 210 mm in x, 193 mm in y and
+        /// 2.07 deg, a textbook random walk of 3.49 mm per cycle (3.49*sqrt(3963) = 220 mm).
+        ///
+        /// A rest hypothesis that constrains the STATE fixes that, and it is not a new mechanism: it
+        /// is a motion factor between the same two slots with a ZERO delta and its own precision, so
+        /// the solver weighs "you moved by Delta" against "you did not move" by their stated
+        /// precisions and moves the MEAN accordingly.
+        ///
+        /// Its covariance is the interval-level analogue of R = sigma_rest^2 + m^2, with the noise
+        /// integrated over the interval and the inconsistency being the motion the interval itself
+        /// measured:
+        ///       R_trans = d_v^2 * T + (|dp| + L*|dtheta|)^2
+        ///       R_rot   = d_w^2 * T + (|dtheta| + |dp|/L)^2
+        /// At rest the second term vanishes and the factor bites; in motion the hypothesis is wrong
+        /// by exactly the observed displacement, R grows with it, and the factor fades out on its
+        /// own. No threshold, and rate-invariant by construction — it is stated per INTERVAL, so the
+        /// number of samples inside cannot change it. That also removes the residual m^2*dt rate
+        /// dependence the per-sample form still carries at speed.
+        ///
+        /// ★ THE TWO FORMS ARE EXCLUSIVE. Running both counts one hypothesis twice — once shaping the
+        /// prior's covariance and once as its own factor — which is the double-counting this file
+        /// spends its length avoiding. Setting this true therefore DISABLES the per-sample shaping.
+        /// OFF by default: it moves the published pose, so it earns its place by A/B against the
+        /// 210 mm above, not by argument.
+        bool  zupt_as_factor = false;
         float zupt_density_v = 0.01496f;    // m/√s   — measured, P3Bot, 8166 parked samples
         float zupt_density_omega = 0.03001f;// rad/√s — measured, P3Bot, same run
         // Lever arm converting between the two channels, so the rest hypothesis is about the WHOLE
@@ -201,6 +231,28 @@ namespace rc::preint
         float           sigma_scale_v     = 0.f;             // σ of the correlated speed-scale error
         float           duration_s = 0.f;
         int             samples    = 0;
+        /// Rest-hypothesis densities carried through, so covariance() and the factor below need no
+        /// side channel telling them which NoiseModel produced this interval.
+        float           zupt_density_v_ = 0.f, zupt_density_omega_ = 0.f, zupt_lever_ = 0.26f;
+
+        /// Covariance of the "this interval had no motion" hypothesis, for the zero-delta factor.
+        /// Returns a zero matrix when the interval is degenerate, which the caller reads as "do not
+        /// add the factor".
+        [[nodiscard]] Eigen::Matrix3f zupt_covariance() const
+        {
+            if (duration_s <= 0.f or zupt_density_v_ <= 0.f or zupt_density_omega_ <= 0.f)
+                return Eigen::Matrix3f::Zero();
+            const float L    = std::max(zupt_lever_, 1e-3f);
+            const float dp   = delta.head<2>().norm();
+            const float dth  = std::abs(delta[2]);
+            const float m_tr = dp + L * dth;          // a pivot is NOT rest: the lever says so
+            const float m_ro = dth + dp / L;
+            const float r_tr = zupt_density_v_ * zupt_density_v_ * duration_s + m_tr * m_tr;
+            const float r_ro = zupt_density_omega_ * zupt_density_omega_ * duration_s + m_ro * m_ro;
+            Eigen::Matrix3f R = Eigen::Matrix3f::Zero();
+            R(0, 0) = r_tr; R(1, 1) = r_tr; R(2, 2) = r_ro;
+            return R;
+        }
 
         /// Full covariance: the propagated random part plus the rank-2 correlated-scale term.
         /// Kept separate from `cov` so that promoting the scales to STATES is a subtraction here and
@@ -304,7 +356,7 @@ namespace rc::preint
             float var_v_long = s_long * s_long / dt;
             float var_omega  = s_om   * s_om   / dt;   // (rad/s)²
 
-            if (q_.zupt_enabled)
+            if (q_.zupt_enabled and not q_.zupt_as_factor)
             {
                 // How inconsistent the measurement is with "the body is at rest", in each channel's
                 // own units, coupled through the lever arm so a pivot cannot claim to be parked.
@@ -361,6 +413,9 @@ namespace rc::preint
             q_ = q;
             iv_.sigma_scale_omega = q.scale_omega;
             iv_.sigma_scale_v     = q.scale_v;
+            iv_.zupt_density_v_     = q.zupt_density_v;
+            iv_.zupt_density_omega_ = q.zupt_density_omega;
+            iv_.zupt_lever_         = q.zupt_lever_m;
         }
         [[nodiscard]] const NoiseModel&  noise()  const { return q_; }
         [[nodiscard]] const Interval&    result() const { return iv_; }
@@ -386,6 +441,12 @@ namespace rc::preint
         A(1, 2) =  b.delta[0];
 
         Interval out;
+        // Carry the rest-hypothesis densities across, or a chained interval would silently lose its
+        // ability to state the hypothesis at all — zupt_covariance() would return zero and the caller
+        // would read that as "do not add the factor" rather than "the densities went missing".
+        out.zupt_density_v_     = a.zupt_density_v_     > 0.f ? a.zupt_density_v_     : b.zupt_density_v_;
+        out.zupt_density_omega_ = a.zupt_density_omega_ > 0.f ? a.zupt_density_omega_ : b.zupt_density_omega_;
+        out.zupt_lever_         = a.zupt_lever_ > 0.f ? a.zupt_lever_ : b.zupt_lever_;
         out.delta      = a.delta + b.delta;          // both already global-frame increments
         out.cov        = A * a.cov * A.transpose() + b.cov;
         out.g_omega    = A * a.g_omega + b.g_omega;

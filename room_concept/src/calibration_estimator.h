@@ -39,6 +39,10 @@
  *  optional.
  */
 #pragma once
+#include <string>
+#include <locale>
+#include <charconv>
+#include <fstream>
 
 #include <Eigen/Dense>
 #include <algorithm>
@@ -163,7 +167,127 @@ namespace rc::calib
         [[nodiscard]] std::size_t size() const noexcept { return eps_.size(); }
         void clear() noexcept { eps_.clear(); }
 
-        /// Solve the window. p = (J'WJ + P0^-1)^-1 J'W r, and that same inverse IS the covariance.
+        /// ── A CLOSED PIVOT, as one more residual row ─────────────────────────────────────────────────
+    /// A closure is a direct, map-free measurement of the rotation model: turn through N complete
+    /// turns, come back to the heading you started from, and the robot turned exactly 2*pi*N radians.
+    /// No map, no survey, no localiser anywhere in that number — which makes it a STRONGER instrument
+    /// than the episode rows, whose reference is the optimizer's own correction.
+    ///
+    /// ★ IT IS THE SAME TWO COVARIATES AS THE HEADING ROW, so it drops into the existing solve with
+    ///   no new machinery. The heading row is r_theta ~ d_theta*k_omega + duration*b_omega; a closure
+    ///   supplies exactly that pair, with the rotation being the truth and the duration being
+    ///   truth/rate. The residual is the heading the model still owes: truth - (what the CORRECTED
+    ///   odometry accumulated), so a perfectly calibrated robot contributes r = 0 and teaches nothing,
+    ///   which is the correct behaviour.
+    ///
+    /// ★ AND IT IS WHY TWO RATES ARE RUN. At one rate the two unknowns enter through a single number,
+    ///   k + b/w, and no solve can separate them. Two blocks at different rates give two rows whose
+    ///   b-covariate differs while the k-covariate does not — the same separation-by-covariate that
+    ///   the episode rows get from rotation versus elapsed time.
+    ///
+    /// `sigma_s` is the closure's own resolution (|heading miss| / |truth|), so the weight comes out
+    /// as one over the heading miss squared — the run is believed exactly as precisely as it closed.
+    void add_closure(double truth_rad, double turned_rad, double rate_rad_s, double sigma_s)
+    {
+        if (not (truth_rad > 0.0) or not (rate_rad_s > 0.0) or not (sigma_s > 0.0)) return;
+        if (not std::isfinite(turned_rad)) return;
+        ClosureRow c;
+        c.r_theta  = static_cast<float>(truth_rad - turned_rad);
+        c.d_theta  = static_cast<float>(truth_rad);
+        c.duration = static_cast<float>(truth_rad / rate_rad_s);
+        const double sigma_r = sigma_s * truth_rad;                 // radians
+        c.weight   = static_cast<float>(1.0 / (sigma_r * sigma_r));
+        cls_.push_back(c);
+        // Closures are rare and expensive -- each is minutes of the robot's time -- so the window is
+        // generous and bounded rather than tuned. Evicting one throws away a measurement no amount of
+        // ordinary driving reproduces.
+        while (cls_.size() > 16) cls_.pop_front();
+    }
+    [[nodiscard]] std::size_t closures() const noexcept { return cls_.size(); }
+
+    /// Forget everything measured and return to the priors. The window is emptied; nothing else
+    /// changes, so the very next solve reports each parameter at its prior sigma and `informed`
+    /// false — which is the honest description of a robot that has just been told to un-learn.
+    void reset() noexcept { eps_.clear(); cls_.clear(); }
+
+    /// ── PERSIST THE EVIDENCE, NOT THE CONCLUSION ─────────────────────────────────────────────────
+    /// What is written is the WINDOW: the episodes and the closed pivots. Not the parameters.
+    ///
+    /// ★ THAT DISTINCTION IS THE WHOLE DESIGN. Saving the fitted values and restoring them as a prior
+    ///   mean is re-centring, and re-centring was tried on 2026-08-23 and measured to fail: a weakly
+    ///   excited parameter gets no restoring force, so the solve nudges the mean, the prior follows
+    ///   it there, and the value random-walks. The gyro bias walked to -0.0140 deg/s over nine
+    ///   minutes, wrong sign and five times the magnitude, without one window ever reporting it
+    ///   informed. Restoring the DATA has none of that: the prior stays at zero, the solve is the
+    ///   same solve it would have been had the run never stopped, and a parameter nothing excited
+    ///   still comes back saying "I don't know".
+    ///
+    /// ★ A closure is worth minutes of the robot's time and cannot be reproduced by ordinary driving,
+    ///   which is the strongest reason for this file to exist at all.
+    ///
+    /// Locale: written through the classic locale and read with std::from_chars, because these
+    /// machines run es_ES where strtof would stop at the decimal point and return the integer part,
+    /// silently. See CLAUDE.md.
+    bool save(const std::string& path) const
+    {
+        std::ofstream f(path, std::ios::out | std::ios::trunc);
+        if (not f.is_open()) return false;
+        f.imbue(std::locale::classic());
+        f << "# motion calibration window — evidence, not parameters. Delete to return to the priors.\n";
+        f << "# E,d_forward,d_lateral,d_theta,duration,r_forward,r_lateral,r_theta,pos_var,theta_var\n";
+        f << "# C,r_theta,d_theta,duration,weight\n";
+        for (const auto& e : eps_)
+            f << "E," << e.d_forward << ',' << e.d_lateral << ',' << e.d_theta << ',' << e.duration
+              << ',' << e.r_forward << ',' << e.r_lateral << ',' << e.r_theta
+              << ',' << e.pos_var << ',' << e.theta_var << '\n';
+        for (const auto& c : cls_)
+            f << "C," << c.r_theta << ',' << c.d_theta << ',' << c.duration << ',' << c.weight << '\n';
+        return true;
+    }
+
+    /// Returns how many rows were restored; 0 for "no file", which is the ordinary first-run state
+    /// and not an error.
+    std::size_t load(const std::string& path)
+    {
+        std::ifstream f(path);
+        if (not f.is_open()) return 0;
+        eps_.clear(); cls_.clear();
+        std::string line; std::size_t n = 0;
+        while (std::getline(f, line))
+        {
+            if (line.empty() or line[0] == '#') continue;
+            std::vector<float> v; v.reserve(9);
+            const char* p = line.data() + 2;              // past the tag and its comma
+            const char* end = line.data() + line.size();
+            while (p < end)
+            {
+                float x = 0.f;
+                const auto [next, ec] = std::from_chars(p, end, x);
+                if (ec != std::errc{}) break;             // a malformed row is dropped, not guessed
+                v.push_back(x);
+                p = (next < end and *next == ',') ? next + 1 : end;
+            }
+            if (line[0] == 'E' and v.size() == 9)
+            {
+                Episode e;
+                e.d_forward = v[0]; e.d_lateral = v[1]; e.d_theta   = v[2]; e.duration = v[3];
+                e.r_forward = v[4]; e.r_lateral = v[5]; e.r_theta   = v[6];
+                e.pos_var   = v[7]; e.theta_var = v[8];
+                eps_.push_back(e); ++n;
+            }
+            else if (line[0] == 'C' and v.size() == 4)
+            {
+                ClosureRow c;
+                c.r_theta = v[0]; c.d_theta = v[1]; c.duration = v[2]; c.weight = v[3];
+                cls_.push_back(c); ++n;
+            }
+        }
+        while (eps_.size() > window_) eps_.pop_front();
+        while (cls_.size() > 16)      cls_.pop_front();
+        return n;
+    }
+
+    /// Solve the window. p = (J'WJ + P0^-1)^-1 J'W r, and that same inverse IS the covariance.
         [[nodiscard]] Result solve() const
         {
             Result out;
@@ -216,6 +340,16 @@ namespace rc::calib
                 b += wt * j_th * e.r_theta;
             }
 
+            // ── Closed pivots, on the same two covariates as the heading row above ────────────────
+            for (const auto &c : cls_)
+            {
+                Eigen::Matrix<float, P_COUNT, 1> j_cl = Eigen::Matrix<float, P_COUNT, 1>::Zero();
+                j_cl[P_K_OMEGA] = c.d_theta;
+                j_cl[P_B_OMEGA] = c.duration;
+                H += c.weight * j_cl * j_cl.transpose();
+                b += c.weight * j_cl * c.r_theta;
+            }
+
             const Eigen::LDLT<Eigen::Matrix<float, P_COUNT, P_COUNT>> ldlt(H);
             if (ldlt.info() != Eigen::Success) return out;
             out.value = ldlt.solve(b);
@@ -245,6 +379,8 @@ namespace rc::calib
     private:
         Prior prior_{};
         std::size_t window_ = 64;
+        struct ClosureRow { float r_theta = 0.f, d_theta = 0.f, duration = 0.f, weight = 0.f; };
+        std::deque<ClosureRow> cls_;
         std::deque<Episode> eps_;
     };
 }

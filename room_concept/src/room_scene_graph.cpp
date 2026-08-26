@@ -688,6 +688,25 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
         const auto outcome = calib_manager_.last_outcome();
         calib_.on_outcome(outcome, theta);
         const auto cl = calib_.closure();
+        // ── HAND THE CLOSURE TO THE ESTIMATOR THAT PRICES THE MANOEUVRE ──────────────────────────
+        // Only on the edge where a NEW block closed, so one closure is offered exactly once. This is
+        // the feedback that was missing: the offer is priced from the batch estimator's information
+        // on k_omega, the batch estimator learned only from episodes, and episodes need the optimizer
+        // to fire — which it did on 1 cycle in 599 during a pivot. So the manoeuvre could not lower
+        // its own price and re-offered for ever. Queued, not applied: the estimator belongs to the
+        // localiser thread.
+        if (const std::size_t nclosed = calib_.pivot().closures().size(); nclosed > closures_seen_)
+        {
+            for (std::size_t i = closures_seen_; i < nclosed; ++i)
+            {
+                const auto& c = calib_.pivot().closures()[i];
+                if (c.usable and room_concept_ != nullptr)
+                    room_concept_->push_calibration_closure(
+                        {c.truth_rad, c.turned_rad, calib_.rate_for_block(static_cast<int>(i)),
+                         c.resolution});
+            }
+            closures_seen_ = nclosed;
+        }
         std::print("[calib] pivot step -> {} | {} step(s), {:.1f} deg accumulated\n",
                    rc::affordance::to_string(outcome), calib_.pivot().steps_issued(),
                    calib_.pivot().accumulated_rad() * 180.0 / M_PI);
@@ -767,6 +786,9 @@ void RoomSceneGraph::dsr_update_calibration(const rc::RoomConcept::UpdateResult&
             // Recorded — so the channel may ask again when it is worth asking. See
             // CalibChannel::restart_after_closure: the marginal gain decides when, not a schedule.
             calib_.restart_after_closure();
+            // The pivot clears its own closures() on restart, so the "already handed over" counter
+            // must follow it or the next pivot's first block would be skipped as already seen.
+            closures_seen_ = 0;
         }
         std::fflush(stdout);
         // ★FALL THROUGH AND RE-ARM IN THIS SAME CYCLE. Returning here left the node in

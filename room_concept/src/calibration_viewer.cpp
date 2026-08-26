@@ -4,6 +4,8 @@
 #include <iterator>
 #include <QSizePolicy>
 #include <QVBoxLayout>
+#include <QMessageBox>
+#include <QPushButton>
 #include <cmath>
 
 namespace rc
@@ -17,6 +19,29 @@ namespace rc
         summary_ = new QLabel(this);
         summary_->setStyleSheet("font-family: monospace; font-size: 11px; color: #cfd3d6;");
         outer->addWidget(summary_);
+
+        // ── Reset to the priors ──────────────────────────────────────────────────────────────────
+        // Deletes the saved window as well as clearing it in memory. A reset that left the file
+        // behind would be undone by the next restart, which is not what anyone pressing this means.
+        // Confirmed, because the thing it discards can be hours of driving and minutes of pivoting
+        // that ordinary motion does not reproduce.
+        auto* reset = new QPushButton("Reset to priors", this);
+        reset->setToolTip("Forget every measurement and delete the saved window, returning all six\n"
+                          "parameters to their priors. Use it after changing something physical about\n"
+                          "the robot — a wheel, a mount, the base kinematics — because measurements\n"
+                          "taken before that change describe a different machine.");
+        connect(reset, &QPushButton::clicked, this, [this]
+        {
+            const auto answer = QMessageBox::question(
+                this, "Reset calibration",
+                "Forget every measurement and delete the saved window?\n\n"
+                "This discards the episodes AND any closed pivots. A closed pivot is several minutes "
+                "of the robot turning in place and cannot be reproduced by ordinary driving.\n\n"
+                "The parameters return to their priors and report NOT informed.",
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+            if (answer == QMessageBox::Yes and on_reset_) on_reset_();
+        });
+        outer->addWidget(reset);
 
         // ── LAYOUT: THE TRACE GETS THE WHOLE WIDTH ────────────────────────────────────────────────
         // A grid with the labels in their own columns leaves the plot only whatever is left over on
@@ -138,8 +163,13 @@ namespace rc
                                           const Eigen::Matrix<float, rc::calib::P_COUNT, 1>& sigma,
                                           int informed_mask, float condition, int episodes)
     {
-        if (not isVisible())
-            return;      // traces only advance while someone is looking; hidden costs nothing
+        // ★ NO VISIBILITY GATE. It used to return early when hidden, so the traces began at the
+        // moment the window was opened and every parameter appeared to start learning right then —
+        // the estimator has been running since startup, but nothing on screen said so, and the window
+        // showed a flat line from t=0 that was really t=opened. A viewer that misrepresents WHEN a
+        // thing was learnt is worse than no viewer, because the plot looks like evidence.
+        // The cost of not gating is six labels and twelve deque pushes per cycle; Qt does not paint a
+        // hidden widget, which was the only expensive part.
 
         for (int i = 0; i < rc::calib::P_COUNT; ++i)
         {

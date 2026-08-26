@@ -46,6 +46,8 @@
  *  See se2_preintegration.h "SCALE-AS-A-STATE".
  */
 #pragma once
+#include <filesystem>
+#include <system_error>
 
 #include "calibration_intake.h"
 
@@ -192,6 +194,37 @@ namespace rc::calib
         ///   r_forward/r_lateral/r_theta : corrected minus predicted, in the ROBOT frame (0 on early exit)
         ///   pos_var/theta_var           : the optimizer's posterior variance, i.e. how much to believe r
         ///   corrected                   : did the optimizer run this cycle
+        /// A closed pivot, straight into the solve. See BatchEstimator::add_closure for why this is
+        /// two rows on the covariates the heading episode already uses, and why two rates are needed
+        /// before k_omega and b_omega can be told apart at all.
+        void observe_closure(double truth_rad, double turned_rad, double rate_rad_s,
+                             double sigma_s) noexcept
+        {
+            if (not enabled()) return;
+            intake_.offer_closure(truth_rad, turned_rad, rate_rad_s, sigma_s);
+            last_ = intake_.estimate();     // re-solve now: a closure is worth minutes of robot time
+        }
+        [[nodiscard]] std::size_t closures() const noexcept { return intake_.closures(); }
+
+        /// Persist / restore what has been MEASURED, and forget it. The parameters are never written:
+        /// see BatchEstimator::save for why restoring a fitted value as a prior mean is a ratchet.
+        bool save_state(const std::string& path) const { return intake_.save(path); }
+        std::size_t load_state(const std::string& path)
+        {
+            const std::size_t n = intake_.load(path);
+            if (n > 0) last_ = intake_.estimate();   // re-solve from the restored evidence
+            return n;
+        }
+        /// Back to the priors, and the file with it — a reset that left the file behind would be
+        /// undone by the next restart, which is not what anyone pressing "reset" means.
+        void reset_state(const std::string& path) noexcept
+        {
+            intake_.reset();
+            last_ = intake_.estimate();
+            std::error_code ec; std::filesystem::remove(path, ec);
+            episodes_ = 0;
+        }
+
         void observe(float d_forward, float d_lateral, float d_theta,
                      float r_forward, float r_lateral, float r_theta,
                      float pos_var, float theta_var, bool corrected,

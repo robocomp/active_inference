@@ -17,6 +17,7 @@
 #include <QDialog>
 #include <QLabel>
 #include <array>
+#include <functional>
 
 namespace rc
 {
@@ -28,6 +29,9 @@ namespace rc
 
         /// Called once per localiser cycle. Cheap when the window is hidden: the traces are only
         /// appended while visible, so an unopened viewer costs nothing but the call.
+        /// What "Reset" does. Set by the owner; the window itself knows nothing about the estimator.
+        void set_reset_handler(std::function<void()> h) { on_reset_ = std::move(h); }
+
         void update_values(const Eigen::Matrix<float, rc::calib::P_COUNT, 1>& value,
                            const Eigen::Matrix<float, rc::calib::P_COUNT, 1>& sigma,
                            int informed_mask, float condition, int episodes);
@@ -47,5 +51,6 @@ namespace rc
         };
         std::array<Row, rc::calib::P_COUNT> rows_{};
         QLabel* summary_ = nullptr;
+        std::function<void()> on_reset_;
     };
 }

@@ -511,6 +511,33 @@ ImuLinearInjection  = true   # Add the accelerometer's within-segment double int
 PreintZuptDensityV     = 0.01496
 PreintZuptDensityOmega = 0.03001
 
+# ── The rest hypothesis as a FACTOR on the state, rather than covariance shaping ────────────────
+# OFF. It moves the published pose, so it earns its place by measurement, not by argument.
+#
+# ★ WHAT IT FIXES. The per-sample form collapses the velocity VARIANCE and never touches the mean,
+# because the preintegrator is a pure observer by design. So of a parked robot the estimator says
+# "the increment is 3.5 mm of noise, and I am very confident" — confidently wrong rather than
+# correctly still. MEASURED 2026-08-26 with ground truth motionless for 3963 cycles: the published
+# pose wandered 210 mm in x, 193 mm in y and 2.07 deg. A textbook random walk — 3.49 mm per cycle,
+# and 3.49*sqrt(3963) = 220 mm — and nothing arrests it, because the optimizer fired on 12 of those
+# 3963 cycles and between firings the pose runs open-loop on odometry noise.
+#
+# ★ WHAT IT IS. Not a new mechanism: a motion factor between the same two slots with a ZERO delta
+# and its own precision, so the solver weighs "you moved by Delta" against "you did not move" and
+# the MEAN goes where the evidence says. Its covariance is the interval-level analogue of the
+# per-sample rule:  R_trans = d_v^2*T + (|dp| + L*|dth|)^2 ,  R_rot = d_w^2*T + (|dth| + |dp|/L)^2.
+# At rest the second term vanishes and it bites; in motion the hypothesis is wrong by exactly the
+# displacement the interval measured, R grows with it, and it fades out on its own. No threshold.
+# Self-test: rate-invariant to 0.16% across an 8x rate change, 11154x looser at 0.5 m/s than parked.
+#
+# ★ IT REPLACES the per-sample shaping rather than joining it — running both counts one hypothesis
+# twice. The loader enforces that, so this flag alone switches the form.
+#
+# ★ THE A/B IS PRE-REGISTERED: park with the controller idle and measure the published pose's wander
+# over a few thousand cycles against the 210 mm above. It should also remove the residual m^2*dt
+# rate dependence the per-sample form still carries at speed (1.47x across a 3x rate change).
+PreintZuptAsFactor   = false
+
 OdomSampleLog = true    # One CSV line per ARRIVING odometry sample -> etc/odom_samples.csv.
                         # An INSTRUMENT, not telemetry: turn it off when the measurement is done.
                         # It exists because the per-cycle log (tmp/sdf_localizer/log_*.csv) records

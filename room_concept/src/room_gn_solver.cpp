@@ -526,6 +526,24 @@ namespace rc::gn
             }
             fs.push_back(std::make_unique<MotionFactor>(idx.offset(i - 1), idx.offset(i),
                                                          curr.odometry_delta, prec));
+
+            // ── The rest hypothesis, as the SAME factor with a ZERO delta ─────────────────────────
+            // "You did not move", weighed against "you moved by Delta" by their stated precisions.
+            // It needs no factor class of its own: a zero-velocity constraint between two poses IS a
+            // between-factor with a zero measurement, which is exactly MotionFactor with odom = 0.
+            // Present only when the interval supplied a precision, i.e. only when the feature is on
+            // — and its precision already fades with the motion the interval measured, so in motion
+            // it contributes nothing without anything having to switch it off.
+            if (curr.zupt_prec_tensor.defined())
+            {
+                Eigen::Matrix3f zprec = Eigen::Matrix3f::Zero();
+                const auto zcpu = curr.zupt_prec_tensor.detach().to(torch::kCPU).contiguous();
+                const auto za = zcpu.accessor<float, 2>();
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 3; ++c) zprec(r, c) = za[r][c];
+                fs.push_back(std::make_unique<MotionFactor>(idx.offset(i - 1), idx.offset(i),
+                                                             Eigen::Vector3f::Zero(), zprec));
+            }
         }
 
         // --- 4. Corner landmarks (newest corner_max_slots slots), yaw channel off

@@ -553,6 +553,36 @@ int main()
                       spread < 0.02f, buf);
             }
 
+            // (a3) THE FACTOR FORM. The rest hypothesis stated per INTERVAL rather than per sample:
+            // R = d^2*T + (observed motion)^2. Two properties must hold and neither is a magnitude.
+            // First, it is rate-invariant BY CONSTRUCTION — it mentions T and never dt, so the same
+            // parked interval at any sample rate gives the same covariance. Second, it fades with
+            // the motion the interval actually measured, which is what lets it be a constraint on
+            // the MEAN without a threshold deciding when to stop applying it.
+            {
+                rc::preint::NoiseModel qf = qn;
+                qf.zupt_enabled = true; qf.zupt_as_factor = true;
+                const auto park_a = [&](float dt, float v)
+                {
+                    rc::preint::Integrator g(theta0);
+                    g.set_noise(qf);
+                    const int n = static_cast<int>(std::lround(10.f / dt));
+                    for (int i = 0; i < n; ++i) g.add(0.f, v, 0.f, dt);
+                    return g.result().zupt_covariance();
+                };
+                const auto R4  = park_a(0.004f, 0.f);
+                const auto R32 = park_a(0.032f, 0.f);
+                const auto Rmv = park_a(0.008f, 0.5f);
+                const float rate_spread = std::abs(R4(0, 0) - R32(0, 0)) / std::max(1e-12f, R32(0, 0));
+                std::snprintf(buf, sizeof buf,
+                              "10 s parked: R_xx %.3e at 4 ms vs %.3e at 32 ms (%.2f%% apart); "
+                              "moving at 0.5 m/s R_xx %.3e (%.0fx looser)",
+                              R4(0, 0), R32(0, 0), rate_spread * 100.f, Rmv(0, 0),
+                              Rmv(0, 0) / std::max(1e-12f, R32(0, 0)));
+                check("the ZUPT factor is rate-invariant and fades with real motion",
+                      rate_spread < 0.01f and Rmv(0, 0) > 100.f * R32(0, 0), buf);
+            }
+
             // (b) Fades out with speed, on its own. No threshold: the gap closes because the rest
             // hypothesis' own variance grows with the observed motion.
             const auto slow_f = run(0.05f, 0.45f, 0.8f, 0.01f, 0.5f, false);

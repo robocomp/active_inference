@@ -135,6 +135,9 @@ private:
     // robot_gt_* on the robot node just while the producer reports simulated, so on real hardware
     // the attributes are absent, the series stay empty and the plot is simply flat.
     QPointer<rc::TimeSeriesPlot> ts_plot_gt_;
+    // RGB projection agreement (ImageEdge). Empty and flat unless ImageEdge.enable && shadow.
+    QPointer<rc::TimeSeriesPlot> ts_plot_imgedge_;
+    std::int64_t last_imgedge_ts_ms_ = 0;   // only append when a NEW cycle produced a number
     QPointer<rc::CalibrationViewer> calib_viewer_;
     // Last state pushed to lbl_room_stable: -1 = never painted, 0 = red, 1 = green, 2 = amber (searching).
     // Tri-state so the very first update always applies a stylesheet, whichever state it reports.

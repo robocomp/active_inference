@@ -139,6 +139,42 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
     ts_plot_rates_->add_series("optimizer Hz",  QColor(230, 126, 34), 1.6f, 0);   // loc-thread solve rate
     custom_widget_->frame_series->layout()->addWidget(ts_plot_rates_);
 
+    // ── RGB projection agreement ─────────────────────────────────────────────────────────────────
+    // How well the predicted image contours match the edges actually found, over time. Flat and
+    // empty unless ImageEdge.enable && shadow, which is the honest appearance of a channel that is
+    // switched off — as opposed to one that is on and has nothing to say.
+    // ★ The reference line at 1.0 is what makes this readable. chi2/dof is the weighted residual per
+    // degree of freedom, so 1.0 means the residuals are exactly the size the per-sample sigmas
+    // claim. Sitting above it is not noise: it is the projection disagreeing with the map by more
+    // than the sensor model admits, which points at the mount, the map or the matching.
+    ts_plot_imgedge_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
+    ts_plot_imgedge_->set_visible_window(60.f);
+    // ★ WITH A RUNNING AVERAGE, because the raw series is mostly sampling noise and reads as
+    // instability. chi2/dof over nu effective degrees of freedom has a relative spread of
+    // sqrt(2/nu), and sum_gamma — the effective sample count after the responsibility weighting —
+    // runs around 3 per cycle here, so +/-80% frame to frame is the DISTRIBUTION, not the signal.
+    // Measured on 5838 rows: the median level is the same (8.10 vs 8.07) whether a cycle had <=6 or
+    // >=20 samples, while the scatter is 3.3x larger in the sparse ones — level is stable, spread is
+    // not, which is exactly the signature of chi2 noise rather than a moving quantity.
+    // The companion "<name>_avg" series the widget creates is the one to read.
+    ts_plot_imgedge_->add_series("img chi2/dof", QColor(155, 89, 182), 1.8f, 25);
+    ts_plot_imgedge_->add_series("img r_rms px", QColor(120, 120, 140), 1.2f, 0);
+    ts_plot_imgedge_->set_reference_line(1.f, QColor(200, 60, 60), "chi2/dof = 1");
+    custom_widget_->frame_series->layout()->addWidget(ts_plot_imgedge_);
+
+    // ── The calibration window exists from startup, hidden ───────────────────────────────────────
+    // It used to be constructed on the first press of the Calib button, so its traces began at that
+    // moment and the six parameters looked as though they started learning when you opened it. They
+    // have been learning since the first cycle: motion_calib_.observe() runs in the update path and
+    // knows nothing about this window. Building it here costs one hidden QDialog and makes the trace
+    // an honest record of the whole run rather than of how long you have been watching.
+    calib_viewer_ = new rc::CalibrationViewer(custom_widget_);
+    calib_viewer_->hide();
+    // The window asks; the localiser thread acts. RoomConcept queues it rather than touching the
+    // estimator from the GUI thread.
+    if (room_concept_ != nullptr)
+        calib_viewer_->set_reset_handler([this] { room_concept_->request_calibration_reset(); });
+
     // ── Ground truth vs estimate (SIMULATION ONLY) ────────────────────────────────────────────
     // The localiser cannot be graded on its own residual: a confidently wrong pose scores like a
     // right one (measured 2026-08-22, SDF 0.009 with the yaw 0.35 rad out). robot_concept publishes
@@ -342,6 +378,19 @@ void RoomViewer::update_ui(const std::optional<rc::RoomConcept::UpdateResult>& l
     // ran (warmup / no odometry) — skip those so the line doesn't spike to a garbage sample.
     if (std::isfinite(loc_res->early_exit_metric))
         ts_plot_fe_->add_point("pred |SDF|", loc_res->early_exit_metric);
+    // RGB projection agreement, appended only when a NEW cycle produced one. Without the stamp test
+    // a stalled camera would draw a flat line at its last value, which reads as "steady" rather than
+    // "stopped" — the two must not look alike.
+    if (ts_plot_imgedge_ and room_concept_ != nullptr)
+    {
+        const auto st = room_concept_->get_image_edge_stats();
+        if (st.valid and st.ts_ms > last_imgedge_ts_ms_)
+        {
+            last_imgedge_ts_ms_ = st.ts_ms;
+            ts_plot_imgedge_->add_point("img chi2/dof", st.chi2_per_dof);
+            ts_plot_imgedge_->add_point("img r_rms px", st.r_rms_px);
+        }
+    }
 
     // Localization confidence from the pose covariance determinant: small det (well-localized) → high.
     // det ~ 1e-8..1e-10 well-localized, ~1e-4 uncertain → -log10(det) ~ 4..10, mapped to [0,1] by /12.
@@ -389,6 +438,7 @@ void RoomViewer::update_ui(const std::optional<rc::RoomConcept::UpdateResult>& l
 
 void RoomViewer::show_calibration()
 {
+    // Constructed at startup, not here — see the constructor. This only raises it.
     if (calib_viewer_.isNull())
         calib_viewer_ = new rc::CalibrationViewer(custom_widget_);
     calib_viewer_->show();

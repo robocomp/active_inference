@@ -85,6 +85,11 @@ public:
     // adv/side/rot are the latest robot-frame velocities for the RT velocity attrs.
     // write_rt=false ⇒ do room creation/affordance but DON'T write the robot↔room RT edge (the
     // odometry-driven complementary-filter publisher owns it; avoids past-stamped block interleaving).
+    // How many pivot blocks have already been handed to the batch estimator, so a closure is offered
+    // exactly once. closures() only grows within a pivot and is cleared on restart, which this
+    // counter follows via reset in restart_after_closure's path.
+    std::size_t closures_seen_ = 0;
+
     void update(const rc::RoomConcept::UpdateResult& res, float adv, float side, float rot,
                 bool write_rt = true);
 

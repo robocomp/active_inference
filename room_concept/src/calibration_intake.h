@@ -95,6 +95,20 @@ namespace rc::calib
         void configure(const IntakeParams &ip, const Prior &prior)
         { p_ = ip; est_.configure(prior, ip.window); }
 
+        /// Offer one CLOSED PIVOT. It bypasses the episode admission policy on purpose: that policy
+        /// exists to reject episodes whose reference — the optimizer's correction — is untrustworthy,
+        /// and a closure has no such reference. Its truth is that the robot came back to the heading
+        /// it left, which no localiser, map or fit residual can spoil. The one thing that can spoil
+        /// it is not closing, and PivotAffordance refuses to report that as a closure at all.
+        void offer_closure(double truth_rad, double turned_rad, double rate_rad_s, double sigma_s)
+        { est_.add_closure(truth_rad, turned_rad, rate_rad_s, sigma_s); }
+        [[nodiscard]] std::size_t closures() const noexcept { return est_.closures(); }
+
+        /// Persist / restore the WINDOW (evidence), and forget it. See BatchEstimator::save.
+        bool        save(const std::string& path) const { return est_.save(path); }
+        std::size_t load(const std::string& path)       { return est_.load(path); }
+        void        reset() noexcept                    { est_.reset(); }
+
         /// Offer one episode. Returns why it was accepted or refused. `fit_residual_m` is the
         /// localiser's own worst residual over the episode; `elapsed_s` its duration.
         Verdict offer(const Episode &e, Source src, float fit_residual_m)

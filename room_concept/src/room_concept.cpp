@@ -2266,6 +2266,16 @@ namespace rc
         new_slot.odometry_delta = slot_odom_delta;
         new_slot.motion_cov = slot_motion_cov;
         new_slot.timestamp_ms = lidar.second;
+        // ── THE CONNECTION, missing until 2026-08-26 ──────────────────────────────────────────────
+        // pump_image_edges() has been extracting contours and calling set_image_edges() every tick,
+        // and NOTHING read them: `image_edges()` had zero call sites and `new_slot.image_edges` was
+        // never assigned, so Slot::image_edges was empty for every slot ever built. Every consumer
+        // guards on `obs.empty()` / `image_edges.empty()` and so all of them silently did nothing —
+        // the shadow monitor, the driving factor, and both loss terms. `drive = true` would have
+        // been inert too. A feature that is enabled, extracting, and disconnected looks exactly like
+        // a feature that is working and has nothing to say.
+        if (params.image_edge.enable)
+            new_slot.image_edges = take_image_edges();
 
         // Pre-cache tensors used every Adam iteration.
         // Always build on CPU first (accessor<> requires CPU), then move to device.
@@ -2280,6 +2290,24 @@ namespace rc
                 for (int c = 0; c < 3; c++)
                     acc[r][c] = prec(r, c);
             new_slot.motion_prec_tensor = prec_cpu.to(get_device());
+        }
+        // ── The rest hypothesis, as a constraint on the STATE ────────────────────────────────────
+        // A zero-delta motion factor between this slot and the last: "you did not move", with the
+        // interval's own precision. The solver then weighs it against "you moved by Delta" and the
+        // MEAN goes where the evidence says — which the covariance-shaping form could never do,
+        // because the preintegrator never writes the mean.
+        if (params.zupt_as_factor and selected_prior.has_preint)
+        {
+            const Eigen::Matrix3f R = selected_prior.preint.zupt_covariance();
+            if (R(0, 0) > 0.f and R(2, 2) > 0.f)
+            {
+                const Eigen::Matrix3f prec_z = R.inverse();
+                auto z_cpu = torch::zeros({3, 3}, torch::kFloat32);
+                auto acc_z = z_cpu.accessor<float, 2>();
+                for (int r = 0; r < 3; r++)
+                    for (int c = 0; c < 3; c++) acc_z[r][c] = prec_z(r, c);
+                new_slot.zupt_prec_tensor = z_cpu.to(get_device());
+            }
         }
 
         bool window_slid = false;
@@ -2394,6 +2422,12 @@ namespace rc
             early->corners_in_fov = res.corners_in_fov;
             early->corner_matches = std::move(res.corner_matches);
             early->lidar_scan = std::move(res.lidar_scan);
+            // The MOUNT monitor runs on early-exit cycles too — pass 1 only, no second solve. This
+            // is where ~99.75% of cycles end, so leaving it below the return starved the instrument
+            // exactly in proportion to how good the prediction had become.
+            if (params.image_edge.enable and params.image_edge_shadow and not params.image_edge.drive)
+                run_image_edge_shadow(read_window_poses(), boundary_weight_now(), lidar.second,
+                                      /*probe_pose=*/false);
             return *early;
         }
 
@@ -2437,7 +2471,8 @@ namespace rc
             // RGB edge shadow: evaluated + logged, pose untouched. Inert unless enable && shadow,
             // and skipped entirely once the term is DRIVING (there would be nothing to compare to).
             if (params.image_edge.enable and params.image_edge_shadow and not params.image_edge.drive)
-                run_image_edge_shadow(read_window_poses(), boundary_weight_now(), lidar.second);
+                run_image_edge_shadow(read_window_poses(), boundary_weight_now(), lidar.second,
+                                      /*probe_pose=*/true);
             res.final_loss     = last_loss;
             res.iterations_used = iterations;
 
@@ -3709,14 +3744,26 @@ namespace rc
 
     // ── RGB edge shadow + systematic-residual monitor ────────────────────────────────────────────
     void RoomConcept::run_image_edge_shadow(const std::vector<Eigen::Vector3f>& poses_after,
-                                            float boundary_weight, std::int64_t timestamp_ms)
+                                            float boundary_weight, std::int64_t timestamp_ms,
+                                            bool probe_pose)
     {
-        if (window_mgr_.window.empty()) return;
+        // ── Health, so "no CSV" is diagnosable instead of ambiguous ───────────────────────────────
+        // Three different failures land in the same silence: the camera never bound, it bound but
+        // extracts nothing, or rows are being written and nobody looked. Count them apart and say so
+        // once every 5 s. Without this the only evidence is an absent file, which is consistent with
+        // all three.
+        ++imgedge_calls_;
+        if (window_mgr_.window.empty()) { ++imgedge_no_window_; return; }
         const auto& slot = window_mgr_.window.back();
         const auto& obs  = slot.image_edges;
-        if (obs.empty() or not obs.cam.valid) return;
+        if (obs.empty())       { ++imgedge_no_obs_; imgedge_health(timestamp_ms); return; }
+        if (not obs.cam.valid) { ++imgedge_no_cam_; imgedge_health(timestamp_ms); return; }
 
+        last_mount_fy_ = obs.cam.fy;
         const Eigen::Vector3f pose = poses_after.back();
+        // Where the robot was while these samples were taken. Logged beside the fit because the
+        // question the cumulative form could not answer is whether the estimate moves WITH position.
+        mnt_pose_x_ = pose.x(); mnt_pose_y_ = pose.y(); mnt_pose_th_ = pose.z();
         const float cth = std::cos(pose.z()), sth = std::sin(pose.z());
         Eigen::Matrix3f Rm; Rm << cth, sth, 0.f, -sth, cth, 0.f, 0.f, 0.f, 1.f;
 
@@ -3767,10 +3814,42 @@ namespace rc
                         const float d = p_cam.norm();
                         if (d > 0.3f)
                         {
-                            const double w  = 1.0 / (smp.sigma_px * smp.sigma_px);
+                            // ★ SAME WEIGHT THE FACTOR USES: gamma/sigma^2, not 1/sigma^2. gamma is
+                            // the mixture responsibility — this sample's posterior probability of
+                            // being an inlier, an inlier Gaussian against a UNIFORM over the window
+                            // actually searched. A bad match therefore removes itself by its own
+                            // evidence, which is the only outlier handling here and needs no
+                            // threshold. Ignoring it, as this monitor did, let mismatches dominate a
+                            // 4-sample fit: r_rms ran 11.9 px against a stated sigma of 0.05.
+                            // ★ THE INLIER VARIANCE MUST INCLUDE THE PREDICTION'S OWN SPREAD, not
+                            // just the edge-localisation sigma. smp.h holds each nuisance's
+                            // sensitivity ALREADY multiplied by that nuisance's prior sigma (px per
+                            // unit-variance nuisance), so h.squaredNorm() IS the predicted px^2
+                            // variance contributed by an unknown mount pitch, height, boresight yaw
+                            // and image/lidar offset. Widening by it is what makes "a residual
+                            // consistent with a plausible mount error" an INLIER — which is exactly
+                            // the sample that carries mount information.
+                            // Weighting by sigma_px alone rejected everything: at r ~ 12 px against
+                            // sigma_px ~ 0.05, exp(-0.5*(r/sigma)^2) underflows, gamma is 0 for every
+                            // sample, and the pooled fit starved silently. An estimator that admits
+                            // nothing and an estimator that has nothing to admit look identical from
+                            // outside, which is why mnt_n_ is logged.
+                            const float s2  = smp.sigma_px * smp.sigma_px + smp.h.squaredNorm();
+                            const float gam = rc::img::responsibility(r, s2, smp.pi_vis, smp.search_L);
+                            if (not (gam > 1e-6f)) return r;
+                            const double w  = static_cast<double>(gam) / static_cast<double>(s2);
                             const double x2 = obs.cam.fy / d;
                             S11 += w;        S12 += w * x2;   S22 += w * x2 * x2;
                             Sy1 += w * r;    Sy2 += w * x2 * r; Syy += w * r * r; Sw += w;
+                            // ── POOLED across the whole run ───────────────────────────────────────
+                            // The mount is STATIC, so the per-frame fit is the wrong unit: it asks
+                            // four samples spanning almost no depth to separate a constant from a
+                            // 1/d term, which is near-degenerate, and the answer wandered a full
+                            // degree between quarters of a run. Pooling turns range diversity from a
+                            // within-image accident into something the TRAJECTORY supplies for free.
+                            mnt_S11_ += w;       mnt_S12_ += w * x2;    mnt_S22_ += w * x2 * x2;
+                            mnt_Sy1_ += w * r;   mnt_Sy2_ += w * x2 * r; mnt_Syy_ += w * r * r;
+                            ++mnt_n_;
                         }
                     }
                     abs_r.push_back(std::fabs(r));
@@ -3807,6 +3886,7 @@ namespace rc
         //    Shadow mode must not be able to change the published pose, so the window poses are
         //    restored afterwards by the caller (poses_after is what the authority produced).
         float dx = 0.f, dy = 0.f, dth = 0.f;
+        if (probe_pose)
         {
             rc::gn::Input in;
             in.model = model_.get();
@@ -3841,11 +3921,24 @@ namespace rc
                     << "ts_ms,frame_stamp,dt_img_lidar_ms,n_segments,n_used,sum_gamma,sigma_i,"
                        "r_rms_px,chi2_per_dof,trace_raw,trace_eff,info_ratio,loss_img,"
                     // who won?
-                       "dpose_x,dpose_y,dpose_th,"
+                       "dpose_valid,dpose_x,dpose_y,dpose_th,"
                     // is the mount calibrated?
                        "bias_const_px,se_const_px,bias_invd_m,se_invd_m,implied_dpitch_rad,implied_dheight_m\n";
             }
         }
+        {   // Publish for the viewer BEFORE the CSV branch, so the plot does not depend on logging
+            // being enabled — an instrument that only works when another instrument is on is how a
+            // channel comes to look dead.
+            std::scoped_lock lk(image_edge_stats_mutex_);
+            image_edge_stats_.valid        = true;
+            image_edge_stats_.chi2_per_dof = chi2 / std::max(1.f, sum_gamma);
+            image_edge_stats_.r_rms_px     = r_rms;
+            image_edge_stats_.loss_img     = loss_img;
+            image_edge_stats_.n_used       = n_used;
+            image_edge_stats_.n_segments   = static_cast<int>(obs.segments.size());
+            image_edge_stats_.ts_ms        = timestamp_ms;
+        }
+
         if (image_edge_csv_.is_open())
         {
             const float chi2_dof = chi2 / std::max(1.f, sum_gamma);
@@ -3856,12 +3949,138 @@ namespace rc
                 << ',' << trace_raw << ',' << trace_eff
                 << ',' << (trace_raw / std::max(1e-9f, trace_eff))
                 << ',' << loss_img
-                << ',' << dx << ',' << dy << ',' << dth
+                << ',' << (probe_pose ? 1 : 0) << ',' << dx << ',' << dy << ',' << dth
                 << ',' << b_const << ',' << se_const << ',' << b_invd << ',' << se_invd
                 << ',' << (obs.cam.fy > 0.f ? b_const / obs.cam.fy : 0.f) << ',' << b_invd
                 << '\n';
             image_edge_csv_.flush();
+            ++imgedge_rows_;
         }
+        imgedge_health(timestamp_ms);
+        mount_pooled_solve(timestamp_ms);
+    }
+
+    /// One weighted least squares per WINDOW — the accumulators reset after every solve — with the
+    /// robot's pose logged beside it.
+    ///
+    /// ★ IT WAS CUMULATIVE, AND THAT HID THE ANSWER. Pooling over the whole run produced an estimate
+    ///   that wandered from −0.087° to +0.565° while its own standard error shrank to ±0.0044°, and
+    ///   crossed zero on the way — 149x its claimed uncertainty, for a quantity that is bolted to the
+    ///   robot and cannot change at all. The formal error assumes each sample is an independent draw,
+    ///   and they are not: every sample taken against one wall shares whatever is wrong with THAT
+    ///   wall — its position in the map, the floor height beneath it, the residual pose error there.
+    ///   Two hundred samples along one wall are close to one measurement repeated, which is exactly
+    ///   the "N samples are not N measurements" correction image_edge_accumulate.h applies WITHIN a
+    ///   frame; pooling reintroduced it ACROSS frames where nothing was correcting it.
+    ///
+    /// ★ A per-window row can be pooled back into the cumulative answer offline; the cumulative row
+    ///   can never be taken apart. So this form strictly dominates, and it makes the between-window
+    ///   scatter — the honest uncertainty — visible instead of hidden.
+    ///
+    /// What to do with the output: plot dpitch_deg against pose_x/pose_y. If it tracks which wall is
+    /// in view, the wandering is MAP error and the mount cannot be measured this way until the map is
+    /// fixed. If the windows agree once pose is accounted for, the mount number survives.
+    ///
+    /// ★ THE STANDARD ERRORS ARE INFLATED BY THE OBSERVED SCATTER, and that is not a fudge. The
+    ///   per-frame monitor reported se_const_px = 0.013 px while consecutive frames disagreed by
+    ///   tens of pixels: it was describing the spread WITHIN one frame's four samples and knew
+    ///   nothing about the frames disagreeing. chi2/dof measures exactly that discrepancy — how much
+    ///   larger the residuals are than the sigmas claim — so scaling the parameter sigma by
+    ///   sqrt(chi2/dof) reports the precision the data actually supports. When the residual model is
+    ///   right chi2/dof -> 1 and the inflation vanishes on its own.
+    void RoomConcept::mount_pooled_solve(std::int64_t timestamp_ms)
+    {
+        if (mnt_win_start_ms_ == 0) { mnt_win_start_ms_ = timestamp_ms; return; }
+        const std::int64_t win_ms = timestamp_ms - mnt_win_start_ms_;
+        if (win_ms < 5000) return;
+        // Both conditions, and NEITHER resets on its own: a window short of samples keeps
+        // accumulating rather than being solved thin and reported as if it were a measurement. The
+        // window length is therefore variable and is logged, so a row can never be misread as
+        // covering 5 s when it covered thirty.
+        if (mnt_n_ < 200) return;
+
+        const double det = mnt_S11_ * mnt_S22_ - mnt_S12_ * mnt_S12_;
+        if (not (det > 0.0) or not std::isfinite(det)) return;
+        const double b_const = ( mnt_S22_ * mnt_Sy1_ - mnt_S12_ * mnt_Sy2_) / det;
+        const double b_invd  = (-mnt_S12_ * mnt_Sy1_ + mnt_S11_ * mnt_Sy2_) / det;
+        // Weighted residual sum of squares of the FITTED model, so chi2/dof is a statement about the
+        // part the two mount parameters could not explain.
+        const double chi2 = std::max(0.0, mnt_Syy_ - (b_const * mnt_Sy1_ + b_invd * mnt_Sy2_));
+        const double dof  = std::max(1.0, static_cast<double>(mnt_n_) - 2.0);
+        const double c2d  = chi2 / dof;
+        const double infl = std::sqrt(std::max(1.0, c2d));
+        const double se_const = std::sqrt(mnt_S22_ / det) * infl;
+        const double se_invd  = std::sqrt(mnt_S11_ / det) * infl;
+        const double fy = last_mount_fy_ > 0.f ? last_mount_fy_ : 1.f;
+        const double dpitch_deg    = (b_const / fy) * 180.0 / M_PI;
+        const double se_pitch_deg  = (se_const / fy) * 180.0 / M_PI;
+
+        if (not mount_csv_.is_open())
+        {
+            mount_csv_.open("etc/image_edge_mount.csv", std::ios::out | std::ios::trunc);
+            if (mount_csv_.is_open())
+            {
+                mount_csv_.imbue(std::locale::classic());   // CLAUDE.md: never a comma decimal
+                mount_csv_ << "ts_ms,window_ms,n_samples,chi2_per_dof,b_const_px,se_const_px,"
+                              "b_invd_m,se_invd_m,dpitch_deg,se_pitch_deg,"
+                              "pose_x,pose_y,pose_theta\n";
+            }
+        }
+        if (mount_csv_.is_open())
+        {
+            mount_csv_ << timestamp_ms << ',' << win_ms << ',' << mnt_n_ << ',' << c2d << ','
+                       << b_const << ',' << se_const << ',' << b_invd << ',' << se_invd << ','
+                       << dpitch_deg << ',' << se_pitch_deg << ','
+                       << mnt_pose_x_ << ',' << mnt_pose_y_ << ',' << mnt_pose_th_ << '\n';
+            mount_csv_.flush();
+        }
+        // ── RESET: every row is an independent window ────────────────────────────────────────────
+        mnt_S11_ = mnt_S12_ = mnt_S22_ = mnt_Sy1_ = mnt_Sy2_ = mnt_Syy_ = 0.0;
+        mnt_n_ = 0;
+        mnt_win_start_ms_ = timestamp_ms;
+        // Between-window scatter, which is the uncertainty that turned out to matter. Kept as a
+        // running mean and sum of squares so the log line can say how much the WINDOWS disagree
+        // beside how much each window claims to know — the two differed by 149x in the pooled form.
+        ++mnt_wins_;
+        mnt_pitch_sum_  += dpitch_deg;
+        mnt_pitch_sum2_ += dpitch_deg * dpitch_deg;
+        // Report the WITHIN-window error beside the BETWEEN-window scatter. If the second is much
+        // larger than the first, the samples are not independent and the first is meaningless — say
+        // so on the line rather than leaving a reader to discover it from a table of rows.
+        double spread = 0.0;
+        if (mnt_wins_ >= 2)
+        {
+            const double m = mnt_pitch_sum_ / mnt_wins_;
+            spread = std::sqrt(std::max(0.0, mnt_pitch_sum2_ / mnt_wins_ - m * m));
+        }
+        qInfo().nospace() << "[mount] window " << mnt_wins_ << " (" << win_ms << " ms, "
+                          << mnt_n_ << " samples) | pitch "
+                          << QString::number(dpitch_deg, 'f', 4) << " +/- "
+                          << QString::number(se_pitch_deg, 'f', 4) << " deg within"
+                          << (mnt_wins_ >= 2
+                              ? QString(", %1 deg BETWEEN windows (%2x)")
+                                    .arg(spread, 0, 'f', 4)
+                                    .arg(spread / std::max(1e-9, se_pitch_deg), 0, 'f', 0)
+                              : QString())
+                          << " | height " << QString::number(b_invd, 'f', 4)
+                          << " | chi2/dof " << QString::number(c2d, 'f', 2)
+                          << " | pose " << QString::number(mnt_pose_x_, 'f', 2) << ","
+                          << QString::number(mnt_pose_y_, 'f', 2)
+                          << (c2d > 4.0 ? "  <- residual model is WRONG; the estimate inherits it"
+                                        : "");
+    }
+
+    /// One line every 5 s naming which of the three silences we are in.
+    void RoomConcept::imgedge_health(std::int64_t timestamp_ms)
+    {
+        if (imgedge_health_last_ms_ == 0) { imgedge_health_last_ms_ = timestamp_ms; return; }
+        if (timestamp_ms - imgedge_health_last_ms_ < 5000) return;
+        qInfo().nospace() << "[imgedge] " << imgedge_rows_ << " rows / " << imgedge_calls_
+                          << " calls | no_window=" << imgedge_no_window_
+                          << " no_obs=" << imgedge_no_obs_ << " (bound, nothing extracted)"
+                          << " no_cam=" << imgedge_no_cam_ << " (no valid intrinsics/extrinsic)";
+        imgedge_health_last_ms_ = timestamp_ms;
+        imgedge_rows_ = imgedge_calls_ = imgedge_no_window_ = imgedge_no_obs_ = imgedge_no_cam_ = 0;
     }
 
     void RoomConcept::run_gn_shadow(const std::vector<Eigen::Vector3f>& poses_before,
@@ -4313,6 +4532,72 @@ namespace rc
      */
     void RoomConcept::adapt_motion_model()
     {
+        // ── Reset, if the calibration window asked for one ────────────────────────────────────────
+        if (calib_reset_pending_.exchange(false))
+        {
+            motion_calib_.reset_state(params.calib_state_file);
+            qInfo() << "[calib] RESET: window emptied and" 
+                    << QString::fromStdString(params.calib_state_file)
+                    << "deleted. Every parameter is back at its prior and reports NOT informed, which"
+                       " is the honest state of a robot that has just been told to un-learn.";
+        }
+
+        // ── Restore the window once, then keep it saved ───────────────────────────────────────────
+        // Evidence, not parameters: the solve after a restart is the solve it would have been had the
+        // run never stopped, with the prior still at zero and nothing ratcheting.
+        if (not calib_state_loaded_)
+        {
+            calib_state_loaded_ = true;
+            if (const std::size_t n = motion_calib_.load_state(params.calib_state_file); n > 0)
+                qInfo().nospace() << "[calib] restored " << n << " measurements from "
+                                  << QString::fromStdString(params.calib_state_file)
+                                  << " (" << motion_calib_.closures() << " closed pivot(s)) — the "
+                                     "window resumes, the priors do not move";
+        }
+
+        // Drain any closed pivots first, on THIS thread, before the episode path runs. A closure is
+        // the strongest measurement of the rotation model this robot can make — no map, no survey,
+        // no localiser in the number — and until 2026-08-26 it reached nothing: the pivot measured
+        // the scale to +/-0.18%, logged it, and the estimator that PRICES the manoeuvre never heard.
+        // So the offer's value never fell and the robot pivoted for ever, unable to extinguish its
+        // own worth. Feeding it back is what closes that loop.
+        {
+            std::vector<ClosureObs> pending;
+            {
+                std::scoped_lock lk(pending_closures_mutex_);
+                pending.swap(pending_closures_);
+            }
+            for (const auto& c : pending)
+            {
+                motion_calib_.observe_closure(c.truth_rad, c.turned_rad, c.rate_rad_s, c.sigma_s);
+                qInfo().nospace() << "[calib] CLOSURE -> batch estimator | truth "
+                                  << QString::number(c.truth_rad * 180.0 / M_PI, 'f', 1) << " deg, odometry "
+                                  << QString::number(c.turned_rad * 180.0 / M_PI, 'f', 1) << " deg, rate "
+                                  << QString::number(c.rate_rad_s, 'f', 3) << " rad/s, sigma "
+                                  << QString::number(c.sigma_s * 100.0, 'f', 3) << "% | k_omega now "
+                                  << QString::number((motion_calib_.omega_scale() - 1.f) * 100.f, 'f', 4)
+                                  << "% +/- " << QString::number(motion_calib_.k_w_sigma() * 100.f, 'f', 4)
+                                  << "% over " << motion_calib_.closures() << " closure(s)";
+            }
+            // A closure is minutes of robot time; persist immediately rather than waiting for the
+            // periodic save, so a crash between here and then cannot throw it away.
+            if (not pending.empty())
+                motion_calib_.save_state(params.calib_state_file);
+        }
+
+        // Periodic save of the window. Every 30 s: often enough that a crash costs little, rare
+        // enough to be invisible next to a solve.
+        {
+            const std::int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            if (calib_state_last_save_ms_ == 0) calib_state_last_save_ms_ = now_ms;
+            else if (now_ms - calib_state_last_save_ms_ >= 30000)
+            {
+                motion_calib_.save_state(params.calib_state_file);
+                calib_state_last_save_ms_ = now_ms;
+            }
+        }
+
         const auto& window = window_mgr_.window;
         if (window.size() < 2) return;
 

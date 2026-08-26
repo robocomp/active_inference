@@ -77,6 +77,11 @@ struct RoomConfig
     // rows -- fatal for any autocorrelation question, since the aliasing invents correlation at one
     // rate and destroys it at another. Off by default; it is an instrument, not telemetry.
     bool        ODOM_SAMPLE_LOG = false;        // config: RoomConcept.OdomSampleLog
+    /// Where the calibration WINDOW is kept between runs. Evidence (episodes + closed pivots), never
+    /// the fitted parameters — restoring a fitted value as a prior mean is the ratchet that walked
+    /// the gyro bias to the wrong sign. Delete the file, or press Reset in the calibration window,
+    /// to return to the priors.
+    std::string CALIB_STATE_FILE = "etc/motion_calib_state.csv";  // config: RoomConcept.CalibStateFile
 
 
 

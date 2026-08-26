@@ -31,6 +31,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
 
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.OdometryNoiseFactor", p.ODOMETRY_NOISE_FACTOR);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.OdomSampleLog", p.ODOM_SAMPLE_LOG);
+    rc::ConfigLoaderUtils::load_optional<std::string>(cl, "RoomConcept.CalibStateFile", p.CALIB_STATE_FILE);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.OdomNoiseScale", room_concept.params.odom_noise_scale);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.DifferentialTest", room_concept.params.differential_test_enabled);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.SdfCurrentSlotOnly", room_concept.params.sdf_current_slot_only);
@@ -256,6 +257,13 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
         auto& po = room_concept.params.odom_preint_noise;
         auto& pc = room_concept.params.cmd_preint_noise;
         rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.PreintZupt", po.zupt_enabled);
+        rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.PreintZuptAsFactor",
+                                                   room_concept.params.zupt_as_factor);
+        // The two forms are EXCLUSIVE: running both counts one hypothesis twice, once shaping the
+        // prior's covariance and once as its own factor. The flag therefore turns the per-sample
+        // shaping off rather than leaving the caller to remember.
+        po.zupt_as_factor = room_concept.params.zupt_as_factor;
+        pc.zupt_as_factor = room_concept.params.zupt_as_factor;
         // ★ The keys were RENAMED with their units on 2026-08-26 (per-sample sigma -> density). The
         // old names are read into a sentinel purely so a config still carrying them FAILS LOUDLY
         // instead of having them silently ignored — which would leave that platform on the header
@@ -381,6 +389,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     room_concept.params.image_edge_max_slots          = p.IMAGE_EDGE_MAX_SLOTS;
     room_concept.params.image_edge_shadow             = p.IMAGE_EDGE_SHADOW;
     room_concept.params.image_edge_csv                = p.IMAGE_EDGE_CSV;
+    room_concept.params.calib_state_file              = p.CALIB_STATE_FILE;
     // GN-only, and refused LOUDLY rather than honoured silently: the autograd backends evaluate the
     // term (the torch mirror exists) but only the GN factor list can be driven by it, so under
     // LBFGS/ADAM the flag would read true while nothing moved. Same rule, same reason, as

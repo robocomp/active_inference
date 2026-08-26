@@ -1,4 +1,5 @@
 #pragma once
+#include <utility>   // std::exchange
 
 #include <memory>
 #include <vector>
@@ -476,6 +477,12 @@ public:
         // for scale_*. Until then these are a faithful translation of the old constants, not a
         // measurement, and a MOVING A/B (early exit while translating, innov_norm, loss_motion) is the
         // only thing that settles whether the looser prior helps or hurts.
+        /// Apply the rest hypothesis as a FACTOR on the state instead of as covariance shaping, so
+        /// it can arrest a parked robot's drift rather than only shrinking the covariance around it.
+        /// Mutually exclusive with the per-sample form; see NoiseModel::zupt_as_factor.
+        bool zupt_as_factor = false;
+        /// Where the calibration WINDOW (evidence, never parameters) is kept between runs.
+        std::string calib_state_file = "etc/motion_calib_state.csv";
         bool motion_preintegration = false;
         rc::preint::NoiseModel odom_preint_noise{};  // measured-odometry channel
         // Command channel. Its floor stays deliberately looser than the encoder's (cmd_noise_base
@@ -973,6 +980,19 @@ public:
                                  std::int64_t ts_ms);
 
     /// Thread-safe: push a command to be executed on the localization thread.
+    /// A closed pivot, handed over from the scene-graph/main thread. NOT applied here: the estimator
+    /// is touched only from the localiser thread, so this queues and adapt_motion_model() drains it.
+    /// Same pattern as push_command, and for the same reason.
+    struct ClosureObs { double truth_rad, turned_rad, rate_rad_s, sigma_s; };
+    void push_calibration_closure(const ClosureObs& c)
+    {
+        std::scoped_lock lk(pending_closures_mutex_);
+        pending_closures_.push_back(c);
+    }
+
+    /// Forget every measurement and delete the state file. Queued: applied on the localiser thread.
+    void request_calibration_reset() { calib_reset_pending_.store(true); }
+
     void push_command(Command cmd);
 
     /// Wake the localization thread when a newer lidar scan is available.
@@ -1049,6 +1069,9 @@ public:
         // Cached tensors (computed once at append-time, reused every Adam iteration)
         torch::Tensor odom_delta_tensor;   // [3], on device
         torch::Tensor motion_prec_tensor;  // [3,3], Σ_dyn^{-1} on device
+        // [3,3] precision of the "this interval had no motion" hypothesis, for the ZERO-delta motion
+        // factor. Undefined unless Params::zupt_as_factor — see NoiseModel::zupt_as_factor.
+        torch::Tensor zupt_prec_tensor;
         bool subsampled = false;           // true once old-slot subsampling has been applied
 
         // Quality of this slot's localization (set after Adam/early-exit, read when slot
@@ -1155,6 +1178,29 @@ public:
         return latest_object_anchors_;
     }
 
+    /// How well the RGB projection is agreeing with the map, per cycle — the readout the viewer
+    /// plots. `chi2_per_dof` is the scale-free one and the only one with a meaningful target: it is
+    /// the weighted residual per degree of freedom, so 1.0 means the residuals are exactly the size
+    /// the per-sample sigmas claim. Above 1 the projection disagrees with the map by more than the
+    /// sensor model admits — which is a statement about the MOUNT, the map or the matching, not about
+    /// noise. `r_rms_px` is the same disagreement in raw pixels, kept because a chi2 can be pushed
+    /// around by the sigmas while pixels cannot.
+    struct ImageEdgeStats
+    {
+        bool  valid        = false;
+        float chi2_per_dof = 0.f;
+        float r_rms_px     = 0.f;
+        float loss_img     = 0.f;
+        int   n_used       = 0;
+        int   n_segments   = 0;
+        std::int64_t ts_ms = 0;
+    };
+    ImageEdgeStats get_image_edge_stats() const
+    {
+        std::scoped_lock lk(image_edge_stats_mutex_);
+        return image_edge_stats_;
+    }
+
     /// Latest RGB edge evidence (compute thread produces, solve consumes). Thread-safe copy.
     ImageEdgeObs image_edges() const
     {
@@ -1165,6 +1211,17 @@ public:
     {
         std::scoped_lock lk(image_edges_mutex_);
         latest_image_edges_ = std::move(obs);
+    }
+    /// TAKE, not peek: the extraction is moved out and the holder left empty, so one image cannot be
+    /// attached to two slots. The rates are independent (images ~30 Hz, slots ~20 Hz and irregular),
+    /// so a peek would silently re-use the same measurement whenever a slot arrived without a fresh
+    /// frame — the same evidence counted twice, which is exactly what the Woodbury marginalisation
+    /// downstream exists to prevent within a single frame. A slot with no fresh image simply carries
+    /// none, which is the honest state and what `obs.empty()` already means everywhere.
+    ImageEdgeObs take_image_edges()
+    {
+        std::scoped_lock lk(image_edges_mutex_);
+        return std::exchange(latest_image_edges_, ImageEdgeObs{});
     }
 
     void set_object_anchors(std::vector<ObjectAnchorObs> anchors)
@@ -1195,6 +1252,13 @@ private:
    std::optional<UpdateResult> last_result_;
 
    // Latest object anchors from the graph (set on main thread, consumed by the localizer thread).
+   std::atomic<bool> calib_reset_pending_{false};
+   bool calib_state_loaded_ = false;
+   std::int64_t calib_state_last_save_ms_ = 0;
+   std::mutex pending_closures_mutex_;
+   std::vector<ClosureObs> pending_closures_;
+   mutable std::mutex image_edge_stats_mutex_;
+   ImageEdgeStats     image_edge_stats_{};
    mutable std::mutex image_edges_mutex_;
    ImageEdgeObs       latest_image_edges_;
    mutable std::mutex object_anchors_mutex_;
@@ -1750,9 +1814,35 @@ private:
     /// trace_raw vs trace_eff) and "who won?" (the pose difference and the covariance both ways).
     /// Also fits the systematic-residual monitor, which is what catches a mis-calibrated mount
     /// BEFORE it biases the pose.
+    ///
+    /// ★ TWO PASSES WITH VERY DIFFERENT COSTS, and `probe_pose` splits them. Pass 1 — evaluate the
+    ///   residuals at the authority pose and fit r ~ b_const + b_invd·(fy/d) — is the MOUNT
+    ///   measurement, and it is cheap: no solve, one 2x2 least squares. Pass 2 re-solves the window
+    ///   with the term driving to answer "how far would it have moved the pose", and only means
+    ///   anything on a cycle where the optimizer actually ran.
+    ///   Passing false runs pass 1 alone, which is what lets the monitor sample EVERY cycle instead
+    ///   of only optimizing ones. That mattered: the optimizer fires on ~0.25% of cycles here — the
+    ///   better the prediction gets, the more starved this instrument became — so characterising the
+    ///   mount was a matter of hours rather than minutes for no reason but where the call sat.
     void run_image_edge_shadow(const std::vector<Eigen::Vector3f>& poses_after,
-                               float boundary_weight, std::int64_t timestamp_ms);
+                               float boundary_weight, std::int64_t timestamp_ms,
+                               bool probe_pose);
     std::ofstream image_edge_csv_;
+    void imgedge_health(std::int64_t timestamp_ms);
+    int imgedge_rows_ = 0, imgedge_calls_ = 0, imgedge_no_window_ = 0,
+        imgedge_no_obs_ = 0, imgedge_no_cam_ = 0;
+    std::int64_t imgedge_health_last_ms_ = 0;
+    /// Per-window mount fit. The accumulators are RESET after every solve, so each row is an
+    /// independent measurement and the between-window scatter is visible. See mount_pooled_solve().
+    void mount_pooled_solve(std::int64_t timestamp_ms);
+    std::ofstream mount_csv_;
+    double mnt_S11_ = 0, mnt_S12_ = 0, mnt_S22_ = 0, mnt_Sy1_ = 0, mnt_Sy2_ = 0, mnt_Syy_ = 0;
+    long   mnt_n_ = 0;
+    std::int64_t mnt_win_start_ms_ = 0;
+    float  last_mount_fy_ = 0.f;
+    float  mnt_pose_x_ = 0.f, mnt_pose_y_ = 0.f, mnt_pose_th_ = 0.f;
+    long   mnt_wins_ = 0;
+    double mnt_pitch_sum_ = 0.0, mnt_pitch_sum2_ = 0.0;
 
     void run_gn_shadow(const std::vector<Eigen::Vector3f>& poses_before,
                        const std::vector<Eigen::Vector3f>& poses_after,
