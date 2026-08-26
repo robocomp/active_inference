@@ -96,6 +96,17 @@ std::optional<Eigen::Matrix4d> MaskIngestor::resolve_transform(std::uint64_t sta
         return m;
     };
 
+    // ★ASK THE GRAPH BEFORE ASKING CORTEX. get_transformation_matrix answers a missing endpoint with a
+    // qWarning — `origen or dest nodes do not exist` — and NOTHING throttles it, so a frame that has left
+    // the graph (a room_concept restart) turns into one line PER INGESTED MASK FRAME for the life of the
+    // run. The caller already reports an unresolvable chain properly: 1 line in 100, naming both frames
+    // and the running total. Bailing here routes the condition into that counter instead of into the log.
+    // Costs two `name_map` lookups under a shared_lock; get_node would have copied both whole nodes.
+    if (G_ != nullptr)
+        if (not G_->get_id_from_name(tgt_frame_).has_value()
+            or not G_->get_id_from_name(src_frame_).has_value())
+            return std::nullopt;
+
     // Direct lookup: correct whenever the chain can't be split (no robot node, src not under the robot),
     // and the only path when extrapolation is off. Still capture-stamp pinned.
     const auto direct = [&]() -> std::optional<Eigen::Matrix4d>
@@ -107,6 +118,14 @@ std::optional<Eigen::Matrix4d> MaskIngestor::resolve_transform(std::uint64_t sta
     if (not pose_extrapolate_ or stamp == 0 or not G_)
         return direct();
 
+    // ★THE MEMO IS DROPPED WHEN THE NODE BEHIND IT LEAVES THE GRAPH. It was write-once, so after the
+    // robot node went (or was renamed — P3Bot vs Shadow) this handed back a dead name for ever and the
+    // three inner_eigen calls below each answered with cortex's warning, per mask frame. Re-discovery is
+    // the same `get_nodes_by_type` call and it is what lets a re-created robot be picked up without
+    // restarting the agent. Clearing it is also SAFE rather than merely quiet: with no robot the chain
+    // simply cannot be split, and `direct()` below is the correct answer, not a degraded one.
+    if (not robot_name_.empty() and not G_->get_id_from_name(robot_name_).has_value())
+        robot_name_.clear();
     if (robot_name_.empty())
         if (const auto robots = G_->get_nodes_by_type("robot"); not robots.empty())
             robot_name_ = robots.front().name();

@@ -241,7 +241,9 @@ private:
     bool                force_legacy_room_ = false;   // MASK_INGESTOR_LEGACY_ROOM=1 (A/B escape hatch)
     bool                pose_extrapolate_  = true;    // beat the room→robot RT lag (producer default)
     float               pose_extrap_max_dt_s_ = 0.2f; // extrapolation horizon clamp (producer default)
-    mutable std::string robot_name_;                  // memoized get_nodes_by_type("robot").front().name()
+    // Memoized get_nodes_by_type("robot").front().name(), DROPPED as soon as that node leaves the
+    // graph — a write-once memo here fed cortex a dead name once per mask frame. See resolve_transform.
+    mutable std::string robot_name_;
     std::uint64_t       dropped_no_transform_ = 0;
 };
 
