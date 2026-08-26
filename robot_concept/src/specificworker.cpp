@@ -481,7 +481,7 @@ void SpecificWorker::compute()
 
 	static auto   last      = std::chrono::steady_clock::now();
 	static std::uint64_t last_rgbd = 0, last_imu = 0, last_ricoh = 0;
-	static std::uint64_t last_helios = 0, last_bpearl = 0;
+	static std::uint64_t last_helios = 0, last_bpearl = 0, last_fullpose = 0;
 	const auto    now = std::chrono::steady_clock::now();
 	const double  dt  = std::chrono::duration<double>(now - last).count();
 	// The raw estimate is (integer frame delta / dt): over a short window this quantises
@@ -498,10 +498,12 @@ void SpecificWorker::compute()
 		const std::uint64_t c = ricoh_frames_.load(std::memory_order_relaxed);
 		const std::uint64_t hl = helios_frames_.load(std::memory_order_relaxed);
 		const std::uint64_t bp = bpearl_frames_.load(std::memory_order_relaxed);
+		const std::uint64_t fp = fullpose_frames_.load(std::memory_order_relaxed);
 		// Instantaneous window rate → EWMA. Seed on first sample; alpha 0.5 settles in a few
 		// windows after a real rate change while erasing per-window quantisation wobble.
 		constexpr double kAlpha = 0.5;
-		static double ema_rgbd = -1.0, ema_helios = -1.0, ema_bpearl = -1.0, ema_imu = -1.0, ema_ricoh = -1.0;
+		static double ema_rgbd = -1.0, ema_helios = -1.0, ema_bpearl = -1.0, ema_imu = -1.0, ema_ricoh = -1.0,
+		              ema_fullpose = -1.0;
 		const auto ewma = [](double& s, double inst)
 		{ s = (s < 0.0) ? inst : kAlpha * inst + (1.0 - kAlpha) * s; return s; };
 		const double f_rgbd   = ewma(ema_rgbd,   static_cast<double>(r  - last_rgbd)   / dt);
@@ -509,6 +511,7 @@ void SpecificWorker::compute()
 		const double f_ricoh  = ewma(ema_ricoh,  static_cast<double>(c  - last_ricoh)  / dt);
 		const double f_helios = ewma(ema_helios, static_cast<double>(hl - last_helios) / dt);
 		const double f_bpearl = ewma(ema_bpearl, static_cast<double>(bp - last_bpearl) / dt);
+		const double f_fullpose = ewma(ema_fullpose, static_cast<double>(fp - last_fullpose) / dt);
 		// Per-thread heartbeat, one table row each. src label: "off" when the whole path is
 		// gated out (no reader thread), "local" while robot_concept bridges Ice→media itself,
 		// "ext-DDS" once negotiation hands the plane to the external producer (bridge off) — which
@@ -528,6 +531,10 @@ void SpecificWorker::compute()
 			{ "BpearlThread",   f_bpearl, src_label(params.ENABLE_LIDAR, &bridge_lidar_) },
 			{ "IMUThread",      f_imu,    src_label(params.ENABLE_IMU,   &bridge_imu_)   },
 			{ "Ricoh360Thread", f_ricoh,  src_label(params.ENABLE_RICOH, &bridge_ricoh_) },
+			// Odometry (FullPoseEstimationPub). Not a thread of ours and not on the media plane: it is
+			// pushed by the producer's Ice callback, so the src is always "ice" — 0.0 Hz here means the
+			// publisher (webots-bridge / base) is silent, not that a reader of ours stalled.
+			{ "FullPoseSub",    f_fullpose, "ice" },
 		};
 		constexpr int NFIELDS = static_cast<int>(std::size(fields));
 		// Print every rate window (~2 s) so the per-stream Hz table is always visible in the terminal,
@@ -540,7 +547,7 @@ void SpecificWorker::compute()
 			qInfo().noquote() << line;
 		}
 		last = now; last_rgbd = r; last_imu = i; last_ricoh = c;
-		last_helios = hl; last_bpearl = bp;
+		last_helios = hl; last_bpearl = bp; last_fullpose = fp;
 
 			// Publish live media-plane throughput onto each sensor's descriptor node (main thread, so
 			// the graph write is safe). The frames travel over zero-copy DDS SHM and never hit the wire,
@@ -1701,6 +1708,10 @@ void SpecificWorker::FullPoseEstimationPub_newFullPose(RoboCompFullPoseEstimatio
 	if (shutting_down_.load())
 		return;
 
+	// Count the ARRIVAL, before any graph work: this measures the producer's publication rate, so a
+	// sample that finds no robot node still counts as received.
+	fullpose_frames_.fetch_add(1, std::memory_order_relaxed);
+
 	// we do not add any noise here. It is up to the users.
 	if (auto pose_node = G->get_node(robot_name); pose_node.has_value())
 	{
@@ -1716,6 +1727,49 @@ void SpecificWorker::FullPoseEstimationPub_newFullPose(RoboCompFullPoseEstimatio
 		// config setting means each consumer reads the answer off the sample itself.
 		G->add_or_modify_attrib_local<robot_current_speed_sim_timestamp_att>(pose_node.value(), static_cast<unsigned long>(pose.simTimestamp));
 		G->add_or_modify_attrib_local<robot_current_speed_simulated_att>(pose_node.value(), pose.simulated);
+
+		// ── Per-sample velocity VARIANCE, as the producer states it ───────────────────────────────
+		// FullPoseEuler has always carried this in velCov and this function used to DROP it, which is
+		// why every consumer downstream falls back on an asserted constant. Forwarding it is what lets
+		// a preintegrator weight a segment by the noise the sensor actually has rather than by a config
+		// value that may describe a different robot — and it is the only channel through which a FASTER
+		// odometry stream can tighten anything at all, because a noise DENSITY is invariant to sample
+		// rate: only a smaller per-sample variance, or a shorter dt_sample, moves it.
+		//
+		// ★ FRAME, AND IT IS THE TRAP HERE. velCov is a BODY-frame quantity, and it could not be
+		// anything else: it is written by the base driver, a component that has no notion of a room or
+		// a world at all. It cannot express a covariance in a frame it does not know exists. (The same
+		// conclusion from the physics: a world-frame velocity covariance would rotate with the robot and
+		// fold the heading's own uncertainty into what is meant to be a property of the SENSOR.)
+		// So its linear block is indexed on the BODY axes (m00 = x, m11 = y, m55 = yaw rate).
+		// ⚠ The `// vx` / `// vy` labels beside the writes in webots-bridge are cosmetic and prove
+		// nothing either way — it stores one nominal value into both slots, so they never disagree.
+		//
+		// ★★ AND THE INDICES CROSS OVER, because this robot's forward axis is +Y:
+		//        adv  = forward = body +Y  ⇒  var_adv  = m11
+		//        side = lateral = body +X  ⇒  var_side = m00
+		// Verified against the producer, which builds the same pair the same way (webots-bridge:
+		// `adv = velocity_local(1)` i.e. y, `side = -velocity_local(0)` i.e. -x; the sign is irrelevant
+		// to a variance). Writing m00 into adv would silently hand the forward channel the lateral
+		// channel's noise — which on a mecanum, where roller slip makes lateral much the worse of the
+		// two, is precisely the swap that would go unnoticed while quietly mis-weighting every segment.
+		//
+		// A negative entry means "this producer does not know" for that channel, matching the .idsl's
+		// m00 = -1 convention and ImuFrame's gyro_var/acc_var. Each channel is independent: a producer
+		// may know its yaw rate noise and not its linear noise. When NOTHING is known the attribute is
+		// not written at all, so "never published" stays distinguishable from "published as unknown" —
+		// a zero would read downstream as INFINITE CONFIDENCE, which is the trap the .idsl warns about.
+		{
+			const auto stated = [](float v) { return v >= 0.f ? v : -1.f; };   // NaN also reads as unknown
+			const float var_adv  = stated(pose.velCov.m11);   // forward, body +Y
+			const float var_side = stated(pose.velCov.m00);   // lateral, body +X
+			const float var_rot  = stated(pose.velCov.m55);   // yaw rate, frame-independent
+			if (var_adv >= 0.f or var_side >= 0.f or var_rot >= 0.f)
+			{
+				const std::vector<float> vel_var{ var_adv, var_side, var_rot };
+				G->add_or_modify_attrib_local<robot_current_speed_variance_att>(pose_node.value(), vel_var);
+			}
+		}
 
 		// ── GROUND TRUTH, SIMULATION ONLY ────────────────────────────────────────────────────────
 		// pose.x/y/rz come straight off the Webots supervisor node (robotNode->getPosition() /

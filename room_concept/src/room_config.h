@@ -71,6 +71,12 @@ struct RoomConfig
     // coords) and any object RT edges persisted under the DSR `room` node are stale by the offset.
     bool        RECENTER_ROOM_POLYGON = true;   // config: RoomConcept.RecenterRoomPolygon
     float       ODOMETRY_NOISE_FACTOR = 0.0f;
+    // One CSV line per ARRIVING odometry sample (etc/odom_samples.csv), for measuring the stream's
+    // own statistics. Deliberately NOT the per-cycle debug log: that one is written once per lidar
+    // sweep and records only the LATEST odometry sample, which aliases a 50 Hz stream onto ~20 Hz
+    // rows -- fatal for any autocorrelation question, since the aliasing invents correlation at one
+    // rate and destroys it at another. Off by default; it is an instrument, not telemetry.
+    bool        ODOM_SAMPLE_LOG = false;        // config: RoomConcept.OdomSampleLog
 
 
 

@@ -28,6 +28,7 @@
 //#define HIBERNATION_ENABLED
 
 #include <genericworker.h>
+#include <fstream>
 #include "buffer_types.h"
 #include "room_concept.h"
 #include "svg_room_loader.h"
@@ -97,10 +98,16 @@ class SpecificWorker : public GenericWorker
 
         // ── Velocity / odometry buffers (thread-safe) ──────────────────────────
         rc::VelocityBuffer velocity_buffer_{20};
-        rc::OdometryBuffer odometry_buffer_{20};
-        // Deeper than the odometry buffer: the IMU runs ~125 Hz against odometry's 10 Hz, and it must
-        // still span the gap between two lidar sweeps (50-100 ms, so 6-13 samples) with slack for a
-        // late one. 20 entries would not cover two sweeps.
+        // Sized in SECONDS OF HISTORY, not in samples, because that is what the integrator needs: it
+        // must find samples bracketing [last accepted pose, this sweep], and that span stretches
+        // whenever a sweep is late or the localiser stalls. 20 entries was ~2.0 s at the old ~10 Hz;
+        // at 50 Hz the same 20 entries are 0.4 s, and the cap is HARD (doublebuffer_sync.h pop_front
+        // evicts the oldest silently), so the bracket would fail as a coverage refusal rather than as
+        // an error anyone could see. 128 restores ~2.6 s at 50 Hz and still covers 6.4 s if a bridge
+        // is republishing at the old rate.
+        rc::OdometryBuffer odometry_buffer_{128};
+        // Same rule: the IMU runs ~125 Hz and must span the gap between two lidar sweeps (50-100 ms)
+        // with slack for a late one. 256 entries is ~2.0 s.
         rc::ImuBuffer imu_buffer_{256};
         // Fitted from the (wall, sim) stamp pairs arriving on every odometry sample; used to put the
         // lidar sweep bounds on the same clock as the rates integrated between them.
@@ -111,6 +118,17 @@ class SpecificWorker : public GenericWorker
         float last_robot_adv_speed_  = 0.f;   // robot-frame forward velocity (m/s), updated from DSR
         float last_robot_side_speed_ = 0.f;   // robot-frame lateral velocity (m/s)
         float last_robot_rot_speed_  = 0.f;   // robot-frame angular velocity (rad/s)
+        // Last COMMANDED velocity seen on the robot node, mirrored so every odometry sample can be
+        // labelled with the command in force when it was produced. Selecting "zero command" rows is
+        // the whole basis of a rest-noise measurement, and a command sampled later would label the
+        // wrong rows at a start or stop.
+        float last_cmd_adv_  = 0.f;
+        float last_cmd_side_ = 0.f;
+        float last_cmd_rot_  = 0.f;
+        std::int64_t last_cmd_ts_ms_ = 0;
+        // Per-sample odometry log (RoomConcept.OdomSampleLog). Opened lazily on the first sample.
+        std::ofstream odom_sample_log_;
+        std::uint64_t odom_sample_seq_ = 0;
 
         std::atomic<bool> pose_saved_{false};
         void save_robot_pose_once();

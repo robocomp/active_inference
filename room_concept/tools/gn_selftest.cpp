@@ -20,6 +20,10 @@
 #include "room_concept.h"
 #include "room_gn_solver.h"
 #include "room_model.h"
+#include "image_edge_types.h"
+#include "image_edge_ops.h"
+#include "image_edge_accumulate.h"
+#include "image_edge_source.h"
 
 using rc::RoomConcept;
 
@@ -500,18 +504,54 @@ int main()
             const float sx_zupt = std::sqrt(park_zupt.cov(0, 0));
             const float st_zupt = std::sqrt(park_zupt.cov(2, 2));
             // ★Assert the MECHANISM, not a magic size. Parked, every sample's velocity variance
-            // collapses to the ZUPT's own, so the interval has a closed form: sigma = sigma_rest·√(dt·T).
-            // Checking against that pins the algebra and stays correct when sigma_rest is re-measured on
-            // another platform — an absolute bound would just re-encode today's number, which is exactly
-            // how the first version of this test came to enshrine a sigma_rest that was 10x too tight.
-            const float predicted = rc::preint::NoiseModel{}.zupt_sigma_v * std::sqrt(0.008f * 300.f);
+            // collapses to the ZUPT's own, so the interval has a closed form. With the rest hypothesis
+            // carried as a DENSITY (2026-08-26) that closed form is sigma = density·√T — note there is
+            // no dt in it, which IS the property being asserted. The old per-sample form gave
+            // sigma_rest·√(dt·T), and that stray √dt was the bug: publishing faster tightened the
+            // parked prior with no physical change. Checking the closed form pins the algebra and
+            // stays correct when the density is re-measured on another platform — an absolute bound
+            // would just re-encode today's number, which is exactly how the first version of this test
+            // came to enshrine a sigma_rest that was 10x too tight.
+            // ★ The EXACT closed form, not the R << P approximation. Parked, both variances are
+            // densities over dt, so P = a/dt and R = b/dt and the scalar update returns their
+            // HARMONIC combination — sigma = sqrt(a·b·T/(a+b)) — with no dt in it. The previous
+            // version asserted sigma_rest·sqrt(dt·T), which is that expression's limit for b << a,
+            // and it held only while the rest constant was 5.9x too tight for this robot. With the
+            // measured density it is no longer a floor far below the model, it is COMPARABLE to it,
+            // and the approximation is off by 20%. Using the exact form keeps the test honest under
+            // any future re-measurement instead of encoding one platform's regime.
+            const float a = qn.sigma_v_lat * qn.sigma_v_lat;
+            const float b = rc::preint::NoiseModel{}.zupt_density_v
+                          * rc::preint::NoiseModel{}.zupt_density_v;
+            const float predicted = std::sqrt(a * b * 300.f / (a + b));
             const float rel_err   = std::abs(sx_zupt - predicted) / predicted;
             std::snprintf(buf, sizeof buf,
                           "300 s parked: sigma_x %.3f m free-drift -> %.4f m with ZUPT "
                           "(closed form %.4f m, err %.1f%%), sigma_th %.4f rad",
                           sx_free, sx_zupt, predicted, rel_err * 100.f, st_zupt);
-            check("ZUPT bounds the parked interval to sigma_rest*sqrt(dt*T)",
-                  rel_err < 0.05f and sx_zupt < 0.2f * sx_free, buf);
+            // The second clause asserts only that the rest hypothesis TIGHTENS the interval. How much
+            // is not a free parameter — it is set by the ratio of the two measured densities, and
+            // demanding a fixed factor would silently re-impose a rest noise nobody measured.
+            check("ZUPT bounds the parked interval to sqrt(a*b*T/(a+b))",
+                  rel_err < 0.05f and sx_zupt < sx_free, buf);
+
+            // (a2) RATE INVARIANCE — the test that would have caught the bug this replaced. The same
+            // 300 s parked interval, integrated at three sample rates spanning 8x, must give the SAME
+            // covariance: the rest hypothesis contributes information per unit of TIME, so how many
+            // samples happened to land in the interval cannot matter. Under the old per-sample form
+            // these three differed by sqrt(8) = 2.83x, and nothing in the suite objected.
+            {
+                const float s_4  = std::sqrt(run(0.f, 0.f, 0.f, 0.004f, 300.f, true).cov(0, 0));
+                const float s_16 = std::sqrt(run(0.f, 0.f, 0.f, 0.016f, 300.f, true).cov(0, 0));
+                const float s_32 = std::sqrt(run(0.f, 0.f, 0.f, 0.032f, 300.f, true).cov(0, 0));
+                const float spread = (std::max({s_4, s_16, s_32}) - std::min({s_4, s_16, s_32}))
+                                   / std::max(s_16, 1e-12f);
+                std::snprintf(buf, sizeof buf,
+                              "300 s parked at 4/16/32 ms: sigma_x %.5f / %.5f / %.5f m (spread %.2f%%)",
+                              s_4, s_16, s_32, spread * 100.f);
+                check("the parked ZUPT interval does not depend on the sample rate",
+                      spread < 0.02f, buf);
+            }
 
             // (b) Fades out with speed, on its own. No threshold: the gap closes because the rest
             // hypothesis' own variance grows with the observed motion.
@@ -531,11 +571,36 @@ int main()
             const auto still = run(0.f, 0.f, 0.0f, 0.008f, 10.f, true);
             const float sx_pivot = std::sqrt(pivot.cov(0, 0));
             const float sx_still = std::sqrt(still.cov(0, 0));
-            std::snprintf(buf, sizeof buf, "10 s: sigma_x %.4f m pivoting vs %.4f m truly still (%.0fx)",
-                          sx_pivot, sx_still, sx_pivot / std::max(sx_still, 1e-9f));
-            // The factor of separation is set by the lever arm against sigma_rest, so it moves whenever
-            // either is re-measured; what must hold is that a pivot is treated as MOTION, decisively.
-            check("a pivot is not mistaken for rest", sx_pivot > 5.f * sx_still, buf);
+            // ★ Assert that the LEVER ARM is what separates them, not a magnitude. The separation
+            // factor is set by the lever against the rest density, so it moves whenever either is
+            // re-measured — it was 5x when the rest noise was 5.9x too tight and is 1.3x now that it
+            // has been measured, because a base whose wheels are genuinely that noisy simply cannot
+            // distinguish a slow pivot from rest as sharply. Demanding the old factor would be
+            // demanding the old wrong constant back. What must remain TRUE is the mechanism: with the
+            // lever arm removed, a pivot becomes indistinguishable from rest, and that is the failure
+            // this term exists to prevent.
+            rc::preint::NoiseModel q_nolever = qn;
+            q_nolever.zupt_enabled = true;
+            // m_v = speed + lever·|omega|, so the lever is what lets a PURE ROTATION register as
+            // motion in the translation channel. Setting it to ~0 removes exactly that coupling and
+            // nothing else: the pivot then presents v_lat = v_long = 0 and is read as rest, which is
+            // the failure this term exists to prevent. (The code floors it at 1e-3 to keep m_w finite.)
+            q_nolever.zupt_lever_m = 1e-3f;
+            rc::preint::Integrator g_nl(theta0);
+            g_nl.set_noise(q_nolever);
+            for (int i = 0; i < 1250; ++i) g_nl.add(0.f, 0.f, 0.8f, 0.008f);
+            const float sx_pivot_nolever = std::sqrt(g_nl.result().cov(0, 0));
+            std::snprintf(buf, sizeof buf,
+                          "10 s: sigma_x %.4f m pivoting vs %.4f m still (%.2fx); with the lever "
+                          "removed the pivot falls to %.4f m (%.2fx)",
+                          sx_pivot, sx_still, sx_pivot / std::max(sx_still, 1e-9f),
+                          sx_pivot_nolever, sx_pivot_nolever / std::max(sx_still, 1e-9f));
+            // Without the lever a pivot collapses onto the parked answer; with it, it is strictly
+            // looser. Both clauses are about the MECHANISM and neither pins a magnitude that would
+            // move when the rest density is re-measured on another robot.
+            check("the lever arm is what stops a pivot being read as rest",
+                  sx_pivot > 1.15f * sx_pivot_nolever
+                  and std::abs(sx_pivot_nolever - sx_still) < 0.05f * sx_still, buf);
 
             // (d) Continuous in speed — the property that makes this a model term and not a switch.
             // ★A RELATIVE step size cannot test this: P⁺ rises quadratically off a tiny rest floor, so
@@ -572,6 +637,328 @@ int main()
                       mono_c and mono_f and shrink > 3.f, buf);
             }
         }
+    }
+
+
+    // ═══ RGB edge alignment (ImageEdge) ═══════════════════════════════════════════════════════
+    // Four questions, in the order in which getting one wrong makes the next meaningless:
+    //   1. does the reduced CameraModel reproduce the projection, and its analytic Jacobian match?
+    //   2. does the sub-pixel edge estimator hit its own claimed precision? (RMS/sigma ~ 1)
+    //   3. does the common-mode cap SATURATE, and stay positive semi-definite?
+    //   4. does the pose Jacobian of the actual residual match central differences?
+    std::printf("\n-- image edge: camera model + jacobian ------------------------------------------\n");
+    {
+        char buf[256];
+        rc::CameraModel cam;
+        cam.kind = rc::CameraModel::Kind::Pinhole;
+        cam.fx = 448.f; cam.fy = 448.f; cam.width = 1280.f; cam.height = 720.f;
+        cam.cx = 640.f; cam.cy = 360.f; cam.valid = true;
+
+        // Analytic P vs central difference of project_with_model itself.
+        double worst = 0.0;
+        const double pts[][3] = {{0.3,3.0,-1.0},{-1.2,2.0,0.4},{0.0,5.0,-1.08},{2.0,4.0,1.1}};
+        for (const auto& q : pts)
+        {
+            const Eigen::Vector3d p(q[0], q[1], q[2]);
+            Eigen::Matrix<double,2,3> Pa, Pn;
+            if (not rc::img::project_jacobian_model(cam, p, Pa)) continue;
+            const double h = 1e-6;
+            for (int j = 0; j < 3; ++j)
+            {
+                Eigen::Vector3d pp = p, pm = p; pp[j] += h; pm[j] -= h;
+                Eigen::Vector2d a, b;
+                rc::img::project_with_model(cam, pp, a);
+                rc::img::project_with_model(cam, pm, b);
+                Pn(0,j) = (a.x()-b.x())/(2*h); Pn(1,j) = (a.y()-b.y())/(2*h);
+            }
+            worst = std::max(worst, (Pa-Pn).cwiseAbs().maxCoeff()
+                                    / std::max(1.0, Pn.cwiseAbs().maxCoeff()));
+        }
+        std::snprintf(buf, sizeof buf, "max rel err %.2e", worst);
+        check("pinhole dP/dp_cam matches finite diff", worst < 1e-5, buf);
+
+        // The 360 branch must round-trip project -> ray -> project. Its azimuth convention is
+        // RECOVERED from project() rather than assumed, so this guards the recovery too.
+        rc::CameraModel eq;
+        eq.kind = rc::CameraModel::Kind::Equirect;
+        eq.width = 1920.f; eq.height = 960.f; eq.azimuth_sign = 1.f; eq.azimuth_offset = 0.f;
+        eq.valid = true;
+        Eigen::Vector2d uv0, uv90;
+        rc::img::project_with_model(eq, Eigen::Vector3d(0,1,0), uv0);
+        rc::img::project_with_model(eq, Eigen::Vector3d(1,0,0), uv90);
+        std::snprintf(buf, sizeof buf, "az0 u=%.1f (want 960), az90 u=%.1f (want 1440)", uv0.x(), uv90.x());
+        check("equirect azimuth mapping", std::abs(uv0.x()-960.)<1e-6 and std::abs(uv90.x()-1440.)<1e-6, buf);
+    }
+
+    std::printf("\n-- image edge: common-mode saturation -------------------------------------------\n");
+    {
+        char buf[256];
+        // The acceptance test for the Woodbury cap, and the reason it exists: information must
+        // SATURATE as samples are added to ONE segment, and H must stay positive semi-definite.
+        // Run well past any realistic segment length -- the float32 version of this code went
+        // INDEFINITE at N=1000 (trace -1.0e4), which is a negative variance downstream.
+        std::mt19937 r2(99);
+        std::normal_distribution<float> nz(0.f, 1.f);
+        float tr_small = 0.f, tr_big = 0.f, min_eig = 0.f, raw_big = 0.f;
+        for (int N : {10, 2000})
+        {
+            rc::ImageEdgeSegment seg;
+            for (int k = 0; k < N; ++k)
+            {
+                rc::ImageEdgeSample smp;
+                const float d = 2.f + 3.f * k / std::max(1, N - 1);
+                smp.sigma_px = 0.4f; smp.pi_vis = 1.f; smp.search_L = 20.f;
+                smp.h(0) = 0.0035f * 448.f;         // pitch: identical for every sample
+                smp.h(1) = 0.010f * 448.f / d;      // height: varies along the line
+                smp.h(2) = 0.0035f * 44.8f;
+                smp.h(3) = 0.f;
+                seg.samples.push_back(smp);
+            }
+            const auto acc = rc::img::accumulate_segment(seg,
+                [&](std::size_t k, Eigen::Matrix<float,1,3>& J) -> float
+                {
+                    const float d = 2.f + 3.f * k / std::max<std::size_t>(1, seg.samples.size()-1);
+                    J << 448.f / d, 0.2f, 30.f;
+                    return 0.35f * nz(r2);
+                },
+                [](std::size_t) { return 0.0f; });
+            Eigen::SelfAdjointEigenSolver<Eigen::Matrix3f> es(acc.H);
+            if (N == 10) tr_small = acc.trace_eff;
+            else { tr_big = acc.trace_eff; min_eig = es.eigenvalues().minCoeff(); raw_big = acc.trace_raw; }
+        }
+        const float growth = tr_big / std::max(1e-9f, tr_small);
+        std::snprintf(buf, sizeof buf, "trace 10 -> 2000 samples: %.0f -> %.0f (%.2fx) while raw = %.3g",
+                      tr_small, tr_big, growth, raw_big);
+        check("information SATURATES with sample count", growth > 1.0f and growth < 3.0f, buf);
+        std::snprintf(buf, sizeof buf, "min eigenvalue %.3e vs trace %.3e", min_eig, tr_big);
+        check("capped H stays positive semi-definite", min_eig > -1e-4f * std::max(1.f, tr_big), buf);
+    }
+
+    std::printf("\n-- image edge: sub-pixel estimator + pose jacobian ------------------------------\n");
+    {
+        char buf[256];
+        // A synthetic room rendered into a synthetic pinhole camera. The shading steps at the
+        // projected wall-wall corners are ANTI-ALIASED, so the true edge sits at a known fractional
+        // column; a hard `x >= u` would quantise the truth to the pixel grid and inject a ~0.29 px
+        // error that has nothing to do with the estimator (that mistake made the CRB look 11x
+        // optimistic when it was in fact correct to 9%).
+        rc::CameraModel cam;
+        cam.kind = rc::CameraModel::Kind::Pinhole;
+        cam.fx = 448.f; cam.fy = 448.f; cam.width = 1280.f; cam.height = 720.f;
+        cam.cx = 640.f; cam.cy = 360.f; cam.valid = true;
+        const Eigen::Matrix3f Rc = Eigen::Matrix3f::Identity();
+        const Eigen::Vector3f tc(0.f, 0.f, -1.08f);       // camera 1.08 m up (P3Bot ZED mount)
+        const auto poly = room_polygon();
+        const float room_h = 2.4f;
+        const Eigen::Vector3f pose_t(0.20f, -0.30f, 0.15f);
+
+        auto to_cam = [&](const Eigen::Vector3f& pr, const Eigen::Vector3f& po)
+        {
+            const float c = std::cos(po.z()), sn = std::sin(po.z());
+            const Eigen::Vector3f e(pr.x()-po.x(), pr.y()-po.y(), pr.z());
+            return Eigen::Vector3f(Rc * Eigen::Vector3f(c*e.x()+sn*e.y(), -sn*e.x()+c*e.y(), e.z()) + tc);
+        };
+
+        const int W = 1280, H = 720;
+        std::vector<float> ucorner;
+        for (const auto& v : poly)
+        {
+            Eigen::Vector2d uv;
+            if (rc::img::project_with_model(cam, to_cam({v.x(), v.y(), 1.2f}, pose_t).cast<double>(), uv)
+                and uv.x() > 2 and uv.x() < W-3) ucorner.push_back(static_cast<float>(uv.x()));
+        }
+        std::sort(ucorner.begin(), ucorner.end());
+        auto shade = [&](double x) { int b = 0; for (float u : ucorner) if (x >= u) ++b; return 70.0 + 55.0*(b%3); };
+        std::vector<std::uint8_t> img(static_cast<std::size_t>(W)*H);
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x)
+            {
+                double acc = 0; const int S = 16;
+                for (int k = 0; k < S; ++k) acc += shade(x - 0.5 + (k + 0.5)/S);
+                img[static_cast<std::size_t>(y)*W + x] = static_cast<std::uint8_t>(std::lround(acc/S));
+            }
+        std::mt19937 r3(5);
+        std::normal_distribution<float> pn(0.f, 1.5f);
+        for (auto& px : img) px = static_cast<std::uint8_t>(std::clamp<int>(px + std::lround(pn(r3)), 0, 255));
+
+        rc::GrayFrame frame;
+        frame.gray = img; frame.width = W; frame.height = H; frame.stamp = 1; frame.valid = true;
+        frame.sigma_i = rc::img::estimate_noise_sigma_immerkaer(frame.gray.data(), W, H);
+        std::snprintf(buf, sizeof buf, "measured %.3f, rendered 1.500", frame.sigma_i);
+        check("Immerkaer noise sigma recovers the truth", std::abs(frame.sigma_i - 1.5f) < 0.25f, buf);
+
+        rc::ImageEdgeSource src;
+        rc::ImageEdgeSource::Config ic;
+        ic.use_wall_corners = true; ic.use_floor_junction = false;
+        ic.room_height = room_h; ic.sample_spacing_m = 0.10f;
+        src.set_config(ic); src.set_room_polygon(poly);
+        rc::ImageEdgeSource::Stats st;
+        const auto obs = src.extract(frame, cam, Rc, tc, pose_t,
+                                     Eigen::Matrix3f::Identity()*1e-4f,
+                                     Eigen::Vector3f::Zero(), 0, &st);
+
+        auto resid_rms = [&](const Eigen::Vector3f& po)
+        {
+            double s2 = 0; int n = 0;
+            for (const auto& sg : obs.segments) for (const auto& sm : sg.samples)
+            {
+                Eigen::Vector2d uv;
+                if (not rc::img::project_with_model(cam, to_cam(sm.p_room, po).cast<double>(), uv)) continue;
+                const double r = sm.n_hat.x()*(uv.x()-sm.uv_meas.x()) + sm.n_hat.y()*(uv.y()-sm.uv_meas.y());
+                s2 += r*r; ++n;
+            }
+            return n ? std::sqrt(s2/n) : -1.0;
+        };
+        const double rms = resid_rms(pose_t);
+        const double ratio = rms / std::max(1e-6f, st.med_sigma_px);
+        std::snprintf(buf, sizeof buf, "%d samples, RMS %.4f px vs claimed sigma %.4f px (ratio %.2f)",
+                      st.n_searched, rms, st.med_sigma_px, ratio);
+        check("sub-pixel edge meets its CLAIMED precision", st.n_searched > 8 and ratio > 0.4 and ratio < 2.5, buf);
+
+        // The residual must actually respond to pose. A term that does not is the circularity bug.
+        const double rms_off = resid_rms(pose_t + Eigen::Vector3f(0.f, 0.f, 0.0087f));  // +0.5 deg
+        std::snprintf(buf, sizeof buf, "RMS %.3f px at truth -> %.3f px at +0.5 deg yaw", rms, rms_off);
+        check("residual RESPONDS to a pose perturbation", rms_off > 5.0 * rms, buf);
+
+        // Pose Jacobian vs central differences, in DOUBLE (a 1e-6 probe of a float pose is float noise).
+        double jworst = 0.0; int jn = 0;
+        for (const auto& sg : obs.segments) for (const auto& sm : sg.samples)
+        {
+            auto to_cam_d = [&](const Eigen::Vector3d& po)
+            {
+                const double c = std::cos(po.z()), sn = std::sin(po.z());
+                const Eigen::Vector3d e(sm.p_room.x()-po.x(), sm.p_room.y()-po.y(), (double)sm.p_room.z());
+                return Eigen::Vector3d(Rc.cast<double>()
+                       * Eigen::Vector3d(c*e.x()+sn*e.y(), -sn*e.x()+c*e.y(), e.z()) + tc.cast<double>());
+            };
+            Eigen::Matrix<double,1,3> Jn;
+            bool ok = true;
+            for (int j = 0; j < 3 and ok; ++j)
+            {
+                Eigen::Vector3d pp = pose_t.cast<double>(), pm = pose_t.cast<double>();
+                const double h = 1e-6; pp[j] += h; pm[j] -= h;
+                Eigen::Vector2d a, b;
+                ok = rc::img::project_with_model(cam, to_cam_d(pp), a)
+                 and rc::img::project_with_model(cam, to_cam_d(pm), b);
+                if (ok) Jn(0,j) = (sm.n_hat.x()*(a.x()-b.x()) + sm.n_hat.y()*(a.y()-b.y())) / (2*h);
+            }
+            if (not ok) continue;
+            Eigen::Matrix<double,2,3> P;
+            if (not rc::img::project_jacobian_model(cam, to_cam_d(pose_t.cast<double>()), P)) continue;
+            const double c = std::cos((double)pose_t.z()), sn = std::sin((double)pose_t.z());
+            Eigen::Matrix3d Rm; Rm << c, sn, 0, -sn, c, 0, 0, 0, 1;
+            const Eigen::Vector3d e(sm.p_room.x()-pose_t.x(), sm.p_room.y()-pose_t.y(), (double)sm.p_room.z());
+            const Eigen::Vector3d prb = Rm * e;
+            Eigen::Matrix3d Jx;
+            Jx.col(0) = Rc.cast<double>() * (-Rm.col(0));
+            Jx.col(1) = Rc.cast<double>() * (-Rm.col(1));
+            Jx.col(2) = Rc.cast<double>() * Eigen::Vector3d(prb.y(), -prb.x(), 0.0);
+            const Eigen::Matrix<double,1,3> Ja = sm.n_hat.transpose().cast<double>() * P * Jx;
+            jworst = std::max(jworst, (Ja-Jn).cwiseAbs().maxCoeff()
+                                      / std::max(1.0, Jn.cwiseAbs().maxCoeff()));
+            ++jn;
+        }
+        std::snprintf(buf, sizeof buf, "max rel err %.2e over %d samples", jworst, jn);
+        check("pose Jacobian d r / d x matches finite diff", jn > 8 and jworst < 1e-4, buf);
+    }
+
+    std::printf("\n-- image edge: panorama seam ----------------------------------------------------\n");
+    {
+        char buf[256];
+        // The Ricoh's column axis is CYCLIC: column W-1 and column 0 are neighbours on one continuous
+        // sphere. A wall corner is near-vertical, so its search normal is near-HORIZONTAL and the
+        // whole normal search runs along u — which means a corner near the seam has its window
+        // straddle the cut. If the sampler does not wrap, half that window returns nothing and the
+        // peak is taken from whichever half stayed in bounds. That is a BIASED MATCH reported with a
+        // finite sigma, not a missing sample, so nothing downstream can tell it apart from a real
+        // edge. This test puts the truth on the far side of the seam on purpose.
+        constexpr int W = 1920, H = 240;
+        const float u_true = 1915.6f;                 // 4.4 px BELOW the cut
+        const float u_pred = 3.0f;                    // ... predicted 7.4 px above it, across the seam
+        const float s_true = -7.4f;                   // u_pred + s_true == u_true (mod W)
+        std::vector<std::uint8_t> img(static_cast<std::size_t>(W) * H);
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x)
+            {
+                // Signed distance to the edge, ON THE CIRCLE.
+                float d = static_cast<float>(x) - u_true;
+                while (d >  0.5f * W) d -= W;
+                while (d <= -0.5f * W) d += W;
+                // Gaussian-blurred step (b = 1 px): |dI/du| is then a smooth peak at d = 0, which is
+                // what the parabolic vertex is entitled to assume.
+                const float f = 0.5f * (1.f + std::erf(d / std::sqrt(2.0f)));
+                img[static_cast<std::size_t>(y) * W + x] =
+                    static_cast<std::uint8_t>(std::lround(40.f + 170.f * f));
+            }
+
+        // The same search image_edge_source.cpp runs, at both settings of the one thing under test.
+        const Eigen::Vector2f n_hat(1.f, 0.f);
+        const auto search = [&](int wrap_u, bool& found) -> float
+        {
+            constexpr int steps = 12;                 // reaches across the seam from u_pred
+            std::vector<float> prof;
+            float best_mag = 0.f, best_s = 0.f;
+            int   best_i = 0;
+            for (int i = -steps; i <= steps; ++i)
+            {
+                float gd = 0.f;
+                if (not rc::img::dir_derivative(img.data(), W, H, u_pred + static_cast<float>(i),
+                                                0.5f * H, n_hat, gd, wrap_u))
+                { prof.push_back(0.f); continue; }
+                const float m = std::fabs(gd);
+                prof.push_back(m);
+                if (m > best_mag) { best_mag = m; best_s = static_cast<float>(i);
+                                    best_i = static_cast<int>(prof.size()) - 1; }
+            }
+            found = best_mag > 1.f;
+            if (best_i > 0 and best_i + 1 < static_cast<int>(prof.size()))
+                best_s += rc::img::parabolic_vertex(prof[best_i-1], prof[best_i], prof[best_i+1]);
+            return best_s;
+        };
+
+        bool found_w = false, found_n = false;
+        const float s_wrap = search(W, found_w);
+        const float s_none = search(0, found_n);
+
+        std::snprintf(buf, sizeof buf, "recovered s = %.3f px, truth %.3f px (err %.3f)",
+                      s_wrap, s_true, std::fabs(s_wrap - s_true));
+        check("seam-straddling search finds the edge WITH wrap",
+              found_w and std::fabs(s_wrap - s_true) < 0.15f, buf);
+
+        // The negative control. It must FAIL, and it must be recorded that it fails, because this is
+        // the defect the wrap exists to remove -- if this line ever starts passing on its own, the
+        // sampler changed underneath and the positive test above stopped proving anything.
+        std::snprintf(buf, sizeof buf, "no-wrap gives s = %.3f px (found=%d) vs truth %.3f",
+                      s_none, static_cast<int>(found_n), s_true);
+        check("... and does NOT find it without wrap (negative control)",
+              not found_w ? false : (not found_n or std::fabs(s_none - s_true) > 2.0f), buf);
+
+        // Away from the seam the two must be INDISTINGUISHABLE: wrapping may not change any answer
+        // it was not introduced to change. A pinhole frame keeps sampling exactly as it did.
+        const float u_mid = 960.0f;
+        const auto search_at = [&](float u0, int wrap_u) -> float
+        {
+            constexpr int steps = 12;
+            std::vector<float> prof;
+            float best_mag = 0.f, best_s = 0.f; int best_i = 0;
+            for (int i = -steps; i <= steps; ++i)
+            {
+                float gd = 0.f;
+                if (not rc::img::dir_derivative(img.data(), W, H, u0 + static_cast<float>(i),
+                                                0.5f * H, n_hat, gd, wrap_u))
+                { prof.push_back(0.f); continue; }
+                const float m = std::fabs(gd);
+                prof.push_back(m);
+                if (m > best_mag) { best_mag = m; best_s = static_cast<float>(i);
+                                    best_i = static_cast<int>(prof.size()) - 1; }
+            }
+            if (best_i > 0 and best_i + 1 < static_cast<int>(prof.size()))
+                best_s += rc::img::parabolic_vertex(prof[best_i-1], prof[best_i], prof[best_i+1]);
+            return best_s;
+        };
+        const float d_mid = std::fabs(search_at(u_mid, W) - search_at(u_mid, 0));
+        std::snprintf(buf, sizeof buf, "|wrap - nowrap| = %.2e px at u = %.0f", d_mid, u_mid);
+        check("wrapping changes NOTHING away from the seam", d_mid < 1e-6f, buf);
     }
 
     std::printf("\n%s (%d failure%s)\n\n", failures == 0 ? "ALL PASS" : "FAILURES",

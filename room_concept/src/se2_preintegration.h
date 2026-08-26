@@ -134,23 +134,49 @@ namespace rc::preint
         // stopped constraining anything for three quarters of a tour.
         //
         // "The body is at rest" is an OBSERVATION (z = 0) with its own precision, not a special case,
-        // so it belongs in the generative model as a factor. zupt_sigma_* is the residual velocity
+        // so it belongs in the generative model as a factor. zupt_density_* is the residual velocity
         // noise of a genuinely stationary sensor — encoder quantisation, gyro output noise.
         //
+        // ★★★ THESE ARE DENSITIES (m/√s, rad/√s), NOT per-sample standard deviations, and that
+        // changed on 2026-08-26 after the per-sample form was caught being rate-dependent. R is
+        // formed as density²/dt, so the information the rest hypothesis contributes over an interval
+        // is set by ELAPSED TIME and not by how many samples happened to land in it. The old form
+        // applied a fixed σ once per sample, so publishing faster silently tightened the parked prior
+        // — measured at the live constants, going 48 → 16 ms made it 1.73x tighter for no physical
+        // reason. The name changed with the units on purpose: a silent unit change on a field with
+        // the same name is exactly how a wrong constant survives a re-measurement.
+        //
+        // ★★★ MEASURED ON P3BOT, 2026-08-26: 8166 parked samples at 16.0 ms (etc/odom_samples.csv,
+        // analysed by tools/odom_whiteness.py) gave a per-sample spread of 0.1183 m/s and
+        // 0.2372 rad/s, i.e. densities of 0.01496 m/√s and 0.03001 rad/√s. The per-sample figure is
+        // provably 1/√dt — 0.0683 m/s at 48 ms against 0.1183 at 16 ms — which is WHY this has to be
+        // a density: no fixed per-sample number can describe a quantity that moves with the sampling
+        // interval. The samples are white at that interval (ρ₁ = 0.026), so applying the update once
+        // per sample is not double-counting; note the noise is INJECTED in simulation and therefore
+        // white by construction, so that finding does NOT transfer to hardware unmeasured.
+        // ★ The values before this were 0.0202 / 0.0323, MEASURED ON SHADOW and never re-measured
+        // here: 5.9x and 7.3x too tight for this robot. Before Shadow they were 0.002 / 0.005 from a
+        // plausible-sounding "encoder quantisation" argument, 10x and 6.5x too tight the other way,
+        // which made the motion factor out-weigh the laser 7:1. That is twice this constant has been
+        // wrong by an order of magnitude because it was reasoned about instead of measured.
+        // RE-MEASURE ON ANY NEW PLATFORM. tools/odom_whiteness.py does it in one parked run.
+        //
         // ★NO THRESHOLD, and none is needed. The factor's own variance carries the measured motion:
-        // R = zupt_sigma² + (how fast the body is actually moving)². At rest that is tiny and the
+        // R = density²/dt + (how fast the body is actually moving)². At rest that is tiny and the
         // update bites; in motion the rest hypothesis is inconsistent by exactly the observed speed,
         // R blows up with it, and the update fades out on its own. The crossover is not tuned — it
-        // falls out where the two variances meet, at |v| ≈ sigma_v/√dt (~5 cm/s at 125 Hz), i.e. it
-        // is set by the sensor's own noise density and sample rate.
-        // ★These are MEASURED, not assumed: the spread of the raw reported velocity over rows whose
-        // COMMAND is zero. On Shadow in sim, 83 791 such rows gave std 0.0202 m/s and 0.0323 rad/s.
-        // They were first set to 0.002 / 0.005 from a plausible-sounding "encoder quantisation"
-        // argument and were 10x and 6.5x too tight, which made the motion factor out-weigh the laser
-        // 7:1. Re-measure on any new platform; do not carry these over as if they were constants.
+        // falls out where the two variances meet.
+        // ⚠ HONEST LIMIT of the density form: it makes the PARKED case exactly rate-invariant (the
+        // regime where this term does its work and where the artefact lived), but the motion term m²
+        // does not scale with dt, so a residual dependence survives at speed — 1.47x across a 3x rate
+        // change at 0.25 m/s, against 1.57x before. Removing it entirely means lifting the rest
+        // hypothesis OUT of the per-sample propagation and applying it as ONE factor per interval,
+        // which is how a factor-graph framework expresses "the body was at rest during this stretch"
+        // and is also strictly more conservative at speed (it is falsified by the whole interval's
+        // motion, not by each segment's). That is the next step, not this one.
         bool  zupt_enabled   = true;
-        float zupt_sigma_v   = 0.0202f;  // m/s   — residual linear velocity of a parked base
-        float zupt_sigma_omega = 0.0323f;// rad/s — residual yaw rate of a parked base
+        float zupt_density_v = 0.01496f;    // m/√s   — measured, P3Bot, 8166 parked samples
+        float zupt_density_omega = 0.03001f;// rad/√s — measured, P3Bot, same run
         // Lever arm converting between the two channels, so the rest hypothesis is about the WHOLE
         // BODY: a robot pivoting in place has v_lat = v_long = 0 yet is emphatically not at rest, and
         // its wheels are scrubbing. Without this, a pivot would be handed the parked translation noise.
@@ -288,16 +314,19 @@ namespace rc::preint
                 const float m_w   = std::abs(omega) + speed / lever;          // rad/s
 
                 // R = (rest sensor noise)² + (observed motion)². Scalar-Kalman update of the velocity
-                // variance: P⁺ = P·R/(P+R). At rest R→zupt_sigma² and P⁺ collapses to it; in motion
+                // variance: P⁺ = P·R/(P+R). At rest R→density²/dt and P⁺ collapses to it; in motion
                 // R→∞ and P⁺→P, recovering the free-drift model exactly.
-                const auto zupt = [](float P, float sigma_rest, float motion)
+                // density²/dt, so the rest hypothesis contributes information per unit TIME rather
+                // than per SAMPLE. The motion term is a velocity and is NOT divided by dt: it is how
+                // wrong the hypothesis is, not how noisy the sensor is.
+                const auto zupt = [dt](float P, float density_rest, float motion)
                 {
-                    const float R = sigma_rest * sigma_rest + motion * motion;
+                    const float R = density_rest * density_rest / dt + motion * motion;
                     return (P * R) / (P + R);
                 };
-                var_v_lat  = zupt(var_v_lat,  q_.zupt_sigma_v,     m_v);
-                var_v_long = zupt(var_v_long, q_.zupt_sigma_v,     m_v);
-                var_omega  = zupt(var_omega,  q_.zupt_sigma_omega, m_w);
+                var_v_lat  = zupt(var_v_lat,  q_.zupt_density_v,     m_v);
+                var_v_long = zupt(var_v_long, q_.zupt_density_v,     m_v);
+                var_omega  = zupt(var_omega,  q_.zupt_density_omega, m_w);
             }
 
             Eigen::Matrix3f Q = Eigen::Matrix3f::Zero();

@@ -448,7 +448,15 @@ FarPointsExponent    = 2.0   # α — exponente de la distancia.
                               #   mejor precisión angular pero más sensible a puntos espurios.
 FarPointsMinWeight   = 0.1   # Floor de peso (evita anular puntos muy cercanos).
 UseCuda              = false   # Fallback automático a CPU si falla
-DebugLog             = false  # CSV -> tmp/sdf_localizer/log_<ts>.csv. Turn on to chase a
+DebugLog             = false  # Off again 2026-08-26, measurement done. It was on for one run to
+                       # verify the ZUPT density change end to end, and the decisive column was
+                       # sel_cov_xx on parked windows: binning by preint_n showed sigma/sqrt(T)
+                       # roughly FLAT (0.0171 -> 0.0216 over n = 2..5) where the old per-sample form
+                       # requires it to FALL 37%. Parked prior 3.22 mm against 1.20 mm before, at the
+                       # modal 33 ms window. ⚠ A ~26% drift with n is unexplained and still open.
+                       # ★ gt_error.csv cannot answer this: it carries the localiser POSTERIOR, a
+                       # different quantity from the motion prior. Turn this on, don't substitute.
+                       # CSV -> tmp/sdf_localizer/log_<ts>.csv. Also useful to chase a
                        # localiser question: `wg_ratio` (wheel/gyro heading ratio, an
                        # odometry-independent witness of rotation), `imu_cover`, `clamp_hit`,
                        # `innov_theta`, and pre/post-clamp `cov_tt`. Writes a row per update.
@@ -487,6 +495,49 @@ ImuLinearInjection  = true   # Add the accelerometer's within-segment double int
                         # 0.5 m/s), integrated dv tracks GT with slope 0.8-0.95 and no bias.
                         # Expect a SMALL effect: the double integral was ~69 um per cycle.
                         # A/B on err/m and ramp steepness, NOT on opt/m (not comparable across runs).
+# ── ZUPT: the rest hypothesis, MEASURED ON THIS ROBOT 2026-08-26 ────────────────────────────────
+# Stated here rather than inherited from the header default so the provenance is visible in the file
+# that runs. 8166 parked samples at 16.0 ms (etc/odom_samples.csv, tools/odom_whiteness.py): the
+# per-sample spread was 0.1183 m/s and 0.2372 rad/s, giving these densities. The previous values were
+# Shadow's 0.0202 / 0.0323 — 5.9x and 7.3x too tight for this base — which made the parked prior
+# 0.81 mm per 100 ms window where the measurement says 4.67 mm.
+# ★ DENSITIES, m/√s and rad/√s. The per-sample spread is provably 1/√dt (0.0683 m/s at 48 ms vs
+# 0.1183 at 16 ms), so a per-sample constant cannot describe it and the old keys are refused at load.
+PreintZuptDensityV     = 0.01496
+PreintZuptDensityOmega = 0.03001
+
+OdomSampleLog = true    # One CSV line per ARRIVING odometry sample -> etc/odom_samples.csv.
+                        # An INSTRUMENT, not telemetry: turn it off when the measurement is done.
+                        # It exists because the per-cycle log (tmp/sdf_localizer/log_*.csv) records
+                        # only the LATEST odometry sample once per lidar sweep, which aliases a 50 Hz
+                        # stream onto ~20 Hz rows. Any autocorrelation computed on those rows answers
+                        # a different question than the one asked, and looks reasonable doing it.
+                        # Purpose: measure the per-sample std and lag-1 autocorrelation of reported
+                        # velocity on ZERO-COMMAND rows, which decides whether the ZUPT's per-sample
+                        # application earns its sqrt(N) or double-counts one fact.
+OdomVarianceInjection = true   # Use the WHEELS' OWN per-sample velocity variance for the motion
+                        # prior, instead of only the asserted PreintOdomSigma* constants. The producer
+                        # states it in FullPoseEuler::velCov; robot_concept forwards it onto the robot
+                        # node as robot_current_speed_variance; here it becomes a density,
+                        # sigma = sqrt(var_sample * dt_sample), with dt_sample MEASURED from the
+                        # stamps -- so the bridge's [FullPose] PublishPeriod (100 -> 20 ms on
+                        # 2026-08-25) can change again without editing anything.
+                        # ADDS IN QUADRATURE to the constants, never replaces them: those are lumped
+                        # MODEL error and this is SENSOR noise. It can therefore only ever LOOSEN the
+                        # prior -- which is the honest asymmetry. It tells us when a producer says its
+                        # wheels are degrading; it can never claim the model is better than we know.
+                        # ON 2026-08-25, and EXPECT NO MEASURABLE EFFECT TODAY -- that is the point
+                        # of turning it on now. At NominalVelVar = 1e-4 and dt_sample = 0.02 s the
+                        # density is sqrt(1e-4*0.02) = 0.0014 m/sqrt(s) against the model's 0.0045:
+                        # a 5% widening of the linear channels, +0.05% on yaw. The bridge publishes
+                        # ONE NOMINAL CONSTANT there, not a measured variance, so the channel is wired
+                        # and inert. It earns its keep when a producer reports a variance that VARIES.
+                        # ★ So the thing to check first is the [OdomVar] line, NOT err/m: it says the
+                        # path is live, the measured dt_sample, and the densities it is really adding.
+                        # If err/m moves at all, something other than this changed -- a 5% widening of
+                        # a prior that the SDF already out-argues cannot show up in an outcome metric,
+                        # and reading one into it is how a null result gets a story attached.
+
 MotionCalibEnabled  = true   # A/B CONCLUDED 2026-08-22, restored to true.
                         # Matched A/B, 262 m ON vs 105 m OFF, per-60s windows, bursts excluded:
                         #   err/m  0.0263 -> 0.0303 when OFF  (+14.9%, t=2.67 z=2.31 SIGNIFICANT)
@@ -644,9 +695,9 @@ MessageSizeMax = "20004800"
 # not merely add noise, it WINS and drags the pose. So the junction stays off until the
 # systematic-residual monitor shows pitch is trusted (bias_const_px ~ 0).
 [ImageEdge]
-enable = false
-shadow = false
-drive  = false
+enable = true    # build the subscriber + ingest thread and run the extraction each tick
+shadow = false   # <- set true to ALSO log etc/image_edge.csv (solves twice, pose untouched)
+drive  = false   # <- the factor moves the published pose. Only after the CSV says it should.
 camera = "zed"            # DSR node name. "ricoh" selects the 360 equirect model; no code changes.
 
 useWallCorners   = true   # bearing; nearly immune to mount pitch/height

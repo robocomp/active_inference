@@ -45,6 +45,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <Eigen/Dense>
 #include <genericworker.h>          // DSR API
@@ -52,7 +53,7 @@
 #include "image_edge_types.h"
 
 namespace DSR { class InnerEigenAPI; class CameraAPI; }
-namespace rc::media { class MediaSubscriber; }
+namespace rc::media { class MediaSubscriber; class Image360Subscriber; }
 
 namespace rc
 {
@@ -60,18 +61,23 @@ namespace rc
 class CameraIngestor
 {
 public:
-    /// `camera_node` is the DSR node name ("zed" | "ricoh"); `robot_frame` MUST be the same frame the
-    /// LiDAR points are expressed in (RoomConfig::LIDAR_ROBOT_FRAME), or the two observation terms
-    /// would be constraining different poses.
-    CameraIngestor(std::shared_ptr<DSR::DSRGraph> graph, std::string camera_node, std::string robot_frame);
+    /// `camera_node` is the DSR node name ("zed" | "ricoh").
+    CameraIngestor(std::shared_ptr<DSR::DSRGraph> graph, std::string camera_node);
     ~CameraIngestor();
     CameraIngestor(const CameraIngestor&) = delete;
     CameraIngestor& operator=(const CameraIngestor&) = delete;
 
     /// MAIN THREAD, once the graph is loaded and the agent is Operating. Binds CameraAPI, calibrates
     /// the reduced CameraModel against project(), and reads the static camera<-robot extrinsic.
-    /// Returns false (and logs why) if any of those is not yet resolvable — the caller may retry.
-    bool bind_camera();
+    /// Returns false (and logs why) if any of those is not yet resolvable — the caller retries.
+    ///
+    /// ★ `robot_frame` is passed HERE and not to the constructor: RoomConfig::LIDAR_ROBOT_FRAME is
+    ///   auto-derived from the type-"robot" node by check_init_graph_is_valid(), which runs AFTER
+    ///   the collaborators are constructed. Capturing it at construction time captures the empty
+    ///   string, and every bind then fails with an unresolvable RT chain — forever, silently apart
+    ///   from a warning. It MUST be the same frame the LiDAR points are in, or the SDF term and this
+    ///   one would be constraining different poses.
+    bool bind_camera(const std::string& robot_frame);
 
     /// Start / stop the ingest thread. START ONLY once Operating (the thread touches the DSR graph for
     /// subscriber discovery, and doing that during the join window corrupts it). Idempotent.
@@ -98,13 +104,25 @@ private:
     void ingest_loop();
     bool ingest_pump();
     bool try_discover();
+    /// The one place a decoded frame becomes the cached GrayFrame — both reader types land here, so
+    /// the ZED and the Ricoh cannot drift apart in how their noise sigma is measured or stamped.
+    void absorb_gray(std::vector<std::uint8_t> gray, int w, int h, std::int64_t stamp_ms);
 
     std::shared_ptr<DSR::DSRGraph> G_;
     std::string camera_node_;
     std::string robot_frame_;
 
     std::unique_ptr<DSR::CameraAPI>          camera_api_;
-    std::unique_ptr<rc::media::MediaSubscriber> sub_;
+    // ★ TWO SUBSCRIBER TYPES, and exactly one of them is ever non-null. This is not a convenience:
+    //   the ZED and the Ricoh are DIFFERENT DDS TYPES on differently-named streams — "rgb" carrying
+    //   ImageFrame vs "rgb360" carrying Image360Frame (~5.5 MB inline, its own topic type). A single
+    //   MediaSubscriber on "rgb" finds no descriptor on the `ricoh` node at all, so it returns
+    //   nullptr and try_discover() retries once a second FOREVER: the agent looks healthy, the
+    //   [imgedge] liveness line never prints, and nothing says why. Which one to build is decided by
+    //   READING THE NODE'S DESCRIPTOR (CLAUDE.md: domain + topic + streams come only from there),
+    //   never by matching the node name against a hard-coded list.
+    std::unique_ptr<rc::media::MediaSubscriber>    sub_;
+    std::unique_ptr<rc::media::Image360Subscriber> sub360_;
 
     CameraModel     model_;
     Eigen::Matrix3f cam_R_robot_ = Eigen::Matrix3f::Identity();
@@ -122,6 +140,7 @@ private:
     std::mutex              wake_mtx_;
     std::condition_variable wake_cv_;
     std::chrono::steady_clock::time_point last_discovery_{};
+    bool no_stream_warned_ = false;   // the "no readable stream" line is permanent news, said once
     std::atomic<std::int64_t>  last_frame_wall_ms_{0};
     std::atomic<std::uint64_t> frames_{0};
 };

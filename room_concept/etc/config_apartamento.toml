@@ -317,8 +317,18 @@ PreintZupt           = true
 # this block as evidence that the tight sigma hurt anything.
 # ★Decide stillness from the COMMAND, never from the measurement — using the measurement to select
 # "parked" rows and then measuring their spread selects for small noise and biases sigma low.
-PreintZuptSigmaV     = 0.0202   # m/s   — measured residual linear velocity, commanded-zero rows
-PreintZuptSigmaOmega = 0.0323   # rad/s — measured residual yaw rate, commanded-zero rows
+PreintZuptDensityV     = 0.00639  # m/√s   — CONVERTED 2026-08-26, not re-measured. Was
+                        # PreintZuptSigmaV = 0.0202 m/s, a PER-SAMPLE spread over 83 791
+                        # commanded-zero rows on Shadow. The ZUPT now takes a DENSITY, because the
+                        # per-sample form made the parked prior depend on the publish rate (1.73x
+                        # tighter across a 3x rate change, for no physical reason).
+                        # density = sigma * sqrt(publish_period) = 0.0202 * sqrt(0.100), so this is
+                        # EXACTLY the old behaviour at Shadow's 100 ms period and nothing else.
+                        # ⚠ It assumes the Shadow figure was a per-sample spread at 10 Hz, which was
+                        # never verified — if those rows came from the per-cycle log they were
+                        # already aliased. Re-measure with tools/odom_whiteness.py on a parked run;
+                        # it takes two minutes and P3Bot's own number turned out to be 5.9x off.
+PreintZuptDensityOmega = 0.01021  # rad/√s — same conversion, 0.0323 * sqrt(0.100)
 # Lever arm coupling the two channels so a PIVOT cannot claim to be at rest: v_lat = v_long = 0 while
 # spinning, and the wheels are scrubbing. Shadow's wheel anchors are +-0.259 m (ShadowDiff.proto).
 PreintZuptLeverM     = 0.26

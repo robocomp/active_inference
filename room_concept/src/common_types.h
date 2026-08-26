@@ -48,6 +48,17 @@ namespace rc
         float adv = 0.0f;    // forward velocity, m/s (robot frame +Y)
         float side = 0.0f;   // lateral velocity, m/s (robot frame +X)
         float rot = 0.0f;    // angular velocity, rad/s (CCW+)
+        // PER-SAMPLE variance the producer stated for this very sample (FullPoseEuler::velCov, in the
+        // BODY frame: m11 = forward, m00 = lateral, m55 = yaw rate -- the driver has no notion of a
+        // room, so it could not express a world-frame covariance even if it wanted to). <0 means "this
+        // producer does not know" for that channel, matching the .idsl's m00 = -1 convention and
+        // ImuReading::gyro_var/acc_var; a ZERO would read downstream as infinite confidence.
+        //
+        // These are VARIANCES AT THE PRODUCER'S RATE, not noise densities. The preintegrator wants
+        // sigma = sqrt(var_sample * dt_sample); see the conversion note in se2_preintegration.h.
+        float var_adv  = -1.0f;  // (m/s)^2,   forward (body +Y)
+        float var_side = -1.0f;  // (m/s)^2,   lateral (body +X)
+        float var_rot  = -1.0f;  // (rad/s)^2, yaw rate
         std::int64_t source_ts_ms = 0;   // timestamp from the sensor (epoch-ms, WALL)
         std::int64_t sim_ts_ms    = 0;   // the same sample on the producer's SIM clock; 0 when real
         bool         simulated    = false;

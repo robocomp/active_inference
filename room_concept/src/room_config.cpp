@@ -30,6 +30,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.GridSearchMaxSamples", room_concept.params.grid_search_max_samples);
 
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.OdometryNoiseFactor", p.ODOMETRY_NOISE_FACTOR);
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.OdomSampleLog", p.ODOM_SAMPLE_LOG);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.OdomNoiseScale", room_concept.params.odom_noise_scale);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.DifferentialTest", room_concept.params.differential_test_enabled);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.SdfCurrentSlotOnly", room_concept.params.sdf_current_slot_only);
@@ -114,6 +115,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
 
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.MotionCalibEnabled", room_concept.params.motion_calib.enabled);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.ImuLinearInjection", room_concept.params.imu_linear_injection);
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.OdomVarianceInjection", room_concept.params.odom_variance_injection);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.MotionCalibYawP0", room_concept.params.motion_calib.yaw_p0);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.MotionCalibYawQ", room_concept.params.motion_calib.yaw_q);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.MotionCalibScaleP0", room_concept.params.motion_calib.scale_p0);
@@ -254,12 +256,29 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
         auto& po = room_concept.params.odom_preint_noise;
         auto& pc = room_concept.params.cmd_preint_noise;
         rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.PreintZupt", po.zupt_enabled);
-        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PreintZuptSigmaV",     po.zupt_sigma_v);
-        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PreintZuptSigmaOmega", po.zupt_sigma_omega);
+        // ★ The keys were RENAMED with their units on 2026-08-26 (per-sample sigma -> density). The
+        // old names are read into a sentinel purely so a config still carrying them FAILS LOUDLY
+        // instead of having them silently ignored — which would leave that platform on the header
+        // default while its config file appeared to say otherwise. A silently orphaned key is worse
+        // than a missing one: the file documents an intent that nothing implements.
+        {
+            constexpr float kSentinel = -12345.f;
+            float legacy_v = kSentinel, legacy_w = kSentinel;
+            rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PreintZuptSigmaV",     legacy_v);
+            rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PreintZuptSigmaOmega", legacy_w);
+            if (legacy_v != kSentinel or legacy_w != kSentinel)
+                throw std::runtime_error(
+                    "config uses PreintZuptSigmaV/Omega, which are PER-SAMPLE standard deviations and "
+                    "no longer exist. They are now PreintZuptDensityV/Omega, in m/sqrt(s) and "
+                    "rad/sqrt(s). Convert with density = sigma * sqrt(publish_period_s) to preserve "
+                    "today's behaviour at today's rate, or re-measure with tools/odom_whiteness.py.");
+        }
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PreintZuptDensityV",     po.zupt_density_v);
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PreintZuptDensityOmega", po.zupt_density_omega);
         rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PreintZuptLeverM",     po.zupt_lever_m);
         pc.zupt_enabled     = po.zupt_enabled;
-        pc.zupt_sigma_v     = po.zupt_sigma_v;
-        pc.zupt_sigma_omega = po.zupt_sigma_omega;
+        pc.zupt_density_v   = po.zupt_density_v;
+        pc.zupt_density_omega = po.zupt_density_omega;
         pc.zupt_lever_m     = po.zupt_lever_m;
     }
 

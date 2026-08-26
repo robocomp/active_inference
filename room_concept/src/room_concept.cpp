@@ -4984,6 +4984,48 @@ namespace rc
             return static_cast<float>(std::sqrt(var_sum / n * dt_sample));
         };
 
+        // ── The WHEELS' own stated noise, as a density ─────────────────────────────────────────────
+        // Same conversion as imu_sigma, and it exists for the same reason: the producer states a
+        // PER-SAMPLE variance at ITS OWN rate (FullPoseEuler::velCov, forwarded onto the robot node by
+        // robot_concept), while the preintegrator integrates densities. sigma = sqrt(var * dt_sample).
+        //
+        // dt_sample is MEASURED from the stamps, never configured. The bridge's [FullPose]
+        // PublishPeriod went 100 ms -> 20 ms on 2026-08-25, and a hard-coded period would have made
+        // the density 5x too large the moment it changed -- silently, since a variance that is merely
+        // wrong still looks like a number. Measuring it means the rate can move again and this line
+        // stays correct; it is also the only way a FASTER stream can tighten anything, because a
+        // density is invariant to sample rate and only a smaller per-sample variance or a shorter
+        // dt_sample moves it.
+        //
+        // Estimated across the whole history rather than per pair, so one late sample cannot inflate
+        // the period for the segment it lands in.
+        double odom_dt_sample = -1.0;
+        if (odometry_history.size() >= 2)
+        {
+            const std::int64_t first = stamp_of(odometry_history.front());
+            const std::int64_t last  = stamp_of(odometry_history.back());
+            if (last > first)
+                odom_dt_sample = static_cast<double>(last - first) * 1e-3
+                               / static_cast<double>(odometry_history.size() - 1);
+        }
+        // Returns <0 for "use the model": the channel is off, the producer said "unknown" (negative
+        // variance), or the period could not be measured. A zero variance is REFUSED for the same
+        // reason: it would claim infinite confidence in a channel, and no wheel is that good.
+        const auto wheel_sigma = [&](float var_sample) -> float
+        {
+            if (not params.odom_variance_injection) return -1.f;
+            if (not (var_sample > 0.f) or odom_dt_sample <= 0.0) return -1.f;
+            return static_cast<float>(std::sqrt(static_cast<double>(var_sample) * odom_dt_sample));
+        };
+        // Two independent noise contributions to the same channel add in quadrature. Either being
+        // "unstated" (<0) leaves the other alone, and both unstated falls back to the model.
+        const auto quad = [](float a, float b) -> float
+        {
+            if (a < 0.f) return b;
+            if (b < 0.f) return a;
+            return std::sqrt(a * a + b * b);
+        };
+
         const auto imu_dtheta = [&](std::int64_t seg_start, std::int64_t seg_end, float &dtheta_out) -> bool
         {
             if (imu_history == nullptr or imu_history->size() < 2) return false;
@@ -5014,6 +5056,7 @@ namespace rc
             return true;
         };
         int imu_segments = 0, wheel_segments = 0;
+        int odom_var_segments = 0;   // segments whose noise the WHEELS themselves stated
         cyc_imu_dtheta_ = cyc_wheel_dtheta_ = cyc_wheel_shadow_dtheta_ = 0.f;
         cyc_dx_local_ = cyc_dy_local_ = 0.f;
         cyc_imu_dvx_ = cyc_imu_dvy_ = cyc_imu_dpx_ = cyc_imu_dpy_ = 0.f;
@@ -5097,6 +5140,10 @@ namespace rc
             const float curve = dk_wheel * dy_local;
             float dtheta = odom.rot * dt * k_w - b_w * dt + curve;
             float rot_eff = dt > 0.f ? dtheta / dt : (odom.rot * k_w - b_w);
+            // Which sensor's noise describes rot_eff below. The channel that SUPPLIED the mean is the
+            // one whose stated variance applies to it; crediting the gyro's noise to a wheel-derived
+            // heading would describe a measurement that was never made.
+            bool heading_from_imu = false;
             if (float dth_imu = 0.f; imu_dtheta(effective_start_ms, effective_end_ms, dth_imu))
             {
                 // Keep BOTH on the covered segments: their ratio is how much heading the gyro is
@@ -5111,6 +5158,7 @@ namespace rc
                 // supplies ~99% of it -- applying it only to the wheel branch would leave it inert.
                 dtheta = dth_imu * k_w - b_w * dt + curve;
                 rot_eff = dtheta / dt;               // the mean rate the gyro actually saw
+                heading_from_imu = true;
                 ++imu_segments;
             }
             else
@@ -5137,16 +5185,28 @@ namespace rc
                 // accelerometer's covers the translation only when its correction is actually being
                 // used, because otherwise the displacement came from the wheels and it is the wheels'
                 // noise that describes it.
-                const float sig_om  = imu_sigma(effective_start_ms, effective_end_ms, true);
-                const float sig_lin = params.imu_linear_injection
+                // Yaw: the gyro's density when the gyro supplied the heading, the wheels' own when
+                // they did. imu_sigma already returns <0 unless the IMU brackets the segment, so the
+                // two never both apply.
+                const float sig_om = heading_from_imu
+                                   ? imu_sigma(effective_start_ms, effective_end_ms, true)
+                                   : wheel_sigma(odom.var_rot);
+                // Translation always comes from the wheels. When the accelerometer's within-segment
+                // correction is enabled it is ADDED to that displacement, so its noise is an extra
+                // independent contribution to the same channel, not a replacement for the wheels'.
+                const float sig_acc = params.imu_linear_injection
                                     ? imu_sigma(effective_start_ms, effective_end_ms, false) : -1.f;
+                const float sig_lat  = quad(wheel_sigma(odom.var_side), sig_acc);
+                const float sig_long = quad(wheel_sigma(odom.var_adv),  sig_acc);
                 // The accelerometer's within-segment correction enters as an EFFECTIVE mean velocity,
                 // so the preintegrator's constant-velocity step reproduces the corrected displacement
                 // without changing its structure -- and the correction is then covered by Q and by
                 // the transport term A, which it would not be if it were added to the mean afterwards.
                 const float v_lat_eff  = odom.side + (params.imu_linear_injection ? imu_dpx_seg / dt : 0.f);
                 const float v_long_eff = odom.adv  + (params.imu_linear_injection ? imu_dpy_seg / dt : 0.f);
-                preint.add(v_lat_eff, v_long_eff, rot_eff, dt, sig_lin, sig_lin, sig_om);
+                preint.add(v_lat_eff, v_long_eff, rot_eff, dt, sig_lat, sig_long, sig_om);
+                if (sig_lat >= 0.f or sig_long >= 0.f or (not heading_from_imu and sig_om >= 0.f))
+                    ++odom_var_segments;
             }
 
             running_theta += dtheta;
@@ -5160,6 +5220,32 @@ namespace rc
         imu_seg_used_  += imu_segments;
         imu_seg_total_ += imu_segments + wheel_segments;
         imu_stats_sim_clock_ = use_sim_clock;
+
+        // Proof of life for the wheel-variance channel. It must be printed from the segment counter
+        // and not from "the flag is on", because every way this can fail -- producer silent, producer
+        // says "unknown", period unmeasurable, attribute never registered -- ends in the same silent
+        // fallback to the constants. A flag that is on and a channel that is working are different
+        // claims, and only the second one is worth logging.
+        if (not odom_var_announced_ and odom_var_segments > 0)
+        {
+            odom_var_announced_ = true;
+            const auto& o = odometry_history.back();
+            const float s_lat  = wheel_sigma(o.var_side);
+            const float s_long = wheel_sigma(o.var_adv);
+            const float s_om   = wheel_sigma(o.var_rot);
+            qInfo().nospace() << "[OdomVar] wheels' stated variance ACTIVE | dt_sample="
+                              << QString::number(odom_dt_sample * 1e3, 'f', 1) << " ms"
+                              << " | var(adv,side,rot)=" << o.var_adv << "," << o.var_side << "," << o.var_rot
+                              << " -> sigma(lat,long,om)="
+                              << QString::number(s_lat,  'g', 3) << ","
+                              << QString::number(s_long, 'g', 3) << ","
+                              << QString::number(s_om,   'g', 3)
+                              << " vs model " << params.odom_preint_noise.sigma_v_lat << ","
+                              << params.odom_preint_noise.sigma_v_long << ","
+                              << params.odom_preint_noise.sigma_omega
+                              << " | " << odom_var_segments << "/" << (imu_segments + wheel_segments)
+                              << " segments";
+        }
 
         if (not imu_injection_announced_ and imu_segments > 0)
         {

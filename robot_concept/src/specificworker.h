@@ -164,6 +164,10 @@ private:
 	std::atomic<std::uint64_t> lidar_frames_{0};
 	std::atomic<std::uint64_t> imu_frames_{0};
 	std::atomic<std::uint64_t> ricoh_frames_{0};
+	// Odometry arrivals on the FullPoseEstimationPub subscription (Ice callback thread, e.g.
+	// webots-bridge). It is the only sensor stream that does NOT come through the media plane,
+	// so without its own counter a silent odometry producer is invisible in the Hz table.
+	std::atomic<std::uint64_t> fullpose_frames_{0};
 	// Per-lidar counters (fed by the read_lidar_thread DDS monitor when bridging is off).
 	std::atomic<std::uint64_t> helios_frames_{0};
 	std::atomic<std::uint64_t> bpearl_frames_{0};

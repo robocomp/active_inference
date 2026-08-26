@@ -163,8 +163,7 @@ void SpecificWorker::initialize()
     // subscriber, no thread and no extraction, so the feature is exactly free when off.
     if (params.IMAGE_EDGE_ENABLE)
     {
-        camera_ingestor_ = std::make_unique<rc::CameraIngestor>(
-            G, params.IMAGE_EDGE_CAMERA, params.LIDAR_ROBOT_FRAME);
+        camera_ingestor_ = std::make_unique<rc::CameraIngestor>(G, params.IMAGE_EDGE_CAMERA);
         image_edge_source_ = std::make_unique<rc::ImageEdgeSource>();
         rc::ImageEdgeSource::Config ic;
         ic.use_wall_corners    = params.IMAGE_EDGE_USE_WALL_CORNERS;
@@ -738,9 +737,20 @@ void SpecificWorker::pump_image_edges()
     // up asynchronously, and a miss here is normal for the first few seconds.
     if (not image_edge_bound_)
     {
-        if (not camera_ingestor_->bind_camera()) return;
+        // The room polygon and the robot-frame name are both resolved asynchronously during
+        // start-up, so this retries until all of it is available rather than binding once and
+        // failing permanently.
+        if (room_polygon_.size() < 3) return;
+        if (not camera_ingestor_->bind_camera(params.LIDAR_ROBOT_FRAME)) return;
         image_edge_bound_ = true;
         image_edge_source_->set_room_polygon(room_polygon_);
+        // room_height is read from the graph after construction, so refresh it here too.
+        auto ic = image_edge_source_->config();
+        ic.room_height = params.room_height;
+        image_edge_source_->set_config(ic);
+        qInfo() << "[imgedge] bound to" << QString::fromStdString(params.IMAGE_EDGE_CAMERA)
+                << "in frame" << QString::fromStdString(params.LIDAR_ROBOT_FRAME)
+                << "| polygon" << room_polygon_.size() << "pts, room_height" << params.room_height;
     }
 
     rc::GrayFrame frame;
@@ -1113,6 +1123,29 @@ void SpecificWorker::modify_node_attrs_slot(std::uint64_t id, const std::vector<
                             if (const auto sim_flag = G->get_attrib_by_name<robot_current_speed_simulated_att>(robot_node);
                                 sim_flag.has_value())
                                 odom.simulated = sim_flag.value();
+                            // ── The producer's OWN per-sample velocity variance ────────────────────
+                            // robot_concept forwards FullPoseEuler::velCov here as {adv, side, rot},
+                            // already de-crossed from the body indices (m11 = forward on this +Y robot).
+                            // Absent attribute = this producer never published it; a NEGATIVE entry =
+                            // it published and said "unknown" for that channel. Both leave the fields
+                            // at -1 and the preintegrator falls back to its asserted constant, so a
+                            // producer that says nothing is not silently treated as a perfect one.
+                            //
+                            // NOT NOISE-FACTOR-ADJUSTED on purpose: ODOMETRY_NOISE_FACTOR above injects
+                            // SYNTHETIC noise for robustness tests, and pretending the sensor reported
+                            // that would let a test knob masquerade as a measurement.
+                            if (const auto vvar = G->get_attrib_by_name<robot_current_speed_variance_att>(robot_node);
+                                vvar.has_value())
+                            {
+                                const auto& v = vvar.value().get();
+                                if (v.size() >= 3)
+                                {
+                                    const auto stated = [](float x) { return x >= 0.f ? x : -1.f; };
+                                    odom.var_adv  = stated(v[0]);
+                                    odom.var_side = stated(v[1]);
+                                    odom.var_rot  = stated(v[2]);
+                                }
+                            }
                             if (odom.simulated and odom.sim_ts_ms > 0)
                                 sim_clock_.observe(odom.source_ts_ms, odom.sim_ts_ms);
                             odom.recv_ts_ms = static_cast<std::int64_t>(
@@ -1127,6 +1160,42 @@ void SpecificWorker::modify_node_attrs_slot(std::uint64_t id, const std::vector<
                                                                   odom.adv,
                                                                   odom.rot,
                                                                   odom.source_ts_ms);
+                            // ── PER-SAMPLE log, for measuring the stream's own statistics ──────
+                            // Written HERE, where samples arrive, and not from the per-cycle debug
+                            // row: that row keeps only the latest sample and is emitted once per
+                            // lidar sweep, so it aliases this stream onto a slower one. An
+                            // autocorrelation computed on aliased rows answers a different question
+                            // than the one asked, and looks perfectly reasonable doing it.
+                            //
+                            // `seq` is the arrival counter and `source_ts_ms` the producer's stamp:
+                            // together they make a DROPPED sample visible as a stamp gap without a
+                            // seq gap, which matters because a dropped sample changes the effective
+                            // sampling interval and therefore the very quantity being measured.
+                            if (params.ODOM_SAMPLE_LOG)
+                            {
+                                if (not odom_sample_log_.is_open())
+                                {
+                                    odom_sample_log_.open("etc/odom_samples.csv",
+                                                          std::ios::out | std::ios::trunc);
+                                    // Locale-proof the WRITE side: these machines run es_ES, where a
+                                    // stray comma separator would silently turn every value into a
+                                    // column break. See CLAUDE.md.
+                                    odom_sample_log_.imbue(std::locale::classic());
+                                    odom_sample_log_ << "seq,recv_ts_ms,source_ts_ms,sim_ts_ms,simulated,"
+                                                        "adv,side,rot,var_adv,var_side,var_rot,"
+                                                        "cmd_adv,cmd_side,cmd_rot,cmd_ts_ms\n";
+                                }
+                                odom_sample_log_ << odom_sample_seq_++ << ','
+                                                 << odom.recv_ts_ms   << ','
+                                                 << odom.source_ts_ms << ','
+                                                 << odom.sim_ts_ms    << ','
+                                                 << (odom.simulated ? 1 : 0) << ','
+                                                 << odom.adv << ',' << odom.side << ',' << odom.rot << ','
+                                                 << odom.var_adv << ',' << odom.var_side << ',' << odom.var_rot << ','
+                                                 << last_cmd_adv_ << ',' << last_cmd_side_ << ','
+                                                 << last_cmd_rot_ << ',' << last_cmd_ts_ms_ << '\n';
+                                odom_sample_log_.flush();   // 50 lines/s; a lost tail costs more
+                            }
                             odometry_buffer_.put<0>(std::move(odom), static_cast<std::uint64_t>(odom.recv_ts_ms));
                             last_robot_current_speed_timestamp_ = source_ts;
                             last_robot_adv_speed_  = adv_value.value();
@@ -1169,6 +1238,10 @@ void SpecificWorker::modify_node_attrs_slot(std::uint64_t id, const std::vector<
                                                                  cmd.adv_y,
                                                                  cmd.rot,
                                                                  cmd.source_ts_ms);
+                            last_cmd_adv_    = cmd.adv_y;
+                            last_cmd_side_   = cmd.adv_x;
+                            last_cmd_rot_    = cmd.rot;
+                            last_cmd_ts_ms_  = cmd.source_ts_ms;
                             velocity_buffer_.put<0>(std::move(cmd), source_ts);
                             last_robot_ref_speed_timestamp_ = source_ts;
                         }

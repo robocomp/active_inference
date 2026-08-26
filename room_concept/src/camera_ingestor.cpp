@@ -34,16 +34,18 @@ namespace
     }
 }   // namespace
 
-CameraIngestor::CameraIngestor(std::shared_ptr<DSR::DSRGraph> graph,
-                               std::string camera_node, std::string robot_frame)
-    : G_(std::move(graph)), camera_node_(std::move(camera_node)), robot_frame_(std::move(robot_frame))
+CameraIngestor::CameraIngestor(std::shared_ptr<DSR::DSRGraph> graph, std::string camera_node)
+    : G_(std::move(graph)), camera_node_(std::move(camera_node))
 {}
 
 CameraIngestor::~CameraIngestor() { stop(); }
 
-bool CameraIngestor::bind_camera()
+bool CameraIngestor::bind_camera(const std::string& robot_frame)
 {
     if (not G_) return false;
+    if (robot_frame.empty())
+        return false;      // the type-"robot" node has not been resolved yet; caller retries
+    robot_frame_ = robot_frame;
 
     // ── The camera node + its intrinsics ─────────────────────────────────────────────────────────
     const auto node = G_->get_node(camera_node_);
@@ -116,6 +118,7 @@ void CameraIngestor::stop()
     wake_cv_.notify_all();
     if (thread_.joinable()) thread_.join();
     sub_.reset();
+    sub360_.reset();
 }
 
 void CameraIngestor::ingest_loop()
@@ -134,19 +137,87 @@ void CameraIngestor::ingest_loop()
 
 bool CameraIngestor::try_discover()
 {
-    if (sub_ or not G_) return false;
+    if (sub_ or sub360_ or not G_) return false;
     const auto now = std::chrono::steady_clock::now();
     if (now - last_discovery_ < std::chrono::seconds(1)) return false;   // self-throttle
     last_discovery_ = now;
-    // Descriptor-driven factory: domain + topic come from the media_descriptor JSON the PRODUCER
-    // authored on the node. Never a config entry (CLAUDE.md).
-    sub_ = rc::media::make_image_subscriber_from_graph(*G_, camera_node_, "rgb");
-    return sub_ != nullptr;
+
+    // ── Which stream, and therefore which READER TYPE, is the producer's statement ────────────────
+    // Descriptor-driven: domain + topic come from the media_descriptor JSON the PRODUCER authored on
+    // the node, never from a config entry (CLAUDE.md). The stream KEY is read from the same place,
+    // for the same reason — the ZED advertises {"rgb","depth"} and the Ricoh advertises {"rgb360"},
+    // and those two keys carry DIFFERENT DDS TYPES (ImageFrame vs the ~5.5 MB Image360Frame).
+    //
+    // Asking the descriptor first also keeps the log clean: the make_*_from_graph factories print to
+    // stderr on a miss, so calling one speculatively once a second is a 1 Hz error stream for the
+    // life of the run. Here a camera whose descriptor has not been published yet is simply not ready.
+    const auto desc = rc::media::descriptor_from_graph(*G_, camera_node_);
+    if (not desc.has_value()) return false;         // node/descriptor not up yet — retry next second
+
+    if (desc->streams.contains("rgb360"))
+        sub360_ = rc::media::make_image360_subscriber_from_graph(*G_, camera_node_, "rgb360");
+    else if (desc->streams.contains("rgb"))
+        sub_ = rc::media::make_image_subscriber_from_graph(*G_, camera_node_, "rgb");
+    else if (not no_stream_warned_)
+    {
+        // ONCE. A camera node that publishes only depth (or only a stream key nobody here knows) is
+        // a real, permanent condition and it must say so — but exactly one line, not one per second.
+        no_stream_warned_ = true;
+        std::string keys;
+        for (const auto& [k, v] : desc->streams) { if (not keys.empty()) keys += ", "; keys += k; }
+        qWarning() << "[imgedge] node" << QString::fromStdString(camera_node_)
+                   << "advertises no image stream this subsystem can read (has:"
+                   << QString::fromStdString(keys) << ") — the RGB edge term will stay silent";
+    }
+    return sub_ != nullptr or sub360_ != nullptr;
+}
+
+void CameraIngestor::absorb_gray(std::vector<std::uint8_t> gray, int w, int h, std::int64_t stamp_ms)
+{
+    // Per-frame sensor noise, MEASURED. It is the denominator of every precision this subsystem
+    // reports, so it must track auto-exposure rather than be pinned in a config file.
+    const float sigma_i = rc::img::estimate_noise_sigma_immerkaer(gray.data(), w, h);
+
+    {
+        std::lock_guard<std::mutex> lk(frame_mtx_);
+        frame_.gray    = std::move(gray);
+        frame_.width   = w;
+        frame_.height  = h;
+        frame_.stamp   = static_cast<std::uint64_t>(stamp_ms);
+        frame_.sigma_i = sigma_i;
+        frame_.valid   = true;
+        frame_fresh_   = true;
+    }
+    last_frame_wall_ms_.store(now_ms(), std::memory_order_relaxed);
+    frames_.fetch_add(1, std::memory_order_relaxed);
 }
 
 bool CameraIngestor::ingest_pump()
 {
-    if (not sub_) { try_discover(); return false; }
+    if (not sub_ and not sub360_) { try_discover(); return false; }
+
+    // Convert to grey HERE, on the ingest thread: the boundary payload becomes a third the size and
+    // the localizer never has to know about channel order. Both readers land in absorb_gray(), so
+    // the two camera kinds cannot drift apart in how their frames are measured.
+    if (sub360_)
+    {
+        const int delivered = sub360_->poll([this](const rc::media::Image360Frame& f, std::int64_t)
+        {
+            const int w = static_cast<int>(f.width());
+            const int h = static_cast<int>(f.height());
+            if (w <= 0 or h <= 0) return;
+            const std::size_t npix = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
+            if (f.size() < npix * 3) return;
+            // ⚠ The 360 format enum is its OWN numbering — IMG360_FORMAT_BGR8 == 0 is the producer
+            //   default, whereas the plain-image enum numbers them differently. Comparing an
+            //   Image360Frame's format against rc::media::FORMAT_BGR8 would compile and be wrong.
+            std::vector<std::uint8_t> gray;
+            rc::img::gray_from_rgb8(f.data().data(), w, h,
+                                    f.format() == rc::media::IMG360_FORMAT_BGR8, gray);
+            absorb_gray(std::move(gray), w, h, f.stamp_ms());
+        });
+        return delivered > 0;
+    }
 
     const int delivered = sub_->poll([this](const rc::media::ImageFrame& f, std::int64_t)
     {
@@ -155,8 +226,6 @@ bool CameraIngestor::ingest_pump()
         if (w <= 0 or h <= 0) return;
         const std::size_t npix = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
 
-        // Convert to grey HERE, on the ingest thread: the boundary payload becomes a third the size
-        // and the localizer never has to know about channel order.
         std::vector<std::uint8_t> gray;
         switch (f.format())
         {
@@ -177,23 +246,7 @@ bool CameraIngestor::ingest_pump()
             }
             default: return;      // depth / unknown are not consumed here
         }
-
-        // Per-frame sensor noise, MEASURED. It is the denominator of every precision this subsystem
-        // reports, so it must track auto-exposure rather than be pinned in a config file.
-        const float sigma_i = rc::img::estimate_noise_sigma_immerkaer(gray.data(), w, h);
-
-        {
-            std::lock_guard<std::mutex> lk(frame_mtx_);
-            frame_.gray    = std::move(gray);
-            frame_.width   = w;
-            frame_.height  = h;
-            frame_.stamp   = static_cast<std::uint64_t>(f.stamp_ms());
-            frame_.sigma_i = sigma_i;
-            frame_.valid   = true;
-            frame_fresh_   = true;
-        }
-        last_frame_wall_ms_.store(now_ms(), std::memory_order_relaxed);
-        frames_.fetch_add(1, std::memory_order_relaxed);
+        absorb_gray(std::move(gray), w, h, f.stamp_ms());
     });
     return delivered > 0;
 }

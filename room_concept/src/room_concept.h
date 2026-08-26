@@ -556,6 +556,18 @@ public:
         // noise. Bounded by construction: the term is confined to one segment and never chained, so
         // it cannot drift however wrong the accelerometer is.
         bool imu_linear_injection = false;
+        // ── The WHEELS' own per-sample velocity variance, as a preintegration density ──────────────
+        // OFF by default, like every channel that can move the published pose. When on, each odometry
+        // sample's stated velCov (forwarded by robot_concept onto robot_current_speed_variance) is
+        // converted to a density -- sigma = sqrt(var_sample * dt_sample), with dt_sample MEASURED --
+        // and ADDED IN QUADRATURE to odom_preint_noise for that segment.
+        //
+        // It can only ever LOOSEN the motion prior, never tighten it: the model constants are lumped
+        // MODEL error (slip, timing, unmodelled dynamics) and a sensor's noise is a separate, extra
+        // contribution, so the two add. Replacing one with the other was tried on 2026-08-23 and made
+        // the prior 135x too confident in heading. What this buys is a prior that widens on its own
+        // when a producer says its wheels are degrading, with nobody editing a config file.
+        bool odom_variance_injection = false;
 
         bool  adaptive_cov_enabled = false;
         // EMA rate for the innovation second moment. 0.02 ~= a 50-frame memory: long enough that one
@@ -1416,6 +1428,11 @@ private:
    int             last_preint_samples_   = 0;    // odometry samples summarised into this slot's factor
    float           last_preint_duration_s_ = 0.f; // and over how long — reveals strided chaining
    bool imu_injection_announced_ = false;  // one-shot "dtheta really is coming from the gyro" log
+   // One-shot "the wheels' OWN stated variance really is reaching the preintegrator" log. Without it
+   // the channel is indistinguishable from off: the quadrature combine can only ever loosen the
+   // prior, so a producer that never publishes velCov and a consumer that never reads it produce
+   // byte-identical behaviour and identical (empty) counters.
+   bool odom_var_announced_ = false;
    // Rolling stats for the periodic [ImuInject] line. The one-shot above proves the path bound at
    // all; these say whether it is still binding, how much of each interval the IMU actually covers,
    // and -- the number that matters -- how much heading the gyro is taking OUT of the wheel estimate.
