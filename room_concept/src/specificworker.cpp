@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <print>
 #include <sys/resource.h>   // getrusage — process CPU% readout
+#include <cstdio>   // std::remove — the Reset must delete the saved evidence
 #include <cstdlib>   // std::_Exit — crash-free terminal shutdown
 #include <thread>    // brief DDS flush before _Exit
 #include <chrono>
@@ -212,6 +213,17 @@ void SpecificWorker::initialize()
     viewer_ = std::make_unique<rc::RoomViewer>(
         G, params, room_polygon_for_viz,
         room_initialized_from_svg_polygon_, room_concept_, epistemic_controller_);
+
+    // AFTER the viewer exists. Registering this beside the ingestor setup (where the camera calib
+    // is otherwise configured) put it before make_unique, so the `if (viewer_)` was false and the
+    // handler was never installed — a Reset that silently cleared only half the evidence.
+    viewer_->set_camera_reset_handler([this]
+    {
+        mp_pool_.reset();
+        mp_win_.reset();
+        std::remove("etc/camera_calib.txt");   // or the next restart undoes the reset
+        qInfo() << "[camcal] evidence cleared and etc/camera_calib.txt deleted";
+    });
 
     if (auto* w = viewer_->widget())
     {
@@ -780,6 +792,23 @@ void SpecificWorker::mount_pair_update(const rc::ImageEdgeObs &obs,
     const auto win  = mp_win_.solve();
     const auto pool = mp_pool_.solve();
     mp_pool_.save("etc/camera_calib.txt");   // every window, so a kill -9 costs at most one
+    if (viewer_ and pool.ok)
+    {
+        Eigen::Matrix<float, rc::camcal::P_COUNT, 1> pv, sv;
+        const double psig[4] = {params.IMAGE_EDGE_MOUNT_PITCH_SIGMA,
+                                params.IMAGE_EDGE_MOUNT_HEIGHT_SIGMA,
+                                params.IMAGE_EDGE_MOUNT_YAW_SIGMA, 1.0};
+        for (int i = 0; i < rc::camcal::P_COUNT; ++i)
+        {
+            // The estimator works in units of the PRIOR SIGMA (h carries it), so convert back to
+            // physical here — and scale the posterior sigma the same way, or the popup would show a
+            // physical value with a dimensionless uncertainty beside it.
+            pv(i) = static_cast<float>(pool.p(i)     * psig[i]);
+            sv(i) = static_cast<float>(pool.sigma(i) * psig[i]);
+        }
+        viewer_->set_camera_calibration(pv, sv, pool.informed,
+                                        static_cast<float>(pool.cond), mp_pool_.pairs());
+    }
     mp_win_.reset();
     if (not win.ok) return;
     ++mp_wins_;

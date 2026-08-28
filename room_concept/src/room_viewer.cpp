@@ -215,7 +215,11 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
     // The window asks; the localiser thread acts. RoomConcept queues it rather than touching the
     // estimator from the GUI thread.
     if (room_concept_ != nullptr)
-        calib_viewer_->set_reset_handler([this] { room_concept_->request_calibration_reset(); });
+        calib_viewer_->set_reset_handler([this]
+        {
+            room_concept_->request_calibration_reset();
+            if (on_camera_reset_) on_camera_reset_();   // both blocks, or neither
+        });
 
     // ── Ground truth vs estimate (SIMULATION ONLY) ────────────────────────────────────────────
     // The localiser cannot be graded on its own residual: a confidently wrong pose scores like a
@@ -537,6 +541,14 @@ void RoomViewer::on_robot_rotated(QPointF scene_pos)
     const float theta = std::atan2(static_cast<float>(scene_pos.y()) - ry,
                                    static_cast<float>(scene_pos.x()) - rx);
     room_concept_->push_command(rc::RoomConcept::CmdSetPose{rx, ry, theta});
+}
+
+
+void RoomViewer::set_camera_calibration(const Eigen::Matrix<float, rc::camcal::P_COUNT, 1>& value,
+                                        const Eigen::Matrix<float, rc::camcal::P_COUNT, 1>& sigma,
+                                        int informed_mask, float condition, long pairs)
+{
+    if (calib_viewer_) calib_viewer_->update_camera(value, sigma, informed_mask, condition, pairs);
 }
 
 }  // namespace rc

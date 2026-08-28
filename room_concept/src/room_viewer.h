@@ -36,6 +36,7 @@
 #include "viewer_2d.h"
 #include "timeseries_plot.h"
 #include "calibration_viewer.h"
+#include "camera_calibration.h"
 #include "custom_widget.h"
 
 namespace rc { class EpistemicController; class CameraVisualizer; }
@@ -46,6 +47,19 @@ namespace rc
 class RoomViewer
 {
 public:
+    /// Forward the CAMERA calibration block to the popup. Pushed from SpecificWorker, which owns the
+    /// estimator, rather than travelling in UpdateResult like the motion block: the camera evidence
+    /// is produced in the image path and never passes through the localiser, and routing it through
+    /// UpdateResult would imply a coupling that does not exist.
+    /// Called when the popup's "Reset to priors" is confirmed, so the CAMERA evidence is discarded
+    /// with the motion evidence. A reset that cleared one block and silently left the other is the
+    /// kind of half-action that makes a later measurement inexplicable.
+    void set_camera_reset_handler(std::function<void()> h) { on_camera_reset_ = std::move(h); }
+
+    void set_camera_calibration(const Eigen::Matrix<float, rc::camcal::P_COUNT, 1>& value,
+                                const Eigen::Matrix<float, rc::camcal::P_COUNT, 1>& sigma,
+                                int informed_mask, float condition, long pairs);
+
     // Constructor injection (out-of-line — unique_ptr<CameraVisualizer> incomplete in
     // callers). Builds the layout widget in its OWN top-level window (independent of the
     // DSR graph viewer, so the agent runs with Agent.graph=false) + the camera-projection
@@ -139,6 +153,7 @@ private:
     QPointer<rc::TimeSeriesPlot> ts_plot_imgedge_;
     std::int64_t last_imgedge_ts_ms_ = 0;   // only append when a NEW cycle produced a number
     QPointer<rc::CalibrationViewer> calib_viewer_;
+    std::function<void()>           on_camera_reset_;
     // Last state pushed to lbl_room_stable: -1 = never painted, 0 = red, 1 = green, 2 = amber (searching).
     // Tri-state so the very first update always applies a stylesheet, whichever state it reports.
     int room_stable_shown_ = -1;

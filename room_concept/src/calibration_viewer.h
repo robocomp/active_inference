@@ -12,6 +12,7 @@
 #pragma once
 
 #include "calibration_estimator.h"
+#include "camera_calibration.h"
 #include "timeseries_plot.h"
 
 #include <QDialog>
@@ -32,6 +33,21 @@ namespace rc
         /// What "Reset" does. Set by the owner; the window itself knows nothing about the estimator.
         void set_reset_handler(std::function<void()> h) { on_reset_ = std::move(h); }
 
+        /// The CAMERA block: a separate estimator with its own evidence, its own `informed` flags and its
+
+        /// own conditioning. Separate because the two are fed by different streams and share no
+
+        /// covariate — see camera_calibration.h. `pairs` is corner pairings, not driving episodes,
+
+        /// and the label says so: two counts called "episodes" would be a quiet lie.
+
+        void update_camera(const Eigen::Matrix<float, rc::camcal::P_COUNT, 1>& value,
+
+                           const Eigen::Matrix<float, rc::camcal::P_COUNT, 1>& sigma,
+
+                           int informed_mask, float condition, long pairs);
+
+
         void update_values(const Eigen::Matrix<float, rc::calib::P_COUNT, 1>& value,
                            const Eigen::Matrix<float, rc::calib::P_COUNT, 1>& sigma,
                            int informed_mask, float condition, int episodes);
@@ -49,8 +65,10 @@ namespace rc
             // the value and the lamp. Static string literals from the spec table; not owned.
             const char* why = "";
         };
-        std::array<Row, rc::calib::P_COUNT> rows_{};
+        std::array<Row, rc::calib::P_COUNT>  rows_{};
+        std::array<Row, rc::camcal::P_COUNT> cam_rows_{};
         QLabel* summary_ = nullptr;
+        QLabel* cam_summary_ = nullptr;
         std::function<void()> on_reset_;
     };
 }

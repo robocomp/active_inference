@@ -26,18 +26,20 @@ namespace rc
         // Confirmed, because the thing it discards can be hours of driving and minutes of pivoting
         // that ordinary motion does not reproduce.
         auto* reset = new QPushButton("Reset to priors", this);
-        reset->setToolTip("Forget every measurement and delete the saved window, returning all six\n"
-                          "parameters to their priors. Use it after changing something physical about\n"
-                          "the robot — a wheel, a mount, the base kinematics — because measurements\n"
-                          "taken before that change describe a different machine.");
+        reset->setToolTip("Forget every measurement and delete the saved evidence, returning BOTH\n"
+                          "blocks — the six motion parameters and the four camera-mount ones — to\n"
+                          "their priors. Use it after changing something physical about the robot:\n"
+                          "a wheel, a mount, the base kinematics. Measurements taken before such a\n"
+                          "change describe a different machine.");
         connect(reset, &QPushButton::clicked, this, [this]
         {
             const auto answer = QMessageBox::question(
                 this, "Reset calibration",
                 "Forget every measurement and delete the saved window?\n\n"
-                "This discards the episodes AND any closed pivots. A closed pivot is several minutes "
-                "of the robot turning in place and cannot be reproduced by ordinary driving.\n\n"
-                "The parameters return to their priors and report NOT informed.",
+                "This discards the driving episodes, any closed pivots, AND the camera-mount "
+                "evidence. A closed pivot is several minutes of the robot turning in place and "
+                "cannot be reproduced by ordinary driving.\n\n"
+                "All ten parameters return to their priors and report NOT informed.",
                 QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
             if (answer == QMessageBox::Yes and on_reset_) on_reset_();
         });
@@ -157,6 +159,108 @@ namespace rc
             r.plot->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
             outer->addWidget(r.plot, 1);    // stretch 1: the traces absorb the window's height
         }
+
+        // ── The CAMERA block ─────────────────────────────────────────────────────────────────────
+        // A separate estimator, so a separate section with its own conditioning line. Not merged
+        // into the six above: different stream, no shared covariate, and its count is corner PAIRS
+        // rather than driving episodes — two numbers both labelled "episodes" would be a quiet lie.
+        // The `why` text comes from rc::camcal::param_why() rather than being duplicated here, so
+        // the tooltip and the estimator can never drift apart.
+        {
+            auto* hdr = new QLabel("camera mount  —  RGB corners against LiDAR corners, pose-free", this);
+            hdr->setStyleSheet("font-size: 12px; font-weight: bold; color: #b8c4cc; "
+                               "padding-top: 10px; border-top: 1px solid #3a4045;");
+            hdr->setToolTip("<div style='width: 380px'>Estimated from the SAME physical corner seen "
+                            "by both sensors, with the localiser's pose absent from the residual "
+                            "entirely — so these cannot absorb a pose error, and a heading error "
+                            "cannot masquerade as a boresight.</div>");
+            outer->addWidget(hdr);
+            cam_summary_ = new QLabel("pairs 0", this);
+            cam_summary_->setStyleSheet("font-family: monospace; font-size: 11px; color: #95a5a6;");
+            outer->addWidget(cam_summary_);
+
+            const struct { const char* name; float scale; const char* unit; QColor col; }
+            cspec[] = {
+                { "cam pitch",  180.f / static_cast<float>(M_PI), "deg", QColor(230, 126, 34) },
+                { "cam height", 1000.f,                           "mm",  QColor(155, 89, 182) },
+                { "cam yaw",    180.f / static_cast<float>(M_PI), "deg", QColor(26, 188, 156) },
+                { "cam dt",     1.f,                              "x",   QColor(149, 165, 166) },
+            };
+            static_assert(std::size(cspec) == static_cast<std::size_t>(rc::camcal::P_COUNT),
+                          "add a row here whenever rc::camcal::Param gains a parameter");
+
+            for (int i = 0; i < rc::camcal::P_COUNT; ++i)
+            {
+                auto& r = cam_rows_[i];
+                r.scale = cspec[i].scale;
+                r.unit  = cspec[i].unit;
+                r.why   = rc::camcal::param_why(i).data();
+
+                auto* header = new QHBoxLayout();
+                r.name = new QLabel(cspec[i].name, this);
+                r.name->setStyleSheet(QString("font-size: 12px; font-weight: bold; color: %1;")
+                                          .arg(cspec[i].col.name()));
+                r.name->setToolTip(QString("<div style='width: 380px'>%1</div>").arg(r.why));
+                r.value = new QLabel("--", this);
+                r.value->setStyleSheet("font-family: monospace; font-size: 12px; color: #e6e9ea;");
+                r.value->setToolTip(QString("<div style='width: 380px'>%1</div>").arg(r.why));
+                r.lamp = new QLabel(this);
+                header->addWidget(r.name);
+                header->addSpacing(12);
+                header->addWidget(r.value);
+                header->addStretch(1);
+                header->addWidget(r.lamp);
+                outer->addLayout(header);
+
+                r.plot = new TimeSeriesPlot(this);
+                r.plot->set_visible_window(600.f);
+                r.plot->add_series(cspec[i].name, cspec[i].col, 1.8f, 0);
+                r.plot->set_reference_line(0.f, QColor(120, 120, 120), "");
+                r.plot->setMinimumHeight(56);
+                r.plot->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+                outer->addWidget(r.plot, 1);
+            }
+        }
+    }
+
+    void CalibrationViewer::update_camera(const Eigen::Matrix<float, rc::camcal::P_COUNT, 1>& value,
+                                          const Eigen::Matrix<float, rc::camcal::P_COUNT, 1>& sigma,
+                                          int informed_mask, float condition, long pairs)
+    {
+        for (int i = 0; i < rc::camcal::P_COUNT; ++i)
+        {
+            auto& r = cam_rows_[i];
+            if (r.value == nullptr) continue;
+            const float v = value[i] * r.scale;
+            const float sg = sigma[i] * r.scale;
+            // Same rule as the motion block: a zero sigma is "not solved yet", never "exact".
+            r.value->setText(sg > 0.f
+                ? QString("%1 ± %2 %3").arg(v, 8, 'f', 3).arg(sg, 6, 'f', 3).arg(r.unit)
+                : QString("%1 ± ?      %2").arg(v, 8, 'f', 3).arg(r.unit));
+            const bool informed = (informed_mask >> i) & 1;
+            r.lamp->setText(informed ? "learning" : "not asked");
+            r.lamp->setToolTip(QString("<div style='width: 380px'>%1%2</div>")
+                                   .arg(informed
+                                            ? QStringLiteral("<b>Learning:</b> the views seen have "
+                                                             "outweighed the prior.<br><br>")
+                                            : QStringLiteral("<b>Not asked:</b> the robot has not "
+                                                             "seen the corners that identify this, "
+                                                             "so the value shown is still the prior "
+                                                             "— not a measurement of zero.<br><br>"))
+                                   .arg(r.why));
+            r.lamp->setStyleSheet(informed
+                ? "font-size: 11px; color: #2ecc71; font-weight: bold;"
+                : "font-size: 11px; color: #7f8c8d;");
+            r.plot->add_point(r.name->text().toStdString(), v);
+        }
+        if (cam_summary_ != nullptr)
+            cam_summary_->setText(
+                QString("pairs %1     conditioning %2%3")
+                    .arg(pairs, 6).arg(condition, 7, 'f', 1)
+                    // Pitch and height are KNOWN to be collinear here and near-wall driving did not
+                    // break it, so name the pair rather than leaving the reader to guess which two.
+                    .arg(condition > 50.f ? "   <- collinear; pitch/height is the usual pair"
+                                          : ""));
     }
 
     void CalibrationViewer::update_values(const Eigen::Matrix<float, rc::calib::P_COUNT, 1>& value,
