@@ -544,23 +544,37 @@ bool SpecificWorker::maybe_publish_corrected_pose()
 
     last_dsr_publish_try_ms_ = now_ms;
 
-    // ---- KINEMATIC CLAMP on the published pose --------------------------------------------------
-    // The published stream must be a physically possible trajectory: the robot cannot have moved
-    // further between two published poses than its own speed limit allows. Measured on this agent's
-    // own debug log (71k frames), it routinely does — 92.8% of frames take the prediction early-exit
-    // and publish a drifting odometry prediction, then the optimizer runs on the remaining 7.2% and
+    // ---- KINEMATIC CLAMP on the published CORRECTION --------------------------------------------
+    // The published stream must be a physically possible trajectory: between two published poses the
+    // robot cannot have jumped further than its own speed limit allows. Measured on this agent's own
+    // debug log (71k frames), it routinely did — 92.8% of frames take the prediction early-exit and
+    // publish a drifting odometry prediction, then the optimizer runs on the remaining 7.2% and
     // discharges the whole accumulated error in ONE frame: |innovation| p99 96.7 mm, max 280.2 mm,
-    // i.e. an implied 2.2 m/s at p99 and 7.2 m/s peak against a 0.70 m/s robot. 13.6% of those frames
-    // break the linear limit and 13.1% the angular one. The controller measured the same events
-    // independently as 6.9% of its updates, and they move its steering carrot up to 1.79 m in a cycle.
+    // i.e. an implied 2.2 m/s at p99 and 7.2 m/s peak against a 0.70 m/s robot.
     //
     // This is not a tuning threshold — it is the support of the motion model. A delta implying 7.2 m/s
     // is not unlikely, it is impossible, so it cannot be a report about where the robot went.
     //
+    // ★ WHAT IS BOUNDED IS THE CORRECTION, NOT THE POSE DELTA. The published delta is the sum of two
+    // things with completely different supports: the motion the sensors MEASURED (bounded by the
+    // robot's dynamics, and already a report about where it went), and the optimizer's correction on
+    // top of it (a teleport, bounded by nothing). Bounding their SUM against W_MAX made the published
+    // yaw rate a hard rate limiter at exactly W_MAX: measured 2026-08-28 on the Webots P3Bot, the
+    // published |omega| maxed at 0.8003 rad/s across 60k frames while ground truth reached 3.51 rad/s,
+    // 4.5% of frames sat pinned in [0.75, 0.80], and 2221 deg of real rotation was forbidden over one
+    // run. The published pose then falls behind DURING a pivot and only catches up once the true rate
+    // drops back under the cap — which is exactly the reported symptom: the controller's LiDAR cloud
+    // and robot icon swing >100 deg off the walls while turning and snap back when the turn ends,
+    // while room_concept's own viewer (which draws the UNCLAMPED last_result_) looks perfect
+    // throughout. The clamp had zero headroom by construction, because W_MAX was set to the
+    // controller's MaxRotSpeed — the very rate the robot is commanded to reach.
+    //
+    // So: let the measured motion (pred[k] - pred[k-1]) through untouched, and rate-limit only the
+    // residual on top of it. A genuine relocalization still converges over a few frames; a pivot at
+    // full speed is no longer misreported as a slower one.
+    //
     // The correction itself is LEGITIMATE (real accumulated drift, not a bad fit), so it is not
-    // rejected — only rate-limited. At a typical 0.35 m/s cruise there is ~20 mm/frame of headroom
-    // under the limit, which absorbs the p50 innovation (12 mm) in one frame and the p99 (97 mm) in
-    // about five. A genuine relocalization therefore still converges, just over a few frames.
+    // rejected — only rate-limited.
     bool clamp_fired = false;
     if (params.POSE_CLAMP_ENABLED and last_published_pose_.has_value()
         and last_published_ts_ms_ > 0 and loc_res->timestamp_ms > last_published_ts_ms_)
@@ -575,15 +589,47 @@ bool SpecificWorker::maybe_publish_corrected_pose()
                                              loc_res->robot_pose.linear()(0, 0));
             const float d_th = std::remainder(new_th - prev_th, 2.f * static_cast<float>(M_PI));
 
+            // The motion the sensors MEASURED between the last published frame and this one. Two
+            // consecutive odometry predictions difference to exactly the preintegrated increment
+            // (verified on 60k frames: pred[k] - pred[k-1] - imu_dtheta is 0.0012 deg at p50), so
+            // this is the measured motion and not another estimate of it. Without a previous
+            // prediction to difference against (first publication after a reset) it is zero, which
+            // degrades to the old total-delta behaviour for that single frame.
+            //
+            // ⚠ THIS DEPENDS ON THE PREDICTOR FREE-RUNNING. Today it does: on the 2734 frames where a
+            // correction was actually applied, pred[k] reproduces pred[k-1] + imu_dtheta to 0.0012 deg
+            // while est[k-1] + imu_dtheta misses by 27 deg — the optimizer's correction is published
+            // but never written back into the prediction accumulator. If that write-back is ever added
+            // (it should be), this difference stops being a pure sensor increment and starts carrying
+            // the previous correction, which would let a correction through UNBOUNDED. Change it to
+            // difference against the last published ESTIMATE at the same time as making that fix.
+            // Note that any correction the clamp did not apply on earlier frames is deliberately left
+            // INSIDE the bounded part here, so a backlog still discharges at max_th per frame rather
+            // than escaping as one jump.
+            Eigen::Vector2f m_xy = Eigen::Vector2f::Zero();
+            float           m_th = 0.f;
+            if (last_published_pred_.has_value())
+            {
+                const Eigen::Vector3f& pp = last_published_pred_.value();
+                m_xy = Eigen::Vector2f(loc_res->pred_x - pp.x(), loc_res->pred_y - pp.y());
+                m_th = std::remainder(loc_res->pred_theta - pp.z(), 2.f * static_cast<float>(M_PI));
+            }
+
+            // What is left after the measured motion is accounted for IS the correction — the only
+            // part of the published delta that has no dynamical support and can therefore be a
+            // teleport. Bound that, and only that.
+            const Eigen::Vector2f c_xy = d_xy - m_xy;
+            const float           c_th = std::remainder(d_th - m_th, 2.f * static_cast<float>(M_PI));
+
             const float max_xy = params.POSE_CLAMP_V_MAX * dt;
             const float max_th = params.POSE_CLAMP_W_MAX * dt;
-            const float n_xy = d_xy.norm();
+            const float n_xy = c_xy.norm();
 
-            if (n_xy > max_xy or std::abs(d_th) > max_th)
+            if (n_xy > max_xy or std::abs(c_th) > max_th)
             {
-                const Eigen::Vector2f xy_c = (n_xy > max_xy and n_xy > 1e-9f)
-                                             ? Eigen::Vector2f(d_xy * (max_xy / n_xy)) : d_xy;
-                const float th_c = std::clamp(d_th, -max_th, max_th);
+                const Eigen::Vector2f xy_c = m_xy + ((n_xy > max_xy and n_xy > 1e-9f)
+                                             ? Eigen::Vector2f(c_xy * (max_xy / n_xy)) : c_xy);
+                const float th_c = m_th + std::clamp(c_th, -max_th, max_th);
 
                 // The part of the correction we did NOT apply is real, known error in the published
                 // pose. Surfacing it as covariance is what keeps the clamp honest rather than a lie:
@@ -603,9 +649,11 @@ bool SpecificWorker::maybe_publish_corrected_pose()
 
                 clamp_fired = true;
                 if (++pose_clamp_hits_ % 20 == 1)
-                    qWarning() << "[pose-clamp] implied" << (n_xy / dt) << "m/s /" << (std::abs(d_th) / dt)
-                               << "rad/s over dt" << dt << "s — limits" << params.POSE_CLAMP_V_MAX << "/"
-                               << params.POSE_CLAMP_W_MAX << "; carried" << res_xy.norm() * 1000.f
+                    qWarning() << "[pose-clamp] CORRECTION implied" << (n_xy / dt) << "m/s /"
+                               << (std::abs(c_th) / dt) << "rad/s over dt" << dt << "s — limits"
+                               << params.POSE_CLAMP_V_MAX << "/" << params.POSE_CLAMP_W_MAX
+                               << "; measured motion passed through at" << (std::abs(m_th) / dt)
+                               << "rad/s; carried" << res_xy.norm() * 1000.f
                                << "mm into covariance (" << pose_clamp_hits_ << " clamps)";
             }
         }
@@ -623,6 +671,9 @@ bool SpecificWorker::maybe_publish_corrected_pose()
     // Publish (corrected pose → robot↔room RT) at the optimizer rate.
     scene_graph_->update(*loc_res, last_robot_adv_speed_, last_robot_side_speed_, last_robot_rot_speed_);
     last_published_pose_ = loc_res->robot_pose;
+    // Anchor for the NEXT frame's measured-motion difference. It must be the prediction that came
+    // with this frame (never the clamped pose), so the increment stays a pure sensor quantity.
+    last_published_pred_ = Eigen::Vector3f(loc_res->pred_x, loc_res->pred_y, loc_res->pred_theta);
     last_published_ts_ms_ = loc_res->timestamp_ms;
     last_dsr_published_ts_ms_ = loc_res->timestamp_ms;
 
@@ -744,6 +795,10 @@ void SpecificWorker::pump_image_edges()
         if (not camera_ingestor_->bind_camera(params.LIDAR_ROBOT_FRAME)) return;
         image_edge_bound_ = true;
         image_edge_source_->set_room_polygon(room_polygon_);
+        // The objects the room currently believes in, so the extraction can explain away wall
+        // samples they stand in front of. Refreshed each tick below, not only at bind: furniture
+        // appears, moves and is forgotten while the agent runs.
+        image_edge_source_->set_object_anchors(room_concept_.object_anchors());
         // room_height is read from the graph after construction, so refresh it here too.
         auto ic = image_edge_source_->config();
         ic.room_height = params.room_height;
@@ -754,6 +809,7 @@ void SpecificWorker::pump_image_edges()
     }
 
     rc::GrayFrame frame;
+    image_edge_source_->set_object_anchors(room_concept_.object_anchors());
     if (not camera_ingestor_->take_latest(frame)) return;    // no fresh image this tick
 
     const auto res = room_concept_.get_last_result();
