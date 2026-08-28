@@ -4367,20 +4367,47 @@ namespace rc
         //   thousands while the recovered dpose is correct to ~1.5 mm, which is exactly the
         //   confusion this split removes.
         const double c2d = chi2 / dof;
-        Eigen::Vector3d dp = Eigen::Vector3d::Zero();
-        double cond = 0.0, chi2_post = chi2, c2d_post = c2d;
+        // ★ A SINGLE CORNER IS NOT A WASTED FRAME. A factor CONTRIBUTES information; it never has to
+        //   be invertible on its own, and in a multi-modal graph which landmarks are visible changes
+        //   from frame to frame by design. One corner is a rank-2 constraint on three DOF, and the
+        //   SDF and LiDAR terms supply the rest — that is what the graph is for.
+        //   The n>=2 gate below belongs to this DIAGNOSTIC, which has to invert to report a dpose.
+        //   Writing 0 for those frames (as this did) reports a real contribution as an absence, and
+        //   dragged every dpose median to exactly 0.000 over 31.5% of frames. NaN now, never 0.
+        const double NAd = std::numeric_limits<double>::quiet_NaN();
+        Eigen::Vector3d dp = Eigen::Vector3d::Constant(NAd);
+        double cond = NAd, chi2_post = NAd, c2d_post = NAd;
+        // The information this frame CONTRIBUTES, which is defined whatever the rank: reported so a
+        // one-corner frame can be seen doing its job instead of looking like a hole in the data.
+        const double info_trace = H.trace();
         if (n_used >= 2)
         {
-            const Eigen::Vector3d ev =
-                Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d>(H).eigenvalues();
-            cond = ev(2) / std::max(1e-12, ev(0));
+            // ★ CORRELATION-NORMALISED, and the raw form is a trap this file already warns about
+            //   for the mount fits: H mixes METRES and RADIANS, so its raw condition number is
+            //   unit-dependent and says nothing about geometry. Measured on a real two-corner view
+            //   the raw number reads 418 while the unit-free one reads 97 — and the posterior is
+            //   5.6 mm / 2.4 mm / 0.083 deg, i.e. excellent. The raw number made a good factor look
+            //   degenerate. What the normalised form shows is STRUCTURE, not weakness: corr(x,theta)
+            //   ~ 0.98, the ordinary bearing-only ambiguity when the visible corners sit ahead and
+            //   clustered, with y determined independently.
+            const Eigen::Matrix3d Cv = H.inverse();
+            if (Cv.allFinite())
+            {
+                Eigen::Matrix3d Rc = Eigen::Matrix3d::Identity();
+                for (int i = 0; i < 3; ++i)
+                    for (int j = 0; j < 3; ++j)
+                        Rc(i, j) = Cv(i, j) / std::sqrt(std::max(1e-300, Cv(i, i) * Cv(j, j)));
+                const Eigen::Vector3d ev =
+                    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d>(Rc).eigenvalues();
+                cond = ev(2) / std::max(1e-12, ev(0));
+            }
             // A tiny ridge only so a single visible corner cannot produce a NaN. It is NOT a prior:
             // if the geometry cannot determine a pose component, `cond` is what says so.
             dp = (H + 1e-9 * Eigen::Matrix3d::Identity()).ldlt().solve(g);
             chi2_post = std::max(0.0, chi2 - g.dot(dp));
             c2d_post  = chi2_post / dof;
         }
-        tps_chi2_sum_ += c2d_post; ++tps_chi2_n_;
+        if (std::isfinite(c2d_post)) { tps_chi2_sum_ += c2d_post; ++tps_chi2_n_; }
         if (not triple_pose_csv_.is_open())
         {
             triple_pose_csv_.open("etc/image_edge_triple_pose.csv", std::ios::out | std::ios::trunc);
@@ -4388,7 +4415,7 @@ namespace rc
             {
                 triple_pose_csv_.imbue(std::locale::classic());
                 triple_pose_csv_ << "ts_ms,n_corners,chi2,dof,chi2_per_dof,"
-                                    "chi2_post,chi2_post_per_dof,"
+                                    "chi2_post,chi2_post_per_dof,info_trace,"
                                     "dpose_x,dpose_y,dpose_th,cond_H,pose_x,pose_y,pose_theta\n";
             }
         }
@@ -4396,6 +4423,7 @@ namespace rc
         {
             triple_pose_csv_ << timestamp_ms << ',' << n_used << ',' << chi2 << ',' << dof << ','
                              << c2d << ',' << chi2_post << ',' << c2d_post << ','
+                             << info_trace << ','
                              << dp(0) << ',' << dp(1) << ',' << dp(2) << ','
                              << cond << ',' << pose.x() << ',' << pose.y() << ',' << pose.z() << '\n';
             triple_pose_csv_.flush();
