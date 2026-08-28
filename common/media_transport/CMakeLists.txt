@@ -25,3 +25,15 @@ target_include_directories(media_bench PRIVATE
 )
 
 target_link_libraries(media_bench PRIVATE fastdds fastcdr)
+
+# Descriptor round-trip under the AGENT'S locale. It calls setlocale(LC_ALL,"") itself,
+# because a standalone harness stays in "C" and the es_ES decimal-comma bug simply
+# VANISHES -- the test and the agent would then answer different questions about the
+# same string. Run it as:  LANG=es_ES.UTF-8 ./descriptor_roundtrip
+add_executable(descriptor_roundtrip
+  bench/descriptor_roundtrip.cpp
+  media_transport.cpp
+  ${AI_COMMON_IDL_SOURCES}
+)
+target_include_directories(descriptor_roundtrip PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(descriptor_roundtrip PRIVATE fastdds fastcdr)

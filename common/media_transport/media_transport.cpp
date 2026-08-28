@@ -3,6 +3,7 @@
 #include "media_transport.h"
 
 #include <cctype>
+#include <charconv>
 #include <chrono>
 #include <cstring>
 #include <cstdlib>
@@ -917,6 +918,80 @@ std::map<std::string, std::string> parse_flat_json(const std::string& s)
 
 bool as_bool(const std::string& v) { return v == "true" or v == "1"; }
 int  as_int (const std::string& v, int def) { try { return std::stoi(v); } catch (...) { return def; } }
+
+// ── Locale-independent number I/O. NOT a style preference. ────────────────────
+// These machines run LANG=es_ES.UTF-8, where the decimal separator is a COMMA, and
+// every agent here is a Qt program -- Qt calls setlocale(LC_ALL, "") at startup, which
+// activates that locale for the C library. strtof/atof/strtod/std::stof/std::stod read
+// through LC_NUMERIC and STOP DEAD at a '.', returning the integer part with no error
+// flag: "0.0005" becomes 0. A published noise floor of 0 reads as INFINITE PRECISION,
+// so a consumer would trust a dead channel absolutely, silently, for ever.
+//
+// The write side is the same trap and is easier to miss: std::to_string(double) is
+// specified as sprintf("%f"), which also honours LC_NUMERIC -- it would emit "0,0005",
+// producing a descriptor no from_chars anywhere can read back. Hence to_chars both ways.
+//
+// std::from_chars/to_chars are locale-independent BY DEFINITION and report failure
+// instead of guessing. See CLAUDE.md, "Parsing numbers from files".
+float as_float(const std::string& v, float def)
+{
+    const char* b = v.data();
+    const char* e = b + v.size();
+    while (b < e and std::isspace(static_cast<unsigned char>(*b))) ++b;
+    float out{};
+    const auto [ptr, ec] = std::from_chars(b, e, out);
+    return ec == std::errc{} ? out : def;
+}
+
+std::int64_t as_i64(const std::string& v, std::int64_t def)
+{
+    const char* b = v.data();
+    const char* e = b + v.size();
+    while (b < e and std::isspace(static_cast<unsigned char>(*b))) ++b;
+    std::int64_t out{};
+    const auto [ptr, ec] = std::from_chars(b, e, out);
+    return ec == std::errc{} ? out : def;
+}
+
+// Shortest round-trippable form, never locale-formatted.
+std::string fmt_float(float v)
+{
+    char buf[64];
+    const auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), v);
+    return ec == std::errc{} ? std::string(buf, ptr) : std::string("0");
+}
+
+// A flat descriptor cannot carry a JSON array: parse_flat_json() reads an unquoted
+// value up to the next ',' or '}', so "[1,2,3]" would truncate at the first comma.
+// Per-ring elevations therefore travel as a ';'-separated QUOTED string, which the
+// existing string path already parses correctly.
+std::string fmt_float_list(const std::vector<float>& xs)
+{
+    std::string r;
+    for (std::size_t i = 0; i < xs.size(); ++i) { if (i) r += ';'; r += fmt_float(xs[i]); }
+    return r;
+}
+
+std::vector<float> as_float_list(const std::string& v)
+{
+    std::vector<float> out;
+    std::size_t i = 0;
+    while (i <= v.size())
+    {
+        const std::size_t j = v.find(';', i);
+        const std::size_t end = (j == std::string::npos) ? v.size() : j;
+        if (end > i)
+        {
+            const char* b = v.data() + i;
+            float f{};
+            if (const auto [ptr, ec] = std::from_chars(b, v.data() + end, f); ec == std::errc{})
+                out.push_back(f);
+        }
+        if (j == std::string::npos) break;
+        i = j + 1;
+    }
+    return out;
+}
 } // namespace
 
 std::string MediaDescriptor::to_json() const
@@ -940,6 +1015,48 @@ std::string MediaDescriptor::to_json() const
         s += ",\"" + esc(key) + "_topic\":\"" + esc(topic) + "\"";
     for (const auto& [key, tname] : stream_types)
         s += ",\"" + esc(key) + "_type\":\"" + esc(tname) + "\"";
+
+    // Sensor physics. Emitted ONLY when a model is advertised, and per-field only when
+    // the producer set it, so absent stays distinguishable from zero and an existing
+    // descriptor's bytes do not move.
+    // ⚠ NO KEY HERE MAY END IN "_topic" OR "_type": from_json() harvests those suffixes
+    // into streams/stream_types by pattern, so such a key would silently become a phantom
+    // stream advertisement rather than a model field.
+    if (not model.empty())
+    {
+        const auto opt = [&s](const char* k, const auto& o)
+        { if (o.has_value()) s += ",\"" + std::string(k) + "\":" + fmt_float(static_cast<float>(*o)); };
+
+        s += ",\"model_version\":" + std::to_string(model.version);
+        if (not model.source.empty()) s += ",\"model_source\":\"" + esc(model.source) + "\"";
+        if (not model.ref.empty())    s += ",\"model_ref\":\"" + esc(model.ref) + "\"";
+        if (model.stamp_ms)           s += ",\"model_stamp_ms\":" + std::to_string(model.stamp_ms);
+        if (not model.frame.empty())  s += ",\"geom_frame\":\"" + esc(model.frame) + "\"";
+
+        if (model.rings.has_value())  s += ",\"geom_rings\":" + std::to_string(*model.rings);
+        if (not model.ring_elev_deg.empty())
+            s += ",\"geom_ring_elev_deg\":\"" + fmt_float_list(model.ring_elev_deg) + "\"";
+        opt("geom_azimuth_step_deg", model.azimuth_step_deg);
+        opt("geom_range_min_m",      model.range_min_m);
+        opt("geom_range_max_m",      model.range_max_m);
+        opt("geom_fov_start_deg",    model.fov_start_deg);
+        opt("geom_fov_end_deg",      model.fov_end_deg);
+        opt("geom_rate_hz",          model.rate_hz);
+
+        opt("noise_range_sigma_floor_m", model.range_sigma_floor_m);
+        opt("noise_range_k_rel",         model.range_k_rel);
+        opt("noise_range_k_incidence",   model.range_k_incidence);
+
+        opt("noise_gyro_sigma",   model.gyro_sigma);
+        opt("noise_gyro_bias",    model.gyro_bias);
+        opt("noise_gyro_bias_rw", model.gyro_bias_rw);
+        opt("noise_acc_sigma",    model.acc_sigma);
+
+        opt("noise_v_floor",  model.v_floor);
+        opt("noise_k_slip_v", model.k_slip_v);
+        opt("noise_w_floor",  model.w_floor);
+        opt("noise_k_slip_w", model.k_slip_w);
+    }
     s += "}";
     return s;
 }
@@ -957,6 +1074,40 @@ std::optional<MediaDescriptor> MediaDescriptor::from_json(const std::string& s)
     if (auto it = kv.find("shared_memory_only"); it != kv.end()) d.shared_memory_only = as_bool(it->second);
     if (auto it = kv.find("data_sharing");       it != kv.end()) d.data_sharing       = as_bool(it->second);
     if (auto it = kv.find("ready");              it != kv.end()) d.ready              = as_bool(it->second);
+    // Sensor physics. Absent keys stay nullopt -- "unknown", which a consumer must treat
+    // as "keep your own constant", never as zero.
+    if (auto it = kv.find("model_version"); it != kv.end())
+    {
+        auto& m = d.model;
+        m.version = as_int(it->second, 0);
+        if (auto j = kv.find("model_source");  j != kv.end()) m.source   = j->second;
+        if (auto j = kv.find("model_ref");     j != kv.end()) m.ref      = j->second;
+        if (auto j = kv.find("model_stamp_ms");j != kv.end()) m.stamp_ms = as_i64(j->second, 0);
+        if (auto j = kv.find("geom_frame");    j != kv.end()) m.frame    = j->second;
+        if (auto j = kv.find("geom_rings");    j != kv.end()) m.rings    = as_int(j->second, 0);
+        if (auto j = kv.find("geom_ring_elev_deg"); j != kv.end()) m.ring_elev_deg = as_float_list(j->second);
+
+        const auto opt = [&kv](const char* k, std::optional<float>& dst)
+        { if (auto j = kv.find(k); j != kv.end()) dst = as_float(j->second, 0.f); };
+        opt("geom_azimuth_step_deg", m.azimuth_step_deg);
+        opt("geom_range_min_m",      m.range_min_m);
+        opt("geom_range_max_m",      m.range_max_m);
+        opt("geom_fov_start_deg",    m.fov_start_deg);
+        opt("geom_fov_end_deg",      m.fov_end_deg);
+        opt("geom_rate_hz",          m.rate_hz);
+        opt("noise_range_sigma_floor_m", m.range_sigma_floor_m);
+        opt("noise_range_k_rel",         m.range_k_rel);
+        opt("noise_range_k_incidence",   m.range_k_incidence);
+        opt("noise_gyro_sigma",   m.gyro_sigma);
+        opt("noise_gyro_bias",    m.gyro_bias);
+        opt("noise_gyro_bias_rw", m.gyro_bias_rw);
+        opt("noise_acc_sigma",    m.acc_sigma);
+        opt("noise_v_floor",  m.v_floor);
+        opt("noise_k_slip_v", m.k_slip_v);
+        opt("noise_w_floor",  m.w_floor);
+        opt("noise_k_slip_w", m.k_slip_w);
+    }
+
     // Any "<name>_topic" key is a stream advertisement; "<name>_type" its IDL type.
     auto ends_with = [](const std::string& k, std::string_view sfx)
     { return k.size() > sfx.size() and k.compare(k.size() - sfx.size(), sfx.size(), sfx) == 0; };
