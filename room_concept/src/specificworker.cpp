@@ -720,6 +720,14 @@ void SpecificWorker::mount_pair_update(const rc::ImageEdgeObs &obs,
 {
     if (obs.triple_points.empty() or matches.empty() or not camera_ingestor_) return;
     if (mp_win_start_ms_ == 0) mp_win_start_ms_ = timestamp_ms;
+    if (not mp_loaded_)
+    {
+        // Resume the measurement from the last session. Loading H and b is not a ratchet: the prior
+        // is re-added at solve time, so this is the same evidence arriving earlier.
+        mp_loaded_ = true;
+        if (const std::size_t k = mp_pool_.load("etc/camera_calib.txt"); k > 0)
+            qInfo().nospace() << "[camcal] resumed from etc/camera_calib.txt (" << k << " pairs)";
+    }
 
     for (const auto &tp : obs.triple_points)
     {
@@ -771,6 +779,7 @@ void SpecificWorker::mount_pair_update(const rc::ImageEdgeObs &obs,
 
     const auto win  = mp_win_.solve();
     const auto pool = mp_pool_.solve();
+    mp_pool_.save("etc/camera_calib.txt");   // every window, so a kill -9 costs at most one
     mp_win_.reset();
     if (not win.ok) return;
     ++mp_wins_;
@@ -816,7 +825,7 @@ void SpecificWorker::mount_pair_update(const rc::ImageEdgeObs &obs,
                       .arg(phys(sc, i), 0, 'f', 4);
         }
         qInfo().nospace().noquote()
-            << "[mount/pool] " << mp_pool_.n << " pairs over " << mp_wins_ << " windows" << pb
+            << "[mount/pool] " << mp_pool_.pairs() << " pairs over " << mp_wins_ << " windows" << pb
             << " | chi2/dof " << QString::number(pool.chi2_dof, 'f', 2)
             << " | cond " << QString::number(pool.cond, 'f', 1)
             << " (" << nm[pool.rho_i] << "/" << nm[pool.rho_j] << " rho "

@@ -38,6 +38,7 @@
 #include "imu_ingestor.h"
 #include "camera_ingestor.h"
 #include "mount_lidar_pair.h"
+#include "camera_calibration.h"
 #include "image_edge_source.h"
 #include "room_viewer.h"
 #include "room_config.h"
@@ -269,7 +270,9 @@ class SpecificWorker : public GenericWorker
     // TWO accumulators on purpose. `mp_win_` resets every window and is directly comparable with
     // stage 1's per-window solve; `mp_pool_` never resets. Pooling is only legitimate if the pose was
     // the dominant between-window nuisance, which is a CLAIM — running both is what tests it.
-    rc::mount::Accum mp_win_, mp_pool_;
+    rc::mount::Accum   mp_win_;      ///< resets every window; comparable with the older stage-1 fit
+    rc::camcal::Estimator mp_pool_;  ///< persistent, saved/loaded as EVIDENCE (see camera_calibration.h)
+    bool               mp_loaded_ = false;
     std::int64_t     mp_win_start_ms_ = 0;
     long             mp_wins_ = 0, mp_seen_ = 0, mp_paired_ = 0;
     std::ofstream    mp_csv_;
