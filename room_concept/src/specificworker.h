@@ -37,6 +37,7 @@
 #include "lidar_ingestor.h"
 #include "imu_ingestor.h"
 #include "camera_ingestor.h"
+#include "mount_lidar_pair.h"
 #include "image_edge_source.h"
 #include "room_viewer.h"
 #include "room_config.h"
@@ -264,6 +265,20 @@ class SpecificWorker : public GenericWorker
     // ★ SELF-CHECKING, not a silent negation. Both conventions are scored every cycle by how CONSTANT
     //   the resulting offset is; gt_convention_report() names the winner. If robot_concept is fixed,
     //   the winner flips and the log says so, instead of this correction inverting a correct signal.
+    // ── Stage 2: camera-vs-LiDAR mount calibration, pose-free (mount_lidar_pair.h) ───────────────
+    // TWO accumulators on purpose. `mp_win_` resets every window and is directly comparable with
+    // stage 1's per-window solve; `mp_pool_` never resets. Pooling is only legitimate if the pose was
+    // the dominant between-window nuisance, which is a CLAIM — running both is what tests it.
+    rc::mount::Accum mp_win_, mp_pool_;
+    std::int64_t     mp_win_start_ms_ = 0;
+    long             mp_wins_ = 0, mp_seen_ = 0, mp_paired_ = 0;
+    std::ofstream    mp_csv_;
+    Eigen::Vector4d  mp_sum_ = Eigen::Vector4d::Zero(), mp_sum2_ = Eigen::Vector4d::Zero();
+    long             mp_sum_n_ = 0;
+    void mount_pair_update(const rc::ImageEdgeObs& obs,
+                           const std::vector<rc::CornerDetector::CornerMatch>& matches,
+                           std::int64_t timestamp_ms);
+
     double gt_sum_diff_c_ = 0, gt_sum_diff_s_ = 0;   ///< circular accumulators for est - gt
     double gt_sum_sum_c_  = 0, gt_sum_sum_s_  = 0;   ///< and for est + gt
     long   gt_n_ = 0;

@@ -711,6 +711,121 @@ bool SpecificWorker::maybe_publish_corrected_pose()
 // a CONSTANT offset (the room frame's arbitrary orientation datum), the wrong one leaves an offset
 // that swings with the robot's heading. Score both by circular concentration R = |mean unit vector|;
 // R -> 1 is constant, R -> 0 is uniformly spread. Reported once, on the first few hundred samples.
+// ── STAGE 2: pair each RGB triple point with the LiDAR corner of the SAME polygon vertex ─────────
+// See mount_lidar_pair.h for why the residual has no pose in it and why that is the point.
+void SpecificWorker::mount_pair_update(const rc::ImageEdgeObs &obs,
+                                       const std::vector<rc::CornerDetector::CornerMatch> &matches,
+                                       std::int64_t timestamp_ms)
+{
+    if (obs.triple_points.empty() or matches.empty() or not camera_ingestor_) return;
+    if (mp_win_start_ms_ == 0) mp_win_start_ms_ = timestamp_ms;
+
+    for (const auto &tp : obs.triple_points)
+    {
+        ++mp_seen_;
+        // EXACT association: both sides index the ORIGINAL polygon vertex list. No gate, no
+        // nearest-neighbour, so no misassociation mode to defend against.
+        const auto it = std::ranges::find_if(matches,
+            [&](const auto &m) { return m.model_index == tp.vertex; });
+        if (it == matches.end()) continue;
+        // A SUPPRESSED match is a retired landmark: still detected, still carrying numbers, but
+        // deliberately kept out of the loss (corner_detector.h). It must stay out of this one too.
+        if (it->suppressed) continue;
+
+        const auto pr = rc::mount::make_pair(tp, *it, camera_ingestor_->model(),
+                                             camera_ingestor_->cam_R_robot(),
+                                             camera_ingestor_->cam_t_robot(),
+                                             params.IMAGE_EDGE_MOUNT_PITCH_SIGMA,
+                                             params.IMAGE_EDGE_MOUNT_HEIGHT_SIGMA,
+                                             params.IMAGE_EDGE_MOUNT_YAW_SIGMA);
+        if (not pr.ok) continue;
+        ++mp_paired_;
+        mp_win_.add(pr);
+        mp_pool_.add(pr);
+
+        if (not mp_csv_.is_open())
+        {
+            mp_csv_.open("etc/image_edge_pair.csv", std::ios::out | std::ios::trunc);
+            if (mp_csv_.is_open())
+            {
+                mp_csv_.imbue(std::locale::classic());   // CLAUDE.md: never a comma decimal
+                mp_csv_ << "ts_ms,vertex,u_img,v_img,u_lidar,v_lidar,ru,rv,"
+                           "sigu,sigv,assoc_prob,range_m,angle_deg,assoc_chi2\n";
+            }
+        }
+        if (mp_csv_.is_open())
+            mp_csv_ << timestamp_ms << ',' << pr.vertex << ','
+                    << pr.uv_image.x() << ',' << pr.uv_image.y() << ','
+                    << pr.uv_lidar.x() << ',' << pr.uv_lidar.y() << ','
+                    << pr.r.x() << ',' << pr.r.y() << ','
+                    << std::sqrt(std::max(0.f, pr.cov(0, 0))) << ','
+                    << std::sqrt(std::max(0.f, pr.cov(1, 1))) << ','
+                    << pr.assoc_prob << ',' << pr.range_m << ','
+                    << it->angle_deg << ',' << it->assoc_chi2_val << '\n';
+    }
+
+    if (timestamp_ms - mp_win_start_ms_ < 5000) return;
+    mp_win_start_ms_ = timestamp_ms;
+    if (mp_csv_.is_open()) mp_csv_.flush();
+
+    const auto win  = mp_win_.solve();
+    const auto pool = mp_pool_.solve();
+    mp_win_.reset();
+    if (not win.ok) return;
+    ++mp_wins_;
+    mp_sum_  += win.p;
+    mp_sum2_ += win.p.cwiseProduct(win.p);
+    ++mp_sum_n_;
+
+    const double sig[4] = {params.IMAGE_EDGE_MOUNT_PITCH_SIGMA,
+                           params.IMAGE_EDGE_MOUNT_HEIGHT_SIGMA,
+                           params.IMAGE_EDGE_MOUNT_YAW_SIGMA, 1.0};
+    const char *nm[4] = {"pitch", "height", "yaw", "dt"};
+    const auto phys = [&](double v, int i)
+    { return (i == 0 or i == 2) ? v * sig[i] * 180.0 / M_PI : v * sig[i]; };
+
+    QString body;
+    for (int i = 0; i < 3; ++i)      // dt is not estimated here; do not print an unmoved prior
+        body += QString(" | %1 %2 (%3%4)").arg(nm[i])
+                    .arg(phys(win.p(i), i), 0, 'f', 4).arg(win.sigma(i), 0, 'f', 3)
+                    .arg((win.informed >> i) & 1 ? ", INF" : "");
+    qInfo().nospace().noquote()
+        << "[mount/pair] window " << mp_wins_ << " (" << win.chi2_dof * 0 + mp_paired_
+        << " pairs of " << mp_seen_ << " triple points)" << body
+        << " | chi2/dof " << QString::number(win.chi2_dof, 'f', 2)
+        << " | cond " << QString::number(win.cond, 'f', 1)
+        << " (" << nm[win.rho_i] << "/" << nm[win.rho_j] << " rho "
+        << QString::number(win.rho, 'f', 3) << ")";
+
+    // ★ The pooled solve is the CLAIM under test: with the pose gone from the residual, windows
+    //   should be comparable draws of one static quantity, so summing their information is legitimate
+    //   and buys the range diversity one window never has. If the between-window scatter does NOT
+    //   collapse toward the pooled sigma, the pose was not the dominant nuisance and pooling is still
+    //   wrong — which is why both numbers are on the same line rather than only the flattering one.
+    if (pool.ok and mp_sum_n_ >= 2)
+    {
+        QString pb;
+        for (int i = 0; i < 3; ++i)
+        {
+            const double m = mp_sum_(i) / mp_sum_n_;
+            const double sc = std::sqrt(std::max(0.0, mp_sum2_(i) / mp_sum_n_ - m * m));
+            pb += QString(" | %1 %2 (%3%4) [scatter %5]").arg(nm[i])
+                      .arg(phys(pool.p(i), i), 0, 'f', 4).arg(pool.sigma(i), 0, 'f', 3)
+                      .arg((pool.informed >> i) & 1 ? ", INF" : "")
+                      .arg(phys(sc, i), 0, 'f', 4);
+        }
+        qInfo().nospace().noquote()
+            << "[mount/pool] " << mp_pool_.n << " pairs over " << mp_wins_ << " windows" << pb
+            << " | chi2/dof " << QString::number(pool.chi2_dof, 'f', 2)
+            << " | cond " << QString::number(pool.cond, 'f', 1)
+            << " (" << nm[pool.rho_i] << "/" << nm[pool.rho_j] << " rho "
+            << QString::number(pool.rho, 'f', 3) << ")"
+            << (pool.cond < 50.0 && win.cond > 50.0
+                    ? "   <- POOLING BROKE THE RIDGE: the pair is separable across poses and was not"
+                      " within one window" : "");
+    }
+}
+
 void SpecificWorker::gt_convention_report(float est_th, float gt_th_raw)
 {
     const double d = est_th - gt_th_raw, u = est_th + gt_th_raw;
@@ -945,6 +1060,7 @@ void SpecificWorker::pump_image_edges()
             }
         }
     }
+    mount_pair_update(obs, res->corner_matches, static_cast<std::int64_t>(frame.stamp));
     room_concept_.set_image_edges(std::move(obs));
 
     if (const auto [polls, hits] = camera_ingestor_->depth_stats();
