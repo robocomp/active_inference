@@ -4301,6 +4301,101 @@ namespace rc
             ++triple_rows_;
         }
         triple_csv_.flush();
+
+        // ── THE TRIPLE-POINT POSE FACTOR, IN SHADOW ──────────────────────────────────────────────
+        // What it would be if it entered the loss: a 2-D projection residual per corner,
+        //     r = uv_meas - project(pose, p_room),     W = cov_uv^-1
+        // with the pose Jacobian the source already derives for its scalar samples, kept in full
+        // rather than contracted onto a contour normal (a triple point has no aperture problem).
+        //
+        // ★ SELF-CONTAINED BY DESIGN. It forms its own 3x3 normal equations here instead of going
+        //   through the GN solver, so there is no code path by which this can move the published
+        //   pose — `drive` is not a flag that has to be respected, the influence does not exist.
+        //   Building it this way first is the point: the gate for letting it drive is its own
+        //   chi2/dof, and that has to be measured before the plumbing that could act on it exists.
+        //
+        // ★ WHAT THIS CANNOT SHOW. Corners sharing a floor segment are correlated (the detector
+        //   pairs each vertex with whichever adjacent floor line carries more weight, so two corners
+        //   of one wall can share it), and this treats them as independent. With a handful per frame
+        //   and a covariance measured CONSERVATIVE by 36x in u / 2.3x in v against fixed-pose
+        //   repeatability, the error is bounded and in the safe direction — but chi2 below 1 must be
+        //   read as "conservative sigmas", not "better than the noise floor".
+        Eigen::Matrix3d H = Eigen::Matrix3d::Zero();
+        Eigen::Vector3d g = Eigen::Vector3d::Zero();
+        double chi2 = 0.0; int n_used = 0;
+        const float cth2 = std::cos(pose.z()), sth2 = std::sin(pose.z());
+        Eigen::Matrix3f Rm2; Rm2 << cth2, sth2, 0.f, -sth2, cth2, 0.f, 0.f, 0.f, 1.f;
+        for (const auto& t : obs.triple_points)
+        {
+            const Eigen::Vector3f e(t.p_room.x() - pose.x(), t.p_room.y() - pose.y(), t.p_room.z());
+            const Eigen::Vector3f p_robot = Rm2 * e;
+            const Eigen::Vector3f p_cam   = obs.cam_R_robot * p_robot + obs.cam_t_robot;
+            Eigen::Vector2d uvp;
+            if (not rc::img::project_with_model(obs.cam, p_cam.cast<double>(), uvp)) continue;
+            Eigen::Matrix<double, 2, 3> P;
+            if (not rc::img::project_jacobian_model(obs.cam, p_cam.cast<double>(), P)) continue;
+            // d(p_cam)/d(pose) — identical to the source's Jx, kept as 2x3 instead of contracted.
+            Eigen::Matrix3f Jx;
+            Jx.col(0) = obs.cam_R_robot * (-Rm2.col(0));
+            Jx.col(1) = obs.cam_R_robot * (-Rm2.col(1));
+            Jx.col(2) = obs.cam_R_robot * Eigen::Vector3f(p_robot.y(), -p_robot.x(), 0.f);
+            const Eigen::Matrix<double, 2, 3> J = P * Jx.cast<double>();
+            const Eigen::Matrix2d C = t.cov_uv.cast<double>();
+            if (not (C.determinant() > 1e-12)) continue;
+            const Eigen::Matrix2d W = C.inverse();
+            const Eigen::Vector2d r(static_cast<double>(t.uv_meas.x()) - uvp.x(),
+                                    static_cast<double>(t.uv_meas.y()) - uvp.y());
+            H.noalias() += J.transpose() * W * J;
+            g.noalias() += J.transpose() * W * r;
+            chi2 += r.dot(W * r);
+            ++n_used;
+        }
+        if (n_used == 0) return;
+        ++tps_frames_;
+        const double dof = std::max(1.0, 2.0 * n_used - 3.0);
+        // ★ TWO CHI-SQUARES, AND ONLY THE SECOND IS THE GATE.
+        //   `chi2` is evaluated at the LOCALISER's pose, so it measures how much this factor
+        //   disagrees with the incumbent — useful, but it conflates a wrong pose with wrong sigmas
+        //   and cannot answer "is the covariance honest?". `chi2_post` is what is LEFT after the
+        //   three pose DOF have absorbed everything they can: chi2 - g' H^-1 g. That is the part no
+        //   pose could explain, so it is the one that must approach 1 before this may drive.
+        //   Verified in simulation: with a deliberately wrong pose the pre-fit value runs into the
+        //   thousands while the recovered dpose is correct to ~1.5 mm, which is exactly the
+        //   confusion this split removes.
+        const double c2d = chi2 / dof;
+        Eigen::Vector3d dp = Eigen::Vector3d::Zero();
+        double cond = 0.0, chi2_post = chi2, c2d_post = c2d;
+        if (n_used >= 2)
+        {
+            const Eigen::Vector3d ev =
+                Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d>(H).eigenvalues();
+            cond = ev(2) / std::max(1e-12, ev(0));
+            // A tiny ridge only so a single visible corner cannot produce a NaN. It is NOT a prior:
+            // if the geometry cannot determine a pose component, `cond` is what says so.
+            dp = (H + 1e-9 * Eigen::Matrix3d::Identity()).ldlt().solve(g);
+            chi2_post = std::max(0.0, chi2 - g.dot(dp));
+            c2d_post  = chi2_post / dof;
+        }
+        tps_chi2_sum_ += c2d_post; ++tps_chi2_n_;
+        if (not triple_pose_csv_.is_open())
+        {
+            triple_pose_csv_.open("etc/image_edge_triple_pose.csv", std::ios::out | std::ios::trunc);
+            if (triple_pose_csv_.is_open())
+            {
+                triple_pose_csv_.imbue(std::locale::classic());
+                triple_pose_csv_ << "ts_ms,n_corners,chi2,dof,chi2_per_dof,"
+                                    "chi2_post,chi2_post_per_dof,"
+                                    "dpose_x,dpose_y,dpose_th,cond_H,pose_x,pose_y,pose_theta\n";
+            }
+        }
+        if (triple_pose_csv_.is_open())
+        {
+            triple_pose_csv_ << timestamp_ms << ',' << n_used << ',' << chi2 << ',' << dof << ','
+                             << c2d << ',' << chi2_post << ',' << c2d_post << ','
+                             << dp(0) << ',' << dp(1) << ',' << dp(2) << ','
+                             << cond << ',' << pose.x() << ',' << pose.y() << ',' << pose.z() << '\n';
+            triple_pose_csv_.flush();
+        }
     }
 
     /// One weighted least squares per WINDOW — the accumulators reset after every solve — with the
@@ -4646,7 +4741,12 @@ namespace rc
             << (triple_rows_ == 0 and triple_frames_ > 0
                     ? "  <- frames ARE arriving and no vertex resolved: check that wall corners AND"
                       " floor junctions are both enabled, they are intersected in pairs"
-                    : "");
+                    : "")
+            << (tps_chi2_n_ > 0
+                    ? QString(" | POSE FACTOR (shadow, cannot drive): POST-fit chi2/dof %1 over"
+                              " %2 frames — this is the gate, and it must approach 1")
+                          .arg(tps_chi2_sum_ / tps_chi2_n_, 0, 'f', 2).arg(tps_frames_)
+                    : QString());
         qInfo().nospace() << "[imgedge] " << imgedge_rows_ << " rows / " << imgedge_calls_
                           << " calls | no_window=" << imgedge_no_window_
                           << " no_obs=" << imgedge_no_obs_ << " (bound, nothing extracted)"
