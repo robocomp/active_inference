@@ -131,6 +131,7 @@ ImageEdgeObs ImageEdgeSource::extract(const GrayFrame& frame,
         int             vertex = -1;
         ContourClass    cls    = ContourClass::WallCorner;
         double          w = 0.0, ws = 0.0;      ///< weight, and weight * along-normal offset
+        double          wh4 = 0.0;              ///< weight * this segment's map-offset sensitivity
         Eigen::Vector2d wn = Eigen::Vector2d::Zero();
     };
     std::vector<SegFit> fits;
@@ -375,9 +376,10 @@ ImageEdgeObs ImageEdgeSource::extract(const GrayFrame& frame,
                 if (gam > 1e-6f)
                 {
                     const double wf = static_cast<double>(gam) / static_cast<double>(s2f);
-                    fit.w  += wf;
-                    fit.ws += wf * static_cast<double>(best_s);
-                    fit.wn += wf * Eigen::Vector2d(n_hat.x(), n_hat.y());
+                    fit.w   += wf;
+                    fit.ws  += wf * static_cast<double>(best_s);
+                    fit.wh4 += wf * static_cast<double>(hcol(4));
+                    fit.wn  += wf * Eigen::Vector2d(n_hat.x(), n_hat.y());
                 }
             }
 
@@ -441,9 +443,25 @@ ImageEdgeObs ImageEdgeSource::extract(const GrayFrame& frame,
             const Eigen::Vector2d d(fc->ws / fc->w, ff->ws / ff->w);
             const Eigen::Matrix2d Ai = A.inverse();
             const Eigen::Vector2d delta = Ai * d;
+            // ── Line-offset variance: TWO parts, and the second does not average down ────────────
+            // 1/w is the standard error of the weighted MEAN, which shrinks as 1/N. That is the
+            // right answer for independent per-sample noise and the WRONG one for the thing that
+            // actually dominates: nuisance column [4], this contour's own position in the map, is
+            // COMMON MODE across the segment. Sampling a misplaced wall more finely does not locate
+            // it any better, so that variance must be added, not averaged.
+            //
+            // ★ MEASURED, and it is why this was found: with only the 1/w term the factor's post-fit
+            //   chi2/dof ran 6.99 — residuals ~2.6x the stated sigma AFTER the pose had absorbed
+            //   everything it could, which is precisely the per-corner systematic (1.74 px in u,
+            //   0.81 px in v across six vertices) that column [4] exists to represent. The column
+            //   was reaching the per-sample weights and stopping there.
+            // ★ The magnitude is a prediction, not a fit: sigma_wall 0.015 m at ~4 m and fy 448 is
+            //   1.68 px, against the 1.74 px measured. Nothing was tuned to make those agree.
+            const double h4c = fc->wh4 / fc->w;      // weighted mean sensitivity over each segment
+            const double h4f = ff->wh4 / ff->w;
             Eigen::Matrix2d S = Eigen::Matrix2d::Zero();
-            S(0, 0) = 1.0 / fc->w;                 // variance of each weighted-mean offset
-            S(1, 1) = 1.0 / ff->w;
+            S(0, 0) = 1.0 / fc->w + h4c * h4c;
+            S(1, 1) = 1.0 / ff->w + h4f * h4f;
 
             TriplePoint tp;
             tp.vertex   = static_cast<int>(i);
