@@ -4380,12 +4380,6 @@ namespace rc
                        << c2d_t << ',' << rho_t << ',' << cond_t << '\n';
             mount_csv_.flush();
         }
-        // ── RESET: every row is an independent window ────────────────────────────────────────────
-        mnt_S11_ = mnt_S12_ = mnt_S22_ = mnt_Sy1_ = mnt_Sy2_ = mnt_Syy_ = 0.0;
-        mnt_T11_ = mnt_T12_ = mnt_T22_ = mnt_Tx_  = mnt_Ty_  = mnt_Tyy_ = 0.0;
-        mnt_n_ = 0;
-        mnt_tn_ = 0;
-        mnt_win_start_ms_ = timestamp_ms;
         // Between-window scatter, which is the uncertainty that turned out to matter. Kept as a
         // running mean and sum of squares so the log line can say how much the WINDOWS disagree
         // beside how much each window claims to know — the two differed by 149x in the pooled form.
@@ -4400,7 +4394,7 @@ namespace rc
             const double m = mnt_pitch_sum_ / mnt_pitch_n_;
             spread = std::sqrt(std::max(0.0, mnt_pitch_sum2_ / mnt_pitch_n_ - m * m));
         }
-        qInfo().nospace() << "[mount] window " << mnt_wins_ << " (" << win_ms << " ms, "
+        qInfo().nospace().noquote() << "[mount] window " << mnt_wins_ << " (" << win_ms << " ms, "
                           << mnt_n_ << " samples) | pitch "
                           << QString::number(dpitch_deg, 'f', 4) << " +/- "
                           << QString::number(se_pitch_deg, 'f', 4) << " deg within"
@@ -4425,7 +4419,7 @@ namespace rc
         // and folding it into the line above would invite reading one window's two fits as one
         // estimate of one thing.
         if (t_ok)
-            qInfo().nospace() << "[mount/shift] window " << mnt_wins_ << " (" << mnt_tn_
+            qInfo().nospace().noquote() << "[mount/shift] window " << mnt_wins_ << " (" << mnt_tn_
                               << " samples, all classes) | tx "
                               << QString::number(tx, 'f', 3) << " +/- "
                               << QString::number(se_tx, 'f', 3) << " px | ty "
@@ -4444,9 +4438,16 @@ namespace rc
                                         " point, NOT distinguishable from each other by this fit"
                                       : "  <- no rigid displacement resolved");
         else
-            qInfo().nospace() << "[mount/shift] window " << mnt_wins_ << ": only " << mnt_tn_
+            qInfo().nospace().noquote() << "[mount/shift] window " << mnt_wins_ << ": only " << mnt_tn_
                               << " weighted samples (need 200) — NOT solved, which is not the same"
                                  " as 'no displacement found'";
+
+        // ── RESET: every row is an independent window ────────────────────────────────────────────
+        mnt_S11_ = mnt_S12_ = mnt_S22_ = mnt_Sy1_ = mnt_Sy2_ = mnt_Syy_ = 0.0;
+        mnt_T11_ = mnt_T12_ = mnt_T22_ = mnt_Tx_  = mnt_Ty_  = mnt_Tyy_ = 0.0;
+        mnt_n_ = 0;
+        mnt_tn_ = 0;
+        mnt_win_start_ms_ = timestamp_ms;
     }
 
     /// One line every 5 s naming which of the three silences we are in.
