@@ -220,11 +220,13 @@ class SpecificWorker : public GenericWorker
         std::optional<Eigen::Affine2f> last_published_pose_;
         std::int64_t                   last_published_ts_ms_ = 0;
         long                           pose_clamp_hits_      = 0;
-        // The odometry PREDICTION that accompanied the last published frame (room frame, x/y/theta).
-        // Differencing two consecutive predictions gives the motion the sensors actually measured
-        // between publications, which is what the clamp must let through untouched -- see the clamp
-        // block for why bounding the total delta instead capped the published yaw rate at W_MAX.
-        std::optional<Eigen::Vector3f> last_published_pred_;
+        // The localiser's PRE-CLAMP estimate for the last published frame (room frame, x/y/theta).
+        // The predictor builds each prediction on the previous CORRECTED estimate, so
+        // pred[k] - est[k-1] is exactly the sensor increment for this interval -- the motion the
+        // clamp must let through untouched. Differencing two consecutive PREDICTIONS instead looks
+        // equivalent but is not: it evaluates to increment + innovation[k-1], which would smuggle
+        // the previous frame's correction through unbounded. See the clamp block.
+        std::optional<Eigen::Vector3f> last_published_est_;
 
 
         // Pose trace CSV (etc/pose_trace.csv): logs CORRECTED (20 Hz, compute) and PREDICTED (60 Hz,

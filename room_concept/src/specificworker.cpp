@@ -575,6 +575,11 @@ bool SpecificWorker::maybe_publish_corrected_pose()
     //
     // The correction itself is LEGITIMATE (real accumulated drift, not a bad fit), so it is not
     // rejected — only rate-limited.
+    // Captured BEFORE the clamp rewrites robot_pose: this is the localiser's own estimate, which is
+    // the base the NEXT prediction will be built on. It is what the next frame's measured-motion
+    // difference must reference -- never the clamped pose, which no predictor ever sees.
+    const Eigen::Affine2f est_pre_clamp = loc_res->robot_pose;
+
     bool clamp_fired = false;
     if (params.POSE_CLAMP_ENABLED and last_published_pose_.has_value()
         and last_published_ts_ms_ > 0 and loc_res->timestamp_ms > last_published_ts_ms_)
@@ -589,30 +594,33 @@ bool SpecificWorker::maybe_publish_corrected_pose()
                                              loc_res->robot_pose.linear()(0, 0));
             const float d_th = std::remainder(new_th - prev_th, 2.f * static_cast<float>(M_PI));
 
-            // The motion the sensors MEASURED between the last published frame and this one. Two
-            // consecutive odometry predictions difference to exactly the preintegrated increment
-            // (verified on 60k frames: pred[k] - pred[k-1] - imu_dtheta is 0.0012 deg at p50), so
-            // this is the measured motion and not another estimate of it. Without a previous
-            // prediction to difference against (first publication after a reset) it is zero, which
-            // degrades to the old total-delta behaviour for that single frame.
+            // The motion the sensors MEASURED between the last published frame and this one.
+            // build_motion_prior_selection() builds every prediction on last_update_result.robot_pose
+            // — the previous CORRECTED estimate — so pred[k] - est[k-1] is exactly the preintegrated
+            // increment for this interval, with nothing else in it. Verified on the live log after the
+            // clamp fix: pred[k] - (est[k-1] + imu_dtheta) is 0.0002 deg at p50.
             //
-            // ⚠ THIS DEPENDS ON THE PREDICTOR FREE-RUNNING. Today it does: on the 2734 frames where a
-            // correction was actually applied, pred[k] reproduces pred[k-1] + imu_dtheta to 0.0012 deg
-            // while est[k-1] + imu_dtheta misses by 27 deg — the optimizer's correction is published
-            // but never written back into the prediction accumulator. If that write-back is ever added
-            // (it should be), this difference stops being a pure sensor increment and starts carrying
-            // the previous correction, which would let a correction through UNBOUNDED. Change it to
-            // difference against the last published ESTIMATE at the same time as making that fix.
-            // Note that any correction the clamp did not apply on earlier frames is deliberately left
-            // INSIDE the bounded part here, so a backlog still discharges at max_th per frame rather
-            // than escaping as one jump.
+            // ⚠ IT MUST BE est[k-1], NOT pred[k-1]. Differencing two consecutive PREDICTIONS looks
+            // equivalent and is not: substituting pred[k-1] = est[k-2] + increment[k-1] gives
+            // pred[k] - pred[k-1] = increment[k] + innovation[k-1], i.e. it hands the previous frame's
+            // correction through the clamp UNBOUNDED, one frame late. That was the bug in the first
+            // version of this fix, and it survived because a free-running predictor would make the two
+            // forms identical — the log column it was checked against (est_theta) is written AFTER the
+            // clamp, so it showed the clamp's own backlog and not the localiser's estimate.
+            //
+            // With no previous estimate to difference against (first publication after a reset) it is
+            // zero, which degrades to the old total-delta behaviour for that single frame.
+            //
+            // Any correction the clamp did not apply on earlier frames is deliberately left INSIDE the
+            // bounded part here, so a backlog still discharges at max_th per frame rather than
+            // escaping as one jump.
             Eigen::Vector2f m_xy = Eigen::Vector2f::Zero();
             float           m_th = 0.f;
-            if (last_published_pred_.has_value())
+            if (last_published_est_.has_value())
             {
-                const Eigen::Vector3f& pp = last_published_pred_.value();
-                m_xy = Eigen::Vector2f(loc_res->pred_x - pp.x(), loc_res->pred_y - pp.y());
-                m_th = std::remainder(loc_res->pred_theta - pp.z(), 2.f * static_cast<float>(M_PI));
+                const Eigen::Vector3f& pe = last_published_est_.value();
+                m_xy = Eigen::Vector2f(loc_res->pred_x - pe.x(), loc_res->pred_y - pe.y());
+                m_th = std::remainder(loc_res->pred_theta - pe.z(), 2.f * static_cast<float>(M_PI));
             }
 
             // What is left after the measured motion is accounted for IS the correction — the only
@@ -671,9 +679,12 @@ bool SpecificWorker::maybe_publish_corrected_pose()
     // Publish (corrected pose → robot↔room RT) at the optimizer rate.
     scene_graph_->update(*loc_res, last_robot_adv_speed_, last_robot_side_speed_, last_robot_rot_speed_);
     last_published_pose_ = loc_res->robot_pose;
-    // Anchor for the NEXT frame's measured-motion difference. It must be the prediction that came
-    // with this frame (never the clamped pose), so the increment stays a pure sensor quantity.
-    last_published_pred_ = Eigen::Vector3f(loc_res->pred_x, loc_res->pred_y, loc_res->pred_theta);
+    // Anchor for the NEXT frame's measured-motion difference: the localiser's own estimate for this
+    // frame, which is the base its next prediction is built on. Taken pre-clamp, so the difference
+    // stays a pure sensor increment however hard the clamp bit here.
+    last_published_est_ = Eigen::Vector3f(
+        est_pre_clamp.translation().x(), est_pre_clamp.translation().y(),
+        std::atan2(est_pre_clamp.linear()(1, 0), est_pre_clamp.linear()(0, 0)));
     last_published_ts_ms_ = loc_res->timestamp_ms;
     last_dsr_published_ts_ms_ = loc_res->timestamp_ms;
 
