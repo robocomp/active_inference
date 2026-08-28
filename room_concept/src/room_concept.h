@@ -1854,6 +1854,15 @@ private:
     float  mnt_pose_x_ = 0.f, mnt_pose_y_ = 0.f, mnt_pose_th_ = 0.f;
     long   mnt_wins_ = 0;
     double mnt_pitch_sum_ = 0.0, mnt_pitch_sum2_ = 0.0;
+    long   mnt_pitch_n_ = 0;   ///< windows monitor 1 could actually solve, which is not mnt_wins_
+    // ── Monitor 2: rigid image translation,  r_k ~ tx*nx_k + ty*ny_k ─────────────────────────────
+    // A basis the const + fy/d fit structurally cannot see. The residual is scalar along each
+    // contour's own normal, so a rigid displacement of the prediction projects as t . n_hat and
+    // averages toward zero in the constant column. Fed by EVERY contour class, because the near-
+    // orthogonality of floor-junction (vertical) and wall-corner (horizontal) normals is what makes
+    // this fit well conditioned while the fy/d one is degenerate at a standstill.
+    double mnt_T11_ = 0, mnt_T12_ = 0, mnt_T22_ = 0, mnt_Tx_ = 0, mnt_Ty_ = 0, mnt_Tyy_ = 0;
+    long   mnt_tn_ = 0;
 
     void run_gn_shadow(const std::vector<Eigen::Vector3f>& poses_before,
                        const std::vector<Eigen::Vector3f>& poses_after,

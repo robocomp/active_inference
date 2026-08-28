@@ -4049,41 +4049,73 @@ namespace rc
                     J = smp.n_hat.transpose() * (P.cast<float>() * Jx);
                     const float r = smp.n_hat.x() * static_cast<float>(du)
                                   + smp.n_hat.y() * static_cast<float>(dv);
-                    // Monitor uses FLOOR-JUNCTION samples only: the fy/d signature is what makes
-                    // pitch and height separable, and a vertical corner does not carry it.
+                    // ── The inlier weight, computed ONCE and shared by both monitors ──────────
+                    // ★ SAME WEIGHT THE FACTOR USES: gamma/sigma^2, not 1/sigma^2. gamma is the
+                    // mixture responsibility — this sample's posterior probability of being an
+                    // inlier, an inlier Gaussian against a UNIFORM over the window actually
+                    // searched. A bad match therefore removes itself by its own evidence, which is
+                    // the only outlier handling here and needs no threshold. Ignoring it let
+                    // mismatches dominate a 4-sample fit: r_rms ran 11.9 px against a stated sigma
+                    // of 0.05.
+                    // ★ THE INLIER VARIANCE MUST INCLUDE THE PREDICTION'S OWN SPREAD, not just the
+                    // edge-localisation sigma. smp.h holds each nuisance's sensitivity ALREADY
+                    // multiplied by that nuisance's prior sigma (px per unit-variance nuisance), so
+                    // h.squaredNorm() IS the predicted px^2 variance contributed by an unknown
+                    // mount pitch, height, boresight yaw and image/lidar offset. Widening by it is
+                    // what makes "a residual consistent with a plausible mount error" an INLIER —
+                    // exactly the sample that carries mount information. Weighting by sigma_px
+                    // alone rejected everything: at r ~ 12 px against sigma_px ~ 0.05,
+                    // exp(-0.5*(r/sigma)^2) underflows, gamma is 0 for every sample, and the pooled
+                    // fit starved silently. An estimator that admits nothing and an estimator that
+                    // has nothing to admit look identical from outside, which is why the sample
+                    // counts are logged.
+                    const float  s2  = smp.sigma_px * smp.sigma_px + smp.h.squaredNorm();
+                    const float  gam = s2 > 0.f
+                                     ? rc::img::responsibility(r, s2, smp.pi_vis, smp.search_L)
+                                     : 0.f;
+                    const double w   = s2 > 0.f ? static_cast<double>(gam) / static_cast<double>(s2)
+                                                : 0.0;
+
+                    // ── Monitor 2: RIGID IMAGE TRANSLATION,  r_k ~ tx*nx_k + ty*ny_k ─────────
+                    // Why this exists beside the fy/d fit below. The residual is SCALAR and taken
+                    // along each contour's OWN normal, so a rigid displacement of the prediction —
+                    // principal point, boresight yaw, a small pitch — enters sample k as
+                    // t . n_hat_k: positive on some contours, negative on others, averaging toward
+                    // zero. The CONSTANT column cannot represent it. So "b_const ~ 0" was never
+                    // evidence that the camera points where we think it does; it is what a rigid
+                    // pointing error looks like in a basis that cannot see one.
+                    // Measured parked (2026-08-28, 82 windows): b_const -0.15 +/- 0.11 px and
+                    // b_invd -0.0036 +/- 0.0012 m together account for ~0.7 px of a 6.11 px r_rms.
+                    // This is the basis in which the missing 5.4 px would show up if it is pointing.
+                    // ★ ALL CONTOUR CLASSES, unlike the fit below. What conditions this fit is the
+                    // spread of contour ORIENTATIONS, not of ranges, and that is why it works
+                    // PARKED where the fy/d fit cannot (rho 0.9864, cond 146, unmoved across 82
+                    // windows because the pose spanned 3 cm). Mixing floor junctions (near-vertical
+                    // normals) with wall corners (near-horizontal) makes the columns orthogonal,
+                    // but it is NOT required: simulated at the real geometry, junctions alone give
+                    // cond 1.1, because a contour's normal already turns by ~0.15 rad along it.
+                    // Taking every class is for sample count and coverage, not conditioning.
+                    if (gam > 1e-6f)
+                    {
+                        const double nx = smp.n_hat.x(), ny = smp.n_hat.y();
+                        mnt_T11_ += w * nx * nx;  mnt_T12_ += w * nx * ny;  mnt_T22_ += w * ny * ny;
+                        mnt_Tx_  += w * nx * r;   mnt_Ty_  += w * ny * r;   mnt_Tyy_ += w * r * r;
+                        ++mnt_tn_;
+                    }
+
+                    // ── Monitor 1: FLOOR-JUNCTION samples only ───────────────────────────────
+                    // The fy/d signature is what makes pitch and height separable, and a vertical
+                    // corner does not carry it.
                     if (seg.class_id == ContourClass::FloorWall and smp.sigma_px > 0.f)
                     {
                         const float d = p_cam.norm();
                         if (d > 0.3f)
                         {
-                            // ★ SAME WEIGHT THE FACTOR USES: gamma/sigma^2, not 1/sigma^2. gamma is
-                            // the mixture responsibility — this sample's posterior probability of
-                            // being an inlier, an inlier Gaussian against a UNIFORM over the window
-                            // actually searched. A bad match therefore removes itself by its own
-                            // evidence, which is the only outlier handling here and needs no
-                            // threshold. Ignoring it, as this monitor did, let mismatches dominate a
-                            // 4-sample fit: r_rms ran 11.9 px against a stated sigma of 0.05.
-                            // ★ THE INLIER VARIANCE MUST INCLUDE THE PREDICTION'S OWN SPREAD, not
-                            // just the edge-localisation sigma. smp.h holds each nuisance's
-                            // sensitivity ALREADY multiplied by that nuisance's prior sigma (px per
-                            // unit-variance nuisance), so h.squaredNorm() IS the predicted px^2
-                            // variance contributed by an unknown mount pitch, height, boresight yaw
-                            // and image/lidar offset. Widening by it is what makes "a residual
-                            // consistent with a plausible mount error" an INLIER — which is exactly
-                            // the sample that carries mount information.
-                            // Weighting by sigma_px alone rejected everything: at r ~ 12 px against
-                            // sigma_px ~ 0.05, exp(-0.5*(r/sigma)^2) underflows, gamma is 0 for every
-                            // sample, and the pooled fit starved silently. An estimator that admits
-                            // nothing and an estimator that has nothing to admit look identical from
-                            // outside, which is why mnt_n_ is logged.
-                            const float s2  = smp.sigma_px * smp.sigma_px + smp.h.squaredNorm();
-                            const float gam = rc::img::responsibility(r, s2, smp.pi_vis, smp.search_L);
                             if (not (gam > 1e-6f)) return r;
-                            const double w  = static_cast<double>(gam) / static_cast<double>(s2);
                             const double x2 = obs.cam.fy / d;
                             S11 += w;        S12 += w * x2;   S22 += w * x2 * x2;
                             Sy1 += w * r;    Sy2 += w * x2 * r; Syy += w * r * r; Sw += w;
-                            // ── POOLED across the whole run ───────────────────────────────────────
+                            // ── POOLED across the whole run ───────────────────────────────────
                             // The mount is STATIC, so the per-frame fit is the wrong unit: it asks
                             // four samples spanning almost no depth to separate a constant from a
                             // 1/d term, which is near-degenerate, and the answer wandered a full
@@ -4239,10 +4271,24 @@ namespace rc
         // accumulating rather than being solved thin and reported as if it were a measurement. The
         // window length is therefore variable and is logged, so a row can never be misread as
         // covering 5 s when it covered thirty.
-        if (mnt_n_ < 200) return;
+        // ★ EITHER monitor having enough samples opens the window. The two draw on DIFFERENT
+        // populations — the fy/d fit on floor junctions only, the translation fit on every class —
+        // so gating both on the first would silence the translation fit in exactly the
+        // corners-only configuration (useFloorJunction = false) where it is the only one of the two
+        // still able to answer.
+        if (mnt_n_ < 200 and mnt_tn_ < 200) return;
 
-        const double det = mnt_S11_ * mnt_S22_ - mnt_S12_ * mnt_S12_;
-        if (not (det > 0.0) or not std::isfinite(det)) return;
+        // ── Monitor 1: b_const + b_invd * (fy/d), floor junctions ────────────────────────────────
+        // ★ NaN, not 0, when the window could not be solved. A 0 here would read as "measured no
+        // pitch error" when it means "never asked", and that conflation has cost this codebase real
+        // time before. NaN survives the CSV round trip and cannot be averaged by accident.
+        const double NA = std::numeric_limits<double>::quiet_NaN();
+        double rho = NA, cond = NA, b_const = NA, b_invd = NA, c2d = NA, se_const = NA, se_invd = NA;
+        double dpitch_deg = NA, se_pitch_deg = NA;
+        const double det  = mnt_S11_ * mnt_S22_ - mnt_S12_ * mnt_S12_;
+        const bool   m_ok = mnt_n_ >= 200 and det > 0.0 and std::isfinite(det);
+        if (m_ok)
+        {
 
         // ── COULD THIS WINDOW SEPARATE PITCH FROM HEIGHT AT ALL? ─────────────────────────────────
         // The two parameters are told apart ONLY by how their covariates scale with range: pitch is
@@ -4265,22 +4311,51 @@ namespace rc
         // ★ It is REPORTED, not gated. "The estimate wanders" and "this window was never able to
         // answer" are different facts, and a filter that silently dropped the second would leave the
         // first looking like noise.
-        const double rho  = mnt_S12_ / std::sqrt(std::max(1e-300, mnt_S11_ * mnt_S22_));
-        const double arho = std::min(std::abs(rho), 1.0 - 1e-12);
-        const double cond = (1.0 + arho) / (1.0 - arho);
-        const double b_const = ( mnt_S22_ * mnt_Sy1_ - mnt_S12_ * mnt_Sy2_) / det;
-        const double b_invd  = (-mnt_S12_ * mnt_Sy1_ + mnt_S11_ * mnt_Sy2_) / det;
-        // Weighted residual sum of squares of the FITTED model, so chi2/dof is a statement about the
-        // part the two mount parameters could not explain.
-        const double chi2 = std::max(0.0, mnt_Syy_ - (b_const * mnt_Sy1_ + b_invd * mnt_Sy2_));
-        const double dof  = std::max(1.0, static_cast<double>(mnt_n_) - 2.0);
-        const double c2d  = chi2 / dof;
-        const double infl = std::sqrt(std::max(1.0, c2d));
-        const double se_const = std::sqrt(mnt_S22_ / det) * infl;
-        const double se_invd  = std::sqrt(mnt_S11_ / det) * infl;
-        const double fy = last_mount_fy_ > 0.f ? last_mount_fy_ : 1.f;
-        const double dpitch_deg    = (b_const / fy) * 180.0 / M_PI;
-        const double se_pitch_deg  = (se_const / fy) * 180.0 / M_PI;
+            rho  = mnt_S12_ / std::sqrt(std::max(1e-300, mnt_S11_ * mnt_S22_));
+            const double arho = std::min(std::abs(rho), 1.0 - 1e-12);
+            cond = (1.0 + arho) / (1.0 - arho);
+            b_const = ( mnt_S22_ * mnt_Sy1_ - mnt_S12_ * mnt_Sy2_) / det;
+            b_invd  = (-mnt_S12_ * mnt_Sy1_ + mnt_S11_ * mnt_Sy2_) / det;
+            // Weighted residual sum of squares of the FITTED model, so chi2/dof is a statement about
+            // the part the two mount parameters could not explain.
+            const double chi2 = std::max(0.0, mnt_Syy_ - (b_const * mnt_Sy1_ + b_invd * mnt_Sy2_));
+            const double dof  = std::max(1.0, static_cast<double>(mnt_n_) - 2.0);
+            c2d  = chi2 / dof;
+            const double infl = std::sqrt(std::max(1.0, c2d));
+            se_const = std::sqrt(mnt_S22_ / det) * infl;
+            se_invd  = std::sqrt(mnt_S11_ / det) * infl;
+            const double fy = last_mount_fy_ > 0.f ? last_mount_fy_ : 1.f;
+            dpitch_deg   = (b_const / fy) * 180.0 / M_PI;
+            se_pitch_deg = (se_const / fy) * 180.0 / M_PI;
+        }
+
+        // ── Monitor 2: tx*nx + ty*ny — the rigid image displacement of the PREDICTION ────────────
+        // Sign: r = n_hat . (uv_pred - uv_meas), so a positive tx means the projected room sits to
+        // the RIGHT of the edge actually found, and positive ty means it sits BELOW.
+        // Interpretation is deliberately NOT unique and must not be reported as if it were: an
+        // image translation is produced identically by a principal-point offset, a boresight yaw
+        // (tx ~ fx*dyaw) and a mount pitch (ty ~ fy*dpitch). What it settles is the question the
+        // fy/d fit cannot even pose — whether a rigid pointing error is present AT ALL.
+        double tx = NA, ty = NA, se_tx = NA, se_ty = NA, c2d_t = NA, rho_t = NA, cond_t = NA;
+        const double det_t = mnt_T11_ * mnt_T22_ - mnt_T12_ * mnt_T12_;
+        const bool   t_ok  = mnt_tn_ >= 200 and det_t > 0.0 and std::isfinite(det_t);
+        if (t_ok)
+        {
+            // Same correlation-normalised conditioning as monitor 1, and here it reads the SPREAD
+            // OF CONTOUR ORIENTATIONS rather than of ranges: rho_t -> +/-1 means every normal in
+            // the window pointed the same way (all floor junctions, or all corners) and the two
+            // components only trade off. Reported, never gated.
+            rho_t = mnt_T12_ / std::sqrt(std::max(1e-300, mnt_T11_ * mnt_T22_));
+            const double ar = std::min(std::abs(rho_t), 1.0 - 1e-12);
+            cond_t = (1.0 + ar) / (1.0 - ar);
+            tx = ( mnt_T22_ * mnt_Tx_ - mnt_T12_ * mnt_Ty_) / det_t;
+            ty = (-mnt_T12_ * mnt_Tx_ + mnt_T11_ * mnt_Ty_) / det_t;
+            const double chi2_t = std::max(0.0, mnt_Tyy_ - (tx * mnt_Tx_ + ty * mnt_Ty_));
+            c2d_t = chi2_t / std::max(1.0, static_cast<double>(mnt_tn_) - 2.0);
+            const double infl_t = std::sqrt(std::max(1.0, c2d_t));
+            se_tx = std::sqrt(mnt_T22_ / det_t) * infl_t;
+            se_ty = std::sqrt(mnt_T11_ / det_t) * infl_t;
+        }
 
         if (not mount_csv_.is_open())
         {
@@ -4290,7 +4365,8 @@ namespace rc
                 mount_csv_.imbue(std::locale::classic());   // CLAUDE.md: never a comma decimal
                 mount_csv_ << "ts_ms,window_ms,n_samples,chi2_per_dof,b_const_px,se_const_px,"
                               "b_invd_m,se_invd_m,dpitch_deg,se_pitch_deg,"
-                              "pose_x,pose_y,pose_theta,rho,cond\n";
+                              "pose_x,pose_y,pose_theta,rho,cond,"
+                              "t_n,tx_px,se_tx_px,ty_px,se_ty_px,chi2_t,rho_t,cond_t\n";
             }
         }
         if (mount_csv_.is_open())
@@ -4299,33 +4375,36 @@ namespace rc
                        << b_const << ',' << se_const << ',' << b_invd << ',' << se_invd << ','
                        << dpitch_deg << ',' << se_pitch_deg << ','
                        << mnt_pose_x_ << ',' << mnt_pose_y_ << ',' << mnt_pose_th_ << ','
-                       << rho << ',' << cond << '\n';
+                       << rho << ',' << cond << ','
+                       << mnt_tn_ << ',' << tx << ',' << se_tx << ',' << ty << ',' << se_ty << ','
+                       << c2d_t << ',' << rho_t << ',' << cond_t << '\n';
             mount_csv_.flush();
         }
         // ── RESET: every row is an independent window ────────────────────────────────────────────
         mnt_S11_ = mnt_S12_ = mnt_S22_ = mnt_Sy1_ = mnt_Sy2_ = mnt_Syy_ = 0.0;
+        mnt_T11_ = mnt_T12_ = mnt_T22_ = mnt_Tx_  = mnt_Ty_  = mnt_Tyy_ = 0.0;
         mnt_n_ = 0;
+        mnt_tn_ = 0;
         mnt_win_start_ms_ = timestamp_ms;
         // Between-window scatter, which is the uncertainty that turned out to matter. Kept as a
         // running mean and sum of squares so the log line can say how much the WINDOWS disagree
         // beside how much each window claims to know — the two differed by 149x in the pooled form.
         ++mnt_wins_;
-        mnt_pitch_sum_  += dpitch_deg;
-        mnt_pitch_sum2_ += dpitch_deg * dpitch_deg;
+        if (m_ok) { mnt_pitch_sum_ += dpitch_deg; mnt_pitch_sum2_ += dpitch_deg * dpitch_deg; ++mnt_pitch_n_; }
         // Report the WITHIN-window error beside the BETWEEN-window scatter. If the second is much
         // larger than the first, the samples are not independent and the first is meaningless — say
         // so on the line rather than leaving a reader to discover it from a table of rows.
         double spread = 0.0;
-        if (mnt_wins_ >= 2)
+        if (mnt_pitch_n_ >= 2)
         {
-            const double m = mnt_pitch_sum_ / mnt_wins_;
-            spread = std::sqrt(std::max(0.0, mnt_pitch_sum2_ / mnt_wins_ - m * m));
+            const double m = mnt_pitch_sum_ / mnt_pitch_n_;
+            spread = std::sqrt(std::max(0.0, mnt_pitch_sum2_ / mnt_pitch_n_ - m * m));
         }
         qInfo().nospace() << "[mount] window " << mnt_wins_ << " (" << win_ms << " ms, "
                           << mnt_n_ << " samples) | pitch "
                           << QString::number(dpitch_deg, 'f', 4) << " +/- "
                           << QString::number(se_pitch_deg, 'f', 4) << " deg within"
-                          << (mnt_wins_ >= 2
+                          << (mnt_pitch_n_ >= 2
                               ? QString(", %1 deg BETWEEN windows (%2x)")
                                     .arg(spread, 0, 'f', 4)
                                     .arg(spread / std::max(1e-9, se_pitch_deg), 0, 'f', 0)
@@ -4334,14 +4413,40 @@ namespace rc
                           << " | chi2/dof " << QString::number(c2d, 'f', 2)
                           << " | rho " << QString::number(rho, 'f', 4)
                           << " cond " << QString::number(cond, 'f', 0)
-                          << (cond > 50.0
+                          << (m_ok and cond > 50.0
                                   ? "  <- DEGENERATE: one range in view, pitch and height are not"
                                     " separable here and these two numbers only trade off"
-                                  : "")
+                                  : m_ok ? "" : "  <- NOT SOLVED (too few floor-junction samples)")
                           << " | pose " << QString::number(mnt_pose_x_, 'f', 2) << ","
                           << QString::number(mnt_pose_y_, 'f', 2)
-                          << (c2d > 4.0 ? "  <- residual model is WRONG; the estimate inherits it"
-                                        : "");
+                          << (m_ok and c2d > 4.0
+                                  ? "  <- residual model is WRONG; the estimate inherits it" : "");
+        // Monitor 2 on its OWN line. It answers a different question from a different population,
+        // and folding it into the line above would invite reading one window's two fits as one
+        // estimate of one thing.
+        if (t_ok)
+            qInfo().nospace() << "[mount/shift] window " << mnt_wins_ << " (" << mnt_tn_
+                              << " samples, all classes) | tx "
+                              << QString::number(tx, 'f', 3) << " +/- "
+                              << QString::number(se_tx, 'f', 3) << " px | ty "
+                              << QString::number(ty, 'f', 3) << " +/- "
+                              << QString::number(se_ty, 'f', 3) << " px | |t| "
+                              << QString::number(std::hypot(tx, ty), 'f', 3) << " px"
+                              << " | chi2/dof " << QString::number(c2d_t, 'f', 2)
+                              << " | rho " << QString::number(rho_t, 'f', 4)
+                              << " cond " << QString::number(cond_t, 'f', 1)
+                              << (cond_t > 50.0
+                                      ? "  <- one contour ORIENTATION in view; tx and ty are not"
+                                        " separable here and only trade off"
+                                      : "")
+                              << (std::hypot(tx, ty) > 3.0 * std::max(se_tx, se_ty)
+                                      ? "  <- SIGNIFICANT rigid displacement: pointing or principal"
+                                        " point, NOT distinguishable from each other by this fit"
+                                      : "  <- no rigid displacement resolved");
+        else
+            qInfo().nospace() << "[mount/shift] window " << mnt_wins_ << ": only " << mnt_tn_
+                              << " weighted samples (need 200) — NOT solved, which is not the same"
+                                 " as 'no displacement found'";
     }
 
     /// One line every 5 s naming which of the three silences we are in.
