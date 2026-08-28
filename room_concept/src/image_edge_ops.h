@@ -251,12 +251,13 @@ namespace rc::img
 
     /// Camera-frame XYZ for a pixel with a measured depth value.
     ///
-    /// Mirrors CameraAPI::get_xyz_from_rgbd_points (X right, Y FORWARD, Z up, with the depth value
-    /// taken as Y itself) but is MODEL-AWARE and refuses rather than guesses. That method applies the
-    /// pinhole intrinsics unconditionally, with no reference to projection_model, so on an
-    /// equirectangular or cylindrical camera it returns confident nonsense; project() and
-    /// ray_from_pixel() in the same class both dispatch on the model. Here a non-pinhole model
-    /// returns false, because a wrong 3-D point is worse than no 3-D point.
+    /// Matches CameraAPI::get_xyz_from_rgbd_points under DepthConvention::Forward (X right,
+    /// Y FORWARD, Z up, the depth value being Y itself) for a pinhole camera, and DECLINES rather
+    /// than guesses on a panoramic one. That cortex method used to apply the pinhole intrinsics
+    /// unconditionally on every model; it was fixed on 2026-08-28 (cortex a8db664) to dispatch
+    /// through ray_from_pixel like project() does, and it now also takes an explicit
+    /// DepthConvention, because whether a depth image carries forward distance or radial range is
+    /// not something the image itself states.
     ///
     /// ★ `depth` IS ASSUMED TO BE THE FORWARD COORDINATE (perpendicular distance to the image
     ///   plane), not the range along the ray. That is the ZED SDK's convention and the one the
@@ -269,11 +270,21 @@ namespace rc::img
                                      Eigen::Vector3d& xyz)
     {
         if (not m.valid or not std::isfinite(depth) or not (depth > 0.0)) return false;
-        if (m.kind != CameraModel::Kind::Pinhole)                         return false;
-        if (not (m.fx > 0.f) or not (m.fy > 0.f))                         return false;
-        xyz = Eigen::Vector3d((u - static_cast<double>(m.cx)) * depth / static_cast<double>(m.fx),
-                              depth,
-                              (static_cast<double>(m.cy) - v) * depth / static_cast<double>(m.fy));
-        return true;
+        if (m.kind == CameraModel::Kind::Pinhole)
+        {
+            if (not (m.fx > 0.f) or not (m.fy > 0.f)) return false;
+            xyz = Eigen::Vector3d((u - static_cast<double>(m.cx)) * depth / static_cast<double>(m.fx),
+                                  depth,
+                                  (static_cast<double>(m.cy) - v) * depth / static_cast<double>(m.fy));
+            return true;
+        }
+        // Panoramic: the depth value can only be RADIAL — there is no single forward axis for a
+        // sensor spanning 360 degrees, and dividing by the ray's Y component would diverge at the
+        // two azimuths where it crosses zero. Needs the model's own inverse mapping, which this
+        // reduced CameraModel does not carry (it was calibrated to reproduce project(), not to
+        // invert it), so it declines rather than guessing. CameraAPI::ray_from_pixel does invert
+        // all three models if a caller here ever needs it — at the cost of a graph-bound call in
+        // the measurement path, which camera_ingestor.h exists to avoid.
+        return false;
     }
 }  // namespace rc::img
