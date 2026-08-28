@@ -9,6 +9,7 @@
  */
 
 #pragma once
+#include "object_anchor_types.h"
 
 /*
  *  image_edge_source.h — turns one grayscale frame + the room model into ImageEdgeObs.
@@ -89,6 +90,10 @@ namespace rc
         /// The room polygon (room frame, ordered). Taken from the MODEL (the SVG source of truth),
         /// never from the DSR `room` node — that mirror is written by this agent, so reading it back
         /// would be a second, quieter circularity.
+        /// Objects that may stand between the camera and a wall. Occlusion by them enters as a soft
+        /// visibility PRIOR on each sample, never as a cull — see the pi_vis block in the .cpp.
+        void set_object_anchors(std::vector<ObjectAnchorObs> a) { anchors_ = std::move(a); }
+
         void set_room_polygon(std::vector<Eigen::Vector2f> poly) { polygon_ = std::move(poly); }
 
         /// Extract one frame's evidence.
@@ -111,6 +116,7 @@ namespace rc
 
     private:
         Config cfg_;
+        std::vector<ObjectAnchorObs> anchors_;
         std::vector<Eigen::Vector2f> polygon_;
     };
 }  // namespace rc

@@ -50,6 +50,20 @@ namespace rc
         // anchor apart from an uncertain one — "stale observation" and "uncertain map" both end up as a
         // big ellipse but are entirely different problems.
         int             obs_age = 0;
+        // ── Footprint and belief, for OCCLUSION ──────────────────────────────────────────────────
+        // An object between the camera and a wall hides it, and the RGB edge term needs to know:
+        // otherwise the normal search does not fail, it succeeds on the OBJECT's edge and returns a
+        // confidently-wrong sub-pixel measurement with a small Cramer-Rao sigma.
+        // ★ A RADIUS, not a box, and deliberately the INSCRIBED one — half the smaller horizontal
+        // extent. Occlusion is applied as a soft prior, so under-claiming leaves a sample slightly
+        // over-trusted while over-claiming would silently discard good wall evidence behind a
+        // circumscribed circle that the object does not actually fill. Prefer to under-explain.
+        // ★ AND WEIGHTED BY BELIEF. These objects are not certain — each concept agent carries an
+        // existence belief — so a marginal detection must only PARTLY explain away what is behind it.
+        // A hard geometric mask would hide real wall evidence on the strength of an object that may
+        // not be there; scaling by P(exists) degrades correctly when the belief is wrong.
+        float           radius_m = 0.f;      ///< inscribed footprint radius; 0 = unknown, no occlusion
+        float           p_exists = 1.f;      ///< P(the object is really there), from the agent's belief
         float           map_pos_sigma = 0.f;                   // σ of the map pose Σ_o (m) — the "how confident
                                                                // is p_o" signal used to decide when to PIN it
     };

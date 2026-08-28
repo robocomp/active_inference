@@ -194,6 +194,90 @@ bool CameraIngestor::try_discover()
     return sub_ != nullptr or sub360_ != nullptr;
 }
 
+int CameraIngestor::probe_depth(const std::vector<Eigen::Vector2f>& uv, int patch_radius,
+                                std::vector<float>& depth_m, std::int64_t& stamp_ms)
+{
+    depth_m.assign(uv.size(), -1.f);       // -1 = NOT AVAILABLE. Never 0: a 0 here would read as a
+    stamp_ms = 0;                          // point at the camera centre and be believed.
+    if (not G_ or uv.empty()) return 0;
+
+    if (not sub_depth_)
+    {
+        const auto desc = rc::media::descriptor_from_graph(*G_, camera_node_);
+        if (not desc.has_value()) return 0;                 // descriptor not up yet, retry next tick
+        if (not desc->streams.contains("depth"))
+        {
+            if (not depth_absent_warned_)                   // ONCE: a permanent condition, not a tick
+            {
+                depth_absent_warned_ = true;
+                qWarning() << "[imgedge] node" << QString::fromStdString(camera_node_)
+                           << "advertises no 'depth' stream — triple points will carry no range";
+            }
+            return 0;
+        }
+        sub_depth_ = rc::media::make_image_subscriber_from_graph(*G_, camera_node_, "depth");
+        if (not sub_depth_) return 0;
+        // ★ MAX_IMAGE_BYTES is 3686400 = exactly 1280x720x4, so FORMAT_DEPTH_F32 at that resolution
+        //   fits with ZERO margin and anything larger is dropped SILENTLY by the plane. Say the size
+        //   out loud once, so "producer healthy, plane reads 0 Hz" is diagnosable from the log.
+        std::print("[imgedge] depth subscriber up on '{}' (Z16 -> 1.84 MB, F32 -> 3.69 MB at "
+                   "1280x720; the plane's ceiling is 3.69 MB)\n", camera_node_);
+    }
+
+    ++depth_polls_;
+    int filled = 0;
+    // poll() drains every pending sample and calls back per frame; the LAST wins, which is what we
+    // want (the newest depth). Everything below runs inside the loaned view — no frame copy.
+    sub_depth_->poll([&](const rc::media::ImageFrame& f, std::int64_t)
+    {
+        const int dw = static_cast<int>(f.width()), dh = static_cast<int>(f.height());
+        if (dw <= 0 or dh <= 0) return;
+        const std::size_t npix = static_cast<std::size_t>(dw) * static_cast<std::size_t>(dh);
+        const std::uint32_t fmt = f.format();
+        const bool f32 = (fmt == rc::media::FORMAT_DEPTH_F32);
+        const bool z16 = (fmt == rc::media::FORMAT_Z16);
+        if (not f32 and not z16) return;
+        if (f.size() < npix * (f32 ? 4u : 2u)) return;
+
+        // The depth image need not share the RGB resolution. Scale rather than assume — and only
+        // uniformly, because a non-uniform difference would mean a different FoV, not a resize.
+        const double sx = (model_.width  > 0.f) ? dw / static_cast<double>(model_.width)  : 1.0;
+        const double sy = (model_.height > 0.f) ? dh / static_cast<double>(model_.height) : 1.0;
+
+        const auto* p32 = reinterpret_cast<const float*>(f.data().data());
+        const auto* p16 = reinterpret_cast<const std::uint16_t*>(f.data().data());
+        int local = 0;
+        std::vector<float> patch;
+        for (std::size_t k = 0; k < uv.size(); ++k)
+        {
+            const int cu = static_cast<int>(std::lround(uv[k].x() * sx));
+            const int cv = static_cast<int>(std::lround(uv[k].y() * sy));
+            patch.clear();
+            for (int dv = -patch_radius; dv <= patch_radius; ++dv)
+                for (int du = -patch_radius; du <= patch_radius; ++du)
+                {
+                    const int x = cu + du, y = cv + dv;
+                    if (x < 0 or y < 0 or x >= dw or y >= dh) continue;
+                    const std::size_t idx = static_cast<std::size_t>(y) * dw + x;
+                    // Z16 is millimetres with 0 meaning NO RETURN; F32 is metres and may be inf/nan
+                    // on a miss. Both are invalid, and neither may be averaged in as a number.
+                    const float d = f32 ? p32[idx] : (p16[idx] == 0 ? 0.f : p16[idx] * 1e-3f);
+                    if (std::isfinite(d) and d > 0.05f) patch.push_back(d);
+                }
+            if (patch.empty()) { depth_m[k] = -1.f; continue; }
+            // MEDIAN, not mean: a triple point sits where three surfaces meet, so a patch straddling
+            // an edge mixes two populations and a mean lands between them, on nothing.
+            std::nth_element(patch.begin(), patch.begin() + patch.size() / 2, patch.end());
+            depth_m[k] = patch[patch.size() / 2];
+            ++local;
+        }
+        stamp_ms = f.stamp_ms();
+        filled = local;
+    });
+    if (filled > 0) ++depth_hits_;
+    return filled;
+}
+
 void CameraIngestor::absorb_gray(std::vector<std::uint8_t> gray, int w, int h, std::int64_t stamp_ms)
 {
     // Per-frame sensor noise, MEASURED. It is the denominator of every precision this subsystem

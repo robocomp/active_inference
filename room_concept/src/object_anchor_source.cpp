@@ -153,6 +153,24 @@ namespace rc
             }
             out.type    = matched;
             out.node_id = node.id();
+            // Footprint, for the occlusion prior. INSCRIBED radius — half the SMALLER horizontal
+            // extent — so an object never claims to hide more than it certainly covers. Absent
+            // dimensions leave it at 0, which the consumer reads as "no occlusion claim", not as
+            // "occludes nothing" — the difference matters because those are the objects we know
+            // least about.
+            {
+                const auto w = G.get_attrib_by_name<width_m_att>(node);
+                const auto d = G.get_attrib_by_name<depth_m_att>(node);
+                if (w.has_value() and d.has_value() and w.value() > 0.f and d.value() > 0.f)
+                    out.radius_m = 0.5f * std::min(w.value(), d.value());
+            }
+            // How much we believe it is there at all. ABSENT means "not stated", and 1.0 is the safe
+            // reading here specifically: this anchor already passed the room's own validation to get
+            // this far, so the question is how strongly to let it explain away wall evidence, not
+            // whether to trust it at all. Absent is NOT a synonym for zero — an object whose agent
+            // has never published a belief is not an object believed absent.
+            if (const auto e = G.get_attrib_by_name<obj_exist_prob_att>(node); e.has_value())
+                out.p_exists = std::clamp(e.value(), 0.f, 1.f);
             return true;
         }
     } // namespace

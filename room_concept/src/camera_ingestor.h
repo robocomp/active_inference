@@ -98,6 +98,27 @@ public:
     void start();
     void stop();
 
+    /// Sample the newest DEPTH frame at the given pixels. Fills `depth_m` (< 0 where unavailable)
+    /// and `stamp_ms` with that frame's capture time. Returns how many pixels yielded a value.
+    ///
+    /// ★ COMPUTE THREAD ONLY, and the depth subscriber is created lazily HERE for that reason. The
+    ///   RGB subscriber is made and polled on the ingest thread; keeping each subscriber confined to
+    ///   one thread is what makes two readers on the same node safe without a lock. Lazy creation
+    ///   from an already-Operating worker is the pattern CLAUDE.md sanctions for this component.
+    ///
+    /// ★ TRUE ZERO-COPY: the loaned sample is a view into the SHM segment and is valid ONLY inside
+    ///   the poll callback (media_transport.h:315), so the pixels are read there and nothing else is
+    ///   copied. A 1280x720 depth frame is 1.8-3.7 MB; this touches a few dozen bytes of it.
+    ///   The corollary is that the pixel list must be known BEFORE polling — which it is, because
+    ///   triple points are detected from the RGB frame first.
+    int probe_depth(const std::vector<Eigen::Vector2f>& uv, int patch_radius,
+                    std::vector<float>& depth_m, std::int64_t& stamp_ms);
+
+    /// polls attempted / polls that returned a depth frame. A subscriber that exists and never
+    /// delivers looks exactly like one that was never created; these two numbers separate them.
+    [[nodiscard]] std::pair<long, long> depth_stats() const noexcept
+    { return {depth_polls_, depth_hits_}; }
+
     /// Move the newest frame out, if one has arrived since the last call. Returns false if not.
     /// Compute thread. Cheap: a vector move under the lock, no copy, no decode.
     bool take_latest(GrayFrame& out);
@@ -139,6 +160,9 @@ private:
     std::unique_ptr<rc::media::Image360Subscriber> sub360_;
 
     CameraModel     model_;
+    std::unique_ptr<rc::media::MediaSubscriber>   sub_depth_;   ///< COMPUTE thread only
+    bool            depth_absent_warned_ = false;
+    long            depth_polls_ = 0, depth_hits_ = 0;
     float           mount_yaw_correction_ = 0.f;   ///< rad, applied about the ROBOT VERTICAL at bind
     Eigen::Matrix3f cam_R_robot_ = Eigen::Matrix3f::Identity();
     Eigen::Vector3f cam_t_robot_ = Eigen::Vector3f::Zero();

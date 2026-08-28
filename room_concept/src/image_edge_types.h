@@ -137,8 +137,18 @@ namespace rc
         Eigen::Vector2f uv_pred = Eigen::Vector2f::Zero(); ///< where the model puts it
         Eigen::Vector2f uv_meas = Eigen::Vector2f::Zero(); ///< where the two fitted lines cross
         Eigen::Matrix2f cov_uv  = Eigen::Matrix2f::Zero(); ///< propagated from the two offset sigmas
-        float range_m     = -1.f;   ///< depth at uv_meas; < 0 = not available (NOT zero — see below)
-        float range_sigma = -1.f;
+        /// ★ THREE QUANTITIES, NOT ONE, SO THE DEPTH CONVENTION CAN CHECK ITSELF. `depth_raw` is
+        ///   what the plane published; `range_m` is |p_cam_meas| under the assumption that the raw
+        ///   value is the FORWARD coordinate (the ZED SDK's convention, and what cortex's
+        ///   get_xyz_from_rgbd_points encodes). If the producer were instead reporting range along
+        ///   the ray, depth_raw would exceed the model's forward distance by 1/cos(angle off axis)
+        ///   — a several-percent excess GROWING toward the image edge, which is a signature no
+        ///   single logged number could show. This data reaches us through the Webots bridge and
+        ///   the convention has NOT been verified, so it is logged, not assumed.
+        float           depth_raw   = -1.f;  ///< as published; < 0 = not available (never 0)
+        Eigen::Vector3f p_cam_meas  = Eigen::Vector3f::Zero();
+        float           range_m     = -1.f;
+        float           range_sigma = -1.f;  ///< < 0 until a depth sigma is MEASURED, not guessed
         int   n_corner = 0;         ///< weighted-effective samples behind the vertical line
         int   n_floor  = 0;         ///< ... and behind the floor line
         float cond     = 0.f;       ///< of the 2x2; ~1 when the two normals are orthogonal
@@ -149,6 +159,7 @@ namespace rc
     {
         std::vector<ImageEdgeSegment> segments;
         std::vector<TriplePoint>      triple_points;
+        std::int64_t                  depth_stamp_ms = 0;  ///< capture time of the depth frame used
         std::uint64_t frame_stamp = 0;      ///< image capture stamp (ms)
         std::int64_t  dt_to_slot_ms = 0;    ///< image stamp - slot stamp; feeds nuisance column [3]
         float         sigma_i = 0.f;        ///< carried through for the CSV

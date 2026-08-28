@@ -18,6 +18,7 @@
  */
 #include "specificworker.h"
 
+#include "image_edge_ops.h"   // xyz_from_pixel_depth(): model-aware, unlike cortex's pinhole-only version
 #include <locale>
 
 #include <algorithm>
@@ -900,7 +901,51 @@ void SpecificWorker::pump_image_edges()
                                            camera_ingestor_->cam_R_robot(),
                                            camera_ingestor_->cam_t_robot(),
                                            pose, res->covariance, twist, dt_ms, &st);
+
+    // ── Range for the triple points, from the ZED depth plane ────────────────────────────────────
+    // Zero-copy: the pixel list is known now (the corners were detected from the RGB frame above),
+    // so probe_depth reads exactly these pixels inside the loaned SHM view and copies no frame.
+    // The depth frame is whatever is newest at this instant; its stamp is recorded beside the RGB
+    // stamp rather than assumed equal, because they are different streams from different threads.
+    if (not obs.triple_points.empty())
+    {
+        std::vector<Eigen::Vector2f> uv;
+        uv.reserve(obs.triple_points.size());
+        for (const auto& t : obs.triple_points) uv.push_back(t.uv_meas);
+        std::vector<float> dm;
+        std::int64_t dstamp = 0;
+        if (camera_ingestor_->probe_depth(uv, 2, dm, dstamp) > 0)
+        {
+            obs.depth_stamp_ms = dstamp;
+            for (std::size_t k = 0; k < obs.triple_points.size(); ++k)
+            {
+                auto& t = obs.triple_points[k];
+                t.depth_raw = dm[k];
+                Eigen::Vector3d xyz;
+                if (not rc::img::xyz_from_pixel_depth(camera_ingestor_->model(),
+                                                      t.uv_meas.x(), t.uv_meas.y(), dm[k], xyz))
+                    continue;
+                t.p_cam_meas = xyz.cast<float>();
+                t.range_m    = static_cast<float>(xyz.norm());
+                // ★ The sigma is a PLACEHOLDER and is marked as one. A depth sigma is a property of
+                //   the sensor at that range and this camera's has not been measured here; the
+                //   LiDAR-anchored depth-correction work in retina is where that number should come
+                //   from. Writing a plausible constant and treating it as measured is how a term
+                //   acquires unearned authority, so nothing may consume this until it is real.
+                t.range_sigma = -1.f;
+            }
+        }
+    }
     room_concept_.set_image_edges(std::move(obs));
+
+    if (const auto [polls, hits] = camera_ingestor_->depth_stats();
+        polls > 0 and polls % 100 == 0)
+        qInfo().nospace().noquote()
+            << "[depth] " << hits << "/" << polls << " polls delivered a frame ("
+            << QString::number(100.0 * hits / polls, 'f', 1) << "%)"
+            << (hits == 0 ? "  <- subscriber exists and NOTHING arrives: check the producer is "
+                            "publishing depth and that the frame is under MAX_IMAGE_BYTES (3.69 MB), "
+                            "which the plane drops SILENTLY" : "");
 
     // ~1/s liveness line. n_searched == 0 with n_projected > 0 means the contours project but carry
     // no gradient — a real answer (blank walls), not a plumbing failure, and the two are worth being

@@ -124,29 +124,55 @@ namespace rc::img
     /// Bilinear intensity at continuous (u, v), pixel CENTRES at integer coordinates.
     /// Returns false when the 2x2 support is not fully inside the image — the caller must treat an
     /// out-of-bounds tap as "no measurement", never as zero (a clamped border is a synthetic edge).
-    inline bool bilinear(const std::uint8_t* g, int w, int h, float u, float v, float& out)
+    ///
+    /// `wrap_u` makes the COLUMN axis cyclic, which is what a 360 panorama actually is: column w-1
+    /// and column 0 are neighbouring pixels on the same continuous image. Pass 0 for a pinhole,
+    /// where they are opposite edges of the sensor and joining them would fabricate an edge.
+    ///
+    /// ★ THIS IS NOT COSMETIC ON THE RICOH. A wall corner is near-vertical, so its search normal is
+    ///   near-HORIZONTAL and the whole normal search runs along u. Without wrapping, a corner within
+    ///   L px of the seam has half its window return false, so the peak is picked from whichever
+    ///   half stayed in bounds — and if the true edge was on the wrapped side, that peak is NOISE
+    ///   reported with a finite sigma. It is a biased match, not a missing sample, and it would show
+    ///   up in the CSV as a fat residual tail at exactly two azimuths.
+    inline bool bilinear(const std::uint8_t* g, int w, int h, float u, float v, float& out,
+                         int wrap_u = 0)
     {
+        if (wrap_u > 0)
+        {
+            u = std::fmod(u, static_cast<float>(wrap_u));
+            if (u < 0.f) u += static_cast<float>(wrap_u);
+        }
         const float fu = std::floor(u), fv = std::floor(v);
-        const int   x0 = static_cast<int>(fu), y0 = static_cast<int>(fv);
-        if (x0 < 0 or y0 < 0 or x0 + 1 >= w or y0 + 1 >= h)
-            return false;
+        const int   y0 = static_cast<int>(fv);
+        int         x0 = static_cast<int>(fu);
+        if (y0 < 0 or y0 + 1 >= h) return false;
+        int x1 = x0 + 1;
+        if (wrap_u > 0)
+        {
+            if (x0 < 0 or x0 >= w) return false;      // fmod already folded it; this catches NaN/inf
+            if (x1 >= w) x1 -= w;                     // ... and here the seam simply closes
+        }
+        else if (x0 < 0 or x1 >= w) return false;
         const float au = u - fu, av = v - fv;
-        const std::uint8_t* r0 = g + static_cast<std::size_t>(y0) * w + x0;
+        const std::uint8_t* r0 = g + static_cast<std::size_t>(y0) * w;
         const std::uint8_t* r1 = r0 + w;
-        const float top = static_cast<float>(r0[0]) * (1.f - au) + static_cast<float>(r0[1]) * au;
-        const float bot = static_cast<float>(r1[0]) * (1.f - au) + static_cast<float>(r1[1]) * au;
+        const float top = static_cast<float>(r0[x0]) * (1.f - au) + static_cast<float>(r0[x1]) * au;
+        const float bot = static_cast<float>(r1[x0]) * (1.f - au) + static_cast<float>(r1[x1]) * au;
         out = top * (1.f - av) + bot * av;
         return true;
     }
 
     /// Directional derivative dI/ds along the UNIT vector n_hat, at (u,v), by central difference of
     /// two bilinear taps one pixel apart. Units: grey levels per pixel.
+    /// `wrap_u`: see bilinear — pass the image width on a panorama, 0 on a pinhole.
     inline bool dir_derivative(const std::uint8_t* g, int w, int h,
-                               float u, float v, const Eigen::Vector2f& n_hat, float& out)
+                               float u, float v, const Eigen::Vector2f& n_hat, float& out,
+                               int wrap_u = 0)
     {
         float a = 0.f, b = 0.f;
-        if (not bilinear(g, w, h, u + n_hat.x(), v + n_hat.y(), a)) return false;
-        if (not bilinear(g, w, h, u - n_hat.x(), v - n_hat.y(), b)) return false;
+        if (not bilinear(g, w, h, u + n_hat.x(), v + n_hat.y(), a, wrap_u)) return false;
+        if (not bilinear(g, w, h, u - n_hat.x(), v - n_hat.y(), b, wrap_u)) return false;
         out = 0.5f * (a - b);
         return true;
     }
@@ -222,4 +248,32 @@ namespace rc::img
         return std::clamp(0.5f * (ym - yp) / den, -0.5f, 0.5f);
     }
 
+
+    /// Camera-frame XYZ for a pixel with a measured depth value.
+    ///
+    /// Mirrors CameraAPI::get_xyz_from_rgbd_points (X right, Y FORWARD, Z up, with the depth value
+    /// taken as Y itself) but is MODEL-AWARE and refuses rather than guesses. That method applies the
+    /// pinhole intrinsics unconditionally, with no reference to projection_model, so on an
+    /// equirectangular or cylindrical camera it returns confident nonsense; project() and
+    /// ray_from_pixel() in the same class both dispatch on the model. Here a non-pinhole model
+    /// returns false, because a wrong 3-D point is worse than no 3-D point.
+    ///
+    /// ★ `depth` IS ASSUMED TO BE THE FORWARD COORDINATE (perpendicular distance to the image
+    ///   plane), not the range along the ray. That is the ZED SDK's convention and the one the
+    ///   cortex method encodes, but this data reaches us through the Webots bridge and the
+    ///   assumption is NOT verified here. It is checkable from the logged columns: if depth were
+    ///   range-along-ray it would exceed the forward distance by 1/cos(angle off axis), a several-
+    ///   percent excess that GROWS toward the image edge. Which is why depth_raw, the predicted
+    ///   forward distance and the predicted range are all recorded per triple point.
+    inline bool xyz_from_pixel_depth(const CameraModel& m, double u, double v, double depth,
+                                     Eigen::Vector3d& xyz)
+    {
+        if (not m.valid or not std::isfinite(depth) or not (depth > 0.0)) return false;
+        if (m.kind != CameraModel::Kind::Pinhole)                         return false;
+        if (not (m.fx > 0.f) or not (m.fy > 0.f))                         return false;
+        xyz = Eigen::Vector3d((u - static_cast<double>(m.cx)) * depth / static_cast<double>(m.fx),
+                              depth,
+                              (static_cast<double>(m.cy) - v) * depth / static_cast<double>(m.fy));
+        return true;
+    }
 }  // namespace rc::img

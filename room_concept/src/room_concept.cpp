@@ -4263,11 +4263,28 @@ namespace rc
             {
                 triple_csv_.imbue(std::locale::classic());   // CLAUDE.md: never a comma decimal
                 triple_csv_ << "ts_ms,vertex,u_pred,v_pred,u_meas,v_meas,du,dv,"
-                               "suu,svv,suv,cond,n_corner,n_floor,range_m,range_sigma,"
+                               "suu,svv,suv,cond,n_corner,n_floor,"
+                               // depth_raw as published; pred_fwd and pred_range are what the MODEL
+                               // says at this pose. depth_raw ~= pred_fwd means the value is the
+                               // forward coordinate (assumed); depth_raw ~= pred_range, with the
+                               // excess growing toward the image edge, means it is range along the
+                               // ray and xyz_from_pixel_depth needs the other formula.
+                               "depth_raw,pred_fwd,pred_range,range_m,range_sigma,depth_dt_ms,"
                                "pose_x,pose_y,pose_theta\n";
             }
         }
         if (not triple_csv_.is_open()) return;
+        // What the MODEL says this corner's distance is, in both conventions, so the logged
+        // depth_raw can be compared against each. Camera Y is forward (CameraAPI::ray_from_pixel).
+        const float cth = std::cos(pose.z()), sth = std::sin(pose.z());
+        Eigen::Matrix3f Rm; Rm << cth, sth, 0.f, -sth, cth, 0.f, 0.f, 0.f, 1.f;
+        const auto to_cam = [&](const Eigen::Vector3f& p_room)
+        {
+            const Eigen::Vector3f e(p_room.x() - pose.x(), p_room.y() - pose.y(), p_room.z());
+            return Eigen::Vector3f(obs.cam_R_robot * (Rm * e) + obs.cam_t_robot);
+        };
+        const auto pred_fwd   = [&](const TriplePoint& t) { return to_cam(t.p_room).y(); };
+        const auto pred_range = [&](const TriplePoint& t) { return to_cam(t.p_room).norm(); };
         for (const auto& t : obs.triple_points)
         {
             triple_csv_ << timestamp_ms << ',' << t.vertex << ','
@@ -4277,7 +4294,9 @@ namespace rc
                         << (t.uv_meas.y() - t.uv_pred.y()) << ','
                         << t.cov_uv(0, 0) << ',' << t.cov_uv(1, 1) << ',' << t.cov_uv(0, 1) << ','
                         << t.cond << ',' << t.n_corner << ',' << t.n_floor << ','
+                        << t.depth_raw << ',' << pred_fwd(t) << ',' << pred_range(t) << ','
                         << t.range_m << ',' << t.range_sigma << ','
+                        << (obs.depth_stamp_ms ? obs.depth_stamp_ms - timestamp_ms : 0) << ','
                         << pose.x() << ',' << pose.y() << ',' << pose.z() << '\n';
             ++triple_rows_;
         }
