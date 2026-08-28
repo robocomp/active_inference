@@ -4101,6 +4101,14 @@ namespace rc
                         mnt_T11_ += w * nx * nx;  mnt_T12_ += w * nx * ny;  mnt_T22_ += w * ny * ny;
                         mnt_Tx_  += w * nx * r;   mnt_Ty_  += w * ny * r;   mnt_Tyy_ += w * r * r;
                         ++mnt_tn_;
+
+                        // ── Monitor 3: the four mount nuisances as PARAMETERS (see room_concept.h) ──
+                        // Same samples, same weight, same residual. The only new thing is keeping h
+                        // instead of collapsing it to h.squaredNorm().
+                        const Eigen::Vector4d hd = smp.h.cast<double>();
+                        mnt_H_.noalias() += w * hd * hd.transpose();
+                        mnt_b_.noalias() += w * hd * static_cast<double>(r);
+                        ++mnt_hn_;
                     }
 
                     // ── Monitor 1: FLOOR-JUNCTION samples only ───────────────────────────────
@@ -4357,6 +4365,44 @@ namespace rc
             se_ty = std::sqrt(mnt_T11_ / det_t) * infl_t;
         }
 
+        // ── Monitor 3 / STAGE 1: the four mount nuisances solved as parameters ───────────────────
+        // ★ SIGN. The residual is r = n_hat.(uv_pred(0) - uv_meas) and h = d(n_hat.uv_pred)/d(nuisance).
+        //   The measurement is the projection under the TRUE mount, so n_hat.uv_meas =
+        //   n_hat.uv_pred(0) + h*x_true, giving r = -h*x_true. A least-squares fit of r on h therefore
+        //   returns MINUS the parameter: the physical value, and the correction to apply, is -x.
+        //   Self-checking: mountYawCorrection is already applied, so p_yaw must now read ~0. If it
+        //   reads about twice the applied correction instead, this sign is inverted.
+        // ★ The prior is the IDENTITY because h carries sigma_i (see the header note).
+        Eigen::Vector4d mp = Eigen::Vector4d::Constant(NA), msig = Eigen::Vector4d::Constant(NA);
+        double c2d_h = NA;
+        int    informed_mask = 0;
+        const bool h_ok = mnt_hn_ >= 200;
+        if (h_ok)
+        {
+            const Eigen::Matrix4d A = mnt_H_ + Eigen::Matrix4d::Identity();
+            const Eigen::Matrix4d C = A.inverse();
+            if (C.allFinite())
+            {
+                const Eigen::Vector4d x = C * mnt_b_;
+                // mnt_Tyy_ is the same weighted sum of squares over the same samples.
+                const double chi2_h = std::max(0.0, mnt_Tyy_ - x.dot(mnt_b_));
+                c2d_h = chi2_h / std::max(1.0, static_cast<double>(mnt_hn_) - 4.0);
+                const double infl_h = std::sqrt(std::max(1.0, c2d_h));
+                mp = -x;
+                for (int i = 0; i < 4; ++i)
+                {
+                    msig(i) = std::sqrt(std::max(0.0, C(i, i))) * infl_h;
+                    // `informed` = the data shrank this parameter's uncertainty below 0.9x its prior.
+                    // Per-parameter, never global: three of these can be answered while the fourth is
+                    // pure prior, and a global flag would licence acting on the one that is not.
+                    if (msig(i) < 0.9) informed_mask |= (1 << i);
+                }
+                mnt_p_sum_  += mp;
+                mnt_p_sum2_ += mp.cwiseProduct(mp);
+                ++mnt_p_n_;
+            }
+        }
+
         if (not mount_csv_.is_open())
         {
             mount_csv_.open("etc/image_edge_mount.csv", std::ios::out | std::ios::trunc);
@@ -4366,7 +4412,9 @@ namespace rc
                 mount_csv_ << "ts_ms,window_ms,n_samples,chi2_per_dof,b_const_px,se_const_px,"
                               "b_invd_m,se_invd_m,dpitch_deg,se_pitch_deg,"
                               "pose_x,pose_y,pose_theta,rho,cond,"
-                              "t_n,tx_px,se_tx_px,ty_px,se_ty_px,chi2_t,rho_t,cond_t\n";
+                              "t_n,tx_px,se_tx_px,ty_px,se_ty_px,chi2_t,rho_t,cond_t,"
+                              "h_n,p_pitch_rad,p_height_m,p_yaw_rad,p_dt,"
+                              "s_pitch,s_height,s_yaw,s_dt,chi2_h,informed\n";
             }
         }
         if (mount_csv_.is_open())
@@ -4377,7 +4425,15 @@ namespace rc
                        << mnt_pose_x_ << ',' << mnt_pose_y_ << ',' << mnt_pose_th_ << ','
                        << rho << ',' << cond << ','
                        << mnt_tn_ << ',' << tx << ',' << se_tx << ',' << ty << ',' << se_ty << ','
-                       << c2d_t << ',' << rho_t << ',' << cond_t << '\n';
+                       << c2d_t << ',' << rho_t << ',' << cond_t << ','
+                       // Parameters written in PHYSICAL units; sigmas stay in units of the prior,
+                       // where 1.0 means "the data said nothing" and <0.9 is `informed`.
+                       << mnt_hn_ << ','
+                       << mp(0) * params.image_edge.mount_pitch_sigma  << ','
+                       << mp(1) * params.image_edge.mount_height_sigma << ','
+                       << mp(2) * params.image_edge.mount_yaw_sigma    << ',' << mp(3) << ','
+                       << msig(0) << ',' << msig(1) << ',' << msig(2) << ',' << msig(3) << ','
+                       << c2d_h << ',' << informed_mask << '\n';
             mount_csv_.flush();
         }
         // Between-window scatter, which is the uncertainty that turned out to matter. Kept as a
@@ -4442,9 +4498,47 @@ namespace rc
                               << " weighted samples (need 200) — NOT solved, which is not the same"
                                  " as 'no displacement found'";
 
+        // ── Monitor 3 line: the calibration itself ───────────────────────────────────────────────
+        if (h_ok and std::isfinite(mp(0)))
+        {
+            const double sig[4] = {params.image_edge.mount_pitch_sigma,
+                                   params.image_edge.mount_height_sigma,
+                                   params.image_edge.mount_yaw_sigma, 1.0};
+            const char*  nm[4]  = {"pitch", "height", "yaw", "dt"};
+            const char*  un[4]  = {"deg", "m", "deg", "x"};
+            QString body;
+            for (int i = 0; i < 4; ++i)
+            {
+                double v = mp(i) * sig[i];
+                if (i == 0 or i == 2) v *= 180.0 / M_PI;          // report angles in degrees
+                // Between-window scatter is the honest uncertainty on any parameter that cannot be
+                // separated within a window (yaw vs heading); the within-window sigma is not.
+                double spread = 0.0;
+                if (mnt_p_n_ >= 2)
+                {
+                    const double m = mnt_p_sum_(i) / mnt_p_n_;
+                    spread = std::sqrt(std::max(0.0, mnt_p_sum2_(i) / mnt_p_n_ - m * m)) * sig[i];
+                    if (i == 0 or i == 2) spread *= 180.0 / M_PI;
+                }
+                body += QString(" | %1 %2 %3 (%4 prior sig%5)")
+                            .arg(nm[i]).arg(v, 0, 'f', i == 1 ? 4 : 4).arg(un[i])
+                            .arg(msig(i), 0, 'f', 3)
+                            .arg((informed_mask >> i) & 1 ? ", INFORMED" : "");
+                if (mnt_p_n_ >= 2)
+                    body += QString(" [%1 between windows]").arg(spread, 0, 'f', 4);
+            }
+            qInfo().nospace().noquote()
+                << "[mount/calib] window " << mnt_wins_ << " (" << mnt_hn_ << " samples)"
+                << body << " | chi2/dof " << QString::number(c2d_h, 'f', 2)
+                << (informed_mask == 0
+                        ? "   <- nothing INFORMED yet: every posterior is still its prior"
+                        : "");
+        }
+
         // ── RESET: every row is an independent window ────────────────────────────────────────────
         mnt_S11_ = mnt_S12_ = mnt_S22_ = mnt_Sy1_ = mnt_Sy2_ = mnt_Syy_ = 0.0;
         mnt_T11_ = mnt_T12_ = mnt_T22_ = mnt_Tx_  = mnt_Ty_  = mnt_Tyy_ = 0.0;
+        mnt_H_.setZero(); mnt_b_.setZero(); mnt_hn_ = 0;
         mnt_n_ = 0;
         mnt_tn_ = 0;
         mnt_win_start_ms_ = timestamp_ms;

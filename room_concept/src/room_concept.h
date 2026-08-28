@@ -1864,6 +1864,31 @@ private:
     double mnt_T11_ = 0, mnt_T12_ = 0, mnt_T22_ = 0, mnt_Tx_ = 0, mnt_Ty_ = 0, mnt_Tyy_ = 0;
     long   mnt_tn_ = 0;
 
+    // ── Monitor 3 / STAGE 1 of online mount self-calibration ─────────────────────────────────────
+    // The four mount nuisances (pitch, height, boresight yaw, image/LiDAR dt) as PARAMETERS rather
+    // than as marginalised noise. No new geometry: ImageEdgeSample::h already holds
+    // sigma_i * d(residual)/d(nuisance_i) per sample (image_edge_source.cpp:261-272), computed every
+    // frame and, until now, used only to WIDEN the inlier variance and then thrown away. Summing
+    // w*h*h' and w*h*r instead turns it into the exact normal-equation block.
+    //
+    // ★ h IS ALREADY SCALED BY THE PRIOR SIGMA, so the parameters are dimensionless — in units of
+    //   their own prior — and the Gaussian prior P0^-1 is exactly the IDENTITY. That also makes
+    //   `informed` fall out with no new convention: posterior sigma < 0.9 in these units IS the
+    //   existing rule (calibration_estimator.h), because the prior sigma is 1 by construction.
+    //
+    // ★ THIS CANNOT SEPARATE BORESIGHT YAW FROM ROBOT HEADING WITHIN ONE WINDOW — they are perfectly
+    //   collinear in a single view, which is why measuring it needed the Webots supervisor. Pooling
+    //   ACROSS windows at different poses separates them only under the assumption that the
+    //   localiser's heading error is zero-mean. That assumption is what stage 2 (RGB<->LiDAR corner
+    //   coupling) removes. Until then the between-window scatter, not the within-window sigma, is
+    //   the honest uncertainty on yaw — hence the pooled accumulators below.
+    Eigen::Matrix4d mnt_H_ = Eigen::Matrix4d::Zero();
+    Eigen::Vector4d mnt_b_ = Eigen::Vector4d::Zero();
+    long            mnt_hn_ = 0;
+    Eigen::Vector4d mnt_p_sum_  = Eigen::Vector4d::Zero();
+    Eigen::Vector4d mnt_p_sum2_ = Eigen::Vector4d::Zero();
+    long            mnt_p_n_ = 0;
+
     void run_gn_shadow(const std::vector<Eigen::Vector3f>& poses_before,
                        const std::vector<Eigen::Vector3f>& poses_after,
                        float authority_loss, int authority_iters, float authority_ms,
