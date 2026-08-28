@@ -850,7 +850,29 @@ shadow = false   # OFF 2026-08-28 for a clean BASELINE drive. `drive` has been f
                  # that: a vertical corner's image normal is horizontal, so pitch and height barely
                  # project onto it (h ~ 0) while bearing is unaffected.
                  # Set back to false once the mount is characterised; drive stays false until then.
-drive  = true    # ★ ON 2026-08-28 — the FIRST time this term moves the published pose. Corners
+drive  = false   # ★ TRIED AND REVERTED 2026-08-28. The A/B ran and the pre-registered criterion
+                 # FAILED, so this goes back off. Result, 2545 driving cycles each, same route:
+                 #     position  median -5.0%  p90 -11.2%  p99 -0.7%  max +18.2%   (mild gain)
+                 #     heading   median +145%  p90 +17.8%  p99 +11.4% max +12.4%   (worse EVERYWHERE)
+                 # Drift check clean (25.3 -> 26.4 mm across the run), so the bias is ADDED, not
+                 # integrated — this was not a runaway, just a worse answer.
+                 #
+                 # ★★★ THE MECHANISM, AND IT WAS ALREADY MEASURED: corr(x, theta) = 0.98, the
+                 #   bearing-only ridge. A position bias along that direction converts DIRECTLY into
+                 #   heading error, so the factor's ~1.7 px per-corner detection bias lands
+                 #   preferentially in theta. It pulled position slightly right and pushed heading
+                 #   wrong — in the DOF a corner should be strongest at.
+                 # ★★★ The trade is bad in absolute terms: +1.3 mm of position at the median against
+                 #   -0.35 deg of heading, which at 4 m is ~25 mm of lateral error at the far end.
+                 # ★★★ chi2_post was 1.411 throughout — a clean pass — because it is by construction
+                 #   the residual AFTER the pose absorbs everything, so a pose bias is invisible to
+                 #   it. Only ground truth could decide this, and that is the general lesson.
+                 #
+                 # WHAT WOULD CHANGE THE ANSWER: not tuning. The per-corner offsets must be
+                 # ESTIMATED (corners as landmarks with their own state) rather than marginalised,
+                 # so the detection bias stops competing with the pose. Marginalising widens the
+                 # covariance; it never recentres the estimate.
+                 # WAS: ON 2026-08-28 — the FIRST time this term moves the published pose. Corners
                  # only: useTriplePoints below is true, so the evidence is one 2-D residual per
                  # floor-wall-wall corner and the per-sample contour residuals do NOT enter.
                  #
