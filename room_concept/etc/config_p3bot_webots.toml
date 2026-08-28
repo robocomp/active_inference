@@ -806,6 +806,25 @@ MessageSizeMax = "20004800"
 # at 3 m, and 0.1 degree is 1.4 cm. Because the image term is PRECISE, a mis-calibrated pitch does
 # not merely add noise, it WINS and drags the pose. So the junction stays off until the
 # systematic-residual monitor shows pitch is trusted (bias_const_px ~ 0).
+[ObjectAnchor]
+# ★ ON 2026-08-26 so the RGB edge term can EXPLAIN AWAY wall samples that furniture stands in front
+# of. Default is false, and with it false `latest_object_anchors_` is never populated: the anchor list
+# reaches the extractor EMPTY, the occlusion loop iterates over nothing, and `occluded` keeps reading
+# 0 — which is indistinguishable from "nothing was in the way". A built, wired, compiled and inert
+# feature is the failure mode this file keeps recording; this is the switch that avoids it.
+#
+# ★ WHAT IT BUYS. An object in front of a wall junction does NOT make the edge search fail — it makes
+# it SUCCEED on the object's edge, returning a confidently wrong sub-pixel position with a small
+# Cramer-Rao sigma. Those samples survive residual-based rejection, so they have to be explained away
+# by the models that predict them. Occlusion enters as a soft visibility PRIOR (pi_vis), never a cull:
+# graded by how centrally the ray passes the footprint, widened and weakened by the anchor's own
+# map_pos_sigma, scaled by obj_exist_prob, and multiplicative so several partial occluders compound.
+#
+# ⚠ enable=true only turns on the ANCHOR GATHER. optimizeLandmark stays false: this is about
+# occlusion, not about letting object poses become state variables in the room's solve.
+enable = true
+optimizeLandmark = false
+
 [ImageEdge]
 enable = true    # build the subscriber + ingest thread and run the extraction each tick
 shadow = true    # ON 2026-08-26 to MEASURE THE MOUNT, not to use the factor. Solves twice and
@@ -829,23 +848,23 @@ drive  = false   # <- the factor moves the published pose. Only after the CSV sa
 camera = "zed"            # DSR node name. "ricoh" selects the 360 equirect model; no code changes.
 
 useWallCorners   = true   # bearing; nearly immune to mount pitch/height
-useFloorJunction = true   # ON 2026-08-26, and ONLY because shadow = true and drive = false.
-                          # ★ THE MONITOR NEEDS IT. run_image_edge_shadow accumulates its
-                          # r ~ b_const + b_invd·(fy/d) fit from FloorWall samples ONLY
-                          # (room_concept.cpp:3789) — "a vertical corner does not carry the fy/d
-                          # signature", which is the same property that makes wall corners nearly
-                          # immune to pitch. So with only corners enabled the normal equations stay
-                          # empty and the monitor reports bias_const_px = 0.00000 with zero spread:
-                          # not "the mount is perfect", but "nothing was ever asked".
-                          # ★ That made the old gate circular in practice — the junction was held off
-                          # until the monitor cleared the pitch, and the monitor could not see pitch
-                          # without the junction. The way out is that the DANGER and the MEASUREMENT
-                          # are different modes: delta_d = theta_pitch·d²/h (14 cm at 3 m per degree)
-                          # only harms a pose the term is allowed to MOVE. In shadow it writes a CSV
-                          # row and nothing else, and the pose it is measured against comes from
-                          # LiDAR + SDF, which do not depend on camera pitch at all.
-                          # ⚠ Do not set drive = true until bias_const_px has been read and is small
-                          # and stable. That gate is still real; only the ordering was wrong.
+useFloorJunction = true   # ★ RESTORED 2026-08-28 after PHASE 0 / TEST A. Result recorded here so the
+                          # experiment is not repeated:
+                          #   corners only -> chi2/dof 8.97 (baseline with both: 8.6). NO reduction,
+                          #   so the residual excess is NOT specific to floor junctions and NOT
+                          #   occlusion — which the empty room already implied, since there is
+                          #   nothing in it to occlude.
+                          # ⚠ WEAK EVIDENCE, stated as such: only 72 rows with sum_gamma ~1.16, and
+                          # at nu~1 the spread of chi2/dof is ~140%.
+                          # ★★ THE REAL FINDING OF THE TEST. Corners alone produced data on ~5% of
+                          # cycles — 0.95 rows/s against a ~20 Hz localiser, versus ~every cycle with
+                          # junctions on. This room has six polygon vertices and the ZED sees ~110
+                          # degrees, so the camera is usually looking at a flat stretch of wall with no
+                          # corner in it; the extraction then returns nothing and the shadow writes no
+                          # row. The wall-corner channel — the bearing information the image genuinely
+                          # adds, and the part immune to mount pitch — is simply not available most of
+                          # the time here. The floor junction carries the term.
+
 useWallCeiling   = false  # cluttered by lamps/ducts, and off the ZED's FoV at close range
 
 # Arc-length spacing along each contour, in 3-D metres -- NOT in pixels. Uniform-in-pixels would
@@ -869,8 +888,60 @@ maxSlots     = 1          # newest window slot only, like corners
 #   marginalisation uses to cap ONE contour segment at roughly ONE nuisance-limited observation --
 #   while leaving its internal near-vs-far contrast at full weight, which is real information.
 #   They are PHYSICAL quantities, not tuning knobs. Widen them if the mount is less well known.
-mountPitchSigma  = 0.0035   # rad (~0.2 deg)
-mountHeightSigma = 0.010    # m
+mountPitchSigma  = 0.0017   # rad (0.097 deg) — MEASURED 2026-08-26, down from 0.0035 (0.20 deg).
+                        # 218 windows of the shadow monitor, of which 8 were well-conditioned
+                        # (cond 19..47): pitch +0.102 deg median, +0.098 weighted, BETWEEN-WINDOW
+                        # spread 0.099 deg. That spread is the honest sigma — the formal per-window
+                        # figure was 0.0127 and is an eightfold overstatement, because samples along
+                        # one junction share the mount they are being used to estimate.
+                        # ★ WHY TIGHTENING MATTERS MORE THAN THE VALUE: this sigma scales the pitch
+                        # NUISANCE COLUMN, h = sigma*fy ~ 2.45 px at the old value, which dominated
+                        # the effective residual sigma and made the common-mode marginalisation
+                        # discount the whole term by info_ratio ~1356. Halving it is what lets the
+                        # RGB factor carry information at all; the term was weak BECAUSE the mount
+                        # was uncertain, not because the camera is bad.
+                        # ⚠ The EXTRINSIC IS NOT CORRECTED. +0.10 +/- 0.10 deg is consistent with
+                        # zero at 1 sigma, so moving the mount on it would be acting on noise. If the
+                        # well-conditioned windows keep landing near +0.10 as cond falls below ~20,
+                        # revisit — but a correction the size of its own uncertainty is not one.
+mountHeightSigma = 0.010    # m — LEFT ALONE, deliberately, and the measurement says why.
+                        # The same 8 well-conditioned windows put the height error at -0.021 m with a
+                        # spread of 0.017 — so the data thinks this prior is OPTIMISTIC, not tight.
+                        # ⚠ But height is CONFOUNDED WITH THE FLOOR DATUM: a floor plane at the wrong
+                        # z is geometrically indistinguishable from a camera at the wrong height, and
+                        # this codebase has a known 3 cm floor-datum offset on record. -0.021 m is
+                        # exactly that scale. Correcting the camera on this reading would bake a map
+                        # error into the mount, so it stays until the floor datum is settled
+                        # independently. Wall corners are what break the degeneracy: their image
+                        # normal is horizontal, so pitch and height barely project onto them.
 mountYawSigma    = 0.0035   # rad
+
+# ── MEASURED boresight-yaw correction, applied LOCALLY to the graph's camera<-robot extrinsic ──
+# +0.814 +/- 0.022 deg, 2026-08-28. This is a physical angle, not a tuning knob: do not "adjust it
+# until chi2 looks good".
+#
+# How it was measured. The old mount monitor fitted the along-normal residual on [1, fy/d] and read
+# b_const = -0.15 +/- 0.11 px -- under 0.7 px of a 6.11 px r_rms -- which was mistaken for the mount
+# being exonerated. It is not: the residual is SCALAR along each contour's OWN normal, so a rigid
+# image displacement enters as t.n_hat, positive on some contours and negative on others, averaging
+# to zero in a constant column. A second monitor in the basis that CAN see it (r ~ tx*nx + ty*ny)
+# gave tx = 6.5 px with chi2_t = 1.25 -- a rigid shift explains the residual down to its noise.
+#
+# Boresight vs localiser heading produce an IDENTICAL shift; they were separated by joining 99
+# windows against the Webots supervisor over ~20 poses:
+#     correlation(tx, true heading error) = +0.816
+#     tx - heading error                  = +0.832 deg, and FLAT across 7 heading bins (spread 0.058)
+# Flat across heading is what makes it a boresight. Localiser heading error is separately ~0.18 deg
+# sd and is healthy. The one stop reading tx ~ 0 was not an outlier: its heading error was -0.748
+# deg, cancelling the boresight almost exactly.
+#
+# ★ WHY NOT widen mountYawSigma (0.0035 rad) to cover it: that makes chi2/dof fall to 1 by telling
+#   the term to stop caring, and hands a real 0.8 deg error authority over the pose once drive=true.
+# ★ WHY LOCAL and not in the robot geometry: the graph's RT is shared by every agent, so a wrong
+#   sign here cannot propagate. Once confirmed, move it there and set this back to 0.
+# ★ SIGN IS A PREDICTION, NOT A MEASUREMENT. Derived from the ZED convention (x-right, y-depth,
+#   z-up) as delta = +tx/fx. If tx goes to ~0 the sign is right; if it goes to ~12.7 px it is
+#   inverted and this becomes -0.01421.
+mountYawCorrection = 0.01421   # rad (+0.814 deg)
 
 csv = "etc/image_edge.csv"

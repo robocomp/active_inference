@@ -379,6 +379,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ImageEdge.mountPitchSigma", p.IMAGE_EDGE_MOUNT_PITCH_SIGMA);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ImageEdge.mountHeightSigma", p.IMAGE_EDGE_MOUNT_HEIGHT_SIGMA);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ImageEdge.mountYawSigma", p.IMAGE_EDGE_MOUNT_YAW_SIGMA);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ImageEdge.mountYawCorrection", p.IMAGE_EDGE_MOUNT_YAW_CORR);
     rc::ConfigLoaderUtils::load_optional<std::string>(cl, "ImageEdge.csv", p.IMAGE_EDGE_CSV);
 
     room_concept.params.image_edge.enable             = p.IMAGE_EDGE_ENABLE;

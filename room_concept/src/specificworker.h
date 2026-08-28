@@ -252,6 +252,23 @@ class SpecificWorker : public GenericWorker
         // CONSTANT offset between them is expected and benign (the room frame's own orientation).
         // What matters is whether that offset stays constant: fit offset+gain over many rows and
         // look at the RESIDUAL. Never compare two single readings; that is how three wrong
+
+    // ── robot_gt_angle arrives with an INVERTED SIGN (measured 2026-08-28, 9258 rows) ────────────
+    // Position is a clean pure translation: gt_x = est_x + 0.53, gt_y = est_y, slope +1 on both.
+    // Heading is not: gt_theta = -est_theta - 89.2 deg. No rigid transform maps position that way
+    // and angle this way, and the position half is verifiably right, so the ANGLE is wrong — the
+    // signature (a clean reflection, not a rotation) is what you get extracting a Webots axis-angle
+    // assuming +Z when the node turns about -Z. The defect is in robot_concept, which publishes it.
+    // Differencing est - gt raw yields garbage that LOOKS like a wild localiser: it reported heading
+    // "errors" of +201/+224/-119 deg before this was found.
+    // ★ SELF-CHECKING, not a silent negation. Both conventions are scored every cycle by how CONSTANT
+    //   the resulting offset is; gt_convention_report() names the winner. If robot_concept is fixed,
+    //   the winner flips and the log says so, instead of this correction inverting a correct signal.
+    double gt_sum_diff_c_ = 0, gt_sum_diff_s_ = 0;   ///< circular accumulators for est - gt
+    double gt_sum_sum_c_  = 0, gt_sum_sum_s_  = 0;   ///< and for est + gt
+    long   gt_n_ = 0;
+    long   gt_report_at_ = 200;
+    void   gt_convention_report(float est_th, float gt_th);
         // conclusions got drawn by hand on 2026-08-22.
         // Gated on the attributes EXISTING, so on the real robot nothing is written at all.
         std::ofstream gt_csv_;

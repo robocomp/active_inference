@@ -259,6 +259,9 @@ struct RoomConfig
     float IMAGE_EDGE_MOUNT_PITCH_SIGMA = 0.0035f; // ImageEdge.mountPitchSigma (rad, ~0.2°)
     float IMAGE_EDGE_MOUNT_HEIGHT_SIGMA= 0.010f;  // ImageEdge.mountHeightSigma (m)
     float IMAGE_EDGE_MOUNT_YAW_SIGMA   = 0.0035f; // ImageEdge.mountYawSigma (rad)
+    // Local boresight correction applied to the graph's camera<-robot extrinsic. NOT a tuning knob:
+    // a measured physical angle. 0 = use the graph's extrinsic unchanged.
+    float IMAGE_EDGE_MOUNT_YAW_CORR    = 0.0f;    // ImageEdge.mountYawCorrection (rad)
     std::string IMAGE_EDGE_CSV = "etc/image_edge.csv";  // ImageEdge.csv
 };
 

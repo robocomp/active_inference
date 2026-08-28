@@ -95,6 +95,28 @@ bool CameraIngestor::bind_camera(const std::string& robot_frame)
     const Eigen::Matrix4d M = cam_T_robot.value().matrix();
     cam_R_robot_ = M.block<3, 3>(0, 0).cast<float>();
     cam_t_robot_ = M.block<3, 1>(0, 3).cast<float>();
+
+    // ── Measured boresight-yaw correction, applied LOCALLY ───────────────────────────────────────
+    // ★ THE AXIS IS DERIVED, NOT ASSUMED. A yaw is a rotation about the VERTICAL, and which camera
+    //   axis that is depends on the camera's internal convention (the ZED is x-right, y-DEPTH,
+    //   z-up — but ricoh is not, and the file header above already warns "fix the model rather
+    //   than guessing a sign"). So take the robot's own up-axis and express it in camera
+    //   coordinates: cam_R_robot * e_z IS the vertical, whatever the camera calls it. Rotating
+    //   about that is unambiguously a pan, for any camera on any mount.
+    // ★ LEFT-multiplied: R' = Rot(axis, d) * R turns the CAMERA after the robot->camera mapping,
+    //   which is a boresight. Right-multiplying would rotate the ROBOT frame instead — that is a
+    //   pose correction wearing a mount's clothes, and it would fight the localiser rather than
+    //   inform it.
+    if (std::abs(mount_yaw_correction_) > 0.f)
+    {
+        const Eigen::Vector3f up_cam = (cam_R_robot_ * Eigen::Vector3f::UnitZ()).normalized();
+        cam_R_robot_ = Eigen::AngleAxisf(mount_yaw_correction_, up_cam).toRotationMatrix()
+                     * cam_R_robot_;
+        std::print("[imgedge] boresight yaw correction {:+.5f} rad ({:+.3f} deg) applied about the "
+                   "robot vertical, in camera coords [{:+.3f} {:+.3f} {:+.3f}]\n",
+                   mount_yaw_correction_, mount_yaw_correction_ * 180.0 / M_PI,
+                   up_cam.x(), up_cam.y(), up_cam.z());
+    }
     extrinsic_ok_ = cam_R_robot_.allFinite() and cam_t_robot_.allFinite();
 
     if (extrinsic_ok_)

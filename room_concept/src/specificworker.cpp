@@ -164,6 +164,8 @@ void SpecificWorker::initialize()
     if (params.IMAGE_EDGE_ENABLE)
     {
         camera_ingestor_ = std::make_unique<rc::CameraIngestor>(G, params.IMAGE_EDGE_CAMERA);
+        // Set BEFORE the first bind_camera(): the correction is applied where the extrinsic is read.
+        camera_ingestor_->set_mount_yaw_correction(params.IMAGE_EDGE_MOUNT_YAW_CORR);
         image_edge_source_ = std::make_unique<rc::ImageEdgeSource>();
         rc::ImageEdgeSource::Config ic;
         ic.use_wall_corners    = params.IMAGE_EDGE_USE_WALL_CORNERS;
@@ -704,6 +706,32 @@ bool SpecificWorker::maybe_publish_corrected_pose()
 // They are deliberately NOT differenced here: the room frame's orientation is arbitrary, so a
 // constant offset is expected and only its VARIATION is a defect. Fit offset+gain across the file
 // and read the residual; a single pair of readings cannot tell those apart.
+// Which convention is right is an EMPIRICAL question with a decisive answer: the correct one leaves
+// a CONSTANT offset (the room frame's arbitrary orientation datum), the wrong one leaves an offset
+// that swings with the robot's heading. Score both by circular concentration R = |mean unit vector|;
+// R -> 1 is constant, R -> 0 is uniformly spread. Reported once, on the first few hundred samples.
+void SpecificWorker::gt_convention_report(float est_th, float gt_th_raw)
+{
+    const double d = est_th - gt_th_raw, u = est_th + gt_th_raw;
+    gt_sum_diff_c_ += std::cos(d); gt_sum_diff_s_ += std::sin(d);
+    gt_sum_sum_c_  += std::cos(u); gt_sum_sum_s_  += std::sin(u);
+    if (++gt_n_ != gt_report_at_) return;
+    gt_report_at_ *= 10;                                   // 200, 2000, 20000 -- three checks, then quiet
+    const double n = static_cast<double>(gt_n_);
+    const double Rd = std::hypot(gt_sum_diff_c_, gt_sum_diff_s_) / n;
+    const double Ru = std::hypot(gt_sum_sum_c_,  gt_sum_sum_s_)  / n;
+    const double od = std::atan2(gt_sum_diff_s_, gt_sum_diff_c_) * 180.0 / M_PI;
+    const double ou = std::atan2(gt_sum_sum_s_,  gt_sum_sum_c_)  * 180.0 / M_PI;
+    qInfo().nospace().noquote()
+        << "[gt] convention check over " << gt_n_ << " samples: "
+        << "est-gt R=" << QString::number(Rd, 'f', 4) << " (offset " << QString::number(od, 'f', 2)
+        << " deg) | est+gt R=" << QString::number(Ru, 'f', 4) << " (offset "
+        << QString::number(ou, 'f', 2) << " deg)  ->  "
+        << (Ru > Rd ? "producer sign is INVERTED, local negation is CORRECT"
+                    : "producer sign looks RIGHT -- robot_concept may have been fixed; REMOVE the "
+                      "local negation in log_ground_truth or every heading comparison inverts");
+}
+
 void SpecificWorker::log_ground_truth(const rc::RoomConcept::UpdateResult &res)
 {
     if (shutting_down_.load() or not G)
@@ -728,7 +756,8 @@ void SpecificWorker::log_ground_truth(const rc::RoomConcept::UpdateResult &res)
             // Written through the CLASSIC locale: these machines run es_ES, where a comma is the
             // decimal separator, and a CSV whose fields contain commas is unparseable.
             gt_csv_.imbue(std::locale::classic());
-            gt_csv_ << "ts_ms,gt_x,gt_y,gt_theta,est_x,est_y,est_theta,sdf_mse,iters,cov_tt,"
+            gt_csv_ << "ts_ms,gt_x,gt_y,gt_theta,est_x,est_y,est_theta,gt_theta_raw,"
+                       "sdf_mse,iters,cov_tt,"
                        "imu_dtheta,wheel_dtheta,wheel_shadow_dtheta,imu_segs,wheel_segs,"
                        "pred_x,pred_y,pred_theta,dx_local,dy_local,"
                        "calib_k_v,calib_k_w,calib_yaw,calib_eps,"
@@ -744,9 +773,16 @@ void SpecificWorker::log_ground_truth(const rc::RoomConcept::UpdateResult &res)
 
     const auto &p = res.robot_pose;
     const float est_th = std::atan2(p.linear()(1, 0), p.linear()(0, 0));
+    // See the declaration in specificworker.h: the producer's sign is inverted, so the CSV carries
+    // the corrected angle in gt_theta (what every downstream analysis wants) and the untouched value
+    // in gt_theta_raw (so nothing is lost and the claim stays checkable from the file alone).
+    const float gt_th_raw = ga.value();
+    const float gt_th     = -gt_th_raw;
+    gt_convention_report(est_th, gt_th_raw);
     gt_csv_ << res.timestamp_ms
-            << ',' << gx.value() << ',' << gy.value() << ',' << ga.value()
+            << ',' << gx.value() << ',' << gy.value() << ',' << gt_th
             << ',' << p.translation().x() << ',' << p.translation().y() << ',' << est_th
+            << ',' << gt_th_raw
             << ',' << res.sdf_mse << ',' << res.iterations_used
             << ',' << (res.covariance.rows() > 2 ? res.covariance(2, 2) : -1.f)
             // Heading-channel attribution: which sensor produced this cycle's predicted rotation.

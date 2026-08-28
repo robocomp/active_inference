@@ -79,6 +79,20 @@ public:
     ///   one would be constraining different poses.
     bool bind_camera(const std::string& robot_frame);
 
+    /// LOCAL boresight-yaw correction, radians, applied to the extrinsic read from the graph.
+    ///
+    /// ★ WHY THIS IS HERE AND NOT IN THE ROBOT'S GEOMETRY. The graph's camera<-robot RT is the
+    ///   shared, authoritative description every agent reads. This knob lets room_concept test a
+    ///   measured mount error WITHOUT editing that shared description, so a wrong sign or a wrong
+    ///   magnitude cannot silently propagate to every other consumer of the zed extrinsic. Once the
+    ///   value is confirmed here it belongs in the robot geometry, and this should go back to 0.
+    ///
+    /// MEASURED 2026-08-28: +0.814 +/- 0.022 deg (0.01421 rad, 6.37 px at fy=448), by joining the
+    /// image-edge rigid-shift fit against the Webots supervisor across 99 windows and 7 heading
+    /// bins. Flat across heading (spread 0.058 deg), which is what makes it a BORESIGHT and not the
+    /// localiser's own heading error (that ran ~0.18 deg sd and correlated at +0.816 with the shift).
+    void set_mount_yaw_correction(float rad) noexcept { mount_yaw_correction_ = rad; }
+
     /// Start / stop the ingest thread. START ONLY once Operating (the thread touches the DSR graph for
     /// subscriber discovery, and doing that during the join window corrupts it). Idempotent.
     void start();
@@ -125,6 +139,7 @@ private:
     std::unique_ptr<rc::media::Image360Subscriber> sub360_;
 
     CameraModel     model_;
+    float           mount_yaw_correction_ = 0.f;   ///< rad, applied about the ROBOT VERTICAL at bind
     Eigen::Matrix3f cam_R_robot_ = Eigen::Matrix3f::Identity();
     Eigen::Vector3f cam_t_robot_ = Eigen::Vector3f::Zero();
     bool            extrinsic_ok_ = false;

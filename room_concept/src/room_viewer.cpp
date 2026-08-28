@@ -458,7 +458,10 @@ void RoomViewer::update_ui(const std::optional<rc::RoomConcept::UpdateResult>& l
                 ts_plot_gt_->add_point("est x",     pose.translation().x());
                 ts_plot_gt_->add_point("gt y",      gy.value());
                 ts_plot_gt_->add_point("est y",     pose.translation().y());
-                ts_plot_gt_->add_point("gt theta",  ga.value());
+                // Negated: the producer publishes robot_gt_angle with an inverted sign (see
+                // SpecificWorker::gt_convention_report). Plotting it raw drew the GT heading as a
+                // mirror image of the estimate, which reads as a wildly wrong localiser.
+                ts_plot_gt_->add_point("gt theta",  -ga.value());
                 ts_plot_gt_->add_point("est theta",
                                        std::atan2(pose.linear()(1, 0), pose.linear()(0, 0)));
             }
