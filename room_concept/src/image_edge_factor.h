@@ -47,6 +47,10 @@ namespace rc
             /// rather than per frame — which is the whole point, since the frame-global nuisances
             /// could never represent one wall being displaced.
             float wall_position_sigma = 0.015f;
+            /// Use TRIPLE POINTS as the evidence instead of the per-sample contour residuals.
+            /// ★ INSTEAD, never as well. A triple point is not new evidence — it is the same segment
+            ///   offsets re-expressed — so running both counts the same photons twice.
+            bool  use_triple_points = false;
             /// NOTE: deliberately NO `weight`. If this term needs a hand-set scalar to behave, its
             /// covariance model is wrong. Do not add one — see room_config.h.
         };

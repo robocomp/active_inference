@@ -265,6 +265,9 @@ struct RoomConfig
     // Per-CONTOUR map-position uncertainty — nuisance column [4]. Not a mount property: how well any
     // single wall's place in the room polygon is known. MEASURED, see image_edge_types.h.
     float IMAGE_EDGE_WALL_POS_SIGMA    = 0.015f;  // ImageEdge.wallPositionSigma (m)
+    // Evidence form: per-sample contour residuals (false) or triple points (true). INSTEAD, not as
+    // well — a triple point is the same segment offsets re-expressed, so both would double-count.
+    bool  IMAGE_EDGE_USE_TRIPLE_POINTS = false;   // ImageEdge.useTriplePoints
     std::string IMAGE_EDGE_CSV = "etc/image_edge.csv";  // ImageEdge.csv
 };
 

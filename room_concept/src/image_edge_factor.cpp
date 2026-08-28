@@ -8,6 +8,7 @@
  *    any later version. See <http://www.gnu.org/licenses/>.
  */
 
+#include <Eigen/Dense>
 #include "image_edge_factor.h"
 
 #include <cmath>
@@ -60,6 +61,61 @@ torch::Tensor ImageEdgeFactor::loss(const ImageEdgeObs& obs,
                                      torch::kFloat32).clone().t().to(device);   // Eigen is col-major
     const auto tc = torch::from_blob(const_cast<float*>(obs.cam_t_robot.data()), {3},
                                      torch::kFloat32).clone().to(device);
+
+    // ── TRIPLE POINTS: the 0-D form of the same evidence ─────────────────────────────────────────
+    // A 2-D projection residual per floor-wall-wall corner, weighted by the line-intersection
+    // covariance. Chosen INSTEAD of the per-sample residuals, never alongside them: a triple point is
+    // those same segment offsets re-expressed, so running both counts the same photons twice.
+    //
+    // ★ NO WOODBURY HERE, AND THAT IS NOT AN OVERSIGHT. The marginalisation exists to stop N samples
+    //   along one wall claiming sqrt(N) precision about a position they share. A triple point is ONE
+    //   measurement per corner; there is no N to over-count. The mount nuisances remain unmodelled in
+    //   this branch, which is a real gap, but the measured mount residual is -0.4 px / +3 mm, an
+    //   order below the corner's own sigma — so folding it in would be modelling a term smaller than
+    //   the noise it sits in.
+    //
+    // ★ A ONE-CORNER FRAME STILL CONTRIBUTES. Two residual components on three DOF is a rank-2
+    //   constraint, and a factor CONTRIBUTES information rather than having to be invertible: in a
+    //   multi-modal graph which landmarks are visible changes frame to frame by design, and the SDF
+    //   and LiDAR terms supply the rest. Nothing here gates on the corner count.
+    if (params.use_triple_points)
+    {
+        for (const auto& t : obs.triple_points)
+        {
+            const auto px = torch::tensor({t.p_room.x(), t.p_room.y(), t.p_room.z()}, f32);
+            const auto dx = px[0] - pose_xy[0];
+            const auto dy = px[1] - pose_xy[1];
+            const auto rx =  cth * dx + sth * dy;
+            const auto ry = -sth * dx + cth * dy;
+            const auto p_robot = torch::stack({rx, ry, px[2]});
+            const auto p_cam   = torch::matmul(Rc, p_robot) + tc;
+            const auto [u, v]  = project_t(obs.cam, p_cam);
+
+            auto du = u - t.uv_meas.x();
+            if (obs.cam.kind != CameraModel::Kind::Pinhole)
+            {   // same detached-wrap trick as the sample path: exact, not an approximation
+                const float wrap = std::round(du.item<float>() / obs.cam.width) * obs.cam.width;
+                du = du - wrap;
+            }
+            const auto dv = v - t.uv_meas.y();
+
+            // W = cov_uv^-1, inverted in double and only if it is actually invertible. A vertex seen
+            // edge-on has a near-parallel line crossing and a huge covariance; that is TRUE and the
+            // weight simply goes to zero, so no gate is needed.
+            const Eigen::Matrix2d C = t.cov_uv.cast<double>();
+            const double det = C.determinant();
+            if (not (det > 1e-12) or not C.allFinite()) continue;
+            const Eigen::Matrix2d W = C.inverse();
+            if (not W.allFinite()) continue;
+
+            const auto quad = static_cast<float>(W(0, 0)) * du * du
+                            + 2.f * static_cast<float>(W(0, 1)) * du * dv
+                            + static_cast<float>(W(1, 1)) * dv * dv;
+            if (not std::isfinite(quad.item<float>())) continue;
+            total = total + 0.5 * quad;
+        }
+        return total;
+    }
 
     for (const auto& seg : obs.segments)
     {

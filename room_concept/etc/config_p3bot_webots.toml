@@ -845,6 +845,35 @@ shadow = true    # ON 2026-08-26 to MEASURE THE MOUNT, not to use the factor. So
                  # project onto it (h ~ 0) while bearing is unaffected.
                  # Set back to false once the mount is characterised; drive stays false until then.
 drive  = false   # <- the factor moves the published pose. Only after the CSV says it should.
+
+# ── WHICH FORM OF THE EVIDENCE THE FACTOR USES ──────────────────────────────────────────────────
+# false = the per-sample contour residuals (~43 scalars/frame, each along its contour's normal).
+# true  = TRIPLE POINTS: the floor-wall-wall corner as a 0-D feature, one 2-D residual per corner
+#         with the covariance of the two-line intersection.
+# ★ INSTEAD, never as well. A triple point is those same segment offsets re-expressed, so running
+#   both would count the same photons twice.
+#
+# What the triple-point form buys, measured 2026-08-28:
+#   * no aperture problem — a corner has two independent components, where a sample on a straight
+#     edge has one by necessity (a 2-D residual there would fabricate a tangential constraint)
+#   * a covariance that is CONSERVATIVE rather than optimistic: fixed-pose repeatability 0.019 px
+#     (u) and 0.093 px (v) against a stated 0.692 and 0.213, i.e. 36x and 2.3x conservative
+#   * accuracy checked two independent ways: 0.25 px against the rigid-shift fit, and ZED depth at
+#     the DETECTED pixel flat at 1.00x the model's forward distance across 12.6-55.9 deg off axis
+#   * post-fit chi2/dof 1.6-1.7, and ~5 mm / 0.08 deg of pose precision from just TWO corners
+#
+# ★★★ THREE OBJECTIONS I RAISED AGAINST IT WERE ALL WRONG, in the same way — judging a factor by
+#   whether it can solve the pose ALONE rather than by what it contributes to a graph:
+#     - "cond(H) = 530" was the RAW information matrix, which mixes metres and radians and is
+#       unit-dependent. Correlation-normalised it is 97, and the posterior is 5.6 mm / 0.083 deg.
+#       What it shows is STRUCTURE — corr(x,theta) ~ 0.98, the ordinary bearing-only ambiguity when
+#       the visible corners sit ahead and clustered — with y determined independently.
+#     - "31.5% of frames see only one corner" — a rank-2 constraint is a real contribution. A
+#       factor adds J'WJ and J'Wr; it never has to be invertible on its own.
+#     - "too few measurements to replace 43 samples" — in a multi-modal graph which landmarks are
+#       visible changes frame to frame BY DESIGN. That is the premise, not a defect.
+useTriplePoints = true
+
 camera = "zed"            # DSR node name. "ricoh" selects the 360 equirect model; no code changes.
 
 useWallCorners   = true   # bearing; nearly immune to mount pitch/height
