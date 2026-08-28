@@ -16,6 +16,7 @@
 #include <occlusion/occlusion.h>
 
 #include "image_edge_ops.h"
+#include "image_edge_accumulate.h"   // responsibility(): the SAME weight the factor and monitors use
 
 namespace rc
 {
@@ -26,6 +27,7 @@ namespace
     {
         Eigen::Vector3f a, b;
         ContourClass    cls;
+        int             vertex = -1;   ///< polygon vertex (WallCorner) or edge's first vertex
     };
 
     /// room -> robot, then robot -> camera. `pose` = [x, y, theta] of room<-robot.
@@ -79,6 +81,9 @@ ImageEdgeObs ImageEdgeSource::extract(const GrayFrame& frame,
     const int   W = frame.width, H = frame.height;
     const auto* g = frame.gray.data();
     const std::size_t np = polygon_.size();
+    // Column axis is CYCLIC on a 360 model and not on a pinhole. Everything that samples the image
+    // below takes this, so the seam is closed in exactly one place. See image_edge_ops.h::bilinear.
+    const int wrap_u = (model.kind == CameraModel::Kind::Pinhole) ? 0 : W;
 
     // ── 1. Enumerate structural contours in the ROOM frame ───────────────────────────────────────
     // Vertical wall-wall corners first: their image normal is HORIZONTAL, so the mount pitch and
@@ -90,13 +95,14 @@ ImageEdgeObs ImageEdgeSource::extract(const GrayFrame& frame,
         for (std::size_t i = 0; i < np; ++i)
             contours.push_back({{polygon_[i].x(), polygon_[i].y(), 0.f},
                                 {polygon_[i].x(), polygon_[i].y(), cfg_.room_height},
-                                ContourClass::WallCorner});
+                                ContourClass::WallCorner, static_cast<int>(i)});
     if (cfg_.use_floor_junction)
         for (std::size_t i = 0; i < np; ++i)
         {
             const auto& a = polygon_[i];
             const auto& b = polygon_[(i + 1) % np];
-            contours.push_back({{a.x(), a.y(), 0.f}, {b.x(), b.y(), 0.f}, ContourClass::FloorWall});
+            contours.push_back({{a.x(), a.y(), 0.f}, {b.x(), b.y(), 0.f}, ContourClass::FloorWall,
+                                static_cast<int>(i)});
         }
     if (cfg_.use_wall_ceiling)
         for (std::size_t i = 0; i < np; ++i)
@@ -104,7 +110,8 @@ ImageEdgeObs ImageEdgeSource::extract(const GrayFrame& frame,
             const auto& a = polygon_[i];
             const auto& b = polygon_[(i + 1) % np];
             contours.push_back({{a.x(), a.y(), cfg_.room_height},
-                                {b.x(), b.y(), cfg_.room_height}, ContourClass::WallCeiling});
+                                {b.x(), b.y(), cfg_.room_height}, ContourClass::WallCeiling,
+                                static_cast<int>(i)});
         }
     st.n_contours = static_cast<int>(contours.size());
 
@@ -112,6 +119,21 @@ ImageEdgeObs ImageEdgeSource::extract(const GrayFrame& frame,
     const Eigen::Vector2f cam_xy(pose.x(), pose.y());
 
     std::vector<float> sig_list, len_list;
+
+    // ── Per-segment line offset, for the triple-point detector ───────────────────────────────────
+    // Each contour is modelled as its PREDICTED line displaced perpendicular by one scalar. The
+    // direction is taken from the model and only the offset is fitted: the direction is far better
+    // known than the offset (it comes from the polygon and the pose, both well constrained), and
+    // letting it float would trade a well-posed 1-parameter fit for an ill-posed 2-parameter one on
+    // samples that already span only a few pixels of lateral range.
+    struct SegFit
+    {
+        int             vertex = -1;
+        ContourClass    cls    = ContourClass::WallCorner;
+        double          w = 0.0, ws = 0.0;      ///< weight, and weight * along-normal offset
+        Eigen::Vector2d wn = Eigen::Vector2d::Zero();
+    };
+    std::vector<SegFit> fits;
 
     for (const auto& c : contours)
     {
@@ -124,6 +146,8 @@ ImageEdgeObs ImageEdgeSource::extract(const GrayFrame& frame,
 
         ImageEdgeSegment seg;
         seg.class_id = c.cls;
+        seg.vertex   = c.vertex;
+        SegFit fit; fit.vertex = c.vertex; fit.cls = c.cls;
         seg.samples.reserve(static_cast<std::size_t>(K));
 
         for (int k = 0; k < K; ++k)
@@ -143,7 +167,12 @@ ImageEdgeObs ImageEdgeSource::extract(const GrayFrame& frame,
             if (not rc::img::project_with_model(model, pc.cast<double>(),  uv))   continue;
             if (not rc::img::project_with_model(model, pcp.cast<double>(), uv_p)) continue;
             if (not rc::img::project_with_model(model, pcn.cast<double>(), uv_n)) continue;
-            if (uv.x() < 1.0 or uv.y() < 1.0 or uv.x() >= W - 2 or uv.y() >= H - 2) continue;
+            // Vertical bounds are real on every model — the top and bottom rows are the ends of the
+            // sensor. The HORIZONTAL bound is not, on a panorama: project_with_model already folded u
+            // into [0, W), so rejecting the columns beside the seam would blank a strip of azimuth
+            // for no reason other than where the manufacturer chose to cut the sphere.
+            if (uv.y() < 1.0 or uv.y() >= H - 2) continue;
+            if (wrap_u == 0 and (uv.x() < 1.0 or uv.x() >= W - 2)) continue;
             st.n_projected++;
 
             // Projected tangent -> image-space normal. Computed from the PROJECTION, so it curves
@@ -170,6 +199,40 @@ ImageEdgeObs ImageEdgeSource::extract(const GrayFrame& frame,
                 // belongs to must not count as its own occluder.
                 if (rc::occlusion::walls_block(cam_xy, tgt, polygon_, 0.08f))
                     pi_vis = 0.02f;      // strongly disbelieved, never exactly 0 (keeps the mixture finite)
+
+                // ── AND BY THE OBJECTS IN THE ROOM ───────────────────────────────────────────────
+                // A table or a chair between the camera and a wall junction does NOT make the edge
+                // search fail — it makes it SUCCEED on the object's edge, returning a confidently
+                // wrong sub-pixel position with a small Cramer-Rao sigma. The mixture would then have
+                // to reject it on residual size alone, and an object edge lying near the predicted
+                // junction would not be rejected at all. Explaining those samples away with the
+                // models that predict them is the point of this block.
+                // ★ SOFT, like the wall case and for the same reason: an object at a contour's edge
+                // would otherwise flicker the term in and out. pi_vis MULTIPLIES, so several partial
+                // occluders compound rather than one winning.
+                // ★ SOFTENED BY THE OBJECT'S OWN POSITION UNCERTAINTY. An anchor known to +/-30 cm
+                // cannot say which specific ray it blocks, so its claim is widened by map_pos_sigma
+                // and weakened with it — a vague object explains away vaguely.
+                for (const auto& a : anchors_)
+                {
+                    if (not (a.radius_m > 0.f)) continue;      // no stated footprint: no claim
+                    const Eigen::Vector2f c(a.pose_world.x(), a.pose_world.y());
+                    const Eigen::Vector2f d = tgt - cam_xy;
+                    const float len2 = d.squaredNorm();
+                    if (len2 < 1e-9f) continue;
+                    // Closest approach of the camera->sample ray to the object centre, clamped to the
+                    // segment: an object BEHIND the wall is not an occluder.
+                    const float t = std::clamp((c - cam_xy).dot(d) / len2, 0.f, 1.f);
+                    const float miss = ((cam_xy + t * d) - c).norm();
+                    const float reach = a.radius_m + std::max(0.f, a.map_pos_sigma);
+                    if (miss >= reach) continue;
+                    // How much of the object's width the ray passes through, in [0,1]: a graze
+                    // explains away a little, a central hit almost everything. No threshold — the
+                    // geometry supplies the number.
+                    const float depth = 1.f - miss / std::max(reach, 1e-6f);
+                    const float claim = std::clamp(depth * a.p_exists, 0.f, 1.f);
+                    pi_vis *= std::max(0.02f, 1.f - claim);
+                }
             }
             if (pi_vis < 0.5f) st.n_occluded++;
             st.n_visible++;
@@ -245,7 +308,7 @@ ImageEdgeObs ImageEdgeSource::extract(const GrayFrame& frame,
                 const float u = static_cast<float>(uv.x()) + static_cast<float>(i) * n_hat.x();
                 const float v = static_cast<float>(uv.y()) + static_cast<float>(i) * n_hat.y();
                 float gd = 0.f;
-                if (not rc::img::dir_derivative(g, W, H, u, v, n_hat, gd)) { prof.push_back(0.f); continue; }
+                if (not rc::img::dir_derivative(g, W, H, u, v, n_hat, gd, wrap_u)) { prof.push_back(0.f); continue; }
                 const float m = std::fabs(gd);
                 prof.push_back(m);
                 sum_g2 += gd * gd;
@@ -274,12 +337,100 @@ ImageEdgeObs ImageEdgeSource::extract(const GrayFrame& frame,
             smp.h        = hcol;
             seg.samples.push_back(smp);
 
+            // ★ SAME WEIGHT THE FACTOR AND THE MONITORS USE: gamma / (sigma_px^2 + |h|^2). The
+            //   mixture responsibility is the only outlier handling anywhere in this term, and a
+            //   line fit that ignored it would let one mismatched sample drag the whole offset —
+            //   which is exactly how the pooled mount fit once ran r_rms 11.9 px against a stated
+            //   sigma of 0.05. `best_s` IS the measurement: uv_meas = uv_pred + best_s * n_hat.
+            const float s2f = sigma_px * sigma_px + hcol.squaredNorm();
+            if (s2f > 0.f)
+            {
+                const float gam = rc::img::responsibility(-best_s, s2f, pi_vis, L);
+                if (gam > 1e-6f)
+                {
+                    const double wf = static_cast<double>(gam) / static_cast<double>(s2f);
+                    fit.w  += wf;
+                    fit.ws += wf * static_cast<double>(best_s);
+                    fit.wn += wf * Eigen::Vector2d(n_hat.x(), n_hat.y());
+                }
+            }
+
             sig_list.push_back(sigma_px);
             len_list.push_back(L);
         }
 
         if (not seg.samples.empty())
             obs.segments.push_back(std::move(seg));
+        if (fit.w > 0.0) fits.push_back(fit);
+    }
+
+    // ── 3. Triple points: floor + wall + wall, i.e. a polygon vertex at z = 0 ─────────────────────
+    // See rc::img::TriplePoint for why this feature is worth having and why it costs no new image
+    // processing. Construction: the vertical corner line and the floor junction line each translate
+    // along their own normal by one measured offset, so their intersection moves by the Delta that
+    // satisfies BOTH, which is a 2x2 solve:
+    //     n_c . Delta = delta_c        n_f . Delta = delta_f
+    // ★ uv_meas is a MEASUREMENT and is stored as one, not as a residual. The line DIRECTIONS come
+    //   from the model (hence from the pose) but the crossing point is where the image says the
+    //   corner is; a factor may later predict it from any pose. The direction's pose dependence is
+    //   second order and is what lets this be extracted once per frame.
+    {
+        const auto find_fit = [&fits](ContourClass cls, int vertex) -> const SegFit*
+        {
+            for (const auto& f : fits)
+                if (f.cls == cls and f.vertex == vertex) return &f;
+            return nullptr;
+        };
+        for (std::size_t i = 0; i < np; ++i)
+        {
+            const SegFit* fc = find_fit(ContourClass::WallCorner, static_cast<int>(i));
+            if (fc == nullptr) continue;
+            // Either floor edge meets this vertex: edge i leaves it, edge i-1 arrives at it. Take
+            // whichever carries more weight rather than averaging two DIFFERENT lines into one.
+            const SegFit* f1 = find_fit(ContourClass::FloorWall, static_cast<int>(i));
+            const SegFit* f2 = find_fit(ContourClass::FloorWall,
+                                        static_cast<int>((i + np - 1) % np));
+            const SegFit* ff = (f1 and f2) ? (f1->w >= f2->w ? f1 : f2) : (f1 ? f1 : f2);
+            if (ff == nullptr) continue;
+
+            // ★ The normals must be CONSISTENT within a segment or a single-offset line is the wrong
+            //   model — a mean normal well short of unit length means they disagreed, and the fitted
+            //   offset would be an average of displacements along different directions.
+            const Eigen::Vector2d nc = fc->wn / fc->w, nf = ff->wn / ff->w;
+            if (nc.norm() < 0.9 or nf.norm() < 0.9) continue;
+            const Eigen::Vector2d nch = nc.normalized(), nfh = nf.normalized();
+
+            Eigen::Matrix2d A; A.row(0) = nch.transpose(); A.row(1) = nfh.transpose();
+            const double det = A.determinant();
+            // |det| = |sin(angle between the normals)|. Near zero means the two lines are parallel
+            // in the image and their crossing is undefined — which happens when the vertex is seen
+            // edge-on. Reported through `cond`, and skipped only when the solve is meaningless.
+            if (not std::isfinite(det) or std::abs(det) < 1e-3) continue;
+
+            const Eigen::Vector3f p_room(polygon_[i].x(), polygon_[i].y(), 0.f);
+            const Eigen::Vector3f p_cam = to_camera(p_room, pose, cam_R_robot, cam_t_robot);
+            Eigen::Vector2d uvp;
+            if (not rc::img::project_with_model(model, p_cam.cast<double>(), uvp)) continue;
+
+            const Eigen::Vector2d d(fc->ws / fc->w, ff->ws / ff->w);
+            const Eigen::Matrix2d Ai = A.inverse();
+            const Eigen::Vector2d delta = Ai * d;
+            Eigen::Matrix2d S = Eigen::Matrix2d::Zero();
+            S(0, 0) = 1.0 / fc->w;                 // variance of each weighted-mean offset
+            S(1, 1) = 1.0 / ff->w;
+
+            TriplePoint tp;
+            tp.vertex   = static_cast<int>(i);
+            tp.p_room   = p_room;
+            tp.uv_pred  = uvp.cast<float>();
+            tp.uv_meas  = (uvp + delta).cast<float>();
+            tp.cov_uv   = (Ai * S * Ai.transpose()).cast<float>();
+            tp.n_corner = static_cast<int>(fc->w);
+            tp.n_floor  = static_cast<int>(ff->w);
+            const double c = std::min(1.0 - 1e-12, std::abs(nch.dot(nfh)));
+            tp.cond     = static_cast<float>((1.0 + c) / (1.0 - c));
+            obs.triple_points.push_back(tp);
+        }
     }
 
     st.med_sigma_px  = median_of(sig_list);

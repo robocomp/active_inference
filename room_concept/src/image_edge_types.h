@@ -98,13 +98,57 @@ namespace rc
     struct ImageEdgeSegment
     {
         ContourClass class_id = ContourClass::WallCorner;
+        /// Polygon vertex this contour belongs to: for WallCorner the vertex itself, for FloorWall
+        /// and WallCeiling the edge's FIRST vertex (so edge i runs from vertex i to i+1). Carried so
+        /// the triple-point detector can pair a vertical corner with the floor junctions that meet
+        /// it; without it a segment is anonymous and the pairing would have to be re-derived from
+        /// sample geometry.
+        int vertex = -1;
         std::vector<ImageEdgeSample> samples;
+    };
+
+    /// The FLOOR-WALL-WALL triple point: where two walls and the floor meet, i.e. a room polygon
+    /// vertex at z = 0, and the bottom end of a vertical wall corner.
+    ///
+    /// ★ WHY IT IS WORTH HAVING. Every existing sample is a SCALAR along its contour's normal —
+    ///   1-D by necessity, because a 2-D residual on a straight edge would fabricate a tangential
+    ///   constraint the image does not contain (the aperture problem; see ImageEdgeSample). A
+    ///   triple point has no aperture problem: it is a genuine 0-D feature with two independent
+    ///   components. And it is the SAME physical (x, y) the LiDAR corner detector reports — the
+    ///   LiDAR sees the wall-wall intersection at sensor height, the image sees it at floor height —
+    ///   so the association between the two sensors is exact in the plane, not approximate.
+    ///
+    /// ★ IT COSTS NO NEW IMAGE PROCESSING. The two lines through it are already measured: the
+    ///   WallCorner segment's weighted mean residual displaces the vertical edge along its
+    ///   (horizontal) normal, the FloorWall segment's does the same for the floor line along its
+    ///   (vertical) normal. Two scalars, two normals, one 2x2 solve. Fixing each line's DIRECTION
+    ///   from the model and fitting only its offset is deliberate: the direction is far better known
+    ///   than the offset, and letting it float would trade a well-posed problem for an ill-posed one.
+    ///
+    /// ★ ITS CONDITIONING IS THE ORTHOGONALITY OF THE TWO CLASSES. A wall corner's normal is
+    ///   horizontal and a floor junction's is vertical, so the 2x2 is near-identity — u comes from
+    ///   the class that carries bearing (yaw), v from the class that carries range (pitch/height).
+    ///   Each component is measured by the contour best able to measure it, which is not an accident
+    ///   of this construction but the reason to prefer it.
+    struct TriplePoint
+    {
+        int             vertex  = -1;
+        Eigen::Vector3f p_room  = Eigen::Vector3f::Zero(); ///< (vx, vy, 0), a constant of the solve
+        Eigen::Vector2f uv_pred = Eigen::Vector2f::Zero(); ///< where the model puts it
+        Eigen::Vector2f uv_meas = Eigen::Vector2f::Zero(); ///< where the two fitted lines cross
+        Eigen::Matrix2f cov_uv  = Eigen::Matrix2f::Zero(); ///< propagated from the two offset sigmas
+        float range_m     = -1.f;   ///< depth at uv_meas; < 0 = not available (NOT zero — see below)
+        float range_sigma = -1.f;
+        int   n_corner = 0;         ///< weighted-effective samples behind the vertical line
+        int   n_floor  = 0;         ///< ... and behind the floor line
+        float cond     = 0.f;       ///< of the 2x2; ~1 when the two normals are orthogonal
     };
 
     /// One frame's worth of edge evidence, attached to the window slot whose stamp is nearest.
     struct ImageEdgeObs
     {
         std::vector<ImageEdgeSegment> segments;
+        std::vector<TriplePoint>      triple_points;
         std::uint64_t frame_stamp = 0;      ///< image capture stamp (ms)
         std::int64_t  dt_to_slot_ms = 0;    ///< image stamp - slot stamp; feeds nuisance column [3]
         float         sigma_i = 0.f;        ///< carried through for the CSV

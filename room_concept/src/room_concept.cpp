@@ -4238,8 +4238,50 @@ namespace rc
             image_edge_csv_.flush();
             ++imgedge_rows_;
         }
+        log_triple_points(obs, timestamp_ms, pose);
         imgedge_health(timestamp_ms);
         mount_pooled_solve(timestamp_ms);
+    }
+
+    /// One row per detected triple point per frame. Diagnostic only — nothing consumes these yet.
+    ///
+    /// ★ THE CROSS-CHECK THAT MAKES THIS WORTH LOGGING SEPARATELY: du and dv here are the SAME
+    ///   displacement the rigid-shift monitor reports as tx and ty, arrived at by a completely
+    ///   different route — two per-segment line offsets intersected, rather than a two-parameter
+    ///   regression over every sample in the frame. If the detector is right the medians agree. If
+    ///   they disagree the detector is wrong, and that is worth knowing BEFORE anything is built on
+    ///   top of it.
+    void RoomConcept::log_triple_points(const ImageEdgeObs& obs, std::int64_t timestamp_ms,
+                                        const Eigen::Vector3f& pose)
+    {
+        ++triple_frames_;
+        if (obs.triple_points.empty()) return;
+        if (not triple_csv_.is_open())
+        {
+            triple_csv_.open("etc/image_edge_triple.csv", std::ios::out | std::ios::trunc);
+            if (triple_csv_.is_open())
+            {
+                triple_csv_.imbue(std::locale::classic());   // CLAUDE.md: never a comma decimal
+                triple_csv_ << "ts_ms,vertex,u_pred,v_pred,u_meas,v_meas,du,dv,"
+                               "suu,svv,suv,cond,n_corner,n_floor,range_m,range_sigma,"
+                               "pose_x,pose_y,pose_theta\n";
+            }
+        }
+        if (not triple_csv_.is_open()) return;
+        for (const auto& t : obs.triple_points)
+        {
+            triple_csv_ << timestamp_ms << ',' << t.vertex << ','
+                        << t.uv_pred.x() << ',' << t.uv_pred.y() << ','
+                        << t.uv_meas.x() << ',' << t.uv_meas.y() << ','
+                        << (t.uv_meas.x() - t.uv_pred.x()) << ','
+                        << (t.uv_meas.y() - t.uv_pred.y()) << ','
+                        << t.cov_uv(0, 0) << ',' << t.cov_uv(1, 1) << ',' << t.cov_uv(0, 1) << ','
+                        << t.cond << ',' << t.n_corner << ',' << t.n_floor << ','
+                        << t.range_m << ',' << t.range_sigma << ','
+                        << pose.x() << ',' << pose.y() << ',' << pose.z() << '\n';
+            ++triple_rows_;
+        }
+        triple_csv_.flush();
     }
 
     /// One weighted least squares per WINDOW — the accumulators reset after every solve — with the
@@ -4578,6 +4620,14 @@ namespace rc
     {
         if (imgedge_health_last_ms_ == 0) { imgedge_health_last_ms_ = timestamp_ms; return; }
         if (timestamp_ms - imgedge_health_last_ms_ < 5000) return;
+        qInfo().nospace().noquote()
+            << "[triple] " << triple_rows_ << " points over " << triple_frames_ << " frames ("
+            << QString::number(triple_frames_ ? double(triple_rows_) / triple_frames_ : 0.0, 'f', 2)
+            << "/frame)"
+            << (triple_rows_ == 0 and triple_frames_ > 0
+                    ? "  <- frames ARE arriving and no vertex resolved: check that wall corners AND"
+                      " floor junctions are both enabled, they are intersected in pairs"
+                    : "");
         qInfo().nospace() << "[imgedge] " << imgedge_rows_ << " rows / " << imgedge_calls_
                           << " calls | no_window=" << imgedge_no_window_
                           << " no_obs=" << imgedge_no_obs_ << " (bound, nothing extracted)"

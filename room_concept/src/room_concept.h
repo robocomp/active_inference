@@ -1847,6 +1847,10 @@ private:
     /// independent measurement and the between-window scatter is visible. See mount_pooled_solve().
     void mount_pooled_solve(std::int64_t timestamp_ms);
     std::ofstream mount_csv_;
+    std::ofstream triple_csv_;
+    long          triple_rows_ = 0, triple_frames_ = 0;
+    void          log_triple_points(const ImageEdgeObs& obs, std::int64_t timestamp_ms,
+                                    const Eigen::Vector3f& pose);
     double mnt_S11_ = 0, mnt_S12_ = 0, mnt_S22_ = 0, mnt_Sy1_ = 0, mnt_Sy2_ = 0, mnt_Syy_ = 0;
     long   mnt_n_ = 0;
     std::int64_t mnt_win_start_ms_ = 0;
