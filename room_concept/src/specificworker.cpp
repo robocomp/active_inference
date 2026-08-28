@@ -927,6 +927,15 @@ void SpecificWorker::pump_image_edges()
                     continue;
                 t.p_cam_meas = xyz.cast<float>();
                 t.range_m    = static_cast<float>(xyz.norm());
+                // camera -> robot -> room. cam_R_robot maps robot into camera, so its transpose
+                // brings the point back; then the pose rotation, which is R(+theta) — the inverse of
+                // the R(-theta) the projection path applies.
+                const Eigen::Vector3f p_rb = camera_ingestor_->cam_R_robot().transpose()
+                                           * (t.p_cam_meas - camera_ingestor_->cam_t_robot());
+                const float cs = std::cos(pose.z()), sn = std::sin(pose.z());
+                t.p_room_meas = Eigen::Vector3f(pose.x() + cs * p_rb.x() - sn * p_rb.y(),
+                                                pose.y() + sn * p_rb.x() + cs * p_rb.y(),
+                                                p_rb.z());
                 // ★ The sigma is a PLACEHOLDER and is marked as one. A depth sigma is a property of
                 //   the sensor at that range and this camera's has not been measured here; the
                 //   LiDAR-anchored depth-correction work in retina is where that number should come

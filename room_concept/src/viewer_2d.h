@@ -22,6 +22,7 @@
 #include <memory>
 #include <unordered_map>
 #include "corner_detector.h"
+#include "image_edge_types.h"   // rc::TriplePoint — RGB corners drawn beside the LiDAR ones
 #include <map>
 #include "object_anchor_types.h"
 
@@ -145,6 +146,13 @@ class Viewer2D : public QObject
 
         /// Draw detected corners: green circles for accepted, yellow for predicted/in-FOV.
         /// Also draws a line from the robot to each detected corner.
+        /// RGB triple points (floor+wall+wall) beside the LiDAR corners. Same physical (x, y) seen
+        /// by a different sensor, which is the whole reason to draw them together: the gap between a
+        /// magenta square and its cyan neighbour IS the RGB-vs-LiDAR disagreement, in metres, on the
+        /// canvas. Squares not circles, and magenta not cyan, so the two remain separable in a
+        /// screenshot and for a viewer who cannot tell the hues apart.
+        void draw_rgb_corners(const std::vector<rc::TriplePoint>& points);
+
         void draw_corners(const std::vector<rc::CornerDetector::CornerMatch>& matches,
                           const Eigen::Affine2f& robot_pose);
 
@@ -230,6 +238,8 @@ class Viewer2D : public QObject
         QGraphicsEllipseItem* epistemic_target_item_ = nullptr;
 
         // Corner detection markers
+        std::vector<QGraphicsRectItem*>    rgb_corner_items_;
+        std::vector<QGraphicsLineItem*>    rgb_corner_line_items_;
         std::vector<QGraphicsEllipseItem*> corner_detected_items_;
         std::vector<QGraphicsEllipseItem*> corner_predicted_items_;
         std::vector<QGraphicsLineItem*>    corner_line_items_;

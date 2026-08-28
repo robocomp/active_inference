@@ -312,6 +312,12 @@ void RoomViewer::update_viewer(const std::optional<rc::RoomConcept::UpdateResult
     else
         viewer_2d_->draw_corners({}, pose_for_draw);
 
+    // RGB triple points beside them. Read through triple_points(), NOT image_edges(): that holder is
+    // emptied by take_image_edges() the moment a slot consumes it, so peeking there would draw
+    // corners only on the tick the viewer happened to win the race against the solver.
+    if (room_concept_)
+        viewer_2d_->draw_rgb_corners(room_concept_->triple_points());
+
     // Object-anchor overlay (fridge, …): pinned p_o, this frame's z_o, the sight line and the residual
     // between them. Display-only — a copy taken under the localizer's lock, drawn without holding it.
     if (room_concept_)

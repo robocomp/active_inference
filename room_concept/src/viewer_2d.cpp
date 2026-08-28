@@ -665,6 +665,56 @@ void Viewer2D::draw_all_trajectories(
 // ─────────────────────────────────────────────────────────────────────────────
 // Corner detection markers
 // ─────────────────────────────────────────────────────────────────────────────
+void Viewer2D::draw_rgb_corners(const std::vector<rc::TriplePoint>& points)
+{
+    // Only points that actually got a depth reading have a room position; range_m < 0 is the
+    // "no depth" marker and p_room_meas is left at the origin, which must not be drawn as a corner
+    // sitting at the room origin.
+    std::vector<const rc::TriplePoint*> shown;
+    shown.reserve(points.size());
+    for (const auto& t : points)
+        if (t.range_m > 0.f and t.p_room_meas.allFinite()) shown.push_back(&t);
+    const size_t n = shown.size();
+
+    auto resize_pool = [&](auto& pool, size_t count, auto make_item)
+    {
+        while (pool.size() < count) pool.push_back(make_item());
+        for (size_t i = 0; i < pool.size(); ++i) pool[i]->setVisible(i < count);
+    };
+
+    // MEASURED corner — solid magenta square. Square and magenta both deliberate: the LiDAR's are
+    // cyan circles, and a difference in shape as well as hue keeps them apart in a screenshot.
+    resize_pool(rgb_corner_items_, n, [&]() {
+        constexpr float r = 0.22f;
+        auto* item = agv_->scene.addRect(-r, -r, 2*r, 2*r,
+            QPen(QColor(255, 0, 200), 0.03), QBrush(QColor(255, 0, 200, 170)));
+        item->setZValue(31);      // above the LiDAR corners, being the smaller marker
+        return item;
+    });
+
+    // Line from the MODEL vertex to where the image says the corner is. This is the residual drawn
+    // at true scale — the quantity the whole mount calibration is about, in metres on the canvas.
+    resize_pool(rgb_corner_line_items_, n, [&]() {
+        auto* item = agv_->scene.addLine(0, 0, 0, 0, QPen(QColor(255, 0, 200, 110), 0.02));
+        item->setZValue(28);
+        return item;
+    });
+
+    for (size_t i = 0; i < n; ++i)
+    {
+        const auto& t = *shown[i];
+        rgb_corner_items_[i]->setPos(t.p_room_meas.x(), t.p_room_meas.y());
+        rgb_corner_line_items_[i]->setLine(t.p_room.x(), t.p_room.y(),
+                                           t.p_room_meas.x(), t.p_room_meas.y());
+        // Opacity carries the intersection conditioning: a vertex seen edge-on has a poorly defined
+        // crossing, and its marker should not look as authoritative as a well-conditioned one. Not a
+        // gate — the point is still drawn, just visibly weaker.
+        const double q = std::clamp(2.0 / std::max(1.0, static_cast<double>(t.cond)), 0.25, 1.0);
+        rgb_corner_items_[i]->setOpacity(q);
+        rgb_corner_line_items_[i]->setOpacity(q);
+    }
+}
+
 void Viewer2D::draw_corners(const std::vector<rc::CornerDetector::CornerMatch>& matches,
                              const Eigen::Affine2f& robot_pose)
 {

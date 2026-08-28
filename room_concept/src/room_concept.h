@@ -1218,7 +1218,17 @@ public:
     void set_image_edges(ImageEdgeObs obs)
     {
         std::scoped_lock lk(image_edges_mutex_);
-        latest_image_edges_ = std::move(obs);
+        latest_triple_points_ = obs.triple_points;   // BEFORE the move
+        latest_image_edges_   = std::move(obs);
+    }
+    /// Display copy of the newest triple points. Deliberately NOT read through image_edges(): that
+    /// holder is emptied by take_image_edges() as soon as a slot consumes it, so a viewer peeking
+    /// there would show corners only on the rare tick it happened to win the race. Kept separately
+    /// because the drawing must not compete with the solver for the evidence.
+    std::vector<TriplePoint> triple_points() const
+    {
+        std::scoped_lock lk(image_edges_mutex_);
+        return latest_triple_points_;
     }
     /// TAKE, not peek: the extraction is moved out and the holder left empty, so one image cannot be
     /// attached to two slots. The rates are independent (images ~30 Hz, slots ~20 Hz and irregular),
@@ -1276,6 +1286,7 @@ private:
    ImageEdgeStats     image_edge_stats_{};
    mutable std::mutex image_edges_mutex_;
    ImageEdgeObs       latest_image_edges_;
+   std::vector<TriplePoint> latest_triple_points_;   ///< display copy, see triple_points()
    mutable std::mutex object_anchors_mutex_;
    std::vector<ObjectAnchorObs> latest_object_anchors_;
 

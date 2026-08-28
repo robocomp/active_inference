@@ -147,6 +147,11 @@ namespace rc
         ///   the convention has NOT been verified, so it is logged, not assumed.
         float           depth_raw   = -1.f;  ///< as published; < 0 = not available (never 0)
         Eigen::Vector3f p_cam_meas  = Eigen::Vector3f::Zero();
+        /// The measured corner in the ROOM frame — p_cam_meas carried through the extrinsic and the
+        /// pose. Display-only, and pose-dependent by construction: it is where the corner WAS while
+        /// the robot believed it was at that pose, so it is a picture of the residual, not evidence.
+        /// Zero when there was no depth (range_m < 0), which is why the drawing checks range_m.
+        Eigen::Vector3f p_room_meas = Eigen::Vector3f::Zero();
         float           range_m     = -1.f;
         float           range_sigma = -1.f;  ///< < 0 until a depth sigma is MEASURED, not guessed
         int   n_corner = 0;         ///< weighted-effective samples behind the vertical line
