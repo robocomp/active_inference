@@ -850,7 +850,31 @@ shadow = false   # OFF 2026-08-28 for a clean BASELINE drive. `drive` has been f
                  # that: a vertical corner's image normal is horizontal, so pitch and height barely
                  # project onto it (h ~ 0) while bearing is unaffected.
                  # Set back to false once the mount is characterised; drive stays false until then.
-drive  = false   # <- the factor moves the published pose. Only after the CSV says it should.
+drive  = true    # ★ ON 2026-08-28 — the FIRST time this term moves the published pose. Corners
+                 # only: useTriplePoints below is true, so the evidence is one 2-D residual per
+                 # floor-wall-wall corner and the per-sample contour residuals do NOT enter.
+                 #
+                 # ── THE BASELINE THIS IS BEING COMPARED AGAINST (same config, drive = false) ──
+                 # Measured against the Webots supervisor, "driving" defined on GT speed > 0.05 m/s
+                 # so a localiser glitch cannot reclassify its own bad samples out of the set:
+                 #     position   DRIVING  median 27.1 mm  p90 57.4  p99 134.6  max 173.4
+                 #                parked   median  6.7 mm
+                 #     heading    DRIVING  median 0.239 deg  p90 2.31  p99 4.11  max 6.11
+                 #                parked   median 0.046 deg  p90 0.066
+                 #
+                 # ★ THE PRE-REGISTERED QUESTION IS THE DRIVING TAIL, NOT THE MEDIAN. Parked, the
+                 #   localiser is already at 2-7 mm and 0.05 deg and nothing can improve it. Driving,
+                 #   heading is 35x worse (p90 2.31 deg vs 0.066) — and bearing is precisely what a
+                 #   corner measures well (0.019 px repeatability; a 0.7 px sigma is 0.09 deg). So
+                 #   the question is whether p90/p99 of heading and position improve.
+                 # ★ AND IT MAY LEGITIMATELY FAIL. The factor carries a MEASURED 27 mm bias: parked
+                 #   with 4 corners it proposed a 26.6 mm correction where the true error was 2.0 mm.
+                 #   That bias is a third of the driving p99. A result that improves the tail while
+                 #   degrading the median is a TRADE, not a win, and must be reported as one.
+                 # ★ chi2 CANNOT ADJUDICATE THIS. chi2_post is the residual after the pose absorbs
+                 #   everything it can, so a pose bias is invisible to it by construction — 1.411
+                 #   looked like a pass while the factor was 27 mm out. Only ground truth decides.
+                 # Set back to false if the tail does not improve.
 
 # ── WHICH FORM OF THE EVIDENCE THE FACTOR USES ──────────────────────────────────────────────────
 # false = the per-sample contour residuals (~43 scalars/frame, each along its contour's normal).
