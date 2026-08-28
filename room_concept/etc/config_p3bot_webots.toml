@@ -916,6 +916,41 @@ mountHeightSigma = 0.010    # m — LEFT ALONE, deliberately, and the measuremen
                         # normal is horizontal, so pitch and height barely project onto them.
 mountYawSigma    = 0.0035   # rad
 
+# ── STAGE 2 RESULT, 2026-08-28: the camera against the LIDAR, with no pose in the residual ──
+# The three priors above are now EMPIRICALLY JUSTIFIED rather than asserted, and the reading that
+# justified them is pose-free. A room corner is seen by both sensors and is the same physical (x,y);
+# CornerMatch::model_index and TriplePoint::vertex are both polygon vertex indices, so the pairing is
+# a lookup, not a gated nearest-neighbour. CornerMatch::detected is in the ROBOT frame, so the LiDAR
+# corner goes through the extrinsic ALONE and the localiser's pose never enters:
+#     r = uv_image - project(cam_R_robot * p_robot + cam_t_robot)
+# Verified in simulation that this is what it claims: with an injected heading bias of 0 / +0.15 /
+# +0.30 / -0.30 deg, the old image-minus-MODEL estimate reads 0.856 / 1.006 / 1.156 / 0.556 deg while
+# this one reads 0.8591 every time, against a truth of 0.8600.
+#
+# Measured over ~30 000 pairs:
+#     residual u   +0.109 px  = +0.014 deg     <- mountYawCorrection below is COMPLETE
+#     residual v   +0.071 px at 4-6 m          <- where 78% of the weight lives
+#     pitch -0.052 deg, height +3.0 mm         <- both far INSIDE the priors above
+#     chi2/dof 0.38                            <- the covariance model is CONSERVATIVE by ~1.6x
+#     live cam height 1.0798 m vs the graph's 1.0800   <- recovered from the projections themselves
+#
+# ★★★ PITCH AND HEIGHT REMAIN ONE RIDGE, AND THAT IS STRUCTURAL — NOT A DRIVING PROBLEM.
+#   rho held at -0.988 through a whole session including deliberate near-wall passes. The reason is
+#   not the trajectory: a LiDAR corner's positional uncertainty projects through Pxy ~ fy/d, so a
+#   fixed few-cm corner error subtends MORE pixels the closer you are. Measured share of total fit
+#   weight by range: under 2 m = 0.00% (sigma_v 18-161 px), 4-6 m = 78% (sigma_v 1.1 px). The very
+#   measurements that would separate a constant from an fy/d column are the ones this geometry makes
+#   worthless. Driving closer cannot fix it, and it does not matter: the pair's COMBINATION is
+#   -0.4 px / +3 mm, smaller than the term's own noise.
+#
+# ★★★ TWO ANALYSIS ERRORS THIS RESULT CORRECTS, both mine, both from trusting an unchecked source:
+#   1. An UNWEIGHTED offline fit of rv ~ a + b(fy/d) reported height -42 mm. It handed full leverage
+#      to close-range points whose own covariance declares them near-worthless. The agent's
+#      accumulator weights by cov^-1 and sees +3 mm. The code was right; the check was not.
+#   2. A "24 cm zed height inconsistency" against a Webots proto that is NOT the running world — the
+#      same file says fieldOfView 2.09 and width 1920 while the live camera is 1.9198 and 1280.
+#      p3bot.json's 1.08 is correct, confirmed to 0.2 mm from the live projections.
+
 # ── MEASURED boresight-yaw correction, applied LOCALLY to the graph's camera<-robot extrinsic ──
 # +0.814 +/- 0.022 deg, 2026-08-28. This is a physical angle, not a tuning knob: do not "adjust it
 # until chi2 looks good".
