@@ -147,6 +147,10 @@ private:
 	// falling back to the single node of type "robot" already in the graph. Nothing here assumes a
 	// particular robot.
 	std::string robot_name;
+	// Degrees to rotate the robot's MESH into the ROBOT frame (x right, y forward). A property of the
+	// ASSET, not of the robot: P3Bot's proto wraps the machine in `Pose { rotation 0 0 1 1.5708 }`, so its
+	// mesh's native forward is +x while the graph's robot frame has forward +y. Agent.mesh_yaw_deg.
+	float mesh_yaw_deg = 0.f;
 
 	// Lidar reader thread
 	void read_lidar_thread();
@@ -229,6 +233,12 @@ private:
 		std::string last_relayed;                                          // empty = advertising our own
 		std::future<std::string> pending;                                  // in-flight async getMediaDescriptor
 		bool present = false;                                              // last completed query had a descriptor
+		// LATCHED sensor physics: the last model this plane's real driver advertised. The
+		// driver is the only party that knows its own geometry and noise, and it answers ""
+		// once it stops publishing on DDS — so without latching, the model would vanish from
+		// the node exactly when we fall back to bridging. Carried into our OWN descriptor so
+		// the physics survives the transport switch. Empty until a driver has advertised one.
+		rc::media::SensorModel model;
 	};
 	struct MediaGroup
 	{
@@ -248,7 +258,10 @@ private:
 	void build_media_groups();                                             // populate media_groups_ (in initialize)
 	void prime_media_groups();                                             // one bounded round so startup adoption is near-immediate
 	void negotiate(MediaGroup& group);                                     // one non-blocking tick (async poll-then-relaunch)
-	void relay_media_descriptor(const std::string& node_name, const std::string& descriptor_json);
+	// THE single writer of `media_descriptor` on a sensor node — used both when relaying a
+	// driver's descriptor and when advertising our own bridged plane. Typed
+	// <media_descriptor_att>, never the runtime_checked string form.
+	void write_media_descriptor(const std::string& node_name, const std::string& descriptor_json);
 
 	// Monitor branch shared by read_rgbd_thread + read_ricoh_thread: while an external DDS
 	// producer owns a single image plane (bridge off), subscribe to it, feed the compute()

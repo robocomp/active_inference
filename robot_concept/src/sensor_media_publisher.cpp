@@ -238,9 +238,13 @@ rc::media::MediaDescriptor SensorMediaPublisher::make_descriptor(
     return desc;
 }
 
-std::string SensorMediaPublisher::descriptor_json(const std::vector<std::string>& keys) const
+std::string SensorMediaPublisher::descriptor_json(const std::vector<std::string>& keys,
+                                                  const rc::media::SensorModel* model) const
 {
-    return make_descriptor(keys).to_json();
+    auto desc = make_descriptor(keys);
+    if (model != nullptr and not model->empty())
+        desc.model = *model;
+    return desc.to_json();
 }
 
 bool SensorMediaPublisher::publish_image(const std::string& key, const ImageFrameView& view)

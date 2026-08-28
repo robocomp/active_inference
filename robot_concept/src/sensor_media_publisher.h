@@ -126,15 +126,20 @@ public:
     [[nodiscard]] bool imu_ready() const noexcept { return imu_.has_value(); }
     [[nodiscard]] bool data_sharing_active() const noexcept;
 
-    // Advertise the plane on a DSR node (templated to keep this header DSR-free).
-    // `keys` selects which streams to write: empty ⇒ all (single-node bundle), or
-    // a subset so each sensor node carries only its own stream(s) — e.g.
-    // {"rgb","depth"} on "zed", {"lidar"} on "helios", {"imu"} on "imu".
-    // Returns false if the node is absent (nothing written).
-    template <class Graph>
-    bool advertise(Graph& graph, const std::string& node_name,
-                   const std::vector<std::string>& keys = {},
-                   const char* attr_name = rc::media::MEDIA_DESCRIPTOR_ATTR) const;
+    // NOTE: this class no longer WRITES the descriptor onto the graph. It used to, via
+    // runtime_checked_add_or_modify_attrib_local(node, "media_descriptor", ...) — a
+    // string-named, runtime-validated write, which CLAUDE.md rules out because a typo or
+    // type mismatch is a runtime throw rather than a compile error. The typed
+    // <media_descriptor_att> form could not be used HERE because this header is
+    // deliberately DSR-att-header-free (it is templated on Graph and includes no dsr/
+    // headers). Resolved by moving the write to the caller, which has the typed alias in
+    // scope: build the JSON here, let SpecificWorker::write_media_descriptor() store it.
+    // That also collapses the two former descriptor writers into ONE site, which is what
+    // makes "fill the sensor model on both paths" a single change rather than two.
+    //
+    // (advertise_stats below still uses the runtime_checked form. It is currently UNUSED
+    // and `media_bps_att` is not registered in cortex, so converting it would mean adding
+    // a cortex attribute for dead code. Left as-is deliberately.)
 
     // Write the live media throughput (bytes/s, summed over the node's streams) onto the same sensor
     // node as its descriptor, as the `media_bps` attribute. Call ~1 Hz from the graph/main thread.
@@ -143,7 +148,19 @@ public:
     bool advertise_stats(Graph& graph, const std::string& node_name,
                          const std::vector<std::string>& keys = {});
 
-    [[nodiscard]] std::string descriptor_json(const std::vector<std::string>& keys = {}) const;
+    // `keys` selects which streams to describe: empty ⇒ all (single-node bundle), or a
+    // subset so each sensor node carries just its own stream(s) — {"rgb","depth"} on
+    // "zed", {"lidar"} on "helios", {"imu"} on "imu".
+    //
+    // `model` is the sensor physics to attach (nullptr ⇒ none). robot_concept does not
+    // KNOW the physics of a sensor it is merely bridging, so this is the model it last
+    // saw the real driver advertise, carried across the fallback. Without it the geometry
+    // and noise would blink out of the graph at exactly the moment the sensor path
+    // degrades — a consumer would silently switch models with nothing to tell it. Before
+    // any driver has ever been up there is nothing to carry, and the fields stay absent,
+    // which the schema defines as "unknown, keep your own constant".
+    [[nodiscard]] std::string descriptor_json(const std::vector<std::string>& keys = {},
+                                              const rc::media::SensorModel* model = nullptr) const;
 
     // Sum of live bytes/s over the streams selected by `keys` (empty ⇒ all), from the LOCAL publish
     // path (nonzero only while robot_concept produces/bridges the stream). Advances each selected
@@ -222,21 +239,7 @@ private:
     std::atomic<std::int64_t> status_report_next_ns_{0};
 };
 
-// ── advertise() is templated on the DSR graph, so it stays in the header ──────
-template <class Graph>
-bool SensorMediaPublisher::advertise(Graph& graph, const std::string& node_name,
-                                     const std::vector<std::string>& keys,
-                                     const char* attr_name) const
-{
-    auto node = graph.get_node(node_name);
-    if (not node.has_value())
-        return false;
-    graph.runtime_checked_add_or_modify_attrib_local(node.value(), attr_name,
-                                                      make_descriptor(keys).to_json());
-    rc::safe_update_node(graph, node.value());
-    return true;
-}
-
+// ── advertise_stats() is templated on the DSR graph, so it stays in the header ──
 template <class Graph>
 bool SensorMediaPublisher::advertise_stats(Graph& graph, const std::string& node_name,
                                            const std::vector<std::string>& keys)

@@ -17,6 +17,7 @@
  *    along with RoboComp.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "specificworker.h"
+#include "../../common/robot_footprint/robot_footprint.h"
 
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include "../../common/media_transport/media_transport.h"
@@ -150,6 +151,14 @@ void SpecificWorker::initialize()
 	// needs no code change. If the key is absent we fall back to the single node of type "robot"
 	// already in the graph rather than guessing a name.
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Agent.robot_name", robot_name);
+	// The MESH's frame, not the robot's shape — see the declaration. P3Bot needs 90.
+	// ★Loaded as double: ConfigLoader's variant carries no float alternative, and asking it for one is a
+	// static_assert, not a conversion.
+	{
+		double yaw_deg = mesh_yaw_deg;
+		rc::ConfigLoaderUtils::load_optional(configLoader, "Agent.mesh_yaw_deg", yaw_deg);
+		mesh_yaw_deg = static_cast<float>(yaw_deg);
+	}
 	rc::ConfigLoaderUtils::load_optional<std::uint64_t, int>(configLoader, "Agent.robot_node_id", canonical_robot_id_);
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Agent.graph_layout", graph_layout_);
 	if (robot_name.empty())
@@ -225,6 +234,48 @@ void SpecificWorker::initialize()
 		{ G->add_or_modify_attrib_local<depth_m_att>(body_node.value(), 0.47f); seeded = true; }
 		if (!G->get_attrib_by_name<height_m_att>(body_node.value()).has_value())
 		{ G->add_or_modify_attrib_local<height_m_att>(body_node.value(), 1.6f); seeded = true; }
+
+		// ── ★MEASURE THE ROBOT INSTEAD OF DECLARING IT ───────────────────────────────────────────
+		// The 0.47 / 0.47 above are a PLACEHOLDER, and provably so: they are byte-identical in
+		// shadow.json and p3bot.json, i.e. the same numbers for two robots of different shapes. Whoever
+		// reads them plans against a robot that does not exist — room_concept's epistemic planner takes
+		// 0.5*hypot(w, d) = 0.332 m as its collision radius, against P3Bot's true 0.371 m.
+		// This agent is the ONE that knows which robot this is (Agent.robot_name / configFile), and the
+		// mesh named by the robot node's own `path` is the only per-robot statement of its shape. So
+		// measure it here, once, and let every existing consumer of width_m/depth_m read the truth
+		// without changing a line — one producer, rather than a mesh loader in every agent.
+		// ★HEIGHT IS DELIBERATELY NOT TOUCHED. Despite its name, `height_m` is consumed as room_concept's
+		// OBSTACLE CLOUD CEILING (RoomConfig::ROBOT_HEIGHT, "m, obstacle cloud ceiling"), not as the
+		// robot's stature. Setting it to the mesh's true 1.31 m would silently change which LiDAR returns
+		// that agent treats as obstacles — a perception change wearing a geometry change's clothes.
+		const auto robot_node = G->get_node(robot_name);
+		if (const auto path_attr = robot_node.has_value()
+		        ? G->get_attrib_by_name<path_att>(robot_node.value())
+		        : std::optional<std::reference_wrapper<const std::string>>{};
+		    path_attr.has_value())
+		{
+			rc::RobotFootprint::MeshReport rep;
+			const float yaw = mesh_yaw_deg * static_cast<float>(M_PI) / 180.f;
+			if (const auto body = rc::RobotFootprint::from_obj(path_attr.value().get(), yaw, rep);
+			    body.has_value())
+			{
+				const float w = 2.f * rep.x_max, d = 2.f * rep.y_max;
+				const float w_old = G->get_attrib_by_name<width_m_att>(body_node.value()).value_or(0.f);
+				const float d_old = G->get_attrib_by_name<depth_m_att>(body_node.value()).value_or(0.f);
+				G->add_or_modify_attrib_local<width_m_att>(body_node.value(), w);
+				G->add_or_modify_attrib_local<depth_m_att>(body_node.value(), d);
+				qInfo().nospace() << "[body] dimensions MEASURED from '"
+				                  << QString::fromStdString(path_attr.value().get()) << "' (yaw "
+				                  << mesh_yaw_deg << " deg): width " << w_old << " -> " << w
+				                  << " m, depth " << d_old << " -> " << d
+				                  << " m. height_m left at its declared value (it is an obstacle-cloud "
+				                     "ceiling, not the robot's stature).";
+			}
+			else
+				qWarning().nospace() << "[body] could NOT measure the robot from its mesh ("
+				                     << QString::fromStdString(rep.reason)
+				                     << ") — the declared dimensions stand, and they may be a placeholder.";
+		}
 
 		rc::safe_update_node(*G, body_node.value());
 		if (seeded)
@@ -308,9 +359,15 @@ void SpecificWorker::initialize()
 	{
 		if (not ad.enabled)
 			continue;                                    // gated OFF: no publisher, no descriptor
-		if (media_.advertise(*G, ad.node, ad.keys))
+		// Cold start: no driver has spoken yet, so there is no model to carry and the sensor
+		// fields stay ABSENT — which the schema defines as "unknown, keep your own constant",
+		// not as zero. They fill in as soon as a driver advertises one.
+		if (G->get_node(ad.node).has_value())
+		{
+			write_media_descriptor(ad.node, media_.descriptor_json(ad.keys));
 			qInfo() << "[Media] descriptor advertised on" << ad.node << ":"
 			        << QString::fromStdString(media_.descriptor_json(ad.keys));
+		}
 		else
 			qWarning() << "[Media]" << ad.node << "node not found at init — media descriptor NOT advertised";
 	}
@@ -1188,10 +1245,17 @@ void SpecificWorker::negotiate(MediaGroup& g)
 			p.present = false;
 			if (not desc.empty())
 				if (const auto d = rc::media::MediaDescriptor::from_json(desc); d.has_value())
+				{
 					p.present = d->ready;
+					// Latch the physics whenever the driver states it, INDEPENDENTLY of `ready`.
+					// A producer that is up but not yet streaming still knows its own geometry and
+					// noise, and that fact does not expire when the stream does.
+					if (not d->model.empty())
+						p.model = d->model;
+				}
 			if (p.present and desc != p.last_relayed)
 			{
-				relay_media_descriptor(p.node, desc);
+				write_media_descriptor(p.node, desc);
 				p.last_relayed = desc;
 			}
 		}
@@ -1230,11 +1294,20 @@ void SpecificWorker::negotiate(MediaGroup& g)
 		for (auto& p : g.planes)
 			if (not p.last_relayed.empty()) { p.last_relayed.clear(); had_relay = true; }
 		if (had_relay)
-			media_.advertise(*G, g.advertise_node, g.advertise_streams);
+		{
+			// Carry the physics across the transport switch: our own bridged descriptor
+			// re-states whatever model this node's driver last advertised, so geometry and
+			// noise do not blink out of the graph at the moment the sensor path degrades.
+			const rc::media::SensorModel* m = nullptr;
+			for (const auto& p : g.planes)
+				if (p.node == g.advertise_node and not p.model.empty()) { m = &p.model; break; }
+			write_media_descriptor(g.advertise_node,
+			                       media_.descriptor_json(g.advertise_streams, m));
+		}
 	}
 }
 
-void SpecificWorker::relay_media_descriptor(const std::string& node_name, const std::string& descriptor_json)
+void SpecificWorker::write_media_descriptor(const std::string& node_name, const std::string& descriptor_json)
 {
 	auto node = G->get_node(node_name);
 	if (not node.has_value())

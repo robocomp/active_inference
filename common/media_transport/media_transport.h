@@ -183,6 +183,11 @@ struct MediaDescriptor
     [[nodiscard]] std::optional<PublisherConfig>  publisher_config(const std::string& stream_key) const;
 };
 
+// Split a ';'-separated list of floats, locale-independently (std::from_chars).
+// Exposed because a PRODUCER has to build ring_elev_deg from its own config, and the
+// obvious std::stof/strtof there would silently truncate at the '.' under es_ES.
+[[nodiscard]] std::vector<float> parse_float_list(const std::string& s);
+
 // Discovery convenience: read the descriptor JSON from a DSR node attribute and
 // parse it. Templated on the graph type so this header stays DSR-free (the
 // standalone media_bench never instantiates it, so it links no DSR). Graph must

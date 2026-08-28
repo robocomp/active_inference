@@ -994,6 +994,8 @@ std::vector<float> as_float_list(const std::string& v)
 }
 } // namespace
 
+std::vector<float> parse_float_list(const std::string& s) { return as_float_list(s); }
+
 std::string MediaDescriptor::to_json() const
 {
     auto esc = [](const std::string& v)
