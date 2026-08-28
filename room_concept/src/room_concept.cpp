@@ -4374,8 +4374,8 @@ namespace rc
         //   reads about twice the applied correction instead, this sign is inverted.
         // ★ The prior is the IDENTITY because h carries sigma_i (see the header note).
         Eigen::Vector4d mp = Eigen::Vector4d::Constant(NA), msig = Eigen::Vector4d::Constant(NA);
-        double c2d_h = NA;
-        int    informed_mask = 0;
+        double c2d_h = NA, cond_h = NA, rho_h = 0.0;
+        int    informed_mask = 0, rho_i = 0, rho_j = 1;
         const bool h_ok = mnt_hn_ >= 200;
         if (h_ok)
         {
@@ -4397,6 +4397,28 @@ namespace rc
                     // pure prior, and a global flag would licence acting on the one that is not.
                     if (msig(i) < 0.9) informed_mask |= (1 << i);
                 }
+                // ── COULD THESE FOUR BE TOLD APART AT ALL? ───────────────────────────────────
+                // ★ `informed` PER PARAMETER CANNOT SEE A DEGENERATE PAIR. A strong prior shrinks
+                //   the posterior sigma even along a direction the data never constrained, so a
+                //   parameter can read INFORMED while only its COMBINATION with another is
+                //   determined. Pitch and height are separated solely by the fy/d covariate — the
+                //   same two columns whose 2-parameter fit sits at rho 0.9864 / cond 146 standing
+                //   still. Reporting them individually without this would repeat, in a 4x4, exactly
+                //   the error the fy/d monitor already made.
+                // Correlation-normalised, per calibration_estimator.h: on the raw matrix the units
+                // span orders of magnitude regardless of geometry, and the raw number once ranked a
+                // separable window as WORSE than a deliberately collinear one.
+                Eigen::Matrix4d R = Eigen::Matrix4d::Identity();
+                for (int i = 0; i < 4; ++i)
+                    for (int j = 0; j < 4; ++j)
+                        R(i, j) = C(i, j) / std::sqrt(std::max(1e-300, C(i, i) * C(j, j)));
+                const Eigen::Vector4d ev = Eigen::SelfAdjointEigenSolver<Eigen::Matrix4d>(R)
+                                               .eigenvalues();
+                cond_h = ev(3) / std::max(1e-12, ev(0));
+                for (int i = 0; i < 4; ++i)              // worst pair, named rather than implied
+                    for (int j = i + 1; j < 4; ++j)
+                        if (std::abs(R(i, j)) > std::abs(rho_h))
+                        { rho_h = R(i, j); rho_i = i; rho_j = j; }
                 mnt_p_sum_  += mp;
                 mnt_p_sum2_ += mp.cwiseProduct(mp);
                 ++mnt_p_n_;
@@ -4414,7 +4436,7 @@ namespace rc
                               "pose_x,pose_y,pose_theta,rho,cond,"
                               "t_n,tx_px,se_tx_px,ty_px,se_ty_px,chi2_t,rho_t,cond_t,"
                               "h_n,p_pitch_rad,p_height_m,p_yaw_rad,p_dt,"
-                              "s_pitch,s_height,s_yaw,s_dt,chi2_h,informed\n";
+                              "s_pitch,s_height,s_yaw,s_dt,chi2_h,informed,cond_h,rho_h\n";
             }
         }
         if (mount_csv_.is_open())
@@ -4433,7 +4455,7 @@ namespace rc
                        << mp(1) * params.image_edge.mount_height_sigma << ','
                        << mp(2) * params.image_edge.mount_yaw_sigma    << ',' << mp(3) << ','
                        << msig(0) << ',' << msig(1) << ',' << msig(2) << ',' << msig(3) << ','
-                       << c2d_h << ',' << informed_mask << '\n';
+                       << c2d_h << ',' << informed_mask << ',' << cond_h << ',' << rho_h << '\n';
             mount_csv_.flush();
         }
         // Between-window scatter, which is the uncertainty that turned out to matter. Kept as a
@@ -4530,6 +4552,13 @@ namespace rc
             qInfo().nospace().noquote()
                 << "[mount/calib] window " << mnt_wins_ << " (" << mnt_hn_ << " samples)"
                 << body << " | chi2/dof " << QString::number(c2d_h, 'f', 2)
+                << " | cond " << QString::number(cond_h, 'f', 1)
+                << " (worst pair " << nm[rho_i] << "/" << nm[rho_j] << " rho "
+                << QString::number(rho_h, 'f', 4) << ")"
+                << (cond_h > 50.0
+                        ? "   <- DEGENERATE: that pair trades off; only their COMBINATION is"
+                          " determined, and a per-parameter INFORMED flag cannot see this"
+                        : "")
                 << (informed_mask == 0
                         ? "   <- nothing INFORMED yet: every posterior is still its prior"
                         : "");
