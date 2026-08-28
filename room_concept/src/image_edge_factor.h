@@ -42,6 +42,11 @@ namespace rc
             float mount_pitch_sigma  = 0.0035f; ///< rad — shared nuisance priors. PHYSICAL, not knobs:
             float mount_height_sigma = 0.010f;  ///< m     they are how well the mount is known, and they
             float mount_yaw_sigma    = 0.0035f; ///< rad   are what caps a wall at ~one observation.
+            /// How well any single wall's position in the MAP is known (m). Unlike the three above
+            /// this is not a property of the mount but of the room model, and it is per CONTOUR
+            /// rather than per frame — which is the whole point, since the frame-global nuisances
+            /// could never represent one wall being displaced.
+            float wall_position_sigma = 0.015f;
             /// NOTE: deliberately NO `weight`. If this term needs a hand-set scalar to behave, its
             /// covariance model is wrong. Do not add one — see room_config.h.
         };

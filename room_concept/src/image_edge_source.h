@@ -64,6 +64,7 @@ namespace rc
             float mount_pitch_sigma  = 0.0035f;
             float mount_height_sigma = 0.010f;
             float mount_yaw_sigma    = 0.0035f;
+            float wall_position_sigma = 0.015f;   ///< m — see IMAGE_EDGE_NUISANCES column [4]
             float room_height        = 2.5f;
         };
 

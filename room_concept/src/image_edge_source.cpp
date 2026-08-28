@@ -291,7 +291,33 @@ ImageEdgeObs ImageEdgeSource::extract(const GrayFrame& frame,
                                          + cam_R_robot * Eigen::Vector3f(p_robot.y(), -p_robot.x(), 0.f)
                                            * (-body_twist.z() * dts);
                 hcol(3) = contract(dp);
+
+                // ── [4] THIS CONTOUR'S OWN POSITION IN THE MAP ───────────────────────────────────────
+                // The four columns above are GLOBAL to the frame, so a wall simply in the wrong place had
+                // nowhere to go but the residual, and every sample along it counted as an independent
+                // measurement of a position they all share. Measured: per-vertex median residuals spread
+                // 1.74 px (u) and 0.81 px (v) against a fixed-pose repeatability of 0.019 and 0.093 px.
+                //
+                // ★ THE SENSITIVE DIRECTION IS NOT ASSUMED, IT FALLS OUT. A displacement of this contour
+                //   in the room PLANE is two unknowns, but only one combination moves the image along
+                //   this sample's normal, and the norm over the plane picks it automatically:
+                //       h4 = sigma_wall * || [ contract(e_x_cam), contract(e_y_cam) ] ||
+                //   For a floor junction, sliding the wall ALONG itself moves the line not at all, so
+                //   that direction contributes ~0 and the norm selects the perpendicular by itself — no
+                //   per-class branch, and it stays correct for a vertical corner where both directions
+                //   matter.
+                // ★ It is the WORST-CASE direction, so the marginalisation is mildly conservative: a
+                //   real displacement along a specific direction removes less information than this
+                //   allows. Conservative is the correct side here — the failure being fixed is a term
+                //   claiming more independent evidence than it has.
+                {
+                    const Eigen::Matrix3f R_cam_room = cam_R_robot * dRm;
+                    const float cxr = contract(R_cam_room.col(0));
+                    const float cyr = contract(R_cam_room.col(1));
+                    hcol(4) = cfg_.wall_position_sigma * std::hypot(cxr, cyr);
+                }
             }
+
 
             float L = cfg_.search_sigmas * std::sqrt(sigma_pred * sigma_pred + hcol.squaredNorm() + 4.f);
             if (L > static_cast<float>(cfg_.max_search_px)) { L = static_cast<float>(cfg_.max_search_px); st.n_clamped++; }

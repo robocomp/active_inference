@@ -178,6 +178,7 @@ void SpecificWorker::initialize()
         ic.mount_pitch_sigma   = params.IMAGE_EDGE_MOUNT_PITCH_SIGMA;
         ic.mount_height_sigma  = params.IMAGE_EDGE_MOUNT_HEIGHT_SIGMA;
         ic.mount_yaw_sigma     = params.IMAGE_EDGE_MOUNT_YAW_SIGMA;
+        ic.wall_position_sigma = params.IMAGE_EDGE_WALL_POS_SIGMA;
         ic.room_height         = params.room_height;
         image_edge_source_->set_config(ic);
     }

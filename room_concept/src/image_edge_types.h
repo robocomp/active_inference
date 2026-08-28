@@ -72,8 +72,26 @@ namespace rc
     enum class ContourClass : std::uint8_t { FloorWall = 0, WallCorner = 1, WallCeiling = 2 };
 
     /// Number of shared (common-mode) nuisances modelled per contour segment.
-    /// Columns: [0] mount pitch, [1] mount height, [2] mount yaw, [3] image/lidar dt.
-    inline constexpr int IMAGE_EDGE_NUISANCES = 4;
+    /// Columns: [0] mount pitch, [1] mount height, [2] mount yaw, [3] image/lidar dt,
+    ///          [4] THIS CONTOUR'S OWN POSITION IN THE MAP.
+    ///
+    /// ★ WHY [4] EXISTS. Columns 0-3 are all GLOBAL to the frame: one pitch, one height, one yaw,
+    ///   one time offset, shared by every contour. So a wall that is simply in the wrong place in the
+    ///   map had nowhere to go except into the residual, and N samples along it counted as N
+    ///   independent measurements of a position they all share.
+    ///   mount_pooled_solve()'s own header predicted this before it was measured: "every sample taken
+    ///   against one wall shares whatever is wrong with THAT wall — its position in the map, the floor
+    ///   height beneath it, the residual pose error there."
+    ///
+    /// ★ MEASURED 2026-08-28, and it is a systematic, not noise. Per-vertex MEDIAN residuals spread
+    ///   1.739 px in u and 0.813 px in v across six polygon vertices, against a fixed-pose
+    ///   repeatability of 0.019 px and 0.093 px — 90x and 9x. Each corner sits consistently
+    ///   somewhere the map does not say it is, frame after frame.
+    ///   ★★ A LARGER sigma CANNOT reach this and would be the wrong response: the Cramer-Rao bound
+    ///      already OVER-states the random noise (0.692 px stated against 0.019 px measured in u), so
+    ///      inflating it only weakens the term while leaving the bias exactly where it was. The cure
+    ///      has to be a model term, which is what this column is.
+    inline constexpr int IMAGE_EDGE_NUISANCES = 5;
 
     /// One normal-search measurement on one projected contour sample.
     ///

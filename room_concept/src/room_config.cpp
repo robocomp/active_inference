@@ -380,6 +380,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ImageEdge.mountHeightSigma", p.IMAGE_EDGE_MOUNT_HEIGHT_SIGMA);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ImageEdge.mountYawSigma", p.IMAGE_EDGE_MOUNT_YAW_SIGMA);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ImageEdge.mountYawCorrection", p.IMAGE_EDGE_MOUNT_YAW_CORR);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ImageEdge.wallPositionSigma", p.IMAGE_EDGE_WALL_POS_SIGMA);
     rc::ConfigLoaderUtils::load_optional<std::string>(cl, "ImageEdge.csv", p.IMAGE_EDGE_CSV);
 
     room_concept.params.image_edge.enable             = p.IMAGE_EDGE_ENABLE;
@@ -388,6 +389,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     room_concept.params.image_edge.mount_pitch_sigma  = p.IMAGE_EDGE_MOUNT_PITCH_SIGMA;
     room_concept.params.image_edge.mount_height_sigma = p.IMAGE_EDGE_MOUNT_HEIGHT_SIGMA;
     room_concept.params.image_edge.mount_yaw_sigma    = p.IMAGE_EDGE_MOUNT_YAW_SIGMA;
+    room_concept.params.image_edge.wall_position_sigma = p.IMAGE_EDGE_WALL_POS_SIGMA;
     room_concept.params.image_edge_max_slots          = p.IMAGE_EDGE_MAX_SLOTS;
     room_concept.params.image_edge_shadow             = p.IMAGE_EDGE_SHADOW;
     room_concept.params.image_edge_csv                = p.IMAGE_EDGE_CSV;

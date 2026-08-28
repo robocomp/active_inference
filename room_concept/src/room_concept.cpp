@@ -4105,7 +4105,11 @@ namespace rc
                         // ── Monitor 3: the four mount nuisances as PARAMETERS (see room_concept.h) ──
                         // Same samples, same weight, same residual. The only new thing is keeping h
                         // instead of collapsing it to h.squaredNorm().
-                        const Eigen::Vector4d hd = smp.h.cast<double>();
+                        // ★ head<4> ON PURPOSE: column [4] is THIS CONTOUR's map position, a
+                        //   per-segment nuisance, not a mount parameter. Fitting it globally would
+                        //   average six different walls' offsets into one meaningless number and
+                        //   contaminate the four that are genuinely global.
+                        const Eigen::Vector4d hd = smp.h.head<4>().cast<double>();
                         mnt_H_.noalias() += w * hd * hd.transpose();
                         mnt_b_.noalias() += w * hd * static_cast<double>(r);
                         ++mnt_hn_;

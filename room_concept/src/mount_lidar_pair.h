@@ -121,8 +121,16 @@ namespace rc::mount
         o.range_m  = pc.norm();
 
         const Eigen::Matrix<float, 2, 3> Pf = P.cast<float>();
-        const Eigen::Vector3f x_cam = cam_R_robot.col(0);   // same axes hcol uses
-        const Eigen::Vector3f z_cam = cam_R_robot.col(2);
+        // ★ THE CAMERA'S OWN AXES, in camera coordinates — literally (1,0,0) and (0,0,1), exactly as
+        //   image_edge_source.cpp:277 defines them. This previously used cam_R_robot.col(0) and
+        //   .col(2), which are the ROBOT's axes expressed in camera coordinates: a different thing.
+        //   For this mount the up-axes coincide, so the yaw and height columns were unaffected — but
+        //   col(0) is the robot's FORWARD axis, so what was labelled "pitch" was a rotation about the
+        //   optical axis, i.e. a ROLL. Any pitch figure from the pair fit before this is void; the
+        //   yaw result (+0.014 deg) stands, which is why it is worth saying which is which rather
+        //   than quietly re-running everything.
+        const Eigen::Vector3f x_cam(1.f, 0.f, 0.f);
+        const Eigen::Vector3f z_cam(0.f, 0.f, 1.f);
         o.J.col(0) = sigma_pitch  * (Pf * x_cam.cross(pc));
         o.J.col(1) = sigma_height * (Pf * z_cam);
         o.J.col(2) = sigma_yaw    * (Pf * z_cam.cross(pc));
@@ -173,7 +181,9 @@ namespace rc::mount
             //   which is what it is — not a threshold, and not a full one either.
             const double w = std::clamp(static_cast<double>(o.assoc_prob), 0.0, 1.0);
             if (not (w > 1e-3)) return;
-            const Eigen::Matrix<double, 2, 4> J = o.J.cast<double>();
+            // Columns 0-3 only: [4] is a per-contour map offset and a single paired corner carries
+            // no information about it that is separable from the mount.
+            const Eigen::Matrix<double, 2, 4> J = o.J.template leftCols<4>().template cast<double>();
             const Eigen::Vector2d r = o.r.cast<double>();
             H.noalias() += w * J.transpose() * W * J;
             b.noalias() += w * J.transpose() * W * r;

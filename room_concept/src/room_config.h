@@ -262,6 +262,9 @@ struct RoomConfig
     // Local boresight correction applied to the graph's camera<-robot extrinsic. NOT a tuning knob:
     // a measured physical angle. 0 = use the graph's extrinsic unchanged.
     float IMAGE_EDGE_MOUNT_YAW_CORR    = 0.0f;    // ImageEdge.mountYawCorrection (rad)
+    // Per-CONTOUR map-position uncertainty — nuisance column [4]. Not a mount property: how well any
+    // single wall's place in the room polygon is known. MEASURED, see image_edge_types.h.
+    float IMAGE_EDGE_WALL_POS_SIGMA    = 0.015f;  // ImageEdge.wallPositionSigma (m)
     std::string IMAGE_EDGE_CSV = "etc/image_edge.csv";  // ImageEdge.csv
 };
 
