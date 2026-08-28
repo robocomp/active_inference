@@ -827,7 +827,13 @@ optimizeLandmark = false
 
 [ImageEdge]
 enable = true    # build the subscriber + ingest thread and run the extraction each tick
-shadow = true    # ON 2026-08-26 to MEASURE THE MOUNT, not to use the factor. Solves twice and
+shadow = false   # OFF 2026-08-28 for a clean BASELINE drive. `drive` has been false throughout, so
+                 # the factor was never in the published pose (room_gn_solver.cpp:613 requires
+                 # enable AND drive) — but shadow runs an EXTRA GN solve to compute the with/without
+                 # comparison, and that costs cycle time, which does affect pose quality. Removing it
+                 # is the only change that actually alters the baseline. Turn back on to resume the
+                 # mount diagnostics; the extraction and all the CSVs still run either way.
+                 # WAS: ON 2026-08-26 to MEASURE THE MOUNT, not to use the factor. Solves twice and
                  # logs etc/image_edge.csv; the published pose is untouched, so this is free of
                  # risk to the run and costs one extra solve per cycle.
                  # ★ WHAT TO READ, and why this is not circular: the pose comes from LiDAR + SDF,
