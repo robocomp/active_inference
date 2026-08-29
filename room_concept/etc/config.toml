@@ -1231,7 +1231,13 @@ shadow = true    # MEASURE THE MOUNT, do not use the factor. Solves twice and lo
                  # offset in its history. useWallCorners is what breaks that degeneracy.
                  # ★★ SHADOW'S MOUNT HAS NEVER BEEN CHARACTERISED THIS WAY. That is the entire reason
                  # this is on: the numbers below are P3Bot's and only a Shadow run can replace them.
-drive  = false   # <- the factor moves the published pose. Only after the CSV says it should.
+drive  = true    # ★ 2026-08-29: the RGB term now MOVES the published pose. CORNERS ONLY —
+                 # useTriplePoints below is already exclusive (one residual per corner INSTEAD
+                 # of the ~43 per-sample contour residuals), so no edge family enters the loss.
+                 # Refused unless OptimizerType == "GN", which it is.
+                 # ⚠ Once true, the term also enters compute_posterior_covariance() — the
+                 #   reported sigma moves too, and that is deliberate: an agent must not act on
+                 #   evidence it does not admit to having.
                  # MUST STAY false on Shadow until bias_const_px has been read here and is small and
                  # stable. It also requires OptimizerType = "GN" (which this file sets); the loader
                  # refuses drive without it rather than leaving a flag that reads true while nothing

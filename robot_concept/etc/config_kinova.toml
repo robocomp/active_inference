@@ -3,16 +3,13 @@
 TopicManager = "IceStorm/TopicManager:default -p 9999"
 
 # Proxies for required interfaces
-CameraRGBDSimple = "camerargbdsimple:tcp -h localhost -p 12001" #ZED
-IMU = "imu:tcp -h localhost -p 10007"
-Lidar3D = "lidar3d:tcp -h localhost -p 11995"
+CameraRGBDSimple = "camerargbdsimple:tcp -h localhost -p 12001" # ZED
 Camera360RGBD = "camera360rgbd:tcp -h localhost -p 12003" # ricoh+lidar
+IMU = "imu:tcp -h localhost -p 10007" 
+Lidar3D = "lidar3d:tcp -h localhost -p 11995"
 Camera360RGB = "camera360rgb:tcp -h localhost -p 10097" # Ricoh
 MediaPlaneDDS = "mediaplanedds:tcp -h localhost -p 12002" # zed_camera: query its DDS media descriptor
 MediaPlaneDDS1 = "mediaplanedds:tcp -h localhost -p 10099" # ricoh_omni_dds: query its DDS media descriptor
-MediaPlaneDDS2 = "mediaplanedds:tcp -h localhost -p 11890" # lidar3d_dds helios: query its DDS media descriptor
-MediaPlaneDDS3 = "mediaplanedds:tcp -h localhost -p 11889" # lidar3d_dds bpearl: query its DDS media descriptor
-MediaPlaneDDS4 = "mediaplanedds:tcp -h localhost -p 11891" # imu_dds: query its DDS media descriptor
 
 [Endpoints]
 # Endpoints for subscriptions interfaces
@@ -35,17 +32,13 @@ scenario   = "apartamento"   # WHERE this robot is. A robot is not a place: the 
                        # several scenarios and the same scenario hosts several robots, so this is an
                        # axis of its own. Published as the `scenario_name` attribute on the robot
                        # node; room_concept picks its floor plan from it and REFUSES TO START
-                       # without it, because it authors the polygon every other agent reads.
+                       # without it, because it authors the polygon every other agent reads.   # ⚠ GUESSED: change it if this rig runs elsewhere.
+
 robot_node_id = 200
-# Graphviz engine used to lay the DSR graph out in the viewer: twopi | sfdp | dot | neato | fdp | circo.
-# Which one reads best depends on the graph's SHAPE, which is a property of the robot: Shadow's single
-# RT chain suits the radial "twopi", while P3Bot — two 12-link arm chains, four wheels and the sensor
-# fan all hanging off `body` — is wide and reads better under the force-directed "sfdp".
-graph_layout = "twopi"
 
 # --- Single Instance Configuration ---
 # Use this if you only have one graph.
-configFile = "shadow.json"   
+configFile = "shadow_arm.json"   
 domain = 0
 tree = false
 graph = true
@@ -120,13 +113,12 @@ dsr_depth_fps = -1
 # never perturb the cortex/DSR discovery + graph-resync path. Must MATCH across
 # robot_concept (producer), retina and room_concept (consumers).
 [Media]
-domain_id   = 7
-rgb_topic   = "rc/zed/rgb"
-depth_topic = "rc/zed/depth"
-ricoh_topic = "rc/ricoh/rgb"
-lidar_topic = "rc/lidar3d/points"
-imu_topic   = "rc/imu/data"
-
+domain_id    = 7
+rgb_topic    = "rc/zed/rgb"
+depth_topic  = "rc/zed/depth"
+ricoh_topic  = "rc/ricoh/rgb"
+lidar_topic  = "rc/lidar3d/points"
+imu_topic    = "rc/imu/data"
 # Per-sensor stream gates. When false: no media publisher is created, no descriptor
 # is advertised, and the sensor's Ice reader thread is not started (no proxy traffic).
 enable_zed   = true    # ZED RGB + depth
@@ -140,30 +132,18 @@ enable_imu   = true    # IMU
 # (a consumer holding a mapped frame across a discovery event reads a remapped segment →
 # heap corruption). Advertised in the descriptor, so consumers adopt the same setting.
 # Env MEDIA_NO_DATASHARING force-disables regardless. See media_transport.h.
-data_sharing = true
+data_sharing = false
 
-# RGB source selector (only effective when enable_zed = true): auto | ice | dds.
-#   auto: bridge via Ice RPC until zed_camera appears on DDS, then follow it.
-#   ice : always bridge via Ice RPC.   dds: never bridge; only monitor zed_camera's DDS topic (alive+FPS).
+# RGB source selector: how robot_concept obtains/relays the ZED plane.
+#   auto (default): negotiate — bridge via Ice RPC until zed_camera is seen on DDS, then follow it up/down.
+#   ice           : always bridge via the CameraRGBDSimple Ice proxy; never defer to an external DDS producer.
+#   dds           : never bridge; always treat zed_camera as the external DDS producer and only monitor (alive+FPS).
 zed_source   = "auto"
-
-# 360 source selector (only effective when enable_ricoh = true): auto | ice | dds.
-#   auto: bridge via Ice RPC until ricoh_omni_dds appears on DDS (Proxies.MediaPlaneDDS1), then follow it.
-#   ice : always bridge via Ice RPC.   dds: never bridge; only monitor ricoh_omni_dds's DDS topic (alive+FPS).
+# 360 source selector: mirror of zed_source for the Ricoh plane (queries Proxies.MediaPlaneDDS1 = ricoh_omni_dds).
+#   auto (default): bridge via Ice RPC until ricoh_omni_dds is seen on DDS, then relay its descriptor + stop bridging.
+#   ice           : always bridge via the Camera360RGB Ice proxy; never defer to an external DDS producer.
+#   dds           : never bridge; always treat ricoh_omni_dds as the external DDS producer and only monitor.
 ricoh_source = "auto"
-
-# LiDAR source selector (only effective when enable_lidar = true): auto | ice | dds.
-#   auto: bridge via Ice RPC until BOTH lidar3d_dds (helios=MediaPlaneDDS2, bpearl=MediaPlaneDDS3)
-#         appear on DDS, then relay their descriptors to the 'helios'/'bpearl' nodes and stop bridging.
-#   ice : always bridge via Ice RPC.   dds: never bridge; only relay/monitor the lidar3d_dds planes.
-lidar_source = "auto"
-
-# IMU source selector (only effective when enable_imu = true): auto | ice | dds.
-#   auto: bridge via Ice RPC until imu_dds appears on DDS (Proxies.MediaPlaneDDS4), then relay its
-#         descriptor to the 'imu' node and stop bridging — samples pass straight through from
-#         imu_dds to the consumers and this agent only notes the observed rate on [IMUThread].
-#   ice : always bridge via Ice RPC.   dds: never bridge; only relay/monitor the imu_dds plane.
-imu_source   = "auto"
 
 [Lidar]
 # Legacy DSR-graph lidar upload. <0 DISABLES it (default): lidar is published on the zero-copy

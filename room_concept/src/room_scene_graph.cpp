@@ -3,6 +3,8 @@
  *    This file is part of RoboComp — see room_scene_graph.h.
  */
 
+#include <chrono>
+#include <thread>
 #include <cstdlib>
 #include <algorithm>
 #include <ranges>
@@ -1913,13 +1915,48 @@ void RoomSceneGraph::resolve_overlays_from_graph()
 {
     if (overlays_resolved_) return;
     if (!G_ or params_ == nullptr) return;
-    const auto robot_nodes = G_->get_nodes_by_type("robot");
-    if (robot_nodes.empty())
+
+    // ── WAIT, then refuse. "Not yet" is not "never" ────────────────────────────────────────────
+    // The robot node arrives over DDS and robot_concept writes `scenario_name` onto it on its first
+    // cycle, so a room_concept that starts a second earlier sees a graph that is merely INCOMPLETE.
+    // Refusing on that is a startup-order race dressed up as a configuration error, and it sends the
+    // reader to edit a config file that was already correct. So poll for a bounded time first; only
+    // a timeout is evidence that the attribute is genuinely absent.
+    // Blocking here is safe and needs no Qt event loop: the CRDT store is written by the FastDDS
+    // reader threads themselves, and the graph API serialises reads with its own shared_mutex. It is
+    // the queued SIGNALS that need the loop, and we are not waiting on one.
+    constexpr int  kPollMs    = 100;
+    constexpr auto kWaitMs    = 5000;
+    const bool     need_scen  = not params_->scenario_overlays.empty();
+    std::vector<DSR::Node> robot_nodes;
+    bool announced = false;
+    for (int waited = 0; ; waited += kPollMs)
     {
-        qWarning() << "[room] no type-\"robot\" node yet: platform/scenario overlays not applied."
-                      " The agent will run the shared values, which is wrong for anything physical.";
-        return;
+        robot_nodes = G_->get_nodes_by_type("robot");
+        const bool have_node = not robot_nodes.empty();
+        const bool have_scen = have_node and not need_scen ? true
+                             : have_node and G_->get_attrib_by_name<scenario_name_att>(robot_nodes.front())
+                                   .transform([](const auto& s) { return not s.get().empty(); })
+                                   .value_or(false);
+        if (have_node and have_scen) break;
+        if (waited >= kWaitMs)
+        {
+            if (not have_node)
+                qWarning() << "[room] no type-\"robot\" node after" << kWaitMs
+                           << "ms: platform/scenario overlays not applied. The agent would run the"
+                              " shared values, which is wrong for anything physical.";
+            break;   // the scenario case is reported by the refusal below, which names the node
+        }
+        if (not announced)
+        {
+            announced = true;
+            qInfo() << "[room] waiting up to" << kWaitMs << "ms for"
+                    << (robot_nodes.empty() ? "the robot node" : "`scenario_name` on the robot node")
+                    << "— start robot_concept first if this times out";
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(kPollMs));
     }
+    if (robot_nodes.empty()) return;
     overlays_resolved_ = true;
     const std::string robot_name = robot_nodes.front().name();
     overlay_robot_name_ = robot_name;
@@ -1945,11 +1982,14 @@ void RoomSceneGraph::resolve_overlays_from_graph()
             const auto sc = G_->get_attrib_by_name<scenario_name_att>(robot_nodes.front());
             if (not sc.has_value() or sc.value().get().empty())
             {
-                qCritical() << "[room] REFUSING TO START: the robot node carries no `scenario_name`,"
+                qCritical() << "[room] REFUSING TO START: robot node"
+                            << QString::fromStdString(robot_name) << "carries no `scenario_name`"
+                            << "after waiting" << kWaitMs << "ms,"
                             << "and this config defines scenario overlays. room_concept AUTHORS the"
                             << "room polygon that every other agent reads, so guessing the layout"
                             << "would put the whole fleet in the wrong building. Set `scenario` in"
-                            << "robot_concept's config so it publishes the attribute.";
+                            << "the robot_concept config THAT IS ACTUALLY RUNNING — check its command"
+                            << "line, not the config you expect it to use — and restart it.";
                 std::exit(EXIT_FAILURE);
             }
             const std::string scen = sc.value().get();
