@@ -1583,6 +1583,14 @@ private:
    // Prediction-based early exit tracking
    int tracking_step_count_ = 0;
    int prediction_early_exits_ = 0;
+   /// Which condition sent a frame to the optimiser, so a gate's cost and its usefulness are
+   /// separable. CornerVeto in particular exists to catch what the SDF cannot see (a 180 deg flip
+   /// is SDF-ambiguous); if it never fires it is paying for a case that does not arise, and if it
+   /// fires often the LiDAR corners are carrying the localiser rather than merely checking it.
+   enum class EeReason { NotTracking = 0, SdfResidual, UnoptDrift, CornerVeto, Count };
+   std::array<int, static_cast<int>(EeReason::Count)> ee_forced_{};
+   int ee_taken_ = 0;
+   std::int64_t ee_report_last_ms_ = 0;
    // Last mean |SDF| at the predicted pose evaluated by try_prediction_early_exit() this frame
    // (the early-exit decision variable). NaN when the gate's pre-conditions weren't met. Consumed
    // by update() to expose it on the Adam path too (the value that TRIGGERED optimization).

@@ -3199,8 +3199,12 @@ namespace rc
         // and neither was visible from the flag that switched the feature on. State that belongs to
         // one decision belongs in the function that makes it.
         if (forced_solve_last_cycle_) { unopt_pos_var_ = 0.f; forced_solve_last_cycle_ = false; }
-        const auto give_up_to_optimizer = [this]() -> std::optional<UpdateResult>
-        { forced_solve_last_cycle_ = true; return std::nullopt; };
+        // WHICH condition sent this frame to the optimiser. Four call sites returned the same
+        // nullopt, so "the optimiser ran" was all the record there was — and a gate cannot be shown
+        // to earn its cost, or to be redundant, from a number that does not distinguish it from the
+        // other three. ee_* are reset by the periodic report.
+        const auto give_up_to_optimizer = [this](EeReason why) -> std::optional<UpdateResult>
+        { forced_solve_last_cycle_ = true; ++ee_forced_[static_cast<int>(why)]; return std::nullopt; };
         // ── THE PREDICTION STEP OF THE POSE COVARIANCE ────────────────────────────────────────────
         // ★ current_covariance was ONLY ever assigned on the optimized path, and the optimizer runs on
         // ~0.2% of cycles. So on every other cycle it carried whatever the last solve left, or its
@@ -3230,7 +3234,7 @@ namespace rc
             !last_update_result.ok ||
             !odometry_prior.valid ||
             tracking_step_count_ <= params.min_tracking_steps)
-            return give_up_to_optimizer();
+            return give_up_to_optimizer(EeReason::NotTracking);
 
         torch::NoGradGuard no_grad;
         const auto& newest = window_mgr_.newest();
@@ -3252,7 +3256,7 @@ namespace rc
         const float rot_boost = params.rotation_sdf_coupling * std::abs(odometry_prior.delta_pose[2]);
         const float prediction_trust_threshold = params.sigma_sdf * params.prediction_trust_factor + rot_boost;
         if (mean_sdf_pred >= prediction_trust_threshold)
-            return give_up_to_optimizer();
+            return give_up_to_optimizer(EeReason::SdfResidual);
 
         // ── AND THE OTHER HALF OF THE STOPPING CRITERION: HOW UNCERTAIN HAS THE POSE BECOME? ──────
         // The residual test above asks "is the fit good?". It cannot ask "could the pose be wrong in
@@ -3293,7 +3297,7 @@ namespace rc
             {
                 unopt_pos_var_ += 0.5f * (dP(0, 0) + dP(1, 1));
                 if (std::sqrt(std::max(0.f, unopt_pos_var_)) >= prediction_trust_threshold)
-                    return give_up_to_optimizer();      // uncertain enough that the map should be consulted
+                    return give_up_to_optimizer(EeReason::UnoptDrift);   // uncertain enough that the map should be consulted
             }
         }
 
@@ -3328,7 +3332,7 @@ namespace rc
                 // CONSENSUS: force Adam only when enough corners disagree — a lone outlier is outvoted by
                 // the corroborating majority, but a rot180 flip (ALL corners disagree) still trips it.
                 if (n_bad >= params.corner_early_exit_min_bad)
-                    return give_up_to_optimizer();
+                    return give_up_to_optimizer(EeReason::CornerVeto);
             }
         }
 
@@ -3338,6 +3342,24 @@ namespace rc
         // (object_anchor_early_exit_sigma is left in the config but unused while this is out.)
 
         prediction_early_exits_++;
+        ++ee_taken_;
+        // Report the split, not just the rate. "99% early exit" is the same number whether the SDF
+        // is doing all the work or the corner veto is quietly forcing a third of the solves.
+        {
+            const std::int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         std::chrono::steady_clock::now().time_since_epoch()).count();
+            if (ee_report_last_ms_ == 0) ee_report_last_ms_ = now;
+            else if (now - ee_report_last_ms_ > 10000)
+            {
+                ee_report_last_ms_ = now;
+                const int f = ee_forced_[0] + ee_forced_[1] + ee_forced_[2] + ee_forced_[3];
+                qInfo().nospace()
+                    << "[earlyexit] taken " << ee_taken_ << " / forced " << f
+                    << "  (not_tracking " << ee_forced_[0] << ", sdf_residual " << ee_forced_[1]
+                    << ", unopt_drift " << ee_forced_[2] << ", CORNER_VETO " << ee_forced_[3] << ")";
+                ee_taken_ = 0; ee_forced_ = {};
+            }
+        }
         last_t_adam_ms_ = 0.f;
         last_t_cov_ms_ = 0.f;
         last_t_breakdown_ms_ = 0.f;
