@@ -2513,6 +2513,7 @@ namespace rc
             auto [covariance, condition_number] = compute_posterior_covariance(points_tensor);
             res.covariance = covariance;
             res.condition_number = condition_number;
+            log_hessian_check(res);
             last_t_cov_ms_ = std::chrono::duration<float, std::milli>(
                 std::chrono::high_resolution_clock::now() - t0).count();
         }
@@ -3896,6 +3897,78 @@ namespace rc
     // =========================================================================
     //  Levenberg-Marquardt backend (analytic Jacobians — see room_gn_solver.h)
     // =========================================================================
+// ── The published sigma, measured against what the window's own equations say ────────────────────
+// Three precisions for the same newest pose, on the frames where all three exist:
+//
+//   marg  = H_nn − H_no H_oo⁻¹ H_on   the window's marginal. What it actually knows.
+//   block = H_nn                      the same without the complement, i.e. pretending the older
+//                                     poses are known EXACTLY. Always the more confident of the two.
+//   pub   = res.covariance⁻¹          what the agent tells everyone else.
+//
+// ★ THE RATIO IS THE READING, NOT THE ABSOLUTE NUMBERS. marg and block carry only this window;
+//   `pub` is a recursion carrying every window before it, so pub being tighter is expected. What is
+//   NOT expected is the ratio DRIFTING with time since the last solve: the recursion's prediction
+//   step (current_covariance += odometry_prior.covariance) is gated on the SDF polish and therefore
+//   off, so between solves Λ_pub can only grow. If sigma is honest the ratio is flat; if the missing
+//   process noise is the problem the ratio climbs with the gap, and that is visible without any
+//   ground truth at all.
+// ★ block/marg is a second, independent reading: how much of the newest pose's apparent precision is
+//   borrowed from neighbours the window has not actually pinned down.
+void RoomConcept::log_hessian_check(const UpdateResult& res)
+{
+    if (not params.hessian_check or not last_marg_ok_) return;
+    const auto sig = [](const Eigen::Matrix3f& prec, int i) -> double
+    {
+        const Eigen::Matrix3f c = prec.inverse();
+        return (c.allFinite() and c(i, i) > 0.f) ? std::sqrt(static_cast<double>(c(i, i))) : -1.0;
+    };
+    const auto pub = [&](int i) -> double
+    {
+        return (res.covariance.allFinite() and res.covariance(i, i) > 0.f)
+                 ? std::sqrt(static_cast<double>(res.covariance(i, i))) : -1.0;
+    };
+    static bool header = false;
+    std::ofstream f("etc/hessian_check.csv", header ? std::ios::app : std::ios::trunc);
+    if (not f) return;
+    f.imbue(std::locale::classic());          // es_ES would write commas; see CLAUDE.md
+    if (not header)
+    {
+        header = true;
+        f << "t_ms,slots,dof_marginalised,"
+             "sx_marg,sy_marg,st_marg,sx_block,sy_block,st_block,sx_pub,sy_pub,st_pub,"
+             "ratio_x,ratio_y,ratio_t,block_over_marg_t,ms_since_last_opt\n";
+    }
+    const double sm[3] = {sig(last_marg_prec_, 0),  sig(last_marg_prec_, 1),  sig(last_marg_prec_, 2)};
+    const double sb[3] = {sig(last_block_prec_, 0), sig(last_block_prec_, 1), sig(last_block_prec_, 2)};
+    const double sp[3] = {pub(0), pub(1), pub(2)};
+    const auto ratio = [](double a, double b) { return (a > 0.0 and b > 0.0) ? a / b : -1.0; };
+    f << std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::system_clock::now().time_since_epoch()).count()
+      << ',' << last_gn_window_slots_ << ',' << last_marg_dof_;
+    for (int i = 0; i < 3; ++i) f << ',' << sm[i];
+    for (int i = 0; i < 3; ++i) f << ',' << sb[i];
+    for (int i = 0; i < 3; ++i) f << ',' << sp[i];
+    // marg / pub > 1 means the window is LESS certain than what we publish — the over-confidence.
+    for (int i = 0; i < 3; ++i) f << ',' << ratio(sm[i], sp[i]);
+    const std::int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now().time_since_epoch()).count();
+    f << ',' << ratio(sb[2], sm[2]) << ','
+      << (hess_prev_opt_ms_ == 0 ? -1 : now_ms - hess_prev_opt_ms_) << '\n';
+    hess_prev_opt_ms_ = now_ms;
+    ++hess_check_rows_;
+
+    if (now_ms - hess_check_last_log_ms_ > 5000)
+    {
+        hess_check_last_log_ms_ = now_ms;
+        qInfo().nospace()
+            << "[hess] sigma_theta  window(marg) " << sm[2] << "  window(block) " << sb[2]
+            << "  published " << sp[2] << "  | marg/pub " << ratio(sm[2], sp[2])
+            << " block/marg " << ratio(sb[2], sm[2])
+            << " | slots " << last_gn_window_slots_ << " dof_marg " << last_marg_dof_
+            << " rows " << hess_check_rows_;
+    }
+}
+
     std::pair<float, int> RoomConcept::run_gn_loop(const OdometryPrior& odometry_prior)
     {
         // velocity_adaptive_weights is deliberately not applied here: it preconditions Adam's
@@ -3975,6 +4048,20 @@ namespace rc
             for (const auto& lm : landmarks)
                 landmark_estimates_[lm.id] = {lm.p, lm.information};
         }
+        // ── What this window says about the newest pose, both ways ──────────────────────────────
+        // Taken HERE because this is the only place the assembled Input and the converged poses
+        // exist together; recomputing either elsewhere would be comparing two different problems.
+        // One extra linearize (~0.3 ms) on an OPTIMISED frame only, and those are ~0.7% of frames.
+        if (params.hessian_check)
+        {
+            const auto nm = gn::newest_pose_marginal(in, poses);
+            last_marg_ok_         = nm.ok;
+            last_marg_prec_       = nm.marginal;
+            last_block_prec_      = nm.block;
+            last_marg_dof_        = nm.n_marginalised;
+            last_gn_window_slots_ = static_cast<int>(poses.size());
+        }
+        else last_marg_ok_ = false;
         last_lbfgs_grad_norm_ = r.grad_norm;
         last_adam_losses_.clear();
         last_adam_losses_.push_back(r.loss_init);

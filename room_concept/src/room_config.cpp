@@ -40,6 +40,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     // Raise the published covariance to at least what the innovations demonstrate, so the sigma stops
     // being a constant. Default OFF — see Params::adaptive_cov_enabled for the acceptance test and for
     // the two measured process-noise approaches that failed before it.
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.HessianCheck", room_concept.params.hessian_check);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.AdaptiveCovEnabled", room_concept.params.adaptive_cov_enabled);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.AdaptiveCovLambda", room_concept.params.adaptive_cov_lambda);
     // Strided RFE window — see Params::window_stride_enabled.

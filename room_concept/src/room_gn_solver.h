@@ -187,4 +187,30 @@ namespace rc::gn
     /// evaluations, so it is opt-in (RoomConcept.GnGradCheck).
     float gradient_check(const Input& in, const std::vector<Eigen::Vector3f>& poses, float eps = 1e-3f);
 
+    /// What the window ACTUALLY says about the newest pose, and what it says if you ignore the rest.
+    ///
+    /// The published sigma does not come from here. compute_posterior_covariance() uses the FILTERING
+    /// form — Λ_post = Λ_prev + H(newest observation) + λI — which is a legitimate alternative to
+    /// marginalising the joint, and would double-count if you did both. But a filter needs its
+    /// prediction step, and that step (current_covariance += odometry_prior.covariance) is gated on
+    /// the SDF polish, which is off. So Λ can only grow and sigma can only shrink, and this is the
+    /// instrument that says by how much.
+    ///
+    ///   marginal — Λ_marg = H_nn − H_no H_oo⁻¹ H_on, the newest pose's own precision once every
+    ///              other window pose (and landmark) is marginalised out. The honest one.
+    ///   block    — H_nn alone. Always ≥ Λ_marg in the Loewner order, because dropping the
+    ///              cross-terms is claiming the neighbours are known exactly.
+    ///
+    /// Both are OBSERVATION+PRIOR precisions of this window only; neither carries the recursion's
+    /// history, so the comparison to make is of their RATIO to the published sigma over time, not of
+    /// one frame's absolute numbers.
+    struct NewestMarginal
+    {
+        bool            ok = false;
+        Eigen::Matrix3f marginal = Eigen::Matrix3f::Zero();   ///< Schur-complemented
+        Eigen::Matrix3f block    = Eigen::Matrix3f::Zero();   ///< diagonal block, no complement
+        int             n_marginalised = 0;                   ///< DOF folded away (older poses + landmarks)
+    };
+    NewestMarginal newest_pose_marginal(const Input& in, const std::vector<Eigen::Vector3f>& poses);
+
 } // namespace rc::gn

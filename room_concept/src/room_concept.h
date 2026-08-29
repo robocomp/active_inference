@@ -581,6 +581,13 @@ public:
         // when a producer says its wheels are degrading, with nobody editing a config file.
         bool odom_variance_injection = false;
 
+        /// Measure the published sigma against what the window's own normal equations say about the
+        /// newest pose. Writes etc/hessian_check.csv on optimised frames.
+        /// ★ It answers a specific question: compute_posterior_covariance() uses the FILTERING form
+        ///   (Λ_prev + H_newest_observation), whose prediction step is gated on the SDF polish and
+        ///   therefore off — so Λ can only grow and sigma can only shrink. This says by how much,
+        ///   with no ground truth required, by comparing the ratio over time since the last solve.
+        bool  hessian_check = true;
         bool  adaptive_cov_enabled = false;
         // EMA rate for the innovation second moment. 0.02 ~= a 50-frame memory: long enough that one
         // bad frame cannot spike the published sigma (which would hit the speed governor), short enough
@@ -1826,6 +1833,23 @@ private:
     /// solution back into the slot pose tensors. Returns {last_loss, iterations}. On failure the
     /// window is left exactly as it was and the loss is NaN.
     std::pair<float, int> run_gn_loop(const OdometryPrior& odometry_prior);
+    /// The newest pose's precision as the WINDOW sees it, captured on the last optimised frame:
+    /// Schur-complemented (the honest one) and the bare diagonal block (what dropping the
+    /// cross-terms would claim). Held as plain matrices rather than gn::NewestMarginal because
+    /// room_gn_solver.h includes THIS header — the dependency only runs one way.
+    /// See Params::hessian_check for what the comparison is for.
+    Eigen::Matrix3f last_marg_prec_  = Eigen::Matrix3f::Zero();
+    Eigen::Matrix3f last_block_prec_ = Eigen::Matrix3f::Zero();
+    bool last_marg_ok_ = false;
+    int  last_marg_dof_ = 0;
+    int  last_gn_window_slots_ = 0;
+    void log_hessian_check(const UpdateResult& res);
+    std::int64_t hess_check_last_log_ms_ = 0;
+    /// Wall-clock gap since the previous OPTIMISED frame. The recursion's missing
+    /// prediction step makes the published sigma a function of this gap, so it is the
+    /// covariate the whole comparison is read against.
+    std::int64_t hess_prev_opt_ms_ = 0;
+    int          hess_check_rows_ = 0;
 
     /// Run the GN backend on the CURRENT window WITHOUT keeping its answer, and log it beside the
     /// authoritative backend's. Call after the authority has run; poses_before is the state both

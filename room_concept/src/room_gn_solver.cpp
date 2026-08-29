@@ -662,6 +662,66 @@ namespace rc::gn
         return (num - sys.b).lpNorm<Eigen::Infinity>() / scale;
     }
 
+    NewestMarginal newest_pose_marginal(const Input& in, const std::vector<Eigen::Vector3f>& poses)
+    {
+        NewestMarginal out;
+        if (in.model == nullptr or in.params == nullptr or in.window == nullptr or
+            in.window->empty() or poses.size() != in.window->size())
+            return out;
+
+        // Same variable layout as solve(), or the blocks below would address the wrong rows.
+        VarIndex idx;
+        for (size_t i = 0; i < in.window->size(); ++i) idx.add(3);
+        const size_t n_lm = (in.landmarks != nullptr) ? in.landmarks->size() : 0;
+        for (size_t k = 0; k < n_lm; ++k) idx.add(2);
+        const int n = idx.total();
+
+        const auto fs = build_factors(in, idx);
+        if (fs.empty()) return out;
+
+        State x = State::Zero(n);
+        x.head(static_cast<int>(in.window->size()) * 3) = pack(poses);
+        for (size_t k = 0; k < n_lm; ++k)
+            x.segment<2>(idx.offset(static_cast<int>(in.window->size() + k))) = (*in.landmarks)[k].p;
+
+        LinearSystem sys(n);
+        for (const auto& f : fs) f->linearize(x, sys);
+        if (not sys.H.allFinite()) return out;
+
+        const int nb = idx.offset(static_cast<int>(in.window->size()) - 1);   // newest pose's first row
+        out.block = sys.H.block<3, 3>(nb, nb);
+        out.n_marginalised = n - 3;
+        if (out.n_marginalised <= 0)          // a one-slot window has nothing to fold away
+        {
+            out.marginal = out.block;
+            out.ok = out.marginal.allFinite();
+            return out;
+        }
+
+        // Gather the OTHER variables into one contiguous block. The newest pose is the last POSE but
+        // not the last variable when landmarks are present, so this cannot be a simple corner slice.
+        Eigen::VectorXi keep(out.n_marginalised);
+        for (int i = 0, k = 0; i < n; ++i)
+            if (i < nb or i >= nb + 3) keep(k++) = i;
+        Eigen::MatrixXf Hoo(out.n_marginalised, out.n_marginalised);
+        Eigen::MatrixXf Hno(3, out.n_marginalised);
+        for (int r = 0; r < out.n_marginalised; ++r)
+        {
+            for (int c = 0; c < out.n_marginalised; ++c) Hoo(r, c) = sys.H(keep(r), keep(c));
+            for (int c = 0; c < 3; ++c)                  Hno(c, r) = sys.H(nb + c, keep(r));
+        }
+        // A ridge, not a threshold: Hoo is singular whenever a window variable is unobserved this
+        // frame (a landmark nobody saw), and the complement is then simply undefined for that
+        // direction. The ridge makes it "known to 1e6 sigma" instead of "known exactly", which errs
+        // toward the block — i.e. toward UNDERSTATING the correction this instrument exists to show.
+        Hoo.diagonal().array() += 1e-6f;
+        const Eigen::LDLT<Eigen::MatrixXf> ldlt(Hoo);
+        if (ldlt.info() != Eigen::Success) return out;
+        out.marginal = out.block - Hno * ldlt.solve(Hno.transpose());
+        out.ok = out.marginal.allFinite();
+        return out;
+    }
+
     Result solve(const Input& in, std::vector<Eigen::Vector3f>& poses, const Options& opts)
     {
         Result res;
