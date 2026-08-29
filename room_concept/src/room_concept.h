@@ -593,6 +593,11 @@ public:
         ///   therefore off — so Λ can only grow and sigma can only shrink. This says by how much,
         ///   with no ground truth required, by comparing the ratio over time since the last solve.
         bool  hessian_check = true;
+        /// Take the published covariance from the GN solver's own normal equations (the newest
+        /// pose's Schur-complemented marginal) instead of a double-backward autograd Hessian folded
+        /// into a recursion. See compute_posterior_covariance for the three measured reasons.
+        /// GN only; with any other optimizer the old path runs regardless.
+        bool  covariance_from_solver = true;
         bool  adaptive_cov_enabled = false;
         // EMA rate for the innovation second moment. 0.02 ~= a 50-frame memory: long enough that one
         // bad frame cannot spike the published sigma (which would hit the speed governor), short enough

@@ -999,6 +999,23 @@ MotionCalibScaleP0  = 4.0e-4   # fractional² initial uncertainty on both scales
 # Costs one extra linearize (~0.3 ms) on optimised frames only, which are ~0.7% of cycles.
 HessianCheck            = true
 
+# Take the published covariance from the GN solver's OWN normal equations — the newest pose's
+# Schur-complemented marginal out of H = sum J'WJ — instead of a double-backward autograd Hessian
+# folded into a recursion. Measured reasons, all 2026-08-29:
+#   • 108 ms of a 131 ms optimised frame went on building a Hessian the solver had already built,
+#     the second time the expensive way (optimizer_timing.csv: t_cov 108.5 vs t_adam 18.2);
+#   • the recursion RATCHETED — it multiplied the same window's observations in every frame, so
+#     sigma_x reached 1.6 mm against the single slot's 1.9 and the window's own 5.5. A marginal
+#     cannot do that;
+#   • it needed the guard that started all of this: `det(P) > 1e-10` refused 89 of 102 updates,
+#     because a determinant cannot tell a PRECISE covariance from a SINGULAR one.
+# Between solves the covariance still inflates through predict_step(). The recursion is gone; the
+# prediction step is not.
+# ★ GN only. The GN Hessian is the Gauss-Newton approximation and drops second-order terms the
+#   autograd one keeps — hessian_check.csv logs both, so a regression is visible rather than
+#   theoretical. Set false to restore the old path.
+CovarianceFromSolver    = true
+
 AdaptiveCovEnabled      = true
 WindowStrideEnabled     = true
 BoundaryFejSchur        = true

@@ -4123,7 +4123,7 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         // Taken HERE because this is the only place the assembled Input and the converged poses
         // exist together; recomputing either elsewhere would be comparing two different problems.
         // One extra linearize (~0.3 ms) on an OPTIMISED frame only, and those are ~0.7% of frames.
-        if (params.hessian_check)
+        if (params.hessian_check or params.covariance_from_solver)
         {
             const auto nm = gn::newest_pose_marginal(in, poses);
             last_marg_ok_         = nm.ok;
@@ -5271,6 +5271,45 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
     std::pair<Eigen::Matrix3f, float> RoomConcept::compute_posterior_covariance(
         const torch::Tensor& points_tensor)
     {
+        // ── THE WINDOW'S OWN ANSWER, WHEN THE SOLVER HAS ONE ────────────────────────────────────
+        // The GN backend assembles H = sum J'WJ over the whole window and solves it. Λ_marg is the
+        // newest pose's marginal out of exactly that system — every other pose and landmark
+        // Schur-complemented away — so it already contains the boundary prior, the motion chain and
+        // every slot's observations. It IS the posterior the estimator just computed.
+        //
+        // What it replaces is a SECOND estimator layered on the first: prior = last posterior, plus
+        // a double-backward autograd Hessian of the newest slot alone. Three things were wrong with
+        // that, all measured 2026-08-29:
+        //   • 108 ms of a 131 ms optimised frame, against 18 ms for the solve itself — a Hessian
+        //     built twice, the second time the expensive way (optimizer_timing.csv);
+        //   • it RATCHETED. The recursion multiplied the same window's observations in every frame,
+        //     so the published sigma_x reached 1.6 mm against the single slot's 1.9 and the window's
+        //     own 5.5 — tighter than either input. A marginal cannot do that;
+        //   • it needed the guard that started this: `det > 1e-10` refused 89 of 102 updates because
+        //     a determinant cannot tell a PRECISE covariance from a SINGULAR one.
+        // Between solves the covariance still inflates through predict_step(), which is where a
+        // prediction step belongs. The recursion is gone; the propagation is not.
+        // ★ The GN Hessian is the Gauss-Newton approximation, so it drops second-order terms the
+        //   autograd one keeps. hessian_check.csv logs both, which is how this was measured and how
+        //   a regression would be seen; CovarianceFromSolver = false restores the old path.
+        if (params.covariance_from_solver and last_marg_ok_ and params.optimizer_type == "GN")
+        {
+            Eigen::SelfAdjointEigenSolver<Eigen::Matrix3f> eig(last_marg_prec_);
+            const Eigen::Vector3f ev = eig.eigenvalues().cwiseMax(params.eigenvalue_clamp_posterior);
+            const Eigen::Matrix3f prec = eig.eigenvectors() * ev.asDiagonal() * eig.eigenvectors().transpose()
+                                       + params.covariance_regularization * Eigen::Matrix3f::Identity();
+            const Eigen::Matrix3f P = prec.inverse();
+            const float cond = ev.maxCoeff() / std::max(1e-8f, ev.minCoeff());
+            hess_pred_cov_   = current_covariance;      // P_pred, for the NIS column
+            hess_obs_prec_   = last_marg_prec_;         // "obs" is now the window marginal
+            hess_cov_det_    = static_cast<double>(P.determinant());
+            hess_cov_cond_   = static_cast<double>(cond);
+            const bool ok = P.allFinite() and ev.minCoeff() > 0.f and cond < params.condition_number_max;
+            hess_cov_accept_ = ok ? 1 : (not P.allFinite() ? -1 : ev.minCoeff() > 0.f ? -3 : -2);
+            if (ok) { current_covariance = P; return {P, cond}; }
+            return {current_covariance, cond};
+        }
+
         try {
             // P_pred, kept before the update overwrites it. This is what predict_step() left in
             // current_covariance, i.e. F·P_prev·Fᵀ + Q — the quantity the innovation has to be

@@ -377,6 +377,29 @@ void LidarIngestor::run_startup_geometry_check()
     // Median horizontal radius of the returns in a z-window, from the joint (z,r) histogram. This is the
     // spatial discriminant: a ceiling PLANE fills the interior, so its returns land CLOSER than the walls;
     // an upright-LiDAR wall-top locus sits at the wall range. Compares like-for-like (both are helios).
+    // Any quantile of the radius distribution in a z slice, not just the median: the ceiling test
+    // below needs the LOW end of the peak's radii as well as its middle.
+    const auto quantile_radius_in = [this](float zlo, float zhi, float q) -> std::pair<float, int>
+    {
+        std::array<int, GEOM_NR> racc{};
+        int total = 0;
+        for (int b = 0; b < GEOM_NBINS; ++b)
+        {
+            const float z = GEOM_Z_LO + (b + 0.5f) * GEOM_BIN;
+            if (z < zlo or z > zhi) continue;
+            const int* row = &geom_rz_hist_[static_cast<std::size_t>(b) * GEOM_NR];
+            for (int rb = 0; rb < GEOM_NR; ++rb) { racc[rb] += row[rb]; total += row[rb]; }
+        }
+        if (total == 0) return {0.f, 0};
+        const int target = std::max(1, static_cast<int>(q * static_cast<float>(total)));
+        int cum = 0;
+        for (int rb = 0; rb < GEOM_NR; ++rb)
+        {
+            cum += racc[rb];
+            if (cum >= target) return {(rb + 0.5f) * GEOM_R_BIN, total};
+        }
+        return {(GEOM_NR - 0.5f) * GEOM_R_BIN, total};
+    };
     const auto median_radius_in = [this](float zlo, float zhi) -> std::pair<float, int>
     {
         std::array<int, GEOM_NR> racc{};
@@ -402,30 +425,53 @@ void LidarIngestor::run_startup_geometry_check()
     // = the UPPER-WALL band just below the peak (same walls, one notch lower — above furniture, apples-to-
     // apples). A wall-top ring has r_peak ≈ r_ref (ratio≈1); a ceiling has r_peak < r_ref. The 0.75 boundary
     // is scale-free (relative range), not an absolute distance cut.
-    constexpr float kCeilInteriorRatio = 0.75f;
     const float ref_lo = std::max(0.9f, ceil_z - 0.70f);
     const float ref_hi = ceil_z - 0.25f;                       // strictly below the peak window
     const auto [r_ref, ref_n]   = median_radius_in(ref_lo, ref_hi);
     const auto [r_peak, peak_n] = median_radius_in(ceil_z - 0.10f, ceil_z + 0.10f);
+    // The INNER edge of the peak's returns, which is what makes the two hypotheses separable.
+    const auto [r_in, in_n]     = quantile_radius_in(ceil_z - 0.10f, ceil_z + 0.10f, 0.05f);
     const bool spatial_ok  = (ceil_cnt >= 400) and (ref_hi > ref_lo)
                              and ref_n >= 200 and peak_n >= 200 and r_ref > 0.f;
-    const bool is_ceiling  = spatial_ok and (r_peak < kCeilInteriorRatio * r_ref);
+
+    // ── CEILING or WALL-TOP: predict r_peak under each, and take the closer ────────────────────
+    // ★ The old test was `r_peak < 0.75 * r_ref` — the z-peak's returns being "interior". That
+    //   ratio encodes a ceiling seen as a FILLED DISC, whose area-weighted median radius is
+    //   0.707*R. It is wrong for any lidar that cannot see straight up, and on 2026-08-29 it
+    //   misclassified a 51450-point ceiling as wall-top by 9 cm, leaving the ceiling plane inside
+    //   the band that feeds a 2-D WALL SDF (residual 0.164 m RMS, 0% early exit, 180% CPU).
+    //   With the helios inverted, a fan reaching +54.5 deg from a 1.075 m mount sees the 3.01 m
+    //   ceiling as an ANNULUS from 1.38 m outward, not a disc — median sqrt((1.38^2+4.12^2)/2)
+    //   = 3.07 m, against the disc model's 2.91 and the measured 3.38.
+    // ★ NO RATIO CAN FIX THAT, because the expected radius depends on the mount height and the
+    //   fan's maximum elevation. So predict it instead, from what is OBSERVABLE in the peak itself:
+    //     ceiling  -> returns fill an annulus [r_in, r_ref];  area-weighted median = sqrt((r_in^2+r_ref^2)/2)
+    //                 (r_in = 0 recovers the filled disc, so the old case is contained, not replaced)
+    //     wall-top -> returns lie ON the boundary, at the same radii as the wall band below: r_ref
+    //   and choose whichever prediction the measurement is closer to. That is a likelihood ratio
+    //   between two shapes, not a cutoff, and it needs no sensor model, no mount height and no
+    //   tuning — the geometry it would need is already imprinted on the returns.
+    const float pred_ceiling = std::sqrt(0.5f * (r_in * r_in + r_ref * r_ref));
+    const float pred_wall    = r_ref;
+    const bool  is_ceiling   = spatial_ok and in_n >= 200
+                               and std::abs(r_peak - pred_ceiling) < std::abs(r_peak - pred_wall);
 
     if (ceil_cnt >= 400 and is_ceiling)
     {
         high_max_z_ = std::clamp(ceil_z - params_->LIDAR_CEILING_MARGIN,
                                  params_->LIDAR_HIGH_MIN_HEIGHT + 0.1f, GEOM_Z_HI);
-        std::println("[CeilingCheck] CEILING at body z = {:.2f} m ({} pts): interior-filling "
-                     "(r_peak={:.2f} m < {:.2f}×r_wall={:.2f} m) -> high band capped at {:.2f} m.",
-                     ceil_z, ceil_cnt, r_peak, kCeilInteriorRatio, r_ref, high_max_z_);
+        std::println("[CeilingCheck] CEILING at body z = {:.2f} m ({} pts): r_peak={:.2f} m matches the "
+                     "annulus prediction {:.2f} m (inner edge {:.2f} m) better than the wall {:.2f} m "
+                     "-> high band capped at {:.2f} m.",
+                     ceil_z, ceil_cnt, r_peak, pred_ceiling, r_in, pred_wall, high_max_z_);
     }
     else if (ceil_cnt >= 400 and spatial_ok)   // strong z-peak but at the wall range → wall-top, keep it
     {
         high_max_z_ = cfg_max;
-        std::println("[CeilingCheck] z-peak at {:.2f} m ({} pts) is WALL-TOP, not a ceiling "
-                     "(r_peak={:.2f} m ≈ r_wall={:.2f} m — on the boundary, above LiDAR ceiling-reach) -> "
+        std::println("[CeilingCheck] z-peak at {:.2f} m ({} pts) is WALL-TOP: r_peak={:.2f} m is closer to "
+                     "the wall {:.2f} m than to the annulus prediction {:.2f} m (inner edge {:.2f} m) -> "
                      "high band kept at config max {:.2f} m (top-wall points retained for the SDF).",
-                     ceil_z, ceil_cnt, r_peak, r_ref, cfg_max);
+                     ceil_z, ceil_cnt, r_peak, pred_wall, pred_ceiling, r_in, cfg_max);
     }
     else if (ceil_cnt >= 400)   // z-peak but spatial test inconclusive (sparse ref/peak) → cut, to be safe
     {
