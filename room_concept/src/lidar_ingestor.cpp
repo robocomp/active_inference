@@ -188,6 +188,12 @@ bool LidarIngestor::pump()
                 band_r_sum_ += std::hypot(p.x(), p.y());
                 band_z_lo_ = std::min(band_z_lo_, p.z());
                 band_z_hi_ = std::max(band_z_hi_, p.z());
+                // Where in the band, in sixths. A CEILING is a spike in the top bin: walls spread
+                // roughly evenly over the band, a horizontal surface piles into one slice. The mean
+                // alone cannot separate those — it is the same 2.28 either way.
+                const int b = std::clamp(static_cast<int>(6.f * (p.z() - min_h_m)
+                                                          / std::max(1e-3f, max_h_m - min_h_m)), 0, 5);
+                band_zhist_[b]++;
             }
             const auto tnow = QDateTime::currentMSecsSinceEpoch();
             if (band_report_ms_ == 0) band_report_ms_ = tnow;
@@ -195,15 +201,20 @@ bool LidarIngestor::pump()
             {
                 band_report_ms_ = tnow;
                 const double n = std::max(1L, band_in_);
+                const double hn = std::max(1L, band_in_);
                 std::println("[band] {:.1f}-{:.2f} m keeps {}/{} pts/sweep ({:.1f}%) | z mean {:.2f} "
-                             "span {:.2f}..{:.2f} | mean ground range {:.2f} m",
+                             "span {:.2f}..{:.2f} | mean ground range {:.2f} m | z sixths "
+                             "{:.0f}/{:.0f}/{:.0f}/{:.0f}/{:.0f}/{:.0f}% (top bin = ceiling if it spikes)",
                              min_h_m, max_h_m,
                              band_in_ / std::max(1L, band_sweeps_), band_total_ / std::max(1L, band_sweeps_),
                              100.0 * band_in_ / std::max(1L, band_total_),
-                             band_z_sum_ / n, band_z_lo_, band_z_hi_, band_r_sum_ / n);
+                             band_z_sum_ / n, band_z_lo_, band_z_hi_, band_r_sum_ / n,
+                             100.0 * band_zhist_[0] / hn, 100.0 * band_zhist_[1] / hn,
+                             100.0 * band_zhist_[2] / hn, 100.0 * band_zhist_[3] / hn,
+                             100.0 * band_zhist_[4] / hn, 100.0 * band_zhist_[5] / hn);
                 band_sweeps_ = band_in_ = band_total_ = 0;
                 band_z_sum_ = band_r_sum_ = 0.0;
-                band_z_lo_ = 1e9f; band_z_hi_ = -1e9f;
+                band_z_lo_ = 1e9f; band_z_hi_ = -1e9f; band_zhist_ = {};
             }
         }
         ingest_scan(std::move(points_high), sweep->stamp_ms);

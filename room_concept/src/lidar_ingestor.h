@@ -144,6 +144,7 @@ private:
     long band_sweeps_ = 0, band_in_ = 0, band_total_ = 0;
     double band_z_sum_ = 0.0, band_r_sum_ = 0.0;
     float band_z_lo_ = 1e9f, band_z_hi_ = -1e9f;
+    std::array<long, 6> band_zhist_{};   ///< where in the band, in sixths
     std::int64_t band_report_ms_ = 0;
     std::int64_t  last_src_report_ms_ = 0;
 
