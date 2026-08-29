@@ -287,4 +287,19 @@ namespace rc::img
         // the measurement path, which camera_ingestor.h exists to avoid.
         return false;
     }
+
+    /// Column difference on a possibly-CYCLIC image axis.
+    ///
+    /// ★ A panorama's column axis wraps: column w-1 and column 0 are neighbours. Subtracting two u
+    ///   coordinates across that seam gives a residual of nearly a full image WIDTH for two points a
+    ///   pixel apart. On a pinhole this is the identity, so calling it unconditionally costs nothing
+    ///   and removes the class of bug where a residual is wrap-corrected in one place and not in
+    ///   another — the sample search and the factor both handle the seam; the triple-point residuals
+    ///   did not, which would have been invisible until a corner happened to sit on it.
+    inline double du_wrapped(double du, const CameraModel& m)
+    {
+        if (m.kind == CameraModel::Kind::Pinhole or not (m.width > 0.f)) return du;
+        const double w = static_cast<double>(m.width);
+        return du - std::round(du / w) * w;
+    }
 }  // namespace rc::img

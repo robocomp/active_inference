@@ -101,12 +101,14 @@ namespace rc::mount
         o.vertex = tp.vertex;
         o.assoc_prob = cm.assoc_prob;
 
-        // ★ z = 0: the triple point is at FLOOR level, and this codebase's robot frame has its origin
-        //   on the floor (the projection path forms e = p_room - pose with e.z() = p_room.z()). The
-        //   LiDAR corner is a 2-D (x, y) at sensor height, but it is the SAME vertical edge, so its
-        //   (x, y) is the triple point's (x, y). Taking z from the LiDAR would be wrong — it does not
-        //   measure one.
-        const Eigen::Vector3f p_robot(cm.detected.x(), cm.detected.y(), 0.f);
+        // ★ z comes from the TRIPLE POINT, not from a constant: the same vertical wall-wall edge
+        //   yields a corner at floor level and another at ceiling level, and this pairs with either.
+        //   The LiDAR corner is a 2-D (x, y) at sensor height, but it is the SAME vertical edge, so
+        //   its (x, y) is the triple point's (x, y) at whichever height that one sits. Taking z from
+        //   the LiDAR would be wrong — it does not measure one.
+        //   (This codebase's robot frame has its origin on the floor: the projection path forms
+        //    e = p_room - pose with e.z() = p_room.z(), and P3Bot->body is identity.)
+        const Eigen::Vector3f p_robot(cm.detected.x(), cm.detected.y(), tp.p_room.z());
         const Eigen::Vector3f pc = cam_R_robot * p_robot + cam_t_robot;
         if (not (pc.norm() > 1e-3f)) return o;
 
@@ -117,7 +119,10 @@ namespace rc::mount
 
         o.uv_lidar = uv.cast<float>();
         o.uv_image = tp.uv_meas;
-        o.r        = o.uv_image - o.uv_lidar;
+        o.r        = Eigen::Vector2f(
+            static_cast<float>(rc::img::du_wrapped(
+                static_cast<double>(o.uv_image.x()) - static_cast<double>(o.uv_lidar.x()), cam)),
+            o.uv_image.y() - o.uv_lidar.y());
         o.range_m  = pc.norm();
 
         const Eigen::Matrix<float, 2, 3> Pf = P.cast<float>();

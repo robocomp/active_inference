@@ -409,15 +409,24 @@ ImageEdgeObs ImageEdgeSource::extract(const GrayFrame& frame,
                 if (f.cls == cls and f.vertex == vertex) return &f;
             return nullptr;
         };
+        // ★ BOTH ENDS OF EACH VERTICAL CORNER. The wall-wall edge runs floor to ceiling, so it can
+        //   be intersected with the floor junction OR the wall-ceiling junction, giving two distinct
+        //   0-D features per vertex at known heights. The CEILING one is the less occluded of the
+        //   two by a wide margin — furniture, people and clutter all sit on the floor, which is
+        //   exactly where a floor corner is blocked — and on a panoramic camera it is the better
+        //   feature outright, since the floor corner's compensating advantage (readable ZED depth)
+        //   does not exist for a 360 model.
+        const ContourClass horiz[2] = {ContourClass::FloorWall, ContourClass::WallCeiling};
         for (std::size_t i = 0; i < np; ++i)
         {
             const SegFit* fc = find_fit(ContourClass::WallCorner, static_cast<int>(i));
             if (fc == nullptr) continue;
-            // Either floor edge meets this vertex: edge i leaves it, edge i-1 arrives at it. Take
-            // whichever carries more weight rather than averaging two DIFFERENT lines into one.
-            const SegFit* f1 = find_fit(ContourClass::FloorWall, static_cast<int>(i));
-            const SegFit* f2 = find_fit(ContourClass::FloorWall,
-                                        static_cast<int>((i + np - 1) % np));
+        for (const ContourClass hcls : horiz)
+        {
+            // Either horizontal edge meets this vertex: edge i leaves it, edge i-1 arrives at it.
+            // Take whichever carries more weight rather than averaging two DIFFERENT lines into one.
+            const SegFit* f1 = find_fit(hcls, static_cast<int>(i));
+            const SegFit* f2 = find_fit(hcls, static_cast<int>((i + np - 1) % np));
             const SegFit* ff = (f1 and f2) ? (f1->w >= f2->w ? f1 : f2) : (f1 ? f1 : f2);
             if (ff == nullptr) continue;
 
@@ -435,7 +444,8 @@ ImageEdgeObs ImageEdgeSource::extract(const GrayFrame& frame,
             // edge-on. Reported through `cond`, and skipped only when the solve is meaningless.
             if (not std::isfinite(det) or std::abs(det) < 1e-3) continue;
 
-            const Eigen::Vector3f p_room(polygon_[i].x(), polygon_[i].y(), 0.f);
+            const Eigen::Vector3f p_room(polygon_[i].x(), polygon_[i].y(),
+                                         hcls == ContourClass::WallCeiling ? cfg_.room_height : 0.f);
             const Eigen::Vector3f p_cam = to_camera(p_room, pose, cam_R_robot, cam_t_robot);
             Eigen::Vector2d uvp;
             if (not rc::img::project_with_model(model, p_cam.cast<double>(), uvp)) continue;
@@ -465,15 +475,25 @@ ImageEdgeObs ImageEdgeSource::extract(const GrayFrame& frame,
 
             TriplePoint tp;
             tp.vertex   = static_cast<int>(i);
+            tp.from     = hcls;
             tp.p_room   = p_room;
             tp.uv_pred  = uvp.cast<float>();
-            tp.uv_meas  = (uvp + delta).cast<float>();
+            // Fold back onto the cyclic column axis, so a corner detected just past the seam is
+            // reported at a column that exists. Identity on a pinhole (wrap_u is 0 there).
+            Eigen::Vector2d uvm = uvp + delta;
+            if (wrap_u > 0)
+            {
+                uvm.x() = std::fmod(uvm.x(), static_cast<double>(wrap_u));
+                if (uvm.x() < 0.0) uvm.x() += static_cast<double>(wrap_u);
+            }
+            tp.uv_meas  = uvm.cast<float>();
             tp.cov_uv   = (Ai * S * Ai.transpose()).cast<float>();
             tp.n_corner = static_cast<int>(fc->w);
             tp.n_floor  = static_cast<int>(ff->w);
             const double c = std::min(1.0 - 1e-12, std::abs(nch.dot(nfh)));
             tp.cond     = static_cast<float>((1.0 + c) / (1.0 - c));
             obs.triple_points.push_back(tp);
+        }
         }
     }
 

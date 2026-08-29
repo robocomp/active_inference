@@ -151,6 +151,15 @@ namespace rc
     struct TriplePoint
     {
         int             vertex  = -1;
+        /// Which horizontal contour was intersected with the vertical wall corner. FloorWall gives
+        /// the corner at floor level, WallCeiling the one at ceiling level.
+        ///
+        /// ★ THE CEILING ONE IS THE LESS OCCLUDED FEATURE, and on a panorama it is the better one:
+        ///   furniture, people and clutter sit on the FLOOR, so a floor corner is exactly where a
+        ///   room is most often blocked, while nothing stands between a camera and the join of two
+        ///   walls at the ceiling. The floor corner's compensating advantage — that its depth can be
+        ///   read from the ZED — does not apply to a 360 model anyway.
+        ContourClass    from    = ContourClass::FloorWall;
         Eigen::Vector3f p_room  = Eigen::Vector3f::Zero(); ///< (vx, vy, 0), a constant of the solve
         Eigen::Vector2f uv_pred = Eigen::Vector2f::Zero(); ///< where the model puts it
         Eigen::Vector2f uv_meas = Eigen::Vector2f::Zero(); ///< where the two fitted lines cross

@@ -4266,7 +4266,7 @@ namespace rc
             if (triple_csv_.is_open())
             {
                 triple_csv_.imbue(std::locale::classic());   // CLAUDE.md: never a comma decimal
-                triple_csv_ << "ts_ms,vertex,u_pred,v_pred,u_meas,v_meas,du,dv,"
+                triple_csv_ << "ts_ms,vertex,at_ceiling,u_pred,v_pred,u_meas,v_meas,du,dv,"
                                "suu,svv,suv,cond,n_corner,n_floor,"
                                // depth_raw as published; pred_fwd and pred_range are what the MODEL
                                // says at this pose. depth_raw ~= pred_fwd means the value is the
@@ -4292,6 +4292,7 @@ namespace rc
         for (const auto& t : obs.triple_points)
         {
             triple_csv_ << timestamp_ms << ',' << t.vertex << ','
+                        << (t.from == ContourClass::WallCeiling ? 1 : 0) << ','
                         << t.uv_pred.x() << ',' << t.uv_pred.y() << ','
                         << t.uv_meas.x() << ',' << t.uv_meas.y() << ','
                         << (t.uv_meas.x() - t.uv_pred.x()) << ','
@@ -4303,6 +4304,7 @@ namespace rc
                         << (obs.depth_stamp_ms ? obs.depth_stamp_ms - timestamp_ms : 0) << ','
                         << pose.x() << ',' << pose.y() << ',' << pose.z() << '\n';
             ++triple_rows_;
+            if (t.from == ContourClass::WallCeiling) ++triple_ceil_; else ++triple_floor_;
         }
         triple_csv_.flush();
 
@@ -4347,8 +4349,12 @@ namespace rc
             const Eigen::Matrix2d C = t.cov_uv.cast<double>();
             if (not (C.determinant() > 1e-12)) continue;
             const Eigen::Matrix2d W = C.inverse();
-            const Eigen::Vector2d r(static_cast<double>(t.uv_meas.x()) - uvp.x(),
-                                    static_cast<double>(t.uv_meas.y()) - uvp.y());
+            // Wrap-safe in u: on the Ricoh's equirectangular model the column axis is cyclic, and a
+            // corner sitting on the seam would otherwise contribute a residual of nearly a full
+            // image width. Identity on a pinhole.
+            const Eigen::Vector2d r(
+                rc::img::du_wrapped(static_cast<double>(t.uv_meas.x()) - uvp.x(), obs.cam),
+                static_cast<double>(t.uv_meas.y()) - uvp.y());
             H.noalias() += J.transpose() * W * J;
             g.noalias() += J.transpose() * W * r;
             chi2 += r.dot(W * r);
@@ -4767,7 +4773,8 @@ namespace rc
         if (imgedge_health_last_ms_ == 0) { imgedge_health_last_ms_ = timestamp_ms; return; }
         if (timestamp_ms - imgedge_health_last_ms_ < 5000) return;
         qInfo().nospace().noquote()
-            << "[triple] " << triple_rows_ << " points over " << triple_frames_ << " frames ("
+            << "[triple] " << triple_rows_ << " points (" << triple_floor_ << " floor, "
+            << triple_ceil_ << " ceiling) over " << triple_frames_ << " frames ("
             << QString::number(triple_frames_ ? double(triple_rows_) / triple_frames_ : 0.0, 'f', 2)
             << "/frame)"
             << (triple_rows_ == 0 and triple_frames_ > 0

@@ -1861,6 +1861,7 @@ private:
     std::ofstream triple_csv_;
     std::ofstream triple_pose_csv_;
     long          triple_rows_ = 0, triple_frames_ = 0;
+    long          triple_floor_ = 0, triple_ceil_ = 0;
     // Running summary of the triple-point POSE factor's shadow. Reported, never applied.
     long          tps_frames_ = 0;
     double        tps_chi2_sum_ = 0.0;

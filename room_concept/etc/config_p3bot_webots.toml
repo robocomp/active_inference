@@ -926,7 +926,26 @@ drive  = false   # ★ TRIED AND REVERTED 2026-08-28. The A/B ran and the pre-re
 #       visible changes frame to frame BY DESIGN. That is the premise, not a defect.
 useTriplePoints = true
 
-camera = "zed"            # DSR node name. "ricoh" selects the 360 equirect model; no code changes.
+camera = "ricoh"          # ★ SWITCHED 2026-08-29 to try the panorama. DSR node name; the equirect
+                          # model is selected from the node's own cam_fov/cam_projection, so this is
+                          # genuinely a one-word change on the projection side.
+                          #
+                          # ★ WHY: the pose factor failed on the ZED because corr(x, theta) = 0.98 —
+                          #   the visible corners sit ahead and CLUSTERED in a 110 deg field, so a
+                          #   lateral shift and a rotation look alike, and the ~1.7 px per-corner
+                          #   detection bias landed in heading. A panorama sees corners at +/-180 deg,
+                          #   and bearings spread all the way round is the textbook condition for
+                          #   separating translation from rotation. The ambiguity should collapse.
+                          # ★ WHAT IT DOES NOT FIX: the detection bias itself, which is a property of
+                          #   how a corner is found and not of the field of view. The panorama removes
+                          #   the mechanism that made the bias harmful, not the bias.
+                          # ⚠ Angular resolution is COARSER: the ZED is ~0.128 deg/px (fx 448) against
+                          #   ~0.19 deg/px for an equirect panorama 1920 px wide. Corner repeatability
+                          #   was 0.019 px, so this should still be ample — but measure it.
+                          # ⚠ No depth: xyz_from_pixel_depth declines on a non-pinhole model rather
+                          #   than guessing, so triple points carry no range here. The detector does
+                          #   not need it; only the depth cross-check goes quiet.
+                          # WAS: "zed"
 
 useWallCorners   = true   # bearing; nearly immune to mount pitch/height
 useFloorJunction = true   # ★ RESTORED 2026-08-28 after PHASE 0 / TEST A. Result recorded here so the
@@ -946,7 +965,16 @@ useFloorJunction = true   # ★ RESTORED 2026-08-28 after PHASE 0 / TEST A. Resu
                           # adds, and the part immune to mount pitch — is simply not available most of
                           # the time here. The floor junction carries the term.
 
-useWallCeiling   = false  # cluttered by lamps/ducts, and off the ZED's FoV at close range
+useWallCeiling   = true   # ★ ON 2026-08-29 — required for the CEILING triple points, which are the
+                          # less occluded feature by a wide margin: furniture, people and clutter all
+                          # sit on the FLOOR, which is exactly where a floor corner is blocked, while
+                          # nothing stands between a camera and the join of two walls at the ceiling.
+                          # Each vertical wall corner now yields TWO 0-D features, one at each end.
+                          # WAS: false — "cluttered by lamps/ducts, and off the ZED's FoV at close
+                          # range". Both objections were about the ZED: a panorama has no close-range
+                          # FoV limit, and the lamp/duct clutter is what the mixture responsibility
+                          # and pi_vis exist to handle. If it turns out they dominate, the honest
+                          # signal will be a low sum_gamma on the ceiling population, not a guess.
 
 # Arc-length spacing along each contour, in 3-D metres -- NOT in pixels. Uniform-in-pixels would
 # concentrate samples at the near end, which is exactly where the height nuisance is weakest, and
