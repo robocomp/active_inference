@@ -971,7 +971,12 @@ HierPrecBoundaryEnabled = true
 CornerEarlyExitCheck    = true
 GnMaxIters              = 20
 GnLossRelTol            = 1e-5
-TorchNumThreads         = 1
+TorchNumThreads         = 2   # intra-op CPU threads for the Torch forward pass. Adam is gone, but
+                              # Torch still runs the SDF/model forward that GN reads its Jacobian
+                              # from, and the double-backward Hessian behind the posterior sigma —
+                              # so this knob still bites. Was unified at 1 on 2026-08-29 and set
+                              # back to 2 the same day: it is a CORE BUDGET, and 1 was Shadow's
+                              # number arriving on P3Bot, which runs a 16 ms period against 50.
 SymmetryGoodFitMse      = 0.101
 
 
