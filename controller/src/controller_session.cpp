@@ -1,5 +1,6 @@
 #include <numbers>
 #include "controller_session.h"
+#include "controller_robot_body.h"
 #include "corner_visibility.h"   // point_in_polygon: is the standpoint in the room at all
 
 #include <algorithm>
@@ -152,6 +153,89 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
     }
 
     room_polygon_ = room_polygon.value();
+
+    // ── THE ROBOT'S OWN BODY, ONCE, AS SOON AS ITS NODE EXISTS ───────────────────────────────────
+    // ★NOT IN initialize(). The robot node may not have synced from the persistent server yet at that point
+    // — the same reason the stale-node sweep runs twice (CLAUDE.md) — and a body loaded from a node that is
+    // not there yet is a silent fallback to the wrong robot. Here the graph state is known-good, and this
+    // runs before anything asks the planner a question.
+    // The mesh is the only PER-ROBOT statement of the shape in the system: the compiled hull is one robot's,
+    // and the `body` node's width_m/depth_m are 0.47/0.47 in BOTH shadow.json and p3bot.json, i.e. a
+    // placeholder. See controller_robot_body.h for what is wrong without this and by how much.
+    if (not body_loaded_ and world_model.graph_state().robot_id != 0)
+    {
+        body_loaded_ = true;
+        rc::RobotBodyReport report;
+        approach_body_ = rc::load_robot_body(*world_model.graph(),
+                                             world_model.graph_state().robot_id,
+                                             world_model.graph_state().robot_name,
+                                             params_ ? params_->robot_mesh_yaw_deg : 0.f,
+                                             report);
+        approach_body_.set_safety_margin(params_ ? params_->footprint_safety_margin_m : 0.f);
+        rc::log_robot_body_report(report, approach_body_);
+        // ONE body, pushed to everything that collides with the world. The grid planner's setter also drops
+        // its per-heading rasterisation, which caches on cell size and margin alone and would otherwise keep
+        // rasterising the previous robot for the life of the process.
+        grid_planner_.set_footprint(approach_body_);
+        path_controller.set_footprint(approach_body_);
+        obstacle_tracker.set_body(approach_body_);
+
+        // ── ...AND WHAT THAT BODY CAN DO ────────────────────────────────────────────────────────
+        // Same one-shot, same node, same reason to wait for it: the shape and the capability are two
+        // halves of one statement about which robot this is, and they should be read and printed
+        // together rather than one at startup and one wherever it was first missed.
+        //
+        // ★THE DISTINCTION, because it is the whole point (common/robot_capability/robot_capability.h):
+        //     CAPABILITY  what the hardware CAN do   — the base component's own config, published by
+        //                                              robot_concept on the robot node.
+        //     POLICY      how fast we CHOOSE to go   — these params, which stay in OUR config.
+        // We assert policy <= capability. We do not substitute one for the other, and we do not
+        // silently retune: the audit prints both numbers and changes nothing.
+        //
+        // ★WHAT THIS IS EXPECTED TO FIND ON THE FIRST RUN (measured off both real SVD48VBase configs,
+        // 2026-08-29). Speeds are fine; the two output-stage ACCELERATION limits are not limits at all:
+        //                       policy        Shadow cap      P3Bot cap
+        //     MaxAdvSpeed       0.70 m/s      0.90            0.70   <- equal on P3Bot, no headroom
+        //     MaxRotSpeed       0.80 rad/s    2.00            1.50
+        //     max_lin_accel     1.50 m/s^2    0.50            0.35   <- 3x / 4.3x the base's own ramp
+        //     max_lin_decel     3.00 m/s^2    1.00            1.00   <- 3x
+        // The slew limiter was measured and justified against the COMMAND chatter it was built to
+        // absorb, which is a real job it still does; what it cannot be is a model of the actuator,
+        // because the base saturates first and by a wide margin. Whether to bring it down to the
+        // hardware's ramp is a live-control decision and is deliberately left to a person.
+        base_capability_ = rc::read_base_capability(*world_model.graph(),
+                                                    world_model.graph_state().robot_id);
+        rc::PolicyAudit audit;
+        if (params_)
+        {
+            audit.check("Controller.MaxAdvSpeed", "m/s", params_->max_adv_speed_mps,
+                        base_capability_.max_linear_speed_mps);
+            audit.check("Controller.MaxRotSpeed", "rad/s", params_->max_rot_speed_rps,
+                        base_capability_.max_rot_speed_rps);
+            // ⚠ Compiled-in, not config keys — see ControllerParams. That they are not even editable
+            //   without a rebuild is part of why nobody had held them against the hardware.
+            audit.check("max_lin_accel_mps2 (compiled)", "m/s^2", params_->max_lin_accel_mps2,
+                        base_capability_.max_linear_accel_mps2);
+            audit.check("max_lin_decel_mps2 (compiled)", "m/s^2", params_->max_lin_decel_mps2,
+                        base_capability_.max_linear_decel_mps2);
+            // ★Controller.MaxLateralAccel is deliberately NOT checked against robot_max_linear_accel.
+            //  It is a CENTRIPETAL comfort budget shaping the route's curvature (rho = v^2/a_lat), bounded
+            //  by traction and by what a passenger tolerates — not by the drive's ability to change speed
+            //  along its own axis. The base config states nothing about it, and pairing the two numbers
+            //  because they share a unit is exactly the kind of copy this channel exists to stop.
+        }
+        rc::log_base_capability(base_capability_, audit, "controller");
+
+        // ★LATERAL DOF. The controller emits (adv, side, rot) and three of its five command sites can
+        //  carry a non-zero `side`. On a differential base that component is simply dropped by the base,
+        //  so a plan that relies on it silently under-executes — the robot goes somewhere other than
+        //  where the trajectory said, with nothing in the log to say why. Report it once; do not gate
+        //  the command here, because the fix belongs where the lateral term is GENERATED.
+        if (base_capability_.holonomic.has_value() and not *base_capability_.holonomic)
+            qInfo() << "[capability] this base is DIFFERENTIAL: any lateral (side) command component is"
+                       " dropped by the base. Watch base_commands.jsonl's `side` field.";
+    }
+
     obstacle_tracker.update_active_obstacle_polygons(timestamp_ms, path_controller);
     // Rasterise the SAME obstacle set the visibility graph used into the footprint planner's grid. Cheap
     // enough to redo every cycle (0.3 ms on the apartment) and independent of polygon count, so the obstacle
@@ -397,6 +481,105 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     ControllerPlanningStep step;
     step.robot_pose = *robot_pose;
     step.plan_origin = robot_pose->pos;
+
+    // ── IS THE WORLD THE PLANNER PLANS AGAINST ACTUALLY THERE? ───────────────────────────────────
+    // ★★★WITH retina DOWN, residual_concept's occupancy grid is the ONLY channel that can put a real
+    // obstacle in front of A*. `n_obst` and `n_temp` are 0 in every row of proximity_obstacles.csv, so
+    // every tracked-obstacle column in every other diagnostic is describing an empty set — and nothing
+    // recorded the one number that decides whether a collision is a PLANNING failure or a TRACKING one:
+    // how many cells residual is publishing, and how far the nearest is. The controller even builds a
+    // `grid_cells=` report string that it never prints.
+    // ★A TIME SERIES ON PURPOSE. The documented failure of this channel is not "the obstacle was never
+    // there", it is "the obstacle was there and then got RELEASED" — a grazing beam erasing a surface, a
+    // decay un-latching a cell — after which the planner routes through what it has forgotten. A count
+    // sampled once cannot tell those apart; a count over time shows the moment it blinks out.
+    // Pure diagnostic: it reads what set_world was already handed and writes a row. It decides nothing.
+    log_residual_world(timestamp_ms, obstacle_tracker, *robot_pose);
+
+    // ── MEASURE THE SYMPTOM, NOT ANOTHER SUSPECT ─────────────────────────────────────────────────
+    // ★★★SEVEN HYPOTHESES HAVE DIED HERE, EVERY ONE OF THEM KILLED BY READING THE PLUMBING RATHER
+    // THAN THE PICTURE: the residual publish rate, TimeQuery::Nearest, the localiser, a clock offset,
+    // interleaved RT writers, the cloud/icon pairing, and the one-frame hold (removed for the display
+    // and the swing did not change). What none of them measured is the thing actually complained
+    // about — how far the DRAWN cloud is rotated off the walls it should be lying on.
+    // This fits a yaw: rotate the cloud about the robot by delta and find the delta that best puts its
+    // points on the room polygon. dtheta_deg is then the swing, in the units it is seen in, and its
+    // relationship to omega says what kind of error it is:
+    //   grows with |omega|, ~0 at rest  ⇒ a rotation lag, and dtheta/omega is its time constant in s
+    //   constant, independent of omega  ⇒ a fixed frame/calibration offset, not a lag at all
+    //   no single delta reduces the residual much ⇒ NOT a rigid rotation: the cloud is SHEARED or
+    //     the room polygon itself is wrong, and every lag hypothesis is the wrong shape of answer.
+    // ★It reports resid_before/resid_after so a poor fit cannot masquerade as a confident angle.
+    log_cloud_wall_fit(timestamp_ms, obstacle_tracker, *robot_pose);
+    // The rate the row shows. Fed from the tracker, which counts it where a scan is ACCEPTED — see
+    // ControllerObstacleTracker::lidar_processed_hz(). ★It is the display lag too: the overlay is
+    // registered one frame old on purpose, so 20 Hz is 50 ms of it and 10 Hz is 100 ms.
+    display.set_lidar_rate_hz(obstacle_tracker.lidar_processed_hz());
+
+    // ── IS THE DRAWN CLOUD ANCHORED TO THE POSE THE ICON IS DRAWN AT? ────────────────────────────
+    // ★THE ONE QUESTION LEFT, AFTER EVERYTHING ELSE WAS ELIMINATED. The cloud in the room buffer is
+    // already in ROOM coordinates, so it cannot swing from a stale pose at DRAW time — absolute points
+    // do not move. The registration query is Interpolated and SLERPs at the scan's own stamp. And the
+    // localiser is sound. What remains is the PAIRING: the viewer draws read_last() from the buffer
+    // while the icon is drawn from a pose read separately, and both are only pinned to proc_ts "by
+    // construction" — which is an assumption, not a measurement, and this is the measurement.
+    // dyaw_deg is the constant-plus-variation to read: a fixed offset is expected (a room YAW against
+    // the display's theta convention); dyaw that GROWS with |omega| and returns to its baseline when
+    // rotation stops is the cloud swinging off and snapping back, expressed as a number.
+    // implied_deg is the same thing predicted from the timestamp gap alone — if dyaw tracks it, the
+    // pairing is off by exactly that many milliseconds and nothing subtler is going on.
+    if (timestamp_ms >= overlay_pairing_last_ms_ + 100)
+    {
+        overlay_pairing_last_ms_ = timestamp_ms;
+        if (not overlay_pairing_csv_open_)
+        {
+            overlay_pairing_csv_.open("overlay_pairing.csv", std::ios::out | std::ios::trunc);
+            overlay_pairing_csv_.imbue(std::locale::classic());   // decimal POINT (CLAUDE.md)
+            overlay_pairing_csv_open_ = true;
+            if (overlay_pairing_csv_.is_open())
+                overlay_pairing_csv_
+                    << "# Is the DRAWN cloud anchored to the pose the ICON is drawn at?\n"
+                       "# cloud_ts   = scan stamp of the cloud sitting in the room buffer (what is drawn)\n"
+                       "# pose_ts    = stamp the icon's pose was pinned to (last_lidar_timestamp_ms)\n"
+                       "# dt_ms      = pose_ts - cloud_ts. Nonzero = the two are different instants.\n"
+                       "# cloud_yaw  = room<-robot yaw the cloud was PLACED with (mount divided out)\n"
+                       "# icon_yaw   = the pose the icon/plan are drawn with\n"
+                       "# dyaw_deg   = icon_yaw - cloud_yaw. ★A CONSTANT OFFSET IS EXPECTED (yaw vs the\n"
+                       "#   display's theta convention). Read the VARIATION with omega, not the value.\n"
+                       "# implied_deg = dt_ms * omega, the disagreement the timestamp gap alone predicts.\n"
+                       "#   dyaw tracking implied ⇒ a pure pairing lag; dyaw exceeding it ⇒ something else.\n"
+                       "# raw_lidar_ts = the scan that JUST ARRIVED, before the one-frame hold.\n"
+                       "# newest_rt_ts  = newest room<-robot RT block at that instant.\n"
+                       "# raw_minus_rt  = raw_lidar_ts - newest_rt_ts. POSITIVE is expected and is the\n"
+                       "#   whole point: the pose is DERIVED from a scan, so the freshest scan must lead\n"
+                       "#   the freshest pose by at least room_concept's processing time. That lead is\n"
+                       "#   what the one-frame hold spends to buy exact registration.\n"
+                       "t_ms,cloud_ts,pose_ts,dt_ms,omega,cloud_yaw,icon_yaw,dyaw_deg,implied_deg,"
+                       "raw_lidar_ts,newest_rt_ts,raw_minus_rt\n";
+        }
+        if (overlay_pairing_csv_.is_open() and obstacle_tracker.last_cloud_yaw().has_value()
+            and obstacle_tracker.last_cloud_ts().has_value())
+        {
+            const auto cloud_ts = *obstacle_tracker.last_cloud_ts();
+            const auto pose_ts = obstacle_tracker.last_lidar_timestamp_ms().value_or(cloud_ts);
+            const auto dt_ms = static_cast<std::int64_t>(pose_ts) - static_cast<std::int64_t>(cloud_ts);
+            const float icon_yaw = static_cast<float>(robot_pose->theta);
+            const float d = std::atan2(std::sin(icon_yaw - *obstacle_tracker.last_cloud_yaw()),
+                                       std::cos(icon_yaw - *obstacle_tracker.last_cloud_yaw()));
+            const auto raw_ts = obstacle_tracker.newest_raw_lidar_ts().value_or(0);
+            const auto rt_ts  = obstacle_tracker.rt_block_newest_ts().value_or(0);
+            overlay_pairing_csv_ << std::format(
+                "{},{},{},{},{:.4f},{:.4f},{:.4f},{:.3f},{:.3f},{},{},{}\n",
+                timestamp_ms, cloud_ts, pose_ts, dt_ms, room_vel_.omega,
+                *obstacle_tracker.last_cloud_yaw(), icon_yaw,
+                d * 180.f / static_cast<float>(M_PI),
+                static_cast<float>(dt_ms) / 1000.f * room_vel_.omega * 180.f / static_cast<float>(M_PI),
+                raw_ts, rt_ts,
+                (raw_ts != 0 and rt_ts != 0)
+                    ? static_cast<std::int64_t>(raw_ts) - static_cast<std::int64_t>(rt_ts) : 0);
+            overlay_pairing_csv_.flush();
+        }
+    }
 
     if (manual_target_room_.has_value())
     {
@@ -1341,7 +1524,7 @@ rc::RouteOptimizerConfig ControllerSession::make_route_optimizer_config() const
     opt.enabled = params_ == nullptr or params_->route_optimize;
     opt.distance = [this](const Eigen::Vector2f &p) { return grid_planner_.distance_at(p); };
     opt.distance_gradient = [this](const Eigen::Vector2f &p) { return grid_planner_.distance_gradient_at(p); };
-    opt.d_target = rc::RobotFootprint::shadow().circumscribed_radius()
+    opt.d_target = approach_body_.circumscribed_radius()
                  + (params_ ? params_->comfort_standoff_m : 0.35f);
     const float v_max = params_ ? params_->max_adv_speed_mps : 0.7f;
     opt.rho = v_max * v_max / std::max(0.05f, params_ ? params_->max_lateral_accel_mps2 : 1.0f);
@@ -1356,12 +1539,16 @@ rc::RouteOptimizerConfig ControllerSession::make_route_optimizer_config() const
     // theta, whose forward axis is +y. Passed raw, the guard tested a body lying 90 degrees across the
     // route it was checking: 4.2 cm too narrow where the route runs beside something and 4.2 cm too
     // long where it approaches one. Same defect, same fix, and support_radius_yaw exists to state it.
-    opt.support_radius = [](float heading_yaw, const Eigen::Vector2f &dir_world)
-    { return rc::RobotFootprint::shadow().support_radius_yaw(heading_yaw, dir_world); };
+    // ★CAPTURES THE BODY BY VALUE, not `this`. The config outlives this call (it is stored in the spline and
+    // re-used by the band every cycle), so a dangling reference to the session's member would be a use-after-
+    // free waiting for a reconfigure; and copying pins the guard to the body the route was BUILT with, which
+    // is what a snapshot replay needs to reproduce it.
+    opt.support_radius = [body = approach_body_](float heading_yaw, const Eigen::Vector2f &dir_world)
+    { return body.support_radius_yaw(heading_yaw, dir_world); };
     // Only used if support_radius is ever unset. INSCRIBED, not circumscribed: below the inscribed
     // radius the body cannot fit at ANY heading, so it is a true bound; the circumscribed radius is the
     // worst case over all headings at once and sits above every clearance this apartment affords.
-    opt.clearance_floor = rc::RobotFootprint::shadow().inscribed_radius();
+    opt.clearance_floor = approach_body_.inscribed_radius();
     opt.iterations = 30;
     opt.safety_bias = params_ ? params_->route_safety_bias : 0.5f;
     opt.w_jerk = params_ ? params_->route_jerk_weight : 0.f;
@@ -1391,6 +1578,284 @@ ControllerPolygon ControllerSession::smooth_plan(const ControllerPolygon &poly)
         return poly;   // smoothing is an improvement, never a precondition: fall back to the polyline
     plan_spline_valid_ = true;
     return replace_samples ? spline.samples() : poly;
+}
+
+// See the call site. One row per cycle at 5 Hz: what residual published, and how far the nearest cell of
+// it is from the robot — so "the boxes were in the world, and then they were not" becomes readable
+// rather than something inferred after a collision.
+// See the call site. Fits a single yaw about the robot that best lays the drawn cloud on the room
+// polygon, and records it against omega. No ground truth, no second agent, no assumption about which
+// stage is late — just the picture, measured.
+void ControllerSession::log_cloud_wall_fit(std::uint64_t t_ms,
+                                           ControllerObstacleTracker &obstacle_tracker,
+                                           const ControllerRobotPose &robot_pose)
+{
+    if (t_ms < cloud_fit_last_ms_ + 200) return;         // 5 Hz; this searches, so it is not free
+    cloud_fit_last_ms_ = t_ms;
+    if (room_polygon_.size() < 3) return;
+    // ★★★BOTH BUFFERS, BECAUSE THE ANSWER DECIDES WHETHER THIS IS COSMETIC. The display buffer is
+    // what the overlay draws; the CONTROL buffer is what the ESDF, the obstacle set and the safety gate
+    // read. If only the first is off, a swinging cloud is an eyesore. If BOTH are off, the robot's own
+    // model of where the walls are rotates away during every pivot, and that is not a drawing problem.
+    // Measured on the buffer contents in room coordinates against the room polygon — this function
+    // never touches the viewer, which is also why it can answer "is it just a drawing bug" at all.
+    auto *buf = obstacle_tracker.display_lidar_buffer();
+    auto *ctrl_buf = obstacle_tracker.lidar_buffer();
+    if (buf == nullptr) return;
+    const auto [cloud] = buf->read_last();
+    if (not cloud.has_value()) return;
+    const auto &[xs, ys, zs] = cloud.value();
+    const std::size_t count = std::min({xs.size(), ys.size(), zs.size()});
+    if (count < 50) return;
+
+    // Distance from a point to the room polygon's boundary (nearest edge segment).
+    const auto dist_to_wall = [this](const Eigen::Vector2f &p)
+    {
+        float best = std::numeric_limits<float>::max();
+        for (std::size_t i = 0, n = room_polygon_.size(); i < n; ++i)
+        {
+            const Eigen::Vector2f a = room_polygon_[i], b = room_polygon_[(i + 1) % n];
+            const Eigen::Vector2f ab = b - a;
+            const float len2 = ab.squaredNorm();
+            const float u = len2 > 1e-9f ? std::clamp((p - a).dot(ab) / len2, 0.f, 1.f) : 0.f;
+            best = std::min(best, (p - (a + u * ab)).norm());
+        }
+        return best;
+    };
+
+    // Subsample, and keep only returns plausibly ON a wall: a point 2 m from every wall is furniture
+    // or a person and would drag the fit toward nothing in particular.
+    const Eigen::Vector2f robot = robot_pose.pos.head<2>().cast<float>();
+    std::vector<Eigen::Vector2f> pts;
+    pts.reserve(400);
+    const std::size_t stride = std::max<std::size_t>(1, count / 400);
+    for (std::size_t i = 0; i < count; i += stride)
+    {
+        const Eigen::Vector2f p(xs[i], ys[i]);
+        if (dist_to_wall(p) < 0.50f) pts.push_back(p);
+    }
+    if (not cloud_fit_csv_open_)
+    {
+        cloud_fit_csv_.open("cloud_wall_fit.csv", std::ios::out | std::ios::trunc);
+        cloud_fit_csv_.imbue(std::locale::classic());     // decimal POINT (CLAUDE.md)
+        cloud_fit_csv_open_ = true;
+        if (cloud_fit_csv_.is_open())
+            cloud_fit_csv_
+                << "# How far the DRAWN cloud is rotated off the walls, measured directly.\n"
+                   "# dtheta_deg = the yaw about the robot that best lays the cloud on the room polygon.\n"
+                   "# resid_before/after = mean point-to-wall distance (m) at 0 and at dtheta.\n"
+                   "# ★IF resid_after IS NOT MUCH BELOW resid_before, THE FIT MEANS NOTHING and the\n"
+                   "#   error is not a rigid rotation — do not read dtheta as an angle in that case.\n"
+                   "# n_pts = wall-ish returns used (within 0.5 m of the polygon before rotating).\n"
+                   "# dx,dy = the TRANSLATION the fit needed as well, measured at the robot (m).\n"
+                   "#   A pure rotation lag would need none. If dx,dy are large the cloud is displaced,\n"
+                   "#   not merely turned; if resid_after stays high even so, it is DEFORMED and no\n"
+                   "#   rigid transform — hence no single late stage — can be the explanation.\n"
+                   "# near_frac = fraction of SAMPLED returns lying within 0.5 m of a wall.\n"
+                   "#   ~1 when the cloud is registered; COLLAPSING is the large-excursion signal, and\n"
+                   "#   a row with empty fit columns means too few wall points to fit at all — which is\n"
+                   "#   itself the measurement, not a gap in it.\n"
+                   "# ctrl_near = the SAME near-wall fraction for the CONTROL buffer (ESDF /\n"
+                   "#   obstacle set / safety gate). If it tracks near_frac, the robot's own world model\n"
+                   "#   rotates off during a pivot too and this was never a drawing problem. -1 = not\n"
+                   "#   enough points to say.\n"
+                   "t_ms,omega,dtheta_deg,dx,dy,resid_before,resid_after,n_pts,near_frac,ctrl_near\n";
+    }
+
+    // ★★★A SPARSE ROW IS THE SIGNAL, NOT A REASON TO STAY SILENT. The previous version returned here
+    // when fewer than 30 returns lay near a wall — which is EXACTLY what a badly-swung cloud looks
+    // like, so the instrument dropped the frames it existed to catch and reported only the healthy
+    // ones. Same defect as the +-12 deg search window: unable to represent the effect, it answered
+    // about something else. Now the row is always written and `near_frac` carries the verdict: at rest
+    // ~all sampled returns sit near a wall, and a cloud rotated far off has almost none.
+    const float near_frac = static_cast<float>(pts.size())
+                          / static_cast<float>(std::max<std::size_t>(1, (count + stride - 1) / stride));
+    if (pts.size() < 30)
+    {
+        if (cloud_fit_csv_open_ and cloud_fit_csv_.is_open())
+            cloud_fit_csv_ << std::format("{},{:.4f},,,,{:.4f},,{},{:.3f},\n",
+                                          t_ms, room_vel_.omega, -1.f, pts.size(), near_frac);
+        return;
+    }
+
+    // Nearest point ON the polygon boundary, not just its distance — a rigid fit needs the
+    // correspondence, not only the error.
+    const auto closest_on_wall = [this](const Eigen::Vector2f &p)
+    {
+        Eigen::Vector2f best = room_polygon_.front();
+        float best_d = std::numeric_limits<float>::max();
+        for (std::size_t i = 0, n = room_polygon_.size(); i < n; ++i)
+        {
+            const Eigen::Vector2f a = room_polygon_[i], b = room_polygon_[(i + 1) % n];
+            const Eigen::Vector2f ab = b - a;
+            const float len2 = ab.squaredNorm();
+            const float u = len2 > 1e-9f ? std::clamp((p - a).dot(ab) / len2, 0.f, 1.f) : 0.f;
+            const Eigen::Vector2f q = a + u * ab;
+            if (const float d = (p - q).norm(); d < best_d) { best_d = d; best = q; }
+        }
+        return best;
+    };
+    const auto residual_of = [&](const std::vector<Eigen::Vector2f> &v)
+    {
+        double acc = 0.0;
+        for (const auto &p : v) acc += dist_to_wall(p);
+        return static_cast<float>(acc / static_cast<double>(v.size()));
+    };
+
+    // ★FIT ALL THREE DEGREES OF FREEDOM, NOT JUST YAW. A yaw-only fit left 0.138 m of the 0.182 m
+    // residual unexplained at fast rotation while explaining most of it at rest — which says the error
+    // is not a pure rotation about the robot, and a one-parameter instrument cannot tell a translation
+    // apart from a deformation. Closed-form 2-D rigid fit (Umeyama) on point-to-nearest-wall
+    // correspondences, iterated: ICP against a known polygon, which converges in a handful of passes
+    // because the correspondences are to a fixed map rather than another cloud.
+    float R_tot_seed = 0.f;
+    const float before = residual_of(pts);
+
+    // ★★★GLOBAL COARSE SCAN FIRST, OVER THE WHOLE CIRCLE. The previous version searched +-12 deg and
+    // reported 5.63 deg at fast rotation — which was the WINDOW EDGE, not a measurement. The observed
+    // swing reaches beyond 100 deg, and an instrument that cannot represent the effect it is pointed at
+    // will always return something plausible instead of admitting it is out of range. ICP alone will
+    // not rescue that either: it converges to the nearest local minimum, and against a near-rectangular
+    // room the minima sit ~90 deg apart. So: scan the full circle coarsely, THEN refine.
+    // ★An error of 100 deg is not a lag of any kind — at 0.9 rad/s that would be 1.9 s of latency. It
+    // is a discrete jump, and the two known sources of one that size are the room fit's symmetry modes
+    // (gt_analyze: 3 modes, 24.7% of cycles in transition) and the deliberate 110.6 deg proto/graph yaw
+    // mismatch P3Bot.proto documents as fragile.
+    std::vector<Eigen::Vector2f> cur = pts;
+    {
+        float coarse_best = before, coarse_th = 0.f;
+        for (int k = -90; k < 90; ++k)                     // +-180 deg at 2 deg
+        {
+            const float th = static_cast<float>(k) * 2.f * static_cast<float>(M_PI) / 180.f;
+            const Eigen::Rotation2Df R(th);
+            double acc = 0.0;
+            for (const auto &p : pts) acc += dist_to_wall(robot + R * (p - robot));
+            if (const float r = static_cast<float>(acc / pts.size()); r < coarse_best)
+            { coarse_best = r; coarse_th = th; }
+        }
+        if (coarse_th != 0.f)
+        {
+            const Eigen::Rotation2Df R(coarse_th);
+            for (auto &p : cur) p = robot + R * (p - robot);
+            R_tot_seed = coarse_th;
+        }
+    }
+    Eigen::Rotation2Df R_tot(R_tot_seed);
+    Eigen::Vector2f t_tot = robot - Eigen::Rotation2Df(R_tot_seed) * robot;
+    for (int iter = 0; iter < 6; ++iter)
+    {
+        Eigen::Vector2f mu_p = Eigen::Vector2f::Zero(), mu_q = Eigen::Vector2f::Zero();
+        std::vector<Eigen::Vector2f> qs;
+        qs.reserve(cur.size());
+        for (const auto &p : cur) { const auto q = closest_on_wall(p); qs.push_back(q); mu_p += p; mu_q += q; }
+        mu_p /= static_cast<float>(cur.size());
+        mu_q /= static_cast<float>(cur.size());
+        double sxy = 0.0, sxx = 0.0;
+        for (std::size_t i = 0; i < cur.size(); ++i)
+        {
+            const Eigen::Vector2f a = cur[i] - mu_p, b = qs[i] - mu_q;
+            sxx += a.x() * b.x() + a.y() * b.y();
+            sxy += a.x() * b.y() - a.y() * b.x();
+        }
+        const float dth = static_cast<float>(std::atan2(sxy, sxx));
+        const Eigen::Rotation2Df R(dth);
+        const Eigen::Vector2f t = mu_q - R * mu_p;
+        for (auto &p : cur) p = R * p + t;
+        R_tot = Eigen::Rotation2Df(R_tot.angle() + dth);
+        t_tot = R * t_tot + t;
+        if (std::abs(dth) < 1e-5f and t.norm() < 1e-4f) break;
+    }
+    const float best_res = residual_of(cur);
+    const float best_dth = R_tot.angle();
+    // The translation the fit needed, measured AT THE ROBOT: how far the cloud had to slide, over and
+    // above turning, to land on the walls.
+    const Eigen::Vector2f slide = (R_tot * robot + t_tot) - robot;
+
+    // The same near-wall test on the CONTROL cloud. Sampled the same way so the two are comparable.
+    float ctrl_near = -1.f;
+    if (ctrl_buf != nullptr)
+    {
+        if (const auto [c2] = ctrl_buf->read_last(); c2.has_value())
+        {
+            const auto &[cx, cy, cz] = c2.value();
+            const std::size_t n2 = std::min({cx.size(), cy.size(), cz.size()});
+            if (n2 > 50)
+            {
+                const std::size_t st2 = std::max<std::size_t>(1, n2 / 400);
+                std::size_t seen = 0, near = 0;
+                for (std::size_t i = 0; i < n2; i += st2)
+                {
+                    ++seen;
+                    if (dist_to_wall(Eigen::Vector2f(cx[i], cy[i])) < 0.50f) ++near;
+                }
+                if (seen > 0) ctrl_near = static_cast<float>(near) / static_cast<float>(seen);
+            }
+        }
+    }
+
+    if (cloud_fit_csv_.is_open())
+    {
+        cloud_fit_csv_ << std::format("{},{:.4f},{:.3f},{:.4f},{:.4f},{:.4f},{:.4f},{},{:.3f},{:.3f}\n",
+                                      t_ms, room_vel_.omega,
+                                      best_dth * 180.f / static_cast<float>(M_PI),
+                                      slide.x(), slide.y(), before, best_res, pts.size(), near_frac,
+                                      ctrl_near);
+        cloud_fit_csv_.flush();
+    }
+}
+
+void ControllerSession::log_residual_world(std::uint64_t t_ms,
+                                           const ControllerObstacleTracker &obstacle_tracker,
+                                           const ControllerRobotPose &robot_pose)
+{
+    if (t_ms < residual_world_last_ms_ + 200) return;   // 5 Hz; the grid updates far slower than we run
+    residual_world_last_ms_ = t_ms;
+
+    if (not residual_world_csv_open_)
+    {
+        residual_world_csv_.open("residual_world.csv", std::ios::out | std::ios::trunc);
+        residual_world_csv_.imbue(std::locale::classic());   // decimal POINT regardless of LANG (CLAUDE.md)
+        residual_world_csv_open_ = true;
+        if (residual_world_csv_.is_open())
+            residual_world_csv_
+                << "# WHAT THE PLANNER'S WORLD ACTUALLY CONTAINS, 5 Hz. With retina down, residual's\n"
+                   "# occupancy grid is the ONLY channel that can put a real obstacle in front of A*.\n"
+                   "# n_cells    = cells residual published this cycle (0 = the planner sees empty floor)\n"
+                   "# d_near_m   = distance from the ROBOT to the nearest of them (-1 = none at all)\n"
+                   "# near_bearing_deg = where it is, in the ROBOT frame (0 = straight ahead)\n"
+                   "# n_within_2m = how many sit inside 2 m. A picket fence and a wall differ HERE, not\n"
+                   "#   in the total: 65 cells all smaller than the footprint is not an obstacle set.\n"
+                   "# n_obst     = the OTHER obstacle channel, for contrast; expect 0 with retina down.\n"
+                   "# occ_cells  = cells the grid planner actually rasterised, room mask included, so a\n"
+                   "#   residual grid that never reaches the planner shows up as n_cells>0 with occ flat.\n"
+                   "t_ms,n_cells,cell_size_m,d_near_m,near_bearing_deg,n_within_2m,n_obst,occ_cells,rx,ry,rtheta\n";
+    }
+    if (not residual_world_csv_.is_open()) return;
+
+    const Eigen::Vector2f robot = robot_pose.pos.head<2>().cast<float>();
+    const auto &cells = obstacle_tracker.residual_cells();
+    float d_near = -1.f, bearing = 0.f;
+    int within_2m = 0;
+    for (const auto &c : cells)
+    {
+        const float d = (c - robot).norm();
+        if (d < 2.f) ++within_2m;
+        if (d_near < 0.f or d < d_near)
+        {
+            d_near = d;
+            const Eigen::Vector2f v = c - robot;
+            const float b = std::atan2(v.y(), v.x()) - static_cast<float>(robot_pose.theta);
+            bearing = std::atan2(std::sin(b), std::cos(b)) * 180.f / static_cast<float>(M_PI);
+        }
+    }
+
+    residual_world_csv_ << std::format("{},{},{:.3f},{:.3f},{:.1f},{},{},{},{:.3f},{:.3f},{:.3f}\n",
+                                       t_ms, cells.size(), obstacle_tracker.residual_cell_size_m(),
+                                       d_near, bearing, within_2m,
+                                       obstacle_tracker.obstacle_polygons().size(),
+                                       grid_planner_.has_world() ? grid_planner_.occupied_cells() : 0L,
+                                       robot.x(), robot.y(), static_cast<float>(robot_pose.theta));
+    residual_world_csv_.flush();
 }
 
 void ControllerSession::log_route_geometry()
@@ -1783,7 +2248,7 @@ float ControllerSession::route_speed_limit(float v_cap, float a_decel) const
         // rotational-acceleration limit never binds at all — so if the robot is to take a REALLY sharp
         // turn more carefully than a wide one, the budget itself has to know how sharp the turn is.
         // See ControllerRuntimeParams::sharp_turn_slowdown for the measured sweep; q = 0 is the old law.
-        const float kr = k_avg * rc::RobotFootprint::shadow().circumscribed_radius();
+        const float kr = k_avg * approach_body_.circumscribed_radius();
         const float sharp = 1.f + std::max(0.f, params_->sharp_turn_slowdown) * kr * kr;
         const float rot_budget = std::max(0.05f, params_->max_rot_speed_rps)
                                * (route_tracker_active_ ? rot_headroom_ : 1.0f) / sharp;
@@ -2004,7 +2469,7 @@ bool ControllerSession::drive_mission_route(const ControllerPlanningStep &step,
                                                  w_max, tp.plain_W, tp.plain_T_lag,
                                                  route_tracker_active_ ? rot_headroom_ : 1.0f,
                                                  params_ ? params_->sharp_turn_slowdown : 0.f,
-                                                 rc::RobotFootprint::shadow().circumscribed_radius());
+                                                 approach_body_.circumscribed_radius());
     mission_.set_route_ideal(ideal.tv_v, ideal.tv_w, ideal.rms_e, ideal.valid);
     std::println("[route] ideal floor: TV(v*)={:.2f} m/s  TV(w*)={:.2f} rad/s  rms(e*)={:.4f} m "
                  "over {:.1f} m ({:.0f}% of the route contributes to TV(w*)){}",
@@ -3401,6 +3866,35 @@ void ControllerSession::step_route_band(const DrivenCurve &curve,
     const rc::RouteSpline &spline = *curve.spline;
     const std::size_t M = curve.control_count;
     if (M < 8) return;                       // nothing a window can be carved out of
+
+    // ── A ROUTE THE ROBOT IS NOT ADVANCING ALONG MUST NOT BE DEFORMED ────────────────────────────
+    // ★★★MEASURED, LIVE, 2026-08-26 — THIS IS WHERE THE "GIANT LOOP" COMES FROM. While PLAIN holds the
+    // wheels at zero and pivots to face a target behind the robot, arc-length progress is frozen, so the
+    // window below is the SAME stretch of route every cycle — and the band re-solved it 20 times a
+    // second. Its own log shows the result: over 1.65 s of one pivot (tracker_diag: adv 0.000,
+    // rot 0.800 saturated, pose pinned at (-0.10,1.28), path generation unchanged) the bending energy
+    // e_kappa grew from 0.0034 to 0.354 — a hundredfold — with cost_before RISING monotonically
+    // cycle after cycle (0.008 -> 0.57) even though every individual solve lowered the cost it was
+    // handed. Mean control-point movement 3-8 cm per solve, singles up to 0.87 m, for 30 s. The route
+    // curled up into a loop while the robot stood still. Meanwhile plan_geometry.csv records the path
+    // A* and the one-shot optimiser had produced: detour 0.994-1.001, deviation 0.000 m, 0 deg of
+    // turning — a straight line. The planner was never the problem; the accumulator was.
+    // ★WHY IT CANNOT CONVERGE. The field is the LIVE ROBOT-FRAME ESDF, so under a pure rotation it is
+    // re-rasterised every cycle from a box that turns with the body; and with the route's own minimum
+    // clearance (0.45-0.75 m here) permanently below d_target (0.925 m), the one-sided term has a
+    // deficit it can never discharge. A descent that is re-excited every cycle by a field moving for
+    // reasons unrelated to the route is not an optimiser, it is a random walk with a bias.
+    // ★AND RE-SOLVING BUYS NOTHING ANYWAY: same window, same objective, a robot that has not moved.
+    // The band exists to shape the route the robot is ABOUT TO DRIVE. So it runs while the robot is
+    // driving, and holds while it turns on the spot. No threshold, no timer — it asks the tracker
+    // whether the wheels are deliberately at zero, which is the same latch the pivot itself is.
+    if (path_controller.tracker_pivoting())
+    {
+        // A row, not silence. "The band is enabled and did nothing" and "the band stopped writing" look
+        // identical in a file that skips its refusals, and this file exists to tell them apart.
+        log_band_diagnostics(overlay_now_ms_, rc::RouteOptimizerReport{}, 0, 0, M);
+        return;
+    }
     if (params_->band_period_cycles > 1 and (band_cycle_++ % params_->band_period_cycles) != 0) return;
 
     // ── The window, in control-point indices ──
@@ -4756,6 +5250,7 @@ void ControllerSession::update_overlay_extrapolation(const ControllerWorldModel 
             if (obstacle_tracker.twist_pred_err_deg().has_value())
                 overlay_csv_ << *obstacle_tracker.twist_pred_err_deg();
             overlay_csv_ << ',' << tracker_pose_lead_m_;
+
             overlay_csv_ << '\n';
             overlay_csv_.flush();
         }

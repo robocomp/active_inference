@@ -80,6 +80,8 @@
 
 #include <cmath>
 #include <cstdint>
+#include <optional>
+#include <string>
 #include <vector>
 #include <Eigen/Dense>
 
@@ -93,7 +95,50 @@ class RobotFootprint
 {
 public:
     // The Shadow robot, measured from its own mesh (see the file header for provenance and the 0.55 m caveat).
+    // ★STILL COMPILED IN, AND STILL SHADOW'S. It has three jobs now: the fallback when no mesh can be read,
+    // the reference every startup report is diffed against, and Shadow's ACTUAL body — because shadow.obj
+    // omits the four wheels (|x|max 0.2420 against the true 0.2464; ROBOT_GEOMETRY.md), so for that one robot
+    // the mesh is NOT the whole silhouette and deriving from it would be a 4.4 mm regression.
     static RobotFootprint shadow();
+
+    // ── A BODY THAT IS NOT COMPILED IN ────────────────────────────────────────────────────────────
+    // Validating constructor. Rejects rather than half-accepts: fewer than 3 vertices, zero/negative area,
+    // clockwise winding, or an origin outside the polygon. `why` (optional) receives the reason.
+    // ★THE POLYGON MUST BE IN THE ROBOT FRAME — x right, y FORWARD, origin at the rotation centre. A mesh in
+    // some other frame is the caller's problem to rotate BEFORE calling this, and getting that wrong is
+    // silent: the class cannot tell a body from the same body turned 90 degrees.
+    static std::optional<RobotFootprint> from_polygon(std::vector<Eigen::Vector2f> poly,
+                                                      std::string *why = nullptr);
+
+    // Where this body came from — "compiled:shadow" or "mesh:<path> yaw+90". Carried so a log line, a mission
+    // manifest or a route snapshot can never attribute a run to the wrong robot.
+    const std::string &source() const { return source_; }
+    void set_source(std::string s) { source_ = std::move(s); }
+
+    // Everything a caller needs to PRINT about a mesh-derived body, in one object. Deliberately not a bool:
+    // "it loaded" is not the question — the question is what shape it loaded and how that differs from the
+    // body the robot was driving a moment ago.
+    struct MeshReport
+    {
+        bool ok = false;
+        std::string reason;                  // why not, when !ok
+        std::string path;
+        float yaw_offset_rad = 0.f;
+        long  vertices = 0, vertices_rejected = 0;
+        Eigen::Vector3f bb_min = Eigen::Vector3f::Zero();   // MESH frame
+        Eigen::Vector3f bb_max = Eigen::Vector3f::Zero();
+        std::size_t hull_raw = 0, hull_simplified = 0;
+        float area_growth_frac = 0.f;
+        // ROBOT frame, after the yaw offset. Margin NOT applied.
+        float area_m2 = 0.f, inscribed = 0.f, circumscribed = 0.f, x_max = 0.f, y_max = 0.f;
+        Eigen::Vector2f centroid = Eigen::Vector2f::Zero();
+    };
+
+    // Read the mesh, rotate it into the robot frame, hull it, and check it looks like a mobile base.
+    // `yaw_offset_rad` turns MESH coordinates into ROBOT coordinates (P3Bot's mesh is native forward=+x while
+    // the robot frame is forward=+y, so it needs +pi/2; Shadow's mesh is already robot-framed, so 0).
+    static std::optional<RobotFootprint> from_obj(const std::string &path, float yaw_offset_rad,
+                                                  MeshReport &report);
 
     // An explicit, uniform outward margin (m). This is the ONE place a standoff belongs: it is a stated
     // preference, not a geometric fact, and keeping it separate from the polygon means the true shape stays
@@ -165,6 +210,7 @@ public:
 
 private:
     std::vector<Eigen::Vector2f> poly_;
+    std::string source_ = "compiled:shadow";
     float safety_margin_m_ = 0.0f;
 };
 

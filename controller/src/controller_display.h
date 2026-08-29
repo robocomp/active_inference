@@ -135,6 +135,9 @@ public:
     // NEGATIVE = the limiter saw no covariance at all. That is genuinely UNDEFINED rather than zero, so
     // the trace breaks (add_point treats non-finite as a gap marker) instead of drawing a confident 0.
     void set_uncertainty_trace_value(float sigma_on_speed_axis);
+    // Scans/second the controller actually processed (wall time). -1 = not measured yet, shown as
+    // "---" rather than 0, because "no reading" and "stalled" are different states.
+    void set_lidar_rate_hz(float hz);
     // ── THE SAME TRACE, WHEN SOMEONE ELSE IS DRIVING ─────────────────────────────────────────────
     // update_velocity_trace above is fed from OUR motion commander's output loop, so the panel went
     // blank whenever anything else commanded the base — a joystick with this controller halted, most
@@ -179,6 +182,7 @@ private:
     // rather than a plain float because those are two different threads and the profile path next door
     // already made exactly this handoff atomic for the same reason.
     std::atomic<float> unc_trace_{-1.f};
+    std::atomic<float> lidar_hz_{-1.f};
     // Set by the output-thread feed, cleared by the per-cycle external feed: "did our own commander
     // speak since the last control cycle". An own-source-wins arbitration with no tuned time constant —
     // the window IS one control cycle, so it scales with whatever rate the loop happens to run at.

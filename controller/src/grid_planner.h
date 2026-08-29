@@ -97,7 +97,23 @@ public:
     };
 
     Params params;
+    // ★DEFAULT ONLY. The body the robot actually has is installed by the session from the mesh the graph
+    // names (see controller_robot_body.h); this default exists so a planner constructed before that read
+    // still has a shape, and so the offline tools keep a body without a graph.
     RobotFootprint footprint = RobotFootprint::shadow();
+
+    // Install a different body. ★MUST invalidate offsets_: the per-heading rasterisation IS the footprint,
+    // and rebuild_offsets() caches on (cell size, margin) alone — so a changed POLYGON with an unchanged
+    // cell size would keep rasterising the old robot, silently, for the life of the process.
+    void set_footprint(RobotFootprint fp)
+    {
+        footprint = std::move(fp);
+        offsets_.clear();
+        offsets_legacy_.clear();
+        offsets_margin_ = -1.f;
+        dist_valid_ = false;
+        rebuild_offsets();
+    }
 
     // Rasterise the world the controller already holds. `room_polygon` bounds free space — anything OUTSIDE it
     // is occupied, which is how walls enter without needing a separate representation. `obstacles` are filled

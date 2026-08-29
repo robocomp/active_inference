@@ -80,6 +80,23 @@ public:
             return lcd;
         };
 
+        // ── LIDAR RATE, FIRST THING IN THE ROW ───────────────────────────────────────────────
+        // The rate the CONTROLLER actually processes scans at, in wall time — not the sensor's
+        // nominal rate. It sits first because when the overlay lags, this is the number that says
+        // whether the cause is upstream (frames are not arriving) or downstream (they are arriving
+        // and something else is late), and that is the first fork in every such diagnosis.
+        pose_row->addWidget(new QLabel("lidar", pose_panel));
+        lidar_hz_lcd_ = make_lcd(pose_panel, 4,
+            QStringLiteral("LiDAR scans per second ACCEPTED and processed by this controller, in wall "
+                           "time over a ~2 s window.\n"
+                           "NOT the sensor's nominal rate, and not the stamp-spacing estimate — those "
+                           "are blind to dropped frames.\n"
+                           "The overlay is registered ONE FRAME OLD, so this number IS the display "
+                           "lag: 20 Hz = 50 ms, 10 Hz = 100 ms.\n"
+                           "Decays toward 0 during a stall rather than freezing at the last good value."));
+        pose_row->addWidget(lidar_hz_lcd_);
+        pose_row->addWidget(new QLabel("Hz", pose_panel));
+
         pose_row->addWidget(new QLabel("adv", pose_panel));
         cmd_adv_lcd_ = make_lcd(pose_panel, 5, QStringLiteral("Commanded forward speed (mm/s)."));
         pose_row->addWidget(cmd_adv_lcd_);
@@ -306,6 +323,25 @@ public:
         }
     }
 
+    // Scans/second the controller ACCEPTED, in wall time. Dedups like set_cmd_vel: it is pushed every
+    // cycle and re-displaying an unchanged reading churns Qt for nothing.
+    // ★"---" for "not measured yet" is NOT the same as 0.0, which means the frames STOPPED. A display
+    // that showed the same thing for both would hide a stall behind a blank.
+    void set_lidar_hz(float hz)
+    {
+        if (lidar_hz_lcd_ == nullptr) return;
+        if (hz < 0.f)
+        {
+            if (not std::isfinite(lidar_hz_shown_)) return;
+            lidar_hz_shown_ = std::numeric_limits<float>::quiet_NaN();
+            lidar_hz_lcd_->display(QStringLiteral("---"));
+            return;
+        }
+        if (std::isfinite(lidar_hz_shown_) and std::abs(hz - lidar_hz_shown_) < 0.05f) return;
+        lidar_hz_shown_ = hz;
+        lidar_hz_lcd_->display(QString::number(static_cast<double>(hz), 'f', 1));
+    }
+
     // The commanded base velocity, as numbers rather than a sentence. Dedups: this is called on every
     // command (~20 Hz) and re-displaying an unchanged value churns Qt for nothing.
     void set_cmd_vel(float adv_mm_s, float side_mm_s, float rot_rps)
@@ -445,6 +481,8 @@ protected:
     }
 
 private:
+        QLCDNumber *lidar_hz_lcd_ = nullptr;
+    float lidar_hz_shown_ = std::numeric_limits<float>::quiet_NaN();
     QLCDNumber *cmd_adv_lcd_ = nullptr;
     QLCDNumber *cmd_side_lcd_ = nullptr;
     QLCDNumber *cmd_rot_lcd_ = nullptr;

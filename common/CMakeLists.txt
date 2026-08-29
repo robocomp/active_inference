@@ -136,6 +136,10 @@ endfunction()
 #   detectability/detectability.h            P(detect | fill, visible_frac) — the detector's INVERSE model
 #   nbv/viewpoint_score.h                    detection-WEIGHTED next-best-view (pure Eigen; testable headless)
 #   nbv/graph_obstacles.h                    its DSR-side adapter (reads other objects' footprints)
+#   view_field/{view_field,phantom_feed}.h   learnt p_FA(cell x bearing x label); persisted CSV
+#   place_memory/place_map.h                 panoramic appearance keyframes -> a pose MIXTURE
+#                                            (Eigen + stdlib ONLY — no DSR, so the offline tools and
+#                                             run_tests.sh build it in seconds)
 #
 # Some of these include <dsr/...> (depth_projection, object_anchor_contract, affordance_protocol,
 # nbv/graph_obstacles), so the DSR libs ride along on the INTERFACE. Qt6::Core rides along too: dsr_api.h pulls in
@@ -276,6 +280,24 @@ target_link_libraries(ai_common_graph3d PUBLIC ai_common_core)
 add_library(ai_common::graph3d ALIAS ai_common_graph3d)
 
 # =====================================================================================
+# ai_common::robot — the robot's own CAPABILITY, read off the robot node.
+#
+# Deliberately its own target rather than a few more lines inside a consumer: the whole point of the
+# capability channel is that ONE component owns what the hardware can do (robot_concept, from
+# SVD48VBase's own config) and every other agent reads it. A per-agent copy of the reader is a per-agent
+# opportunity to disagree about units or about what an absent attribute means — and "an agent's own
+# constant standing in for a hardware fact" is precisely the defect this channel exists to close.
+#
+# Dependency cluster is DSR + Qt6::Core, i.e. exactly ai_common_core's interface; nothing else.
+# Consumers today: controller (speed/accel policy audit). room_concept is the next one — its
+# POSE_CLAMP_W_MAX is currently a copy of the controller's comfort setting.
+# =====================================================================================
+add_library(ai_common_robot STATIC robot_capability/robot_capability.cpp)
+ai_common_defaults(ai_common_robot)
+target_link_libraries(ai_common_robot PUBLIC ai_common_core)
+add_library(ai_common::robot ALIAS ai_common_robot)
+
+# =====================================================================================
 # ai_common::obj — Wavefront OBJ loader for the display meshes named by nodes' mesh_path attr.
 # Qt6::Gui for <QVector3D>; no DSR.
 # =====================================================================================
@@ -293,6 +315,10 @@ add_library(ai_common::obj ALIAS ai_common_obj)
 # =====================================================================================
 add_library(ai_common_geometry STATIC
   robot_footprint/robot_footprint.cpp
+  # The robot's silhouette read from the mesh the GRAPH names, so a P3Bot stops planning as a Shadow.
+  # Pure <charconv>/<fstream>: it must never acquire a Qt or mesh-library dependency, or controller/tools/
+  # stops building without Qt — which is the property this target exists to protect.
+  robot_footprint/mesh_hull.cpp
   robust_metrics/robust_metrics.cpp
 )
 ai_common_defaults(ai_common_geometry)

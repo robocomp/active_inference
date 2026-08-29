@@ -14,6 +14,7 @@
 #include "controller_affordance_view.h"
 #include "controller_mission.h"
 #include "../../common/affordance_protocol/affordance_protocol.h"
+#include "../../common/robot_capability/robot_capability.h"
 #include "controller_motion_commander.h"
 #include "controller_obstacle_tracker.h"
 #include "controller_runtime_types.h"
@@ -334,6 +335,26 @@ private:
     bool route_geom_csv_open_ = false;
     int  route_event_id_ = 0;
     void log_route_geometry();
+    // ── WHAT THE PLANNER'S WORLD CONTAINS, OVER TIME ─────────────────────────────────────────────
+    // With retina down, residual_concept's occupancy grid is the ONLY channel that can put a real
+    // obstacle in front of A*, and nothing recorded whether it was doing so. See the definition.
+    // Cloud-vs-icon pose pairing — see the block in build_planning_step.
+    std::ofstream overlay_pairing_csv_;
+    bool overlay_pairing_csv_open_ = false;
+    std::uint64_t overlay_pairing_last_ms_ = 0;
+
+    std::ofstream residual_world_csv_;
+    bool residual_world_csv_open_ = false;
+    std::uint64_t residual_world_last_ms_ = 0;
+    void log_residual_world(std::uint64_t t_ms, const ControllerObstacleTracker &obstacle_tracker,
+                            const ControllerRobotPose &robot_pose);
+    // Fits the drawn cloud onto the room polygon and records the yaw error against omega — the
+    // symptom itself, rather than another suspected cause of it. See the definition.
+    std::ofstream cloud_fit_csv_;
+    bool cloud_fit_csv_open_ = false;
+    std::uint64_t cloud_fit_last_ms_ = 0;
+    void log_cloud_wall_fit(std::uint64_t t_ms, ControllerObstacleTracker &obstacle_tracker,
+                            const ControllerRobotPose &robot_pose);
     // WORLD SNAPSHOT at route-build time: the planner's raster, the waypoints (as recorded AND as
     // repaired), and every parameter the build consumed. It exists so the route can be rebuilt offline
     // by tools/route_bench against exactly this world — the route optimiser has weights whose effect is
@@ -738,7 +759,18 @@ private:
 
     std::uint64_t approach_blocked_log_ms_ = 0;   // rate limit for "found nowhere better"
     // The body used by the approach re-check, held rather than rebuilt per call (shadow() allocates).
+    // ★THE ONE BODY. Built once from the mesh the graph names (controller_robot_body.h) and pushed into the
+    // grid planner and the trajectory controller; every other consumer reads it from here. It was previously
+    // a fresh RobotFootprint::shadow() temporary at eleven call sites, which is why a per-robot shape could
+    // not be delivered at all: a static factory has nowhere to put "which robot".
     rc::RobotFootprint approach_body_ = rc::RobotFootprint::shadow();
+    bool body_loaded_ = false;                 // one-shot guard: load when the robot node first appears
+    // ★WHAT THIS BASE CAN DO, as opposed to what we have chosen to ask of it. Read once beside the body
+    // (the robot node states both), and held rather than re-read because it is a property of the hardware,
+    // not a signal. Every field is optional and absent means "the base did not say — keep our constant",
+    // never zero. Nothing here clamps anything: see common/robot_capability/robot_capability.h on why the
+    // audit reports and does not retune.
+    rc::BaseCapability base_capability_;
     // Re-ask the standpoint against the LIVE return cloud once the robot is close enough for that cloud
     // to carry information about it, and move it if it is occupied by something the grid has forgotten.
     // Mutates step.target (position and, when it moves, the facing yaw that aims at the object).

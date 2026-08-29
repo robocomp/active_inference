@@ -11,6 +11,10 @@ find_package(Eigen3 QUIET NO_MODULE)
 
 add_executable(route_bench
   route_bench.cpp
+  # rc::mesh — the robot's silhouette read from its own mesh. Linked here (rather than via
+  # ai_common::geometry alone) for the same reason every other module is: the bench must run the SAME
+  # code the component does, and its self_test is the only place the es_ES locale trap is exercised.
+  ${CMAKE_CURRENT_LIST_DIR}/../../common/robot_footprint/mesh_hull.cpp
   # PlainTracker rides along for its self_test() only — it depends on RouteSpline and the geometry lib
   # and nothing else, so --self-test can cover the arc-length projection alongside the route modules.
   ${CMAKE_CURRENT_LIST_DIR}/../src/trackers/plain_tracker.cpp

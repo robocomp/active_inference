@@ -71,6 +71,17 @@ struct ControllerParams
     // Planning grid resolution. Independent of the residual's evidence grid: the planner does not need
     // centimetre fidelity, and cell count drives both memory and search time quadratically.
     float planner_cell_size_m = 0.06f;
+    // ── THE MESH'S OWN FRAME, WHICH IS NOT ALWAYS THE ROBOT'S ────────────────────────────────────
+    // Degrees to rotate the robot's mesh into the ROBOT frame (x right, y FORWARD). This is a property of
+    // the ASSET, not of the robot: P3Bot's mesh comes from a proto that wraps the whole machine in
+    // `Pose { rotation 0 0 1 1.5708 }` so its native forward is +x, and every sensor RT in p3bot.json is
+    // the proto value rotated by exactly +90 deg (verified: helios, zed, ricoh all match to 1e-6).
+    // ★THE SIGN MATTERS MORE THAN THE VALUE. On P3Bot, +90 makes the body 22 mm WIDER than the compiled
+    // hull (correct); 0 makes it 45 mm NARROWER — the same file, the error moved onto the axis along which
+    // corridors close. It is logged at startup beside the resulting extents so it can be read, not assumed.
+    // ★The proper cure is to re-export the asset in the robot frame and delete this knob; until then it is
+    // stated here rather than guessed from the mesh's aspect ratio.
+    float robot_mesh_yaw_deg = 0.f;
     // A* CLEARANCE PREFERENCE — see GridPlanner::Params::clearance_weight. The search cost was pure
     // shortest-path, so it hugged anything the footprint test would legally allow and the route
     // optimiser downstream had to undo it. This makes tight cells cost more inside the search itself.

@@ -50,7 +50,9 @@ void ControllerDisplay::initialize(rc::LidarPointBuffer *lidar_buffer, Callbacks
     restore_window_geometry();
     custom_widget_->show();
 
-    viewer_2d_ = std::make_unique<rc::Viewer2D>(custom_widget_->frame, QRectF(-5.0, -5.0, 10.0, 10.0), true);
+    // No axis from the base viewer: it is pinned to the centre of this initial view rect, not to the
+    // room. The only axis drawn is the one on the room polygon centroid (see Viewer2D::draw_room_polygon).
+    viewer_2d_ = std::make_unique<rc::Viewer2D>(custom_widget_->frame, QRectF(-5.0, -5.0, 10.0, 10.0), false);
     viewer_2d_->add_robot(0.5f, 0.6f, 0.f, 0.f, QColor("Tomato"));
     viewer_2d_->set_lidar_buffer(lidar_buffer);
     viewer_2d_->set_lidar_visible(custom_widget_->lidar_toggle_btn != nullptr
@@ -301,6 +303,12 @@ void ControllerDisplay::update_velocity_trace_external(float ref_adv_mps, float 
 void ControllerDisplay::set_uncertainty_trace_value(float sigma_on_speed_axis)
 {
     unc_trace_.store(sigma_on_speed_axis, std::memory_order_relaxed);
+}
+
+void ControllerDisplay::set_lidar_rate_hz(float hz)
+{
+    lidar_hz_.store(hz, std::memory_order_relaxed);
+    if (custom_widget_) custom_widget_->set_lidar_hz(hz);
 }
 
 void ControllerDisplay::update_affordance_efe(const std::vector<AffordanceEfeSample> &samples)

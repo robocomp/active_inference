@@ -136,6 +136,18 @@ public:
     // with a different window, which is why both are logged.
     [[nodiscard]] std::optional<float> tracker_arc_length() const { return plain_tracker_.arc_length_hint(); }
 
+    // Is PLAIN holding the wheels at zero and turning on the spot — the start alignment or a mid-route
+    // pivot? ★ControllerSession::step_route_band reads it to HOLD the elastic band: a route the robot is
+    // not advancing along must not be deformed, and re-solving the same window at 20 Hz against a field
+    // that rotates with the body is what curled a straight path into a loop (measured — see there).
+    [[nodiscard]] bool tracker_pivoting() const { return plain_tracker_.pivoting(); }
+
+    // Install the robot's real body. ★It also moves the ESDF SELF-FILTER FLOOR, which is
+    // max(esdf_self_filter_radius, body_extent_max() + 0.08) — on P3Bot that is 0.405 -> 0.442 m, so more
+    // near-body returns are discarded. That is correct (the body really is bigger) but it must be noticed
+    // here rather than discovered later in a census column.
+    void set_footprint(RobotFootprint fp) { footprint_ = std::move(fp); }
+
     // `force_reset` = "this is a NEW curve", even if it arrives in the SAME object. A mission route is
     // built once and its address identifies it, but every point target — click or affordance — is
     // refitted into the session's one `plan_spline_` member, whose address never changes. Comparing
@@ -298,6 +310,8 @@ private:
     // The robot's real shape — the SAME polygon the global planner collides (common/robot_footprint), so the
     // two layers cannot disagree about what fits. Previously the MPPI used a 0.25 m disc while the planner
     // used the footprint, which meant the planner could route through a 0.46 m gap the MPPI would then refuse.
+    // ★DEFAULT ONLY — the session installs the real body (set_footprint below). Everything derived from it
+    // follows automatically: body_extent(), body_extent_max(), and the ESDF self-filter floor.
     RobotFootprint footprint_ = RobotFootprint::shadow();
     bool aligning_ = false;                 // true while doing the final in-place rotation
     // Worst-case time the base may keep executing one alignment command before we can revise it. Used to bound

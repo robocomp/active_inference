@@ -484,7 +484,11 @@ void SpecificWorker::initialize()
 		});
 	};
 
-	display_.initialize(obstacle_tracker_.lidar_buffer(), std::move(gui));
+	// ★THE VIEWER READS THE DISPLAY BUFFER, NOT THE CONTROL ONE. It carries the NEWEST scan instead of
+	// the one-frame-held one, so the overlay stops lagging the robot through a fast pivot. The control
+	// path (path_controller_ above) keeps the held buffer, because that frame of smoothing is what the
+	// safety gate's 1-cycle pulses depend on — see the fill site in controller_obstacle_tracker.cpp.
+	display_.initialize(obstacle_tracker_.display_lidar_buffer(), std::move(gui));
 	// The Stick <-> Loose slider must open on the L the tracker is actually running (load_params ran
 	// long before this). Its predecessor opened at a hard-coded midpoint that disagreed with the config.
 	display_.set_plain_l(path_controller_.params.plain_L);
@@ -756,6 +760,8 @@ bool SpecificWorker::ensure_current_plan(const PlanningStep &step)
 void SpecificWorker::load_params()
 {
 	load_optional_cast<double>("Planner.CellSize", params.planner_cell_size_m);
+	// The mesh's frame, not the robot's shape — see ControllerParams::robot_mesh_yaw_deg.
+	load_optional_cast<double>("Planner.RobotMeshYawDeg", params.robot_mesh_yaw_deg);
 	// Clearance PREFERENCE inside the A* cost (grid_planner.h). Distinct from FootprintSafetyMarginM,
 	// which is a hard admissibility margin — this one never makes a passable gap unplannable.
 	// ★[Planner], not [Controller]: these sit with CellSize, beside the thing they configure.

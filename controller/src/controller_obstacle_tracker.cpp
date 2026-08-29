@@ -3,6 +3,7 @@
 #include "../../common/robot_footprint/robot_footprint.h"
 
 #include <array>
+#include <chrono>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -367,7 +368,11 @@ std::vector<Eigen::Vector2f> ControllerObstacleTracker::read_temporary_obstacle_
     // to the body. This is the FOOTPRINT, tested at each return's own bearing: the old code used a 0.50 m
     // disc (clearance_m), which deleted every return in 0.79 m² around the robot — 3.4× the robot's actual
     // area — including the obstacles closest to it, the ones that matter most.
-    static const rc::RobotFootprint footprint = rc::RobotFootprint::shadow();
+    // ★NOT A FUNCTION-LOCAL static ANY MORE, AND THAT MATTERS MORE HERE THAN ANYWHERE ELSE. A `static const
+    // … = shadow()` is initialised once per PROCESS, so it would go on filtering with Shadow's body for the
+    // life of a P3Bot run no matter what the session installed — silently, in the one place whose whole job
+    // is deciding which returns are the robot itself. The session owns the body; this reads it.
+    const rc::RobotFootprint &footprint = body_;
 
     for (const auto &point3d_room : fused_points_room)
     {
@@ -654,7 +659,7 @@ bool ControllerObstacleTracker::has_compelling_absence_evidence(std::uint64_t ti
     const Eigen::Vector2f center_robot = robot_pose.as_transform().inverse() * state.center;
     // The obstacle must be in front of the body for its absence to mean anything — behind it, "we see no
     // points there" is a statement about the sensor, not about the world.
-    if (center_robot.y() <= rc::RobotFootprint::shadow().support_radius(0.f, {0.f, 1.f}))
+    if (center_robot.y() <= body_.support_radius(0.f, {0.f, 1.f}))
         return false;
 
     const auto points_room = read_temporary_obstacle_points(timestamp_ms,
@@ -1400,7 +1405,7 @@ bool ControllerObstacleTracker::create_temporary_lidar_obstacle(std::uint64_t ti
                                             .yaw_rad = observation->yaw_rad,
                                             .width_m = observation->width_m,
                                             .depth_m = observation->depth_m};
-    if (obstacle_sdf(candidate, robot_pose.pos) < rc::RobotFootprint::shadow().circumscribed_radius())
+    if (obstacle_sdf(candidate, robot_pose.pos) < body_.circumscribed_radius())
         return false;
 
     ingest_obstacle_observation(*observation, timestamp_ms);
@@ -1953,6 +1958,38 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
     }
     newest_raw_lidar_ts_ = timestamp_ms;
 
+    // ── THE RATE THE UI SHOWS, COUNTED WHERE A SCAN IS ACTUALLY ACCEPTED ─────────────────────────
+    // ★★★MEASURED IN WALL TIME, NOT FROM THE STAMPS. `lidar_period_ms_` above is an EMA of the
+    // difference between successive SOURCE STAMPS, which answers "how fast does the sensor say it is
+    // sampling" — it stays at the nominal period even when we drop every other frame, because the
+    // frames we do get are still stamped one period apart. The question a human asks looking at a
+    // lagging overlay is the other one: how many scans per second is this process actually turning
+    // into a cloud. Those two differ by exactly the drop rate, which is the interesting quantity.
+    // ★This codebase has been bitten by rate displays before — four of them once disagreed, each
+    // measuring a different stage and none saying which. So: counted HERE, after the dedup gate and
+    // before any work, one place, and the label says what it counts.
+    // A sliding window of arrival instants: rate = (n-1) / (newest - oldest). Robust to a burst and
+    // self-clearing after a stall, with no EMA constant to explain.
+    {
+        const auto now_ms = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+        lidar_accept_wall_ms_.push_back(now_ms);
+        while (lidar_accept_wall_ms_.size() > 32) lidar_accept_wall_ms_.pop_front();
+        // Drop anything older than 2 s so a stall decays the reading toward 0 instead of freezing it
+        // at the last healthy value — a rate display that keeps showing 20 Hz through a stall is worse
+        // than none, because it is the display you would consult to notice the stall.
+        while (lidar_accept_wall_ms_.size() > 2 and now_ms - lidar_accept_wall_ms_.front() > 2000)
+            lidar_accept_wall_ms_.pop_front();
+        if (lidar_accept_wall_ms_.size() >= 2)
+        {
+            const auto span = lidar_accept_wall_ms_.back() - lidar_accept_wall_ms_.front();
+            lidar_processed_hz_ = span > 0
+                ? 1000.f * static_cast<float>(lidar_accept_wall_ms_.size() - 1) / static_cast<float>(span)
+                : 0.f;
+        }
+    }
+
     // ── ONE-FRAME HOLD (not optional; was Transforms.overlay_draw_one_frame_old until 2026-08-04) ──
     // Register the PREVIOUS scan, not the newest one. Two things come of the delay, and only the first
     // is obvious:
@@ -2002,6 +2039,22 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
                                                                                proc_ts,
                                                                                "RT",
                                                                                interp);
+    // ── THE POSE THIS CLOUD IS ACTUALLY REGISTERED WITH ─────────────────────────────────────────
+    // Recorded so it can be compared against the pose the ICON is drawn at. The two are supposed to be
+    // the same instant — both are pinned to proc_ts — but "supposed to" is what an instrument is for.
+    // room←robot = room←lidar · (robot←lidar)^-1, i.e. the mount divided out, so this is directly
+    // comparable with the robot pose the display uses. ★A CONSTANT offset between them is expected
+    // (this is a room YAW, the display carries the footprint's theta convention); the VARIATION with
+    // rotation is the quantity that would explain a cloud swinging off and snapping back.
+    if (room_from_lidar.has_value() and robot_from_lidar.has_value())
+    {
+        const Eigen::Matrix4d room_T_robot =
+            twist_corrected(room_from_lidar->matrix(), proc_ts)
+            * robot_from_lidar->matrix().inverse();
+        last_cloud_yaw_ = static_cast<float>(std::atan2(room_T_robot(1, 0), room_T_robot(0, 0)));
+        last_cloud_ts_ = proc_ts;
+    }
+
     if (!room_from_lidar.has_value() || !robot_from_lidar.has_value())
         return false;
 
@@ -2162,5 +2215,73 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
                 room_zs.push_back(room_z);
             }
         });
+
+    // ── THE DISPLAY GETS THE FRESHEST SCAN; THE ROBOT KEEPS THE HELD ONE ─────────────────────────
+    // ★★★TWO CONSUMERS, TWO DIFFERENT QUESTIONS, AND THE ONE-FRAME HOLD WAS ANSWERING BOTH THE SAME.
+    // The hold above is NOT about registration — twist_corrected reproduces the pose at the scan
+    // instant to 0.22 cm p50, so registering the newest scan is just as exact. It survives because a
+    // one-frame-old cloud is a temporally SMOOTHED one, and the safety gate fires in 1-cycle pulses:
+    // measured with the hold off, safety_guard_cycles went 124 against a 16-61 baseline, lin_jerk_effort
+    // 92.6 against 17.5-55.0, rot_reversals 54 against 17-28. That cost is real and it belongs to the
+    // CONTROL path.
+    // ★The OVERLAY pays that cost for nothing. It does not brake, it does not plan; it only has to show
+    // where the world is now, and a frame of smoothing is a frame of visible lag — 4-6 deg of cloud
+    // swing at 0.9 rad/s, which is the symptom this exists to remove. Measured on the live robot: the
+    // freshest scan already leads the newest pose by p50 32 ms, and in 43% of frames a pose stamped at
+    // that very scan ALREADY EXISTS, so the wait buys the display nothing at all in those.
+    // So: the room buffer (ESDF, obstacle set, safety gate) keeps the held scan, unchanged. This second
+    // buffer carries the NEWEST scan, registered at its own stamp, and only the viewer reads it.
+    // ★Deliberately NOT per-plane. The per-plane registration above exists because helios and bpearl
+    // can be a full lidar period apart, which matters to a gate that brakes on it; for a drawn overlay
+    // one transform is the right cost. Anything that reasons about the world must read the other buffer.
+    if (room_from_lidar.has_value() and robot_from_lidar.has_value() and timestamp_ms != 0)
+    {
+        const auto fresh_T = inner_eigen_api_->get_transformation_matrix(graph_state_->room_name,
+                                                                        lidar_node_name,
+                                                                        timestamp_ms, "RT", interp);
+        if (fresh_T.has_value() and pending_lidar_scan_.has_value())
+        {
+            // twist_corrected is what makes this exact when the ring does not yet reach the newest
+            // scan — the case the hold was invented to avoid and this one is allowed to walk into.
+            const auto m = twist_corrected(fresh_T->matrix(), timestamp_ms);
+            const std::array<double, 12> c{m(0,0), m(0,1), m(0,2), m(0,3),
+                                           m(1,0), m(1,1), m(1,2), m(1,3),
+                                           m(2,0), m(2,1), m(2,2), m(2,3)};
+            const std::size_t fresh_count = std::min({pending_lidar_scan_->xs.size(),
+                                                      pending_lidar_scan_->ys.size(),
+                                                      pending_lidar_scan_->zs.size()});
+            display_room_buffer_.put<0>(
+                rc::RawLidarPointVectors{.xs = pending_lidar_scan_->xs,
+                                         .ys = pending_lidar_scan_->ys,
+                                         .zs = pending_lidar_scan_->zs},
+                timestamp_ms,
+                [c, robot_from_lidar_matrix, robot_from_lidar_is_identity, fresh_count, min_h, max_h]
+                (rc::RawLidarPointVectors &&raw_points, rc::LidarPointVectors &room_points)
+                {
+                    auto &[room_xs, room_ys, room_zs] = room_points;
+                    const auto &xs_in = raw_points.xs;
+                    const auto &ys_in = raw_points.ys;
+                    const auto &zs_in = raw_points.zs;
+                    const std::size_t n = std::min({fresh_count, xs_in.size(), ys_in.size(), zs_in.size()});
+                    room_xs.reserve(n); room_ys.reserve(n); room_zs.reserve(n);
+                    const double r20 = robot_from_lidar_matrix(2, 0), r21 = robot_from_lidar_matrix(2, 1);
+                    const double r22 = robot_from_lidar_matrix(2, 2), r23 = robot_from_lidar_matrix(2, 3);
+                    for (std::size_t i = 0; i < n; ++i)
+                    {
+                        const float x = xs_in[i], y = ys_in[i], z = zs_in[i];
+                        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) continue;
+                        // Same z-band cut as the room buffer: the overlay must not start drawing
+                        // returns the rest of the system has already decided are floor or ceiling.
+                        const float robot_z = robot_from_lidar_is_identity
+                            ? z : static_cast<float>(r20 * x + r21 * y + r22 * z + r23);
+                        if (robot_z < min_h || robot_z > max_h) continue;
+                        room_xs.push_back(static_cast<float>(c[0] * x + c[1] * y + c[2]  * z + c[3]));
+                        room_ys.push_back(static_cast<float>(c[4] * x + c[5] * y + c[6]  * z + c[7]));
+                        room_zs.push_back(static_cast<float>(c[8] * x + c[9] * y + c[10] * z + c[11]));
+                    }
+                });
+        }
+    }
+
     return true;
 }

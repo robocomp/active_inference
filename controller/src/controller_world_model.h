@@ -16,6 +16,9 @@ public:
 
     bool refresh_graph_state();
     const ControllerGraphState &graph_state() const { return graph_state_; }
+    // The graph itself, for the one-shot reads that belong to the session rather than here — currently the
+    // robot's mesh `path` (controller_robot_body.h). Null until set_dependencies has run.
+    DSR::DSRGraph *graph() const { return graph_.get(); }
 
     std::optional<std::vector<Eigen::Vector2f>> read_room_polygon() const;
     // ── TWO POSES, BECAUSE TWO CONSUMERS WANT DIFFERENT INSTANTS ─────────────────────────────────

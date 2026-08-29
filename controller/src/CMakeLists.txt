@@ -9,6 +9,7 @@ LIST(APPEND LIBS
   ai_common::geometry     # robot_footprint + robust_metrics (pure Eigen; also used by tools/)
   ai_common::affordance   # affordance_manager
   ai_common::perception   # mask_ingestor — the shared "masks" node parse, for the affordance panel
+  ai_common::robot        # base CAPABILITY off the robot node — what the hardware can do, vs our policy
   ai_common::ui           # TimeSeriesPlot (compiled Q_OBJECT)
   ai_common::core         # header-only geometry/beliefs
 )
@@ -24,6 +25,8 @@ LIST(APPEND SOURCES
   ../src/controller_obstacle_tracker.cpp
   ../src/controller_session.cpp
   ../src/controller_world_model.cpp
+  # This robot's body, from the mesh the graph names — see controller_robot_body.h.
+  ../src/controller_robot_body.cpp
   ../src/controller_mission.cpp
   ../src/controller_mission_panel.cpp
   ../src/route_spline.cpp

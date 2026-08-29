@@ -78,6 +78,19 @@ RunDir = "etc/runs"
 # A* planning grid. Collision is the robot's real footprint tested against this grid, so the ONLY thing
 # this controls is planning resolution/cost — nothing here inflates obstacles.
 CellSize = 0.06
+# ── THE MESH'S FRAME, WHICH IS NOT ALWAYS THE ROBOT'S ─────────────────────────────────────────────
+# Degrees to rotate the robot's mesh (the `path` attribute on the robot node) into the ROBOT frame:
+# x right, y FORWARD. This is a property of the ASSET, not of the robot.
+# P3Bot needs +90: webots-p3bot/protos/P3Bot.proto:430 wraps the whole machine in
+# `Pose { rotation 0 0 1 1.5708 }` so the mesh's native forward is +x, and every sensor RT in
+# p3bot.json is the proto value rotated by exactly that (helios (-0.0535264,0.00230873) ->
+# (-0.002309,-0.053526); zed (0.088,0) -> (0,0.088); ricoh (-0.05,0) -> (0,-0.05) — all exact).
+# ★THE SIGN MATTERS MORE THAN THE VALUE. At +90 the body comes out 22 mm WIDER than the compiled
+# Shadow hull it replaces, which is correct; at 0 the same file yields a body 45 mm NARROWER — the
+# error moves onto the axis along which a corridor closes. Read the [body] block at startup: it
+# prints the extents and the delta, so this is checkable in one line rather than trusted.
+# ★Shadow keeps its compiled hull regardless (shadow.obj has no wheels — ROBOT_GEOMETRY.md).
+RobotMeshYawDeg = 90.0
 # ── CLEARANCE PREFERENCE INSIDE THE A* COST ──
 # The search cost was distance + a small turn penalty and NOTHING ELSE, with the footprint test
 # (+ Controller.FootprintSafetyMarginM) as the only thing keeping it off obstacles. So it returned the

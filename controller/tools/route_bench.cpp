@@ -40,6 +40,9 @@
 
 #include <Eigen/Dense>
 
+#include <clocale>
+
+#include "../../common/robot_footprint/mesh_hull.h"
 #include "../src/grid_planner.h"
 #include "../src/route_follower.h"
 #include "../src/route_optimizer.h"
@@ -367,7 +370,15 @@ int main(int argc, char **argv)
         // units is the natural place for them to live, so they are one command away from being run.
         if (a == "--self-test")
         {
-            const bool ok = rc::GridPlanner::self_test()
+            // ★SET THE AGENT'S LOCALE FIRST. rc::mesh parses an OBJ, and these machines run es_ES where the
+            // decimal separator is a COMMA — but a standalone harness has no Qt, so nothing calls
+            // setlocale() and the truncation bug SIMPLY DOES NOT OCCUR here. Without this line the mesh
+            // test would pass while the agent broke, which is the exact contradiction CLAUDE.md says to
+            // chase before any other explanation.
+            std::setlocale(LC_ALL, "");
+            const bool ok = rc::mesh::self_test()
+                          & rc::RobotFootprint::self_test()
+                          & rc::GridPlanner::self_test()
                           & rc::RouteSpline::self_test()
                           & rc::RouteFollower::self_test()
                           & rc::route_optimizer_self_test()

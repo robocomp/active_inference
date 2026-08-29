@@ -3,6 +3,7 @@
 #include <genericworker.h>
 
 #include <array>
+#include <deque>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -11,6 +12,7 @@
 #include <vector>
 
 #include "controller_obstacle_model.h"
+#include "../../common/robot_footprint/robot_footprint.h"
 #include "controller_runtime_types.h"
 #include "trajectory_controller.h"
 
@@ -18,18 +20,47 @@ class ControllerObstacleTracker
 {
     public:
         void set_params(const ControllerParams *params);
+        // The robot's real silhouette, from the session (controller_robot_body.h). Governs the per-bearing
+        // self-filter, the "genuinely ahead of the body" test, and the obstacle-overlaps-the-body reject.
+        void set_body(rc::RobotFootprint body) { body_ = std::move(body); }
         void set_dependencies(std::shared_ptr<DSR::DSRGraph> graph,
                             DSR::InnerEigenAPI *inner_eigen_api,
                             const ControllerGraphState *graph_state);
         void set_graph_layout_callback(std::function<void()> callback);
 
         rc::LidarPointBuffer *lidar_buffer() { return &lidar_room_buffer_; }
+        // ★DISPLAY ONLY. The NEWEST scan, registered at its own stamp — one frame fresher than
+        // lidar_buffer(), which the control path keeps for the smoothing the safety gate depends on.
+        // Nothing that decides where the robot goes may read this; see the note at the fill site.
+        rc::LidarPointBuffer *display_lidar_buffer() { return &display_room_buffer_; }
         const ControllerPolygons &obstacle_polygons() const { return obstacle_polygons_; }
         const ControllerObstacleVisuals &display_obstacle_polygons() const { return display_obstacle_polygons_; }
         // residual_concept's occupancy, as CELLS — what the planner marks directly (see the decode
         // site for why the polygon round trip was removed).
         const std::vector<Eigen::Vector2f> &residual_cells() const { return residual_cells_; }
         float residual_cell_size_m() const { return residual_cell_size_m_; }
+
+        // Scans per second this process actually ACCEPTED and turned into a cloud, in WALL time over a
+        // ~2 s sliding window. ★NOT the sensor's nominal rate and NOT lidar_period_ms_ (an EMA of the
+        // source STAMP spacing, which is blind to dropped frames by construction). The two differ by
+        // the drop rate. -1 until enough scans have arrived to measure one.
+        float lidar_processed_hz() const { return lidar_processed_hz_; }
+
+        // ── WHAT THE DRAWN CLOUD IS ACTUALLY ANCHORED TO ─────────────────────────────────────────
+        // The room←robot YAW used to place the cloud now sitting in the room buffer, and the scan
+        // stamp it belongs to. The display draws that cloud (read_last) and the robot icon from a
+        // separately-read pose; these let the two be compared instead of assumed equal.
+        // ── THE THREE STAMPS, RAW, SO A TABLE CAN SHOW THE ACTUAL PATH ──────────────────────────
+        // newest_raw_lidar_ts  the scan that JUST ARRIVED (before the one-frame hold). This is the
+        //                      freshest thing the controller holds, and it must be NEWER than any RT
+        //                      pose, because room_concept derives the pose FROM a scan.
+        // last_lidar_timestamp the scan actually registered and drawn (the previous one, held).
+        // rt_block_newest_ts   the newest room←robot block in the RT ring at that moment.
+        const std::optional<std::uint64_t> &newest_raw_lidar_ts() const { return newest_raw_lidar_ts_; }
+        const std::optional<std::uint64_t> &rt_block_newest_ts() const { return rt_block_newest_ts_; }
+
+        const std::optional<float> &last_cloud_yaw() const { return last_cloud_yaw_; }
+        const std::optional<std::uint64_t> &last_cloud_ts() const { return last_cloud_ts_; }
         ControllerPolygons temporary_obstacle_rfe_points() const;
 
         // Diagnostic breakdown of what the planner sees near a query point, split by SOURCE. Lets the
@@ -286,10 +317,22 @@ class ControllerObstacleTracker
         const ControllerGraphState *graph_state_ = nullptr;
         std::function<void()> graph_layout_callback_;
         rc::LidarPointBuffer lidar_room_buffer_{5};
+        rc::LidarPointBuffer display_room_buffer_;   // newest scan, viewer only (see display_lidar_buffer)
         RawCloudProximity raw_cloud_proximity_;   // measured on the raw sweep, pre z-band (see the struct)
         std::vector<GraphObstacleRecord> known_graph_obstacles_;
         ControllerPolygons obstacle_polygons_;
         ControllerObstacleVisuals display_obstacle_polygons_;
+        // The robot's own body, installed by the session from the mesh the graph names. ★It was a
+        // function-local `static const … = shadow()` at the self-filter, i.e. one robot's shape frozen for
+        // the life of the process — see the note at that call site.
+        rc::RobotFootprint body_ = rc::RobotFootprint::shadow();
+
+        // Arrival instants of ACCEPTED scans (wall clock, ms) — see lidar_processed_hz().
+        std::deque<std::uint64_t> lidar_accept_wall_ms_;
+        float lidar_processed_hz_ = -1.f;
+        std::optional<float> last_cloud_yaw_;            // room←robot yaw the buffered cloud was placed with
+        std::optional<std::uint64_t> last_cloud_ts_;     // ...and the scan stamp it belongs to
+
         std::vector<Eigen::Vector2f> residual_cells_;
         float residual_cell_size_m_ = 0.f;
         std::unordered_map<std::string, int> object_label_counts_;   // per-type object tag counter (t/c/b)
