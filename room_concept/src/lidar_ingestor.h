@@ -137,6 +137,14 @@ private:
     // Source-attribution telemetry (ingest thread only): 5 s "[LidarSrc]" log.
     std::uint64_t fresh_frames_      = 0;   // LidarFrames drained from the plane
     std::uint64_t served_            = 0;   // scans actually pushed to the buffer
+    /// Band-composition telemetry. The high band is selected by two HEIGHTS, but which points those
+    /// two heights select depends on the sensor's FAN — invert the helios and the same two numbers
+    /// pick near walls at steep elevation instead of far walls at shallow. Nothing downstream can
+    /// show that: every number after this point reports the FIT, not what was fitted.
+    long band_sweeps_ = 0, band_in_ = 0, band_total_ = 0;
+    double band_z_sum_ = 0.0, band_r_sum_ = 0.0;
+    float band_z_lo_ = 1e9f, band_z_hi_ = -1e9f;
+    std::int64_t band_report_ms_ = 0;
     std::int64_t  last_src_report_ms_ = 0;
 
     // Wall-clock stamp (ms since epoch) of the last sweep pushed to the buffer, 0 = never. Written on

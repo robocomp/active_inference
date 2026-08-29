@@ -171,6 +171,41 @@ bool LidarIngestor::pump()
         for (const auto& p : sweep->points)
             if (p.z() > min_h_m and p.z() < max_h_m)
                 points_high.emplace_back(p);
+
+        // ── WHAT IS ACTUALLY IN THE BAND ────────────────────────────────────────────────────────
+        // The band limits are a property of the SENSOR'S FAN as much as of the room: they were set
+        // for a helios hanging the other way up, whose beams reached this height range at long range.
+        // Invert the fan and the same two numbers select a completely different population — near
+        // walls at steep elevation instead of far walls at shallow — and the localiser is fitting a
+        // polygon to whatever survives. That change is invisible in every number downstream, which
+        // report the FIT and not what was fitted, so it is reported here at the point of selection.
+        {
+            band_sweeps_++; band_in_ += static_cast<long>(points_high.size());
+            band_total_ += static_cast<long>(sweep->points.size());
+            for (const auto& p : points_high)
+            {
+                band_z_sum_ += p.z();
+                band_r_sum_ += std::hypot(p.x(), p.y());
+                band_z_lo_ = std::min(band_z_lo_, p.z());
+                band_z_hi_ = std::max(band_z_hi_, p.z());
+            }
+            const auto tnow = QDateTime::currentMSecsSinceEpoch();
+            if (band_report_ms_ == 0) band_report_ms_ = tnow;
+            else if (tnow - band_report_ms_ > 5000)
+            {
+                band_report_ms_ = tnow;
+                const double n = std::max(1L, band_in_);
+                std::println("[band] {:.1f}-{:.2f} m keeps {}/{} pts/sweep ({:.1f}%) | z mean {:.2f} "
+                             "span {:.2f}..{:.2f} | mean ground range {:.2f} m",
+                             min_h_m, max_h_m,
+                             band_in_ / std::max(1L, band_sweeps_), band_total_ / std::max(1L, band_sweeps_),
+                             100.0 * band_in_ / std::max(1L, band_total_),
+                             band_z_sum_ / n, band_z_lo_, band_z_hi_, band_r_sum_ / n);
+                band_sweeps_ = band_in_ = band_total_ = 0;
+                band_z_sum_ = band_r_sum_ = 0.0;
+                band_z_lo_ = 1e9f; band_z_hi_ = -1e9f;
+            }
+        }
         ingest_scan(std::move(points_high), sweep->stamp_ms);
         ingested = true;
     }
