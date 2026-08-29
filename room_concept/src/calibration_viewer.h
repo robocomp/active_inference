@@ -18,6 +18,7 @@
 #include <QDialog>
 #include <QLabel>
 #include <array>
+#include <string>
 #include <functional>
 
 namespace rc
@@ -42,10 +43,14 @@ namespace rc
         /// and the label says so: two counts called "episodes" would be a quiet lie.
 
         void update_camera(const Eigen::Matrix<float, rc::camcal::P_COUNT, 1>& value,
-
                            const Eigen::Matrix<float, rc::camcal::P_COUNT, 1>& sigma,
+                           int informed_mask, float condition, long pairs,
+                           const std::string& camera = "");
 
-                           int informed_mask, float condition, long pairs);
+        /// The sensor triangle: camera-vs-camera disagreement with the LiDAR's own corner error
+        /// CANCELLED. It is the only line in this window that needs no ground truth, which is why
+        /// it is the one that still works on the real robot.
+        void update_loop_closure(double du_deg, double dv_deg, double sd_du, double sd_dv, long n);
 
 
         void update_values(const Eigen::Matrix<float, rc::calib::P_COUNT, 1>& value,
@@ -69,6 +74,8 @@ namespace rc
         std::array<Row, rc::camcal::P_COUNT> cam_rows_{};
         QLabel* summary_ = nullptr;
         QLabel* cam_summary_ = nullptr;
+        QLabel* cam_which_ = nullptr;     ///< which camera the block above describes
+        QLabel* loop_label_ = nullptr;
         std::function<void()> on_reset_;
     };
 }

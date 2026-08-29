@@ -62,7 +62,10 @@ public:
 
     void set_camera_calibration(const Eigen::Matrix<float, rc::camcal::P_COUNT, 1>& value,
                                 const Eigen::Matrix<float, rc::camcal::P_COUNT, 1>& sigma,
-                                int informed_mask, float condition, long pairs);
+                                int informed_mask, float condition, long pairs,
+                                const std::string& camera);
+    /// The sensor triangle — see CalibrationViewer::update_loop_closure.
+    void set_loop_closure(double du_deg, double dv_deg, double sd_du, double sd_dv, long n);
 
     // Constructor injection (out-of-line — unique_ptr<CameraVisualizer> incomplete in
     // callers). Builds the layout widget in its OWN top-level window (independent of the

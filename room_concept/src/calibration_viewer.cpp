@@ -175,6 +175,15 @@ namespace rc
                             "entirely — so these cannot absorb a pose error, and a heading error "
                             "cannot masquerade as a boresight.</div>");
             outer->addWidget(hdr);
+            cam_which_ = new QLabel("camera: —", this);
+            cam_which_->setStyleSheet("font-family: monospace; font-size: 11px; color: #7f8c8d;");
+            cam_which_->setToolTip("<div style='width: 400px'>Which camera these four parameters "
+                                   "describe. They are a property of ONE mount — body&rarr;zed sits at "
+                                   "1.08 m and body&rarr;ricoh at 1.42 m — so a value learned for one "
+                                   "says nothing about the other. The evidence is kept in a separate "
+                                   "file per camera for that reason, and a file from the wrong camera "
+                                   "is refused rather than merged.</div>");
+            outer->addWidget(cam_which_);
             cam_summary_ = new QLabel("pairs 0", this);
             cam_summary_->setStyleSheet("font-family: monospace; font-size: 11px; color: #95a5a6;");
             outer->addWidget(cam_summary_);
@@ -220,13 +229,54 @@ namespace rc
                 r.plot->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
                 outer->addWidget(r.plot, 1);
             }
+
+            loop_label_ = new QLabel("sensor triangle: no corner seen by two cameras yet", this);
+            loop_label_->setStyleSheet("font-family: monospace; font-size: 11px; color: #7f8c8d;");
+            loop_label_->setToolTip(
+                "<div style='width: 420px'><b>The sensor triangle.</b><br><br>"
+                "Each camera's residual against the LiDAR is <i>(camera error) + (LiDAR corner "
+                "error)</i>, and with ONE camera those are inseparable — a systematic in the LiDAR's "
+                "corner detector is indistinguishable from a camera mount error and would be "
+                "corrected into the mount, silently.<br><br>"
+                "Differencing two cameras against the <b>same</b> corner cancels the LiDAR term:<br>"
+                "&nbsp;&nbsp;• large individual residuals, <b>small</b> difference &rarr; the fault "
+                "is the LiDAR<br>"
+                "&nbsp;&nbsp;• <b>large</b> difference &rarr; the two cameras disagree<br><br>"
+                "Three sensors let you <i>attribute</i> error; two only let you measure "
+                "disagreement. In degrees, not pixels — a pixel is 0.128° on the zed and 0.188° on "
+                "the ricoh, so a pixel residual is not comparable across cameras.<br><br>"
+                "This is the only reading in this window that needs no ground truth, so it is the "
+                "one that still works on the real robot.</div>");
+            outer->addWidget(loop_label_);
         }
+    }
+
+    void CalibrationViewer::update_loop_closure(double du_deg, double dv_deg,
+                                                double sd_du, double sd_dv, long n)
+    {
+        if (loop_label_ == nullptr) return;
+        if (n <= 0)
+        {
+            loop_label_->setText("sensor triangle: no corner seen by two cameras yet");
+            loop_label_->setStyleSheet("font-family: monospace; font-size: 11px; color: #7f8c8d;");
+            return;
+        }
+        loop_label_->setText(QString("sensor triangle: %1 shared corners   du %2 ± %3°   dv %4 ± %5°")
+                                 .arg(n).arg(du_deg, 0, 'f', 4).arg(sd_du, 0, 'f', 4)
+                                 .arg(dv_deg, 0, 'f', 4).arg(sd_dv, 0, 'f', 4));
+        const bool tight = std::abs(du_deg) < 0.05 and std::abs(dv_deg) < 0.05;
+        loop_label_->setStyleSheet(tight
+            ? "font-family: monospace; font-size: 11px; color: #2ecc71;"
+            : "font-family: monospace; font-size: 11px; color: #e67e22;");
     }
 
     void CalibrationViewer::update_camera(const Eigen::Matrix<float, rc::camcal::P_COUNT, 1>& value,
                                           const Eigen::Matrix<float, rc::camcal::P_COUNT, 1>& sigma,
-                                          int informed_mask, float condition, long pairs)
+                                          int informed_mask, float condition, long pairs,
+                                          const std::string& camera)
     {
+        if (cam_which_ != nullptr and not camera.empty())
+            cam_which_->setText(QString("camera: %1").arg(QString::fromStdString(camera)));
         for (int i = 0; i < rc::camcal::P_COUNT; ++i)
         {
             auto& r = cam_rows_[i];

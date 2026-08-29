@@ -854,8 +854,17 @@ void SpecificWorker::mount_pair_update(const rc::ImageEdgeObs &obs,
             pv(i) = static_cast<float>(pool.p(i)     * psig[i]);
             sv(i) = static_cast<float>(pool.sigma(i) * psig[i]);
         }
-        viewer_->set_camera_calibration(pv, sv, pool.informed,
-                                        static_cast<float>(pool.cond), mp_pool_.pairs());
+        viewer_->set_camera_calibration(pv, sv, pool.informed, static_cast<float>(pool.cond),
+                                        mp_pool_.pairs(), params.IMAGE_EDGE_CAMERA);
+        if (loop_n_ > 0)
+        {
+            const double R = 180.0 / M_PI;
+            const double mu = loop_du_sum_ / loop_n_, mv = loop_dv_sum_ / loop_n_;
+            viewer_->set_loop_closure(
+                mu * R, mv * R,
+                std::sqrt(std::max(0.0, loop_du_sq_ / loop_n_ - mu * mu)) * R,
+                std::sqrt(std::max(0.0, loop_dv_sq_ / loop_n_ - mv * mv)) * R, loop_n_);
+        }
     }
     mp_win_.reset();
     if (not win.ok) return;

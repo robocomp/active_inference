@@ -579,9 +579,16 @@ void RoomViewer::on_robot_rotated(QPointF scene_pos)
 
 void RoomViewer::set_camera_calibration(const Eigen::Matrix<float, rc::camcal::P_COUNT, 1>& value,
                                         const Eigen::Matrix<float, rc::camcal::P_COUNT, 1>& sigma,
-                                        int informed_mask, float condition, long pairs)
+                                        int informed_mask, float condition, long pairs,
+                                        const std::string& camera)
 {
-    if (calib_viewer_) calib_viewer_->update_camera(value, sigma, informed_mask, condition, pairs);
+    if (calib_viewer_)
+        calib_viewer_->update_camera(value, sigma, informed_mask, condition, pairs, camera);
+}
+
+void RoomViewer::set_loop_closure(double du_deg, double dv_deg, double sd_du, double sd_dv, long n)
+{
+    if (calib_viewer_) calib_viewer_->update_loop_closure(du_deg, dv_deg, sd_du, sd_dv, n);
 }
 
 }  // namespace rc
