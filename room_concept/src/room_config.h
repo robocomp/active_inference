@@ -106,9 +106,6 @@ struct RoomConfig
         std::optional<bool> corner_early_exit_check;
         std::optional<float> w_ior;
         std::optional<float> belief_forget_time;
-        /// WHICH object subtype anchors the pose. Shadow moved to the refrigerator on purpose
-        /// (the table's pin is suspect); P3Bot never did and still anchors on the table.
-        std::optional<std::vector<std::string>> object_anchor_subtypes;
         std::optional<float> object_anchor_meas_sigma_xy;
         std::optional<float> stable_sdf_mse_max;
     };
@@ -140,6 +137,11 @@ struct RoomConfig
         /// How close a viewpoint may be planned to a wall. A cramped apartment and an open lab room
         /// do not admit the same margin, and the robot is unchanged between them.
         std::optional<float>       target_wall_margin;
+        /// WHICH object subtypes anchor the pose — a property of what stands in the room, not of the
+        /// robot looking at it. The apartment anchors on the refrigerator (deliberately: the table's
+        /// pin is suspect); the WAF room has no refrigerator at all, so anchoring on one there would
+        /// leave the channel with nothing to find, which is not the same thing as turning it off.
+        std::optional<std::vector<std::string>> object_anchor_subtypes;
     };
     std::map<std::string, ScenarioOverlay> scenario_overlays;
     std::vector<std::string> apply_scenario(const std::string& scenario);

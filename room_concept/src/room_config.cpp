@@ -463,13 +463,6 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             b("CornerEarlyExitCheck",              ov.corner_early_exit_check);
             f("WIor",                              ov.w_ior);
             f("BeliefForgetTime",                  ov.belief_forget_time);
-            {   // ⚠ ConfigLoader throws on an EMPTY array, so absent is the way to say "leave it".
-                std::vector<std::string> subs;
-                try { rc::ConfigLoaderUtils::load_optional<std::vector<std::string>>(
-                          cl, ("Platform." + n + ".ObjectAnchorSubtypes").c_str(), subs); }
-                catch (...) {}
-                if (not subs.empty()) ov.object_anchor_subtypes = std::move(subs);
-            }
             f("ObjectAnchorMeasSigmaXY",           ov.object_anchor_meas_sigma_xy);
             f("StableSdfMseMax",                   ov.stable_sdf_mse_max);
             std::string cam;
@@ -517,6 +510,13 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             };
             sf("LidarHighMaxHeight", ov.lidar_high_max_height);
             sf("TargetWallMargin",   ov.target_wall_margin);
+            {   // ⚠ ConfigLoader throws on an EMPTY array, so absent is how to say "leave it".
+                std::vector<std::string> subs;
+                try { rc::ConfigLoaderUtils::load_optional<std::vector<std::string>>(
+                          cl, ("Scenario." + n + ".ObjectAnchorSubtypes").c_str(), subs); }
+                catch (...) {}
+                if (not subs.empty()) ov.object_anchor_subtypes = std::move(subs);
+            }
             p.scenario_overlays[n] = ov;
         }
         if (not names.empty())
@@ -669,8 +669,6 @@ std::vector<std::string> RoomConfig::apply_platform(const std::string& robot)
     { changed.emplace_back("CalibPivotEnabled"); CALIB_PIVOT_ENABLED = *ov.calib_pivot_enabled; }
     if (ov.odom_sample_log.has_value() and *ov.odom_sample_log != ODOM_SAMPLE_LOG)
     { changed.emplace_back("OdomSampleLog"); ODOM_SAMPLE_LOG = *ov.odom_sample_log; }
-    if (ov.object_anchor_subtypes.has_value() and *ov.object_anchor_subtypes != OBJECT_ANCHOR_SUBTYPES)
-    { changed.emplace_back("ObjectAnchorSubtypes"); OBJECT_ANCHOR_SUBTYPES = *ov.object_anchor_subtypes; }
     if (ov.object_anchor_meas_sigma_xy.has_value() and *ov.object_anchor_meas_sigma_xy != OBJECT_ANCHOR_MEAS_SIG_XY)
     { changed.emplace_back("ObjectAnchorMeasSigmaXY"); OBJECT_ANCHOR_MEAS_SIG_XY = *ov.object_anchor_meas_sigma_xy; }
     if (ov.stable_sdf_mse_max.has_value() and *ov.stable_sdf_mse_max != STABLE_SDF_MSE_MAX)
@@ -750,6 +748,8 @@ std::vector<std::string> RoomConfig::apply_scenario(const std::string& scenario)
     { changed.emplace_back("RecenterRoomPolygon"); RECENTER_ROOM_POLYGON = *ov.recenter_room_polygon; }
     if (ov.lidar_high_max_height.has_value() and *ov.lidar_high_max_height != LIDAR_HIGH_MAX_HEIGHT)
     { changed.emplace_back("LidarHighMaxHeight"); LIDAR_HIGH_MAX_HEIGHT = *ov.lidar_high_max_height; }
+    if (ov.object_anchor_subtypes.has_value() and *ov.object_anchor_subtypes != OBJECT_ANCHOR_SUBTYPES)
+    { changed.emplace_back("ObjectAnchorSubtypes"); OBJECT_ANCHOR_SUBTYPES = *ov.object_anchor_subtypes; }
     return changed;
 }
 

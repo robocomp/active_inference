@@ -958,7 +958,24 @@ MotionCalibScaleP0  = 4.0e-4   # fractional² initial uncertainty on both scales
 # ★A/B: baseline traces saved as etc/*.baseline-legacy-gate.csv. Compare the >150 mm population —
 # count, and the fraction that improve the fit — not the median, which the legacy gate already handles.
 
+# ── 2026-08-29: unified across robots ──────────────────────────────────────────────────────────
+# These eleven were split between the two old config files, but nobody chose the split: P3Bot's
+# file simply said nothing about them, so it ran the older code defaults with nothing on the page
+# to say so, while every one of these landed on Shadow's side as the work was done. They are one
+# value for both machines now. Nothing here is physical; if one of them ever needs to differ per
+# robot, [Platform.<robot>] still overrides it — that is not a reason to keep it split by default.
+AdaptiveCovEnabled      = true
+WindowStrideEnabled     = true
+BoundaryFejSchur        = true
+HierPrecBoundaryEnabled = true
+CornerEarlyExitCheck    = true
+GnMaxIters              = 20
+GnLossRelTol            = 1e-5
+TorchNumThreads         = 1
+SymmetryGoodFitMse      = 0.101
+
 [DSR]
+StableSdfMseMax = 0.076   # unified 2026-08-29; P3Bot ran the 0.06 default only because its file was silent
 # This apartment fits chronically at ~0.079 mean|SDF| on early-exit frames (5th–95th pct 0.075–0.083),
 # so the 0.06 header default was UNREACHABLE on the very (iters==0) frames the gate requires → the room
 # never uploaded (0/2213 frames stable, longest streak 0). Raised above the 95th pct with margin.
@@ -966,6 +983,7 @@ MotionCalibScaleP0  = 4.0e-4   # fractional² initial uncertainty on both scales
 
 # ── Object anchors (validated modelled objects as SE(2) pose landmarks in the RFE loss) ──
 [ObjectAnchor]
+measSigmaXY = 0.3   # unified 2026-08-29; P3Bot ran the 0.05 default only because its file was silent
 # 2026-08-10: back ON, but for the REFRIGERATOR only. It was turned off by an A/B checking whether the
 # flips/delocalizations persisted without the anchor -- anchorSD=85 at good poses implicated a wrong PIN
 # as the destabilizer, and that pin was a TABLE's. So this re-opens the landmark path without re-opening
@@ -1330,6 +1348,7 @@ csv = "etc/image_edge.csv"
 # constants differ. The log says which case applied; it is never silent.
 #
 # ⚠ Omit Platform.names rather than writing [] — ConfigLoader throws on an empty array.
+
 # ══ PLATFORM OVERLAY ═══════════════════════════════════════════════════════════════════════════
 # ONE file for every robot, keyed on the robot node's own name in the graph.
 #
@@ -1383,19 +1402,7 @@ PredictionTrustFactor           = 0.7
 RotationSdfCoupling             = 0.5
 BoundaryHessianQualityThreshold = 0.051
 BoundaryMuQualityThreshold      = 0.084
-SymmetryGoodFitMse              = 0.101
-GnLossRelTol                    = 1e-5
-GnMaxIters                      = 20
-TorchNumThreads                 = 1
-AdaptiveCovEnabled              = true
-WindowStrideEnabled             = true
-BoundaryFejSchur                = true
-HierPrecBoundaryEnabled         = true
-CornerEarlyExitCheck            = true
 WIor                            = 2.0
-StableSdfMseMax                 = 0.076
-ObjectAnchorMeasSigmaXY         = 0.3
-ObjectAnchorSubtypes            = ["refrigerator"]
 
 
 [Platform.P3Bot]
@@ -1423,7 +1430,6 @@ UseCommandVelocityPrior         = false
 CalibPivotEnabled               = true
 OdomSampleLog                   = true
 BeliefForgetTime                = 90.0
-ObjectAnchorSubtypes            = ["table"]   # Shadow anchors on the refrigerator, deliberately
                                              # (the table pin is suspect). P3Bot never moved.
 # ── drift, not physics — see the DRIFT paragraph above [Platform] ──────────────────────────────
 # ★ Every value below is what P3Bot has been RUNNING, and for most of them only because its old
@@ -1435,18 +1441,7 @@ PredictionTrustFactor           = 0.40
 RotationSdfCoupling             = 0.2
 BoundaryHessianQualityThreshold = 0.06
 BoundaryMuQualityThreshold      = 0.10
-SymmetryGoodFitMse              = 0.02     # code default; Shadow runs 0.101
-GnLossRelTol                    = 1e-4     # code default; Shadow runs 1e-5
-GnMaxIters                      = 10       # code default; Shadow runs 20
-TorchNumThreads                 = 2        # code default; Shadow runs 1
-AdaptiveCovEnabled              = false    # code default; Shadow runs it ON
-WindowStrideEnabled             = false    # code default; Shadow runs it ON
-BoundaryFejSchur                = false    # code default; Shadow runs it ON
-HierPrecBoundaryEnabled         = false    # code default; Shadow runs it ON
-CornerEarlyExitCheck            = false    # code default; Shadow runs it ON
 WIor                            = 1.0
-StableSdfMseMax                 = 0.06     # code default; Shadow runs 0.076
-ObjectAnchorMeasSigmaXY         = 0.05     # code default; Shadow runs 0.3
 
 
 # ══ SCENARIO OVERLAY ═══════════════════════════════════════════════════════════════════════════
@@ -1477,6 +1472,7 @@ LidarHighMaxHeight  = 2.75       # m — cap of the LiDAR "high" band. It tracks
                                  # the robot: the band exists to exclude the ceiling return.
 TargetWallMargin    = 0.55       # m — how close a viewpoint may be planned to a wall. A cramped
                                  # apartment does not admit the lab room's margin.
+ObjectAnchorSubtypes = ["refrigerator"]   # deliberately fridge-only here: the table pin is suspect.
                                  # is stated rather than detected.
 
 [Scenario.waf]
@@ -1485,3 +1481,6 @@ RoomHeight          = 2.4
 RecenterRoomPolygon = true
 LidarHighMaxHeight  = 2.0
 TargetWallMargin    = 1.0
+ObjectAnchorSubtypes = ["table"]   # ⚠ NOT the refrigerator: WAF.wbt contains none, so anchoring
+                                   # on one would leave the channel with nothing to find —
+                                   # which is not the same thing as switching it off.
