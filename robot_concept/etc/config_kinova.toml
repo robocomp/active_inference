@@ -126,6 +126,13 @@ enable_ricoh = true    # RGBD_360 360 panorama
 enable_lidar = true    # 3D LiDAR cloud
 enable_imu   = true    # IMU
 
+# LiDAR source selector (only effective when enable_lidar = true): auto | ice | dds.
+#   auto: bridge via Ice RPC until BOTH lidar3d_dds planes appear, then relay their descriptors
+#         and stop bridging.  ice: always bridge.  dds: never bridge, only relay/monitor.
+# Stated rather than left absent: absent happens to equal "auto" here, but a reader cannot tell
+# that from the file, and this session has already cost a run to a value nobody could see.
+lidar_source = "auto"
+
 # Zero-copy SHM data-sharing QoS. false (default) = churn-safe: payload rides the SHM
 # TRANSPORT (one memcpy/frame), safe while concept agents join/leave. true = true zero-copy
 # writer/reader loans into a mapped SHM segment — ONLY for a static, non-churning topology
