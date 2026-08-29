@@ -36,6 +36,7 @@
  *  would be a ratchet — each session would inherit the last one's answer as though it were data.
  */
 
+#include <QDebug>
 #include <charconv>
 #include <iomanip>
 #include <limits>
@@ -120,6 +121,10 @@ namespace rc::camcal
     class Estimator
     {
     public:
+        /// Which camera this evidence belongs to. Set BEFORE load(); changing it invalidates.
+        void set_camera(std::string name) { camera_ = std::move(name); }
+        [[nodiscard]] const std::string& camera() const noexcept { return camera_; }
+
         void add(const rc::mount::PairObs& o) { acc_.add(o); }
         void reset() { acc_.reset(); }
         [[nodiscard]] long pairs() const noexcept { return acc_.n; }
@@ -139,6 +144,12 @@ namespace rc::camcal
             f << "# camera mount calibration — EVIDENCE (H, b), not parameters.\n"
                  "# Delete to return to the priors. Restoring H and b and re-adding the prior at\n"
                  "# solve time resumes the measurement; restoring fitted VALUES would be a ratchet.\n";
+            // ★ THE CAMERA IS PART OF THE EVIDENCE. These parameters describe ONE mount; body->zed
+            //   is at 1.08 m and body->ricoh at 1.42 m, so summing their information matrices
+            //   estimates a single mount from two different ones and the result means nothing.
+            //   Recorded here as well as in the filename, so a copied or renamed file is still
+            //   caught rather than silently accepted.
+            f << "camera," << camera_ << '\n';
             f << "n," << acc_.n << '\n' << "rTr," << acc_.rTr << '\n';
             for (int i = 0; i < 4; ++i)
                 for (int j = i; j < 4; ++j) f << "H," << i << ',' << j << ',' << acc_.H(i, j) << '\n';
@@ -166,6 +177,20 @@ namespace rc::camcal
                 { b = line.find(',', a); if (b == std::string::npos) b = line.size();
                   tok.emplace_back(line.substr(a, b - a)); }
                 double v = 0.0;
+                if (tok[0] == "camera" and tok.size() == 2)
+                {
+                    if (not camera_.empty() and tok[1] != camera_)
+                    {
+                        // REFUSED, not merged. A wrong-camera file is not partial evidence, it is
+                        // evidence about a different object.
+                        qWarning() << "[camcal] refusing" << QString::fromStdString(path)
+                                   << "— it holds evidence for camera"
+                                   << QString::fromStdString(tok[1]) << "but this is"
+                                   << QString::fromStdString(camera_);
+                        return 0;
+                    }
+                    continue;
+                }
                 if (tok[0] == "n" and tok.size() == 2 and num(tok[1], v))   in.n = static_cast<long>(v);
                 else if (tok[0] == "rTr" and tok.size() == 2 and num(tok[1], v)) in.rTr = v;
                 else if (tok[0] == "H" and tok.size() == 4)
@@ -194,5 +219,6 @@ namespace rc::camcal
 
     private:
         rc::mount::Accum acc_;
+        std::string      camera_;
     };
 }   // namespace rc::camcal

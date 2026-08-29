@@ -221,7 +221,7 @@ void SpecificWorker::initialize()
     {
         mp_pool_.reset();
         mp_win_.reset();
-        std::remove("etc/camera_calib.txt");   // or the next restart undoes the reset
+        std::remove(("etc/camera_calib_" + params.IMAGE_EDGE_CAMERA + ".txt").c_str());
         qInfo() << "[camcal] evidence cleared and etc/camera_calib.txt deleted";
     });
 
@@ -738,8 +738,16 @@ void SpecificWorker::mount_pair_update(const rc::ImageEdgeObs &obs,
         // Resume the measurement from the last session. Loading H and b is not a ratchet: the prior
         // is re-added at solve time, so this is the same evidence arriving earlier.
         mp_loaded_ = true;
-        if (const std::size_t k = mp_pool_.load("etc/camera_calib.txt"); k > 0)
-            qInfo().nospace() << "[camcal] resumed from etc/camera_calib.txt (" << k << " pairs)";
+        // ★ ONE FILE PER CAMERA. A single etc/camera_calib.txt accumulated 523844 pairs across a
+        //   zed -> ricoh switch on 2026-08-29 before this was noticed: two different mounts summed
+        //   into one information matrix, which estimates neither. The name keys the file AND is
+        //   checked inside it, so a copy or a rename is caught too.
+        mp_pool_.set_camera(params.IMAGE_EDGE_CAMERA);
+        const std::string path = "etc/camera_calib_" + params.IMAGE_EDGE_CAMERA + ".txt";
+        if (const std::size_t k = mp_pool_.load(path); k > 0)
+            qInfo().nospace() << "[camcal] resumed from " << QString::fromStdString(path)
+                              << " (" << k << " pairs, camera "
+                              << QString::fromStdString(params.IMAGE_EDGE_CAMERA) << ")";
     }
 
     for (const auto &tp : obs.triple_points)
@@ -792,7 +800,8 @@ void SpecificWorker::mount_pair_update(const rc::ImageEdgeObs &obs,
 
     const auto win  = mp_win_.solve();
     const auto pool = mp_pool_.solve();
-    mp_pool_.save("etc/camera_calib.txt");   // every window, so a kill -9 costs at most one
+    mp_pool_.save("etc/camera_calib_" + params.IMAGE_EDGE_CAMERA + ".txt");   // per camera; a
+                                            // kill -9 then costs at most one window of evidence
     if (viewer_ and pool.ok)
     {
         Eigen::Matrix<float, rc::camcal::P_COUNT, 1> pv, sv;
