@@ -33,6 +33,7 @@
 #include <fstream>
 #include <unordered_set>
 #include <QDir>
+#include <QFile>
 #include <QDateTime>
 #include <QMetaObject>
 #include <QFileInfo>
@@ -1018,6 +1019,23 @@ void SpecificWorker::log_ground_truth(const rc::RoomConcept::UpdateResult &res)
     {
         gt_csv_open_attempted_ = true;
         QDir().mkpath("tmp/sdf_localizer");
+        // ★ ARCHIVE THE PREVIOUS RUN BEFORE TRUNCATING. This file is the only record of what the
+        //   localiser actually did, and every restart used to erase it. That has already cost real
+        //   evidence: an A/B comparison could not be re-checked because the baseline run's data was
+        //   gone, and a stale copy of a DIFFERENT file was once analysed as if it were live. A
+        //   comparison between two configurations is only possible if both survive.
+        {
+            const QString cur = "tmp/sdf_localizer/gt_error.csv";
+            if (QFileInfo fi(cur); fi.exists() and fi.size() > 0)
+            {
+                const QString keep = QString("tmp/sdf_localizer/gt_error_%1.csv")
+                                         .arg(fi.lastModified().toString("yyyy-MM-dd_HH-mm-ss"));
+                if (QFile::rename(cur, keep))
+                    qInfo() << "[gt] previous run archived as" << keep;
+                else
+                    qWarning() << "[gt] could NOT archive the previous run; it is about to be lost";
+            }
+        }
         gt_csv_.open("tmp/sdf_localizer/gt_error.csv", std::ios::out | std::ios::trunc);
         if (gt_csv_.is_open())
         {
