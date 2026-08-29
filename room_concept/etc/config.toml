@@ -622,6 +622,21 @@ CmdNoiseTrans   = 0.20  # Fracción de ruido translacional del comando (m/m)
                         # to what the scale alone supports, and part of the benefit may be
                         # compensating the ~7% meas/post residual below. Re-derive it if that is fixed.
 CmdNoiseBase    = 0.05  # Ruido base translacional del comando (m)
+
+# ── Q, the process noise, is a property of THIS ROBOT'S wheels ─────────────────────────────────
+# These are the coefficients compute_motion_covariance() builds Q from, and Q is what predict_step()
+# adds in P_pred = F·P_prev·Fᵀ + Q. They describe encoders, wheels and the floor under them, so by
+# the same rule as the mount and the ZUPT densities they belong per robot — [Platform.<robot>]
+# overrides any of them. They are left shared here because NEITHER robot's has been measured; the
+# day one is, it moves, and this comment is the reminder that shared is a default and not a finding.
+#
+# ★ MEASURED 2026-08-29: sigma_x_pred ~= 0.089 m, and OdomNoiseTrans alone accounts for nearly all
+#   of it — 8% of distance travelled, over the ~1 m the robot covers between optimised solves. That
+#   is what makes the published sigma 5-12x looser than the window's own fit supports.
+# ★ DO NOT hand-tune these to close that gap. etc/hessian_check.csv now logs NIS = nu'·P_pred^-1·nu
+#   over the fit's own correction: it has expectation 3 under a correct P_pred, and reading BELOW 3
+#   means Q is too large by that factor — a measurement, not a taste, and it needs no ground truth.
+#   OdomNoiseScale multiplies all three at once and is the knob that reading sets.
 OdomNoiseTrans  = 0.08  # Fracción de ruido translacional de odometría
 OdomNoiseRot    = 0.04  # Fracción de ruido rotacional de odometría
 OdomNoiseBase   = 0.01  # Ruido base translacional de odometría (m)

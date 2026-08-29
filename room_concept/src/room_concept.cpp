@@ -3946,6 +3946,8 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         f << "t_ms,slots,dof_marginalised,"
              "sx_marg,sy_marg,st_marg,sx_block,sy_block,st_block,"
              "sx_rec,sy_rec,st_rec,sx_pub,sy_pub,st_pub,"
+             "sx_pred,sy_pred,st_pred,sx_obs,sy_obs,st_obs,"
+             "innov_x,innov_y,innov_t,nis,"
              "ratio_x,ratio_y,ratio_t,block_over_marg_t,ms_since_last_opt\n";
     }
     const double sm[3] = {sig(last_marg_prec_, 0),  sig(last_marg_prec_, 1),  sig(last_marg_prec_, 2)};
@@ -3960,6 +3962,26 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
     for (int i = 0; i < 3; ++i) f << ',' << sb[i];
     for (int i = 0; i < 3; ++i) f << ',' << sr[i];
     for (int i = 0; i < 3; ++i) f << ',' << sp[i];
+    for (int i = 0; i < 3; ++i) f << ',' << sd(hess_pred_cov_, i);
+    // The single slot's observation on its own, so "Q too big" and "H too small" stay separable.
+    const Eigen::Matrix3f obs_cov = hess_obs_prec_.inverse();
+    for (int i = 0; i < 3; ++i) f << ',' << sd(obs_cov, i);
+    // ── NIS: the only reading that can SIZE the process noise without ground truth ───────────────
+    // The innovation is the fit's correction to the prediction. Under a correct P_pred it is drawn
+    // from it, so nu' P_pred^-1 nu has expectation 3 (its DOF). Below 3 ⇒ P_pred is bigger than the
+    // corrections it is meant to cover, i.e. the process noise is too large, BY THAT FACTOR. This is
+    // the number to set OdomNoiseScale from, and it is a measurement rather than a taste.
+    // ⚠ Ignoring the observation noise makes this an UNDER-estimate of NIS, so it errs toward
+    //   saying Q is fine — the conservative direction for a knob that would loosen safety margins.
+    double nis = -1.0;
+    if (hess_pred_cov_.allFinite() and res.innovation.allFinite())
+    {
+        const Eigen::Matrix3f P = hess_pred_cov_;
+        if (std::abs(P.determinant()) > 1e-18f)
+            nis = static_cast<double>(res.innovation.transpose() * P.inverse() * res.innovation);
+    }
+    for (int i = 0; i < 3; ++i) f << ',' << res.innovation[i];
+    f << ',' << nis;
     // marg / pub > 1 means the window is LESS certain than what we publish — the over-confidence.
     for (int i = 0; i < 3; ++i) f << ',' << ratio(sm[i], sp[i]);
     const std::int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -3976,6 +3998,7 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
             << "[hess] sigma_theta  window(marg) " << sm[2] << "  window(block) " << sb[2]
             << "  filter " << sr[2] << "  published " << sp[2] << "  | marg/pub " << ratio(sm[2], sp[2])
             << " block/marg " << ratio(sb[2], sm[2])
+            << " | NIS " << nis << " (3 = consistent, below = Q too large)"
             << " | slots " << last_gn_window_slots_ << " dof_marg " << last_marg_dof_
             << " rows " << hess_check_rows_;
     }
@@ -5175,6 +5198,10 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         const torch::Tensor& points_tensor)
     {
         try {
+            // P_pred, kept before the update overwrites it. This is what predict_step() left in
+            // current_covariance, i.e. F·P_prev·Fᵀ + Q — the quantity the innovation has to be
+            // consistent with, and the one the process noise actually sets.
+            hess_pred_cov_ = current_covariance;
             auto& newest = window_mgr_.newest();
             auto pose_for_hess = newest.pose.clone().detach().requires_grad_(true);
             auto pose_xy = pose_for_hess.index({torch::indexing::Slice(0, 2)});
@@ -5193,6 +5220,7 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
                     newest.image_edges, pose_xy, pose_theta_h, params.image_edge, get_device());
 
             Eigen::Matrix3f H_likelihood = autograd_hessian_3x3(likelihood_loss, pose_for_hess);
+            hess_obs_prec_ = H_likelihood;   // this slot's observation alone, before the clamp
 
             Eigen::SelfAdjointEigenSolver<Eigen::Matrix3f> eig(H_likelihood);
             Eigen::Vector3f evals = eig.eigenvalues().cwiseMax(params.eigenvalue_clamp_posterior);

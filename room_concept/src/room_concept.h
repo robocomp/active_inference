@@ -1852,6 +1852,11 @@ private:
     /// The filter's posterior BEFORE apply_adaptive_covariance floors it, so the CSV can
     /// separate what the recursion computed from what the innovation floor raised it to.
     Eigen::Matrix3f hess_pre_adaptive_ = Eigen::Matrix3f::Zero();
+    /// P_pred = F·P_prev·Fᵀ + Q, kept before the update consumes it: the quantity the process noise
+    /// sets and the one the innovation must be consistent with.
+    Eigen::Matrix3f hess_pred_cov_ = Eigen::Matrix3f::Zero();
+    /// This slot's observation Hessian alone, so "Q too large" and "H too small" stay separable.
+    Eigen::Matrix3f hess_obs_prec_ = Eigen::Matrix3f::Identity();
     int          hess_check_rows_ = 0;
 
     /// Run the GN backend on the CURRENT window WITHOUT keeping its answer, and log it beside the
