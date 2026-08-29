@@ -169,25 +169,6 @@ void SpecificWorker::initialize()
         // Set BEFORE the first bind_camera(): the correction is applied where the extrinsic is read.
         camera_ingestor_->set_mount_yaw_correction(params.IMAGE_EDGE_MOUNT_YAW_CORR);
 
-        // ── Extra CALIBRATION channels ───────────────────────────────────────────────────────────
-        // The driving camera is skipped: it already has an ingestor above, and running it twice
-        // would feed its own evidence file from two extractions of the same frames — the exact
-        // double-count the triple-point/segment choice exists to avoid.
-        for (const auto &cam : params.CALIB_CAMERAS)
-        {
-            if (cam == params.IMAGE_EDGE_CAMERA) continue;
-            auto ch = std::make_unique<CalibChannel>();
-            ch->name = cam;
-            ch->ingestor = std::make_unique<rc::CameraIngestor>(G, cam);
-            // ★ The yaw correction is per CAMERA and is NOT shared. It was measured for the zed; a
-            //   second camera has its own mount and applying one camera's correction to another
-            //   would be a fabricated extrinsic.
-            ch->source = std::make_unique<rc::ImageEdgeSource>();
-            ch->source->set_config(image_edge_source_->config());
-            calib_channels_.push_back(std::move(ch));
-            qInfo() << "[camcal] calibration channel for" << QString::fromStdString(cam)
-                    << "(does not drive the pose)";
-        }
         image_edge_source_ = std::make_unique<rc::ImageEdgeSource>();
         rc::ImageEdgeSource::Config ic;
         ic.use_wall_corners    = params.IMAGE_EDGE_USE_WALL_CORNERS;
@@ -202,6 +183,31 @@ void SpecificWorker::initialize()
         ic.wall_position_sigma = params.IMAGE_EDGE_WALL_POS_SIGMA;
         ic.room_height         = params.room_height;
         image_edge_source_->set_config(ic);
+
+        // ── Extra CALIBRATION channels ─────────────────────────────────────────────────────────
+        // ★ AFTER image_edge_source_ is built and configured. This block sat BEFORE it and
+        //   called image_edge_source_->config() on a null unique_ptr — a segfault on the
+        //   very first start, before the graph was even up. Second time today that adding
+        //   setup beside related code put it ahead of the thing it depends on; the
+        //   dependency is on CONSTRUCTION ORDER and nothing in the surrounding code shows it.──
+        // The driving camera is skipped: it already has an ingestor above, and running it twice
+        // would feed its own evidence file from two extractions of the same frames — the exact
+        // double-count the triple-point/segment choice exists to avoid.
+        for (const auto &cam : params.CALIB_CAMERAS)
+        {
+            if (cam == params.IMAGE_EDGE_CAMERA) continue;
+            auto ch = std::make_unique<CalibChannel>();
+            ch->name = cam;
+            ch->ingestor = std::make_unique<rc::CameraIngestor>(G, cam);
+            // ★ The yaw correction is per CAMERA and is NOT shared. It was measured for the zed; a
+            //   second camera has its own mount and applying one camera's correction to another
+            //   would be a fabricated extrinsic.
+            ch->source = std::make_unique<rc::ImageEdgeSource>();
+            ch->source->set_config(ic);   // the same config, from the local `ic` — see below
+            calib_channels_.push_back(std::move(ch));
+            qInfo() << "[camcal] calibration channel for" << QString::fromStdString(cam)
+                    << "(does not drive the pose)";
+        }
     }
 
     // ── Wire RoomConcept run context ───────────────────────────────────────
