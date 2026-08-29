@@ -1215,7 +1215,15 @@ drive  = false   # <- the factor moves the published pose. Only after the CSV sa
                  # stable. It also requires OptimizerType = "GN" (which this file sets); the loader
                  # refuses drive without it rather than leaving a flag that reads true while nothing
                  # optimises.
-camera = "zed"            # DSR node name. VERIFIED FOR SHADOW, not assumed: robot_concept/shadow.json
+camera = "ricoh"          # ★ 2026-08-29: the PANORAMA, matching the P3Bot setup. Verified present on
+                          # Shadow — shadow.json has body->ricoh at [0, -0.17, 1.275] alongside zed
+                          # at 0.945 and helios at 1.075, so the three-sensor triangle is available
+                          # on this platform too.
+                          # WHY the panorama: on the ZED the corner factor failed because
+                          # corr(x, theta) = 0.98 — corners clustered ahead in a narrow field make a
+                          # lateral shift and a rotation look alike. A panorama spreads bearings over
+                          # 359 deg and that correlation collapsed to ~3 on P3Bot.
+                          # WAS: "zed". DSR node name. VERIFIED FOR SHADOW, not assumed: robot_concept/shadow.json
                           # declares nodes root/Shadow/body/{helios,bpearl,imu,zed,ricoh,mind}, so
                           # "zed" exists; and robot_concept/etc/config.toml has enable_zed = true with
                           # rgb_topic = "rc/zed/rgb", so the media plane the ingestor subscribes to is
@@ -1242,7 +1250,13 @@ useFloorJunction = true   # ON, and ONLY because shadow = true and drive = false
                           # pose the term is allowed to MOVE.
                           # ⚠ Do not set drive = true until bias_const_px has been read and is small
                           # and stable. That gate is still real; only the ordering was wrong.
-useWallCeiling   = false  # OFF. On P3Bot the reason was clutter (lamps/ducts) and the ZED's FoV at
+useWallCeiling   = true   # ★ ON 2026-08-29. Each vertical wall corner then yields TWO 0-D features,
+                          # one at each end, and the CEILING one is far less occluded — furniture,
+                          # people and clutter all sit on the floor, which is exactly where a floor
+                          # corner is blocked. Measured on P3Bot the ceiling corners were slightly
+                          # BETTER than the floor ones in the vertical channel (sigma_v 0.344 vs
+                          # 0.456 px), so the clutter objection did not materialise.
+                          # WAS false, and both stated reasons were about the ZED: clutter (lamps/ducts) and the ZED's FoV at
                           # close range. On Shadow there is a second, stronger reason: this room's
                           # ceiling is at RoomHeight = 3.0 m, above the helios's ~2.77 m vertical
                           # reach, so the wall-ceiling line is asserted from the layout and has no
@@ -1281,6 +1295,35 @@ maxSlots     = 1          # newest window slot only, like corners
 mountPitchSigma  = 0.0035   # rad (~0.2 deg)   ⚠ NOT MEASURED ON SHADOW
 mountHeightSigma = 0.010    # m                ⚠ NOT MEASURED ON SHADOW
 mountYawSigma    = 0.0035   # rad              ⚠ NOT MEASURED ON SHADOW
+
+# ── Structural features ported from config_p3bot_webots.toml, 2026-08-29 ───────────────────────
+# ★★ mountYawCorrection is DELIBERATELY ABSENT, i.e. zero. P3Bot's +0.814 deg was measured on
+#    P3BOT'S ricoh, and Shadow's sits at 1.275 m against P3Bot's 1.42 m — a different mount on a
+#    different robot. Copying that number across would be fabricating an extrinsic, which is the
+#    same error the per-(robot, camera) evidence files exist to prevent.
+#    Shadow's boresight is to be MEASURED here from scratch. That is not a loss: it is a second
+#    independent run of the whole procedure, and a value that lands well away from 0.814 would
+#    VALIDATE the method rather than embarrass it.
+#
+# Evidence accumulates in etc/camera_calib_<robot>_<camera>.txt and a file from another robot or
+# another camera is refused rather than merged.
+
+# One 2-D residual per floor-wall-wall corner INSTEAD of the ~43 per-sample contour residuals.
+# Instead, never as well: a triple point is those same segment offsets re-expressed, so both would
+# count the same photons twice.
+useTriplePoints = true
+
+# Both cameras calibrated; `camera` above stays the one that may drive. Each camera's residual
+# against the LiDAR is (camera error) + (LiDAR corner error) and those are inseparable with ONE
+# camera — differencing two cameras against the SAME corner cancels the LiDAR term, which is the
+# only reading here that needs no ground truth. See camera_calibration.h.
+calibCameras = ["zed", "ricoh"]
+
+# Per-CONTOUR map-position uncertainty (m). Not a mount property: how well any single wall's place
+# in the polygon is known. Stops N samples along one wall counting as N independent measurements of
+# a position they all share. ⚠ 0.015 was measured on P3Bot's room; Shadow's apartment may differ,
+# and the per-vertex residual spread is what would say so.
+wallPositionSigma = 0.015
 
 # Kept inside etc/ deliberately: every data file this config causes to be written is read back by a
 # tool, and the readers here are locale-safe (std::from_chars) only where they were fixed. Keeping the

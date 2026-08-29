@@ -248,7 +248,7 @@ void SpecificWorker::initialize()
     {
         mp_pool_.reset();
         mp_win_.reset();
-        std::remove(("etc/camera_calib_" + params.IMAGE_EDGE_CAMERA + ".txt").c_str());
+        std::remove(mp_pool_.path().c_str());
         qInfo() << "[camcal] evidence cleared and etc/camera_calib.txt deleted";
     });
 
@@ -809,8 +809,8 @@ void SpecificWorker::mount_pair_update(const rc::ImageEdgeObs &obs,
         //   zed -> ricoh switch on 2026-08-29 before this was noticed: two different mounts summed
         //   into one information matrix, which estimates neither. The name keys the file AND is
         //   checked inside it, so a copy or a rename is caught too.
-        mp_pool_.set_camera(params.IMAGE_EDGE_CAMERA);
-        const std::string path = "etc/camera_calib_" + params.IMAGE_EDGE_CAMERA + ".txt";
+        mp_pool_.set_camera(params.IMAGE_EDGE_CAMERA, params.LIDAR_ROBOT_FRAME);
+        const std::string path = mp_pool_.path();
         if (const std::size_t k = mp_pool_.load(path); k > 0)
             qInfo().nospace() << "[camcal] resumed from " << QString::fromStdString(path)
                               << " (" << k << " pairs, camera "
@@ -877,8 +877,7 @@ void SpecificWorker::mount_pair_update(const rc::ImageEdgeObs &obs,
 
     const auto win  = mp_win_.solve();
     const auto pool = mp_pool_.solve();
-    mp_pool_.save("etc/camera_calib_" + params.IMAGE_EDGE_CAMERA + ".txt");   // per camera; a
-                                            // kill -9 then costs at most one window of evidence
+    mp_pool_.save(mp_pool_.path());   // per (robot, camera); a kill -9 costs at most one window
     if (viewer_ and pool.ok)
     {
         Eigen::Matrix<float, rc::camcal::P_COUNT, 1> pv, sv;
@@ -1212,8 +1211,8 @@ void SpecificWorker::pump_calib_channels()
         if (not ch.loaded)
         {
             ch.loaded = true;
-            ch.calib.set_camera(ch.name);
-            const std::string path = "etc/camera_calib_" + ch.name + ".txt";
+            ch.calib.set_camera(ch.name, params.LIDAR_ROBOT_FRAME);
+            const std::string path = ch.calib.path();
             if (const std::size_t k = ch.calib.load(path); k > 0)
                 qInfo().nospace() << "[camcal] " << QString::fromStdString(ch.name)
                                   << " resumed from " << QString::fromStdString(path)
@@ -1260,7 +1259,7 @@ void SpecificWorker::pump_calib_channels()
         }
         if (ch.pairs % 2000 < 12 and ch.pairs > 0)
         {
-            ch.calib.save("etc/camera_calib_" + ch.name + ".txt");
+            ch.calib.save(ch.calib.path());
             if (const auto sol = ch.calib.solve(); sol.ok)
                 qInfo().nospace().noquote()
                     << "[camcal] " << QString::fromStdString(ch.name) << " " << ch.pairs

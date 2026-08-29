@@ -121,9 +121,19 @@ namespace rc::camcal
     class Estimator
     {
     public:
-        /// Which camera this evidence belongs to. Set BEFORE load(); changing it invalidates.
-        void set_camera(std::string name) { camera_ = std::move(name); }
+        /// Which camera AND which robot this evidence belongs to. Set BEFORE load().
+        ///
+        /// ★ THE ROBOT IS PART OF THE KEY TOO. Keying by camera alone still lets two ROBOTS share a
+        ///   file: Shadow's ricoh sits at 1.275 m and P3Bot's at 1.42 m, so "the ricoh's mount" is
+        ///   not one quantity across platforms. This is the same defect as the camera key, one level
+        ///   up, and it would mix silently in exactly the same way.
+        void set_camera(std::string name, std::string robot = "")
+        { camera_ = std::move(name); robot_ = std::move(robot); }
         [[nodiscard]] const std::string& camera() const noexcept { return camera_; }
+        /// Path for this (robot, camera) pair. One place, so save and load cannot disagree.
+        [[nodiscard]] std::string path() const
+        { return "etc/camera_calib_" + (robot_.empty() ? std::string("unknown") : robot_)
+                 + "_" + camera_ + ".txt"; }
 
         void add(const rc::mount::PairObs& o) { acc_.add(o); }
         void reset() { acc_.reset(); }
@@ -149,6 +159,7 @@ namespace rc::camcal
             //   estimates a single mount from two different ones and the result means nothing.
             //   Recorded here as well as in the filename, so a copied or renamed file is still
             //   caught rather than silently accepted.
+            f << "robot," << robot_ << '\n';
             f << "camera," << camera_ << '\n';
             f << "n," << acc_.n << '\n' << "rTr," << acc_.rTr << '\n';
             for (int i = 0; i < 4; ++i)
@@ -177,6 +188,17 @@ namespace rc::camcal
                 { b = line.find(',', a); if (b == std::string::npos) b = line.size();
                   tok.emplace_back(line.substr(a, b - a)); }
                 double v = 0.0;
+                if (tok[0] == "robot" and tok.size() == 2)
+                {
+                    if (not robot_.empty() and tok[1] != robot_)
+                    {
+                        qWarning() << "[camcal] refusing" << QString::fromStdString(path)
+                                   << "— evidence for robot" << QString::fromStdString(tok[1])
+                                   << "but this is" << QString::fromStdString(robot_);
+                        return 0;
+                    }
+                    continue;
+                }
                 if (tok[0] == "camera" and tok.size() == 2)
                 {
                     if (not camera_.empty() and tok[1] != camera_)
@@ -219,6 +241,6 @@ namespace rc::camcal
 
     private:
         rc::mount::Accum acc_;
-        std::string      camera_;
+        std::string      camera_, robot_;
     };
 }   // namespace rc::camcal
