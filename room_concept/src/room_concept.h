@@ -385,7 +385,12 @@ public:
         // poorly-fit dropped slot contributes weak, high-covariance information that cannot anchor.
         float boundary_quality_sigma = 0.10f;             // m — σ_q for the soft obs-quality weight
         float covariance_regularization = 1e-4f;       // λ added to posterior precision diagonal
-        float covariance_det_min = 1e-10f;             // Min determinant for valid covariance
+        // covariance_det_min RETIRED 2026-08-29. It gated the posterior update on
+        // det(P) > 1e-10, which for a 3x3 pose covariance means sigma > 21.5 mm on equal axes — so
+        // it refused 89 of 102 updates and the published sigma never absorbed an observation.
+        // A determinant cannot distinguish a SINGULAR covariance from a PRECISE one. Replaced by
+        // the positive-definiteness and condition-number tests already computed alongside it.
+        // float covariance_det_min = 1e-10f;
         float condition_number_max = 1e6f;             // Max condition number for valid covariance
 
         // ===== Motion Model =====
@@ -1858,7 +1863,7 @@ private:
     /// This slot's observation Hessian alone, so "Q too large" and "H too small" stay separable.
     Eigen::Matrix3f hess_obs_prec_ = Eigen::Matrix3f::Identity();
     /// Did the covariance update land, and if not which guard refused it.
-    /// 1 = taken, -1 non-finite, -2 determinant below covariance_det_min, -3 condition number.
+    /// 1 = taken, -1 non-finite, -2 not positive definite, -3 condition number too high.
     int    hess_cov_accept_ = 0;
     double hess_cov_det_    = 0.0;
     double hess_cov_cond_   = 0.0;

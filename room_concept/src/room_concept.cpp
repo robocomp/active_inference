@@ -4000,7 +4000,7 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
             << " block/marg " << ratio(sb[2], sm[2])
             << " | NIS " << nis
             << " | cov update " << (hess_cov_accept_ == 1 ? "TAKEN"
-                                  : hess_cov_accept_ == -2 ? "REFUSED: det below covariance_det_min"
+                                  : hess_cov_accept_ == -2 ? "REFUSED: not positive definite"
                                   : hess_cov_accept_ == -3 ? "REFUSED: cond above condition_number_max"
                                   : hess_cov_accept_ == -1 ? "REFUSED: non-finite" : "?")
             << " det " << hess_cov_det_
@@ -5244,20 +5244,30 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
             const float min_ev = eigenvalues.minCoeff();
             const float cond = (min_ev > 1e-8f) ? (max_ev / min_ev) : 1e8f;
 
-            // Why the candidate was taken or refused, recorded rather than inferred. The three
-            // conditions fail for entirely different reasons and the outcome is identical in the
-            // published number, which is how a covariance that never updates looks exactly like one
-            // that updates to the same value.
+            // ── ACCEPT THE UPDATE, OR SAY WHICH CONDITION REFUSED IT ────────────────────────────
+            // ★ 2026-08-29: the determinant test that used to stand here REFUSED 89 of 102 updates,
+            //   so the published sigma never absorbed an observation — it was F·P·Fᵀ + Q compounding
+            //   and nothing else. For a 3x3 pose covariance det = (sx·sy·st)², so
+            //   `det > covariance_det_min` (1e-10) forbade anything tighter than sigma = 21.5 mm on
+            //   equal axes, while the observation alone supports ~2.9 mm — refused by 3e6.
+            //   A SINGULAR covariance and a PRECISE one both have a small determinant, and a
+            //   determinant cannot tell them apart. It was rejecting precision as degeneracy, and it
+            //   is the root cause of a sigma that stayed at 0.086 through a 3.97 m pose jump.
+            // The two tests that DO discriminate were already here:
+            //   min_ev > 0                    positive-definiteness — a real covariance, not a
+            //                                 degenerate one collapsed onto a subspace;
+            //   cond < condition_number_max   degeneracy by ratio, which is scale-free and therefore
+            //                                 says nothing about how precise the estimate is.
+            // Together they reject exactly the matrices that are unusable and none that are merely
+            // small, which is the distinction the old test could not make.
             hess_cov_det_  = static_cast<double>(new_cov.determinant());
             hess_cov_cond_ = static_cast<double>(cond);
-            hess_cov_accept_ = 0;
-            if (not new_cov.allFinite())                              hess_cov_accept_ = -1;
-            else if (not (new_cov.determinant() > params.covariance_det_min)) hess_cov_accept_ = -2;
-            else if (not (cond < params.condition_number_max))        hess_cov_accept_ = -3;
-            if (new_cov.allFinite() && new_cov.determinant() > params.covariance_det_min
-                && cond < params.condition_number_max)
+            const bool finite_ok = new_cov.allFinite();
+            const bool pd_ok     = min_ev > 0.f;
+            const bool cond_ok   = cond < params.condition_number_max;
+            hess_cov_accept_ = not finite_ok ? -1 : not pd_ok ? -2 : not cond_ok ? -3 : 1;
+            if (finite_ok and pd_ok and cond_ok)
             {
-                hess_cov_accept_ = 1;
                 current_covariance = new_cov;
                 return {new_cov, cond};
             }
