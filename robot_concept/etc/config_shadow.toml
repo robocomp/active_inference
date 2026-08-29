@@ -156,7 +156,11 @@ ricoh_source = "auto"
 #   auto: bridge via Ice RPC until BOTH lidar3d_dds (helios=MediaPlaneDDS2, bpearl=MediaPlaneDDS3)
 #         appear on DDS, then relay their descriptors to the 'helios'/'bpearl' nodes and stop bridging.
 #   ice : always bridge via Ice RPC.   dds: never bridge; only relay/monitor the lidar3d_dds planes.
-lidar_source = "dds"
+lidar_source = "auto"   # ★ 2026-08-29: was "dds" here, but the file that was actually
+                        # RUNNING (config_beta.toml, now removed) said "auto", and that is
+                        # the value kept. "auto" bridges over Ice until both lidar3d_dds
+                        # planes appear and then stops; "dds" never bridges, so it needs
+                        # those producers already up or there is no LiDAR at all.
 
 # IMU source selector (only effective when enable_imu = true): auto | ice | dds.
 #   auto: bridge via Ice RPC until imu_dds appears on DDS (Proxies.MediaPlaneDDS4), then relay its
