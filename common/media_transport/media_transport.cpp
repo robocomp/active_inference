@@ -902,6 +902,16 @@ std::map<std::string, std::string> parse_flat_json(const std::string& s)
         {
             if (not parse_string(val)) break;
         }
+        else if (i < n and s[i] == '[')                            // JSON array, kept whole
+        {
+            // The scan below stops at ',' or '}', so an array would truncate at its first
+            // element. Capture it wholesale instead; as_float_list() splits it afterwards.
+            // No nesting: these are flat numeric arrays (per-ring elevations), nothing deeper.
+            const std::size_t start = i;
+            while (i < n and s[i] != ']') ++i;
+            if (i < n) ++i;                                        // closing bracket
+            val = s.substr(start, i - start);
+        }
         else                                                       // number / bool / null token
         {
             const std::size_t start = i;
@@ -967,13 +977,18 @@ std::string fmt_float(float v)
 // existing string path already parses correctly.
 std::string fmt_float_list(const std::vector<float>& xs)
 {
-    std::string r;
-    for (std::size_t i = 0; i < xs.size(); ++i) { if (i) r += ';'; r += fmt_float(xs[i]); }
-    return r;
+    std::string r = "[";
+    for (std::size_t i = 0; i < xs.size(); ++i) { if (i) r += ','; r += fmt_float(xs[i]); }
+    return r + "]";
 }
 
-std::vector<float> as_float_list(const std::string& v)
+// Accepts a JSON array "[a,b,c]" (what to_json emits) and a bare ';'- or ','-separated
+// list (what a human writes in a config file). Locale-independent throughout.
+std::vector<float> as_float_list(const std::string& in)
 {
+    std::string v = in;
+    if (not v.empty() and v.front() == '[') v = v.substr(1, v.size() - (v.back() == ']' ? 2 : 1));
+    for (char& c : v) if (c == ',') c = ';';
     std::vector<float> out;
     std::size_t i = 0;
     while (i <= v.size())
@@ -1037,7 +1052,7 @@ std::string MediaDescriptor::to_json() const
 
         if (model.rings.has_value())  s += ",\"geom_rings\":" + std::to_string(*model.rings);
         if (not model.ring_elev_deg.empty())
-            s += ",\"geom_ring_elev_deg\":\"" + fmt_float_list(model.ring_elev_deg) + "\"";
+            s += ",\"geom_ring_elev_deg\":" + fmt_float_list(model.ring_elev_deg);
         opt("geom_azimuth_step_deg", model.azimuth_step_deg);
         opt("geom_range_min_m",      model.range_min_m);
         opt("geom_range_max_m",      model.range_max_m);
