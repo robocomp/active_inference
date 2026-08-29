@@ -10,6 +10,7 @@
 
 #include <QBrush>
 #include <QColor>
+#include <QFontMetrics>
 #include <QPainter>
 #include <QPolygonF>
 #include <QVBoxLayout>
@@ -1128,7 +1129,9 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
             const bool ceiling = (t.from == ContourClass::WallCeiling);
             // Ceiling corners in cyan, floor in magenta: the two populations answer differently
             // (the ceiling one is far less occluded) and a single colour would hide which is which.
-            const QColor col = ceiling ? QColor(0, 220, 255) : QColor(255, 0, 200);
+            // Orange floor / cyan ceiling, matching the 2-D canvas. The two displays are read side
+            // by side and the same feature must not change colour between them.
+            const QColor col = ceiling ? QColor(0, 220, 255) : QColor(255, 150, 0);
             // MEASURED: a filled square, the same shape used for these in the 2-D canvas.
             painter.setPen(QPen(col, 2.0));
             painter.setBrush(QBrush(QColor(col.red(), col.green(), col.blue(), 150)));
@@ -1176,6 +1179,12 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
             for (const double h : {0.0, static_cast<double>(ceil_z)})
             {
                 const auto cam = transform_room_point(basis, Mat::Vector3d(w.x(), w.y(), h));
+                // ★ BEHIND THE CAMERA. On a pinhole, project() of a point with y < 0 returns a
+                //   FINITE but mirrored pixel — it does not fail, it lies — so a corner behind the
+                //   ZED was being drawn at a plausible position on the wrong side of the image. A
+                //   panorama genuinely sees behind itself, so the test applies only to the pinhole.
+                if (not panoramic and cam.y() <= 1e-4) continue;
+                if (panoramic and cam.norm() <= 1e-4) continue;
                 const Eigen::Vector2d uv = camera_api_->project(cam);
                 if (!std::isfinite(uv.x()) || !std::isfinite(uv.y())) continue;
                 // A retired corner is still detected and can still recover, so it is drawn faint
@@ -1187,6 +1196,56 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
                 painter.drawLine(QPointF(uv.x() - 13.0, uv.y()), QPointF(uv.x() + 13.0, uv.y()));
                 painter.drawLine(QPointF(uv.x(), uv.y() - 13.0), QPointF(uv.x(), uv.y() + 13.0));
             }
+        }
+    }
+
+    // 3.4d) Legend. Four marker types on one image, two of them differing only by hue, is more than
+    // a reader should have to reconstruct from memory — and the whole point of these overlays is
+    // comparing markers against each other, which needs knowing which is which.
+    {
+        struct Item { QColor col; const char* text; int shape; };   // 0 filled square, 1 ring, 2 cross
+        const Item items[] = {
+            { QColor(255, 150, 0), "camera corner — floor",    0 },
+            { QColor(0, 220, 255), "camera corner — ceiling",  0 },
+            { QColor(200, 200, 200), "same corner, model says", 1 },
+            { QColor(0, 230, 120), "LiDAR corner (both ends)",  2 },
+        };
+        const int pad = 8, row = 18, box = 12;
+        int wmax = 0;
+        const QFontMetrics fm(painter.font());
+        for (const auto& it : items) wmax = std::max(wmax, fm.horizontalAdvance(it.text));
+        const QRectF panel(8, 8, static_cast<double>(pad * 3 + box + wmax),
+                           static_cast<double>(pad * 2 + row * std::size(items)));
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(0, 0, 0, 140));
+        painter.drawRoundedRect(panel, 4, 4);
+        int y = static_cast<int>(panel.y()) + pad + row / 2;
+        for (const auto& it : items)
+        {
+            const int x = static_cast<int>(panel.x()) + pad;
+            painter.setPen(QPen(it.col, 2.0));
+            switch (it.shape)
+            {
+                case 0:
+                    painter.setBrush(QColor(it.col.red(), it.col.green(), it.col.blue(), 150));
+                    painter.drawRect(QRectF(x, y - box / 2.0, box, box));
+                    break;
+                case 1:
+                    painter.setBrush(Qt::NoBrush);
+                    painter.drawEllipse(QPointF(x + box / 2.0, y), box / 2.0, box / 2.0);
+                    break;
+                default:
+                    painter.setBrush(Qt::NoBrush);
+                    painter.drawEllipse(QPointF(x + box / 2.0, y), box / 2.0, box / 2.0);
+                    painter.drawLine(QPointF(x - 2, y), QPointF(x + box + 2, y));
+                    painter.drawLine(QPointF(x + box / 2.0, y - box / 2.0 - 2),
+                                     QPointF(x + box / 2.0, y + box / 2.0 + 2));
+                    break;
+            }
+            painter.setPen(QPen(QColor(235, 235, 235), 1.0));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawText(QPointF(x + box + pad, y + 4), it.text);
+            y += row;
         }
     }
 
