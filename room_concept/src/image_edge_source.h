@@ -81,6 +81,12 @@ namespace rc
             float med_sigma_px  = 0.f;
             float med_search_px = 0.f;
             float sigma_i       = 0.f;
+            /// Triple points formed, and how many of those the occlusion prior disbelieves.
+            /// ★ Reported separately from n_occluded (which counts SAMPLES): with drive = true
+            ///   the corners are what moves the pose, so "how many corners, and how many of them
+            ///   are behind a wall" is the number that says whether the term is being fed.
+            int   n_triple      = 0;
+            int   n_triple_occl = 0;
         };
 
         ImageEdgeSource() = default;

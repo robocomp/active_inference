@@ -715,11 +715,25 @@ void Viewer2D::draw_rgb_corners(const std::vector<rc::TriplePoint>& points)
         rgb_corner_items_[i]->setPos(t.p_room_meas.x(), t.p_room_meas.y());
         rgb_corner_line_items_[i]->setLine(t.p_room.x(), t.p_room.y(),
                                            t.p_room_meas.x(), t.p_room_meas.y());
-        // Opacity carries the intersection conditioning: a vertex seen edge-on has a poorly defined
-        // crossing, and its marker should not look as authoritative as a well-conditioned one. Not a
-        // gate — the point is still drawn, just visibly weaker.
-        const double q = std::clamp(2.0 / std::max(1.0, static_cast<double>(t.cond)), 0.25, 1.0);
+        // ── The marker carries the model's own belief in it, on two independent axes ─────────────
+        // CONDITIONING: a vertex seen edge-on has a poorly defined crossing, and its marker should
+        // not look as authoritative as a well-conditioned one.
+        // VISIBILITY: pi_vis is the occlusion prior the mixture ALREADY applied to this corner's
+        // samples. Every polygon vertex projects somewhere in a 360 image, including the ones behind
+        // this room's own walls — a non-convex plan hides half of itself from any single viewpoint —
+        // so drawing them all identically painted a room with transparent walls. The loss was never
+        // fooled (an occluded corner's samples are downweighted, its w collapses and cov_uv blows
+        // up), but the CANVAS was, and a display that hides the model's doubt is how a term ends up
+        // trusted more than it earned.
+        // ★ Still not a gate. An occluded corner is drawn HOLLOW and faint rather than dropped:
+        //   "the model predicts a corner here and does not believe it" is a different statement from
+        //   "there is no corner here", and only one of them is true.
+        const double q_cond = std::clamp(2.0 / std::max(1.0, static_cast<double>(t.cond)), 0.25, 1.0);
+        const double vis    = std::clamp(static_cast<double>(t.pi_vis), 0.0, 1.0);
+        const double q      = q_cond * (0.10 + 0.90 * vis);
+        const bool   seen   = vis >= 0.5;
         rgb_corner_items_[i]->setOpacity(q);
+        rgb_corner_items_[i]->setBrush(seen ? QBrush(QColor(255, 150, 0, 180)) : QBrush(Qt::NoBrush));
         rgb_corner_line_items_[i]->setOpacity(q);
     }
 }

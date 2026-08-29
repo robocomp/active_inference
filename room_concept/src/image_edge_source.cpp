@@ -132,6 +132,7 @@ ImageEdgeObs ImageEdgeSource::extract(const GrayFrame& frame,
         ContourClass    cls    = ContourClass::WallCorner;
         double          w = 0.0, ws = 0.0;      ///< weight, and weight * along-normal offset
         double          wh4 = 0.0;              ///< weight * this segment's map-offset sensitivity
+        double          wv  = 0.0;              ///< weight * pi_vis, for the corner's carried visibility
         Eigen::Vector2d wn = Eigen::Vector2d::Zero();
     };
     std::vector<SegFit> fits;
@@ -379,6 +380,7 @@ ImageEdgeObs ImageEdgeSource::extract(const GrayFrame& frame,
                     fit.w   += wf;
                     fit.ws  += wf * static_cast<double>(best_s);
                     fit.wh4 += wf * static_cast<double>(hcol(4));
+                    fit.wv  += wf * static_cast<double>(pi_vis);
                     fit.wn  += wf * Eigen::Vector2d(n_hat.x(), n_hat.y());
                 }
             }
@@ -488,10 +490,16 @@ ImageEdgeObs ImageEdgeSource::extract(const GrayFrame& frame,
             }
             tp.uv_meas  = uvm.cast<float>();
             tp.cov_uv   = (Ai * S * Ai.transpose()).cast<float>();
+            // Weighted over BOTH segments: a crossing is only as visible as the pair that
+            // formed it, and the two can disagree (a ceiling join in the clear, its floor
+            // counterpart behind a wall).
+            tp.pi_vis   = static_cast<float>((fc->wv + ff->wv) / std::max(1e-12, fc->w + ff->w));
             tp.n_corner = static_cast<int>(fc->w);
             tp.n_floor  = static_cast<int>(ff->w);
             const double c = std::min(1.0 - 1e-12, std::abs(nch.dot(nfh)));
             tp.cond     = static_cast<float>((1.0 + c) / (1.0 - c));
+            st.n_triple++;
+            if (tp.pi_vis < 0.5f) st.n_triple_occl++;
             obs.triple_points.push_back(tp);
         }
         }

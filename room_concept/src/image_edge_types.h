@@ -164,6 +164,15 @@ namespace rc
         Eigen::Vector2f uv_pred = Eigen::Vector2f::Zero(); ///< where the model puts it
         Eigen::Vector2f uv_meas = Eigen::Vector2f::Zero(); ///< where the two fitted lines cross
         Eigen::Matrix2f cov_uv  = Eigen::Matrix2f::Zero(); ///< propagated from the two offset sigmas
+        /// The occlusion prior the mixture already applied to this corner's own samples, carried
+        /// out so a CONSUMER can see it. Weighted mean of pi_vis over the two segments that formed
+        /// the crossing; 1 = clear line of sight, 0.02 = a wall of this very room stands in the way.
+        /// ★ It exists because the 2-D canvas was drawing every predicted corner identically, so a
+        ///   room whose far side is hidden behind its own walls looked like a room with transparent
+        ///   walls. The LOSS was already right — an occluded corner's samples are downweighted, its
+        ///   w collapses and cov_uv blows up — but nothing SAID so, and a display that hides the
+        ///   model's own doubt is how a term gets trusted more than it deserves.
+        float           pi_vis  = 1.f;
         /// ★ THREE QUANTITIES, NOT ONE, SO THE DEPTH CONVENTION CAN CHECK ITSELF. `depth_raw` is
         ///   what the plane published; `range_m` is |p_cam_meas| under the assumption that the raw
         ///   value is the FORWARD coordinate (the ZED SDK's convention, and what cortex's

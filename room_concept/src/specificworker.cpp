@@ -1454,7 +1454,9 @@ void SpecificWorker::pump_image_edges()
         last_image_edge_log_ms_ = now;
         qInfo() << "[imgedge] contours" << st.n_contours << "projected" << st.n_projected
                 << "visible" << st.n_visible << "searched" << st.n_searched
-                << "occluded" << st.n_occluded << "| med sigma" << st.med_sigma_px << "px"
+                << "occluded" << st.n_occluded
+                << "| corners" << st.n_triple << "(" << st.n_triple_occl << "behind a wall)"
+                << "| med sigma" << st.med_sigma_px << "px"
                 << "med L" << st.med_search_px << "px sigma_i" << st.sigma_i
                 << "| dt_img_lidar" << dt_ms << "ms";
     }
