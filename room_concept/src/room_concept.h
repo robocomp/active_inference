@@ -217,7 +217,7 @@ public:
         // matched populations. It is NOT the command's measured error -- properly integrated (the
         // localizer's own cmd_dth/meas_dth, not a re-integration of the velocity columns, which
         // mangles the sparse stepwise command signal) the command runs ~10% below the encoder and
-        // ~3% below the room-anchored posterior. See config_apartamento.toml for the full retraction.
+        // ~3% below the room-anchored posterior. See config.toml for the full retraction.
         float cmd_noise_rot   = 0.18f;
         float cmd_noise_base  = 0.05f;   // Base position noise even when stationary (m)
         float stationary_noise_damping = 0.7f;  // Multiplier applied to base noise when near-stationary
@@ -243,7 +243,7 @@ public:
         // command (CmdNoiseRot), not this one. Set to 0 to disable.
         // (An earlier version of this note quoted "encoder 1.068, command 0.747 of true rotation".
         // Those ratios were measurement artefacts — corrected figures are cmd/post 0.967 and
-        // meas/post 1.072; see the retraction in config_apartamento.toml. Note also that under
+        // meas/post 1.072; see the retraction in config.toml. Note also that under
         // webots-bridge the reported angular speed is the supervisor's GROUND TRUTH
         // (specificworker.cpp: pose_data.rot = shadow_velocity[5]), not wheel odometry, so in sim
         // this term is modelling noise that does not exist on the input.)

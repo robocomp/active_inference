@@ -26,7 +26,7 @@ namespace rc
         /// median|x| = 0.674*sigma. Until 2026-08-13 UpdateResult::sdf_mse was a MEAN on the
         /// early-exit path and a MEDIAN on the optimized path; it is now a median everywhere, so a
         /// threshold that was calibrated against the old mean must be multiplied by this factor to
-        /// keep its meaning. Applied once to each affected config value (see config_apartamento.toml)
+        /// keep its meaning. Applied once to each affected config value (see config.toml)
         /// and once in boundary_weight_now().
         /// ⚠ PROVISIONAL. 0.845 is the ratio for a HALF-NORMAL residual, and this residual is not
         /// half-normal: roughly two thirds of the floor is systematic map mismatch (furniture,
@@ -40,7 +40,7 @@ namespace rc
         /// On an early-exit frame the log now carries both statistics of the SAME residuals at the
         /// SAME pose (sdf_mse = median, early_exit_metric = mean), so their ratio IS this constant.
         /// The tool prints the measured value and re-derives all six thresholds from their original
-        /// mean-calibrated numbers. Replace the value here and in config_apartamento.toml together.
+        /// mean-calibrated numbers. Replace the value here and in config.toml together.
         constexpr float kMedianOverMeanAbs = 0.674f / 0.798f;   // = 0.845, pending measurement
     }
 

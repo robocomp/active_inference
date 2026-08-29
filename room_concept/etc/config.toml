@@ -1359,6 +1359,38 @@ wallPositionSigma = 0.015
 # paths together makes the sweep in LOCALE_PARSING_SWEEP.md checkable.
 csv = "etc/image_edge.csv"
 
+
+# ══ REJECTED: online motion-model learning ═════════════════════════════════════════════════════
+# Preserved here on 2026-08-29 from config_apartamento.toml, which is being deleted. The FEATURE is
+# gone (LearnMotionModel and the MotionLearn* knobs were removed from the code on 2026-08-26 with
+# the learner they configured, see room_concept.h and compute_motion_covariance) — but the reason it
+# was rejected is a measurement, and a measurement outlives the code it condemned. There are no keys
+# below: nothing here is settable, and re-adding it would mean re-adding the learner.
+#
+# It continuously adapted three odometry noise parameters from post-optimisation residuals of the
+# RFE window, gated on localisation quality. A/B'd 2026-08-09 and REJECTED:
+#
+#   • It learnt slip_k ≈ 0.81 (clamped at 1.0 on 5% of frames): σ_meas = 0.039 rad against a true
+#     increment of 0.036 rad, i.e. it declared the encoder's per-update rotation UNINFORMATIVE. The
+#     measured-prior weight then collapsed to 0.04 during fast turns, the prior fell back onto the
+#     ~18%-short command channel, and everything the units fix bought was undone — early exit while
+#     rotating 91.6% → 68.5%, over-gate frames 3.6% → 26.7%.
+#   • ★ 0.814 × dt(42 ms) = 0.034, the same value as the old static 0.05/0.25 in the PRE-fix units:
+#     the learner normalises by the same quantity build_motion_covariance multiplies by, so the loop
+#     closes in either convention and the units fix is a NO-OP here.
+#   • ★★★ THE DEFECT IS THE RESIDUAL IT LEARNS FROM. r[2] is a post-optimisation window-pair
+#     residual carrying the optimiser's own correction and the marginalisation, so attributing all
+#     of it to odometry double-counts.
+#   • Corroboration: every learned parameter came out implausibly large in the SAME direction
+#     (ml_odom_noise_trans 0.538 vs static 0.08; ml_bias_theta 3.66e-02 rad = 2.1°).
+#   • Decisive: a covariance that makes predictions WORSE when you trust it is mis-estimated.
+#   • It was also the only one of three runs that LOST THE TRACK — 7 recovery episodes in 6.2 min,
+#     against 0 in a static-k run that drove twice as much rotation above 1.4 rad/s.
+#
+# ⚠ Do not revive this without first fixing what the learner MEASURES. The online self-calibration
+#   that IS live (MotionCalib*, and the batch estimator) learns from a different quantity for exactly
+#   this reason.
+
 # ══ PLATFORM OVERLAY ═══════════════════════════════════════════════════════════════════════════
 # Everything above is POLICY and is the same on every robot. The values below are PHYSICAL —
 # measured on one machine and meaningless on another — and they are the ONLY reason this file was
