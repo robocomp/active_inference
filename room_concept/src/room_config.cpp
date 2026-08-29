@@ -74,6 +74,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     {
         p.ROOM_LAYOUT_SVG = svg_file;
     });
+    rc::ConfigLoaderUtils::load_optional<std::string>(cl, "RoomConcept.LayoutDir", p.LAYOUT_DIR);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.RecenterRoomPolygon", p.RECENTER_ROOM_POLYGON);
     // Ceiling height (m). Sets the room DSR node's room_height attribute (walls/ceiling overlay) and
     // the EXPECTED ceiling location for the LiDAR startup geometry check. Set it explicitly for rooms
@@ -417,6 +418,60 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
             f("wallPositionSigma",  ov.wall_position_sigma);
             f("CmdNoiseRot",        ov.cmd_noise_rot);
             f("CmdNoiseTrans",      ov.cmd_noise_trans);
+            f("PreintZuptDensityV",     ov.zupt_density_v);
+            f("PreintZuptDensityOmega", ov.zupt_density_omega);
+            f("PreintOdomSigmaOmega",   ov.odom_preint_sigma_omega);
+            f("PreintOdomScaleOmega",   ov.odom_preint_scale_omega);
+            f("SdfSafe",                ov.sdf_safe);
+            f("SdfDanger",              ov.sdf_danger);
+            // An int and a bool have no spare sentinel the way a float has NaN, so each is read
+            // twice from opposite seeds: only a key that is actually present makes the two agree.
+            const auto i = [&](const char* key, std::optional<int>& dst)
+            {
+                int lo = std::numeric_limits<int>::min(), hi = std::numeric_limits<int>::max();
+                try { rc::ConfigLoaderUtils::load_optional<int>(cl, ("Platform." + n + "." + key).c_str(), lo);
+                      rc::ConfigLoaderUtils::load_optional<int>(cl, ("Platform." + n + "." + key).c_str(), hi); }
+                catch (...) { return; }
+                if (lo == hi) dst = lo;
+            };
+            const auto b = [&](const char* key, std::optional<bool>& dst)
+            {
+                bool t = true, fa = false;
+                try { rc::ConfigLoaderUtils::load_optional<bool>(cl, ("Platform." + n + "." + key).c_str(), t);
+                      rc::ConfigLoaderUtils::load_optional<bool>(cl, ("Platform." + n + "." + key).c_str(), fa); }
+                catch (...) { return; }
+                if (t == fa) dst = t;
+            };
+            i("Period",                     ov.period_compute);
+            b("UseCommandVelocityPrior",    ov.use_command_velocity_prior);
+            b("CalibPivotEnabled",          ov.calib_pivot_enabled);
+            b("OdomSampleLog",              ov.odom_sample_log);
+            // Drift keys — see PlatformOverlay in the header for why they are here.
+            f("RecoveryLossThreshold",             ov.recovery_loss_threshold);
+            f("PredictionTrustFactor",             ov.prediction_trust_factor);
+            f("RotationSdfCoupling",               ov.rotation_sdf_coupling);
+            f("BoundaryHessianQualityThreshold",   ov.boundary_hessian_quality_threshold);
+            f("BoundaryMuQualityThreshold",        ov.boundary_mu_quality_threshold);
+            f("SymmetryGoodFitMse",                ov.symmetry_good_fit_mse);
+            f("GnLossRelTol",                      ov.gn_loss_rel_tol);
+            i("GnMaxIters",                        ov.gn_max_iters);
+            i("TorchNumThreads",                   ov.torch_num_threads);
+            b("AdaptiveCovEnabled",                ov.adaptive_cov_enabled);
+            b("WindowStrideEnabled",               ov.window_stride_enabled);
+            b("BoundaryFejSchur",                  ov.boundary_fej_schur);
+            b("HierPrecBoundaryEnabled",           ov.hier_prec_boundary_enabled);
+            b("CornerEarlyExitCheck",              ov.corner_early_exit_check);
+            f("WIor",                              ov.w_ior);
+            f("BeliefForgetTime",                  ov.belief_forget_time);
+            {   // ⚠ ConfigLoader throws on an EMPTY array, so absent is the way to say "leave it".
+                std::vector<std::string> subs;
+                try { rc::ConfigLoaderUtils::load_optional<std::vector<std::string>>(
+                          cl, ("Platform." + n + ".ObjectAnchorSubtypes").c_str(), subs); }
+                catch (...) {}
+                if (not subs.empty()) ov.object_anchor_subtypes = std::move(subs);
+            }
+            f("ObjectAnchorMeasSigmaXY",           ov.object_anchor_meas_sigma_xy);
+            f("StableSdfMseMax",                   ov.stable_sdf_mse_max);
             std::string cam;
             try { rc::ConfigLoaderUtils::load_optional<std::string>(
                       cl, ("Platform." + n + ".camera").c_str(), cam); }
@@ -427,6 +482,46 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
         if (not names.empty())
             qInfo() << "[cfg] platform overlays parsed for" << static_cast<int>(names.size())
                     << "robot(s); the matching one is applied once the graph names this robot";
+    }
+    {
+        std::vector<std::string> names;
+        try { rc::ConfigLoaderUtils::load_optional<std::vector<std::string>>(cl, "Scenario.names", names); }
+        catch (const std::exception& e) { qWarning() << "[cfg] Scenario.names ignored:" << e.what(); }
+        for (const auto& n : names)
+        {
+            RoomConfig::ScenarioOverlay ov;
+            std::string svg;
+            try { rc::ConfigLoaderUtils::load_optional<std::string>(
+                      cl, ("Scenario." + n + ".RoomLayoutSvg").c_str(), svg); } catch (...) {}
+            if (not svg.empty()) ov.room_layout_svg = svg;
+            float h = std::numeric_limits<float>::quiet_NaN();
+            try { rc::ConfigLoaderUtils::load_optional<float, double>(
+                      cl, ("Scenario." + n + ".RoomHeight").c_str(), h); } catch (...) {}
+            if (std::isfinite(h)) ov.room_height = h;
+            // A bool has no spare sentinel, so it is read twice from opposite starting points: if
+            // the key is absent both reads keep their seed and disagree, and only a key that is
+            // actually present makes them agree. Cheaper than adding an API for one flag.
+            bool b_t = true, b_f = false;
+            try { rc::ConfigLoaderUtils::load_optional<bool>(
+                      cl, ("Scenario." + n + ".RecenterRoomPolygon").c_str(), b_t);
+                  rc::ConfigLoaderUtils::load_optional<bool>(
+                      cl, ("Scenario." + n + ".RecenterRoomPolygon").c_str(), b_f); } catch (...) {}
+            if (b_t == b_f) ov.recenter_room_polygon = b_t;
+            const auto sf = [&](const char* key, std::optional<float>& dst)
+            {
+                float v = std::numeric_limits<float>::quiet_NaN();
+                try { rc::ConfigLoaderUtils::load_optional<float, double>(
+                          cl, ("Scenario." + n + "." + key).c_str(), v); }
+                catch (...) { return; }
+                if (std::isfinite(v)) dst = v;
+            };
+            sf("LidarHighMaxHeight", ov.lidar_high_max_height);
+            sf("TargetWallMargin",   ov.target_wall_margin);
+            p.scenario_overlays[n] = ov;
+        }
+        if (not names.empty())
+            qInfo() << "[cfg] scenario overlays parsed for" << static_cast<int>(names.size())
+                    << "scenario(s); the matching one is applied once the graph names this place";
     }
     // ConfigLoader throws on an EMPTY array (memory: configloader-empty-array-throws), so an absent
     // key is the way to say "no extra calibration cameras", not `calibCameras = []`.
@@ -570,6 +665,91 @@ std::vector<std::string> RoomConfig::apply_platform(const std::string& robot)
     set(ov.wall_position_sigma,  IMAGE_EDGE_WALL_POS_SIGMA,     "wallPositionSigma");
     if (ov.image_edge_camera.has_value() and *ov.image_edge_camera != IMAGE_EDGE_CAMERA)
     { changed.emplace_back("camera"); IMAGE_EDGE_CAMERA = *ov.image_edge_camera; }
+    if (ov.calib_pivot_enabled.has_value() and *ov.calib_pivot_enabled != CALIB_PIVOT_ENABLED)
+    { changed.emplace_back("CalibPivotEnabled"); CALIB_PIVOT_ENABLED = *ov.calib_pivot_enabled; }
+    if (ov.odom_sample_log.has_value() and *ov.odom_sample_log != ODOM_SAMPLE_LOG)
+    { changed.emplace_back("OdomSampleLog"); ODOM_SAMPLE_LOG = *ov.odom_sample_log; }
+    if (ov.object_anchor_subtypes.has_value() and *ov.object_anchor_subtypes != OBJECT_ANCHOR_SUBTYPES)
+    { changed.emplace_back("ObjectAnchorSubtypes"); OBJECT_ANCHOR_SUBTYPES = *ov.object_anchor_subtypes; }
+    if (ov.object_anchor_meas_sigma_xy.has_value() and *ov.object_anchor_meas_sigma_xy != OBJECT_ANCHOR_MEAS_SIG_XY)
+    { changed.emplace_back("ObjectAnchorMeasSigmaXY"); OBJECT_ANCHOR_MEAS_SIG_XY = *ov.object_anchor_meas_sigma_xy; }
+    if (ov.stable_sdf_mse_max.has_value() and *ov.stable_sdf_mse_max != STABLE_SDF_MSE_MAX)
+    { changed.emplace_back("StableSdfMseMax"); STABLE_SDF_MSE_MAX = *ov.stable_sdf_mse_max; }
+    return changed;
+}
+
+// The overlay values whose destinations live in RoomConcept / EpistemicController rather than here.
+// ⚠ CmdNoiseRot/Trans were PARSED by apply_platform and applied by nothing — harmless while each
+//   robot had its own file (the top-level key did the work) and a silent regression the moment the
+//   files merged. They are applied here.
+std::vector<std::string> RoomConfig::apply_platform_to(const std::string& robot,
+                                                       rc::RoomConcept& room_concept,
+                                                       rc::EpistemicController& epistemic)
+{
+    std::vector<std::string> changed;
+    const auto it = platform_overlays.find(robot);
+    if (it == platform_overlays.end()) return changed;
+    const auto& ov = it->second;
+    const auto set = [&](const auto& src, auto& dst, const char* name)
+    { if (src.has_value() and *src != dst) { changed.emplace_back(name); dst = *src; } };
+    auto& rp = room_concept.params;
+    set(ov.cmd_noise_rot,           rp.cmd_noise_rot,                     "CmdNoiseRot");
+    set(ov.cmd_noise_trans,         rp.cmd_noise_trans,                   "CmdNoiseTrans");
+    set(ov.use_command_velocity_prior, rp.use_command_velocity_prior,     "UseCommandVelocityPrior");
+    set(ov.zupt_density_v,          rp.odom_preint_noise.zupt_density_v,     "PreintZuptDensityV");
+    set(ov.zupt_density_omega,      rp.odom_preint_noise.zupt_density_omega, "PreintZuptDensityOmega");
+    set(ov.odom_preint_sigma_omega, rp.odom_preint_noise.sigma_omega,        "PreintOdomSigmaOmega");
+    set(ov.odom_preint_scale_omega, rp.odom_preint_noise.scale_omega,        "PreintOdomScaleOmega");
+    set(ov.sdf_safe,                epistemic.params.sdf_safe,            "SdfSafe");
+    set(ov.sdf_danger,              epistemic.params.sdf_danger,          "SdfDanger");
+    // Drift keys — same mechanism, different reason. See PlatformOverlay in the header.
+    set(ov.recovery_loss_threshold,         rp.recovery_loss_threshold,               "RecoveryLossThreshold");
+    set(ov.prediction_trust_factor,         rp.prediction_trust_factor,               "PredictionTrustFactor");
+    set(ov.rotation_sdf_coupling,           rp.rotation_sdf_coupling,                 "RotationSdfCoupling");
+    set(ov.boundary_hessian_quality_threshold, rp.boundary_hessian_quality_threshold,    "BoundaryHessianQualityThreshold");
+    set(ov.boundary_mu_quality_threshold,   rp.boundary_mu_quality_threshold,         "BoundaryMuQualityThreshold");
+    set(ov.symmetry_good_fit_mse,           rp.symmetry_good_fit_mse,                 "SymmetryGoodFitMse");
+    set(ov.gn_loss_rel_tol,                 rp.gn_loss_rel_tol,                       "GnLossRelTol");
+    set(ov.gn_max_iters,                    rp.gn_max_iters,                          "GnMaxIters");
+    set(ov.torch_num_threads,               rp.torch_num_threads,                     "TorchNumThreads");
+    set(ov.adaptive_cov_enabled,            rp.adaptive_cov_enabled,                  "AdaptiveCovEnabled");
+    set(ov.window_stride_enabled,           rp.window_stride_enabled,                 "WindowStrideEnabled");
+    set(ov.boundary_fej_schur,              rp.boundary_fej_schur,                    "BoundaryFejSchur");
+    set(ov.hier_prec_boundary_enabled,      rp.hier_prec_boundary_enabled,            "HierPrecBoundaryEnabled");
+    set(ov.corner_early_exit_check,         rp.corner_early_exit_check,               "CornerEarlyExitCheck");
+    set(ov.w_ior, epistemic.epistemic_planner().params.w_ior, "WIor");
+    set(ov.belief_forget_time, epistemic.epistemic_planner().params.belief_forget_time, "BeliefForgetTime");
+    return changed;
+}
+
+std::vector<std::string> RoomConfig::apply_scenario_to(const std::string& scenario,
+                                                       rc::EpistemicController& epistemic)
+{
+    std::vector<std::string> changed;
+    const auto it = scenario_overlays.find(scenario);
+    if (it == scenario_overlays.end()) return changed;
+    const auto& ov = it->second;
+    if (ov.target_wall_margin.has_value() and
+        *ov.target_wall_margin != epistemic.epistemic_planner().params.target_wall_margin)
+    { changed.emplace_back("TargetWallMargin");
+      epistemic.epistemic_planner().params.target_wall_margin = *ov.target_wall_margin; }
+    return changed;
+}
+
+std::vector<std::string> RoomConfig::apply_scenario(const std::string& scenario)
+{
+    std::vector<std::string> changed;
+    const auto it = scenario_overlays.find(scenario);
+    if (it == scenario_overlays.end()) return changed;
+    const auto& ov = it->second;
+    if (ov.room_layout_svg.has_value() and *ov.room_layout_svg != ROOM_LAYOUT_SVG)
+    { changed.emplace_back("RoomLayoutSvg"); ROOM_LAYOUT_SVG = *ov.room_layout_svg; }
+    if (ov.room_height.has_value() and *ov.room_height != room_height)
+    { changed.emplace_back("RoomHeight"); room_height = *ov.room_height; }
+    if (ov.recenter_room_polygon.has_value() and *ov.recenter_room_polygon != RECENTER_ROOM_POLYGON)
+    { changed.emplace_back("RecenterRoomPolygon"); RECENTER_ROOM_POLYGON = *ov.recenter_room_polygon; }
+    if (ov.lidar_high_max_height.has_value() and *ov.lidar_high_max_height != LIDAR_HIGH_MAX_HEIGHT)
+    { changed.emplace_back("LidarHighMaxHeight"); LIDAR_HIGH_MAX_HEIGHT = *ov.lidar_high_max_height; }
     return changed;
 }
 

@@ -80,6 +80,17 @@ public:
 
     // Resolve root/robot ids and read body dimensions (updates the planner footprint).
     void check_init_graph_is_valid();
+    /// Apply the [Platform.*] and [Scenario.*] overlays once the graph can name the robot and
+    /// the place. Idempotent. MUST run before the layout SVG is read — the scenario overlay is
+    /// what chooses that file.
+    void resolve_overlays_from_graph();
+    /// Did the overlays actually apply? "Not applied" and "applied and changed nothing"
+    /// look identical in the values afterwards, so the caller has to be able to ask.
+    [[nodiscard]] bool overlays_resolved() const noexcept { return overlays_resolved_; }
+    /// The names the overlays matched on, for the half of the overlay that this class cannot
+    /// apply itself (the localiser's and the planner's own params live in their objects).
+    [[nodiscard]] const std::string& overlay_robot_name()    const noexcept { return overlay_robot_name_; }
+    [[nodiscard]] const std::string& overlay_scenario_name() const noexcept { return overlay_scenario_name_; }
 
     // Stabilize → create room / reparent, then publish pose + affordance each frame.
     // adv/side/rot are the latest robot-frame velocities for the RT velocity attrs.
@@ -272,6 +283,8 @@ private:
     std::uint64_t dsr_robot_id_ = 0;
     std::uint64_t dsr_body_id_  = 0;
     std::uint64_t dsr_world_id_ = 0;
+    bool overlays_resolved_ = false;
+    std::string overlay_robot_name_, overlay_scenario_name_;   ///< resolve_overlays_from_graph() runs once, from whichever site reaches it first
     std::uint64_t dsr_room_id_  = 0;
     bool          room_node_created_ = false;
     int           stable_frames_     = 0;

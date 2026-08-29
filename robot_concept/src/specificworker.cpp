@@ -177,6 +177,19 @@ void SpecificWorker::initialize()
 		qInfo() << "[Agent] robot node =" << QString::fromStdString(robot_name)
 		        << "(canonical id" << canonical_robot_id_ << ")";
 
+	// ── WHERE the robot is, published for everyone ───────────────────────────────────────────────
+	// A robot is not a place: the same P3Bot runs in the WAF room and in the apartment, and the same
+	// apartment hosts P3Bot and Shadow. This agent owns the robot's identity, and it is also the one
+	// component that exists in simulation AND on the real robot — the bridge knows the world too,
+	// but only in simulation — so the scenario belongs here beside robot_name.
+	// room_concept consumes it to pick its layout, and REFUSES TO START without it: it authors the
+	// room polygon every other agent reads, so a wrong floor plan puts the whole fleet in the wrong
+	// building while every number downstream stays self-consistent.
+	rc::ConfigLoaderUtils::load_optional(configLoader, "Agent.scenario", scenario_name_);
+	if (scenario_name_.empty())
+		qWarning() << "[Agent] Agent.scenario is not set, so `scenario_name` will not be published."
+		              " room_concept will refuse to start if its config defines scenario overlays.";
+
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Camera.dsr_rgb_fps", params.DSR_RGB_FPS);
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Camera.dsr_depth_fps", params.DSR_DEPTH_FPS);
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Lidar.dsr_lidar_fps", params.DSR_LIDAR_FPS);
@@ -526,6 +539,24 @@ void SpecificWorker::check_robot_identity()
 		           << s->id() << "(expected" << canonical_robot_id_
 		           << ") — likely a stale node from an unclean previous exit; stop agents with SIGTERM, "
 		              "not kill -9, and ensure etc/robot_concept.toml exists so peers reap it.";
+
+	// Publish WHERE this robot is, once, alongside the identity check that already runs here — same
+	// node, same one-shot timing, and it needs the graph to be up for exactly the same reason.
+	// ⚠ update_node is a WHOLE-NODE write: an attribute absent from the copy is ERASED (see
+	//   dsr-node-attr-erasure-hazard). Re-fetch, add, write back — never write a stale copy.
+	if (not scenario_name_.empty())
+	{
+		if (auto n = G->get_node(robot_name); n.has_value())
+		{
+			G->add_or_modify_attrib_local<scenario_name_att>(n.value(), scenario_name_);
+			if (rc::safe_update_node(*G, n.value()))
+				qInfo() << "[graph] scenario_name =" << QString::fromStdString(scenario_name_)
+				        << "published on" << QString::fromStdString(robot_name);
+			else
+				qWarning() << "[graph] could NOT publish scenario_name — room_concept will refuse to"
+				              " start if its config defines scenario overlays.";
+		}
+	}
 }
 
 void SpecificWorker::compute()

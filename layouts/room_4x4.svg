@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+     width="600" height="600"
+     viewBox="-3 -3 6 6">
+  <!-- Room layout polygon for the shadow_arm (bottle_concept Option-A) world. -->
+  <!-- Coordinates are in metres. Scale: 100 pixels/metre. -->
+  <!-- room_concept loads ONLY the polygon id="room_contour" (flip_y=false, mirror_x=true). -->
+  <!-- 4x4 m square, centred at the origin, matching the RectangleArena (floorSize 4 4). -->
+  <!-- NOTE: this is SYMMETRIC. When dynamic localisation is enabled, add a dent/column in -->
+  <!-- one corner here AND in the Webots walls together, to break the 4-fold orientation -->
+  <!-- ambiguity. Keep the SVG contour and the Webots wall geometry identical. -->
+  <!-- Previous ~14x8 m layout preserved as beta_layout_prev_14x8.svg. -->
+
+  <g inkscape:groupmode="layer" inkscape:label="Grid" style="opacity:0.3">
+    <line x1="-3" y1="-3" x2="-3" y2="3" stroke="#cccccc" stroke-width="0.01"/>
+    <line x1="-2" y1="-3" x2="-2" y2="3" stroke="#cccccc" stroke-width="0.01"/>
+    <line x1="-1" y1="-3" x2="-1" y2="3" stroke="#cccccc" stroke-width="0.01"/>
+    <line x1="0"  y1="-3" x2="0"  y2="3" stroke="#cccccc" stroke-width="0.01"/>
+    <line x1="1"  y1="-3" x2="1"  y2="3" stroke="#cccccc" stroke-width="0.01"/>
+    <line x1="2"  y1="-3" x2="2"  y2="3" stroke="#cccccc" stroke-width="0.01"/>
+    <line x1="3"  y1="-3" x2="3"  y2="3" stroke="#cccccc" stroke-width="0.01"/>
+    <line x1="-3" y1="-3" x2="3" y2="-3" stroke="#cccccc" stroke-width="0.01"/>
+    <line x1="-3" y1="-2" x2="3" y2="-2" stroke="#cccccc" stroke-width="0.01"/>
+    <line x1="-3" y1="-1" x2="3" y2="-1" stroke="#cccccc" stroke-width="0.01"/>
+    <line x1="-3" y1="0"  x2="3" y2="0"  stroke="#cccccc" stroke-width="0.01"/>
+    <line x1="-3" y1="1"  x2="3" y2="1"  stroke="#cccccc" stroke-width="0.01"/>
+    <line x1="-3" y1="2"  x2="3" y2="2"  stroke="#cccccc" stroke-width="0.01"/>
+    <line x1="-3" y1="3"  x2="3" y2="3"  stroke="#cccccc" stroke-width="0.01"/>
+  </g>
+
+  <g inkscape:groupmode="layer" inkscape:label="Origin">
+    <circle cx="0" cy="0" r="0.1" fill="red" opacity="0.7"/>
+    <line x1="-0.3" y1="0" x2="0.3" y2="0" stroke="red" stroke-width="0.02"/>
+    <line x1="0" y1="-0.3" x2="0" y2="0.3" stroke="red" stroke-width="0.02"/>
+  </g>
+
+  <g inkscape:groupmode="layer" inkscape:label="Room Polygon">
+    <polygon
+      id="room_contour"
+      inkscape:label="Room Contour"
+      points="-2,-2 2,-2 2,2 -2,2"
+      style="fill:none;stroke:#ff00ff;stroke-width:0.05;stroke-linejoin:round"/>
+    <!-- Vertex markers -->
+    <circle cx="-2" cy="-2" r="0.08" fill="#ffff00" stroke="#000000" stroke-width="0.01" inkscape:label="Vertex 0"/>
+    <circle cx="2"  cy="-2" r="0.08" fill="#ffff00" stroke="#000000" stroke-width="0.01" inkscape:label="Vertex 1"/>
+    <circle cx="2"  cy="2"  r="0.08" fill="#ffff00" stroke="#000000" stroke-width="0.01" inkscape:label="Vertex 2"/>
+    <circle cx="-2" cy="2"  r="0.08" fill="#ffff00" stroke="#000000" stroke-width="0.01" inkscape:label="Vertex 3"/>
+  </g>
+</svg>

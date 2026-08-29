@@ -16,6 +16,10 @@ LIST(APPEND LIBS
   ai_common::obj             # obj_loader for the display meshes
   ai_common::ui_headers      # common/viewers/gl_*.h — header-only, mocced by OUR autogen
   ai_common::core            # agent_state_publisher/agent_status.h (header-only)
+  # The robot's silhouette from its own mesh. robot_concept is the one agent that KNOWS which robot this
+  # is (Agent.robot_name / configFile), so it is the right place to turn the mesh into the dimensions the
+  # rest of the fleet reads off the body node. Pure Eigen — no new heavyweight dependency.
+  ai_common::geometry
 )
 
 # Sources set

@@ -66,15 +66,95 @@ struct RoomConfig
     //   physical ones are listed here explicitly rather than "whatever happens to be in the file".
     struct PlatformOverlay
     {
+        // Camera mount — measured on one machine, meaningless on another.
         std::optional<float> mount_pitch_sigma, mount_height_sigma, mount_yaw_sigma;
         std::optional<float> mount_yaw_correction, wall_position_sigma;
-        std::optional<float> cmd_noise_rot, cmd_noise_trans;
         std::optional<std::string> image_edge_camera;
+        // Odometry noise — the wheels, the encoders and the floor they run on. Every one of these
+        // was MEASURED on its robot (see the ZUPT and velCov work); inheriting another machine's
+        // number is exactly the silent failure this overlay exists to prevent.
+        std::optional<float> cmd_noise_rot, cmd_noise_trans;
+        std::optional<float> zupt_density_v, zupt_density_omega;
+        std::optional<float> odom_preint_sigma_omega, odom_preint_scale_omega;
+        // Body geometry: the safety distances scale with the footprint.
+        std::optional<float> sdf_safe, sdf_danger;
+        // Which channels this machine runs, and how fast it runs them.
+        std::optional<bool>  use_command_velocity_prior, calib_pivot_enabled, odom_sample_log;
+        std::optional<int>   period_compute;
+
+        // ── DRIFT, not physics ──────────────────────────────────────────────────────────────
+        // These are solver settings and thresholds that SHOULD be the same on every machine.
+        // They are per-robot only because the two config files diverged while they were apart:
+        // shadow's file received later work that p3bot's never did, so p3bot has been running
+        // the older code defaults with nothing in its file to say so. They live here to make the
+        // merge change no running behaviour and to make the divergence VISIBLE side by side —
+        // not because anyone decided a robot needs its own value. Collapse them into the shared
+        // section once each pair has been judged; every one removed is a real simplification.
+        std::optional<float> recovery_loss_threshold;
+        std::optional<float> prediction_trust_factor;
+        std::optional<float> rotation_sdf_coupling;
+        std::optional<float> boundary_hessian_quality_threshold;
+        std::optional<float> boundary_mu_quality_threshold;
+        std::optional<float> symmetry_good_fit_mse;
+        std::optional<float> gn_loss_rel_tol;
+        std::optional<int> gn_max_iters;
+        std::optional<int> torch_num_threads;
+        std::optional<bool> adaptive_cov_enabled;
+        std::optional<bool> window_stride_enabled;
+        std::optional<bool> boundary_fej_schur;
+        std::optional<bool> hier_prec_boundary_enabled;
+        std::optional<bool> corner_early_exit_check;
+        std::optional<float> w_ior;
+        std::optional<float> belief_forget_time;
+        /// WHICH object subtype anchors the pose. Shadow moved to the refrigerator on purpose
+        /// (the table's pin is suspect); P3Bot never did and still anchors on the table.
+        std::optional<std::vector<std::string>> object_anchor_subtypes;
+        std::optional<float> object_anchor_meas_sigma_xy;
+        std::optional<float> stable_sdf_mse_max;
     };
     std::map<std::string, PlatformOverlay> platform_overlays;
+
+    // ── SCENARIO OVERLAY: a robot is not a place ────────────────────────────────────────────────
+    // The same P3Bot runs in the WAF room and in the apartment; the same apartment hosts P3Bot and
+    // Shadow. Robot identity and scenario identity are INDEPENDENT axes and a config keyed on one
+    // cannot express the other, which is why there are two overlays rather than one.
+    // Keyed on the `scenario_name` graph attribute, published by robot_concept — the component that
+    // exists in simulation and in reality alike, unlike the bridge.
+    /// Where the layout SVGs live. Shared by every scenario, so a scenario section names only the
+    /// FILE and the directory is stated once. Relative to the component's working directory, which
+    /// is the component folder when launched as `bin/room_concept etc/config`.
+    /// ★ The layouts moved OUT of room_concept's own folder on 2026-08-29: a floor plan is not a
+    ///   property of the agent that happens to load it — every concept agent localises against the
+    ///   same room, and one of them owning the file made it look otherwise.
+    std::string LAYOUT_DIR = "../layouts";
+
+    struct ScenarioOverlay
+    {
+        std::optional<std::string> room_layout_svg;
+        std::optional<float>       room_height;
+        std::optional<bool>        recenter_room_polygon;
+        /// Upper bound of the LiDAR "high" band. It is a property of the CEILING, not of the robot:
+        /// the band must exclude the ceiling return, so a 3 m room and a 2.4 m room need different
+        /// caps for the same LiDAR.
+        std::optional<float>       lidar_high_max_height;
+        /// How close a viewpoint may be planned to a wall. A cramped apartment and an open lab room
+        /// do not admit the same margin, and the robot is unchanged between them.
+        std::optional<float>       target_wall_margin;
+    };
+    std::map<std::string, ScenarioOverlay> scenario_overlays;
+    std::vector<std::string> apply_scenario(const std::string& scenario);
     /// Apply the section matching `robot`, if there is one. Returns what it changed, for the log:
     /// a silent overlay is how a machine ends up running another machine's constants.
     std::vector<std::string> apply_platform(const std::string& robot);
+    /// The half of the overlays whose targets do NOT live in this struct — the localiser's and the
+    /// planner's own params, which are loaded into their objects directly. Split out rather than
+    /// merged because RoomConfig does not own those objects; the caller does.
+    /// Returns what it changed, for the same log line as apply_platform.
+    std::vector<std::string> apply_platform_to(const std::string& robot,
+                                               rc::RoomConcept& room_concept,
+                                               rc::EpistemicController& epistemic);
+    std::vector<std::string> apply_scenario_to(const std::string& scenario,
+                                               rc::EpistemicController& epistemic);
                                               // (so the SDF optimises in the SAME frame the robot↔room RT
                                               // is published onto). Set explicitly only to override.
     float MAX_LIDAR_HIGH_RANGE        = 100.f;  // m

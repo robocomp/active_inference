@@ -147,6 +147,7 @@ private:
 	// falling back to the single node of type "robot" already in the graph. Nothing here assumes a
 	// particular robot.
 	std::string robot_name;
+	std::string scenario_name_;   ///< WHERE the robot is; published as `scenario_name` on its node
 	// Degrees to rotate the robot's MESH into the ROBOT frame (x right, y forward). A property of the
 	// ASSET, not of the robot: P3Bot's proto wraps the machine in `Pose { rotation 0 0 1 1.5708 }`, so its
 	// mesh's native forward is +x while the graph's robot frame has forward +y. Agent.mesh_yaw_deg.

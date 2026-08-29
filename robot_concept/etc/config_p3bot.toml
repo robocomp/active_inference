@@ -31,6 +31,19 @@ name = "robot_concept"
 # robot's JSON and change these two lines — no code change, no rebuild.
 # If robot_name is removed, the agent falls back to the single node of type "robot" in the graph.
 robot_name = "P3Bot"
+scenario   = "waf"   # WHERE this robot is. A robot is not a place: the same robot runs in
+                       # several scenarios and the same scenario hosts several robots, so this is an
+                       # axis of its own. Published as the `scenario_name` attribute on the robot node;
+                       # room_concept selects its floor plan from it and REFUSES TO START without it,
+                       # because it authors the polygon every other agent reads.
+# Degrees to rotate the robot's MESH (the `path` attribute on the robot node) into the ROBOT frame —
+# x right, y FORWARD. A property of the ASSET, not of the robot: P3Bot.proto:430 wraps the whole machine
+# in `Pose { rotation 0 0 1 1.5708 }`, so the mesh's native forward is +x while the graph's robot frame
+# has forward +y. Verified against this file's own RT tree: every sensor mount here is the proto value
+# rotated by exactly +90 deg (helios, zed, ricoh all match to 1e-6).
+# Used to MEASURE width_m/depth_m off the mesh and publish them on the body node, replacing the
+# 0.47/0.47 placeholder that shadow.json and p3bot.json share verbatim.
+mesh_yaw_deg = 90.0
 robot_node_id = 200
 # Graphviz engine used to lay the DSR graph out in the viewer: twopi | sfdp | dot | neato | fdp | circo.
 # Which one reads best depends on the graph's SHAPE, which is a property of the robot: Shadow's single

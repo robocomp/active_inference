@@ -221,6 +221,45 @@ void SpecificWorker::initialize()
     room_concept_.set_run_context(run_ctx);
     room_concept_.params.prediction_early_exit = params.PREDICTION_EARLY_EXIT;
 
+    // The scenario overlay CHOOSES the layout file, so it has to be resolved before the SVG is
+    // read. It used to be applied at the end of check_init_graph_is_valid() (below), which is
+    // after this line — the axis was inert and the log still said "applied".
+    scene_graph_->resolve_overlays_from_graph();
+    if (not scene_graph_->overlays_resolved() and not params.scenario_overlays.empty())
+    {
+        // The graph could not name the robot yet, so the scenario is unknown — and the very next
+        // line would read whatever layout the shared section happens to hold. Stopping is the
+        // only honest option: a wrong floor plan reads downstream as a localiser fault.
+        qCritical() << "[room] REFUSING TO START: no type-\"robot\" node in the graph when the"
+                    << "layout must be chosen. Start robot_concept first.";
+        std::exit(EXIT_FAILURE);
+    }
+    // The other half of the overlays: values whose home is the localiser or the planner, not the
+    // config struct. Same sections, same log line — split only because RoomConfig does not own those
+    // objects. ★ This is where CmdNoise* finally lands: the parse existed, the application did not.
+    {
+        QStringList l;
+        for (const auto& c : params.apply_platform_to(scene_graph_->overlay_robot_name(),
+                                                      room_concept_, epistemic_controller_))
+            l << QString::fromStdString(c);
+        for (const auto& c : params.apply_scenario_to(scene_graph_->overlay_scenario_name(),
+                                                      epistemic_controller_))
+            l << QString::fromStdString(c);
+        if (not l.isEmpty())
+            qInfo() << "[room] overlay (localiser/planner params) applied:" << l.join(", ");
+    }
+    // The compute period is fixed into the GRAFCET steps at construction, before the graph can name
+    // the robot — so a per-robot Period is applied here instead, by re-setting the steps.
+    if (const auto it = params.platform_overlays.find(scene_graph_->overlay_robot_name());
+        it != params.platform_overlays.end() and it->second.period_compute.has_value())
+    {
+        const int per = *it->second.period_compute;
+        for (const auto& name : {"Waiting", "Operating", "Degraded", "Emergency", "Initialize", "Compute"})
+            if (const auto st = states.find(name); st != states.end() and st->second)
+                st->second->setPeriod(per);
+        qInfo() << "[room] platform overlay: compute period set to" << per << "ms";
+    }
+
     initialize_room_model_from_svg();
     const std::string pose_path = pose_file_path();
     room_concept_.set_seed_pose_file(pose_path);
@@ -1560,8 +1599,19 @@ void SpecificWorker::compute()
 
 void SpecificWorker::initialize_room_model_from_svg()
 {
+    // The scenario names the FILE; LayoutDir says where the layouts live. An explicit path in the
+    // config (anything containing a separator) wins, so a one-off layout outside the folder still
+    // works without a config-shape change.
+    const std::string svg_path =
+        (params.ROOM_LAYOUT_SVG.find('/') != std::string::npos or params.LAYOUT_DIR.empty())
+            ? params.ROOM_LAYOUT_SVG
+            : params.LAYOUT_DIR + "/" + params.ROOM_LAYOUT_SVG;
     auto room_polygon = rc::SvgRoomLoader::load_polygon_points(
-        params.ROOM_LAYOUT_SVG, "room_contour", false, true);
+        svg_path, "room_contour", false, true);
+    if (room_polygon.size() < 3)
+        qWarning() << "[room] layout" << QString::fromStdString(svg_path)
+                   << "gave fewer than 3 points — check RoomConcept.LayoutDir and the scenario's"
+                      " RoomLayoutSvg. The layouts moved to active_inference/layouts on 2026-08-29.";
     if (room_polygon.size() >= 3)
     {
         // Move the room-frame origin onto the layout's geometric centre. Everything downstream is

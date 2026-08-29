@@ -31,6 +31,11 @@ name = "robot_concept"
 # robot's JSON and change these two lines — no code change, no rebuild.
 # If robot_name is removed, the agent falls back to the single node of type "robot" in the graph.
 robot_name = "Shadow"
+scenario   = "apartamento"   # WHERE this robot is. A robot is not a place: the same robot runs in
+                       # several scenarios and the same scenario hosts several robots, so this is an
+                       # axis of its own. Published as the `scenario_name` attribute on the robot node;
+                       # room_concept selects its floor plan from it and REFUSES TO START without it,
+                       # because it authors the polygon every other agent reads.
 robot_node_id = 200
 # Graphviz engine used to lay the DSR graph out in the viewer: twopi | sfdp | dot | neato | fdp | circo.
 # Which one reads best depends on the graph's SHAPE, which is a property of the robot: Shadow's single

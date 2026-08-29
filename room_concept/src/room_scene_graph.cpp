@@ -3,6 +3,7 @@
  *    This file is part of RoboComp — see room_scene_graph.h.
  */
 
+#include <cstdlib>
 #include <algorithm>
 #include <ranges>
 #include "room_scene_graph.h"
@@ -1902,6 +1903,94 @@ void RoomSceneGraph::cleanup_room_graph_nodes()
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+// ── Overlays, resolved as soon as the graph can name the robot and the place ────────────────────
+// ★ CALLED BEFORE THE LAYOUT IS LOADED, on purpose. It used to live at the end of
+//   check_init_graph_is_valid(), which runs AFTER initialize_room_model_from_svg() — so the scenario
+//   overlay set RoomLayoutSvg long after the SVG had been read, and the whole scenario axis was
+//   inert while looking correct in the log. Idempotent, and still called from the old site, so
+//   neither ordering can silently drop it.
+void RoomSceneGraph::resolve_overlays_from_graph()
+{
+    if (overlays_resolved_) return;
+    if (!G_ or params_ == nullptr) return;
+    const auto robot_nodes = G_->get_nodes_by_type("robot");
+    if (robot_nodes.empty())
+    {
+        qWarning() << "[room] no type-\"robot\" node yet: platform/scenario overlays not applied."
+                      " The agent will run the shared values, which is wrong for anything physical.";
+        return;
+    }
+    overlays_resolved_ = true;
+    const std::string robot_name = robot_nodes.front().name();
+    overlay_robot_name_ = robot_name;
+        // ── The platform overlay, applied HERE because this is where the robot names itself ──────
+        // One config for every robot: the shared 95% is written once, and the handful of values that
+        // are PHYSICAL — measured on one machine and meaningless on another — come from a per-robot
+        // section. Keeping two whole files apart so those few could differ is what let the rest
+        // drift, and the drift is what cost the time: a producer fix that landed and was ignored
+        // because a flag was true in one file and false in the other.
+        // ★ ANNOUNCED, never silent. A machine quietly running another machine's constants is the
+        //   failure this exists to prevent, so it says what it changed — and says so too when a
+        //   robot has no section, because "nothing was overlaid" and "the overlay did not match"
+        //   look identical in the values afterwards.
+        // ── SCENARIO: where the robot is, which is not what it is ───────────────────────────────
+        // ★ REFUSES TO START if the attribute is absent. Falling back to whatever layout happens to
+        //   be in the file would localise the robot against the wrong floor plan — and it would look
+        //   like a localiser fault, not a configuration one, because every number downstream stays
+        //   self-consistent. There is no safe default for "which building am I in".
+        //   Absent means robot_concept did not publish it: either it predates scenario_name, or its
+        //   own `scenario` key is unset. Both are fixed in one line, and neither is worth guessing.
+        if (not params_->scenario_overlays.empty())
+        {
+            const auto sc = G_->get_attrib_by_name<scenario_name_att>(robot_nodes.front());
+            if (not sc.has_value() or sc.value().get().empty())
+            {
+                qCritical() << "[room] REFUSING TO START: the robot node carries no `scenario_name`,"
+                            << "and this config defines scenario overlays. room_concept AUTHORS the"
+                            << "room polygon that every other agent reads, so guessing the layout"
+                            << "would put the whole fleet in the wrong building. Set `scenario` in"
+                            << "robot_concept's config so it publishes the attribute.";
+                std::exit(EXIT_FAILURE);
+            }
+            const std::string scen = sc.value().get();
+            overlay_scenario_name_ = scen;
+            if (not params_->scenario_overlays.contains(scen))
+            {
+                qCritical() << "[room] REFUSING TO START: scenario" << QString::fromStdString(scen)
+                            << "has no section in this config. Add [Scenario."
+                            << QString::fromStdString(scen) << "] naming its RoomLayoutSvg, or the"
+                            << "agent would load some other building's floor plan.";
+                std::exit(EXIT_FAILURE);
+            }
+            const auto changed = params_->apply_scenario(scen);
+            QStringList l;
+            for (const auto& c : changed) l << QString::fromStdString(c);
+            qInfo() << "[room] scenario" << QString::fromStdString(scen)
+                    << (changed.empty() ? "matched; its section equals the shared values"
+                                        : QString("applied: %1").arg(l.join(", ")).toUtf8().constData());
+        }
+
+        if (not params_->platform_overlays.empty())
+        {
+            const auto changed = params_->apply_platform(robot_name);
+            if (changed.empty())
+            {
+                const bool have = params_->platform_overlays.contains(robot_name);
+                qInfo() << "[room] platform overlay:" << QString::fromStdString(robot_name)
+                        << (have ? "matched, nothing to change (its section equals the shared values)"
+                                 : "has NO section — running the shared defaults, which is correct only"
+                                   " if none of the physical constants differ on this machine");
+            }
+            else
+            {
+                QStringList l;
+                for (const auto& c : changed) l << QString::fromStdString(c);
+                qInfo() << "[room] platform overlay for" << QString::fromStdString(robot_name)
+                        << "applied:" << l.join(", ");
+            }
+        }
+}
+
 void RoomSceneGraph::check_init_graph_is_valid()
 {
     if (!G_) { qWarning() << "dsr_init_graph: DSR graph not available"; return; }
@@ -1939,35 +2028,7 @@ void RoomSceneGraph::check_init_graph_is_valid()
                        << "differs from the robot node" << QString::fromStdString(robot_name)
                        << "— the published robot↔room RT will carry that frame's offset. Set it empty to auto-derive.";
 
-        // ── The platform overlay, applied HERE because this is where the robot names itself ──────
-        // One config for every robot: the shared 95% is written once, and the handful of values that
-        // are PHYSICAL — measured on one machine and meaningless on another — come from a per-robot
-        // section. Keeping two whole files apart so those few could differ is what let the rest
-        // drift, and the drift is what cost the time: a producer fix that landed and was ignored
-        // because a flag was true in one file and false in the other.
-        // ★ ANNOUNCED, never silent. A machine quietly running another machine's constants is the
-        //   failure this exists to prevent, so it says what it changed — and says so too when a
-        //   robot has no section, because "nothing was overlaid" and "the overlay did not match"
-        //   look identical in the values afterwards.
-        if (not params_->platform_overlays.empty())
-        {
-            const auto changed = params_->apply_platform(robot_name);
-            if (changed.empty())
-            {
-                const bool have = params_->platform_overlays.contains(robot_name);
-                qInfo() << "[room] platform overlay:" << QString::fromStdString(robot_name)
-                        << (have ? "matched, nothing to change (its section equals the shared values)"
-                                 : "has NO section — running the shared defaults, which is correct only"
-                                   " if none of the physical constants differ on this machine");
-            }
-            else
-            {
-                QStringList l;
-                for (const auto& c : changed) l << QString::fromStdString(c);
-                qInfo() << "[room] platform overlay for" << QString::fromStdString(robot_name)
-                        << "applied:" << l.join(", ");
-            }
-        }
+        resolve_overlays_from_graph();   // idempotent: normally already done before the SVG load
     }
 
     load_robot_body_dimensions_from_graph();
