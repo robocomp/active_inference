@@ -111,11 +111,14 @@ static std::vector<Eigen::Vector2f> read_room_polygon_from_dsr(const std::shared
 }
 
 CameraVisualizer::CameraVisualizer(std::shared_ptr<DSRGraph> graph, const std::vector<Eigen::Vector2f>& room_polygon,
-                                   std::vector<std::string> overlay_object_types, QWidget* parent)
+                                   std::vector<std::string> overlay_object_types,
+                                   std::string camera_node, QWidget* parent)
     : QDialog(parent), graph_(graph), room_polygon_(room_polygon),
       overlay_object_types_(std::move(overlay_object_types))
 {
-    setWindowTitle("Camera Visualization - Room Layout Projection");
+    if (not camera_node.empty()) camera_node_name_ = std::move(camera_node);
+    setWindowTitle(QString("%1 — room layout projection")
+                       .arg(QString::fromStdString(camera_node_name_).toUpper()));
     setGeometry(100, 100, 800, 600);
 
     auto* layout = new QVBoxLayout(this);
@@ -159,6 +162,13 @@ void CameraVisualizer::set_corner_matches(std::vector<rc::CornerDetector::Corner
 {
     std::lock_guard<std::mutex> lk(corner_matches_mtx_);
     corner_matches_ = std::move(matches);
+}
+
+void CameraVisualizer::set_triple_points(std::vector<rc::TriplePoint> pts, const std::string& from_camera)
+{
+    std::lock_guard<std::mutex> lk(triple_mtx_);
+    triple_points_ = std::move(pts);
+    triple_from_   = from_camera;
 }
 
 void CameraVisualizer::start_media_plane()
@@ -212,18 +222,50 @@ bool CameraVisualizer::try_discover_media_plane()
 
     // Shared descriptor-driven factory (same init code as every other agent): verifies
     // the "zed" node + descriptor exist and reads the DDS domain/topic from the JSON.
-    media_rgb_sub_ = rc::media::make_image_subscriber_from_graph(*graph_, camera_node_name_, "rgb");
-    if (media_rgb_sub_)
-        subscriber_ready_.store(true, std::memory_order_release);
-    return media_rgb_sub_ != nullptr;
+    // ★ THE STREAM KEY COMES FROM THE NODE'S OWN DESCRIPTOR, not from an assumption. The zed
+    //   advertises "rgb" and the ricoh advertises "rgb360", and those two keys carry DIFFERENT DDS
+    //   types — ImageFrame against the ~5.5 MB Image360Frame — so asking for the wrong one does not
+    //   merely return nothing, it asks the wrong reader for the wrong thing.
+    const auto desc = rc::media::descriptor_from_graph(*graph_, camera_node_name_);
+    if (not desc.has_value()) return false;          // descriptor not published yet; retry next second
+    if (desc->streams.contains("rgb360"))
+        media_rgb360_sub_ = rc::media::make_image360_subscriber_from_graph(*graph_, camera_node_name_,
+                                                                          "rgb360");
+    else if (desc->streams.contains("rgb"))
+        media_rgb_sub_ = rc::media::make_image_subscriber_from_graph(*graph_, camera_node_name_, "rgb");
+    const bool up = (media_rgb_sub_ != nullptr or media_rgb360_sub_ != nullptr);
+    if (up) subscriber_ready_.store(true, std::memory_order_release);
+    return up;
 }
 
 bool CameraVisualizer::ingest_pump()
 {
-    if (!media_rgb_sub_)
+    if (!media_rgb_sub_ && !media_rgb360_sub_)
     {
-        try_discover_media_plane();   // lazy: brings the subscriber up once "zed" descriptor exists
+        try_discover_media_plane();   // lazy: up once the node's descriptor exists
         return false;
+    }
+
+    if (media_rgb360_sub_)
+    {
+        // The 360 frame is RGB8 by construction (Image360Frame carries no format field), so it is
+        // NOT checked against rc::media::FORMAT_* — doing so would compile and be wrong.
+        const int got = media_rgb360_sub_->poll([this](const rc::media::Image360Frame& f, std::int64_t)
+        {
+            const int w = static_cast<int>(f.width()), h = static_cast<int>(f.height());
+            if (w <= 0 || h <= 0) return;
+            const std::size_t need = static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 3;
+            if (f.data().size() < need) return;
+            std::lock_guard<std::mutex> lk(media_rgb_mtx_);
+            media_rgb_.bytes.resize(need);
+            std::memcpy(media_rgb_.bytes.data(), f.data().data(), need);
+            media_rgb_.width  = w;
+            media_rgb_.height = h;
+            media_rgb_.format = rc::media::FORMAT_RGB8;
+            media_rgb_.stamp  = f.stamp_ms();
+            media_rgb_.valid  = true;
+        });
+        return got > 0;
     }
 
     const int delivered = media_rgb_sub_->poll([this](const rc::media::ImageFrame& f, std::int64_t)
@@ -945,6 +987,48 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
                                              : QColor(255, static_cast<int>(120 + 40 * u), 0, 130);
             painter.setBrush(fill);
             painter.drawEllipse(QPointF(uv.x(), uv.y()), radius_px, radius_px);
+        }
+        painter.setBrush(Qt::NoBrush);
+    }
+
+    // 3.4b) RGB TRIPLE POINTS — where the image says each wall-wall corner is, against where the
+    // model puts it. Two markers and the line between them IS the residual, at true scale in the
+    // image, which is the quantity the whole camera calibration is about.
+    //
+    // ★ DRAWN ONLY IN THE WINDOW WHOSE CAMERA PRODUCED THEM. uv_meas is a pixel coordinate in ONE
+    //   camera's image; painting the ricoh's corners on the zed's frame would place them at
+    //   plausible-looking positions that mean nothing. The producing camera is carried alongside the
+    //   points and compared, rather than assumed to be this one.
+    {
+        std::vector<rc::TriplePoint> tps;
+        {
+            std::lock_guard<std::mutex> lk(triple_mtx_);
+            if (triple_from_ == camera_node_name_) tps = triple_points_;
+        }
+        for (const auto& t : tps)
+        {
+            if (!std::isfinite(t.uv_meas.x()) || !std::isfinite(t.uv_meas.y())) continue;
+            const bool ceiling = (t.from == ContourClass::WallCeiling);
+            // Ceiling corners in cyan, floor in magenta: the two populations answer differently
+            // (the ceiling one is far less occluded) and a single colour would hide which is which.
+            const QColor col = ceiling ? QColor(0, 220, 255) : QColor(255, 0, 200);
+            // MEASURED: a filled square, the same shape used for these in the 2-D canvas.
+            painter.setPen(QPen(col, 1.4));
+            painter.setBrush(QBrush(QColor(col.red(), col.green(), col.blue(), 150)));
+            painter.drawRect(QRectF(t.uv_meas.x() - 4.0, t.uv_meas.y() - 4.0, 8.0, 8.0));
+            // PREDICTED: a hollow circle, plus the residual as a line. Skipped when the two are far
+            // apart in u on a cyclic axis — that is the seam, not a 1900 px error.
+            if (std::isfinite(t.uv_pred.x()) && std::isfinite(t.uv_pred.y()))
+            {
+                painter.setBrush(Qt::NoBrush);
+                painter.drawEllipse(QPointF(t.uv_pred.x(), t.uv_pred.y()), 5.0, 5.0);
+                if (std::abs(t.uv_meas.x() - t.uv_pred.x()) < 0.5 * camera_data_.width)
+                {
+                    painter.setPen(QPen(QColor(col.red(), col.green(), col.blue(), 120), 1.0));
+                    painter.drawLine(QPointF(t.uv_pred.x(), t.uv_pred.y()),
+                                     QPointF(t.uv_meas.x(), t.uv_meas.y()));
+                }
+            }
         }
         painter.setBrush(Qt::NoBrush);
     }

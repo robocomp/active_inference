@@ -21,7 +21,8 @@
 #include <memory>
 #include <string>
 
-#include "corner_detector.h"   // rc::CornerDetector::CornerMatch (matched-corner overlay)
+#include "corner_detector.h"
+#include "image_edge_types.h"   // rc::CornerDetector::CornerMatch (matched-corner overlay)
 
 // Forward declarations
 namespace DSR {
@@ -31,7 +32,9 @@ namespace DSR {
 }
 using DSRGraph = DSR::DSRGraph;
 
-namespace rc::media { class MediaSubscriber; }  // media-plane RGB consumer (keeps fastdds out of MOC header)
+namespace rc::media { class MediaSubscriber; class Image360Subscriber; }  // media-plane RGB consumers,
+                                                                        // forward-declared to keep fastdds
+                                                                        // out of this MOC header
 
 namespace rc {
 
@@ -44,9 +47,23 @@ class CameraVisualizer : public QDialog
     Q_OBJECT
 
     public:
+        /// `camera_node` is the DSR node name. "zed" is a pinhole camera carrying an `rgb` stream;
+        /// "ricoh" is a 360 model carrying `rgb360`, which is a DIFFERENT DDS type (Image360Frame,
+        /// ~5.5 MB) — so the stream key is chosen from the node's own descriptor rather than
+        /// assumed, exactly as CameraIngestor does.
+        ///
+        /// ★ The OVERLAY needs no special case: every projection here goes through
+        ///   CameraAPI::project(), which dispatches on the node's projection model. The equirect
+        ///   geometry is therefore free. What is NOT free is the column SEAM — a wall segment can
+        ///   run off one edge and back on the other — and that is handled where segments are drawn.
         explicit CameraVisualizer(std::shared_ptr<DSRGraph> graph, const std::vector<Eigen::Vector2f>& room_polygon,
                                   std::vector<std::string> overlay_object_types = {"object"},
+                                  std::string camera_node = "zed",
                                   QWidget* parent = nullptr);
+
+        /// RGB triple points (floor/ceiling wall-wall corners) for the overlay, from the image-edge
+        /// path. Drawn only when this visualiser's camera IS the one that produced them.
+        void set_triple_points(std::vector<rc::TriplePoint> pts, const std::string& from_camera);
         ~CameraVisualizer();  // defined in .cpp for unique_ptr<MediaSubscriber> of incomplete type
 
         // Start the dedicated media-plane ingest thread. The RGB subscriber itself is
@@ -100,7 +117,11 @@ class CameraVisualizer : public QDialog
         // try_discover_media_plane, polled in ingest_pump, destroyed after the thread joins).
         // The GUI thread never touches the subscriber — it only reads the latest decoded frame
         // from media_rgb_ under media_rgb_mtx_, gated by the subscriber_ready_ flag.
-        std::unique_ptr<rc::media::MediaSubscriber> media_rgb_sub_;
+        std::unique_ptr<rc::media::MediaSubscriber>    media_rgb_sub_;
+        std::unique_ptr<rc::media::Image360Subscriber> media_rgb360_sub_;   ///< the ricoh's stream
+        std::mutex                     triple_mtx_;
+        std::vector<rc::TriplePoint>   triple_points_;
+        std::string                    triple_from_;
         struct MediaRgbCache
         {
             std::vector<std::uint8_t> bytes;

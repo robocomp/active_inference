@@ -19,7 +19,17 @@
      <item>
       <widget class="QPushButton" name="btn_camera_viz">
        <property name="text">
-        <string>Camera</string>
+        <string>ZED</string>
+       </property>
+       <property name="maximumHeight">
+        <number>35</number>
+       </property>
+      </widget>
+     </item>
+<item>
+      <widget class="QPushButton" name="btn_ricoh_viz">
+       <property name="text">
+        <string>Ricoh</string>
        </property>
        <property name="maximumHeight">
         <number>35</number>

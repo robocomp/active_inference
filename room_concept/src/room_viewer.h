@@ -56,6 +56,10 @@ public:
     /// kind of half-action that makes a later measurement inexplicable.
     void set_camera_reset_handler(std::function<void()> h) { on_camera_reset_ = std::move(h); }
 
+    /// Triple points for whichever camera produced them; forwarded to BOTH windows, each of which
+    /// draws them only if it is that camera (see CameraVisualizer::set_triple_points).
+    void set_triple_points(std::vector<rc::TriplePoint> pts, const std::string& from_camera);
+
     void set_camera_calibration(const Eigen::Matrix<float, rc::camcal::P_COUNT, 1>& value,
                                 const Eigen::Matrix<float, rc::camcal::P_COUNT, 1>& sigma,
                                 int informed_mask, float condition, long pairs);
@@ -115,6 +119,11 @@ public:
 
     // Button actions.
     void show_camera();
+    /// The Ricoh panorama in its own window. A SECOND CameraVisualizer rather than a mode switch on
+    /// the first: each owns a media subscriber for a different stream type (rgb vs rgb360, which are
+    /// different DDS types), and both windows can then be open at once — which is the point, since
+    /// the interesting comparison is the same corner seen by both.
+    void show_ricoh();
     /// Open (or raise) the self-calibration window.
     void show_calibration();
     void toggle_lidar_points(bool checked);
@@ -158,6 +167,7 @@ private:
     // Tri-state so the very first update always applies a stylesheet, whichever state it reports.
     int room_stable_shown_ = -1;
     std::unique_ptr<rc::CameraVisualizer> camera_viz_;
+    std::unique_ptr<rc::CameraVisualizer> ricoh_viz_;
     bool camera_media_plane_initialized_ = false;
 };
 

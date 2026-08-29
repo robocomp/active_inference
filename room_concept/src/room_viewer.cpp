@@ -260,7 +260,15 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
         viewer_2d_->draw_room_polygon(room_polygon, false);
 
     // Camera-projection window: overlays the room layout on the live RGB image.
-    camera_viz_ = std::make_unique<rc::CameraVisualizer>(graph, room_polygon, params_->OVERLAY_OBJECT_TYPES, nullptr);
+    // ★ The camera node is passed EXPLICITLY. It has a default of "zed", but the old call passed
+    //   `nullptr` in the position the node name now occupies — and nullptr converts to std::string
+    //   through the const char* constructor, so it compiles cleanly and is undefined behaviour at
+    //   runtime. A defaulted std::string parameter added ahead of a pointer parameter is a trap;
+    //   naming both arguments removes it.
+    camera_viz_ = std::make_unique<rc::CameraVisualizer>(
+        graph, room_polygon, params_->OVERLAY_OBJECT_TYPES, std::string("zed"), nullptr);
+    ricoh_viz_ = std::make_unique<rc::CameraVisualizer>(
+        graph, room_polygon, params_->OVERLAY_OBJECT_TYPES, std::string("ricoh"), nullptr);
 
     // Bring up the RGB media plane. The subscriber is created lazily by the camera
     // visualizer once the "zed" node + media descriptor exist, reading the DDS
@@ -499,6 +507,23 @@ void RoomViewer::show_calibration()
     calib_viewer_->show();
     calib_viewer_->raise();
     calib_viewer_->activateWindow();
+}
+
+void RoomViewer::show_ricoh()
+{
+    if (ricoh_viz_)
+    {
+        ricoh_viz_->update_frame();
+        ricoh_viz_->show();
+        ricoh_viz_->raise();
+        ricoh_viz_->activateWindow();
+    }
+}
+
+void RoomViewer::set_triple_points(std::vector<rc::TriplePoint> pts, const std::string& from_camera)
+{
+    if (camera_viz_) camera_viz_->set_triple_points(pts, from_camera);
+    if (ricoh_viz_)  ricoh_viz_->set_triple_points(std::move(pts), from_camera);
 }
 
 void RoomViewer::show_camera()

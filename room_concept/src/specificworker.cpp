@@ -228,6 +228,7 @@ void SpecificWorker::initialize()
     if (auto* w = viewer_->widget())
     {
         connect(w->btn_camera_viz, &QPushButton::clicked, this, [this] { viewer_->show_camera(); });
+        connect(w->btn_ricoh_viz,  &QPushButton::clicked, this, [this] { viewer_->show_ricoh(); });
         connect(w->btn_calib_viz, &QPushButton::clicked, this, [this] { viewer_->show_calibration(); });
         connect(w->btn_lidar_points_viz, &QPushButton::toggled, this, [this](bool on) { viewer_->toggle_lidar_points(on); });
         if (auto* v = viewer_->viewer())
@@ -1100,6 +1101,9 @@ void SpecificWorker::pump_image_edges()
         }
     }
     mount_pair_update(obs, res->corner_matches, static_cast<std::int64_t>(frame.stamp));
+    // The overlay draws these on whichever window IS this camera; the name travels with them so a
+    // ricoh corner can never be painted onto a zed frame at a plausible-looking wrong position.
+    if (viewer_) viewer_->set_triple_points(obs.triple_points, params.IMAGE_EDGE_CAMERA);
     room_concept_.set_image_edges(std::move(obs));
 
     if (const auto [polls, hits] = camera_ingestor_->depth_stats();
