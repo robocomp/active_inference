@@ -497,12 +497,30 @@ bool CameraVisualizer::fetch_camera_intrinsics()
     if (!camera_api_)
         return false;
 
-    const float fx = camera_api_->get_focal_x();
-    const float fy = camera_api_->get_focal_y();
+    float fx = camera_api_->get_focal_x();
+    float fy = camera_api_->get_focal_y();
     const int width = static_cast<int>(camera_api_->get_width());
     const int height = static_cast<int>(camera_api_->get_height());
     const float cx = static_cast<float>(width) * 0.5f;
     const float cy = static_cast<float>(height) * 0.5f;
+
+    // ★ A PANORAMA HAS NO FOCAL LENGTH, AND ITS ABSENCE IS NOT AN ERROR. cortex sets
+    //   focal_x = focal_y = 0 for Equirectangular and Cylindrical deliberately
+    //   (dsr_camera_api.cpp:51). Testing fx > 0 as a validity condition is therefore a PINHOLE test
+    //   wearing the clothes of a sanity check: on the ricoh it set camera_data_.valid = false and
+    //   silently disabled the entire overlay, while the image itself displayed perfectly — contours
+    //   and corners simply never drawn, with nothing saying why.
+    //   Nothing in the projection needs a focal length: CameraAPI::project() dispatches on the model.
+    const bool panoramic =
+        camera_api_->get_projection_model() != DSR::CameraAPI::ProjectionModel::Pinhole;
+    if (panoramic and (fx <= 0.f or fy <= 0.f) and width > 0)
+    {
+        // Pixels per RADIAN, which is the panoramic analogue and the only thing K is used for here:
+        // turning a metric sigma at range d into an overlay radius (px = (W/2pi) * sigma / d). It is
+        // NOT a focal length and must not be read as one — hence the name of the field it feeds is
+        // the only place this value is allowed to matter.
+        fx = fy = static_cast<float>(width) / (2.f * static_cast<float>(M_PI));
+    }
 
     if (fx <= 0.f || fy <= 0.f || width <= 0 || height <= 0)
     {
@@ -866,26 +884,44 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
         painter.drawLine(p0, p1);
     };
 
+    // ★ A 360 CAMERA SEES BEHIND ITSELF, so the near-plane clip below is a PINHOLE operation and
+    //   applying it to a panorama discards the half of the room that is behind the robot — which is
+    //   most of what a panorama is for. Detected from the model, not configured.
+    const bool panoramic =
+        camera_api_ and camera_api_->get_projection_model() != DSR::CameraAPI::ProjectionModel::Pinhole;
+    const double img_w = static_cast<double>(camera_data_.width);
+
     auto project_clipped_segment = [&](Mat::Vector3d a, Mat::Vector3d b, Eigen::Vector2f& out_a, Eigen::Vector2f& out_b)
     {
         constexpr double near_y = 1e-4;
 
-        if (a.y() <= near_y && b.y() <= near_y)
-            return false;
+        if (not panoramic)
+        {
+            if (a.y() <= near_y && b.y() <= near_y)
+                return false;
 
-        if (a.y() <= near_y)
-        {
-            const double t = (near_y - a.y()) / (b.y() - a.y());
-            a = a + t * (b - a);
-        }
-        else if (b.y() <= near_y)
-        {
-            const double t = (near_y - b.y()) / (a.y() - b.y());
-            b = b + t * (a - b);
+            if (a.y() <= near_y)
+            {
+                const double t = (near_y - a.y()) / (b.y() - a.y());
+                a = a + t * (b - a);
+            }
+            else if (b.y() <= near_y)
+            {
+                const double t = (near_y - b.y()) / (a.y() - b.y());
+                b = b + t * (a - b);
+            }
         }
 
         const Eigen::Vector2d uv0 = camera_api_->project(a);
-        const Eigen::Vector2d uv1 = camera_api_->project(b);
+        Eigen::Vector2d uv1 = camera_api_->project(b);
+        // ★ THE SEAM. On a cyclic column axis two ends of one short wall can land at u=1918 and u=2,
+        //   and a straight line between them is drawn right across the image — a wall that is not
+        //   there, which is worse than a wall that is missing. Unwrap the second endpoint so the
+        //   segment stays continuous; Qt clips the part that leaves the widget. The piece that
+        //   re-enters on the far side is not drawn, which is a small gap at the seam rather than a
+        //   line across the middle.
+        if (panoramic and img_w > 0.0)
+            uv1.x() -= std::round((uv1.x() - uv0.x()) / img_w) * img_w;
         out_a = Eigen::Vector2f(static_cast<float>(uv0.x()), static_cast<float>(uv0.y()));
         out_b = Eigen::Vector2f(static_cast<float>(uv1.x()), static_cast<float>(uv1.y()));
         return true;
@@ -990,12 +1026,20 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
             matches = corner_matches_;
         }
         constexpr double near_y = 1e-4;
-        const float fx = camera_data_.K(0, 0);             // focal length (px) for the metres→px radius
+        // px per metre at unit range: a focal length on a pinhole, pixels-per-radian on a panorama
+        // (fetch_camera_intrinsics fills the latter, since a panorama has no focal length).
+        const float fx = camera_data_.K(0, 0);
+        const bool pano =
+            camera_api_ and camera_api_->get_projection_model() != DSR::CameraAPI::ProjectionModel::Pinhole;
         painter.setPen(Qt::NoPen);
         for (const auto& m : matches)
         {
             const auto cam = transform_room_point(basis, Mat::Vector3d(m.model_world.x(), m.model_world.y(), ceil_z));
-            if (cam.y() <= near_y)                          // behind / on the camera plane
+            // Behind the camera is INVISIBLE on a pinhole and perfectly visible on a panorama; the
+            // radius below uses |cam| rather than cam.y() there, since y is not the range off-axis.
+            if (not pano and cam.y() <= near_y)
+                continue;
+            if (pano and cam.norm() <= near_y)
                 continue;
             const Eigen::Vector2d uv = camera_api_->project(cam);
             if (!std::isfinite(uv.x()) || !std::isfinite(uv.y()))
@@ -1014,7 +1058,8 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
             // Project the metric σ to pixels at the corner's depth; clamp so it stays visible but bounded.
             // The radius carries the uncertainty (bigger blob = shallower corner), so the fill is a uniform
             // orange tone — brightening slightly with uncertainty — rather than a hue ramp.
-            const float radius_px = std::clamp(fx * sigma_m / static_cast<float>(cam.y()), 5.f, 140.f);
+            const double range = pano ? cam.norm() : cam.y();
+            const float radius_px = std::clamp(fx * sigma_m / static_cast<float>(range), 5.f, 140.f);
             const float u = std::clamp((sigma_m - 0.02f) / (0.60f - 0.02f), 0.f, 1.f);
             // A RETIRED corner (information yield never materialised) is still projected — it is still
             // being detected and can still recover — but as a faint grey blob, so it never reads as a
@@ -1083,21 +1128,27 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
             for (const auto& c : wall.corners)
                 cam.push_back(transform_room_point(basis, Mat::Vector3d(c.x(), c.y(), c.z())));
 
+            // ★ The near-plane clip is a PINHOLE operation: it keeps the part of the quad in front
+            //   of the camera. A panorama has no front, so clipping there would delete every wall
+            //   behind the robot. Panoramic keeps all four corners.
             std::vector<Mat::Vector3d> clipped;
-            for (std::size_t i = 0; i < cam.size(); ++i)
-            {
-                const Mat::Vector3d& curr = cam[i];
-                const Mat::Vector3d& next = cam[(i + 1) % cam.size()];
-                const bool in_curr = curr.y() >= near_y;
-                const bool in_next = next.y() >= near_y;
-                if (in_curr)
-                    clipped.push_back(curr);
-                if (in_curr != in_next)
+            if (panoramic)
+                clipped = cam;
+            else
+                for (std::size_t i = 0; i < cam.size(); ++i)
                 {
-                    const double t = (near_y - curr.y()) / (next.y() - curr.y());
-                    clipped.push_back(curr + t * (next - curr));
+                    const Mat::Vector3d& curr = cam[i];
+                    const Mat::Vector3d& next = cam[(i + 1) % cam.size()];
+                    const bool in_curr = curr.y() >= near_y;
+                    const bool in_next = next.y() >= near_y;
+                    if (in_curr)
+                        clipped.push_back(curr);
+                    if (in_curr != in_next)
+                    {
+                        const double t = (near_y - curr.y()) / (next.y() - curr.y());
+                        clipped.push_back(curr + t * (next - curr));
+                    }
                 }
-            }
             if (clipped.size() < 3)
                 continue;
 
@@ -1111,6 +1162,17 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
             }
             if (!poly_ok || poly.size() < 3)
                 continue;
+            // ★ A quad spanning the seam projects to columns at both edges, and FILLING that
+            //   polygon paints a purple band straight across the image — a wall where there is
+            //   none. Unlike a line segment a wrapping polygon cannot simply be unwrapped, so it is
+            //   SKIPPED. A missing wall is honest; an invented one is not.
+            if (panoramic and img_w > 0.0)
+            {
+                double umin = poly[0].x(), umax = poly[0].x();
+                for (const auto& pt : poly) { umin = std::min(umin, pt.x()); umax = std::max(umax, pt.x()); }
+                if (umax - umin > 0.5 * img_w)
+                    continue;
+            }
 
             painter.setPen(QPen(wall_edge, 1.5));
             painter.setBrush(QBrush(wall_fill));
