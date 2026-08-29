@@ -751,6 +751,30 @@ std::vector<std::string> RoomConfig::apply_scenario(const std::string& scenario)
     { changed.emplace_back("LidarHighMaxHeight"); LIDAR_HIGH_MAX_HEIGHT = *ov.lidar_high_max_height; }
     if (ov.object_anchor_subtypes.has_value() and *ov.object_anchor_subtypes != OBJECT_ANCHOR_SUBTYPES)
     { changed.emplace_back("ObjectAnchorSubtypes"); OBJECT_ANCHOR_SUBTYPES = *ov.object_anchor_subtypes; }
+
+    // ── A WALL BAND MAY NOT REACH THE CEILING ───────────────────────────────────────────────────
+    // The high band feeds a 2-D WALL polygon SDF. A ceiling return sits at an arbitrary INTERIOR
+    // xy, so its distance to the nearest wall is large by construction: let the ceiling plane into
+    // the band and the localiser is fitting a wall model to points that are not on a wall.
+    // ★ MEASURED 2026-08-29: with LidarHighMaxHeight raised to 3.0 in a room whose RoomHeight is
+    //   3.0, the startup check found a 51450-point z-peak at 3.01 m and the SDF residual sat at
+    //   0.164 m RMS after optimisation, gate pinned, 0% early exit — while the pose stayed
+    //   confident and corner association healthy, because the pose was not the thing that was wrong.
+    // ★ NOT a tuned threshold: it is the same LIDAR_CEILING_MARGIN the startup ceiling check already
+    //   applies, enforced against the ceiling the SCENARIO states rather than only against the one
+    //   the check manages to detect. The check can be fooled — it was, here — and a stated ceiling
+    //   cannot be. Announced, never silent: a value that is quietly reduced is a value nobody
+    //   revisits.
+    if (const float cap = room_height - LIDAR_CEILING_MARGIN;
+        room_height > 0.f and LIDAR_HIGH_MAX_HEIGHT > cap)
+    {
+        qWarning() << "[cfg] LidarHighMaxHeight" << LIDAR_HIGH_MAX_HEIGHT
+                   << "m reaches the stated" << room_height << "m ceiling; the high band feeds a 2-D"
+                   << "WALL SDF and a ceiling return has no wall to be near. Clamped to" << cap
+                   << "m (ceiling -" << LIDAR_CEILING_MARGIN << "m).";
+        LIDAR_HIGH_MAX_HEIGHT = cap;
+        changed.emplace_back("LidarHighMaxHeight(clamped below the ceiling)");
+    }
     return changed;
 }
 
