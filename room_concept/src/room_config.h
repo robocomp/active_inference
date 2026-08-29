@@ -16,6 +16,8 @@
 // the ConfigLoader. Keeps the ~150 lines of load_* boilerplate out of
 // SpecificWorker::initialize().
 
+#include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -41,6 +43,38 @@ struct RoomConfig
     std::string LIDAR_HELIOS_NAME     = "helios";
     // Destination frame for the device->robot transform (the mount RT edge parent, e.g. body->helios).
     std::string LIDAR_ROBOT_FRAME     = "";   // empty ⇒ auto-derived from the type-"robot" node at init
+
+    // ── PLATFORM OVERLAY: one config for every robot ────────────────────────────────────────────
+    // Most of this file is POLICY and is the same everywhere. A handful of values are PHYSICAL —
+    // measured on one machine and meaningless on another — and keeping two whole files apart so
+    // those few can differ is what let the rest drift: on 2026-08-29 the two platform files had 14
+    // keys present in only one of them, four thresholds quietly different, and
+    // OdomVarianceInjection true on one and false on the other, so a producer fix landed and was
+    // ignored. The cost of the split was paid by the 95% that should never have differed.
+    //
+    // So: ONE file, with the physical few in a per-robot section applied by NAME:
+    //     [Platform.Shadow]  mountPitchSigma = 0.0035
+    //     [Platform.P3Bot]   mountPitchSigma = 0.0017
+    //
+    // ★ READ at load time, APPLIED at init. The robot's identity comes from the graph (the
+    //   type-"robot" node), which is not up when the config is parsed — the same constraint that
+    //   makes LIDAR_ROBOT_FRAME auto-derive rather than be configured. Every section is therefore
+    //   parsed up front and the matching one applied once the name is known.
+    // ★ A section that does not match ANY robot is not an error; a robot with NO section is not one
+    //   either — it simply keeps the shared defaults. What IS an error is a value that must be
+    //   measured per machine silently inheriting another machine's number, which is why the
+    //   physical ones are listed here explicitly rather than "whatever happens to be in the file".
+    struct PlatformOverlay
+    {
+        std::optional<float> mount_pitch_sigma, mount_height_sigma, mount_yaw_sigma;
+        std::optional<float> mount_yaw_correction, wall_position_sigma;
+        std::optional<float> cmd_noise_rot, cmd_noise_trans;
+        std::optional<std::string> image_edge_camera;
+    };
+    std::map<std::string, PlatformOverlay> platform_overlays;
+    /// Apply the section matching `robot`, if there is one. Returns what it changed, for the log:
+    /// a silent overlay is how a machine ends up running another machine's constants.
+    std::vector<std::string> apply_platform(const std::string& robot);
                                               // (so the SDF optimises in the SAME frame the robot↔room RT
                                               // is published onto). Set explicitly only to override.
     float MAX_LIDAR_HIGH_RANGE        = 100.f;  // m

@@ -1340,3 +1340,46 @@ wallPositionSigma = 0.015
 # tool, and the readers here are locale-safe (std::from_chars) only where they were fixed. Keeping the
 # paths together makes the sweep in LOCALE_PARSING_SWEEP.md checkable.
 csv = "etc/image_edge.csv"
+
+# ══ PLATFORM OVERLAY ═══════════════════════════════════════════════════════════════════════════
+# Everything above is POLICY and is the same on every robot. The values below are PHYSICAL —
+# measured on one machine and meaningless on another — and they are the ONLY reason this file was
+# ever split per platform.
+#
+# ★ THE SPLIT COST MORE THAN IT BOUGHT. On 2026-08-29 the two platform files had 14 keys present in
+#   only one of them, four thresholds quietly different, and OdomVarianceInjection true in one and
+#   false in the other — so a producer fix landed in the bridge and was ignored by the consumer. The
+#   handful of values that genuinely differ were being protected at the cost of the 95% that should
+#   never have differed at all.
+#
+# Applied by ROBOT NAME, taken from the graph's type-"robot" node — the same source that already
+# auto-derives LIDAR_ROBOT_FRAME, and for the same reason: the robot knows what it is, and a config
+# file asserting it is one more thing that can disagree with reality.
+# A robot with no section keeps the shared values, which is correct only if none of its physical
+# constants differ. The log says which case applied; it is never silent.
+#
+# ⚠ Omit Platform.names rather than writing [] — ConfigLoader throws on an empty array.
+[Platform]
+names = ["Shadow", "P3Bot"]
+
+[Platform.Shadow]
+# ⚠ NOT MEASURED ON SHADOW — nominal priors. The boresight is deliberately absent (i.e. zero):
+# P3Bot's +0.814 deg was measured on P3BOT'S ricoh, and copying it to a different mount on a
+# different robot would be fabricating an extrinsic. Shadow's is to be measured from scratch.
+camera            = "ricoh"
+mountPitchSigma   = 0.0035
+mountHeightSigma  = 0.010
+mountYawSigma     = 0.0035
+wallPositionSigma = 0.015
+
+[Platform.P3Bot]
+# MEASURED on P3Bot. mountPitchSigma 0.0017 came from the mount monitor (down from 0.0035);
+# mountYawCorrection +0.814 deg (0.01421 rad) from the pose-free camera/LiDAR pairing, confirmed
+# afterwards at a residual of +0.014 deg; wallPositionSigma 0.015 from the per-vertex residual
+# spread (1.74 px in u at ~4 m).
+camera             = "ricoh"
+mountPitchSigma    = 0.0017
+mountHeightSigma   = 0.010
+mountYawSigma      = 0.0035
+mountYawCorrection = 0.01421
+wallPositionSigma  = 0.015

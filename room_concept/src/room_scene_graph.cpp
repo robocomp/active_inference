@@ -1938,6 +1938,36 @@ void RoomSceneGraph::check_init_graph_is_valid()
             qWarning() << "[room] LIDAR_ROBOT_FRAME =" << QString::fromStdString(params_->LIDAR_ROBOT_FRAME)
                        << "differs from the robot node" << QString::fromStdString(robot_name)
                        << "— the published robot↔room RT will carry that frame's offset. Set it empty to auto-derive.";
+
+        // ── The platform overlay, applied HERE because this is where the robot names itself ──────
+        // One config for every robot: the shared 95% is written once, and the handful of values that
+        // are PHYSICAL — measured on one machine and meaningless on another — come from a per-robot
+        // section. Keeping two whole files apart so those few could differ is what let the rest
+        // drift, and the drift is what cost the time: a producer fix that landed and was ignored
+        // because a flag was true in one file and false in the other.
+        // ★ ANNOUNCED, never silent. A machine quietly running another machine's constants is the
+        //   failure this exists to prevent, so it says what it changed — and says so too when a
+        //   robot has no section, because "nothing was overlaid" and "the overlay did not match"
+        //   look identical in the values afterwards.
+        if (not params_->platform_overlays.empty())
+        {
+            const auto changed = params_->apply_platform(robot_name);
+            if (changed.empty())
+            {
+                const bool have = params_->platform_overlays.contains(robot_name);
+                qInfo() << "[room] platform overlay:" << QString::fromStdString(robot_name)
+                        << (have ? "matched, nothing to change (its section equals the shared values)"
+                                 : "has NO section — running the shared defaults, which is correct only"
+                                   " if none of the physical constants differ on this machine");
+            }
+            else
+            {
+                QStringList l;
+                for (const auto& c : changed) l << QString::fromStdString(c);
+                qInfo() << "[room] platform overlay for" << QString::fromStdString(robot_name)
+                        << "applied:" << l.join(", ");
+            }
+        }
     }
 
     load_robot_body_dimensions_from_graph();

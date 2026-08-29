@@ -4,6 +4,8 @@
  */
 
 #include "room_config.h"
+#include <limits>
+#include <cmath>
 
 #include <ConfigLoader/ConfigLoader.h>
 #include <QDebug>
@@ -382,6 +384,50 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ImageEdge.mountYawCorrection", p.IMAGE_EDGE_MOUNT_YAW_CORR);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ImageEdge.wallPositionSigma", p.IMAGE_EDGE_WALL_POS_SIGMA);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "ImageEdge.useTriplePoints", p.IMAGE_EDGE_USE_TRIPLE_POINTS);
+
+    // ── Platform overlays ────────────────────────────────────────────────────────────────────────
+    // Parsed here because the ConfigLoader does not outlive this call; APPLIED later, once the
+    // robot's own name is known from the graph. See RoomConfig::apply_platform.
+    // The names come from Platform.names so the loader never has to enumerate sections — and an
+    // absent key means "no overlays", which is the ordinary single-robot case rather than an error.
+    // ⚠ ConfigLoader THROWS on an empty array (memory: configloader-empty-array-throws), so omit
+    //   Platform.names rather than writing [].
+    {
+        std::vector<std::string> names;
+        try { rc::ConfigLoaderUtils::load_optional<std::vector<std::string>>(cl, "Platform.names", names); }
+        catch (const std::exception& e) { qWarning() << "[cfg] Platform.names ignored:" << e.what(); }
+        for (const auto& n : names)
+        {
+            RoomConfig::PlatformOverlay ov;
+            // load_optional returns void and leaves the destination ALONE when the key is absent,
+            // so presence is detected with a sentinel rather than a return value. NaN is the right
+            // sentinel here: no legitimate config value can collide with it, whereas 0 or -1 could.
+            const auto f = [&](const char* key, std::optional<float>& dst)
+            {
+                float v = std::numeric_limits<float>::quiet_NaN();
+                try { rc::ConfigLoaderUtils::load_optional<float, double>(
+                          cl, ("Platform." + n + "." + key).c_str(), v); }
+                catch (...) { return; }
+                if (std::isfinite(v)) dst = v;
+            };
+            f("mountPitchSigma",    ov.mount_pitch_sigma);
+            f("mountHeightSigma",   ov.mount_height_sigma);
+            f("mountYawSigma",      ov.mount_yaw_sigma);
+            f("mountYawCorrection", ov.mount_yaw_correction);
+            f("wallPositionSigma",  ov.wall_position_sigma);
+            f("CmdNoiseRot",        ov.cmd_noise_rot);
+            f("CmdNoiseTrans",      ov.cmd_noise_trans);
+            std::string cam;
+            try { rc::ConfigLoaderUtils::load_optional<std::string>(
+                      cl, ("Platform." + n + ".camera").c_str(), cam); }
+            catch (...) {}
+            if (not cam.empty()) ov.image_edge_camera = cam;
+            p.platform_overlays[n] = ov;
+        }
+        if (not names.empty())
+            qInfo() << "[cfg] platform overlays parsed for" << static_cast<int>(names.size())
+                    << "robot(s); the matching one is applied once the graph names this robot";
+    }
     // ConfigLoader throws on an EMPTY array (memory: configloader-empty-array-throws), so an absent
     // key is the way to say "no extra calibration cameras", not `calibCameras = []`.
     try { rc::ConfigLoaderUtils::load_optional<std::vector<std::string>>(cl, "ImageEdge.calibCameras", p.CALIB_CAMERAS); }
@@ -506,6 +552,25 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.DwellTime", ep.dwell_time);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.BeliefForgetTime", ep.belief_forget_time);
     epistemic.set_robot_footprint(p.ROBOT_WIDTH, p.ROBOT_LENGTH);
+}
+
+
+std::vector<std::string> RoomConfig::apply_platform(const std::string& robot)
+{
+    std::vector<std::string> changed;
+    const auto it = platform_overlays.find(robot);
+    if (it == platform_overlays.end()) return changed;   // no section for this robot: keep the shared defaults
+    const auto& ov = it->second;
+    const auto set = [&](const std::optional<float>& src, float& dst, const char* name)
+    { if (src.has_value() and *src != dst) { changed.emplace_back(name); dst = *src; } };
+    set(ov.mount_pitch_sigma,    IMAGE_EDGE_MOUNT_PITCH_SIGMA,  "mountPitchSigma");
+    set(ov.mount_height_sigma,   IMAGE_EDGE_MOUNT_HEIGHT_SIGMA, "mountHeightSigma");
+    set(ov.mount_yaw_sigma,      IMAGE_EDGE_MOUNT_YAW_SIGMA,    "mountYawSigma");
+    set(ov.mount_yaw_correction, IMAGE_EDGE_MOUNT_YAW_CORR,     "mountYawCorrection");
+    set(ov.wall_position_sigma,  IMAGE_EDGE_WALL_POS_SIGMA,     "wallPositionSigma");
+    if (ov.image_edge_camera.has_value() and *ov.image_edge_camera != IMAGE_EDGE_CAMERA)
+    { changed.emplace_back("camera"); IMAGE_EDGE_CAMERA = *ov.image_edge_camera; }
+    return changed;
 }
 
 }  // namespace rc
