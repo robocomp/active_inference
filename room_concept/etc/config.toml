@@ -974,6 +974,17 @@ GnLossRelTol            = 1e-5
 TorchNumThreads         = 1
 SymmetryGoodFitMse      = 0.101
 
+
+# ── 2026-08-29: the last drift pairs, merged ───────────────────────────────────────────────────
+# Both old files stated a value for these, which is why they were kept split at first — but the
+# numbers give the split away: 0.06/0.051 and 0.10/0.084 are the SAME two pairs that appear as
+# EpistemicController.SdfSafe/SdfDanger, i.e. one batch edit that scaled a family by ~0.85 on one
+# side and never reached the other. Nothing here is a property of a machine. One value for both.
+PredictionTrustFactor           = 0.7    # threshold = SigmaSdf x factor -> 10.5 cm early-exit gate
+RotationSdfCoupling             = 0.5
+BoundaryHessianQualityThreshold = 0.051
+BoundaryMuQualityThreshold      = 0.084
+
 [DSR]
 StableSdfMseMax = 0.076   # unified 2026-08-29; P3Bot ran the 0.06 default only because its file was silent
 # This apartment fits chronically at ~0.079 mean|SDF| on early-exit frames (5th–95th pct 0.075–0.083),
@@ -1042,6 +1053,11 @@ freshnessAgeScale = 3.0  # frames of staleness at which σ roughly doubles (vari
 
 # ── Epistemic Controller ───────────────────────────────────────────────────────
 [EpistemicController]
+WIor            = 2.0    # unified 2026-08-29 (was 1.0 on P3Bot)
+# Seconds after which a viewpoint's belief is forgotten; 0 disables it, which is the code default
+# and therefore all Shadow ever ran — its file never mentioned the key. P3Bot's 90 s is the only
+# value anyone actually chose, so it is now the value for both.
+BeliefForgetTime = 90.0
 # MaxLinAccel / MaxRotAccel removed 2026-08-29: read by NOTHING in this component —
 # they survive only in robot_concept_prev (an old copy) and config.protocol_test.
 # ---- Arc trajectory generation ----
@@ -1359,11 +1375,12 @@ csv = "etc/image_edge.csv"
 #     stay here permanently. A machine silently running another machine's measurement is the
 #     failure the whole mechanism exists to prevent.
 #
-#   DRIFT — solver settings and thresholds that should be ONE value for both, split only because
-#     the two files lived apart while the work went into one of them. P3Bot's file said nothing
-#     about most of them, so it ran the code defaults with nothing on the page to say so. The merge
-#     writes both sides out rather than quietly adopting Shadow's. Judge each pair and DELETE it
-#     from both sections when they agree — every deletion is a real simplification.
+#   ✅ DRIFT — GONE, 2026-08-29. The merge first wrote both sides of every divergence out here so
+#     nothing moved while they were judged; all eighteen have since collapsed into the shared
+#     sections. What is left below is physical, and that is the invariant to hold: if a key that is
+#     not a property of a machine appears here again, it is drift arriving, not a decision.
+#     The one survivor of a different kind is ObjectAnchor.subtypes, which did not unify but changed
+#     AXIS — it names what stands in the ROOM, so it lives under [Scenario.<place>].
 #
 # ★ Applied ANNOUNCED, never silently: the agent logs what each overlay changed, and says so too
 #   when a robot has NO section — "nothing was overlaid" and "the overlay did not match" look
@@ -1396,13 +1413,6 @@ SdfDanger                       = 0.084
 UseCommandVelocityPrior         = true
 CalibPivotEnabled               = false
 OdomSampleLog                   = false
-# ── drift, not physics — see the DRIFT paragraph above [Platform] ──────────────────────────────
-RecoveryLossThreshold           = 0.2
-PredictionTrustFactor           = 0.7
-RotationSdfCoupling             = 0.5
-BoundaryHessianQualityThreshold = 0.051
-BoundaryMuQualityThreshold      = 0.084
-WIor                            = 2.0
 
 
 [Platform.P3Bot]
@@ -1429,19 +1439,6 @@ SdfDanger                       = 0.1
 UseCommandVelocityPrior         = false
 CalibPivotEnabled               = true
 OdomSampleLog                   = true
-BeliefForgetTime                = 90.0
-                                             # (the table pin is suspect). P3Bot never moved.
-# ── drift, not physics — see the DRIFT paragraph above [Platform] ──────────────────────────────
-# ★ Every value below is what P3Bot has been RUNNING, and for most of them only because its old
-#   file said nothing and the code default applied. They are written out so the pair is visible in
-#   one place; several are likely wrong for P3Bot rather than right, and the fix for those is to
-#   DELETE the line here (and Shadow's), not to edit it.
-RecoveryLossThreshold           = 0.45
-PredictionTrustFactor           = 0.40
-RotationSdfCoupling             = 0.2
-BoundaryHessianQualityThreshold = 0.06
-BoundaryMuQualityThreshold      = 0.10
-WIor                            = 1.0
 
 
 # ══ SCENARIO OVERLAY ═══════════════════════════════════════════════════════════════════════════
