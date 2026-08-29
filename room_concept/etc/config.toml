@@ -1006,7 +1006,9 @@ measSigmaXY = 0.3   # unified 2026-08-29; P3Bot ran the 0.05 default only becaus
 # the suspect: a fridge is position-only (no mode-ambiguous yaw to pin wrong), large, and static.
 # If flips return, the first thing to check is whether they track the fridge's pin.
 enable   = true
-subtypes = ["refrigerator"]   # classes admitted as landmarks; add "table" back only deliberately
+# subtypes moved to [Scenario.*] on 2026-08-29 — WHICH objects anchor the pose is a property of
+# what stands in the room. Left unset here so a scenario that forgets it falls back to the code
+# default ("table") rather than silently inheriting another building's furniture.
 
 # ── p_o as a PRIVATE VARIABLE instead of a pin (GATED OFF) ────────────────────────────────────
 # The pin freezes p_o at whatever pose was believed when the object's map sigma first went under
@@ -1465,7 +1467,7 @@ OdomSampleLog                   = true
 #   one, because every number downstream stays self-consistent.
 # ⚠ Omit Scenario.names rather than writing [] — ConfigLoader throws on an empty array.
 [Scenario]
-names = ["apartamento", "waf"]
+names = ["apartamento", "waf", "beta"]
 
 # RecenterRoomPolygon puts the room-frame origin on the layout's geometric (bbox) centre instead of
 # wherever the SVG author placed (0,0) — it matters for plans traced from a corner (apartamento) and
@@ -1492,3 +1494,18 @@ TargetWallMargin    = 1.0
 ObjectAnchorSubtypes = ["table"]   # ⚠ NOT the refrigerator: WAF.wbt contains none, so anchoring
                                    # on one would leave the channel with nothing to find —
                                    # which is not the same thing as switching it off.
+
+[Scenario.beta]
+# The Beta lab: 17.41 x 9.38 m from beta_layout.svg's viewBox, much larger than either of the
+# others. Values below are the ones config_beta.toml actually STATED; the two marked NOT MEASURED
+# are inherited rather than invented.
+RoomLayoutSvg       = "beta_layout.svg"
+RecenterRoomPolygon = true
+TargetWallMargin    = 0.55
+ObjectAnchorSubtypes = ["table"]   # no refrigerator here; the lab's tables are what there is to pin to
+# ⚠ NOT MEASURED. config_beta.toml never stated a ceiling, so this is the shared default carried
+#   over, not a reading of the room. A lab ceiling is usually higher than 2.4 m — measure it before
+#   quoting anything that depends on it, and raise LidarHighMaxHeight with it. Too LOW is the safe
+#   direction: the high band then merely excludes wall it could have used.
+RoomHeight          = 2.4
+LidarHighMaxHeight  = 2.0
