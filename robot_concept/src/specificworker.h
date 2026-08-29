@@ -155,6 +155,15 @@ private:
 	/// absent means "unknown, keep doing what you do", which is the only honest default. Guessing
 	/// false would silently disable a mecanum's lateral DOF; guessing true keeps the present bug.
 	std::optional<bool> holonomic_;
+	/// Base CAPABILITY + geometry, read from the base component's own config (SVD48VBase's
+	/// etc/config_diferential.toml / config_omnidirectional.toml) via Agent.base_config_file.
+	/// SI units; that file is in mm and mm/s. Each std::nullopt when the key is absent, and an
+	/// absent field is simply not published — "unknown, keep your own constant".
+	/// ⚠ These are what the HARDWARE can do, never what an agent chooses to do. A controller's
+	/// MaxAdvSpeed/MaxRotSpeed is a POLICY and must assert itself <= these, not replace them:
+	/// merging the two is what let room_concept's pose clamp bound real motion by a preference.
+	std::optional<float> max_linear_speed_, max_rot_speed_, max_linear_accel_, max_linear_decel_,
+	                     wheel_radius_, axes_length_;
 	// Degrees to rotate the robot's MESH into the ROBOT frame (x right, y forward). A property of the
 	// ASSET, not of the robot: P3Bot's proto wraps the machine in `Pose { rotation 0 0 1 1.5708 }`, so its
 	// mesh's native forward is +x while the graph's robot frame has forward +y. Agent.mesh_yaw_deg.

@@ -44,11 +44,19 @@ scenario   = "waf"   # WHERE this robot is. A robot is not a place: the same rob
 # Used to MEASURE width_m/depth_m off the mesh and publish them on the body node, replacing the
 # 0.47/0.47 placeholder that shadow.json and p3bot.json share verbatim.
 mesh_yaw_deg = 90.0
-holonomic  = true     # WHAT this base can do, as opposed to where it is: can it command an INSTANTANEOUS lateral
-                       # velocity in its own frame? Published as the `robot_holonomic` attribute on the robot node.
-                       # P3Bot.proto is a mecanum base (omnidirectional_wheel.stl x4), so yes.
-                       # REMOVE the line to publish nothing: absent means "unknown, consumers keep what they
-                       # assume today", which is never wrong, only uninformative.
+base_config_file = "/home/pbustos/robocomp/components/robocomp-robolab/components/hardware/base/SVD48VBase/etc/config_omnidirectional.toml"
+                       # THE base's own config, and the SAME file the real robot runs. Source of truth for
+                       # what this hardware CAN do (maxLinSpeed, maxRotSpeed, maxAcceleration/Deceleration)
+                       # and for its geometry (wheelRadius, axesLength), plus `baseType`, from which
+                       # `robot_holonomic` is DERIVED. An agent-side `holonomic` flag used to live here and
+                       # was a second copy of that same fact, so it is gone: one fact, one file, owned by
+                       # the component that owns the hardware.
+                       # Published on the robot node in SI units; the file itself is mm and mm/s.
+                       # ⚠ CAPABILITY, NOT POLICY. A controller's MaxAdvSpeed/MaxRotSpeed says how fast we
+                       # CHOOSE to drive and belongs in the controller; these say what the base CAN do.
+                       # Merging the two is what let room_concept's pose clamp rate-limit real rotation by
+                       # a comfort preference. Consumers assert policy <= capability, never swap them.
+                       # P3Bot is the OMNIDIRECTIONAL (mecanum) base.
 robot_node_id = 200
 # Graphviz engine used to lay the DSR graph out in the viewer: twopi | sfdp | dot | neato | fdp | circo.
 # Which one reads best depends on the graph's SHAPE, which is a property of the robot: Shadow's single

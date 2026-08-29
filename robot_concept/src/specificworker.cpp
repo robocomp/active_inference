@@ -16,6 +16,9 @@
  *    You should have received a copy of the GNU General Public License
  *    along with RoboComp.  If not, see <http://www.gnu.org/licenses/>.
  */
+#include <charconv>
+#include <fstream>
+#include <map>
 #include <QtMath>
 #include "specificworker.h"
 #include "../../common/robot_footprint/robot_footprint.h"
@@ -41,6 +44,69 @@
 #include <iterator>
 #include <iostream>
 #include <print>
+
+// ── SVD48VBase config reader ──────────────────────────────────────────────────────────────────
+// The base component owns its own kinematics and geometry, and it is the SAME file on the real
+// robot as in simulation — which is the whole point: a capability read from the base is true for
+// both, while a number copied into an agent's config is true only until someone swaps the base.
+//
+// Format is flat `key=value` with optional quotes and a trailing `#comment` (no space required:
+// `port="/dev/Driver_base"#Direcion`). Values are mm and mm/s; callers convert to SI.
+//
+// ★ std::from_chars, NOT stod/stof/strtod. These machines run LANG=es_ES.UTF-8 and Qt calls
+// setlocale(LC_ALL,"") at startup, so the C library reads a decimal COMMA: `axesLength=518.0`
+// would parse as 518 (harmless here) but `maxRotSpeed=1.5` would parse as **1**, a third of the
+// real limit, silently and with no error flag. See CLAUDE.md "Parsing numbers from files".
+namespace
+{
+std::map<std::string, std::string> read_flat_config(const std::string &path)
+{
+    std::map<std::string, std::string> kv;
+    std::ifstream f(path);
+    if (not f) return kv;
+    std::string line;
+    while (std::getline(f, line))
+    {
+        const auto eq = line.find('=');
+        if (eq == std::string::npos or line.find_first_not_of(" \t") == std::string::npos) continue;
+        if (line[line.find_first_not_of(" \t")] == '#') continue;
+        std::string key = line.substr(0, eq);
+        std::string val = line.substr(eq + 1);
+        auto trim = [](std::string &v)
+        {
+            const auto a = v.find_first_not_of(" \t\r\n");
+            const auto b = v.find_last_not_of(" \t\r\n");
+            v = (a == std::string::npos) ? std::string{} : v.substr(a, b - a + 1);
+        };
+        trim(key);
+        trim(val);
+        if (not val.empty() and val.front() == '"')            // quoted: take to the closing quote
+        {
+            const auto close = val.find('"', 1);
+            val = (close == std::string::npos) ? val.substr(1) : val.substr(1, close - 1);
+        }
+        else if (const auto h = val.find('#'); h != std::string::npos)   // else strip the comment
+        {
+            val = val.substr(0, h);
+            trim(val);
+        }
+        if (not key.empty()) kv.emplace(std::move(key), std::move(val));
+    }
+    return kv;
+}
+
+std::optional<float> num(const std::map<std::string, std::string> &kv, const char *key)
+{
+    const auto it = kv.find(key);
+    if (it == kv.end()) return std::nullopt;
+    const char *b = it->second.data();
+    float out{};
+    if (const auto [p, ec] = std::from_chars(b, b + it->second.size(), out); ec == std::errc{})
+        return out;
+    return std::nullopt;
+}
+} // namespace
+
 
 namespace
 {
@@ -248,17 +314,40 @@ void SpecificWorker::initialize()
 	// room polygon every other agent reads, so a wrong floor plan puts the whole fleet in the wrong
 	// building while every number downstream stays self-consistent.
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Agent.scenario", scenario_name_);
-	// WHAT this base can do, as opposed to where it is. Optional on purpose: a config that does not
-	// say leaves the attribute absent rather than asserting a default (see holonomic_).
-	// get<bool> THROWS when the key is absent, which is what distinguishes "not configured" from
-	// "configured false" — load_optional() returns void and would collapse the two into `false`,
-	// silently asserting that every unconfigured robot is non-holonomic.
-	try { holonomic_ = configLoader.get<bool>("Agent.holonomic"); }
-	catch (...)
+	// WHAT this base can do, as opposed to where it is — read from the BASE COMPONENT's own config,
+	// which is the same file on the real robot as in simulation. An earlier version of this declared
+	// `Agent.holonomic` here by hand; that was a second copy of `baseType`, which SVD48VBase already
+	// states, so it is gone. One fact, one file, owned by the component that owns the hardware.
+	std::string base_config_path;
+	try { base_config_path = configLoader.get<std::string>("Agent.base_config_file"); } catch (...) {}
+	if (base_config_path.empty())
+		qWarning() << "[Agent] Agent.base_config_file is not set: no base capability or geometry will"
+		              " be published. Consumers keep whatever constants they hold today.";
+	else if (const auto kv = read_flat_config(base_config_path); kv.empty())
+		qWarning() << "[Agent] could not read base config"
+		           << QString::fromStdString(base_config_path) << "— nothing published.";
+	else
 	{
-		qWarning() << "[Agent] Agent.holonomic is not set, so `robot_holonomic` will not be"
-		              " published. Consumers cannot then tell whether this base can move sideways,"
-		              " and will keep whatever they assume today.";
+		// Holonomy is DERIVED from baseType rather than declared: the base component already says
+		// which it is, and a second declaration is a second thing to get wrong.
+		if (const auto it = kv.find("baseType"); it != kv.end())
+			holonomic_ = (it->second == "Omnidirectional");
+		else
+			qWarning() << "[Agent] base config has no `baseType`, so `robot_holonomic` stays absent.";
+
+		// mm and mm/s in that file; SI on the graph. Absent stays absent — never defaulted.
+		if (const auto v = num(kv, "maxLinSpeed"))    max_linear_speed_ = *v / 1000.f;
+		if (const auto v = num(kv, "maxRotSpeed"))    max_rot_speed_    = *v;            // already rad/s
+		if (const auto v = num(kv, "maxAcceleration")) max_linear_accel_ = *v / 1000.f;
+		if (const auto v = num(kv, "maxDeceleration")) max_linear_decel_ = *v / 1000.f;
+		if (const auto v = num(kv, "wheelRadius"))    wheel_radius_     = *v / 1000.f;
+		if (const auto v = num(kv, "axesLength"))     axes_length_      = *v / 1000.f;
+
+		qInfo() << "[Agent] base" << QString::fromStdString(base_config_path)
+		        << ": holonomic=" << (holonomic_.has_value() ? (*holonomic_ ? "true" : "false") : "?")
+		        << " v_max=" << (max_linear_speed_ ? *max_linear_speed_ : -1.f) << "m/s"
+		        << " w_max=" << (max_rot_speed_ ? *max_rot_speed_ : -1.f) << "rad/s"
+		        << " track=" << (axes_length_ ? *axes_length_ : -1.f) << "m";
 	}
 	if (scenario_name_.empty())
 		qWarning() << "[Agent] Agent.scenario is not set, so `scenario_name` will not be published."
@@ -623,7 +712,7 @@ void SpecificWorker::check_robot_identity()
 	// node, same one-shot timing, and it needs the graph to be up for exactly the same reason.
 	// ⚠ update_node is a WHOLE-NODE write: an attribute absent from the copy is ERASED (see
 	//   dsr-node-attr-erasure-hazard). Re-fetch, add, write back — never write a stale copy.
-	if (not scenario_name_.empty() or holonomic_.has_value())
+	if (not scenario_name_.empty() or holonomic_.has_value() or max_linear_speed_.has_value())
 	{
 		if (auto n = G->get_node(robot_name); n.has_value())
 		{
@@ -636,6 +725,15 @@ void SpecificWorker::check_robot_identity()
 			// scenario_name — same node, same reason to wait for the graph.
 			if (holonomic_.has_value())
 				G->add_or_modify_attrib_local<robot_holonomic_att>(n.value(), *holonomic_);
+			// Base CAPABILITY, not policy. A consumer's own speed limit is a preference and must
+			// assert itself <= these; substituting one for the other is what let the pose clamp
+			// rate-limit real motion by a comfort setting.
+			if (max_linear_speed_) G->add_or_modify_attrib_local<robot_max_linear_speed_att>(n.value(), *max_linear_speed_);
+			if (max_rot_speed_)    G->add_or_modify_attrib_local<robot_max_rot_speed_att>(n.value(), *max_rot_speed_);
+			if (max_linear_accel_) G->add_or_modify_attrib_local<robot_max_linear_accel_att>(n.value(), *max_linear_accel_);
+			if (max_linear_decel_) G->add_or_modify_attrib_local<robot_max_linear_decel_att>(n.value(), *max_linear_decel_);
+			if (wheel_radius_)     G->add_or_modify_attrib_local<robot_wheel_radius_att>(n.value(), *wheel_radius_);
+			if (axes_length_)      G->add_or_modify_attrib_local<robot_axes_length_att>(n.value(), *axes_length_);
 			if (rc::safe_update_node(*G, n.value()))
 				qInfo() << "[graph] scenario_name =" << QString::fromStdString(scenario_name_)
 				        << "| robot_holonomic ="
@@ -647,6 +745,7 @@ void SpecificWorker::check_robot_identity()
 		}
 	}
 }
+
 
 void SpecificWorker::compute()
 {
