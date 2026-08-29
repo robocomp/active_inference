@@ -382,6 +382,10 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ImageEdge.mountYawCorrection", p.IMAGE_EDGE_MOUNT_YAW_CORR);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ImageEdge.wallPositionSigma", p.IMAGE_EDGE_WALL_POS_SIGMA);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "ImageEdge.useTriplePoints", p.IMAGE_EDGE_USE_TRIPLE_POINTS);
+    // ConfigLoader throws on an EMPTY array (memory: configloader-empty-array-throws), so an absent
+    // key is the way to say "no extra calibration cameras", not `calibCameras = []`.
+    try { rc::ConfigLoaderUtils::load_optional<std::vector<std::string>>(cl, "ImageEdge.calibCameras", p.CALIB_CAMERAS); }
+    catch (const std::exception& e) { qWarning() << "[cfg] ImageEdge.calibCameras ignored:" << e.what(); }
     rc::ConfigLoaderUtils::load_optional<std::string>(cl, "ImageEdge.csv", p.IMAGE_EDGE_CSV);
 
     room_concept.params.image_edge.enable             = p.IMAGE_EDGE_ENABLE;

@@ -955,6 +955,33 @@ drive  = true    # ★ ON AGAIN 2026-08-29, on the RICOH. The 08-28 attempt on t
 #       visible changes frame to frame BY DESIGN. That is the premise, not a defect.
 useTriplePoints = true
 
+# ── CAMERAS RUN FOR CALIBRATION, which need not be the one that drives ──────────────────────────
+# Each gets its own ingestor, its own extraction and its own evidence file
+# (etc/camera_calib_<name>.txt). `camera` below stays the one whose factor may enter the loss.
+#
+# ★ WHY TWO, and it is not redundancy. Each camera's residual against the LiDAR is
+#   (camera error) + (LiDAR corner error), and those are inseparable with ONE camera — a systematic
+#   in the LiDAR corner detector is indistinguishable from a camera mount error and would be
+#   "corrected" into the mount, silently. Differencing two cameras' residuals against the SAME
+#   LiDAR corner CANCELS the LiDAR term and leaves camera-vs-camera. So:
+#       large individual residuals, SMALL difference   -> the fault is in the LIDAR
+#       large difference                               -> the two cameras disagree
+#   Three sensors let you ATTRIBUTE error; two only let you measure disagreement. Reported as
+#   [loop] and etc/camera_loop.csv, in RADIANS — a pixel is 0.128 deg on the zed and 0.188 on the
+#   ricoh, so a pixel residual cannot be compared across cameras.
+#
+# ★ IT ALSO ANSWERS THE QUESTION THAT STOPPED THE POSE FACTOR: is the ~1.7 px per-corner detection
+#   bias a property of the CAMERA or of the MAP? The zed and ricoh share no optics, resolution or
+#   projection model, so if both show the same per-corner pattern it is the map, and if they differ
+#   it is detection. That decides the remedy — corners as landmark states, or a map fix — and is
+#   unanswerable with one camera.
+#
+# ⚠ COST: a second ingestor, a second subscriber (rgb 2.76 MB and rgb360 5.5 MB per frame) and a
+#   second extraction each tick. The compute loop had headroom (p90 3 ms) but this is the expensive
+#   part of it. Remove a name to stop paying for it.
+# ⚠ An EMPTY array throws in ConfigLoader, so omit the key rather than writing [].
+calibCameras = ["zed", "ricoh"]
+
 camera = "ricoh"          # ★ SWITCHED 2026-08-29 to try the panorama. DSR node name; the equirect
                           # model is selected from the node's own cam_fov/cam_projection, so this is
                           # genuinely a one-word change on the projection side.

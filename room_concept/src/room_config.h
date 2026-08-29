@@ -268,6 +268,10 @@ struct RoomConfig
     // Evidence form: per-sample contour residuals (false) or triple points (true). INSTEAD, not as
     // well — a triple point is the same segment offsets re-expressed, so both would double-count.
     bool  IMAGE_EDGE_USE_TRIPLE_POINTS = false;   // ImageEdge.useTriplePoints
+    // Cameras run for CALIBRATION, which need not be the one that drives the pose. Each gets its own
+    // ingestor, its own extraction and its own evidence file; IMAGE_EDGE_CAMERA stays the one whose
+    // factor may enter the loss. Two of them make the sensor triangle close — see camera_calibration.h.
+    std::vector<std::string> CALIB_CAMERAS = {};   // ImageEdge.calibCameras
     std::string IMAGE_EDGE_CSV = "etc/image_edge.csv";  // ImageEdge.csv
 };
 

@@ -302,4 +302,31 @@ namespace rc::img
         const double w = static_cast<double>(m.width);
         return du - std::round(du / w) * w;
     }
+
+    /// Pixels per RADIAN on each image axis — the only currency in which two different cameras can
+    /// be compared. A pixel means a different angle on a 448 px/rad pinhole and on a panorama whose
+    /// whole 2*pi maps to its width, so a residual in PIXELS is meaningless across cameras and a
+    /// residual in radians is not.
+    ///
+    /// Equirectangular: azimuth is linear in u over the full turn (W / 2*pi), and elevation is
+    /// linear in v over half a turn (H / pi) — the asin mapping is linear in the ANGLE, which is
+    /// exactly what makes that model equirectangular.
+    /// Cylindrical: azimuth as above; elevation is a tangent map, so v is linear in tan(elev) rather
+    /// than in elev and W / 2*pi is the small-angle value at the horizon. Returned with that caveat
+    /// because near the horizon is where the room contours are.
+    inline Eigen::Vector2f px_per_rad(const CameraModel& m)
+    {
+        switch (m.kind)
+        {
+            case CameraModel::Kind::Equirect:
+                return {m.width / (2.f * static_cast<float>(M_PI)),
+                        m.height / static_cast<float>(M_PI)};
+            case CameraModel::Kind::Cylindrical:
+                return {m.width / (2.f * static_cast<float>(M_PI)),
+                        m.width / (2.f * static_cast<float>(M_PI))};
+            case CameraModel::Kind::Pinhole:
+            default:
+                return {m.fx, m.fy};      // exact at the principal point, the usual small-angle form
+        }
+    }
 }  // namespace rc::img

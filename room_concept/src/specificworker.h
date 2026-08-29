@@ -39,6 +39,7 @@
 #include "camera_ingestor.h"
 #include "mount_lidar_pair.h"
 #include "camera_calibration.h"
+#include <map>
 #include "image_edge_source.h"
 #include "room_viewer.h"
 #include "room_config.h"
@@ -270,6 +271,40 @@ class SpecificWorker : public GenericWorker
     // TWO accumulators on purpose. `mp_win_` resets every window and is directly comparable with
     // stage 1's per-window solve; `mp_pool_` never resets. Pooling is only legitimate if the pose was
     // the dominant between-window nuisance, which is a CLAIM — running both is what tests it.
+    // ── One calibration channel per camera ───────────────────────────────────────────────────────
+    // The driving camera keeps the members below; every OTHER camera in ImageEdge.calibCameras gets
+    // one of these — its own ingestor, its own extraction, its own evidence file. Calibration and
+    // driving are different jobs and need not use the same sensor.
+    struct CalibChannel
+    {
+        std::string                          name;
+        std::unique_ptr<rc::CameraIngestor>  ingestor;
+        std::unique_ptr<rc::ImageEdgeSource> source;
+        rc::camcal::Estimator                calib;
+        bool                                 bound = false, loaded = false;
+        long                                 pairs = 0;
+    };
+    std::vector<std::unique_ptr<CalibChannel>> calib_channels_;
+    void pump_calib_channels();
+
+    // ── THE SENSOR TRIANGLE ──────────────────────────────────────────────────────────────────────
+    // Each camera's residual against the LiDAR is (camera error) + (LiDAR corner error). Differencing
+    // two of them CANCELS the LiDAR term and leaves camera-vs-camera — the loop closure, and the only
+    // statement here that needs no ground truth. Its use is ATTRIBUTION: with one camera a systematic
+    // in the LiDAR corner detector is indistinguishable from a camera mount error and would be
+    // "corrected" into the mount. Large individual residuals with a SMALL difference put the fault in
+    // the LiDAR; a large difference puts it between the cameras.
+    // Held in RADIANS, because a pixel is a different angle on each camera and the two are otherwise
+    // not comparable at all. Both mounts have identity rotation to `body`, so their u/v axes are
+    // mutually aligned and the components can be differenced directly.
+    struct CornerAngle { double du_rad = 0, dv_rad = 0; std::int64_t ts = 0; };
+    std::map<std::pair<std::string, int>, CornerAngle> loop_last_;   // (camera, vertex*2+ceiling)
+    double loop_du_sum_ = 0, loop_dv_sum_ = 0, loop_du_sq_ = 0, loop_dv_sq_ = 0;
+    long   loop_n_ = 0;
+    std::ofstream loop_csv_;
+    void loop_closure_observe(const std::string& cam, int vertex, bool ceiling,
+                              double du_rad, double dv_rad, std::int64_t ts);
+
     rc::mount::Accum   mp_win_;      ///< resets every window; comparable with the older stage-1 fit
     rc::camcal::Estimator mp_pool_;  ///< persistent, saved/loaded as EVIDENCE (see camera_calibration.h)
     bool               mp_loaded_ = false;

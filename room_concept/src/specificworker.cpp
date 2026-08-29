@@ -168,6 +168,26 @@ void SpecificWorker::initialize()
         camera_ingestor_ = std::make_unique<rc::CameraIngestor>(G, params.IMAGE_EDGE_CAMERA);
         // Set BEFORE the first bind_camera(): the correction is applied where the extrinsic is read.
         camera_ingestor_->set_mount_yaw_correction(params.IMAGE_EDGE_MOUNT_YAW_CORR);
+
+        // ── Extra CALIBRATION channels ───────────────────────────────────────────────────────────
+        // The driving camera is skipped: it already has an ingestor above, and running it twice
+        // would feed its own evidence file from two extractions of the same frames — the exact
+        // double-count the triple-point/segment choice exists to avoid.
+        for (const auto &cam : params.CALIB_CAMERAS)
+        {
+            if (cam == params.IMAGE_EDGE_CAMERA) continue;
+            auto ch = std::make_unique<CalibChannel>();
+            ch->name = cam;
+            ch->ingestor = std::make_unique<rc::CameraIngestor>(G, cam);
+            // ★ The yaw correction is per CAMERA and is NOT shared. It was measured for the zed; a
+            //   second camera has its own mount and applying one camera's correction to another
+            //   would be a fabricated extrinsic.
+            ch->source = std::make_unique<rc::ImageEdgeSource>();
+            ch->source->set_config(image_edge_source_->config());
+            calib_channels_.push_back(std::move(ch));
+            qInfo() << "[camcal] calibration channel for" << QString::fromStdString(cam)
+                    << "(does not drive the pose)";
+        }
         image_edge_source_ = std::make_unique<rc::ImageEdgeSource>();
         rc::ImageEdgeSource::Config ic;
         ic.use_wall_corners    = params.IMAGE_EDGE_USE_WALL_CORNERS;
@@ -731,6 +751,8 @@ void SpecificWorker::mount_pair_update(const rc::ImageEdgeObs &obs,
                                        const std::vector<rc::CornerDetector::CornerMatch> &matches,
                                        std::int64_t timestamp_ms)
 {
+    // The driving camera. Auxiliary channels call feed_calib_pairs() with their own name and model.
+
     if (obs.triple_points.empty() or matches.empty() or not camera_ingestor_) return;
     if (mp_win_start_ms_ == 0) mp_win_start_ms_ = timestamp_ms;
     if (not mp_loaded_)
@@ -772,6 +794,16 @@ void SpecificWorker::mount_pair_update(const rc::ImageEdgeObs &obs,
         ++mp_paired_;
         mp_win_.add(pr);
         mp_pool_.add(pr);
+        // ★ IN RADIANS, not pixels. A pixel is 0.128 deg on the zed and 0.188 on the ricoh, so a
+        //   pixel residual cannot be compared across cameras and an angular one can.
+        {
+            const Eigen::Vector2f ppr = rc::img::px_per_rad(obs.cam);
+            if (ppr.x() > 0.f and ppr.y() > 0.f)
+                loop_closure_observe(params.IMAGE_EDGE_CAMERA, tp.vertex,
+                                     tp.from == rc::ContourClass::WallCeiling,
+                                     static_cast<double>(pr.r.x() / ppr.x()),
+                                     static_cast<double>(pr.r.y() / ppr.y()), timestamp_ms);
+        }
 
         if (not mp_csv_.is_open())
         {
@@ -873,6 +905,62 @@ void SpecificWorker::mount_pair_update(const rc::ImageEdgeObs &obs,
                     ? "   <- POOLING BROKE THE RIDGE: the pair is separable across poses and was not"
                       " within one window" : "");
     }
+}
+
+// One camera's angular disagreement with the LiDAR, for one corner. When a SECOND camera reports the
+// same corner close enough in time, the two are differenced: the LiDAR corner's own error is common
+// to both and cancels, leaving camera-vs-camera.
+void SpecificWorker::loop_closure_observe(const std::string &cam, int vertex, bool ceiling,
+                                          double du_rad, double dv_rad, std::int64_t ts)
+{
+    const int key = vertex * 2 + (ceiling ? 1 : 0);
+    for (auto &[k, v] : loop_last_)
+    {
+        if (k.second != key or k.first == cam) continue;
+        // ★ NEAR-SIMULTANEOUS ONLY. The two cameras free-run at different rates, and differencing
+        //   observations 200 ms apart would fold the robot's own motion into what is meant to be a
+        //   static mount comparison. 60 ms is about one frame at these rates.
+        if (std::abs(ts - v.ts) > 60) continue;
+        const double ddu = du_rad - v.du_rad, ddv = dv_rad - v.dv_rad;
+        loop_du_sum_ += ddu; loop_dv_sum_ += ddv;
+        loop_du_sq_  += ddu * ddu; loop_dv_sq_ += ddv * ddv;
+        ++loop_n_;
+        if (not loop_csv_.is_open())
+        {
+            loop_csv_.open("etc/camera_loop.csv", std::ios::out | std::ios::trunc);
+            if (loop_csv_.is_open())
+            {
+                loop_csv_.imbue(std::locale::classic());   // CLAUDE.md: never a comma decimal
+                loop_csv_ << "ts_ms,vertex,ceiling,cam_a,cam_b,"
+                             "du_a_deg,dv_a_deg,du_b_deg,dv_b_deg,ddu_deg,ddv_deg\n";
+            }
+        }
+        if (loop_csv_.is_open())
+        {
+            const double R = 180.0 / M_PI;
+            loop_csv_ << ts << ',' << vertex << ',' << (ceiling ? 1 : 0) << ','
+                      << cam << ',' << k.first << ','
+                      << du_rad * R << ',' << dv_rad * R << ','
+                      << v.du_rad * R << ',' << v.dv_rad * R << ','
+                      << ddu * R << ',' << ddv * R << '\n';
+        }
+        if (loop_n_ % 500 == 0)
+        {
+            const double R = 180.0 / M_PI;
+            const double mu = loop_du_sum_ / loop_n_, mv = loop_dv_sum_ / loop_n_;
+            const double su = std::sqrt(std::max(0.0, loop_du_sq_ / loop_n_ - mu * mu));
+            const double sv = std::sqrt(std::max(0.0, loop_dv_sq_ / loop_n_ - mv * mv));
+            qInfo().nospace().noquote()
+                << "[loop] " << loop_n_ << " shared corners | camera-vs-camera du "
+                << QString::number(mu * R, 'f', 4) << " +/- " << QString::number(su * R, 'f', 4)
+                << " deg, dv " << QString::number(mv * R, 'f', 4) << " +/- "
+                << QString::number(sv * R, 'f', 4) << " deg"
+                << "   <- the LiDAR corner's own error CANCELS here; what is left is the two"
+                   " cameras disagreeing with each other";
+        }
+        break;
+    }
+    loop_last_[{cam, key}] = CornerAngle{du_rad, dv_rad, ts};
 }
 
 void SpecificWorker::gt_convention_report(float est_th, float gt_th_raw)
@@ -992,6 +1080,88 @@ void SpecificWorker::log_ground_truth(const rc::RoomConcept::UpdateResult &res)
 // makes no DSR call at all — in particular no room<-robot lookup, which is the circularity trap the
 // whole design is built to avoid (see image_edge_source.h). The only graph access in this subsystem
 // is CameraIngestor::bind_camera(), which is main-thread by construction because of the ts==0 cache.
+// Every camera in ImageEdge.calibCameras that is NOT the driving one: bind, extract, pair against
+// the same LiDAR corners, and feed its own evidence file. Deliberately a separate function from
+// pump_image_edges(): the driving camera's path also produces the pose factor and the shadow, and
+// none of that should run twice.
+void SpecificWorker::pump_calib_channels()
+{
+    const auto res = room_concept_.get_last_result();
+    if (not res.has_value() or room_polygon_.size() < 3) return;
+
+    for (auto &chp : calib_channels_)
+    {
+        auto &ch = *chp;
+        if (not ch.bound)
+        {
+            if (not ch.ingestor->bind_camera(params.LIDAR_ROBOT_FRAME)) continue;
+            ch.bound = true;
+            ch.source->set_room_polygon(room_polygon_);
+            auto ic = ch.source->config();
+            ic.room_height = params.room_height;
+            ch.source->set_config(ic);
+            ch.ingestor->start();
+            qInfo() << "[camcal] channel" << QString::fromStdString(ch.name) << "bound";
+        }
+        if (not ch.loaded)
+        {
+            ch.loaded = true;
+            ch.calib.set_camera(ch.name);
+            const std::string path = "etc/camera_calib_" + ch.name + ".txt";
+            if (const std::size_t k = ch.calib.load(path); k > 0)
+                qInfo().nospace() << "[camcal] " << QString::fromStdString(ch.name)
+                                  << " resumed from " << QString::fromStdString(path)
+                                  << " (" << k << " pairs)";
+        }
+
+        rc::GrayFrame frame;
+        if (not ch.ingestor->take_latest(frame)) continue;
+
+        const Eigen::Affine2f &rp = res->robot_pose;
+        const Eigen::Vector3f pose(rp.translation().x(), rp.translation().y(),
+                                   std::atan2(rp.linear()(1, 0), rp.linear()(0, 0)));
+        const std::int64_t dt_ms = static_cast<std::int64_t>(frame.stamp) - res->timestamp_ms;
+        auto obs = ch.source->extract(frame, ch.ingestor->model(), ch.ingestor->cam_R_robot(),
+                                      ch.ingestor->cam_t_robot(), pose, res->covariance,
+                                      Eigen::Vector3f::Zero(), dt_ms, nullptr);
+        if (obs.triple_points.empty() or res->corner_matches.empty()) continue;
+
+        const Eigen::Vector2f ppr = rc::img::px_per_rad(obs.cam);
+        for (const auto &tp : obs.triple_points)
+        {
+            const auto it = std::ranges::find_if(res->corner_matches,
+                [&](const auto &m) { return m.model_index == tp.vertex; });
+            if (it == res->corner_matches.end() or it->suppressed) continue;
+            const auto pr = rc::mount::make_pair(tp, *it, ch.ingestor->model(),
+                                                 ch.ingestor->cam_R_robot(),
+                                                 ch.ingestor->cam_t_robot(),
+                                                 params.IMAGE_EDGE_MOUNT_PITCH_SIGMA,
+                                                 params.IMAGE_EDGE_MOUNT_HEIGHT_SIGMA,
+                                                 params.IMAGE_EDGE_MOUNT_YAW_SIGMA);
+            if (not pr.ok) continue;
+            ch.calib.add(pr);
+            ++ch.pairs;
+            if (ppr.x() > 0.f and ppr.y() > 0.f)
+                loop_closure_observe(ch.name, tp.vertex,
+                                     tp.from == rc::ContourClass::WallCeiling,
+                                     static_cast<double>(pr.r.x() / ppr.x()),
+                                     static_cast<double>(pr.r.y() / ppr.y()),
+                                     static_cast<std::int64_t>(frame.stamp));
+        }
+        if (ch.pairs % 2000 < 12 and ch.pairs > 0)
+        {
+            ch.calib.save("etc/camera_calib_" + ch.name + ".txt");
+            if (const auto sol = ch.calib.solve(); sol.ok)
+                qInfo().nospace().noquote()
+                    << "[camcal] " << QString::fromStdString(ch.name) << " " << ch.pairs
+                    << " pairs | yaw "
+                    << QString::number(-sol.p(2) * params.IMAGE_EDGE_MOUNT_YAW_SIGMA * 180.0 / M_PI,
+                                       'f', 4)
+                    << " deg | cond " << QString::number(sol.cond, 'f', 1);
+        }
+    }
+}
+
 void SpecificWorker::pump_image_edges()
 {
     if (not camera_ingestor_ or not image_edge_source_) return;
@@ -1166,7 +1336,9 @@ void SpecificWorker::compute()
     // pumps a fresh scan to the localizer with ~0-2 ms latency instead of this ~16 ms tick. compute()
     // only reads the resulting buffer/result below.
 
-    pump_image_edges();   // no-op unless ImageEdge.enable
+    pump_image_edges();
+
+    pump_calib_channels();   // extra cameras: calibration only, never the pose   // no-op unless ImageEdge.enable
 
     QElapsedTimer section_timer;
     section_timer.start();
