@@ -1214,8 +1214,12 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
         int wmax = 0;
         const QFontMetrics fm(painter.font());
         for (const auto& it : items) wmax = std::max(wmax, fm.horizontalAdvance(it.text));
-        const QRectF panel(8, 8, static_cast<double>(pad * 3 + box + wmax),
-                           static_cast<double>(pad * 2 + row * std::size(items)));
+        // Right-hand side. Anchored to the IMAGE width rather than a constant, so it stays put on
+        // the 1280 px ZED and the 1920 px panorama alike; clamped to 0 so a window narrower than the
+        // panel still shows it rather than pushing it off the left edge.
+        const double panel_w = static_cast<double>(pad * 3 + box + wmax);
+        const double panel_h = static_cast<double>(pad * 2 + row * std::size(items));
+        const QRectF panel(std::max(0.0, image.width() - panel_w - 8.0), 8.0, panel_w, panel_h);
         painter.setPen(Qt::NoPen);
         painter.setBrush(QColor(0, 0, 0, 140));
         painter.drawRoundedRect(panel, 4, 4);
