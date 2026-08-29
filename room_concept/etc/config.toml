@@ -117,10 +117,13 @@ subtrees = ["room"]
 [Media]
 #domain_id = 7          # media-plane DDS domain comes from the producer descriptor; leave commented
 #rgb_topic = "rc/zed/rgb"
-# Upper bound of the LiDAR high band (m, body frame). The apartamento ceiling (3 m) is above the
-# helios's vertical reach (~2.77 m), so the topmost returns are clean upper-WALL points, not ceiling.
-# Keep the band up near the reach limit so those points feed the SDF; the CeilingCheck's perimeter-vs-
-# interior test only cuts the band when the high returns are genuinely interior (a real low ceiling).
+# Upper bound of the LiDAR high band (m, body frame).
+# ★2026-08-29 this comment used to read "the apartamento ceiling (3 m) is above the helios's vertical
+# reach (~2.77 m), so the topmost returns are clean upper-WALL points, not ceiling". That was true of
+# an UPRIGHT helios and is now FALSE: mounted inverted it looks 54.5 deg up and reaches the ceiling
+# at 1.37 m range. Roughly the top 10 of its 32 layers terminate on the ceiling plane before reaching
+# a 3 m-distant wall. So the band no longer excludes the ceiling by geometry — the CeilingCheck's
+# perimeter-vs-interior test is what has to do it, and its startup line is worth reading on every run.
 
 [RoomConcept]
 
@@ -1542,8 +1545,20 @@ RoomLayoutSvg       = "apartamento_layout.svg"
 RoomHeight          = 3.0        # m — the real apartment ceiling. The LiDAR cannot reach 3 m, so it
                                  # is stated here rather than detected.
 RecenterRoomPolygon = true
-LidarHighMaxHeight  = 2.75       # m — cap of the LiDAR "high" band. It tracks the CEILING, not
-                                 # the robot: the band exists to exclude the ceiling return.
+# ★2026-08-29: 2.75 -> 3.0, because the sensor changed under it. 2.75 was the helios's UPRIGHT
+# vertical REACH: looking only 15.5 deg up from 1.075 m it could not paint a wall above ~2.77 m
+# anywhere in this apartment, so the cap was a no-op that cost nothing. The helios now hangs
+# INVERTED and looks 54.5 deg UP, so it paints wall all the way to the 3 m ceiling — and 2.75 would
+# throw away the topmost 25 cm of every wall, which is the highest-contrast, least-occluded band the
+# new mount was adopted to get.
+# ⚠ IT NO LONGER EXCLUDES THE CEILING. It never did by geometry, only by the sensor's inability to
+# reach; now the ceiling plane (world z = 3.0, body z ≈ 2.97) falls INSIDE this cap. What keeps it
+# out is the CeilingCheck's perimeter-vs-interior test, which caps the band at ceil_z minus
+# LidarCeilingMargin when the high returns are interior-filling. That test is now load-bearing
+# rather than a backstop: read its startup line. If it reports "no z-density peak" or "WALL-TOP"
+# while the robot is under a real ceiling, the band falls back to THIS number and ceiling returns
+# enter the SDF as a ring that moves with the robot.
+LidarHighMaxHeight  = 3.0        # m — cap of the LiDAR "high" band, in the BODY frame.
 TargetWallMargin    = 0.55       # m — how close a viewpoint may be planned to a wall. A cramped
                                  # apartment does not admit the lab room's margin.
 ObjectAnchorSubtypes = ["refrigerator"]   # deliberately fridge-only here: the table pin is suspect.
