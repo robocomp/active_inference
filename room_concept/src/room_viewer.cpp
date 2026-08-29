@@ -275,6 +275,13 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
     // domain/topic straight from that JSON descriptor (no config). This just starts
     // the always-on drain/discovery timer.
     camera_viz_->start_media_plane();
+    // ★ THE SECOND WINDOW NEEDS THIS TOO. Without it the ricoh visualiser is constructed, shows,
+    //   and reports "Media plane RGB subscriber not initialized" for ever — because the ingest
+    //   thread that performs discovery is never started, so discovery is never even attempted.
+    //   The failure is indistinguishable from a producer that is not publishing, which is what made
+    //   it look like a DDS problem: the diagnostics added to try_discover_media_plane() could not
+    //   fire, since nothing called it.
+    ricoh_viz_->start_media_plane();
     camera_media_plane_initialized_ = true;
     qInfo() << "[room][camera] RGB media plane discovery started (waits for 'zed' descriptor)";
 }
