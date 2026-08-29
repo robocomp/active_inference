@@ -158,10 +158,12 @@ CameraVisualizer::~CameraVisualizer()
     media_rgb_sub_.reset();
 }
 
-void CameraVisualizer::set_corner_matches(std::vector<rc::CornerDetector::CornerMatch> matches)
+void CameraVisualizer::set_corner_matches(std::vector<rc::CornerDetector::CornerMatch> matches,
+                                          const Eigen::Affine2f& robot_pose)
 {
     std::lock_guard<std::mutex> lk(corner_matches_mtx_);
     corner_matches_ = std::move(matches);
+    corner_pose_ = robot_pose;
 }
 
 void CameraVisualizer::set_triple_points(std::vector<rc::TriplePoint> pts, const std::string& from_camera)
@@ -1128,15 +1130,15 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
             // (the ceiling one is far less occluded) and a single colour would hide which is which.
             const QColor col = ceiling ? QColor(0, 220, 255) : QColor(255, 0, 200);
             // MEASURED: a filled square, the same shape used for these in the 2-D canvas.
-            painter.setPen(QPen(col, 1.4));
+            painter.setPen(QPen(col, 2.0));
             painter.setBrush(QBrush(QColor(col.red(), col.green(), col.blue(), 150)));
-            painter.drawRect(QRectF(t.uv_meas.x() - 4.0, t.uv_meas.y() - 4.0, 8.0, 8.0));
+            painter.drawRect(QRectF(t.uv_meas.x() - 7.0, t.uv_meas.y() - 7.0, 14.0, 14.0));
             // PREDICTED: a hollow circle, plus the residual as a line. Skipped when the two are far
             // apart in u on a cyclic axis — that is the seam, not a 1900 px error.
             if (std::isfinite(t.uv_pred.x()) && std::isfinite(t.uv_pred.y()))
             {
                 painter.setBrush(Qt::NoBrush);
-                painter.drawEllipse(QPointF(t.uv_pred.x(), t.uv_pred.y()), 5.0, 5.0);
+                painter.drawEllipse(QPointF(t.uv_pred.x(), t.uv_pred.y()), 8.0, 8.0);
                 if (std::abs(t.uv_meas.x() - t.uv_pred.x()) < 0.5 * camera_data_.width)
                 {
                     painter.setPen(QPen(QColor(col.red(), col.green(), col.blue(), 120), 1.0));
@@ -1146,6 +1148,46 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
             }
         }
         painter.setBrush(Qt::NoBrush);
+    }
+
+    // 3.4c) The LiDAR's DETECTED corners, projected into this camera's image. Drawn at BOTH heights
+    // because a LiDAR corner is a 2-D (x, y) on a vertical edge, and the camera sees that edge end
+    // at the floor and again at the ceiling — the two points a triple point can be. So each green
+    // marker has a same-height camera marker to be compared against, and the gap between them IS
+    // the camera-vs-LiDAR disagreement for that corner, in this camera's own pixels.
+    //
+    // ★ DETECTED, not model_world. The struct carries the model position, which is where the corner
+    //   is BELIEVED to be; drawing that would show the map agreeing with itself and say nothing
+    //   about either sensor.
+    // ★ GREEN, chosen against the palette already in use here: magenta and cyan are the camera's own
+    //   floor and ceiling corners, and orange is the uncertainty blob above.
+    {
+        std::vector<rc::CornerDetector::CornerMatch> ms;
+        Eigen::Affine2f rp;
+        {
+            std::lock_guard<std::mutex> lk(corner_matches_mtx_);
+            ms = corner_matches_;
+            rp = corner_pose_;
+        }
+        const QColor lid(0, 230, 120);
+        for (const auto& m : ms)
+        {
+            const Eigen::Vector2f w = rp * m.detected;      // robot frame -> room
+            for (const double h : {0.0, static_cast<double>(ceil_z)})
+            {
+                const auto cam = transform_room_point(basis, Mat::Vector3d(w.x(), w.y(), h));
+                const Eigen::Vector2d uv = camera_api_->project(cam);
+                if (!std::isfinite(uv.x()) || !std::isfinite(uv.y())) continue;
+                // A retired corner is still detected and can still recover, so it is drawn faint
+                // rather than dropped — the same treatment it gets in the 2-D canvas.
+                const int a = m.suppressed ? 70 : 210;
+                painter.setPen(QPen(QColor(lid.red(), lid.green(), lid.blue(), a), 2.0));
+                painter.setBrush(Qt::NoBrush);
+                painter.drawEllipse(QPointF(uv.x(), uv.y()), 9.0, 9.0);
+                painter.drawLine(QPointF(uv.x() - 13.0, uv.y()), QPointF(uv.x() + 13.0, uv.y()));
+                painter.drawLine(QPointF(uv.x(), uv.y() - 13.0), QPointF(uv.x(), uv.y() + 13.0));
+            }
+        }
     }
 
     // 3.5) Translucent mesh + name label on each DSR wall. Each wall is a vertical quad; clip it

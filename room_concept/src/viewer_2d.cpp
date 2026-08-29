@@ -689,10 +689,14 @@ void Viewer2D::draw_rgb_corners(const std::vector<rc::TriplePoint>& points)
 
     // MEASURED corner — solid magenta square. Square and magenta both deliberate: the LiDAR's are
     // cyan circles, and a difference in shape as well as hue keeps them apart in a screenshot.
+    // ★ ORANGE, not magenta. Magenta is the OBJECT ANCHOR pair further down, whose comment already
+    //   says it is "deliberately unlike the corner markers" — sharing the hue undid that. The LiDAR's
+    //   predicted corners are also orange but HOLLOW CIRCLES against these FILLED SQUARES, so shape
+    //   separates them where hue alone would not.
     resize_pool(rgb_corner_items_, n, [&]() {
         constexpr float r = 0.22f;
         auto* item = agv_->scene.addRect(-r, -r, 2*r, 2*r,
-            QPen(QColor(255, 0, 200), 0.03), QBrush(QColor(255, 0, 200, 170)));
+            QPen(QColor(255, 150, 0), 0.03), QBrush(QColor(255, 150, 0, 180)));
         item->setZValue(31);      // above the LiDAR corners, being the smaller marker
         return item;
     });
@@ -700,7 +704,7 @@ void Viewer2D::draw_rgb_corners(const std::vector<rc::TriplePoint>& points)
     // Line from the MODEL vertex to where the image says the corner is. This is the residual drawn
     // at true scale — the quantity the whole mount calibration is about, in metres on the canvas.
     resize_pool(rgb_corner_line_items_, n, [&]() {
-        auto* item = agv_->scene.addLine(0, 0, 0, 0, QPen(QColor(255, 0, 200, 110), 0.02));
+        auto* item = agv_->scene.addLine(0, 0, 0, 0, QPen(QColor(255, 150, 0, 120), 0.02));
         item->setZValue(28);
         return item;
     });

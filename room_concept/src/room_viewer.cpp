@@ -346,9 +346,10 @@ void RoomViewer::update_viewer(const std::optional<rc::RoomConcept::UpdateResult
         viewer_2d_->draw_object_anchors({}, pose_for_draw);
 
     // Feed the same matched corners to the RGB camera overlay (translucent uncertainty circles).
-    if (camera_viz_)
-        camera_viz_->set_corner_matches(have_loc ? loc_res->corner_matches
-                                                 : std::vector<rc::CornerDetector::CornerMatch>{});
+    const auto ms = have_loc ? loc_res->corner_matches
+                             : std::vector<rc::CornerDetector::CornerMatch>{};
+    if (camera_viz_) camera_viz_->set_corner_matches(ms, pose_for_draw);
+    if (ricoh_viz_)  ricoh_viz_->set_corner_matches(ms, pose_for_draw);
 }
 
 void RoomViewer::update_epistemic_overlay()

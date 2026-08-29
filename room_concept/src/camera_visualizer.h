@@ -77,7 +77,12 @@ class CameraVisualizer : public QDialog
 
         // Hand the latest matched corners (localizer thread → GUI) for the RGB uncertainty overlay.
         // Each is projected as a translucent circle whose radius grows with det(Σ_corner). Thread-safe.
-        void set_corner_matches(std::vector<rc::CornerDetector::CornerMatch> matches);
+        /// `robot_pose` turns CornerMatch::detected — which is in the ROBOT frame — into room
+        /// coordinates so it can be projected. The struct carries model_world but no detected_world,
+        /// and the model position is where the corner is BELIEVED to be, not where the LiDAR found
+        /// it: drawing that instead would show the map agreeing with itself.
+        void set_corner_matches(std::vector<rc::CornerDetector::CornerMatch> matches,
+                                const Eigen::Affine2f& robot_pose = Eigen::Affine2f::Identity());
 
         void update_frame();  // Call this periodically to refresh the visualization
 
@@ -122,6 +127,7 @@ class CameraVisualizer : public QDialog
         std::mutex                     triple_mtx_;
         std::vector<rc::TriplePoint>   triple_points_;
         std::string                    triple_from_;
+        Eigen::Affine2f                corner_pose_ = Eigen::Affine2f::Identity();
         bool                           discovery_reason_logged_ = false;
         struct MediaRgbCache
         {
