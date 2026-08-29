@@ -490,6 +490,7 @@ ImageEdgeObs ImageEdgeSource::extract(const GrayFrame& frame,
             }
             tp.uv_meas  = uvm.cast<float>();
             tp.cov_uv   = (Ai * S * Ai.transpose()).cast<float>();
+            tp.resid_px = delta.cast<float>();   // pre-wrap, so the seam cannot inflate it
             // Weighted over BOTH segments: a crossing is only as visible as the pair that
             // formed it, and the two can disagree (a ceiling join in the clear, its floor
             // counterpart behind a wall).

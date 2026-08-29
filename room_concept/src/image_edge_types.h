@@ -173,6 +173,10 @@ namespace rc
         ///   w collapses and cov_uv blows up — but nothing SAID so, and a display that hides the
         ///   model's own doubt is how a term gets trusted more than it deserves.
         float           pi_vis  = 1.f;
+        /// The crossing's own residual in pixels, uv_meas − uv_pred, taken where the wrap is known
+        /// so a corner beside the panorama seam does not look like a 4000 px miss. With cov_uv this
+        /// gives the corner's normalised distance from the model, which is what "matched" means.
+        Eigen::Vector2f resid_px = Eigen::Vector2f::Zero();
         /// ★ THREE QUANTITIES, NOT ONE, SO THE DEPTH CONVENTION CAN CHECK ITSELF. `depth_raw` is
         ///   what the plane published; `range_m` is |p_cam_meas| under the assumption that the raw
         ///   value is the FORWARD coordinate (the ZED SDK's convention, and what cortex's

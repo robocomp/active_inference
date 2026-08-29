@@ -672,13 +672,52 @@ void Viewer2D::draw_rgb_corners(const std::vector<rc::TriplePoint>& points)
     // sitting at the room origin.
     std::vector<const rc::TriplePoint*> shown;
     shown.reserve(points.size());
+    // ── Only corners that are actually MATCHED to the model get drawn ────────────────────────────
+    // Three conditions, and the last two are new: the canvas is a picture of what the agent believes
+    // it is looking at, and a marker for a corner the agent does not believe is a claim it is not
+    // making. This is a DISPLAY gate and nothing more — the loss still sees every crossing, weighted
+    // by exactly these quantities, because down-weighting inside a mixture and refusing to draw are
+    // different jobs and only one of them is inference.
+    //   1. a room position at all;
+    //   2. the occlusion prior does not disbelieve it (pi_vis) — every polygon vertex projects
+    //      somewhere in a 360 image, including the ones behind this room's own walls;
+    //   3. the crossing sits within 3 sigma of the model vertex it claims to be, in ITS OWN
+    //      covariance. An edge search that locked onto a different structure returns a confident
+    //      sub-pixel position that is nowhere near the prediction, and this is what says so.
+    int n_occluded = 0, n_unmatched = 0;
     for (const auto& t : points)
+    {
         // Gate on the ROOM POSITION, not on range_m. range_m used to come only from the ZED depth
         // stream, so every corner from the panorama was silently dropped here — the markers simply
         // never appeared and nothing said why. p_room_meas is now filled by a ray-plane
         // intersection at the corner's known height, which needs no depth and works for both.
-        if (t.p_room_meas.allFinite() and t.p_room_meas.squaredNorm() > 1e-12f)
-            shown.push_back(&t);
+        if (not (t.p_room_meas.allFinite() and t.p_room_meas.squaredNorm() > 1e-12f)) continue;
+        if (t.pi_vis < 0.5f) { ++n_occluded; continue; }
+        const Eigen::Matrix2f C = t.cov_uv;
+        const float det = C(0, 0) * C(1, 1) - C(0, 1) * C(1, 0);
+        if (std::isfinite(det) and det > 1e-12f)
+        {
+            // chi2 with 2 DOF; 9.0 is 3 sigma. Written out rather than inverted for a 2x2.
+            const Eigen::Vector2f r = t.resid_px;
+            const float chi2 = (C(1, 1) * r.x() * r.x() - 2.f * C(0, 1) * r.x() * r.y()
+                                + C(0, 0) * r.y() * r.y()) / det;
+            if (not (chi2 < 9.f)) { ++n_unmatched; continue; }
+        }
+        shown.push_back(&t);
+    }
+    // Silence and "nothing to show" look identical on a canvas, so say what was withheld.
+    if (n_occluded + n_unmatched > 0 and points.size() > 0)
+    {
+        static std::int64_t last_ms = 0;
+        const auto now = QDateTime::currentMSecsSinceEpoch();
+        if (now - last_ms > 5000)
+        {
+            last_ms = now;
+            qInfo() << "[canvas] RGB corners" << static_cast<int>(shown.size()) << "of"
+                    << static_cast<int>(points.size()) << "drawn —" << n_occluded
+                    << "behind a wall," << n_unmatched << "not matched to their model vertex";
+        }
+    }
     const size_t n = shown.size();
 
     auto resize_pool = [&](auto& pool, size_t count, auto make_item)
@@ -725,15 +764,13 @@ void Viewer2D::draw_rgb_corners(const std::vector<rc::TriplePoint>& points)
         // fooled (an occluded corner's samples are downweighted, its w collapses and cov_uv blows
         // up), but the CANVAS was, and a display that hides the model's doubt is how a term ends up
         // trusted more than it earned.
-        // ★ Still not a gate. An occluded corner is drawn HOLLOW and faint rather than dropped:
-        //   "the model predicts a corner here and does not believe it" is a different statement from
-        //   "there is no corner here", and only one of them is true.
+        // Everything reaching here is past the visibility and match gates above, so the remaining
+        // fade is a matter of degree, not of belief: how well conditioned the crossing is, and how
+        // clear its line of sight was.
         const double q_cond = std::clamp(2.0 / std::max(1.0, static_cast<double>(t.cond)), 0.25, 1.0);
         const double vis    = std::clamp(static_cast<double>(t.pi_vis), 0.0, 1.0);
-        const double q      = q_cond * (0.10 + 0.90 * vis);
-        const bool   seen   = vis >= 0.5;
+        const double q      = q_cond * vis;
         rgb_corner_items_[i]->setOpacity(q);
-        rgb_corner_items_[i]->setBrush(seen ? QBrush(QColor(255, 150, 0, 180)) : QBrush(Qt::NoBrush));
         rgb_corner_line_items_[i]->setOpacity(q);
     }
 }
