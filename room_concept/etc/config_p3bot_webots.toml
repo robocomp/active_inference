@@ -827,7 +827,12 @@ optimizeLandmark = false
 
 [ImageEdge]
 enable = true    # build the subscriber + ingest thread and run the extraction each tick
-shadow = false   # OFF 2026-08-28 for a clean BASELINE drive. `drive` has been false throughout, so
+shadow = true    # ★ BACK ON 2026-08-29 for the Ricoh trial. It was off for the baseline drive,
+                 # and with it off log_triple_points() never runs — so the triple-point CSV and the
+                 # pose-factor shadow (cond_H, chi2_post, dpose) go silent while the extraction and
+                 # the camera/LiDAR pairing carry on normally. The stale CSV then reads exactly like
+                 # a live one, which is how an hour of yesterday's numbers got analysed as today's.
+                 # WAS OFF 2026-08-28 for a clean BASELINE drive. `drive` has been false throughout, so
                  # the factor was never in the published pose (room_gn_solver.cpp:613 requires
                  # enable AND drive) — but shadow runs an EXTRA GN solve to compute the with/without
                  # comparison, and that costs cycle time, which does affect pose quality. Removing it
