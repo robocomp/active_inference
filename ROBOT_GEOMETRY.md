@@ -14,9 +14,33 @@ root  (world datum; z=0 at the FLOOR)
         ├── zed   rgbd       T[ 0,   -0.075, +0.945]  R[0,   0, 0]
         ├── imu   imu        T[ 0,     0,     0    ]  R[0,   0, 0]
         ├── ricoh rgbd       T[ 0,   -0.170, +1.275]  R[0,   0, 0]
-        ├── helios laser     T[ 0,   -0.155, +1.075]  R[0,   0, 0]   ← UPRIGHT, high
+        ├── helios laser     T[ 0,   -0.155, +1.075]  R[0, 180, 0]   ← flipped 180°: fan points UP
         └── bpearl laser     T[ 0,   +0.140, +0.670]  R[0, 180, 0]   ← flipped 180°: points DOWN
 ```
+
+### ★ 2026-08-29 — THE HELIOS NOW HANGS UPSIDE DOWN
+
+Shadow carries the helios INVERTED so the wide part of its fan points UP. The H32F70 is asymmetric
+about its own horizon (−54.5..+15.5°); inverted, that becomes **+54.5..−15.5° in the body frame**.
+
+* **What it buys:** the upper walls. From 1.075 m the top beam reaches **2.48 m of wall height at 1 m
+  range, 3.88 m at 2 m** — permanent, high-contrast structure, and far better localisation geometry
+  than the floor.
+* **What it costs, and it is deliberate:** the near floor. The fan only reaches 15.5° down, so the
+  floor is first hit at **3.88 m** instead of 0.77 m. That band is the **bpearl's** job — it hangs
+  inverted at 0.67 m for exactly this reason. The two lidars now have IDENTICAL orientation and
+  differ only in height.
+* **The encoding**, because a 180° flip has two equally valid axes and only one preserves the yaw:
+  `Rz(+90°)·Rx(180°)` — same bracket yaw, sensor inverted about its own x. As axis-angle that is
+  `1 1 0 3.14159`, bit-identical to the bpearl's `-1 -1 0 3.14159`. The old `-4.7116` was `-3π/2`
+  rounded, 0.045° shy of a right angle; the clean axis-angle removes that stray 0.8 mrad.
+* **Both files move together or every consumer's cloud is upside down.** By the invariant below,
+  `R_json = R_proto · Rz(−90°)`, so `R_proto = Rz(90)Rx(180)` ⇒ `R_json = Ry(180)` ⇒ shadow.json
+  body←helios `rt_rotation_euler_xyz = (0, π, 0)`. Same commit. `config_helios_webots.toml`'s silent
+  `rx..tz` fallback was synced too (`ry = π`) — it feeds the Embree self-filter.
+* ⚠ The `[SensorModel]` block advertised on the `helios` DSR node states the span in the **sensor**
+  frame (−54.5..+15.5, "frame only NAMES the frame, it never restates the pose"). A consumer that
+  reads `fov_start/end` without applying the RT edge will conclude this sensor stares at the floor.
 
 ### ★ THE MOUNT INVARIANT — read this before "correcting" any number above
 
@@ -44,7 +68,7 @@ Two traps that produced hours of wrong conclusions, so do not repeat them:
    own default field is 0.033), shadow.json is the `body` frame. Comparing them raw makes three correct
    sensors look 45 mm wrong and the one wrong sensor look correct. Apply the `body` offset first.
 2. **Do not copy the proto ROTATIONS.** Both lidars differ from shadow.json by *exactly* 90.0° about Z
-   (helios `0 0 1 -4.7116`, bpearl `-1 -1 0 3.14159`). Two sensors differing by precisely the same
+   (helios `1 1 0 3.14159`, bpearl `-1 -1 0 3.14159` — since 2026-08-29 the same rotation, both inverted). Two sensors differing by precisely the same
    90° is a Webots-`Lidar`-local-axis vs RoboComp frame-convention offset that is already absorbed
    downstream — **not** two independent mounting errors. Transcribing them literally would introduce a
    90° error, not remove one. (A real 90° yaw error would rotate every obstacle a quarter turn around
@@ -83,7 +107,7 @@ its floor is all grazing, so it reads 130–170 mm depending only on where the r
 |------|------|-------------------|-----------------------|
 | `zed` | rgbd | +0.945 m, upright | ZED stereo RGB-D (pinhole). Masks/depth for concept fits; the "measurement" camera. |
 | `ricoh` | rgbd | +1.275 m, upright | Ricoh 360 camera, **equirectangular** proj (`cam_fov≈2π`). Peripheral attention only (biased centroid). |
-| `helios` | laser | +1.075 m, upright | High 360 spinning LiDAR. **Walls** (upper band) + floor-at-range. Media plane **id 0**. Grazing far-floor returns bias its floor estimate high (13–17 cm, and it MOVES with the robot's position because the bias grows with range) — not a mount error; use for walls, never as a floor datum or a mount check. residual_concept fits its floor plane from bpearl ONLY for this reason, and drops helios returns below `Clusterer.HeliosFloorZ0` so its own floor cannot latch as obstacle. |
+| `helios` | laser | +1.075 m, **INVERTED** (R=[0,180,0], since 2026-08-29) — fan spans **+54.5..−15.5°**, i.e. UP at the walls | High 360 spinning LiDAR. **Walls** (upper band) + floor-at-range. Media plane **id 0**. Grazing far-floor returns bias its floor estimate high (13–17 cm, and it MOVES with the robot's position because the bias grows with range) — not a mount error; use for walls, never as a floor datum or a mount check. residual_concept fits its floor plane from bpearl ONLY for this reason, and drops helios returns below `Clusterer.HeliosFloorZ0` so its own floor cannot latch as obstacle. |
 | `bpearl` | laser | +0.670 m, **pointing DOWN** (R=[0,180,0]) | Low 360° dome under the tray (spreads 360° around + ~90° solid down). Legs / low obstacles / floor. Media plane **id 1**. **Good floor-datum sensor** — but detect the floor as the EXTENDED flat plane (the low z that wraps all azimuths), NOT the densest z-bin (that's near clutter/structure), and skip the helios 0.8 m self-hit cut (it strips bpearl's floor disc). room's startup check does exactly this. |
 | `imu` | imu | at `body` | IMU. |
 
@@ -143,7 +167,7 @@ the same day. Three flawed instruments, one lesson.
 ★THE r ≈ 0 POPULATION IS STILL UNEXPLAINED. It is not the mesh gap. A bpearl beam aimed at the axis at
 z = 0.514 terminates on the body at 0.0358 m (robot r = 0.116, z = 0.643), so the proto assembly does
 not generate it either. The mount chain was verified correct end to end, including the `Rz(+90°)` at
-`specificworker.cpp:464-466`, which reproduces the proto's helios `0 0 1 -4.7116` to 0.045° and bpearl
+`specificworker.cpp:464-466`, which reproduced the proto's then-upright helios `0 0 1 -4.7116` to 0.045° and bpearl
 `-1 -1 0 3.14159` exactly. Diagnosing it needs a per-return radius/bearing histogram, which nothing
 currently logs.
 
