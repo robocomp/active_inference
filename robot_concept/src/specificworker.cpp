@@ -16,6 +16,7 @@
  *    You should have received a copy of the GNU General Public License
  *    along with RoboComp.  If not, see <http://www.gnu.org/licenses/>.
  */
+#include <QtMath>
 #include "specificworker.h"
 #include "../../common/robot_footprint/robot_footprint.h"
 
@@ -1439,6 +1440,36 @@ void SpecificWorker::write_media_descriptor(const std::string& node_name, const 
 	rc::safe_update_node(*G, node.value());
 }
 
+// body<-sensor from the sensor's incoming RT edge. Returns identity (and says so) when the edge or
+// its attributes are missing, which is the safe answer: the viewer then shows the device frame, the
+// way it always did, instead of silently drawing a wrong pose.
+QMatrix4x4 SpecificWorker::body_from_sensor(const std::string& sensor)
+{
+	QMatrix4x4 m;   // Qt default-constructs to the identity
+	const auto node = G->get_node(sensor);
+	if (not node.has_value()) { qWarning() << "[view-data] no node" << QString::fromStdString(sensor); return m; }
+	const auto parent_id = G->get_attrib_by_name<parent_att>(node.value());
+	if (not parent_id.has_value()) { qWarning() << "[view-data] no parent for" << QString::fromStdString(sensor); return m; }
+	const auto edge = G->get_edge(parent_id.value(), node->id(), "RT");
+	if (not edge.has_value()) { qWarning() << "[view-data] no RT edge for" << QString::fromStdString(sensor); return m; }
+	const auto rot = G->get_attrib_by_name<rt_rotation_euler_xyz_att>(edge.value());
+	const auto tr  = G->get_attrib_by_name<rt_translation_att>(edge.value());
+	if (not rot.has_value() or not tr.has_value() or rot->get().size() != 3 or tr->get().size() != 3)
+	{
+		qWarning() << "[view-data] RT edge for" << QString::fromStdString(sensor) << "has no rt_* attributes";
+		return m;
+	}
+	// Same composition the rest of the fleet uses for rt_rotation_euler_xyz: Rx * Ry * Rz, then translate.
+	m.translate(tr->get()[0], tr->get()[1], tr->get()[2]);
+	m.rotate(qRadiansToDegrees(rot->get()[0]), 1, 0, 0);
+	m.rotate(qRadiansToDegrees(rot->get()[1]), 0, 1, 0);
+	m.rotate(qRadiansToDegrees(rot->get()[2]), 0, 0, 1);
+	qInfo().noquote() << QString::asprintf("[view-data] %s body<-sensor: euler (%.3f %.3f %.3f) rad, t (%.3f %.3f %.3f) m",
+	                                       sensor.c_str(), rot->get()[0], rot->get()[1], rot->get()[2],
+	                                       tr->get()[0], tr->get()[1], tr->get()[2]);
+	return m;
+}
+
 void SpecificWorker::trigger_graph_layout()
 {
 	// Re-run the DSR graph viewer's automatic layout with the Graphviz engine from Agent.graph_layout
@@ -1544,9 +1575,15 @@ void SpecificWorker::open_stream_viewer(std::uint64_t node_id, const std::string
 		std::unique_ptr<rc::media::LidarSubscriber> helios, bpearl;
 		if (node_name != "bpearl") helios = rc::media::make_lidar_subscriber_from_graph(*G, "helios", "lidar");
 		if (node_name != "helios") bpearl = rc::media::make_lidar_subscriber_from_graph(*G, "bpearl", "lidar");
+		// Draw in the ROBOT frame, not the sensor's. A cloud arrives in the DEVICE frame, and for an
+		// INVERTED sensor that frame is the body turned over — so an untransformed window shows the
+		// room x-flipped and two differently-mounted lidars disagree on screen while both are
+		// correct. Read here, on the main thread, from the RT edge (static mounts, so once is enough).
+		const QMatrix4x4 hx = body_from_sensor("helios"), bx = body_from_sensor("bpearl");
 		if (helios or bpearl)
 			viewer = new rc::viewers::LidarStreamViewer(std::move(helios), std::move(bpearl),
-			                                            QString::fromStdString(node_name + " — points (media plane)"));
+			                                            QString::fromStdString(node_name + " — points (media plane, ROBOT frame)"),
+			                                            hx, bx);
 	}
 	else if (node_name == "imu")
 	{

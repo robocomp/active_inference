@@ -20,6 +20,7 @@
 #ifndef SPECIFICWORKER_H
 #define SPECIFICWORKER_H
 
+#include <QMatrix4x4>
 #include <genericworker.h>
 #include <fps/fps.h>
 
@@ -318,6 +319,8 @@ private:
 	// Agent.graph_layout. Which engine reads best depends on the graph's SHAPE, and that is a property
 	// of the robot, not of this code: a single deep RT chain suits the radial "twopi", a wide graph
 	// with two arm chains and four wheels suits the force-directed "sfdp". Hence config, not a constant.
+	// body<-sensor transform read from the RT edge, so the lidar viewer can draw in the ROBOT frame.
+	QMatrix4x4 body_from_sensor(const std::string& sensor);
 	void trigger_graph_layout();
 	std::string graph_layout_ = "twopi";   // Graphviz engine: twopi|sfdp|dot|neato|fdp|circo
 	void schedule_graph_relayout();      // debounced request → one twopi after a burst of structural changes

@@ -29,6 +29,7 @@
 #include <QPainter>
 #include <QString>
 #include <QVector3D>
+#include <QMatrix4x4>
 #include <QMetaObject>
 #include <QDebug>
 
@@ -240,10 +241,24 @@ private:
 class LidarStreamViewer : public GLPointCloudViewer
 {
 public:
+	// `h_xform` / `b_xform` are the body<-sensor transforms. They are passed IN, resolved once on
+	// the main thread, because the mounts are static and because this class runs a worker thread
+	// (a ts==0 inner_eigen lookup off the main thread is the one graph call that is not safe).
+	//
+	// ★★★WHY THEY EXIST AT ALL. Until 2026-08-29 this viewer drew the RAW published points, which
+	// are in the SENSOR's own frame. That is fine while a sensor is mounted upright — device and
+	// body then coincide and the window looks like the robot. The moment a sensor is INVERTED, the
+	// device frame is the body frame turned over, so the window shows the room x-flipped, and two
+	// sensors mounted differently disagree with each other on screen while both are perfectly
+	// correct. That cost hours on 2026-08-29: an x-flip that was read as a mount bug was the
+	// viewer drawing a frame nobody had declared. Both lidars now arrive in the ROBOT frame, which
+	// is the frame every consumer of this data actually works in, and they overlay.
 	LidarStreamViewer(std::unique_ptr<rc::media::LidarSubscriber> helios,
 	                  std::unique_ptr<rc::media::LidarSubscriber> bpearl,
-	                  QString title, QWidget *parent = nullptr)
-		: GLPointCloudViewer(parent), helios_(std::move(helios)), bpearl_(std::move(bpearl))
+	                  QString title, QMatrix4x4 h_xform = {}, QMatrix4x4 b_xform = {},
+	                  QWidget *parent = nullptr)
+		: GLPointCloudViewer(parent), helios_(std::move(helios)), bpearl_(std::move(bpearl)),
+		  h_xform_(h_xform), b_xform_(b_xform)
 	{
 		setWindowTitle(std::move(title));
 		setAttribute(Qt::WA_DeleteOnClose);
@@ -259,7 +274,7 @@ public:
 
 private:
 	static bool drain_latest(rc::media::LidarSubscriber *sub, std::vector<QVector3D> &dst, int timeout_ms,
-	                         std::uint64_t *stamp_out = nullptr)
+	                         std::uint64_t *stamp_out = nullptr, const QMatrix4x4 *xform = nullptr)
 	{
 		if(sub == nullptr)
 			return false;
@@ -272,7 +287,10 @@ private:
 			dst.reserve(npts);
 			const auto &pts = f.points();
 			for(std::size_t i = 0; i < npts; ++i)
-				dst.emplace_back(pts[i * stride + 0], pts[i * stride + 1], pts[i * stride + 2]);
+			{
+				const QVector3D p(pts[i * stride + 0], pts[i * stride + 1], pts[i * stride + 2]);
+				dst.push_back(xform ? xform->map(p) : p);   // sensor frame -> ROBOT frame
+			}
 			if(stamp_out != nullptr) *stamp_out = f.stamp_ms();   // SOURCE scan stamp (ms)
 			got = true;
 		};
@@ -290,8 +308,8 @@ private:
 			// Block on whichever ring exists; refresh the other non-blockingly. Keep the last known
 			// cloud of each so a repaint always shows both rings.
 			std::uint64_t helios_stamp = 0, bpearl_stamp = 0;
-			const bool a = drain_latest(helios_.get(), helios_pts_, helios_ ? 200 : 0, &helios_stamp);
-			const bool b = drain_latest(bpearl_.get(), bpearl_pts_, helios_ ? 0 : 200, &bpearl_stamp);
+			const bool a = drain_latest(helios_.get(), helios_pts_, helios_ ? 200 : 0, &helios_stamp, &h_xform_);
+			const bool b = drain_latest(bpearl_.get(), bpearl_pts_, helios_ ? 0 : 200, &bpearl_stamp, &b_xform_);
 			if(not a and not b)
 				continue;
 			if(not logged) { qInfo() << "[view-data] lidar viewer first frame — helios" << helios_pts_.size()
@@ -309,6 +327,7 @@ private:
 		}
 	}
 
+	QMatrix4x4 h_xform_, b_xform_;   // body<-sensor, identity if the RT edge could not be read
 	std::unique_ptr<rc::media::LidarSubscriber> helios_, bpearl_;
 	std::vector<QVector3D> helios_pts_, bpearl_pts_;   // worker-thread persistent latest per ring
 	std::jthread poller_;
