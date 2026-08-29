@@ -1857,6 +1857,11 @@ private:
     Eigen::Matrix3f hess_pred_cov_ = Eigen::Matrix3f::Zero();
     /// This slot's observation Hessian alone, so "Q too large" and "H too small" stay separable.
     Eigen::Matrix3f hess_obs_prec_ = Eigen::Matrix3f::Identity();
+    /// Did the covariance update land, and if not which guard refused it.
+    /// 1 = taken, -1 non-finite, -2 determinant below covariance_det_min, -3 condition number.
+    int    hess_cov_accept_ = 0;
+    double hess_cov_det_    = 0.0;
+    double hess_cov_cond_   = 0.0;
     int          hess_check_rows_ = 0;
 
     /// Run the GN backend on the CURRENT window WITHOUT keeping its answer, and log it beside the

@@ -3947,7 +3947,7 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
              "sx_marg,sy_marg,st_marg,sx_block,sy_block,st_block,"
              "sx_rec,sy_rec,st_rec,sx_pub,sy_pub,st_pub,"
              "sx_pred,sy_pred,st_pred,sx_obs,sy_obs,st_obs,"
-             "innov_x,innov_y,innov_t,nis,"
+             "innov_x,innov_y,innov_t,nis,cov_accept,cov_det,cov_cond,"
              "ratio_x,ratio_y,ratio_t,block_over_marg_t,ms_since_last_opt\n";
     }
     const double sm[3] = {sig(last_marg_prec_, 0),  sig(last_marg_prec_, 1),  sig(last_marg_prec_, 2)};
@@ -3981,7 +3981,7 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
             nis = static_cast<double>(res.innovation.transpose() * P.inverse() * res.innovation);
     }
     for (int i = 0; i < 3; ++i) f << ',' << res.innovation[i];
-    f << ',' << nis;
+    f << ',' << nis << ',' << hess_cov_accept_ << ',' << hess_cov_det_ << ',' << hess_cov_cond_;
     // marg / pub > 1 means the window is LESS certain than what we publish — the over-confidence.
     for (int i = 0; i < 3; ++i) f << ',' << ratio(sm[i], sp[i]);
     const std::int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -3998,7 +3998,12 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
             << "[hess] sigma_theta  window(marg) " << sm[2] << "  window(block) " << sb[2]
             << "  filter " << sr[2] << "  published " << sp[2] << "  | marg/pub " << ratio(sm[2], sp[2])
             << " block/marg " << ratio(sb[2], sm[2])
-            << " | NIS " << nis << " (3 = consistent, below = Q too large)"
+            << " | NIS " << nis
+            << " | cov update " << (hess_cov_accept_ == 1 ? "TAKEN"
+                                  : hess_cov_accept_ == -2 ? "REFUSED: det below covariance_det_min"
+                                  : hess_cov_accept_ == -3 ? "REFUSED: cond above condition_number_max"
+                                  : hess_cov_accept_ == -1 ? "REFUSED: non-finite" : "?")
+            << " det " << hess_cov_det_
             << " | slots " << last_gn_window_slots_ << " dof_marg " << last_marg_dof_
             << " rows " << hess_check_rows_;
     }
@@ -5239,9 +5244,20 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
             const float min_ev = eigenvalues.minCoeff();
             const float cond = (min_ev > 1e-8f) ? (max_ev / min_ev) : 1e8f;
 
+            // Why the candidate was taken or refused, recorded rather than inferred. The three
+            // conditions fail for entirely different reasons and the outcome is identical in the
+            // published number, which is how a covariance that never updates looks exactly like one
+            // that updates to the same value.
+            hess_cov_det_  = static_cast<double>(new_cov.determinant());
+            hess_cov_cond_ = static_cast<double>(cond);
+            hess_cov_accept_ = 0;
+            if (not new_cov.allFinite())                              hess_cov_accept_ = -1;
+            else if (not (new_cov.determinant() > params.covariance_det_min)) hess_cov_accept_ = -2;
+            else if (not (cond < params.condition_number_max))        hess_cov_accept_ = -3;
             if (new_cov.allFinite() && new_cov.determinant() > params.covariance_det_min
                 && cond < params.condition_number_max)
             {
+                hess_cov_accept_ = 1;
                 current_covariance = new_cov;
                 return {new_cov, cond};
             }
