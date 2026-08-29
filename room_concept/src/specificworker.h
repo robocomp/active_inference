@@ -286,6 +286,16 @@ class SpecificWorker : public GenericWorker
     };
     std::vector<std::unique_ptr<CalibChannel>> calib_channels_;
     void pump_calib_channels();
+    /// Put each triple point in the ROOM by intersecting its measured ray with the plane it lies in.
+    ///
+    /// ★ NO DEPTH NEEDED, and that is the point: a triple point sits at a KNOWN height — the floor,
+    ///   or the ceiling — so the ray through its measured pixel meets that plane at exactly one
+    ///   place. This works for the panorama, which has no depth stream at all, and is better than
+    ///   depth even where depth exists: the height is exact while ZED depth carries a measured
+    ///   ~0.4% bias. It is also what the 2-D canvas needs to draw a camera corner beside its LiDAR
+    ///   one, which until now it silently skipped for want of a range.
+    static void place_triple_points_in_room(rc::ImageEdgeObs& obs, const rc::CameraIngestor& ing,
+                                            const Eigen::Vector3f& pose);
 
     // ── THE SENSOR TRIANGLE ──────────────────────────────────────────────────────────────────────
     // Each camera's residual against the LiDAR is (camera error) + (LiDAR corner error). Differencing

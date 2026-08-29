@@ -673,7 +673,12 @@ void Viewer2D::draw_rgb_corners(const std::vector<rc::TriplePoint>& points)
     std::vector<const rc::TriplePoint*> shown;
     shown.reserve(points.size());
     for (const auto& t : points)
-        if (t.range_m > 0.f and t.p_room_meas.allFinite()) shown.push_back(&t);
+        // Gate on the ROOM POSITION, not on range_m. range_m used to come only from the ZED depth
+        // stream, so every corner from the panorama was silently dropped here — the markers simply
+        // never appeared and nothing said why. p_room_meas is now filled by a ray-plane
+        // intersection at the corner's known height, which needs no depth and works for both.
+        if (t.p_room_meas.allFinite() and t.p_room_meas.squaredNorm() > 1e-12f)
+            shown.push_back(&t);
     const size_t n = shown.size();
 
     auto resize_pool = [&](auto& pool, size_t count, auto make_item)

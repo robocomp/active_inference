@@ -1090,6 +1090,41 @@ void SpecificWorker::log_ground_truth(const rc::RoomConcept::UpdateResult &res)
 // the same LiDAR corners, and feed its own evidence file. Deliberately a separate function from
 // pump_image_edges(): the driving camera's path also produces the pose factor and the shadow, and
 // none of that should run twice.
+void SpecificWorker::place_triple_points_in_room(rc::ImageEdgeObs &obs,
+                                                 const rc::CameraIngestor &ing,
+                                                 const Eigen::Vector3f &pose)
+{
+    const Eigen::Matrix3f Rcr = obs.cam_R_robot;          // robot -> camera
+    const Eigen::Matrix3f Rrc = Rcr.transpose();          // camera -> robot
+    const Eigen::Vector3f o_rob = -Rrc * obs.cam_t_robot; // camera centre in robot coords
+    const float c = std::cos(pose.z()), sn = std::sin(pose.z());
+    const auto to_room = [&](const Eigen::Vector3f &v, bool is_point)
+    {
+        const Eigen::Vector3f r(c * v.x() - sn * v.y(), sn * v.x() + c * v.y(), v.z());
+        return is_point ? Eigen::Vector3f(r.x() + pose.x(), r.y() + pose.y(), r.z()) : r;
+    };
+    const Eigen::Vector3f o_room = to_room(o_rob, true);
+
+    for (auto &t : obs.triple_points)
+    {
+        const Eigen::Vector3f d_cam = ing.ray_from_pixel(t.uv_meas.x(), t.uv_meas.y());
+        if (not (d_cam.norm() > 1e-6f)) continue;
+        const Eigen::Vector3f d_room = to_room(Rrc * d_cam, false);
+        // The plane this corner lies in is its own height: 0 for a floor corner, room_height for a
+        // ceiling one. A ray nearly parallel to that plane meets it nowhere useful — the intersection
+        // runs away to infinity — so it is skipped rather than clamped.
+        if (std::abs(d_room.z()) < 1e-3f) continue;
+        const float tt = (t.p_room.z() - o_room.z()) / d_room.z();
+        if (not (tt > 0.f) or not std::isfinite(tt)) continue;   // behind the camera
+        const Eigen::Vector3f p = o_room + tt * d_room;
+        if (not p.allFinite()) continue;
+        t.p_room_meas = p;
+        // Range along the ray, so a consumer has one whether or not a depth stream exists. NOT the
+        // same quantity as depth_raw, which stays what the sensor said.
+        t.range_m = tt * d_room.norm();
+    }
+}
+
 void SpecificWorker::pump_calib_channels()
 {
     const auto res = room_concept_.get_last_result();
@@ -1130,6 +1165,10 @@ void SpecificWorker::pump_calib_channels()
         auto obs = ch.source->extract(frame, ch.ingestor->model(), ch.ingestor->cam_R_robot(),
                                       ch.ingestor->cam_t_robot(), pose, res->covariance,
                                       Eigen::Vector3f::Zero(), dt_ms, nullptr);
+        place_triple_points_in_room(obs, *ch.ingestor, pose);
+        // Each camera's corners go to ITS OWN window: the ZED popup shows the ZED's corners even
+        // though the Ricoh is the one driving, which is the comparison worth being able to see.
+        if (viewer_) viewer_->set_triple_points(obs.triple_points, ch.name);
         if (obs.triple_points.empty() or res->corner_matches.empty()) continue;
 
         const Eigen::Vector2f ppr = rc::img::px_per_rad(obs.cam);
@@ -1285,6 +1324,9 @@ void SpecificWorker::pump_image_edges()
             }
         }
     }
+    // Place the corners in the room BEFORE anything consumes them: the 2-D canvas needs it, and it
+    // works for a camera with no depth at all, which the panorama is.
+    place_triple_points_in_room(obs, *camera_ingestor_, pose);
     mount_pair_update(obs, res->corner_matches, static_cast<std::int64_t>(frame.stamp));
     // The overlay draws these on whichever window IS this camera; the name travels with them so a
     // ricoh corner can never be painted onto a zed frame at a plausible-looking wrong position.

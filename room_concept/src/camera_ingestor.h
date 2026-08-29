@@ -127,6 +127,14 @@ public:
     [[nodiscard]] const CameraModel& model() const noexcept { return model_; }
     /// camera <- robot, the ONLY transform the measurement path takes from the graph. room <- robot
     /// is the STATE VARIABLE and must never be read here (see image_edge_source.h).
+    /// Unit ray through a pixel, in CAMERA coordinates (x right, y forward, z up).
+    ///
+    /// ★ Goes through CameraAPI, which dispatches on the projection model, because the reduced
+    ///   CameraModel cannot invert itself — it was calibrated to REPRODUCE project(), not to undo
+    ///   it, and declines on a panorama for that reason. Pure arithmetic on stored intrinsics: no
+    ///   graph read, so the ts==0 cache cliff does not apply and any thread may call it.
+    [[nodiscard]] Eigen::Vector3f ray_from_pixel(double u, double v) const;
+
     [[nodiscard]] const Eigen::Matrix3f& cam_R_robot() const noexcept { return cam_R_robot_; }
     [[nodiscard]] const Eigen::Vector3f& cam_t_robot() const noexcept { return cam_t_robot_; }
     [[nodiscard]] const std::string& node_name() const noexcept { return camera_node_; }

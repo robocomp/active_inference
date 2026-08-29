@@ -128,6 +128,12 @@ bool CameraIngestor::bind_camera(const std::string& robot_frame)
     return extrinsic_ok_;
 }
 
+Eigen::Vector3f CameraIngestor::ray_from_pixel(double u, double v) const
+{
+    if (not camera_api_) return Eigen::Vector3f::Zero();
+    return camera_api_->ray_from_pixel(u, v).cast<float>();
+}
+
 void CameraIngestor::start()
 {
     if (running_.exchange(true)) return;      // idempotent
