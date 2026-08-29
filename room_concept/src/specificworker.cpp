@@ -1489,9 +1489,34 @@ void SpecificWorker::compute()
     // pumps a fresh scan to the localizer with ~0-2 ms latency instead of this ~16 ms tick. compute()
     // only reads the resulting buffer/result below.
 
-    pump_image_edges();
-
-    pump_calib_channels();   // extra cameras: calibration only, never the pose   // no-op unless ImageEdge.enable
+    // ── WHERE THE CPU GOES WHEN NOTHING IS BEING OPTIMISED ──────────────────────────────────────
+    // At 100% early exit the localiser update is ~1.6 ms at 20 Hz — 3% of a core — so the rest of
+    // the CPU is not the thing being watched. Both pumps below run EVERY compute tick regardless of
+    // whether the optimiser will: the driving camera's extraction, and then the SAME extraction
+    // again for each entry in ImageEdge.calibCameras (zed + ricoh today, so three per tick).
+    // Their only live consumers while the gate holds are the calibration accumulator and the canvas
+    // — the loss sees them just on optimised frames. Reported as ms per second, i.e. percent of one
+    // core, so the answer is a number rather than an argument about which pump is heavy.
+    {
+        QElapsedTimer t; t.start();
+        pump_image_edges();
+        const auto t_edge = t.nsecsElapsed();
+        t.restart();
+        pump_calib_channels();   // extra cameras: calibration only, never the pose
+        const auto t_calib = t.nsecsElapsed();
+        pump_ns_edge_ += t_edge; pump_ns_calib_ += t_calib; ++pump_ticks_;
+        const auto now_ms = QDateTime::currentMSecsSinceEpoch();
+        if (pump_report_ms_ == 0) pump_report_ms_ = now_ms;
+        else if (now_ms - pump_report_ms_ > 5000)
+        {
+            const double secs = 1e-3 * static_cast<double>(now_ms - pump_report_ms_);
+            qInfo().nospace()
+                << "[pumps] over " << secs << " s: image_edge " << (1e-6 * pump_ns_edge_ / secs)
+                << " ms/s  calib_channels " << (1e-6 * pump_ns_calib_ / secs)
+                << " ms/s  (= % of one core) | " << pump_ticks_ << " ticks";
+            pump_report_ms_ = now_ms; pump_ns_edge_ = pump_ns_calib_ = 0; pump_ticks_ = 0;
+        }
+    }
 
     QElapsedTimer section_timer;
     section_timer.start();

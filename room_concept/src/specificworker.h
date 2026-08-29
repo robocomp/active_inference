@@ -286,6 +286,11 @@ class SpecificWorker : public GenericWorker
     };
     std::vector<std::unique_ptr<CalibChannel>> calib_channels_;
     void pump_calib_channels();
+    /// Cost of the two per-tick camera pumps, in nanoseconds accumulated between reports. They run
+    /// whether or not the optimiser will, so at 100% early exit they ARE the CPU.
+    qint64 pump_ns_edge_ = 0, pump_ns_calib_ = 0;
+    int    pump_ticks_ = 0;
+    qint64 pump_report_ms_ = 0;
     /// Put each triple point in the ROOM by intersecting its measured ray with the plane it lies in.
     ///
     /// ★ NO DEPTH NEEDED, and that is the point: a triple point sits at a KNOWN height — the floor,
