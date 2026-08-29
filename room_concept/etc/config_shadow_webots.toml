@@ -797,7 +797,18 @@ OdomSampleLog = false   # One CSV line per ARRIVING odometry sample -> etc/odom_
                         # settle Shadow's ZUPT densities (see PreintZuptDensityV above, which is a
                         # UNIT CONVERSION of a 2026-08-18 figure and has never been re-measured).
                         # One parked run of a couple of minutes is the whole cost.
-OdomVarianceInjection = false  # ★ OFF ON SHADOW, and for a reason that does not apply to P3Bot.
+OdomVarianceInjection = true   # ★ ON 2026-08-29. The precondition this flag was waiting for is met:
+                       # webots-bridge now builds velCov honestly (nominal + sigma_eff^2/dt_publish)
+                       # with a SPEED-DEPENDENT sigma, ported from p3bot-bridge in webots-bridge
+                       # commit 35f5bb2. The note below is kept because it records exactly what was
+                       # wrong and what the test was — its own last line said "set true once
+                       # webots-bridge adds the vel_extra term", and that is what happened.
+                       # ⚠ VERIFY BEFORE TRUSTING IT: the bridge binary must be rebuilt (it was, at
+                       #   14:12), and sqrt(var*dt_sample) recovered from the published velCov should
+                       #   track the injected sigma(v) — ~0 parked, the slip term at speed. If it
+                       #   comes back constant, the running bridge predates the port.
+                       # ── the original reason it was off, now historical ──
+                       # WAS false: OFF ON SHADOW, and for a reason that does not apply to P3Bot.
                        # The channel consumes the variance the producer states in FullPoseEuler::velCov.
                        # p3bot-bridge builds that honestly — nominal + WheelSigma^2/dt_publish — so its
                        # advertised variance describes the data it actually sent, and room_concept's
