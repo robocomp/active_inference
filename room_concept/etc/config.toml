@@ -968,13 +968,14 @@ MotionCalibScaleP0  = 4.0e-4   # fractional² initial uncertainty on both scales
 # On every OPTIMISED frame, write three precisions for the same newest pose to
 # etc/hessian_check.csv: the window's Schur-complemented marginal (H_nn - H_no H_oo^-1 H_on), the
 # bare diagonal block H_nn, and the sigma actually published.
-# ★ The RATIO is the reading, never the absolute numbers. The first two carry only this window while
-#   the published one is a recursion over every window before it, so it being tighter is expected.
-#   What is not expected is the ratio DRIFTING with ms_since_last_opt: compute_posterior_covariance
-#   uses the filtering form Lambda_prev + H(newest obs), and a filter needs a prediction step —
-#   which here is `current_covariance += odometry_prior.covariance`, gated on the SDF polish and so
-#   OFF. Lambda can then only grow and sigma only shrink. A flat ratio says that does not matter; a
-#   ratio climbing with the gap says it does, and neither reading needs ground truth.
+# ★ The RATIO is the reading, never the absolute numbers, and the CSV also separates the filter's own
+#   posterior (sx_rec) from what the innovation floor raises it to (sx_pub).
+# ★ FIRST 79 FRAMES, 2026-08-29: the published sigma_theta ran 0.042 rad against the window's own
+#   0.0034 — 12x LOOSER, x and y 7-8x — and the ratio did NOT drift with ms_since_last_opt
+#   (corr +0.05). The filter is conservative, not over-confident, and its prediction step
+#   (predict_step -> propagated_cov) is working. What is still open is whether 7-12x is the RIGHT
+#   amount: sigma_pub varies much less than sigma_marg (CV 0.16 vs 0.33 in x), so the published
+#   number is carrying more motion prior than fit quality, and the speed governor reads it.
 # ★ block/marg is a second, independent reading: how much of the newest pose's apparent precision is
 #   borrowed from window neighbours the solve has not actually pinned down.
 # Costs one extra linearize (~0.3 ms) on optimised frames only, which are ~0.7% of cycles.

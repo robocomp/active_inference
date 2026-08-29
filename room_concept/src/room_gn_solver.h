@@ -191,10 +191,10 @@ namespace rc::gn
     ///
     /// The published sigma does not come from here. compute_posterior_covariance() uses the FILTERING
     /// form — Λ_post = Λ_prev + H(newest observation) + λI — which is a legitimate alternative to
-    /// marginalising the joint, and would double-count if you did both. But a filter needs its
-    /// prediction step, and that step (current_covariance += odometry_prior.covariance) is gated on
-    /// the SDF polish, which is off. So Λ can only grow and sigma can only shrink, and this is the
-    /// instrument that says by how much.
+    /// marginalising the joint, and would double-count if you did both. Its prediction step is
+    /// predict_step() writing propagated_cov into current_covariance, on the optimised path.
+    /// ★ MEASURED: the filter is 7-12x LOOSER than this marginal, not tighter, and the gap does not
+    ///   grow with time since the last solve. See log_hessian_check() for the numbers.
     ///
     ///   marginal — Λ_marg = H_nn − H_no H_oo⁻¹ H_on, the newest pose's own precision once every
     ///              other window pose (and landmark) is marginalised out. The honest one.

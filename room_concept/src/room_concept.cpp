@@ -2513,7 +2513,7 @@ namespace rc
             auto [covariance, condition_number] = compute_posterior_covariance(points_tensor);
             res.covariance = covariance;
             res.condition_number = condition_number;
-            log_hessian_check(res);
+            hess_pre_adaptive_ = res.covariance;   // before apply_adaptive_covariance floors it
             last_t_cov_ms_ = std::chrono::duration<float, std::milli>(
                 std::chrono::high_resolution_clock::now() - t0).count();
         }
@@ -2696,6 +2696,9 @@ namespace rc
                                                 res.innovation[1]*res.innovation[1]);
                 apply_adaptive_covariance(res);
             }
+            // AFTER the adaptive floor, so `pub` is what actually leaves this agent. Logging it at
+            // the covariance update instead recorded the recursion and called it the published value.
+            log_hessian_check(res);
         }
 
         // ===== FINALIZE =====
@@ -3898,22 +3901,29 @@ namespace rc
     //  Levenberg-Marquardt backend (analytic Jacobians — see room_gn_solver.h)
     // =========================================================================
 // ── The published sigma, measured against what the window's own equations say ────────────────────
-// Three precisions for the same newest pose, on the frames where all three exist:
+// Four precisions for the same newest pose:
 //
-//   marg  = H_nn − H_no H_oo⁻¹ H_on   the window's marginal. What it actually knows.
-//   block = H_nn                      the same without the complement, i.e. pretending the older
-//                                     poses are known EXACTLY. Always the more confident of the two.
-//   pub   = res.covariance⁻¹          what the agent tells everyone else.
+//   marg  = H_nn − H_no H_oo⁻¹ H_on   the window's marginal. What the solve actually knows.
+//   block = H_nn                      the same without the complement, i.e. pretending every other
+//                                     window pose is known EXACTLY. Always the more confident.
+//   rec   = current_covariance⁻¹      the filter's own posterior, before the adaptive floor.
+//   pub   = res.covariance⁻¹          what leaves this agent, after apply_adaptive_covariance.
 //
-// ★ THE RATIO IS THE READING, NOT THE ABSOLUTE NUMBERS. marg and block carry only this window;
-//   `pub` is a recursion carrying every window before it, so pub being tighter is expected. What is
-//   NOT expected is the ratio DRIFTING with time since the last solve: the recursion's prediction
-//   step (current_covariance += odometry_prior.covariance) is gated on the SDF polish and therefore
-//   off, so between solves Λ_pub can only grow. If sigma is honest the ratio is flat; if the missing
-//   process noise is the problem the ratio climbs with the gap, and that is visible without any
-//   ground truth at all.
-// ★ block/marg is a second, independent reading: how much of the newest pose's apparent precision is
-//   borrowed from neighbours the window has not actually pinned down.
+// ★ MEASURED 2026-08-29, first 79 optimised frames, and it corrected the guess that prompted it.
+//   The guess was that sigma would prove OVER-confident because the filter has no prediction step.
+//   It has one: predict_step() writes propagated_cov into current_covariance on every optimised
+//   cycle (the polish-gated growth further down is the EARLY-EXIT path's, a different branch). And
+//   the reading came out the other way — sigma_theta published 0.042 rad against the window's own
+//   0.0034, i.e. 12x LOOSER, with x and y 7-8x. The filter is conservative, not over-confident, and
+//   the ratio does NOT drift with the gap since the last solve (corr +0.05 over log gap), which is
+//   what a working prediction step looks like.
+// ★ block/marg came out at 0.79 median (0.51 at p10, on short windows): dropping the cross-terms
+//   would claim ~21% tighter than the window supports, and up to 2x. That is the answer to "why
+//   Schur-complement at all" in numbers.
+// ★ WHAT IS STILL OPEN: whether 7-12x is the RIGHT amount of conservatism. It is set by the process
+//   noise in propagated_cov, and sigma_pub varies far less than sigma_marg does (CV 0.16 vs 0.33 in
+//   x), so the published number is carrying much more motion prior than fit quality. That matters
+//   downstream — the speed governor and every concept agent's precision read it.
 void RoomConcept::log_hessian_check(const UpdateResult& res)
 {
     if (not params.hessian_check or not last_marg_ok_) return;
@@ -3922,10 +3932,9 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         const Eigen::Matrix3f c = prec.inverse();
         return (c.allFinite() and c(i, i) > 0.f) ? std::sqrt(static_cast<double>(c(i, i))) : -1.0;
     };
-    const auto pub = [&](int i) -> double
+    const auto sd = [](const Eigen::Matrix3f& c, int i) -> double
     {
-        return (res.covariance.allFinite() and res.covariance(i, i) > 0.f)
-                 ? std::sqrt(static_cast<double>(res.covariance(i, i))) : -1.0;
+        return (c.allFinite() and c(i, i) > 0.f) ? std::sqrt(static_cast<double>(c(i, i))) : -1.0;
     };
     static bool header = false;
     std::ofstream f("etc/hessian_check.csv", header ? std::ios::app : std::ios::trunc);
@@ -3935,18 +3944,21 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
     {
         header = true;
         f << "t_ms,slots,dof_marginalised,"
-             "sx_marg,sy_marg,st_marg,sx_block,sy_block,st_block,sx_pub,sy_pub,st_pub,"
+             "sx_marg,sy_marg,st_marg,sx_block,sy_block,st_block,"
+             "sx_rec,sy_rec,st_rec,sx_pub,sy_pub,st_pub,"
              "ratio_x,ratio_y,ratio_t,block_over_marg_t,ms_since_last_opt\n";
     }
     const double sm[3] = {sig(last_marg_prec_, 0),  sig(last_marg_prec_, 1),  sig(last_marg_prec_, 2)};
     const double sb[3] = {sig(last_block_prec_, 0), sig(last_block_prec_, 1), sig(last_block_prec_, 2)};
-    const double sp[3] = {pub(0), pub(1), pub(2)};
+    const double sr[3] = {sd(hess_pre_adaptive_, 0), sd(hess_pre_adaptive_, 1), sd(hess_pre_adaptive_, 2)};
+    const double sp[3] = {sd(res.covariance, 0),     sd(res.covariance, 1),     sd(res.covariance, 2)};
     const auto ratio = [](double a, double b) { return (a > 0.0 and b > 0.0) ? a / b : -1.0; };
     f << std::chrono::duration_cast<std::chrono::milliseconds>(
              std::chrono::system_clock::now().time_since_epoch()).count()
       << ',' << last_gn_window_slots_ << ',' << last_marg_dof_;
     for (int i = 0; i < 3; ++i) f << ',' << sm[i];
     for (int i = 0; i < 3; ++i) f << ',' << sb[i];
+    for (int i = 0; i < 3; ++i) f << ',' << sr[i];
     for (int i = 0; i < 3; ++i) f << ',' << sp[i];
     // marg / pub > 1 means the window is LESS certain than what we publish — the over-confidence.
     for (int i = 0; i < 3; ++i) f << ',' << ratio(sm[i], sp[i]);
@@ -3962,7 +3974,7 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         hess_check_last_log_ms_ = now_ms;
         qInfo().nospace()
             << "[hess] sigma_theta  window(marg) " << sm[2] << "  window(block) " << sb[2]
-            << "  published " << sp[2] << "  | marg/pub " << ratio(sm[2], sp[2])
+            << "  filter " << sr[2] << "  published " << sp[2] << "  | marg/pub " << ratio(sm[2], sp[2])
             << " block/marg " << ratio(sb[2], sm[2])
             << " | slots " << last_gn_window_slots_ << " dof_marg " << last_marg_dof_
             << " rows " << hess_check_rows_;

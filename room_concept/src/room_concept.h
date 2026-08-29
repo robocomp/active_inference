@@ -1849,6 +1849,9 @@ private:
     /// prediction step makes the published sigma a function of this gap, so it is the
     /// covariate the whole comparison is read against.
     std::int64_t hess_prev_opt_ms_ = 0;
+    /// The filter's posterior BEFORE apply_adaptive_covariance floors it, so the CSV can
+    /// separate what the recursion computed from what the innovation floor raised it to.
+    Eigen::Matrix3f hess_pre_adaptive_ = Eigen::Matrix3f::Zero();
     int          hess_check_rows_ = 0;
 
     /// Run the GN backend on the CURRENT window WITHOUT keeping its answer, and log it beside the
