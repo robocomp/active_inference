@@ -927,6 +927,37 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
         return true;
     };
 
+    // ★ A STRAIGHT 3-D LINE IS A CURVE IN EQUIRECTANGULAR. Joining two projected endpoints with a
+    //   straight image-space line is right for a pinhole and wrong for a panorama: the true image of
+    //   the segment is a great-circle arc, and the error is largest exactly where the wall passes
+    //   above or below the camera — which for a room contour is most of the frame. The fix is the
+    //   one retina already uses (ricoh_projection_overlay.cpp:91): subdivide the 3-D segment,
+    //   project every sample, and join consecutive samples ONLY when they lie on the same side of
+    //   the wrap seam. Same construction, same reason, so the two cannot drift apart.
+    //   Pinhole keeps the single clipped line — subdividing there would be pure cost for no change.
+    auto draw_edge_cam = [&](const Mat::Vector3d& a, const Mat::Vector3d& b, const QPen& pen,
+                             int subdiv)
+    {
+        if (not panoramic)
+        {
+            Eigen::Vector2f pa, pb;
+            if (project_clipped_segment(a, b, pa, pb)) draw_segment(pa, pb, pen);
+            return;
+        }
+        painter.setPen(pen);
+        std::optional<QPointF> prev;
+        for (int k = 0; k <= subdiv; ++k)
+        {
+            const double t = static_cast<double>(k) / static_cast<double>(subdiv);
+            const Eigen::Vector2d uv = camera_api_->project(a + t * (b - a));
+            if (!std::isfinite(uv.x()) || !std::isfinite(uv.y())) { prev.reset(); continue; }
+            const QPointF cur(uv.x(), uv.y());
+            if (prev.has_value() and std::abs(cur.x() - prev->x()) < 0.5 * img_w)
+                painter.drawLine(*prev, cur);
+            prev = cur;
+        }
+    };
+
     // 2) Draw a very light grid on floor and ceiling (different colors).
     float min_x = std::numeric_limits<float>::infinity();
     float max_x = -std::numeric_limits<float>::infinity();
@@ -967,7 +998,8 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
             Eigen::Vector2f a;
             Eigen::Vector2f b;
             if (project_room_segment(Mat::Vector3d(x, y0, z), Mat::Vector3d(x, y1, z), a, b))
-                draw_segment(a, b, pen);
+                draw_edge_cam(transform_room_point(basis, Mat::Vector3d(x, y0, z)),
+                              transform_room_point(basis, Mat::Vector3d(x, y1, z)), pen, 24);
         }
 
         // Lines parallel to room X axis.
@@ -976,7 +1008,8 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
             Eigen::Vector2f a;
             Eigen::Vector2f b;
             if (project_room_segment(Mat::Vector3d(x0, y, z), Mat::Vector3d(x1, y, z), a, b))
-                draw_segment(a, b, pen);
+                draw_edge_cam(transform_room_point(basis, Mat::Vector3d(x0, y, z)),
+                              transform_room_point(basis, Mat::Vector3d(x1, y, z)), pen, 24);
         }
     };
 
@@ -995,10 +1028,11 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
         const bool floor_ok = project_clipped_segment(floor_in_cam[i], floor_in_cam[j], floor_a, floor_b);
         const bool top_ok = project_clipped_segment(top_in_cam[i], top_in_cam[j], top_a, top_b);
 
+        // Subdivision counts follow retina's: 40 along a wall run, which is where the curvature is.
         if (floor_ok)
-            draw_segment(floor_a, floor_b, QPen(Qt::blue, 3));
+            draw_edge_cam(floor_in_cam[i], floor_in_cam[j], QPen(Qt::blue, 3), 40);
         if (top_ok)
-            draw_segment(top_a, top_b, QPen(Qt::red, 3));
+            draw_edge_cam(top_in_cam[i], top_in_cam[j], QPen(Qt::red, 3), 40);
 
         // Optional endpoints for visual debugging.
         painter.setPen(QPen(Qt::blue, 2));
@@ -1210,8 +1244,10 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
             const auto b_cam = transform_room_point(basis, Mat::Vector3d(cb.x(), cb.y(), cb.z()));
             Eigen::Vector2f a;
             Eigen::Vector2f b;
+            // 12 for a box edge: shorter than a wall run, so the arc is gentler and fewer samples
+            // carry it. Still curved — an object edge above or below the camera bends visibly.
             if (project_clipped_segment(a_cam, b_cam, a, b))
-                draw_segment(a, b, box_pen);
+                draw_edge_cam(a_cam, b_cam, box_pen, 12);
         }
 
         // Label the box at its projected top-front corner (corner 4), if visible.
