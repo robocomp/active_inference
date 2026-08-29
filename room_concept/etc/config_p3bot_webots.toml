@@ -855,7 +855,23 @@ shadow = true    # ★ BACK ON 2026-08-29 for the Ricoh trial. It was off for th
                  # that: a vertical corner's image normal is horizontal, so pitch and height barely
                  # project onto it (h ~ 0) while bearing is unaffected.
                  # Set back to false once the mount is characterised; drive stays false until then.
-drive  = true    # ★ ON AGAIN 2026-08-29, on the RICOH. The 08-28 attempt on the ZED failed its
+drive  = false   # ★ OFF for the PAIRED experiment, 2026-08-29. Not a retreat — a better design.
+                 #
+                 # Two drives with IDENTICAL config disagreed on the heading tail (run 1 p99 -1.5%,
+                 # run 2 p99 +11.7%) because the effect is smaller than route-to-route variation. A
+                 # between-run A/B measures the route as much as the change.
+                 # With drive = false and shadow = true the window is solved TWICE PER CYCLE, with
+                 # and without the factor, on IDENTICAL inputs. The per-cycle difference cancels
+                 # route, speed, geometry and localiser state exactly. dpose_* in image_edge.csv is
+                 # that difference; joined to gt_error.csv by ts_ms it gives both errors:
+                 #     e_without = est - gt          (the published pose IS the without one)
+                 #     e_with    = est + dpose - gt
+                 # so Delta|e| is a PAIRED sample and the sign test needs no matched route.
+                 #
+                 # ⚠ Only ~8% of cycles yield a pair: the twice-solve runs only when the optimiser
+                 #   does, and the early-exit rate is ~92%. Still hundreds per run, and paired beats
+                 #   thousands unpaired here.
+                 # WAS: ON AGAIN 2026-08-29, on the RICOH. The 08-28 attempt on the ZED failed its
                  # pre-registered criterion and was reverted; both reasons it failed have since
                  # moved, which is why this is a new experiment and not a retry of the same one:
                  #

@@ -523,6 +523,44 @@ void SpecificWorker::update_rt_rate_readout(std::int64_t now_ms, bool on_gui_thr
         }
     }
 
+    // ── Cost, logged rather than only displayed ──────────────────────────────────────────────────
+    // The experiment compares configurations that differ in what they compute — a second camera
+    // channel, a corner factor in the loss — so CPU is a RESULT, not housekeeping: an accuracy gain
+    // bought with 40% more CPU is a different claim from one that is free.
+    // ★ The active configuration is written into the header. Runs are compared days apart from
+    //   archived files, and a cost figure whose condition has to be reconstructed from memory is
+    //   worth very little — this file says what produced it.
+    {
+        static std::ofstream res_csv;
+        if (not res_csv.is_open())
+        {
+            res_csv.open("etc/resource_usage.csv", std::ios::out | std::ios::trunc);
+            if (res_csv.is_open())
+            {
+                res_csv.imbue(std::locale::classic());   // CLAUDE.md: never a comma decimal
+                std::string cams;
+                for (const auto &c : params.CALIB_CAMERAS)
+                { if (not cams.empty()) cams += "+"; cams += c; }
+                res_csv << "# camera=" << params.IMAGE_EDGE_CAMERA
+                        << " drive=" << (params.IMAGE_EDGE_DRIVE ? 1 : 0)
+                        << " shadow=" << (params.IMAGE_EDGE_SHADOW ? 1 : 0)
+                        << " triple=" << (params.IMAGE_EDGE_USE_TRIPLE_POINTS ? 1 : 0)
+                        << " calib_cameras=" << (cams.empty() ? "none" : cams)
+                        << " enable=" << (params.IMAGE_EDGE_ENABLE ? 1 : 0) << '\n';
+                res_csv << "ts_ms,cpu_pct,rss_mb,opt_hz,corr_hz,early_exit_pct,avg_update_ms\n";
+            }
+        }
+        if (res_csv.is_open())
+        {
+            struct rusage ru2;
+            const double rss_mb = (getrusage(RUSAGE_SELF, &ru2) == 0)
+                                      ? ru2.ru_maxrss / 1024.0 : 0.0;   // ru_maxrss is KiB on Linux
+            res_csv << now_ms << ',' << cpu_pct << ',' << rss_mb << ',' << opt_hz << ','
+                    << corr_hz << ',' << ee_pct << ',' << opt.avg_update_ms << '\n';
+            res_csv.flush();
+        }
+    }
+
     if (on_gui_thread && viewer_)
     {
         // RT/opt rates → live plot (trend). The text readout keeps only the scalar optimizer-health
