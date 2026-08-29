@@ -28,6 +28,7 @@
 #include "graph_safe.h"   // rc::safe_update_node — guard update_node against exceptions
 #include <QTimer>
 #include <QLabel>
+#include <QSettings>
 #include <QVBoxLayout>
 
 #include <ConfigLoader/ConfigLoader.h>
@@ -113,10 +114,70 @@ SpecificWorker::~SpecificWorker()
 	request_shutdown();
 }
 
+// QSettings group for one graph's window: windows/<agent id>/<graph name>. The id keys it so two agents
+// sharing a config file (different Agent.id) do not fight over one geometry; the empty graph name — the
+// single-graph case, which is ours — is spelled "default", matching what the rest of the fleet writes.
+QString SpecificWorker::settings_group_name(const std::string& graph_name, int agent_id)
+{
+	const QString graph_suffix = graph_name.empty() ? QStringLiteral("default")
+	                                                : QString::fromStdString(graph_name);
+	return QStringLiteral("windows/%1/%2").arg(agent_id).arg(graph_suffix);
+}
+
+// Restore is deliberately tolerant: an absent key leaves Qt's own placement alone, so a first run (or a
+// wiped config) is not a special case. `state` carries the dock/toolbar layout and is versioned — bump
+// kWindowStateVersion if the viewer's dock composition ever changes, and Qt then ignores the stale blob
+// instead of restoring a layout whose widgets no longer exist.
+void SpecificWorker::restore_window_settings()
+{
+	QSettings settings(QStringLiteral("RoboComp"), QString::fromStdString(agent_name));
+
+	for (const auto& [name, window] : windows)
+	{
+		if (window == nullptr)
+			continue;
+
+		settings.beginGroup(settings_group_name(name, agent_id));
+
+		if (const QByteArray geometry = settings.value(QStringLiteral("geometry")).toByteArray();
+		    not geometry.isEmpty())
+			window->restoreGeometry(geometry);
+
+		if (const QByteArray state = settings.value(QStringLiteral("state")).toByteArray();
+		    not state.isEmpty())
+			window->restoreState(state, kWindowStateVersion);
+
+		settings.endGroup();
+	}
+}
+
+void SpecificWorker::save_window_settings() const
+{
+	QSettings settings(QStringLiteral("RoboComp"), QString::fromStdString(agent_name));
+
+	for (const auto& [name, window] : windows)
+	{
+		if (window == nullptr)
+			continue;
+
+		settings.beginGroup(settings_group_name(name, agent_id));
+		settings.setValue(QStringLiteral("geometry"), window->saveGeometry());
+		settings.setValue(QStringLiteral("state"), window->saveState(kWindowStateVersion));
+		settings.endGroup();
+	}
+
+	settings.sync();   // the process may be seconds from exit; do not leave the write to QSettings' timer
+}
+
 void SpecificWorker::request_shutdown()
 {
 	if (shutting_down_.exchange(true))
 		return;
+
+	// FIRST, while the windows still exist: this runs on aboutToQuit (graceful SIGTERM/SIGINT path) and
+	// again from ~SpecificWorker, and the exchange above makes the second call a no-op. A kill -9 saves
+	// nothing — same contract as the owned-node cleanup below.
+	save_window_settings();
 
 	stop_imu_thread = true;
 	stop_lidar_thread = true;
@@ -186,6 +247,18 @@ void SpecificWorker::initialize()
 	// room polygon every other agent reads, so a wrong floor plan puts the whole fleet in the wrong
 	// building while every number downstream stays self-consistent.
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Agent.scenario", scenario_name_);
+	// WHAT this base can do, as opposed to where it is. Optional on purpose: a config that does not
+	// say leaves the attribute absent rather than asserting a default (see holonomic_).
+	// get<bool> THROWS when the key is absent, which is what distinguishes "not configured" from
+	// "configured false" — load_optional() returns void and would collapse the two into `false`,
+	// silently asserting that every unconfigured robot is non-holonomic.
+	try { holonomic_ = configLoader.get<bool>("Agent.holonomic"); }
+	catch (...)
+	{
+		qWarning() << "[Agent] Agent.holonomic is not set, so `robot_holonomic` will not be"
+		              " published. Consumers cannot then tell whether this base can move sideways,"
+		              " and will keep whatever they assume today.";
+	}
 	if (scenario_name_.empty())
 		qWarning() << "[Agent] Agent.scenario is not set, so `scenario_name` will not be published."
 		              " room_concept will refuse to start if its config defines scenario overlays.";
@@ -496,6 +569,11 @@ void SpecificWorker::initialize()
 		wire_agent_status_overlay();   // colour every agent node by its live health (green/orange/red/grey)
 		check_robot_identity();   // flag a stale/mismatched robot node ingested during bootstrap
 	});
+
+	// Put the viewer window back where the user left it. Queued at the head of the event loop rather than
+	// called inline: GenericWorker::initialize() has created the window, but a geometry set before the
+	// window manager has mapped it is silently overridden by some WMs.
+	QTimer::singleShot(0, this, [this]() { restore_window_settings(); });
 }
 
 // A node was inserted OR an attribute was updated (update_node_signal covers both). Relayout only when the id
@@ -544,13 +622,23 @@ void SpecificWorker::check_robot_identity()
 	// node, same one-shot timing, and it needs the graph to be up for exactly the same reason.
 	// ⚠ update_node is a WHOLE-NODE write: an attribute absent from the copy is ERASED (see
 	//   dsr-node-attr-erasure-hazard). Re-fetch, add, write back — never write a stale copy.
-	if (not scenario_name_.empty())
+	if (not scenario_name_.empty() or holonomic_.has_value())
 	{
 		if (auto n = G->get_node(robot_name); n.has_value())
 		{
-			G->add_or_modify_attrib_local<scenario_name_att>(n.value(), scenario_name_);
+			if (not scenario_name_.empty())
+				G->add_or_modify_attrib_local<scenario_name_att>(n.value(), scenario_name_);
+			// WHAT this base can do. A differential base cannot move sideways, and nothing in the
+			// graph said so: the controller issues setSpeedBase(side, adv, rot) unconditionally and
+			// room_concept's odometry carries a dx_local = side*dt term, so on ShadowDiff both were
+			// describing motion the robot cannot make. Published on the SAME one-shot write as
+			// scenario_name — same node, same reason to wait for the graph.
+			if (holonomic_.has_value())
+				G->add_or_modify_attrib_local<robot_holonomic_att>(n.value(), *holonomic_);
 			if (rc::safe_update_node(*G, n.value()))
 				qInfo() << "[graph] scenario_name =" << QString::fromStdString(scenario_name_)
+				        << "| robot_holonomic ="
+				        << (holonomic_.has_value() ? (*holonomic_ ? "true" : "false") : "(absent)")
 				        << "published on" << QString::fromStdString(robot_name);
 			else
 				qWarning() << "[graph] could NOT publish scenario_name — room_concept will refuse to"

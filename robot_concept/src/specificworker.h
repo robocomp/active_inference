@@ -35,6 +35,7 @@
 #include <thread>
 #include <vector>
 
+#include <QString>
 #include <QTimer>
 #include <QWidget>
 
@@ -148,6 +149,11 @@ private:
 	// particular robot.
 	std::string robot_name;
 	std::string scenario_name_;   ///< WHERE the robot is; published as `scenario_name` on its node
+	/// Can the base command an INSTANTANEOUS lateral velocity in its own frame? Published as
+	/// `robot_holonomic`. std::nullopt = the config did not say, and then NOTHING is published:
+	/// absent means "unknown, keep doing what you do", which is the only honest default. Guessing
+	/// false would silently disable a mecanum's lateral DOF; guessing true keeps the present bug.
+	std::optional<bool> holonomic_;
 	// Degrees to rotate the robot's MESH into the ROBOT frame (x right, y forward). A property of the
 	// ASSET, not of the robot: P3Bot's proto wraps the machine in `Pose { rotation 0 0 1 1.5708 }`, so its
 	// mesh's native forward is +x while the graph's robot frame has forward +y. Agent.mesh_yaw_deg.
@@ -285,6 +291,17 @@ private:
 	void degraded_enter();
 	void degraded_loop();
 	void request_shutdown();
+
+	// Persist/restore the DSR viewer QMainWindow(s) across runs. This lives HERE, in the agent's own
+	// source, and NOT in generated/genericworker.cpp where the rest of the fleet keeps it: there it is a
+	// hand-patch on a GENERATED file, and re-running robocompdsl wiped robot_concept's copy on 2026-07-01
+	// (720b723, -112 lines) — the window has come up unplaced ever since. Same QSettings layout as every
+	// other agent ("RoboComp"/<agent_name>, group windows/<agent_id>/<graph name|default>, keys geometry +
+	// state) so the entries already on disk from before that regression are honoured.
+	void save_window_settings() const;
+	void restore_window_settings();
+	static QString settings_group_name(const std::string& graph_name, int agent_id);
+	static constexpr int kWindowStateVersion = 1;
 
 	void cleanup_owned_nodes();
 	// Diagnostic (runs once): the robot node (Agent.robot_name) is seeded from Agent.configFile with a

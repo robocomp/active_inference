@@ -36,6 +36,18 @@ scenario   = "apartamento"   # WHERE this robot is. A robot is not a place: the 
                        # axis of its own. Published as the `scenario_name` attribute on the robot node;
                        # room_concept selects its floor plan from it and REFUSES TO START without it,
                        # because it authors the polygon every other agent reads.
+holonomic  = false    # WHAT this base can do, as opposed to where it is: can it command an INSTANTANEOUS lateral
+                       # velocity in its own frame? Published as the `robot_holonomic` attribute on the robot node.
+                       # ★ FALSE because worlds/piso/piso.wbt instantiates `DEF shadow ShadowDiff`, and
+                       # ShadowDiff.proto is DIFFERENTIAL: wheel_left / wheel_right, no lateral DOF.
+                       # ⚠ Shadow.proto (wheel1..wheel4) IS omnidirectional. If you switch the world back to
+                       # that one, this must become true -- it is a property of the base you instantiate, not
+                       # of the name "Shadow". The two protos differ in exactly this.
+                       # The controller issues setSpeedBase(side, adv, rot) unconditionally and room_concept's
+                       # odometry carries a dx_local = side*dt term, so a wrong value here is motion the robot
+                       # cannot make being planned and then attributed. REMOVE the line to publish nothing:
+                       # absent means "unknown, consumers keep what they assume today", which is never wrong,
+                       # only uninformative.
 robot_node_id = 200
 # Graphviz engine used to lay the DSR graph out in the viewer: twopi | sfdp | dot | neato | fdp | circo.
 # Which one reads best depends on the graph's SHAPE, which is a property of the robot: Shadow's single
