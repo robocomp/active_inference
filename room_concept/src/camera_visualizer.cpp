@@ -1186,13 +1186,28 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
             if (clipped.size() < 3)
                 continue;
 
+            // ★ THE FILL MUST FOLLOW THE SAME CURVE AS THE OUTLINE. Projecting only the four
+            //   corners and filling between them draws a straight-edged trapezoid underneath the
+            //   correctly-curved contour lines — visibly wrong, and wrong in the direction that
+            //   makes a wall look like it covers floor it does not. Walk each EDGE of the quad with
+            //   the same subdivision the outlines use, so the polygon boundary is the projected arc
+            //   rather than its chord.
             QPolygonF poly;
             bool poly_ok = true;
-            for (const auto& p : clipped)
+            const int quad_subdiv = panoramic ? 24 : 1;
+            for (std::size_t i = 0; i < clipped.size() && poly_ok; ++i)
             {
-                const Eigen::Vector2d uv = camera_api_->project(p);
-                if (!std::isfinite(uv.x()) || !std::isfinite(uv.y())) { poly_ok = false; break; }
-                poly << QPointF(uv.x(), uv.y());
+                const Mat::Vector3d& a = clipped[i];
+                const Mat::Vector3d& b = clipped[(i + 1) % clipped.size()];
+                // k < subdiv, not <=: the next edge contributes its own start point, so the shared
+                // vertex is added once rather than duplicated at every corner.
+                for (int k = 0; k < quad_subdiv; ++k)
+                {
+                    const double t = static_cast<double>(k) / static_cast<double>(quad_subdiv);
+                    const Eigen::Vector2d uv = camera_api_->project(a + t * (b - a));
+                    if (!std::isfinite(uv.x()) || !std::isfinite(uv.y())) { poly_ok = false; break; }
+                    poly << QPointF(uv.x(), uv.y());
+                }
             }
             if (!poly_ok || poly.size() < 3)
                 continue;
@@ -1202,10 +1217,20 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
             //   SKIPPED. A missing wall is honest; an invented one is not.
             if (panoramic and img_w > 0.0)
             {
-                double umin = poly[0].x(), umax = poly[0].x();
-                for (const auto& pt : poly) { umin = std::min(umin, pt.x()); umax = std::max(umax, pt.x()); }
-                if (umax - umin > 0.5 * img_w)
-                    continue;
+                // ★ A JUMP between CONSECUTIVE boundary points, not the overall span. The span test
+                //   cannot tell a quad that wraps the seam from a genuinely wide wall seen close up
+                //   — both span more than half the image — and would silently delete the second.
+                //   Now that the boundary is finely sampled, a wrap shows as one adjacent pair
+                //   leaping most of the width, which nothing else produces.
+                bool wraps = false;
+                for (int i = 0; i < poly.size() and not wraps; ++i)
+                {
+                    const QPointF& q0 = poly[i];
+                    const QPointF& q1 = poly[(i + 1) % poly.size()];
+                    if (std::abs(q1.x() - q0.x()) > 0.5 * img_w) wraps = true;
+                }
+                if (wraps)
+                    continue;   // a wall that is missing is honest; one painted across the image is not
             }
 
             painter.setPen(QPen(wall_edge, 1.5));
