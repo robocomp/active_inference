@@ -122,6 +122,7 @@ class CameraVisualizer : public QDialog
         std::mutex                     triple_mtx_;
         std::vector<rc::TriplePoint>   triple_points_;
         std::string                    triple_from_;
+        bool                           discovery_reason_logged_ = false;
         struct MediaRgbCache
         {
             std::vector<std::uint8_t> bytes;

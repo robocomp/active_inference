@@ -211,7 +211,10 @@ void CameraVisualizer::ingest_loop()
 
 bool CameraVisualizer::try_discover_media_plane()
 {
-    if (media_rgb_sub_ || !graph_)
+    // ★ BOTH subscribers. Checking only media_rgb_sub_ meant the ricoh path never saw itself as
+    //   discovered and rebuilt its 360 reader once a second for ever, which is not a slow start —
+    //   a reader recreated before it delivers never delivers.
+    if (media_rgb_sub_ || media_rgb360_sub_ || !graph_)
         return false;
 
     // Self-throttle discovery attempts (ingest thread, ~200 Hz idle poll).
@@ -227,14 +230,47 @@ bool CameraVisualizer::try_discover_media_plane()
     //   types — ImageFrame against the ~5.5 MB Image360Frame — so asking for the wrong one does not
     //   merely return nothing, it asks the wrong reader for the wrong thing.
     const auto desc = rc::media::descriptor_from_graph(*graph_, camera_node_name_);
-    if (not desc.has_value()) return false;          // descriptor not published yet; retry next second
+    if (not desc.has_value())
+    {
+        // Not an error: the producer may simply not have advertised yet. Said ONCE, because a
+        // window that reports "not initialized" with no reason leaves the reader guessing between
+        // a missing node, a missing stream and a failed reader — three different problems.
+        if (not discovery_reason_logged_)
+        {
+            discovery_reason_logged_ = true;
+            qWarning() << "[camviz]" << QString::fromStdString(camera_node_name_)
+                       << "has no media descriptor yet — retrying every second";
+        }
+        return false;
+    }
     if (desc->streams.contains("rgb360"))
         media_rgb360_sub_ = rc::media::make_image360_subscriber_from_graph(*graph_, camera_node_name_,
                                                                           "rgb360");
     else if (desc->streams.contains("rgb"))
         media_rgb_sub_ = rc::media::make_image_subscriber_from_graph(*graph_, camera_node_name_, "rgb");
+    else if (not discovery_reason_logged_)
+    {
+        discovery_reason_logged_ = true;
+        std::string keys;
+        for (const auto& [k, v] : desc->streams) { if (not keys.empty()) keys += ", "; keys += k; }
+        qWarning() << "[camviz]" << QString::fromStdString(camera_node_name_)
+                   << "advertises no stream this window can read (has:"
+                   << QString::fromStdString(keys) << ")";
+    }
     const bool up = (media_rgb_sub_ != nullptr or media_rgb360_sub_ != nullptr);
-    if (up) subscriber_ready_.store(true, std::memory_order_release);
+    if (up)
+    {
+        subscriber_ready_.store(true, std::memory_order_release);
+        qInfo() << "[camviz]" << QString::fromStdString(camera_node_name_) << "subscriber up on"
+                << (media_rgb360_sub_ ? "rgb360" : "rgb");
+    }
+    else if (not discovery_reason_logged_)
+    {
+        discovery_reason_logged_ = true;
+        qWarning() << "[camviz]" << QString::fromStdString(camera_node_name_)
+                   << "descriptor found and the stream is advertised, but the reader could not be"
+                      " created — check the media plane domain and MAX_IMAGE_BYTES";
+    }
     return up;
 }
 
