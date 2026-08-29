@@ -4332,6 +4332,35 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
             }
         }
 
+        // ── The DRIVING term's own consistency ──────────────────────────────────────────────────
+        // Everything above describes the per-SAMPLE contour path. With useTriplePoints = true the
+        // factor that actually moves the pose uses ONE residual per corner instead, weighted by that
+        // corner's own cov_uv — so the sample path's chi2 diagnoses a different object from the one
+        // being driven, and reporting it as if it were the same is how an arm gets graded on a
+        // quantity it does not use.
+        // chi2 here is exactly what ImageEdgeFactor weights by: r' cov_uv^-1 r, 2 DOF per corner.
+        // Split MATCHED vs all, so occlusion contamination is separable from a genuine misfit rather
+        // than averaged into it.
+        int   tp_n = 0, tp_n_matched = 0, tp_occl = 0;
+        float tp_ss = 0.f, tp_chi2 = 0.f, tp_ss_m = 0.f, tp_chi2_m = 0.f;
+        for (const auto& t : obs.triple_points)
+        {
+            const Eigen::Matrix2f& C = t.cov_uv;
+            const float det = C(0, 0) * C(1, 1) - C(0, 1) * C(1, 0);
+            if (not std::isfinite(det) or not (det > 1e-12f)) continue;
+            const Eigen::Vector2f r = t.resid_px;
+            if (not r.allFinite()) continue;
+            const float q = (C(1, 1) * r.x() * r.x() - 2.f * C(0, 1) * r.x() * r.y()
+                             + C(0, 0) * r.y() * r.y()) / det;
+            ++tp_n; tp_ss += r.squaredNorm(); tp_chi2 += q;
+            if (t.pi_vis < 0.5f) { ++tp_occl; continue; }
+            ++tp_n_matched; tp_ss_m += r.squaredNorm(); tp_chi2_m += q;
+        }
+        const float tp_rms   = tp_n ? std::sqrt(tp_ss / static_cast<float>(tp_n)) : 0.f;
+        const float tp_c2    = tp_n ? tp_chi2 / (2.f * static_cast<float>(tp_n)) : 0.f;
+        const float tp_rms_m = tp_n_matched ? std::sqrt(tp_ss_m / static_cast<float>(tp_n_matched)) : 0.f;
+        const float tp_c2_m  = tp_n_matched ? tp_chi2_m / (2.f * static_cast<float>(tp_n_matched)) : 0.f;
+
         if (not image_edge_csv_.is_open())
         {
             image_edge_csv_.open(params.image_edge_csv, std::ios::out | std::ios::trunc);
@@ -4345,6 +4374,8 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
                     // under what MOTION? exposure smear scales with omega and is NOT modelled;
                     // ego-motion over the image-lidar offset IS (nuisance column [3]).
                        "omega,speed,"
+                    // the DRIVING term (useTriplePoints), separately from the sample path above
+                       "tp_n,tp_r_rms_px,tp_chi2_per_dof,tp_n_matched,tp_r_rms_matched,tp_chi2_matched,tp_occluded,"
                     // who won?
                        "dpose_valid,dpose_x,dpose_y,dpose_th,"
                     // is the mount calibrated?
@@ -4376,6 +4407,8 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
                 << ',' << loss_img
                 << ',' << obs.body_twist.z()
                 << ',' << std::hypot(obs.body_twist.x(), obs.body_twist.y())
+                << ',' << tp_n << ',' << tp_rms << ',' << tp_c2
+                << ',' << tp_n_matched << ',' << tp_rms_m << ',' << tp_c2_m << ',' << tp_occl
                 << ',' << (probe_pose ? 1 : 0) << ',' << dx << ',' << dy << ',' << dth
                 << ',' << b_const << ',' << se_const << ',' << b_invd << ',' << se_invd
                 << ',' << (obs.cam.fy > 0.f ? b_const / obs.cam.fy : 0.f) << ',' << b_invd
