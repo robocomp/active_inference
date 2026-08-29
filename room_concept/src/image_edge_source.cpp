@@ -63,6 +63,7 @@ ImageEdgeObs ImageEdgeSource::extract(const GrayFrame& frame,
                                       Stats* stats) const
 {
     ImageEdgeObs obs;
+    obs.body_twist = body_twist;   // carried out for the consumers' motion analysis
     obs.frame_stamp   = frame.stamp;
     obs.dt_to_slot_ms = dt_ms;
     obs.sigma_i       = frame.sigma_i;

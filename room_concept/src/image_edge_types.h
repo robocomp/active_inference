@@ -204,6 +204,12 @@ namespace rc
     {
         std::vector<ImageEdgeSegment> segments;
         std::vector<TriplePoint>      triple_points;
+        /// The body twist [vx, vy, omega] this extraction ran under, carried out so a consumer can
+        /// ask whether the term degrades with motion. Ego-motion over the image↔LiDAR offset is
+        /// ALREADY modelled as nuisance column [3] — a variance, never a gate. What is NOT modelled
+        /// is smear during the EXPOSURE itself, which scales with omega and not with that offset,
+        /// and this is the covariate that would show it.
+        Eigen::Vector3f               body_twist = Eigen::Vector3f::Zero();
         std::int64_t                  depth_stamp_ms = 0;  ///< capture time of the depth frame used
         std::uint64_t frame_stamp = 0;      ///< image capture stamp (ms)
         std::int64_t  dt_to_slot_ms = 0;    ///< image stamp - slot stamp; feeds nuisance column [3]

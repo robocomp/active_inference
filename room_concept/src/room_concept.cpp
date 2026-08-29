@@ -2424,7 +2424,16 @@ namespace rc
             // The MOUNT monitor runs on early-exit cycles too — pass 1 only, no second solve. This
             // is where ~99.75% of cycles end, so leaving it below the return starved the instrument
             // exactly in proportion to how good the prediction had become.
-            if (params.image_edge.enable and params.image_edge_shadow and not params.image_edge.drive)
+            // ── The ROW is written whenever the term runs; only the PROBE needs drive off ─────
+            // ★ These two were one gate until 2026-08-29, so turning drive ON silently stopped
+            //   etc/image_edge.csv — chi2_per_dof, r_rms_px, sum_gamma, n_used, info_ratio, every
+            //   number that says whether the term is healthy — in exactly the arm where the term is
+            //   actually steering the pose. A channel that logs its fit quality only while it cannot
+            //   affect anything is instrumented backwards.
+            // The twice-solve probe (dpose_*) genuinely does need drive off: with drive on the term
+            // is already in the authority solve, so the "with/without" comparison has nothing left
+            // to compare against and those columns are written zero.
+            if (params.image_edge.enable and params.image_edge_shadow)
                 run_image_edge_shadow(read_window_poses(), boundary_weight_now(), lidar.second,
                                       /*probe_pose=*/false);
             return *early;
@@ -2469,9 +2478,9 @@ namespace rc
 
             // RGB edge shadow: evaluated + logged, pose untouched. Inert unless enable && shadow,
             // and skipped entirely once the term is DRIVING (there would be nothing to compare to).
-            if (params.image_edge.enable and params.image_edge_shadow and not params.image_edge.drive)
+            if (params.image_edge.enable and params.image_edge_shadow)
                 run_image_edge_shadow(read_window_poses(), boundary_weight_now(), lidar.second,
-                                      /*probe_pose=*/true);
+                                      /*probe_pose=*/not params.image_edge.drive);
             res.final_loss     = last_loss;
             res.iterations_used = iterations;
 
@@ -4333,6 +4342,9 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
                     // does it carry information?
                     << "ts_ms,frame_stamp,dt_img_lidar_ms,n_segments,n_used,sum_gamma,sigma_i,"
                        "r_rms_px,chi2_per_dof,trace_raw,trace_eff,info_ratio,loss_img,"
+                    // under what MOTION? exposure smear scales with omega and is NOT modelled;
+                    // ego-motion over the image-lidar offset IS (nuisance column [3]).
+                       "omega,speed,"
                     // who won?
                        "dpose_valid,dpose_x,dpose_y,dpose_th,"
                     // is the mount calibrated?
@@ -4362,6 +4374,8 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
                 << ',' << trace_raw << ',' << trace_eff
                 << ',' << (trace_raw / std::max(1e-9f, trace_eff))
                 << ',' << loss_img
+                << ',' << obs.body_twist.z()
+                << ',' << std::hypot(obs.body_twist.x(), obs.body_twist.y())
                 << ',' << (probe_pose ? 1 : 0) << ',' << dx << ',' << dy << ',' << dth
                 << ',' << b_const << ',' << se_const << ',' << b_invd << ',' << se_invd
                 << ',' << (obs.cam.fy > 0.f ? b_const / obs.cam.fy : 0.f) << ',' << b_invd
