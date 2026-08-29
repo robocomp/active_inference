@@ -1,0 +1,32 @@
+# Proxies for required interfaces
+Proxies.CameraRGBDSimple = "camerargbdsimple:tcp -h localhost -p 0"
+Proxies.Lidar3D = "lidar3d:tcp -h localhost -p 0"
+
+# --- Common Agent Data ---
+Agent.id = 909
+Agent.name = "robot_concept"
+
+# --- Protocol test graph ---
+# This is the first agent to start in the protocol-test setup. It seeds the DSR graph.
+Agent.configFile = "/home/pbustos/robocomp/components/active_inference/robot_concept/shadow.json"
+Agent.domain = 40
+Agent.tree = true
+Agent.graph = true
+Agent.2d = true
+Agent.3d = true
+
+Period.Compute = 100
+Period.Emergency = 500
+
+Yolo.model_path  = "yolo26l-seg.onnx"
+Yolo.conf_thresh = 0.25
+Yolo.iou_thresh  = 0.45
+Yolo.use_gpu     = True
+Yolo.use_trt     = True
+
+Component.Debug.Verbose = true
+
+Ice.Warn.Connections = "0"
+Ice.Trace.Network = "0"
+Ice.Trace.Protocol = "0"
+Ice.MessageSizeMax = "20004800"

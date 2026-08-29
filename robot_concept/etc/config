@@ -1,0 +1,48 @@
+# This property is used by the clients to connect to IceStorm.
+Proxies.TopicManager = "IceStorm/TopicManager:default -p 9999"
+
+# Proxies for required interfaces
+Proxies.Camera360RGB = "camera360rgb:tcp -h localhost -p 0"
+Proxies.Camera360RGBD = "camera360rgbd:tcp -h localhost -p 0"
+Proxies.CameraRGBDSimple = "camerargbdsimple:tcp -h localhost -p 0"
+Proxies.IMU = "imu:tcp -h localhost -p 0"
+Proxies.Lidar3D = "lidar3d:tcp -h localhost -p 0"
+Proxies.MediaPlaneDDS = "mediaplanedds:tcp -h localhost -p 0"
+Proxies.MediaPlaneDDS1 = "mediaplanedds:tcp -h localhost -p 0"
+
+# Endpoints for subscriptions interfaces
+Endpoints.FullPoseEstimationPubTopic = "tcp -p 0"
+Endpoints.FullPoseEstimationPubPrefix = ""
+
+
+# --- Common Agent Data ---
+Agent.id = 0 # Change id
+Agent.name = "robot_concept"
+
+# --- Single Instance Configuration ---
+# Use this if you only have one graph.
+Agent.configFile = ""
+Agent.domain = 0
+Agent.tree = true
+Agent.graph = true
+Agent.2d = true
+Agent.3d = false
+
+# --- Multiple Instance Template ---
+# If you define sub-instances, the single instance config above will be ignored.
+# Agent.instance_name.configFile = ""
+# Agent.instance_name.domain = 1
+# Agent.instance_name.tree = true
+# Agent.instance_name.graph = true
+# Agent.instance_name.2d = true
+# Agent.instance_name.3d = true
+
+Period.Compute = 100
+Period.Emergency = 500
+
+Component.Debug.Verbose = true
+
+Ice.Warn.Connections = "0"
+Ice.Trace.Network = "0"
+Ice.Trace.Protocol = "0"
+Ice.MessageSizeMax = "20004800"

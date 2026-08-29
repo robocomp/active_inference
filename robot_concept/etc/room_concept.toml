@@ -1,0 +1,8 @@
+[Owns]
+# Peer-cleanup descriptor for room_concept, read by THIS agent (robot_concept monitors
+# room_concept with config_dir="etc") when room_concept departs/crashes. STATIC-ROOM phase
+# (room_concept PreserveBootstrapRoom=true): room_concept does NOT own the room — it is a
+# pre-seeded static prior under Shadow — so do NOT delete it here either. Keep in sync with
+# room_concept's real [Owns]. Going dynamic: restore subtrees=["room"], nodes+=afford_room.
+nodes    = ["room_concept 5"]
+#subtrees = []
