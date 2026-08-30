@@ -17,6 +17,7 @@
  *    along with RoboComp.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "specificworker.h"
+#include "../../common/robot_capability/robot_capability.h"
 
 #include "image_edge_ops.h"   // xyz_from_pixel_depth(): model-aware, unlike cortex's pinhole-only version
 #include <locale>
@@ -757,6 +758,10 @@ bool SpecificWorker::maybe_publish_corrected_pose()
             const Eigen::Vector2f c_xy = d_xy - m_xy;
             const float           c_th = std::remainder(d_th - m_th, 2.f * static_cast<float>(M_PI));
 
+            // Take the bound from the robot before using it. Cheap after the first success (one bool),
+            // and placed HERE rather than in initialize() so it cannot silently fall back for the life
+            // of the process because the robot node had not synced yet.
+            apply_base_capability_to_pose_clamp();
             const float max_xy = params.POSE_CLAMP_V_MAX * dt;
             const float max_th = params.POSE_CLAMP_W_MAX * dt;
             const float n_xy = c_xy.norm();
@@ -1082,6 +1087,36 @@ void SpecificWorker::gt_convention_report(float est_th, float gt_th_raw)
         << (Ru > Rd ? "producer sign is INVERTED, local negation is CORRECT"
                     : "producer sign looks RIGHT -- robot_concept may have been fixed; REMOVE the "
                       "local negation in log_ground_truth or every heading comparison inverts");
+}
+
+void SpecificWorker::apply_base_capability_to_pose_clamp()
+{
+    if (pose_clamp_from_capability_ or shutting_down_.load() or not G) return;
+    const auto robots = G->get_nodes_by_type("robot");
+    if (robots.empty()) return;                       // not synced yet: try again next cycle
+    pose_clamp_from_capability_ = true;               // one shot, whatever it finds
+
+    const auto cap = rc::read_base_capability(*G, robots.front().id());
+    if (not cap.any())
+    {
+        std::cout << "[pose-clamp] the robot node publishes no base capability; keeping the configured "
+                     "fallback (v " << params.POSE_CLAMP_V_MAX << " m/s, w " << params.POSE_CLAMP_W_MAX
+                  << " rad/s). Producer: robot_concept + Agent.base_config_file." << std::endl;
+        return;
+    }
+    // Absent stays absent: a field the base did not state leaves the fallback in force. Zero would
+    // pin every correction to zero, which is not a conservative reading of "unknown".
+    const float v_old = params.POSE_CLAMP_V_MAX, w_old = params.POSE_CLAMP_W_MAX;
+    if (cap.max_linear_speed_mps) params.POSE_CLAMP_V_MAX = *cap.max_linear_speed_mps;
+    if (cap.max_rot_speed_rps)    params.POSE_CLAMP_W_MAX = *cap.max_rot_speed_rps;
+    std::cout << "[pose-clamp] bounded by what the ROBOT can do, not by a controller's preference: "
+              << "v " << v_old << " -> " << params.POSE_CLAMP_V_MAX << " m/s, "
+              << "w " << w_old << " -> " << params.POSE_CLAMP_W_MAX << " rad/s "
+              << "(from robot_max_linear_speed / robot_max_rot_speed on '"
+              << robots.front().name() << "')." << std::endl;
+    if (params.POSE_CLAMP_W_MAX <= w_old)
+        std::cout << "[pose-clamp] note: the capability is NOT above the previous value, so this clamp "
+                     "was not the thing limiting the published yaw rate." << std::endl;
 }
 
 void SpecificWorker::log_ground_truth(const rc::RoomConcept::UpdateResult &res)

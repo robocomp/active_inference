@@ -252,8 +252,22 @@ struct RoomConfig
     // MaxRotSpeed (0.9 / 0.75) disagree with what the controller actually commands (0.7 / 0.8) and
     // neither is a superset. These default to the controller's and must be kept tracking it.
     bool  POSE_CLAMP_ENABLED           = true;    // RoomConcept.PoseClampEnabled
-    float POSE_CLAMP_V_MAX             = 0.7f;    // m/s   — controller MaxAdvSpeed
-    float POSE_CLAMP_W_MAX             = 0.8f;    // rad/s — controller MaxRotSpeed
+    // ── THE POSE CLAMP IS BOUNDED BY THE HARDWARE, NOT BY A CONTROLLER'S PREFERENCE ──────────────
+    // ★★★THESE WERE COPIES OF THE CONTROLLER'S MaxAdvSpeed/MaxRotSpeed, and that was the defect: a
+    // COMFORT SETTING became a hard rate limiter on the PUBLISHED yaw. Measured 2026-08-28: the clamp
+    // held the published yaw rate at exactly 0.8 rad/s while the robot turned at 3.5.
+    // ★WHAT ACTUALLY BOUNDS A PLAUSIBLE POSE CORRECTION is what the ROBOT CAN PHYSICALLY DO. The clamp
+    // does not bound motion — it bounds the part of a published delta left over AFTER measured motion
+    // is accounted for, i.e. the part with no dynamical support. A correction implying more rotation
+    // than the hardware can produce in dt is a teleport whatever any consumer's speed preference is.
+    // So these are overwritten at runtime from robot_max_linear_speed / robot_max_rot_speed on the
+    // robot node, which robot_concept publishes from the base component's own config.
+    // ★The values below are the FALLBACK, used when the robot node says nothing — absent means
+    // "unknown, keep what you have", never zero, which would pin every correction to zero.
+    // ⚠They are no longer the controller's numbers and must not be re-synced to them: raising the
+    // controller's MaxRotSpeed is a policy change and must not touch this.
+    float POSE_CLAMP_V_MAX             = 0.7f;    // m/s   — fallback; capability supersedes it
+    float POSE_CLAMP_W_MAX             = 0.8f;    // rad/s — fallback; capability supersedes it
     // Gap beyond which the clamp is skipped entirely (stream restart, agent stall, relocalization after
     // a long silence). Clamping across a long gap would slew the pose in at v_max for many frames.
     float POSE_CLAMP_MAX_DT_S          = 0.5f;    // s

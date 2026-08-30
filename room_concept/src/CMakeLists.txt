@@ -70,6 +70,7 @@ LIST(APPEND LIBS
   ai_common::media        # zero-copy media plane (was 10 spliced IDL paths + an include_directories)
   ai_common::presence     # agent presence monitor + coordinator
   ai_common::affordance   # affordance_manager
+  ai_common::robot        # base CAPABILITY off the robot node — bounds the pose clamp
   ai_common::core         # header-only beliefs/geometry (object_anchor/, occlusion, …)
 )
 

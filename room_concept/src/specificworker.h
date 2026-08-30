@@ -347,6 +347,13 @@ class SpecificWorker : public GenericWorker
         std::ofstream gt_csv_;
         bool          gt_csv_open_attempted_ = false;
         void          log_ground_truth(const rc::RoomConcept::UpdateResult &res);
+        // ── THE POSE CLAMP TAKES ITS BOUND FROM THE ROBOT, ONCE ──────────────────────────────────
+        // Reads robot_max_linear_speed / robot_max_rot_speed off the robot node and installs them as
+        // POSE_CLAMP_V_MAX / POSE_CLAMP_W_MAX. One-shot, and NOT in initialize(): the robot node may
+        // not have synced from the persistent server yet at that point, and a clamp taken from a node
+        // that is not there is silently the config fallback for the life of the process.
+        void          apply_base_capability_to_pose_clamp();
+        bool          pose_clamp_from_capability_ = false;
 
         // RT publish-rate monitor (shown in the window title at ~1 Hz so it can be watched visually).
         int          rt_corr_count_           = 0;   // corrected RT publishes this window
