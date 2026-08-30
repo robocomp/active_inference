@@ -2398,18 +2398,6 @@ rc::RouteFollower::FreeFn ControllerSession::route_free_fn()
 // waypoint arc lengths and the band's frozen prefix are all defined on it, and slicing what the
 // CONTROLLER drives is a different and much larger change (it is the same change as building one lap
 // at a time, which would also fix the build cost). This slices the mirror, not the thing.
-ControllerPolygon ControllerSession::current_lap_path() const
-{
-    // ★THE SLICING IS GONE BECAUSE THE ROUTE IS NOW ONE LAP. This used to cut the drawn path down to the
-    // lap the robot was on, because RouteFollower::build laid the tour down once per lap and path()
-    // returned every one of them — six near-copies drawn on top of each other, which is what "two paths
-    // on the canvas" was. Laps are restarts of a single curve now, so the whole curve IS the current
-    // lap and there is nothing to select. Kept as a named function rather than inlined at both call
-    // sites: it is the place that answers "what should the canvas show", and if a route ever holds more
-    // than one lap again this is where that has to be handled.
-    return route_.path();
-}
-
 void ControllerSession::on_route_reauthored(const char *event, float window_m,
                                            rc::TrajectoryController &path_controller,
                                            std::uint64_t now_ms)
@@ -2560,7 +2548,7 @@ bool ControllerSession::drive_mission_route(const ControllerPlanningStep &step,
         // is ended by arc length below (route_.finished()), which knows the difference between not
         // yet departed and returned — so that is the only arrival test left running here.
         path_controller.set_endpoint_arrival(false);
-        current_plan_ = ControllerPathPlan{.room_path = current_lap_path()};
+        current_plan_ = ControllerPathPlan{.room_path = route_.path()};
     }
     return true;
 }
@@ -4039,8 +4027,13 @@ void ControllerSession::step_route_band(const DrivenCurve &curve,
     // prefix is frozen, so arc length behind the robot is unchanged and progress()/waypoint arc lengths
     // still mean what they did.
     const auto &deformed = *curve.samples;
-    path_controller.update_path_geometry(deformed);   // the FOLLOWER gets every lap, as it always did
-    current_plan_ = ControllerPathPlan{.room_path = current_lap_path()};   // the CANVAS gets one
+    // ★THE CURVE BEING DRIVEN, WHICH IS NOT ALWAYS THE MISSION'S. step_route_band serves BOTH a
+    // mission route and a clicked/affordance point plan — `on_mission` above is exactly that
+    // distinction — and `deformed` is whichever one this cycle actually deformed. Publishing
+    // route_.path() here instead put the MISSION's route on the canvas while the robot drove to a
+    // clicked target, so a far-away click showed the old tour rather than the route to the click.
+    path_controller.update_path_geometry(deformed);
+    current_plan_ = ControllerPathPlan{.room_path = deformed};
 }
 
 void ControllerSession::ensure_band_csv(bool band_enabled)

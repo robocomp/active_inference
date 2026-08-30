@@ -849,9 +849,6 @@ private:
         [[nodiscard]] bool on_mission() const { return owner == DriveOwner::MissionRoute; }
     };
     [[nodiscard]] DrivenCurve driven_curve() const;
-    // The samples of the lap the robot is currently on. DISPLAY ONLY — see the .cpp for why the route
-    // contains every lap concatenated and why the follower must keep it that way.
-    [[nodiscard]] ControllerPolygon current_lap_path() const;
 
     void step_route_band(const DrivenCurve &curve, const ControllerRobotPose &robot_pose, rc::TrajectoryController &path_controller);
     // Truncate band_diag.csv for THIS run, whether or not the band is enabled. Called before any early
