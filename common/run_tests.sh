@@ -4,8 +4,9 @@
 #
 # ★They are STANDALONE ON PURPOSE, and that carries one trap worth knowing: a harness has no Qt, so it never
 # calls setlocale(LC_ALL, "") and stays in the "C" locale. Any test that PARSES a data file must add that call
-# itself or it answers a different question than the agent does (see CLAUDE.md, locale section). None of the
-# tests here read files; if you add one that does, add the setlocale.
+# itself or it answers a different question than the agent does (see CLAUDE.md, locale section).
+# place_memory/place_map_test.cpp is the one test that PARSES A FILE, and it sets the locale itself
+# (es_ES.UTF-8, falling back to ""). Any new file-reading test must do the same.
 set -u
 cd "$(dirname "$0")" || exit 1
 EIGEN=$(pkg-config --cflags eigen3 2>/dev/null || echo -I/usr/include/eigen3)

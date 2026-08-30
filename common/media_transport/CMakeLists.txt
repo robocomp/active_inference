@@ -37,3 +37,14 @@ add_executable(descriptor_roundtrip
 )
 target_include_directories(descriptor_roundtrip PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(descriptor_roundtrip PRIVATE fastdds fastcdr)
+
+# Beam-geometry probe: reads one frame off a lidar plane and prints the elevation span,
+# the layer step, and the mean elevation PER AZIMUTH SECTOR — the measurement that tells a
+# tilted FAN (pitch, flat across sectors) from a tilted SWEEP PLANE (roll, sinusoidal).
+add_executable(lidar_probe
+  bench/lidar_probe.cpp
+  media_transport.cpp
+  ${AI_COMMON_IDL_SOURCES}
+)
+target_include_directories(lidar_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(lidar_probe PRIVATE fastdds fastcdr)
