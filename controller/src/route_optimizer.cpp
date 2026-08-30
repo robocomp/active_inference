@@ -10,6 +10,9 @@
 #include <cstdio>
 #include <limits>
 
+#include <Eigen/Sparse>
+#include <Eigen/SparseCholesky>
+
 namespace rc
 {
 
@@ -128,9 +131,20 @@ struct Problem
     // Row ranges per term, so a solve can be split into WHICH term is paying. A total tells you nothing
     // about whether a bounded term is being swamped by an unbounded one.
     int row_bend = 0, row_jerk = 0, row_clear = 0, row_anchor = 0, row_gauge = 0;
-    // Residual rows and the sparse-by-construction Jacobian, held dense: at ~600 rows x ~180 columns the
-    // dense normal equations are ~180^3/3 flops, i.e. microseconds. Banded storage would be faster and
-    // considerably easier to get wrong, and this runs once per route build.
+    // Residual rows and the sparse-by-construction Jacobian. ASSEMBLED dense — that part is O(rows*cols)
+    // and stays honest — but the NORMAL EQUATIONS are formed and solved SPARSELY (see the solve).
+    //
+    // ★THIS COMMENT USED TO SAY the dense normal equations were "~180^3/3 flops, i.e. microseconds", and
+    // that was true at the size it was written for: ONE lap, ~180 columns. The premise is the number of
+    // control points, and a multi-lap tour multiplies it — a 6-lap route has 795. J^T J is O(rows*cols^2)
+    // and a dense LDLT is O(cols^3), so (795/180)^3 = 86x per inner solve, up to 8 inner solves per
+    // iteration, 30 iterations. MEASURED end to end on the real 6-lap tour: 0.16 s at 1 lap and 7.94 s at
+    // 6 — 50x the work for 6x the route, O(n^2.2) — and it runs ON THE CONTROL THREAD, so the loop was
+    // dead for seconds, the lidar was never drained, and the media plane's reliable readers backed up
+    // until the producer stopped publishing to the whole fleet.
+    // ★The Jacobian was ALWAYS sparse by construction: a cubic B-spline residual touches at most four
+    // consecutive control points, so every row has at most 8 non-zeros whatever the route length. Only
+    // the storage claimed otherwise.
     Eigen::VectorXf r;
     Eigen::MatrixXf J;
 };
@@ -508,17 +522,44 @@ RouteOptimizerReport optimize_route(std::vector<Eigen::Vector2f> &ctrl, const Ro
     int it = 0;
     for (; it < cfg.iterations; ++it)
     {
-        const Eigen::MatrixXf H = pr.J.transpose() * pr.J;
-        const Eigen::VectorXf g = pr.J.transpose() * pr.r;
+        // ── THE NORMAL EQUATIONS, SPARSELY ───────────────────────────────────────────────────────
+        // Same maths as the dense form it replaces, same LM damping, same acceptance test — only the
+        // storage and the factorisation change. sparseView() with the default reference of 0 drops
+        // EXACTLY the structural zeros and keeps every other value, so this is lossless rather than a
+        // thresholded approximation.
+        const Eigen::SparseMatrix<float> Js = pr.J.sparseView();
+        const Eigen::SparseMatrix<float> H = (Js.transpose() * Js).pruned();
+        const Eigen::VectorXf g = Js.transpose() * pr.r;
         if (g.norm() < 1e-7f) break;
+        // Held once: the damping reads H's diagonal, and A is rebuilt from H every inner iteration.
+        const Eigen::VectorXf h_diag = H.diagonal();
+        const int n_var = static_cast<int>(H.rows());
 
         bool accepted = false;
         for (int inner = 0; inner < 8 and not accepted; ++inner)
         {
-            Eigen::MatrixXf A = H;
-            A.diagonal() += mu * H.diagonal().cwiseMax(1e-9f);
-            const Eigen::VectorXf step = A.ldlt().solve(-g);
-            if (not step.allFinite()) { mu *= 4.f; continue; }
+            // A = H + mu * max(diag(H), 1e-9) on the diagonal — the dense line was
+            // `A.diagonal() += mu * H.diagonal().cwiseMax(1e-9f)`, and this is that, spelled out
+            // because a sparse matrix's diagonal is not assignable in place.
+            Eigen::SparseMatrix<float> D(n_var, n_var);
+            D.reserve(Eigen::VectorXi::Constant(n_var, 1));
+            for (int i = 0; i < n_var; ++i)
+                D.insert(i, i) = mu * std::max(h_diag(i), 1e-9f);
+            D.makeCompressed();
+            const Eigen::SparseMatrix<float> A = H + D;
+
+            // ★SimplicialLDLT, not a hand-rolled banded Cholesky. The previous comment was right that
+            // banded storage is "considerably easier to get wrong"; a sparse Cholesky gets the same
+            // asymptotics from a tested implementation, and its fill-reducing ordering handles the
+            // anchor and gauge rows that are NOT banded without any special case.
+            Eigen::SimplicialLDLT<Eigen::SparseMatrix<float>> solver;
+            solver.compute(A);
+            // A failed factorisation is treated exactly as a non-finite step was: shrink the trust
+            // region and try again. With LM damping on a Gauss-Newton H this should not happen, and if
+            // it does the answer is more damping, not a different solver.
+            if (solver.info() != Eigen::Success) { mu *= 4.f; continue; }
+            const Eigen::VectorXf step = solver.solve(-g);
+            if (solver.info() != Eigen::Success or not step.allFinite()) { mu *= 4.f; continue; }
 
             auto trial = ctrl;
             for (std::size_t i = lo; i <= hi; ++i)
