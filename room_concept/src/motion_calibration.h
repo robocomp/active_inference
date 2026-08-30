@@ -318,11 +318,31 @@ namespace rc::calib
             // in the episode carries it, and without it the two are collinear whenever the robot
             // turns at a steady rate -- which is most of the time.
             if (std::isfinite(dt) and dt > 0.f) acc_dur_ += dt;
-            // Worst fit seen in the episode, not the mean: one bad frame is enough to make the whole
-            // accumulated correction untrustworthy, and averaging would let a long clean ramp hide it.
-            if (std::isfinite(fit_residual)) acc_fit_ = std::max(acc_fit_, fit_residual);
             if (corrected)
             {
+                // ── THE FIT THAT PRODUCED A CORRECTION, NOT THE DRIFT THAT PRECEDED IT ───────────
+                // Worst fit seen, not the mean: one bad frame is enough to make the whole
+                // accumulated correction untrustworthy, and averaging would let a long clean ramp
+                // hide it. That rationale is about the fits that ACTUALLY RAN, and this used to be
+                // accumulated on every cycle, corrected or not.
+                //
+                // ★ ON AN EARLY-EXIT CYCLE THE RESIDUAL IS NOT A FIT QUALITY -- IT IS THE
+                //   ACCUMULATED DRIFT, which is to say the SIZE OF THE VERY ERROR THE PARAMETERS
+                //   EXIST TO EXPLAIN. Taking the max across the whole episode therefore made R grow
+                //   with the response rather than with any measure of trustworthiness, so the
+                //   episodes carrying the largest true errors were believed least. That is selection
+                //   on the outcome, performed by the weights, and it attenuates the fitted slope the
+                //   way a regression weighted by |y| would. Measured 2026-08-30 on the live window:
+                //   corr(|r_forward|, pos_var) = +0.317, and an unweighted refit of the same 415
+                //   episodes moved the slope 16% further from nominal than the weighted one.
+                //
+                // ⚠ Same term, second inversion. It was added on 2026-08-23 to distrust bad fits;
+                //   it had already been found trusting UNMEASURED episodes most (an early-exit
+                //   cycle has a small residual by definition, so a span with no correction in it
+                //   drew the tightest variance in the window). Both failures come from reading a
+                //   number that means "how far off was the prediction" as though it meant "how good
+                //   was the fit". They are the same number only on a cycle where a fit happened.
+                if (std::isfinite(fit_residual)) acc_fit_ = std::max(acc_fit_, fit_residual);
                 acc_r_fwd_ += r_forward; acc_r_lat_ += r_lateral; acc_r_th_ += r_theta;
                 acc_pos_var_ = std::max(acc_pos_var_, pos_var);
                 acc_th_var_  = std::max(acc_th_var_,  theta_var);
