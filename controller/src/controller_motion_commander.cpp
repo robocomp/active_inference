@@ -287,7 +287,7 @@ void ControllerMotionCommander::set_output_enabled(bool enabled)
         // cannot be left holding the last non-zero value if one packet is dropped. After the burst the
         // loop goes quiet and stays quiet until this is re-armed.
         pending_.stop_requested = true;
-        quiet_burst_left_ = 5;        // 5 ticks at 20 Hz = 250 ms of "definitely stop"
+        quiet_burst_left_ = kQuietBurstTicks;   // see the constant: 250 ms of "definitely stop"
         applied_adv_ = applied_side_ = applied_rot_ = 0.f;
     }
 }
@@ -320,6 +320,7 @@ void ControllerMotionCommander::output_loop(std::stop_token stop)
 
         PendingCommand cmd;
         bool armed = true;
+        bool went_quiet = false;
         {
             const std::scoped_lock lock(mutex_);
             cmd = pending_;
@@ -330,7 +331,40 @@ void ControllerMotionCommander::output_loop(std::stop_token stop)
                 if (quiet_burst_left_ > 0) --quiet_burst_left_;
                 else armed = false;
             }
+            // IDLE: the controller is holding the robot rather than driving it. Same treatment, and for
+            // the same reason — deliver a definite stop, then hand the base back to whoever else wants
+            // it (the joystick). See the long note on idle_quiet_left_ in the header.
+            else if (cmd.stop_requested)
+            {
+                // ★NOT UNTIL THE ROBOT IS ACTUALLY AT REST. The burst counts ticks, but the slew limiter
+                // needs however many ticks the decel limit takes to bring the last speed to zero — at
+                // 0.7 m/s and 3.0 m/s^2 over a 50 ms tick that is 5 ticks, i.e. the burst only just
+                // covers it, and a lower decel or a longer period would not. Going silent one tick early
+                // would leave the base holding a NON-ZERO velocity with nobody talking to it: the robot
+                // would drive away, quietly, which is the worst possible failure of a stop.
+                // The test is exact, not an epsilon: slew() clamps to the target, so once the target is
+                // zero the applied value becomes exactly zero rather than approaching it.
+                const bool at_rest = applied_adv_ == 0.f and applied_side_ == 0.f and applied_rot_ == 0.f;
+                if (not at_rest)
+                    idle_quiet_left_ = kQuietBurstTicks;   // still braking: keep talking, restart the count
+                else if (idle_quiet_left_ > 0)
+                {
+                    --idle_quiet_left_;
+                    went_quiet = (idle_quiet_left_ == 0) and not idle_quiet_notice_given_;
+                    if (went_quiet) idle_quiet_notice_given_ = true;
+                }
+                else armed = false;
+            }
+            else
+            {
+                // Driving again. Re-arm the burst so the NEXT stop is delivered just as firmly.
+                idle_quiet_left_ = kQuietBurstTicks;
+                idle_quiet_notice_given_ = false;
+            }
         }
+        if (went_quiet)
+            std::println("[vel-out] idle — stop delivered, releasing the base. No commands will be sent "
+                         "until the controller drives again (the joystick has the base now).");
         if (not armed) continue;
 
         float adv = 0.f, side = 0.f, rot = 0.f, scale = 1.f, age_ms = 0.f;

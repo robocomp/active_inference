@@ -151,7 +151,39 @@ private:
     mutable std::mutex mutex_;
     bool output_enabled_ = true;      // false ⇒ the loop stays silent (see set_output_enabled)
     bool disarmed_notice_given_ = false;   // the "commands are being discarded" line, once per disarm
+    // How many explicit zeros go out before the loop goes quiet. Long enough that a dropped packet
+    // cannot leave the base holding the last non-zero value; short enough to hand the bus back fast.
+    static constexpr int kQuietBurstTicks = 5;   // 5 ticks at 20 Hz = 250 ms of "definitely stop"
     int  quiet_burst_left_ = 0;       // zero commands still to send before going silent
+
+    // ── WHEN THERE IS NOTHING TO DRIVE, LET GO OF THE BASE ────────────────────────────────────────
+    // ★★★THE DEFECT. The loop sent setSpeedBase EVERY tick "unchanged or not", which is right while
+    // driving and wrong the moment the controller has nothing to say: after a tour completes, after an
+    // affordance finishes, during the post-affordance dwell, while waiting for a pose or a room
+    // polygon, and before Run is ever pressed. In all of those the controller was streaming
+    // setSpeedBase(0,0,0) at 20 Hz for ever, which is not harmless — it is a second writer on the
+    // base, and it BLOCKS THE JOYSTICK. Stop already knew this ("the output loop otherwise keeps
+    // sending setSpeedBase(0,0,0) at 20 Hz forever, which is right under control and wrong after the
+    // user has said stop" -- specificworker.cpp) and disarmed explicitly; the same reasoning was
+    // simply never applied to the controller finishing on its own.
+    //
+    // ★THE CONDITION IS THE COMMAND, NOT A MAGNITUDE. `stop_requested` is a latched STATEMENT that
+    // the controller is holding the robot, and every idle path already sets it: the halt branch calls
+    // stop_robot(), and all three of build_planning_step's nullopt returns call
+    // ControllerSession::stop() — including "idle — no eligible affordance". So no |v| < eps test is
+    // needed, and none is wanted: a freshness-decayed command coasts asymptotically toward zero
+    // without ever reaching it, so a magnitude test would either cut that coast short or never fire.
+    // PendingCommand::stop_requested also defaults TRUE, so a freshly constructed commander is quiet
+    // from the start rather than hogging the base before Run.
+    //
+    // ★IT COSTS NOTHING TO RESUME. The tick still happens; only the RPC is skipped. send_speed_command
+    // clears stop_requested, so motion resumes on the very next tick (<= one output period).
+    //
+    // ★SILENCE IS EQUIVALENT TO ZERO, once the burst has landed. The base is a velocity servo holding
+    // the last command — which is zero — so ceasing to repeat it changes nothing about the robot and
+    // everything about who else can talk to it.
+    int  idle_quiet_left_ = kQuietBurstTicks;
+    bool idle_quiet_notice_given_ = false;   // said once per idle episode, not per tick
     std::condition_variable_any cv_;
     PendingCommand pending_;
     // Last values actually sent to the base — the state the slew limiter integrates from. Output-thread only.
