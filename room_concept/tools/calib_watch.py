@@ -15,14 +15,14 @@ with open(p) as f:
     for r in csv.DictReader(f):
         try: rows.append({k: float(v) for k, v in r.items()})
         except ValueError: pass
-need = ['ts_ms','iters','dy_local','dx_local','imu_dtheta','wheel_dtheta',
+need = ['ts_ms','iters','dy_local','dx_local','imu_dtheta','wheel_dtheta','gt_x','gt_y',
         'calib_k_v','calib_k_w','calib_yaw','calib_eps','sdf_mse','est_x','est_y','est_theta',
         'pred_x','pred_y','pred_theta']
 missing = [k for k in need if k not in rows[0]]
 if missing:
     sys.exit(f"missing columns {missing} — this CSV predates the calibrator")
 d = np.array([[r[k] for k in need] for r in rows])
-ts,it,dyl,dxl,imu,wh,kv,kw,yaw,eps,mse,ex,ey,eth,px,py,pth = d.T
+ts,it,dyl,dxl,imu,wh,gx,gy,kv,kw,yaw,eps,mse,ex,ey,eth,px,py,pth = d.T
 t = (ts - ts[0]) / 1000.0
 print(f"{len(t)} rows, {t[-1]:.0f} s   optimizer cycles {(it>0).sum()}   episodes closed {int(eps.max())}")
 if eps.max() == 0:
@@ -60,7 +60,14 @@ print(f"\nFINAL  k_v {kv[-1]:.5f} ({(kv[-1]-1)*100:+.2f}%)   k_w {kw[-1]:.5f} ({
 # A p50 of the error is the wrong statistic: it is dominated by parked cycles, where the predictor
 # predicts nothing and therefore always looks accurate.
 dt = np.diff(t, prepend=t[0])
-dist = np.abs(dyl)
+# ★ DISTANCE MUST COME FROM GROUND TRUTH, NOT FROM sum|dy_local|. With synthetic wheel noise on
+# (SensorNoise.WheelSigmaV), a PARKED robot accumulates |dy_local| indefinitely: measured 2026-08-24,
+# a run that was 99.3% stationary by GT reported 74.9 m of "distance", 68.9 m of which (92%) was
+# noise. Every per-metre figure derived from it was inflated ~12x in the flattering direction --
+# opt/m read 0.42 when the true value was 21.09. On hardware, use the localiser's own corrected path.
+_chg = np.r_[True, (np.diff(gx) != 0) | (np.diff(gy) != 0)]
+_GX = np.interp(t, t[_chg], gx[_chg]); _GY = np.interp(t, t[_chg], gy[_chg])
+dist = np.r_[0, np.hypot(np.diff(_GX), np.diff(_GY))]
 tot_d = dist.sum()
 if tot_d > 1.0:
     # PER WINDOW, never halves. A single pathological burst (the optimizer pinned near 100% for a
