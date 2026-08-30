@@ -793,10 +793,20 @@ void MissionRunner::stop(const std::string &reason, std::uint64_t now_ms)
                 active_.name.c_str(), reason.c_str(), s2.laps_completed, loops_,
                 s2.progress_m, s2.route_length_m, s2.duration_s,
                 s2.cross_track_rms_m, s2.cross_track_max_m, s2.heading_err_rms_rad,
+                // ★★★THIS LIST WAS IN write_csv()'s FIELD ORDER, NOT THE FORMAT STRING'S, and the two
+                // diverge from the 16th argument on. Every number after `d2v` was therefore printed in
+                // the wrong slot, and three floats landed on `%d` — undefined behaviour, which is where
+                // the `-1073741824 replans` came from. It was not a corrupt counter; it was
+                // lat_accel_max reinterpreted as an int.
+                // ★WHAT IT COST: the console reported `clearance 23.220 min / 24.087 p05` — those were
+                // dev_norm and mission_cost — while the ACTUAL clearance, 0.059 m / 0.079 m, was printed
+                // one line lower labelled `lap-to-lap`. The one line a person reads to decide whether a
+                // run was safe was reporting 23 m of room where the robot had SIX CENTIMETRES.
+                // ★write_csv() and write_run_json() name their fields and were always correct, so the
+                // recorded data is sound and only the console lied. That is the worse failure mode, not
+                // the better one: the numbers a person acts on live-came from the broken path.
                 s2.rot_effort_rad, s2.rot_reversals, s2.lin_accel_effort, s2.lin_accel_max,
-                s2.lin_jerk_effort,
-                s2.rot_accel_effort, s2.smooth_lin, s2.smooth_rot, s2.dev_norm, s2.mission_cost,
-                s2.lin_jerk_max, s2.lat_accel_rms, s2.lat_accel_max,
+                s2.lin_jerk_effort, s2.lin_jerk_max, s2.lat_accel_rms, s2.lat_accel_max,
                 s2.min_clearance_m, s2.p05_clearance_m,
                 s2.safety_guard_cycles, s2.escapes, s2.replans,
                 s2.lap_repeat_mean_m, s2.lap_repeat_max_m,
