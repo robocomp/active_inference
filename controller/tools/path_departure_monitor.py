@@ -81,6 +81,42 @@ def parse_args():
     p.add_argument("--once", action="store_true", help="analyse what is already in the file, then exit")
     return p.parse_args()
 
+def archive(path):
+    """Copy the log aside before the controller's next run overwrites it.
+
+    ★THE CONTROLLER TRUNCATES tracker_diag.csv AT STARTUP, so a run's per-cycle record is destroyed
+    the moment the next run begins — measured the hard way: a completed 9-lap run's data was gone
+    before it could be read, and its numbers survive only in whatever was printed at the time. The
+    per-run artefacts under etc/runs/ persist, but the per-cycle log does not, and that is the one a
+    lap-by-lap comparison needs. So the monitor, which is watching anyway and sees the rotation,
+    keeps a copy.
+    ★Named by the FIRST timestamp in the file, not by the wall clock at rotation: that identifies the
+    run rather than the moment it was noticed, so two archives can never claim the same name and none
+    of them is off by however long the monitor took to see it.
+    """
+    import shutil
+    try:
+        if not os.path.exists(path) or os.path.getsize(path) < 200: return None
+        stamp = None
+        with open(path, errors="replace") as f:
+            for ln in f:
+                if ln.startswith("#") or ln.startswith("t_ms"): continue
+                try:
+                    stamp = time.strftime("%Y%m%d-%H%M%S",
+                                          time.localtime(float(ln.split(",")[0]) / 1000.0))
+                except Exception: pass
+                break
+        stamp = stamp or time.strftime("%Y%m%d-%H%M%S")
+        base, ext = os.path.splitext(os.path.basename(path))
+        out = os.path.join("runs_archive", f"{base}_{stamp}{ext}")
+        os.makedirs("runs_archive", exist_ok=True)
+        if os.path.exists(out): return None            # already kept this run
+        shutil.copy2(path, out)
+        return out
+    except Exception as e:
+        print(f"[monitor] could not archive {path}: {e}", flush=True)
+        return None
+
 def follow(path, once):
     """Yield rows, tolerating a controller restart that truncates or replaces the file."""
     f = None; ino = None; hdr = None
@@ -91,6 +127,11 @@ def follow(path, once):
             if once: return
             time.sleep(0.5); continue
         if f is None or st.st_ino != ino or f.tell() > st.st_size:
+            # Keep the OUTGOING run before letting go of it. On the very first open there is nothing
+            # outgoing yet — but the file on disk may still be a previous run nobody archived, so it
+            # is copied too; the name is taken from its own first timestamp, so this cannot mislabel.
+            kept = archive(path)
+            if kept: print(f"[monitor] kept the previous run's log -> {kept}", flush=True)
             if f: f.close()
             first = f is None and ino is None
             f = open(path, "r", errors="replace"); ino = st.st_ino; hdr = None
