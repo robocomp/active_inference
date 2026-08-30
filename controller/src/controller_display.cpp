@@ -428,7 +428,13 @@ void ControllerDisplay::present()
         viewer_2d_->draw_mission(snap.mission_waypoints, snap.mission_index, snap.mission_view.recording,
                                  // Draggable whenever nothing is being measured: editing the route under a
                                  // running mission would invalidate the run without saying so.
-                                 not snap.mission_view.running);
+                                 not snap.mission_view.running,
+                                 // ONE path at a time: a real route suppresses the straight dotted links
+                                 // between waypoints, which are only a stand-in for one. Read from the same
+                                 // snapshot field draw_path() is about to draw, so the two cannot disagree
+                                 // about whether a route exists.
+                                 snap.current_plan.has_value()
+                                     and not snap.current_plan->room_path.empty());
     // Mission status rides in the WINDOW TITLE. As a stretchy label in the mission row it forced the whole
     // window wider than the 2D view needs; the title bar is free real estate and always visible.
     // Control rate rides here too. It is the number that says whether the loop is keeping its deadline,

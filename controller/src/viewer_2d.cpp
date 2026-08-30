@@ -728,8 +728,11 @@ void Viewer2D::clear_mission_items()
 }
 
 void Viewer2D::draw_mission(const std::vector<Eigen::Vector2f> &waypoints, int current_index, bool recording,
-                            bool draggable)
+                            bool draggable, bool route_visible)
 {
+    // Held rather than passed down, because render_mission() is also called mid-drag from the event
+    // filter, where there is no frame to ask.
+    route_visible_ = route_visible;
     // A drag in flight OWNS the waypoint positions. present() redraws every cycle from the control thread's
     // snapshot, which cannot yet contain the point being dragged — rendering that snapshot mid-drag snapped
     // the marker back to its old place between mouse moves, which is what made dragging feel like it only
@@ -754,15 +757,19 @@ void Viewer2D::render_mission()
     // the view means "append a waypoint" in one and "drive there now" in the other.
     const QColor base = mission_recording_ ? QColor(142, 68, 173) : QColor(22, 160, 133);
 
-    QPen link_pen(base.lighter(120), 0.03);
-    link_pen.setCosmetic(false);
-    link_pen.setStyle(Qt::DotLine);
-    for (std::size_t i = 0; i + 1 < mission_wps_.size(); ++i)
+    // The links stand in for a route; a route replaces them. See route_visible_ in the header.
+    if (not route_visible_)
     {
-        auto *line = agv_->scene.addLine(mission_wps_[i].x(), mission_wps_[i].y(),
-                                         mission_wps_[i + 1].x(), mission_wps_[i + 1].y(), link_pen);
-        line->setZValue(17);
-        mission_items_.push_back(line);
+        QPen link_pen(base.lighter(120), 0.03);
+        link_pen.setCosmetic(false);
+        link_pen.setStyle(Qt::DotLine);
+        for (std::size_t i = 0; i + 1 < mission_wps_.size(); ++i)
+        {
+            auto *line = agv_->scene.addLine(mission_wps_[i].x(), mission_wps_[i].y(),
+                                             mission_wps_[i + 1].x(), mission_wps_[i + 1].y(), link_pen);
+            line->setZValue(17);
+            mission_items_.push_back(line);
+        }
     }
 
     constexpr float radius = 0.10f;

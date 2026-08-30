@@ -63,8 +63,10 @@ class Viewer2D : public QObject
     void clear_path_items();
     // Mission waypoints: numbered markers plus the tour's own connecting line, so a recorded route is
     // visible while you record it and its progress is visible while it runs.
+    // `route_visible` says a real route is being drawn this frame. When it is, the straight dotted
+    // links between waypoints are NOT drawn — see render_mission().
     void draw_mission(const std::vector<Eigen::Vector2f> &waypoints, int current_index, bool recording,
-                      bool draggable);
+                      bool draggable, bool route_visible);
     void clear_mission_items();
     void clear_robot_trajectory();
     void update_target_marker(float x, float y, bool visible);
@@ -106,6 +108,16 @@ private:
     // base viewer turns the press into a pan.
     std::vector<Eigen::Vector2f> mission_wps_;
     bool mission_draggable_ = false;
+    // ── ONE PATH ON THE CANVAS ───────────────────────────────────────────────────────────────────
+    // The dotted links between waypoints are a STAND-IN for a route that does not exist yet: they say
+    // "the tour goes A to B to C" when nothing has planned how. Once a real route is on the canvas they
+    // are a SECOND, WRONG picture of the same journey — the straight-line shape the tour was authored
+    // as, drawn underneath the curve actually being driven, which reads as the un-optimised path left
+    // behind the optimised one. So they are drawn only while there is no route to replace them, which
+    // is exactly while recording or before a run. The waypoint DOTS always stay: they are the tour's
+    // structure, they carry the current-waypoint highlight, and they are what a drag, an insert or a
+    // remove aims at.
+    bool route_visible_ = false;
     int  mission_index_ = -1;
     bool mission_recording_ = false;
     int  drag_index_ = -1;
