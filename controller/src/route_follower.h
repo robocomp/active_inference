@@ -194,15 +194,14 @@ public:
     bool rewound() { const bool r = rewound_; rewound_ = false; return r; }
     int laps_done() const
     {
-        // laps_done_ is authoritative now; the arc-length reasoning below only survives as the
-        // end-of-run allowance, because finished() may end a run with finish_tol_m still nominally left.
         if (laps_done_ >= laps_) return laps_;
-        // The route ENDS at its last waypoint, so that waypoint's arc length IS the route length — and
-        // finished() lets the run end with up to finish_tol_m still nominally remaining. The last
-        // waypoint is therefore never "passed" by a strict s >= ws test, and the final lap was lost.
-        // If the route is driven, every lap in it is driven; there is nothing to infer.
-        if (remaining() <= finish_tol_m) return laps_;
-        return laps_completed_at(progress_);
+        // ★THE END-OF-ROUTE ALLOWANCE APPLIES ONLY ON THE FINAL LAP, and forgetting that STOPPED THE
+        // RUN AFTER LAP 1. finished() lets a run end with up to finish_tol_m still nominally remaining,
+        // so this used to answer "at the end of the route => every lap is done". That was true when the
+        // route CONTAINED every lap. It contains ONE now, so reaching its end completes THAT lap — and
+        // reporting the whole run complete made the mission stop the moment the first lap closed.
+        if (laps_done_ == laps_ - 1 and remaining() <= finish_tol_m) return laps_;
+        return laps_done_;
     }
     // ── LOCAL ELASTIC BAND ────────────────────────────────────────────────────────────────────────
     // Deform the installed route in a WINDOW of control points against a live field, without refitting

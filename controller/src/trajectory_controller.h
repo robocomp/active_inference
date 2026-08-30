@@ -159,6 +159,10 @@ public:
         route_spline_ = spline;
     }
 
+    // The curve is unchanged and the caller knows where on it the robot is — a lap restart. Seeding
+    // beats re-acquiring: see Tracker::resume_at for the 18 m error a global search made here.
+    void resume_route_at(float s) { plain_tracker_.resume_at(s); pd_tracker_.resume_at(s); }
+
     void set_carrot_hint(int segment_index) { carrot_seg_hint_ = std::max(0, segment_index); }
 
     ControlOutput compute(const Eigen::Affine2f& robot_pose);

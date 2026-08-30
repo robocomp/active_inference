@@ -79,6 +79,15 @@ public:
     virtual const char* name() const = 0;
     // Called when the path changes or the robot stops, so a tracker can drop stale state.
     virtual void reset() {}
+    // ── RESUME AT A KNOWN ARC LENGTH ─────────────────────────────────────────────────────────────
+    // reset() means "re-acquire": the tracker forgets where it was and searches the WHOLE curve for
+    // its nearest point. That is right after a stop or a new curve, and WRONG when the caller already
+    // knows where the robot is on the route — because a global nearest-point search on a tour that
+    // folds or repeats can land on the wrong branch, which is the very thing the monotone projection
+    // exists to prevent. Measured on a lap restart: the follower rewound to 0.95 m and the tracker
+    // re-acquired at 17.90 m, an 18 m error on a 35.6 m route, and the robot drove off backwards.
+    // Default is reset(), so a tracker with no arc length of its own loses nothing.
+    virtual void resume_at(float) { reset(); }
     virtual ControlOutput& compute(ControlOutput& out,
                                    const TrackerInput& in,
                                    const TrackerParams& p) = 0;

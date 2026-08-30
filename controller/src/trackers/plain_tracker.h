@@ -57,6 +57,14 @@ public:
     // Forcing s_hint_ to 0 would satisfy the first and break the second — the tracker would steer at the
     // route's beginning from thirty metres away, which is the same "drives into a wall" failure.
     void reset() override { s_hint_.reset(); pivoting_ = false; start_align_ = true; holding_ = false; }
+    // Resume with the arc length the CALLER knows, instead of searching for it.
+    // ★start_align_ IS DELIBERATELY NOT ARMED. A re-acquisition arms it because the robot may be facing
+    // anywhere; a LAP RESTART is not that. The robot arrives at the lap start along the closing hop,
+    // already pointing down the first leg, and arming the start alignment would stop it dead to turn on
+    // the spot for an alignment it already has. The lap boundary is a place the robot drives THROUGH:
+    // nothing may stop it between arriving and departing.
+    void resume_at(float s) override
+    { s_hint_ = std::max(0.f, s); pivoting_ = false; start_align_ = false; holding_ = false; }
 
     // Is the tracker holding the wheels still and turning on the spot? For the overlay and the logs —
     // a robot that is deliberately stopped and one that is stuck look identical from outside.

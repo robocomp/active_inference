@@ -4385,7 +4385,13 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         // exactly what a restart is.
         if (route_.rewound())
         {
-            path_controller.set_route(&route_.spline(), /*force_reset=*/true);
+            // ★SEED, DO NOT RE-ACQUIRE. force_reset made the tracker search the WHOLE curve for its
+            // nearest point, and on this tour that landed 18 m from where the robot actually was
+            // (follower at 0.95 m, tracker at 17.90 m on a 35.6 m route): it then steered at a
+            // different part of the route and the robot drove backwards after lap 1. The curve has not
+            // changed across a rewind — only the position on it — and the follower knows exactly what
+            // that position is, so it is handed over rather than searched for.
+            path_controller.resume_route_at(route_.progress());
             std::println("[route] lap {} of {} complete — restarting the same curve at {:.2f} m",
                          route_.laps_done(), route_.laps_total(), route_.progress());
         }
