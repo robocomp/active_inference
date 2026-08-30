@@ -31,7 +31,8 @@
 
 #include <genericworker.h>            // DSR::DSRGraph / DSR::DSRViewer
 
-#include "room_concept.h"            // rc::RoomConcept (+ UpdateResult)
+#include "room_concept.h"     // rc::RoomConcept (+ UpdateResult)
+#include "localization_drift.h"   // rc::LocalizationDriftMeter — the localization metric
 #include "room_config.h"       // rc::RoomConfig (shared config)
 #include "viewer_2d.h"
 #include "timeseries_plot.h"
@@ -161,9 +162,30 @@ private:
     // robot_gt_* on the robot node just while the producer reports simulated, so on real hardware
     // the attributes are absent, the series stay empty and the plot is simply flat.
     QPointer<rc::TimeSeriesPlot> ts_plot_gt_;
-    // RGB projection agreement (ImageEdge). Empty and flat unless ImageEdge.enable && shadow.
-    QPointer<rc::TimeSeriesPlot> ts_plot_imgedge_;
-    std::int64_t last_imgedge_ts_ms_ = 0;   // only append when a NEW cycle produced a number
+    // ── THE LOCALIZATION METRIC ──────────────────────────────────────────────────────────────────
+    // Replaced the RGB-projection plot here 2026-08-30. That channel still writes etc/image_edge.csv
+    // and its own diagnostics; only its on-screen plot moved aside, for a number the estimator is
+    // graded on rather than one of its inputs.
+    //
+    // Three series, all mm per metre travelled, because error either reaches the output or shows up
+    // as the work spent preventing it, and those two together are conserved:
+    //   pred drift   predicted pose vs ground truth   — the motion model itself
+    //   pose drift   published pose vs ground truth   — what every consumer of the RT tree sees
+    //   correction   how far the optimizer moved the pose — where the error went if drift held flat
+    // Measured 2026-08-29: on the 96.2% of cycles that early-exit the correction is EXACTLY zero, so
+    // the published pose IS the raw prediction and the first two series coincide. Their separating
+    // is the news, not their agreeing.
+    //
+    // SIMULATION ONLY: needs robot_gt_*, which robot_concept writes only while the producer reports
+    // simulated. On real hardware the series stay empty and the plot is honestly flat.
+    QPointer<rc::TimeSeriesPlot> ts_plot_loc_;
+    rc::LocalizationDriftMeter   drift_pred_;   ///< ground truth vs the PREDICTED pose
+    rc::LocalizationDriftMeter   drift_pose_;   ///< ground truth vs the PUBLISHED pose
+    double corr_sum_m_ = 0.0;                   ///< |published - predicted| accumulated, metres
+    double corr_dist_m_ = 0.0;                  ///< ground-truth distance over the same span
+    double last_gt_x_ = 0.0, last_gt_y_ = 0.0;
+    bool   have_last_gt_ = false;
+    bool   drift_suspect_logged_ = false;
     QPointer<rc::CalibrationViewer> calib_viewer_;
     std::function<void()>           on_camera_reset_;
     // Last state pushed to lbl_room_stable: -1 = never painted, 0 = red, 1 = green, 2 = amber (searching).

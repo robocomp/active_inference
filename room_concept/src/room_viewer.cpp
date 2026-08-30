@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numbers>
 
 #include <QByteArray>
 #include <QColor>
@@ -139,28 +140,20 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
     ts_plot_rates_->add_series("optimizer Hz",  QColor(230, 126, 34), 1.6f, 0);   // loc-thread solve rate
     custom_widget_->frame_series->layout()->addWidget(ts_plot_rates_);
 
-    // ── RGB projection agreement ─────────────────────────────────────────────────────────────────
-    // How well the predicted image contours match the edges actually found, over time. Flat and
-    // empty unless ImageEdge.enable && shadow, which is the honest appearance of a channel that is
-    // switched off — as opposed to one that is on and has nothing to say.
-    // ★ The reference line at 1.0 is what makes this readable. chi2/dof is the weighted residual per
-    // degree of freedom, so 1.0 means the residuals are exactly the size the per-sample sigmas
-    // claim. Sitting above it is not noise: it is the projection disagreeing with the map by more
-    // than the sensor model admits, which points at the mount, the map or the matching.
-    ts_plot_imgedge_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
-    ts_plot_imgedge_->set_visible_window(60.f);
-    // ★ WITH A RUNNING AVERAGE, because the raw series is mostly sampling noise and reads as
-    // instability. chi2/dof over nu effective degrees of freedom has a relative spread of
-    // sqrt(2/nu), and sum_gamma — the effective sample count after the responsibility weighting —
-    // runs around 3 per cycle here, so +/-80% frame to frame is the DISTRIBUTION, not the signal.
-    // Measured on 5838 rows: the median level is the same (8.10 vs 8.07) whether a cycle had <=6 or
-    // >=20 samples, while the scatter is 3.3x larger in the sparse ones — level is stable, spread is
-    // not, which is exactly the signature of chi2 noise rather than a moving quantity.
-    // The companion "<name>_avg" series the widget creates is the one to read.
-    ts_plot_imgedge_->add_series("img chi2/dof", QColor(155, 89, 182), 1.8f, 25);
-    ts_plot_imgedge_->add_series("img r_rms px", QColor(120, 120, 140), 1.2f, 0);
-    ts_plot_imgedge_->set_reference_line(1.f, QColor(200, 60, 60), "chi2/dof = 1");
-    custom_widget_->frame_series->layout()->addWidget(ts_plot_imgedge_);
+    // ── THE LOCALIZATION METRIC ──────────────────────────────────────────────────────────────────
+    // What the estimator is GRADED on, rather than one of its inputs. All three series are mm per
+    // metre travelled: normalised by motion because a parked robot predicts nothing and would score
+    // perfectly for standing still, and relative (not |est - gt|) because ground truth is the world
+    // frame while the estimate is the room frame, whose orientation room_concept picks for itself —
+    // an absolute difference measures that arbitrary choice, not the localiser. See
+    // localization_drift.h for the two heading conventions this has to undo, one of which cost a
+    // 27x wrong number when it was missed.
+    ts_plot_loc_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
+    ts_plot_loc_->set_visible_window(60.f);
+    ts_plot_loc_->add_series("pred drift mm/m", QColor(0, 190, 255), 1.8f, 5);
+    ts_plot_loc_->add_series("pose drift mm/m", QColor(46, 204, 113), 1.6f, 5);
+    ts_plot_loc_->add_series("correction mm/m", QColor(230, 126, 34), 1.4f, 5);
+    custom_widget_->frame_series->layout()->addWidget(ts_plot_loc_);
     // ── What each legend entry MEANS, on hover ───────────────────────────────────────────────────
     // A series name is a label, not an explanation. None of these say what units they are in, which
     // direction is good, or what a reader should do about a value — and the plots are read by people
@@ -190,18 +183,28 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
         "error is visible before a correction wipes it.\n\n"
         "A SUSTAINED rise means the prediction has stopped being good enough — either the motion model\n"
         "drifted or the prior loosened."));
-    ts_plot_imgedge_->set_series_tooltip("img chi2/dof", QStringLiteral(
-        "How well the predicted image contours match the edges actually found — the RGB projection\n"
-        "likelihood, as a weighted residual per degree of freedom.\n\n"
-        "1.0 (the dashed line) means the residuals are exactly the size the per-sample sigmas claim.\n"
-        "Sitting ABOVE it is not noise: the projection disagrees with the map by more than the sensor\n"
-        "model admits, which points at the camera mount, the map, or the edge matching.\n\n"
-        "The raw line is bumpy by construction — with ~3 effective samples per cycle its spread is\n"
-        "sqrt(2/nu), about +/-80%. Read the _avg companion, not this."));
-    ts_plot_imgedge_->set_series_tooltip("img r_rms px", QStringLiteral(
-        "The same disagreement in raw pixels, RMS.\n\n"
-        "Kept beside chi2/dof because a chi2 can be moved by changing the sigmas while pixels cannot.\n"
-        "If chi2/dof falls while this does not, the noise model got looser rather than the fit better."));
+    ts_plot_loc_->set_series_tooltip("pred drift mm/m", QStringLiteral(
+        "LOCALIZATION ERROR OF THE MOTION MODEL, in millimetres per metre travelled.\n\n"
+        "Over each metre of true travel, how far the PREDICTED motion departs from the true motion.\n"
+        "This is the channel a wrong odometry scale or gyro scale shows up in first, and the one the\n"
+        "self-calibration is trying to reduce.\n\n"
+        "Relative, not absolute: ground truth is the world frame and the estimate is the room frame,\n"
+        "whose orientation this agent picks from its own fit. The offset between them is arbitrary and\n"
+        "carries no information, so only the motion is compared.\n\n"
+        "Simulation only — it needs robot_gt_*, which exists only while the producer reports simulated."));
+    ts_plot_loc_->set_series_tooltip("pose drift mm/m", QStringLiteral(
+        "The same measure applied to the PUBLISHED pose — what every consumer of the RT tree sees.\n\n"
+        "Measured 2026-08-29: on the 96.2% of cycles that early-exit, the optimizer does not run and\n"
+        "the correction is EXACTLY zero, so the published pose IS the raw prediction and this line sits\n"
+        "on top of the blue one. Them SEPARATING is the news: it means the optimizer started working.\n\n"
+        "If this stays flat while pred drift rises, the model got worse and the optimizer is paying for\n"
+        "it — look at the orange line, which is where that cost appears."));
+    ts_plot_loc_->set_series_tooltip("correction mm/m", QStringLiteral(
+        "How far the optimizer had to MOVE the pose, per metre travelled: |published - predicted|.\n\n"
+        "The effort channel. An uncalibrated robot need not localise visibly worse — it can localise\n"
+        "just as well by working harder — and this is where that work becomes visible. Error either\n"
+        "reaches the output or shows up here; the two together are conserved.\n\n"
+        "Near zero while the early-exit gate holds, because on those cycles nothing is corrected."));
 
 
     // ── The calibration window exists from startup, hidden ───────────────────────────────────────
@@ -212,6 +215,16 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
     // an honest record of the whole run rather than of how long you have been watching.
     calib_viewer_ = new rc::CalibrationViewer(custom_widget_);
     calib_viewer_->hide();
+    // ★ EVERY CAMERA GETS ITS COLUMN NOW, fed or not. Declaring the list here rather than letting a
+    // column appear when the first solve arrives is what lets the window show "no evidence" for a
+    // camera that has never produced a pair: a column that does not exist cannot say anything, and
+    // an absent column and a silent one would be indistinguishable. The driving camera goes first.
+    {
+        std::vector<std::string> cams{params_->IMAGE_EDGE_CAMERA};
+        for (const auto& c : params_->CALIB_CAMERAS)
+            if (c != params_->IMAGE_EDGE_CAMERA) cams.push_back(c);
+        calib_viewer_->set_cameras(cams, params_->IMAGE_EDGE_CAMERA);
+    }
     // The window asks; the localiser thread acts. RoomConcept queues it rather than touching the
     // estimator from the GUI thread.
     if (room_concept_ != nullptr)
@@ -335,7 +348,7 @@ void RoomViewer::update_viewer(const std::optional<rc::RoomConcept::UpdateResult
     // emptied by take_image_edges() the moment a slot consumes it, so peeking there would draw
     // corners only on the tick the viewer happened to win the race against the solver.
     if (room_concept_)
-        viewer_2d_->draw_rgb_corners(room_concept_->triple_points());
+        viewer_2d_->draw_rgb_corners(room_concept_->triple_points(), pose_for_draw);
 
     // Object-anchor overlay (fridge, …): pinned p_o, this frame's z_o, the sight line and the residual
     // between them. Display-only — a copy taken under the localizer's lock, drawn without holding it.
@@ -449,16 +462,6 @@ void RoomViewer::update_ui(const std::optional<rc::RoomConcept::UpdateResult>& l
     // RGB projection agreement, appended only when a NEW cycle produced one. Without the stamp test
     // a stalled camera would draw a flat line at its last value, which reads as "steady" rather than
     // "stopped" — the two must not look alike.
-    if (ts_plot_imgedge_ and room_concept_ != nullptr)
-    {
-        const auto st = room_concept_->get_image_edge_stats();
-        if (st.valid and st.ts_ms > last_imgedge_ts_ms_)
-        {
-            last_imgedge_ts_ms_ = st.ts_ms;
-            ts_plot_imgedge_->add_point("img chi2/dof", st.chi2_per_dof);
-            ts_plot_imgedge_->add_point("img r_rms px", st.r_rms_px);
-        }
-    }
 
     // Localization confidence from the pose covariance determinant: small det (well-localized) → high.
     // det ~ 1e-8..1e-10 well-localized, ~1e-4 uncertain → -log10(det) ~ 4..10, mapped to [0,1] by /12.
@@ -468,8 +471,14 @@ void RoomViewer::update_ui(const std::optional<rc::RoomConcept::UpdateResult>& l
     if (ts_plot_conf_)
         ts_plot_conf_->add_point("confidence", conf);
 
-    // Ground truth beside the estimate. Absent attributes (real robot) => nothing plotted.
-    if (ts_plot_gt_ and graph_)
+    // ── FEED THE LOCALIZATION METRIC ─────────────────────────────────────────────────────────────
+    // ⚠ This replaced a block that fed ts_plot_gt_, a plot that was DECLARED and USED but never
+    // CONSTRUCTED — so the pointer was always null and none of it ever ran. Ground truth has not
+    // been on screen at all. (Found 2026-08-30.)
+    //
+    // Absent attributes (real robot) => nothing plotted, which is the honest appearance of a
+    // measurement that needs a simulator.
+    if (ts_plot_loc_ and graph_)
     {
         if (const auto robots = graph_->get_nodes_by_type("robot"); not robots.empty())
         {
@@ -480,16 +489,43 @@ void RoomViewer::update_ui(const std::optional<rc::RoomConcept::UpdateResult>& l
             if (gx.has_value() and gy.has_value() and ga.has_value())
             {
                 const auto &pose = loc_res->robot_pose;
-                ts_plot_gt_->add_point("gt x",      gx.value());
-                ts_plot_gt_->add_point("est x",     pose.translation().x());
-                ts_plot_gt_->add_point("gt y",      gy.value());
-                ts_plot_gt_->add_point("est y",     pose.translation().y());
-                // Negated: the producer publishes robot_gt_angle with an inverted sign (see
-                // SpecificWorker::gt_convention_report). Plotting it raw drew the GT heading as a
-                // mirror image of the estimate, which reads as a wildly wrong localiser.
-                ts_plot_gt_->add_point("gt theta",  -ga.value());
-                ts_plot_gt_->add_point("est theta",
-                                       std::atan2(pose.linear()(1, 0), pose.linear()(0, 0)));
+                const double est_th = std::atan2(pose.linear()(1, 0), pose.linear()(0, 0));
+                // The raw published values go in; localization_drift.h owns the sign flip on
+                // robot_gt_angle and the +90 deg on the room-frame heading, so no caller can apply
+                // either of them twice.
+                const auto dp = drift_pred_.push(gx.value(), gy.value(), ga.value(),
+                                                 loc_res->pred_x, loc_res->pred_y, loc_res->pred_theta);
+                const auto de = drift_pose_.push(gx.value(), gy.value(), ga.value(),
+                                                 pose.translation().x(), pose.translation().y(), est_th);
+                if (dp.has_trans) ts_plot_loc_->add_point("pred drift mm/m", static_cast<float>(dp.mm_per_m));
+                if (de.has_trans) ts_plot_loc_->add_point("pose drift mm/m", static_cast<float>(de.mm_per_m));
+
+                // Correction effort, on the same 1 m yardstick so it is directly comparable with
+                // the two drift series rather than being a differently-scaled third thing.
+                corr_sum_m_ += std::hypot(pose.translation().x() - loc_res->pred_x,
+                                          pose.translation().y() - loc_res->pred_y);
+                if (have_last_gt_)
+                    corr_dist_m_ += std::hypot(gx.value() - last_gt_x_, gy.value() - last_gt_y_);
+                last_gt_x_ = gx.value(); last_gt_y_ = gy.value(); have_last_gt_ = true;
+                if (corr_dist_m_ >= 1.0)
+                {
+                    ts_plot_loc_->add_point("correction mm/m",
+                                            static_cast<float>(corr_sum_m_ / corr_dist_m_ * 1000.0));
+                    corr_sum_m_ = corr_dist_m_ = 0.0;
+                }
+
+                // Say it ONCE, loudly, and stop plotting — a metric quietly measuring the wrong
+                // thing is worse than a gap in the plot, because only one of the two looks wrong.
+                if (drift_pred_.suspect() and not drift_suspect_logged_)
+                {
+                    drift_suspect_logged_ = true;
+                    qCritical() << "[loc-metric] DISABLED:" << drift_pred_.suspect_reason()
+                                << "| measured mean(course-theta): gt"
+                                << drift_pred_.measured_gt_offset() * 180.0 / std::numbers::pi << "deg, est"
+                                << drift_pred_.measured_est_offset() * 180.0 / std::numbers::pi
+                                << "deg (both should be ~0 AFTER the declared corrections). Fix the "
+                                   "convention in localization_drift.h; do not widen the tolerance.";
+                }
             }
         }
     }
