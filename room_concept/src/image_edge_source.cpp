@@ -492,10 +492,36 @@ ImageEdgeObs ImageEdgeSource::extract(const GrayFrame& frame,
             tp.uv_meas  = uvm.cast<float>();
             tp.cov_uv   = (Ai * S * Ai.transpose()).cast<float>();
             tp.resid_px = delta.cast<float>();   // pre-wrap, so the seam cannot inflate it
-            // Weighted over BOTH segments: a crossing is only as visible as the pair that
-            // formed it, and the two can disagree (a ceiling join in the clear, its floor
-            // counterpart behind a wall).
-            tp.pi_vis   = static_cast<float>((fc->wv + ff->wv) / std::max(1e-12, fc->w + ff->w));
+            // ── THE CORNER'S OWN LINE OF SIGHT, not a mean over the pair that formed it ─────────
+            // Every sample on a WallCorner segment sits at the SAME (x, y) — the vertex — because the
+            // segment is the vertical join of two walls. walls_block() and the anchor occlusion terms
+            // are both 2-D, so pi_vis is CONSTANT along that segment, and `fc->wv / fc->w` recovers it
+            // exactly however small fc->w has become. That single number answers the only question a
+            // consumer is asking: can the camera see THIS CORNER.
+            //
+            // ★ IT USED TO BE POOLED WITH THE FLOOR/CEILING SEGMENT, WEIGHTED BY w, AND THAT IS
+            //   SELF-DEFEATING. w carries the mixture responsibility, and responsibility() multiplies
+            //   the inlier density by pi_vis — so an occluded sample's weight collapses toward zero.
+            //   The pooled mean was therefore weighted by the very quantity occlusion destroys: the
+            //   more thoroughly a corner was hidden, the less its own visibility counted in the number
+            //   meant to say it was hidden, and the result drifted up to whatever the long floor edge
+            //   could see. `ff` spans a whole wall edge (vertex i to i+1) and stays mostly visible even
+            //   when the vertex at its end is not, which is why it won.
+            //
+            // ★ MEASURED 2026-08-30 over 60k rows of etc/image_edge_triple.csv against the live
+            //   32-vertex polygon: 45.3% of emitted crossings have their vertex geometrically behind a
+            //   wall. Among those the median weight of their OWN corner segment is 0 against 9 for the
+            //   floor edge (for VISIBLE corners it is 9 against 11), the floor edge's own visibility
+            //   runs 0.755, and 48.5% of them came out with a pooled pi_vis at or above 0.5 — half the
+            //   corners standing behind a wall passed the display's visibility test. That is the "the
+            //   robot sees through walls" report, and it was never the viewer's gate: it was this line.
+            //
+            // ★ WHY NOT min(corner, floor). A crossing is the intersection of two fitted LINES, and a
+            //   line is fitted wherever it IS visible and then EXTRAPOLATED to the meeting point, so a
+            //   half-hidden floor edge still yields an honest line. Requiring the whole edge to be
+            //   visible would withhold corners that are plainly in view. The corner point's own
+            //   sightline is both necessary and sufficient, and it is what this field's name claims.
+            tp.pi_vis   = static_cast<float>(fc->wv / fc->w);
             tp.n_corner = static_cast<int>(fc->w);
             tp.n_floor  = static_cast<int>(ff->w);
             const double c = std::min(1.0 - 1e-12, std::abs(nch.dot(nfh)));
