@@ -450,6 +450,14 @@ void SpecificWorker::initialize()
 			// look like a dead robot. It also clears a stale pause, so Run is unambiguously "go".
 			paused_ = false;
 			motion_commander_.set_output_enabled(true);
+			// ★CLEAR THE DRIVEN TRACE HERE, BEFORE THE MODE BRANCH. It used to be cleared only after a
+			// mission actually started, which meant AFFORDANCE mode — the branch below, which returns
+			// early — never cleared it at all. The trace is the one overlay that ACCUMULATES (every
+			// other item list is rebuilt each frame), so run after run it kept every metre the robot had
+			// ever driven until it hit the 4000-segment cap, and by then the window was a solid mat of
+			// old paths with the current one somewhere inside it. A trace belongs to the run that drew
+			// it; a new run starts on a clean canvas whatever the mode.
+			display_.clear_robot_trajectory();
 			if (not rc::uses_mission(session_.mission().mode()))
 			{
 				driving_enabled_ = true;
@@ -458,9 +466,8 @@ void SpecificWorker::initialize()
 			session_.mission().set_click_target(std::nullopt);   // a tour replaces a lingering click target
 			clear_manual_target();
 			const bool started = session_.mission().start(laps, current_time_ms());
-			// A new run starts with a clean canvas: the driven trace belongs to the run that drew it, and
-			// leaving the previous one on screen makes two different runs look like one confused path.
-			if (started) display_.clear_robot_trajectory();
+			// (The trace was already cleared above, before the mode branch, so it happens whether or not
+			// this start succeeds and whether or not a mission is what is being run.)
 			if (started) driving_enabled_ = true;
 			// Say what Run actually decided. Driving is only enabled when the mission starts, so a
 			// refused start leaves the robot halted — and without this line that is silent from the
