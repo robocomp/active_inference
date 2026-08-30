@@ -70,8 +70,21 @@ ControlOutput& PlainTracker::compute(ControlOutput& out, const TrackerInput& in,
         // correct, and the re-acquire branch above legitimately needs to move s BACKWARDS (a stop or a
         // repaired curve must be free to land the robot at s = 0, or wherever it now stands). Monotone
         // is a property of ONE traversal, which is exactly what the optional distinguishes.
-        s_hint_ = std::clamp(sp.project(pos, *s_hint_, std::max(0.05f, p.plain_proj_window)),
-                             *s_hint_, sp.length());
+    {
+        // ★AND NO FURTHER FORWARD THAN THE ROBOT ACTUALLY MOVED. See last_pos_ in the header: the
+        // forward-only clamp stops s walking BACK, and this stops it leaping AHEAD across a fold. The
+        // allowance is the chord the robot covered since the last cycle plus one sample spacing — on
+        // the curve those are the same quantity, off it arc must advance less, and the spacing is the
+        // slack project() itself needs to find its nearest point. No new constant.
+        // ★Absent last_pos_ (first cycle after a reset or a lap resume) means there is nothing to
+        // measure against, so the bound is not applied — the projection is trusted exactly where it is
+        // the only thing that knows where the robot is.
+        const float advance_cap = last_pos_.has_value()
+                                    ? (pos - *last_pos_).norm() + sp.spacing()
+                                    : std::numeric_limits<float>::max();
+        const float projected = sp.project(pos, *s_hint_, std::max(0.05f, p.plain_proj_window));
+        s_hint_ = std::clamp(projected, *s_hint_, std::min(sp.length(), *s_hint_ + advance_cap));
+    }
     const float s = *s_hint_;
     if (reacquiring) start_align_ = true;
 
@@ -451,6 +464,8 @@ ControlOutput& PlainTracker::compute(ControlOutput& out, const TrackerInput& in,
         }
         s_hint_ = best;
     }
+
+    last_pos_ = pos;          // for the advance bound above, next cycle
 
     out.adv  = v_cmd;
     out.side = 0.f;

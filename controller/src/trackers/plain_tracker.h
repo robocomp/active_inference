@@ -1,6 +1,7 @@
 #ifndef RC_PLAIN_TRACKER_H
 #define RC_PLAIN_TRACKER_H
 
+#include <optional>
 #include "tracker.h"
 
 namespace rc
@@ -56,7 +57,8 @@ public:
     //     -> the robot is somewhere in the middle, and the nearest point is right where it stands.
     // Forcing s_hint_ to 0 would satisfy the first and break the second — the tracker would steer at the
     // route's beginning from thirty metres away, which is the same "drives into a wall" failure.
-    void reset() override { s_hint_.reset(); pivoting_ = false; start_align_ = true; holding_ = false; }
+    void reset() override
+    { s_hint_.reset(); pivoting_ = false; start_align_ = true; holding_ = false; last_pos_.reset(); }
     // Resume with the arc length the CALLER knows, instead of searching for it.
     // ★start_align_ IS DELIBERATELY NOT ARMED. A re-acquisition arms it because the robot may be facing
     // anywhere; a LAP RESTART is not that. The robot arrives at the lap start along the closing hop,
@@ -64,7 +66,8 @@ public:
     // the spot for an alignment it already has. The lap boundary is a place the robot drives THROUGH:
     // nothing may stop it between arriving and departing.
     void resume_at(float s) override
-    { s_hint_ = std::max(0.f, s); pivoting_ = false; start_align_ = false; holding_ = false; }
+    { s_hint_ = std::max(0.f, s); pivoting_ = false; start_align_ = false; holding_ = false;
+      last_pos_.reset(); }
 
     // Is the tracker holding the wheels still and turning on the spot? For the overlay and the logs —
     // a robot that is deliberately stopped and one that is stuck look identical from outside.
@@ -100,6 +103,24 @@ private:
     // facing the way out yet?"). A memoryless test cannot express that, and the two stateless versions
     // both failed — see the measured deadlocks in plain_tracker.cpp.
     bool  pivoting_ = false;
+    // ── WHERE THE ROBOT WAS LAST CYCLE, TO BOUND HOW FAR THE PROJECTION MAY ADVANCE ───────────────
+    // ★★★THE PROJECTION CAN CROSS A FOLD, AND CROSS-TRACK CANNOT SEE IT. s_hint_ is clamped so it
+    // cannot go BACKWARDS; nothing stopped it leaping FORWARD. At a hairpin the outgoing leg runs
+    // within half a metre of the incoming one — well inside plain_proj_window (2.0 m) — so as the robot
+    // begins to turn it becomes geometrically nearer the outgoing leg and the search snaps across the
+    // corner. MEASURED LIVE, at the two hairpins an operator reported independently: s advancing 1.43,
+    // 1.68 and 1.78 m in a SINGLE 50 ms cycle, where 0.7 m/s allows 0.035 m.
+    // ★AND IT IS INVISIBLE TO EVERY TRACKING METRIC. Cross-track at those cycles was 0.008-0.063 m:
+    // the tracker is delighted, because it re-projected onto a genuinely nearby piece of route. Then
+    // psi(s) is the tangent on the FAR side of the corner, the robot turns the other way, and it drives
+    // off along route it never covered. Nothing downstream reports a fault.
+    // ★THE BOUND IS PHYSICAL AND NEEDS NO CONSTANT: arc length cannot advance further in one cycle than
+    // the ROBOT MOVED in it, plus one sample spacing — the resolution at which the curve is known, and
+    // therefore the slack the projection legitimately needs to find its own nearest point. On the
+    // curve, arc advance and distance travelled are the same quantity; off it, arc must advance LESS.
+    // Cleared by reset() and resume_at(), because after either the robot's previous position says
+    // nothing about where it now is on the curve.
+    std::optional<Eigen::Vector2f> last_pos_;
     // TURN AND ONLY THEN GO, AT THE START OF A PATH. Armed on every re-acquisition of the projection —
     // a mission start, a route repair, a new curve — and disarmed for the rest of that traversal the
     // moment the robot faces where the route leaves.
