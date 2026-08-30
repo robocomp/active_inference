@@ -20,7 +20,19 @@ already mean something to this robot, and every episode records which one it cro
                                                tracking statement at all, it is a collision one, and it
                                                is reported even when cross-track is small.
 
-★A ROUTE RE-AUTHORING IS NOT A DEPARTURE, and conflating them is the easy mistake here. When the band
+★NEITHER A ROUTE RE-AUTHORING NOR A POSE JUMP IS A DEPARTURE, and conflating either with one is the
+easy mistake here.
+
+A POSE JUMP is the localiser moving the ESTIMATE, not the robot moving. Measured on this log: 978 of
+9723 cycles carry a pose step implying more than the base's own 0.70 m/s limit, the worst 4.45 m/s
+(2.7 cm in a single cycle) — and several of the largest cross-track episodes sit on exactly those
+cycles, with heading errors near 2.65 rad. A robot cannot do that; an estimator can. So a step whose
+implied speed exceeds what the HARDWARE can do (SVD48VBase's maxLinSpeed, --v-cap) is not evidence
+about tracking, and an episode containing one is tagged pose-jump and kept out of the tally. Without
+this the monitor reports the localiser as a path departure, which is the failure mode of an
+instrument that cannot be believed.
+
+★A ROUTE RE-AUTHORING IS NOT A DEPARTURE EITHER. When the band
 deforms the curve or a repair splices it, the PATH moves under the robot and e_y steps without the
 robot doing anything. tracker_diag carries path_gen for exactly this; an episode that begins within
 one cycle of a path_gen change is tagged `route-moved` and kept out of the departure tally rather than
@@ -28,7 +40,7 @@ silently inflating it.
 
 Usage:
     tools/path_departure_monitor.py [--file tracker_diag.csv] [--inscribed 0.230] [--cell 0.06]
-                                    [--episodes path_departures.csv] [--quiet-s 5]
+                                    [--episodes path_departures.csv] [--quiet-s 5] [--v-cap 0.70]
 """
 import argparse, csv, math, os, sys, time
 
@@ -42,6 +54,9 @@ def parse_args():
     p.add_argument("--cell", type=float, default=0.06)
     p.add_argument("--episodes", default="path_departures.csv")
     p.add_argument("--quiet-s", type=float, default=5.0, help="seconds between live status lines")
+    # The BASE's own limit, from SVD48VBase/etc/config_*.toml (maxLinSpeed). A pose step implying more
+    # than this is the estimate jumping, not the robot driving.
+    p.add_argument("--v-cap", type=float, default=0.70)
     p.add_argument("--once", action="store_true", help="analyse what is already in the file, then exit")
     return p.parse_args()
 
@@ -78,6 +93,8 @@ def num(row, hdr, key, default=float("nan")):
 
 class Episode:
     def __init__(self, t_ms, tier, row, hdr, route_moved):
+        self.pose_jump = False
+        self.worst_implied = 0.0
         self.t0 = t_ms; self.t1 = t_ms; self.tier = tier
         self.peak = abs(num(row, hdr, "pd_cross_err_m"))
         self.peak_at = (num(row, hdr, "pose_x"), num(row, hdr, "pose_y"))
@@ -88,6 +105,9 @@ class Episode:
         self.min_gate = num(row, hdr, "gate_scale")
         self.route_moved = route_moved
         self.n = 1
+    def note_jump(self, implied):
+        self.pose_jump = True
+        self.worst_implied = max(self.worst_implied, implied)
     def update(self, t_ms, tier, row, hdr):
         self.t1 = t_ms; self.n += 1
         if tier > self.tier: self.tier = tier
@@ -113,24 +133,29 @@ def main():
     ep_w = csv.writer(ep_f)
     ep_w.writerow(["t_start_ms","dur_s","tier","peak_cross_m","peak_x","peak_y","s_from_m","s_to_m",
                    "min_clearance_m","max_heading_err_rad","max_speed_mps","min_gate_scale",
-                   "cycles","route_moved"])
+                   "cycles","route_moved","pose_jump","worst_implied_mps"])
     ep_f.flush()
 
     cur = None; last_gen = None; last_gen_t = None
     n = 0; worst = 0.0; sum_sq = 0.0; last_report = 0.0
-    counts = {1: 0, 2: 0, 3: 0}; moved = 0
+    counts = {1: 0, 2: 0, 3: 0}; moved = 0; jumped = 0
+    prev_pose = None
 
     def close(e):
-        nonlocal moved
+        nonlocal moved, jumped
         dur = (e.t1 - e.t0) / 1000.0
         ep_w.writerow([int(e.t0), f"{dur:.2f}", TIER_NAME[e.tier], f"{e.peak:.4f}",
                        f"{e.peak_at[0]:.3f}", f"{e.peak_at[1]:.3f}", f"{e.s0:.2f}", f"{e.s1:.2f}",
                        f"{e.min_clear:.3f}", f"{e.max_head:.3f}", f"{e.max_speed:.3f}",
-                       f"{e.min_gate:.3f}", e.n, int(e.route_moved)])
+                       f"{e.min_gate:.3f}", e.n, int(e.route_moved), int(e.pose_jump),
+                       f"{e.worst_implied:.2f}"])
         ep_f.flush()
         if e.route_moved: moved += 1
+        elif e.pose_jump: jumped += 1
         else: counts[e.tier] += 1
-        tag = "  [route-moved: the CURVE shifted, not the robot]" if e.route_moved else ""
+        tag = ("  [route-moved: the CURVE shifted, not the robot]" if e.route_moved
+               else f"  [pose-jump: {e.worst_implied:.2f} m/s implied, above the base's own cap — the "
+                    f"ESTIMATE moved]" if e.pose_jump else "")
         print(f"[{TIER_NAME[e.tier]:6s}] {dur:5.2f} s  peak |e_y| {e.peak:.3f} m at ({e.peak_at[0]:+.2f},"
               f"{e.peak_at[1]:+.2f})  s {e.s0:.1f}->{e.s1:.1f} m  clear {e.min_clear:.3f} m  "
               f"e_psi {e.max_head:.2f} rad  v {e.max_speed:.2f} m/s{tag}", flush=True)
@@ -149,6 +174,15 @@ def main():
         if last_gen is not None and gen != last_gen: last_gen_t = t
         last_gen = gen
 
+        # Implied speed from consecutive poses — the test the base's own limit makes available.
+        px = num(row, hdr, "pose_x"); py = num(row, hdr, "pose_y")
+        implied = 0.0
+        if prev_pose is not None and not math.isnan(px):
+            dt = (t - prev_pose[0]) / 1000.0
+            if 0.001 < dt < 1.0:
+                implied = math.hypot(px - prev_pose[1], py - prev_pose[2]) / dt
+        if not math.isnan(px): prev_pose = (t, px, py)
+
         n += 1; sum_sq += cross * cross; worst = max(worst, abs(cross))
 
         tier = 0
@@ -164,6 +198,7 @@ def main():
                 cur = Episode(t, tier, row, hdr, rm)
             else:
                 cur.update(t, tier, row, hdr)
+            if implied > a.v_cap: cur.note_jump(implied)
         elif cur is not None:
             close(cur); cur = None
 
@@ -173,14 +208,15 @@ def main():
             rms = math.sqrt(sum_sq / n) if n else 0.0
             print(f"[monitor] {n:7d} cycles | cross rms {rms*1000:6.1f} mm  worst {worst*1000:6.1f} mm | "
                   f"episodes drift {counts[1]} off {counts[2]} unsafe {counts[3]} "
-                  f"(+{moved} route-moved) | now |e_y| {abs(cross)*1000:5.1f} mm clear {clear:.3f} m",
+                  f"(+{moved} route-moved, +{jumped} pose-jump) | "
+                  f"now |e_y| {abs(cross)*1000:5.1f} mm clear {clear:.3f} m",
                   flush=True)
 
     if cur: close(cur)
     rms = math.sqrt(sum_sq / n) if n else 0.0
     print(f"\n[monitor] TOTAL {n} cycles | cross rms {rms*1000:.1f} mm | worst {worst*1000:.1f} mm")
-    print(f"[monitor] departures: drift {counts[1]}, off {counts[2]}, unsafe {counts[3]}; "
-          f"route-moved (excluded) {moved}")
+    print(f"[monitor] departures: drift {counts[1]}, off {counts[2]}, unsafe {counts[3]}")
+    print(f"[monitor] EXCLUDED as not-the-robot: route-moved {moved}, pose-jump {jumped}")
     print(f"[monitor] episodes -> {a.episodes}")
 
 if __name__ == "__main__":
