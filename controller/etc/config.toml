@@ -545,7 +545,24 @@ MaxAdvSpeed = 0.7
 # robot arrives at a corner already slow enough to follow it) and the route optimiser's curvature
 # normaliser. Lower = gentler corners and slower laps; it does not affect straight-line speed at all.
 MaxLateralAccel = 1.0
-MaxRotSpeed = 0.8
+# ★2026-08-30 0.8 -> 1.0. A POLICY, raised toward the CAPABILITY the robot node publishes
+# (robot_max_rot_speed = 2.0 rad/s for this Shadow, from SVD48VBase/etc/config_diferential).
+# WHY, measured rather than guessed: the speed law is v = min(v_profile, max_rot/|k_cmd|), so in
+# every turn the speed is DIRECTLY PROPORTIONAL to this number — and 38% of moving time is capped
+# by that rotation limit rather than by MaxAdvSpeed, with cmd_rot sitting on the 0.8 rail for
+# 11.8% of every lap. Re-timing the logged run against the same law:
+#     MaxRotSpeed  0.80 -> 100.0 s/lap (as measured)   1.00 -> 86.1 s (-13.9%)
+#                  1.20 ->  83.1 s (-16.9%)            1.50 -> 80.6 s (-19.4%)
+# Most of the gain is in the first step, which is why this is 1.0 and not 1.5: one variable, the
+# smallest move that should show, and 50% of capability still left in hand.
+# ★THE COUPLING THAT USED TO MAKE THIS UNSAFE IS GONE. room_concept's POSE_CLAMP_W_MAX was a COPY
+# of this number, so raising it here used to let the robot turn faster than the PUBLISHED pose was
+# allowed to change — the localiser rate-limited the robot. Since ffbf8e0 that clamp reads
+# robot_max_rot_speed off the graph, so it is bounded by the machine and not by this preference.
+# ⚠room_concept must be running that build for this to be safe.
+# ★EXPECTED: lap time down, deviation flat or slightly better (less rotation saturation means more
+# authority left for the feedback). If deviation rises instead, this is the variable to put back.
+MaxRotSpeed = 1.0
 # ── HOW MUCH HARDER TO SLOW FOR A REALLY SHARP TURN ──────────────────────────────────────────────
 # MEASURED FIRST, and the measurement is why this key exists rather than a re-tune of an existing one
 # (tools/tracker_sim route_world.txt --brake, 30-waypoint tour):
