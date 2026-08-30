@@ -77,9 +77,10 @@ public:
     // Achieved output cadence since the last call (diagnostic; resets the accumulators).
     struct OutputRateStats
     {
-        int   ticks = 0;
+        int   ticks = 0;              // LOOP iterations — counted whether or not anything was sent
+        int   sends = 0;              // of those, how many actually reached the base
         float period_mean_ms = 0.f;
-        float period_max_ms = 0.f;    // worst gap between consecutive base commands
+        float period_max_ms = 0.f;    // worst gap between consecutive loop TICKS
         float cmd_age_max_ms = 0.f;   // oldest command ever pushed to the base
         float scale_min = 1.f;        // strongest freshness attenuation applied
         float ice_mean_ms = 0.f;      // setSpeedBase RPC duration — a hard floor on the achievable period
@@ -189,6 +190,7 @@ private:
     // Last values actually sent to the base — the state the slew limiter integrates from. Output-thread only.
     float applied_adv_ = 0.f, applied_side_ = 0.f, applied_rot_ = 0.f;
     int   stat_ticks_ = 0;
+    int   stat_sends_ = 0;
     float stat_period_sum_ms_ = 0.f;
     float stat_period_max_ms_ = 0.f;
     float stat_cmd_age_max_ms_ = 0.f;

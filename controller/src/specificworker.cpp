@@ -599,9 +599,9 @@ void SpecificWorker::compute()
 		if (now_ms - last_rate_log_ms >= 5000)
 		{
 			last_rate_log_ms = now_ms;
-			std::println("[vel-out] {} ticks | period mean {:.1f} ms WORST {:.1f} ms | ice mean {:.1f} ms "
+			std::println("[vel-out] {} ticks ({} sent) | period mean {:.1f} ms WORST {:.1f} ms | ice mean {:.1f} ms "
 			             "max {:.1f} ms | cmd age max {:.0f} ms | freshness min {:.2f}",
-			             stats.ticks, stats.period_mean_ms, stats.period_max_ms,
+			             stats.ticks, stats.sends, stats.period_mean_ms, stats.period_max_ms,
 			             stats.ice_mean_ms, stats.ice_max_ms, stats.cmd_age_max_ms, stats.scale_min);
 		}
 	}

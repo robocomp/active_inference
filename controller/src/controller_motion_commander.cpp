@@ -305,6 +305,9 @@ void ControllerMotionCommander::output_loop(std::stop_token stop)
     const float tau_ms    = params_ ? std::max(1.f, params_->command_freshness_tau_ms) : 500.f;
     auto next = steady_clock::now();
     auto last_send = steady_clock::time_point{};
+    // Separate from last_send: the LOOP's own cadence, sampled every tick, including the ticks that
+    // transmit nothing because the controller is idle. See the note where it is accumulated.
+    auto last_tick = steady_clock::time_point{};
 
     while (not stop.stop_requested())
     {
@@ -365,6 +368,27 @@ void ControllerMotionCommander::output_loop(std::stop_token stop)
         if (went_quiet)
             std::println("[vel-out] idle — stop delivered, releasing the base. No commands will be sent "
                          "until the controller drives again (the joystick has the base now).");
+        // ── THE TICK IS COUNTED WHETHER OR NOT ANYTHING IS SENT ──────────────────────────────────
+        // ★These statistics answer "is the OUTPUT LOOP healthy?", and the loop ticks even when it has
+        // nothing to transmit. Accumulating them only around the send made the reported period the gap
+        // between TRANSMISSIONS, so one idle stretch produced `2 ticks | period mean 2547676.8 ms` —
+        // 42 minutes, from a loop that was running perfectly at 20 Hz throughout. Worse than useless:
+        // it is exactly the shape a real output-thread stall would take, so the one instrument that
+        // would report that stall could no longer be believed.
+        // Sends are counted separately, because "how often did we talk to the base" is a different and
+        // also useful question — and their ratio is what says the robot is idle rather than stuck.
+        {
+            const auto tick_now = steady_clock::now();
+            const std::scoped_lock lock(mutex_);
+            if (last_tick.time_since_epoch().count() != 0)
+            {
+                const float gap = duration<float, std::milli>(tick_now - last_tick).count();
+                stat_period_sum_ms_ += gap;
+                stat_period_max_ms_ = std::max(stat_period_max_ms_, gap);
+                ++stat_ticks_;
+            }
+            last_tick = tick_now;
+        }
         if (not armed) continue;
 
         float adv = 0.f, side = 0.f, rot = 0.f, scale = 1.f, age_ms = 0.f;
@@ -425,13 +449,7 @@ void ControllerMotionCommander::output_loop(std::stop_token stop)
         const auto now = steady_clock::now();
         const float ice_ms = duration<float, std::milli>(now - ice_t0).count();
         const std::scoped_lock lock(mutex_);
-        if (last_send.time_since_epoch().count() != 0)
-        {
-            const float gap = duration<float, std::milli>(now - last_send).count();
-            stat_period_sum_ms_ += gap;
-            stat_period_max_ms_ = std::max(stat_period_max_ms_, gap);
-            ++stat_ticks_;
-        }
+        ++stat_sends_;
         last_send = now;
         stat_cmd_age_max_ms_ = std::max(stat_cmd_age_max_ms_, age_ms);
         stat_scale_min_ = std::min(stat_scale_min_, scale);
@@ -445,13 +463,14 @@ ControllerMotionCommander::OutputRateStats ControllerMotionCommander::take_outpu
     const std::scoped_lock lock(mutex_);
     OutputRateStats s;
     s.ticks = stat_ticks_;
+    s.sends = stat_sends_;
     s.period_mean_ms = stat_ticks_ > 0 ? stat_period_sum_ms_ / static_cast<float>(stat_ticks_) : 0.f;
     s.period_max_ms = stat_period_max_ms_;
     s.cmd_age_max_ms = stat_cmd_age_max_ms_;
     s.scale_min = stat_scale_min_;
     s.ice_mean_ms = stat_ticks_ > 0 ? stat_ice_sum_ms_ / static_cast<float>(stat_ticks_) : 0.f;
     s.ice_max_ms = stat_ice_max_ms_;
-    stat_ticks_ = 0; stat_period_sum_ms_ = 0.f; stat_period_max_ms_ = 0.f;
+    stat_ticks_ = 0; stat_sends_ = 0; stat_period_sum_ms_ = 0.f; stat_period_max_ms_ = 0.f;
     stat_cmd_age_max_ms_ = 0.f; stat_scale_min_ = 1.f;
     stat_ice_max_ms_ = 0.f; stat_ice_sum_ms_ = 0.f;
     last_rate_stats_ = s;      // so the per-cycle CSV can read it without stealing the window
