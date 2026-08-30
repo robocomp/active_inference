@@ -2346,11 +2346,64 @@ rc::RouteFollower::FreeFn ControllerSession::route_free_fn()
     return [this](const Eigen::Vector2f &p, float hdg) { return grid_planner_.pose_free(p, hdg); };
 }
 
+// ── THE LAP BEING DRIVEN, NOT EVERY LAP AT ONCE ──────────────────────────────────────────────────
+// ★★★WHY THE CANVAS SHOWED TWO PATHS. RouteFollower::build lays the tour down ONCE PER LAP
+// (route_follower.cpp:44, `for lap … for waypoint …`) and fits ONE spline through the whole
+// concatenation, so path() is the tour repeated N times: measured on the real tour, 39.88 m / 800
+// samples at 1 lap against 230.17 m / 4608 at 6. Drawing that draws six near-copies of the same
+// journey on top of each other. They are NOT identical — the spline is continuous across the seams and
+// the optimiser moves each lap's control points differently — so they separate into visibly distinct
+// curves, which reads exactly as "the original path with the optimised one drawn over it".
+//
+// So the display gets the lap the robot is ON. Lap boundaries are already known: wp_s_ holds every
+// waypoint's arc length and wp_per_lap_ how many belong to a lap, so the k-th lap spans
+// [wp_s[k*per_lap], wp_s[(k+1)*per_lap]).
+//
+// ★DISPLAY ONLY. The follower keeps the whole concatenated curve — progress(), finished(), the
+// waypoint arc lengths and the band's frozen prefix are all defined on it, and slicing what the
+// CONTROLLER drives is a different and much larger change (it is the same change as building one lap
+// at a time, which would also fix the build cost). This slices the mirror, not the thing.
+ControllerPolygon ControllerSession::current_lap_path() const
+{
+    const auto &all = route_.path();
+    const auto &wp_s = route_.waypoint_arclengths();
+    const int per_lap = route_.waypoints_per_lap();
+    const float spacing = route_.spline().spacing();
+    // Anything missing and the honest answer is the whole curve — a partial picture invented from bad
+    // indices would be worse than a busy correct one.
+    if (all.empty() or per_lap <= 0 or wp_s.empty() or spacing <= 0.f) return all;
+
+    const int lap = std::max(0, route_.laps_completed_at(route_.progress()));
+    const std::size_t i_lo = static_cast<std::size_t>(lap) * static_cast<std::size_t>(per_lap);
+    const std::size_t i_hi = i_lo + static_cast<std::size_t>(per_lap);
+    if (i_lo >= wp_s.size()) return all;                 // past the last lap boundary: draw it all
+    // The lap STARTS at the previous boundary — or at 0 for the first, whose leading hop is the run-in
+    // from wherever the robot happened to be, and which belongs to lap 1.
+    const float s_lo = lap == 0 ? 0.f : wp_s[i_lo - 1];
+    const float s_hi = i_hi <= wp_s.size() and i_hi > 0 ? wp_s[i_hi - 1] : route_.spline().length();
+
+    const auto idx = [&](float x)
+    { return std::min(all.size(), static_cast<std::size_t>(std::max(0.f, x) / spacing)); };
+    const std::size_t a = idx(s_lo), b = std::max(a, idx(s_hi));
+    if (b <= a) return all;
+    // Said ONCE per route, because "it draws one lap now" is a claim and this is the number that
+    // settles it: on a 6-lap tour the drawn length should be about a sixth of the route.
+    if (not lap_slice_logged_)
+    {
+        lap_slice_logged_ = true;
+        std::println("[route] canvas draws lap {} only: {:.2f} m of {:.2f} m ({} of {} samples). The "
+                     "follower still drives the whole concatenation.",
+                     lap + 1, s_hi - s_lo, route_.spline().length(), b - a, all.size());
+    }
+    return ControllerPolygon(all.begin() + static_cast<long>(a), all.begin() + static_cast<long>(b));
+}
+
 void ControllerSession::on_route_reauthored(const char *event, float window_m,
                                            rc::TrajectoryController &path_controller,
                                            std::uint64_t now_ms)
 {
     ++route_repair_count_;
+    lap_slice_logged_ = false;   // a new curve gets to report its own lap slice
     mission_.note_replan();   // count what HAPPENED, not the reflex that asked for it
     // The curve the trace belongs to has just been replaced — see RouteChangedCallback.
     note_route_changed();
@@ -2496,7 +2549,7 @@ bool ControllerSession::drive_mission_route(const ControllerPlanningStep &step,
         // is ended by arc length below (route_.finished()), which knows the difference between not
         // yet departed and returned — so that is the only arrival test left running here.
         path_controller.set_endpoint_arrival(false);
-        current_plan_ = ControllerPathPlan{.room_path = route_.path()};
+        current_plan_ = ControllerPathPlan{.room_path = current_lap_path()};
     }
     return true;
 }
@@ -3975,8 +4028,8 @@ void ControllerSession::step_route_band(const DrivenCurve &curve,
     // prefix is frozen, so arc length behind the robot is unchanged and progress()/waypoint arc lengths
     // still mean what they did.
     const auto &deformed = *curve.samples;
-    path_controller.update_path_geometry(deformed);
-    current_plan_ = ControllerPathPlan{.room_path = deformed};
+    path_controller.update_path_geometry(deformed);   // the FOLLOWER gets every lap, as it always did
+    current_plan_ = ControllerPathPlan{.room_path = current_lap_path()};   // the CANVAS gets one
 }
 
 void ControllerSession::ensure_band_csv(bool band_enabled)
