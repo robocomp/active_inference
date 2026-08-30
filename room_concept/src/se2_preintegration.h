@@ -210,7 +210,7 @@ namespace rc::preint
         // Lever arm converting between the two channels, so the rest hypothesis is about the WHOLE
         // BODY: a robot pivoting in place has v_lat = v_long = 0 yet is emphatically not at rest, and
         // its wheels are scrubbing. Without this, a pivot would be handed the parked translation noise.
-        // Set it to the wheel anchor offset (±0.259 m on Shadow, see ShadowDiff.proto).
+        // Set it to the wheel anchor offset (±0.259 m on Shadow, see Shadow.proto).
         float zupt_lever_m   = 0.26f;
     };
 

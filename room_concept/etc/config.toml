@@ -17,7 +17,7 @@
 # Shadow measurement exists and the alternative was to leave the feature undocumented. Each one says
 # what would settle it. Treat those as open, not as settings.
 #
-# ⚠ BASE KINEMATICS. Shadow in Piso.wbt is a DIFFERENTIAL base (ShadowDiff.proto, wheel anchors
+# ⚠ BASE KINEMATICS. Shadow in Piso.wbt is a DIFFERENTIAL base (Shadow.proto, wheel anchors
 # +-0.259 m, which is where PreintZuptLeverM = 0.26 comes from); P3Bot is MECANUM. Nothing derived
 # from wheel geometry or base kinematics crossed over.
 # ⚠ AND ONE THING TO CHECK BEFORE THE FIRST RUN, because the two bridge config files disagree:
@@ -387,7 +387,7 @@ PreintZupt           = true
 # which is what says whether applying the ZUPT once per SAMPLE earns its sqrt(N) or counts one fact
 # many times. The per-cycle log physically cannot answer that, because it aliases the stream.
 # Lever arm coupling the two channels so a PIVOT cannot claim to be at rest: v_lat = v_long = 0 while
-# spinning, and the wheels are scrubbing. Shadow's wheel anchors are +-0.259 m (ShadowDiff.proto).
+# spinning, and the wheels are scrubbing. Shadow's wheel anchors are +-0.259 m (Shadow.proto).
 PreintZuptLeverM     = 0.26
 
 # ── The rest hypothesis as a FACTOR on the state, rather than covariance shaping ────────────────

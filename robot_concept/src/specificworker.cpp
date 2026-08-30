@@ -720,7 +720,7 @@ void SpecificWorker::check_robot_identity()
 				G->add_or_modify_attrib_local<scenario_name_att>(n.value(), scenario_name_);
 			// WHAT this base can do. A differential base cannot move sideways, and nothing in the
 			// graph said so: the controller issues setSpeedBase(side, adv, rot) unconditionally and
-			// room_concept's odometry carries a dx_local = side*dt term, so on ShadowDiff both were
+			// room_concept's odometry carries a dx_local = side*dt term, so on the differential Shadow both were
 			// describing motion the robot cannot make. Published on the SAME one-shot write as
 			// scenario_name — same node, same reason to wait for the graph.
 			if (holonomic_.has_value())
