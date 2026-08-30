@@ -151,7 +151,13 @@ class Viewer2D : public QObject
         /// magenta square and its cyan neighbour IS the RGB-vs-LiDAR disagreement, in metres, on the
         /// canvas. Squares not circles, and magenta not cyan, so the two remain separable in a
         /// screenshot and for a viewer who cannot tell the hues apart.
-        void draw_rgb_corners(const std::vector<rc::TriplePoint>& points);
+        /// Each drawn corner also gets a DOTTED sight line back to the robot, so the RGB channel's
+        /// geometry can be read the same way the LiDAR one is. Dotted, because the LiDAR sight lines
+        /// are solid (live) or dashed (retired) — the stroke pattern alone says which sensor it is.
+        /// `robot_pose` is only used for the robot→corner sight lines; the corner positions
+        /// themselves are already in the room frame.
+        void draw_rgb_corners(const std::vector<rc::TriplePoint>& points,
+                              const Eigen::Affine2f& robot_pose);
 
         void draw_corners(const std::vector<rc::CornerDetector::CornerMatch>& matches,
                           const Eigen::Affine2f& robot_pose);
@@ -237,14 +243,21 @@ class Viewer2D : public QObject
         // Epistemic target
         QGraphicsEllipseItem* epistemic_target_item_ = nullptr;
 
-        // Corner detection markers
+        // ── Corner detection markers ─────────────────────────────────────────────────────────────
+        // One grammar across both channels, so a screenshot is readable without a legend:
+        //   SHAPE = which sensor  — circle = LiDAR, square = RGB.
+        //   FILL  = what it is    — filled = MEASURED (what the sensor says), hollow = MODEL (where
+        //                           the room polygon predicts it), the residual line joining the pair.
+        //   HUE   = the channel   — LiDAR blues (bright cyan measured, dark blue model),
+        //                           RGB warms (orange measured, dark brown model).
         std::vector<QGraphicsRectItem*>    rgb_corner_items_;
-        std::vector<QGraphicsLineItem*>    rgb_corner_line_items_;
+        std::vector<QGraphicsRectItem*>    rgb_model_items_;             // model vertex, hollow dark-brown square
+        std::vector<QGraphicsLineItem*>    rgb_corner_line_items_;       // model vertex → measured crossing (the residual)
+        std::vector<QGraphicsLineItem*>    rgb_corner_robot_line_items_; // robot → measured RGB corner (sight line)
         std::vector<QGraphicsEllipseItem*> corner_detected_items_;
         std::vector<QGraphicsEllipseItem*> corner_predicted_items_;
         std::vector<QGraphicsLineItem*>    corner_line_items_;
         std::vector<QGraphicsLineItem*>    corner_robot_line_items_;   // robot → detected corner
-        std::vector<QGraphicsTextItem*>    corner_cov_text_items_;     // det(cov) label on each sight line
 
         // Landmark markers (pinned objects): robot → landmark lines
         std::vector<QGraphicsLineItem*>    landmark_line_items_;

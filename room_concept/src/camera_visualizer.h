@@ -2,6 +2,8 @@
 #define CAMERA_VISUALIZER_H
 
 #include <QDialog>
+#include <QPointer>
+#include <QPushButton>
 #include <QHideEvent>
 #include <QLabel>
 #include <QImage>
@@ -96,6 +98,17 @@ class CameraVisualizer : public QDialog
         std::vector<std::string> overlay_object_types_;  // DSR node types projected as boxes (config Overlay.ObjectTypes)
 
         // Latest matched corners for the uncertainty overlay (set from the GUI thread each frame).
+        // ── All / Matched, for the corner overlays ───────────────────────────────────────────────
+        // The 2-D canvas draws only corners that are matched to a model vertex and believed
+        // (rc::CornerDetector::matched_for_display). Without this control the camera overlays drew
+        // EVERY match, so the two views of the same state disagreed about which corners exist —
+        // which reads as a broken detector rather than as two different questions being asked.
+        //
+        // Defaults to MATCHED so the window agrees with the canvas out of the box; press the button
+        // to see everything the detector produced, which is what you want when asking "why was that
+        // corner dropped?". Display-only: the estimator sees every match either way.
+        bool corners_matched_only_ = true;
+        QPointer<QPushButton> corner_filter_btn_;
         std::mutex corner_matches_mtx_;
         std::vector<rc::CornerDetector::CornerMatch> corner_matches_;
         QLabel* image_label_;

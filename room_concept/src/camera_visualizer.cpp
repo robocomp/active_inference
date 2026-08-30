@@ -1,4 +1,5 @@
 #include "camera_visualizer.h"
+#include <pthread.h>   // pthread_setname_np: name the worker so a per-thread CPU sample attributes itself
 
 #include <dsr/api/dsr_api.h>
 #include <dsr/api/dsr_camera_api.h>
@@ -13,6 +14,7 @@
 #include <QFontMetrics>
 #include <QPainter>
 #include <QPolygonF>
+#include <QHBoxLayout>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -127,6 +129,33 @@ CameraVisualizer::CameraVisualizer(std::shared_ptr<DSRGraph> graph, const std::v
     image_label_->setMinimumSize(640, 480);
     image_label_->setScaledContents(false);
     image_label_->setAlignment(Qt::AlignCenter);
+    // ── All / Matched corner filter ──────────────────────────────────────────────────────────────
+    // Checkable, and the LABEL is the state rather than a caption beside a tick: this window has no
+    // other controls, so there is no settings idiom for a reader to lean on.
+    corner_filter_btn_ = new QPushButton(this);
+    corner_filter_btn_->setCheckable(true);
+    corner_filter_btn_->setChecked(corners_matched_only_);
+    corner_filter_btn_->setToolTip(
+        "Which corners the overlays draw — BOTH channels, LiDAR and RGB.\n\n"
+        "MATCHED (default): only corners matched to a model vertex and believed — the same rules the\n"
+        "2-D canvas uses (assoc_prob for LiDAR, occlusion + residual chi2 for RGB), so the two views\n"
+        "agree.\n"
+        "ALL: every corner the detector produced, including ambiguous ones it is not using and RGB\n"
+        "crossings whose vertex stands behind a wall. Switch to this when asking why a corner was\n"
+        "dropped.\n\n"
+        "Display only: the estimator receives every match either way.");
+    const auto sync_btn = [this]
+    { corner_filter_btn_->setText(corners_matched_only_ ? "Corners: Matched" : "Corners: All"); };
+    sync_btn();
+    connect(corner_filter_btn_, &QPushButton::toggled, this, [this, sync_btn](bool on)
+    {
+        corners_matched_only_ = on;
+        sync_btn();
+    });
+    auto* controls = new QHBoxLayout;
+    controls->addWidget(corner_filter_btn_);
+    controls->addStretch(1);
+    layout->addLayout(controls);
     layout->addWidget(image_label_);
     setLayout(layout);
 
@@ -185,7 +214,11 @@ void CameraVisualizer::start_media_plane()
     // serialized against the LiDAR ingest thread by media_transport's entity mutex.
     if (ingest_running_.exchange(true))
         return;   // idempotent: already started
-    ingest_thread_ = std::thread(&CameraVisualizer::ingest_loop, this);
+    ingest_thread_ = std::thread([this]
+    {
+        pthread_setname_np(pthread_self(), "camview-ingest");
+        ingest_loop();
+    });
 }
 
 void CameraVisualizer::stop_ingest()
@@ -1062,6 +1095,10 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
             std::lock_guard<std::mutex> lk(corner_matches_mtx_);
             matches = corner_matches_;
         }
+        // One rule, shared with the 2-D canvas (corner_detector.h), so the two views cannot drift.
+        if (corners_matched_only_)
+            std::erase_if(matches, [](const auto& m)
+                          { return not rc::CornerDetector::matched_for_display(m); });
         constexpr double near_y = 1e-4;
         // px per metre at unit range: a focal length on a pinhole, pixels-per-radian on a panorama
         // (fetch_camera_intrinsics fills the latter, since a panorama has no focal length).
@@ -1123,6 +1160,16 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
             std::lock_guard<std::mutex> lk(triple_mtx_);
             if (triple_from_ == camera_node_name_) tps = triple_points_;
         }
+        // One rule, shared with the 2-D canvas (rc::visible_and_matched, image_edge_types.h), and
+        // governed by the SAME All/Matched button as the LiDAR corners above — one control for both
+        // channels, because a reader comparing the two markers must know they were filtered alike.
+        // Applied to this window's own copy, taken under triple_mtx_ above: the shared list is never
+        // mutated to make a picture.
+        // ★ It drops the WHOLE corner — measured square, predicted ring AND the residual line
+        //   between them — not just the marker. A residual line hanging off a corner that is not
+        //   drawn is worse than the corner: it points at nothing and still reads as evidence.
+        if (corners_matched_only_)
+            std::erase_if(tps, [](const auto& t) { return not rc::visible_and_matched(t); });
         for (const auto& t : tps)
         {
             if (!std::isfinite(t.uv_meas.x()) || !std::isfinite(t.uv_meas.y())) continue;
@@ -1172,6 +1219,9 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
             ms = corner_matches_;
             rp = corner_pose_;
         }
+        if (corners_matched_only_)
+            std::erase_if(ms, [](const auto& m)
+                          { return not rc::CornerDetector::matched_for_display(m); });
         const QColor lid(0, 230, 120);
         for (const auto& m : ms)
         {

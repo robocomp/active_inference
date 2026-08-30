@@ -23,6 +23,7 @@
  *    cannot arise by construction.
  */
 
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -165,8 +166,12 @@ namespace rc
         Eigen::Vector2f uv_meas = Eigen::Vector2f::Zero(); ///< where the two fitted lines cross
         Eigen::Matrix2f cov_uv  = Eigen::Matrix2f::Zero(); ///< propagated from the two offset sigmas
         /// The occlusion prior the mixture already applied to this corner's own samples, carried
-        /// out so a CONSUMER can see it. Weighted mean of pi_vis over the two segments that formed
-        /// the crossing; 1 = clear line of sight, 0.02 = a wall of this very room stands in the way.
+        /// out so a CONSUMER can see it. THIS VERTEX's own line of sight — the WallCorner segment's
+        /// pi_vis, which is constant along that segment because every sample on it shares the
+        /// vertex's (x, y); 1 = clear line of sight, 0.02 = a wall of this very room stands in the way.
+        /// ★ It was once a w-weighted mean over BOTH segments, which could not work: w collapses under
+        ///   occlusion, so the pooling was weighted by the quantity it was averaging away and half the
+        ///   corners behind a wall read as visible. See the block at its assignment for the numbers.
         /// ★ It exists because the 2-D canvas was drawing every predicted corner identically, so a
         ///   room whose far side is hidden behind its own walls looked like a room with transparent
         ///   walls. The LOSS was already right — an occluded corner's samples are downweighted, its
@@ -194,10 +199,85 @@ namespace rc
         Eigen::Vector3f p_room_meas = Eigen::Vector3f::Zero();
         float           range_m     = -1.f;
         float           range_sigma = -1.f;  ///< < 0 until a depth sigma is MEASURED, not guessed
+        /// cov_uv carried into the ROOM plane — the (x, y) covariance of p_room_meas, in m^2.
+        /// Display-only, like p_room_meas, and zero until the intersection that produces p_room_meas
+        /// has been run (SpecificWorker::place_triple_points_in_room).
+        ///
+        /// ★ WHY IT MUST EXIST RATHER THAN BEING DERIVED WHERE IT IS NEEDED. cov_uv is in PIXELS, and
+        ///   converting it needs a camera model — fx, or the panorama's width — that this struct
+        ///   deliberately does not carry. A consumer that guessed an angular rule (metres = px * range
+        ///   / f) would also be wrong in the v axis, whose error the grazing ray-plane intersection
+        ///   amplifies by roughly d^2 / h, exactly the relation ContourClass already records above. So
+        ///   the covariance is propagated where the intersection actually happens, by differencing
+        ///   that map itself: the code IS the Jacobian, and nothing is modelled a second time.
+        ///
+        /// ★ IT IS WHAT MAKES THE TWO CORNER CHANNELS COMPARABLE. The 2-D canvas draws a LiDAR corner's
+        ///   sight line with a width linear in (det cov)^{1/4} — a characteristic 1-sigma in metres.
+        ///   Without a metric covariance here the RGB channel could only draw a constant width, which
+        ///   reads as a constant certainty it never established.
+        Eigen::Matrix2f cov_room    = Eigen::Matrix2f::Zero();
         int   n_corner = 0;         ///< weighted-effective samples behind the vertical line
         int   n_floor  = 0;         ///< ... and behind the floor line
         float cond     = 0.f;       ///< of the 2x2; ~1 when the two normals are orthogonal
     };
+
+    // ── THE ONE "MAY THIS RGB CORNER BE DRAWN?" RULE, SHARED BY EVERY VIEW ───────────────────────
+    // The counterpart of rc::CornerDetector::matched_for_display, which does this job for the LiDAR
+    // channel. It lives HERE, beside TriplePoint, because that is the only header both views already
+    // include and it drags no framework behind it; putting it in corner_detector.h would have made
+    // this struct's own display rule depend on the detector, which it does not.
+    //
+    // It exists because the two views disagreed about the same state: the 2-D canvas withheld
+    // occluded and unmatched crossings while the camera overlays painted every one of them as a
+    // filled square with a residual line, and 45.3% of emitted crossings have their vertex
+    // geometrically behind a wall. Two views of one estimator arguing is a bug report waiting to be
+    // filed against the estimator.
+    //
+    // Display-only: nothing here gates detection, association or the loss. The loss still sees every
+    // crossing, weighted by exactly these quantities, because down-weighting inside a mixture and
+    // refusing to draw are different jobs and only one of them is inference.
+    //
+    // The rule is `visible_for_display and matched_to_model`; the two halves are exposed separately
+    // ONLY so a view can say WHICH one withheld a corner in its log. Nothing may test one without
+    // the other.
+
+    /// The occlusion prior does not disbelieve this corner. Every polygon vertex projects somewhere
+    /// in a 360 image, including the ones behind this room's own walls — a non-convex plan hides half
+    /// of itself from any single viewpoint — so drawing them all painted a room with transparent
+    /// walls. Tested at 0.5, the same coin flip the LiDAR path applies to its `assoc_prob`.
+    [[nodiscard]] inline bool visible_for_display(const TriplePoint& t) noexcept
+    {
+        return t.pi_vis >= 0.5f;
+    }
+
+    /// The crossing sits within 3 sigma of the model vertex it claims to be, in ITS OWN covariance.
+    /// An edge search that locked onto a different structure returns a confident sub-pixel position
+    /// that is nowhere near the prediction, and this is what says so.
+    ///
+    /// ★ THIS TEST IS NOT INERT and must not be dropped by analogy with the LiDAR path's absent chi2
+    ///   (which is provably dead because the association gate already bounds the residual upstream).
+    ///   Nothing bounds `resid_px` before it arrives here: a post-fit chi2/dof of ~6.99 was MEASURED,
+    ///   i.e. ~14 for 2 DOF against a 9.0 cut.
+    ///
+    /// A covariance that is not positive-definite carries no scale to test against, so such a corner
+    /// PASSES rather than being withheld: refusing to draw is a claim, and "no number" is not one.
+    [[nodiscard]] inline bool matched_to_model(const TriplePoint& t) noexcept
+    {
+        const Eigen::Matrix2f C = t.cov_uv;
+        const float det = C(0, 0) * C(1, 1) - C(0, 1) * C(1, 0);
+        if (not (std::isfinite(det) and det > 1e-12f)) return true;
+        // chi2 with 2 DOF; 9.0 is 3 sigma. Written out rather than inverted for a 2x2.
+        const Eigen::Vector2f r = t.resid_px;
+        const float chi2 = (C(1, 1) * r.x() * r.x() - 2.f * C(0, 1) * r.x() * r.y()
+                            + C(0, 0) * r.y() * r.y()) / det;
+        return chi2 < 9.f;
+    }
+
+    /// The whole display rule, and what every view should call unless it needs to name the reason.
+    [[nodiscard]] inline bool visible_and_matched(const TriplePoint& t) noexcept
+    {
+        return visible_for_display(t) and matched_to_model(t);
+    }
 
     /// One frame's worth of edge evidence, attached to the window slot whose stamp is nearest.
     struct ImageEdgeObs

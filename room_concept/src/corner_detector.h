@@ -184,6 +184,40 @@ public:
                                     // pose jump. This is the number that identifies WHICH corners alias.
     };
 
+    /// ── THE ONE "IS THIS CORNER MATCHED?" RULE, SHARED BY EVERY VIEW ────────────────────────────
+    /// The 2-D canvas and the camera overlays both decide whether to draw a corner. When they each
+    /// carried their own version of that decision they disagreed about the same state — the canvas
+    /// showed only believed corners while the overlay showed everything — and two views of one
+    /// estimator arguing is a bug report waiting to be filed against the estimator.
+    ///
+    /// Display-only: nothing here gates detection, association or the loss. A corner that fails this
+    /// is still tracked, still in `matches`, and still available to any view that asks for all of
+    /// them (the camera window's All/Matched button does exactly that).
+    ///
+    /// The two conditions, and why each is the number it is:
+    ///   1. matched to a model vertex at all, with a finite position;
+    ///   2. `assoc_prob >= 0.5` — the PDA posterior that this detection came from `model_index`
+    ///      rather than a rival in-gate vertex. Below a coin flip the corner is not matched to the
+    ///      vertex it claims to be; it is merely the best of several guesses. This is the LiDAR
+    ///      counterpart of the RGB path's `pi_vis`, tested at the same 0.5.
+    ///
+    /// There is deliberately NO chi2 test here, because the association gate already bounds
+    /// `assoc_chi2_val` upstream and a repeat of it could never fire:
+    ///   • corner_detector.cpp:531 leaves every (model corner, detection) pair whose squared
+    ///     Mahalanobis distance exceeds `Params::assoc_chi2` (5.991 = χ²₂ @95%) INFEASIBLE;
+    ///   • solve_hungarian drops infeasible pairs when it extracts the assignment
+    ///     (corner_detector.cpp:166), so an over-gate pair is never assigned;
+    ///   • corner_detector.cpp:580 is the ONLY writer of `assoc_chi2_val`, and it writes that
+    ///     same gated cost — so every emitted match carries a value in [0, assoc_chi2].
+    /// `assoc_chi2` is a compiled-in constant: no config key reaches it (room_config.cpp loads the
+    /// other CornerDetector::Params fields, not this one), so the `assoc_chi2 <= 0` escape hatch
+    /// cannot be taken by a running agent either. Should that ever change, this rule stops bounding
+    /// the residual — which is the association gate's job, not the viewer's.
+    [[nodiscard]] static bool matched_for_display(const CornerMatch &m) noexcept
+    {
+        return m.model_index >= 0 and m.detected.allFinite() and m.assoc_prob >= 0.5f;
+    }
+
     struct DetectionResult
     {
         std::vector<CornerMatch> matches;

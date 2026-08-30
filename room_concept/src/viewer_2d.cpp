@@ -665,7 +665,8 @@ void Viewer2D::draw_all_trajectories(
 // ─────────────────────────────────────────────────────────────────────────────
 // Corner detection markers
 // ─────────────────────────────────────────────────────────────────────────────
-void Viewer2D::draw_rgb_corners(const std::vector<rc::TriplePoint>& points)
+void Viewer2D::draw_rgb_corners(const std::vector<rc::TriplePoint>& points,
+                                const Eigen::Affine2f& robot_pose)
 {
     // Only points that actually got a depth reading have a room position; range_m < 0 is the
     // "no depth" marker and p_room_meas is left at the origin, which must not be drawn as a corner
@@ -692,17 +693,12 @@ void Viewer2D::draw_rgb_corners(const std::vector<rc::TriplePoint>& points)
         // never appeared and nothing said why. p_room_meas is now filled by a ray-plane
         // intersection at the corner's known height, which needs no depth and works for both.
         if (not (t.p_room_meas.allFinite() and t.p_room_meas.squaredNorm() > 1e-12f)) continue;
-        if (t.pi_vis < 0.5f) { ++n_occluded; continue; }
-        const Eigen::Matrix2f C = t.cov_uv;
-        const float det = C(0, 0) * C(1, 1) - C(0, 1) * C(1, 0);
-        if (std::isfinite(det) and det > 1e-12f)
-        {
-            // chi2 with 2 DOF; 9.0 is 3 sigma. Written out rather than inverted for a 2x2.
-            const Eigen::Vector2f r = t.resid_px;
-            const float chi2 = (C(1, 1) * r.x() * r.x() - 2.f * C(0, 1) * r.x() * r.y()
-                                + C(0, 0) * r.y() * r.y()) / det;
-            if (not (chi2 < 9.f)) { ++n_unmatched; continue; }
-        }
+        // Conditions 2 and 3 now live in rc::visible_and_matched (image_edge_types.h), so the camera
+        // overlays apply the SAME rule rather than a second copy of it. Called as its two halves
+        // here, and only here, so the log below can say WHICH half withheld a corner — their
+        // conjunction is exactly rc::visible_and_matched(t).
+        if (not rc::visible_for_display(t)) { ++n_occluded; continue; }
+        if (not rc::matched_to_model(t))    { ++n_unmatched; continue; }
         shown.push_back(&t);
     }
     // Silence and "nothing to show" look identical on a canvas, so say what was withheld.
@@ -726,12 +722,10 @@ void Viewer2D::draw_rgb_corners(const std::vector<rc::TriplePoint>& points)
         for (size_t i = 0; i < pool.size(); ++i) pool[i]->setVisible(i < count);
     };
 
-    // MEASURED corner — solid magenta square. Square and magenta both deliberate: the LiDAR's are
-    // cyan circles, and a difference in shape as well as hue keeps them apart in a screenshot.
-    // ★ ORANGE, not magenta. Magenta is the OBJECT ANCHOR pair further down, whose comment already
-    //   says it is "deliberately unlike the corner markers" — sharing the hue undid that. The LiDAR's
-    //   predicted corners are also orange but HOLLOW CIRCLES against these FILLED SQUARES, so shape
-    //   separates them where hue alone would not.
+    // MEASURED corner — solid ORANGE square. Square and orange both deliberate, and now part of one
+    // grammar the whole canvas obeys (see the pool declarations in viewer_2d.h): SQUARE = RGB,
+    // CIRCLE = LiDAR; FILLED = measured, HOLLOW = model; warm hues = RGB, blues = LiDAR. Magenta is
+    // the OBJECT ANCHOR pair further down, which is why these are not magenta.
     resize_pool(rgb_corner_items_, n, [&]() {
         constexpr float r = 0.22f;
         auto* item = agv_->scene.addRect(-r, -r, 2*r, 2*r,
@@ -740,20 +734,60 @@ void Viewer2D::draw_rgb_corners(const std::vector<rc::TriplePoint>& points)
         return item;
     });
 
+    // MODEL vertex — hollow DARK BROWN square, the RGB counterpart of the LiDAR's hollow dark-blue
+    // circle. The residual line below already ran to this point, but nothing marked it, so the line
+    // ended in mid-air and the pair "where the image says / where the model says" could not be read
+    // off the canvas the way the LiDAR pair can. Drawn LARGER than the measured square, the same
+    // ordering the LiDAR pair uses (0.35 hollow around 0.30 filled), so the measurement sits inside
+    // its prediction rather than beside it.
+    resize_pool(rgb_model_items_, n, [&]() {
+        constexpr float r = 0.27f;
+        auto* item = agv_->scene.addRect(-r, -r, 2*r, 2*r,
+            QPen(QColor(101, 67, 33), 0.05), QBrush(Qt::NoBrush));
+        item->setZValue(30);      // under the measured square, over the LiDAR markers
+        return item;
+    });
+
     // Line from the MODEL vertex to where the image says the corner is. This is the residual drawn
     // at true scale — the quantity the whole mount calibration is about, in metres on the canvas.
+    // ★ This pool is the RESIDUAL, not a sight line: it spans p_room (the model vertex) → p_room_meas
+    //   (the crossing). The robot→corner line below is a SECOND pool, kept separate so neither
+    //   meaning is quietly overwritten by the other.
     resize_pool(rgb_corner_line_items_, n, [&]() {
         auto* item = agv_->scene.addLine(0, 0, 0, 0, QPen(QColor(255, 150, 0, 120), 0.02));
         item->setZValue(28);
         return item;
     });
 
+    // Sight line robot → measured RGB corner, the counterpart of corner_robot_line_items_ for the
+    // LiDAR corners, and drawn on the SAME visual scale: SOLID, with the width carrying the corner's
+    // own positional 1-sigma under the identical law draw_corners uses — same expression, same
+    // constants, same metres. What separates the two channels is HUE alone: these are the RGB term's
+    // orange, the LiDAR ones ramp green→red with their sigma. Sharing the width law is the whole
+    // point — a fat line must mean the same size of doubt in both channels, which it could not while
+    // one of them was a fixed thin dot-dash encoding nothing.
+    // ★ The width needs a METRIC covariance and cov_uv is in pixels, so the pen is set per corner
+    //   below from TriplePoint::cov_room — cov_uv propagated through the ray-plane intersection
+    //   itself (SpecificWorker::place_triple_points_in_room). Where that propagation did not run the
+    //   line falls back to DOTTED at the base width, this canvas's existing idiom for "no number is
+    //   encoded here", rather than drawing the hairline a zero covariance would otherwise imply.
+    resize_pool(rgb_corner_robot_line_items_, n, [&]() {
+        auto* item = agv_->scene.addLine(0, 0, 0, 0, QPen(QColor(255, 150, 0, 110), 0.025));
+        item->setZValue(26);   // under the LiDAR sight lines (27), which carry the localiser's weight
+        return item;
+    });
+
+    const Eigen::Vector2f robot_xy = robot_pose.translation();
+
     for (size_t i = 0; i < n; ++i)
     {
         const auto& t = *shown[i];
         rgb_corner_items_[i]->setPos(t.p_room_meas.x(), t.p_room_meas.y());
+        rgb_model_items_[i]->setPos(t.p_room.x(), t.p_room.y());
         rgb_corner_line_items_[i]->setLine(t.p_room.x(), t.p_room.y(),
                                            t.p_room_meas.x(), t.p_room_meas.y());
+        rgb_corner_robot_line_items_[i]->setLine(robot_xy.x(), robot_xy.y(),
+                                                 t.p_room_meas.x(), t.p_room_meas.y());
         // ── The marker carries the model's own belief in it, on two independent axes ─────────────
         // CONDITIONING: a vertex seen edge-on has a poorly defined crossing, and its marker should
         // not look as authoritative as a well-conditioned one.
@@ -771,14 +805,74 @@ void Viewer2D::draw_rgb_corners(const std::vector<rc::TriplePoint>& points)
         const double vis    = std::clamp(static_cast<double>(t.pi_vis), 0.0, 1.0);
         const double q      = q_cond * vis;
         rgb_corner_items_[i]->setOpacity(q);
+        rgb_model_items_[i]->setOpacity(q);
         rgb_corner_line_items_[i]->setOpacity(q);
+        rgb_corner_robot_line_items_[i]->setOpacity(q);
+
+        // ── Sight-line width = this corner's own 1-sigma, on the LiDAR channel's scale ───────────
+        // The same law draw_corners applies to a LiDAR corner: the characteristic 1-sigma length is
+        // (det cov)^{1/4}, the geometric mean of the two sigma axes in metres, and the width is
+        // linear in it over the same clamp. cov_room is metric by construction, so a fat orange line
+        // and a fat green one stand for the same size of doubt — which is the only reason to share
+        // an encoding at all.
+        const Eigen::Matrix2f Cr = t.cov_room;
+        const float det_room = Cr(0, 0) * Cr(1, 1) - Cr(0, 1) * Cr(1, 0);
+        if (std::isfinite(det_room) and det_room > 0.f)
+        {
+            const float sigma_scale = std::pow(std::max(det_room, 1e-12f), 0.25f);
+            const float width = std::clamp(0.03f + 0.9f * sigma_scale, 0.03f, 0.9f);
+            rgb_corner_robot_line_items_[i]->setPen(QPen(QColor(255, 150, 0, 110), width));
+        }
+        else
+        {   // No metric covariance reached us. Say that, rather than draw the hairline a zero
+            // covariance would produce and let it read as a perfectly located corner.
+            QPen pen(QColor(255, 150, 0, 110), 0.025);
+            pen.setStyle(Qt::DotLine);
+            rgb_corner_robot_line_items_[i]->setPen(pen);
+        }
     }
 }
 
 void Viewer2D::draw_corners(const std::vector<rc::CornerDetector::CornerMatch>& matches,
                              const Eigen::Affine2f& robot_pose)
 {
-    const size_t n = matches.size();
+    // ── Only corners that are actually MATCHED to a model vertex get drawn ───────────────────────
+    // ONE decision, and it is NOT taken here: rc::CornerDetector::matched_for_display (corner_detector.h)
+    // is the single rule, so this canvas and the camera overlays cannot drift apart. A marker for a
+    // corner the agent does not believe is a claim it is not making, and this canvas is read as
+    // evidence of what the localiser is using. DISPLAY only: the loss still sees every match,
+    // weighted by exactly the same quantities.
+    //
+    // The counters below only ATTRIBUTE a rejection the predicate has already made — they decide
+    // nothing, and they mirror the predicate's own two conditions in its own order:
+    //   • no model vertex / non-finite detection  → n_unmatched;
+    //   • assoc_prob below a coin flip            → n_ambiguous (the detection is the best of several
+    //     guesses rather than a match to the vertex it claims).
+    // There is no chi2 reason to report: the association gate bounds assoc_chi2_val upstream
+    // (see the note on matched_for_display), so a residual test here could never withhold a marker.
+    std::vector<const rc::CornerDetector::CornerMatch*> shown;
+    shown.reserve(matches.size());
+    int n_ambiguous = 0, n_unmatched = 0;
+    for (const auto& m : matches)
+    {
+        if (rc::CornerDetector::matched_for_display(m)) { shown.push_back(&m); continue; }
+        if (m.model_index < 0 or not m.detected.allFinite()) ++n_unmatched;
+        else                                                 ++n_ambiguous;
+    }
+    // Silence and "nothing to show" look identical on a canvas, so say what was withheld.
+    if (n_ambiguous + n_unmatched > 0 and not matches.empty())
+    {
+        static std::int64_t last_ms = 0;
+        const auto now = QDateTime::currentMSecsSinceEpoch();
+        if (now - last_ms > 5000)
+        {
+            last_ms = now;
+            qInfo() << "[canvas] LiDAR corners" << static_cast<int>(shown.size()) << "of"
+                    << static_cast<int>(matches.size()) << "drawn —" << n_ambiguous
+                    << "ambiguous association," << n_unmatched << "not matched to a model vertex";
+        }
+    }
+    const size_t n = shown.size();
 
     // Helper: ensure a pool has exactly `count` items, hiding extras
     auto resize_pool = [&](auto& pool, size_t count, auto make_item)
@@ -798,18 +892,21 @@ void Viewer2D::draw_corners(const std::vector<rc::CornerDetector::CornerMatch>& 
         return item;
     });
 
-    // Predicted corners — hollow red circles in world frame
+    // MODEL corners — hollow DARK BLUE circles in world frame. Blue, not orange: hue names the
+    // CHANNEL on this canvas, and orange belongs to the RGB pair. An orange ring around a cyan dot
+    // put two channels' colours on one measurement and read as a cross-sensor pairing that is not
+    // what it is — this ring is the LiDAR's own model vertex, so it stays inside the LiDAR's blues.
     resize_pool(corner_predicted_items_, n, [&]() {
         constexpr float r = 0.35f;
         auto* item = agv_->scene.addEllipse(-r, -r, 2*r, 2*r,
-            QPen(QColor(255, 140, 0), 0.06), QBrush(Qt::NoBrush));
+            QPen(QColor(20, 60, 170), 0.06), QBrush(Qt::NoBrush));
         item->setZValue(29);
         return item;
     });
 
-    // Lines connecting predicted → detected
+    // Residual line, model → detected. Follows its own channel for the same reason the ring does.
     resize_pool(corner_line_items_, n, [&]() {
-        QPen pen(QColor(255, 100, 0, 200), 0.03);
+        QPen pen(QColor(20, 60, 170, 200), 0.03);
         auto* item = agv_->scene.addLine(0, 0, 0, 0, pen);
         item->setZValue(28);
         return item;
@@ -823,22 +920,12 @@ void Viewer2D::draw_corners(const std::vector<rc::CornerDetector::CornerMatch>& 
         return item;
     });
 
-    // Numeric |Σ| (= det of the detection covariance) label at the midpoint of each sight line
-    // (screen-sized, transform-invariant).
-    resize_pool(corner_cov_text_items_, n, [&]() {
-        auto* item = agv_->scene.addText("");
-        item->setZValue(31);
-        item->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
-        QFont f = item->font(); f.setPointSizeF(7.0); item->setFont(f);
-        return item;
-    });
-
     const Eigen::Matrix2f R = robot_pose.linear();
     const Eigen::Vector2f t = robot_pose.translation();
 
     for (size_t i = 0; i < n; ++i)
     {
-        const auto& m = matches[i];
+        const auto& m = *shown[i];
 
         // Detected: transform from robot frame to world using display pose
         const Eigen::Vector2f det_world = R * m.detected + t;
@@ -887,17 +974,6 @@ void Viewer2D::draw_corners(const std::vector<rc::CornerDetector::CornerMatch>& 
         corner_detected_items_[i]->setOpacity(m.suppressed ? 0.25 : 1.0);
         corner_predicted_items_[i]->setOpacity(m.suppressed ? 0.25 : 1.0);
         corner_line_items_[i]->setOpacity(m.suppressed ? 0.25 : 1.0);
-
-        // Numeric label at the line midpoint: the covariance determinant in m⁴, written in the standard
-        // |Σ| notation purely to save canvas width over spelling out "det(cov)". A retired corner shows
-        // WHY instead — its yield against the bar is the number that decides when it comes back.
-        auto* txt = corner_cov_text_items_[i];
-        if (m.suppressed)
-            txt->setPlainText(QStringLiteral("RETIRED λ=%1").arg(m.yield, 0, 'g', 3));
-        else
-            txt->setPlainText(QStringLiteral("|Σ|=%1").arg(det_cov, 0, 'g', 3));
-        txt->setDefaultTextColor(col);
-        txt->setPos(0.5f * (t.x() + det_world.x()), 0.5f * (t.y() + det_world.y()));
     }
 }
 
