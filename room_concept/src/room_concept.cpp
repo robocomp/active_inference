@@ -5754,6 +5754,8 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         res.calib_k_w = motion_calib_.omega_scale();
         res.calib_yaw = motion_calib_.yaw_offset();
         res.calib_episodes = motion_calib_.episodes();
+        res.calib_carried = motion_calib_.carried();
+        res.calib_dropped = motion_calib_.dropped();
     }
 
     void RoomConcept::apply_adaptive_covariance(UpdateResult& res)

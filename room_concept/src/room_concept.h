@@ -760,6 +760,16 @@ public:
         // Learned motion-model parameters at this cycle, so convergence can be watched in the CSV.
         float calib_k_v = 1.f, calib_k_w = 1.f, calib_yaw = 0.f;
         int   calib_episodes = 0;
+        /// Spans that reached the episode trigger with NO correction in them, and were CARRIED
+        /// forward rather than emitted as an observation of zero. Logged beside calib_episodes
+        /// because the ratio is the honest measure of how much the localiser is actually teaching:
+        /// on 2026-08-30, 86% of the window was such spans, emitted as confident zeros, and they
+        /// carried 94% of the information (CALIB_UNMEASURED_EPISODES.md). A rising carried count
+        /// with a flat episode count means the teacher has gone quiet -- which is exactly what was
+        /// invisible before.
+        int   calib_carried = 0;
+        /// Carried spans abandoned at the linearisation cap: the pose went uncorrected too far.
+        int   calib_dropped = 0;
         // 1-sigma uncertainty of each learned parameter. These are what say whether a parameter has
         // CONVERGED or merely stopped moving: a value that sits still with a wide sigma has not been
         // taught anything, it just has not been asked. Units differ (yaw in rad, the scales

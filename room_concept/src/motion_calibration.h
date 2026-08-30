@@ -132,6 +132,16 @@ namespace rc::calib
         // own. Same rule as rot_model_sigma -- grow the covariance with the covariate that predicts
         // the model error, never a threshold on it.
         float fit_model_gain  = 2.0f;   // multiplies mean |SDF| over the episode, into the position R
+        // ── HOW FAR AN UNMEASURED EPISODE MAY BE CARRIED ─────────────────────────────────────────
+        // An episode that saw no correction is not flushed (see observe): its motion is carried
+        // forward so the covariate survives until a real correction arrives to explain it. These cap
+        // that carry. They are a LINEARISATION guard, not a sensitivity knob: the episode's Jacobian
+        // rows treat the accumulated motion as one small increment, and that stops being true long
+        // before the old 1e4 guard they replace. Ten times the identifiability triggers.
+        // ★ Hitting one means the localiser has not corrected the pose across several metres, which
+        // is itself worth knowing -- dropped_ counts it rather than letting it pass silently.
+        float episode_carry_max_trans = 2.5f;   ///< m
+        float episode_carry_max_rot   = 2.0f;   ///< rad
     };
 
     /// Accumulates one ramp-plus-correction episode and folds it into the parameters.
@@ -214,6 +224,13 @@ namespace rc::calib
         /// cannot change how an episode is weighted, and must not: see calibration_intake.h.
         void set_source(rc::calib::Source s) noexcept { source_hint_ = s; }
         [[nodiscard]] int   episodes() const noexcept { return episodes_; }
+        /// Spans that reached the close trigger with NO correction in them and were carried forward
+        /// instead of emitted as a zero. A large ratio against episodes() is the honest signature of
+        /// a localiser that is early-exiting almost everything -- it says the teacher has gone quiet,
+        /// which used to be invisible because those spans were emitted as confident zeros.
+        [[nodiscard]] int   carried() const noexcept { return carried_; }
+        /// Carried spans abandoned at the linearisation cap: the pose went uncorrected too far.
+        [[nodiscard]] int   dropped() const noexcept { return dropped_; }
 
         /// Called once per localiser cycle, on BOTH the early-exit and the optimized path.
         ///   d_forward/d_lateral/d_theta : what the motion model predicted this cycle (post-scaling)
@@ -275,6 +292,7 @@ namespace rc::calib
                 acc_r_fwd_ += r_forward; acc_r_lat_ += r_lateral; acc_r_th_ += r_theta;
                 acc_pos_var_ = std::max(acc_pos_var_, pos_var);
                 acc_th_var_  = std::max(acc_th_var_,  theta_var);
+                acc_measured_ = true;   // this episode contains an actual measurement
             }
 
             // ── WHEN AN EPISODE ENDS ─────────────────────────────────────────────────────────────
@@ -300,12 +318,45 @@ namespace rc::calib
             // never close an episode, or the window fills with rows that only dilute.
             const bool moved_enough = std::abs(acc_fwd_) >= cfg_.episode_min_trans
                                    or std::abs(acc_th_)  >= cfg_.episode_min_rot;
-            if ((prev_corrected_ and not corrected) or moved_enough) flush();
+            const bool want_close = (prev_corrected_ and not corrected) or moved_enough;
+
+            // ── ★★★ AN EPISODE WITH NO CORRECTION IS NOT AN OBSERVATION OF ZERO ──────────────────
+            // Measured 2026-08-30 on a live cold-started run, and this is why the test exists:
+            // at 98.4% early exit the optimizer runs on 1.6% of cycles, so 438 of 512 episodes in
+            // the window (86%) closed on MOTION having never seen a correction and were emitted as
+            // "the correction was exactly zero". Worse, they were the BEST weighted rows in the
+            // window -- median pos_var 0.004945 against 0.007436 for real ones, and a larger
+            // covariate (0.2512 m against 0.1592) -- because with acc_pos_var_ still 0 the variance
+            // is set entirely by fit_model_gain * max|SDF|, and an early-exit cycle is BY DEFINITION
+            // one whose SDF residual was small. The term written on 2026-08-23 to distrust bad fits
+            // had inverted into one that trusts unmeasured episodes most. Result: 94.2% of the
+            // Fisher information on a distance-regressed parameter came from rows in which nothing
+            // was measured, every parameter sat at nominal with shrinking sigma, and eps_yaw never
+            // became informed at all. See CALIB_UNMEASURED_EPISODES.md.
+            //
+            // ★ Widening R does NOT fix it and that was checked, not assumed: those rows already
+            // carry sigma_pos 0.070 m, about the width of the early-exit gate itself. 438 assertions
+            // of "zero" outvote 74 measurements on weight of numbers whatever the variance. The
+            // defect is not the precision on the observation -- it is that an observation is
+            // asserted when nobody looked.
+            //
+            // ★ This is NOT a threshold. `corrected` is a boolean fact about whether the optimizer
+            // ran; measured-versus-not-measured is the one distinction an estimator may never blur.
+            // The motion is CARRIED, not discarded: the covariate survives, and the next real
+            // correction simply explains a longer span.
+            if (want_close)
+            {
+                if (acc_measured_) { flush(); waiting_ = false; }
+                else if (not waiting_) { waiting_ = true; ++carried_; }
+            }
             prev_corrected_ = corrected;
 
-            // Numerical guard only (not a model threshold): a robot that drives for ever without a
-            // single correction would otherwise accumulate unboundedly.
-            if (std::abs(acc_fwd_) > 1e4f or std::abs(acc_th_) > 1e4f) reset_episode();
+            // Linearisation guard on a carried episode (see episode_carry_max_*). Reaching it means
+            // the pose went uncorrected across several metres, so the accumulated motion can no
+            // longer be treated as one increment and the episode is dropped rather than distorted.
+            if (std::abs(acc_fwd_) > cfg_.episode_carry_max_trans
+                or std::abs(acc_th_) > cfg_.episode_carry_max_rot)
+            { ++dropped_; reset_episode(); }
         }
 
     private:
@@ -344,6 +395,8 @@ namespace rc::calib
             acc_fwd_ = acc_lat_ = acc_th_ = 0.f;
             acc_r_fwd_ = acc_r_lat_ = acc_r_th_ = 0.f;
             acc_pos_var_ = acc_th_var_ = acc_fit_ = acc_dur_ = 0.f;
+            acc_measured_ = false;
+            waiting_ = false;
         }
 
         Config cfg_{};
@@ -355,6 +408,12 @@ namespace rc::calib
         float acc_fwd_ = 0.f, acc_lat_ = 0.f, acc_th_ = 0.f;
         float acc_r_fwd_ = 0.f, acc_r_lat_ = 0.f, acc_r_th_ = 0.f;
         float acc_pos_var_ = 0.f, acc_th_var_ = 0.f, acc_fit_ = 0.f, acc_dur_ = 0.f;
-        int episodes_ = 0;
+        /// Has any corrected cycle contributed to the episode being accumulated? Only then is it an
+        /// observation at all.
+        bool acc_measured_ = false;
+        /// Already counted as carried, so a span that keeps exceeding the trigger while waiting for
+        /// a correction is one carry, not one per cycle.
+        bool waiting_ = false;
+        int episodes_ = 0, carried_ = 0, dropped_ = 0;
     };
 }

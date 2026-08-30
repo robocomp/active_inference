@@ -1129,7 +1129,7 @@ void SpecificWorker::log_ground_truth(const rc::RoomConcept::UpdateResult &res)
                        "sdf_mse,iters,cov_tt,"
                        "imu_dtheta,wheel_dtheta,wheel_shadow_dtheta,imu_segs,wheel_segs,"
                        "pred_x,pred_y,pred_theta,dx_local,dy_local,"
-                       "calib_k_v,calib_k_w,calib_yaw,calib_eps,"
+                       "calib_k_v,calib_k_w,calib_yaw,calib_eps,calib_carried,calib_dropped,"
                        "calib_sig_kv,calib_sig_kw,calib_sig_yaw,calib_pos_var,"
                        "calib_b_omega,calib_informed,calib_cond,"
                        "imu_dvx,imu_dvy,wheel_dvx,wheel_dvy,imu_dpx,imu_dpy,imu_lin_segs\n";
@@ -1171,6 +1171,9 @@ void SpecificWorker::log_ground_truth(const rc::RoomConcept::UpdateResult &res)
             // error they are supposed to remove.
             << ',' << res.calib_k_v << ',' << res.calib_k_w << ',' << res.calib_yaw
             << ',' << res.calib_episodes
+            // Spans that reached the trigger with nothing measured in them. See
+            // CALIB_UNMEASURED_EPISODES.md: these used to be emitted as zeros.
+            << ',' << res.calib_carried << ',' << res.calib_dropped
             // Sigmas + the R actually used: without these a replay of the filter from this file is
             // guesswork, and a parameter that stopped moving cannot be told from one never taught.
             << ',' << res.calib_sigma_k_v << ',' << res.calib_sigma_k_w
