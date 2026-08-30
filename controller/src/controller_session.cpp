@@ -2400,37 +2400,14 @@ rc::RouteFollower::FreeFn ControllerSession::route_free_fn()
 // at a time, which would also fix the build cost). This slices the mirror, not the thing.
 ControllerPolygon ControllerSession::current_lap_path() const
 {
-    const auto &all = route_.path();
-    const auto &wp_s = route_.waypoint_arclengths();
-    const int per_lap = route_.waypoints_per_lap();
-    const float spacing = route_.spline().spacing();
-    // Anything missing and the honest answer is the whole curve — a partial picture invented from bad
-    // indices would be worse than a busy correct one.
-    if (all.empty() or per_lap <= 0 or wp_s.empty() or spacing <= 0.f) return all;
-
-    const int lap = std::max(0, route_.laps_completed_at(route_.progress()));
-    const std::size_t i_lo = static_cast<std::size_t>(lap) * static_cast<std::size_t>(per_lap);
-    const std::size_t i_hi = i_lo + static_cast<std::size_t>(per_lap);
-    if (i_lo >= wp_s.size()) return all;                 // past the last lap boundary: draw it all
-    // The lap STARTS at the previous boundary — or at 0 for the first, whose leading hop is the run-in
-    // from wherever the robot happened to be, and which belongs to lap 1.
-    const float s_lo = lap == 0 ? 0.f : wp_s[i_lo - 1];
-    const float s_hi = i_hi <= wp_s.size() and i_hi > 0 ? wp_s[i_hi - 1] : route_.spline().length();
-
-    const auto idx = [&](float x)
-    { return std::min(all.size(), static_cast<std::size_t>(std::max(0.f, x) / spacing)); };
-    const std::size_t a = idx(s_lo), b = std::max(a, idx(s_hi));
-    if (b <= a) return all;
-    // Said ONCE per route, because "it draws one lap now" is a claim and this is the number that
-    // settles it: on a 6-lap tour the drawn length should be about a sixth of the route.
-    if (not lap_slice_logged_)
-    {
-        lap_slice_logged_ = true;
-        std::println("[route] canvas draws lap {} only: {:.2f} m of {:.2f} m ({} of {} samples). The "
-                     "follower still drives the whole concatenation.",
-                     lap + 1, s_hi - s_lo, route_.spline().length(), b - a, all.size());
-    }
-    return ControllerPolygon(all.begin() + static_cast<long>(a), all.begin() + static_cast<long>(b));
+    // ★THE SLICING IS GONE BECAUSE THE ROUTE IS NOW ONE LAP. This used to cut the drawn path down to the
+    // lap the robot was on, because RouteFollower::build laid the tour down once per lap and path()
+    // returned every one of them — six near-copies drawn on top of each other, which is what "two paths
+    // on the canvas" was. Laps are restarts of a single curve now, so the whole curve IS the current
+    // lap and there is nothing to select. Kept as a named function rather than inlined at both call
+    // sites: it is the place that answers "what should the canvas show", and if a route ever holds more
+    // than one lap again this is where that has to be handled.
+    return route_.path();
 }
 
 void ControllerSession::on_route_reauthored(const char *event, float window_m,
@@ -2438,7 +2415,6 @@ void ControllerSession::on_route_reauthored(const char *event, float window_m,
                                            std::uint64_t now_ms)
 {
     ++route_repair_count_;
-    lap_slice_logged_ = false;   // a new curve gets to report its own lap slice
     mission_.note_replan();   // count what HAPPENED, not the reflex that asked for it
     // The curve the trace belongs to has just been replaced — see RouteChangedCallback.
     note_route_changed();
@@ -4400,7 +4376,22 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     {
         // Progress is a scalar that only increases. Legs are read OFF it rather than driven by it.
         route_.advance(robot_pose.pos);
-        mission_.note_progress(route_.progress(), route_.length(), route_.laps_done());
+        // ── A LAP RESTARTED: THE ARC LENGTH JUMPED BACKWARDS ON PURPOSE ─────────────────────────
+        // Laps are restarts of one curve now, so completing a lap rewinds progress_ to the lap start.
+        // The TRACKER's own projection is monotone within one traversal and knows nothing about that:
+        // left alone it would sit at the end of the route while the robot drives the start of the next
+        // lap — the same staleness that once pointed the tracker at the route's end point after a
+        // restart, with the robot driving into a wall. force_reset makes it re-acquire, which is
+        // exactly what a restart is.
+        if (route_.rewound())
+        {
+            path_controller.set_route(&route_.spline(), /*force_reset=*/true);
+            std::println("[route] lap {} of {} complete — restarting the same curve at {:.2f} m",
+                         route_.laps_done(), route_.laps_total(), route_.progress());
+        }
+        // ★TOTAL, not progress(). progress_ rewinds every lap, so it is no longer the distance the run
+        // has covered; the mission's metrics want the cumulative figure across laps.
+        mission_.note_progress(route_.total_progress(), route_.total_length(), route_.laps_done());
         if (route_.finished(robot_pose.pos))
         {
             mission_.stop("completed", time_source());

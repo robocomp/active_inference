@@ -176,8 +176,27 @@ public:
     // is not cosmetic: lap_at is clamped to laps_, so deriving "completed" as lap_at-1 can never reach
     // laps_ and a finished single-lap run reported 0 of 1 forever.
     int laps_completed_at(float s) const;
+    // Arc length of one lap, and how far the run has gone in TOTAL across laps. progress_ rewinds, so
+    // it is no longer a cumulative distance and anything reporting the run's extent must use this.
+    float lap_length() const { return std::max(0.f, spline_.length() - lap_start_s_); }
+    // ★COUNTED FROM REWINDS, NOT FROM laps_done_. The last lap does NOT rewind — laps_done_ reaches
+    // laps_ while progress_ stays at the end of the route — so using laps_done_ here counts that final
+    // lap twice (measured: 22.79 m reported on a 15.26 m two-lap run). A rewind is exactly the event
+    // "one lap of arc was driven and progress went back to the start", which is what this sums.
+    float total_progress() const
+    { return static_cast<float>(rewinds_) * lap_length() + std::max(0.f, progress_ - lap_start_s_); }
+    int laps_total() const { return laps_; }
+    float total_length() const { return static_cast<float>(std::max(1, laps_)) * lap_length(); }
+    // ★TRUE FOR EXACTLY ONE CALL, then cleared. A rewind is a DISCONTINUITY in arc length: the tracker's
+    // own projection is monotone within one traversal, so without being told it would sit at the end of
+    // the route while the robot drives the start of the next lap — the same staleness that put the
+    // tracker at the route's end point after a restart. The caller re-acquires on this.
+    bool rewound() { const bool r = rewound_; rewound_ = false; return r; }
     int laps_done() const
     {
+        // laps_done_ is authoritative now; the arc-length reasoning below only survives as the
+        // end-of-run allowance, because finished() may end a run with finish_tol_m still nominally left.
+        if (laps_done_ >= laps_) return laps_;
         // The route ENDS at its last waypoint, so that waypoint's arc length IS the route length — and
         // finished() lets the run end with up to finish_tol_m still nominally remaining. The last
         // waypoint is therefore never "passed" by a strict s >= ws test, and the final lap was lost.
@@ -245,6 +264,14 @@ private:
     int   wp_per_lap_ = 0;
     int   laps_ = 1;
     float progress_ = 0.f;
+    // ── LAPS ARE RESTARTS OF ONE CURVE ───────────────────────────────────────────────────────────
+    // The route is a run-in plus ONE closed lap. A lap completes by rewinding progress_ to
+    // lap_start_s_, so the per-lap cost is an assignment rather than a re-plan, and every lap is the
+    // same curve BY CONSTRUCTION — which is what lap_repeat_* has always claimed to measure.
+    int   laps_done_ = 0;        // completed laps; the only thing that knows which lap we are on
+    float lap_start_s_ = 0.f;    // where a lap begins: past the run-in, at the first waypoint
+    bool  rewound_ = false;      // consumed by rewound(); see there
+    int   rewinds_ = 0;          // how many times a lap actually rewound — see total_progress()
 };
 
 }  // namespace rc

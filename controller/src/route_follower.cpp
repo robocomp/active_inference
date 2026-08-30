@@ -41,8 +41,20 @@ bool RouteFollower::build(const Eigen::Vector2f &start,
     Eigen::Vector2f from = start;
     deferred_.clear();
     int unreachable = 0;
-    for (int lap = 0; lap < laps; ++lap)
-        for (const auto &wp : waypoints)
+    // ── ONE LAP, CLOSED — laps are RESTARTS OF THIS CURVE, not more of it ────────────────────────
+    // ★★★THIS USED TO LAY THE TOUR DOWN ONCE PER LAP (`for lap … for waypoint …`) and fit ONE spline
+    // through the concatenation, so a 6-lap tour was a 289 m route. Everything scaled with it and none
+    // of it bought anything, because every lap is the SAME journey:
+    //   · the optimiser solved 6x the problem — measured 3.67 s per build at 31 waypoints x 6 laps,
+    //     on the CONTROL THREAD, which is a stall (and it was 8 s before the solve went sparse);
+    //   · the canvas drew 6 near-copies on top of each other, which is what "two paths" looked like;
+    //   · and the laps were not even identical — the spline is continuous across the seams and the
+    //     optimiser moved each lap's control points differently, so lap_repeat_* was measuring the
+    //     fit's seam behaviour as much as the robot's.
+    // Now the curve is: the run-in from `start` to the first waypoint, then ONE lap that ENDS WHERE IT
+    // BEGAN. A lap is completed by rewinding progress_ to lap_start_s_ — no rebuild, no re-plan, no
+    // per-lap cost at all, and every lap is the same curve by construction rather than by hope.
+    for (const auto &wp : waypoints)
         {
             const auto hop = plan(from, wp);
             if (not hop.has_value() or hop->size() < 2)
@@ -72,14 +84,34 @@ bool RouteFollower::build(const Eigen::Vector2f &start,
             }
             for (std::size_t i = 1; i < hop->size(); ++i) poly_.push_back((*hop)[i]);
             wp_pos_.push_back(wp);
-            if (lap == 0) ++wp_per_lap_;      // the reachable count, which is what lap_at must divide by
+            ++wp_per_lap_;                    // the reachable count, which is what lap_at must divide by
             from = wp;
         }
+
+    // ★THE CLOSING HOP IS WHAT MAKES A RESTART POSSIBLE. Without it the curve ends at the last waypoint
+    // and rewinding would teleport the robot back to the first — so the lap is closed here, planned like
+    // every other hop rather than drawn as a straight line. It is deliberately NOT pushed into wp_pos_:
+    // it arrives at waypoint 0 again, and counting that as a fifteenth waypoint would make wp_per_lap_
+    // disagree with the tour and every arc length derived from it shift by one.
+    // ★ONLY WHEN THERE IS A LAP TO RESTART. A single-lap run has nothing to rewind to, and closing it
+    // would append a return leg the robot would then drive — on the straight test route that is a 16 m
+    // doubling-back, and on a real tour it is a whole extra traversal nobody asked for. Measured as two
+    // self-test failures before this guard existed, which is exactly what a 1-lap route closing itself
+    // looks like from the outside.
+    if (laps > 1 and wp_pos_.size() >= 2)
+    {
+        if (const auto hop = plan(from, wp_pos_.front()); hop.has_value() and hop->size() >= 2)
+            for (std::size_t i = 1; i < hop->size(); ++i) poly_.push_back((*hop)[i]);
+        else
+            std::printf("[route] could not close the lap from (%.2f,%.2f) back to (%.2f,%.2f). The route "
+                        "still drives, but a lap cannot restart on it — laps beyond the first will not "
+                        "run.\n", from.x(), from.y(), wp_pos_.front().x(), wp_pos_.front().y());
+    }
 
     if (wp_per_lap_ < 2 or wp_pos_.size() < 2)
     {
         std::printf("[route] build FAILED: only %zu of %d waypoints are reachable — that is not a route.\n",
-                    wp_pos_.size(), wp_per_lap_ * laps);
+                    wp_pos_.size(), wp_per_lap_);
         std::fflush(stdout);
         return false;
     }
@@ -88,10 +120,18 @@ bool RouteFollower::build(const Eigen::Vector2f &start,
     //      fit_from_polyline so a repair reproduces them by the same code.
     if (not fit_from_polyline(is_free)) return false;
 
-    std::printf("[route] built: %d lap(s) x %d reachable waypoints (%d UNREACHABLE, deferred) -> %.2f m, "
-                "%zu samples at %.0f cm, %d feasibility corrections\n",
-                laps, wp_per_lap_, unreachable, spline_.length(), spline_.samples().size(),
-                spline_.spacing() * 100, spline_.corrections());
+    // Where a lap begins: the first waypoint's arc length, i.e. the end of the run-in from wherever the
+    // robot happened to be. Rewinding to 0 instead would re-drive that run-in on every lap.
+    lap_start_s_ = wp_s_.empty() ? 0.f : wp_s_.front();
+    laps_done_ = 0;
+    rewinds_ = 0;
+    rewound_ = false;
+    std::printf("[route] built ONE lap of %d reachable waypoints (%d UNREACHABLE, deferred) -> %.2f m "
+                "(%.2f m run-in + %.2f m lap), %zu samples at %.0f cm, %d feasibility corrections. "
+                "%d lap(s) will RESTART this curve.\n",
+                wp_per_lap_, unreachable, spline_.length(), lap_start_s_,
+                spline_.length() - lap_start_s_, spline_.samples().size(),
+                spline_.spacing() * 100, spline_.corrections(), laps);
     std::fflush(stdout);
     return true;
 }
@@ -479,26 +519,44 @@ float RouteFollower::advance(const Eigen::Vector2f &robot_pos)
     if (not spline_.valid()) return progress_;
     // Forward-only, and never past the end.
     progress_ = std::clamp(spline_.project(robot_pos, progress_), progress_, spline_.length());
+
+    // ── A LAP ENDS BY REWINDING, NOT BY RUNNING OUT OF ROUTE ─────────────────────────────────────
+    // The curve is one closed lap, so reaching its end means the lap is done. Rewind to where the lap
+    // began (past the run-in) and count it. That is the whole per-lap cost: one assignment, against
+    // re-planning and re-optimising the same tour N times.
+    // ★THE LAST LAP DOES NOT REWIND. laps_done_ reaches laps_ and progress_ stays at the end, which is
+    // what finished() reads — so a run still ends where it always did, at the end of the route.
+    // ★A REWIND IS A DISCONTINUITY IN ARC LENGTH, and every consumer of progress_ that assumes monotone
+    // motion must be told. rewound() reports it for exactly one call so the caller can re-acquire the
+    // tracker's own projection, which is monotone within ONE traversal and would otherwise sit at the
+    // end of the route while the robot drives the start of the next lap.
+    if (spline_.length() - progress_ <= finish_tol_m and laps_done_ < laps_)
+    {
+        ++laps_done_;
+        if (laps_done_ < laps_)
+        {
+            progress_ = lap_start_s_;
+            rewound_ = true;
+            ++rewinds_;
+        }
+    }
     return progress_;
 }
 
-int RouteFollower::lap_at(float s) const
+// ── LAPS ARE COUNTED, NOT DERIVED FROM ARC LENGTH ────────────────────────────────────────────────
+// These used to divide the concatenated waypoint arc lengths by wp_per_lap_, because the route
+// physically contained every lap. It contains ONE now, so arc length can no longer say which lap the
+// robot is on — laps_done_ does, and it is incremented by the rewind in advance(). The argument is
+// kept for callers that ask about an arbitrary s; within a single-lap curve every s is in the current
+// lap, so the honest answer no longer depends on it.
+int RouteFollower::lap_at(float) const
 {
-    if (wp_s_.empty() or wp_per_lap_ <= 0) return 1;
-    // The lap containing s = how many whole laps of waypoints are already behind it.
-    int passed = 0;
-    for (const float ws : wp_s_)
-        if (s >= ws) ++passed;
-    return std::min(laps_, 1 + passed / wp_per_lap_);
+    return std::min(laps_, laps_done_ + 1);
 }
 
-int RouteFollower::laps_completed_at(float s) const
+int RouteFollower::laps_completed_at(float) const
 {
-    if (wp_s_.empty() or wp_per_lap_ <= 0) return 0;
-    int passed = 0;
-    for (const float ws : wp_s_)
-        if (s >= ws) ++passed;
-    return std::min(laps_, passed / wp_per_lap_);   // NO +1: a lap counts once its last waypoint is behind us
+    return std::min(laps_, laps_done_);
 }
 
 bool RouteFollower::self_test()
@@ -516,35 +574,64 @@ bool RouteFollower::self_test()
     {
         RouteFollower r;
         check(r.build({0.f, 0.f}, square, 2, straight, {}), "a square route must build");
-        check(r.waypoint_arclengths().size() == 8, "2 laps x 4 waypoints = 8 waypoint arc lengths");
-        check(r.laps_completed_at(0.f) == 0, "nothing driven yet is zero laps completed");
-        check(r.laps_completed_at(r.length()) == 2, "driving the whole route completes every lap");
-        // The real path: DRIVE the route (advance is forward-only within a window, so it cannot be
-        // teleported to the end), stopping just short exactly as finished() permits. The lap count must
-        // still be complete — a strict arc-length test loses the final lap here, because the last
-        // waypoint's arc length IS the route length.
-        const float stop_at = r.length() - 0.5f * RouteFollower::finish_tol_m;
-        for (float s = 0.f; s <= stop_at; s += 0.5f) r.advance(r.spline().position_at(s));
-        r.advance(r.spline().position_at(stop_at));
-        std::printf("  finish tolerance: stopped at s=%.2f of %.2f m -> %d laps done\n",
-                    r.progress(), r.length(), r.laps_done());
-        check(r.laps_done() == 2, "a run that ends within the finish tolerance has completed every lap");
+        // ── LAPS ARE RESTARTS, SO THE CURVE HOLDS EXACTLY ONE ────────────────────────────────────
+        // These assertions replace the ones that pinned the CONCATENATION (8 arc lengths, ~16 m of
+        // route, lap derived from arc length). Those were not wrong then and are not merely updated
+        // now: they described a route that contained every lap, and this one does not.
+        check(r.waypoint_arclengths().size() == 4, "the curve holds ONE lap of waypoints, not laps x that");
         check(r.waypoints_per_lap() == 4, "waypoints per lap must be remembered");
-        // 8 m per lap, 2 laps; smoothing cuts the corners so it is a little shorter.
-        std::printf("  square x2: length %.2f m (raw 16.00), samples %zu\n", r.length(), r.path().size());
-        check(r.length() > 14.f and r.length() < 16.5f, "length must be about two laps of the square");
+        // Run-in (0,0)->(2,0) is 2 m; the closed lap is 4 sides of 2 m. Smoothing cuts the corners.
+        std::printf("  square, 2 laps as restarts: curve %.2f m (run-in + one closed lap), "
+                    "lap %.2f m, total to drive %.2f m, samples %zu\n",
+                    r.length(), r.lap_length(), r.total_length(), r.path().size());
+        check(r.length() > 8.f and r.length() < 10.5f, "the curve is a run-in plus ONE lap, not two");
+        check(r.lap_length() > 6.5f and r.lap_length() < 8.5f, "a lap is one circuit of the square");
+        check(std::abs(r.total_length() - 2.f * r.lap_length()) < 1e-3f,
+              "two laps to drive is twice one lap");
+        check(r.laps_completed_at(0.f) == 0, "nothing driven yet is zero laps completed");
+        check(r.lap_at(0.1f) == 1, "the start is lap 1");
 
-        // Arc lengths must be strictly increasing — a waypoint bound to the wrong passage on lap 2
-        // would show up as a step backwards here, and would silently mis-attribute every metric.
+        // ── DRIVE IT. The first circuit must REWIND rather than finish. ──────────────────────────
+        const float stop_at = r.length() - 0.5f * RouteFollower::finish_tol_m;
+        bool saw_rewind = false;
+        for (float s = 0.f; s <= stop_at; s += 0.25f)
+        {
+            r.advance(r.spline().position_at(s));
+            if (r.rewound()) saw_rewind = true;
+        }
+        r.advance(r.spline().position_at(stop_at));
+        if (r.rewound()) saw_rewind = true;
+        check(saw_rewind, "completing a lap must REWIND and say so, so the tracker can re-acquire");
+        check(r.laps_done() == 1, "one circuit of the curve is one lap, not the whole run");
+        check(r.progress() < r.length() - 1.f,
+              "after a rewind progress sits back at the lap start, not at the end");
+        check(r.lap_at(0.f) == 2, "after one lap the robot is on lap 2");
+        std::printf("  after one circuit: laps_done %d, progress %.2f m (lap starts at %.2f), "
+                    "total_progress %.2f m\n",
+                    r.laps_done(), r.progress(), r.length() - r.lap_length(), r.total_progress());
+
+        // ── SECOND CIRCUIT: now the run is finished and there must be NO further rewind. ─────────
+        bool rewound_again = false;
+        for (float s = r.progress(); s <= stop_at; s += 0.25f)
+        {
+            r.advance(r.spline().position_at(s));
+            if (r.rewound()) rewound_again = true;
+        }
+        r.advance(r.spline().position_at(stop_at));
+        if (r.rewound()) rewound_again = true;
+        check(not rewound_again, "the LAST lap must not rewind — the run ends at the end of the route");
+        check(r.laps_done() == 2, "two circuits completes a two-lap run");
+        check(r.progress() > r.length() - 1.f, "the last lap leaves progress at the end of the route");
+        check(std::abs(r.total_progress() - r.total_length()) < 0.6f,
+              "total progress across laps must add up to the total length to drive");
+        std::printf("  after two circuits: laps_done %d, total_progress %.2f of %.2f m\n",
+                    r.laps_done(), r.total_progress(), r.total_length());
+
+        // Arc lengths must be strictly increasing — a waypoint bound to the wrong passage would show
+        // up as a step backwards here and would silently mis-attribute every metric.
         const auto &ws = r.waypoint_arclengths();
         for (std::size_t i = 1; i < ws.size(); ++i)
-            check(ws[i] > ws[i - 1], "waypoint arc lengths must increase monotonically across laps");
-
-        // Lap mapping.
-        check(r.lap_at(0.1f) == 1, "the start is lap 1");
-        check(r.lap_at(r.length() - 0.1f) == 2, "the end is on lap 2");
-        std::printf("  mapping: s=0.1 -> lap %d | s=%.1f -> lap %d\n",
-                    r.lap_at(0.1f), r.length() - 0.1f, r.lap_at(r.length() - 0.1f));
+            check(ws[i] > ws[i - 1], "waypoint arc lengths must increase monotonically");
     }
 
     // PROGRESS IS MONOTONE. Feeding poses that step backwards must not move progress backwards: on a
@@ -733,19 +820,33 @@ bool RouteFollower::self_test()
         r3.set_optimizer(opt);
         check(r1.build({0.f, 0.f}, square, 1, straight, {}), "1-lap optimised route must build");
         check(r3.build({0.f, 0.f}, square, 3, straight, {}), "3-lap optimised route must build");
-        const float ratio = r3.length() / std::max(1e-3f, r1.length());
+        // ── THE INVARIANT CHANGED WITH THE DESIGN, AND SO DID THE BUG IT GUARDED ────────────────
+        // This used to assert "N laps of a route is N times one lap of it", which was exact while the
+        // curve CONTAINED every lap. It no longer does: laps are restarts, so a 3-lap build produces
+        // the same single lap a 1-lap build does, plus the closing hop that makes the restart possible.
+        // ★AND THE FAILURE IT WATCHED FOR IS NOW STRUCTURALLY IMPOSSIBLE. The bug was an anchor binding
+        // to the wrong LAP — on a repeating route the same waypoint is the same POINT once per lap, so
+        // only arc length could say which passage an anchor belonged to, and getting it wrong silently
+        // deleted 15 m of a 109.7 m tour. With one lap in the curve there is exactly one passage per
+        // waypoint and nothing to confuse. The assertions below pin the new shape instead, and they are
+        // just as exact: one lap's worth of anchors however many laps are asked for.
         const auto &rep = r3.spline().last_optimizer_report();
-        std::printf("  multi-lap: 1 lap %.2f m, 3 laps %.2f m (ratio %.3f), anchor cost %.3f, "
-                    "max move %.3f m\n", r1.length(), r3.length(), ratio, rep.e_anchor, rep.max_move_m);
-        check(ratio > 2.85f and ratio < 3.15f,
-              "a 3-lap optimised route must be three times the 1-lap route — anchors bound to the wrong lap");
-        check(rep.e_anchor < 1.0f, "the anchor term must not explode on a repeating route");
+        std::printf("  laps as restarts: 1 lap %.2f m, 3 laps %.2f m (same lap + closing hop), "
+                    "lap %.2f m, total to drive %.2f m, anchor cost %.3f, max move %.3f m\n",
+                    r1.length(), r3.length(), r3.lap_length(), r3.total_length(),
+                    rep.e_anchor, rep.max_move_m);
+        check(r3.waypoints_per_lap() == r1.waypoints_per_lap(),
+              "asking for more laps must not change how many waypoints a lap has");
+        check(std::abs(r3.total_length() - 3.f * r3.lap_length()) < 1e-3f,
+              "three laps to DRIVE is three times one lap, even though the CURVE holds one");
+        check(r3.length() < 1.6f * r1.length(),
+              "a 3-lap curve is one lap plus a closing hop, not three laps of route");
+        check(rep.e_anchor < 1.0f, "the anchor term must not explode");
         check(rep.max_move_m < 3.f * opt.h, "control points must not be dragged across the route");
 
-        // The arc lengths handed to the optimiser must be monotone and cover the whole polyline — the
-        // property that makes "which lap" answerable at all.
         const auto as = r3.anchor_polyline_arclengths();
-        check(as.size() == 12, "3 laps x 4 waypoints = 12 anchor arc lengths");
+        check(as.size() == static_cast<std::size_t>(r3.waypoints_per_lap()),
+              "ONE lap's worth of anchor arc lengths, whatever the lap count");
         bool monotone = true;
         for (std::size_t i = 1; i < as.size(); ++i) if (as[i] <= as[i - 1]) monotone = false;
         check(monotone, "anchor arc lengths must increase strictly along the route");

@@ -785,7 +785,6 @@ private:
     // a fresh RobotFootprint::shadow() temporary at eleven call sites, which is why a per-robot shape could
     // not be delivered at all: a static factory has nowhere to put "which robot".
     rc::RobotFootprint approach_body_ = rc::RobotFootprint::shadow();
-    mutable bool lap_slice_logged_ = false;    // the "canvas draws one lap" line, once per route
     bool body_loaded_ = false;                 // one-shot guard: load when the robot node first appears
     // ★WHAT THIS BASE CAN DO, as opposed to what we have chosen to ask of it. Read once beside the body
     // (the robot node states both), and held rather than re-read because it is a property of the hardware,
