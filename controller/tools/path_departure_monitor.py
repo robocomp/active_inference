@@ -20,6 +20,25 @@ already mean something to this robot, and every episode records which one it cro
                                                tracking statement at all, it is a collision one, and it
                                                is reported even when cross-track is small.
 
+★★★ARC-LENGTH JUMPS ARE A FOURTH CLASS, AND THEY ARE INVISIBLE TO CROSS-TRACK. The tracker projects
+the robot onto the route and keeps the result in s_hint_; the projection is clamped so it cannot go
+BACKWARDS, but nothing stops it leaping FORWARD. At a hairpin the outgoing leg runs within half a
+metre of the incoming one — well inside PlainTrackerProjWindow (2.0 m) — so as the robot begins to
+turn it becomes geometrically nearer the outgoing leg and the projection snaps across the fold.
+Measured live: s advancing 1.43, 1.68 and 1.78 m in a SINGLE 50 ms cycle, at the wp17-18 and wp20-21
+hairpins, where 0.7 m/s allows 0.035 m.
+
+★WHY THIS NEEDS ITS OWN CLASS. At exactly those cycles the cross-track error was 0.008-0.063 m. The
+tracker is perfectly happy, because it re-projected onto a genuinely nearby piece of the route — so
+the failure is invisible to every cross-track tier above, by construction. Then psi(s) is the tangent
+on the FAR side of the corner, the robot turns the other way and drives off along route it never
+covered. A monitor built only on cross-track would report a clean run.
+
+★THE TEST IS PHYSICAL, not a tuned threshold: arc length cannot advance further in one cycle than the
+BASE can drive in it (--v-cap, SVD48VBase's own maxLinSpeed), plus one route sample (--spacing),
+which is the resolution the projection can legitimately snap within. A jump coinciding with a
+path_gen change is the curve being re-authored, not this, and is tagged route-moved as usual.
+
 ★NEITHER A ROUTE RE-AUTHORING NOR A POSE JUMP IS A DEPARTURE, and conflating either with one is the
 easy mistake here.
 
@@ -40,7 +59,7 @@ silently inflating it.
 
 Usage:
     tools/path_departure_monitor.py [--file tracker_diag.csv] [--inscribed 0.230] [--cell 0.06]
-                                    [--episodes path_departures.csv] [--quiet-s 5] [--v-cap 0.70]
+                                    [--episodes path_departures.csv] [--quiet-s 5] [--v-cap 0.70] [--spacing 0.05]
 """
 import argparse, csv, math, os, sys, time
 
@@ -57,6 +76,8 @@ def parse_args():
     # The BASE's own limit, from SVD48VBase/etc/config_*.toml (maxLinSpeed). A pose step implying more
     # than this is the estimate jumping, not the robot driving.
     p.add_argument("--v-cap", type=float, default=0.70)
+    # RouteSpacing: the resolution the projection may legitimately snap within.
+    p.add_argument("--spacing", type=float, default=0.05)
     p.add_argument("--once", action="store_true", help="analyse what is already in the file, then exit")
     return p.parse_args()
 
@@ -71,8 +92,13 @@ def follow(path, once):
             time.sleep(0.5); continue
         if f is None or st.st_ino != ino or f.tell() > st.st_size:
             if f: f.close()
+            first = f is None and ino is None
             f = open(path, "r", errors="replace"); ino = st.st_ino; hdr = None
-            yield ("__restart__", None)
+            # Only a REAL rotation is reported. Saying "restarted" on the first open would put a
+            # restart in the record that never happened — and in a long run that is exactly the kind
+            # of line a later reader would anchor a conclusion to.
+            if not first:
+                yield ("__restart__", None)
         line = f.readline()
         if not line:
             if once: return
@@ -134,12 +160,21 @@ def main():
     ep_w.writerow(["t_start_ms","dur_s","tier","peak_cross_m","peak_x","peak_y","s_from_m","s_to_m",
                    "min_clearance_m","max_heading_err_rad","max_speed_mps","min_gate_scale",
                    "cycles","route_moved","pose_jump","worst_implied_mps"])
+    # ★HOLD THE HANDLE AND FLUSH EVERY ROW. Written once without it, this file sat at 0 bytes for the
+    # whole run: the writer buffers, and a monitor that only flushes on exit has no durable record at
+    # all while the thing it is monitoring is still happening — which is the only time it matters.
+    jump_f = open(a.episodes.replace(".csv", "_jumps.csv"), "w", newline="")
+    jump_w = csv.writer(jump_f)
+    jump_w.writerow(["t_ms","s_from_m","s_to_m","jump_m","allowed_m","pose_x","pose_y",
+                     "cross_at_jump_m","meas_speed_mps","route_moved"])
+    jump_f.flush()
     ep_f.flush()
 
     cur = None; last_gen = None; last_gen_t = None
     n = 0; worst = 0.0; sum_sq = 0.0; last_report = 0.0
     counts = {1: 0, 2: 0, 3: 0}; moved = 0; jumped = 0
     prev_pose = None
+    prev_s = None; arc_jumps = 0; worst_jump = 0.0
 
     def close(e):
         nonlocal moved, jumped
@@ -183,6 +218,30 @@ def main():
                 implied = math.hypot(px - prev_pose[1], py - prev_pose[2]) / dt
         if not math.isnan(px): prev_pose = (t, px, py)
 
+        # ── ARC-LENGTH JUMP ──────────────────────────────────────────────────────────────────────
+        s_now = num(row, hdr, "track_s")
+        if prev_s is not None and not math.isnan(s_now):
+            dt_s = (t - prev_s[0]) / 1000.0
+            if 0.001 < dt_s < 1.0:
+                ds = s_now - prev_s[1]
+                allowed = a.v_cap * dt_s + a.spacing
+                if ds > allowed:
+                    rm = last_gen_t is not None and (t - last_gen_t) <= 250.0
+                    jump_w.writerow([int(t), f"{prev_s[1]:.2f}", f"{s_now:.2f}", f"{ds:.3f}",
+                                     f"{allowed:.3f}", f"{px:.3f}", f"{py:.3f}",
+                                     f"{cross:.4f}", f"{num(row,hdr,'meas_speed'):.3f}", int(rm)])
+                    jump_f.flush()
+                    if not rm:
+                        arc_jumps += 1; worst_jump = max(worst_jump, ds)
+                        # Factual: state the excess and let its SIZE speak. A 0.12 m jump is the
+                        # projection snapping within a bend; a 1.7 m one is it crossing a hairpin.
+                        # Both are the same defect, and neither is something the robot did.
+                        print(f"[JUMP  ] arc length {prev_s[1]:.2f} -> {s_now:.2f} m "
+                              f"(+{ds:.2f} m in {dt_s*1000:.0f} ms, {ds/allowed:.1f}x what the base "
+                              f"can drive) at ({px:+.2f},{py:+.2f})  cross-track {abs(cross)*1000:.0f} mm",
+                              flush=True)
+        if not math.isnan(s_now): prev_s = (t, s_now)
+
         n += 1; sum_sq += cross * cross; worst = max(worst, abs(cross))
 
         tier = 0
@@ -208,7 +267,8 @@ def main():
             rms = math.sqrt(sum_sq / n) if n else 0.0
             print(f"[monitor] {n:7d} cycles | cross rms {rms*1000:6.1f} mm  worst {worst*1000:6.1f} mm | "
                   f"episodes drift {counts[1]} off {counts[2]} unsafe {counts[3]} "
-                  f"(+{moved} route-moved, +{jumped} pose-jump) | "
+                  f"(+{moved} route-moved, +{jumped} pose-jump) | arc-jumps {arc_jumps}"
+                  f"{f' worst +{worst_jump:.2f} m' if arc_jumps else ''} | "
                   f"now |e_y| {abs(cross)*1000:5.1f} mm clear {clear:.3f} m",
                   flush=True)
 
@@ -217,6 +277,9 @@ def main():
     print(f"\n[monitor] TOTAL {n} cycles | cross rms {rms*1000:.1f} mm | worst {worst*1000:.1f} mm")
     print(f"[monitor] departures: drift {counts[1]}, off {counts[2]}, unsafe {counts[3]}")
     print(f"[monitor] EXCLUDED as not-the-robot: route-moved {moved}, pose-jump {jumped}")
+    print(f"[monitor] ARC-LENGTH JUMPS (projection crossed a fold): {arc_jumps}"
+          f"{f', worst +{worst_jump:.2f} m' if arc_jumps else ''} "
+          f"-> {a.episodes.replace('.csv', '_jumps.csv')}")
     print(f"[monitor] episodes -> {a.episodes}")
 
 if __name__ == "__main__":
