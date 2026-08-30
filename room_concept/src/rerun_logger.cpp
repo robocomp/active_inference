@@ -1,4 +1,5 @@
 #include "rerun_logger.h"
+#include <pthread.h>   // pthread_setname_np: name the worker so a per-thread CPU sample attributes itself
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -144,7 +145,11 @@ void RerunLogger::init(const Config& cfg)
 
     stop_requested_ = false;
     frame_counter_ = 0;
-    sender_thread_ = std::thread(&RerunLogger::sender_loop, this);
+    sender_thread_ = std::thread([this]
+    {
+        pthread_setname_np(pthread_self(), "rerun-send");
+        sender_loop();
+    });
 }
 
 void RerunLogger::stop()

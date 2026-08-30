@@ -9,6 +9,7 @@
  */
 
 #include "camera_ingestor.h"
+#include <pthread.h>   // pthread_setname_np: name the worker so a per-thread CPU sample attributes itself
 
 #include <cstring>
 #include <print>
@@ -137,7 +138,14 @@ Eigen::Vector3f CameraIngestor::ray_from_pixel(double u, double v) const
 void CameraIngestor::start()
 {
     if (running_.exchange(true)) return;      // idempotent
-    thread_ = std::thread(&CameraIngestor::ingest_loop, this);
+    thread_ = std::thread([this]
+    {
+        // Name the thread so a per-thread CPU sample (/proc/<pid>/task/*/stat) attributes itself.
+        // There is one ingestor per camera and they cost different amounts, so carry the node name.
+        const auto tname = ("cam:" + camera_node_).substr(0, 15);
+        pthread_setname_np(pthread_self(), tname.c_str());
+        ingest_loop();
+    });
 }
 
 void CameraIngestor::stop()
@@ -304,6 +312,21 @@ void CameraIngestor::absorb_gray(std::vector<std::uint8_t> gray, int w, int h, s
     frames_.fetch_add(1, std::memory_order_relaxed);
 }
 
+// Is this frame due for conversion? Counts every frame it is asked about, so the ratio of converted
+// to delivered is observable. The clock is the FRAME's own stamp, not wall time: a stalled producer
+// must not accumulate "credit" and then convert a burst it has no use for.
+bool CameraIngestor::convert_due(std::int64_t stamp_ms) noexcept
+{
+    ++conv_seen_;
+    if (min_convert_ms_ <= 0) { ++conv_done_; return true; }
+    if (last_convert_ms_ != 0 and stamp_ms - last_convert_ms_ < min_convert_ms_
+        and stamp_ms >= last_convert_ms_)                       // a stamp going backwards = new run
+        return false;
+    last_convert_ms_ = stamp_ms;
+    ++conv_done_;
+    return true;
+}
+
 bool CameraIngestor::ingest_pump()
 {
     if (not sub_ and not sub360_) { try_discover(); return false; }
@@ -320,6 +343,9 @@ bool CameraIngestor::ingest_pump()
             if (w <= 0 or h <= 0) return;
             const std::size_t npix = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
             if (f.size() < npix * 3) return;
+            // Returning here still ENDS THE LOAN, so the pool drains exactly as before — only the
+            // ~5.5 MB grey conversion is skipped.
+            if (not convert_due(f.stamp_ms())) return;
             // ⚠ The 360 format enum is its OWN numbering — IMG360_FORMAT_BGR8 == 0 is the producer
             //   default, whereas the plain-image enum numbers them differently. Comparing an
             //   Image360Frame's format against rc::media::FORMAT_BGR8 would compile and be wrong.
@@ -337,6 +363,7 @@ bool CameraIngestor::ingest_pump()
         const int h = static_cast<int>(f.height());
         if (w <= 0 or h <= 0) return;
         const std::size_t npix = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
+        if (not convert_due(f.stamp_ms())) return;   // loan still released; conversion skipped
 
         std::vector<std::uint8_t> gray;
         switch (f.format())

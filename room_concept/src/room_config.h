@@ -352,6 +352,15 @@ struct RoomConfig
     bool  IMAGE_EDGE_SHADOW = false;   // ImageEdge.shadow
     bool  IMAGE_EDGE_DRIVE  = false;   // ImageEdge.drive   (refused unless OptimizerType == "GN")
     std::string IMAGE_EDGE_CAMERA = "zed";   // ImageEdge.camera — DSR node name ("zed" | "ricoh")
+    /// Convert at most one camera frame per this many ms, per ingestor. 0 = every frame.
+    /// The DRAIN is never throttled (a reliable reader whose pool backs up stops the producer);
+    /// only the grey conversion of frames nobody would have read. See CameraIngestor.
+    int   IMAGE_EDGE_MIN_CONVERT_MS = 0;     // ImageEdge.minConvertIntervalMs
+    /// The same throttle for the CALIBRATION channels, which is a different question: their frames
+    /// never reach the loss, so a skipped one costs coverage of a fit that accumulates over minutes,
+    /// not evidence for this tick's pose. Kept SEPARATE from the driving camera on purpose — one
+    /// number for both would buy the calibration's saving with the pose factor's rate.
+    int   IMAGE_EDGE_CALIB_MIN_CONVERT_MS = 100;   // ImageEdge.calibMinConvertIntervalMs
     // Which structural contours are measured. Vertical wall-wall corners carry BEARING on a
     // horizontal normal and are nearly immune to the mount pitch/height nuisances; the floor-wall
     // junction carries RANGE and is exposed to them (δd = θ_pitch·d²/h ⇒ 1° ≈ 14 cm at 3 m).

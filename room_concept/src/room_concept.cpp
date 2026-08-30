@@ -1,4 +1,5 @@
 #include "room_concept.h"
+#include <pthread.h>   // pthread_setname_np: name the worker so a per-thread CPU sample attributes itself
 #include "pointcloud_center_estimator.h"
 #include "room_gn_solver.h"
 #include "room_obs_weights.h"
@@ -199,7 +200,11 @@ namespace rc
                     << "motion_prior_source will read measured / fallback_zero, never fused / command.";
 
         loc_running_ = true;
-        loc_thread_ = std::thread(&RoomConcept::run, this);
+        loc_thread_ = std::thread([this]
+        {
+            pthread_setname_np(pthread_self(), "localizer");
+            run();
+        });
     }
 
     void RoomConcept::stop()

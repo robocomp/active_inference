@@ -169,6 +169,8 @@ void SpecificWorker::initialize()
         camera_ingestor_ = std::make_unique<rc::CameraIngestor>(G, params.IMAGE_EDGE_CAMERA);
         // Set BEFORE the first bind_camera(): the correction is applied where the extrinsic is read.
         camera_ingestor_->set_mount_yaw_correction(params.IMAGE_EDGE_MOUNT_YAW_CORR);
+        // Throttle the grey CONVERSION, never the drain — see CameraIngestor and the config note.
+        camera_ingestor_->set_min_convert_interval_ms(params.IMAGE_EDGE_MIN_CONVERT_MS);
 
         image_edge_source_ = std::make_unique<rc::ImageEdgeSource>();
         rc::ImageEdgeSource::Config ic;
@@ -200,6 +202,11 @@ void SpecificWorker::initialize()
             auto ch = std::make_unique<CalibChannel>();
             ch->name = cam;
             ch->ingestor = std::make_unique<rc::CameraIngestor>(G, cam);
+            // ★ The CALIB interval, not the driving one. A calibration channel's frames never
+            //   reach the loss — they feed an estimator that accumulates H and b over minutes — so
+            //   skipping frames here costs coverage, not evidence. Sharing one number with the
+            //   driving camera would pay for this saving with the pose factor's rate.
+            ch->ingestor->set_min_convert_interval_ms(params.IMAGE_EDGE_CALIB_MIN_CONVERT_MS);
             // ★ The yaw correction is per CAMERA and is NOT shared. It was measured for the zed; a
             //   second camera has its own mount and applying one camera's correction to another
             //   would be a fabricated extrinsic.
@@ -1208,23 +1215,55 @@ void SpecificWorker::place_triple_points_in_room(rc::ImageEdgeObs &obs,
     };
     const Eigen::Vector3f o_room = to_room(o_rob, true);
 
+    // ONE map, pixel -> room plane, used both for the point and for its uncertainty. Writing it once
+    // is the point: a covariance propagated through a SECOND, hand-written copy of this geometry would
+    // be a model of the map rather than the map, and the two would drift apart silently.
+    // The plane a corner lies in is its own height: 0 for a floor corner, room_height for a ceiling
+    // one. A ray nearly parallel to that plane meets it nowhere useful — the intersection runs away to
+    // infinity — so it is skipped rather than clamped.
+    const auto intersect = [&](const rc::TriplePoint &tp, double u, double v,
+                               Eigen::Vector3f &out) -> bool
+    {
+        const Eigen::Vector3f d_cam = ing.ray_from_pixel(u, v);
+        if (not (d_cam.norm() > 1e-6f)) return false;
+        const Eigen::Vector3f d_room = to_room(Rrc * d_cam, false);
+        if (std::abs(d_room.z()) < 1e-3f) return false;
+        const float tt = (tp.p_room.z() - o_room.z()) / d_room.z();
+        if (not (tt > 0.f) or not std::isfinite(tt)) return false;   // behind the camera
+        out = o_room + tt * d_room;
+        return out.allFinite();
+    };
+
     for (auto &t : obs.triple_points)
     {
-        const Eigen::Vector3f d_cam = ing.ray_from_pixel(t.uv_meas.x(), t.uv_meas.y());
-        if (not (d_cam.norm() > 1e-6f)) continue;
-        const Eigen::Vector3f d_room = to_room(Rrc * d_cam, false);
-        // The plane this corner lies in is its own height: 0 for a floor corner, room_height for a
-        // ceiling one. A ray nearly parallel to that plane meets it nowhere useful — the intersection
-        // runs away to infinity — so it is skipped rather than clamped.
-        if (std::abs(d_room.z()) < 1e-3f) continue;
-        const float tt = (t.p_room.z() - o_room.z()) / d_room.z();
-        if (not (tt > 0.f) or not std::isfinite(tt)) continue;   // behind the camera
-        const Eigen::Vector3f p = o_room + tt * d_room;
-        if (not p.allFinite()) continue;
+        Eigen::Vector3f p;
+        if (not intersect(t, t.uv_meas.x(), t.uv_meas.y(), p)) continue;
         t.p_room_meas = p;
         // Range along the ray, so a consumer has one whether or not a depth stream exists. NOT the
         // same quantity as depth_raw, which stays what the sensor said.
-        t.range_m = tt * d_room.norm();
+        t.range_m = (p - o_room).norm();
+
+        // ── cov_uv (px^2) carried into the room plane (m^2) ─────────────────────────────────────
+        // A CENTRED difference of the intersection itself, one pixel apart, gives d(x, y)/d(u, v)
+        // directly in metres per pixel. No angular rule is assumed and no focal length is quoted:
+        // whatever the camera model does — pinhole, equirectangular, cylindrical — and whatever the
+        // grazing geometry does to the v axis (the d^2/h amplification a floor corner suffers and a
+        // bearing does not) is already inside the map being differenced. Half a pixel each side stays
+        // within the frame for any uv the extractor could have produced, and the map is smooth there.
+        // If either probe fails the corner simply keeps cov_room zero, and the consumer must say so
+        // rather than draw the width a zero covariance would imply.
+        Eigen::Vector3f p_up, p_um, p_vp, p_vm;
+        if (intersect(t, t.uv_meas.x() + 0.5, t.uv_meas.y(), p_up) and
+            intersect(t, t.uv_meas.x() - 0.5, t.uv_meas.y(), p_um) and
+            intersect(t, t.uv_meas.x(), t.uv_meas.y() + 0.5, p_vp) and
+            intersect(t, t.uv_meas.x(), t.uv_meas.y() - 0.5, p_vm))
+        {
+            Eigen::Matrix2f J;                       // d(x, y) / d(u, v), metres per pixel
+            J.col(0) = (p_up - p_um).head<2>();
+            J.col(1) = (p_vp - p_vm).head<2>();
+            const Eigen::Matrix2f C = J * t.cov_uv * J.transpose();
+            if (C.allFinite()) t.cov_room = C;
+        }
     }
 }
 
@@ -1256,6 +1295,41 @@ void SpecificWorker::pump_calib_channels()
                 qInfo().nospace() << "[camcal] " << QString::fromStdString(ch.name)
                                   << " resumed from " << QString::fromStdString(path)
                                   << " (" << k << " pairs)";
+        }
+
+        // ── This channel's own column in the Calib window ────────────────────────────────────────
+        // ★ THE SECOND ESTIMATOR HAD NO WAY OUT. Only the driving camera's pool ever reached the
+        //   viewer (see mount_pair_update), so this channel's evidence accumulated in its own file
+        //   with nothing on screen able to show it, while the window's single camera block was
+        //   captioned with whichever camera reported last. One column per camera now, each fed by
+        //   its own estimator.
+        // ★ BEFORE take_latest(), not after the pairing loop. Placed after it, a channel that is
+        //   bound but currently sees no corner — including one that has just RESUMED a full evidence
+        //   file from disk — would never push, and its column would read "no evidence" while the
+        //   evidence sat on disk. The column must describe the estimator, not this tick's luck.
+        //   Wall clock, 5 s, matching the driving camera's window so both columns are the same age.
+        if (const auto now_ms = QDateTime::currentMSecsSinceEpoch();
+            viewer_ and now_ms - ch.viz_ms >= 5000)
+        {
+            ch.viz_ms = now_ms;
+            if (const auto sol = ch.calib.solve(); sol.ok)
+            {
+                Eigen::Matrix<float, rc::camcal::P_COUNT, 1> pv, sv;
+                // Same unit conversion as the driving camera: the estimator works in units of the
+                // PRIOR SIGMA, so value AND sigma are both scaled back to physical here — scaling
+                // only the value would put a dimensionless uncertainty beside a physical number.
+                const double psig[4] = {params.IMAGE_EDGE_MOUNT_PITCH_SIGMA,
+                                        params.IMAGE_EDGE_MOUNT_HEIGHT_SIGMA,
+                                        params.IMAGE_EDGE_MOUNT_YAW_SIGMA, 1.0};
+                for (int i = 0; i < rc::camcal::P_COUNT; ++i)
+                {
+                    pv(i) = static_cast<float>(sol.p(i)     * psig[i]);
+                    sv(i) = static_cast<float>(sol.sigma(i) * psig[i]);
+                }
+                viewer_->set_camera_calibration(pv, sv, sol.informed,
+                                                static_cast<float>(sol.cond),
+                                                ch.calib.pairs(), ch.name);
+            }
         }
 
         rc::GrayFrame frame;
@@ -1510,10 +1584,26 @@ void SpecificWorker::compute()
         else if (now_ms - pump_report_ms_ > 5000)
         {
             const double secs = 1e-3 * static_cast<double>(now_ms - pump_report_ms_);
-            qInfo().nospace()
+            // ★ The CONVERSION ratio belongs on the same line as the extraction cost, because the
+            //   two answer one question between them. The pumps measured 5.5% of a core, which is
+            //   NOT where this agent's CPU goes; the frames those pumps read are pulled and greyed
+            //   on the per-camera ingest threads, and that is what minConvertIntervalMs throttles.
+            //   Printing converted/delivered per camera is what makes the throttle falsifiable —
+            //   a ratio of 1.00 means it never fired, and no CPU number would have said so.
+            QString conv;
+            const auto add_conv = [&conv](const std::string &name, std::pair<long, long> st)
+            {
+                conv += QString(" %1 %2/%3").arg(QString::fromStdString(name))
+                            .arg(st.second).arg(st.first);   // converted / delivered
+            };
+            if (camera_ingestor_) add_conv(params.IMAGE_EDGE_CAMERA, camera_ingestor_->convert_stats());
+            for (auto &chp : calib_channels_)
+                if (chp->ingestor) add_conv(chp->name, chp->ingestor->convert_stats());
+            qInfo().nospace().noquote()
                 << "[pumps] over " << secs << " s: image_edge " << (1e-6 * pump_ns_edge_ / secs)
                 << " ms/s  calib_channels " << (1e-6 * pump_ns_calib_ / secs)
-                << " ms/s  (= % of one core) | " << pump_ticks_ << " ticks";
+                << " ms/s  (= % of one core) | " << pump_ticks_ << " ticks | conv" << conv
+                << " (converted/delivered)";
             pump_report_ms_ = now_ms; pump_ns_edge_ = pump_ns_calib_ = 0; pump_ticks_ = 0;
         }
     }

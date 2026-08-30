@@ -283,6 +283,11 @@ class SpecificWorker : public GenericWorker
         rc::camcal::Estimator                calib;
         bool                                 bound = false, loaded = false;
         long                                 pairs = 0;
+        /// Last time this channel's solve was pushed to the Calib window (ms, WALL clock). Same
+        /// 5 s cadence as the driving camera's block, so the two columns are read at the same age.
+        /// Wall clock and not the frame stamp on purpose: the push must happen even on a tick where
+        /// no frame arrived, or a channel resuming its evidence from disk would never show it.
+        std::int64_t                         viz_ms = 0;
     };
     std::vector<std::unique_ptr<CalibChannel>> calib_channels_;
     void pump_calib_channels();

@@ -4,6 +4,7 @@
  */
 
 #include "lidar_ingestor.h"
+#include <pthread.h>   // pthread_setname_np: name the worker so a per-thread CPU sample attributes itself
 
 #include <algorithm>
 #include <array>
@@ -78,7 +79,11 @@ void LidarIngestor::start()
     geom_rz_hist_.assign(static_cast<std::size_t>(GEOM_NBINS) * GEOM_NR, 0);
     geom_hist_bpearl_.assign(GEOM_NBINS, 0);
     high_max_z_      = params_ ? params_->LIDAR_HIGH_MAX_HEIGHT : 2.0f;
-    thread_ = std::thread(&LidarIngestor::ingest_loop, this);
+    thread_ = std::thread([this]
+    {
+        pthread_setname_np(pthread_self(), "lidar-ingest");
+        ingest_loop();
+    });
 }
 
 void LidarIngestor::stop()

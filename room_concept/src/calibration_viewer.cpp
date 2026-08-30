@@ -1,6 +1,8 @@
 #include "calibration_viewer.h"
 
+#include <QFrame>
 #include <QHBoxLayout>
+#include <algorithm>
 #include <iterator>
 #include <QSizePolicy>
 #include <QVBoxLayout>
@@ -13,7 +15,8 @@ namespace rc
     CalibrationViewer::CalibrationViewer(QWidget* parent) : QDialog(parent)
     {
         setWindowTitle("Self-calibration");
-        resize(900, 760);   // tall enough that four full-width traces are each readable
+        resize(1180, 800);  // wide enough for two camera columns side by side, and tall enough
+                            // that each full-width motion trace is still readable
         auto* outer = new QVBoxLayout(this);
 
         summary_ = new QLabel(this);
@@ -26,20 +29,24 @@ namespace rc
         // Confirmed, because the thing it discards can be hours of driving and minutes of pivoting
         // that ordinary motion does not reproduce.
         auto* reset = new QPushButton("Reset to priors", this);
-        reset->setToolTip("Forget every measurement and delete the saved evidence, returning BOTH\n"
-                          "blocks — the six motion parameters and the four camera-mount ones — to\n"
-                          "their priors. Use it after changing something physical about the robot:\n"
-                          "a wheel, a mount, the base kinematics. Measurements taken before such a\n"
-                          "change describe a different machine.");
+        reset->setToolTip("Forget every measurement and delete the saved evidence, returning the six\n"
+                          "motion parameters and the DRIVING camera's four mount parameters to their\n"
+                          "priors. Use it after changing something physical about the robot: a wheel,\n"
+                          "a mount, the base kinematics. Measurements taken before such a change\n"
+                          "describe a different machine.\n\n"
+                          "★ It does NOT clear the other camera columns: each extra calibration\n"
+                          "channel keeps its own evidence file, and nothing here deletes it. Say so\n"
+                          "rather than let a column survive a reset that claimed to clear it.");
         connect(reset, &QPushButton::clicked, this, [this]
         {
             const auto answer = QMessageBox::question(
                 this, "Reset calibration",
                 "Forget every measurement and delete the saved window?\n\n"
                 "This discards the driving episodes, any closed pivots, AND the camera-mount "
-                "evidence. A closed pivot is several minutes of the robot turning in place and "
-                "cannot be reproduced by ordinary driving.\n\n"
-                "All ten parameters return to their priors and report NOT informed.",
+                "evidence OF THE DRIVING CAMERA. A closed pivot is several minutes of the robot "
+                "turning in place and cannot be reproduced by ordinary driving.\n\n"
+                "Those ten parameters return to their priors and report NOT informed. The other "
+                "camera columns keep their own evidence files and are NOT cleared.",
                 QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
             if (answer == QMessageBox::Yes and on_reset_) on_reset_();
         });
@@ -160,10 +167,16 @@ namespace rc
             outer->addWidget(r.plot, 1);    // stretch 1: the traces absorb the window's height
         }
 
-        // ── The CAMERA block ─────────────────────────────────────────────────────────────────────
-        // A separate estimator, so a separate section with its own conditioning line. Not merged
-        // into the six above: different stream, no shared covariate, and its count is corner PAIRS
-        // rather than driving episodes — two numbers both labelled "episodes" would be a quiet lie.
+        // ── The CAMERA blocks: ONE COLUMN PER CAMERA ─────────────────────────────────────────────
+        // A separate estimator per camera, so a separate column each, with its own pair count and its
+        // own conditioning line. Not merged into the six above: different stream, no shared
+        // covariate, and the count is corner PAIRS rather than driving episodes — two numbers both
+        // labelled "episodes" would be a quiet lie.
+        // ★ SIDE BY SIDE, NEVER ONE BLOCK THAT SWITCHES CAPTION. These four parameters describe ONE
+        //   mount — body→zed sits at 1.08 m and body→ricoh at 1.42 m — and the block used to be
+        //   relabelled with whichever camera reported last, so half the time it showed one camera's
+        //   numbers under the other's name. Two columns also put the comparison the sensor-triangle
+        //   line below is ABOUT on the screen at the same time, which is the only way to read it.
         // The `why` text comes from rc::camcal::param_why() rather than being duplicated here, so
         // the tooltip and the estimator can never drift apart.
         {
@@ -175,60 +188,13 @@ namespace rc
                             "entirely — so these cannot absorb a pose error, and a heading error "
                             "cannot masquerade as a boresight.</div>");
             outer->addWidget(hdr);
-            cam_which_ = new QLabel("camera: —", this);
-            cam_which_->setStyleSheet("font-family: monospace; font-size: 11px; color: #7f8c8d;");
-            cam_which_->setToolTip("<div style='width: 400px'>Which camera these four parameters "
-                                   "describe. They are a property of ONE mount — body&rarr;zed sits at "
-                                   "1.08 m and body&rarr;ricoh at 1.42 m — so a value learned for one "
-                                   "says nothing about the other. The evidence is kept in a separate "
-                                   "file per camera for that reason, and a file from the wrong camera "
-                                   "is refused rather than merged.</div>");
-            outer->addWidget(cam_which_);
-            cam_summary_ = new QLabel("pairs 0", this);
-            cam_summary_->setStyleSheet("font-family: monospace; font-size: 11px; color: #95a5a6;");
-            outer->addWidget(cam_summary_);
 
-            const struct { const char* name; float scale; const char* unit; QColor col; }
-            cspec[] = {
-                { "cam pitch",  180.f / static_cast<float>(M_PI), "deg", QColor(230, 126, 34) },
-                { "cam height", 1000.f,                           "mm",  QColor(155, 89, 182) },
-                { "cam yaw",    180.f / static_cast<float>(M_PI), "deg", QColor(26, 188, 156) },
-                { "cam dt",     1.f,                              "x",   QColor(149, 165, 166) },
-            };
-            static_assert(std::size(cspec) == static_cast<std::size_t>(rc::camcal::P_COUNT),
-                          "add a row here whenever rc::camcal::Param gains a parameter");
-
-            for (int i = 0; i < rc::camcal::P_COUNT; ++i)
-            {
-                auto& r = cam_rows_[i];
-                r.scale = cspec[i].scale;
-                r.unit  = cspec[i].unit;
-                r.why   = rc::camcal::param_why(i).data();
-
-                auto* header = new QHBoxLayout();
-                r.name = new QLabel(cspec[i].name, this);
-                r.name->setStyleSheet(QString("font-size: 12px; font-weight: bold; color: %1;")
-                                          .arg(cspec[i].col.name()));
-                r.name->setToolTip(QString("<div style='width: 380px'>%1</div>").arg(r.why));
-                r.value = new QLabel("--", this);
-                r.value->setStyleSheet("font-family: monospace; font-size: 12px; color: #e6e9ea;");
-                r.value->setToolTip(QString("<div style='width: 380px'>%1</div>").arg(r.why));
-                r.lamp = new QLabel(this);
-                header->addWidget(r.name);
-                header->addSpacing(12);
-                header->addWidget(r.value);
-                header->addStretch(1);
-                header->addWidget(r.lamp);
-                outer->addLayout(header);
-
-                r.plot = new TimeSeriesPlot(this);
-                r.plot->set_visible_window(600.f);
-                r.plot->add_series(cspec[i].name, cspec[i].col, 1.8f, 0);
-                r.plot->set_reference_line(0.f, QColor(120, 120, 120), "");
-                r.plot->setMinimumHeight(56);
-                r.plot->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-                outer->addWidget(r.plot, 1);
-            }
+            // The strip the per-camera columns are appended to. Columns are created by
+            // set_cameras() (so a camera with no evidence still gets one) or lazily by
+            // block_for() if an undeclared camera reports.
+            cam_columns_ = new QHBoxLayout();
+            cam_columns_->setSpacing(14);
+            outer->addLayout(cam_columns_, 1);   // stretch 1: the camera traces absorb height too
 
             loop_label_ = new QLabel("sensor triangle: no corner seen by two cameras yet", this);
             loop_label_->setStyleSheet("font-family: monospace; font-size: 11px; color: #7f8c8d;");
@@ -270,16 +236,132 @@ namespace rc
             : "font-family: monospace; font-size: 11px; color: #e67e22;");
     }
 
+    void CalibrationViewer::set_cameras(const std::vector<std::string>& cameras,
+                                        const std::string& driving)
+    {
+        for (const auto& c : cameras)
+        {
+            if (c.empty()) continue;
+            if (std::ranges::any_of(cam_blocks_, [&](const auto& b) { return b->name == c; }))
+                continue;
+            cam_blocks_.push_back(std::make_unique<CameraBlock>());
+            auto& b = *cam_blocks_.back();
+            b.name    = c;
+            b.driving = (c == driving);
+            build_camera_column(b);
+        }
+    }
+
+    CalibrationViewer::CameraBlock* CalibrationViewer::block_for(const std::string& camera)
+    {
+        // An empty name can only mean the single column that exists; with none it means nothing.
+        if (camera.empty())
+            return cam_blocks_.empty() ? nullptr : cam_blocks_.front().get();
+        for (auto& b : cam_blocks_)
+            if (b->name == camera) return b.get();
+        // A camera nobody declared still gets a column: dropping its numbers would be the same
+        // silence this window exists to break.
+        cam_blocks_.push_back(std::make_unique<CameraBlock>());
+        auto& nb = *cam_blocks_.back();
+        nb.name = camera;
+        build_camera_column(nb);
+        return &nb;
+    }
+
+    void CalibrationViewer::build_camera_column(CameraBlock& b)
+    {
+        // ★ SIZE DEDUCED AND CHECKED, never declared as [P_COUNT] — same trap as the motion spec
+        // above: too-few initialisers compile, leaving `name` a null char* for std::string.
+        const struct { const char* name; float scale; const char* unit; QColor col; }
+        cspec[] = {
+            { "cam pitch",  180.f / static_cast<float>(M_PI), "deg", QColor(230, 126, 34) },
+            { "cam height", 1000.f,                           "mm",  QColor(155, 89, 182) },
+            { "cam yaw",    180.f / static_cast<float>(M_PI), "deg", QColor(26, 188, 156) },
+            { "cam dt",     1.f,                              "x",   QColor(149, 165, 166) },
+        };
+        static_assert(std::size(cspec) == static_cast<std::size_t>(rc::camcal::P_COUNT),
+                      "add a row here whenever rc::camcal::Param gains a parameter");
+
+        auto* col = new QFrame(this);
+        col->setFrameShape(QFrame::StyledPanel);
+        auto* v = new QVBoxLayout(col);
+        v->setContentsMargins(8, 6, 8, 6);
+
+        b.title = new QLabel(QString::fromStdString(b.name) +
+                                 (b.driving ? QStringLiteral("   — drives the pose")
+                                            : QStringLiteral("   — calibration only")),
+                             col);
+        b.title->setStyleSheet("font-family: monospace; font-size: 12px; font-weight: bold; "
+                               "color: #d5dbe0;");
+        b.title->setToolTip("<div style='width: 400px'>Which camera these four parameters "
+                            "describe. They are a property of ONE mount — body&rarr;zed sits at "
+                            "1.08 m and body&rarr;ricoh at 1.42 m — so a value learned for one "
+                            "says nothing about the other. The evidence is kept in a separate "
+                            "file per camera for that reason, and a file from the wrong camera "
+                            "is refused rather than merged.</div>");
+        v->addWidget(b.title);
+
+        // ★ "NO EVIDENCE" IS A STATE, NOT AN EMPTY COLUMN. A column of priors with a flat trace and
+        // a "0 pairs" line reads as a measurement of zero; the point of this window is that it must
+        // not. Until update_camera() is called for this camera the whole column says so, in words.
+        b.status = new QLabel("NO EVIDENCE YET — nothing measured for this camera", col);
+        b.status->setStyleSheet("font-family: monospace; font-size: 11px; color: #e67e22; "
+                                "font-weight: bold;");
+        b.status->setToolTip("<div style='width: 380px'>No corner pair from this camera has reached "
+                             "its estimator yet — either it has seen no corner the LiDAR also saw, "
+                             "or nothing is feeding it. Nothing below has been measured: the values "
+                             "are the priors, and the trace is empty because there is nothing to "
+                             "trace, not because the parameters are not moving.</div>");
+        v->addWidget(b.status);
+
+        for (int i = 0; i < rc::camcal::P_COUNT; ++i)
+        {
+            auto& r = b.rows[i];
+            r.scale = cspec[i].scale;
+            r.unit  = cspec[i].unit;
+            r.why   = rc::camcal::param_why(i).data();
+
+            auto* header = new QHBoxLayout();
+            r.name = new QLabel(cspec[i].name, col);
+            r.name->setStyleSheet(QString("font-size: 12px; font-weight: bold; color: %1;")
+                                      .arg(cspec[i].col.name()));
+            r.name->setToolTip(QString("<div style='width: 380px'>%1</div>").arg(r.why));
+            // Not "--": a dash is silence, and silence is what must not be mistaken for a reading.
+            r.value = new QLabel("no evidence", col);
+            r.value->setStyleSheet("font-family: monospace; font-size: 12px; color: #7f8c8d;");
+            r.value->setToolTip(QString("<div style='width: 380px'>%1</div>").arg(r.why));
+            r.lamp = new QLabel("no evidence", col);
+            r.lamp->setStyleSheet("font-size: 11px; color: #7f8c8d;");
+            header->addWidget(r.name);
+            header->addSpacing(12);
+            header->addWidget(r.value);
+            header->addStretch(1);
+            header->addWidget(r.lamp);
+            v->addLayout(header);
+
+            r.plot = new TimeSeriesPlot(col);
+            r.plot->set_visible_window(600.f);
+            r.plot->add_series(cspec[i].name, cspec[i].col, 1.8f, 0);
+            r.plot->set_reference_line(0.f, QColor(120, 120, 120), "");
+            r.plot->setMinimumHeight(56);
+            r.plot->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+            v->addWidget(r.plot, 1);
+        }
+
+        if (cam_columns_ != nullptr) cam_columns_->addWidget(col, 1);   // equal share of the width
+    }
+
     void CalibrationViewer::update_camera(const Eigen::Matrix<float, rc::camcal::P_COUNT, 1>& value,
                                           const Eigen::Matrix<float, rc::camcal::P_COUNT, 1>& sigma,
                                           int informed_mask, float condition, long pairs,
                                           const std::string& camera)
     {
-        if (cam_which_ != nullptr and not camera.empty())
-            cam_which_->setText(QString("camera: %1").arg(QString::fromStdString(camera)));
+        auto* blk = block_for(camera);
+        if (blk == nullptr) return;
+        blk->has_evidence = true;
         for (int i = 0; i < rc::camcal::P_COUNT; ++i)
         {
-            auto& r = cam_rows_[i];
+            auto& r = blk->rows[i];
             if (r.value == nullptr) continue;
             const float v = value[i] * r.scale;
             const float sg = sigma[i] * r.scale;
@@ -287,6 +369,7 @@ namespace rc
             r.value->setText(sg > 0.f
                 ? QString("%1 ± %2 %3").arg(v, 8, 'f', 3).arg(sg, 6, 'f', 3).arg(r.unit)
                 : QString("%1 ± ?      %2").arg(v, 8, 'f', 3).arg(r.unit));
+            r.value->setStyleSheet("font-family: monospace; font-size: 12px; color: #e6e9ea;");
             const bool informed = (informed_mask >> i) & 1;
             r.lamp->setText(informed ? "learning" : "not asked");
             r.lamp->setToolTip(QString("<div style='width: 380px'>%1%2</div>")
@@ -303,14 +386,18 @@ namespace rc
                 : "font-size: 11px; color: #7f8c8d;");
             r.plot->add_point(r.name->text().toStdString(), v);
         }
-        if (cam_summary_ != nullptr)
-            cam_summary_->setText(
+        if (blk->status != nullptr)
+        {
+            blk->status->setText(
                 QString("pairs %1     conditioning %2%3")
                     .arg(pairs, 6).arg(condition, 7, 'f', 1)
                     // Pitch and height are KNOWN to be collinear here and near-wall driving did not
                     // break it, so name the pair rather than leaving the reader to guess which two.
                     .arg(condition > 50.f ? "   <- collinear; pitch/height is the usual pair"
                                           : ""));
+            blk->status->setStyleSheet("font-family: monospace; font-size: 11px; color: #95a5a6;");
+            blk->status->setToolTip("");
+        }
     }
 
     void CalibrationViewer::update_values(const Eigen::Matrix<float, rc::calib::P_COUNT, 1>& value,

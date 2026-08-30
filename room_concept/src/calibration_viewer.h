@@ -18,8 +18,12 @@
 #include <QDialog>
 #include <QLabel>
 #include <array>
+#include <memory>
 #include <string>
+#include <vector>
 #include <functional>
+
+class QHBoxLayout;
 
 namespace rc
 {
@@ -34,14 +38,26 @@ namespace rc
         /// What "Reset" does. Set by the owner; the window itself knows nothing about the estimator.
         void set_reset_handler(std::function<void()> h) { on_reset_ = std::move(h); }
 
-        /// The CAMERA block: a separate estimator with its own evidence, its own `informed` flags and its
+        /// Declare which cameras get a column, in display order, and which one drives the pose.
+        /// Called once by the owner right after construction.
+        ///
+        /// ★ A CAMERA DECLARED HERE BUT NEVER UPDATED RENDERS AS AN EXPLICIT "no evidence" COLUMN.
+        ///   That is the whole reason the list is declared instead of columns appearing when data
+        ///   first arrives: a column that only exists once it has numbers cannot say "nothing has
+        ///   been measured for this camera", and silence would then look exactly like a reading.
+        void set_cameras(const std::vector<std::string>& cameras, const std::string& driving = "");
 
-        /// own conditioning. Separate because the two are fed by different streams and share no
-
-        /// covariate — see camera_calibration.h. `pairs` is corner pairings, not driving episodes,
-
-        /// and the label says so: two counts called "episodes" would be a quiet lie.
-
+        /// The CAMERA block for ONE camera: a separate estimator with its own evidence, its own
+        /// `informed` flags and its own conditioning. Separate from the motion block because the two
+        /// are fed by different streams and share no covariate — see camera_calibration.h. `pairs` is
+        /// corner pairings, not driving episodes, and the label says so: two counts called
+        /// "episodes" would be a quiet lie.
+        ///
+        /// ★ `camera` SELECTS A COLUMN, it does not relabel a shared one. These parameters describe
+        ///   ONE mount (body→zed at 1.08 m, body→ricoh at 1.42 m), so one block whose caption
+        ///   followed whichever camera reported last showed one camera's numbers under the other's
+        ///   name on every alternate update. An unknown name gets its own column rather than being
+        ///   dropped.
         void update_camera(const Eigen::Matrix<float, rc::camcal::P_COUNT, 1>& value,
                            const Eigen::Matrix<float, rc::camcal::P_COUNT, 1>& sigma,
                            int informed_mask, float condition, long pairs,
@@ -70,12 +86,28 @@ namespace rc
             // the value and the lamp. Static string literals from the spec table; not owned.
             const char* why = "";
         };
+        /// One camera = one column. Held by pointer so the Rows' addresses survive the vector
+        /// growing when a camera nobody declared turns up.
+        struct CameraBlock
+        {
+            std::string name;
+            bool        driving = false;      ///< this is the camera the localiser actually uses
+            bool        has_evidence = false; ///< has update_camera() ever been called for it
+            QLabel*     title  = nullptr;
+            QLabel*     status = nullptr;     ///< pairs + conditioning, or the "no evidence" state
+            std::array<Row, rc::camcal::P_COUNT> rows{};
+        };
+
         std::array<Row, rc::calib::P_COUNT>  rows_{};
-        std::array<Row, rc::camcal::P_COUNT> cam_rows_{};
+        std::vector<std::unique_ptr<CameraBlock>> cam_blocks_;
+        QHBoxLayout* cam_columns_ = nullptr;   ///< the side-by-side strip the columns live in
         QLabel* summary_ = nullptr;
-        QLabel* cam_summary_ = nullptr;
-        QLabel* cam_which_ = nullptr;     ///< which camera the block above describes
         QLabel* loop_label_ = nullptr;
         std::function<void()> on_reset_;
+
+        /// The column for `camera`, creating one if the name is new. Empty name = the first column.
+        CameraBlock* block_for(const std::string& camera);
+        /// Build one column's widgets and append it to `cam_columns_`.
+        void build_camera_column(CameraBlock& b);
     };
 }

@@ -93,6 +93,24 @@ public:
     /// localiser's own heading error (that ran ~0.18 deg sd and correlated at +0.816 with the shift).
     void set_mount_yaw_correction(float rad) noexcept { mount_yaw_correction_ = rad; }
 
+    /// Convert at most one frame per `ms`. 0 = every delivered frame (the old behaviour).
+    ///
+    /// ★ THIS THROTTLES THE CONVERSION, NEVER THE DRAIN. The reader is RELIABLE: if its SHM pool is
+    ///   allowed to back up the producer's loan_sample() eventually fails and it stops publishing,
+    ///   freezing every other consumer on the plane (see ingest_loop). So the poll keeps running at
+    ///   full rate and the loaned sample is still consumed — what is skipped is gray_from_rgb8 over
+    ///   a frame nobody was going to read. On the ricoh that is ~5.5 MB per frame.
+    /// ★ Measured 2026-08-29: the corner MATHS is 45 ms/s for the driving camera and 10 ms/s for the
+    ///   calibration channel — 5.5% of a core between them. The cost is here, in pulling and
+    ///   converting frames, spread over the per-camera ingest threads. Rate-limiting the extraction
+    ///   would have saved 1%; rate-limiting this is where the CPU actually is.
+    void set_min_convert_interval_ms(int ms) noexcept { min_convert_ms_ = std::max(0, ms); }
+
+    /// Frames delivered vs frames actually converted since the last call, then reset. A throttle
+    /// nobody can see is a throttle nobody revisits.
+    [[nodiscard]] std::pair<long, long> convert_stats() noexcept
+    { const auto r = std::pair{conv_seen_, conv_done_}; conv_seen_ = conv_done_ = 0; return r; }
+
     /// Start / stop the ingest thread. START ONLY once Operating (the thread touches the DSR graph for
     /// subscriber discovery, and doing that during the join window corrupts it). Idempotent.
     void start();
@@ -172,6 +190,10 @@ private:
     bool            depth_absent_warned_ = false;
     long            depth_polls_ = 0, depth_hits_ = 0;
     float           mount_yaw_correction_ = 0.f;   ///< rad, applied about the ROBOT VERTICAL at bind
+    int  min_convert_ms_ = 0;      ///< see set_min_convert_interval_ms
+    std::int64_t last_convert_ms_ = 0;
+    long conv_seen_ = 0, conv_done_ = 0;
+    bool convert_due(std::int64_t stamp_ms) noexcept;
     Eigen::Matrix3f cam_R_robot_ = Eigen::Matrix3f::Identity();
     Eigen::Vector3f cam_t_robot_ = Eigen::Vector3f::Zero();
     bool            extrinsic_ok_ = false;

@@ -530,6 +530,8 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     try { rc::ConfigLoaderUtils::load_optional<std::vector<std::string>>(cl, "ImageEdge.calibCameras", p.CALIB_CAMERAS); }
     catch (const std::exception& e) { qWarning() << "[cfg] ImageEdge.calibCameras ignored:" << e.what(); }
     rc::ConfigLoaderUtils::load_optional<std::string>(cl, "ImageEdge.csv", p.IMAGE_EDGE_CSV);
+    rc::ConfigLoaderUtils::load_optional<int>(cl, "ImageEdge.minConvertIntervalMs", p.IMAGE_EDGE_MIN_CONVERT_MS);
+    rc::ConfigLoaderUtils::load_optional<int>(cl, "ImageEdge.calibMinConvertIntervalMs", p.IMAGE_EDGE_CALIB_MIN_CONVERT_MS);
 
     room_concept.params.image_edge.enable             = p.IMAGE_EDGE_ENABLE;
     room_concept.params.image_edge.drive              = p.IMAGE_EDGE_DRIVE;

@@ -1023,12 +1023,17 @@ HierPrecBoundaryEnabled = true
 CornerEarlyExitCheck    = true
 GnMaxIters              = 20
 GnLossRelTol            = 1e-5
-TorchNumThreads         = 2   # intra-op CPU threads for the Torch forward pass. Adam is gone, but
+TorchNumThreads         = 1   # intra-op CPU threads for the Torch forward pass. Adam is gone, but
                               # Torch still runs the SDF/model forward that GN reads its Jacobian
                               # from, and the double-backward Hessian behind the posterior sigma —
                               # so this knob still bites. Was unified at 1 on 2026-08-29 and set
                               # back to 2 the same day: it is a CORE BUDGET, and 1 was Shadow's
                               # number arriving on P3Bot, which runs a 16 ms period against 50.
+                              # ★ Back to 1 the SAME EVENING, and the reason changed under it:
+                              #   CovarianceFromSolver removed the double-backward Hessian that was
+                              #   108 ms of a 131 ms optimised frame, so the Torch path now runs a
+                              #   forward pass on optimised frames only. Two intra-op threads were
+                              #   sized for work that no longer happens.
 SymmetryGoodFitMse      = 0.101
 
 
@@ -1393,6 +1398,31 @@ mountYawSigma    = 0.0035   # rad              ⚠ NOT MEASURED ON SHADOW
 # Instead, never as well: a triple point is those same segment offsets re-expressed, so both would
 # count the same photons twice.
 useTriplePoints = true
+
+# Convert at most one camera frame per this many ms, per ingestor. 0 = every delivered frame.
+# ★ THIS THROTTLES THE CONVERSION, NEVER THE DRAIN. The media readers are RELIABLE: let their SHM
+#   pool back up and the producer's loan_sample() fails and it silently stops publishing, freezing
+#   every consumer on the plane. So polling continues at full rate and each loaned sample is still
+#   released — what is skipped is gray_from_rgb8 over a frame nobody was going to read (~5.5 MB on
+#   the ricoh panorama).
+# ★ MEASURED 2026-08-29, and it corrected the obvious guess: the corner MATHS is 45 ms/s for the
+#   driving camera and 10 ms/s for the calibration channel — 5.5% of one core between them, against
+#   81% total spread over the per-camera ingest threads. Rate-limiting the extraction would have
+#   returned 1%. The cost is pulling and converting frames, which is what this limits.
+# ★ BOTH cameras stay in calibCameras deliberately: zed + ricoh + the LiDAR give three independent
+#   corner sources, and differencing two cameras against the SAME corner cancels the LiDAR term —
+#   the one pose-free calibration reading that needs no ground truth.
+# ⚠ Judge it on the `conv <cam> converted/delivered` field of the [pumps] line, not on CPU alone:
+#   a ratio of 1.00 means the throttle never fired, and no CPU number would have said so.
+minConvertIntervalMs = 0      # DRIVING camera: every frame. Its greyed frames feed the RGB corner
+                              # factor that MOVES the published pose (drive = true), so a skipped
+                              # frame here is evidence the localiser does not get — a different
+                              # trade from the one below, which is why it is a different number.
+calibMinConvertIntervalMs = 100   # CALIBRATION channels (the zed today): 10 Hz. Their frames never
+                              # reach the loss; they feed an estimator that accumulates H and b over
+                              # minutes and wants COVERAGE — poses spread around the room — not every
+                              # frame from one pose. Convergence is slower in wall-clock by the same
+                              # factor the cost falls.
 
 # Both cameras calibrated; `camera` above stays the one that may drive. Each camera's residual
 # against the LiDAR is (camera error) + (LiDAR corner error) and those are inseparable with ONE

@@ -1,5 +1,6 @@
 /*  imu_ingestor.cpp — see imu_ingestor.h for why the IMU moved off the DSR graph. */
 #include "imu_ingestor.h"
+#include <pthread.h>   // pthread_setname_np: name the worker so a per-thread CPU sample attributes itself
 
 #include <QDateTime>
 #include <QDebug>
@@ -13,7 +14,7 @@ void ImuIngestor::start()
 {
     if (running_.exchange(true))
         return;
-    thread_ = std::thread([this] { loop(); });
+    thread_ = std::thread([this] { pthread_setname_np(pthread_self(), "imu-ingest"); loop(); });
 }
 
 void ImuIngestor::stop()
