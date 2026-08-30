@@ -101,6 +101,24 @@ namespace rc::calib
     struct Config
     {
         bool  enabled      = false;
+        /// ── OPEN-LOOP MODE: ESTIMATE, BUT DO NOT APPLY ───────────────────────────────────────────
+        /// false severs the estimator's output from the odometry while leaving everything else
+        /// running: episodes still close, the window still fills, the solve still runs, and the
+        /// value and sigma are still logged (via the estimated_* accessors, which ignore this flag).
+        ///
+        /// ★ THIS IS AN INSTRUMENT, NOT A TUNING KNOB. The estimator's covariate is the POST-scaled
+        /// odometry (room_concept.cpp: dy_local = odom.adv * dt * k_v) and an Episode records no
+        /// trace of the parameter values that were active when it was written. So once a value is
+        /// applied, later episodes report only the error REMAINING after it acted, while the batch
+        /// re-solves the window from scratch as though those leftovers were totals. Fixed point:
+        /// v = k* S/(2S + P0), i.e. recovery is capped at 50% however much data arrives.
+        /// Measured 2026-08-30 on a +3% injected forward-scale error: the unweighted, prior-free
+        /// slope of the saved window was 49.8% of the true deviation -- the ceiling, almost exactly.
+        /// Setting apply=false breaks that loop: the covariate stays raw and the residual stays the
+        /// FULL error, so recovery should jump toward 100%. That prediction is the whole point of
+        /// the flag, and it discriminates this account from any rival that does not involve
+        /// feedback. Leave it TRUE for normal operation.
+        bool  apply        = true;
         float yaw_p0       = 1.0e-4f;   // (rad)^2   -> 1 sigma ~ 0.57 deg
         float yaw_q        = 1.0e-9f;   // (rad)^2 per update
         float scale_p0     = 4.0e-4f;   // fractional^2 -> 1 sigma ~ 2%
@@ -192,18 +210,34 @@ namespace rc::calib
         /// move the robot's odometry. Diagnosis and authority are different questions.
         [[nodiscard]] bool taught(int p) const noexcept
         { return enabled() and last_.informed[p]; }
+        /// Taught AND allowed to act. The applied accessors below gate on this; the estimated_*
+        /// accessors gate on taught() alone, so the log keeps its meaning in open-loop mode.
+        [[nodiscard]] bool acting(int p) const noexcept
+        { return taught(p) and cfg_.apply; }
         /// Applied to the body->world rotation of the odometry displacement.
         [[nodiscard]] float yaw_offset() const noexcept
+        { return acting(rc::calib::P_EPS_YAW) ? last_.value[rc::calib::P_EPS_YAW] : 0.f; }
+        /// The ESTIMATE, regardless of whether it is allowed to act. For logging only.
+        [[nodiscard]] float estimated_yaw_offset() const noexcept
         { return taught(rc::calib::P_EPS_YAW) ? last_.value[rc::calib::P_EPS_YAW] : 0.f; }
         /// Multiplies forward (and lateral) wheel displacement.
         [[nodiscard]] float forward_scale() const noexcept
+        { return acting(rc::calib::P_K_V) ? 1.f + last_.value[rc::calib::P_K_V] : 1.f; }
+        /// The ESTIMATE, regardless of whether it is allowed to act. For logging only.
+        [[nodiscard]] float estimated_forward_scale() const noexcept
         { return taught(rc::calib::P_K_V) ? 1.f + last_.value[rc::calib::P_K_V] : 1.f; }
         /// Multiplies the heading increment, whichever channel produced it.
         [[nodiscard]] float omega_scale() const noexcept
+        { return acting(rc::calib::P_K_OMEGA) ? 1.f + last_.value[rc::calib::P_K_OMEGA] : 1.f; }
+        /// The ESTIMATE, regardless of whether it is allowed to act. For logging only.
+        [[nodiscard]] float estimated_omega_scale() const noexcept
         { return taught(rc::calib::P_K_OMEGA) ? 1.f + last_.value[rc::calib::P_K_OMEGA] : 1.f; }
         /// rad/s, subtracted from the measured rate. Separated from the SCALE only by the
         /// time-vs-rotation covariate pair, which is why it needs the joint solve to exist at all.
         [[nodiscard]] float omega_bias() const noexcept
+        { return acting(rc::calib::P_B_OMEGA) ? last_.value[rc::calib::P_B_OMEGA] : 0.f; }
+        /// The ESTIMATE, regardless of whether it is allowed to act. For logging only.
+        [[nodiscard]] float estimated_omega_bias() const noexcept
         { return taught(rc::calib::P_B_OMEGA) ? last_.value[rc::calib::P_B_OMEGA] : 0.f; }
         /// Multiplies LATERAL wheel displacement. Separate from forward_scale(): a mecanum's lateral
         /// channel is the one roller slip corrupts, so the two are physically different errors.
@@ -380,6 +414,13 @@ namespace rc::calib
             e.duration  = acc_dur_;
             e.r_forward = acc_r_fwd_; e.r_lateral = acc_r_lat_; e.r_theta = acc_r_th_;
             e.pos_var = r_pos;        e.theta_var = r_th;
+            // ★ WHAT WAS ACTING WHILE THIS EPISODE WAS ACCUMULATED. Captured here, BEFORE the offer
+            // below re-solves and moves last_, so it is the value that was in force over the span --
+            // not the one the window is about to produce. acting() and not taught(): a value that is
+            // known but withheld (untaught, disabled, or open-loop) never touched the odometry, so
+            // nothing needs undoing for it. See Episode::p_applied for why this exists at all.
+            for (int i = 0; i < rc::calib::P_COUNT; ++i)
+                e.p_applied[i] = acting(i) ? last_.value[i] : 0.f;
             ++episodes_;
 
             // OFFER it -- do not assume it will be taken. The intake owns the admission policy and

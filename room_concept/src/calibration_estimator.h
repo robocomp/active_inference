@@ -101,6 +101,22 @@ namespace rc::calib
         // How much this episode should be believed.
         float pos_var   = 1e-4f; ///< m^2, localiser posterior + model-error terms
         float theta_var = 1e-4f; ///< rad^2
+
+        /// ★★★ THE PARAMETER VALUES THAT WERE ACTING WHEN THIS ROW WAS WRITTEN.
+        /// Without it the estimator measures itself through its own output and cannot tell.
+        /// The covariates above are the POST-corrected odometry, so once a value is applied the
+        /// residual r is only the error REMAINING after it acted -- while solve() re-solves the
+        /// whole window from scratch and would read those leftovers as totals. Fixed point
+        /// v = k* S/(2S + P0): recovery capped at 50% however much data arrives.
+        /// MEASURED 2026-08-30 against a +3% injected forward-scale error, three ways that agree:
+        ///   fixed-point arithmetic                          <= 50%
+        ///   unweighted prior-free fit of the saved window      49.8%
+        ///   controlled open-loop vs closed-loop A/B            49.3%
+        /// solve() adds J*p_applied back, reconstituting the TOTAL error the parameters must
+        /// explain. Zero when nothing was applied (untaught, disabled, or MotionCalibApply=false),
+        /// so the open-loop arm is unaffected -- which is what makes "the closed-loop run now
+        /// reproduces the open-loop recovery" the validating prediction for this fix.
+        Eigen::Matrix<float, P_COUNT, 1> p_applied = Eigen::Matrix<float, P_COUNT, 1>::Zero();
     };
 
     struct Result
@@ -234,12 +250,17 @@ namespace rc::calib
         if (not f.is_open()) return false;
         f.imbue(std::locale::classic());
         f << "# motion calibration window — evidence, not parameters. Delete to return to the priors.\n";
-        f << "# E,d_forward,d_lateral,d_theta,duration,r_forward,r_lateral,r_theta,pos_var,theta_var\n";
+        f << "# E,d_forward,d_lateral,d_theta,duration,r_forward,r_lateral,r_theta,pos_var,theta_var,"
+             "p_applied x P_COUNT\n";
         f << "# C,r_theta,d_theta,duration,weight\n";
         for (const auto& e : eps_)
+        {
             f << "E," << e.d_forward << ',' << e.d_lateral << ',' << e.d_theta << ',' << e.duration
               << ',' << e.r_forward << ',' << e.r_lateral << ',' << e.r_theta
-              << ',' << e.pos_var << ',' << e.theta_var << '\n';
+              << ',' << e.pos_var << ',' << e.theta_var;
+            for (int i = 0; i < P_COUNT; ++i) f << ',' << e.p_applied[i];
+            f << '\n';
+        }
         for (const auto& c : cls_)
             f << "C," << c.r_theta << ',' << c.d_theta << ',' << c.duration << ',' << c.weight << '\n';
         return true;
@@ -267,12 +288,18 @@ namespace rc::calib
                 v.push_back(x);
                 p = (next < end and *next == ',') ? next + 1 : end;
             }
-            if (line[0] == 'E' and v.size() == 9)
+            // 9 columns is the PRE-2026-08-30 format, written before p_applied existed. Such a row
+            // loads with p_applied = 0, reproducing the old (biased) reading for it rather than
+            // inventing a value -- an honest degradation, and a reason to DELETE state files written
+            // by an older build rather than carry them across this fix.
+            if (line[0] == 'E' and (v.size() == 9 or v.size() == 9 + std::size_t{P_COUNT}))
             {
                 Episode e;
                 e.d_forward = v[0]; e.d_lateral = v[1]; e.d_theta   = v[2]; e.duration = v[3];
                 e.r_forward = v[4]; e.r_lateral = v[5]; e.r_theta   = v[6];
                 e.pos_var   = v[7]; e.theta_var = v[8];
+                if (v.size() > 9)
+                    for (int i = 0; i < P_COUNT; ++i) e.p_applied[i] = v[9 + i];
                 eps_.push_back(e); ++n;
             }
             else if (line[0] == 'C' and v.size() == 4)
@@ -315,7 +342,9 @@ namespace rc::calib
                 Eigen::Matrix<float, P_COUNT, 1> j_along = Eigen::Matrix<float, P_COUNT, 1>::Zero();
                 j_along[P_K_V] = e.d_forward;
                 H += wp * j_along * j_along.transpose();
-                b += wp * j_along * e.r_forward;
+                // Undo the feedback: the recorded residual is what remained AFTER
+                // p_applied acted, so the total this row must explain is r + J*p_applied.
+                b += wp * j_along * (e.r_forward + j_along.dot(e.p_applied));
 
                 // CROSS-track row: a yaw offset rotates FORWARD travel off-axis, while a lateral
                 // scale error mis-measures LATERAL travel. Same component, different covariates —
@@ -326,7 +355,9 @@ namespace rc::calib
                 j_cross[P_EPS_YAW] = -e.d_forward;
                 j_cross[P_K_LAT]   =  e.d_lateral;
                 H += wp * j_cross * j_cross.transpose();
-                b += wp * j_cross * e.r_lateral;
+                // Undo the feedback: the recorded residual is what remained AFTER
+                // p_applied acted, so the total this row must explain is r + J*p_applied.
+                b += wp * j_cross * (e.r_lateral + j_cross.dot(e.p_applied));
 
                 // THREE parameters share this component and are separated only by covariate:
                 // a SCALE by rotation, a BIAS by elapsed time, and a per-wheel mismatch by DISTANCE
@@ -337,7 +368,9 @@ namespace rc::calib
                 j_th[P_B_OMEGA]  = e.duration;
                 j_th[P_DK_WHEEL] = e.d_forward;
                 H += wt * j_th * j_th.transpose();
-                b += wt * j_th * e.r_theta;
+                // Undo the feedback: the recorded residual is what remained AFTER
+                // p_applied acted, so the total this row must explain is r + J*p_applied.
+                b += wt * j_th * (e.r_theta + j_th.dot(e.p_applied));
             }
 
             // ── Closed pivots, on the same two covariates as the heading row above ────────────────
