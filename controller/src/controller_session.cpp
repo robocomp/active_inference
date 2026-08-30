@@ -2175,6 +2175,9 @@ bool ControllerSession::build_route(const ControllerRobotPose &robot_pose)
     route_active_ = built;
     if (not built and not last_plan_failure_.empty())
         std::println("[route] the planner refused that hop: {}", last_plan_failure_);
+    // A WHOLE new curve, including the route optimiser's pass over it. Only on success: a refused
+    // build leaves the robot on the curve it already had, so its trace is still the right picture.
+    if (built) note_route_changed();
     return built;
 }
 
@@ -2349,6 +2352,8 @@ void ControllerSession::on_route_reauthored(const char *event, float window_m,
 {
     ++route_repair_count_;
     mission_.note_replan();   // count what HAPPENED, not the reflex that asked for it
+    // The curve the trace belongs to has just been replaced — see RouteChangedCallback.
+    note_route_changed();
     // Force the new curve to be installed: the follower is still holding the old one.
     path_controller.stop();
     current_plan_.reset();

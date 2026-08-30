@@ -29,6 +29,22 @@ class ControllerSession
 {
 public:
     using WakeCallback = std::function<void()>;
+    // ── THE ROUTE THE ROBOT IS FOLLOWING HAS BEEN REPLACED ───────────────────────────────────────
+    // Fired when the curve is re-authored: a full build (start of a run, or the route optimiser's
+    // pass over the whole tour) and every in-place repair or reinstatement of a SECTION.
+    //
+    // ★WHY THE DISPLAY WANTS IT. The driven trace is the one overlay that accumulates, and its whole
+    // meaning is "where the robot went on the route it is on". Re-author the route and that trace
+    // becomes a picture of a curve nobody is driving any more, sitting on the canvas beside the one
+    // that replaced it — two trajectories where there should be one, and more with every repair.
+    //
+    // ★A CALLBACK RATHER THAN A DISPLAY REFERENCE, because the session must not acquire one: this is
+    // the only thing it would use it for, drive_mission_route (where both repair sites live) is
+    // deliberately display-free, and threading a ControllerDisplay through it to erase a line would
+    // put a GUI type in the middle of the control path. The worker owns the policy; the session only
+    // reports the event.
+    using RouteChangedCallback = std::function<void()>;
+    void set_route_changed_callback(RouteChangedCallback cb) { route_changed_cb_ = std::move(cb); }
     using TimeSource = std::function<std::uint64_t()>;
 
     void set_params(const ControllerParams *params);
@@ -751,6 +767,11 @@ private:
         Eigen::Vector2f last_offer_counted{0.f, 0.f};  // the last offer the counter below has counted
         int deferred = 0;                   // republishes held off — REPUBLISHES, not cycles
     };
+    RouteChangedCallback route_changed_cb_;
+    // One place to fire it, so a future re-authoring site cannot forget: everything that replaces the
+    // curve already funnels through on_route_reauthored() or build_route().
+    void note_route_changed() { if (route_changed_cb_) route_changed_cb_(); }
+
     std::optional<ApproachCommitment> approach_commit_;
     std::uint64_t approach_commit_log_ms_ = 0;   // rate limit for the deferral line
     // Applied where the producer's pose lands, before every repair. Returns nothing: it edits

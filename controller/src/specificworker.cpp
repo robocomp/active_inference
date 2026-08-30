@@ -204,6 +204,15 @@ void SpecificWorker::initialize()
 	load_params();
 	inner_eigen_api_ = G ? G->get_inner_eigen_api() : nullptr;
 	session_.set_graph(G);
+	// ★ONE TRAJECTORY ON THE CANVAS AT A TIME. The driven trace is the only overlay that accumulates,
+	// and it means "where the robot went on the route it is on". Every time the curve is re-authored —
+	// a full build or the optimiser's pass, and every in-place repair of a section — that trace becomes
+	// a picture of a route nobody is driving, left beside the one that replaced it. So it goes with the
+	// curve it belonged to. Clearing here rather than inside the session keeps the display decision in
+	// the worker and the control path free of GUI types (see RouteChangedCallback).
+	// ★Safe from the control thread: clear_robot_trajectory() only raises a pending flag under the
+	// snapshot mutex, and the GUI thread acts on it in present().
+	session_.set_route_changed_callback([this]() { display_.clear_robot_trajectory(); });
 	world_model_.set_affordance_manager(&affordance_manager_);
 	world_model_.set_dependencies(G, inner_eigen_api_.get());
 	obstacle_tracker_.set_dependencies(G, inner_eigen_api_.get(), &world_model_.graph_state());
