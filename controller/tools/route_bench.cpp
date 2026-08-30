@@ -114,6 +114,9 @@ struct Metrics
     float clear_min = 0.f, clear_p05 = 0.f, clear_mean = 0.f;
     int   infeasible = 0;          // samples whose footprint (at the tangent heading) is in collision
     float dev_max = 0.f, dev_mean = 0.f;   // route vs the RECORDED waypoints
+    // Per waypoint, so "the route passes far from one of them" can name WHICH. The aggregate above
+    // cannot: a single badly-missed point and a route uniformly loose look the same in dev_max/dev_mean.
+    std::vector<float> dev_per_wp;
     float t_ideal = 0.f;           // traversal time under the curvature speed law
     rc::RouteOptimizerReport opt;
     // Each pivot as (arc length, radius, position), worst first. The POSITION is the point of it: a pivot
@@ -257,6 +260,7 @@ Metrics evaluate(World &w, const rc::RouteOptimizerConfig *opt, float smoothing,
         float best = 1e9f;
         for (const auto &p : s) best = std::min(best, (p - q).norm());
         m.dev_max = std::max(m.dev_max, best);
+        m.dev_per_wp.push_back(best);
         dev_sum += best;
     }
     m.dev_mean = static_cast<float>(dev_sum / std::max<std::size_t>(1, w.wp_raw.size()));
@@ -288,6 +292,17 @@ void print_detail(const std::string &label, const Metrics &m)
     if (not m.built) return;
     std::printf("  %s: kappa max %.3f rms %.3f | infeasible samples %d | samples %d\n",
                 label.c_str(), m.kappa_max, m.kappa_rms, m.infeasible, m.samples);
+    // Which waypoint the route gives up on. dev_max alone cannot tell a single abandoned point from a
+    // uniformly loose route, and "it passes far from one of them" is a per-waypoint claim.
+    if (not m.dev_per_wp.empty())
+    {
+        std::printf("    waypoint fit (m):");
+        for (std::size_t i = 0; i < m.dev_per_wp.size(); ++i)
+            std::printf(" %zu:%.2f", i, m.dev_per_wp[i]);
+        const auto it = std::max_element(m.dev_per_wp.begin(), m.dev_per_wp.end());
+        std::printf("   <- worst wp%zu at %.3f m\n",
+                    static_cast<std::size_t>(it - m.dev_per_wp.begin()), *it);
+    }
     if (m.opt.ran)
         std::printf("    optimiser: %d iters, S %.4f -> %.4f  (kappa %.4f clear %.4f anchor %.4f gauge %.4f)"
                     "  max_move %.3f m  clearance %.3f -> %.3f%s\n",

@@ -1,3 +1,4 @@
+#include <format>
 #include <numbers>
 #include "controller_session.h"
 #include "controller_robot_body.h"
@@ -2175,6 +2176,40 @@ bool ControllerSession::build_route(const ControllerRobotPose &robot_pose)
     route_active_ = built;
     if (not built and not last_plan_failure_.empty())
         std::println("[route] the planner refused that hop: {}", last_plan_failure_);
+
+    // ── HOW WELL THE ROUTE ACTUALLY VISITS THE WAYPOINTS IT WAS BUILT FROM ───────────────────────
+    // ★A RECORDED WAYPOINT IS A REQUEST, AND UNTIL NOW NOTHING SAID WHETHER IT WAS HONOURED. The
+    // optimiser trades fidelity to the authored points against curvature and clearance — that is its
+    // job — but the aggregate it reports (dev max / dev mean) cannot say WHICH point was given up, and
+    // "the robot passed far from one of them" is a per-waypoint question. So this prints the miss at
+    // every waypoint, once per build.
+    //
+    // ★MEASURED AT THE WAYPOINT'S OWN ARC LENGTH, not at the nearest point of the curve. wp_s_ is where
+    // the route claims to be visiting waypoint i; the nearest-point distance would quietly answer a
+    // different question — "does the curve pass near here at any time" — which on a tour that crosses
+    // itself or repeats laps can be satisfied by a completely different part of the route.
+    // ★FIRST LAP ONLY: later laps are the same waypoints again, and the arc lengths repeat.
+    if (built)
+    {
+        const auto &wp_s = route_.waypoint_arclengths();
+        const auto &sp = route_.spline();
+        const std::size_t n = std::min(wps.size(), wp_s.size());
+        float worst = 0.f, sum = 0.f;
+        std::size_t worst_i = 0;
+        std::string detail;
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            const float d = (sp.position_at(wp_s[i]) - wps[i]).norm();
+            sum += d;
+            if (d > worst) { worst = d; worst_i = i; }
+            detail += std::format("{}{}:{:.2f}", i ? " " : "", i, d);
+        }
+        if (n > 0)
+            std::println("[route] waypoint fit (m, at each waypoint's OWN arc length): {}\n"
+                         "[route]   worst wp{} misses by {:.3f} m at ({:+.2f},{:+.2f}); mean {:.3f} m "
+                         "over {} waypoints",
+                         detail, worst_i, worst, wps[worst_i].x(), wps[worst_i].y(), sum / n, n);
+    }
     // A WHOLE new curve, including the route optimiser's pass over it. Only on success: a refused
     // build leaves the robot on the curve it already had, so its trace is still the right picture.
     if (built) note_route_changed();
