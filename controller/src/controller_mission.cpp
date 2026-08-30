@@ -527,6 +527,89 @@ bool MissionRunner::move_waypoint(int index, const Eigen::Vector2f &pos)
     return true;
 }
 
+// ── EDITING AN EXISTING TOUR ──────────────────────────────────────────────────────────────────────
+// ★WHY THESE EXIST. Dragging was the whole editor: move_waypoint() could reposition a stored tour's
+// points, but there was no way to ADD one or DROP one. Fixing a tour that clipped a corner meant
+// re-recording it from scratch, because start_recording() clears the buffer and add_point() refuses
+// outside Recording. So a five-metre correction cost the whole route.
+//
+// Both target the same list move_waypoint() does -- the recording buffer while recording, otherwise
+// the SELECTED library mission -- so editing behaves identically whether the tour is being built or
+// revisited. Both refuse while Running, for move_waypoint's reason: editing the route under a
+// measured run would invalidate it without saying so.
+
+// Insert BETWEEN the two waypoints whose segment passes nearest to `room_pos`, and return the index
+// the new point landed at (-1 if refused).
+//
+// ★NEAREST SEGMENT, NOT NEAREST POINT. The question a click answers is "which leg of the tour should
+// this bend?", and that is a segment. Nearest-endpoint would put the point on the wrong side of a
+// corner whenever the click is beside the leg rather than beyond its end -- which is where you click
+// when you want to route around something.
+//
+// ★THE CLOSING LEG COUNTS. A tour is driven in laps, so last->first is a real leg the robot really
+// drives; a click beside it must be insertable. Inserting there means appending at the end, which is
+// exactly what "between the last point and the first" is.
+int MissionRunner::insert_point(const Eigen::Vector2f &room_pos)
+{
+    if (state_ == State::Running) return -1;
+    auto &points = state_ == State::Recording ? recording_
+                                              : (selected_writable() != nullptr ? selected_writable()->waypoints
+                                                                                : recording_);
+    const int n = static_cast<int>(points.size());
+    // Fewer than two points has no segment to be "between": append, which is the only thing it can mean.
+    int at = n;
+    if (n >= 2)
+    {
+        // Squared distance from p to segment [a,b], and where along it the foot falls.
+        const auto seg_d2 = [](const Eigen::Vector2f &p, const Eigen::Vector2f &a, const Eigen::Vector2f &b)
+        {
+            const Eigen::Vector2f ab = b - a;
+            const float len2 = ab.squaredNorm();
+            // A degenerate leg (two coincident waypoints, which a hand-clicked tour really does produce)
+            // collapses to its endpoint rather than dividing by zero.
+            const float t = len2 > 1e-9f ? std::clamp((p - a).dot(ab) / len2, 0.f, 1.f) : 0.f;
+            return (p - (a + t * ab)).squaredNorm();
+        };
+        float best = std::numeric_limits<float>::max();
+        for (int i = 0; i < n; ++i)
+        {
+            const int j = (i + 1) % n;          // the wrap is the closing leg; see above
+            if (j == 0 and n < 3) continue;     // two points have ONE leg, not a there-and-back pair
+            if (const float d2 = seg_d2(room_pos, points[i].pos, points[j].pos); d2 < best)
+            { best = d2; at = i + 1; }
+        }
+    }
+    // ★YAW IS DELIBERATELY nullopt, like every hand-clicked waypoint. A waypoint inserted into a leg
+    // inherits nothing about facing: the tour's own geometry decides the heading there, and inventing
+    // one from the neighbours would pin an orientation the user never asked for.
+    points.insert(points.begin() + at, MissionWaypoint{.pos = room_pos, .yaw_rad = std::nullopt});
+    refresh_display_waypoints();
+    return at;
+}
+
+// Drop one waypoint. Refuses to leave a stored tour with fewer than two, because that is not a
+// shorter tour, it is an undriveable one -- the same minimum finish_recording() enforces. The
+// recording buffer is exempt: undo_point() already takes it to empty, and a tour under construction
+// is allowed to be incomplete.
+bool MissionRunner::remove_waypoint(int index)
+{
+    if (state_ == State::Running) return false;
+    const bool recording = state_ == State::Recording;
+    auto &points = recording ? recording_
+                             : (selected_writable() != nullptr ? selected_writable()->waypoints : recording_);
+    if (index < 0 or index >= static_cast<int>(points.size())) return false;
+    if (not recording and points.size() <= 2)
+    {
+        std::printf("[mission] refusing to remove waypoint %d: '%s' would be left with %zu, and a tour "
+                    "needs 2. Delete the mission instead.\n",
+                    index, selected_.c_str(), points.size() - 1);
+        return false;
+    }
+    points.erase(points.begin() + index);
+    refresh_display_waypoints();
+    return true;
+}
+
 void MissionRunner::add_point(const Eigen::Vector2f &room_pos)
 {
     if (state_ != State::Recording) return;
@@ -1222,6 +1305,64 @@ bool MissionRunner::self_test()
         r.set_mode(DriveMode::MissionWithAffordances);
         check(not r.mode_implemented() and not r.start(1, 0),
               "an UNIMPLEMENTED mode must refuse to run, never fall back to another");
+    }
+
+    // (N) EDITING AN EXISTING TOUR: insert by nearest LEG, and remove.
+    {
+        MissionRunner r;
+        r.set_csv_path(""); r.set_run_dir("");
+        r.set_mode(DriveMode::MissionOnly);
+        r.start_recording();
+        r.add_point({0.f, 0.f}); r.add_point({3.f, 0.f}); r.add_point({3.f, 3.f}); r.add_point({0.f, 3.f});
+        check(r.finish_recording("square"), "a 4-point recording must commit");
+        r.select("square");
+
+        // Beside the BOTTOM leg (0,0)->(3,0): between waypoints 0 and 1.
+        check(r.insert_point({1.5f, -0.5f}) == 1, "insert beside leg 0-1 must land at index 1");
+        check(r.remove_waypoint(1), "the inserted point must be removable");
+        // Beside the RIGHT leg (3,0)->(3,3): between 1 and 2.
+        check(r.insert_point({3.5f, 1.5f}) == 2, "insert beside leg 1-2 must land at index 2");
+        check(r.remove_waypoint(2), "remove must undo it");
+        // ★Beside the CLOSING leg (0,3)->(0,0): appending is what "between last and first" means.
+        check(r.insert_point({-0.5f, 1.5f}) == 4, "insert beside the closing leg must append");
+        check(r.remove_waypoint(4), "remove must undo it");
+
+        // ★NEAREST LEG, NOT NEAREST ENDPOINT — the case that separates the two. This click is closest
+        // to CORNER (3,0) of any waypoint, but it lies beside the RIGHT leg, so it must bend that leg
+        // (index 2) and not the bottom one (index 1). Nearest-endpoint would answer 1 or 2 by a
+        // coin-toss on rounding; the segment test answers it geometrically.
+        check(r.insert_point({3.4f, 0.6f}) == 2, "insert must pick the nearest LEG, not the nearest point");
+        check(r.remove_waypoint(2), "remove must undo it");
+
+        // A tour must not be edited down to something undriveable.
+        check(r.remove_waypoint(0), "4 -> 3 waypoints is fine");
+        check(r.remove_waypoint(0), "3 -> 2 waypoints is fine");
+        check(not r.remove_waypoint(0), "2 -> 1 must be REFUSED: a tour needs two waypoints");
+        check(not r.remove_waypoint(7), "an out-of-range index must be refused");
+
+        // Degenerate sizes: with no leg to be between, insert can only append.
+        MissionRunner e;
+        e.set_csv_path(""); e.set_run_dir("");
+        e.set_mode(DriveMode::MissionOnly);
+        e.start_recording();
+        check(e.insert_point({1.f, 1.f}) == 0, "insert into an empty tour must append at 0");
+        check(e.insert_point({2.f, 2.f}) == 1, "insert into a 1-point tour must append at 1");
+        // ★A 2-POINT TOUR HAS EXACTLY ONE LEG, and because a tour is driven in LAPS that leg is
+        // travelled in both directions — so "between A and B" and "between B and A" describe the same
+        // route up to relabelling, and index 1 is the only meaningful answer wherever the click lands.
+        // This is asserted rather than left implicit because it is the one size where "nearest leg"
+        // cannot discriminate, and a future reader would otherwise read it as a bug.
+        check(e.insert_point({9.f, 9.f}) == 1, "a 2-point tour has ONE leg, so insert lands between them");
+
+        // Refused while a run is being measured, exactly as move_waypoint is.
+        MissionRunner g;
+        g.set_csv_path(""); g.set_run_dir("");
+        g.set_mode(DriveMode::MissionOnly);
+        g.start_recording();
+        g.add_point({0.f, 0.f}); g.add_point({1.f, 0.f}); g.add_point({1.f, 1.f});
+        g.finish_recording("t2"); g.select("t2"); g.start(1, 0);
+        check(g.insert_point({0.5f, 0.5f}) == -1, "insert must be refused while Running");
+        check(not g.remove_waypoint(0), "remove must be refused while Running");
     }
 
     std::printf("MissionRunner::self_test %s\n", ok ? "PASS" : "FAIL");

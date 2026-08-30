@@ -83,6 +83,11 @@ Q_SIGNALS:
     // A mission waypoint was dragged to a new place. Index into the waypoint list last passed to
     // draw_mission(); position in room coordinates.
     void mission_waypoint_moved(int index, QPointF room_pos);
+    // A right CLICK (press and release without panning) on empty canvas while the mission is editable:
+    // insert a waypoint here, into whichever leg passes nearest. The receiver decides the index.
+    void mission_waypoint_inserted(QPointF room_pos);
+    // Ctrl + right click ON a waypoint: drop it. Index into the list last passed to draw_mission().
+    void mission_waypoint_removed(int index);
 
 private:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -104,6 +109,16 @@ private:
     int  mission_index_ = -1;
     bool mission_recording_ = false;
     int  drag_index_ = -1;
+    // ★TELLING A CLICK FROM A PAN. Right-drag on empty canvas is how the view PANS, and panning is how
+    // you reach the part of the room you are about to edit — so inserting on right-button PRESS would
+    // have traded the pan gesture for the insert one. Instead the press is remembered and the insert
+    // fires on RELEASE, only if the pointer never left a few pixels of where it went down. A pan moves
+    // far more than that, so the two gestures separate cleanly and neither is lost.
+    // Pixels, not metres, on purpose: this measures a hand holding a mouse still, not a distance in
+    // the room, and it must not change meaning when the view zooms.
+    static constexpr int kClickSlopPx = 4;
+    bool    pending_insert_ = false;
+    QPoint  press_pos_px_;
     QGraphicsEllipseItem *target_marker_ = nullptr;
     QGraphicsLineItem    *orient_ray_ = nullptr;      // the bearing the producer asked for
     QGraphicsPathItem    *orient_arc_ = nullptr;      // what is still to be turned

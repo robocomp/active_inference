@@ -330,6 +330,33 @@ void SpecificWorker::initialize()
 				session_.mission().save(missions_path_);
 		});
 	};
+	// ── THE REST OF THE EDITOR ───────────────────────────────────────────────────────────────────
+	// Until now the only edit an existing tour accepted was a DRAG. There was no way to add a waypoint
+	// or drop one, so fixing a route that clipped a corner meant re-recording the whole thing —
+	// start_recording() clears the buffer and add_point() refuses outside Recording. Same persistence
+	// rule as dragging: the edit is saved the moment it is made.
+	gui.on_waypoint_inserted = [this](float x, float y)
+	{
+		enqueue_command([this, x, y]()
+		{
+			if (const int at = session_.mission().insert_point({x, y}); at >= 0)
+			{
+				session_.mission().save(missions_path_);
+				std::println("[mission] waypoint inserted at index {} ({:.2f}, {:.2f})", at, x, y);
+			}
+		});
+	};
+	gui.on_waypoint_removed = [this](int index)
+	{
+		enqueue_command([this, index]()
+		{
+			if (session_.mission().remove_waypoint(index))
+			{
+				session_.mission().save(missions_path_);
+				std::println("[mission] waypoint {} removed", index);
+			}
+		});
+	};
 	// Skip the running affordance. Enqueued, never called through: the button is pressed on the GUI
 	// thread and this touches the session, the lock-on state and the graph, all of which belong to the
 	// control thread. Also WAKES the loop, so the next affordance is chosen immediately rather than at

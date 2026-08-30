@@ -33,6 +33,11 @@ public:
         std::function<void()>                on_clear_target;    // Ctrl+right click
         // A mission waypoint was dragged to a new place (index, room x, room y).
         std::function<void(int, float, float)> on_waypoint_moved;
+        // Right CLICK on empty canvas: insert a waypoint here, into whichever leg of the tour passes
+        // nearest. The model picks the index; the view only says where.
+        std::function<void(float, float)>      on_waypoint_inserted;
+        // Ctrl + right click ON a waypoint: drop it.
+        std::function<void(int)>               on_waypoint_removed;
         // Skip pressed in the affordance window: abandon the running affordance, take the next.
         std::function<void()>                on_skip_affordance;
         // Everything mission-shaped is the panel's own vocabulary; the display just forwards it.

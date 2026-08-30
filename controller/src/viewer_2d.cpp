@@ -811,7 +811,12 @@ bool Viewer2D::eventFilter(QObject *watched, QEvent *event)
     if (event->type() == QEvent::MouseButtonPress)
     {
         auto *me = static_cast<QMouseEvent *>(event);
-        if (me->button() != Qt::RightButton or me->modifiers() != Qt::NoModifier or not mission_draggable_)
+        if (me->button() != Qt::RightButton or not mission_draggable_)
+            return false;
+        // Ctrl+right is the base viewer's "clear target"; over a WAYPOINT it means remove that
+        // waypoint instead. Off a waypoint it falls through untouched, so clearing a target still works.
+        const bool ctrl = (me->modifiers() & Qt::ControlModifier) != 0;
+        if (me->modifiers() != Qt::NoModifier and not ctrl)
             return false;
         const QPointF p = scene_pos(me);
         // COINCIDENT WAYPOINTS ARE NORMAL — a hand-clicked tour that returns to the same corner stacks
@@ -828,10 +833,57 @@ bool Viewer2D::eventFilter(QObject *watched, QEvent *event)
             if (const float d2 = dx * dx + dy * dy; d2 <= best_d2) { best_d2 = d2; best = static_cast<int>(i); }
         }
         if (best < 0)
-            return false;                    // not on a waypoint → let the base viewer pan
+        {
+            if (ctrl)
+                return false;                // Ctrl+right off a waypoint → base viewer clears the target
+            // Not on a waypoint. Remember where the button went down and let the press through so the
+            // base viewer can still start a pan; if the pointer never really moves we turn it into an
+            // INSERT on release instead. See kClickSlopPx.
+            pending_insert_ = true;
+            press_pos_px_ = me->position().toPoint();
+            return false;
+        }
+        if (ctrl)
+        {
+            // Remove, and do it from the local cache immediately for the same reason a drag does: the
+            // control thread's snapshot cannot know about the edit until its next cycle, and redrawing
+            // the stale list would flash the point back before it disappeared again.
+            const int index = best;
+            if (index_valid(index)) mission_wps_.erase(mission_wps_.begin() + index);
+            render_mission();
+            emit mission_waypoint_removed(index);
+            return true;
+        }
         drag_index_ = best;
         agv_->viewport()->setCursor(Qt::ClosedHandCursor);
         return true;
+    }
+
+    // A pan disqualifies the pending insert as soon as the pointer travels: the gesture has become a
+    // drag, and the release that ends it must not drop a waypoint where the pan finished.
+    if (event->type() == QEvent::MouseMove and pending_insert_)
+    {
+        auto *me = static_cast<QMouseEvent *>(event);
+        const QPoint d = me->position().toPoint() - press_pos_px_;
+        if (std::abs(d.x()) > kClickSlopPx or std::abs(d.y()) > kClickSlopPx)
+            pending_insert_ = false;
+        return false;                        // never consumed: the base viewer is panning
+    }
+
+    if (event->type() == QEvent::MouseButtonRelease and pending_insert_)
+    {
+        auto *me = static_cast<QMouseEvent *>(event);
+        pending_insert_ = false;
+        if (me->button() != Qt::RightButton)
+            return false;
+        const QPoint d = me->position().toPoint() - press_pos_px_;
+        if (std::abs(d.x()) > kClickSlopPx or std::abs(d.y()) > kClickSlopPx)
+            return false;                    // it was a pan after all
+        // No local-cache update here: unlike a move or a remove, this viewer does not know WHERE in the
+        // list the point goes — that is the model's nearest-leg decision. The next snapshot brings it
+        // back with the right index, one cycle later, which is imperceptible and cannot disagree.
+        emit mission_waypoint_inserted(scene_pos(me));
+        return false;                        // let the base viewer finish its (zero-length) pan cleanly
     }
 
     if (event->type() == QEvent::MouseMove and drag_index_ >= 0)

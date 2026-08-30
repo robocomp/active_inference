@@ -73,6 +73,18 @@ void ControllerDisplay::initialize(rc::LidarPointBuffer *lidar_buffer, Callbacks
                      {
                          if (cb) cb(index, static_cast<float>(p.x()), static_cast<float>(p.y()));
                      });
+    QObject::connect(viewer_2d_.get(), &rc::Viewer2D::mission_waypoint_inserted,
+                     custom_widget_.get(),
+                     [cb = callbacks.on_waypoint_inserted](const QPointF &p)
+                     {
+                         if (cb) cb(static_cast<float>(p.x()), static_cast<float>(p.y()));
+                     });
+    QObject::connect(viewer_2d_.get(), &rc::Viewer2D::mission_waypoint_removed,
+                     custom_widget_.get(),
+                     [cb = callbacks.on_waypoint_removed](int index)
+                     {
+                         if (cb) cb(index);
+                     });
     QObject::connect(viewer_2d_.get(), &rc::Viewer2D::right_click,
                      custom_widget_.get(),
                      [on_clear_target](const QPointF &)

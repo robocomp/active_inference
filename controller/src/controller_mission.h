@@ -302,6 +302,11 @@ public:
     // editing the route under a running measurement would invalidate it silently.
     bool move_waypoint(int index, const Eigen::Vector2f &pos);
     void add_point(const Eigen::Vector2f &room_pos);
+    // Editing an EXISTING tour, not just recording a new one — see the .cpp for why these exist and
+    // why insertion is by nearest SEGMENT. Both act on the recording buffer while recording and on the
+    // selected library mission otherwise, and both refuse while Running.
+    int  insert_point(const Eigen::Vector2f &room_pos);   // returns the index inserted at, or -1
+    bool remove_waypoint(int index);
     void undo_point();
     // Commits the recorded points under `name`, replacing any mission of that name. Fewer than 2 points is
     // rejected: a one-point "tour" is a manual target with extra steps.
