@@ -4,6 +4,7 @@
 #
 #   tools/arm4_setup.sh off        # injected, calibration NOT applied
 #   tools/arm4_setup.sh on         # injected, calibration applied (k_v only)
+#   tools/arm4_setup.sh check      # is the RUNNING fleet actually running the armed config?
 #   tools/arm4_setup.sh save <leg> # copy the finished leg's gt_error.csv aside, with checks
 #   tools/arm4_setup.sh restore    # back to the uninjected baseline, calibration on
 #
@@ -16,6 +17,49 @@ BR=/home/pbustos/robocomp/components/webots-bridge/etc
 RC=/home/pbustos/robocomp/components/active_inference/room_concept/etc
 
 die() { echo "arm4: $*" >&2; exit 1; }
+
+# ── check: is what is RUNNING what is on disk? ───────────────────────────────────────────────
+# ★★★ THE TEST THAT CATCHES THE FAILURE THAT KEEPS HAPPENING. Twice now a leg has been driven
+# against a config the running process had never read: on 2026-08-30 because the value went into
+# a file the bridge does not read, and on 2026-08-31 because the bridge was never restarted. Both
+# are the same defect and both are caught by one comparison — **if the process started BEFORE the
+# config file was last written, the process is not running that config.** No banner can tell you
+# this, because a banner reports what was loaded at a start-up you may be reasoning about the
+# wrong instance of. This is the only subcommand that runs while the fleet is UP; that is its job.
+if [ "${1:-}" = check ]; then
+  now=$(date +%s); rc_ok=1
+  probe() {  # $1 = process name, $2 = config path
+    local pid start age
+    pid=$(pgrep -x "$1" | head -1) || true
+    if [ -z "$pid" ]; then printf "  %-18s NOT RUNNING\n" "$1"; rc_ok=0; return; fi
+    age=$(ps -o etimes= -p "$pid" | tr -d " ")
+    start=$((now - age))
+    printf "  %-18s pid %-8s up %sh%02dm\n" "$1" "$pid" "$((age/3600))" "$(((age%3600)/60))"
+    if [ "$(stat -c %Y "$2")" -gt "$start" ]; then
+      printf "    ⚠ STALE — %s was written AFTER this process started.\n" "$2"
+      printf "      The running process is NOT using it. Restart before driving.\n"
+      printf "      (A COMMENT-only edit trips this too — it compares mtimes, not values. That is\n"
+      printf "       the safe direction: it cannot miss a real change, it can only over-warn.)\n"
+      rc_ok=0
+    else
+      printf "    config %s predates the process ✓\n" "$2"
+    fi
+  }
+  probe Webots2Robocomp /home/pbustos/robocomp/components/webots-bridge/etc/config.toml
+  probe room_concept    "$RC/config.toml"
+  echo "  ── values ON DISK (which is only what is RUNNING if both lines above are ✓) ──"
+  grep -H "^WheelScaleV" /home/pbustos/robocomp/components/webots-bridge/etc/config.toml | sed "s|^|    |"
+  grep -H "^MotionCalibApply \|^MotionCalibApplyMask\|^MapMode" "$RC/config.toml" | sed "s|^|    |"
+  echo
+  if [ "$rc_ok" = 1 ]; then
+    echo "  Process/config agreement OK. This is NECESSARY, NOT SUFFICIENT — it proves the file"
+    echo "  was read, not that the value is acting. Still confirm the odometry/GT ratio reads"
+    echo "  ~1.10 within the first 10 m. A signature says what is happening; a file does not."
+  else
+    echo "  ✗ DO NOT DRIVE THIS LEG until the lines above are clean."
+  fi
+  exit 0
+fi
 
 # ── save a finished leg ──────────────────────────────────────────────────────────────────────
 # ★★★ A STEPPER THAT INFERS "a run happened" FROM PROCESS STATE RACES. Two different bugs saved
@@ -110,7 +154,7 @@ case "${1:-}" in
     # NOT touched: MapMode. Whoever set "estimate" owns it — restore means "undo arm 4",
     # not "undo somebody else's experiment".
     ;;
-  *) die "usage: $0 {off|on|save <leg>|restore}" ;;
+  *) die "usage: $0 {off|on|check|save <leg>|restore}" ;;
 esac
 
 wipe_evidence
