@@ -950,4 +950,17 @@ overlay_csv_path = "overlay_lag_eval.csv"
 # fires on about half of all HEALTHY cycles (20 Hz control loop against a ~9.4 Hz sensor).
 # Loader key is Lidar.StallTimeoutMs — it was absent from every config, so the 2000 ms default was in
 # force and undiscoverable. Stated here so it can be found and changed.
-StallTimeoutMs = 2000
+# ★2026-08-31 2000 -> 500, and this is the first time the number has been set against MEASURED data
+# rather than inherited as a default. Over 534 s / 10594 cycles of a healthy stream on this robot:
+#     p50 50.0 ms   p90 51.0   p99 56.0   MAX 1600.0
+# So 500 ms is NINE TIMES the worst healthy gap — a wide margin against a false positive — while 2000
+# was thirty times it and left a blind spot that this run walked straight into: a single 1600 ms
+# dropout, 32 consecutive missed scans, which froze the canvas and drove the robot 1.1 m at 0.70 m/s on
+# perception that had stopped arriving, and tripped NOTHING. It exceeded the [canvas] staleness warning
+# (1 s) and not this, so no halt, no Fsm=Emergency, no banner, no media recovery, no trace.
+# ★WHAT IT COSTS IF IT IS STILL TOO TIGHT: a false stall halts the robot and publishes Emergency, which
+# is loud and recoverable — the watchdog clears itself on the next fresh sweep and logs
+# "[LidarStall] RECOVERED after N s". The failure it replaces was silent. Judge it on how often
+# [LidarStall] fires: at p99 = 56 ms it should be never, and if it fires on a healthy stream then the
+# gap distribution has changed and THAT is the finding, not this number.
+StallTimeoutMs = 500
