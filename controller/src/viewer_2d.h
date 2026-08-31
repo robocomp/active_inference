@@ -81,6 +81,15 @@ class Viewer2D : public QObject
     // the current viewport corner each frame, so it stays legible and in place through any pan or zoom
     // — a banner in metres would scale away or drift off screen exactly when it is needed.
     void set_lidar_stall_banner(bool visible, float seconds);
+    // ── EVIDENCE THAT THE SCENE IS ACTUALLY CHANGING ─────────────────────────────────────────────
+    // A canvas that stops updating while present() runs and the snapshot is fresh is a DRAWING fault,
+    // and the two halves of that need separating: is the scene being rebuilt (items change) and not
+    // painted, or is it not being rebuilt at all? The item count answers the first directly.
+    [[nodiscard]] int scene_item_count() const;
+    // ★FORCE THE REPAINT. QGraphicsView normally schedules its own update when the scene changes; when
+    // it demonstrably does not — scene rebuilt, panel updating, view static — this is the one lever
+    // that does not depend on knowing why. It costs one viewport update per frame at 30 Hz.
+    void force_repaint();
     void update_target_marker(float x, float y, bool visible);
     // ── AN ORIENT HAS NOTHING TO DRAW AS A PLACE ────────────────────────────────────────────────
     // A Reach shows up on this view as a marker somewhere else and a path leading to it. An Orient is

@@ -487,9 +487,29 @@ void ControllerDisplay::present()
         if (now_ms - canvas_hb_ms_ >= 5000)
         {
             const double secs = (now_ms - canvas_hb_ms_) / 1000.0;
+            const int items = viewer_2d_ ? viewer_2d_->scene_item_count() : -1;
             std::println("[canvas] fed {:.1f} Hz (pipeline staging frames), drawn {:.1f} Hz "
-                         "(present consuming them), snapshot age {:.2f} s",
-                         canvas_fed_ / secs, canvas_drawn_ / secs, age / 1000.0);
+                         "(present consuming them), snapshot age {:.2f} s, scene items {}",
+                         canvas_fed_ / secs, canvas_drawn_ / secs, age / 1000.0, items);
+            if (not canvas_csv_open_)
+            {
+                canvas_csv_.open("canvas_health.csv", std::ios::out | std::ios::trunc);
+                canvas_csv_.imbue(std::locale::classic());
+                if (canvas_csv_.is_open())
+                    canvas_csv_ << "# fed  = the control pipeline staging DISTINCT frames\n"
+                                   "# drawn= present() consuming them (its own 30 Hz timer)\n"
+                                   "# items= objects in the scene; changing => it IS being rebuilt\n"
+                                   "# fed~0 => perception. drawn~0 => the GUI thread. both healthy and a\n"
+                                   "# static view => a REPAINT fault, which is what force_repaint targets.\n"
+                                   "t_ms,fed_hz,drawn_hz,snapshot_age_s,scene_items\n";
+                canvas_csv_open_ = true;
+            }
+            if (canvas_csv_.is_open())
+            {
+                canvas_csv_ << now_ms << ',' << canvas_fed_ / secs << ',' << canvas_drawn_ / secs
+                            << ',' << age / 1000.0 << ',' << items << '\n';
+                canvas_csv_.flush();
+            }
             canvas_hb_ms_ = now_ms; canvas_drawn_ = 0; canvas_fed_ = 0;
         }
         // Throttled to once a second, and only while it is actually a problem: a canvas being fed at
@@ -536,6 +556,9 @@ void ControllerDisplay::present()
         .average_trajectory = snap.last_mppi_average_trajectory,
         .best_trajectory_idx = snap.last_best_mppi_trajectory_idx
     });
+    // ★See Viewer2D::force_repaint. The scene is rebuilt above; this makes sure it reaches the screen.
+    viewer_2d_->force_repaint();
+
     if (!room_view_fitted_ && !snap.room_polygon.empty())
     {
         viewer_2d_->fit_view();

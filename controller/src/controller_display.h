@@ -6,6 +6,7 @@
 
 #include <functional>
 #include <memory>
+#include <fstream>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -266,6 +267,13 @@ private:
     // consumes one. Both healthy and a frozen view means the fault is in the DRAWING, not upstream;
     // drawn ~0 means present() is not running; fed ~0 means the pipeline is not triggering.
     std::uint64_t last_stale_canvas_log_ms_ = 0;   // throttle for the [canvas] line
+    // ★TO A FILE, NOT ONLY TO STDOUT. Every diagnosis this session has come from a file; a line on
+    // the terminal needs someone watching at the instant it fires, and a canvas that stops changing
+    // is noticed minutes later. Three columns settle which of the three causes it is without anyone
+    // having to be present: fed (the pipeline staging frames), drawn (present consuming them), and
+    // the snapshot age.
+    std::ofstream canvas_csv_;
+    bool          canvas_csv_open_ = false;
     std::uint64_t canvas_hb_ms_ = 0;               // window start for the heartbeat
     int           canvas_drawn_ = 0;               // present() calls in the window
     std::uint64_t canvas_last_stamp_ = 0;          // to count DISTINCT staged frames

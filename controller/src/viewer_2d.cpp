@@ -922,6 +922,16 @@ bool Viewer2D::eventFilter(QObject *watched, QEvent *event)
     return QObject::eventFilter(watched, event);
 }
 
+int Viewer2D::scene_item_count() const
+{
+    return agv_ ? static_cast<int>(agv_->scene.items().size()) : -1;
+}
+
+void Viewer2D::force_repaint()
+{
+    if (agv_ and agv_->viewport()) agv_->viewport()->update();
+}
+
 void Viewer2D::set_lidar_stall_banner(bool visible, float seconds)
 {
     if (agv_ == nullptr) return;
