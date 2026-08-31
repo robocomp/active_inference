@@ -165,7 +165,117 @@ for arm 3.
 
 ⚠ Not controlled: different robot, drive type, route and localiser regime.
 
-### Arms 2 and 3 — not yet run.
+### Arm 2 — injection. DONE, 2026-08-31. PASSES.
+
+Run PAIRED, back to back in one session, `WheelScaleV = 0.03` on the injected leg and the sensor
+sigmas zeroed on both (this arm tests recovery of a BIAS, so the noise is removed rather than
+averaged over):
+
+| leg | `k_v` |
+|---|---|
+| uninjected | 0.976630 |
+| injected (`WheelScaleV = 0.03`) | 0.946424 |
+| **difference** | **+0.030206** |
+
+The injected truth is `1 − 1/1.03 = 0.029126`, so the estimator recovered **104.2%** of it. ✅
+
+★ **Use the PAIRED form.** It needs no absolute baseline, which matters because the estimator
+(3.4% deviation) and the direct odometry/GT ratio (~1.1%) still DISAGREE by ~3x on the absolute
+forward scale on this turn-heavy route. That disagreement is unresolved (§10) and it does not touch
+the paired difference, because whatever it is, it is present in both legs and subtracts out.
+
+⚠ The pre-registered target in §4 (`k_v → 0.9627`) was written against `0.991556`, a pre-fix value
+that the two estimator defects biased low. It is void. The paired difference above is the test that
+was actually available once those defects were fixed, and it is the stronger one.
+
+### Arm 3 — localization A/B. DONE, 2026-08-31. NULL on accuracy, 3-4x on EFFORT.
+
+Three-way, matched inside one session (203 / 215 / 208 m, 10-11 windows each, **burst windows = 0
+in all three**):
+
+| arm | optimiser firing | odom correction (mm/m) | RPE trans (mm/m) | RPE rot (deg/rad) |
+|---|---|---|---|---|
+| calibration **OFF** | **4.92%** | 48.99 | 37.56 | 1.649 |
+| **ON**, all params (`mask = -1`) | **1.74%** | 38.79 | 37.23 | 1.763 |
+| **ON**, `k_v` only (`mask = 1`) | **1.11%** | 43.51 | 37.86 | 1.824 |
+
+**Accuracy: null.** No pairwise |t| above 1.37 on either RPE channel — nothing significant.
+**Effort: 3-4x.** Optimiser firing falls 4.92% → 1.74% → 1.11%.
+
+★★★ **THE RESULT, and the framing it needs.** The SDF localiser was already removing Shadow's
+odometry scale error either way, so RPE measures the CORRECTOR, not the calibration. What
+calibration changes is how hard the corrector has to work: a better-calibrated prediction lands
+inside the early-exit band more often, so the expensive Gauss-Newton solve is needed on a third to a
+quarter as many cycles. **Quote the claim with its dose: at a ~2-3% initial scale error,
+calibration buys EFFORT, not accuracy.** This was the concern raised at the very start of the design
+and then forgotten for a day — a corrector doing its job absorbs model error, so grading calibration
+on corrected output grades the corrector.
+
+⚠ **RETRACTED — "applying heading corrections harms the localiser."** The 2026-08-30 night figure
+(rotation RPE 1.699 → 2.955 deg/rad, t = −2.45) is REFUTED by the matched re-run above: 1.649 →
+1.763, t = −0.68. The old ON leg carried **6 burst windows against 0**; it was simply a worse run,
+not a treatment effect. One bad run dressed as a treatment effect. `MotionCalibApplyMask = 1` is
+therefore no longer justified by that finding — it stands only as the lowest-effort arm.
+
+### Arm 4 — DOSE RESPONSE at a larger initial error. PRE-REGISTERED 2026-08-31, not yet run.
+
+Arm 3's result is conditional on the dose. Arm 4 asks the next question directly: **does the effort
+saving grow with the initial error, and does accuracy eventually separate?**
+
+**Dose.** `WheelScaleV = 0.10` (reported forward velocity = true × 1.10, true `k_v` = 1/1.10 =
+0.9091), ~4x Shadow's native −0.84% and ~3.4x arm 2's. Sensor noise stays at the BASELINE values —
+this arm is compared against arm 3, whose runs had the full noise model live, so the only difference
+from the live file is that one line. Config prepared: `webots-bridge/etc/config.toml.arm4-inj10`.
+
+**Legs**, back to back in one session, cold each, evidence deleted with the agent stopped:
+
+| leg | bridge | room_concept |
+|---|---|---|
+| 4-OFF | `config.toml.arm4-inj10` | `MotionCalibApply = false` |
+| 4-ON | `config.toml.arm4-inj10` | `MotionCalibApply = true`, `MotionCalibApplyMask = 1` |
+
+`mask = 1` because the injected error is exactly a forward-scale error: applying only `k_v` puts the
+dose and the response on the same channel and avoids re-opening the (badly conditioned, and now
+un-incriminated) heading parameters. A third leg at `mask = -1` is optional and answers a different
+question — what normal operation does.
+
+**Pre-registered endpoints, in this order.**
+
+1. **PRIMARY — optimiser firing %.** Predicted: 4-OFF ≫ 4.92% (arm 3's OFF), 4-ON ≈ arm 3's ON
+   (~1.1%) once converged, because a converged calibrator returns the prediction to native quality
+   whatever the dose. The contrast should therefore be much wider than arm 3's 4.4x.
+2. **SECONDARY — RPE translation (mm/m) and rotation (deg/rad)**, same instrument as arm 3
+   (`tools/calib_localization_ab.py`, ds = 1.0 m, moving rows only). Predicted: this is where the
+   null may BREAK. There is a dose at which the uncorrected prediction leaves the optimiser's
+   convergence basin and the corrector can no longer absorb the error; arm 4 either finds it or
+   raises the floor on where it is.
+3. **THIRD, AND NEW — burst-window rate.** ★★★ **Arm 3's exclusion rule would delete the very effect
+   a large dose is meant to produce.** "Exclude burst windows" was right when bursts were a nuisance
+   regime unrelated to the treatment (arm 3 had 0 in every arm). At a large dose, losing tracking IS
+   the treatment effect, and excluding it would report a null while the robot was failing. So: report
+   burst windows as a COUNT per leg alongside the excluded-window analysis, never silently drop them.
+   If 4-OFF bursts and 4-ON does not, that is the headline and RPE is a footnote.
+4. **CONTROL — paired parameter recovery.** `k_v`(uninjected, arm 2 leg) − `k_v`(4-ON) should be
+   **+0.0909**. Expect a few percent of shrinkage toward the prior: `MotionCalibScaleP0 = 4e-4` is a
+   2% 1σ, so 9.1% is 4.5σ out, but arm 1 measured the data at ~23x the prior's precision, so the pull
+   is ~4%. `MotionCalibScaleP0` is deliberately NOT widened — changing it would break comparability
+   with arm 3 for the sake of a correction smaller than the effect.
+
+⚠ **BLOCKER — `MapMode` must be `"given"`, and it is not right now.** The live `etc/config.toml`
+carries an UNCOMMITTED `MapMode = "estimate"` (the wall-SLAM layout experiment, committed default is
+`"given"`). Measured on the running agent 2026-08-31 over 155 s: `sdf_mse` median **0.55** against
+`StableSdfMseMax = 0.076`, so the stability gate **cannot pass** — the optimiser fires on **100%** of
+cycles at 46-94 ms median and the solver alone eats **81% of one core**. Arm 4's primary endpoint is
+optimiser firing %; under `"estimate"` that endpoint is pinned at 100 and would measure the layout
+estimator rather than the calibration. `tools/arm4_setup.sh` sets `given` on both legs. Arm 4 and the
+wall-SLAM run cannot share the simulator.
+
+**Verify the injection FROM BEHAVIOUR, not from the banner.** The odometry/GT distance ratio should
+read ~1.10 (vs ~0.99 uninjected) and resolves within ~10 m of driving. A component reads its config
+once at start-up: four runs on 2026-08-30 were driven believing an injection was live when the flat
+`etc/config` it had been written into was not the file the bridge reads. `ps` shows
+`Webots2Robocomp etc/config.toml` — **`etc/config.toml` is the live file**; the flat `etc/config`
+is dead and still carries a stale `SensorNoise.WheelScaleV = 0.03`.
 
 ## 7. Caveats on the arm 1 numbers
 
