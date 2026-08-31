@@ -2347,6 +2347,7 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
     {
         display.set_stuck_active(true);   // this path returns before compute()'s update_custom_widget
         step_escape(step.robot_pose, path_controller, motion_commander, time_source());
+        note_hold("escape manoeuvre owns the base");
         return false;
     }
 
@@ -2356,6 +2357,7 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
     // ── CONTINUOUS ROUTE ──
     // Built once, driven in arc-length coordinates. Nothing below this block runs in that mode: there is
     // no target to replan to, and re-issuing a path is exactly what destroys the follower's continuity.
+    hold_reason_.clear();      // set again below by whichever branch refuses
     if (params_ and params_->route_continuous and mission_.running())
         return drive_mission_route(step, path_controller, motion_commander, time_source);
     return drive_point_target(step, obstacle_tracker, path_controller, motion_commander,
@@ -2435,6 +2437,8 @@ bool ControllerSession::drive_mission_route(const ControllerPlanningStep &step,
             last_no_route_log_ms_ = time_source();
             std::println("[controller] HOLDING — the mission route could not be built.");
         }
+        note_hold(std::format("route not built ({})",
+                              last_plan_failure_.empty() ? "no reason recorded" : last_plan_failure_));
         return false;
     }
     // ── SECOND CHANCE FOR THE WAYPOINTS THE BUILD COULD NOT REACH ────────────────────────────────
@@ -2499,6 +2503,9 @@ bool ControllerSession::drive_mission_route(const ControllerPlanningStep &step,
             path_controller.stop();
             motion_commander.stop_robot();
             log_route_event("repair_failed", false, time_source(), path_controller, kRepairBackM + kRepairAheadM);
+            note_hold(std::format("repair FAILED at s={:.2f} m — the route under the robot is not "
+                                  "footprint-feasible and could not be re-authored around it",
+                                  route_.progress()));
             return false;
         }
     }

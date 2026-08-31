@@ -699,7 +699,27 @@ void SpecificWorker::compute()
 	stop_sent_when_halted_ = false;
 
 	if (!ensure_current_plan(*step))
+	{
+		// ★THE DISPLAY MUST BE UPDATED HERE TOO, and its absence is why a hold looked like a frozen
+		// viewer. compute() used to return on this path without touching it, so the canvas kept the
+		// last frame from before the hold — for as long as the hold lasted, which for a failed repair
+		// or an unbuildable route is indefinitely. The one state where you most need to see where the
+		// robot is and what is around it was the one state that stopped drawing.
+		update_custom_widget(step->robot_pose);
+		// ★AND SAY WHY, throttled. "It stopped" is not a diagnosis and this path had none: three
+		// different causes — an escape owning the base, a route that will not build, a repair that
+		// failed — all presented identically, as silence.
+		if (const auto &why = session_.hold_reason(); not why.empty())
+		{
+			const auto now_ms = current_time_ms();
+			if (now_ms - last_hold_log_ms_ >= 2000)
+			{
+				last_hold_log_ms_ = now_ms;
+				std::println("[hold] not planning this cycle: {}", why);
+			}
+		}
 		return;
+	}
 
 	execute_plan(step->robot_pose);
 	update_custom_widget(step->robot_pose);

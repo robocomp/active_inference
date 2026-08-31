@@ -248,6 +248,7 @@ private:
 		// stale perception. Transitions are logged so the user sees what happened.
 		std::chrono::steady_clock::time_point last_lidar_rx_{};
 		bool lidar_ever_received_ = false;
+		std::uint64_t last_hold_log_ms_ = 0;   // throttle for the [hold] line
 		bool lidar_stalled_ = false;
 		std::chrono::steady_clock::time_point lidar_stall_since_{};
 		// ── BOUNDED RECOVERY OF THE MEDIA READER ─────────────────────────────────────────────

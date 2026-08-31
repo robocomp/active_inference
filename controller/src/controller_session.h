@@ -767,6 +767,18 @@ private:
         Eigen::Vector2f last_offer_counted{0.f, 0.f};  // the last offer the counter below has counted
         int deferred = 0;                   // republishes held off — REPUBLISHES, not cycles
     };
+    // ── WHY THE PIPELINE REFUSED TO PLAN THIS CYCLE ──────────────────────────────────────────────
+    // ★ensure_current_plan() returning false is the one outcome with NO diagnosis attached, and it is
+    // also the one that freezes the canvas: compute() returns on it WITHOUT updating the display, so
+    // exactly when something has gone wrong the view stops telling you anything. Each false return now
+    // names itself, and the worker prints it throttled.
+    std::string hold_reason_;
+    void note_hold(std::string why) { hold_reason_ = std::move(why); }
+
+public:
+    [[nodiscard]] const std::string &hold_reason() const { return hold_reason_; }
+private:
+
     RouteChangedCallback route_changed_cb_;
     // One place to fire it, so a future re-authoring site cannot forget: everything that replaces the
     // curve already funnels through on_route_reauthored() or build_route().
