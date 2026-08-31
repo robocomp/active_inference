@@ -1243,13 +1243,31 @@ void SpecificWorker::control_loop()
 			    std::chrono::duration_cast<std::chrono::milliseconds>(
 			        std::chrono::system_clock::now().time_since_epoch()).count());
 
+			// ── THE HALT IS HELD FOR AS LONG AS THE STALL, NOT ASSERTED ONCE ─────────────────
+			// ★A ONE-SHOT STOP IS NOT A HALT. It used to be issued only on the TRANSITION into
+			// stalled, which leaves the robot stopped only if nothing commands it afterwards. That
+			// is not guaranteed: fresh_lidar is false on about half of all HEALTHY cycles at a
+			// 20 Hz loop against a ~9.4 Hz sensor, so a stream that is degraded rather than dead
+			// delivers the occasional scan, the pipeline triggers on it, and the robot drives on
+			// again between scans that are already too old to plan from. The stop must therefore
+			// be RE-ASSERTED every pass the stall is still true.
+			// ★It is safe to repeat: stop_robot() latches a stop for the output thread and is
+			// idempotent — stop_command_latched_ makes the second and later calls cost nothing on
+			// the wire, and the commander then goes quiet after its zero burst.
+			// ★And it is placed BEFORE the transition branch so it runs on the first stalled pass
+			// too, not one cycle later.
+			if (stalled)
+			{
+				motion_commander_.stop_robot();
+				// Try to bring the stream back. Bounded and spaced; see recover_lidar_media().
+				recover_lidar_media();
+			}
+
 			if (stalled and not lidar_stalled_)
 			{
 				lidar_stalled_ = true;
 				lidar_stall_since_ = now;
 				last_stall_log_ms_ = wall_ms;
-				// Stop first, then report: never plan on stale perception (CLAUDE.md's stream rule).
-				motion_commander_.stop_robot();
 				// PUBLISH it, so an observer sees it without reading this process's stdout: the Fsm
 				// axis maps Emergency -> Bad -> a red agent node in the graph viewer/dashboard.
 				presence_coordinator_.publish_fsm(rc::agent_status::Fsm::Emergency);
@@ -1269,6 +1287,10 @@ void SpecificWorker::control_loop()
 			else if (not stalled and lidar_stalled_)
 			{
 				lidar_stalled_ = false;
+				// ★THE BUDGET RE-ARMS ON RECOVERY. Three attempts are for ONE fault; a stream that
+				// came back and later stalls again is a new one, and refusing to try because an
+				// earlier, resolved stall used the budget would be the wrong kind of memory.
+				lidar_recoveries_ = 0;
 				const auto held = std::chrono::duration_cast<std::chrono::seconds>(
 				                      now - lidar_stall_since_).count();
 				presence_coordinator_.publish_fsm(rc::agent_status::Fsm::Compute);
@@ -1358,6 +1380,37 @@ void SpecificWorker::init_lidar_media()
 	lidar_reader_ = std::make_unique<rc::media::LidarPlaneReader>(
 		G, inner_eigen_api_.get(),
 		std::vector<std::string>{params.lidar_helios_name, params.lidar_bpearl_name}, "lidar");
+}
+
+// See the note on kMaxLidarRecoveries in the header for why rebuilding can help and why it is bounded.
+void SpecificWorker::recover_lidar_media()
+{
+	if (not params.lidar_use_media or not G) return;
+	if (lidar_recoveries_ >= kMaxLidarRecoveries) return;
+
+	const auto now = std::chrono::steady_clock::now();
+	// ★SPACED, because a fresh subscriber needs DDS discovery time. The reader self-throttles its own
+	// discovery to 1 Hz and the factory returns nullptr until the descriptor is readable, so retrying
+	// faster than a few seconds cannot tell "it did not work" from "it has not finished yet" — it would
+	// only destroy the subscriber that was about to succeed.
+	if (lidar_recoveries_ > 0 and now - last_lidar_recovery_ < std::chrono::seconds(5)) return;
+	last_lidar_recovery_ = now;
+	++lidar_recoveries_;
+
+	// Drop it FIRST and let the destructor run: releasing the loans is the point, not the rebuild.
+	lidar_reader_.reset();
+	lidar_reader_ = std::make_unique<rc::media::LidarPlaneReader>(
+		G, inner_eigen_api_.get(),
+		std::vector<std::string>{params.lidar_helios_name, params.lidar_bpearl_name}, "lidar");
+	qWarning().noquote()
+	    << QString("[LidarStall] RECOVERY %1 of %2: media reader torn down and rebuilt. Its subscribers "
+	               "come back up on the next poll; if the fault is producer-side this will not help and "
+	               "the remaining attempts will say so.")
+	           .arg(lidar_recoveries_).arg(kMaxLidarRecoveries);
+	if (lidar_recoveries_ >= kMaxLidarRecoveries)
+		qWarning().noquote()
+		    << QString("[LidarStall] that was the last automatic attempt. If the stream does not come "
+		               "back, the producer needs restarting — this end has done what it can.");
 }
 
 SpecificWorker::LidarPoll SpecificWorker::poll_lidar_media()

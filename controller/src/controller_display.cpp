@@ -1,5 +1,8 @@
 #include "controller_display.h"
 
+#include <chrono>
+#include <print>
+
 #include <QByteArray>
 #include <limits>
 #include <QComboBox>
@@ -187,6 +190,9 @@ void ControllerDisplay::update(const std::optional<ControllerRobotPose> &robot_p
     snapshot_.max_lidar_draw_points = max_lidar_draw_points;
     snapshot_.lidar_correction = lidar_correction;
     snapshot_.valid = true;
+    snapshot_.stamp_ms = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
 }
 
 void ControllerDisplay::set_command_values(float adv_mm_s, float side_mm_s, float rot_rps)
@@ -459,6 +465,34 @@ void ControllerDisplay::present()
         t += QStringLiteral(" · ") + QString::fromStdString(snap.mission_view.status);
     if (custom_widget_->windowTitle() != t)
         custom_widget_->setWindowTitle(t);
+
+    // ── SAY WHEN THE CANVAS IS NOT BEING FED, AND WHICH OF THE TWO REASONS IT IS ────────────────
+    // ★A FROZEN CANVAS HAS THREE POSSIBLE CAUSES AND THEY NEED DIFFERENT FIXES, and telling them
+    // apart by inspection cost most of a session: (a) the snapshot was NEVER staged, so the pipeline
+    // has not completed a cycle; (b) it was staged but is OLD, so the pipeline has stopped being
+    // triggered — the data-driven gate, i.e. perception; (c) it is fresh and the canvas still looks
+    // frozen, which is a DRAWING fault and nothing to do with the pipeline. The snapshot carries the
+    // stamp that separates them, and nothing was reading it.
+    {
+        const auto now_ms = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
+        const std::uint64_t age = snap.stamp_ms ? now_ms - snap.stamp_ms : 0;
+        // Throttled to once a second, and only while it is actually a problem: a canvas being fed at
+        // the sensor's own rate says nothing.
+        if ((not snap.valid or age > 1000) and now_ms - last_stale_canvas_log_ms_ >= 1000)
+        {
+            last_stale_canvas_log_ms_ = now_ms;
+            if (not snap.valid)
+                std::println("[canvas] NOT DRAWING: the control pipeline has never staged a frame. "
+                             "Everything above the validity gate (panel, title, waypoints) still "
+                             "updates, which is why only the canvas looks frozen.");
+            else
+                std::println("[canvas] STALE by {:.1f} s: the pipeline staged a frame but has stopped "
+                             "being triggered. It is data-driven on a fresh LiDAR scan, so this is "
+                             "perception, not the viewer.", age / 1000.0);
+        }
+    }
 
     // ★ABOVE THE VALID GATE, DELIBERATELY. Everything below is drawn from the control pipeline, and
     // the pipeline is what stops when the scan stops — so a banner placed below could only ever appear

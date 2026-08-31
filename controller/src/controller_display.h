@@ -213,6 +213,9 @@ private:
         bool valid = false;
         bool  lidar_stalled = false;   // see set_lidar_stall
         float lidar_stall_s = 0.f;
+        // When the canvas snapshot was last STAGED by the control pipeline. present() reports on it —
+        // see the note there. 0 = never staged.
+        std::uint64_t stamp_ms = 0;
 
         QString command_text;
         bool command_text_pending = false;
@@ -255,5 +258,6 @@ private:
     std::size_t efe_color_next_ = 0;                     // next palette colour for a new affordance
 
     mutable std::mutex snapshot_mutex_;
+    std::uint64_t last_stale_canvas_log_ms_ = 0;   // throttle for the [canvas] line
     DisplaySnapshot snapshot_;
 };

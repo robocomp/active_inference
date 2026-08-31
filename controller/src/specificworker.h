@@ -250,6 +250,23 @@ private:
 		bool lidar_ever_received_ = false;
 		bool lidar_stalled_ = false;
 		std::chrono::steady_clock::time_point lidar_stall_since_{};
+		// ── BOUNDED RECOVERY OF THE MEDIA READER ─────────────────────────────────────────────
+		// ★A LIVE-BUT-SILENT SUBSCRIBER IS NEVER REPLACED. LidarPlaneReader::ensure_subscribers
+		// only builds a plane when `not p.sub`, so once a subscriber exists it stays for the life
+		// of the process however long it has been delivering nothing. That is right for discovery
+		// and wrong for recovery, and it is why a stall never ended on its own.
+		// ★WHY REBUILDING CAN HELP, and it is a mechanism rather than a hope: the media readers are
+		// RELIABLE, so a consumer that stops draining backs up the SHM pool until the PRODUCER's
+		// loan_sample() fails and it silently stops publishing to everyone. Destroying the reader
+		// releases its loans — the destructor drops every subscriber — which drains the pool and
+		// lets the producer publish again.
+		// ⚠IT CANNOT FIX A PRODUCER THAT DIED. This addresses the consumer-side half only, which is
+		// why it is BOUNDED: three attempts, then stop and stay in emergency rather than reconnect
+		// for ever and mask a fault that needs a person.
+		static constexpr int kMaxLidarRecoveries = 3;
+		int lidar_recoveries_ = 0;
+		std::chrono::steady_clock::time_point last_lidar_recovery_{};
+		void recover_lidar_media();
 		std::int64_t last_stall_log_ms_ = 0;
 
 		// Grace period before a Degraded (required-peer-lost) state actually tears down.
