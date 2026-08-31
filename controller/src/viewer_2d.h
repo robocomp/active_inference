@@ -7,6 +7,8 @@
 #include <QGraphicsLineItem>
 #include <QGraphicsPolygonItem>
 #include <QGraphicsPathItem>
+#include <QGraphicsSimpleTextItem>
+#include <QGraphicsRectItem>
 #include <QGraphicsItem>
 #include <QPointF>
 #include <QRectF>
@@ -69,6 +71,16 @@ class Viewer2D : public QObject
                       bool draggable, bool route_visible);
     void clear_mission_items();
     void clear_robot_trajectory();
+    // ── SAY WHY THE CANVAS IS NOT MOVING ─────────────────────────────────────────────────────────
+    // The control pipeline is DATA-DRIVEN: it triggers on a fresh LiDAR scan, and everything below
+    // present()'s `if (!snap.valid) return` — the robot pose, the cloud, the route — is drawn from
+    // that pipeline. So when the stream stalls the canvas holds its last frame while the panel, the
+    // title and the [CTRL] fps line all keep ticking. That is correct behaviour (never plan on stale
+    // perception) presented as a UI bug, and it cost an operator the time to notice and ask.
+    // ★ANCHORED TO THE VIEW, NOT THE ROOM. It ignores the item transformation and is repositioned to
+    // the current viewport corner each frame, so it stays legible and in place through any pan or zoom
+    // — a banner in metres would scale away or drift off screen exactly when it is needed.
+    void set_lidar_stall_banner(bool visible, float seconds);
     void update_target_marker(float x, float y, bool visible);
     // ── AN ORIENT HAS NOTHING TO DRAW AS A PLACE ────────────────────────────────────────────────
     // A Reach shows up on this view as a marker somewhere else and a path leading to it. An Orient is
@@ -131,6 +143,8 @@ private:
     static constexpr int kClickSlopPx = 4;
     bool    pending_insert_ = false;
     QPoint  press_pos_px_;
+    QGraphicsSimpleTextItem *stall_banner_ = nullptr;   // see set_lidar_stall_banner
+    QGraphicsRectItem       *stall_bg_ = nullptr;
     QGraphicsEllipseItem *target_marker_ = nullptr;
     QGraphicsLineItem    *orient_ray_ = nullptr;      // the bearing the producer asked for
     QGraphicsPathItem    *orient_arc_ = nullptr;      // what is still to be turned

@@ -377,6 +377,13 @@ void ControllerDisplay::clear_robot_trajectory()
     snapshot_.clear_trajectory_pending = true;
 }
 
+void ControllerDisplay::set_lidar_stall(bool stalled, float seconds)
+{
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    snapshot_.lidar_stalled = stalled;
+    snapshot_.lidar_stall_s = seconds;
+}
+
 void ControllerDisplay::present()
 {
     // GUI thread only. Consume the latest staged snapshot and draw it.
@@ -452,6 +459,12 @@ void ControllerDisplay::present()
         t += QStringLiteral(" · ") + QString::fromStdString(snap.mission_view.status);
     if (custom_widget_->windowTitle() != t)
         custom_widget_->setWindowTitle(t);
+
+    // ★ABOVE THE VALID GATE, DELIBERATELY. Everything below is drawn from the control pipeline, and
+    // the pipeline is what stops when the scan stops — so a banner placed below could only ever appear
+    // when it was not needed. This is the one thing on the canvas that must survive the freeze.
+    if (viewer_2d_)
+        viewer_2d_->set_lidar_stall_banner(snap.lidar_stalled, snap.lidar_stall_s);
 
     if (!snap.valid || !viewer_2d_)
         return;

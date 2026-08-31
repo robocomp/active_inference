@@ -922,6 +922,47 @@ bool Viewer2D::eventFilter(QObject *watched, QEvent *event)
     return QObject::eventFilter(watched, event);
 }
 
+void Viewer2D::set_lidar_stall_banner(bool visible, float seconds)
+{
+    if (agv_ == nullptr) return;
+    if (not visible)
+    {
+        if (stall_banner_) stall_banner_->setVisible(false);
+        if (stall_bg_)     stall_bg_->setVisible(false);
+        return;
+    }
+    if (stall_banner_ == nullptr)
+    {
+        // Background first so it sits UNDER the text. Both ignore the item transformation, so they
+        // keep a constant pixel size whatever the zoom.
+        stall_bg_ = agv_->scene.addRect(QRectF(0, 0, 300, 26), QPen(QColor(120, 0, 0), 0),
+                                        QBrush(QColor(190, 30, 30, 220)));
+        stall_bg_->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+        stall_bg_->setZValue(60);
+        stall_banner_ = agv_->scene.addSimpleText(QString());
+        stall_banner_->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+        stall_banner_->setBrush(QBrush(QColor(255, 255, 255)));
+        QFont f = stall_banner_->font();
+        f.setBold(true);
+        f.setPointSize(11);
+        stall_banner_->setFont(f);
+        stall_banner_->setZValue(61);
+    }
+    // ★THE TEXT SAYS WHAT IS STALE AND FOR HOW LONG, because "frozen" alone sends you looking at the
+    // viewer. The canvas is drawn from the control pipeline, and that pipeline is triggered BY the
+    // scan — so no scan means no new frame, and the number is the evidence for that claim.
+    stall_banner_->setText(QStringLiteral("  ⚠ LiDAR STALLED %1 s — the view is the last good frame  ")
+                               .arg(seconds, 0, 'f', 1));
+    // Anchor to the viewport's top-left every call: the view pans and zooms under the scene.
+    const QPointF tl = agv_->mapToScene(QPoint(12, 12));
+    stall_banner_->setPos(tl);
+    stall_bg_->setPos(tl);
+    stall_bg_->setRect(QRectF(0, 0, stall_banner_->boundingRect().width(),
+                              stall_banner_->boundingRect().height()));
+    stall_banner_->setVisible(true);
+    stall_bg_->setVisible(true);
+}
+
 void Viewer2D::update_target_marker(float x, float y, bool visible)
 {
     if (target_marker_ == nullptr)

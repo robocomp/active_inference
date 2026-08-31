@@ -1234,6 +1234,11 @@ void SpecificWorker::control_loop()
 			const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
 			                        now - last_lidar_rx_).count();
 			const bool stalled = age_ms > params.lidar_stall_timeout_ms;
+			// ★TELL THE CANVAS EVERY PASS, not just on the transition. This block runs OUTSIDE the
+			// data-driven pipeline gate below, which is the only reason the message can reach a view
+			// that is frozen precisely because that gate is closed. The age is republished each pass
+			// so the banner counts up rather than reporting the instant it was first noticed.
+			display_.set_lidar_stall(stalled, static_cast<float>(age_ms) / 1000.f);
 			const auto wall_ms = static_cast<std::int64_t>(
 			    std::chrono::duration_cast<std::chrono::milliseconds>(
 			        std::chrono::system_clock::now().time_since_epoch()).count());

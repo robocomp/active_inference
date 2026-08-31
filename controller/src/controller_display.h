@@ -174,6 +174,9 @@ public:
     [[nodiscard]] bool affordance_panel_visible() const
     { return affordance_panel_visible_.load(std::memory_order_relaxed); }
     void clear_robot_trajectory();
+    // Published by the worker's LiDAR watchdog, which runs OUTSIDE the data-driven pipeline gate —
+    // so it still reaches the canvas on exactly the cycles where the pipeline does not.
+    void set_lidar_stall(bool stalled, float seconds);
 
     // Presentation — MUST be called on the GUI thread only. Reads the latest
     // staged snapshot and performs all Qt scene drawing.
@@ -208,6 +211,8 @@ private:
         int max_lidar_draw_points = 0;
         std::optional<Eigen::Affine2f> lidar_correction;   // room(now)←room(scan) overlay dead-reckoning
         bool valid = false;
+        bool  lidar_stalled = false;   // see set_lidar_stall
+        float lidar_stall_s = 0.f;
 
         QString command_text;
         bool command_text_pending = false;
