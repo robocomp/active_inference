@@ -2,9 +2,10 @@
 # Arm 4 — dose response at a LARGE initial odometry error (WheelScaleV = 0.10).
 # Sets the config for one leg. It does NOT start or stop anything: the user owns the lifecycle.
 #
-#   tools/arm4_setup.sh off      # injected, calibration NOT applied
-#   tools/arm4_setup.sh on       # injected, calibration applied (k_v only)
-#   tools/arm4_setup.sh restore  # back to the uninjected baseline, calibration on
+#   tools/arm4_setup.sh off        # injected, calibration NOT applied
+#   tools/arm4_setup.sh on         # injected, calibration applied (k_v only)
+#   tools/arm4_setup.sh save <leg> # copy the finished leg's gt_error.csv aside, with checks
+#   tools/arm4_setup.sh restore    # back to the uninjected baseline, calibration on
 #
 # After each call: STOP the bridge + room_concept, delete the evidence (this script does it),
 # then START them again. A component reads its config ONCE at start-up, so a leg driven without
@@ -15,6 +16,40 @@ BR=/home/pbustos/robocomp/components/webots-bridge/etc
 RC=/home/pbustos/robocomp/components/active_inference/room_concept/etc
 
 die() { echo "arm4: $*" >&2; exit 1; }
+
+# ── save a finished leg ──────────────────────────────────────────────────────────────────────
+# ★★★ A STEPPER THAT INFERS "a run happened" FROM PROCESS STATE RACES. Two different bugs saved
+# the same stale CSV under two arm names on 2026-08-30, and the analysis then compared a run with
+# itself. So this refuses to guess: it checks the file's mtime is newer than the destination it
+# would overwrite, prints the distance the file actually covers, and never runs while the agent
+# is up (the localiser is still appending).
+if [ "${1:-}" = save ]; then
+  leg="${2:-}"
+  case "$leg" in off|on) ;; *) die "usage: $0 save {off|on}" ;; esac
+  if pgrep -x room_concept >/dev/null; then
+    die "room_concept is RUNNING — stop it first, it is still appending to gt_error.csv."
+  fi
+  src=/home/pbustos/robocomp/components/active_inference/room_concept/tmp/sdf_localizer/gt_error.csv
+  dst="$RC/runs/arm4_$leg.csv"
+  [ -f "$src" ] || die "no $src"
+  mkdir -p "$RC/runs"
+  if [ -f "$dst" ] && [ ! "$src" -nt "$dst" ]; then
+    die "$src is NOT newer than $dst — this is the stale-file bug. Did the leg actually run?"
+  fi
+  cp -v "$src" "$dst"
+  python3 - "$dst" <<'PY'
+import csv, math, sys
+xs=[]
+for r in csv.DictReader(open(sys.argv[1])):
+    try: xs.append((float(r['gt_x']), float(r['gt_y'])))
+    except (KeyError, TypeError, ValueError): pass
+d=sum(math.dist(a,b) for a,b in zip(xs, xs[1:]))
+print("  %d rows, ground-truth path %.1f m" % (len(xs), d))
+print("  ⚠ SHORT — arm 3's legs were 203-215 m. A leg this short is not matched to them."
+      if d < 150 else "  length is in arm 3's range (203-215 m).")
+PY
+  exit 0
+fi
 
 # ── refuse to touch anything while the agents are up ─────────────────────────────────────────
 if pgrep -x room_concept >/dev/null || pgrep -x Webots2Robocomp >/dev/null; then
@@ -75,7 +110,7 @@ case "${1:-}" in
     # NOT touched: MapMode. Whoever set "estimate" owns it — restore means "undo arm 4",
     # not "undo somebody else's experiment".
     ;;
-  *) die "usage: $0 {off|on|restore}" ;;
+  *) die "usage: $0 {off|on|save <leg>|restore}" ;;
 esac
 
 wipe_evidence
