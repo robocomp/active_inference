@@ -186,9 +186,16 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
     const float sdf_mse = res.sdf_mse;
     const float cov_tt  = (res.covariance.rows() > 2 && res.covariance.cols() > 2)
                           ? res.covariance(2, 2) : 1.f;
-    const bool stable   = (res.iterations_used == 0)
-                          && sdf_mse < params_->STABLE_SDF_MSE_MAX
-                          && cov_tt  < params_->STABLE_COV_TT_MAX;
+    // Estimate mode: the SDF stability constants were fitted to a GIVEN layout of THIS apartment;
+    // while walls are landmarks the scan also contains other rooms through the doorways, so the
+    // median |SDF| never passes them (measured live: 0.55 m vs a 0.076 gate ⇒ publication deadlock).
+    // The polygon's own publishability (every corner sharp) is the shape gate — map_ready carries
+    // it — leaving pose confidence as the stability question here.
+    const bool stable   = room_concept_->estimating()
+                          ? (cov_tt < params_->STABLE_COV_TT_MAX)
+                          : ((res.iterations_used == 0)
+                             && sdf_mse < params_->STABLE_SDF_MSE_MAX
+                             && cov_tt  < params_->STABLE_COV_TT_MAX);
 
     // Steady-state stability, for the object-anchor pin guard. Maintained on EVERY frame — unlike
     // stable_frames_ below, which stops being updated the moment the room node exists.

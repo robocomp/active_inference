@@ -1,0 +1,7 @@
+[Owns]
+# Peer-cleanup descriptor for bottle_concept, read by THIS agent when bottle_concept
+# departs/crashes (this agent monitors bottle_concept as an OPTIONAL peer, config_dir="etc").
+# Keep in sync with bottle_concept's real [Owns]. "bottle*" matches every cylinder it
+# scaffolds (bottle_1, bottle_2, …) so no perceived bottle survives a bottle_concept crash.
+nodes    = ["bottle_concept 10", "bottle*"]
+subtrees = []

@@ -1685,7 +1685,16 @@ private:
     wallmap::FrameResult last_wall_frame_;
     std::string last_wall_status_;                   // last polygon status logged (log on change only)
     int wall_stat_frames_ = 0, wall_stat_assoc_ = 0, wall_stat_segs_ = 0,
-        wall_stat_twins_ = 0, wall_stat_births_ = 0, wall_stat_deaths_ = 0;   // rate-limited health counters
+        wall_stat_twins_ = 0, wall_stat_births_ = 0, wall_stat_deaths_ = 0,
+        wall_stat_contained_ = 0;   // rate-limited health counters
+    // Wall-SLAM analysis CSVs (loc thread only; imbued classic — es_ES writes commas otherwise).
+    // etc/wall_slam.csv: one row per frame. etc/wall_slam_events.csv: one row per birth/death,
+    // carrying the Z DISTRIBUTION of the points the wall was built from — the column that separates
+    // "a wall" from "the ceiling in the band" without a screenshot.
+    std::ofstream wall_csv_, wall_events_csv_;
+    std::vector<float> last_seg_z_;                  // per-segment mean z of its inliers, this frame
+    float wall_z_mean_ = 0.f, wall_z_p95_ = 0.f, wall_z_max_ = 0.f;
+    std::int64_t wall_frame_ts_ = 0;
     /// Segment the newest slot's scan, associate to the walls, store the associations in the slot.
     void wall_slam_observe(const std::vector<Eigen::Vector3f>& points, const Eigen::Vector3f& pose,
                            std::int64_t timestamp_ms);

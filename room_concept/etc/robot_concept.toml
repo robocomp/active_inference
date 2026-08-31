@@ -1,0 +1,8 @@
+# Peer config for robot_concept (agent id 6).
+# Read by room_concept's presence monitor when robot_concept crashes,
+# to clean up its owned DSR nodes before declaring the peer lost.
+# Must mirror robot_concept/etc/config.toml [Owns] section.
+
+[Owns]
+nodes    = ["mind"]
+subtrees = ["Shadow"]

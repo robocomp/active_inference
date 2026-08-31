@@ -1,6 +1,8 @@
 #include "room_concept.h"
 #include <pthread.h>   // pthread_setname_np: name the worker so a per-thread CPU sample attributes itself
 #include "pointcloud_center_estimator.h"
+#include <numeric>
+#include <set>
 #include "room_gn_solver.h"
 #include "room_obs_weights.h"
 #include "room_gn_solver.h"
@@ -577,6 +579,10 @@ namespace rc
             init_polygon_vertices_.clear();
             set_polygon_room(placeholder);
             set_robot_pose(0.f, 0.f, 0.f, false);
+            // MODEL-FIRST: the OBB rectangle IS the initial room model — the prior on shape and
+            // size. Everything after is refinement of its sides plus splice jumps.
+            if (wall_map_.walls.empty())
+                wall_map_.initialize_rect(placeholder);
             qInfo() << "[room][wall-slam] Estimate mode: origin = first pose; placeholder box from the scan's OBB"
                     << "until the walls close.";
             return true;
@@ -1982,9 +1988,46 @@ namespace rc
                 for (size_t k = 0; k < idx.size(); ++k) weights(idx[k]) = wa[k];
             }
         }
+        // Z attribution BEFORE anything is logged: per-segment mean z, and the frame's z profile.
+        last_seg_z_.assign(seg.segments.size(), 0.f);
+        for (size_t si = 0; si < seg.segments.size(); ++si)
+        {
+            double zs = 0.0;
+            for (int i : seg.segments[si].inliers) zs += points[static_cast<size_t>(i)].z();
+            last_seg_z_[si] = seg.segments[si].inliers.empty() ? 0.f
+                              : static_cast<float>(zs / static_cast<double>(seg.segments[si].inliers.size()));
+        }
+        {
+            std::vector<float> zs;
+            zs.reserve(points.size());
+            for (const auto& p : points) zs.push_back(p.z());
+            std::sort(zs.begin(), zs.end());
+            wall_z_mean_ = zs.empty() ? 0.f : std::accumulate(zs.begin(), zs.end(), 0.f) / static_cast<float>(zs.size());
+            wall_z_p95_  = zs.empty() ? 0.f : zs[static_cast<size_t>(0.95f * static_cast<float>(zs.size() - 1))];
+            wall_z_max_  = zs.empty() ? 0.f : zs.back();
+        }
+        wall_frame_ts_ = timestamp_ms;
+
         last_wall_frame_ = wall_map_.observe(seg, pts, weights, pose, current_covariance, timestamp_ms);
         last_wall_segments_ = seg.segments;
         window_mgr_.newest().wall_assoc = last_wall_frame_.assoc;
+
+        if (not wall_events_csv_.is_open())
+        {
+            wall_events_csv_.open("etc/wall_slam_events.csv", std::ios::trunc);
+            wall_events_csv_.imbue(std::locale::classic());
+            wall_events_csv_ << "ts_ms,event,id,phi,d,npts,frames,dF_or_lodds,nearest_wall,nearest_chi2,seg_z_mean\n";
+        }
+        for (const auto& d : last_wall_frame_.deaths_info)
+            wall_events_csv_ << timestamp_ms << ",death," << d.id << ",,," << d.points_seen << ','
+                             << d.frames_seen << ',' << d.lodds << ",,,\n";
+        for (const auto& b : last_wall_frame_.births_info)
+            wall_events_csv_ << timestamp_ms << ",birth," << b.id << ',' << b.phi << ',' << b.d << ','
+                             << b.npts << ',' << b.frames << ',' << b.dF << ',' << b.nearest_wall << ','
+                             << b.nearest_chi2 << ','
+                             << ((b.seg >= 0 and b.seg < static_cast<int>(last_seg_z_.size())) ? last_seg_z_[static_cast<size_t>(b.seg)] : -1.f)
+                             << "\n";
+        wall_events_csv_.flush();
         // Every birth is loggable: after the duplicate fix a birth is a rare, meaningful event, and
         // nearest_chi2 is the number that says whether the gate refused a twin (small-ish, tens) or
         // this line truly matches nothing (huge/inf).
@@ -2003,14 +2046,18 @@ namespace rc
         wall_stat_twins_  += last_wall_frame_.twins_fused;
         wall_stat_births_ += last_wall_frame_.births;
         wall_stat_deaths_ += last_wall_frame_.deaths;
+        wall_stat_contained_ += last_wall_frame_.splice_rejected;
         if (wall_stat_frames_ >= 200)
         {
-            qInfo().noquote() << QString("[room][wall-slam] health over %1 frames: assoc %2/%3 segments, twins fused %4, births %5, deaths %6, walls %7, candidates %8")
+            // splice_rej counts qualified candidates that found no valid place on the polygon —
+            // a refusal is never silent (the residual agent's "refused vs never asked" lesson).
+            qInfo().noquote() << QString("[room][wall-slam] health over %1 frames: assoc %2/%3 segments, twins fused %4, births %5, deaths %6, %7, walls %8, candidates %9")
                                      .arg(wall_stat_frames_).arg(wall_stat_assoc_).arg(wall_stat_segs_)
                                      .arg(wall_stat_twins_).arg(wall_stat_births_).arg(wall_stat_deaths_)
+                                     .arg(QString("splice_rej %1").arg(wall_stat_contained_))
                                      .arg(wall_map_.walls.size()).arg(wall_map_.candidates.size());
             wall_stat_frames_ = wall_stat_assoc_ = wall_stat_segs_ = wall_stat_twins_ = wall_stat_births_ = 0;
-            wall_stat_deaths_ = 0;
+            wall_stat_deaths_ = 0; wall_stat_contained_ = 0;
         }
         if (wall_map_.walls.size() > 64 and wall_map_.walls.size() % 32 == 0)
             qWarning() << "[room][wall-slam]" << wall_map_.walls.size()
@@ -2055,7 +2102,16 @@ namespace rc
             last_wall_status_ = poly.status;
         }
         res.wall_view.segments    = last_wall_segments_;
-        res.wall_view.walls       = wall_map_.walls;
+        // The canvas shows the WORKING SET, not the graveyard: walls in the polygon plus walls a
+        // segment touched in the last two seconds. Everything else still exists in the map (and in
+        // the CSV) but stopped earning screen space — 350 grey immortals were the whole picture.
+        {
+            std::set<std::uint64_t> in_poly(poly.wall_of_edge.begin(), poly.wall_of_edge.end());
+            res.wall_view.walls.clear();
+            for (const auto& w : wall_map_.walls)
+                if (in_poly.contains(w.id) or wall_frame_ts_ - w.last_seen_ms <= 2000)
+                    res.wall_view.walls.push_back(w);
+        }
         res.wall_view.polygon     = poly;
         res.wall_view.seg_to_wall = last_wall_frame_.seg_to_wall;
         res.wall_view.theta0_born = wall_map_.theta0_born;
@@ -2063,6 +2119,28 @@ namespace rc
         res.wall_view.candidates  = static_cast<int>(wall_map_.candidates.size());
         res.wall_view.births      = last_wall_frame_.births;
         res.wall_view.map_ready   = map_ready_.load();
+
+        // One analysis row per frame. Small, append-only, truncated per run.
+        if (not wall_csv_.is_open())
+        {
+            wall_csv_.open("etc/wall_slam.csv", std::ios::trunc);
+            wall_csv_.imbue(std::locale::classic());
+            wall_csv_ << "ts_ms,x,y,theta,npts,z_mean,z_p95,z_max,segs,assoc,twins,births,deaths,"
+                         "walls,candidates,closed,publishable,worst_corner_sigma,map_ready\n";
+        }
+        {
+            const auto st = (model_ != nullptr and model_->has_state()) ? model_->get_state()
+                                                                        : Eigen::Matrix<float, 5, 1>::Zero().eval();
+            wall_csv_ << wall_frame_ts_ << ',' << st[2] << ',' << st[3] << ',' << st[4] << ','
+                      << last_wall_segments_.size() << ',' << wall_z_mean_ << ',' << wall_z_p95_ << ','
+                      << wall_z_max_ << ',' << last_wall_frame_.seg_to_wall.size() << ','
+                      << last_wall_frame_.segments_associated << ',' << last_wall_frame_.twins_fused << ','
+                      << last_wall_frame_.births << ',' << last_wall_frame_.deaths << ','
+                      << wall_map_.walls.size() << ',' << wall_map_.candidates.size() << ','
+                      << (poly.closed ? 1 : 0) << ',' << (poly.publishable ? 1 : 0) << ','
+                      << poly.worst_corner_sigma << ',' << (map_ready_.load() ? 1 : 0) << "\n";
+            wall_csv_.flush();
+        }
     }
 
     void RoomConcept::reanchor_map_frame(const Eigen::Vector2f& c, float rot)

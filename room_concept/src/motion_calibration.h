@@ -119,6 +119,22 @@ namespace rc::calib
         /// the flag, and it discriminates this account from any rival that does not involve
         /// feedback. Leave it TRUE for normal operation.
         bool  apply        = true;
+        /// WHICH parameters may act, as a bitmask over rc::calib::Param (bit 0 = k_v, 1 = eps_yaw,
+        /// 2 = k_omega, 3 = b_omega, 4 = k_lat, 5 = dk_wheel). -1 = all, which is normal operation.
+        ///
+        /// ★ It exists to separate the CHANNELS, not to tune them. Measured 2026-08-31, arm 3: with
+        /// everything applied, translation drift was unchanged (39.59 -> 38.98 mm/m, d = 0.04) while
+        /// heading drift got WORSE (1.699 -> 2.955 deg/rad, t = -2.45, d = -1.00) and the localiser
+        /// lost tracking in 6 windows against 0. The forward scale is the well-conditioned parameter;
+        /// the heading three share one component and are separated only by covariate, and they are
+        /// the ones whose values move between runs. Applying a well-estimated k_v with a
+        /// poorly-estimated heading correction would produce exactly that split, and a mask is how
+        /// you ask. 1 = k_v only.
+        ///
+        /// ⚠ p_applied records what ACTED, so a masked-out parameter is correctly recorded as not
+        /// applied and the feedback undo stays exact. Masking changes what the robot DOES, never
+        /// what the estimator learns -- every parameter keeps being estimated and logged.
+        int   apply_mask   = -1;
         float yaw_p0       = 1.0e-4f;   // (rad)^2   -> 1 sigma ~ 0.57 deg
         float yaw_q        = 1.0e-9f;   // (rad)^2 per update
         float scale_p0     = 4.0e-4f;   // fractional^2 -> 1 sigma ~ 2%
@@ -213,7 +229,7 @@ namespace rc::calib
         /// Taught AND allowed to act. The applied accessors below gate on this; the estimated_*
         /// accessors gate on taught() alone, so the log keeps its meaning in open-loop mode.
         [[nodiscard]] bool acting(int p) const noexcept
-        { return taught(p) and cfg_.apply; }
+        { return taught(p) and cfg_.apply and ((cfg_.apply_mask >> p) & 1); }
         /// Applied to the body->world rotation of the odometry displacement.
         [[nodiscard]] float yaw_offset() const noexcept
         { return acting(rc::calib::P_EPS_YAW) ? last_.value[rc::calib::P_EPS_YAW] : 0.f; }

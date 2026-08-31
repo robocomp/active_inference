@@ -891,7 +891,7 @@ ImuLinearInjection  = true   # Add the accelerometer's within-segment double int
 # There is no learning-rate constant here on purpose. The gain is P*H/(H*P*H+R) with R taken from the
 # optimizer's own posterior covariance, so an uninformative episode (parked robot: H -> 0) and a
 # low-confidence correction both teach ~nothing without any threshold saying so.
-MotionCalibEnabled  = true   # ⚠ THE A/B THAT CONCLUDED "keep it on" WAS RUN ON P3Bot, 2026-08-22:
+MotionCalibEnabled  = true
 # ── OPEN-LOOP ARM: ESTIMATE, BUT DO NOT APPLY ────────────────────────────────────────────────────
 # false severs the calibrator's output from the odometry while it keeps learning and logging.
 # ★ It exists to test ONE prediction. The estimator's covariate is the POST-scaled odometry and an
@@ -905,10 +905,17 @@ MotionCalibEnabled  = true   # ⚠ THE A/B THAT CONCLUDED "keep it on" WAS RUN O
 # ⚠ TRUE for all normal operation. The robot drives UNCALIBRATED while this is false.
 MotionCalibApply    = true    # normal operation. false = open-loop arm (estimate, do not apply).
 # Which parameters may ACT, bitmask: 1=k_v 2=eps_yaw 4=k_omega 8=b_omega 16=k_lat 32=dk_wheel.
-# -1 = all (normal). 1 = forward scale only, which is the arm 3 follow-up: with everything applied
-# translation was unchanged and HEADING got worse (1.699 -> 2.955 deg/rad, t=-2.45), and the heading
-# parameters are the badly-conditioned ones. Estimation and logging are unaffected either way.
-MotionCalibApplyMask = 1      # ARM: k_v only. Set back to -1 when the arm is done.
+# -1 = all (normal). 1 = forward scale only. Estimation and logging are unaffected either way.
+# ⚠ THE FINDING THAT PUT THIS AT 1 WAS RETRACTED, 2026-08-31. It read: "with everything applied
+# translation was unchanged and HEADING got worse (1.699 -> 2.955 deg/rad, t=-2.45)". The matched
+# three-way re-run gives 1.649 -> 1.763, t=-0.68 — nothing. The old ON leg carried 6 burst windows
+# against 0; it was a worse RUN, not a treatment effect. See room_concept/EXPERIMENT.md §6 arm 3.
+# What survives is weaker and is the only reason this is still 1: mask=1 was the LOWEST-EFFORT arm
+# (optimiser firing 1.11% vs 1.74% for mask=-1 vs 4.92% OFF), on accuracy indistinguishable from
+# both. The heading parameters remain the badly-conditioned ones, which is a reason for caution,
+# not evidence against them. Setting -1 costs nothing measured and is the honest default if the
+# heading channel is ever wanted; left at 1 pending arm 4.
+MotionCalibApplyMask = 1
                         # 262 m ON vs 105 m OFF, per-60s windows, bursts excluded, err/m 0.0263 ->
                         # 0.0303 when OFF (+14.9%, t=2.67 z=2.31). It lowers the error FLOOR; it does
                         # not flatten the sawtooth — a ramp of the same slope starts lower and takes
@@ -1096,12 +1103,18 @@ MergeChi2            = 5.991    # χ²₂ @95% — two segments/walls statistica
 WallBirthNats        = 4.605    # ln 100 — decisive Bayes factor for bearing a wall
 BirthMinFrames       = 2        # a landmark needs a second view (tracker-only birth)
 PublishCornerSigma   = 0.06     # m — every derived corner this sharp before publishing (= corner map_sigma)
-VoteLeak             = 0.02     # per frame — adjacency evidence fades (~2.5 s at 20 Hz) so a structure
-                                # change can win against old corners
+# Model-first (2026-08-31): the map IS a closed polygon. The first scan's OBB seeds a rectangle —
+# the prior on room shape and size; these sigmas are that prior's strength (they anchor the yaw from
+# frame 1). Structure changes are SPLICE JUMPS on the cycle (notch / corner cut), never free walls.
+RectPriorSigmaD      = 0.50     # m — per-side offset prior from the OBB
+RectPriorSigmaPhiDeg = 15.0     # deg — an OBB of a non-convex cloud tilts this much; a tighter prior
+                                # refuses the true walls at the gate and the sides never rotate onto them
+SpliceEndTol         = 0.5      # m — candidate span end "reaches the corner" tolerance
 # The step-back operator, PER EXTENT BIN (the residual layer's lesson, one level up): a beam that
-# passes THROUGH a bin of a wall's extent refutes that bin (weighted by P(detect)); a return short
-# of it is occlusion and holds; dead END bins shrink the extent; a wall dies only when every bin is
-# refuted, at −WallBirthNats — symmetric with birth. A wall out of view never decays (no timer).
+# passes THROUGH a bin of an edge's extent refutes that bin (weighted by P(detect)); a return short
+# of it is occlusion and holds; dead END bins shrink the extent; an edge dies only when its testable
+# span is gone, at −WallBirthNats — symmetric with birth, never a timer — and is spliced OUT with
+# the cycle healing around it.
 ExistRefutePdet      = 0.5      # P(detect) weight of a pass-through beam vs a supporting one
 ExistBinM            = 0.25     # m — extent bin width (spatial resolution of refutation)
 RansacConfidence     = 0.99

@@ -1,6 +1,7 @@
 #include "room_gn_solver.h"
 
 #include <algorithm>
+#include <set>
 #include <cmath>
 
 #include "room_obs_weights.h"
@@ -690,9 +691,19 @@ namespace rc::gn
         if (in.walls != nullptr)
         {
             if (in.walls->theta0_born) lay.theta0 = lay.idx.offset(lay.idx.add(1));
+            // Only walls the WINDOW actually observes become variables: an unobserved wall's factors
+            // are its prior alone, which moves nothing — but its two columns still cost LDLT time,
+            // and a map that has accumulated junk (measured live: 395 walls) turns a 15-variable
+            // solve into an 800×800 one. When the window observes nothing (a prior-only problem, as
+            // in the harness's isolated-factor tests), every wall stays in.
+            std::set<std::uint64_t> active;
+            if (in.window != nullptr)
+                for (const auto& slot : *in.window)
+                    for (const auto& a : slot.wall_assoc) active.insert(a.wall_id);
             lay.wall_off.assign(in.walls->walls.size(), -1);
             for (size_t k = 0; k < in.walls->walls.size(); ++k)
-                lay.wall_off[k] = lay.idx.offset(lay.idx.add(2));
+                if (active.empty() or active.contains(in.walls->walls[k].id))
+                    lay.wall_off[k] = lay.idx.offset(lay.idx.add(2));
         }
         return lay;
     }

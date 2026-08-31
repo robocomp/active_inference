@@ -112,9 +112,14 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
         rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.WallBirthNats", wm.birth_nats);
         rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomShape.BirthMinFrames", wm.birth_min_frames);
         rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.PublishCornerSigma", wm.publish_corner_sigma);
-        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.VoteLeak", wm.vote_leak);
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.RectPriorSigmaD", wm.rect_prior_sigma_d);
+        float rps = std::numeric_limits<float>::quiet_NaN();
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.RectPriorSigmaPhiDeg", rps);
+        if (std::isfinite(rps)) wm.rect_prior_sigma_phi_rad = rps * static_cast<float>(M_PI) / 180.f;
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.SpliceEndTol", wm.splice_end_tol);
         rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.ExistRefutePdet", wm.exist_refute_pdet);
         rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.ExistBinM", wm.exist_bin_m);
+
         rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.GaugeSigmaXY", room_concept.params.wall_gauge_sigma_xy);
         rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.GaugeSigmaTheta", room_concept.params.wall_gauge_sigma_theta);
         rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomShape.WallMaxSlots", room_concept.params.wall_max_slots);

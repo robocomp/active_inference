@@ -1,0 +1,20 @@
+# camera mount calibration — EVIDENCE (H, b), not parameters.
+# Delete to return to the priors. Restoring H and b and re-adding the prior at
+# solve time resumes the measurement; restoring fitted VALUES would be a ratchet.
+camera,zed
+n,418039
+rTr,958759.86554877309
+H,0,0,105426.91007892306
+H,0,1,142730.11402234848
+H,0,2,-266.91888840878175
+H,0,3,0
+H,1,1,212384.26032409558
+H,1,2,-349.94278185537951
+H,1,3,0
+H,2,2,50059.752720113269
+H,2,3,0
+H,3,3,0
+b,0,15987.259611194975
+b,1,26013.883474669034
+b,2,127861.46191206566
+b,3,0

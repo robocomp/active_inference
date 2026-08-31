@@ -20,7 +20,11 @@
 #include <cmath>
 #include <cstdio>
 #include <deque>
+#include <queue>
 #include <random>
+#include <charconv>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -149,6 +153,29 @@ namespace
             best = std::min(best, point_to_segment(p, poly[i], poly[(i + 1) % poly.size()]));
         return best;
     }
+    /// Rasterised intersection-over-union: the metric that PUNISHES a missing concavity (Hausdorff
+    /// under-reports a deep interior wall the estimate paves over). 4 cm cells.
+    float polygon_iou(const Poly& a, const Poly& b)
+    {
+        if (a.size() < 3 or b.size() < 3) return 0.f;
+        float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+        for (const auto& P : {a, b})
+            for (const auto& v : P)
+            { x0 = std::min(x0, v.x()); y0 = std::min(y0, v.y()); x1 = std::max(x1, v.x()); y1 = std::max(y1, v.y()); }
+        const float cell = 0.04f;
+        long inter = 0, uni = 0;
+        for (float x = x0 + cell * 0.5f; x < x1; x += cell)
+            for (float y = y0 + cell * 0.5f; y < y1; y += cell)
+            {
+                const Eigen::Vector2f p(x, y);
+                const bool ia = rc::corner_visibility::point_in_polygon(p, a);
+                const bool ib = rc::corner_visibility::point_in_polygon(p, b);
+                if (ia and ib) ++inter;
+                if (ia or ib) ++uni;
+            }
+        return (uni > 0) ? static_cast<float>(inter) / static_cast<float>(uni) : 0.f;
+    }
+
     float hausdorff(const Poly& a, const Poly& b)
     {
         float h = 0.f;
@@ -163,7 +190,7 @@ namespace
         rc::wallmap::WallMap map;
         rc::wallmap::Polygon poly;
         float pose_rmse_xy = 0.f, pose_max_xy = 0.f, pose_max_th = 0.f;
-        int frames = 0, closed_at = -1, births = 0;
+        int frames = 0, closed_at = -1, births = 0, deaths = 0, rejected = 0;
     };
 
     struct RunConfig
@@ -181,6 +208,26 @@ namespace
         RunResult R;
         if (resume) R = *resume;
         rc::wallseg::Params sp;
+        const auto obb_rect = [](const std::vector<Eigen::Vector2f>& pts) -> Poly
+        {
+            Eigen::Vector2f mu = Eigen::Vector2f::Zero();
+            for (const auto& p : pts) mu += p;
+            mu /= static_cast<float>(pts.size());
+            Eigen::Matrix2f C = Eigen::Matrix2f::Zero();
+            for (const auto& p : pts) { const Eigen::Vector2f d = p - mu; C += d * d.transpose(); }
+            Eigen::SelfAdjointEigenSolver<Eigen::Matrix2f> eig(C);
+            const Eigen::Vector2f ax = eig.eigenvectors().col(1), ay = eig.eigenvectors().col(0);
+            float lo0 = 1e9f, hi0 = -1e9f, lo1 = 1e9f, hi1 = -1e9f;
+            for (const auto& p : pts)
+            {
+                const float u = ax.dot(p - mu), v = ay.dot(p - mu);
+                lo0 = std::min(lo0, u); hi0 = std::max(hi0, u);
+                lo1 = std::min(lo1, v); hi1 = std::max(hi1, v);
+            }
+            // CCW for right-handed (ax, ay)
+            return {mu + ax * lo0 + ay * lo1, mu + ax * hi0 + ay * lo1,
+                    mu + ax * hi0 + ay * hi1, mu + ax * lo0 + ay * hi1};
+        };
         sp.sensor_sigma = cfg.scan_sigma;
         R.map.params.obs_sigma = 0.05f;
         R.map.params.huber_delta = 0.15f;
@@ -225,10 +272,23 @@ namespace
                                                   : Eigen::Vector3f(est.x() + odom.x(), est.y() + odom.y(), wrap(est.z() + odom.z()));
 
             const auto pts = scan(room, truth[f], cfg.n_rays, cfg.scan_sigma, rng);
+            // MODEL-FIRST: the very first scan's OBB seeds the rectangle (map frame = first pose).
+            if (R.map.walls.empty())
+            {
+                Poly rect = obb_rect(pts);
+                // Ensure CCW (positive area)
+                float a2 = 0.f;
+                for (size_t i = 0; i < rect.size(); ++i)
+                { const auto& p = rect[i]; const auto& q = rect[(i + 1) % rect.size()]; a2 += p.x() * q.y() - q.x() * p.y(); }
+                if (a2 < 0.f) std::reverse(rect.begin(), rect.end());
+                R.map.initialize_rect(rect);
+            }
             const auto seg = rc::wallseg::segment(pts, sp, rng);
             const Eigen::Matrix3f pcov = Eigen::Vector3f(0.05f * 0.05f, 0.05f * 0.05f, 0.03f * 0.03f).asDiagonal();
             const auto fr = R.map.observe(seg, pts, Eigen::VectorXf{}, pred, pcov, static_cast<std::int64_t>(f) * 50);
             R.births += fr.births;
+            R.deaths += fr.deaths;
+            R.rejected += fr.splice_rejected;
 
             RoomConcept::WindowSlot slot;
             slot.pose = pose_tensor(pred);
@@ -290,6 +350,320 @@ namespace
             R.frames = static_cast<int>(f) + 1;
         }
         R.pose_rmse_xy = (n_err > 0) ? static_cast<float>(std::sqrt(se / n_err)) : 0.f;
+        R.poly = R.map.build_polygon();
+        return R;
+    }
+
+
+    // ── Epistemic exploration: the robot is DRIVEN BY WHAT THE MODEL DOES NOT KNOW ─────────────
+    // No scripted tour: after each solve the explorer collects the map's unknowns — existence bins
+    // not yet solid, homeless candidates, corners above the publish bar — scores reachable
+    // viewpoints by how much unknown they see, and A*-walks to the best. It stops when the model
+    // has nothing left to ask (publishable and no unknowns) or at the frame cap. Physical
+    // feasibility (collision, visibility) uses the TRUTH polygon — the simulator's job; the
+    // TARGETS come only from the estimator's own uncertainty, as they must.
+    struct Explorer
+    {
+        const Poly& room;
+        float cell = 0.30f, clearance = 0.35f;
+        float x0, y0; int nx, ny;
+        std::vector<char> free_;
+        explicit Explorer(const Poly& r) : room(r)
+        {
+            float xa = 1e9f, ya = 1e9f, xb = -1e9f, yb = -1e9f;
+            for (const auto& v : room) { xa = std::min(xa, v.x()); ya = std::min(ya, v.y()); xb = std::max(xb, v.x()); yb = std::max(yb, v.y()); }
+            x0 = xa; y0 = ya;
+            nx = static_cast<int>((xb - xa) / cell) + 1;
+            ny = static_cast<int>((yb - ya) / cell) + 1;
+            free_.assign(static_cast<size_t>(nx * ny), 0);
+            for (int i = 0; i < nx; ++i)
+                for (int j = 0; j < ny; ++j)
+                {
+                    const Eigen::Vector2f p = at(i, j);
+                    if (rc::corner_visibility::point_in_polygon(p, room) and point_to_poly(p, room) > clearance)
+                        free_[static_cast<size_t>(j * nx + i)] = 1;
+                }
+        }
+        Eigen::Vector2f at(int i, int j) const { return {x0 + (i + 0.5f) * cell, y0 + (j + 0.5f) * cell}; }
+        bool is_free(int i, int j) const
+        { return i >= 0 and i < nx and j >= 0 and j < ny and free_[static_cast<size_t>(j * nx + i)] != 0; }
+        std::pair<int,int> cell_of(const Eigen::Vector2f& p) const
+        { return {static_cast<int>((p.x() - x0) / cell), static_cast<int>((p.y() - y0) / cell)}; }
+        bool sees(const Eigen::Vector2f& from, const Eigen::Vector2f& to) const
+        {
+            const int N = static_cast<int>(room.size());
+            const Eigen::Vector2f d = to - from;
+            const float L = d.norm();
+            if (L < 1e-3f or L > 8.f) return L <= 8.f;
+            const Eigen::Vector2f dir = d / L;
+            for (int e = 0; e < N; ++e)
+                if (auto t = rc::corner_visibility::ray_segment_t(from, dir, room[static_cast<size_t>(e)], room[static_cast<size_t>((e + 1) % N)]);
+                    t and *t < L - 0.15f)
+                    return false;
+            return true;
+        }
+        std::vector<Eigen::Vector2f> astar(const Eigen::Vector2f& from, const Eigen::Vector2f& to) const
+        {
+            auto [si, sj] = cell_of(from);
+            auto [ti, tj] = cell_of(to);
+            if (not is_free(ti, tj) or not is_free(si, sj)) return {};
+            const int n = nx * ny;
+            std::vector<float> g(static_cast<size_t>(n), 1e18f);
+            std::vector<int> par(static_cast<size_t>(n), -1);
+            auto idx = [&](int i, int j) { return j * nx + i; };
+            auto h = [&](int i, int j) { return std::hypot(static_cast<float>(i - ti), static_cast<float>(j - tj)); };
+            using QN = std::pair<float, int>;
+            std::priority_queue<QN, std::vector<QN>, std::greater<>> q;
+            g[static_cast<size_t>(idx(si, sj))] = 0.f;
+            q.push({h(si, sj), idx(si, sj)});
+            const int di[8] = {1,-1,0,0,1,1,-1,-1}, dj[8] = {0,0,1,-1,1,-1,1,-1};
+            while (not q.empty())
+            {
+                const auto [f, u] = q.top(); q.pop();
+                const int ui = u % nx, uj = u / nx;
+                if (ui == ti and uj == tj) break;
+                if (f > g[static_cast<size_t>(u)] + h(ui, uj) + 1e-4f) continue;
+                for (int k = 0; k < 8; ++k)
+                {
+                    const int vi = ui + di[k], vj = uj + dj[k];
+                    if (not is_free(vi, vj)) continue;
+                    if (k >= 4 and (not is_free(ui, vj) or not is_free(vi, uj))) continue;  // no corner cutting
+                    const float w = (k < 4) ? 1.f : 1.41421f;
+                    if (g[static_cast<size_t>(u)] + w < g[static_cast<size_t>(idx(vi, vj))])
+                    {
+                        g[static_cast<size_t>(idx(vi, vj))] = g[static_cast<size_t>(u)] + w;
+                        par[static_cast<size_t>(idx(vi, vj))] = u;
+                        q.push({g[static_cast<size_t>(idx(vi, vj))] + h(vi, vj), idx(vi, vj)});
+                    }
+                }
+            }
+            if (par[static_cast<size_t>(idx(ti, tj))] < 0 and not (si == ti and sj == tj)) return {};
+            std::vector<Eigen::Vector2f> path;
+            for (int u = idx(ti, tj); u >= 0; u = par[static_cast<size_t>(u)])
+            { path.push_back(at(u % nx, u / nx)); if (u == idx(si, sj)) break; }
+            std::reverse(path.begin(), path.end());
+            return path;
+        }
+    };
+
+    struct Unknown { Eigen::Vector2f p; float w; };
+    std::vector<Unknown> collect_unknowns(const rc::wallmap::WallMap& map)
+    {
+        std::vector<Unknown> out;
+        const float bar = map.params.birth_nats;
+        for (const auto& w : map.walls)
+        {
+            const Eigen::Vector2f n = w.normal(), t = w.tangent();
+            for (size_t b = 0; b < w.exist_bins.size(); ++b)
+                if (w.exist_bins[b] < bar)   // not yet solid — the map still has a question here
+                    out.push_back({n * w.d + t * (w.bins_s0 + (static_cast<float>(b) + 0.5f) * map.params.exist_bin_m), 1.f});
+            if (w.exist_bins.empty() and w.has_extent)
+                out.push_back({n * w.d + t * (0.5f * (w.s_min + w.s_max)), 1.f});
+        }
+        for (const auto& c : map.candidates)
+            if (c.npts >= 3)
+                out.push_back({rc::linefit::normal_of(c.phi) * c.d
+                               + rc::linefit::tangent_of(c.phi) * (0.5f * (c.s_min + c.s_max)), 2.f});
+        const auto poly = map.build_polygon();
+        for (const auto& c : poly.corners)
+            if (not std::isfinite(c.sigma) or c.sigma > map.params.publish_corner_sigma)
+                out.push_back({c.p, 3.f});
+        for (const auto& fpt : map.frontiers())
+            out.push_back({fpt, 1.5f});    // free space touching the unknown: go and look
+        return out;
+    }
+
+    /// The estimation loop with the robot DRIVEN by the model's uncertainty instead of a script.
+    RunResult run_explore(const Poly& room, const RunConfig& cfg, std::mt19937& rng, int max_frames,
+                          const Eigen::Vector2f& start)
+    {
+        RunResult R;
+        Explorer ex(room);
+        rc::wallseg::Params sp;
+        sp.sensor_sigma = cfg.scan_sigma;
+        R.map.params.obs_sigma = 0.05f;
+        R.map.params.huber_delta = 0.15f;
+
+        rc::Model model;
+        model.init_from_polygon({{-20.f, -20.f}, {20.f, -20.f}, {20.f, 20.f}, {-20.f, 20.f}}, 0.f, 0.f, 0.f, 2.4f);
+        RoomConcept::Params params;
+        params.rfe_obs_sigma = 0.05f;
+        params.rfe_huber_delta = 0.15f;
+        params.enable_corner_tracking = false;
+        params.object_anchor.enable = false;
+        params.image_edge.enable = false;
+
+        std::deque<RoomConcept::WindowSlot> window;
+        RoomConcept::BoundaryPrior bp;
+        std::normal_distribution<float> nxy(0.f, cfg.odom_sigma_xy), nth(0.f, cfg.odom_sigma_th);
+
+        Eigen::Vector3f tru(start.x(), start.y(), 0.f);   // simulated TRUE pose; first pose = map origin
+        const Eigen::Vector3f origin = tru;
+        const auto to_map = [&](const Eigen::Vector3f& p)
+        {
+            const float c = std::cos(-origin.z()), s = std::sin(-origin.z());
+            const Eigen::Vector2f dxy = p.head<2>() - origin.head<2>();
+            return Eigen::Vector3f(c * dxy.x() - s * dxy.y(), s * dxy.x() + c * dxy.y(), wrap(p.z() - origin.z()));
+        };
+        const auto from_map = [&](const Eigen::Vector2f& p)   // estimator frame → truth frame
+        {
+            const float c = std::cos(origin.z()), s = std::sin(origin.z());
+            return Eigen::Vector2f(c * p.x() - s * p.y() + origin.x(), s * p.x() + c * p.y() + origin.y());
+        };
+
+        Eigen::Vector3f est = Eigen::Vector3f::Zero();
+        Eigen::Vector3f prev_tru_map = to_map(tru);
+        double se = 0.0; int n_err = 0;
+        std::vector<Eigen::Vector2f> path;   // truth-frame waypoints ahead
+        int replan_in = 0;
+        int quiet_frames = 0;
+        int last_rederive = 0, rejected_since_rederive = 0, rederives = 0;
+
+        for (int f = 0; f < max_frames; ++f)
+        {
+            // ── act: follow the current plan one step ─────────────────────────────────────────
+            if (not path.empty())
+            {
+                const Eigen::Vector2f tgt = path.front();
+                const Eigen::Vector2f d = tgt - tru.head<2>();
+                const float L = d.norm();
+                if (L < 0.15f) path.erase(path.begin());
+                else
+                {
+                    const float step = std::min(0.28f, L);
+                    tru.head<2>() += d / L * step;
+                    tru.z() = std::atan2(d.y(), d.x());
+                }
+            }
+
+            const Eigen::Vector3f tm = to_map(tru);
+            Eigen::Vector3f odom = tm - prev_tru_map; odom.z() = wrap(odom.z());
+            if (f > 0) odom += Eigen::Vector3f(nxy(rng), nxy(rng), nth(rng));
+            prev_tru_map = tm;
+            const Eigen::Vector3f pred = (f == 0) ? Eigen::Vector3f::Zero()
+                : Eigen::Vector3f(est.x() + odom.x(), est.y() + odom.y(), wrap(est.z() + odom.z()));
+
+            const auto pts = scan(room, tru, cfg.n_rays, cfg.scan_sigma, rng);
+            if (R.map.walls.empty())
+            {
+                // model-first init from the first scan's OBB (same as run_loop)
+                Eigen::Vector2f mu = Eigen::Vector2f::Zero();
+                for (const auto& p : pts) mu += p;
+                mu /= static_cast<float>(pts.size());
+                Eigen::Matrix2f C = Eigen::Matrix2f::Zero();
+                for (const auto& p : pts) { const Eigen::Vector2f dd = p - mu; C += dd * dd.transpose(); }
+                Eigen::SelfAdjointEigenSolver<Eigen::Matrix2f> eig(C);
+                const Eigen::Vector2f ax = eig.eigenvectors().col(1), ay = eig.eigenvectors().col(0);
+                float lo0 = 1e9f, hi0 = -1e9f, lo1 = 1e9f, hi1 = -1e9f;
+                for (const auto& p : pts)
+                { const float u = ax.dot(p - mu), v2 = ay.dot(p - mu);
+                  lo0 = std::min(lo0, u); hi0 = std::max(hi0, u); lo1 = std::min(lo1, v2); hi1 = std::max(hi1, v2); }
+                Poly rect = {mu + ax * lo0 + ay * lo1, mu + ax * hi0 + ay * lo1, mu + ax * hi0 + ay * hi1, mu + ax * lo0 + ay * hi1};
+                float a2 = 0.f;
+                for (size_t i = 0; i < rect.size(); ++i)
+                { const auto& p = rect[i]; const auto& q = rect[(i + 1) % rect.size()]; a2 += p.x() * q.y() - q.x() * p.y(); }
+                if (a2 < 0.f) std::reverse(rect.begin(), rect.end());
+                R.map.initialize_rect(rect);
+            }
+            const auto seg = rc::wallseg::segment(pts, sp, rng);
+            const Eigen::Matrix3f pcov = Eigen::Vector3f(0.05f * 0.05f, 0.05f * 0.05f, 0.03f * 0.03f).asDiagonal();
+            const auto fr = R.map.observe(seg, pts, Eigen::VectorXf{}, pred, pcov, static_cast<std::int64_t>(f) * 50);
+            R.births += fr.births; R.deaths += fr.deaths; R.rejected += fr.splice_rejected;
+
+            RoomConcept::WindowSlot slot;
+            slot.pose = pose_tensor(pred);
+            slot.lidar_points = points_tensor(pts);
+            slot.odometry_delta = (f == 0) ? Eigen::Vector3f::Zero() : odom;
+            slot.motion_cov = Eigen::Vector3f(cfg.odom_sigma_xy * cfg.odom_sigma_xy, cfg.odom_sigma_xy * cfg.odom_sigma_xy,
+                                              cfg.odom_sigma_th * cfg.odom_sigma_th).asDiagonal();
+            slot.odom_delta_tensor = torch::tensor({odom.x(), odom.y(), odom.z()}, torch::kFloat32);
+            slot.motion_prec_tensor = mat3(slot.motion_cov.inverse());
+            slot.wall_assoc = fr.assoc;
+
+            rc::gn::Input in;
+            in.model = &model; in.params = &params; in.window = &window; in.boundary_prior = &bp;
+            in.device = torch::kCPU;
+            in.walls = &R.map; in.no_sdf = true; in.gauge_fix = true;
+            if (static_cast<int>(window.size()) >= cfg.window)
+            {
+                auto fp = window.front().pose.detach();
+                rc::gn::absorb_wall_observations(in, window.front(),
+                    Eigen::Vector3f(fp[0].item<float>(), fp[1].item<float>(), fp[2].item<float>()));
+                window.pop_front();
+                auto nf = window.front().pose.detach();
+                bp.valid = true;
+                bp.mu = Eigen::Vector3f(nf[0].item<float>(), nf[1].item<float>(), nf[2].item<float>());
+                bp.precision = Eigen::Vector3f(400.f, 400.f, 1600.f).asDiagonal();
+            }
+            window.push_back(std::move(slot));
+            std::vector<Eigen::Vector3f> poses;
+            for (const auto& sl : window)
+            { auto pp = sl.pose.detach(); poses.emplace_back(pp[0].item<float>(), pp[1].item<float>(), pp[2].item<float>()); }
+            rc::gn::Options opts;
+            const auto r = rc::gn::solve(in, poses, opts);
+            if (r.ok) for (size_t i = 0; i < window.size(); ++i) window[i].pose = pose_tensor(poses[i]);
+            est = poses.back();
+            R.map.merge_indistinguishable();
+
+            // ── GLOBAL re-derivation: when local jumps are stuck (rejections pile up) or on a slow
+            // cadence, trace the observed free space and adopt its cycle iff it explains more.
+            rejected_since_rederive += fr.splice_rejected;
+            if (f - last_rederive >= 40 or rejected_since_rederive >= 30)
+            {
+                last_rederive = f;
+                rejected_since_rederive = 0;
+                if (R.map.re_derive(est.head<2>()))
+                {
+                    ++rederives;
+                    if (cfg.verbose)
+                        std::printf("    f=%3d GLOBAL re-derivation adopted: %zu walls in cycle\n",
+                                    f, R.map.order.size());
+                }
+            }
+
+            const Eigen::Vector3f err = est - tm;
+            const float exy = err.head<2>().norm();
+            se += exy * exy; ++n_err;
+            R.pose_max_xy = std::max(R.pose_max_xy, exy);
+            R.pose_max_th = std::max(R.pose_max_th, std::abs(wrap(err.z())));
+
+            // ── perceive → decide: replan toward the largest visible unknown ──────────────────
+            if (--replan_in <= 0 or path.empty())
+            {
+                replan_in = 15;
+                const auto unknowns = collect_unknowns(R.map);
+                // Exploration is COMPLETE when free space has no true frontier left; the map may
+                // keep refining, but there is nowhere informative left to drive to.
+                quiet_frames = (f > 60 and R.map.frontiers().empty()) ? quiet_frames + 1 : 0;
+                if (quiet_frames >= 3 or unknowns.empty()) { R.frames = f + 1; break; }
+                // score viewpoints on the free grid (subsampled) by visible unknown mass
+                float best_sc = -1.f; Eigen::Vector2f best_v = tru.head<2>();
+                for (int i = 0; i < ex.nx; i += 2)
+                    for (int j = 0; j < ex.ny; j += 2)
+                    {
+                        if (not ex.is_free(i, j)) continue;
+                        const Eigen::Vector2f v = ex.at(i, j);
+                        float sc = 0.f;
+                        for (const auto& u : unknowns)
+                            if (ex.sees(v, from_map(u.p))) sc += u.w;
+                        if (sc <= 0.f) continue;
+                        sc /= (1.f + 0.10f * (v - tru.head<2>()).norm());
+                        if (sc > best_sc) { best_sc = sc; best_v = v; }
+                    }
+                if (best_sc > 0.f)
+                {
+                    path = ex.astar(tru.head<2>(), best_v);
+                    if (path.size() > 1) path.erase(path.begin());   // skip the cell we stand in
+                }
+            }
+            if (cfg.verbose and (f % 25 == 0 or fr.births > 0))
+                std::printf("    f=%3d walls=%zu cand=%d births=%d deaths=%d err=%.3fm poly=%s\n",
+                            f, R.map.walls.size(), fr.candidates, fr.births, fr.deaths, exy,
+                            R.map.build_polygon().closed ? "closed" : "open");
+            R.frames = f + 1;
+        }
+        R.pose_rmse_xy = (n_err > 0) ? static_cast<float>(std::sqrt(se / n_err)) : 0.f;
+        if (cfg.verbose) std::printf("    global re-derivations adopted: %d\n", rederives);
         R.poly = R.map.build_polygon();
         return R;
     }
@@ -531,6 +905,12 @@ int main()
         for (const auto& w : R.map.walls)
             std::printf("    wall %llu k=%d phi=%.3f d=%.3f frames=%d dF=%.2f\n",
                         static_cast<unsigned long long>(w.id), w.k, w.phi, w.d, w.frames_seen, w.room_factor_dF);
+        {
+            const Poly ew = to_world(R.poly.verts, truth[0]);
+            std::printf("    order:"); for (auto id : R.map.order) std::printf(" %llu", (unsigned long long)id); std::printf("\n    verts:");
+            for (const auto& v : ew) std::printf(" (%.2f,%.2f)", v.x(), v.y());
+            std::printf("\n");
+        }
         check("5 walls, one of them class-less (the chamfer)", R.map.walls.size() == 5 and off == 1,
               fmt("%zu walls, %d without class", R.map.walls.size(), off));
         const Poly est_world = to_world(R.poly.verts, truth[0]);
@@ -549,6 +929,15 @@ int main()
         RunConfig cfg;
         const auto R = run_loop(rooms, twice, cfg, rng);
         std::printf("    walls=%zu births=%d closed_at=%d status='%s'\n", R.map.walls.size(), R.births, R.closed_at, R.poly.status.c_str());
+        for (const auto& w : R.map.walls)
+            std::printf("    wall %llu k=%d phi=%.3f d=%.3f extent[%.2f,%.2f] frames=%d\n",
+                        (unsigned long long)w.id, w.k, w.phi, w.d, w.s_min, w.s_max, w.frames_seen);
+        {
+            const Poly ew = to_world(R.poly.verts, twice[0]);
+            std::printf("    order:"); for (auto id : R.map.order) std::printf(" %llu", (unsigned long long)id); std::printf("\n    verts:");
+            for (const auto& v : ew) std::printf(" (%.2f,%.2f)", v.x(), v.y());
+            std::printf("\n");
+        }
         const Poly est_world = to_world(R.poly.verts, twice[0]);
         const float h = R.poly.closed ? hausdorff(est_world, l_room_notch()) : 1e9f;
         check("the two notch walls were born after closure", R.map.walls.size() == 8, fmt("%zu walls (expected 8)", R.map.walls.size()));
@@ -556,34 +945,239 @@ int main()
               fmt("closed=%d hausdorff=%.3f status='%s'", R.poly.closed, h, R.poly.status.c_str()));
     }
 
-    // ═══ 6. Existence: a phantom wall dies by pass-through; the real ones survive ═══════════════
-    std::printf("\n6. Step-back operator: beams walk through a phantom wall\n");
+    // ═══ 6. Step-back on the MODEL: a wrong splice (fake notch) heals itself ════════════════════
+    std::printf("\n6. Step-back operator: a fake notch spliced into the south wall heals\n");
     {
         const Poly room = l_room();
         const auto truth = trajectory(12);
         RunConfig cfg;
         auto Rr = run_loop({room}, truth, cfg, rng);
         const size_t walls_before = Rr.map.walls.size();
-        // Inject a phantom "furniture wall" across the interior — the LiDAR sees straight through
-        // where it claims to stand. phi/d chosen with d < 0 (the sign convention) and the extent well
-        // inside the room, crossing the driven loop's lines of sight.
-        rc::wallmap::WallLandmark ph;
-        ph.id = 999;
-        ph.phi = 0.3f;
-        ph.d = -0.4f;
-        ph.information = Eigen::Vector2f(500.f, 2000.f).asDiagonal();
-        ph.has_extent = true; ph.s_min = -1.2f; ph.s_max = 1.2f;
-        ph.exist_lodds = Rr.map.params.birth_nats;
-        Rr.map.walls.push_back(ph);
+        // Wound: an inward fake notch on the longest wall — [E, jogB, C, jogA, E].
+        std::uint64_t host_id = 0; float host_len = 0.f;
+        for (const auto& w : Rr.map.walls)
+            if (w.has_extent and w.s_max - w.s_min > host_len) { host_len = w.s_max - w.s_min; host_id = w.id; }
+        auto* E = Rr.map.find(host_id);
+        const float mid = 0.5f * (E->s_min + E->s_max);
+        const Eigen::Vector2f tE = E->tangent();
+        auto mk = [&](float phi, float d, std::uint64_t id)
+        {
+            rc::wallmap::WallLandmark w;
+            w.id = id; w.phi = phi; w.d = d;
+            w.information = Eigen::Vector2f(300.f, 100.f).asDiagonal();
+            w.exist_lodds = Rr.map.params.birth_nats;
+            return w;
+        };
+        // C parallel to E, 0.8 m INTO the room; jogs at mid±0.6 along E.
+        auto C  = mk(E->phi, E->d + 0.8f, 999);
+        C.has_extent = true; C.s_min = mid - 0.6f; C.s_max = mid + 0.6f;
+        auto J1 = mk(std::atan2(tE.y(), tE.x()), tE.dot(tE * (mid + 0.6f)), 998);
+        auto J0 = mk(std::atan2(-tE.y(), -tE.x()), -(mid - 0.6f), 997);
+        // The jogs' extents: between the host line and C, in each jog's own tangent coordinates.
+        for (auto* J : {&J1, &J0})
+        {
+            const Eigen::Vector2f tJ = rc::linefit::tangent_of(J->phi);
+            const Eigen::Vector2f nE = E->normal();
+            const float sa = tJ.dot(nE * E->d), sb = tJ.dot(nE * C.d);
+            J->s_min = std::min(sa, sb); J->s_max = std::max(sa, sb); J->has_extent = true;
+        }
+        Rr.map.walls.push_back(J1); Rr.map.walls.push_back(C); Rr.map.walls.push_back(J0);
+        std::vector<std::uint64_t> no;
+        for (auto id : Rr.map.order)
+        {
+            no.push_back(id);
+            if (id == host_id and no.size() and std::find(no.begin(), no.end(), 999ULL) == no.end())
+            { no.push_back(998); no.push_back(999); no.push_back(997); no.push_back(host_id); }
+        }
+        Rr.map.order = no;
+        const bool wounded = Rr.map.build_polygon().closed;
         auto R2 = run_loop({room}, truth, cfg, rng, &Rr);
-        const bool phantom_gone = R2.map.find(999) == nullptr;
-        int real_alive = 0;
-        for (const auto& w : R2.map.walls) if (w.id <= 6) ++real_alive;
-        for (const auto& w : R2.map.walls)
-            std::printf("    wall %llu lodds=%.1f extent[%.2f,%.2f] bins=%zu\n",
-                        static_cast<unsigned long long>(w.id), w.exist_lodds, w.s_min, w.s_max, w.exist_bins.size());
-        check("the phantom wall died", phantom_gone, fmt("walls %zu -> %zu", walls_before + 1, R2.map.walls.size()));
-        check("the six real walls survived", real_alive == 6, fmt("%d / 6 alive", real_alive));
+        const bool fake_gone = R2.map.find(999) == nullptr and R2.map.find(998) == nullptr and R2.map.find(997) == nullptr;
+        check("the wounded polygon was valid to start", wounded, "");
+        check("the fake notch died and was spliced out", fake_gone,
+              fmt("walls %zu -> %zu", walls_before + 3, R2.map.walls.size()));
+        const Poly est_world = to_world(R2.poly.verts, truth[0]);
+        const float h = R2.poly.closed ? hausdorff(est_world, room) : 1e9f;
+        check("the healed polygon matches the room", R2.poly.closed and h < 0.06f,
+              fmt("closed=%d hausdorff=%.3f", R2.poly.closed, h));
+    }
+
+    // ═══ 7. THE REAL LAYOUT: apartamento_layout.svg, toured and estimated to convergence ════════
+    std::printf("\n7. The real apartamento layout (32 vertices incl. trace artefacts)\n");
+    {
+        // Local SVG polygon read (std::from_chars — the agents' locale rule; no Qt in the harness).
+        Poly room;
+        {
+            std::ifstream in("/home/pbustos/robocomp/components/active_inference/layouts/apartamento_layout.svg");
+            std::stringstream ss; ss << in.rdbuf();
+            const std::string svg = ss.str();
+            const auto idpos = svg.find("id=\"room_contour\"");
+            check("layout file readable", idpos != std::string::npos, "");
+            if (idpos != std::string::npos)
+            {
+                // points="..." nearest to the id, searching the enclosing tag both ways.
+                const auto tag0 = svg.rfind('<', idpos);
+                const auto tag1 = svg.find('>', idpos);
+                const std::string tag = svg.substr(tag0, tag1 - tag0);
+                const auto pp = tag.find("points=\"");
+                if (pp != std::string::npos)
+                {
+                    const auto pend = tag.find('"', pp + 8);
+                    const std::string pts_str = tag.substr(pp + 8, pend - pp - 8);
+                    const char* c = pts_str.data();
+                    const char* end = c + pts_str.size();
+                    while (c < end)
+                    {
+                        while (c < end and (*c == ' ' or *c == ',' or *c == '\n' or *c == '\t')) ++c;
+                        float x = 0.f, y = 0.f;
+                        auto r1 = std::from_chars(c, end, x);
+                        if (r1.ec != std::errc{}) break;
+                        c = r1.ptr;
+                        while (c < end and (*c == ' ' or *c == ',')) ++c;
+                        auto r2 = std::from_chars(c, end, y);
+                        if (r2.ec != std::errc{}) break;
+                        c = r2.ptr;
+                        room.emplace_back(x, y);
+                    }
+                }
+            }
+            // Recentre on the bbox centre, as the agent does.
+            if (not room.empty())
+            {
+                Eigen::Vector2f lo = room.front(), hi = room.front();
+                for (const auto& v : room) { lo = lo.cwiseMin(v); hi = hi.cwiseMax(v); }
+                const Eigen::Vector2f c0 = 0.5f * (lo + hi);
+                for (auto& v : room) v -= c0;
+            }
+        }
+        float a2 = 0.f;
+        for (size_t i = 0; i < room.size(); ++i)
+        { const auto& p = room[i]; const auto& q = room[(i + 1) % room.size()]; a2 += p.x() * q.y() - q.x() * p.y(); }
+        if (a2 < 0.f) std::reverse(room.begin(), room.end());
+        check("layout loaded", room.size() >= 20, fmt("%zu vertices, area %.1f m2", room.size(), std::abs(a2) * 0.5f));
+
+        // An interior tour generated from the polygon itself: inward-offset waypoints on the angle
+        // bisectors, greedily connected by legs that stay inside with clearance.
+        const auto inside = [&](const Eigen::Vector2f& p, float clear)
+        { return rc::corner_visibility::point_in_polygon(p, room) and point_to_poly(p, room) > clear; };
+        std::vector<Eigen::Vector2f> wps;
+        const int NV = static_cast<int>(room.size());
+        for (int i = 0; i < NV; ++i)
+        {
+            const Eigen::Vector2f prev = room[static_cast<size_t>((i + NV - 1) % NV)];
+            const Eigen::Vector2f cur = room[static_cast<size_t>(i)];
+            const Eigen::Vector2f next = room[static_cast<size_t>((i + 1) % NV)];
+            const Eigen::Vector2f din = (cur - prev).normalized(), dout = (next - cur).normalized();
+            Eigen::Vector2f bis = Eigen::Vector2f(-din.y(), din.x()) + Eigen::Vector2f(-dout.y(), dout.x());
+            if (bis.norm() < 1e-3f) bis = Eigen::Vector2f(-din.y(), din.x());
+            bis.normalize();
+            const Eigen::Vector2f w = cur + bis * 0.8f;
+            if (inside(w, 0.4f)) wps.push_back(w);
+        }
+        // Densify: midpoints of consecutive reachable waypoints, so long legs get intermediate views.
+        {
+            std::vector<Eigen::Vector2f> dense;
+            for (size_t j = 0; j < wps.size(); ++j)
+            {
+                dense.push_back(wps[j]);
+                const Eigen::Vector2f mid = 0.5f * (wps[j] + wps[(j + 1) % wps.size()]);
+                if (inside(mid, 0.4f)) dense.push_back(mid);
+            }
+            wps = std::move(dense);
+        }
+        const auto leg_ok = [&](const Eigen::Vector2f& a, const Eigen::Vector2f& b)
+        {
+            const float L = (b - a).norm();
+            const int n = std::max(2, static_cast<int>(L / 0.1f));
+            for (int k = 0; k <= n; ++k)
+                if (not inside(a + (b - a) * (static_cast<float>(k) / static_cast<float>(n)), 0.3f)) return false;
+            return true;
+        };
+        std::vector<Eigen::Vector2f> path;
+        size_t at = 0;
+        path.push_back(wps[0]);
+        for (size_t j = 1; j < wps.size(); ++j)
+            if (leg_ok(wps[at], wps[j])) { path.push_back(wps[j]); at = j; }
+        if (leg_ok(wps[at], wps[0])) path.push_back(wps[0]);
+        std::vector<Eigen::Vector3f> truth;
+        for (int lap = 0; lap < 2; ++lap)   // two laps: the second closes what the first only glimpsed
+            for (size_t l = 0; l + 1 < path.size(); ++l)
+            {
+                const Eigen::Vector2f e = path[l + 1] - path[l];
+                const float th = std::atan2(e.y(), e.x());
+                const int n = std::max(2, static_cast<int>(e.norm() / 0.25f));
+                for (int i = 0; i < n; ++i)
+                {
+                    const float a = static_cast<float>(i) / static_cast<float>(n);
+                    truth.emplace_back(path[l].x() + a * e.x(), path[l].y() + a * e.y(), th);
+                }
+            }
+        check("tour generated", truth.size() > 60, fmt("%zu waypoints, %zu poses", path.size(), truth.size()));
+
+        RunConfig cfg;
+        cfg.n_rays = 720;
+        cfg.verbose = true;
+        // EPISTEMIC DRIVE: no scripted tour — the robot goes where the model is uncertain.
+        (void)truth;
+        const auto R7 = run_explore(room, cfg, rng, 900, path[0]);
+        std::printf("    explorer finished after %d frames; frontiers left=%zu\n", R7.frames, R7.map.frontiers().size());
+        {
+            // Does the grid RESOLVE the thin interior wall? Sample along the truth spur's two faces.
+            const Eigen::Vector2f o = path[0];
+            int occ = 0, fre = 0, unk = 0, n = 0;
+            for (const auto& pr : {std::make_pair(room[21], room[22]), std::make_pair(room[23], room[24])})
+                for (int k = 0; k <= 20; ++k)
+                {
+                    const Eigen::Vector2f pt = pr.first + (pr.second - pr.first) * (static_cast<float>(k) / 20.f) - o;
+                    const int i = static_cast<int>((pt.x() - R7.map.fgrid.x0) / R7.map.fgrid.cell);
+                    const int j = static_cast<int>((pt.y() - R7.map.fgrid.y0) / R7.map.fgrid.cell);
+                    if (not R7.map.fgrid.in(i, j)) continue;
+                    ++n;
+                    const float l = R7.map.fgrid.lodds[static_cast<size_t>(R7.map.fgrid.idx(i, j))];
+                    if (l > 1.f) ++occ; else if (l < -1.f) ++fre; else ++unk;
+                }
+            std::printf("    spur-face grid cells: occupied %d, FREE %d, unknown %d of %d — free>0 means beams carved through the thin wall\n",
+                        occ, fre, unk, n);
+        }
+        std::printf("    births=%d deaths=%d splice_rejected=%d\n", R7.births, R7.deaths, R7.rejected);
+        {
+            auto cs = R7.map.candidates;
+            std::sort(cs.begin(), cs.end(), [](const auto& a, const auto& b) { return a.npts > b.npts; });
+            for (size_t i = 0; i < std::min<size_t>(10, cs.size()); ++i)
+                std::printf("    cand phi=%.3f d=%.3f extent[%.2f,%.2f] npts=%d frames=%d gain=%.0f\n",
+                            cs[i].phi, cs[i].d, cs[i].s_min, cs[i].s_max, cs[i].npts, cs[i].frames, cs[i].gain);
+        }
+        for (const auto& w : R7.map.walls)
+            std::printf("    wall %llu k=%d phi=%.3f d=%.3f extent[%.2f,%.2f] frames=%d pts=%d lodds=%.1f\n",
+                        (unsigned long long)w.id, w.k, w.phi, w.d, w.s_min, w.s_max, w.frames_seen, w.points_seen, w.exist_lodds);
+        std::printf("    order:");
+        for (auto id : R7.map.order) std::printf(" %llu", (unsigned long long)id);
+        std::printf("\n    verts:");
+        for (const auto& v : R7.poly.verts) std::printf(" (%.2f,%.2f)", v.x(), v.y());
+        std::printf("\n");
+        std::printf("    walls=%zu candidates=%zu births=%d closed_at=%d status='%s' worst corner sigma=%.3f\n",
+                    R7.map.walls.size(), R7.map.candidates.size(), R7.births, R7.closed_at,
+                    R7.poly.status.c_str(), R7.poly.worst_corner_sigma);
+        const Poly est_world = to_world(R7.poly.verts, Eigen::Vector3f(path[0].x(), path[0].y(), 0.f));
+        const float h = R7.poly.closed ? hausdorff(est_world, room) : 1e9f;
+        // Per-vertex nearest-boundary error of the TRUTH against the estimate: where is it worst?
+        float worst_v = 0.f; int worst_i = -1;
+        for (size_t i = 0; i < room.size(); ++i)
+        {
+            const float d = R7.poly.closed ? point_to_poly(room[i], est_world) : 1e9f;
+            if (d > worst_v) { worst_v = d; worst_i = static_cast<int>(i); }
+        }
+        const float iou = R7.poly.closed ? polygon_iou(est_world, room) : 0.f;
+        const float sym_diff = (1.f - iou) * 60.5f / std::max(iou, 1e-3f) * iou;   // ≈ union·(1−IoU) m²
+        std::printf("    hausdorff=%.3f m; IoU=%.3f (sym diff ~%.1f m2); worst truth vertex #%d off by %.3f m; pose rmse %.3f max %.3f m\n",
+                    h, iou, sym_diff, worst_i, worst_v, R7.pose_rmse_xy, R7.pose_max_xy);
+        check("polygon closed on the real layout", R7.poly.closed, R7.poly.status);
+        // 0.20 m bar: the SVG itself carries 6-15 cm trace artefacts the estimator may lawfully
+        // smooth over; a real miss (a whole alcove) is metres.
+        check("estimate within 20 cm of the real layout (Hausdorff)", h < 0.20f, fmt("%.3f m", h));
+        check("estimate overlaps the real layout (IoU >= 0.95)", iou >= 0.95f, fmt("IoU %.3f", iou));
+        check("pose stayed on track through the tour", R7.pose_rmse_xy < 0.08f,
+              fmt("rmse %.3f m, max %.3f m", R7.pose_rmse_xy, R7.pose_max_xy));
     }
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
