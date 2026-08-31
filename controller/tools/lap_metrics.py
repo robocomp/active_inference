@@ -51,6 +51,27 @@ def main():
                 rejected += 1
     cur.append(D[-1]); laps.append(cur)
 
+    # ★A LAP MUST COVER THE ROUTE, and without this test the very start of a run invents one. The
+    # boundary test above compares against 0.25 * the largest arc length SEEN SO FAR — and early in a
+    # run that maximum is a metre or two, so any re-acquisition near the start (the tracker's first
+    # projection, a route re-authoring) lands under the threshold and reads as a completed lap. Observed:
+    # a "lap" of 4.9 s and 1.2 m on a 35 m route, which then drags the per-lap mean down and makes a
+    # partial run look fast. So a segment that spans much less arc than the longest one is not a lap; it
+    # is reported rather than silently dropped, because a run full of them means something else is wrong.
+    def arc_span(L):
+        v = [g(r, "track_s") for r in L if not math.isnan(g(r, "track_s"))]
+        return (max(v) - min(v)) if v else 0.0
+    if len(laps) > 1:
+        longest = max(arc_span(L) for L in laps)
+        keep = [L for L in laps if arc_span(L) >= 0.5 * longest]
+        dropped = len(laps) - len(keep)
+        if dropped:
+            spans = [f"{arc_span(L):.1f} m" for L in laps if arc_span(L) < 0.5 * longest]
+            print(f"  ⚠ {dropped} segment(s) spanning only {', '.join(spans)} against a {longest:.1f} m "
+                  f"lap — too short to be laps (a re-acquisition near the start reads as a boundary). "
+                  f"NOT counted.")
+        laps = keep
+
     print(f"  {len(D)} cycles, {len(laps)} lap segment(s) (the last is partial unless it rewound)")
     if rejected:
         print(f"  ⚠ {rejected} backward step(s) in track_s did NOT return to the lap start — those are"
