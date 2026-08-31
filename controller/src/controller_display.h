@@ -258,6 +258,17 @@ private:
     std::size_t efe_color_next_ = 0;                     // next palette colour for a new affordance
 
     mutable std::mutex snapshot_mutex_;
+    // ── THE CANVAS HEARTBEAT ─────────────────────────────────────────────────────────────────────
+    // ★A DIAGNOSTIC THAT ONLY SPEAKS ON FAILURE CANNOT CONFIRM HEALTH, and that is the case we kept
+    // landing in: the pipeline was staging frames, present() was running, and the canvas still looked
+    // frozen — so the stale/never-staged warning stayed silent and proved nothing. Two rates settle it
+    // outright: FED is how often the control pipeline stages a frame, DRAWN is how often present()
+    // consumes one. Both healthy and a frozen view means the fault is in the DRAWING, not upstream;
+    // drawn ~0 means present() is not running; fed ~0 means the pipeline is not triggering.
     std::uint64_t last_stale_canvas_log_ms_ = 0;   // throttle for the [canvas] line
+    std::uint64_t canvas_hb_ms_ = 0;               // window start for the heartbeat
+    int           canvas_drawn_ = 0;               // present() calls in the window
+    std::uint64_t canvas_last_stamp_ = 0;          // to count DISTINCT staged frames
+    int           canvas_fed_ = 0;
     DisplaySnapshot snapshot_;
 };

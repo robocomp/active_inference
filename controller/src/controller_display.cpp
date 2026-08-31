@@ -478,6 +478,20 @@ void ControllerDisplay::present()
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count());
         const std::uint64_t age = snap.stamp_ms ? now_ms - snap.stamp_ms : 0;
+
+        // Heartbeat: two rates, once every 5 s. See the note in the header for why a failure-only
+        // diagnostic could not answer this.
+        ++canvas_drawn_;
+        if (snap.stamp_ms != canvas_last_stamp_) { canvas_last_stamp_ = snap.stamp_ms; ++canvas_fed_; }
+        if (canvas_hb_ms_ == 0) canvas_hb_ms_ = now_ms;
+        if (now_ms - canvas_hb_ms_ >= 5000)
+        {
+            const double secs = (now_ms - canvas_hb_ms_) / 1000.0;
+            std::println("[canvas] fed {:.1f} Hz (pipeline staging frames), drawn {:.1f} Hz "
+                         "(present consuming them), snapshot age {:.2f} s",
+                         canvas_fed_ / secs, canvas_drawn_ / secs, age / 1000.0);
+            canvas_hb_ms_ = now_ms; canvas_drawn_ = 0; canvas_fed_ = 0;
+        }
         // Throttled to once a second, and only while it is actually a problem: a canvas being fed at
         // the sensor's own rate says nothing.
         if ((not snap.valid or age > 1000) and now_ms - last_stale_canvas_log_ms_ >= 1000)
