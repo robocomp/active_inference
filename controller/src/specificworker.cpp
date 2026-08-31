@@ -709,10 +709,23 @@ void SpecificWorker::compute()
 		// ★AND SAY WHY, throttled. "It stopped" is not a diagnosis and this path had none: three
 		// different causes — an escape owning the base, a route that will not build, a repair that
 		// failed — all presented identically, as silence.
-		if (const auto &why = session_.hold_reason(); not why.empty())
 		{
+			const auto &why = session_.hold_reason();
 			const auto now_ms = current_time_ms();
-			if (now_ms - last_hold_log_ms_ >= 2000)
+			if (not holding_)
+			{
+				holding_ = true;
+				hold_started_ms_ = now_ms;
+				hold_hb_ms_ = now_ms;
+				hold_started_reason_ = why;
+				log_hold("begin", why, &step->robot_pose);
+			}
+			else if (now_ms - hold_hb_ms_ >= 5000)
+			{
+				hold_hb_ms_ = now_ms;
+				log_hold("ongoing", why, &step->robot_pose);   // a hold that outlives the run must show
+			}
+			if (not why.empty() and now_ms - last_hold_log_ms_ >= 2000)
 			{
 				last_hold_log_ms_ = now_ms;
 				std::println("[hold] not planning this cycle: {}", why);
@@ -721,6 +734,13 @@ void SpecificWorker::compute()
 		return;
 	}
 
+	// Planning again: close any hold that was open, with what it cost.
+	if (holding_)
+	{
+		holding_ = false;
+		log_hold("end", hold_started_reason_, &step->robot_pose);
+		hold_started_ms_ = 0;
+	}
 	execute_plan(step->robot_pose);
 	update_custom_widget(step->robot_pose);
 }
@@ -1125,6 +1145,31 @@ void SpecificWorker::push_mission_view()
 	                               .laps_remaining = mission.laps_remaining()},
 	                           mission.display_waypoints(),
 	                           -1);   // no waypoint index: the route is one curve
+}
+
+// One row per hold event: begin, a heartbeat every 5 s while it lasts, and end with the duration.
+// See the note on hold_csv_ in the header for why this is a file and not only a log line.
+void SpecificWorker::log_hold(const char *event, const std::string &why, const RobotPose *pose)
+{
+	if (not hold_csv_open_)
+	{
+		hold_csv_.open("hold_events.csv", std::ios::out | std::ios::trunc);
+		hold_csv_.imbue(std::locale::classic());   // decimal POINT regardless of LANG (CLAUDE.md)
+		if (hold_csv_.is_open())
+			hold_csv_ << "# one row per HOLD: the controller refused to plan this cycle and compute()\n"
+			             "# returned early. Until 0696086 that also stopped the display being staged,\n"
+			             "# which is what a frozen canvas actually was.\n"
+			             "t_ms,event,dur_s,reason,pose_x,pose_y,pose_th\n";
+		hold_csv_open_ = true;
+	}
+	if (not hold_csv_.is_open()) return;
+	const auto now = current_time_ms();
+	const double dur = hold_started_ms_ ? (now - hold_started_ms_) / 1000.0 : 0.0;
+	hold_csv_ << now << ',' << event << ',' << dur << ",\"" << why << "\",";
+	if (pose) hold_csv_ << pose->pos.x() << ',' << pose->pos.y() << ',' << pose->theta;
+	else      hold_csv_ << ",,";
+	hold_csv_ << '\n';
+	hold_csv_.flush();          // a record of a fault that is still running must be on disk NOW
 }
 
 void SpecificWorker::update_custom_widget(const std::optional<RobotPose> &robot_pose)

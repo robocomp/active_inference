@@ -37,6 +37,7 @@
 #include <mutex>
 #include <optional>
 #include <sstream>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -249,6 +250,20 @@ private:
 		std::chrono::steady_clock::time_point last_lidar_rx_{};
 		bool lidar_ever_received_ = false;
 		std::uint64_t last_hold_log_ms_ = 0;   // throttle for the [hold] line
+		// ── THE HOLD RECORD, ON DISK ─────────────────────────────────────────────────────────
+		// ★A DIAGNOSTIC ONLY ON STDOUT NEEDS SOMEONE WATCHING THE TERMINAL AT THE MOMENT IT
+		// HAPPENS, and holds are exactly the events nobody is watching for. This writes one row
+		// per hold EPISODE — begin, a heartbeat while it lasts, and end with its duration — so
+		// the question "what was it holding on, where, and for how long" is answerable
+		// afterwards from the file instead of from memory. Flushed per row: a record that only
+		// reaches disk when the process exits is no record of a fault that is still running.
+		std::ofstream hold_csv_;
+		bool          hold_csv_open_ = false;
+		bool          holding_ = false;
+		std::uint64_t hold_started_ms_ = 0;
+		std::uint64_t hold_hb_ms_ = 0;
+		std::string   hold_started_reason_;
+		void log_hold(const char *event, const std::string &why, const RobotPose *pose);
 		bool lidar_stalled_ = false;
 		std::chrono::steady_clock::time_point lidar_stall_since_{};
 		// ── BOUNDED RECOVERY OF THE MEDIA READER ─────────────────────────────────────────────
