@@ -106,15 +106,35 @@ fi
 if [ "${1:-}" = save ]; then
   leg="${2:-}"
   case "$leg" in off|on) ;; *) die "usage: $0 save {off|on}" ;; esac
-  if pgrep -x room_concept >/dev/null; then
-    die "room_concept is RUNNING — stop it first, it is still appending to gt_error.csv."
-  fi
   src=/home/pbustos/robocomp/components/active_inference/room_concept/tmp/sdf_localizer/gt_error.csv
   dst="$RC/runs/arm4_$leg.csv"
   [ -f "$src" ] || die "no $src"
   mkdir -p "$RC/runs"
   if [ -f "$dst" ] && [ ! "$src" -nt "$dst" ]; then
     die "$src is NOT newer than $dst — this is the stale-file bug. Did the leg actually run?"
+  fi
+  # ★★★ AND THE HOLE THAT LET IT THROUGH ANYWAY, 2026-08-31. The test above compares the source
+  # only against the destination it would OVERWRITE, so the first save of a leg is unguarded —
+  # `save off` then `save on` against one unchanged source wrote two byte-identical files and the
+  # analysis would have compared a run with itself. Guard against the OTHER leg too: two legs of
+  # one arm can never be the same bytes.
+  other="$RC/runs/arm4_$([ "$leg" = off ] && echo on || echo off).csv"
+  if [ -f "$other" ] && cmp -s "$src" "$other"; then
+    die "$src is BYTE-IDENTICAL to $other — this is the same run saved twice, not two legs.
+      The leg was not re-driven, or the config was never flipped. Check MotionCalibApply."
+  fi
+  # A leg is defined by its treatment, so refuse to file one under a name the config contradicts.
+  want=$([ "$leg" = off ] && echo false || echo true)
+  have=$(sed -n "s/^MotionCalibApply *= *\([a-z]*\).*/\1/p" "$RC/config.toml" | head -1)
+  if [ "$have" != "$want" ]; then
+    die "config says MotionCalibApply = $have but you are saving the '$leg' leg (needs $want).
+      Either the wrong leg name, or arm4_setup.sh $leg was never run before driving."
+  fi
+  # LAST gate before the copy. It is last on purpose: the guards above are about whether this
+  # leg is what it claims to be, and you want to hear that even while the agent is still up —
+  # sooner is better than after another 200 m.
+  if pgrep -x room_concept >/dev/null; then
+    die "room_concept is RUNNING — stop it first, it is still appending to gt_error.csv."
   fi
   cp -v "$src" "$dst"
   python3 - "$dst" <<'PY'
