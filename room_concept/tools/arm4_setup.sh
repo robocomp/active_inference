@@ -5,6 +5,7 @@
 #   tools/arm4_setup.sh off        # injected, calibration NOT applied
 #   tools/arm4_setup.sh on         # injected, calibration applied (k_v only)
 #   tools/arm4_setup.sh check      # is the RUNNING fleet actually running the armed config?
+#   tools/arm4_setup.sh ratio      # is the injection ACTING? drive ~10 m first, then run this
 #   tools/arm4_setup.sh save <leg> # copy the finished leg's gt_error.csv aside, with checks
 #   tools/arm4_setup.sh restore    # back to the uninjected baseline, calibration on
 #
@@ -17,6 +18,41 @@ BR=/home/pbustos/robocomp/components/webots-bridge/etc
 RC=/home/pbustos/robocomp/components/active_inference/room_concept/etc
 
 die() { echo "arm4: $*" >&2; exit 1; }
+
+# ── ratio: the behavioural signature of the injection ────────────────────────────────────────
+# ★★★ THE ONLY PROOF THAT THE VALUE IS ACTING. `check` proves the file was read; this proves the
+# number is doing something. Odometry path over ground-truth path: ~1.10 injected, ~0.99 clean,
+# and it resolves within about 10 m of driving. Runs live, as often as you like.
+# dx_local/dy_local are the per-cycle odometry increments in the robot frame. On the OFF leg they
+# are raw; on the ON leg the calibrator is correcting them, so the ratio there is EXPECTED to fall
+# back toward 1.0 as k_v converges — on that leg a ratio near 1.0 is the treatment working, not a
+# missing injection. Read this on the OFF leg to prove the dose, and on the ON leg to watch it go.
+if [ "${1:-}" = ratio ]; then
+  python3 - "$RC/../tmp/sdf_localizer/gt_error.csv" <<'PY'
+import csv, math, sys
+gt=[]; odo=0.0; ts=[]
+for r in csv.DictReader(open(sys.argv[1])):
+    try:
+        gt.append((float(r['gt_x']), float(r['gt_y']))); ts.append(float(r['ts_ms']))
+        odo += math.hypot(float(r['dx_local']), float(r['dy_local']))
+    except (TypeError, ValueError, KeyError): pass
+if len(gt) < 2: sys.exit("  no usable rows yet")
+g = sum(math.dist(a,b) for a,b in zip(gt,gt[1:]))
+print("  %d rows over %.0f s" % (len(gt), (max(ts)-min(ts))/1000))
+print("  ground-truth path %.2f m | odometry %.2f m" % (g, odo))
+if len(set(p[0] for p in gt)) == 1:
+    sys.exit("  GROUND TRUTH IS CONSTANT — either the robot is parked, or the supervisor is not\n"
+             "  publishing robot_gt_*. Check est_* moves before blaming the supervisor.")
+if g < 5.0:
+    sys.exit("  only %.2f m driven — the ratio does not resolve below ~10 m. Drive more." % g)
+r = odo/g
+verdict = ("INJECTION IS ACTING (~1.10 expected)" if r > 1.06 else
+           "CLEAN / NO INJECTION (~0.99 expected)" if r < 1.03 else
+           "AMBIGUOUS — drive further, or the calibrator is already correcting it")
+print("  ratio odo/GT = %.4f  ->  %s" % (r, verdict))
+PY
+  exit 0
+fi
 
 # ── check: is what is RUNNING what is on disk? ───────────────────────────────────────────────
 # ★★★ THE TEST THAT CATCHES THE FAILURE THAT KEEPS HAPPENING. Twice now a leg has been driven
@@ -154,7 +190,7 @@ case "${1:-}" in
     # NOT touched: MapMode. Whoever set "estimate" owns it — restore means "undo arm 4",
     # not "undo somebody else's experiment".
     ;;
-  *) die "usage: $0 {off|on|check|save <leg>|restore}" ;;
+  *) die "usage: $0 {off|on|check|ratio|save <leg>|restore}" ;;
 esac
 
 wipe_evidence
