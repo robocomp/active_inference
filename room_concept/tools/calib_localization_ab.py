@@ -39,11 +39,20 @@ scale). It is a consistency figure, not an accuracy one — read it as "how well
 rigid transform explain this window", never as "how far the robot was from where it thought".
 
 PRE-REGISTER BEFORE YOU RUN (print this, then run):
-  - endpoint            : RPE translation (mm/m) at ds = 1.0 m, MOVING rows only
+  ⚠ THE PRIMARY ENDPOINT DEPENDS ON THE DOSE, and which one applied to which arm is fixed in
+    EXPERIMENT.md before that arm was driven. Arm 3 (native ~2-3% error) pre-registered RPE and
+    returned a null on it with a 3-4x fall in firing; arm 4 (injected 10%) pre-registers firing,
+    because arm 3 established that at a small dose the SDF fit absorbs the error either way, so
+    an accuracy endpoint grades the corrector rather than the correction. Neither was chosen
+    after seeing the other's data.
+  - effort endpoint     : optimiser firing %, per window, over MOVING cycles, BURSTS INCLUDED
+  - accuracy endpoint   : RPE translation (mm/m) at ds = 1.0 m, MOVING rows only
   - secondary           : RPE rotation (deg/rad) at dth = 0.5 rad; aligned ATE RMS
+  - third (large dose)  : burst-window RATE, reported as a fraction of all windows
   - unit of analysis    : 60 s window; arms compared window-to-window
-  - exclusions          : parked rows; burst windows (>50% of cycles with iters>0)
-  - direction predicted : calibration ON <= OFF on both RPE channels
+  - exclusions          : parked rows, and burst windows FROM THE RPE/ATE CHANNELS ONLY -- never
+                          from firing, which is the channel a burst is a measurement of
+  - direction predicted : calibration ON <= OFF on firing and on both RPE channels
   - expected size       : SMALL on a healthy robot (k_v 1.00004, k_omega 0.9974 as of 2026-08-23);
                           eps_yaw (-0.536 deg) is the only sizeable term. Run the INJECTED-ERROR
                           arm if you need power — see EXPERIMENT_CALIB_LOCALIZATION.md.
@@ -255,9 +264,18 @@ def windows(d):
 
 def arm(path, label):
     d = load(path)
-    rows = {'label': label, 'path': path, 'trans': [], 'rot': [], 'ate': [],
-            'burst': 0, 'parked': 0, 'used': 0, 'dist': 0.0}
+    rows = {'label': label, 'path': path, 'trans': [], 'rot': [], 'ate': [], 'fire': [],
+            'burst': 0, 'parked': 0, 'used': 0, 'windows': 0, 'dist': 0.0}
     for _w0, idx, moving, burst in windows(d):
+        rows['windows'] += 1
+        # ★★★ OPTIMISER FIRING IS SAMPLED BEFORE THE BURST EXCLUSION, ON PURPOSE. A burst window
+        # is not a corrupted measurement of firing -- it IS a measurement of firing, and the
+        # highest one there is. Excluding it here would be the same inversion the exclusion rule
+        # was written to avoid: at a small injected error bursts are a confound unrelated to the
+        # treatment, but at a large one they ARE the treatment effect, and an exclusion inherited
+        # without thought would delete exactly the result the arm was run to find.
+        if moving.size >= 30 and 'iters' in d:
+            rows['fire'].append(100.0 * float(np.mean(d['iters'][moving] > 0)))
         if burst:
             rows['burst'] += 1
             continue
@@ -314,15 +332,21 @@ def main():
     print()
     arms = [arm(sys.argv[i], sys.argv[i + 1]) for i in range(1, len(sys.argv), 2)]
 
-    print("%-22s %7s %8s %10s %10s %10s" %
-          ("arm", "wins", "dist_m", "RPE mm/m", "RPE d/rad", "ATE mm"))
+    print("%-22s %6s %8s %8s %9s %10s %10s %9s" %
+          ("arm", "wins", "dist_m", "fire %", "burst", "RPE mm/m", "RPE d/rad", "ATE mm"))
     for a in arms:
-        print("%-22s %7d %8.1f %10.3f %10.3f %10.1f  (burst %d, parked %d)" %
+        # burst as a RATE with its denominator: 6 windows out of 11 and 6 out of 25 are different
+        # findings, and a bare count cannot tell them apart when the arms differ in length.
+        bstr = "%d/%d" % (a['burst'], a['windows'])
+        print("%-22s %6d %8.1f %8.2f %9s %10.3f %10.3f %9.1f  (parked %d)" %
               (a['label'], a['used'], a['dist'],
+               np.mean(a['fire']) if a['fire'] else math.nan, bstr,
                np.mean(a['trans']) if a['trans'] else math.nan,
                np.mean(a['rot']) if a['rot'] else math.nan,
                np.mean(a['ate']) if a['ate'] else math.nan,
-               a['burst'], a['parked']))
+               a['parked']))
+    print("  fire % = share of MOVING cycles on which the optimiser ran, per 60 s window, burst")
+    print("  windows INCLUDED. It is the effort endpoint; the RPE columns are the accuracy one.")
 
     print("\nheading convention check, mean(course - theta) per trajectory:")
     for a in arms:
@@ -346,7 +370,8 @@ def main():
         for i in range(len(arms)):
             for j in range(i + 1, len(arms)):
                 A, B = arms[i], arms[j]
-                for m, name in (('trans', 'RPE mm/m'), ('rot', 'RPE d/rad'), ('ate', 'ATE mm')):
+                for m, name in (('fire', 'fire %'), ('trans', 'RPE mm/m'),
+                                ('rot', 'RPE d/rad'), ('ate', 'ATE mm')):
                     t, z, dd = welch(A[m], B[m])
                     print("%-30s %10s %8.2f %8.2f %8.2f" %
                           ("%s vs %s" % (A['label'], B['label']), name, t, z, dd))
