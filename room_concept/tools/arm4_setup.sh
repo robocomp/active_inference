@@ -131,12 +131,21 @@ PY
   exit 0
 fi
 
-# ── refuse to touch anything while the agents are up ─────────────────────────────────────────
-if pgrep -x room_concept >/dev/null || pgrep -x Webots2Robocomp >/dev/null; then
-  echo "arm4: room_concept and/or Webots2Robocomp are RUNNING." >&2
-  echo "      Stop them first (SIGTERM / Ctrl-C, never kill -9) — a live agent rewrites" >&2
-  echo "      motion_calib_state.csv from its warm in-memory window, so deleting it now" >&2
-  echo "      restores the warm one and the leg inherits the previous leg's evidence." >&2
+# ── who has to be DOWN, and who does not ─────────────────────────────────────────────────────
+# room_concept ALWAYS: it rewrites motion_calib_state.csv from its warm in-memory window, so a
+# delete under a live process just restores the warm one and the leg inherits the previous leg's
+# evidence. The calibrator must start this leg from its priors.
+#
+# ★ The BRIDGE only when its config actually changes. Going from the OFF leg to the ON leg the
+# injection is IDENTICAL — the treatment is entirely `MotionCalibApply` on the room_concept side
+# — so the bridge should stay up across the pair. That is not merely convenient: the standing
+# rule is that arms are back to back inside one session or they are not comparable, and leaving
+# the producer running keeps both legs on one continuous stream from one simulator session.
+# Rewriting an identical file would also bump its mtime and make `check` cry STALE for no reason.
+if pgrep -x room_concept >/dev/null; then
+  echo "arm4: room_concept is RUNNING. Stop it first (SIGTERM / Ctrl-C, never kill -9) — it" >&2
+  echo "      rewrites motion_calib_state.csv from its warm window, so wiping the evidence" >&2
+  echo "      under a live process leaves the leg inheriting the previous leg's calibration." >&2
   exit 1
 fi
 
@@ -179,12 +188,22 @@ wipe_evidence() {
 case "${1:-}" in
   off|on)
     [ -f "$BR/config.toml.arm4-inj10" ] || die "missing $BR/config.toml.arm4-inj10"
-    cp -v "$BR/config.toml.arm4-inj10" "$BR/config.toml"
+    if cmp -s "$BR/config.toml.arm4-inj10" "$BR/config.toml"; then
+      echo "bridge config already carries the injection — left untouched, no restart needed"
+    else
+      pgrep -x Webots2Robocomp >/dev/null && die \
+        "the bridge config must CHANGE for this leg, so Webots2Robocomp must be stopped first
+      (it reads its config once at start-up). Webots itself can keep running."
+      cp -v "$BR/config.toml.arm4-inj10" "$BR/config.toml"
+      echo "  ⚠ bridge config CHANGED — it must be restarted before this leg is driven"
+    fi
     if [ "$1" = off ]; then set_apply false; else set_apply true; fi
     set_mapmode given
     ;;
   restore)
     [ -f "$BR/config.toml.pre-arm2" ] || die "missing $BR/config.toml.pre-arm2"
+    pgrep -x Webots2Robocomp >/dev/null && die \
+      "restore changes the bridge config; stop Webots2Robocomp first."
     cp -v "$BR/config.toml.pre-arm2" "$BR/config.toml"
     set_apply true
     # NOT touched: MapMode. Whoever set "estimate" owns it — restore means "undo arm 4",
