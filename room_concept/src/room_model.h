@@ -103,6 +103,12 @@ public:
     void init_from_polygon(const std::vector<Eigen::Vector2f>& vertices,
                            float x, float y, float phi, float wall_height);
 
+    // Replace the polygon WITHOUT touching the pose tensors, the covariance or anything else the
+    // estimator carries between frames. Wall-SLAM re-derives the polygon from the wall landmarks every
+    // cycle; rebuilding the whole Model for that (set_polygon_room) would reset the window and the
+    // covariance on every update. Only the geometry tensors and the bbox half_extents change here.
+    void update_polygon_vertices(const std::vector<Eigen::Vector2f>& vertices);
+
     // True once the three state tensors actually hold something. A default-constructed
     // torch::Tensor is UNDEFINED, not empty: it has no device, so .to() on it throws
     // "tensor does not have a device" from deep inside ATen, naming nothing. Existence of a

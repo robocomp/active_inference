@@ -1,5 +1,6 @@
 #include "corner_detector.h"
 #include "corner_visibility.h"
+#include "assignment.h"
 #include <cmath>
 #include <algorithm>
 #include <ranges>
@@ -81,93 +82,8 @@ void CornerDetector::set_model_corners(const std::vector<Eigen::Vector2f>& polyg
 
 // ---------------------------------------------------------------------------
 //  detect — model-guided partitioning + PCA line fit + intersect
-// ---------------------------------------------------------------------------
-//  solve_hungarian — minimum-cost bipartite assignment (Kuhn-Munkres, O(N³))
-//
-//  Returns assignment[row] = col, or -1 if that row remains unassigned.
-//  Infeasible pairs must be encoded as INFEASIBLE (defined below).
-//  Rows with no feasible column end up unassigned (-1).
-// ---------------------------------------------------------------------------
-static constexpr float INFEASIBLE = 1e9f;
-
-static std::vector<int> solve_hungarian(
-        const std::vector<std::vector<float>>& cost, int R, int C)
-{
-    if (R == 0 || C == 0) return std::vector<int>(R, -1);
-
-    const int N = std::max(R, C);   // pad to square
-
-    auto cell = [&](int i, int j) -> float {
-        return (i < R && j < C) ? cost[i][j] : INFEASIBLE;
-    };
-
-    // u[i]/v[j] — row/column potentials (1-indexed internally)
-    // p[j]      — row currently matched to column j  (0 = free)
-    // way[j]    — predecessor column on the shortest-path tree
-    std::vector<float> u(N + 1, 0.f), v(N + 1, 0.f);
-    std::vector<int>   p(N + 1, 0),   way(N + 1, 0);
-
-    for (int i = 1; i <= N; ++i)
-    {
-        p[0] = i;
-        int j0 = 0;
-        std::vector<float> minv(N + 1, INFEASIBLE);
-        std::vector<bool>  used(N + 1, false);
-
-        bool augmented = true;
-        do {
-            used[j0] = true;
-            const int i0 = p[j0];
-            int   j1    = -1;          // -1 ⇒ no unused column found this step
-            float delta = INFEASIBLE;
-            for (int j = 1; j <= N; ++j)
-            {
-                if (not used[j])
-                {
-                    const float c = cell(i0 - 1, j - 1) - u[i0] - v[j];
-                    if (c < minv[j]) { minv[j] = c; way[j] = j0; }
-                    if (minv[j] < delta) { delta = minv[j]; j1 = j; }
-                }
-            }
-            // Termination guard: a valid augmenting step must reach a FEASIBLE free column. If none
-            // exists (row i0 reaches only INFEASIBLE/padded columns — e.g. corner candidates far from
-            // every model corner), the classic Kuhn-Munkres loop leaves delta==INFEASIBLE, never
-            // advances j0 to a free column, and spins FOREVER (caught live via gdb: this thread at
-            // 100% CPU, the whole agent hung, needing kill -9). Bail here WITHOUT touching the
-            // potentials so the matching stays consistent; row i then stays unassigned (-1) — exactly
-            // this function's documented contract for a row with no feasible column.
-            if (j1 < 0 or delta >= INFEASIBLE * 0.5f) { augmented = false; break; }
-            for (int j = 0; j <= N; ++j)
-            {
-                if (used[j]) { u[p[j]] += delta; v[j] -= delta; }
-                else          { minv[j] -= delta; }
-            }
-            j0 = j1;
-        } while (p[j0] != 0);
-
-        // Augment along the discovered path only when we actually reached a free column. On a bail
-        // the loop above never wrote p[], so previously matched rows/columns are left intact.
-        if (augmented)
-        {
-            do {
-                const int j1 = way[j0];
-                p[j0] = p[j1];
-                j0 = j1;
-            } while (j0);
-        }
-    }
-
-    // Extract: p[j] = 1-indexed row assigned to column j
-    // Reject padded or infeasible pairs.
-    std::vector<int> assignment(R, -1);
-    for (int j = 1; j <= C; ++j)
-    {
-        const int r = p[j] - 1;   // 0-based
-        if (r >= 0 && r < R && cost[r][j - 1] < INFEASIBLE * 0.5f)
-            assignment[r] = j - 1;
-    }
-    return assignment;
-}
+using rc::assign::solve_hungarian;
+using rc::assign::INFEASIBLE;
 
 // ---------------------------------------------------------------------------
 //  detect — two-phase pipeline:
@@ -696,62 +612,6 @@ CornerDetector::DetectionResult CornerDetector::detect(
     result.rej_unassigned = C - result.corners_accepted;
 
     return result;
-}
-
-// ---------------------------------------------------------------------------
-//  fit_line_pca — least-squares line fit via PCA
-// ---------------------------------------------------------------------------
-std::optional<CornerDetector::Line2D> CornerDetector::fit_line_pca(
-        const std::vector<Eigen::Vector2f>& pts, int min_points)
-{
-    if (static_cast<int>(pts.size()) < min_points)
-        return std::nullopt;
-
-    Eigen::Vector2f centroid = Eigen::Vector2f::Zero();
-    for (const auto& p : pts)
-        centroid += p;
-    centroid /= static_cast<float>(pts.size());
-
-    Eigen::Matrix2f scatter = Eigen::Matrix2f::Zero();
-    for (const auto& p : pts)
-    {
-        Eigen::Vector2f dp = p - centroid;
-        scatter += dp * dp.transpose();
-    }
-
-    Eigen::SelfAdjointEigenSolver<Eigen::Matrix2f> eig(scatter);
-    Line2D line;
-    line.normal = eig.eigenvectors().col(0);  // smallest eigenvalue = line normal
-    line.d = line.normal.dot(centroid);
-    // Smallest eigenvalue = Σ perpendicular² of the points about the fitted line.
-    // Per-point mean square scatter → a graded quality signal for σ_L (clean wall ≈ sensor noise).
-    line.npts = static_cast<int>(pts.size());
-    line.resid_var = std::max(0.f, eig.eigenvalues()(0)) / static_cast<float>(line.npts);
-    return line;
-}
-
-// ---------------------------------------------------------------------------
-//  intersect
-// ---------------------------------------------------------------------------
-std::optional<Eigen::Vector2f> CornerDetector::intersect(
-        const Line2D& a, const Line2D& b, float* angle_deg)
-{
-    const float det = a.normal.x() * b.normal.y() - a.normal.y() * b.normal.x();
-    if (std::abs(det) < 1e-6f)
-        return std::nullopt;
-
-    const float x = (b.normal.y() * a.d - a.normal.y() * b.d) / det;
-    const float y = (a.normal.x() * b.d - b.normal.x() * a.d) / det;
-
-    if (angle_deg)
-    {
-        // Angle between the two wall directions (= 180° - angle between normals)
-        const float ndot = std::abs(a.normal.dot(b.normal));
-        const float clamped = std::min(1.0f, ndot);
-        *angle_deg = 180.0f - std::acos(clamped) * 180.0f / static_cast<float>(M_PI);
-    }
-
-    return Eigen::Vector2f(x, y);
 }
 
 } // namespace rc

@@ -268,7 +268,19 @@ void SpecificWorker::initialize()
         qInfo() << "[room] platform overlay: compute period set to" << per << "ms";
     }
 
-    initialize_room_model_from_svg();
+    if (room_concept_.estimating())
+    {
+        // RoomShape.MapMode = estimate: no layout is loaded. The room is learnt from the LiDAR and
+        // published once its polygon closes; the viewer draws the walls as they are born.
+        room_concept_.configure_room_estimate();
+        room_polygon_.clear();
+        room_polygon_offset_ = Eigen::Vector2f::Zero();
+        room_initialized_from_svg_polygon_ = false;
+        qInfo() << "[room] RoomShape.MapMode = estimate: no layout loaded; the room will be learnt from the LiDAR"
+                << "(first pose = origin until the polygon closes and is re-anchored).";
+    }
+    else
+        initialize_room_model_from_svg();
     const std::string pose_path = pose_file_path();
     room_concept_.set_seed_pose_file(pose_path);
 
@@ -1797,6 +1809,9 @@ void SpecificWorker::initialize_room_model_from_svg()
 ///////////////////////////////////////////////////////////////////////////////
 void SpecificWorker::save_robot_pose_on_exit() const
 {
+    // An estimated map defines its own frame each run; a seed pose from it would mislead a later
+    // Given-mode start against the layout (and an Estimate-mode start ignores seeds anyway).
+    if (room_concept_.estimating()) return;
     Eigen::Vector3f pose = Eigen::Vector3f::Zero();
     if (const auto loc = room_concept_.get_last_result(); loc.has_value() && loc->ok)
     {

@@ -83,6 +83,38 @@ void Model::init_from_polygon(const std::vector<Eigen::Vector2f>& vertices,
     init_common();
 }
 
+void Model::update_polygon_vertices(const std::vector<Eigen::Vector2f>& vertices)
+{
+    if (vertices.size() < 3) return;
+    use_polygon = true;
+    std::vector<float> verts_flat;
+    verts_flat.reserve(vertices.size() * 2);
+    for (const auto& v : vertices)
+    {
+        verts_flat.push_back(v.x());
+        verts_flat.push_back(v.y());
+    }
+    polygon_vertices = torch::from_blob(verts_flat.data(),
+        {static_cast<long>(vertices.size()), 2}, torch::kFloat32).clone().to(device_);
+    const int64_t num_verts = polygon_vertices.size(0);
+    auto indices_a = torch::arange(num_verts,
+        torch::TensorOptions().dtype(torch::kLong).device(device_));
+    auto indices_b = (indices_a + 1) % num_verts;
+    seg_a_ = polygon_vertices.index_select(0, indices_a).contiguous();
+    const auto seg_b = polygon_vertices.index_select(0, indices_b).contiguous();
+    seg_ab_ = (seg_b - seg_a_).contiguous();
+    seg_ab_sq_ = torch::sum(seg_ab_ * seg_ab_, /*dim=*/1).contiguous();
+    float min_x = vertices[0].x(), max_x = vertices[0].x();
+    float min_y = vertices[0].y(), max_y = vertices[0].y();
+    for (const auto& v : vertices)
+    {
+        min_x = std::min(min_x, v.x()); max_x = std::max(max_x, v.x());
+        min_y = std::min(min_y, v.y()); max_y = std::max(max_y, v.y());
+    }
+    half_extents = torch::tensor({(max_x - min_x) / 2.f, (max_y - min_y) / 2.f},
+        torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+}
+
 void Model::init_common()
 {
     // Initialize prediction tensors (detached from graph)

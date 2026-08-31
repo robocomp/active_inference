@@ -1024,6 +1024,97 @@ void Viewer2D::draw_landmark_lines(const std::vector<Eigen::Vector2f>& landmarks
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Wall-SLAM overlay — segments, wall landmarks, derived corners, derived polygon
+// ─────────────────────────────────────────────────────────────────────────────
+void Viewer2D::draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segments,
+                             const std::vector<rc::wallmap::WallLandmark>& walls,
+                             const rc::wallmap::Polygon& polygon, bool map_ready,
+                             const Eigen::Affine2f& robot_pose)
+{
+    auto resize_pool = [&](auto& pool, size_t count, auto make_item)
+    {
+        while (pool.size() < count) pool.push_back(make_item());
+        for (size_t i = 0; i < pool.size(); ++i) pool[i]->setVisible(i < count);
+    };
+
+    // This frame's segments: thin cyan, in the room frame through the pose.
+    resize_pool(wall_seg_items_, segments.size(), [&]() {
+        auto* item = agv_->scene.addLine(0, 0, 0, 0, QPen(QColor(0, 200, 220), 0.05));
+        item->setZValue(26);
+        return item;
+    });
+    for (size_t i = 0; i < segments.size(); ++i)
+    {
+        const Eigen::Vector2f a = robot_pose * segments[i].p0;
+        const Eigen::Vector2f b = robot_pose * segments[i].p1;
+        wall_seg_items_[i]->setLine(a.x(), a.y(), b.x(), b.y());
+    }
+
+    // Wall landmarks: thick lines over their observed extent; colour by Manhattan class, grey when
+    // class-less (a chamfer, or born before θ₀ existed).
+    static const QColor kClass[4] = {QColor(200, 40, 40), QColor(40, 160, 40), QColor(40, 80, 220), QColor(220, 140, 0)};
+    resize_pool(wall_line_items_, walls.size(), [&]() {
+        auto* item = agv_->scene.addLine(0, 0, 0, 0, QPen(Qt::gray, 0.12));
+        item->setZValue(28);
+        return item;
+    });
+    resize_pool(wall_label_items_, walls.size(), [&]() {
+        auto* item = agv_->scene.addSimpleText("");
+        item->setZValue(35);
+        QFont f = item->font(); f.setPointSizeF(0.35); item->setFont(f);
+        return item;
+    });
+    for (size_t i = 0; i < walls.size(); ++i)
+    {
+        const auto& w = walls[i];
+        const Eigen::Vector2f n = w.normal(), t = w.tangent();
+        const float s0 = w.has_extent ? w.s_min : -1.f, s1 = w.has_extent ? w.s_max : 1.f;
+        const Eigen::Vector2f a = n * w.d + t * s0, b = n * w.d + t * s1;
+        wall_line_items_[i]->setLine(a.x(), a.y(), b.x(), b.y());
+        wall_line_items_[i]->setPen(QPen(w.k >= 0 ? kClass[w.k] : QColor(120, 120, 120), 0.12));
+        const Eigen::Vector2f mid = (a + b) * 0.5f + n * 0.25f;
+        wall_label_items_[i]->setText(QString("w%1 k=%2%3").arg(static_cast<qulonglong>(w.id))
+                                          .arg(w.k).arg(w.room_factor_dF > 4.6f ? QString(" dF=%1").arg(w.room_factor_dF, 0, 'f', 1) : ""));
+        wall_label_items_[i]->setPos(mid.x(), mid.y());
+        wall_label_items_[i]->setTransform(QTransform::fromScale(1, -1));   // scene y is up
+    }
+
+    // Derived corners: filled when observed meeting, hollow when inferred by intersection.
+    resize_pool(wall_corner_items_, polygon.corners.size(), [&]() {
+        constexpr float r = 0.12f;
+        auto* item = agv_->scene.addEllipse(-r, -r, 2 * r, 2 * r, QPen(QColor(200, 0, 200), 0.04), QBrush(Qt::NoBrush));
+        item->setZValue(32);
+        return item;
+    });
+    for (size_t i = 0; i < polygon.corners.size(); ++i)
+    {
+        const auto& c = polygon.corners[i];
+        wall_corner_items_[i]->setPos(c.p.x(), c.p.y());
+        wall_corner_items_[i]->setBrush(c.inferred ? QBrush(Qt::NoBrush) : QBrush(QColor(200, 0, 200, 160)));
+    }
+
+    // Derived polygon: dashed magenta until published, solid after.
+    if (wall_poly_item_ == nullptr)
+    {
+        wall_poly_item_ = agv_->scene.addPolygon(QPolygonF(), QPen(Qt::magenta, 0.10), QBrush(Qt::NoBrush));
+        wall_poly_item_->setZValue(9);
+    }
+    if (polygon.closed and polygon.verts.size() >= 3)
+    {
+        QPolygonF poly;
+        for (const auto& v : polygon.verts) poly << QPointF(v.x(), v.y());
+        poly << QPointF(polygon.verts.front().x(), polygon.verts.front().y());
+        wall_poly_item_->setPolygon(poly);
+        QPen pen(Qt::magenta, 0.10);
+        pen.setStyle(map_ready ? Qt::SolidLine : Qt::DashLine);
+        wall_poly_item_->setPen(pen);
+        wall_poly_item_->setVisible(true);
+    }
+    else
+        wall_poly_item_->setVisible(false);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Score grid overlay — soft-toned coloured rectangles per cell
 // ─────────────────────────────────────────────────────────────────────────────
 void Viewer2D::draw_score_grid(const std::vector<std::pair<Eigen::Vector2f, float>>& cells,

@@ -470,16 +470,205 @@ namespace rc::gn
             Eigen::Matrix2f prec_;
         };
 
-        State pack(const std::vector<Eigen::Vector3f>& poses)
+
+        // =====================================================================================
+        //  Wall point factor — one slot's points on ONE wall landmark (Hesse line n(φ)·q = d).
+        //
+        //      q_i = R(θ)p_i + t ,   r_i = n·q_i − d
+        //      ∂r/∂(x,y) = nᵀ ,  ∂r/∂θ = n·(J R p_i) ,  ∂r/∂φ = t(φ)·q_i ,  ∂r/∂d = −1
+        //
+        //  Same weighting convention as SdfFactor: loss = Σ_i a_i·huber_δ(r_i) with
+        //  a_i = 0.5·σ_obs⁻²·w_i·pda/N_slot and huber_δ(r) = 0.5·u·r², u = min(1, δ/|r|). N_slot is
+        //  the slot's TOTAL point count, so the wall terms carry exactly the weight the SDF term they
+        //  replace would have. The IRLS weight in the saturated branch is u/2 (the loss is linear in
+        //  |r| there), which is the exact gradient — see the note in Se2LandmarkFactor.
+        //  This is the S-Graphs+ pose↔plane constraint in 2-D (Bavle et al., arXiv 2212.11770).
+        // =====================================================================================
+        class WallPointFactor final : public IFactor
         {
-            State x(static_cast<int>(poses.size()) * 3);
-            for (size_t i = 0; i < poses.size(); ++i) x.segment<3>(static_cast<int>(i) * 3) = poses[i];
+        public:
+            WallPointFactor(int off_pose, int off_wall, const Eigen::Matrix<float, Eigen::Dynamic, 2>& pts,
+                            const Eigen::VectorXf& weights, float inv_var, float huber_delta,
+                            int n_slot, float pda)
+                : op_(off_pose), ow_(off_wall), pts_(pts), w_(weights),
+                  scale_(0.5f * inv_var * pda / static_cast<float>(std::max(1, n_slot))), delta_(huber_delta) {}
+
+            float evaluate(const State& x) const override
+            {
+                float L = 0.f;
+                const float th = x(op_ + 2), c = std::cos(th), s = std::sin(th);
+                const float phi = x(ow_), d = x(ow_ + 1);
+                const Eigen::Vector2f n(std::cos(phi), std::sin(phi));
+                for (long i = 0; i < pts_.rows(); ++i)
+                {
+                    const float qx = c * pts_(i, 0) - s * pts_(i, 1) + x(op_);
+                    const float qy = s * pts_(i, 0) + c * pts_(i, 1) + x(op_ + 1);
+                    const float r = n.x() * qx + n.y() * qy - d;
+                    const float ar = std::abs(r);
+                    const float u = (ar <= delta_ or ar < 1e-9f) ? 1.f : delta_ / ar;
+                    L += scale_ * wgt(i) * 0.5f * u * r * r;
+                }
+                return L;
+            }
+
+            float linearize(const State& x, LinearSystem& sys) const override
+            {
+                float L = 0.f;
+                const float th = x(op_ + 2), c = std::cos(th), s = std::sin(th);
+                const float phi = x(ow_), d = x(ow_ + 1);
+                const Eigen::Vector2f n(std::cos(phi), std::sin(phi));
+                const Eigen::Vector2f tv(-std::sin(phi), std::cos(phi));
+                Eigen::Matrix<float, 5, 5> H = Eigen::Matrix<float, 5, 5>::Zero();
+                Eigen::Matrix<float, 5, 1> b = Eigen::Matrix<float, 5, 1>::Zero();
+                for (long i = 0; i < pts_.rows(); ++i)
+                {
+                    const float rpx = c * pts_(i, 0) - s * pts_(i, 1);   // R p
+                    const float rpy = s * pts_(i, 0) + c * pts_(i, 1);
+                    const float qx = rpx + x(op_), qy = rpy + x(op_ + 1);
+                    const float r = n.x() * qx + n.y() * qy - d;
+                    const float ar = std::abs(r);
+                    const float u = (ar <= delta_ or ar < 1e-9f) ? 1.f : delta_ / ar;
+                    const float w_irls = (ar <= delta_ or ar < 1e-9f) ? 1.f : 0.5f * u;
+                    const float a = scale_ * wgt(i);
+                    Eigen::Matrix<float, 5, 1> J;
+                    J << n.x(), n.y(), -n.x() * rpy + n.y() * rpx, tv.x() * qx + tv.y() * qy, -1.f;
+                    H.noalias() += (a * w_irls) * J * J.transpose();
+                    b.noalias() += (a * w_irls * r) * J;
+                    L += a * 0.5f * u * r * r;
+                }
+                sys.add_H(op_, op_, Eigen::MatrixXf(H.block<3, 3>(0, 0)));
+                sys.add_H(ow_, ow_, Eigen::MatrixXf(H.block<2, 2>(3, 3)));
+                sys.add_H(op_, ow_, Eigen::MatrixXf(H.block<3, 2>(0, 3)));
+                sys.add_H(ow_, op_, Eigen::MatrixXf(H.block<2, 3>(3, 0)));
+                sys.add_b(op_, Eigen::VectorXf(b.head<3>()));
+                sys.add_b(ow_, Eigen::VectorXf(b.tail<2>()));
+                return L;
+            }
+
+        private:
+            float wgt(long i) const { return (w_.size() > i) ? w_(i) : 1.f; }
+            int op_, ow_;
+            Eigen::Matrix<float, Eigen::Dynamic, 2> pts_;
+            Eigen::VectorXf w_;
+            float scale_, delta_;
+        };
+
+        // =====================================================================================
+        //  Room↔wall factor — the hierarchical Manhattan prior (S-Graphs+ room-to-wall, in 2-D):
+        //      r = wrap(φ − θ₀ − kπ/2),   loss = 0.5·r²/σ_ε²,   ∂r/∂φ = 1,  ∂r/∂θ₀ = −1
+        //  A genuine prior on static parameters, applied every solve (unlike the object-landmark
+        //  BIRTH prior, which was derived through the pose and must be spent once).
+        // =====================================================================================
+        class RoomWallFactor final : public IFactor
+        {
+        public:
+            RoomWallFactor(int off_phi, int off_theta0, int k, float var)
+                : of_(off_phi), ot_(off_theta0), k_(k), lam_(var > 0.f ? 1.f / var : 0.f) {}
+
+            float evaluate(const State& x) const override
+            {
+                const float r = residual(x);
+                return 0.5f * lam_ * r * r;
+            }
+            float linearize(const State& x, LinearSystem& sys) const override
+            {
+                const float r = residual(x);
+                Eigen::MatrixXf L(1, 1); L(0, 0) = lam_;
+                sys.add_H(of_, of_,  L);
+                sys.add_H(ot_, ot_,  L);
+                sys.add_H(of_, ot_, -L);
+                sys.add_H(ot_, of_, -L);
+                Eigen::VectorXf v(1); v(0) = lam_ * r;
+                sys.add_b(of_,  v);
+                sys.add_b(ot_, -v);
+                return 0.5f * lam_ * r * r;
+            }
+            float residual(const State& x) const
+            {
+                return wrap_pi(x(of_) - x(ot_) - static_cast<float>(k_) * static_cast<float>(M_PI) * 0.5f);
+            }
+        private:
+            int of_, ot_, k_;
+            float lam_;
+        };
+
+        // =====================================================================================
+        //  Carried-information priors on the map variables: 0.5·Δᵀ Λ Δ with Δ = (wrap(φ−μ_φ), d−μ_d)
+        //  for a wall and a wrapped scalar for θ₀. Λ is what the DROPPED slots said (see
+        //  absorb_wall_observations) — never the live window.
+        // =====================================================================================
+        class WallPriorFactor final : public IFactor
+        {
+        public:
+            WallPriorFactor(int off, float mu_phi, float mu_d, const Eigen::Matrix2f& prec)
+                : o_(off), mu_phi_(mu_phi), mu_d_(mu_d), prec_(prec) {}
+            float evaluate(const State& x) const override
+            {
+                const Eigen::Vector2f dl = delta(x);
+                return 0.5f * dl.dot(prec_ * dl);
+            }
+            float linearize(const State& x, LinearSystem& sys) const override
+            {
+                const Eigen::Vector2f dl = delta(x);
+                sys.add_H(o_, o_, Eigen::MatrixXf(prec_));
+                const Eigen::Vector2f Ld = prec_ * dl;
+                sys.add_b(o_, Eigen::VectorXf(Ld));
+                return 0.5f * dl.dot(Ld);
+            }
+        private:
+            Eigen::Vector2f delta(const State& x) const
+            { return Eigen::Vector2f(wrap_pi(x(o_) - mu_phi_), x(o_ + 1) - mu_d_); }
+            int o_;
+            float mu_phi_, mu_d_;
+            Eigen::Matrix2f prec_;
+        };
+
+        class Theta0PriorFactor final : public IFactor
+        {
+        public:
+            Theta0PriorFactor(int off, float mu, float lam) : o_(off), mu_(mu), lam_(lam) {}
+            float evaluate(const State& x) const override
+            {
+                const float r = wrap_pi(x(o_) - mu_);
+                return 0.5f * lam_ * r * r;
+            }
+            float linearize(const State& x, LinearSystem& sys) const override
+            {
+                const float r = wrap_pi(x(o_) - mu_);
+                Eigen::MatrixXf L(1, 1); L(0, 0) = lam_;
+                sys.add_H(o_, o_, L);
+                Eigen::VectorXf v(1); v(0) = lam_ * r;
+                sys.add_b(o_, v);
+                return 0.5f * lam_ * r * r;
+            }
+        private:
+            int o_;
+            float mu_, lam_;
+        };
+
+        /// Full state vector in the layout's order: poses, object landmarks, θ₀, walls.
+        State pack_state(const Input& in, const Layout& lay, const std::vector<Eigen::Vector3f>& poses)
+        {
+            State x = State::Zero(lay.idx.total());
+            for (size_t i = 0; i < poses.size(); ++i) x.segment<3>(lay.idx.offset(static_cast<int>(i))) = poses[i];
+            for (int k = 0; k < lay.n_lm; ++k)
+                x.segment<2>(lay.idx.offset(lay.n_pose + k)) = (*in.landmarks)[static_cast<size_t>(k)].p;
+            if (lay.theta0 >= 0) x(lay.theta0) = in.walls->theta0;
+            for (size_t k = 0; k < lay.wall_off.size(); ++k)
+                if (lay.wall_off[k] >= 0)
+                {
+                    x(lay.wall_off[k])     = in.walls->walls[k].phi;
+                    x(lay.wall_off[k] + 1) = in.walls->walls[k].d;
+                }
             return x;
         }
 
-        void unpack(const State& x, std::vector<Eigen::Vector3f>& poses)
+        /// Wrap every angular component of a state: pose yaws, θ₀, wall φ's.
+        void wrap_angles(const Layout& lay, State& x)
         {
-            for (size_t i = 0; i < poses.size(); ++i) poses[i] = x.segment<3>(static_cast<int>(i) * 3);
+            for (int i = 0; i < lay.n_pose; ++i) x(lay.idx.offset(i) + 2) = wrap_pi(x(lay.idx.offset(i) + 2));
+            if (lay.theta0 >= 0) x(lay.theta0) = wrap_pi(x(lay.theta0));
+            for (int o : lay.wall_off) if (o >= 0) x(o) = wrap_pi(x(o));
         }
 
         float total_loss(const FactorList& fs, const State& x)
@@ -490,9 +679,50 @@ namespace rc::gn
         }
     } // namespace
 
-    FactorList build_factors(const Input& in, const VarIndex& idx)
+    Layout make_layout(const Input& in)
+    {
+        Layout lay;
+        if (in.window == nullptr) return lay;
+        for (size_t i = 0; i < in.window->size(); ++i) lay.idx.add(3);
+        lay.n_pose = static_cast<int>(in.window->size());
+        lay.n_lm = (in.landmarks != nullptr) ? static_cast<int>(in.landmarks->size()) : 0;
+        for (int k = 0; k < lay.n_lm; ++k) lay.idx.add(2);       // landmarks are 2-DOF (position-only)
+        if (in.walls != nullptr)
+        {
+            if (in.walls->theta0_born) lay.theta0 = lay.idx.offset(lay.idx.add(1));
+            lay.wall_off.assign(in.walls->walls.size(), -1);
+            for (size_t k = 0; k < in.walls->walls.size(); ++k)
+                lay.wall_off[k] = lay.idx.offset(lay.idx.add(2));
+        }
+        return lay;
+    }
+
+    void absorb_wall_observations(const Input& in, const RoomConcept::WindowSlot& slot,
+                                  const Eigen::Vector3f& pose)
+    {
+        if (in.walls == nullptr or in.params == nullptr or slot.wall_assoc.empty()) return;
+        const auto& P = *in.params;
+        const float inv_var = 1.0f / (P.rfe_obs_sigma * P.rfe_obs_sigma);
+        const int n_slot = slot.lidar_points.defined() ? static_cast<int>(slot.lidar_points.size(0)) : 0;
+        for (const auto& a : slot.wall_assoc)
+        {
+            auto* w = in.walls->find(a.wall_id);
+            if (w == nullptr) continue;
+            // A private 5-variable system: [pose(3), wall(2)]. Only the wall block is kept.
+            LinearSystem sys(5);
+            State x(5);
+            x << pose, w->phi, w->d;
+            WallPointFactor f(0, 3, a.pts, a.weights, inv_var, P.rfe_huber_delta, n_slot, a.pda);
+            f.linearize(x, sys);
+            const Eigen::Matrix2f block = sys.H.block<2, 2>(3, 3);
+            if (block.allFinite()) w->information += block;
+        }
+    }
+
+    FactorList build_factors(const Input& in, const Layout& lay)
     {
         FactorList fs;
+        const VarIndex& idx = lay.idx;
         const auto& W = *in.window;
         const auto& P = *in.params;
         const int n = static_cast<int>(W.size());
@@ -503,8 +733,8 @@ namespace rc::gn
             fs.push_back(std::make_unique<BoundaryFactor>(idx.offset(0), in.boundary_prior->mu,
                                                            in.boundary_prior->precision, in.boundary_weight));
 
-        // --- 2. SDF observation factors
-        for (int i = 0; i < n; ++i)
+        // --- 2. SDF observation factors (none in Estimate mode: the wall factors ARE the observation)
+        for (int i = 0; i < n and not in.no_sdf; ++i)
         {
             if (P.sdf_current_slot_only and i != n - 1) continue;
             const auto& slot = W[static_cast<size_t>(i)];
@@ -621,28 +851,69 @@ namespace rc::gn
             }
         }
 
+        // --- 8. Wall-SLAM (Estimate mode only) ------------------------------------------------
+        if (in.walls != nullptr)
+        {
+            // Gauge: nothing pins trajectory+map until the first marginalisation has produced a
+            // boundary prior. Until then slot 0 sits at the origin with σ_gauge — the first-pose gauge.
+            if (in.gauge_fix and not (in.boundary_prior != nullptr and in.boundary_prior->valid and n > 1))
+            {
+                Eigen::Matrix3f prec = Eigen::Matrix3f::Zero();
+                prec(0, 0) = prec(1, 1) = 1.f / (in.gauge_sigma_xy * in.gauge_sigma_xy);
+                prec(2, 2) = 1.f / (in.gauge_sigma_theta * in.gauge_sigma_theta);
+                fs.push_back(std::make_unique<BoundaryFactor>(idx.offset(0), Eigen::Vector3f::Zero(), prec, 1.f));
+            }
+            // Wall point factors: each slot's observations of each wall it associated.
+            const float inv_var = 1.0f / (P.rfe_obs_sigma * P.rfe_obs_sigma);
+            const int first = (in.wall_max_slots > 0) ? std::max(0, n - in.wall_max_slots) : 0;
+            for (int i = first; i < n; ++i)
+            {
+                const auto& slot = W[static_cast<size_t>(i)];
+                const int n_slot = slot.lidar_points.defined() ? static_cast<int>(slot.lidar_points.size(0)) : 0;
+                for (const auto& a : slot.wall_assoc)
+                {
+                    const int wk = in.walls->index_of(a.wall_id);
+                    if (wk < 0 or lay.wall_off[static_cast<size_t>(wk)] < 0) continue;
+                    fs.push_back(std::make_unique<WallPointFactor>(
+                        idx.offset(i), lay.wall_off[static_cast<size_t>(wk)], a.pts, a.weights,
+                        inv_var, P.rfe_huber_delta, n_slot, a.pda));
+                }
+            }
+            // Carried information (what the dropped slots said) and the hierarchical Manhattan prior.
+            for (size_t k = 0; k < in.walls->walls.size(); ++k)
+            {
+                const auto& w = in.walls->walls[k];
+                const int o = lay.wall_off[k];
+                if (o < 0) continue;
+                if (w.information.allFinite() and w.information.trace() > 0.f)
+                    fs.push_back(std::make_unique<WallPriorFactor>(o, w.phi, w.d, w.information));
+                if (w.k >= 0 and w.manhattan_var > 0.f and lay.theta0 >= 0)
+                    fs.push_back(std::make_unique<RoomWallFactor>(o, lay.theta0, w.k, w.manhattan_var));
+            }
+            if (lay.theta0 >= 0 and in.walls->theta0_information > 0.f)
+                fs.push_back(std::make_unique<Theta0PriorFactor>(lay.theta0, in.walls->theta0, in.walls->theta0_information));
+        }
+
         return fs;
     }
 
     float evaluate(const Input& in, const std::vector<Eigen::Vector3f>& poses)
     {
         if (in.window == nullptr or in.window->empty()) return std::numeric_limits<float>::quiet_NaN();
-        VarIndex idx;
-        for (size_t i = 0; i < in.window->size(); ++i) idx.add(3);
-        const auto fs = build_factors(in, idx);
-        return total_loss(fs, pack(poses));
+        const Layout lay = make_layout(in);
+        const auto fs = build_factors(in, lay);
+        return total_loss(fs, pack_state(in, lay, poses));
     }
 
     float gradient_check(const Input& in, const std::vector<Eigen::Vector3f>& poses, float eps)
     {
         if (in.window == nullptr or in.window->empty()) return std::numeric_limits<float>::quiet_NaN();
-        VarIndex idx;
-        for (size_t i = 0; i < in.window->size(); ++i) idx.add(3);
-        const int n = idx.total();
-        const auto fs = build_factors(in, idx);
+        const Layout lay = make_layout(in);
+        const int n = lay.idx.total();
+        const auto fs = build_factors(in, lay);
         if (fs.empty()) return std::numeric_limits<float>::quiet_NaN();
 
-        const State x = pack(poses);
+        const State x = pack_state(in, lay, poses);
         LinearSystem sys(n);
         for (const auto& f : fs) f->linearize(x, sys);
 
@@ -670,19 +941,14 @@ namespace rc::gn
             return out;
 
         // Same variable layout as solve(), or the blocks below would address the wrong rows.
-        VarIndex idx;
-        for (size_t i = 0; i < in.window->size(); ++i) idx.add(3);
-        const size_t n_lm = (in.landmarks != nullptr) ? in.landmarks->size() : 0;
-        for (size_t k = 0; k < n_lm; ++k) idx.add(2);
+        const Layout lay = make_layout(in);
+        const VarIndex& idx = lay.idx;
         const int n = idx.total();
 
-        const auto fs = build_factors(in, idx);
+        const auto fs = build_factors(in, lay);
         if (fs.empty()) return out;
 
-        State x = State::Zero(n);
-        x.head(static_cast<int>(in.window->size()) * 3) = pack(poses);
-        for (size_t k = 0; k < n_lm; ++k)
-            x.segment<2>(idx.offset(static_cast<int>(in.window->size() + k))) = (*in.landmarks)[k].p;
+        State x = pack_state(in, lay, poses);
 
         LinearSystem sys(n);
         for (const auto& f : fs) f->linearize(x, sys);
@@ -729,20 +995,15 @@ namespace rc::gn
             in.window->empty() or poses.size() != in.window->size())
             return res;
 
-        VarIndex idx;
-        for (size_t i = 0; i < in.window->size(); ++i) idx.add(3);
-        const int n_pose = idx.total();
-        const size_t n_lm = (in.landmarks != nullptr) ? in.landmarks->size() : 0;
-        for (size_t k = 0; k < n_lm; ++k) idx.add(2);       // landmarks are 2-DOF (position-only)
+        const Layout lay = make_layout(in);
+        const VarIndex& idx = lay.idx;
+        const size_t n_lm = static_cast<size_t>(lay.n_lm);
         const int n = idx.total();
 
-        const auto fs = build_factors(in, idx);
+        const auto fs = build_factors(in, lay);
         if (fs.empty()) return res;
 
-        State x = State::Zero(n);
-        x.head(n_pose) = pack(poses);
-        for (size_t k = 0; k < n_lm; ++k)
-            x.segment<2>(idx.offset(static_cast<int>(in.window->size() + k))) = (*in.landmarks)[k].p;
+        State x = pack_state(in, lay, poses);
         float loss = total_loss(fs, x);
         res.loss_init = loss;
         if (not std::isfinite(loss)) return res;
@@ -782,8 +1043,7 @@ namespace rc::gn
             }
 
             State x_try = x + step;
-            for (size_t k = 0; k < in.window->size(); ++k)          // yaw wrap: pose blocks only
-                x_try(idx.offset(static_cast<int>(k)) + 2) = wrap_pi(x_try(idx.offset(static_cast<int>(k)) + 2));
+            wrap_angles(lay, x_try);                                // pose yaws, θ₀ and wall φ's
             const float loss_try = total_loss(fs, x_try);
 
             // Gain ratio: how much of the reduction the LOCAL MODEL promised did we actually get.
@@ -847,6 +1107,27 @@ namespace rc::gn
                         lm.information = c.inverse();
                 }
                 lm.has_prior = false;   // the birth prior is spent; never re-applied
+            }
+        }
+
+        if (in.walls != nullptr)
+        {
+            // The map variables move with the solve; their INFORMATION does not (see
+            // absorb_wall_observations). room_factor_dF is the converged cost of each wall's Manhattan
+            // factor — the number that says "this one is a chamfer" without gating anything.
+            if (lay.theta0 >= 0) in.walls->theta0 = wrap_pi(x(lay.theta0));
+            for (size_t k = 0; k < in.walls->walls.size(); ++k)
+            {
+                auto& w = in.walls->walls[k];
+                const int o = lay.wall_off[k];
+                if (o < 0) continue;
+                w.phi = wrap_pi(x(o));
+                w.d   = x(o + 1);
+                if (w.k >= 0 and w.manhattan_var > 0.f and lay.theta0 >= 0)
+                {
+                    const float r = wrap_pi(w.phi - in.walls->theta0 - static_cast<float>(w.k) * static_cast<float>(M_PI) * 0.5f);
+                    w.room_factor_dF = 0.5f * r * r / w.manhattan_var;
+                }
             }
         }
 

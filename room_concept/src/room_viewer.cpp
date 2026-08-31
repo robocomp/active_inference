@@ -344,6 +344,11 @@ void RoomViewer::update_viewer(const std::optional<rc::RoomConcept::UpdateResult
     else
         viewer_2d_->draw_corners({}, pose_for_draw);
 
+    // Wall-SLAM overlay (Estimate mode): the walls as they are born, the derived polygon, the corners.
+    if (have_loc && room_concept_ && room_concept_->estimating())
+        viewer_2d_->draw_wall_map(loc_res->wall_view.segments, loc_res->wall_view.walls,
+                                  loc_res->wall_view.polygon, loc_res->wall_view.map_ready, pose_for_draw);
+
     // RGB triple points beside them. Read through triple_points(), NOT image_edges(): that holder is
     // emptied by take_image_edges() the moment a slot consumes it, so peeking there would draw
     // corners only on the tick the viewer happened to win the race against the solver.

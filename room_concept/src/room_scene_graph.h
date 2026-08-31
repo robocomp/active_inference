@@ -181,6 +181,11 @@ private:
     void log_table_landmarks();
     void load_robot_body_dimensions_from_graph();
     void dsr_create_wall_nodes();
+    // Adoption path: walls created before the floor existed hang from the room; move them under the
+    // floor (identity RT to the room, so no pose changes) and drop the stale room->wall RT edge.
+    void re_parent_walls_onto_floor(const std::vector<DSR::Node>& walls,
+                                    DSR::Node& floor_node,
+                                    const std::vector<Eigen::Vector2f>& polygon);
 
     std::shared_ptr<DSR::DSRGraph> G_;
     DSR::RT_API*                   rt_api_       = nullptr;   // worker-owned, injected
@@ -288,6 +293,7 @@ private:
     std::uint64_t dsr_room_id_  = 0;
     bool          room_node_created_ = false;
     int           stable_frames_     = 0;
+    std::size_t published_polygon_verts_ = 0;   // Estimate mode: vertex count last written to the room node
     // Sustained-stability counter for the object-anchor PIN guard. Distinct from stable_frames_, which
     // only runs BEFORE the room node exists (bootstrap) and is reset by every re-anchor: pinning happens
     // in the steady state, long after that counter has stopped being maintained.

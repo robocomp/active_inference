@@ -98,6 +98,12 @@ private:
     // reach the localizer. Re-armed by start() so it re-runs on each Operating entry.
     void accumulate_geometry_sample(const std::vector<Eigen::Vector3f>& sweep_body);
     void run_startup_geometry_check();
+    /// The ceiling half of the geometry check, callable FOREVER: locate the ceiling plane in the
+    /// (leaky) z / z×r histograms with the annulus-vs-wall-top likelihood test and cap high_max_z_
+    /// at (ceiling − margin). One-shot at startup was not enough: a verdict taken from wherever the
+    /// robot happened to boot froze the band, and a missed ceiling then fed the 2-D wall model
+    /// interior rings for the rest of the run (the wall-SLAM hairball). Logs on VERDICT CHANGE only.
+    void update_ceiling_cap(bool startup);
 
     std::shared_ptr<DSR::DSRGraph> G_;
     rc::RoomConcept*      room_concept_ = nullptr;
@@ -117,11 +123,20 @@ private:
     // Startup geometry-check state (ingest thread only; re-armed by start()).
     bool  geom_check_done_ = false;
     int   geom_sweeps_     = 0;
-    std::vector<int> geom_hist_;   // helios z-histogram (walls/ceiling; floor is grazing/high)
+    // Helios z-histogram (walls/ceiling; floor is grazing/high). LEAKY floats: after the startup
+    // check these stay alive, decayed per sweep, so the ceiling verdict can be re-taken as the robot
+    // moves (~20 s memory). ⚠ the leak is a time constant.
+    std::vector<float> geom_hist_;
     // Joint (z-bin × horizontal-radius-bin) helios histogram, for the ceiling perimeter-vs-interior test:
     // a real ceiling fills the interior (returns CLOSER than the walls), a wall-top ring sits at the wall
-    // range. Row-major [z_bin * GEOM_NR + r_bin]. Dropped with geom_hist_ after the one-shot check.
-    std::vector<int> geom_rz_hist_;
+    // range. Row-major [z_bin * GEOM_NR + r_bin]. Same leaky lifetime as geom_hist_.
+    std::vector<float> geom_rz_hist_;
+    static constexpr float kGeomLeak = 0.995f;      // per sweep (~200-sweep memory)
+    static constexpr int   kCeilRecheckSweeps = 100; // re-take the ceiling verdict every ~5-10 s
+    int   ceil_recheck_counter_ = 0;
+    int   last_ceiling_verdict_ = -9;                // -9 never, 1 ceiling, 0 wall-top, 2 inconclusive, 3 none
+    float last_ceiling_cap_     = -1.f;
+    std::optional<double> geom_base_z_;              // root<-robot height cached at startup
     // bpearl (downward dome) is the HEAD-ON floor sensor — its own z-histogram is the floor calibration
     // datum. Comes up later than helios → warm-up counter; separate reader dropped after the check.
     int   geom_bpearl_sweeps_ = 0;

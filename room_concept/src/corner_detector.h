@@ -3,6 +3,7 @@
 #include <vector>
 #include <optional>
 #include <Eigen/Dense>
+#include "line_fit.h"
 
 namespace rc {
 
@@ -345,25 +346,17 @@ private:
     /// original polygon index → slot in model_corners_/yield_, for attributing a match back.
     std::vector<int>   slot_of_original_;
 
-    /// 2D line: normal · p = d   (normal is unit length)
-    struct Line2D
-    {
-        Eigen::Vector2f normal;
-        float d;
-        float resid_var = 0.f;   // λ_min / N — mean squared perpendicular scatter of the fitted points
-                                 // about the line (≈ sensor noise for a clean wall; large for a cluttered
-                                 // gather). Inflates σ_L so a poorly-fit wall is trusted less.
-        int   npts = 0;          // number of points the line was fit to
-        Eigen::Vector2f direction() const { return Eigen::Vector2f(-normal.y(), normal.x()); }
-    };
+    /// 2D line in Hesse form. Shared with the wall segmenter — see line_fit.h.
+    using Line2D = linefit::Line2D;
 
-    /// PCA line fit — returns nullopt if fewer than min_points.
-    static std::optional<Line2D> fit_line_pca(const std::vector<Eigen::Vector2f>& pts,
-                                               int min_points);
+    /// PCA line fit — returns nullopt if fewer than min_points. Forwards to linefit (one definition).
+    static std::optional<Line2D> fit_line_pca(const std::vector<Eigen::Vector2f>& pts, int min_points)
+    { return linefit::fit_line_pca(pts, min_points); }
 
     /// Intersect two lines.  Returns nullopt if (nearly) parallel.
     static std::optional<Eigen::Vector2f> intersect(const Line2D& a, const Line2D& b,
-                                                     float* angle_deg = nullptr);
+                                                    float* angle_deg = nullptr)
+    { return linefit::intersect(a, b, angle_deg); }
 };
 
 } // namespace rc

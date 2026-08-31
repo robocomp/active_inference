@@ -892,6 +892,23 @@ ImuLinearInjection  = true   # Add the accelerometer's within-segment double int
 # optimizer's own posterior covariance, so an uninformative episode (parked robot: H -> 0) and a
 # low-confidence correction both teach ~nothing without any threshold saying so.
 MotionCalibEnabled  = true   # ⚠ THE A/B THAT CONCLUDED "keep it on" WAS RUN ON P3Bot, 2026-08-22:
+# ── OPEN-LOOP ARM: ESTIMATE, BUT DO NOT APPLY ────────────────────────────────────────────────────
+# false severs the calibrator's output from the odometry while it keeps learning and logging.
+# ★ It exists to test ONE prediction. The estimator's covariate is the POST-scaled odometry and an
+# episode records nothing about which parameter values were active when it was written, so once a
+# value is applied later episodes report only the error REMAINING after it acted, while the batch
+# re-solves the window as though those leftovers were totals. That caps recovery at 50%:
+# v = k* S/(2S+P0). Measured 2026-08-30 against a +3% injected forward-scale error, the unweighted
+# prior-free slope of the saved window was 49.8% of the true deviation — the ceiling, almost exactly.
+# With apply=false the covariate stays raw and the residual stays the FULL error, so recovery should
+# jump toward 100%. Any account not involving feedback predicts no change.
+# ⚠ TRUE for all normal operation. The robot drives UNCALIBRATED while this is false.
+MotionCalibApply    = true    # normal operation. false = open-loop arm (estimate, do not apply).
+# Which parameters may ACT, bitmask: 1=k_v 2=eps_yaw 4=k_omega 8=b_omega 16=k_lat 32=dk_wheel.
+# -1 = all (normal). 1 = forward scale only, which is the arm 3 follow-up: with everything applied
+# translation was unchanged and HEADING got worse (1.699 -> 2.955 deg/rad, t=-2.45), and the heading
+# parameters are the badly-conditioned ones. Estimation and logging are unaffected either way.
+MotionCalibApplyMask = 1      # ARM: k_v only. Set back to -1 when the arm is done.
                         # 262 m ON vs 105 m OFF, per-60s windows, bursts excluded, err/m 0.0263 ->
                         # 0.0303 when OFF (+14.9%, t=2.67 z=2.31). It lowers the error FLOOR; it does
                         # not flatten the sawtooth — a ramp of the same slope starts lower and takes
@@ -1046,6 +1063,54 @@ PredictionTrustFactor           = 0.7    # threshold = SigmaSdf x factor -> 10.5
 RotationSdfCoupling             = 0.5
 BoundaryHessianQualityThreshold = 0.051
 BoundaryMuQualityThreshold      = 0.084
+
+# ══ ROOM SHAPE — learn the layout instead of loading it (wall-SLAM) ═══════════════════════════
+# MapMode is the ONE switch for the whole feature.
+#   "given"    — today's agent, byte for byte: the scenario's RoomLayoutSvg is loaded and localised
+#                against; nothing else in this table is read.
+#   "estimate" — no layout is loaded. Walls are LANDMARKS (Hesse lines, S-Graphs+ style, 2-D), each
+#                a variable of the same solve as the pose window; corners are DERIVED from adjacent
+#                walls; the polygon is published once it closes and its corners are sharp enough,
+#                after a one-shot re-anchoring of the frame to the bbox centre with θ₀ = 0 (what the
+#                fleet expects of a room frame). The first pose is the origin until then.
+#                After closure the walls stay variables (their precision only grows) and a new wall
+#                can still be born by model comparison — there is no second gate inside this mode.
+[RoomShape]
+MapMode              = "given"
+# σ_ε of the hierarchical Manhattan prior φᵢ − θ₀ − kπ/2 ~ N(0, σ_ε²) — a tight PRIOR, not a hard
+# constraint: a chamfer is born class-less (no factor) when no class beats ManhattanOffPrior.
+ManhattanSigmaDeg    = 2.0
+ManhattanOffPrior    = 0.1      # prior mass of "this wall obeys no class"
+SensorSigma          = 0.02     # m — LiDAR range noise perpendicular to a wall (physical)
+# MODEL error of a wall between views (multi-ring spread, band mixing heights, calibration bias) —
+# enters the association/merge innovation so a re-observed wall ASSOCIATES instead of birthing a
+# twin. The corner detector's map_sigma lesson; without it a live run bred 490 walls from six.
+WallMapSigmaD        = 0.04     # m
+WallMapSigmaPhiDeg   = 1.0      # deg
+SensorRange          = 15.0     # m — extent of the uniform prior on a wall's offset (Occam term)
+# ⚠ Decision constants that could not be modelled away (each is a discrete decision):
+SegmentChi2          = 3.841    # χ²₁ @95% — fallback inlier band + the corner endpoint test. The
+                                # inlier band itself is DERIVED from the clutter model (≈3σ).
+AssocChi2            = 5.991    # χ²₂ @95% — segment↔wall association gate (as the corner detector)
+MergeChi2            = 5.991    # χ²₂ @95% — two segments/walls statistically one
+WallBirthNats        = 4.605    # ln 100 — decisive Bayes factor for bearing a wall
+BirthMinFrames       = 2        # a landmark needs a second view (tracker-only birth)
+PublishCornerSigma   = 0.06     # m — every derived corner this sharp before publishing (= corner map_sigma)
+VoteLeak             = 0.02     # per frame — adjacency evidence fades (~2.5 s at 20 Hz) so a structure
+                                # change can win against old corners
+# The step-back operator, PER EXTENT BIN (the residual layer's lesson, one level up): a beam that
+# passes THROUGH a bin of a wall's extent refutes that bin (weighted by P(detect)); a return short
+# of it is occlusion and holds; dead END bins shrink the extent; a wall dies only when every bin is
+# refuted, at −WallBirthNats — symmetric with birth. A wall out of view never decays (no timer).
+ExistRefutePdet      = 0.5      # P(detect) weight of a pass-through beam vs a supporting one
+ExistBinM            = 0.25     # m — extent bin width (spatial resolution of refutation)
+RansacConfidence     = 0.99
+RansacMaxIters       = 200
+MinPointsPerSegment  = 3        # PCA needs ≥3 for a residual DOF
+MaxSegments          = 16
+GaugeSigmaXY         = 0.001    # m   — first-pose gauge fix (not a model term)
+GaugeSigmaTheta      = 0.001    # rad
+WallMaxSlots         = 0        # wall factors on the newest N slots; 0 = every slot
 
 [DSR]
 StableSdfMseMax = 0.076   # unified 2026-08-29; P3Bot ran the 0.06 default only because its file was silent

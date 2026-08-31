@@ -77,6 +77,48 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
         p.ROOM_LAYOUT_SVG = svg_file;
     });
     rc::ConfigLoaderUtils::load_optional<std::string>(cl, "RoomConcept.LayoutDir", p.LAYOUT_DIR);
+
+    // ── [RoomShape] wall-SLAM: estimate the layout instead of loading it ───────────────────────
+    // MapMode is the ONE switch; absent ⇒ "given" ⇒ nothing else in this block has any effect.
+    rc::ConfigLoaderUtils::load_optional_apply<std::string>(cl, "RoomShape.MapMode", [&](const std::string& m)
+    {
+        p.MAP_MODE = m;
+        room_concept.params.map_mode = (m == "estimate") ? rc::RoomConcept::Params::MapMode::Estimate
+                                                         : rc::RoomConcept::Params::MapMode::Given;
+        if (m != "estimate" and m != "given")
+            qWarning() << "[cfg] RoomShape.MapMode" << QString::fromStdString(m) << "is not 'given'|'estimate' — treated as given";
+    });
+    {
+        auto& ws = room_concept.params.wall_seg;
+        auto& wm = room_concept.params.wall_map;
+        float deg = std::numeric_limits<float>::quiet_NaN();
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.ManhattanSigmaDeg", deg);
+        if (std::isfinite(deg)) wm.manhattan_sigma_rad = deg * static_cast<float>(M_PI) / 180.f;
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.ManhattanOffPrior", wm.manhattan_off_prior);
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.SensorSigma", ws.sensor_sigma);
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.WallMapSigmaD", wm.map_sigma_d);
+        float msp = std::numeric_limits<float>::quiet_NaN();
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.WallMapSigmaPhiDeg", msp);
+        if (std::isfinite(msp)) wm.map_sigma_phi_rad = msp * static_cast<float>(M_PI) / 180.f;
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.SegmentChi2", ws.chi2_inlier);
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.MergeChi2", ws.chi2_merge);
+        wm.merge_chi2 = ws.chi2_merge;
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.AssocChi2", wm.assoc_chi2);
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.RansacConfidence", ws.ransac_confidence);
+        rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomShape.RansacMaxIters", ws.ransac_max_iters);
+        rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomShape.MinPointsPerSegment", ws.min_points);
+        rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomShape.MaxSegments", ws.max_segments);
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.SensorRange", wm.sensor_range);
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.WallBirthNats", wm.birth_nats);
+        rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomShape.BirthMinFrames", wm.birth_min_frames);
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.PublishCornerSigma", wm.publish_corner_sigma);
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.VoteLeak", wm.vote_leak);
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.ExistRefutePdet", wm.exist_refute_pdet);
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.ExistBinM", wm.exist_bin_m);
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.GaugeSigmaXY", room_concept.params.wall_gauge_sigma_xy);
+        rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomShape.GaugeSigmaTheta", room_concept.params.wall_gauge_sigma_theta);
+        rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomShape.WallMaxSlots", room_concept.params.wall_max_slots);
+    }
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.RecenterRoomPolygon", p.RECENTER_ROOM_POLYGON);
     // Ceiling height (m). Sets the room DSR node's room_height attribute (walls/ceiling overlay) and
     // the EXPECTED ceiling location for the LiDAR startup geometry check. Set it explicitly for rooms
@@ -120,6 +162,8 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     });
 
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.MotionCalibEnabled", room_concept.params.motion_calib.enabled);
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.MotionCalibApply", room_concept.params.motion_calib.apply);
+    rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.MotionCalibApplyMask", room_concept.params.motion_calib.apply_mask);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.ImuLinearInjection", room_concept.params.imu_linear_injection);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.OdomVarianceInjection", room_concept.params.odom_variance_injection);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.MotionCalibYawP0", room_concept.params.motion_calib.yaw_p0);

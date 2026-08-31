@@ -179,6 +179,8 @@ struct RoomConfig
     // Localizer
     bool        PREDICTION_EARLY_EXIT = true;
     std::string OptimizerType         = "LBFGS";
+    /// RoomShape.MapMode: "given" (load the layout — today's agent) or "estimate" (learn it).
+    std::string MAP_MODE              = "given";
     std::string ROOM_LAYOUT_SVG       = "beta_layout.svg";  // config: RoomConcept.RoomLayoutSvg
     // Put the room-frame origin on the layout's geometric (bounding-box) centre instead of wherever
     // the SVG author happened to place (0,0). Only affects plans traced from a corner

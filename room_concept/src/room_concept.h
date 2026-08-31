@@ -15,6 +15,7 @@
 #include <string>
 #include <fstream>
 #include <functional>
+#include <random>
 
 // ---- PyTorch vs Qt macros (slots/signals/emit) ----
 // Qt uses 'slots' as a macro. PyTorch/libtorch has methods named slots(), which breaks compilation.
@@ -52,6 +53,7 @@
 #include "buffer_types.h"
 #include "room_model.h"
 #include "corner_detector.h"
+#include "wall_map.h"
 #include "rerun_logger.h"
 #include "object_anchor_types.h"
 #include "object_anchor_factor.h"
@@ -674,6 +676,20 @@ public:
         float object_anchor_early_exit_sigma = 2.0f;   // prediction early-exit gate: whitened anchor-residual
                                                        // σ-cutoff above which the optimizer is forced to run
 
+        // ===== Wall-SLAM: estimate the room layout instead of loading it (RoomShape.MapMode) =====
+        // The ONE switch for the whole feature. Given ⇒ today's agent, byte for byte: nothing below is
+        // read. Estimate ⇒ no layout is loaded; walls are landmarks (wall_map.h), the wall point factors
+        // replace the SDF factor, the first pose is the origin until the polygon closes and is
+        // re-anchored to the bbox-centred frame the fleet expects (reanchor_map_frame). No second gate
+        // inside Estimate mode: freezing is by accumulated precision, structure change by ΔF.
+        enum class MapMode { Given, Estimate };
+        MapMode map_mode = MapMode::Given;
+        wallseg::Params wall_seg;              // segmenter: sensor σ, χ² levels, RANSAC budget
+        wallmap::Params wall_map;              // association, birth, Manhattan prior, publish bar
+        float wall_gauge_sigma_xy = 1e-3f;     // m — first-pose gauge fix (a gauge, not a model term)
+        float wall_gauge_sigma_theta = 1e-3f;  // rad
+        int   wall_max_slots = 0;              // wall factors on the newest N slots (0 ⇒ every slot)
+
         // Torch threading configuration. The window solve is a tiny problem (3 DOF × ~5 slots ×
         // ~400 pts), so intra-op parallelism mostly buys thread-dispatch overhead, not speed, while
         // pinning that many cores. Applied in start() (set_num_threads is runtime-safe), config key
@@ -815,6 +831,21 @@ public:
 
         // The lidar scan used for this result (robot frame, synchronized with robot_pose)
         std::vector<Eigen::Vector3f> lidar_scan;
+
+        // Wall-SLAM snapshot for the viewer (Estimate mode only; empty otherwise).
+        struct WallView
+        {
+            std::vector<wallseg::WallSegment>  segments;    // this frame, robot frame
+            std::vector<wallmap::WallLandmark> walls;       // map frame
+            wallmap::Polygon polygon;
+            std::vector<int> seg_to_wall;
+            bool  theta0_born = false;
+            float theta0 = 0.f;
+            int   candidates = 0;
+            int   births = 0;
+            bool  map_ready = false;
+        };
+        WallView wall_view;
     };
 
     struct OdometryPrior
@@ -1036,9 +1067,25 @@ public:
     // ----- Initialization configuration -----
     void configure_room_from_polygon(const std::vector<Eigen::Vector2f>& polygon_vertices);
     void configure_room_from_rect(float width, float length);
+    /// Estimate mode: no layout. The first scan seeds a placeholder box (viewers only); the walls
+    /// learnt from the LiDAR replace it as soon as they close.
+    void configure_room_estimate();
+    bool estimating() const { return params.map_mode == Params::MapMode::Estimate; }
+    /// Estimate mode: the polygon closed, was re-anchored and may be published. Given mode: always.
+    bool map_ready() const { return not estimating() or map_ready_.load(); }
+    /// Recovery, relocalisation, symmetry and the prediction early-exit all judge a pose against the
+    /// MAP. Until there is one (Estimate mode before closure) they have nothing to judge against.
+    bool map_guided_checks_allowed() const { return map_ready(); }
     const std::vector<Eigen::Vector2f>& polygon_vertices() const { return init_polygon_vertices_; }
     std::vector<Eigen::Vector2f> nominal_room_polygon() const
     {
+        if (estimating())
+        {
+            // The DERIVED polygon (empty until the walls close). Read from the main thread by the
+            // scene graph and the viewer while the localisation thread rewrites it: hence the lock.
+            std::scoped_lock lk(wall_map_mutex_);
+            return derived_polygon_;
+        }
         if (init_use_polygon_ && init_polygon_vertices_.size() >= 3)
             return init_polygon_vertices_;
 
@@ -1124,6 +1171,11 @@ public:
             Eigen::Matrix2f information = Eigen::Matrix2f::Identity();
         };
         std::vector<CornerObs> corner_obs;
+
+        // Wall-SLAM (MapMode = Estimate): this slot's observations of the wall landmarks, in ITS robot
+        // frame, as the segmenter/associator left them. Consumed by gn::WallPointFactor; folded into
+        // the walls' carried information when the slot is dropped (gn::absorb_wall_observations).
+        std::vector<wallmap::WallAssoc> wall_assoc;
 
         // Batched corner constants (built ONCE from corner_obs, reused every optimizer closure).
         // The per-corner world corner / robot-frame detection / anisotropic precision Λ_det do NOT
@@ -1621,6 +1673,26 @@ private:
 
     // Corner detector
     CornerDetector corner_detector_;
+
+    // ===== Wall-SLAM state (Estimate mode) =====
+    wallmap::WallMap wall_map_;
+    std::mt19937     wall_rng_{12345};
+    mutable std::mutex wall_map_mutex_;              // guards derived_polygon_ (read by the main thread)
+    std::vector<Eigen::Vector2f> derived_polygon_;   // the published polygon (map frame, CCW)
+    std::atomic<bool> map_ready_{false};
+    bool wall_reanchored_ = false;
+    std::vector<wallseg::WallSegment> last_wall_segments_;   // this frame's segments (viewer)
+    wallmap::FrameResult last_wall_frame_;
+    std::string last_wall_status_;                   // last polygon status logged (log on change only)
+    int wall_stat_frames_ = 0, wall_stat_assoc_ = 0, wall_stat_segs_ = 0,
+        wall_stat_twins_ = 0, wall_stat_births_ = 0, wall_stat_deaths_ = 0;   // rate-limited health counters
+    /// Segment the newest slot's scan, associate to the walls, store the associations in the slot.
+    void wall_slam_observe(const std::vector<Eigen::Vector3f>& points, const Eigen::Vector3f& pose,
+                           std::int64_t timestamp_ms);
+    /// After the solve: merge, derive the polygon, re-anchor once it is publishable, fill the view.
+    void wall_slam_after_solve(UpdateResult& res);
+    /// One-shot gauge change p' = R(−rot)(p − c) over everything that lives in the map frame.
+    void reanchor_map_frame(const Eigen::Vector2f& c, float rot);
 
     // Startup initialization configuration
     bool init_use_polygon_ = false;

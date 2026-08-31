@@ -94,6 +94,8 @@ LIST(APPEND SOURCES
   ../src/timeseries_plot.cpp
   ../src/calibration_viewer.cpp
   ../src/corner_detector.cpp
+  ../src/wall_segmenter.cpp
+  ../src/wall_map.cpp
   ../src/object_anchor_factor.cpp
   ../src/object_anchor_source.cpp
   ../src/camera_ingestor.cpp
@@ -139,12 +141,38 @@ add_executable(gn_selftest EXCLUDE_FROM_ALL
   ../src/image_edge_factor.cpp
   ../src/image_edge_source.cpp
   ../src/corner_detector.cpp
+  ../src/wall_segmenter.cpp
+  ../src/wall_map.cpp
   ../src/pointcloud_center_estimator.cpp
   ../src/rerun_logger.cpp
 )
 target_include_directories(gn_selftest PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
 target_link_libraries(gn_selftest ${LIBS})
 set_target_properties(gn_selftest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
+
+# ── wall_slam_selftest ────────────────────────────────────────────────────────
+# Offline validation of the wall-SLAM layer (wall_segmenter + wall_map + the wall factor family in
+# room_gn_solver): segmenter recall on ray-cast scans of a known L-shaped room, analytic Jacobians of
+# the new factors vs finite differences, and the full estimate→closure→republish loop with pose and
+# polygon error against the synthetic truth. EXCLUDE_FROM_ALL like gn_selftest. Build with:
+#     make -C build wall_slam_selftest && ./bin/wall_slam_selftest
+add_executable(wall_slam_selftest EXCLUDE_FROM_ALL
+  ../tools/wall_slam_selftest.cpp
+  ../src/room_gn_solver.cpp
+  ../src/room_model.cpp
+  ../src/room_concept.cpp
+  ../src/object_anchor_factor.cpp
+  ../src/image_edge_factor.cpp
+  ../src/image_edge_source.cpp
+  ../src/corner_detector.cpp
+  ../src/wall_segmenter.cpp
+  ../src/wall_map.cpp
+  ../src/pointcloud_center_estimator.cpp
+  ../src/rerun_logger.cpp
+)
+target_include_directories(wall_slam_selftest PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
+target_link_libraries(wall_slam_selftest ${LIBS})
+set_target_properties(wall_slam_selftest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
 
 # ── motion_calib ──────────────────────────────────────────────────────────────
 # Calibrates the preintegrated motion model's noise DENSITIES and SCALE errors from a logged run, by

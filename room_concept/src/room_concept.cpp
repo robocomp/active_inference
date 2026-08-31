@@ -48,11 +48,19 @@ namespace rc
     // NOTE: these two are declared in room_obs_weights.h (external linkage) rather than living in the
     // anonymous namespace, so room_gn_solver builds its analytic Jacobian from the SAME weights this
     // loss uses. Bodies unchanged.
-        torch::Tensor build_observation_weights(const Model& model,
+        torch::Tensor build_observation_weights(const Model& /*model*/,
                                                 const RoomConcept::Params& params,
                                                 const torch::Tensor& points_robot,
                                                 const torch::Tensor& pose_theta,
                                                 const Model::SdfQueryResult& query)
+        {
+            return weights_from_normals(params, points_robot, pose_theta, query.closest_normals);
+        }
+
+        torch::Tensor weights_from_normals(const RoomConcept::Params& params,
+                                           const torch::Tensor& points_robot,
+                                           const torch::Tensor& pose_theta,
+                                           const torch::Tensor& normals_in)
         {
             auto weights = torch::ones({points_robot.size(0)}, points_robot.options());
             bool any_weighting = false;
@@ -72,7 +80,7 @@ namespace rc
                 any_weighting = true;
             }
 
-            if (params.incidence_angle_weight && query.closest_normals.defined() && query.closest_normals.numel() > 0)
+            if (params.incidence_angle_weight && normals_in.defined() && normals_in.numel() > 0)
             {
                 auto pts_xy = points_robot.index(
                     {torch::indexing::Slice(), torch::indexing::Slice(0, 2)});
@@ -88,7 +96,7 @@ namespace rc
                 });
                 auto ray_dirs_room = torch::matmul(ray_dirs_robot, rot.transpose(0, 1));
 
-                auto normals = query.closest_normals;
+                auto normals = normals_in;
                 auto normal_norms = torch::norm(normals, 2, /*dim=*/1).clamp_min(kObsWeightEps);
                 auto normals_unit = normals / normal_norms.unsqueeze(1);
 
@@ -542,6 +550,37 @@ namespace rc
             return true;
         if (run_ctx_.high_lidar_buffer == nullptr)
             return false;
+
+        if (estimating())
+        {
+            // No layout, no seed, no search: the first pose IS the origin of the map frame. The model
+            // still needs SOME polygon to exist (the viewer, the SDF paths Estimate mode never
+            // optimises against): the scan's oriented bounding box, until the walls replace it.
+            std::vector<Eigen::Vector3f> pts;
+            {
+                const auto& [lidar_from_buffer] = run_ctx_.high_lidar_buffer->read_last();
+                if (lidar_from_buffer.has_value()) pts = lidar_from_buffer->first;
+            }
+            if (pts.empty()) return false;
+            std::vector<Eigen::Vector2f> placeholder = {{-10.f, -10.f}, {10.f, -10.f}, {10.f, 10.f}, {-10.f, 10.f}};
+            PointcloudCenterEstimator estimator;
+            if (const auto obb = estimator.estimate_obb(pts); obb.has_value())
+            {
+                const Eigen::Rotation2Df Rb(static_cast<float>(obb->rotation));
+                const Eigen::Vector2f c = obb->center.cast<float>();
+                const float hw = static_cast<float>(obb->width) * 0.5f, hh = static_cast<float>(obb->height) * 0.5f;
+                if (hw > 0.1f and hh > 0.1f)
+                    placeholder = {c + Rb * Eigen::Vector2f(-hw, -hh), c + Rb * Eigen::Vector2f(hw, -hh),
+                                   c + Rb * Eigen::Vector2f(hw, hh),   c + Rb * Eigen::Vector2f(-hw, hh)};
+            }
+            init_use_polygon_ = false;          // no MODEL corners ⇒ the model-guided corner detector stays off
+            init_polygon_vertices_.clear();
+            set_polygon_room(placeholder);
+            set_robot_pose(0.f, 0.f, 0.f, false);
+            qInfo() << "[room][wall-slam] Estimate mode: origin = first pose; placeholder box from the scan's OBB"
+                    << "until the walls close.";
+            return true;
+        }
 
         Eigen::Vector2f init_xy = Eigen::Vector2f::Zero();
         float init_phi = 0.f;
@@ -1008,7 +1047,7 @@ namespace rc
                 // recovery fire on a signal running some 15-20% high, i.e. earlier than the
                 // threshold says. Comparing like with like restores the documented meaning.
                 const float avg_sdf_err = std::max(res.sdf_mse, res.pred_sdf_median);
-                if (recovery_.check(avg_sdf_err, res.iterations_used,
+                if (map_guided_checks_allowed() and recovery_.check(avg_sdf_err, res.iterations_used,
                                     params.recovery_loss_threshold, params.recovery_consecutive_count))
                 {
                     qWarning() << "[LocThread] Recovery triggered after" << recovery_.consecutive_bad_frames
@@ -1028,7 +1067,7 @@ namespace rc
             // map-trust belief exp(u_b_) collapsing (the map no longer explains the robot) rather than a raw
             // sdf threshold. u_b_ was just updated this frame (optimized path) or nudged (early-exit rotation),
             // so it is current here. Coexists with recovery_ (independent backstop). See HIERARCHICAL_PRECISION.md.
-            if (params.hier_prec_reloc_enabled && params.hier_prec_boundary_enabled)
+            if (params.hier_prec_reloc_enabled && params.hier_prec_boundary_enabled && map_guided_checks_allowed())
             {
                 if (map_trust_reloc_cooldown_ > 0)
                     --map_trust_reloc_cooldown_;
@@ -1063,7 +1102,7 @@ namespace rc
             //   refl_x  : ( x, -y,   −θ)   — X-axis reflection
             //   rot180_y: (-x,  y,  θ+π)   — combined rot+refl (same as rot180 ∘ refl_y)
             if (params.symmetry_check_interval > 0
-                && res.iterations_used > 0)
+                && res.iterations_used > 0 && map_guided_checks_allowed())
             {
                 ++symmetry_check_counter_;
                 if (symmetry_check_counter_ >= params.symmetry_check_interval)
@@ -1890,6 +1929,190 @@ namespace rc
     }
 
 
+    void RoomConcept::configure_room_estimate()
+    {
+        init_use_polygon_ = false;
+        init_polygon_vertices_.clear();
+        wall_map_ = wallmap::WallMap{};
+        wall_map_.params = params.wall_map;
+        wall_map_.params.obs_sigma   = params.rfe_obs_sigma;     // the wall factor's σ and knee ARE the SDF's
+        wall_map_.params.huber_delta = params.rfe_huber_delta;
+        map_ready_ = false;
+        wall_reanchored_ = false;
+        last_wall_status_.clear();
+        std::scoped_lock lk(wall_map_mutex_);
+        derived_polygon_.clear();
+    }
+
+    void RoomConcept::wall_slam_observe(const std::vector<Eigen::Vector3f>& points, const Eigen::Vector3f& pose,
+                                        std::int64_t timestamp_ms)
+    {
+        std::vector<Eigen::Vector2f> pts;
+        pts.reserve(points.size());
+        for (const auto& p : points) pts.emplace_back(p.x(), p.y());
+        const auto seg = wallseg::segment(pts, params.wall_seg, wall_rng_);
+
+        // Observation weights (range / incidence) — the SAME as the SDF term's, from each segment's own
+        // normal, in ONE call over every claimed point so the normalisation is per slot, not per wall.
+        Eigen::VectorXf weights = Eigen::VectorXf::Ones(static_cast<long>(pts.size()));
+        if (params.far_points_weight or params.incidence_angle_weight)
+        {
+            std::vector<int> idx;
+            std::vector<Eigen::Vector2f> nrm;
+            for (const auto& sg : seg.segments)
+                for (int i : sg.inliers) { idx.push_back(i); nrm.push_back(sg.normal); }
+            if (not idx.empty())
+            {
+                auto P = torch::zeros({static_cast<long>(idx.size()), 3}, torch::kFloat32);
+                auto N = torch::zeros({static_cast<long>(idx.size()), 2}, torch::kFloat32);
+                auto pa = P.accessor<float, 2>();
+                auto na = N.accessor<float, 2>();
+                const float c = std::cos(pose.z()), s = std::sin(pose.z());
+                for (size_t k = 0; k < idx.size(); ++k)
+                {
+                    pa[k][0] = pts[static_cast<size_t>(idx[k])].x();
+                    pa[k][1] = pts[static_cast<size_t>(idx[k])].y();
+                    // weights_from_normals wants ROOM-frame normals (it rotates the rays by θ itself)
+                    na[k][0] = c * nrm[k].x() - s * nrm[k].y();
+                    na[k][1] = s * nrm[k].x() + c * nrm[k].y();
+                }
+                const auto w = weights_from_normals(params, P, torch::tensor({pose.z()}, torch::kFloat32), N)
+                                   .to(torch::kCPU).contiguous();
+                auto wa = w.accessor<float, 1>();
+                for (size_t k = 0; k < idx.size(); ++k) weights(idx[k]) = wa[k];
+            }
+        }
+        last_wall_frame_ = wall_map_.observe(seg, pts, weights, pose, current_covariance, timestamp_ms);
+        last_wall_segments_ = seg.segments;
+        window_mgr_.newest().wall_assoc = last_wall_frame_.assoc;
+        // Every birth is loggable: after the duplicate fix a birth is a rare, meaningful event, and
+        // nearest_chi2 is the number that says whether the gate refused a twin (small-ish, tens) or
+        // this line truly matches nothing (huge/inf).
+        for (const auto& d : last_wall_frame_.deaths_info)
+            qInfo().noquote() << QString("[room][wall-slam] DEATH wall %1: existence log-odds %2 after %3 frames / %4 points — the beams walked through it")
+                                     .arg(d.id).arg(d.lodds, 0, 'f', 1).arg(d.frames_seen).arg(d.points_seen);
+        for (const auto& b : last_wall_frame_.births_info)
+            qInfo().noquote() << QString("[room][wall-slam] BIRTH wall %1: phi=%2 d=%3 npts=%4 frames=%5 dF=%6 | nearest wall %7 chi2=%8")
+                                     .arg(b.id).arg(b.phi, 0, 'f', 3).arg(b.d, 0, 'f', 3).arg(b.npts).arg(b.frames)
+                                     .arg(b.dF, 0, 'f', 1).arg(b.nearest_wall).arg(b.nearest_chi2, 0, 'f', 1);
+        // Rate-limited health line (~every 200 frames): the numbers that say whether association is
+        // doing its job. assoc/segs near 1 and twins ≈ births ≈ 0 is a healthy converged map.
+        wall_stat_frames_++;
+        wall_stat_assoc_  += last_wall_frame_.segments_associated;
+        wall_stat_segs_   += static_cast<int>(seg.segments.size());
+        wall_stat_twins_  += last_wall_frame_.twins_fused;
+        wall_stat_births_ += last_wall_frame_.births;
+        wall_stat_deaths_ += last_wall_frame_.deaths;
+        if (wall_stat_frames_ >= 200)
+        {
+            qInfo().noquote() << QString("[room][wall-slam] health over %1 frames: assoc %2/%3 segments, twins fused %4, births %5, deaths %6, walls %7, candidates %8")
+                                     .arg(wall_stat_frames_).arg(wall_stat_assoc_).arg(wall_stat_segs_)
+                                     .arg(wall_stat_twins_).arg(wall_stat_births_).arg(wall_stat_deaths_)
+                                     .arg(wall_map_.walls.size()).arg(wall_map_.candidates.size());
+            wall_stat_frames_ = wall_stat_assoc_ = wall_stat_segs_ = wall_stat_twins_ = wall_stat_births_ = 0;
+            wall_stat_deaths_ = 0;
+        }
+        if (wall_map_.walls.size() > 64 and wall_map_.walls.size() % 32 == 0)
+            qWarning() << "[room][wall-slam]" << wall_map_.walls.size()
+                       << "walls — far more than a room has. If they are twins of a few real ones,"
+                       << "raise RoomShape.WallMapSigmaD (the corner detector's map_sigma lesson).";
+    }
+
+    void RoomConcept::wall_slam_after_solve(UpdateResult& res)
+    {
+        wall_map_.merge_indistinguishable();
+        auto poly = wall_map_.build_polygon();
+        if (poly.closed and poly.verts.size() >= 3)
+        {
+            if (poly.publishable and not wall_reanchored_)
+            {
+                // One-shot re-anchoring to the frame the fleet expects: origin on the Manhattan-aligned
+                // bbox centre of the polygon, θ₀ = 0. Everything in the map frame moves together.
+                const float rot = wall_map_.theta0_born ? wall_map_.theta0 : 0.f;
+                const Eigen::Rotation2Df Rm(-rot);
+                Eigen::Vector2f lo = Rm * poly.verts.front(), hi = lo;
+                for (const auto& v : poly.verts) { const Eigen::Vector2f q = Rm * v; lo = lo.cwiseMin(q); hi = hi.cwiseMax(q); }
+                const Eigen::Vector2f c = Eigen::Rotation2Df(rot) * ((lo + hi) * 0.5f);
+                reanchor_map_frame(c, rot);
+                wall_reanchored_ = true;
+                poly = wall_map_.build_polygon();
+                map_ready_ = true;
+                res.covariance = current_covariance;
+                qInfo() << "[room][wall-slam] polygon CLOSED and publishable:" << poly.verts.size()
+                        << "vertices, worst corner sigma" << poly.worst_corner_sigma << "m. Map frame re-anchored:"
+                        << "origin moved by (" << c.x() << "," << c.y() << ") m, rotated" << rot * 180.f / static_cast<float>(M_PI) << "deg.";
+            }
+            if (model_ != nullptr and model_->has_state())
+                model_->update_polygon_vertices(poly.verts);
+            std::scoped_lock lk(wall_map_mutex_);
+            derived_polygon_ = poly.verts;
+        }
+        if (poly.status != last_wall_status_)
+        {
+            qInfo().noquote() << "[room][wall-slam]" << wall_map_.walls.size() << "walls," << wall_map_.candidates.size()
+                              << "candidates, polygon" << (poly.closed ? "closed" : "open")
+                              << (poly.status.empty() ? "" : QString::fromStdString("— " + poly.status));
+            last_wall_status_ = poly.status;
+        }
+        res.wall_view.segments    = last_wall_segments_;
+        res.wall_view.walls       = wall_map_.walls;
+        res.wall_view.polygon     = poly;
+        res.wall_view.seg_to_wall = last_wall_frame_.seg_to_wall;
+        res.wall_view.theta0_born = wall_map_.theta0_born;
+        res.wall_view.theta0      = wall_map_.theta0;
+        res.wall_view.candidates  = static_cast<int>(wall_map_.candidates.size());
+        res.wall_view.births      = last_wall_frame_.births;
+        res.wall_view.map_ready   = map_ready_.load();
+    }
+
+    void RoomConcept::reanchor_map_frame(const Eigen::Vector2f& c, float rot)
+    {
+        const Eigen::Rotation2Df Rm(-rot);
+        const auto wrap = [](float a) { return std::atan2(std::sin(a), std::cos(a)); };
+        const auto xf = [&](const Eigen::Vector3f& p)
+        {
+            const Eigen::Vector2f q = Rm * (p.head<2>() - c);
+            return Eigen::Vector3f(q.x(), q.y(), wrap(p.z() - rot));
+        };
+        Eigen::Matrix3f A = Eigen::Matrix3f::Identity();
+        A.topLeftCorner<2, 2>() = Rm.toRotationMatrix();
+
+        auto poses = read_window_poses();
+        for (auto& p : poses) p = xf(p);
+        write_window_poses(poses);
+        auto& bp = window_mgr_.boundary_prior;
+        if (bp.valid)
+        {
+            bp.mu = xf(bp.mu);
+            bp.precision = A * bp.precision * A.transpose();   // Δ' = A·Δ ⇒ Λ' = A Λ Aᵀ
+        }
+        // The model's own pose tensors — NOT set_robot_pose(), which clears the window.
+        if (model_ != nullptr and model_->has_state())
+        {
+            const auto st = model_->get_state();
+            const Eigen::Vector3f p = xf(Eigen::Vector3f(st[2], st[3], st[4]));
+            const auto opts = torch::TensorOptions().dtype(torch::kFloat32).device(model_->device_).requires_grad(true);
+            model_->robot_pos   = torch::tensor({p.x(), p.y()}, opts);
+            model_->robot_theta = torch::tensor({p.z()}, opts);
+            model_->has_prediction = false;
+            model_->robot_prev_pose = std::nullopt;
+        }
+        current_covariance = A * current_covariance * A.transpose();
+        if (has_smoothed_pose_) smoothed_pose_ = xf(smoothed_pose_);
+        if (stride_has_admitted_) stride_last_admitted_ = xf(stride_last_admitted_);
+        if (last_good_pose_valid_) last_good_pose_ = xf(last_good_pose_);
+        {
+            std::scoped_lock lk(object_anchors_mutex_);
+            const Eigen::Matrix2f R2 = Rm.toRotationMatrix();
+            for (auto& [id, e] : landmark_estimates_)
+            {
+                e.p = R2 * (e.p - c);
+                e.information = R2 * e.information * R2.transpose();
+            }
+        }
+        wall_map_.reanchor(c, rot);
+    }
+
     void RoomConcept::set_polygon_room(const std::vector<Eigen::Vector2f>& polygon_vertices)
     {
         if (polygon_vertices.size() < 3)
@@ -2329,6 +2552,17 @@ namespace rc
             // and its Markov blanket x₁ (window[1]) are still live at their converged linearization
             // points. append() then just pops (fej_schur=true suppresses the legacy mu re-anchoring),
             // and the post-optimization recompute_boundary_prior() below is skipped.
+            // Wall-SLAM: the slot about to be dropped hands its wall observations to the map's carried
+            // information — the ONLY place that information may grow (see absorb_wall_observations).
+            if (estimating() and not window_mgr_.empty()
+                and static_cast<int>(window_mgr_.size()) >= params.rfe_window_size)
+            {
+                gn::Input ain; ain.params = &params; ain.walls = &wall_map_;
+                const auto& front = window_mgr_.window.front();
+                auto fp = front.pose.detach().to(torch::kCPU);
+                auto fa = fp.accessor<float, 1>();
+                gn::absorb_wall_observations(ain, front, Eigen::Vector3f(fa[0], fa[1], fa[2]));
+            }
             if (params.boundary_fej_schur)
                 window_mgr_.marginalize_oldest(*model_, params, get_device());
 
@@ -2345,6 +2579,14 @@ namespace rc
             }
         }
         window_mgr_.subsample_old_slots(params.rfe_max_lidar_per_old_slot);
+
+        // ===== WALL-SLAM OBSERVATION (Estimate mode) =====
+        if (estimating())
+        {
+            auto newest_cpu = window_mgr_.newest().pose.detach().to(torch::kCPU);
+            auto pa = newest_cpu.accessor<float, 1>();
+            wall_slam_observe(sampled_points, Eigen::Vector3f(pa[0], pa[1], pa[2]), lidar.second);
+        }
 
         // ===== CORNER DETECTION (optional, controlled by EnableCornerTracking) =====
         if (params.enable_corner_tracking && !init_polygon_vertices_.empty())
@@ -2417,7 +2659,9 @@ namespace rc
         }
 
         // ===== EARLY EXIT CHECK =====
-        if (auto early = try_prediction_early_exit(points_tensor, slot_odom_delta, selected_prior, lidar.second))
+        if (auto early = map_guided_checks_allowed()
+                             ? try_prediction_early_exit(points_tensor, slot_odom_delta, selected_prior, lidar.second)
+                             : std::optional<UpdateResult>{})
         {
             // Store quality for future boundary prior gate (early exit = good pose).
             window_mgr_.newest().sdf_mse_final = early->sdf_mse;
@@ -2471,7 +2715,7 @@ namespace rc
 
             const auto t0 = std::chrono::high_resolution_clock::now();
             auto [last_loss, iterations] =
-                  (params.optimizer_type == "GN")    ? run_gn_loop(selected_prior)
+                  (params.optimizer_type == "GN" or estimating()) ? run_gn_loop(selected_prior)
                 : (params.optimizer_type == "LBFGS") ? run_lbfgs_loop(selected_prior)
                                                      : run_adam_loop(selected_prior);
             last_t_adam_ms_ = std::chrono::duration<float, std::milli>(
@@ -2531,6 +2775,10 @@ namespace rc
             last_t_cov_ms_ = std::chrono::duration<float, std::milli>(
                 std::chrono::high_resolution_clock::now() - t0).count();
         }
+
+        // ===== WALL-SLAM: merge, derive the polygon, re-anchor once, fill the view =====
+        if (estimating())
+            wall_slam_after_solve(res);
 
         // ===== EXTRACT RESULT FROM NEWEST SLOT =====
         res.ok = true;
@@ -4056,6 +4304,15 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         in.boundary_prior  = &window_mgr_.boundary_prior;
         in.boundary_weight = boundary_weight_now();
         in.device          = get_device();
+        if (estimating())
+        {
+            in.walls             = &wall_map_;
+            in.no_sdf            = true;     // the polygon is derived from these walls: no SDF on it
+            in.gauge_fix         = true;     // first-pose gauge until the boundary prior exists
+            in.gauge_sigma_xy    = params.wall_gauge_sigma_xy;
+            in.gauge_sigma_theta = params.wall_gauge_sigma_theta;
+            in.wall_max_slots    = params.wall_max_slots;
+        }
 
         gn::Options opts;
         opts.max_iters    = params.gn_max_iters;
@@ -5276,6 +5533,12 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
     std::pair<Eigen::Matrix3f, float> RoomConcept::compute_posterior_covariance(
         const torch::Tensor& points_tensor)
     {
+        // Estimate mode: the only covariance is the window's own (the GN marginal). The autograd
+        // fallback below takes a Hessian of the SDF against the polygon, which here is DERIVED from
+        // the very walls the solve just moved — or a placeholder before closure. Keep the predicted one.
+        if (estimating() and not (params.covariance_from_solver and last_marg_ok_ and params.optimizer_type != ""))
+            return {current_covariance, 1.f};
+
         // ── THE WINDOW'S OWN ANSWER, WHEN THE SOLVER HAS ONE ────────────────────────────────────
         // The GN backend assembles H = sum J'WJ over the whole window and solves it. Λ_marg is the
         // newest pose's marginal out of exactly that system — every other pose and landmark
@@ -5737,7 +6000,7 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         }
         res.calib_value = motion_calib_.last_solve().value;
         res.calib_sigma = motion_calib_.last_solve().sigma;
-        res.calib_b_omega = motion_calib_.omega_bias();
+        res.calib_b_omega = motion_calib_.estimated_omega_bias();
         {
             const auto &r = motion_calib_.last_solve();
             res.calib_informed = (r.informed[rc::calib::P_K_V]     ? 1 : 0)
@@ -5750,9 +6013,12 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         res.calib_sigma_yaw = motion_calib_.yaw_sigma();
         res.calib_sigma_k_v = motion_calib_.k_v_sigma();
         res.calib_sigma_k_w = motion_calib_.k_w_sigma();
-        res.calib_k_v = motion_calib_.forward_scale();
-        res.calib_k_w = motion_calib_.omega_scale();
-        res.calib_yaw = motion_calib_.yaw_offset();
+        // ★ The ESTIMATE, not the applied value: in open-loop mode (MotionCalibApply=false) the
+        // applied accessors return nominal by design, and logging those would blind the very arm
+        // the mode exists to run. Identical to the applied values whenever apply is true.
+        res.calib_k_v = motion_calib_.estimated_forward_scale();
+        res.calib_k_w = motion_calib_.estimated_omega_scale();
+        res.calib_yaw = motion_calib_.estimated_yaw_offset();
         res.calib_episodes = motion_calib_.episodes();
         res.calib_carried = motion_calib_.carried();
         res.calib_dropped = motion_calib_.dropped();

@@ -48,6 +48,7 @@
 
 #include "room_concept.h"
 #include "room_model.h"
+#include "wall_map.h"
 
 namespace rc::gn
 {
@@ -165,7 +166,48 @@ namespace rc::gn
         // Landmarks to optimise JOINTLY with the poses. Empty ⇒ the classic behaviour, where every
         // object anchor is a fixed constant taken from ObjectAnchorObs::pose_world.
         std::vector<Landmark>*                    landmarks = nullptr;
+
+        // ── Wall-SLAM (MapMode = Estimate) ──────────────────────────────────────────────────────
+        // nullptr ⇒ Given mode: nothing below is read and the factor list is exactly the classic one.
+        // Otherwise the map's θ₀ and every wall's (φ, d) are VARIABLES of this solve (see
+        // make_layout), observed by WallPointFactor from each slot's wall_assoc, pinned between solves
+        // by their carried information (WallPriorFactor / Theta0PriorFactor), and tied to θ₀ by the
+        // hierarchical Manhattan factor (RoomWallFactor). Written back by solve().
+        wallmap::WallMap*                         walls = nullptr;
+        // Estimate mode: the polygon is DERIVED from the walls, so an SDF factor on it would count the
+        // same points twice. The wall point factors replace it.
+        bool                                      no_sdf = false;
+        // First-pose gauge: while no boundary prior exists yet, nothing pins the trajectory+map to the
+        // frame. A prior on slot 0 at the origin with σ_gauge does — a gauge fix, not a model term.
+        bool                                      gauge_fix = false;
+        float                                     gauge_sigma_xy = 1e-3f;
+        float                                     gauge_sigma_theta = 1e-3f;
+        // Wall factors on the newest N slots only (0 ⇒ every slot). Older slots' observations are what
+        // absorb_wall_observations folds into the walls' carried information when they drop.
+        int                                       wall_max_slots = 0;
     };
+
+    /// Where every variable lives in the state vector: poses first, then object landmarks (2-DOF),
+    /// then θ₀ (1-DOF, only once the map has a first wall) and each wall (φ, d). One function builds
+    /// it so solve(), evaluate(), gradient_check() and newest_pose_marginal() can never disagree.
+    struct Layout
+    {
+        VarIndex idx;
+        int n_pose = 0;
+        int n_lm = 0;
+        int theta0 = -1;                   // offset of θ₀, or −1 when not a variable
+        std::vector<int> wall_off;         // offset of wall k (index into walls->walls), or −1
+    };
+    Layout make_layout(const Input& in);
+
+    /// Fold ONE slot's wall observations into the walls' carried information, at the slot's (FEJ)
+    /// pose, right before the window drops it. The live window's factors enter every solve directly,
+    /// so this is the ONLY place a wall's information may grow — carrying the live window too would
+    /// count it twice. ⚠ Block-diagonal approximation: the 2×2 wall block of that slot's Hessian,
+    /// treating the dropped pose as known; the exact Schur complement against the pose is the
+    /// planned follow-up (it can only LOOSEN these numbers).
+    void absorb_wall_observations(const Input& in, const RoomConcept::WindowSlot& slot,
+                                  const Eigen::Vector3f& pose);
 
     /// Minimise the window RFE. `poses` is in/out: one [x, y, θ] per window slot, same order as the
     /// window. The caller writes them back into the slot tensors (or discards them, in shadow mode).
@@ -178,7 +220,7 @@ namespace rc::gn
     /// Builds the factor list for one window state. Exposed for testing and because it is the single
     /// place a new factor family (a new landmark type, an extent variable, …) has to be registered.
     /// The returned factors hold a reference to `in`, which must outlive them.
-    FactorList build_factors(const Input& in, const VarIndex& idx);
+    FactorList build_factors(const Input& in, const Layout& lay);
 
     /// Self-check: max relative error between the analytic gradient (b of the normal equations) and a
     /// central finite difference of the SAME loss, over all state components. Anything above ~1e-2 means

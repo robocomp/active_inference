@@ -11,6 +11,7 @@
 #include "room_scene_graph.h"
 
 #include <array>
+#include <charconv>
 #include <cmath>
 #include <cstdio>
 #include <ctime>
@@ -196,13 +197,37 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
     if (!room_node_created_)
     {
         stable_frames_ = stable ? stable_frames_ + 1 : 0;
-        if (stable_frames_ >= params_->STABLE_FRAMES_REQUIRED)
+        // Estimate mode: also wait for the learnt polygon to close and be re-anchored (map_ready).
+        if (stable_frames_ >= params_->STABLE_FRAMES_REQUIRED and room_concept_->map_ready())
             dsr_create_room_and_reparent(res);
         else if (write_rt)
             dsr_update_pose(res);   // world->robot RT while waiting for stable room creation
     }
     else
     {
+        // Estimate mode, after publication: a structure change (a wall born after closure) changes
+        // the polygon's vertex count. Republish the contract attribute so consumers see the new
+        // shape. The wall_i nodes are NOT rebuilt here (dsr_create_wall_nodes is create-once); that
+        // is the known follow-up, as is naming walls by landmark id so door edge indices survive.
+        if (room_concept_->estimating())
+        {
+            const auto poly = room_concept_->nominal_room_polygon();
+            if (poly.size() >= 3 and poly.size() != published_polygon_verts_)
+            {
+                if (auto rn = G_->get_node(dsr_room_id_); rn.has_value())
+                {
+                    std::vector<float> px, py;
+                    for (const auto& v : poly) { px.push_back(v.x()); py.push_back(v.y()); }
+                    rn->attrs()[delimiting_polygon_x_str.data()] = DSR::Attribute{px, 0, 0};
+                    rn->attrs()[delimiting_polygon_y_str.data()] = DSR::Attribute{py, 0, 0};
+                    G_->update_node(rn.value());
+                    qInfo() << "[room][wall-slam] structure change: republished delimiting_polygon with"
+                            << static_cast<int>(poly.size()) << "vertices (was" << static_cast<int>(published_polygon_verts_)
+                            << "); wall_i nodes are stale until restart";
+                    published_polygon_verts_ = poly.size();
+                }
+            }
+        }
         if (write_rt)
             dsr_update_pose(res);   // robot->room RT (skipped when the odometry publisher owns it)
         if (params_->PUBLISH_AFFORDANCE)
@@ -526,6 +551,7 @@ void RoomSceneGraph::dsr_create_room_and_reparent(const rc::RoomConcept::UpdateR
     dsr_room_id_ = room_id_opt.value();
     room_node_created_ = true;
     stable_frames_ = 0;
+    published_polygon_verts_ = room_polygon.size();
     trigger_layout_();
 
     dsr_update_pose(res);
@@ -1758,6 +1784,48 @@ void RoomSceneGraph::load_robot_body_dimensions_from_graph()
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+// Move walls that still hang from the room onto the floor, preserving their pose. floor->room is the
+// identity, so the RT payload is identical in either frame and is simply recomputed from `polygon`.
+// The old room->wall RT edge must go, or the wall would show two parents in the RT tree.
+void RoomSceneGraph::re_parent_walls_onto_floor(const std::vector<DSR::Node>& walls,
+                                                DSR::Node& floor_node,
+                                                const std::vector<Eigen::Vector2f>& polygon)
+{
+    if (!G_ || !rt_api_ || polygon.size() < 3) return;
+    const int n = static_cast<int>(polygon.size());
+    const float half_h = params_->room_height * 0.5f;
+
+    for (const auto& wall : walls)
+    {
+        const auto parent = G_->get_attrib_by_name<parent_att>(wall);
+        if (!parent.has_value() or parent.value() != dsr_room_id_) continue;
+
+        // The wall's index is its name suffix; from_chars because this codebase never parses numbers
+        // through the C locale (see CLAUDE.md), even when the input is a node name.
+        const std::string& name = wall.name();
+        const auto dash = name.rfind('_');
+        if (dash == std::string::npos) continue;
+        int idx = -1;
+        if (const auto* first = name.data() + dash + 1;
+            std::from_chars(first, name.data() + name.size(), idx).ec != std::errc{} or idx < 0 or idx >= n)
+            continue;
+
+        const Eigen::Vector2f& p0 = polygon[idx];
+        const Eigen::Vector2f& p1 = polygon[(idx + 1) % n];
+        const float L = (p1 - p0).norm();
+        if (L < 0.1f) continue;
+        const Eigen::Vector2f dir = (p1 - p0) / L;
+        const Eigen::Vector2f mid = (p0 + p1) * 0.5f;
+
+        rt_api_->insert_or_assign_edge_RT(floor_node, wall.id(),
+                                          {mid.x(), mid.y(), half_h},
+                                          {0.f, 0.f, std::atan2(dir.y(), dir.x())});
+        G_->delete_edge(dsr_room_id_, wall.id(), "RT");
+        qInfo() << "dsr_create_wall_nodes: re-parented" << QString::fromStdString(name) << "onto the floor";
+    }
+}
+
+///////////////////////////////////////////////////////////////////////////////
 void RoomSceneGraph::dsr_create_wall_nodes()
 {
     if (!G_ || !rt_api_) return;
@@ -1789,21 +1857,75 @@ void RoomSceneGraph::dsr_create_wall_nodes()
         // may be carrying a mesh built from a different polygon than the one in force now.
         if (auto f = G_->get_node("floor"); f.has_value())
         {
+            bool floor_changed = false;
             if (float fw = 0.f, fd = 0.f;
                 write_floor_obj(polygon, std::filesystem::path(kFloorMeshOut), fw, fd))
             {
                 G_->add_or_modify_attrib_local<mesh_path_att>(f.value(), std::string(kFloorMeshRel));
                 G_->add_or_modify_attrib_local<width_m_att>(f.value(), fw);
                 G_->add_or_modify_attrib_local<depth_m_att>(f.value(), fd);
-                G_->update_node(f.value());
+                floor_changed = true;
                 qInfo() << "dsr_create_wall_nodes: regenerated floor display mesh"
                         << fw << "x" << fd << "m";
             }
+            // Only SEEDED, never re-asserted: `collapsed` is a default the viewer honours once, and
+            // rewriting it on every adoption would fight a user who opened the fan on purpose.
+            if (not G_->get_attrib_by_name<collapsed_att>(f.value()).has_value())
+            {
+                G_->add_or_modify_attrib_local<collapsed_att>(f.value(), true);
+                floor_changed = true;
+            }
+            if (floor_changed)
+                G_->update_node(f.value());
+
+            // Walls authored before the floor became their parent still hang from the room. Re-hang
+            // them, recomputing the RT from the polygon in force now — the same source the floor mesh
+            // above is regenerated from, so the two cannot disagree.
+            re_parent_walls_onto_floor(existing, f.value(), polygon);
         }
         return;
     }
 
     const float half_h = params_->room_height * 0.5f;
+
+    // ── Floor ─────────────────────────────────────────────────────────────────
+    // Created FIRST, because it is the parent the walls hang from: a purely semantic frame for
+    // everything that stands on the floor of this room. It sits at the room origin, so its RT edge
+    // is the identity and no wall's world pose changes by hanging from it instead of from the room.
+    // It also carries `collapsed`, which folds the whole wall fan behind one "+" badge in the graph
+    // viewer — n walls under the room would otherwise bury every other node in the scene.
+    DSR::Node floor_node = DSR::Node::create<floor_node_type>("floor");
+    G_->add_or_modify_attrib_local<parent_att>(floor_node, dsr_room_id_);
+    if (const auto room_level = G_->get_node_level(room_node_opt.value()); room_level.has_value())
+        G_->add_or_modify_attrib_local<level_att>(floor_node, room_level.value() + 1);
+    G_->add_or_modify_attrib_local<collapsed_att>(floor_node, true);
+    // Display mesh generated from THIS polygon, so a viewer draws the actual layout instead of a
+    // stand-in rectangle. width_m/depth_m carry the bbox so the unit-box OBJ can be rescaled.
+    if (float fw = 0.f, fd = 0.f; write_floor_obj(polygon, std::filesystem::path(kFloorMeshOut), fw, fd))
+    {
+        G_->add_or_modify_attrib_local<mesh_path_att>(floor_node, std::string(kFloorMeshRel));
+        G_->add_or_modify_attrib_local<width_m_att>(floor_node, fw);
+        G_->add_or_modify_attrib_local<depth_m_att>(floor_node, fd);
+    }
+    else
+        qWarning() << "dsr_create_wall_nodes: could not write the floor display mesh";
+
+    rc::provenance::stamp_creation(*G_, floor_node);   // birth stamp: epoch ms + local ISO-8601
+    const auto floor_id = G_->insert_node(floor_node);
+    if (floor_id.has_value())
+        rt_api_->insert_or_assign_edge_RT_identity(room_node_opt.value(), floor_id.value());
+    else
+        qWarning() << "dsr_create_wall_nodes: failed to insert floor node";
+
+    // Walls hang from the floor when there is one; if the floor could not be created they fall back
+    // to the room, so a failed floor costs the fold, never the walls.
+    std::optional<DSR::Node> wall_parent_opt;
+    if (floor_id.has_value())
+        wall_parent_opt = G_->get_node(floor_id.value());
+    if (not wall_parent_opt.has_value())
+        wall_parent_opt = room_node_opt;
+    auto& wall_parent = wall_parent_opt.value();
+    const int wall_level = G_->get_node_level(wall_parent).value_or(3) + 1;
 
     // ── Walls ────────────────────────────────────────────────────────────────
     for (int i = 0; i < n; ++i)
@@ -1828,8 +1950,8 @@ void RoomSceneGraph::dsr_create_wall_nodes()
         // shared unit-box convention (local x ALONG the wall, z = height, y = the normal, no
         // thickness), which a viewer rescales by width_m/height_m. The agent owns its appearance.
         G_->add_or_modify_attrib_local<mesh_path_att>(wall_node, std::string("room_concept/meshes/wall.obj"));
-        G_->add_or_modify_attrib_local<parent_att>(wall_node, dsr_room_id_);
-        G_->add_or_modify_attrib_local<level_att>(wall_node, 4);
+        G_->add_or_modify_attrib_local<parent_att>(wall_node, wall_parent.id());
+        G_->add_or_modify_attrib_local<level_att>(wall_node, wall_level);
 
         rc::provenance::stamp_creation(*G_, wall_node);   // birth stamp: epoch ms + local ISO-8601
         const auto wall_id = G_->insert_node(wall_node);
@@ -1839,37 +1961,13 @@ void RoomSceneGraph::dsr_create_wall_nodes()
             continue;
         }
 
-        rt_api_->insert_or_assign_edge_RT(room_node_opt.value(),
+        // The pose is unchanged by the re-parenting: floor->room is the identity, so (mid, yaw)
+        // still reads in ROOM coordinates, which is what every consumer of a wall quad assumes.
+        rt_api_->insert_or_assign_edge_RT(wall_parent,
                                           wall_id.value(),
                                           {mid.x(), mid.y(), half_h},
                                           {0.f, 0.f, yaw});
     }
-
-    // ── Floor ─────────────────────────────────────────────────────────────────
-    // Purely semantic parent for floor-attached objects; placed at room origin.
-    DSR::Node floor_node = DSR::Node::create<floor_node_type>("floor");
-    G_->add_or_modify_attrib_local<parent_att>(floor_node, dsr_room_id_);
-    G_->add_or_modify_attrib_local<level_att>(floor_node, 4);
-    // Display mesh generated from THIS polygon, so a viewer draws the actual layout instead of a
-    // stand-in rectangle. width_m/depth_m carry the bbox so the unit-box OBJ can be rescaled.
-    if (float fw = 0.f, fd = 0.f; write_floor_obj(polygon, std::filesystem::path(kFloorMeshOut), fw, fd))
-    {
-        G_->add_or_modify_attrib_local<mesh_path_att>(floor_node, std::string(kFloorMeshRel));
-        G_->add_or_modify_attrib_local<width_m_att>(floor_node, fw);
-        G_->add_or_modify_attrib_local<depth_m_att>(floor_node, fd);
-    }
-    else
-        qWarning() << "dsr_create_wall_nodes: could not write the floor display mesh";
-
-    rc::provenance::stamp_creation(*G_, floor_node);   // birth stamp: epoch ms + local ISO-8601
-    const auto floor_id = G_->insert_node(floor_node);
-    if (!floor_id.has_value())
-        qWarning() << "dsr_create_wall_nodes: failed to insert floor node";
-    else
-        rt_api_->insert_or_assign_edge_RT(room_node_opt.value(),
-                                          floor_id.value(),
-                                          {0.f, 0.f, 0.f},
-                                          {0.f, 0.f, 0.f});
 
     trigger_layout_();
 }

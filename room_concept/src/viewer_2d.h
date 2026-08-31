@@ -25,6 +25,7 @@
 #include "image_edge_types.h"   // rc::TriplePoint — RGB corners drawn beside the LiDAR ones
 #include <map>
 #include "object_anchor_types.h"
+#include "wall_map.h"
 
 class AbstractGraphicViewer;
 namespace DSR { class DSRGraph; }
@@ -169,6 +170,15 @@ class Viewer2D : public QObject
                                  const std::vector<char>& measured,
                                  const Eigen::Vector2f& robot_xy);
 
+        /// Wall-SLAM overlay (Estimate mode): this frame's segments (robot frame, drawn in the room
+        /// frame through `robot_pose`), the wall landmarks clipped to their observed extents with
+        /// their class, the derived corners (filled = observed, hollow = inferred) and the derived
+        /// polygon (dashed until it is published, solid after).
+        void draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segments,
+                           const std::vector<rc::wallmap::WallLandmark>& walls,
+                           const rc::wallmap::Polygon& polygon, bool map_ready,
+                           const Eigen::Affine2f& robot_pose);
+
         /// Draw the epistemic score grid as semi-transparent coloured cells.
         /// cell_size is in world-frame meters.
         void draw_score_grid(const std::vector<std::pair<Eigen::Vector2f, float>>& cells,
@@ -215,6 +225,12 @@ class Viewer2D : public QObject
         std::vector<QGraphicsEllipseItem*> capture_vertex_items_;
 
         // Room polygon outline
+        // Wall-SLAM overlay pools (see draw_wall_map)
+        std::vector<QGraphicsLineItem*>       wall_seg_items_;
+        std::vector<QGraphicsLineItem*>       wall_line_items_;
+        std::vector<QGraphicsEllipseItem*>    wall_corner_items_;
+        std::vector<QGraphicsSimpleTextItem*> wall_label_items_;
+        QGraphicsPolygonItem*                 wall_poly_item_ = nullptr;
         QGraphicsPolygonItem* polygon_item_         = nullptr;
         QGraphicsPolygonItem* polygon_fill_item_    = nullptr;   // warm floor fill (interior only)
         QGraphicsPolygonItem* polygon_item_backup_  = nullptr;
