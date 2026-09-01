@@ -120,6 +120,14 @@ namespace rc::wallmap
         // structure (a pocket over unobserved space), while the [keep·cost, cost] band gives the
         // hysteresis that prevents up/down flapping at the boundary.
         float order_keep_fraction = 0.7f;
+        // ── STRICT MANHATTAN (user directive 2026-09-01): this stage estimates the room's MAIN
+        // LINES only. Every polygon wall carries a Manhattan class; an off-axis candidate (chamfer,
+        // oblique clutter line) may never splice into the cycle — it stays in the candidate bank as
+        // the input of a later chamfer-refinement postprocessing stage. Small details are already
+        // priced out by the order-jump economy. ⚠ gate: how far off the nearest Manhattan direction
+        // a candidate may lie and still count as structural (measured oblique junk sits 17° off).
+        bool  manhattan_strict = true;
+        float manhattan_gate_rad = 10.f * static_cast<float>(M_PI) / 180.f;
         bool  debug_splice = false;         // diagnostic prints from try_splice (bench use)
         // ── Existence (the step-back operator), per extent bin — see the header comment ──────────
         float exist_refute_pdet = 0.5f;     // P(detect): weight of a pass-through vs a support ⚠
@@ -359,6 +367,11 @@ namespace rc::wallmap
         /// thin separation AND connected-free space observed on w's outward side? (A phantom twin
         /// 0.2 m behind a boundary wall has exterior/unknown there.) Needs comp_cache_ fresh.
         bool mirror_backed(const WallLandmark& w) const;
+        /// Honest uncertainty of θ0: the worst class disagreement among CONFIRMED order walls
+        /// (≥500 points), or the OBB prior's 15° while nothing is confirmed. The strict-Manhattan
+        /// gate and the class cost widen by this, so an unconfirmed tilted θ0 cannot lock the
+        /// true walls out (the tilted-prior lesson, measured a second time).
+        float theta0_sigma() const;
         /// Evidence a trial polygon newly explains vs the current one, in grid-log-odds nats,
         /// evaluated ONLY over the region where the two interior claims differ (bounding box of
         /// unmatched vertices ± margin). Matter cells the trial releases from the interior count

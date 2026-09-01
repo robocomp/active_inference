@@ -915,7 +915,10 @@ int main()
     }
 
     // ═══ 4. Chamfer ═══════════════════════════════════════════════════════════════════════════
-    std::printf("\n4. A 45-degree chamfer: a wall with no Manhattan class\n");
+    // STRICT MANHATTAN (2026-09-01): this stage estimates the room's MAIN LINES — the polygon is
+    // the Manhattan outline (a square corner where the chamfer is), and the chamfer itself is
+    // preserved as a strong OBLIQUE CANDIDATE for the later refinement stage.
+    std::printf("\n4. A 45-degree chamfer: Manhattan outline now, the chamfer kept for postprocessing\n");
     {
         const Poly room = chamfer_room();
         std::vector<Eigen::Vector3f> truth;
@@ -944,11 +947,28 @@ int main()
             for (const auto& v : ew) std::printf(" (%.2f,%.2f)", v.x(), v.y());
             std::printf("\n");
         }
-        check("5 walls, one of them class-less (the chamfer)", R.map.walls.size() == 5 and off == 1,
+        check("Manhattan outline: 4 walls, every one classified", R.map.walls.size() == 4 and off == 0,
               fmt("%zu walls, %d without class", R.map.walls.size(), off));
         const Poly est_world = to_world(R.poly.verts, truth[0]);
         const float h = R.poly.closed ? hausdorff(est_world, room) : 1e9f;
-        check("chamfered polygon closed and within 5 cm", R.poly.closed and h < 0.05f, fmt("closed=%d hausdorff=%.3f", R.poly.closed, h));
+        // The square corner lies 0.71 m from the 45-degree chamfer line — that is the lawful cost
+        // of the main-lines stage, not an error.
+        check("closed within the square-corner bound (0.75 m)", R.poly.closed and h < 0.75f,
+              fmt("closed=%d hausdorff=%.3f", R.poly.closed, h));
+        {
+            int strong_oblique = 0;
+            for (const auto& cnd : R.map.candidates)
+            {
+                if (cnd.npts < 50) continue;
+                float eps = std::numeric_limits<float>::infinity();
+                for (int k = 0; k < 4; ++k)
+                    eps = std::min(eps, std::abs(rc::linefit::wrap_pi(
+                        cnd.phi - R.map.theta0 - static_cast<float>(k) * kPi * 0.5f)));
+                if (eps > R.map.params.manhattan_gate_rad) ++strong_oblique;
+            }
+            check("the chamfer survives as an oblique candidate for postprocessing", strong_oblique >= 1,
+                  fmt("%d strong oblique candidates", strong_oblique));
+        }
     }
 
     // ═══ 5. Structure change after closure ═════════════════════════════════════════════════════

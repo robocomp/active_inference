@@ -101,11 +101,30 @@ namespace rc::wallmap
              n.x(), n.y(), tv.dot(t);
     }
 
+    float WallMap::theta0_sigma() const
+    {
+        // Trust in θ0 comes from CONFIRMED walls agreeing with it: until a wall has real support,
+        // θ0 is only as good as the OBB prior (a non-convex first scan tilts it 15-20°), and gating
+        // structure against an unconfirmed θ0 re-creates the tilted-prior lock-out (measured:
+        // births=0 from frame 0, the rectangle culled to 2 walls).
+        // MEDIAN, not max: one confirmed off-axis wall must not hold the trust hostage — an
+        // oblique 22k-point junk wall admitted while the gate was annealing-wide kept the gate at
+        // 41° for ever through its own 15.6° error, re-admitting exactly its own kind (measured).
+        std::vector<float> eps_list;
+        for (const auto id : order)
+            if (const auto* w = find(id); w != nullptr and w->points_seen >= 500 and w->k >= 0)
+                eps_list.push_back(std::abs(wrap_pi(w->phi - theta0 - static_cast<float>(w->k) * kPi * 0.5f)));
+        if (eps_list.empty()) return params.rect_prior_sigma_phi_rad;
+        std::nth_element(eps_list.begin(), eps_list.begin() + static_cast<long>(eps_list.size() / 2), eps_list.end());
+        return std::max(eps_list[eps_list.size() / 2], params.manhattan_sigma_rad);
+    }
+
     WallMap::ClassChoice WallMap::classify(float phi) const
     {
         ClassChoice c;
         if (not theta0_born) { c.k = 0; c.eps = 0.f; c.cost = 0.f; return c; }
-        const float var = params.manhattan_sigma_rad * params.manhattan_sigma_rad;
+        const float s0 = theta0_sigma();
+        const float var = params.manhattan_sigma_rad * params.manhattan_sigma_rad + s0 * s0;
         float best = std::numeric_limits<float>::infinity();
         for (int k = 0; k < 4; ++k)
         {
@@ -114,7 +133,9 @@ namespace rc::wallmap
             if (cost < best) { best = cost; c.k = k; c.eps = eps; c.cost = cost; }
         }
         const float off_cost = -std::log(std::clamp(params.manhattan_off_prior, 1e-6f, 1.f - 1e-6f));
-        if (best > off_cost) { c.k = -1; c.eps = 0.f; c.cost = off_cost; }
+        // Strict mode admits no class-less walls: the nearest class always stands, and structure
+        // that cannot live with that is refused UPSTREAM (the splice gate), not exempted here.
+        if (best > off_cost and not params.manhattan_strict) { c.k = -1; c.eps = 0.f; c.cost = off_cost; }
         return c;
     }
 
@@ -124,7 +145,13 @@ namespace rc::wallmap
         {
             const auto cls = classify(w.phi);
             w.k = cls.k;
-            w.manhattan_var = (w.k >= 0) ? params.manhattan_sigma_rad * params.manhattan_sigma_rad : 0.f;
+            // Strict mode has no class-less escape; the honesty moves into the VARIANCE — a wall
+            // far from its class gets a factor only as strong as its current agreement
+            // (max(σ², ε²)), so a tilted prior side ANNEALS onto its class as data rotates it
+            // instead of being yanked (the yank collapsed the spur-room map when strictness
+            // first landed: 15-20° OBB sides x a tight σ was a huge false residual).
+            const float sig2 = params.manhattan_sigma_rad * params.manhattan_sigma_rad;
+            w.manhattan_var = (w.k >= 0) ? std::max(sig2, cls.eps * cls.eps) : 0.f;
         }
     }
 
@@ -333,6 +360,24 @@ namespace rc::wallmap
     int WallMap::try_splice(const Candidate& c, FrameResult& fr, std::int64_t ts)
     {
         if (order.size() < 3) return -1;
+        // STRICT MANHATTAN: an off-axis candidate is not structural at this stage. It is kept in
+        // the candidate bank (rejection preserves it) as the input of the chamfer postprocessing.
+        if (params.manhattan_strict and theta0_born)
+        {
+            float best_eps = std::numeric_limits<float>::infinity();
+            for (int k = 0; k < 4; ++k)
+                best_eps = std::min(best_eps,
+                                    std::abs(wrap_pi(c.phi - theta0 - static_cast<float>(k) * kPi * 0.5f)));
+            // The gate widens by θ0's own honest uncertainty and anneals as walls confirm.
+            if (best_eps > params.manhattan_gate_rad + 2.f * theta0_sigma())
+            {
+                if (params.debug_splice)
+                    std::printf("[mh-gate] refused cand phi=%.3f d=%.3f npts=%d eps=%.1fdeg gate=%.1fdeg\n",
+                                c.phi, c.d, c.npts, best_eps * 180.f / kPi,
+                                (params.manhattan_gate_rad + 2.f * theta0_sigma()) * 180.f / kPi);
+                return -1;
+            }
+        }
         const int N = static_cast<int>(order.size());
         // Chosen across ALL hosts and cases by SCORE, not first-valid: a valid polygon cannot tell
         // the right corner from a wrong one (the chamfer once replaced a dead ghost at the ghost's
@@ -861,6 +906,11 @@ namespace rc::wallmap
             const Polygon trial = build_from(best_v.ord);
             const float dnats = jump_delta_nats(poly_cur, trial, c.first_ms);
             const int dorder = static_cast<int>(best_v.ord.size()) - static_cast<int>(order.size());
+            // A replacement (dorder == 0) changes no order, yet it still pays one pair: the free
+            // version was TRIED and measured — with zero toll a noise-level replacement committed
+            // against a transient baseline and amputated half a flat (IoU 0.865 → 0.460, seed
+            // 1001). The toll is not only an order prior; it is the noise floor of the evidence
+            // comparison itself.
             float cost = params.order_jump_nats * static_cast<float>(std::max(1, (std::abs(dorder) + 1) / 2));
             if (std::abs(dorder) % 2 == 1) cost += params.parity_jump_nats;
             if (params.debug_splice)
@@ -1557,6 +1607,34 @@ namespace rc::wallmap
                     skip("edge-not-free");
                 }
         }
+        // STRICT MANHATTAN eviction: an order wall whose class error exceeds the annealed gate is
+        // not structural at this stage, however many points it carries — an oblique junk line
+        // admitted during the wide-gate transient must leave once θ0 is trusted, or it keeps the
+        // polygon (and, through max-trust, once kept the gate itself) wrong. One per frame.
+        if (params.manhattan_strict and theta0_born and order.size() > 4)
+        {
+            const float gate_eff = params.manhattan_gate_rad + 2.f * theta0_sigma();
+            for (const auto id : order)
+            {
+                const auto* w = find(id);
+                if (w == nullptr) continue;
+                if (std::count(order.begin(), order.end(), id) != 1) continue;
+                float best_eps = std::numeric_limits<float>::infinity();
+                for (int k = 0; k < 4; ++k)
+                    best_eps = std::min(best_eps,
+                                        std::abs(wrap_pi(w->phi - theta0 - static_cast<float>(k) * kPi * 0.5f)));
+                if (best_eps > gate_eff)
+                {
+                    if (params.debug_splice)
+                        std::printf("[mh-evict] wall %llu phi=%.3f pts=%d eps=%.1fdeg > gate %.1fdeg\n",
+                                    (unsigned long long)w->id, w->phi, w->points_seen,
+                                    best_eps * 180.f / kPi, gate_eff * 180.f / kPi);
+                    splice_out(id);
+                    fr.deaths++;
+                    break;
+                }
+            }
+        }
         // Classes follow the walls: an edge that converged onto a Manhattan direction after being
         // born off it (the tilted-OBB transient) regains its class — and its room factor — here.
         reclassify_all();
@@ -1901,7 +1979,22 @@ namespace rc::wallmap
                 // wall; a wall created from it starts with that known bias removed (outward along
                 // its inward normal), and the point factors refine from there. Validated 3-seed
                 // paired A/B (2026-09-01): with this + micro-prune, IoU median 0.917 vs 0.774.
-                WallLandmark w = make_wall(phi_c, d_c - 1.5f * fgrid.cell, weak, 0.5f * params.birth_nats, 0);
+                // Strict Manhattan: a contour run is stair-stepped by the grid; snap its line to
+                // the nearest Manhattan direction through the run's midpoint before creating the
+                // wall, so re-derivation cannot introduce oblique edges either.
+                float phi_w = phi_c, d_w = d_c;
+                if (params.manhattan_strict and theta0_born)
+                {
+                    float best_eps = std::numeric_limits<float>::infinity();
+                    for (int k2 = 0; k2 < 4; ++k2)
+                    {
+                        const float eps = wrap_pi(phi_c - theta0 - static_cast<float>(k2) * kPi * 0.5f);
+                        if (std::abs(eps) < std::abs(best_eps))
+                        { best_eps = eps; phi_w = wrap_pi(theta0 + static_cast<float>(k2) * kPi * 0.5f); }
+                    }
+                    d_w = linefit::normal_of(phi_w).dot(0.5f * (a + b));
+                }
+                WallLandmark w = make_wall(phi_w, d_w - 1.5f * fgrid.cell, weak, 0.5f * params.birth_nats, 0);
                 const Eigen::Vector2f tv = w.tangent();
                 w.s_min = std::min(tv.dot(a), tv.dot(b)); w.s_max = std::max(tv.dot(a), tv.dot(b));
                 w.has_extent = true;
