@@ -400,14 +400,28 @@ arm 3R comparison above is unaffected — both its legs use one definition.
 - **`iters/solve` is FLAT within 1.05x** (13.27–13.99). The per-solve work is a constant of the
   solver, not a function of how wrong the motion model is.
 - **Firing sorts by SESSION, not by treatment** — ~5.6% in both arm 3R legs, ~8.0% in both arm 4
-  legs. Between-session drift (1.47x) exceeds every within-session treatment effect measured. That is
-  exactly how a 4.4x can appear once and vanish on repetition, and it is the documented 5x `opt/m`
-  spread showing up again.
+  legs. Between-session drift (1.47x) exceeds every within-session treatment effect measured, and it
+  is the documented 5x `opt/m` spread showing up again.
+
+⚠ **THAT DOES NOT EXPLAIN ARM 3, and an earlier draft of this section claimed it did.** Session
+sorting explains why the absolute LEVELS differ between arms. It cannot explain a 4.4x difference
+between two legs PAIRED INSIDE ONE SESSION, because within-session pairing evidently controls firing
+well in both arms measured here. **Arm 3's within-session 4.4x is unexplained, and its raw CSVs are
+gone, so it cannot be explained.** What is established is narrower and sufficient: the endpoint
+cannot support the interpretation placed on it, and the result does not reproduce. ★ An unexplained
+non-reproducing result reported AS unexplained is stronger than one handed a cause it cannot carry —
+which is the same error as believing a 4.4x from an instrument documented to spread fivefold.
 
 **Conclusion, stated for the thesis.** Calibration reliably reduces the ERROR THE OPTIMISER MUST
-REMOVE and reliably does not reduce how often or how hard it solves. The effort result was a
-measurement of a binary over a threshold, in a session that happened to differ from its control; it
-is not a property of calibration. ★ The claim that survives is about the correction load, it has a
+REMOVE and reliably does not reduce how often or how hard it solves. The effort result came from a
+binary over a threshold and does not reproduce; whether it is a property of calibration is settled
+(it is not), why the original run produced it is not.
+
+★★★ **BURST-WINDOW RATE IS NULL EVERYWHERE**: 0/16 and 0/12 in arm 4, 0/13 and 0/13 in arm 3R. Zero
+burst windows in all four legs across a model error from ~0% to 10%. The localiser never lost
+tracking under any condition produced, which quantifies the corrector's slack: a 10% odometry scale
+error, 4x the robot's native error, is absorbed without one lost window. The registered third
+endpoint returns empty and that is a result, not a gap. ★ The claim that survives is about the correction load, it has a
 monotone dose-response, and it is the one to carry.
 
 ### Arm 5 — DOES THE COST APPEAR WHEN THE CORRECTOR IS SCARCE? Pre-registered 2026-09-01, not run.
