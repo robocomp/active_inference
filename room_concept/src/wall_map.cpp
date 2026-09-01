@@ -2339,6 +2339,27 @@ namespace rc::wallmap
         };
         const float iou_new = grid_iou(build_from(new_order));
         const float iou_old = grid_iou(build_from(order));
+        // SURRENDER RULE: observed existence support the new cycle would erase. Counted once per
+        // wall (duplicate rides skipped), only ABOVE the birth seed, and only for walls whose LINE
+        // the new cycle does not hold anywhere.
+        float surrender = 0.f;
+        for (auto it = order.begin(); it != order.end(); ++it)
+        {
+            if (std::find(order.begin(), it, *it) != it) continue;   // count each wall once
+            const auto* w = find(*it);
+            if (w == nullptr) continue;
+            bool held = false;
+            for (const auto id2 : new_order)
+                if (const auto* w2 = find(id2); w2 != nullptr
+                    and std::abs(wrap_pi(w->phi - w2->phi)) < 0.2f
+                    and std::abs(w->d - w2->d) < 0.3f) { held = true; break; }
+            if (held) continue;
+            for (const float b : w->exist_bins) surrender += std::max(0.f, b - params.birth_nats);
+        }
+        if (params.debug_splice and surrender > params.adopt_surrender_nats
+            and iou_new > iou_old + 0.02f)
+            std::printf("[adopt-surrender] VETO: adoption would erase %.1f nats of observed support\n",
+                        surrender);
         if (params.debug_splice)
         {
             const Polygon tp = build_from(new_order);
@@ -2385,7 +2406,7 @@ namespace rc::wallmap
                                 iou_old, iou_new);
             }
         }
-        if (iou_new > iou_old + 0.02f)
+        if (iou_new > iou_old + 0.02f and surrender <= params.adopt_surrender_nats)
         {
             order = new_order;
             // Erase promoted candidates (largest indices first) and orphaned walls.

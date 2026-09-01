@@ -120,6 +120,12 @@ namespace rc::wallmap
         // structure (a pocket over unobserved space), while the [keep·cost, cost] band gives the
         // hysteresis that prevents up/down flapping at the boundary.
         float order_keep_fraction = 0.7f;
+        // SURRENDER RULE INSIDE ADOPTION (user design 2026-09-01): a wall backed by OBSERVED
+        // existence support (bins above the birth seed) may not be dropped by a contour adoption
+        // for free. This is a VETO, not a price — a global trade cannot protect a small structure
+        // inside a big-gain adoption (measured: a 26-bin wrapped face ≈ 120 nats against
+        // thousands of area nats). ⚠ threshold ≈ two fully-observed bins.
+        float adopt_surrender_nats = 9.f;
         // ── STRICT MANHATTAN (user directive 2026-09-01): this stage estimates the room's MAIN
         // LINES only. Every polygon wall carries a Manhattan class; an off-axis candidate (chamfer,
         // oblique clutter line) may never splice into the cycle — it stays in the candidate bank as
