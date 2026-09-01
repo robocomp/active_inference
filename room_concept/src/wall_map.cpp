@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <limits>
 #include <sstream>
 
@@ -353,14 +354,94 @@ namespace rc::wallmap
         const Eigen::Vector2f c0 = n_c * c.d + t_c * c.s_min, c1 = n_c * c.d + t_c * c.s_max;
         const float tol = params.splice_end_tol;
 
+        // ── Stub-vs-boundary discriminator, measured on the free grid ────────────────────────────
+        // Every boundary splice (notch, corner cut, replacement, direct) makes C a boundary edge:
+        // interior in FRONT of C, exterior BEHIND it. The STUB claims the opposite — the room
+        // CONTINUES behind the face and wraps around a free-standing interior wall. The two classes
+        // differ over exactly one observable region (the strip behind C beyond the thin-wall
+        // thickness), so the global ΔF selection the stub was gated on reduces to evidence there:
+        // free cells count only if CONNECTED to the robot's own free component (a room change can
+        // leave stale free log-odds behind a new wall — the grid never forgets — but that region is
+        // sealed off, and unreachable free space supports no wrap); occupied cells refute; unknown
+        // cells are silent.
+        if (comp_cache_ts_ != ts)
+        {
+            comp_cache_ = free_component(last_pose_xy_);
+            comp_cache_ts_ = ts;
+        }
+        const float wrap_evidence = [&]() -> float
+        {
+            if (not fgrid.ready() or comp_cache_.empty() or c.s_max <= c.s_min) return 0.f;
+            int net = 0, ntot = 0;
+            const float ds = std::max(fgrid.cell, (c.s_max - c.s_min) / 24.f);
+            const float t_from = params.stub_thickness + fgrid.cell, t_to = params.stub_thickness + 0.5f;
+            for (float s = c.s_min + 0.5f * ds; s < c.s_max; s += ds)
+            {
+                // No face, no question: a fresh connected-FREE cell ON the candidate line means no
+                // wall exists at this stretch at all — a candidate's extent can spill past the real
+                // wall's end into open room (measured: the notch candidate spilled 2 m, and the
+                // spill's genuinely-free far side mis-classed the whole face as a stub). Such
+                // columns are silent either way.
+                {
+                    const Eigen::Vector2f pl = n_c * c.d + t_c * s;
+                    const int li = static_cast<int>((pl.x() - fgrid.x0) / fgrid.cell);
+                    const int lj = static_cast<int>((pl.y() - fgrid.y0) / fgrid.cell);
+                    if (fgrid.in(li, lj) and fgrid.is_free(li, lj)
+                        and comp_cache_[static_cast<size_t>(fgrid.idx(li, lj))] != 0
+                        and fgrid.free_ms[static_cast<size_t>(fgrid.idx(li, lj))] >= c.first_ms) continue;
+                }
+                for (float t = t_from + 0.5f * fgrid.cell; t < t_to; t += fgrid.cell)
+                {
+                    const Eigen::Vector2f p = n_c * (c.d - t) + t_c * s;
+                    const int gi = static_cast<int>((p.x() - fgrid.x0) / fgrid.cell);
+                    const int gj = static_cast<int>((p.y() - fgrid.y0) / fgrid.cell);
+                    if (not fgrid.in(gi, gj)) continue;
+                    ++ntot;
+                    // A free cell asserts the wrap only when (a) currently CONNECTED to the robot's
+                    // free component and (b) marked free at full weight AFTER this face first
+                    // existed: passage while the face stood proves the room goes AROUND it. A room
+                    // change leaves stale free log-odds behind a new wall (the grid never forgets),
+                    // and a young wall's porous seal lets a bare connectivity flood leak through.
+                    if (fgrid.is_occupied(gi, gj)) --net;
+                    else if (fgrid.is_free(gi, gj) and comp_cache_[static_cast<size_t>(fgrid.idx(gi, gj))] != 0
+                             and fgrid.free_ms[static_cast<size_t>(fgrid.idx(gi, gj))] >= c.first_ms) ++net;
+                }
+            }
+            return (ntot > 0) ? static_cast<float>(net) / static_cast<float>(ntot) : 0.f;
+        }();
+        const bool wraps_behind = params.enable_stub_jumps and wrap_evidence > params.stub_free_behind_min;
+        // If the mirror face ALREADY EXISTS as a mapped wall overlapping C, fabricating another can
+        // only duplicate and wreck (measured: a 7 m fabricated twin of the space divider committed
+        // beside the real far face). The wrap-completion family — which uses the existing wall as
+        // the mirror — is then the only lawful stub-class move.
+        bool mirror_exists = false;
+        if (wraps_behind)
+            for (const auto& w2 : walls)
+                if (std::abs(wrap_pi(wrap_pi(w2.phi - c.phi) - kPi)) < 0.35f
+                    and std::abs(w2.d + c.d) < 0.35f and w2.has_extent
+                    and -w2.s_max < c.s_max and -w2.s_min > c.s_min)
+                    { mirror_exists = true; break; }
+        if (params.debug_splice)
+            std::printf("[splice] cand phi=%.3f d=%.3f s[%.2f,%.2f] npts=%d wrap=%.2f %s\n",
+                        c.phi, c.d, c.s_min, c.s_max, c.npts, wrap_evidence,
+                        wraps_behind ? "STUB-CLASS" : "boundary-class");
+
         for (int i = 0; i < N; ++i)
         {
             WallLandmark* E = find(order[static_cast<size_t>(i)]);
             if (E == nullptr or not E->has_extent) continue;
             const float dphi = wrap_pi(c.phi - E->phi);
             const bool parallel = std::abs(dphi) < kPi / 4.f;
-            // Anti-parallel (a face looking the other way) is not an edge of THIS boundary.
-            if (std::abs(dphi) > 3.f * kPi / 4.f) continue;
+            // Anti-parallel: a face looking the other way is not an edge of THIS boundary — except
+            // as the FAR FACE of the host itself, when the room provably wraps around it (the
+            // WRAP-COMPLETION family below). Everything else skips anti-parallel hosts.
+            const bool antiparallel = std::abs(dphi) > 3.f * kPi / 4.f;
+            if (antiparallel and params.debug_splice)
+                std::printf("[splice]   antipar host %llu: dsum=%.2f ext=%d wrap_ok=%d\n",
+                            (unsigned long long)E->id, c.d + E->d,
+                            static_cast<int>(E->has_extent), static_cast<int>(wraps_behind));
+            if (antiparallel and not (wraps_behind and std::abs(c.d + E->d) < 0.35f and E->has_extent))
+                continue;
 
             const Eigen::Vector2f tE = E->tangent();
             float a = tE.dot(c0), b = tE.dot(c1);
@@ -389,11 +470,22 @@ namespace rc::wallmap
                 const Eigen::Matrix2f prior_info =
                     Eigen::Vector2f(1.f / (params.rect_prior_sigma_phi_rad * params.rect_prior_sigma_phi_rad),
                                     1.f / (params.rect_prior_sigma_d * params.rect_prior_sigma_d)).asDiagonal();
-                return make_wall(phi_j, d_j, prior_info, 0.5f * params.birth_nats, ts);
+                WallLandmark J = make_wall(phi_j, d_j, prior_info, 0.5f * params.birth_nats, ts);
+                // The jog physically spans from the host's line to the candidate's line — DECLARE
+                // that, or the corner-evidence gate cannot see a jog edge amputate a room: an
+                // extent-less trial wall is skipped by the gate, and a jog once extended 4 m to the
+                // opposite wall, cutting off everything beyond it (synthetic spur harness).
+                const Eigen::Vector2f t_j = linefit::tangent_of(phi_j);
+                const Eigen::Vector2f p1 = linefit::normal_of(E->phi) * E->d + tE * s0;
+                const Eigen::Vector2f p2 = p1 + n_c * (c.d - n_c.dot(p1));
+                J.s_min = std::min(t_j.dot(p1), t_j.dot(p2)) - 0.10f;
+                J.s_max = std::max(t_j.dot(p1), t_j.dot(p2)) + 0.10f;
+                J.has_extent = true;
+                return J;
             };
 
             // Enumerate order variants (walls listed by VALUE first; committed only on validation).
-            struct Variant { std::vector<WallLandmark> new_walls; std::vector<std::uint64_t> ord; };
+            struct Variant { std::vector<WallLandmark> new_walls; std::vector<std::uint64_t> ord; bool is_stub = false; };
             std::vector<Variant> variants;
             const auto splice_at = [&](const std::vector<std::uint64_t>& inserted, bool replace_host_after) -> std::vector<std::uint64_t>
             {
@@ -420,6 +512,7 @@ namespace rc::wallmap
             // (measured: a 25k-point real wall homeless through 792 rejections). Evidence-gated: the
             // run's combined support must be LESS than the candidate's own, so a supported stretch of
             // boundary can never be amputated by one loud line.
+            if (not antiparallel)
             for (int L = 1; L <= std::min(5, N - 3); ++L)
             {
                 int run_pts = 0;
@@ -450,7 +543,7 @@ namespace rc::wallmap
             // (swapping the east wall for a notch line also builds a valid polygon). A host that has
             // NEVER been confirmed (frames_seen == 0: a tilted OBB side the gate refused for ever) may
             // be substituted; a supported host only when the candidate covers both its ends.
-            if (E->frames_seen == 0 or (at_lo and at_hi))
+            if (not antiparallel and (E->frames_seen == 0 or (at_lo and at_hi)))
             {
                 Variant v;
                 v.new_walls = {C};
@@ -498,7 +591,7 @@ namespace rc::wallmap
             // candidate is one face; its mirror starts at a thin-wall prior thickness and the tip at
             // the deep end; evidence (and the other face's own candidate, which twin-fuses into the
             // mirror) refines both. This is what makes the room CONCAVE around interior walls.
-            if (not parallel and params.enable_stub_jumps)
+            if (not parallel and not antiparallel and wraps_behind and not mirror_exists)
             {
                 const float e0 = E->normal().dot(c0) - E->d;   // distances from the host line,
                 const float e1 = E->normal().dot(c1) - E->d;   // positive = interior side
@@ -506,11 +599,35 @@ namespace rc::wallmap
                 const Eigen::Vector2f near_p = (e0 <= e1) ? c0 : c1;
                 const Eigen::Vector2f far_p  = (e0 <= e1) ? c1 : c0;
                 const float s_att = tE.dot(near_p);
+                if (params.debug_splice)
+                    std::printf("[splice]   stub geom @host %llu: near_e=%.2f far_e=%.2f s_att=%.2f span[%.2f,%.2f]\n",
+                                (unsigned long long)E->id, near_e, far_e, s_att, E->s_min, E->s_max);
                 if (near_e >= -tol and near_e <= tol
                     and far_e >= 4.f * params.exist_bin_m
                     and s_att > E->s_min + tol and s_att < E->s_max - tol)
                 {
-                    const float t0 = 0.12f;   // ⚠ thin-wall thickness prior (m); evidence refines it
+                    // The mirror goes WHERE THE MATTER IS: scan depth behind C for the boundary
+                    // where free space begins — matter cannot be where free passage was observed.
+                    // The fixed thickness prior put the mirror 4 cm into open space beside a real
+                    // 8 cm wall, and the false face wrecked the cycle when the real one arrived.
+                    // Unobserved depths fall back to the prior thickness.
+                    float t0 = -1.f;
+                    for (float tt = fgrid.cell; tt <= 0.4f + 1e-3f; tt += fgrid.cell)
+                    {
+                        int fre = 0, tot = 0;
+                        const float ds2 = std::max(fgrid.cell, (c.s_max - c.s_min) / 16.f);
+                        for (float s2 = c.s_min + 0.5f * ds2; s2 < c.s_max; s2 += ds2)
+                        {
+                            const Eigen::Vector2f p2 = n_c * (c.d - tt) + t_c * s2;
+                            const int gi2 = static_cast<int>((p2.x() - fgrid.x0) / fgrid.cell);
+                            const int gj2 = static_cast<int>((p2.y() - fgrid.y0) / fgrid.cell);
+                            if (not fgrid.in(gi2, gj2)) continue;
+                            ++tot;
+                            if (fgrid.is_free(gi2, gj2)) ++fre;
+                        }
+                        if (tot > 0 and 2 * fre > tot) { t0 = std::max(tt - fgrid.cell, fgrid.cell); break; }
+                    }
+                    if (t0 < 0.f) t0 = params.stub_thickness;
                     const Eigen::Matrix2f prior_info =
                         Eigen::Vector2f(1.f / (params.rect_prior_sigma_phi_rad * params.rect_prior_sigma_phi_rad),
                                         1.f / (params.rect_prior_sigma_d * params.rect_prior_sigma_d)).asDiagonal();
@@ -528,6 +645,7 @@ namespace rc::wallmap
                         for (bool c_first : {true, false})
                         {
                             Variant v;
+                            v.is_stub = true;
                             WallLandmark Cw = C, Mw = M, Tw = T;
                             v.new_walls = c_first ? std::vector<WallLandmark>{Cw, Tw, Mw}
                                                   : std::vector<WallLandmark>{Mw, Tw, Cw};
@@ -538,16 +656,65 @@ namespace rc::wallmap
                 }
             }
 
+            // WRAP COMPLETION: C is the OTHER FACE of the host itself — an anti-parallel twin
+            // within thin-wall separation, with connected free space observed behind C while it
+            // existed. The fabricated-mirror stub above cannot serve here: the mirror ALREADY
+            // EXISTS as E, and splicing a copy beside it can only self-cross (measured: ~10k stub
+            // offers, ~10 survivors, every thin-wall far face homeless). Complete the wrap instead:
+            // a tip cap T between the two faces — [.., E, T, C, ..] or [.., C, T, E, ..] — with the
+            // neighbour wall optionally RESUMED after the return face (the spur springs from its
+            // line and the boundary continues along it). Tip end, tip normal, insertion side and
+            // resume are enumerated; validation + the corner-evidence gate + extent score choose,
+            // as for every other jump.
+            if (antiparallel and wraps_behind and std::abs(c.d + E->d) < 0.35f and E->has_extent)
+            {
+                const Eigen::Matrix2f prior_info =
+                    Eigen::Vector2f(1.f / (params.rect_prior_sigma_phi_rad * params.rect_prior_sigma_phi_rad),
+                                    1.f / (params.rect_prior_sigma_d * params.rect_prior_sigma_d)).asDiagonal();
+                for (float s_end : {c.s_min, c.s_max})
+                    for (int tsign : {+1, -1})
+                    {
+                        const float phi_t = wrap_pi(c.phi + static_cast<float>(tsign) * kPi * 0.5f);
+                        const Eigen::Vector2f p_tip = n_c * c.d + t_c * s_end;
+                        const WallLandmark T = make_wall(phi_t, linefit::normal_of(phi_t).dot(p_tip),
+                                                         prior_info, 0.5f * params.birth_nats, ts);
+                        for (bool c_after : {true, false})
+                            for (bool resume : {false, true})
+                            {
+                                Variant v;
+                                v.is_stub = true;
+                                v.new_walls = {T, C};
+                                std::vector<std::uint64_t> o;
+                                for (int j = 0; j < N; ++j)
+                                {
+                                    if (j == i and not c_after)
+                                    {
+                                        if (resume) o.push_back(order[static_cast<size_t>((j + 1) % N)]);
+                                        o.push_back(C.id); o.push_back(T.id);
+                                    }
+                                    o.push_back(order[static_cast<size_t>(j)]);
+                                    if (j == i and c_after)
+                                    {
+                                        o.push_back(T.id); o.push_back(C.id);
+                                        if (resume) o.push_back(order[static_cast<size_t>((j + N - 1) % N)]);
+                                    }
+                                }
+                                v.ord = std::move(o);
+                                variants.push_back(std::move(v));
+                            }
+                    }
+            }
+
             // Direct connection, no jog — for ANY angle: a 45° chamfer sits exactly on the
             // parallel/oblique boundary, and when the candidate's endpoint lies ON the host line the
             // jog is zero-length by geometry. Validation + score decide against the jog variants.
-            if (at_lo)
+            if (not antiparallel and at_lo)
             {
                 Variant v; v.new_walls = {C};
                 v.ord = splice_at({C.id}, false);
                 variants.push_back(std::move(v));
             }
-            if (at_hi)
+            if (not antiparallel and at_hi)
             {
                 Variant v; v.new_walls = {C};
                 std::vector<std::uint64_t> o;
@@ -563,11 +730,15 @@ namespace rc::wallmap
 
             for (auto& v : variants)
             {
+                // The discriminator's verdict is class-wide: connected free space behind C refutes
+                // every boundary variant (they all claim exterior there); its absence refutes the stub.
+                if (v.is_stub != wraps_behind) continue;
                 // Trial: add the new walls, build, validate, score, roll back.
                 const size_t walls_before = walls.size();
                 for (const auto& w : v.new_walls) walls.push_back(w);
                 Polygon poly = build_from(v.ord);
                 bool ok = poly.closed;
+                const char* why = ok ? "valid" : "not-closed";
                 std::uint64_t c_id = v.new_walls.back().id;
                 for (const auto& w : v.new_walls) if (std::abs(wrap_pi(w.phi - c.phi)) < 1e-4f) c_id = w.id;
                 float score = -1.f;
@@ -588,6 +759,7 @@ namespace rc::wallmap
                         if (left.dot(We->normal()) <= 0.f) { ok = false; break; }
                     }
                 }
+                if (not ok and why[0] == 'v') why = "interior";
                 if (ok)
                 {
                     // Every corner of the trial cycle must sit NEAR the observed evidence of the two
@@ -612,6 +784,39 @@ namespace rc::wallmap
                         }
                     }
                 }
+                if (not ok and why[0] == 'v') why = "corner";
+                if (ok and not comp_cache_.empty())
+                {
+                    // A NEW wall's edge may not run through space the robot has seen FREE while
+                    // this candidate existed: matter cannot be where fresh passage was observed.
+                    // The amputating corner-cut passes every geometric gate — a jog spanning 4 m of
+                    // toured room to reach a distant host is self-consistent — but the grid watched
+                    // beams cross its claimed line (synthetic spur harness). Stale free history
+                    // stays silent, so a genuine room change (the notch) still commits over its past.
+                    for (size_t e2 = 0; e2 < poly.verts.size() and ok; ++e2)
+                    {
+                        const std::uint64_t eid = poly.wall_of_edge[e2];
+                        bool is_new = false;
+                        for (const auto& nwl : v.new_walls) if (nwl.id == eid) { is_new = true; break; }
+                        if (not is_new) continue;
+                        const Eigen::Vector2f a2 = poly.verts[e2];
+                        const Eigen::Vector2f b2 = poly.verts[(e2 + 1) % poly.verts.size()];
+                        int nfree = 0, ntot2 = 0;
+                        const int nsamp = std::max(2, static_cast<int>((b2 - a2).norm() / fgrid.cell));
+                        for (int k2 = 0; k2 <= nsamp; ++k2)
+                        {
+                            const Eigen::Vector2f p = a2 + (b2 - a2) * (static_cast<float>(k2) / static_cast<float>(nsamp));
+                            const int gi = static_cast<int>((p.x() - fgrid.x0) / fgrid.cell);
+                            const int gj = static_cast<int>((p.y() - fgrid.y0) / fgrid.cell);
+                            if (not fgrid.in(gi, gj)) continue;
+                            ++ntot2;
+                            if (fgrid.is_free(gi, gj) and comp_cache_[static_cast<size_t>(fgrid.idx(gi, gj))] != 0
+                                and fgrid.free_ms[static_cast<size_t>(fgrid.idx(gi, gj))] >= c.first_ms) ++nfree;
+                        }
+                        if (ntot2 > 0 and 2 * nfree > ntot2) ok = false;
+                    }
+                    if (not ok and why[0] == 'v') why = "edge-free";
+                }
                 if (ok)
                 {
                     // Score: length of C's observed extent that lies on C's polygon edge.
@@ -626,13 +831,22 @@ namespace rc::wallmap
                         }
                 }
                 walls.resize(walls_before);
+                if (params.debug_splice)
+                    std::printf("[splice]   %s-variant nw=%zu ord=%zu why=%s score=%.2f host=%llu\n",
+                                v.is_stub ? "stub" : "bnd",
+                                v.new_walls.size(), v.ord.size(), why, score, (unsigned long long)E->id);
                 // ⚠ fraction bar: a jump must place the MAJORITY of its candidate's observed extent on
                 // the resulting edge — "some overlap" let wrong-position commits win over nothing.
                 if (ok and score > 0.5f * std::max(params.exist_bin_m, c.s_max - c.s_min) and better(score, v.new_walls.size()))
                     best_v = Best{score, v.new_walls, v.ord, E->id};
             }
         }
-        if (best_v.score < 0.f) return -1;
+        if (best_v.score < 0.f)
+        {
+            if (params.debug_splice and wraps_behind)
+                std::printf("[splice]   no stub variant survived for cand phi=%.3f d=%.3f\n", c.phi, c.d);
+            return -1;
+        }
         // Commit the winner.
         for (const auto& w : best_v.new_walls) walls.push_back(w);
         order = best_v.ord;
@@ -650,6 +864,176 @@ namespace rc::wallmap
         fr.births_info.push_back(bi);
         fr.births++;
         return index_of(bi.id);
+    }
+
+    int WallMap::try_spur_wraps(FrameResult& fr, std::int64_t ts)
+    {
+        if (order.size() < 3 or not params.enable_stub_jumps or not fgrid.ready()) return -1;
+        const Polygon poly = build_polygon();
+        if (not poly.closed) return -1;
+        if (comp_cache_ts_ != ts) { comp_cache_ = free_component(last_pose_xy_); comp_cache_ts_ = ts; }
+        if (comp_cache_.empty()) return -1;
+        const int NE = static_cast<int>(poly.verts.size());
+        if (NE != static_cast<int>(order.size())) return -1;
+        for (int e = 0; e < NE; ++e)
+        {
+            if (poly.wall_of_edge[static_cast<size_t>(e)] != order[static_cast<size_t>(e)]) continue;
+            WallLandmark* W = find(order[static_cast<size_t>(e)]);
+            if (W == nullptr or not W->has_extent or W->exist_bins.empty()) continue;
+            const Eigen::Vector2f tW = W->tangent(), nW = W->normal();
+            const float sa = tW.dot(poly.verts[static_cast<size_t>(e)]);
+            const float sb = tW.dot(poly.verts[static_cast<size_t>((e + 1) % NE)]);
+            const float e_lo = std::min(sa, sb), e_hi = std::max(sa, sb);
+            for (int side : {+1, -1})
+            {
+                const float corner_s = (side > 0) ? e_hi : e_lo;
+                const float reach    = (side > 0) ? W->s_max - corner_s : corner_s - W->s_min;
+                if (reach < 2.f * params.exist_bin_m) continue;
+                // Contiguous SOLID bins from the corner outward place the tip from evidence — the
+                // existence layer already knows where the matter on this line ENDS.
+                float tip_s = corner_s;
+                int bi = static_cast<int>((corner_s - W->bins_s0) / params.exist_bin_m) + side;
+                while (bi >= 0 and bi < static_cast<int>(W->exist_bins.size())
+                       and W->exist_bins[static_cast<size_t>(bi)] >= params.birth_nats)
+                {
+                    tip_s = W->bins_s0 + (static_cast<float>(bi) + (side > 0 ? 1.f : 0.f)) * params.exist_bin_m;
+                    bi += side;
+                }
+                const float overshoot = (side > 0) ? tip_s - corner_s : corner_s - tip_s;
+                if (overshoot < 2.f * params.exist_bin_m) continue;
+                // The room must provably WRAP: connected free space observed behind the overshoot
+                // stretch (beyond thin-wall thickness). Same measurement as the stub discriminator.
+                const float s0 = std::min(corner_s, tip_s), s1 = std::max(corner_s, tip_s);
+                int net = 0, ntot = 0;
+                {
+                    const float ds = std::max(fgrid.cell, (s1 - s0) / 24.f);
+                    const float t_from = params.stub_thickness + fgrid.cell;
+                    const float t_to   = params.stub_thickness + 0.5f;
+                    for (float s = s0 + 0.5f * ds; s < s1; s += ds)
+                        for (float t = t_from + 0.5f * fgrid.cell; t < t_to; t += fgrid.cell)
+                        {
+                            const Eigen::Vector2f p = nW * (W->d - t) + tW * s;
+                            const int gi = static_cast<int>((p.x() - fgrid.x0) / fgrid.cell);
+                            const int gj = static_cast<int>((p.y() - fgrid.y0) / fgrid.cell);
+                            if (not fgrid.in(gi, gj)) continue;
+                            ++ntot;
+                            if (fgrid.is_occupied(gi, gj)) --net;
+                            else if (fgrid.is_free(gi, gj)
+                                     and comp_cache_[static_cast<size_t>(fgrid.idx(gi, gj))] != 0) ++net;
+                        }
+                }
+                if (ntot == 0 or static_cast<float>(net) / static_cast<float>(ntot) <= params.stub_free_behind_min)
+                    continue;
+                // If the far face ALREADY EXISTS as a mapped wall overlapping this overshoot, the
+                // wrap is not ours to fabricate — a twin mirror beside it can only duplicate and
+                // churn (measured: 6 re-wraps of one wall in a run, each dying against the existing
+                // face, each death leaving a near-parallel spike). That rearrangement belongs to
+                // the global re-derivation.
+                {
+                    bool twin_exists = false;
+                    for (const auto& w2 : walls)
+                        if (std::abs(wrap_pi(wrap_pi(w2.phi - W->phi) - kPi)) < 0.35f
+                            and std::abs(w2.d + W->d) < 0.35f and w2.has_extent
+                            and -w2.s_max < s1 and -w2.s_min > s0)   // overlap in W's tangent coords
+                            { twin_exists = true; break; }
+                    if (twin_exists) continue;
+                }
+                if (params.debug_splice)
+                    std::printf("[spur] wall %llu edge %d side %+d corner_s=%.2f tip_s=%.2f wrap=%.2f\n",
+                                (unsigned long long)W->id, e, side, corner_s, tip_s,
+                                static_cast<float>(net) / static_cast<float>(ntot));
+                // Trial: mirror M (extent = the overshoot, mirrored) and tip cap T (both signs).
+                const Eigen::Matrix2f prior_info =
+                    Eigen::Vector2f(1.f / (params.rect_prior_sigma_phi_rad * params.rect_prior_sigma_phi_rad),
+                                    1.f / (params.rect_prior_sigma_d * params.rect_prior_sigma_d)).asDiagonal();
+                const std::uint64_t w_id = W->id;
+                for (int tsign : {+1, -1})
+                {
+                    const size_t walls_before = walls.size();
+                    WallLandmark M = make_wall(wrap_pi(W->phi + kPi), params.stub_thickness - W->d,
+                                               prior_info, 0.5f * params.birth_nats, ts);
+                    M.s_min = -s1; M.s_max = -s0; M.has_extent = true;   // t_M = −t_W
+                    const float phi_t = wrap_pi(W->phi + static_cast<float>(tsign) * kPi * 0.5f);
+                    const Eigen::Vector2f p_tip = nW * W->d + tW * tip_s;
+                    WallLandmark T = make_wall(phi_t, linefit::normal_of(phi_t).dot(p_tip),
+                                               prior_info, 0.5f * params.birth_nats, ts);
+                    // T carries a BOUNDED extent from the start — the cap is exactly the thin-wall
+                    // thickness — so the corner-evidence gate applies to its corners at trial time
+                    // (an extent-less T was skipped, and a near-parallel adjacency once threw its
+                    // corner 8 m out of the room).
+                    {
+                        const float sT = linefit::tangent_of(phi_t).dot(p_tip);
+                        T.s_min = sT - params.stub_thickness - 0.10f;
+                        T.s_max = sT + params.stub_thickness + 0.10f;
+                        T.has_extent = true;
+                    }
+                    std::vector<std::uint64_t> o;
+                    const bool at_end_vertex = std::abs(sb - corner_s) < 1e-4f;
+                    for (int j = 0; j < NE; ++j)
+                    {
+                        if (j == e and not at_end_vertex) { o.push_back(M.id); o.push_back(T.id); }
+                        o.push_back(order[static_cast<size_t>(j)]);
+                        if (j == e and at_end_vertex) { o.push_back(T.id); o.push_back(M.id); }
+                    }
+                    walls.push_back(T); walls.push_back(M);
+                    const Polygon p2 = build_from(o);
+                    bool ok = p2.closed;
+                    const char* why = ok ? "valid" : "not-closed";
+                    for (size_t e2 = 0; e2 < p2.verts.size() and ok; ++e2)
+                    {
+                        const Eigen::Vector2f dirv = p2.verts[(e2 + 1) % p2.verts.size()] - p2.verts[e2];
+                        if (dirv.norm() < 0.05f) { ok = false; break; }
+                        const auto* We2 = find(p2.wall_of_edge[e2]);
+                        if (We2 == nullptr) { ok = false; break; }
+                        const Eigen::Vector2f left(-dirv.y(), dirv.x());
+                        if (left.dot(We2->normal()) <= 0.f)
+                        {
+                            if (params.debug_splice)
+                                std::printf("[spur]     interior-fail edge %zu wall %llu dir(%.2f,%.2f) n(%.2f,%.2f)\n",
+                                            e2, (unsigned long long)p2.wall_of_edge[e2],
+                                            dirv.x(), dirv.y(), We2->normal().x(), We2->normal().y());
+                            ok = false; break;
+                        }
+                    }
+                    if (not ok and why[0] == 'v') why = "interior";
+                    for (size_t e2 = 0; e2 < p2.verts.size() and ok; ++e2)
+                    {
+                        const auto* W2 = find(p2.wall_of_edge[e2]);
+                        if (W2 == nullptr) { ok = false; break; }
+                        if (not W2->has_extent) continue;
+                        const Eigen::Vector2f tv2 = W2->tangent();
+                        for (const Eigen::Vector2f& vv : {p2.verts[e2], p2.verts[(e2 + 1) % p2.verts.size()]})
+                        {
+                            const float sc = tv2.dot(vv);
+                            if (sc < W2->s_min - 1.0f or sc > W2->s_max + 1.0f) { ok = false; break; }
+                        }
+                    }
+                    if (not ok and why[0] == 'v') why = "corner";
+                    if (not ok)
+                    {
+                        if (params.debug_splice)
+                            std::printf("[spur]   tsign %+d REFUSED: %s (%s)\n", tsign, why, p2.status.c_str());
+                        walls.resize(walls_before);
+                        continue;
+                    }
+                    order = std::move(o);
+                    heal_order();
+                    reclassify_all();
+                    seed_extents_from_polygon();
+                    BirthInfo biM;
+                    biM.id = M.id; biM.phi = M.phi; biM.d = M.d;
+                    biM.nearest_wall = w_id;
+                    fr.births_info.push_back(biM);
+                    fr.births++;
+                    if (params.debug_splice)
+                        std::printf("[spur]   WRAPPED wall %llu: tip T=%llu mirror M=%llu (tsign %+d)\n",
+                                    (unsigned long long)w_id, (unsigned long long)T.id,
+                                    (unsigned long long)M.id, tsign);
+                    return index_of(M.id);
+                }
+            }
+        }
+        return -1;
     }
 
     void WallMap::seed_extents_from_polygon()
@@ -680,13 +1064,14 @@ namespace rc::wallmap
         FrameResult fr;
         {
             // Free-space evidence first: beams traverse free space and end on matter.
+            last_pose_xy_ = pose.head<2>();
             if (not fgrid.ready()) fgrid.init(pose.head<2>(), params.sensor_range);
             const Eigen::Matrix2f Rm = rot2(pose.z());
             std::vector<Eigen::Vector2f> pm;
             pm.reserve(pts_robot.size());
             for (const auto& pr : pts_robot)
                 pm.push_back(Rm * pr + pose.head<2>());
-            fgrid.mark(pose.head<2>(), pm);
+            fgrid.mark(pose.head<2>(), pm, timestamp_ms);
         }
         update_existence(pts_robot, pose, fr);
 
@@ -907,6 +1292,7 @@ namespace rc::wallmap
         fr.candidates = static_cast<int>(candidates.size());
         fr.merged = merge_indistinguishable();
         repair_if_crossing();
+        try_spur_wraps(fr, timestamp_ms);
         // Zero-evidence micro-edges: a polygon edge shorter than ~2 grid cells whose wall carries
         // essentially no observations asserts nothing — contour debris (a dilated stair-step)
         // kinking the boundary. Its neighbours re-intersect when it goes. Validated with the bias
@@ -922,8 +1308,84 @@ namespace rc::wallmap
                     const auto* w = find(id);
                     if (w == nullptr or w->points_seen >= 50) continue;
                     if (std::count(order.begin(), order.end(), id) != 1) continue;
+                    // A TIP CAP is not debris: a short edge whose two neighbours are anti-parallel
+                    // twins at thin-wall separation is the structural cap of a spur wrap — the
+                    // model's only assertion of where the wall ENDS. It is short BY NATURE and
+                    // rarely collects returns (beams graze the tip edge-on); deleting it un-wraps
+                    // the spur (measured: the wrap died 14 frames after commit, eaten here).
+                    const auto* wa = find(pnow.wall_of_edge[(e + pnow.verts.size() - 1) % pnow.verts.size()]);
+                    const auto* wb = find(pnow.wall_of_edge[(e + 1) % pnow.verts.size()]);
+                    if (wa != nullptr and wb != nullptr
+                        and std::abs(wrap_pi(wrap_pi(wa->phi - wb->phi) - kPi)) < 0.35f
+                        and std::abs(wa->d + wb->d) < 0.5f) continue;
                     splice_out(id);
                     break;   // one per frame; the rebuilt polygon decides the next
+                }
+        }
+        // A ZERO-EVIDENCE wall whose edge runs through observed free space is refuted structure:
+        // it was never observed (points_seen == 0 ⇒ it has no existence bins for the step-back to
+        // kill — immortal by omission), yet beams provably cross its claimed line. The trial-time
+        // edge-free gate refuses NEW walls on this evidence; this is the same rule applied to
+        // STANDING structure (measured: an oblique frames=0 leftover cut a room corner diagonally
+        // for ever). One per frame; heal_order re-closes the cycle.
+        if (fgrid.ready())
+        {
+            if (comp_cache_ts_ != timestamp_ms)
+            { comp_cache_ = free_component(last_pose_xy_); comp_cache_ts_ = timestamp_ms; }
+            const Polygon pz = build_polygon();
+            if (pz.closed and not comp_cache_.empty())
+                for (size_t e = 0; e < pz.verts.size(); ++e)
+                {
+                    const auto* w = find(pz.wall_of_edge[e]);
+                    if (w == nullptr or w->points_seen > 0) continue;
+                    if (std::count(order.begin(), order.end(), pz.wall_of_edge[e]) != 1) continue;
+                    // TIP-CAP exemption (as in the micro-edge cleanup): a cap between anti-parallel
+                    // twins has 0 points BY NATURE — culling it un-wrapped the spur every frame
+                    // (measured: 986 wrap/death flaps in one bench run).
+                    {
+                        const auto* wa = find(pz.wall_of_edge[(e + pz.verts.size() - 1) % pz.verts.size()]);
+                        const auto* wb = find(pz.wall_of_edge[(e + 1) % pz.verts.size()]);
+                        if (wa != nullptr and wb != nullptr
+                            and std::abs(wrap_pi(wrap_pi(wa->phi - wb->phi) - kPi)) < 0.35f
+                            and std::abs(wa->d + wb->d) < 0.5f) continue;
+                    }
+                    // MIRROR exemption: a points-0 wall whose ANTI-PARALLEL TWIN carries real
+                    // observations is the far face of a wrapped thin wall. Its line often READS
+                    // free — grazing corridor traffic carves an 8 cm wall on an 8 cm grid (the
+                    // residual grazing-beam lesson at line level) — but the observed near face
+                    // plus proven free space behind it assert a boundary there; culling it
+                    // re-opened the wrap each frame on exactly the carved seeds.
+                    {
+                        bool twin_backed = false;
+                        for (const auto& w2 : walls)
+                            if (w2.points_seen > 0
+                                and std::abs(wrap_pi(wrap_pi(w2.phi - w->phi) - kPi)) < 0.35f
+                                and std::abs(w2.d + w->d) < 0.35f) { twin_backed = true; break; }
+                        if (twin_backed) continue;
+                    }
+                    const Eigen::Vector2f a2 = pz.verts[e];
+                    const Eigen::Vector2f b2 = pz.verts[(e + 1) % pz.verts.size()];
+                    int nfree = 0, ntot = 0;
+                    const int nsamp = std::max(2, static_cast<int>((b2 - a2).norm() / fgrid.cell));
+                    for (int k2 = 0; k2 <= nsamp; ++k2)
+                    {
+                        const Eigen::Vector2f p = a2 + (b2 - a2) * (static_cast<float>(k2) / static_cast<float>(nsamp));
+                        const int gi = static_cast<int>((p.x() - fgrid.x0) / fgrid.cell);
+                        const int gj = static_cast<int>((p.y() - fgrid.y0) / fgrid.cell);
+                        if (not fgrid.in(gi, gj)) continue;
+                        ++ntot;
+                        if (fgrid.is_free(gi, gj)
+                            and comp_cache_[static_cast<size_t>(fgrid.idx(gi, gj))] != 0) ++nfree;
+                    }
+                    if (ntot > 0 and 2 * nfree > ntot)
+                    {
+                        if (params.debug_splice)
+                            std::printf("[cull] zero-evidence wall %llu phi=%.3f d=%.3f edge through free (%d/%d)\n",
+                                        (unsigned long long)w->id, w->phi, w->d, nfree, ntot);
+                        splice_out(pz.wall_of_edge[e]);
+                        fr.deaths++;
+                        break;
+                    }
                 }
         }
         // Classes follow the walls: an edge that converged onto a Manhattan direction after being
@@ -982,9 +1444,11 @@ namespace rc::wallmap
         y0 = centre.y() - half_span;
         lodds.assign(static_cast<size_t>(nx * ny), 0.f);
         hits.assign(static_cast<size_t>(nx * ny), 0);
+        free_ms.assign(static_cast<size_t>(nx * ny), -1);
     }
 
-    void WallMap::FreeGrid::mark(const Eigen::Vector2f& origin, const std::vector<Eigen::Vector2f>& pts_map)
+    void WallMap::FreeGrid::mark(const Eigen::Vector2f& origin, const std::vector<Eigen::Vector2f>& pts_map,
+                                 std::int64_t ts_ms)
     {
         for (const auto& p : pts_map)
         {
@@ -1005,7 +1469,13 @@ namespace rc::wallmap
                 // The residual layer's grazing-beam lesson: matter established by RETURNS latches;
                 // grazing passes cannot erase it (see FreeGrid::hits). Unestablished cells take full
                 // free evidence, which keeps the free region dense enough to trace.
-                l = std::max(-4.f, l - ((hits[static_cast<size_t>(idx(i, j))] >= 3 or l > 1.5f) ? 0.02f : 0.4f));
+                if (hits[static_cast<size_t>(idx(i, j))] >= 3 or l > 1.5f)
+                    l = std::max(-4.f, l - 0.02f);
+                else
+                {
+                    l = std::max(-4.f, l - 0.4f);
+                    free_ms[static_cast<size_t>(idx(i, j))] = ts_ms;   // full-weight free passage NOW
+                }
             }
             const int i = static_cast<int>((p.x() - x0) / cell), j = static_cast<int>((p.y() - y0) / cell);
             if (in(i, j))
@@ -1068,9 +1538,9 @@ namespace rc::wallmap
         return out;
     }
 
-    bool WallMap::re_derive(const Eigen::Vector2f& robot_map)
+    std::vector<char> WallMap::free_component(const Eigen::Vector2f& seed_map) const
     {
-        if (not fgrid.ready()) return false;
+        if (not fgrid.ready()) return {};
         const int nx = fgrid.nx, ny = fgrid.ny;
         // Free-for-flood: free AND not touching matter (one cell of dilation). An 8 cm wall on an
         // 8 cm grid ALIASES across two cell columns — hits split, neither column confirms, and a
@@ -1085,37 +1555,44 @@ namespace rc::wallmap
                     if (fgrid.is_occupied(i + di, j + dj)) return false;
             return true;
         };
-        // Connected free component containing the robot (4-connectivity flood fill).
-        std::vector<char> comp(static_cast<size_t>(nx * ny), 0);
+        int ri = static_cast<int>((seed_map.x() - fgrid.x0) / fgrid.cell);
+        int rj = static_cast<int>((seed_map.y() - fgrid.y0) / fgrid.cell);
+        // The seed's own cell may sit within the dilation ring of a nearby wall: seed from the
+        // nearest flood-free cell in a small window instead of giving up.
+        if (not flood_free(ri, rj))
         {
-            int ri = static_cast<int>((robot_map.x() - fgrid.x0) / fgrid.cell);
-            int rj = static_cast<int>((robot_map.y() - fgrid.y0) / fgrid.cell);
-            // The robot's own cell may sit within the dilation ring of a nearby wall: seed from the
-            // nearest flood-free cell in a small window instead of giving up.
-            if (not flood_free(ri, rj))
+            bool found = false;
+            for (int r2 = 1; r2 <= 4 and not found; ++r2)
+                for (int di = -r2; di <= r2 and not found; ++di)
+                    for (int dj = -r2; dj <= r2 and not found; ++dj)
+                        if (flood_free(ri + di, rj + dj)) { ri += di; rj += dj; found = true; }
+            if (not found) return {};
+        }
+        std::vector<char> comp(static_cast<size_t>(nx * ny), 0);
+        std::vector<int> stack = {fgrid.idx(ri, rj)};
+        comp[static_cast<size_t>(fgrid.idx(ri, rj))] = 1;
+        while (not stack.empty())
+        {
+            const int u = stack.back(); stack.pop_back();
+            const int ui = u % nx, uj = u / nx;
+            const int di[4] = {1, -1, 0, 0}, dj[4] = {0, 0, 1, -1};
+            for (int k = 0; k < 4; ++k)
             {
-                bool found = false;
-                for (int r2 = 1; r2 <= 4 and not found; ++r2)
-                    for (int di = -r2; di <= r2 and not found; ++di)
-                        for (int dj = -r2; dj <= r2 and not found; ++dj)
-                            if (flood_free(ri + di, rj + dj)) { ri += di; rj += dj; found = true; }
-                if (not found) return false;
-            }
-            std::vector<int> stack = {fgrid.idx(ri, rj)};
-            comp[static_cast<size_t>(fgrid.idx(ri, rj))] = 1;
-            while (not stack.empty())
-            {
-                const int u = stack.back(); stack.pop_back();
-                const int ui = u % nx, uj = u / nx;
-                const int di[4] = {1, -1, 0, 0}, dj[4] = {0, 0, 1, -1};
-                for (int k = 0; k < 4; ++k)
-                {
-                    const int vi = ui + di[k], vj = uj + dj[k];
-                    if (flood_free(vi, vj) and comp[static_cast<size_t>(fgrid.idx(vi, vj))] == 0)
-                    { comp[static_cast<size_t>(fgrid.idx(vi, vj))] = 1; stack.push_back(fgrid.idx(vi, vj)); }
-                }
+                const int vi = ui + di[k], vj = uj + dj[k];
+                if (flood_free(vi, vj) and comp[static_cast<size_t>(fgrid.idx(vi, vj))] == 0)
+                { comp[static_cast<size_t>(fgrid.idx(vi, vj))] = 1; stack.push_back(fgrid.idx(vi, vj)); }
             }
         }
+        return comp;
+    }
+
+    bool WallMap::re_derive(const Eigen::Vector2f& robot_map)
+    {
+        if (not fgrid.ready()) return false;
+        const int nx = fgrid.nx, ny = fgrid.ny;
+        // Connected free component containing the robot.
+        const std::vector<char> comp = free_component(robot_map);
+        if (comp.empty()) return false;
         const auto inc = [&](int i, int j) { return fgrid.in(i, j) and comp[static_cast<size_t>(fgrid.idx(i, j))] != 0; };
         // Moore boundary trace of the component, CCW.
         int si = -1, sj = -1;

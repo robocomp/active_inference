@@ -19,6 +19,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <queue>
 #include <random>
@@ -231,6 +232,7 @@ namespace
         sp.sensor_sigma = cfg.scan_sigma;
         R.map.params.obs_sigma = 0.05f;
         R.map.params.huber_delta = 0.15f;
+        R.map.params.debug_splice = std::getenv("WS_DEBUG_SPLICE") != nullptr;
 
         rc::Model model;
         model.init_from_polygon({{-20.f, -20.f}, {20.f, -20.f}, {20.f, 20.f}, {-20.f, 20.f}}, 0.f, 0.f, 0.f, 2.4f);
@@ -490,6 +492,7 @@ namespace
         sp.sensor_sigma = cfg.scan_sigma;
         R.map.params.obs_sigma = 0.05f;
         R.map.params.huber_delta = 0.15f;
+        R.map.params.debug_splice = std::getenv("WS_DEBUG_SPLICE") != nullptr;
 
         rc::Model model;
         model.init_from_polygon({{-20.f, -20.f}, {20.f, -20.f}, {20.f, 20.f}, {-20.f, 20.f}}, 0.f, 0.f, 0.f, 2.4f);
@@ -710,6 +713,9 @@ int main()
     torch::set_num_threads(1);
     std::mt19937 rng(7);
 
+    // WS_ONLY7=1 skips the synthetic sections — iteration aid for the (slow) real-layout bench.
+    if (std::getenv("WS_ONLY7") == nullptr)
+    {
     // ═══ 1. Segmenter ═════════════════════════════════════════════════════════════════════════
     std::printf("\n1. Segmenter on one scan of the L room\n");
     {
@@ -1029,7 +1035,56 @@ int main()
               fmt("closed=%d hausdorff=%.3f", R2.poly.closed, h));
     }
 
+    }   // end WS_ONLY7 skip
+
+    // ═══ 6b. SPUR: a thin interior wall the boundary must wrap as THREE walls ═══════════════════
+    // The user's grammar: one wall toward the room centre, a small perpendicular cap, one going
+    // back. Deterministic and fast — the development harness for the wrap operators; runs under
+    // WS_ONLY7 too.
+    std::printf("\n6b. Spur room: thin interior wall wrapped as [in, cap, back]\n");
+    {
+        const Poly room = {{-4.f, -3.f}, {4.f, -3.f}, {4.f, 3.f}, {0.08f, 3.f}, {0.08f, 0.5f},
+                           {-0.04f, 0.5f}, {-0.04f, 3.f}, {-4.f, 3.f}};
+        const std::vector<Eigen::Vector2f> wp = {{-2.5f, 1.5f}, {-2.5f, -1.5f}, {0.f, -2.f},
+                                                 {2.5f, -1.5f}, {2.5f, 1.5f}, {1.2f, 2.3f},
+                                                 {0.6f, 1.2f}, {1.2f, 2.3f}, {2.5f, 1.5f},
+                                                 {0.f, -2.f}, {-2.5f, -1.5f}, {-1.2f, 2.3f},
+                                                 {-0.6f, 1.2f}, {-1.2f, 2.3f}, {-2.5f, 1.5f}};
+        std::vector<Eigen::Vector3f> truth;
+        for (size_t l = 0; l + 1 < wp.size(); ++l)
+        {
+            const Eigen::Vector2f e = wp[l + 1] - wp[l];
+            const float th = std::atan2(e.y(), e.x());
+            const int n = std::max(2, static_cast<int>(e.norm() / 0.25f));
+            for (int i = 0; i < n; ++i)
+                truth.emplace_back(wp[l].x() + e.x() * static_cast<float>(i) / static_cast<float>(n),
+                                   wp[l].y() + e.y() * static_cast<float>(i) / static_cast<float>(n), th);
+        }
+        std::mt19937 rng6(99);
+        RunConfig cfg;
+        cfg.verbose = true;
+        auto R1 = run_loop({room}, truth, cfg, rng6);
+        auto R2 = run_loop({room}, truth, cfg, rng6, &R1);   // second lap: steady state
+        const Poly ew = to_world(R2.poly.verts, truth[0]);
+        const float h = R2.poly.closed ? hausdorff(ew, room) : 1e9f;
+        const float tip_a = R2.poly.closed ? point_to_poly(room[4], ew) : 1e9f;
+        const float tip_b = R2.poly.closed ? point_to_poly(room[5], ew) : 1e9f;
+        std::printf("    walls=%zu births=%d deaths=%d verts:", R2.map.walls.size(),
+                    R1.births + R2.births, R1.deaths + R2.deaths);
+        for (const auto& v : ew) std::printf(" (%.2f,%.2f)", v.x(), v.y());
+        std::printf("\n");
+        for (const auto& w : R2.map.walls)
+            std::printf("    wall %llu k=%d phi=%.3f d=%.3f extent[%.2f,%.2f] frames=%d pts=%d\n",
+                        (unsigned long long)w.id, w.k, w.phi, w.d, w.s_min, w.s_max, w.frames_seen, w.points_seen);
+        check("spur room closed", R2.poly.closed, R2.poly.status);
+        check("spur wrapped: both truth tips on the estimate (<12 cm)", tip_a < 0.12f and tip_b < 0.12f,
+              fmt("tips %.3f / %.3f m", tip_a, tip_b));
+        check("spur room shape within 12 cm (Hausdorff)", h < 0.12f, fmt("%.3f m", h));
+    }
+
     // ═══ 7. THE REAL LAYOUT: apartamento_layout.svg, toured and estimated to convergence ════════
+    if (std::getenv("WS_NO7") == nullptr)
+    {
     std::printf("\n7. The real apartamento layout (32 vertices incl. trace artefacts)\n");
     {
         // Local SVG polygon read (std::from_chars — the agents' locale rule; no Qt in the harness).
@@ -1164,6 +1219,37 @@ int main()
             std::printf("      verts[%u]:", seed);
             for (const auto& v : ew) std::printf(" (%.2f,%.2f)", v.x(), v.y());
             std::printf("\n");
+            {
+                // Per-seed diagnostics: is the deep spur resolved (grid cells on its two truth
+                // faces; distance of the truth tip vertices to the estimate), and which frontiers
+                // refuse to close (they keep the coverage gate armed for ever).
+                const Eigen::Vector2f o = path[0];
+                int occ = 0, fre = 0, unk = 0, n = 0;
+                for (const auto& pr : {std::make_pair(room[21], room[22]), std::make_pair(room[23], room[24])})
+                    for (int k2 = 0; k2 <= 20; ++k2)
+                    {
+                        const Eigen::Vector2f pt = pr.first + (pr.second - pr.first) * (static_cast<float>(k2) / 20.f) - o;
+                        const int i2 = static_cast<int>((pt.x() - Rx.map.fgrid.x0) / Rx.map.fgrid.cell);
+                        const int j2 = static_cast<int>((pt.y() - Rx.map.fgrid.y0) / Rx.map.fgrid.cell);
+                        if (not Rx.map.fgrid.in(i2, j2)) continue;
+                        ++n;
+                        const float l = Rx.map.fgrid.lodds[static_cast<size_t>(Rx.map.fgrid.idx(i2, j2))];
+                        if (l > 1.f) ++occ; else if (l < -1.f) ++fre; else ++unk;
+                    }
+                const float tip_a = Rx.poly.closed ? point_to_poly(room[22], ew) : 1e9f;
+                const float tip_b = Rx.poly.closed ? point_to_poly(room[23], ew) : 1e9f;
+                const auto fl = Rx.map.frontiers();
+                std::printf("      diag[%u]: spur cells occ/free/unk=%d/%d/%d of %d; tip->est %.2f / %.2f m; frontiers=%zu weak=%zu\n",
+                            seed, occ, fre, unk, n, tip_a, tip_b, fl.size(), Rx.map.weak_matter().size());
+                for (const auto& fp : fl)
+                    std::printf("        frontier world(%.2f,%.2f)\n", fp.x() + o.x(), fp.y() + o.y());
+                for (const auto& w : Rx.map.walls)
+                    std::printf("        wall %llu k=%d phi=%.3f d=%.3f extent[%.2f,%.2f] frames=%d pts=%d\n",
+                                (unsigned long long)w.id, w.k, w.phi, w.d, w.s_min, w.s_max, w.frames_seen, w.points_seen);
+                std::printf("        order[%u]:", seed);
+                for (auto id : Rx.map.order) std::printf(" %llu", (unsigned long long)id);
+                std::printf("\n");
+            }
             if (iou_x > best_iou) { best_iou = iou_x; R7 = std::move(Rx); }
         }
         float iou_min = 2.f, iou_med = 0.f;
@@ -1229,6 +1315,7 @@ int main()
         check("pose stayed on track through the tour", R7.pose_rmse_xy < 0.08f,
               fmt("rmse %.3f m, max %.3f m", R7.pose_rmse_xy, R7.pose_max_xy));
     }
+    }   // end WS_NO7 skip
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;

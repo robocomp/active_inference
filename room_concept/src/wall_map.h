@@ -91,12 +91,20 @@ namespace rc::wallmap
         // A candidate span end within this of a host edge's end "reaches the corner" — a corner-cut
         // splice instead of a notch. ⚠ a tolerance, tied to extent noise at range.
         float splice_end_tol = 0.5f;        // m
-        // Stub jumps (a free-standing interior wall the boundary wraps around: [E, face, tip,
-        // mirror-face, E]). OFF until jump selection is a GLOBAL free-energy comparison: with local
-        // scoring the stub ties a notch's corner-cut on overlap and the tie-breaks are fragile
-        // (measured: return-slivers on the notch test). The concavity MISSING from the estimate is
-        // what the IoU metric is there to show meanwhile.
-        bool  enable_stub_jumps = false;
+        // Stub jumps: a free-standing interior wall (spur) the boundary wraps around — spliced as
+        // the THREE-wall sequence [E, near-face, tip, far-face, E]. Selection against the notch
+        // family is no longer a fragile tie-break: the two classes differ over exactly ONE
+        // observable region (the strip BEHIND the candidate face), so the global ΔF comparison
+        // reduces to free-grid evidence there — free cells CONNECTED to the robot's own free
+        // component assert the wrap, occupied cells refute it, and stale disconnected free space
+        // (a sealed-off room change: the grid never forgets) is silent. See try_splice.
+        bool  enable_stub_jumps = true;
+        float stub_thickness = 0.12f;       // m — thin-wall prior thickness of a stub; evidence refines it
+        // ⚠ decision constant: net connected-free fraction behind the face above which the room
+        // provably wraps (only stub variants offered) and below which it provably does not (only
+        // boundary variants offered).
+        float stub_free_behind_min = 0.25f;
+        bool  debug_splice = false;         // diagnostic prints from try_splice (bench use)
         // ── Existence (the step-back operator), per extent bin — see the header comment ──────────
         float exist_refute_pdet = 0.5f;     // P(detect): weight of a pass-through vs a support ⚠
         float exist_bin_m       = 0.25f;    // m — extent bin width (spatial resolution of refutation)
@@ -232,12 +240,19 @@ namespace rc::wallmap
             // climb back — so returns are kept as their own evidence and three of them assert matter
             // regardless of how many beams grazed past.
             std::vector<unsigned short> hits;
+            // Timestamp (ms) of the last FULL-WEIGHT free marking per cell (−1 = never). Freshness
+            // is evidence: a beam traversing a cell freely AFTER a wall face came into existence
+            // proves the room continues behind that face (the stub discriminator's question); free
+            // log-odds alone cannot say WHEN the cell was last actually reachable — the grid never
+            // forgets, so a sealed-off room change keeps stale free cells for ever.
+            std::vector<std::int64_t> free_ms;
             bool ready() const { return nx > 0; }
             int  idx(int i, int j) const { return j * nx + i; }
             bool in(int i, int j) const { return i >= 0 and i < nx and j >= 0 and j < ny; }
             Eigen::Vector2f at(int i, int j) const { return {x0 + (i + 0.5f) * cell, y0 + (j + 0.5f) * cell}; }
             void init(const Eigen::Vector2f& centre, float half_span);
-            void mark(const Eigen::Vector2f& origin, const std::vector<Eigen::Vector2f>& pts_map);
+            void mark(const Eigen::Vector2f& origin, const std::vector<Eigen::Vector2f>& pts_map,
+                      std::int64_t ts_ms);
             bool is_occupied(int i, int j) const
             { return in(i, j) and (hits[static_cast<size_t>(idx(i, j))] >= 3 or lodds[static_cast<size_t>(idx(i, j))] > 1.5f); }
             bool is_free(int i, int j) const
@@ -253,6 +268,11 @@ namespace rc::wallmap
         /// are confirmed only if something goes and LOOKS at them frontally, so they are epistemic
         /// targets in their own right, not merely map state.
         std::vector<Eigen::Vector2f> weak_matter() const;
+        /// Connected free component of the grid containing `seed_map` (dilated 4-conn flood: a free
+        /// cell whose 8-neighbourhood holds matter is wall surface, not passage). Empty when the
+        /// grid is not ready or no floodable seed exists nearby. Used by re_derive() and by the
+        /// stub discriminator in try_splice.
+        std::vector<char> free_component(const Eigen::Vector2f& seed_map) const;
         /// GLOBAL re-derivation: trace the free region's contour, snap its runs to the evidence
         /// lines (walls ∪ candidates, Manhattan preferred), and ADOPT the resulting cycle iff it
         /// explains the observed free space better than the current one. The escape hatch from a
@@ -305,6 +325,14 @@ namespace rc::wallmap
         /// neighbour. Committed only if the resulting cycle builds a simple CCW polygon. Returns the
         /// new C edge's index in walls, or −1 (rejected — counted, never silent).
         int  try_splice(const Candidate& c, FrameResult& fr, std::int64_t ts);
+        /// SPUR WRAP from the model's own residual: an order wall whose existence-SOLID extent
+        /// overshoots its polygon corner into the interior is matter the current topology cannot
+        /// explain (a spur's near face rides collinear on a mapped wall, so no candidate ever
+        /// exists for it). Wrap the boundary around the evidence: the wall runs on to the end of
+        /// its solid bins, a perpendicular tip cap T there, a mirror face M returns —
+        /// [.., W, T, M, ..]. Gated on connected free space observed behind the overshoot (the
+        /// room provably wraps); a wrong wrap dies by the step-back operator. ≤ 1 per frame.
+        int  try_spur_wraps(FrameResult& fr, std::int64_t ts);
         /// Remove a dead edge from the order and HEAL the cycle (collapse parallel neighbours).
         void splice_out(std::uint64_t id);
         void heal_order();
@@ -314,6 +342,11 @@ namespace rc::wallmap
         /// and removes the least-supported crossing edge after a short persistence.
         void repair_if_crossing();
         int  crossing_frames_ = 0;
+        /// Robot position (map frame) at the last observe() — the seed of the stub discriminator's
+        /// connectivity flood, whose result is cached per frame timestamp.
+        Eigen::Vector2f last_pose_xy_ = Eigen::Vector2f::Zero();
+        std::vector<char> comp_cache_;
+        std::int64_t comp_cache_ts_ = -1;
         WallLandmark make_wall(float phi, float d, const Eigen::Matrix2f& info, float exist_seed,
                                std::int64_t ts);
         /// Give NEW (extent-less) edges their extent from the polygon they now bound.
