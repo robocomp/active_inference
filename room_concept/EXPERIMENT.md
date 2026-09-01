@@ -843,7 +843,28 @@ detail, and it has already produced defects:
 
 ★ The general rule: **a factor estimated through another factor inherits that factor's errors, so its
 evidence must be weighted by the other's confidence.** That is what precision-weighting is for, and
-it is the one place in this design where getting the weight wrong is worse than having no estimate.
+it is the one place in this design where getting the weight wrong is worse than having no estimate —
+because an unweighted body-model update does not merely learn SLOWLY, **it learns the world's
+mistakes as facts about itself.** The failure is a bias, not a variance.
+
+★★★★ **AND THE CORRECTION LOAD CANNOT SEE IT — a scope limit on §11.2's endpoint, not a defect in it.**
+Follow the bias one step further. Once the body-model has absorbed the map's distortion, its
+predictions match what the distorted map will say the motion was, so `|est − pred|` SHRINKS. The two
+factors settle into a state that is internally consistent and externally wrong, and the endpoint this
+work makes central **reports that as an improvement**. It is measured entirely inside the agent, so a
+bias shared between the body-model and the world-model is invisible to it: the failure mode is not
+divergence but **silent self-consistency**, and the instrument that best measures the body-model in
+normal operation is precisely the one that cannot see it.
+
+> The correction load isolates the body-model's contribution to prediction error, but only RELATIVE
+> to the world-model that produced the correction. It therefore measures the self-model's fit to the
+> agent's own world-model, not to the world, and must be read alongside a measure referenced OUTSIDE
+> the agent.
+
+★ Which is the real justification for carrying ground truth (`robot_gt_*`) rather than "it is
+available": the two measures fail in different directions, so neither alone is sufficient. In one
+line — **a factor estimated through another can be biased into agreement with it, and internal error
+measures go quiet exactly when that happens.**
 
 ### 11.7 A prior can place part of the body beyond experience
 
