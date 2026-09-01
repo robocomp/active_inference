@@ -1840,6 +1840,14 @@ namespace rc::wallmap
         // 4-connected flood zigzags through the alternating gaps, truncating the traced inlet at the
         // first leak. A genuinely traversable corridor is wider than one cell; a free cell whose
         // 8-neighbourhood holds matter is wall surface, not passage.
+        //
+        // NOTE (bin-informed blocking, TRIED AND REVERTED 2026-09-01): letting walls' solid
+        // existence bins block the flood was measured twice — masking at >= birth_nats let every
+        // young wall's SEEDED bins wall off space wholesale (min IoU 0.931 -> 0.860); masking at
+        // 1.5x birth flapped inside the adoption feedback loop (bins mature -> block -> contour
+        // changes -> re-adoption resets them; 561 deaths in one run) and regressed the short spur
+        // on every seed. A viable version needs a LATCH that survives bin remapping, plus the
+        // downstream adoption trace — see the memory's short-spur campaign note.
         const auto flood_free = [&](int i, int j) -> bool
         {
             if (not fgrid.is_free(i, j)) return false;

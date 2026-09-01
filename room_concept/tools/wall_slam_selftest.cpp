@@ -1273,6 +1273,25 @@ int main()
                 const auto fl = Rx.map.frontiers();
                 std::printf("      diag[%u]: spur cells occ/free/unk=%d/%d/%d of %d; tip->est %.2f / %.2f m; frontiers=%zu weak=%zu\n",
                             seed, occ, fre, unk, n, tip_a, tip_b, fl.size(), Rx.map.weak_matter().size());
+                {
+                    // The SHORT spur (truth verts 2..5): same instrumentation as the deep one.
+                    int occ2 = 0, fre2 = 0, unk2 = 0, n2 = 0;
+                    for (const auto& pr : {std::make_pair(room[2], room[3]), std::make_pair(room[4], room[5])})
+                        for (int k2 = 0; k2 <= 20; ++k2)
+                        {
+                            const Eigen::Vector2f pt = pr.first + (pr.second - pr.first) * (static_cast<float>(k2) / 20.f) - o;
+                            const int i2 = static_cast<int>((pt.x() - Rx.map.fgrid.x0) / Rx.map.fgrid.cell);
+                            const int j2 = static_cast<int>((pt.y() - Rx.map.fgrid.y0) / Rx.map.fgrid.cell);
+                            if (not Rx.map.fgrid.in(i2, j2)) continue;
+                            ++n2;
+                            const float l = Rx.map.fgrid.lodds[static_cast<size_t>(Rx.map.fgrid.idx(i2, j2))];
+                            if (l > 1.f) ++occ2; else if (l < -1.f) ++fre2; else ++unk2;
+                        }
+                    const float stip_a = Rx.poly.closed ? point_to_poly(room[3], ew) : 1e9f;
+                    const float stip_b = Rx.poly.closed ? point_to_poly(room[4], ew) : 1e9f;
+                    std::printf("      diag[%u] SHORT spur: cells occ/free/unk=%d/%d/%d of %d; tip->est %.2f / %.2f m\n",
+                                seed, occ2, fre2, unk2, n2, stip_a, stip_b);
+                }
                 for (const auto& fp : fl)
                     std::printf("        frontier world(%.2f,%.2f)\n", fp.x() + o.x(), fp.y() + o.y());
                 for (const auto& w : Rx.map.walls)
