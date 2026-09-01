@@ -907,6 +907,25 @@ namespace rc::wallmap
         fr.candidates = static_cast<int>(candidates.size());
         fr.merged = merge_indistinguishable();
         repair_if_crossing();
+        // Zero-evidence micro-edges: a polygon edge shorter than ~2 grid cells whose wall carries
+        // essentially no observations asserts nothing — contour debris (a dilated stair-step)
+        // kinking the boundary. Its neighbours re-intersect when it goes. Validated with the bias
+        // compensation above (paired A/B).
+        {
+            const Polygon pnow = build_polygon();
+            if (pnow.closed)
+                for (size_t e = 0; e < pnow.verts.size(); ++e)
+                {
+                    const float elen = (pnow.verts[(e + 1) % pnow.verts.size()] - pnow.verts[e]).norm();
+                    if (elen > 0.2f) continue;
+                    const std::uint64_t id = pnow.wall_of_edge[e];
+                    const auto* w = find(id);
+                    if (w == nullptr or w->points_seen >= 50) continue;
+                    if (std::count(order.begin(), order.end(), id) != 1) continue;
+                    splice_out(id);
+                    break;   // one per frame; the rebuilt polygon decides the next
+                }
+        }
         // Classes follow the walls: an edge that converged onto a Manhattan direction after being
         // born off it (the tilted-OBB transient) regains its class — and its room factor — here.
         reclassify_all();
@@ -1022,16 +1041,66 @@ namespace rc::wallmap
         return out;
     }
 
+    std::vector<Eigen::Vector2f> WallMap::weak_matter() const
+    {
+        std::vector<Eigen::Vector2f> out;
+        if (not fgrid.ready()) return out;
+        for (int i = 0; i < fgrid.nx; i += 2)
+            for (int j = 0; j < fgrid.ny; j += 2)
+            {
+                const auto h = fgrid.hits[static_cast<size_t>(fgrid.idx(i, j))];
+                const float l = fgrid.lodds[static_cast<size_t>(fgrid.idx(i, j))];
+                const bool suspected = (h >= 1 and h <= 2);            // seen once or twice, unconfirmed
+                const bool contested = (h >= 3 and l < 0.5f);          // returns vs grazing passes disagree
+                if (not suspected and not contested) continue;
+                // The THIN-WALL signature, and only that: free space on two OPPOSITE sides of the
+                // cell. True for every unconfirmed gap along an interior wall (including the deep
+                // tip), false for the fringe of a boundary wall (unknown behind it). The previous
+                // filter — "no confirmed matter nearby" — self-limited: once a stretch confirmed,
+                // its neighbourhood suppressed the remaining gaps of the SAME wall (31/42 held with
+                // periodic holes, and the traced inlet stopped at the first leak).
+                const auto free2 = [&](int di, int dj)
+                { return fgrid.is_free(i + di, j + dj) or fgrid.is_free(i + 2 * di, j + 2 * dj); };
+                const bool thin = (free2(1, 0) and free2(-1, 0)) or (free2(0, 1) and free2(0, -1))
+                               or (free2(1, 1) and free2(-1, -1)) or (free2(1, -1) and free2(-1, 1));
+                if (thin) out.push_back(fgrid.at(i, j));
+            }
+        return out;
+    }
+
     bool WallMap::re_derive(const Eigen::Vector2f& robot_map)
     {
         if (not fgrid.ready()) return false;
         const int nx = fgrid.nx, ny = fgrid.ny;
+        // Free-for-flood: free AND not touching matter (one cell of dilation). An 8 cm wall on an
+        // 8 cm grid ALIASES across two cell columns — hits split, neither column confirms, and a
+        // 4-connected flood zigzags through the alternating gaps, truncating the traced inlet at the
+        // first leak. A genuinely traversable corridor is wider than one cell; a free cell whose
+        // 8-neighbourhood holds matter is wall surface, not passage.
+        const auto flood_free = [&](int i, int j) -> bool
+        {
+            if (not fgrid.is_free(i, j)) return false;
+            for (int di = -1; di <= 1; ++di)
+                for (int dj = -1; dj <= 1; ++dj)
+                    if (fgrid.is_occupied(i + di, j + dj)) return false;
+            return true;
+        };
         // Connected free component containing the robot (4-connectivity flood fill).
         std::vector<char> comp(static_cast<size_t>(nx * ny), 0);
         {
-            const int ri = static_cast<int>((robot_map.x() - fgrid.x0) / fgrid.cell);
-            const int rj = static_cast<int>((robot_map.y() - fgrid.y0) / fgrid.cell);
-            if (not fgrid.is_free(ri, rj)) return false;
+            int ri = static_cast<int>((robot_map.x() - fgrid.x0) / fgrid.cell);
+            int rj = static_cast<int>((robot_map.y() - fgrid.y0) / fgrid.cell);
+            // The robot's own cell may sit within the dilation ring of a nearby wall: seed from the
+            // nearest flood-free cell in a small window instead of giving up.
+            if (not flood_free(ri, rj))
+            {
+                bool found = false;
+                for (int r2 = 1; r2 <= 4 and not found; ++r2)
+                    for (int di = -r2; di <= r2 and not found; ++di)
+                        for (int dj = -r2; dj <= r2 and not found; ++dj)
+                            if (flood_free(ri + di, rj + dj)) { ri += di; rj += dj; found = true; }
+                if (not found) return false;
+            }
             std::vector<int> stack = {fgrid.idx(ri, rj)};
             comp[static_cast<size_t>(fgrid.idx(ri, rj))] = 1;
             while (not stack.empty())
@@ -1042,7 +1111,7 @@ namespace rc::wallmap
                 for (int k = 0; k < 4; ++k)
                 {
                     const int vi = ui + di[k], vj = uj + dj[k];
-                    if (fgrid.is_free(vi, vj) and comp[static_cast<size_t>(fgrid.idx(vi, vj))] == 0)
+                    if (flood_free(vi, vj) and comp[static_cast<size_t>(fgrid.idx(vi, vj))] == 0)
                     { comp[static_cast<size_t>(fgrid.idx(vi, vj))] = 1; stack.push_back(fgrid.idx(vi, vj)); }
                 }
             }
@@ -1138,7 +1207,11 @@ namespace rc::wallmap
             if (chosen == 0)
             {
                 const Eigen::Matrix2f weak = Eigen::Vector2f(30.f, 15.f).asDiagonal();
-                WallLandmark w = make_wall(phi_c, d_c, weak, 0.5f * params.birth_nats, 0);
+                // The traced contour runs through DILATED free space, ~1.5 cells inside the true
+                // wall; a wall created from it starts with that known bias removed (outward along
+                // its inward normal), and the point factors refine from there. Validated 3-seed
+                // paired A/B (2026-09-01): with this + micro-prune, IoU median 0.917 vs 0.774.
+                WallLandmark w = make_wall(phi_c, d_c - 1.5f * fgrid.cell, weak, 0.5f * params.birth_nats, 0);
                 const Eigen::Vector2f tv = w.tangent();
                 w.s_min = std::min(tv.dot(a), tv.dot(b)); w.s_max = std::max(tv.dot(a), tv.dot(b));
                 w.has_extent = true;

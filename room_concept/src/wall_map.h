@@ -248,6 +248,11 @@ namespace rc::wallmap
         FreeGrid fgrid;
         /// Free cells adjacent to unknown cells — where the map still has questions (map frame).
         std::vector<Eigen::Vector2f> frontiers() const;
+        /// WEAKLY-HELD MATTER: cells with 1–2 endpoint returns (suspected, unconfirmed) or with
+        /// returns that grazing passes still contest. Thin interior walls live or die here — they
+        /// are confirmed only if something goes and LOOKS at them frontally, so they are epistemic
+        /// targets in their own right, not merely map state.
+        std::vector<Eigen::Vector2f> weak_matter() const;
         /// GLOBAL re-derivation: trace the free region's contour, snap its runs to the evidence
         /// lines (walls ∪ candidates, Manhattan preferred), and ADOPT the resulting cycle iff it
         /// explains the observed free space better than the current one. The escape hatch from a

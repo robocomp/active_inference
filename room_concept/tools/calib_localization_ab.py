@@ -265,6 +265,7 @@ def windows(d):
 def arm(path, label):
     d = load(path)
     rows = {'label': label, 'path': path, 'trans': [], 'rot': [], 'ate': [], 'fire': [],
+            'corr': [], 'corrsolve': [],
             'burst': 0, 'parked': 0, 'used': 0, 'windows': 0, 'dist': 0.0}
     for _w0, idx, moving, burst in windows(d):
         rows['windows'] += 1
@@ -276,6 +277,25 @@ def arm(path, label):
         # without thought would delete exactly the result the arm was run to find.
         if moving.size >= 30 and 'iters' in d:
             rows['fire'].append(100.0 * float(np.mean(d['iters'][moving] > 0)))
+            # ★★★ THE CORRECTION LOAD — the endpoint that sits UPSTREAM of the corrector.
+            # |est - pred| is what the optimiser had to remove from the motion model's guess. It
+            # is measured on the optimiser's INPUT, so unlike RPE it cannot be absorbed by the
+            # optimiser doing its job, and unlike firing % it is not an indicator over a
+            # threshold that saturates. Validated 2026-09-01: on cycles that did not solve it is
+            # 0.06-0.19 mm (i.e. zero), and on cycles that did it is 13.7-23.7 mm.
+            if all(k in d for k in ('pred_x', 'pred_y')):
+                c = np.hypot(d['ex'][moving] - d['pred_x'][moving],
+                             d['ey'][moving] - d['pred_y'][moving])
+                c = c[np.isfinite(c)]
+                dm = float(d['s'][moving[-1]] - d['s'][moving[0]])
+                if c.size and dm > 1.0:
+                    rows['corr'].append(1000.0 * float(c.sum()) / dm)     # mm per metre
+                sol = d['iters'][moving] > 0
+                cs = np.hypot(d['ex'][moving][sol] - d['pred_x'][moving][sol],
+                              d['ey'][moving][sol] - d['pred_y'][moving][sol])
+                cs = cs[np.isfinite(cs)]
+                if cs.size:
+                    rows['corrsolve'].append(1000.0 * float(cs.mean()))   # mm per solve
         if burst:
             rows['burst'] += 1
             continue
@@ -332,21 +352,27 @@ def main():
     print()
     arms = [arm(sys.argv[i], sys.argv[i + 1]) for i in range(1, len(sys.argv), 2)]
 
-    print("%-22s %6s %8s %8s %9s %10s %10s %9s" %
-          ("arm", "wins", "dist_m", "fire %", "burst", "RPE mm/m", "RPE d/rad", "ATE mm"))
+    print("%-22s %6s %7s %9s %9s %7s %7s %9s %9s" %
+          ("arm", "wins", "dist_m", "corr mm/m", "corr/solve", "fire %", "burst",
+           "RPE mm/m", "ATE mm"))
     for a in arms:
         # burst as a RATE with its denominator: 6 windows out of 11 and 6 out of 25 are different
         # findings, and a bare count cannot tell them apart when the arms differ in length.
         bstr = "%d/%d" % (a['burst'], a['windows'])
-        print("%-22s %6d %8.1f %8.2f %9s %10.3f %10.3f %9.1f  (parked %d)" %
+        print("%-22s %6d %7.1f %9.2f %9.2f %7.2f %7s %9.3f %9.1f  (parked %d)" %
               (a['label'], a['used'], a['dist'],
+               np.mean(a['corr']) if a['corr'] else math.nan,
+               np.mean(a['corrsolve']) if a['corrsolve'] else math.nan,
                np.mean(a['fire']) if a['fire'] else math.nan, bstr,
                np.mean(a['trans']) if a['trans'] else math.nan,
-               np.mean(a['rot']) if a['rot'] else math.nan,
                np.mean(a['ate']) if a['ate'] else math.nan,
                a['parked']))
-    print("  fire % = share of MOVING cycles on which the optimiser ran, per 60 s window, burst")
-    print("  windows INCLUDED. It is the effort endpoint; the RPE columns are the accuracy one.")
+    print("  corr mm/m  = |est - pred| the optimiser had to remove, per metre travelled. PRIMARY:")
+    print("               it is the optimiser's INPUT, so the corrector cannot absorb it, and it")
+    print("               is continuous rather than an indicator over a threshold.")
+    print("  corr/solve = the same quantity per solve — how big each correction event was.")
+    print("  fire %%     = share of MOVING cycles that solved. DIAGNOSTIC ONLY: a binary over a")
+    print("               gate, so it saturates and it discards how hard each solve was.")
 
     print("\nheading convention check, mean(course - theta) per trajectory:")
     for a in arms:
@@ -370,7 +396,8 @@ def main():
         for i in range(len(arms)):
             for j in range(i + 1, len(arms)):
                 A, B = arms[i], arms[j]
-                for m, name in (('fire', 'fire %'), ('trans', 'RPE mm/m'),
+                for m, name in (('corr', 'corr mm/m'), ('corrsolve', 'corr/solve'),
+                                ('fire', 'fire %'), ('trans', 'RPE mm/m'),
                                 ('rot', 'RPE d/rad'), ('ate', 'ATE mm')):
                     t, z, dd = welch(A[m], B[m])
                     print("%-30s %10s %8.2f %8.2f %8.2f" %
