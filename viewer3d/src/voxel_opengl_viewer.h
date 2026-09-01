@@ -10,6 +10,7 @@
 #include <QOpenGLVertexArrayObject>
 #include <QOpenGLWidget>
 #include <QPoint>
+#include <QString>
 #include <QVector2D>
 #include <QVector3D>
 
@@ -51,9 +52,13 @@ public:
     void set_show_grid(bool show);
     // Beta-posterior BELIEF FIELD heatmap: per-cell centres + mean occupancy P (RISK, hue) + Var[P] (EPISTEMIC,
     // brightness). Cells the source collapsed to P=0 (a modelled object owns them) are skipped.
-    // Residual "surprise landscape" surface: occupied cells carry a real top height in z; the grid extent
-    // is [xmin,ymin] + cell·(w,h). Builds the shared Gaussian-splat mesh (blue→orange→red by height).
-    void update_grid_field(std::span<const QVector3D> occupied, float xmin, float ymin, float cell, int w, int h);
+    // Residual field, drawn as ONE COLUMN PER CELL on the cell's own footprint (blue→orange→red by
+    // height). The grid extent [xmin,ymin] + cell·(w,h) is used only to find neighbours for face culling.
+    // `occupied` = cell centres with z = the cell's top height; `base_z` = the matching band BOTTOMS
+    // (same order, one per cell) — pass an empty span when the producer publishes no bottom and every
+    // column will stand on the floor.
+    void update_grid_field(std::span<const QVector3D> occupied, std::span<const float> base_z,
+                           float xmin, float ymin, float cell, int w, int h);
     void set_show_field(bool show);
     // Fitted-model layer: the table mesh, the solid bottle cylinder and the graph object boxes.
     void set_show_models(bool show);
@@ -98,6 +103,11 @@ public:
 
     // Input-stream delivery rates (Hz) shown in the HUD; <0 ⇒ "--". Pushed from the render tick.
     void set_stream_fps(float rgb_hz, float rgb360_hz) { rgb_fps_ = rgb_hz; rgb360_fps_ = rgb360_hz; }
+
+    // A HELD state, said ON THE CANVAS. The agent goes on rendering while it holds — that is the whole
+    // point of a viewer — so a frozen scene looks exactly like a live one unless the reason is drawn
+    // over it. Empty ⇒ no banner. Set from the GRAFCET transitions, never per tick.
+    void set_status_banner(const QString& text);
     void set_perf_log(bool on) { perf_log_ = on; }   // gate the per-paint CSV probe (off in production)
 
     // Robot pose in room frame (x, y in meters; theta in radians).
@@ -180,8 +190,8 @@ private:
     std::vector<Vertex> residual_vertices_;
     std::vector<Vertex> grid_vertices_;        // residual_concept occupancy-grid cells (amber)
     std::vector<Vertex> grid_border_vertices_; // inflated clearance border (cyan)
-    std::vector<Vertex> grid_field_vertices_;  // Beta belief-field COLUMNS: line pairs (floor→top), height=P, hue=P, brightness=confidence
-    std::vector<Vertex> grid_field_cap_vertices_;  // top-of-column cap points (one per field cell)
+    std::vector<Vertex> grid_field_vertices_;      // residual COLUMNS: box triangles, one box per occupied cell
+    std::vector<Vertex> grid_field_cap_vertices_;  // unused by the column build (its caps are triangles)
     std::vector<Vertex> mask_vertices_;
     std::mutex data_mutex_;
 
@@ -253,6 +263,7 @@ private:
     bool perf_log_ = false;   // when false, skip the per-paint CSV write+flush (see paintGL probe)
     float rgb_fps_    = -1.0f;   // input-stream rates for the HUD (<0 ⇒ unknown/"--")
     float rgb360_fps_ = -1.0f;
+    QString status_banner_;      // non-empty ⇒ the agent is HOLDING; drawn over the scene (see set_status_banner)
 
     float yaw_ = 0.0f;
     float pitch_ = +0.52f;

@@ -89,8 +89,13 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader,
 
     // Compute → Waiting on start
     states["Compute"]->addTransition(states["Compute"].get(), SIGNAL(entered()), states["Waiting"].get());
-    // Waiting → Operating when all required peers are ready (immediately: there are none)
+    // Waiting → Operating when all required peers are ready (there are none) AND the world frames the
+    // view is drawn in exist. The second half is emitted from refresh_scene — see
+    // update_world_frame_state — because the refresh timer runs in every state, including this one.
     states["Waiting"]->addTransition(this, SIGNAL(presenceReady()), states["Operating"].get());
+    // Operating → Waiting when the room/robot frames go. NOT Degraded: that path schedules a shutdown
+    // after its grace, and a pure observer must not die because the room it was watching restarted.
+    states["Operating"]->addTransition(this, SIGNAL(worldFramesLost()), states["Waiting"].get());
     // Operating → Degraded when a required peer is lost
     states["Operating"]->addTransition(this, SIGNAL(presenceLost()), states["Degraded"].get());
     // Degraded → Waiting immediately (self-kill scheduled inside degraded_enter)
@@ -174,6 +179,17 @@ void SpecificWorker::initialize()
     G->set_ignored_attributes<cam_rgb_att, cam_depth_att, laser_X_att, laser_Y_att, laser_Z_att>();
 
     presence_coordinator_.configure(configLoader, G, static_cast<std::uint32_t>(agent_id));
+    // ★The auto-bounce out of Waiting is turned OFF for this agent. By default waiting_enter()
+    // re-emits presenceReady() the moment all required peers are ready — and this agent declares NO
+    // required peers, so that condition is ALWAYS true. Left on, the world-frame hold below would
+    // enter Waiting and be thrown straight back into Operating on the same tick, ping-ponging the
+    // state machine instead of holding. Readiness is therefore requested from ONE place:
+    // update_world_frame_state(), which knows about both the peers and the frames.
+    {
+        auto policy = AgentPresenceCoordinator::Policy{};
+        policy.auto_request_presence_ready_from_waiting = false;
+        presence_coordinator_.set_policy(policy);
+    }
     // Colour this agent's own node in the graph view by its live health, exactly as every other
     // agent does — the viewer should not be the one node in the graph that lies about itself.
     presence_coordinator_.attach_state_machine(&statemachine);
@@ -392,7 +408,72 @@ void SpecificWorker::refresh_scene()
         return;
     if (not lidar_ready_)
         lidar_ready_ = feed_->init_lidar(cfg_.lidar_topic);   // cheap no-op once it succeeds
-    feed_->refresh();
+    const auto frames = feed_->refresh();
+    update_world_frame_state(frames.room_name, frames.robot_name);
+}
+
+// ── World-frame hold ─────────────────────────────────────────────────────────────────────────────
+// Every layer this agent draws — the polygon, the boxes, the meshes, the grid, the mask cloud, the
+// LiDAR sweep — is expressed in the ROOM frame and posed through room←robot. With either node gone
+// there is no frame to place anything in, and the honest state is "waiting", not "operating".
+//
+// ★IT HELD SILENTLY BEFORE. Every pass already no-oped on a missing room, so the agent went on
+// reporting Operating, went on drawing the LAST scene it managed to build, and the only trace was
+// cortex's `get_transformation_matrix … origen or dest nodes do not exist` scrolling past at the
+// refresh rate. A frozen scene is indistinguishable from a live one, so the view was actively
+// misleading. Now: the graph node's colour changes (the coordinator publishes Waiting), the log says
+// which node went, and the canvas carries a banner over the stale picture.
+void SpecificWorker::update_world_frame_state(const std::string& room_name, const std::string& robot_name)
+{
+    const bool ready   = not room_name.empty() and not robot_name.empty();
+    const bool changed = (world_frames_ready_ != ready);   // unset ⇒ the first observation is a change
+    world_frames_ready_ = ready;
+
+    // ★THE SIGNAL IS DRIVEN BY THE LIVE STATE, THE LOG BY THE EDGE. An edge-only emit latches: the
+    // presence channel can request Operating at any moment (a peer coming ready re-emits
+    // presenceReady), and with the frames still gone this would already have flipped its edge and
+    // never fire again — Operating, no frames, silent. Asking the machine where it actually is costs
+    // one set lookup per refresh and cannot get out of step with it.
+    const auto in_state = [this](const char* name)
+    {
+        const auto it = states.find(name);
+        return it != states.end() and it->second
+               and statemachine.configuration().contains(it->second.get());
+    };
+
+    if (not ready)
+    {
+        if (in_state("Operating"))
+            emit worldFramesLost();
+        if (not changed)
+            return;   // already said it; do not repeat the line at the refresh rate
+        // Name the one that went. "the world frames are missing" sends you looking at both; the graph
+        // knows which, and saying so is the difference between a message and a diagnosis.
+        const QString missing = room_name.empty()
+            ? (robot_name.empty() ? QStringLiteral("no 'room' and no 'robot' node")
+                                  : QStringLiteral("no 'room' node"))
+            : QStringLiteral("no 'robot' node");
+        qWarning() << "[SM] -> Waiting: the room frame is gone —" << missing
+                   << "in the graph. Holding; the view below is the LAST scene built and is now stale.";
+        if (viewer_)
+            viewer_->set_status_banner(QStringLiteral("WAITING — %1 in the graph · scene frozen")
+                                           .arg(missing));
+        return;
+    }
+
+    if (changed)
+    {
+        qInfo() << "[SM] world frames back: room ='" << QString::fromStdString(room_name)
+                << "' robot ='" << QString::fromStdString(robot_name) << "' — resuming";
+        if (viewer_)
+            viewer_->set_status_banner({});
+    }
+    // The way back in. This is now the ONLY place readiness is requested (the coordinator's own
+    // auto-request is off, see initialize), so it must be driven by the state and not by the edge —
+    // otherwise a Degraded→Waiting round trip while the frames were fine would leave the agent parked
+    // in Waiting with nothing left to ask for Operating again.
+    if (in_state("Waiting") and presence_coordinator_.all_required_ready())
+        emit presenceReady();
 }
 
 void SpecificWorker::restore_window_geometry()

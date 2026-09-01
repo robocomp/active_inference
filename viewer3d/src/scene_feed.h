@@ -48,12 +48,24 @@ class SceneFeed
 public:
     SceneFeed(std::shared_ptr<DSR::DSRGraph> graph, VoxelOpenGLViewer* viewer);
 
-    // Names are discovered by TYPE, never hardcoded, and memoized once found.
+    // The two frames EVERY drawing pass is expressed in. Reported by refresh() so the agent can hold
+    // in Waiting and say so, instead of asking cortex for a transform that cannot resolve — which is
+    // what produced `get_transformation_matrix … origen or dest nodes do not exist` at the refresh
+    // rate: a log flood standing in for a state change.
+    struct WorldFrames
+    {
+        std::string room_name;    // empty ⇒ no node of type "room" in the graph right now
+        std::string robot_name;   // empty ⇒ no node of type "robot"
+        [[nodiscard]] bool ready() const { return not room_name.empty() and not robot_name.empty(); }
+    };
+
+    // Names are discovered by TYPE, never hardcoded, and memoized — but the memo is DROPPED as soon as
+    // the node behind it leaves the graph (see the definition).
     std::pair<std::string, std::string> room_robot_names();
 
     // One full refresh: everything below, in the order the view expects. Safe to call with pieces of
     // the graph missing — each step no-ops rather than blanking what it cannot read this tick.
-    void refresh();
+    WorldFrames refresh();
 
     // LiDAR arrives on the media plane (domain 7), NOT through the graph. Returns false if the
     // descriptor/stream is not up yet; safe to retry every tick.

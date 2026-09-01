@@ -52,6 +52,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include <genericworker.h>
@@ -93,6 +94,14 @@ private:
     QWidget* build_layer_panel();
     // One full refresh: DSR graph + LiDAR plane → the metric 3D view. MAIN THREAD ONLY.
     void refresh_scene();
+    // ── World-frame hold ──────────────────────────────────────────────────────────
+    // Everything this agent draws is expressed in the room frame and posed by room←robot. With
+    // either node gone there is nothing to place anything against, so the agent HOLDS in Waiting and
+    // says so on the canvas rather than rendering a confident picture of a world it cannot locate.
+    // Called from refresh_scene (the timer, which runs in EVERY state — that is what lets Waiting
+    // ever end). Takes the two names the feed just resolved (empty ⇒ that node is not in the graph);
+    // plain strings so this header keeps SceneFeed forward-declared and the DSR headers out.
+    void update_world_frame_state(const std::string& room_name, const std::string& robot_name);
     // Pick handler. The 3D view is an inspection tool, so a click answers "what is this?" in the
     // log. (In robot_concept this opened the node's live media-plane stream viewer; that handler
     // stays there — it needs media_transport, a domain-7 participant and the stream widgets, and
@@ -134,6 +143,10 @@ private:
     std::unique_ptr<rc::SceneFeed> feed_;
     bool                          lidar_ready_ = false;
     QTimer*                       refresh_timer_ = nullptr;
+    // Last observed world-frame readiness. UNSET until the first refresh, so the very first
+    // observation always counts as a change and an agent that comes up into a room-less graph says so
+    // instead of holding mutely — the failure this whole path exists to make visible.
+    std::optional<bool>           world_frames_ready_;
 
     std::uint64_t cycle_ = 0;
     // Liveness + COST of the view. A 3D viewer is the one agent on the graph that can quietly burn a
@@ -145,6 +158,10 @@ private:
 signals:
     void presenceReady();
     void presenceLost();
+    // Operating → Waiting when the room/robot frames vanish. A SEPARATE signal from presenceLost on
+    // purpose: that one lands in Degraded, which schedules a shutdown. A missing room is not a reason
+    // for a pure observer to die — it is a reason to hold and be visible about it.
+    void worldFramesLost();
 };
 
 #endif   // SPECIFICWORKER_H

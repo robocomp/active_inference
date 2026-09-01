@@ -539,12 +539,20 @@ void SceneFeed::update_viewer_grid()
             gxmin = M[0]; gymin = M[1]; gcell = M[2]; gw = static_cast<int>(M[3]); gh = static_cast<int>(M[4]);
         }
     }
-    // Flat 2-D amber cells want the floor; flatten a copy. The 3-D surface uses the real height.
+    // Flat 2-D amber cells want the floor; flatten a copy. The columns use the real height.
     std::vector<QVector3D> cells_flat = cells_real;
     for (auto& c : cells_flat) c.setZ(0.02f);
     voxel_viewer_->update_grid_cells(cells_flat, 0.05f);
     voxel_viewer_->update_grid_border(border);
-    voxel_viewer_->update_grid_field(cells_real, gxmin, gymin, gcell, gw, gh);
+    // ★NO PER-CELL BASE ON THE WIRE YET, so every column stands on the floor. residual_concept HAS the
+    // number — OccupancyGrid::readout_zband() returns (zmn_, dispz_) and zmn_ is exactly the band
+    // bottom that makes an object ON A TABLE float — but `grid_occupied_cells` carries only [x,y,top]
+    // and nothing else on the node carries the bottom. Publishing it needs one new registered
+    // attribute (grid_occupied_zlow, one float per occupied cell in the SAME order) and therefore a
+    // cortex reinstall; see CLAUDE.md. The empty span here is the honest fallback, NOT a zero: the
+    // builder plants a column on the floor only because it was told nothing, and the moment the
+    // attribute exists this line is the only change on the consumer side.
+    voxel_viewer_->update_grid_field(cells_real, {}, gxmin, gymin, gcell, gw, gh);
 }
 
 void SceneFeed::update_viewer_mask_points()
@@ -711,6 +719,19 @@ SceneFeed::SceneFeed(std::shared_ptr<DSR::DSRGraph> graph, rc::VoxelOpenGLViewer
 
 std::pair<std::string, std::string> SceneFeed::room_robot_names()
 {
+    // ★THE MEMO MUST BE DROPPED WHEN THE NODE BEHIND IT GOES. It used to be write-once, so after a
+    // room_concept restart this went on handing back the dead name and every pass below kept asking
+    // cortex for a transform between nodes that no longer exist — answered with a qWarning per call,
+    // at the refresh rate. An unresolvable name is a STATE the agent has to react to, not a line to
+    // print ten times a second. Re-discovery is the same lookup, so a re-created (or renamed) room is
+    // picked up on the next tick at no extra cost.
+    // get_id_from_name, NOT get_node: get_node COPIES the whole node with its attributes, and this runs
+    // every refresh. This is a shared_lock and one map lookup.
+    if (not room_node_name_.empty() and not graph_->get_id_from_name(room_node_name_).has_value())
+        room_node_name_.clear();
+    if (not robot_node_name_.empty() and not graph_->get_id_from_name(robot_node_name_).has_value())
+        robot_node_name_.clear();
+
     if (room_node_name_.empty())
         if (const auto rooms = graph_->get_nodes_by_type("room"); not rooms.empty())
             room_node_name_ = rooms.front().name();
@@ -750,10 +771,10 @@ void SceneFeed::poll_lidar()
         update_viewer_lidar_points(sweep->points, sweep->plane_id);
 }
 
-void SceneFeed::refresh()
+SceneFeed::WorldFrames SceneFeed::refresh()
 {
     if (graph_ == nullptr or voxel_viewer_ == nullptr)
-        return;
+        return {};
 
     const auto [room_name, robot_name] = room_robot_names();
 
@@ -775,4 +796,9 @@ void SceneFeed::refresh()
     update_viewer_mask_points();
     refresh_viewer_robot_pose_latest();
     poll_lidar();
+
+    // What the caller decides the GRAFCET state from. Reported AFTER the passes, not instead of them:
+    // a viewer with no room still draws whatever it does have (CLAUDE.md — a view that hides when the
+    // graph wobbles hides exactly when you need it), it just stops claiming to be Operating.
+    return WorldFrames{room_name, robot_name};
 }

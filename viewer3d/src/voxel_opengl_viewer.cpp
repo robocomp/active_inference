@@ -30,6 +30,11 @@ namespace rc
 namespace
 {
 constexpr auto kViewerSettingsGroup = "VoxelOpenGLViewer";
+// QSettings application name — i.e. WHICH file under ~/.config/RoboComp/ the camera state lives in.
+// This widget was born inside robot_concept, moved to voxelizer, and finally to this agent; the app name
+// never followed, so until now viewer3d's camera was being written into robot_concept.conf — a file
+// belonging to an agent that has no 3-D view at all. Keep it equal to this agent's Agent.name.
+constexpr auto kViewerSettingsApp = "viewer3d";
 
 // Soft studio lighting for the solid furniture meshes, baked per-face into vertex colour (the shader is a
 // plain colour pass-through). Room frame is Z-up. A hemispheric ambient (brighter from above) keeps every
@@ -76,7 +81,7 @@ VoxelOpenGLViewer::VoxelOpenGLViewer(QWidget* parent)
 
 void VoxelOpenGLViewer::load_view_state()
 {
-    QSettings settings("RoboComp", "robot_concept");
+    QSettings settings("RoboComp", kViewerSettingsApp);
     settings.beginGroup(kViewerSettingsGroup);
 
     if (!(settings.contains("yaw") && settings.contains("pitch")
@@ -100,7 +105,7 @@ void VoxelOpenGLViewer::load_view_state()
 
 void VoxelOpenGLViewer::save_view_state() const
 {
-    QSettings settings("RoboComp", "robot_concept");
+    QSettings settings("RoboComp", kViewerSettingsApp);
     settings.beginGroup(kViewerSettingsGroup);
     settings.setValue("yaw", yaw_);
     settings.setValue("pitch", pitch_);
@@ -245,6 +250,14 @@ void VoxelOpenGLViewer::update_graph_boxes(std::span<const QVector3D> centers,
         graph_box_mesh_tex_.assign(mesh_texture_paths.begin(), mesh_texture_paths.end());
         graph_box_mesh_color_.assign(mesh_colors.begin(), mesh_colors.end());
     }
+}
+
+void VoxelOpenGLViewer::set_status_banner(const QString& text)
+{
+    if (status_banner_ == text)
+        return;   // called on transitions only, but a redundant repaint here is a repaint of the whole scene
+    status_banner_ = text;
+    request_update_throttled();
 }
 
 void VoxelOpenGLViewer::set_show_lidar(bool show)
@@ -440,12 +453,14 @@ void VoxelOpenGLViewer::set_show_grid(bool show)
 // term: vivid = well-observed, faded = uncertain). Cells the source collapsed to P=0 (a modelled object owns
 // them) or that lean free (P≤0.5) are skipped, so objects visibly collapse and free space stays uncluttered.
 void VoxelOpenGLViewer::update_grid_field(std::span<const QVector3D> occupied,
+                                          std::span<const float> base_z,
                                           float xmin, float ymin, float cell, int w, int h)
 {
-    // Residual "surprise landscape": a smooth Gaussian-splat surface rising to each occupied cell's real
-    // top height (blue→orange→red). Geometry comes from the SHARED builder (same code as the standalone
-    // viewer). The scene shader is unlit, so bake a simple flat Lambert shade into the vertex colour here.
-    const auto surface = rc::viewers::build_residual_surface(occupied, xmin, ymin, cell, w, h);
+    // Residual field: ONE COLUMN PER CELL, spanning the z-band that cell holds — floor-standing when
+    // `base_z` says so (or is absent), floating when it does not. Geometry comes from the SHARED
+    // builder. The scene shader is unlit, so bake a flat Lambert shade into the vertex colour here;
+    // the columns' faces are axis-aligned, so that alone separates the sides from the caps.
+    const auto surface = rc::viewers::build_residual_columns(occupied, base_z, xmin, ymin, cell, w, h);
     const float fx = voxel_flip_x_ ? -1.f : 1.f;
     const float fy = voxel_flip_y_ ? -1.f : 1.f;
     const QVector3D light = QVector3D(fx * 0.4f, 0.85f, fy * 0.35f).normalized();   // match the mapped frame
@@ -462,7 +477,7 @@ void VoxelOpenGLViewer::update_grid_field(std::span<const QVector3D> occupied,
     {
         std::scoped_lock lk(data_mutex_);
         grid_field_vertices_ = std::move(tris);
-        grid_field_cap_vertices_.clear();   // mesh has no column caps
+        grid_field_cap_vertices_.clear();   // the caps are real geometry now, not point sprites
     }
     request_update_throttled();
 }
@@ -2072,6 +2087,23 @@ void VoxelOpenGLViewer::paintGL()
                          .arg(render_fps_ > 0.0f ? QString::number(render_fps_, 'f', 1) : QStringLiteral("--"))
                          .arg(hz(rgb_fps_))
                          .arg(hz(rgb360_fps_)));
+
+    // ── HELD-STATE BANNER ────────────────────────────────────────────────────────────────────────
+    // Drawn LAST and over everything, because what it reports is that the scene under it is stale.
+    // The scene keeps being redrawn while the agent holds, so without this the view is a confident
+    // picture of a world the agent can no longer place — which is the failure mode this exists for.
+    if (not status_banner_.isEmpty())
+    {
+        QFont banner_font = painter.font();
+        banner_font.setPointSizeF(11.0);
+        banner_font.setBold(true);
+        painter.setFont(banner_font);
+        const QRect box(0, 34, width(), 30);
+        painter.fillRect(box, QColor(120, 30, 30, 210));   // amber-red plate: unmissable, still readable
+        painter.setPen(QColor(255, 220, 120));
+        painter.drawText(box, Qt::AlignCenter, status_banner_);
+        painter.setFont(QFont());
+    }
 
     // [perf-probe] append paintGL cost per frame to a CSV. t_ms is a shared steady-clock stamp so this
     // aligns with viewer_perf_frames/compute/yolo on one timeline. File truncated once per launch.
