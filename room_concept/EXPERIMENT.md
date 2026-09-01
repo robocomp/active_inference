@@ -378,6 +378,17 @@ that number is what the effort claim in the thesis rests on. Repeated under its 
 firing goes 5.41% -> 5.08%: t = 0.20, d = 0.08, nothing. What DOES move is the correction per solve,
 down 21% with the only significant statistic in the table.
 
+⚠ **DO NOT CALL THE Pose-ERROR RESULT HERE "UNCHANGED" — IT IS UNDERPOWERED, NOT NULL.** RPE
+translation is 41.33 → 34.98 mm/m at **d = 0.72**, and the power to detect d = 0.72 at n = 13/11
+windows is about **39%**. A non-significant result is therefore the MODAL outcome even if the effect
+is entirely real. Arm 4's d = 1.34 at n = 10/10 had ~81% power, which is why it separated. ★ The
+claim to make is that the EFFECT SIZE grows with the dose — 0.72 at the native error, 1.34 at four
+times it — because effect size does not depend on how many windows an arm happened to yield.
+Treating a 39%-power non-detection as a measurement of zero is the mirror image of the error this
+section convicts the experiment of: discounting an effect for missing significance, having earlier
+believed one for being large. ⚠ This applies ONLY to arm 3R. Arm 3's own registered null is a
+different measurement in a different session and stands as recorded.
+
 ⚠ **A CROSS-SESSION CLAIM MADE EARLIER TODAY IS WITHDRAWN.** It was reported that the correction load
 "reproduces across sessions within 8% (48.99 vs 45.27) while firing drifts 60%". The 45.27 was
 computed over ALL rows including parked ones; on the moving-only basis the instrument uses, that leg
