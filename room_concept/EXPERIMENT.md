@@ -378,6 +378,35 @@ that number is what the effort claim in the thesis rests on. Repeated under its 
 firing goes 5.41% -> 5.08%: t = 0.20, d = 0.08, nothing. What DOES move is the correction per solve,
 down 21% with the only significant statistic in the table.
 
+#### The two native-error runs are COMPATIBLE, not contradictory — and what may be quoted beside what
+
+**RPE: same code, verifiably, so arm 3 and arm 3R may be quoted side by side.** Every functional
+change to `calib_localization_ab.py` since `7f4f572` (2026-08-30 11:58, before arm 3 was driven) is
+additive — new dict keys, blocks that only append to them, print formatting, new entries in the
+pairwise loop. Nothing touches `rpe()`, `load()`, `windows()`, `aligned_ate()`, the `trans`/`rot`/`ate`
+accumulation, or `DS_TRANS`/`DTH_ROT`/`WINDOW_S`/`PARKED_MPS`/`BURST_FRAC`, and the burst/parked
+exclusions still precede the RPE computation.
+
+★ **The CORRECTION column is the opposite case and is STRONGER than "unknown definition": the script
+had no correction column until 2026-09-01** — the old header was `arm, wins, dist_m, RPE mm/m,
+RPE d/rad, ATE mm`. Arm 3's 48.99 therefore did NOT come from this tool and is definitely not the
+same computation. **Never quote it beside arm 3R's or arm 4's correction figures.**
+
+**The contrasts differ by 1.85 SE — compatible.** Levels agree: 37.56 vs 41.33 OFF (10%), 37.86 vs
+34.98 ON (8%). Contrasts differ: −0.30 vs +6.35 mm/m. But arm 3R's per-window scatter is OFF sd 10.70
+(n=13), ON sd 5.73 (n=11), pooled **8.79**, so the SE of a single run's contrast is **3.60 mm/m** and
+the two runs sit **1.85 SE** apart — routine for two runs sampling one effect.
+
+★★★ **So the statement is not "two matched runs disagree". It is that the treatment contrast at the
+native error is small relative to run-to-run variation, so a single 200 m arm cannot resolve its
+sign.** One run put it slightly negative, the other moderately positive, and neither had the
+precision to distinguish those. Same lesson as the firing channel, one level less severe: there the
+instrument could not resolve what it was quoted for at all; here the instrument is sound and the arm
+is too small for the question.
+
+★ **Sizing the confirmatory arm**: at pooled SD 8.79 and a 6.35 mm/m contrast, ~32 windows per leg
+reaches 80% power — roughly **500 m per leg**, not 200.
+
 ⚠ **DO NOT CALL THE Pose-ERROR RESULT HERE "UNCHANGED" — IT IS UNDERPOWERED, NOT NULL.** RPE
 translation is 41.33 → 34.98 mm/m at **d = 0.72**, and the power to detect d = 0.72 at n = 13/11
 windows is about **39%**. A non-significant result is therefore the MODAL outcome even if the effect
