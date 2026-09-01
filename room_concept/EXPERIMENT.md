@@ -870,8 +870,15 @@ measures go quiet exactly when that happens.**
 
 `b_omega`'s prior of 5e-4 rad/s asserts 4.0e6 of information against 9.6e5 supplied by 220 m of
 driving — a 19.4% data share where every other live parameter reaches 93–98% (§10.2). The agent has
-declared a belief about its own body precise enough that ordinary experience cannot revise it, and
-its `informed` flag can therefore never fire.
+declared a belief about its own body precise enough that ordinary DRIVING cannot revise it, and its
+`informed` flag can therefore never fire on a driving window.
+
+⚠ **CORRECTED 2026-09-01 — see §12.6.** That reading treats the data share as a property of the
+parameter. It is a property of the WINDOW: measured across arm 6's two legs, `b_omega`'s data share
+is **94.1%** in the leg containing a parked stretch and **47.3%** in the one without. Its covariate
+is elapsed time alone, so **the action that informs it is standing still** — which the robot was
+simply not being asked to do. It is not beyond experience; it is beyond experience *of the kind this
+route supplies*.
 
 ★ This is a legitimate modelling choice and it is currently an INHERITED one. A prior that strong is
 a claim that the gyro's bias is known to 0.03 deg/s before the robot has moved; if that is true it
@@ -1051,26 +1058,58 @@ variance explanation was refuted. The median is the wrong statistic: information
 information-weighted effective variance is what matters, and that ROSE 1.15x. Same data, opposite
 conclusion. ★ For any quantity that enters as a sum, summarise it by its sum.
 
-### 12.6 ⚠ A DEFECT FOUND ON THE WAY: duration carries without bound while parked
+### 12.6 ⚠ A "DEFECT" I CLAIMED AND THEN REFUTED — and the real result underneath it
 
-The base leg's window contained **9 episodes of ~219.6 s each with median `d_theta` = 0.015 rad** —
-essentially stationary. The top 5% of episodes carried **80%** of that leg's summed duration, which
-came to 1991 s for a run containing about 480 s of motion.
+**Retracted 2026-09-01, same day, before any code was changed.** The claim was that the carry
+mechanism has a defect: it caps translation (2.5 m) and rotation (2.0 rad) but nothing caps DURATION,
+so the base leg accumulated **9 episodes of ~219.6 s each with median `d_theta` = 0.015 rad**, and
+since duration is `b_omega`'s covariate these inflated its information from 1 370 993 to
+**63 787 246** — a 47x factor from 3.6% of the episodes, all stationary. I called it a defect and
+proposed capping the carry in time.
 
-The carry mechanism caps translation (2.5 m) and rotation (2.0 rad) but **nothing caps DURATION**. A
-near-stationary robot therefore accumulates an episode for minutes without accumulating information.
+**It is not a defect, and the cap would have deleted the best evidence about `b_omega` there is.**
+Three things check out against the code and the physics:
 
-★★★ **And duration is `b_omega`'s covariate.** Those 9 episodes handed the gyro-bias channel a
-Jacobian entry of 219.6 s each: `b_omega` information reads **63 787 246** with them and **1 370 993**
-without — a **47x inflation** from 3.6% of the episodes, all of them stationary. The parameter already
-identified as prior-swamped (§10.2) is simultaneously being fed enormous spurious information by
-standing still. ⚠ Both readings of `b_omega` in this document are therefore suspect until this is
-fixed; §10.2's 19.4% data share was computed on a window that may contain the same inflation.
+- **The emission guard holds.** `if (acc_measured_) flush()` — an episode with no correction is never
+  emitted. 7 of the 9 carry a real correction; the other two have a residual that rounds to zero.
+- **The carry is deliberate and documented**: *"The motion is CARRIED, not discarded: the covariate
+  survives, and the next real correction simply explains a longer span."*
+- **`T` is the correct covariate.** A gyro bias genuinely integrates across the whole span, and the
+  correction that ends the episode absorbs the drift it produced. Measured on those rows,
+  `r_theta / T` gives `b_omega` ~1e-6 rad/s with `sigma = sqrt(theta_var)/T ~ 2e-4` — tighter than
+  the 5e-4 prior and consistent with zero. That is a real measurement, not an artefact.
 
-★ The invariant the design states — *"a parked robot must never close an episode"* — is honoured.
-The gap is that a parked robot may CARRY one indefinitely, which the invariant does not cover.
-Cure: cap the carry in TIME as the other two covariates are capped, or exclude duration accumulated
-below a motion threshold. **This is worth fixing regardless of arm 6.**
+★★★ **THE RESULT UNDERNEATH: THE OPTIMAL EXCITATION FOR `b_omega` IS TO STAND STILL.** §10.1 derived
+that its Jacobian is `T` and contains no rate at all, and then read that as "no manoeuvre can help
+it". The stronger reading was there and I missed it: if the covariate is elapsed time alone, then the
+information-maximising action is the one that spends time without spending anything else —
+**stillness**. Those parked episodes are the estimator doing exactly the right thing, and it is what
+a ZUPT is.
+
+★★★★ **WHICH CLOSES THE AFFORDANCE ARGUMENT RATHER THAN CONTRADICTING IT.** §11.5 concluded that a
+calibration affordance should compete with idleness and never with a task. `b_omega` is the one
+parameter that needs a deliberate action, that action is *to do nothing*, and doing nothing is
+exactly free when the robot is already idle. **The only justified calibration affordance on this
+platform is a pause** — and it costs nothing precisely where §10.3's need/cost coupling says a
+manoeuvre would cost most.
+
+⚠ **AND IT CORRECTS §10.2.** That section reports `b_omega` at a 19.4% data share and calls it
+prior-swamped, treating it as a structural property. It is not — it is a property of how much the
+robot happened to stand still in that window. Measured across arm 6's two legs, same robot and same
+code: **94.1% data share in the leg containing a parked stretch, 47.3% in the leg without one.**
+`b_omega` is not beyond experience; it is reachable by an action the robot was not being asked to
+take. ★ Read §10.2's figure as one window's accident, not as a fact about the parameter.
+
+★ **What survives as a real, smaller concern:** those 9 episodes are consecutive windows within ONE
+parked period, so they are not 9 independent observations — the bias is constant and the localiser's
+heading error across them is likely correlated by scene and fit. Treating them as independent
+overstates the resulting precision. That is a correlation question and it is not measured here.
+
+★★★ **The method lesson, which is why this section stays in rather than being deleted.** I found an
+anomaly, built a causal story for it, quantified it at 47x, wrote it into the results, and was one
+step from changing code — before checking the anomaly against the emission guard and the physics.
+The check took two commands. **A number that is 47x larger than its neighbours is a reason to ask
+what it is, not evidence that something is broken.**
 
 ## Appendix A — the empty-episode defect (fixed, `96d48bc`)
 
