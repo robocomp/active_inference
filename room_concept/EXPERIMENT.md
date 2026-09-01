@@ -667,8 +667,26 @@ robot:
 
 ⚠ The scope is real and should be stated wherever this is quoted: a LARGE open environment would
 invert the rotation half. Long gentle arcs and few hairpins would starve `k_omega` exactly as the
-rate-headroom figure (3.81x) predicts, and there an affordance would earn its cost. The apartment is
-not a limitation of this result — it is a condition of it.
+rate-headroom figure (3.81x) predicts. The apartment is not a limitation of this result — it is a
+condition of it.
+
+★★★ **NEED AND COST ARE THE SAME VARIABLE, which is why the rule bites.** The rule above states the
+BENEFIT side. The COST side is not independent of it: a planner avoids a motion BECAUSE that motion
+costs it something, so the degree to which a route lacks rotation is precisely the degree to which
+inserting rotation deviates from that route. Cluttered — excitation free AND a manoeuvre would be
+cheap, and it is unnecessary. Open — the parameter genuinely starved AND the manoeuvre must override
+a route the planner considered optimal. **An affordance must overcome its own justification.** That
+is why the answer comes out against affordances in general and not merely in this apartment.
+
+★★★ **THE ONE EXCEPTION, AND IT IS THE PRACTICAL CONCLUSION: the anti-correlation holds only while
+the robot is EXECUTING A TASK.** It vanishes when the robot is idle — a manoeuvre performed during
+idle time has near-zero opportunity cost and undiminished benefit. So the design rule is not "build
+no affordance", it is:
+
+> **A calibration affordance should compete with IDLENESS, never with a task.**
+
+★ Which is what `afford_calib` already does (passive estimation live, manoeuvre off) — arrived at
+empirically before this derivation existed. See [[base-self-calibration-affordance]].
 
 `b_omega` sits outside the argument: no rate appears in its Jacobian, so wait-and-watch is trivially
 optimal there in the sense that nothing else works either. Separately it is PRIOR-SWAMPED — its
