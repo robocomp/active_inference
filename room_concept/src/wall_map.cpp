@@ -2175,6 +2175,154 @@ namespace rc::wallmap
         // Adopt iff the new cycle explains the observed free space BETTER (grid IoU) — the global
         // free-energy comparison, evaluated on the evidence both cycles claim to explain.
         for (const auto& w : created) walls.push_back(w);
+        // ── WRAP PRESERVATION: a bin-backed wrapped thin wall (an anti-parallel pair at thin
+        // separation) must SURVIVE adoption. The trace caught a 2904-point, 26-bin face being
+        // discarded by an adoption that improved grid IoU 0.757→0.843 — the area criterion is
+        // blind to thin MATTER. Each lost evidence-backed pair is re-spliced into the contour
+        // cycle as the narrow notch [host, face, cap, face, host] before the comparison: the
+        // contour contributes topology, beam-confirmed walls are not erased for free.
+        {
+            const auto near3 = [&](const WallLandmark* x, const WallLandmark* y)
+            { return std::abs(wrap_pi(x->phi - y->phi)) < 0.2f and std::abs(x->d - y->d) < 0.3f; };
+            for (size_t a2 = 0; a2 < order.size(); ++a2)
+                for (size_t b2 = a2 + 1; b2 < order.size(); ++b2)
+                {
+                    const auto* fa = find(order[a2]);
+                    const auto* fb = find(order[b2]);
+                    if (fa == nullptr or fb == nullptr or fa->id == fb->id) continue;
+                    if (std::abs(wrap_pi(wrap_pi(fa->phi - fb->phi) - kPi)) >= 0.35f
+                        or std::abs(fa->d + fb->d) >= 0.5f) continue;
+                    const auto* fs = (fa->points_seen >= fb->points_seen) ? fa : fb;
+                    if (fs->points_seen < 500) continue;                         // evidence-backed only
+                    // Lost as a PAIR: the new cycle must hold an anti-parallel thin pair matching
+                    // this one. Testing mere MEMBER presence was measured inert — the supported
+                    // face survives as a plain boundary edge while the wrap is gone.
+                    bool pair_present = false;
+                    for (size_t k3 = 0; k3 < new_order.size() and not pair_present; ++k3)
+                        for (size_t k4 = k3 + 1; k4 < new_order.size() and not pair_present; ++k4)
+                        {
+                            const auto* x2 = find(new_order[k3]);
+                            const auto* y2 = find(new_order[k4]);
+                            if (x2 == nullptr or y2 == nullptr) continue;
+                            if (std::abs(wrap_pi(wrap_pi(x2->phi - y2->phi) - kPi)) >= 0.35f
+                                or std::abs(x2->d + y2->d) >= 0.5f) continue;
+                            if ((near3(x2, fa) and near3(y2, fb)) or (near3(x2, fb) and near3(y2, fa)))
+                                pair_present = true;
+                        }
+                    if (pair_present) continue;
+                    if (params.debug_splice)
+                        std::printf("[wrap-keep?] lost pair (d=%.3f pts=%d / d=%.3f pts=%d) — searching anchor\n",
+                                    fa->d, fa->points_seen, fb->d, fb->points_seen);
+                    // Anchor at the SURVIVING member's entry (the measured case); insert the cap
+                    // and the missing face beside it — tip end, cap sign, side and host-resume
+                    // enumerated, validation choosing.
+                    int surv_pos = -1;
+                    const WallLandmark* miss = nullptr;
+                    for (size_t k3 = 0; k3 < new_order.size() and surv_pos < 0; ++k3)
+                        if (const auto* w2 = find(new_order[k3]); w2 != nullptr)
+                        {
+                            if (near3(w2, fa)) { surv_pos = static_cast<int>(k3); miss = fb; }
+                            else if (near3(w2, fb)) { surv_pos = static_cast<int>(k3); miss = fa; }
+                        }
+                    if (surv_pos < 0)
+                    {
+                        if (params.debug_splice)
+                            std::printf("[wrap-keep?] no anchor for the lost pair in the new cycle\n");
+                        continue;
+                    }
+                    (void)miss;
+                    // TRANSPLANT the old wrap's own sub-path — the pair's cyclic arc (faces plus
+                    // the real cap between them) from the old, VALIDATED cycle — instead of
+                    // fabricating a cap at the missing face's raw extent end (measured: tip -5.83,
+                    // a 6 m slice, 118/128 variants self-crossing). Geometry is inherited;
+                    // orientation and neighbour-resume are enumerated; validation chooses.
+                    int pa = -1, pb = -1;
+                    for (size_t k3 = 0; k3 < order.size(); ++k3)
+                    {
+                        if (order[k3] == fa->id and pa < 0) pa = static_cast<int>(k3);
+                        if (order[k3] == fb->id and pb < 0) pb = static_cast<int>(k3);
+                    }
+                    if (pa < 0 or pb < 0) continue;
+                    const int NO = static_cast<int>(order.size());
+                    const auto arc = [&](int from, int to)
+                    {
+                        std::vector<std::uint64_t> s2;
+                        for (int k3 = from; ; k3 = (k3 + 1) % NO)
+                        {
+                            s2.push_back(order[static_cast<size_t>(k3)]);
+                            if (k3 == to) break;
+                            if (static_cast<int>(s2.size()) > 5) { s2.clear(); break; }
+                        }
+                        return s2;
+                    };
+                    std::vector<std::uint64_t> sub = arc(pa, pb);
+                    if (sub.empty()) sub = arc(pb, pa);
+                    if (sub.empty())
+                    {
+                        if (params.debug_splice)
+                            std::printf("[wrap-keep?] pair's old arc longer than 5 entries — skipped\n");
+                        continue;
+                    }
+                    if (params.debug_splice)
+                    {
+                        std::printf("[wk-arc]");
+                        for (const auto ida2 : sub)
+                            if (const auto* wA = find(ida2); wA != nullptr)
+                                std::printf(" (id=%llu phi=%.2f d=%.2f pts=%d)",
+                                            (unsigned long long)wA->id, wA->phi, wA->d, wA->points_seen);
+                        std::printf("\n");
+                    }
+                    bool injected = false;
+                    for (const bool fwd : {true, false})
+                    {
+                        if (injected) break;
+                        std::vector<std::uint64_t> path = sub;
+                        if (not fwd) std::reverse(path.begin(), path.end());
+                        for (const int resume3 : {0, 1, 2})   // none / resume-prev after / resume-next before
+                        {
+                            if (injected) break;
+                            std::vector<std::uint64_t> o2;
+                            const int NN = static_cast<int>(new_order.size());
+                            for (int j = 0; j < NN; ++j)
+                            {
+                                if (j == surv_pos)
+                                {
+                                    if (resume3 == 2) o2.push_back(new_order[static_cast<size_t>((j + 1) % NN)]);
+                                    for (const auto idp : path) o2.push_back(idp);
+                                    if (resume3 == 1) o2.push_back(new_order[static_cast<size_t>((j + NN - 1) % NN)]);
+                                    continue;                 // the near-duplicate entry is replaced
+                                }
+                                o2.push_back(new_order[static_cast<size_t>(j)]);
+                            }
+                            const Polygon t2 = build_from(o2);
+                            bool ok2 = t2.closed;
+                            const char* wv = ok2 ? "valid" : "not-closed";
+                            for (size_t e2 = 0; e2 < t2.verts.size() and ok2; ++e2)
+                            {
+                                const Eigen::Vector2f dv = t2.verts[(e2 + 1) % t2.verts.size()] - t2.verts[e2];
+                                if (dv.norm() < 0.04f) { ok2 = false; wv = "short-edge"; break; }
+                                const auto* We3 = find(t2.wall_of_edge[e2]);
+                                if (We3 == nullptr) { ok2 = false; wv = "missing-wall"; break; }
+                                if (Eigen::Vector2f(-dv.y(), dv.x()).dot(We3->normal()) <= 0.f)
+                                { ok2 = false; wv = "interior"; break; }
+                            }
+                            if (params.debug_splice and not ok2)
+                                std::printf("[wk-var] arc=%zu fwd=%d res=%d -> %s [%.60s]\n",
+                                            path.size(), static_cast<int>(fwd), resume3, wv, t2.status.c_str());
+                            if (ok2)
+                            {
+                                new_order = std::move(o2);
+                                injected = true;
+                                if (params.debug_splice)
+                                    std::printf("[wrap-keep] transplanted the pair's %zu-entry arc (pts=%d) into the contour cycle\n",
+                                                path.size(), fs->points_seen);
+                            }
+                        }
+                    }
+                    if (not injected and params.debug_splice)
+                        std::printf("[wrap-keep?] all transplant variants refused (surv_pos=%d)\n", surv_pos);
+                }
+        }
         const auto grid_iou = [&](const Polygon& poly) -> float
         {
             if (not poly.closed) return -1.f;
@@ -2198,6 +2346,44 @@ namespace rc::wallmap
                         new_order.size(), created.size(), static_cast<int>(tp.closed),
                         iou_new, iou_old, (iou_new > iou_old + 0.02f) ? "ADOPT" : "keep",
                         tp.status.c_str());
+        }
+        // ── ADOPTION-LOSS TRACE: does the adopted cycle LOSE a wrapped thin wall — an
+        // anti-parallel pair at thin separation — that the current cycle holds? Three fence
+        // variants proved the short-spur loss lives HERE, downstream of a solid fence (41/42
+        // latched cells, full frames, spur still gone): catch the discarding adoption in the act.
+        if (params.debug_splice and iou_new > iou_old + 0.02f)
+        {
+            const auto pairs_of = [&](const std::vector<std::uint64_t>& ord)
+            {
+                std::vector<std::pair<const WallLandmark*, const WallLandmark*>> out;
+                for (size_t a2 = 0; a2 < ord.size(); ++a2)
+                    for (size_t b2 = a2 + 1; b2 < ord.size(); ++b2)
+                    {
+                        const auto* wa2 = find(ord[a2]);
+                        const auto* wb2 = find(ord[b2]);
+                        if (wa2 == nullptr or wb2 == nullptr or wa2->id == wb2->id) continue;
+                        if (std::abs(wrap_pi(wrap_pi(wa2->phi - wb2->phi) - kPi)) < 0.35f
+                            and std::abs(wa2->d + wb2->d) < 0.5f)
+                            out.push_back({wa2, wb2});
+                    }
+                return out;
+            };
+            const auto near2 = [&](const WallLandmark* x, const WallLandmark* y)
+            { return std::abs(wrap_pi(x->phi - y->phi)) < 0.2f and std::abs(x->d - y->d) < 0.3f; };
+            const auto new_pairs = pairs_of(new_order);
+            for (const auto& [oa, ob] : pairs_of(order))
+            {
+                bool kept = false;
+                for (const auto& [na2, nb2] : new_pairs)
+                    if ((near2(oa, na2) and near2(ob, nb2)) or (near2(oa, nb2) and near2(ob, na2)))
+                    { kept = true; break; }
+                if (not kept)
+                    std::printf("[adopt-loss] wrapped pair LOST by adoption: "
+                                "(phi=%.3f d=%.3f pts=%d bins=%zu)/(phi=%.3f d=%.3f pts=%d bins=%zu) iou %.3f->%.3f\n",
+                                oa->phi, oa->d, oa->points_seen, oa->exist_bins.size(),
+                                ob->phi, ob->d, ob->points_seen, ob->exist_bins.size(),
+                                iou_old, iou_new);
+            }
         }
         if (iou_new > iou_old + 0.02f)
         {
