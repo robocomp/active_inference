@@ -1929,7 +1929,8 @@ namespace rc::wallmap
         const int nx = fgrid.nx, ny = fgrid.ny;
         // Connected free component containing the robot.
         const std::vector<char> comp = free_component(robot_map);
-        if (comp.empty()) return false;
+        if (comp.empty())
+        { if (params.debug_splice) std::printf("[rederive] bail: no free component\n"); return false; }
         const auto inc = [&](int i, int j) { return fgrid.in(i, j) and comp[static_cast<size_t>(fgrid.idx(i, j))] != 0; };
         // Moore boundary trace of the component, CCW.
         int si = -1, sj = -1;
@@ -1957,7 +1958,8 @@ namespace rc::wallmap
                 if (ci == si and cj == sj and contour.size() > 8) break;
             }
         }
-        if (contour.size() < 12) return false;
+        if (contour.size() < 12)
+        { if (params.debug_splice) std::printf("[rederive] bail: contour %zu cells\n", contour.size()); return false; }
         // Simplify: Douglas-Peucker with the grid's own resolution as tolerance.
         std::vector<Eigen::Vector2f> simp;
         {
@@ -1980,7 +1982,8 @@ namespace rc::wallmap
             for (size_t m = 0; m < contour.size(); ++m) if (keep[m]) simp.push_back(contour[m]);
             if (simp.size() > 1 and (simp.front() - simp.back()).norm() < 1e-3f) simp.pop_back();
         }
-        if (simp.size() < 3) return false;
+        if (simp.size() < 3)
+        { if (params.debug_splice) std::printf("[rederive] bail: simplified to %zu verts\n", simp.size()); return false; }
         // Ensure CCW.
         {
             float a2 = 0.f;
@@ -1993,6 +1996,7 @@ namespace rc::wallmap
         // contour itself, with weak info — the contour sits half a cell inside the true wall, which
         // the point factors then pull out.
         std::vector<std::uint64_t> new_order;
+        std::vector<Eigen::Vector2f> starts;   // edge-start per new_order entry (junction anchors)
         std::vector<WallLandmark> created;
         const int M = static_cast<int>(simp.size());
         for (int m = 0; m < M; ++m)
@@ -2047,8 +2051,95 @@ namespace rc::wallmap
                 created.push_back(w);
                 chosen = w.id;
             }
-            if (new_order.empty() or new_order.back() != chosen) new_order.push_back(chosen);
+            if (new_order.empty() or new_order.back() != chosen)
+            { new_order.push_back(chosen); starts.push_back(a); }
         }
+        // (rectilinearization happens AFTER candidate promotion below — a run snapped to a
+        // candidate ref would otherwise be invisible to it and keep a parallel adjacency.)
+        const auto rectilinearize = [&]()
+        {
+        if (params.manhattan_strict and new_order.size() >= 3 and starts.size() == new_order.size())
+        {
+            const auto dir_of = [&](std::uint64_t id) -> const WallLandmark*
+            {
+                if (id >= 1000000000ULL) return nullptr;   // candidate refs: promoted later, skip
+                for (const auto& w : created) if (w.id == id) return &w;
+                return find(id);
+            };
+            const Eigen::Matrix2f weak2 = Eigen::Vector2f(30.f, 15.f).asDiagonal();
+            // Implied ⊥ connector through the junction; its normal is interior-LEFT of the walk,
+            // which travels from wa2's line to wb2's line along wa2's normal. Fetch nothing from
+            // wa2/wb2 after created.push_back — the pointers dangle on reallocation.
+            const auto connect = [&](const WallLandmark* wa2, const WallLandmark* wb2, bool par,
+                                     const Eigen::Vector2f& vj) -> std::uint64_t
+            {
+                const float gap = par ? std::abs(wa2->d - wb2->d) : std::abs(wa2->d + wb2->d);
+                const Eigen::Vector2f na = wa2->normal();
+                const float d_target = par ? wb2->d : -wb2->d;
+                const Eigen::Vector2f wd = na * ((d_target - wa2->d) >= 0.f ? 1.f : -1.f);
+                const Eigen::Vector2f nc(-wd.y(), wd.x());
+                WallLandmark conn = make_wall(std::atan2(nc.y(), nc.x()), nc.dot(vj),
+                                              weak2, 0.5f * params.birth_nats, 0);
+                const Eigen::Vector2f tc2 = conn.tangent();
+                conn.s_min = tc2.dot(vj) - gap - 0.15f;
+                conn.s_max = tc2.dot(vj) + gap + 0.15f;
+                conn.has_extent = true;
+                created.push_back(conn);
+                return conn.id;
+            };
+            // Single forward pass with true MERGING: two DISTINCT near-collinear walls adjacent in
+            // the sequence previously survived (only identical ids were collapsed) and closure
+            // failed on "edges parallel, no corner". Under 2.5 cells of separation — below any
+            // main-line feature — they are one line at grid resolution: the better-supported wall
+            // stands for both.
+            std::vector<std::uint64_t> ro;
+            const auto push_entry = [&](std::uint64_t id, const Eigen::Vector2f& vj)
+            {
+                while (true)
+                {
+                    if (ro.empty()) { ro.push_back(id); return; }
+                    if (ro.back() == id) return;
+                    const auto* wa2 = dir_of(ro.back());
+                    const auto* wb2 = dir_of(id);
+                    if (wa2 == nullptr or wb2 == nullptr) { ro.push_back(id); return; }
+                    const float dphi2 = wrap_pi(wa2->phi - wb2->phi);
+                    const bool par  = std::abs(dphi2) < 0.1f;
+                    const bool anti = std::abs(wrap_pi(dphi2 - kPi)) < 0.1f;
+                    if (not par and not anti) { ro.push_back(id); return; }
+                    const float gap = par ? std::abs(wa2->d - wb2->d) : std::abs(wa2->d + wb2->d);
+                    if (par and gap < 2.5f * fgrid.cell)
+                    {
+                        // Merge: keep the better-supported line and RE-CHECK against the new back.
+                        if (wb2->points_seen > wa2->points_seen) { ro.pop_back(); continue; }
+                        return;
+                    }
+                    ro.push_back(connect(wa2, wb2, par, vj));
+                    ro.push_back(id);
+                    return;
+                }
+            };
+            const int M2 = static_cast<int>(new_order.size());
+            for (int m = 0; m < M2; ++m)
+                push_entry(new_order[static_cast<size_t>(m)], starts[static_cast<size_t>(m)]);
+            // The seam (back ↔ front) obeys the same rules.
+            while (ro.size() > 3)
+            {
+                if (ro.back() == ro.front()) { ro.pop_back(); continue; }
+                const auto* wa2 = dir_of(ro.back());
+                const auto* wb2 = dir_of(ro.front());
+                if (wa2 == nullptr or wb2 == nullptr) break;
+                const float dphi2 = wrap_pi(wa2->phi - wb2->phi);
+                const bool par  = std::abs(dphi2) < 0.1f;
+                const bool anti = std::abs(wrap_pi(dphi2 - kPi)) < 0.1f;
+                if (not par and not anti) break;
+                const float gap = par ? std::abs(wa2->d - wb2->d) : std::abs(wa2->d + wb2->d);
+                if (par and gap < 2.5f * fgrid.cell) { ro.pop_back(); continue; }
+                ro.push_back(connect(wa2, wb2, par, starts.front()));
+                break;
+            }
+            new_order = std::move(ro);
+        }
+        };
         // Promote referenced candidates to walls.
         for (auto& id : new_order)
             if (id >= 1000000000ULL)
@@ -2060,8 +2151,18 @@ namespace rc::wallmap
                 created.push_back(w);
                 id = w.id;
             }
+        // RECTILINEARIZE (strict Manhattan): snapping stair-stepped contour runs to the four
+        // directions leaves ADJACENT PARALLEL runs — build_from finds no corner between parallel
+        // lines and the cycle never closes (measured: closed=0 on 100% of re-derivations,
+        // iou_new=-1 — the primary estimator silently dead since strictness landed). Same-line
+        // neighbours merge; offset parallel neighbours get the implied perpendicular JOG through
+        // their junction; ANTI-parallel neighbours get the implied CAP — the contour thereby
+        // expresses notches and spurs natively, with no splice enumeration. Runs after candidate
+        // promotion so every entry resolves to a real wall.
+        rectilinearize();
         if (new_order.size() > 1 and new_order.front() == new_order.back()) new_order.pop_back();
-        if (new_order.size() < 3) return false;
+        if (new_order.size() < 3)
+        { if (params.debug_splice) std::printf("[rederive] bail: only %zu runs after snap\n", new_order.size()); return false; }
 
         // Adopt iff the new cycle explains the observed free space BETTER (grid IoU) — the global
         // free-energy comparison, evaluated on the evidence both cycles claim to explain.
@@ -2082,6 +2183,14 @@ namespace rc::wallmap
         };
         const float iou_new = grid_iou(build_from(new_order));
         const float iou_old = grid_iou(build_from(order));
+        if (params.debug_splice)
+        {
+            const Polygon tp = build_from(new_order);
+            std::printf("[rederive] runs=%zu created=%zu closed=%d iou_new=%.3f iou_old=%.3f -> %s [%.70s]\n",
+                        new_order.size(), created.size(), static_cast<int>(tp.closed),
+                        iou_new, iou_old, (iou_new > iou_old + 0.02f) ? "ADOPT" : "keep",
+                        tp.status.c_str());
+        }
         if (iou_new > iou_old + 0.02f)
         {
             order = new_order;
