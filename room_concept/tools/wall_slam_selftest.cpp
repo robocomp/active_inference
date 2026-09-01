@@ -524,7 +524,7 @@ namespace
         std::vector<Eigen::Vector2f> path;   // truth-frame waypoints ahead
         int replan_in = 0;
         int quiet_frames = 0;
-        int last_rederive = 0, rejected_since_rederive = 0, rederives = 0;
+        int last_rederive = 0, rejected_since_rederive = 0, rederives = 0, replan_count = 0;
 
         for (int f = 0; f < max_frames; ++f)
         {
@@ -643,8 +643,28 @@ namespace
                 // keep refining, but there is nowhere informative left to drive to.
                 quiet_frames = (f > 60 and R.map.frontiers().empty()) ? quiet_frames + 1 : 0;
                 if (quiet_frames >= 3 or unknowns.empty()) { R.frames = f + 1; break; }
-                // score viewpoints on the free grid (subsampled) by visible unknown mass
                 float best_sc = -1.f; Eigen::Vector2f best_v = tru.head<2>();
+                // COVERAGE GUARANTEE: greedy argmax-by-visible-mass starves sparse far regions — a
+                // wrong early wall then amputates a whole space for ever, because nothing ever goes
+                // where it would be contradicted (seed-7: one diagonal cut off the SE space for 1100
+                // frames). Every 4th replan goes to the NEAREST frontier, mass be damned.
+                // Coverage has diminishing value as frontiers vanish; dwell does not. Once the
+                // space is essentially explored, every replan goes back to refinement — that is
+                // what the good seeds paid for coverage turns before this condition existed.
+                const auto fronts = R.map.frontiers();
+                const bool coverage_turn = (++replan_count % 4 == 0) and fronts.size() > 3;
+                if (coverage_turn)
+                {
+                    float dbest = 1e9f;
+                    for (const auto& fp : fronts)
+                    {
+                        const Eigen::Vector2f ft = from_map(fp);
+                        const float dd = (ft - tru.head<2>()).norm();
+                        if (dd < dbest) { dbest = dd; best_v = ft; best_sc = 1.f; }
+                    }
+                }
+                // score viewpoints on the free grid (subsampled) by visible unknown mass
+                if (best_sc < 0.f)
                 for (int i = 0; i < ex.nx; i += 2)
                     for (int j = 0; j < ex.ny; j += 2)
                     {
