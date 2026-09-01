@@ -903,7 +903,7 @@ MotionCalibEnabled  = true
 # With apply=false the covariate stays raw and the residual stays the FULL error, so recovery should
 # jump toward 100%. Any account not involving feedback predicts no change.
 # ⚠ TRUE for all normal operation. The robot drives UNCALIBRATED while this is false.
-MotionCalibApply    = true    # normal operation. false = open-loop arm (estimate, do not apply).
+MotionCalibApply = true    # normal operation. false = open-loop arm (estimate, do not apply).
 # Which parameters may ACT, bitmask: 1=k_v 2=eps_yaw 4=k_omega 8=b_omega 16=k_lat 32=dk_wheel.
 # -1 = all (normal). 1 = forward scale only. Estimation and logging are unaffected either way.
 # ⚠ THE FINDING THAT PUT THIS AT 1 WAS RETRACTED, 2026-08-31. It read: "with everything applied
@@ -967,6 +967,23 @@ MotionCalibFitModelGain  = 2.0    # x mean |SDF| over the episode, into the posi
                         # makes Shadow's calibrator uniformly MORE conservative than P3Bot's, which is
                         # the safe direction, but it means the P3Bot tuning story does not transfer
                         # and the value should be revisited once Shadow has episodes to look at.
+# ── HOW MUCH MOTION CLOSES AN EPISODE — the episode LENGTH, and the dominant lever ──────────────
+# An episode closes once EITHER threshold is met, carrying whatever correction accumulated over that
+# span. They are IDENTIFIABILITY triggers, not sensitivity knobs: below them the Jacobian rows are ~0
+# and the episode teaches nothing whatever its residual says (a parked robot must never close one).
+# ★★★ BUT THEY ALSO SET HOW MUCH A GIVEN MOTION TEACHES, which is why they are here. Information in a
+# channel goes as (accumulated covariate)^2 while episodes arrive at 1/T, so information per unit of
+# motion is LINEAR in the trigger. Measured 2026-09-01: episodes close at the MINIMUM
+# (0.25 m / 0.43 m/s = 0.58 s against an observed 0.55 s median), so the estimator sits at the floor
+# of its dominant lever; controlling for speed, information per second rises 16x from the shortest to
+# the longest duration bin. A 3.14 rad hairpin closing as ONE episode is worth 1580 against 103 for
+# the same hairpin chopped into sixteen 0.20 rad pieces — 15.4x.
+# ⚠ NOT free: the Jacobian linearises the whole accumulated motion as one increment, and the carry
+# caps below are a GUESS at where that stops being true. Raising these is the subject of §12, whose
+# pre-registered discriminator is that longer episodes must improve k_omega's SIGMA without moving
+# its VALUE — a value shift on the same robot and route is the signature of linearisation breaking.
+MotionCalibEpisodeMinTrans = 0.25   # m of accumulated forward travel
+MotionCalibEpisodeMinRot   = 0.20   # rad of accumulated rotation (~11 deg)
 MotionCalibYawP0    = 1.0e-4   # (rad)^2 initial uncertainty on the body/mount yaw offset (1σ ≈ 0.57°)
 MotionCalibScaleP0  = 4.0e-4   # fractional² initial uncertainty on both scales (1σ ≈ 2%)
                         # ★ These two are PRIORS, not measurements — how little is known before any
@@ -1083,7 +1100,7 @@ BoundaryMuQualityThreshold      = 0.084
 #                After closure the walls stay variables (their precision only grows) and a new wall
 #                can still be born by model comparison — there is no second gate inside this mode.
 [RoomShape]
-MapMode              = "given"
+MapMode = "given"
 # σ_ε of the hierarchical Manhattan prior φᵢ − θ₀ − kπ/2 ~ N(0, σ_ε²) — a tight PRIOR, not a hard
 # constraint: a chamfer is born class-less (no factor) when no class beats ManhattanOffPrior.
 ManhattanSigmaDeg    = 2.0

@@ -177,6 +177,13 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.MotionCalibScaleQ", room_concept.params.motion_calib.scale_q);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.MotionCalibRotModelSigma", room_concept.params.motion_calib.rot_model_sigma);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.MotionCalibFitModelGain", room_concept.params.motion_calib.fit_model_gain);
+    // ★ EXPOSED 2026-09-01 so the episode LENGTH can be A/B'd without a rebuild between legs.
+    // These are identifiability triggers, not tuning: below them the Jacobian rows are ~0. But
+    // information in a channel goes as (accumulated covariate)^2 while episodes arrive at 1/T, so
+    // where the trigger sits sets how much a given motion teaches — a 3.14 rad hairpin closing as
+    // ONE episode is worth 15.4x the same hairpin chopped at 0.20 rad. See EXPERIMENT.md §12.
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.MotionCalibEpisodeMinTrans", room_concept.params.motion_calib.episode_min_trans);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.MotionCalibEpisodeMinRot", room_concept.params.motion_calib.episode_min_rot);
 
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.SigmaSdf", room_concept.params.sigma_sdf);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PredictionTrustFactor", room_concept.params.prediction_trust_factor);

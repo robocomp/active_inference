@@ -888,6 +888,97 @@ energy, and the epistemic-value asymmetry between body and world. These are the 
 which the measurements cohere. They are not tested by them, and a reader should be able to reject the
 frame and keep every number.
 
+## 12. Arm 6 — does episode LENGTH buy information, and where does linearisation break?
+
+Pre-registered 2026-09-01. NOT RUN. Driver `tools/arm6_setup.sh`.
+
+**Why this and not a manoeuvre.** §10 established that `T` is a common factor in every row of the
+information table — episode duration is the universal lever — and that the estimator sits at its
+FLOOR: `episode_min_trans` = 0.25 m at 0.43 m/s is 0.58 s against an observed 0.55 s median, so
+episodes close the instant they are allowed to. §11 established that no affordance is justified here.
+So the question that remains is not which motion to perform but **how much of the motion the robot
+already performs is being thrown away**, and that is a constant, not a manoeuvre.
+
+The rotation channel is where it bites hardest, because information goes as the SQUARE of the
+accumulated covariate. Measured over the arm 3R window: **16.7% of episodes close exactly at
+`episode_min_rot` = 0.20 rad**, and a 3.14 rad hairpin taken as ONE episode is worth 1580 against 103
+for the same hairpin chopped into sixteen — **15.4x**. Meanwhile the surviving long turns (median
+1.37 rad over 3.73 s) already carry **82.4%** of `k_omega`'s information.
+
+**Design.** Two legs, same route, ~220 m each to match arm 3R, back to back in one session, cold each,
+UNINJECTED (the native robot). `MotionCalibEpisodeMinRot` is the ONLY thing that varies:
+
+| leg | `MotionCalibEpisodeMinRot` |
+|---|---|
+| 6-base | **0.20 rad** (the current value) |
+| 6-long | **1.00 rad** (~57°, five times the trigger) |
+
+Everything else is pinned to arm 3R's conditions — `MotionCalibEpisodeMinTrans` = 0.25,
+`MotionCalibApply` = true, `mask` = 1, `StableSdfMseMax` = 0.076, `MapMode` = "given" — so a
+difference cannot be attributed to anything but the trigger.
+
+★ 1.00 rad is chosen against two bounds, not guessed: it must stay well below
+`episode_carry_max_rot` = 2.0, or episodes would be DROPPED at the carry cap rather than closed; and
+it must sit below a typical hairpin so that turns still close on rotation rather than being carried.
+The observed `d_theta` p90 is 1.066 rad and the maximum is 1.984 — hard against the carry cap.
+
+★★ Raising the ROTATION trigger alone is deliberate. Episodes close on EITHER threshold, so during an
+arc the translation trigger still fires first; only tight and pure turns are affected, which is
+exactly the hairpin case this arm is about. The translation lever is a separate question (§12.4).
+
+### 12.1 Pre-registered endpoints, in order
+
+1. **PRIMARY — `k_omega` posterior sigma at MATCHED ROTATION.** Not per metre and not per run: this
+   arm is about information per radian TURNED, so the legs must be compared at equal cumulative
+   rotation or the comparison is against the route. Predicted: 6-long lower. The information law says
+   information per unit rotation is LINEAR in the trigger, so the ceiling is 5x more information,
+   i.e. sigma down by up to sqrt(5) = 2.2x. Anything approaching that closes the rotation gap and
+   removes the last argument for a rotation affordance.
+2. **SECONDARY — the heading block's lambda_min and condition number**, from
+   `tools/excitation.py` on each leg's episode log. Predicted: lambda_min up in 6-long,
+   condition number roughly unchanged (the trigger scales the block, it does not re-orient it).
+3. **DIAGNOSTIC — episode bookkeeping**: emitted, carried and DROPPED counts, median `d_theta` and
+   duration. 6-long must show a larger median `d_theta`; if it does not, the trigger is not binding
+   and the arm has not manipulated what it claims to.
+
+### 12.2 ★★★ THE DISCRIMINATOR: sigma must improve while the VALUE must not move
+
+This is the pre-registered test for the linearisation limit, and it is the reason this arm is worth
+driving rather than reasoning about.
+
+Both legs observe **the same robot on the same route**, so `k_omega`'s TRUE value is identical. A
+longer episode should therefore buy PRECISION and nothing else:
+
+- **sigma falls, value agrees within its sigma** ⇒ the trigger was throwing information away and
+  raising it is free. The rotation gap was a constant all along.
+- **sigma falls but the VALUE SHIFTS** ⇒ ★ **the signature of linearisation breaking.** The Jacobian
+  treats the whole accumulated motion as one small increment; when that stops being true the estimate
+  acquires a BIAS, and a bias is exactly what a shift in the value on an unchanged robot means. This
+  is the first measurement of a limit currently asserted by two constants and never tested.
+- **neither moves** ⇒ the trigger was not the binding constraint; look at `theta_var` instead, since
+  the weight may be growing with the episode as fast as the covariate does.
+
+⚠ **Report the value comparison BEFORE the sigma comparison.** A precision improvement bought with a
+bias is worse than no improvement, and reporting sigma first invites reading the arm as a success.
+
+### 12.3 What would make this arm uninterpretable
+
+- **Unmatched rotation content.** The endpoint is per radian turned; if the legs differ much in total
+  rotation the primary comparison is against the route. Drive the same circuit.
+- **A change in dropped-episode count.** If 6-long drops many more episodes at the carry cap, it is
+  not measuring longer episodes but fewer of them, and the two effects are confounded. `dropped_`
+  is logged; report it.
+- **Window lag.** Fewer, longer episodes mean the 512-episode window spans more distance, so the
+  estimator adapts more slowly. On a static parameter this only affects the transient, but it is the
+  reason not to raise the trigger further than this arm tests.
+
+### 12.4 Parked, and deliberately
+
+The translation trigger. `MotionCalibEpisodeMinTrans` is now config-exposed alongside the rotation
+one and the same argument applies to `k_v`, `eps_yaw` and `dk_wheel` — but those three are already
+`informed` at 5.5-7.3x shrink from ordinary driving, so the headroom that matters is in the channel
+that is not. Raise it only if arm 6 shows the mechanism is real.
+
 ## Appendix A — the empty-episode defect (fixed, `96d48bc`)
 
 Necessary because it dates the validity of every calibration number.
