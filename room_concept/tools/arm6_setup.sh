@@ -2,7 +2,8 @@
 # Arm 6 — does episode LENGTH buy information, and where does linearisation break?
 # Spec and pre-registered endpoints: EXPERIMENT.md, "Arm 6".
 #
-#   tools/arm6_setup.sh base|long     arm one leg (base = 0.20 rad, long = 1.00 rad)
+#   tools/arm6_setup.sh base|long     arm one leg — BOTH triggers scale together, 4x:
+#                                       base = 0.25 m / 0.20 rad, long = 1.00 m / 0.80 rad
 #   tools/arm6_setup.sh check         is the RUNNING fleet running the armed config?
 #   tools/arm6_setup.sh ratio         MUST read ~0.99 — this arm is UNINJECTED
 #   tools/arm6_setup.sh save <leg>    file a finished leg, with the guards the earlier arms earned
@@ -12,10 +13,15 @@ set -euo pipefail
 BR=/home/pbustos/robocomp/components/webots-bridge/etc
 RC=/home/pbustos/robocomp/components/active_inference/room_concept/etc
 SRC=/home/pbustos/robocomp/components/active_inference/room_concept/tmp/sdf_localizer/gt_error.csv
-ROT_BASE=0.20
-ROT_LONG=1.00
+# ★★★ BOTH triggers, scaled together by 4x. Raising one alone is defeated by the other: they are a
+# min(), and at the observed 0.43 m/s and 0.27 rad/s the translation limit arrives in 0.58 s against
+# the rotation limit's 0.74 s, so translation closes 43% of episodes and rotation only 9% — and the
+# trans-closed ones carry 98.8% of k_omega's information. Measured 2026-09-01 before driving.
+ROT_BASE=0.20;   TRANS_BASE=0.25
+ROT_LONG=0.80;   TRANS_LONG=1.00
 die() { echo "arm6: $*" >&2; exit 1; }
-leg_rot() { case "$1" in base) echo $ROT_BASE;; long) echo $ROT_LONG;; *) die "unknown leg '$1'";; esac; }
+leg_rot()   { case "$1" in base) echo $ROT_BASE;;   long) echo $ROT_LONG;;   *) die "unknown leg '$1'";; esac; }
+leg_trans() { case "$1" in base) echo $TRANS_BASE;; long) echo $TRANS_LONG;; *) die "unknown leg '$1'";; esac; }
 
 setkey() {
   python3 - "$1" "$2" "$3" <<'PY'
@@ -87,6 +93,9 @@ if [ "${1:-}" = save ]; then
   want=$(leg_rot "$leg")
   have=$(sed -n "s/^MotionCalibEpisodeMinRot *= *\([0-9.]*\).*/\1/p" "$RC/config.toml" | head -1)
   [ "$have" = "$want" ] || die "leg $leg needs MotionCalibEpisodeMinRot=$want, config says $have."
+  wantt=$(leg_trans "$leg")
+  havet=$(sed -n "s/^MotionCalibEpisodeMinTrans *= *\([0-9.]*\).*/\1/p" "$RC/config.toml" | head -1)
+  [ "$havet" = "$wantt" ] || die "leg $leg needs MotionCalibEpisodeMinTrans=$wantt, config says $havet."
   inj=$(sed -n "s/^WheelScaleV *= *\([0-9.]*\).*/\1/p" "$BR/config.toml" | head -1)
   [ "$inj" = "0.0" ] || die "this arm is UNINJECTED but the bridge says WheelScaleV=$inj."
   other="$RC/runs/arm6_$([ "$leg" = base ] && echo long || echo base).csv"
@@ -124,8 +133,8 @@ fi
 
 # ★ ONLY the rotation trigger varies. Everything else is pinned to arm 3R's conditions so the two
 # arms are comparable, and so a difference cannot be attributed to anything but the trigger.
-setkey MotionCalibEpisodeMinRot   "$(leg_rot "$leg")" "$RC/config.toml"
-setkey MotionCalibEpisodeMinTrans 0.25      "$RC/config.toml"
+setkey MotionCalibEpisodeMinRot   "$(leg_rot "$leg")"   "$RC/config.toml"
+setkey MotionCalibEpisodeMinTrans "$(leg_trans "$leg")" "$RC/config.toml"
 setkey MotionCalibApply           true      "$RC/config.toml"
 setkey MotionCalibApplyMask       1         "$RC/config.toml"
 setkey StableSdfMseMax            0.076     "$RC/config.toml"
@@ -134,7 +143,7 @@ rm -fv "$RC/motion_calib_state.csv" "$RC/camera_calib_Shadow_ricoh.txt" \
        "$RC/camera_calib_Shadow_zed.txt" "$RC/image_edge_mount.csv" 2>/dev/null || true
 
 echo
-echo "── arm 6 leg '$leg' armed: uninjected, MotionCalibEpisodeMinRot = $(leg_rot "$leg") rad ──"
+echo "── arm 6 leg '$leg' armed: uninjected, triggers = $(leg_trans "$leg") m / $(leg_rot "$leg") rad ──"
 grep -n "^WheelScaleV" "$BR/config.toml"
 grep -n "^MotionCalibEpisodeMinRot\|^MotionCalibEpisodeMinTrans\|^MotionCalibApply \|^StableSdfMseMax\|^MapMode" "$RC/config.toml"
 echo

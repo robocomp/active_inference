@@ -908,10 +908,31 @@ for the same hairpin chopped into sixteen — **15.4x**. Meanwhile the surviving
 **Design.** Two legs, same route, ~220 m each to match arm 3R, back to back in one session, cold each,
 UNINJECTED (the native robot). `MotionCalibEpisodeMinRot` is the ONLY thing that varies:
 
-| leg | `MotionCalibEpisodeMinRot` |
-|---|---|
-| 6-base | **0.20 rad** (the current value) |
-| 6-long | **1.00 rad** (~57°, five times the trigger) |
+| leg | `MotionCalibEpisodeMinTrans` | `MotionCalibEpisodeMinRot` |
+|---|---|---|
+| 6-base | **0.25 m** | **0.20 rad** (the current values) |
+| 6-long | **1.00 m** | **0.80 rad** (both 4x) |
+
+★★★ **BOTH TRIGGERS SCALE TOGETHER, and an earlier version of this arm raised only the rotation one.
+It would have measured nothing.** The two are a `min()`: an episode closes when EITHER is met, so
+raising one is simply defeated by the other. Measured on the arm 3R window BEFORE driving —
+
+| what closed the episode | share of episodes | share of `k_omega`'s information |
+|---|---|---|
+| translation trigger (0.25 m) | 43.3% | **98.8%** |
+| rotation trigger (0.20 rad) | 9.0% | **1.0%** |
+| a correction's falling edge | 47.8% | 0.2% |
+
+The robot TURNS WHILE DRIVING: at the observed 0.43 m/s and 0.27 rad/s, 0.25 m arrives in 0.58 s and
+0.20 rad in 0.74 s, so translation fires first and cuts the episode short — its rotation content
+included. **The hairpins are being chopped, but by the wrong knob.** Raising `min_rot` alone would
+have lengthened 9% of episodes carrying 1% of the information: a 1.04x total gain, indistinguishable
+from noise. Raising `min_trans` alone inverts the problem — at 1.00 m the rotation trigger fires
+first instead.
+
+★ Note the third row: **48% of episodes close on a correction's falling edge, which no trigger
+controls.** That bounds what this arm can buy — at most the 52% that are trigger-closed — and it is
+the reason the predicted effect is stated as a ceiling rather than a target.
 
 Everything else is pinned to arm 3R's conditions — `MotionCalibEpisodeMinTrans` = 0.25,
 `MotionCalibApply` = true, `mask` = 1, `StableSdfMseMax` = 0.076, `MapMode` = "given" — so a
@@ -922,17 +943,20 @@ difference cannot be attributed to anything but the trigger.
 it must sit below a typical hairpin so that turns still close on rotation rather than being carried.
 The observed `d_theta` p90 is 1.066 rad and the maximum is 1.984 — hard against the carry cap.
 
-★★ Raising the ROTATION trigger alone is deliberate. Episodes close on EITHER threshold, so during an
-arc the translation trigger still fires first; only tight and pure turns are affected, which is
-exactly the hairpin case this arm is about. The translation lever is a separate question (§12.4).
+★★ 4x on both, not 5x, because `min_rot` = 1.00 rad would sit too close to the 2.0 rad carry cap
+once episodes are actually allowed to grow: 0.80 leaves margin for an episode to accumulate without
+being dropped. `min_trans` = 1.00 m against a 2.5 m carry cap has the same margin.
 
 ### 12.1 Pre-registered endpoints, in order
 
 1. **PRIMARY — `k_omega` posterior sigma at MATCHED ROTATION.** Not per metre and not per run: this
    arm is about information per radian TURNED, so the legs must be compared at equal cumulative
    rotation or the comparison is against the route. Predicted: 6-long lower. The information law says
-   information per unit rotation is LINEAR in the trigger, so the ceiling is 5x more information,
-   i.e. sigma down by up to sqrt(5) = 2.2x. Anything approaching that closes the rotation gap and
+   information per unit motion is LINEAR in the trigger, so a 4x trigger is 4x more information on
+   the episodes it governs — but only 52% of episodes are trigger-closed (48% close on a correction's
+   falling edge, which no knob controls), so the whole-window ceiling is ~2.6x and sigma falls by at
+   most sqrt(2.6) = 1.6x. ★ Anything ABOVE that ceiling is not this mechanism and needs another
+   explanation. Anything approaching it closes the rotation gap and
    removes the last argument for a rotation affordance.
 2. **SECONDARY — the heading block's lambda_min and condition number**, from
    `tools/excitation.py` on each leg's episode log. Predicted: lambda_min up in 6-long,
