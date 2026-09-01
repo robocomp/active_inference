@@ -359,6 +359,57 @@ re-cut, or given a t-statistic, and it is a different session. It is a strong hi
 look, NOT a measurement — which is an argument for pre-registering correction load in arm 5, not for
 rewriting arm 3 around it.
 
+### Arm 3R — arm 3 REPEATED with an instrument that measures work. 2026-09-01. IT DOES NOT REPRODUCE.
+
+Arm 3's conditions exactly: no injection, the native robot, `mask = 1`, calibration off then on,
+back to back in one session, bridge never restarted between legs. 219.9 m and 216.0 m, 13 and 11
+windows. Injection absence verified from behaviour: odometry/GT 1.0001 and 0.9789.
+
+| endpoint | 3R-OFF | 3R-ON | t | z | d |
+|---|---|---|---|---|---|
+| **correction per solve, mm** | **22.04** | **17.33** | **2.41** | **2.17** | **0.94** |
+| correction load, mm/m | 50.11 | 36.96 | 1.09 | 0.96 | 0.42 |
+| RPE translation, mm/m | 41.33 | 34.98 | 1.85 | 1.48 | 0.72 |
+| aligned ATE, mm | 45.2 | 43.0 | 0.53 | 0.32 | 0.22 |
+| **optimiser firing, %** | **5.41** | **5.08** | **0.20** | −0.20 | **0.08** |
+
+★★★ **ARM 3'S HEADLINE RESULT DOES NOT REPRODUCE.** Arm 3 recorded 4.92% -> 1.11%, a 4.4x drop, and
+that number is what the effort claim in the thesis rests on. Repeated under its own conditions,
+firing goes 5.41% -> 5.08%: t = 0.20, d = 0.08, nothing. What DOES move is the correction per solve,
+down 21% with the only significant statistic in the table.
+
+⚠ **A CROSS-SESSION CLAIM MADE EARLIER TODAY IS WITHDRAWN.** It was reported that the correction load
+"reproduces across sessions within 8% (48.99 vs 45.27) while firing drifts 60%". The 45.27 was
+computed over ALL rows including parked ones; on the moving-only basis the instrument uses, that leg
+is 24.99 mm/m. Arm 3's raw CSVs are gone, so its 48.99 cannot be re-derived on a matching basis and
+NO cross-session comparison of correction load is established in either direction. The within-session
+arm 3R comparison above is unaffected — both its legs use one definition.
+
+#### The four conditions on one basis — what responds and what does not
+
+| condition | model error | firing % | iters/solve | **corr/solve, mm** |
+|---|---|---|---|---|
+| native, calibrated | ~0% | 5.60 | 13.64 | **17.30** |
+| injected 10%, calibrated | ~0.8% | 8.17 | 13.27 | **18.11** |
+| native, uncalibrated | ~2.9% | 5.57 | 13.99 | **20.24** |
+| injected 10%, uncalibrated | ~10% | 7.80 | 13.90 | **25.59** |
+
+★★★ **Correction per solve is MONOTONE in the model error** — 17.30, 18.11, 20.24, 25.59 against
+0%, 0.8%, 2.9%, 10%. Across a range of model error spanning more than an order of magnitude:
+
+- **`iters/solve` is FLAT within 1.05x** (13.27–13.99). The per-solve work is a constant of the
+  solver, not a function of how wrong the motion model is.
+- **Firing sorts by SESSION, not by treatment** — ~5.6% in both arm 3R legs, ~8.0% in both arm 4
+  legs. Between-session drift (1.47x) exceeds every within-session treatment effect measured. That is
+  exactly how a 4.4x can appear once and vanish on repetition, and it is the documented 5x `opt/m`
+  spread showing up again.
+
+**Conclusion, stated for the thesis.** Calibration reliably reduces the ERROR THE OPTIMISER MUST
+REMOVE and reliably does not reduce how often or how hard it solves. The effort result was a
+measurement of a binary over a threshold, in a session that happened to differ from its control; it
+is not a property of calibration. ★ The claim that survives is about the correction load, it has a
+monotone dose-response, and it is the one to carry.
+
 ### Arm 5 — DOES THE COST APPEAR WHEN THE CORRECTOR IS SCARCE? Pre-registered 2026-09-01, not run.
 
 **The question.** Arm 4 established that an uncalibrated model raises the correction LOAD by ~1.5x
