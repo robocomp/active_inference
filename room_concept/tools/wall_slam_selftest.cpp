@@ -645,7 +645,10 @@ namespace
                 // Exploration is COMPLETE when free space has no true frontier left; the map may
                 // keep refining, but there is nowhere informative left to drive to.
                 quiet_frames = (f > 60 and R.map.frontiers().empty()) ? quiet_frames + 1 : 0;
-                if (quiet_frames >= 3 or unknowns.empty()) { R.frames = f + 1; break; }
+                // Termination needs BOTH no frontier AND (nearly) no epistemic targets left: the
+                // bin-latch seals maps early, and stopping on frontier-exhaustion alone forfeited
+                // 310 refinement frames on one seed (IoU 0.841 with the spur still unresolved).
+                if (unknowns.empty() or (quiet_frames >= 3 and unknowns.size() <= 3)) { R.frames = f + 1; break; }
                 float best_sc = -1.f; Eigen::Vector2f best_v = tru.head<2>();
                 // COVERAGE GUARANTEE: greedy argmax-by-visible-mass starves sparse far regions — a
                 // wrong early wall then amputates a whole space for ever, because nothing ever goes
