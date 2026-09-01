@@ -1025,6 +1025,18 @@ int main()
         Rr.map.order = no;
         const bool wounded = Rr.map.build_polygon().closed;
         auto R2 = run_loop({room}, truth, cfg, rng, &Rr);
+        {
+            const Poly ew6 = to_world(R2.poly.verts, truth[0]);
+            std::printf("    healed verts:");
+            for (const auto& v : ew6) std::printf(" (%.2f,%.2f)", v.x(), v.y());
+            std::printf("\n");
+            for (const auto& w : R2.map.walls)
+                std::printf("    wall %llu k=%d phi=%.3f d=%.3f extent[%.2f,%.2f] frames=%d pts=%d\n",
+                            (unsigned long long)w.id, w.k, w.phi, w.d, w.s_min, w.s_max, w.frames_seen, w.points_seen);
+            std::printf("    order:");
+            for (auto id : R2.map.order) std::printf(" %llu", (unsigned long long)id);
+            std::printf("\n");
+        }
         const bool fake_gone = R2.map.find(999) == nullptr and R2.map.find(998) == nullptr and R2.map.find(997) == nullptr;
         check("the wounded polygon was valid to start", wounded, "");
         check("the fake notch died and was spliced out", fake_gone,

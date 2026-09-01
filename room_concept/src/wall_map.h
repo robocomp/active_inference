@@ -104,6 +104,22 @@ namespace rc::wallmap
         // provably wraps (only stub variants offered) and below which it provably does not (only
         // boundary variants offered).
         float stub_free_behind_min = 0.25f;
+        // ── ORDER-QUANTIZED GROWTH (user design 2026-09-01) ─────────────────────────────────────
+        // The map starts as the minimal Manhattan polygon (the rectangle) and grows in EVEN order
+        // jumps (+2 corner-cut/direct, +4 notch/spur-wrap). Each jump pays a CONSTANT structural
+        // cost — a geometric prior on polygon order, birth_nats at the topology level — and is
+        // accepted only when the evidence it NEWLY EXPLAINS over the region where the two polygons
+        // disagree (jump_delta_nats: matter cells released from the interior pay FOR it, fresh
+        // free cells released pay AGAINST it) exceeds that cost. Symmetric on down-jumps ⇒ a 2x
+        // hysteresis band that kills commit/death flapping. ⚠ decision constants.
+        float order_jump_nats  = 15.f;      // per +2 edges
+        float parity_jump_nats = 2.f;       // extra for an ODD jump (the class-less chamfer)
+        // Standing structure pays RENT: a down-jump is accepted when the evidence AGAINST removal
+        // (grid delta plus the removed walls' existence-bin nats) is smaller than this fraction of
+        // the order cost it refunds — Occam pushes the polygon down through evidence-neutral
+        // structure (a pocket over unobserved space), while the [keep·cost, cost] band gives the
+        // hysteresis that prevents up/down flapping at the boundary.
+        float order_keep_fraction = 0.7f;
         bool  debug_splice = false;         // diagnostic prints from try_splice (bench use)
         // ── Existence (the step-back operator), per extent bin — see the header comment ──────────
         float exist_refute_pdet = 0.5f;     // P(detect): weight of a pass-through vs a support ⚠
@@ -333,6 +349,22 @@ namespace rc::wallmap
         /// [.., W, T, M, ..]. Gated on connected free space observed behind the overshoot (the
         /// room provably wraps); a wrong wrap dies by the step-back operator. ≤ 1 per frame.
         int  try_spur_wraps(FrameResult& fr, std::int64_t ts);
+        /// DOWN-JUMPS — the symmetric half of order-quantized growth: propose removing order
+        /// entries (zero-evidence walls and duplicate rides), accept when the evidence surrendered
+        /// (jump_delta plus removed walls' existence-bin nats) is worth less than the refunded
+        /// order cost × keep_fraction. Evidence-neutral structure (a pocket over unobserved space)
+        /// unfolds; supported structure pays its rent and stays. ≤ 1 per frame.
+        int  try_down_jumps(FrameResult& fr, std::int64_t ts);
+        /// Is `w` the verified FAR FACE of a wrapped thin wall — an anti-parallel observed twin at
+        /// thin separation AND connected-free space observed on w's outward side? (A phantom twin
+        /// 0.2 m behind a boundary wall has exterior/unknown there.) Needs comp_cache_ fresh.
+        bool mirror_backed(const WallLandmark& w) const;
+        /// Evidence a trial polygon newly explains vs the current one, in grid-log-odds nats,
+        /// evaluated ONLY over the region where the two interior claims differ (bounding box of
+        /// unmatched vertices ± margin). Matter cells the trial releases from the interior count
+        /// FOR it; FRESH connected free cells it releases count AGAINST it; stale free (free_ms
+        /// before `fresh_ref_ms`) and unknown are silent — a sealed room change must stay payable.
+        float jump_delta_nats(const Polygon& cur, const Polygon& trial, std::int64_t fresh_ref_ms) const;
         /// Remove a dead edge from the order and HEAL the cycle (collapse parallel neighbours).
         void splice_out(std::uint64_t id);
         void heal_order();
