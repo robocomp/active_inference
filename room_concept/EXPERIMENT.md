@@ -217,7 +217,11 @@ on corrected output grades the corrector.
 not a treatment effect. One bad run dressed as a treatment effect. `MotionCalibApplyMask = 1` is
 therefore no longer justified by that finding — it stands only as the lowest-effort arm.
 
-### Arm 4 — DOSE RESPONSE at a larger initial error. PRE-REGISTERED 2026-08-31, not yet run.
+### Arm 4 — DOSE RESPONSE at a larger initial error. Pre-registration, written 2026-08-31 BEFORE the run.
+
+★ Kept verbatim. Both endpoints below answered the OPPOSITE of what is predicted here, and the
+reason turned out to be the instruments rather than the robot — see the results section that
+follows. A pre-registration that was wrong is worth more on the page than one quietly amended.
 
 Arm 3's result is conditional on the dose. Arm 4 asks the next question directly: **does the effort
 saving grow with the initial error, and does accuracy eventually separate?**
@@ -276,6 +280,145 @@ once at start-up: four runs on 2026-08-30 were driven believing an injection was
 `etc/config` it had been written into was not the file the bridge reads. `ps` shows
 `Webots2Robocomp etc/config.toml` — **`etc/config.toml` is the live file**; the flat `etc/config`
 is dead and still carries a stale `SensorNoise.WheelScaleV = 0.03`.
+
+### Arm 4 — RESULTS, 2026-09-01. The endpoints INVERT, and the pre-registered ones were the wrong ones.
+
+Two legs, one session, bridge never restarted between them: 199.4 m OFF, 205.8 m ON, 10 windows
+each, matched on route composition (0.698 vs 0.753 rad/m of turning). Injection verified from
+behaviour, not from a banner: odometry/GT ratio 1.1003 over the OFF leg against an injected 1.10.
+
+| endpoint | 4-OFF | 4-ON | t | z | d |
+|---|---|---|---|---|---|
+| **correction load, mm/m** | **87.17** | **58.77** | **3.57** | **3.02** | **1.59** |
+| correction per solve, mm | 30.00 | 18.46 | 3.36 | 2.87 | 1.50 |
+| RPE translation, mm/m | 64.46 | 48.65 | 3.00 | 2.27 | 1.34 |
+| aligned ATE, mm | 67.8 | 53.8 | 2.99 | 2.42 | 1.34 |
+| RPE rotation, deg/rad | 1.982 | 1.758 | 1.46 | 1.36 | 0.65 |
+| optimiser firing, % | 5.80 | 6.49 | **−0.60** | −0.83 | −0.27 |
+| burst windows | 0/16 | 0/12 | — | — | — |
+
+**Accuracy moved and effort did not — the exact inverse of arm 3.** Both pre-registered endpoints
+answered, and both answered the opposite of the prediction written before the run.
+
+**Control passed.** Recovery 92.8% of the injected 0.0909; `k_v` settled at 0.91566 against a
+pre-registered ~0.913, the small shortfall being the predicted pull toward a prior centred at 1.0.
+
+**The effort null is NOT the convergence transient**, which was the obvious alternative and is why
+the per-window series was pre-registered. The ON leg's RPE falls 72.6 → 53.2 → 48.2 → 37.3 → 40.0 →
+36.0 mm/m as `k_v` converges, reaching arm 3's NATIVE accuracy — calibration restores a 10%-broken
+robot to as-new. Over those same windows its firing is 9.66, 6.82, 6.65, 7.14, 8.07, 10.16, 9.29,
+8.48, 8.08. Flat. Firing does not fall as the model becomes correct.
+
+**Third endpoint returned empty.** No burst windows in either leg. The localiser never lost tracking
+at 10%, so there is no robustness finding; the corrector is more robust than predicted.
+
+#### ★★★ WHY BOTH PRE-REGISTERED ENDPOINTS WERE THE WRONG INSTRUMENT
+
+Neither RPE nor firing % can carry this experiment, and the reason is structural rather than bad luck.
+
+- **RPE is measured DOWNSTREAM of the corrector.** It reports what the localiser managed to achieve
+  after removing the model error, so it grades the corrector. That was already written down after
+  arm 3 and then not acted on.
+- **Firing % is an INDICATOR OVER A THRESHOLD.** It asks whether `iters > 0`, so it discards how hard
+  each solve was and it saturates between 0 and 100. Measured directly: iterations per metre 23.61
+  vs 22.69 (1.04x), iterations PER SOLVE 13.90 vs 13.27 (1.05x), achieved `sdf_mse` 0.0405 vs 0.0418.
+  The optimiser removed 52% more error at the same price and reached the same residual.
+
+**The reason the price is flat is a number nobody had looked at: the mean correction is 2.22 mm.**
+At ~0.5 m/s and 10 Hz a 10% scale error produces ~5 mm of drift per cycle. Gauss-Newton converging
+from 2.2 mm instead of 1.5 mm is the same 13 iterations. The experiment never left the regime where
+the solve is trivially easy, so no cost endpoint could have moved. ★ A cost endpoint measured in a
+regime with no cost is not a null result about cost.
+
+#### The endpoint that works: CORRECTION LOAD
+
+`|est − pred|` is what the optimiser had to remove from the motion model's guess. It is the
+optimiser's **INPUT**, so the corrector cannot absorb it, and it is continuous rather than an
+indicator, so it cannot saturate. It is now computed by the instrument
+(`tools/calib_localization_ab.py`), not by hand.
+
+Validated before adoption: on cycles that did not solve it is 0.06–0.19 mm (i.e. zero), and on
+cycles that did it is 13.7–23.7 mm. Computed two ways that must agree on the effect and do — mean of
+per-window ratios 87.17/58.77 = **1.48x**, ratio of whole-leg sums 48.38/31.82 = **1.52x**. The
+levels differ because they are different estimators; the effect does not.
+
+**And the dose-response the effort channel never showed is present here.** Reading arm 3's own table,
+where this column sat unused:
+
+| | correction OFF | correction ON (`mask = 1`) | REMOVED by calibration |
+|---|---|---|---|
+| arm 3, native ~2–3% | 48.99 | 43.51 | **5.5 mm/m** |
+| arm 4, injected 10% | 48.38 | 31.82 | **16.6 mm/m** |
+
+**3.0x more correction removed for ~3.4x more error** — near-proportional. The ~48 mm/m present in
+BOTH uncalibrated legs is the irreducible part `k_v` cannot touch (heading, scene, noise), which is
+also why the TOTAL looked insensitive to the dose and why only the removed part carries the signal.
+
+⚠ The arm 3 row is a single figure from a run whose raw CSVs no longer exist. It cannot be windowed,
+re-cut, or given a t-statistic, and it is a different session. It is a strong hint about where to
+look, NOT a measurement — which is an argument for pre-registering correction load in arm 5, not for
+rewriting arm 3 around it.
+
+### Arm 5 — DOES THE COST APPEAR WHEN THE CORRECTOR IS SCARCE? Pre-registered 2026-09-01, not run.
+
+**The question.** Arm 4 established that an uncalibrated model raises the correction LOAD by ~1.5x
+while the PRICE of removing it stays flat, because at full corrector rate the per-cycle error is
+~2 mm and the solve never leaves its easy regime. The cost of a wrong model should be paid when
+error accumulates BETWEEN corrections. So: starve the corrector and the same model error accumulates
+over ~17x longer before anything removes it.
+
+This is the sim2real question stated as an experiment. A real robot has a slower, noisier, more often
+unavailable localiser, and that is precisely the regime in which an uncalibrated model should stop
+being free.
+
+**Design: 2×2, ONE session, four legs of ~200 m on the same route.** The injection is held CONSTANT
+at `WheelScaleV = 0.10` in all four legs — it is not a variable here. The two manipulated variables:
+
+| leg | calibration | corrector | config |
+|---|---|---|---|
+| 5-A | OFF | abundant | `MotionCalibApply=false`, `StableSdfMseMax=0.076` |
+| 5-B | ON | abundant | `MotionCalibApply=true`,  `StableSdfMseMax=0.076` |
+| 5-C | OFF | **starved** | `MotionCalibApply=false`, `StableSdfMseMax=0.16` |
+| 5-D | ON | **starved** | `MotionCalibApply=true`,  `StableSdfMseMax=0.16` |
+
+`mask = 1` throughout, matching arm 4 and putting the dose and the response on one channel.
+
+**Why 0.16, and it is not a guess.** Measured over both arm-4 legs (n = 32204 cycles), the share of
+cycles whose `sdf_mse` exceeds the gate: 4.93% at 0.076, 1.25% at 0.10, 0.72% at 0.13, **0.29% at
+0.16**, 0.13% at 0.20, and 0.00% at 0.25. 0.16 is ~17x fewer solves while the corrector still
+EXISTS; 0.25 would switch it off entirely, which is a different experiment and an uncontrolled one.
+
+⚠ **That 0.29% is an UNDERESTIMATE and must not be reported as the manipulation.** The residual
+distribution is endogenous: starving the corrector lets drift accumulate, which raises `sdf_mse`,
+which pushes cycles back over the gate. The loop is self-limiting. The knob sets a target; the
+REALISED firing rate is a measurement and has to be reported as one.
+
+**Pre-registered endpoints, in order.**
+
+1. **PRIMARY — the INTERACTION on correction load (mm/m):** (5-C − 5-D) > (5-A − 5-B). The claim is
+   that calibration removes MORE load when the corrector is scarce. Arm 4 measured (5-A − 5-B) at
+   28.4 mm/m; the prediction is that the starved pair separates by more.
+2. **SECONDARY — iterations PER SOLVE.** This is where the price should finally move: after a long
+   blind stretch the solve starts from a large offset instead of 2 mm. Predicted 5-C > 5-D, and both
+   above arm 4's flat 13.3–13.9. ★ If this stays flat too, the solve is not offset-limited at ANY
+   reachable dose and the "effortful inference" reading of firing does not survive.
+3. **THIRD — RPE translation**, the interaction again. Predicted: the accuracy penalty for being
+   uncalibrated is far larger under starvation.
+4. **FOURTH — burst-window rate**, counted, never excluded, per the arm 4 rule. Starvation is the
+   condition most likely to finally produce bursts, and if it does in 5-C but not 5-D that is the
+   headline and everything above is a footnote.
+5. **MANIPULATION CHECK, reported before any endpoint:** realised firing % per leg, and the
+   odometry/GT ratio confirming the injection acted (≈1.10 on the OFF legs, falling toward 1.0 on
+   the ON legs as `k_v` converges).
+
+**What would falsify the thesis's reading.** If 5-C and 5-D are indistinguishable on every endpoint,
+then corrector abundance is not what protects the robot from a bad model, and the claim that
+calibration buys anything at all under a working localiser does not survive contact with a scarce
+one. That outcome is reportable and must be reported.
+
+**What is NOT being claimed.** Arm 5 holds the dose fixed, so it says nothing further about
+dose-response. The 5.5 → 16.6 mm/m scaling above remains a cross-session hint until a within-session
+dose ladder measures it.
 
 ## 7. Caveats on the arm 1 numbers
 
