@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <set>
 #include <sstream>
 
 #include "corner_visibility.h"
@@ -237,9 +238,31 @@ namespace rc::wallmap
         const float bw = std::max(0.05f, params.exist_bin_m);
         const float lo_clamp = -1.5f * params.birth_nats, hi_clamp = 2.f * params.birth_nats;
 
+        // A TIP CAP is not judged by beams on its own line: it closes a wrapped thin wall at the
+        // opening where traffic passes, so beams cross its short window and fly on — refuting it
+        // 600 times per run while its 12 cm face collects no supports (measured: every flap death
+        // was a cap at lodds −6.9, frames=0). A beam beside the tip is CONSISTENT with the wrap;
+        // only a beam through the 8 cm body would refute it, which is below beam discrimination.
+        // A cap's evidence lives in its FACES: it dies when they do (heal), or when they stop
+        // being its twins (it then loses this exemption and every cull applies again).
+        std::set<std::uint64_t> cap_ids;
+        {
+            const int N = static_cast<int>(order.size());
+            for (int i = 0; i < N; ++i)
+            {
+                const auto* wa = find(order[static_cast<size_t>((i + N - 1) % N)]);
+                const auto* wb = find(order[static_cast<size_t>((i + 1) % N)]);
+                if (wa != nullptr and wb != nullptr
+                    and std::abs(wrap_pi(wrap_pi(wa->phi - wb->phi) - kPi)) < 0.35f
+                    and std::abs(wa->d + wb->d) < 0.5f)
+                    cap_ids.insert(order[static_cast<size_t>(i)]);
+            }
+        }
+
         for (auto& w : walls)
         {
             if (not w.has_extent or w.s_max - w.s_min < bw) continue;
+            if (cap_ids.count(w.id) > 0) continue;
             const float seed = std::clamp(w.exist_lodds, 0.f, params.birth_nats);
             if (w.exist_bins.empty())
             {
@@ -302,6 +325,10 @@ namespace rc::wallmap
         {
             if (walls[static_cast<size_t>(i)].exist_lodds > lo_clamp + 1e-3f) continue;
             const auto& w = walls[static_cast<size_t>(i)];
+            if (params.debug_splice)
+                std::printf("[death-exist] wall %llu phi=%.3f d=%.3f lodds=%.1f frames=%d pts=%d bins=%zu\n",
+                            (unsigned long long)w.id, w.phi, w.d, w.exist_lodds,
+                            w.frames_seen, w.points_seen, w.exist_bins.size());
             fr.deaths_info.push_back({w.id, w.exist_lodds, w.frames_seen, w.points_seen});
             fr.deaths++;
             splice_out(w.id);   // erases from walls too — index i is not reused after this
@@ -383,7 +410,7 @@ namespace rc::wallmap
         // the right corner from a wrong one (the chamfer once replaced a dead ghost at the ghost's
         // position, wherever that was). The score is how much of C's OBSERVED extent lies on the
         // polygon edge C would get — evidence placing the jump, not geometry alone.
-        struct Best { float score = -1.f; std::vector<WallLandmark> new_walls; std::vector<std::uint64_t> ord; std::uint64_t host = 0; };
+        struct Best { float score = -1.f; std::vector<WallLandmark> new_walls; std::vector<std::uint64_t> ord; std::uint64_t host = 0; bool is_stub = false; };
         Best best_v;
         // Occam on ties: a notch side wall and a free-standing stub both start at the host and run
         // interior, and both variants place the candidate's full extent — the SCORE ties. At equal
@@ -887,7 +914,7 @@ namespace rc::wallmap
                 // refused by the ORDER-QUANTIZED global acceptance below, on evidence, not extent
                 // fractions; the local score remains the RANKING among valid variants.
                 if (ok and score > 0.5f * params.exist_bin_m and better(score, v.new_walls.size()))
-                    best_v = Best{score, v.new_walls, v.ord, E->id};
+                    best_v = Best{score, v.new_walls, v.ord, E->id, v.is_stub};
             }
         }
         if (best_v.score < 0.f)
@@ -904,7 +931,13 @@ namespace rc::wallmap
         for (const auto& w : best_v.new_walls) walls.push_back(w);
         {
             const Polygon trial = build_from(best_v.ord);
-            const float dnats = jump_delta_nats(poly_cur, trial, c.first_ms);
+            // CURRENCY: a spur is a NARROW, ELONGATED NOTCH of three walls (face, cap, face), and
+            // its disagreement region is the thin wall body itself — which the grid cannot testify
+            // about (grazing traffic carves it fresh-free, so the grid delta goes NEGATIVE on
+            // exactly the real spurs). Matter claims pay in matter currency: the face candidate's
+            // own accumulated point evidence, already in nats. Area claims (every boundary splice)
+            // keep paying in grid nats. The discriminator and the geometry gates remain the guards.
+            const float dnats = best_v.is_stub ? c.gain : jump_delta_nats(poly_cur, trial, c.first_ms);
             const int dorder = static_cast<int>(best_v.ord.size()) - static_cast<int>(order.size());
             // A replacement (dorder == 0) changes no order, yet it still pays one pair: the free
             // version was TRIED and measured — with zero toll a noise-level replacement committed
@@ -1022,6 +1055,11 @@ namespace rc::wallmap
                     Eigen::Vector2f(1.f / (params.rect_prior_sigma_phi_rad * params.rect_prior_sigma_phi_rad),
                                     1.f / (params.rect_prior_sigma_d * params.rect_prior_sigma_d)).asDiagonal();
                 const std::uint64_t w_id = W->id;
+                // RESUME first: without it the mirror connects to whatever followed the host, and
+                // the wrap commits as an amputation — measured: the mirror ran 4.9 m to the bottom
+                // wall and cut off the west half of the flat (IoU 0.503). The spur is a narrow
+                // notch INTO the neighbouring boundary: that boundary resumes after the mirror.
+                for (const bool resume : {true, false})
                 for (int tsign : {+1, -1})
                 {
                     const size_t walls_before = walls.size();
@@ -1046,9 +1084,17 @@ namespace rc::wallmap
                     const bool at_end_vertex = std::abs(sb - corner_s) < 1e-4f;
                     for (int j = 0; j < NE; ++j)
                     {
-                        if (j == e and not at_end_vertex) { o.push_back(M.id); o.push_back(T.id); }
+                        if (j == e and not at_end_vertex)
+                        {
+                            if (resume) o.push_back(order[static_cast<size_t>((j + 1) % NE)]);
+                            o.push_back(M.id); o.push_back(T.id);
+                        }
                         o.push_back(order[static_cast<size_t>(j)]);
-                        if (j == e and at_end_vertex) { o.push_back(T.id); o.push_back(M.id); }
+                        if (j == e and at_end_vertex)
+                        {
+                            o.push_back(T.id); o.push_back(M.id);
+                            if (resume) o.push_back(order[static_cast<size_t>((j + NE - 1) % NE)]);
+                        }
                     }
                     walls.push_back(T); walls.push_back(M);
                     const Polygon p2 = build_from(o);
@@ -2081,7 +2127,13 @@ namespace rc::wallmap
             const auto* w = find(poly.wall_of_edge[static_cast<size_t>(e)]);
             if (w != nullptr and w->points_seen < weakest_pts) { weakest_pts = w->points_seen; weakest = w->id; }
         }
-        if (weakest != 0) splice_out(weakest);
+        if (weakest != 0)
+        {
+            if (params.debug_splice)
+                std::printf("[death-cross] wall %llu pts=%d spliced out to uncross the cycle\n",
+                            (unsigned long long)weakest, weakest_pts);
+            splice_out(weakest);
+        }
     }
 
     Polygon WallMap::build_from(const std::vector<std::uint64_t>& ord) const
