@@ -626,7 +626,7 @@ Shrink against the prior over a matched 600 s budget:
 is the whole difference. Ordinary driving was never beating a good design — it was beating a search
 that had the wrong free variable.
 
-### 10.3 ★★★ WHY WAIT-AND-WATCH IS RIGHT FOR TRANSLATION AND WRONG FOR ROTATION
+### 10.3 ★★★ WHEN TO CALIBRATE, NOT WHETHER — and why wait-and-watch wins in a cluttered room
 
 > A parameter is excited for free exactly to the extent that its covariate is ALIGNED with what the
 > task already wants to do.
@@ -654,12 +654,16 @@ sustain 1.0 rad/s against the 0.184 rad/s the apartment averages — 5.4x the ra
 ±0.54% to perhaps ±0.2%. There is no evidence that difference changes anything, and the finding that
 heading corrections improve the pose at all was RETRACTED (§6, arm 3R).
 
-★★★ **CONCLUSION: NO CALIBRATION AFFORDANCE IS JUSTIFIED ON THIS PLATFORM IN THIS ENVIRONMENT.**
-Translation because purposeful navigation already runs at 0.68 of a 0.70 m/s ceiling during the long
-runs that dominate the information. Rotation because a cluttered apartment forces a hairpin every few
-metres, and geometry the robot cannot avoid is excitation it does not have to pay for. **Wait-and-watch
-is not the fallback here; it is the optimum.** The generalisation, and the part that transfers off this
-robot:
+★★★ **CONCLUSION: NOTHING HERE JUSTIFIES INTERRUPTING A TASK TO CALIBRATE.** Translation because
+purposeful navigation already runs at 0.68 of a 0.70 m/s ceiling during the long runs that dominate
+the information. Rotation because a cluttered apartment forces a hairpin every few metres, and
+geometry the robot cannot avoid is excitation it does not have to pay for. **Wait-and-watch is not the
+fallback here; it is the optimum.**
+
+⚠ Note the shape of that claim, which is NARROWER than a prohibition — see the idleness rule below. An
+earlier draft of this section read "no calibration affordance is justified", and the two statements
+drifted apart the moment the idleness exception was added. The generalisation, and the part that
+transfers off this robot:
 
 > An affordance is worth its cost only where the task's own motion does NOT already span the
 > parameter's covariate. Compute that span before building the affordance — it is a ratio of squared
