@@ -198,7 +198,7 @@ namespace rc::wallmap
 
     void WallMap::initialize_rect(const std::vector<Eigen::Vector2f>& rect_ccw)
     {
-        walls.clear(); candidates.clear(); order.clear();
+        walls.clear(); candidates.clear(); order.clear(); corner_residue.clear();
         if (rect_ccw.size() < 3) return;
         const Eigen::Matrix2f prior_info =
             Eigen::Vector2f(1.f / (params.rect_prior_sigma_phi_rad * params.rect_prior_sigma_phi_rad),
@@ -1363,11 +1363,88 @@ namespace rc::wallmap
             sm[s].ok = sm[s].Sigma.allFinite();
         }
 
+        // ── CORNER EXPLANATION: the model predicts its own segmenter artifact ─────────────────────
+        // Sequential RANSAC at a corner of the CURRENT polygon can fit one oblique chord through the
+        // tails of the two meeting walls. Such a segment is not evidence of an unmodelled wall — it
+        // is the predictable image of two MODELLED walls under the segmenter. It must neither
+        // associate (it would drag both walls) nor feed candidates (it would accumulate the homeless
+        // oblique mass whose housing was the inclined-wall failure). Signature: the modelled corner
+        // lies within its span, its direction is OBLIQUE to both walls (a mixture direction — a
+        // segment parallel to either wall is real evidence, e.g. a notch face), and the pair of
+        // walls explains one endpoint each while neither explains both. A real CHAMFER shares this
+        // signature and 3-30 points cannot separate them (measured: three likelihood-ratio variants
+        // inert or leaky) — so every silenced chord is preserved in the CORNER RESIDUE ledger, where
+        // a chamfer accumulates persistently for the postprocessing stage; artifacts stay weak.
+        std::vector<char> corner_explained(static_cast<size_t>(S), 0);
+        if (not order.empty())
+        {
+            const Polygon pcx = build_polygon();
+            if (pcx.closed)
+                for (int s = 0; s < S; ++s)
+                {
+                    if (not sm[s].ok) continue;
+                    const auto& sgx = seg.segments[static_cast<size_t>(s)];
+                    const Eigen::Vector2f e0 = R * sgx.p0 + t;
+                    const Eigen::Vector2f e1 = R * sgx.p1 + t;
+                    const float len = (e1 - e0).norm();
+                    if (len < 1e-3f) continue;
+                    const Eigen::Vector2f sd = (e1 - e0) / len;
+                    const float band = 3.f * (params.map_sigma_d
+                                              + std::sqrt(std::max(0.f, sm[s].Sigma(1, 1))));
+                    const int NC = static_cast<int>(pcx.verts.size());
+                    for (int c2 = 0; c2 < NC and corner_explained[static_cast<size_t>(s)] == 0; ++c2)
+                    {
+                        const Eigen::Vector2f& cv = pcx.verts[static_cast<size_t>(c2)];
+                        const float sc = sd.dot(cv - e0);
+                        if (sc < -0.2f or sc > len + 0.2f) continue;      // corner within the span
+                        const auto* wA = find(pcx.wall_of_edge[static_cast<size_t>((c2 + NC - 1) % NC)]);
+                        const auto* wB = find(pcx.wall_of_edge[static_cast<size_t>(c2)]);
+                        if (wA == nullptr or wB == nullptr or wA->id == wB->id) continue;
+                        // Oblique to BOTH walls: a mixture's direction lies strictly between theirs.
+                        const float sgate = std::sin(params.manhattan_gate_rad + 2.f * theta0_sigma());
+                        if (std::abs(sd.dot(wA->normal())) <= sgate
+                            or std::abs(sd.dot(wB->normal())) <= sgate) continue;
+                        const float dA0 = std::abs(wA->normal().dot(e0) - wA->d);
+                        const float dB0 = std::abs(wB->normal().dot(e0) - wB->d);
+                        const float dA1 = std::abs(wA->normal().dot(e1) - wA->d);
+                        const float dB1 = std::abs(wB->normal().dot(e1) - wB->d);
+                        // Neither wall alone explains it (else it associates normally)…
+                        if ((dA0 < band and dA1 < band) or (dB0 < band and dB1 < band)) continue;
+                        // …but the pair does, one end each.
+                        if ((dA0 < band and dB1 < band) or (dB0 < band and dA1 < band))
+                        {
+                            corner_explained[static_cast<size_t>(s)] = 1;
+                            if (params.debug_splice)
+                                std::printf("[corner-explained] seg %d npts=%d phi=%.3f at corner %d\n",
+                                            s, sgx.npts, sm[s].phi, c2);
+                            bool fused_cr = false;
+                            for (auto& cr : corner_residue)
+                                if (std::abs(wrap_pi(sm[s].phi - cr.phi)) < 0.2f
+                                    and std::abs(sm[s].d - cr.d) < 0.3f)   // ledger bucketing, not inference
+                                {
+                                    const float w = static_cast<float>(cr.npts)
+                                                    / static_cast<float>(cr.npts + sgx.npts);
+                                    cr.phi = wrap_pi(cr.phi + (1.f - w) * wrap_pi(sm[s].phi - cr.phi));
+                                    cr.d   = w * cr.d + (1.f - w) * sm[s].d;
+                                    cr.npts += sgx.npts; cr.frames += 1; fused_cr = true; break;
+                                }
+                            if (not fused_cr and corner_residue.size() < 64)
+                            {
+                                Candidate cr; cr.phi = sm[s].phi; cr.d = sm[s].d;
+                                cr.npts = sgx.npts; cr.frames = 1;
+                                corner_residue.push_back(cr);
+                            }
+                        }
+                    }
+                }
+        }
+
         // ── Association: Mahalanobis under the innovation covariance, MANY-TO-ONE, PDA ───────────
         std::vector<std::vector<float>> chi2(static_cast<size_t>(S), std::vector<float>(static_cast<size_t>(W), std::numeric_limits<float>::infinity()));
         for (int s = 0; s < S; ++s)
         {
             if (not sm[s].ok) continue;
+            if (corner_explained[static_cast<size_t>(s)] == 1) continue;   // predicted, not evidence
             for (int w = 0; w < W; ++w)
             {
                 const auto& wl = walls[static_cast<size_t>(w)];
@@ -1421,7 +1498,8 @@ namespace rc::wallmap
         for (auto& c : candidates) c.this_frame_seg = -1;
         for (int s = 0; s < S; ++s)
         {
-            if (fr.seg_to_wall[static_cast<size_t>(s)] >= 0 or not sm[s].ok) continue;
+            if (fr.seg_to_wall[static_cast<size_t>(s)] >= 0 or not sm[s].ok
+                or corner_explained[static_cast<size_t>(s)] == 1) continue;
             const auto& sg = seg.segments[static_cast<size_t>(s)];
             const Eigen::Matrix2f info_m = sm[s].Sigma.inverse();
             if (not info_m.allFinite()) continue;
@@ -1684,6 +1762,33 @@ namespace rc::wallmap
         // Classes follow the walls: an edge that converged onto a Manhattan direction after being
         // born off it (the tilted-OBB transient) regains its class — and its room factor — here.
         reclassify_all();
+        // GHOST SWEEP — the one order invariant that phi drift can break with no discrete event
+        // following (measured: a 45 m spike corner from a 49-pt ghost 1 m behind the true wall,
+        // whose absence evidence the boundary itself occludes for ever). Scan ONLY for that
+        // signature — adjacent, same-facing, near-parallel, claiming the same span — and retire
+        // the weaker from the cycle. Full heal_order() stays event-driven: running ALL its rules
+        // per frame collapses the wrap/jog machinery's staged insertions (measured: 0.956→0.820).
+        for (size_t oi = 0; oi < order.size() and order.size() >= 3; ++oi)
+        {
+            const auto* A = find(order[oi]);
+            const auto* B = find(order[(oi + 1) % order.size()]);
+            if (A == nullptr or B == nullptr or A->id == B->id) continue;
+            if (not A->has_extent or not B->has_extent) continue;
+            const float sin_ab = std::abs(A->normal().x() * B->normal().y()
+                                          - A->normal().y() * B->normal().x());
+            if (sin_ab >= 5e-2f or A->normal().dot(B->normal()) <= 0.f) continue;
+            const float ov = std::min(A->s_max, B->s_max) - std::max(A->s_min, B->s_min);
+            const float shorter = std::min(A->s_max - A->s_min, B->s_max - B->s_min);
+            if (shorter <= 0.f or ov <= 0.5f * shorter) continue;
+            const std::uint64_t victim = (A->points_seen < B->points_seen) ? A->id : B->id;
+            if (params.debug_splice)
+                std::printf("[ghost-sweep] wall %llu retired from the cycle (same-facing same-span with %llu)\n",
+                            static_cast<unsigned long long>(victim),
+                            static_cast<unsigned long long>((victim == A->id) ? B->id : A->id));
+            order.erase(std::remove(order.begin(), order.end(), victim), order.end());
+            heal_order();
+            break;   // one repair per frame — bounded, gentle
+        }
         return fr;
     }
 
@@ -2337,8 +2442,20 @@ namespace rc::wallmap
                 }
             return (uni > 0) ? static_cast<float>(inter) / static_cast<float>(uni) : -1.f;
         };
-        const float iou_new = grid_iou(build_from(new_order));
-        const float iou_old = grid_iou(build_from(order));
+        const Polygon pnew = build_from(new_order);
+        const Polygon pold = build_from(order);
+        const float iou_new = grid_iou(pnew);
+        const float iou_old = grid_iou(pold);
+        // The +0.02 margin protects a HEALTHY incumbent from noise-flapping. An incumbent whose own
+        // corner uncertainty fails the publish bar (e.g. a near-parallel adjacent pair whose corner
+        // is unbounded — measured: sigma 89 m, a 45 m spike vertex the grid-IoU barely sees) gets no
+        // such protection against a strictly healthier challenger that is no worse on IoU. Ordering
+        // on existing model signals, no new constant.
+        const bool health_waiver = pnew.closed and pold.closed
+            and iou_new >= iou_old
+            and pold.worst_corner_sigma > params.publish_corner_sigma
+            and pnew.worst_corner_sigma < pold.worst_corner_sigma;
+        const bool adopt_ok = (iou_new > iou_old + 0.02f) or health_waiver;
         // SURRENDER RULE: observed existence support the new cycle would erase. Counted once per
         // wall (duplicate rides skipped), only ABOVE the birth seed, and only for walls whose LINE
         // the new cycle does not hold anywhere.
@@ -2356,23 +2473,21 @@ namespace rc::wallmap
             if (held) continue;
             for (const float b : w->exist_bins) surrender += std::max(0.f, b - params.birth_nats);
         }
-        if (params.debug_splice and surrender > params.adopt_surrender_nats
-            and iou_new > iou_old + 0.02f)
+        if (params.debug_splice and surrender > params.adopt_surrender_nats and adopt_ok)
             std::printf("[adopt-surrender] VETO: adoption would erase %.1f nats of observed support\n",
                         surrender);
         if (params.debug_splice)
         {
-            const Polygon tp = build_from(new_order);
-            std::printf("[rederive] runs=%zu created=%zu closed=%d iou_new=%.3f iou_old=%.3f -> %s [%.70s]\n",
-                        new_order.size(), created.size(), static_cast<int>(tp.closed),
-                        iou_new, iou_old, (iou_new > iou_old + 0.02f) ? "ADOPT" : "keep",
-                        tp.status.c_str());
+            std::printf("[rederive] runs=%zu created=%zu closed=%d iou_new=%.3f iou_old=%.3f%s -> %s [%.70s]\n",
+                        new_order.size(), created.size(), static_cast<int>(pnew.closed),
+                        iou_new, iou_old, health_waiver ? " WAIVER" : "",
+                        adopt_ok ? "ADOPT" : "keep", pnew.status.c_str());
         }
         // ── ADOPTION-LOSS TRACE: does the adopted cycle LOSE a wrapped thin wall — an
         // anti-parallel pair at thin separation — that the current cycle holds? Three fence
         // variants proved the short-spur loss lives HERE, downstream of a solid fence (41/42
         // latched cells, full frames, spur still gone): catch the discarding adoption in the act.
-        if (params.debug_splice and iou_new > iou_old + 0.02f)
+        if (params.debug_splice and adopt_ok)
         {
             const auto pairs_of = [&](const std::vector<std::uint64_t>& ord)
             {
@@ -2406,7 +2521,7 @@ namespace rc::wallmap
                                 iou_old, iou_new);
             }
         }
-        if (iou_new > iou_old + 0.02f and surrender <= params.adopt_surrender_nats)
+        if (adopt_ok and surrender <= params.adopt_surrender_nats)
         {
             order = new_order;
             // Erase promoted candidates (largest indices first) and orphaned walls.

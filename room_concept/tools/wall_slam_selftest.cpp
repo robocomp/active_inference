@@ -960,15 +960,20 @@ int main()
               fmt("closed=%d hausdorff=%.3f", R.poly.closed, h));
         {
             int strong_oblique = 0;
-            for (const auto& cnd : R.map.candidates)
+            const auto scan_oblique = [&](const auto& pool)
             {
-                if (cnd.npts < 50) continue;
-                float eps = std::numeric_limits<float>::infinity();
-                for (int k = 0; k < 4; ++k)
-                    eps = std::min(eps, std::abs(rc::linefit::wrap_pi(
-                        cnd.phi - R.map.theta0 - static_cast<float>(k) * kPi * 0.5f)));
-                if (eps > R.map.params.manhattan_gate_rad) ++strong_oblique;
-            }
+                for (const auto& cnd : pool)
+                {
+                    if (cnd.npts < 50) continue;
+                    float eps = std::numeric_limits<float>::infinity();
+                    for (int k = 0; k < 4; ++k)
+                        eps = std::min(eps, std::abs(rc::linefit::wrap_pi(
+                            cnd.phi - R.map.theta0 - static_cast<float>(k) * kPi * 0.5f)));
+                    if (eps > R.map.params.manhattan_gate_rad) ++strong_oblique;
+                }
+            };
+            scan_oblique(R.map.candidates);
+            scan_oblique(R.map.corner_residue);   // silenced corner chords land here for postprocessing
             check("the chamfer survives as an oblique candidate for postprocessing", strong_oblique >= 1,
                   fmt("%d strong oblique candidates", strong_oblique));
         }
@@ -1254,6 +1259,13 @@ int main()
             std::printf("      verts[%u]:", seed);
             for (const auto& v : ew) std::printf(" (%.2f,%.2f)", v.x(), v.y());
             std::printf("\n");
+            std::printf("      order[%u]:\n", seed);
+            for (const auto oid : Rx.map.order)
+                for (const auto& w : Rx.map.walls)
+                    if (w.id == oid)
+                        std::printf("        id=%llu phi=%.3f d=%.3f pts=%d frames=%d lodds=%.1f ext=[%.2f,%.2f]%d\n",
+                                    static_cast<unsigned long long>(w.id), w.phi, w.d, w.points_seen,
+                                    w.frames_seen, w.exist_lodds, w.s_min, w.s_max, static_cast<int>(w.has_extent));
             {
                 // Per-seed diagnostics: is the deep spur resolved (grid cells on its two truth
                 // faces; distance of the truth tip vertices to the estimate), and which frontiers

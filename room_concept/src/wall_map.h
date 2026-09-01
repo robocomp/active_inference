@@ -249,6 +249,11 @@ namespace rc::wallmap
         float theta0_information = 0.f;
         std::vector<WallLandmark> walls;
         std::vector<Candidate>    candidates;
+        /// CORNER RESIDUE: oblique segments the model explains as its own segmenter corner
+        /// artifacts. Never associated, never spliceable — but preserved, because a real CHAMFER has
+        /// the same signature and accumulates here persistently at its corner. The postprocessing
+        /// stage (chamfers, small details) reads this ledger; the main-lines stage never does.
+        std::vector<Candidate>    corner_residue;
         // ── FREE-SPACE EVIDENCE: a coarse log-odds grid the scans build directly ─────────────────
         // Every beam traverses free space and ends on matter; that is observed, not inferred. The
         // grid answers two questions the wall set cannot: WHERE the room's free region actually is
