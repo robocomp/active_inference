@@ -552,6 +552,179 @@ nearly never ran.
 
 ---
 
+## 10. Optimal excitation — the analytic design, and what it says about active calibration
+
+Derived 2026-09-01, tool `tools/excitation.py` (`74f42d5`). This section replaces the question "what
+experiment identifies each parameter?" with an answer that is mostly algebra: the model is LINEAR in
+the parameters, so the Fisher information has a closed form and the optimal motion falls out of it.
+
+### 10.1 The information rate, in one line
+
+Per episode the residual is `r = J p + noise`, `J` built from the covariates (§2). For a motion held
+at constant `(v, w)` for duration `T`, every Jacobian entry is a rate times `T`, so information per
+EPISODE goes as `(rate * T)^2 / sigma^2`, and since episodes arrive at `1/T`:
+
+| parameter | Jacobian entry | information per SECOND | maximise |
+|---|---|---|---|
+| `k_v` | `v*T` (along) | `v^2 T / sigma_p^2` | **v and T** |
+| `eps_yaw` | `-v*T` (cross) | `v^2 T / sigma_p^2` | **v and T** — identical to `k_v` |
+| `k_omega` | `w*T` (head) | `w^2 T / sigma_th^2` | **w and T** |
+| `b_omega` | **`T`** (head) | **`T / sigma_th^2`** | **T only** |
+| `dk_wheel` | `v*T` (head) | `v^2 T / sigma_th^2` | **v and T** |
+| `k_lat` | `l*T` (cross) | zero on a differential base | — |
+
+Everything below follows from that table without any data:
+
+- **`k_v` and `eps_yaw` have IDENTICAL optimal designs** — same covariate, different component. A
+  numerical search "discovering" this is reproducing algebra.
+- ★★★ **`b_omega`'s Jacobian contains no rate at all.** No manoeuvre can help it; the only lever is
+  episode duration. This is why its column sits at 1.00 for every candidate the tool scores, single
+  or combined. ★ A score column stuck at 1.00 is the theory being right, not the library being short.
+- **`T` is a common factor in EVERY row.** Episode duration is the universal lever, and it is the one
+  a rate-mixture search cannot see if it holds `T` fixed. Mine did, which is why its designs lost to
+  ordinary driving until `T` was freed.
+- Two degeneracies share the heading component and have DIFFERENT cures: a single-rate pivot makes
+  every `(w, 1, v)` parallel so `k_omega`/`b_omega` go rank 1 (cured by rate diversity, cond
+  inf -> 12.4), while `dk_wheel` needs FORWARD DISTANCE, which no pivot at any rate supplies (cured
+  only by adding straights, cond inf -> 51.6 -> 32.5 with arcs). Turning separates the gyro pair;
+  DRIVING reveals the wheel mismatch.
+
+**What is NOT derivable:** `sigma^2` as a function of the motion. The formulas take it as given, but
+`pos_var` is the localiser's posterior plus the model-error terms, and its behaviour is a property of
+the localiser and the route. Measured here it FALLS with duration (log-log slope −0.20), so
+information per second scales as `T^1.20` — superlinear, and that exponent is empirical.
+
+★ **And one thing the algebra gets WRONG by construction:** information per second grows with `T`
+without bound, so the formulas say make episodes infinitely long. That must break, because the
+Jacobian linearises the whole accumulated motion as one increment. Nothing in the inverse model knows
+this; it is why `episode_carry_max_trans = 2.5 m` and `episode_carry_max_rot = 2.0 rad` exist as
+separate guards. **The design question the algebra cannot answer is how long an episode may get
+before linearisation breaks, and that is the one thing worth driving for.**
+
+### 10.2 What a dedicated manoeuvre can buy — the ceiling, from the platform
+
+A manoeuvre can only raise the rate and the episode length, both capped by the base
+(`MaxAdvSpeed = 0.7 m/s`, `MaxRotSpeed = 1.0 rad/s`). So its value is bounded by a ratio of squares
+against what purposeful driving already does. Measured over a 220 m apartment window:
+
+| channel | ordinary driving | platform max | rate headroom | measured gain |
+|---|---|---|---|---|
+| forward (`k_v`, `eps_yaw`, `dk_wheel`) | v p90 = 0.68 m/s | 0.70 | **1.05x** | 1.15–1.26x |
+| heading (`k_omega`) | w p90 = 0.51 rad/s | 1.00 | **3.81x** | **8.74x** |
+
+Shrink against the prior over a matched 600 s budget:
+
+| design | `k_v` | `eps_yaw` | `k_omega` | `dk_wheel` | `b_omega` |
+|---|---|---|---|---|---|
+| ordinary driving (observed) | 7.07 | 6.20 | 4.18 | 8.11 | 1.06 |
+| rate-mixture search, `T` fixed at 0.55 s | 2.65 | 2.37 | 1.85 | 1.97 | 1.00 |
+| analytic: max v, straight, `T` = 0.55 s | 2.65 | 2.37 | 1.00 | 2.60 | 1.00 |
+| analytic: max v, straight, `T` = 5 s | 11.19 | 9.80 | 1.00 | 11.69 | 1.00 |
+| analytic: + sustained max turn, `T` = 5 s | 7.94 | 6.96 | **12.36** | 8.68 | 1.00 |
+
+★ At fixed `T` the analytic design and the numerical search agree exactly (2.65 vs 2.65). Freeing `T`
+is the whole difference. Ordinary driving was never beating a good design — it was beating a search
+that had the wrong free variable.
+
+### 10.3 ★★★ WHY WAIT-AND-WATCH IS RIGHT FOR TRANSLATION AND WRONG FOR ROTATION
+
+> A parameter is excited for free exactly to the extent that its covariate is ALIGNED with what the
+> task already wants to do.
+
+Forward speed **is** what navigation wants: going fast in straight lines is the job, so `k_v`,
+`eps_yaw` and `dk_wheel` are excited as a by-product, at 0.68 of a 0.70 m/s ceiling, during exactly
+the long corridor runs that dominate the information. A dedicated manoeuvre buys 15–26%. **No
+calibration affordance is justified for the forward channel, and that follows from the platform
+limits rather than from this dataset.**
+
+Rotation looks like the opposite: turning is a COST the planner minimises, so the heading channel
+ought to be systematically starved by purposeful behaviour. **In an apartment it is not**, and this
+is what closes the argument:
+
+| how often the apartment supplies rotation, measured over 185 m / 464 s of motion |
+|---|
+| a turn > 0.5 rad **every 3.6 m** (every 9.1 s of motion) |
+| a turn > 1.0 rad **every 6.4 m** (every 16.0 s) |
+| a turn > 1.5 rad every 18.5 m |
+| **46.2 rad of turning per 100 m driven, for free** |
+
+★★★ **And it is already enough.** After ONE ordinary window `k_omega` is `informed` at 3.70x shrink:
+sigma 0.0054 on a 0.02 prior, i.e. **the rotation scale is known to ±0.54%**. A dedicated pivot would
+sustain 1.0 rad/s against the 0.184 rad/s the apartment averages — 5.4x the rate — and would tighten
+±0.54% to perhaps ±0.2%. There is no evidence that difference changes anything, and the finding that
+heading corrections improve the pose at all was RETRACTED (§6, arm 3R).
+
+★★★ **CONCLUSION: NO CALIBRATION AFFORDANCE IS JUSTIFIED ON THIS PLATFORM IN THIS ENVIRONMENT.**
+Translation because purposeful navigation already runs at 0.68 of a 0.70 m/s ceiling during the long
+runs that dominate the information. Rotation because a cluttered apartment forces a hairpin every few
+metres, and geometry the robot cannot avoid is excitation it does not have to pay for. **Wait-and-watch
+is not the fallback here; it is the optimum.** The generalisation, and the part that transfers off this
+robot:
+
+> An affordance is worth its cost only where the task's own motion does NOT already span the
+> parameter's covariate. Compute that span before building the affordance — it is a ratio of squared
+> rates against the platform limits, and it needs no experiment.
+
+⚠ The scope is real and should be stated wherever this is quoted: a LARGE open environment would
+invert the rotation half. Long gentle arcs and few hairpins would starve `k_omega` exactly as the
+rate-headroom figure (3.81x) predicts, and there an affordance would earn its cost. The apartment is
+not a limitation of this result — it is a condition of it.
+
+`b_omega` sits outside the argument: no rate appears in its Jacobian, so wait-and-watch is trivially
+optimal there in the sense that nothing else works either. Separately it is PRIOR-SWAMPED — its
+`5e-4 rad/s` asserts 4e6 of information against 9.6e5 from 220 m of driving, a **19.4% data share**
+where every other live parameter gets 93–98%. Halving its sigma would need ~49 HOURS. The question
+there is whether 0.03 deg/s is a justified prior, not which route to drive.
+
+⚠ **The awkward part.** The one parameter a manoeuvre could materially improve is `k_omega`, and it
+is the one with the least evidence that applying it helps at all — the heading finding was RETRACTED
+on 2026-08-31 (§6, arm 3R). Real in information terms, unproven in outcome terms.
+
+### 10.4 Hairpins already do most of this, and the episode machinery is damaging them
+
+The apartment's hairpins ARE the rotation excitation: the top 10% of episodes carry **82.4%** of
+`k_omega`'s information, with median `d_theta` = **1.37 rad** over **3.73 s**. Purposeful driving is
+not starving the heading channel as badly as the rate headroom alone suggests — it is producing good
+turns and then losing them twice:
+
+- **16.7% of episodes close exactly at `episode_min_rot = 0.20 rad`.** Information goes as
+  `(d_theta)^2`, so a 3.14 rad hairpin taken as ONE episode is worth 1580 while the same hairpin
+  chopped into sixteen 0.20 rad pieces is worth 103 — **15.4x less**.
+- **No episode exceeds 1.984 rad**, sitting hard against `episode_carry_max_rot = 2.0`. A 180 deg
+  hairpin is 3.14 rad, so the largest turns are clipped or dropped at the linearisation guard —
+  and by `(d_theta)^2` those are the highest-information episodes in the window.
+
+★★★ So a large part of the `k_omega` gap is NOT a missing manoeuvre. It is the episode machinery
+destroying turns the robot is already performing. That is a config question before it is an
+affordance question, and the two are confounded in every number in §10.2 — the 8.74x is measured
+against driving whose hairpins were being chopped.
+
+### 10.5 ⚠ ROTATION EXPERIMENTS STILL NEEDED — this section is not self-sufficient
+
+The translation conclusion stands on the algebra plus the platform limits. **The rotation conclusion
+does not, and must not be quoted as settled.** Three things are unmeasured:
+
+1. **How much of the 8.74x is chopping rather than starvation.** Re-run the same route with
+   `episode_min_rot` raised so a hairpin survives as one episode, and re-measure `k_omega`'s shrink.
+   If most of the gap closes, the affordance is not needed and a constant was the whole story.
+2. **Where linearisation actually breaks.** The algebra says `T` without bound; the carry caps are a
+   GUESS at where that stops being true. The endpoint is per-parameter sigma per metre against
+   episode length, watching for the point where longer episodes stop paying — the first measurement
+   of a limit currently asserted by two constants.
+3. **Whether a sustained-rotation manoeuvre delivers its predicted 12.36x in practice.** Predicted
+   from a model whose `sigma_th^2` is assumed to hold at rates the robot rarely sustains; a fast
+   sustained pivot may degrade the localiser's own fit and inflate `sigma_th^2`, which would eat the
+   gain. The prediction is untested and it is the one the affordance's case rests on.
+
+⚠ Do not build a rotation affordance before (1). The cheapest experiment is a constant, not a
+manoeuvre, and it may remove the reason for the manoeuvre entirely.
+
+★ Note what these three experiments are now FOR. They are no longer deciding whether to build an
+affordance — §10.3 answers that with geometry and the platform limits. They are asking whether the
+episode machinery is throwing away rotation the robot already performs, which is a defect question,
+and where linearisation actually breaks, which is two constants currently asserted without
+measurement. Both are worth driving for; neither is a manoeuvre.
+
 ## Appendix A — the empty-episode defect (fixed, `96d48bc`)
 
 Necessary because it dates the validity of every calibration number.
