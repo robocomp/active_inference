@@ -1003,6 +1003,75 @@ one and the same argument applies to `k_v`, `eps_yaw` and `dk_wheel` — but tho
 `informed` at 5.5-7.3x shrink from ordinary driving, so the headroom that matters is in the channel
 that is not. Raise it only if arm 6 shows the mechanism is real.
 
+### Arm 6 — RESULTS, 2026-09-01. The trigger binds, the information does not follow.
+
+Two legs, one session, uninjected, cold each: 205.5 m / 153.2 rad and 219.3 m / 159.3 rad — rotation
+content 4.0% apart, so the comparison is at the shared 153.2 rad span.
+
+| endpoint | 6-base (0.25 m / 0.20 rad) | 6-long (1.00 m / 0.80 rad) | ratio |
+|---|---|---|---|
+| median episode DURATION | 0.93 s | 2.27 s | **2.07–2.44x** |
+| median `d_theta` | 0.125 rad | 0.174 rad | 1.38x |
+| **`k_omega` VALUE** | **0.99541 ± 0.00586** | **0.99400 ± 0.00590** | **0.17 sigma apart** |
+| sigma(`k_omega`) | 0.00586 | 0.00590 | **0.99x — no gain** |
+
+**The value held.** 0.17 combined sigmas on the same robot and route. ★ **So linearisation is NOT
+breaking at 1.00 m / 0.80 rad** — a useful negative, and the first evidence about a limit that
+`episode_carry_max_trans` and `episode_carry_max_rot` have been asserting without measurement. The
+caps are more conservative than they need to be.
+
+**The trigger bound and the information did not follow.** Decomposing, with runaway carried episodes
+excluded (§12.6):
+
+| | base | long | ratio |
+|---|---|---|---|
+| `sum (d_theta)^2` — the GEOMETRY | 83.45 | 90.80 | **1.09x** |
+| `sum (d_theta)^2 / theta_var` — the INFORMATION | 29 021 | 27 345 | **0.94x** |
+| effective `theta_var` | 0.00288 | 0.00332 | **1.15x** |
+
+**A 4x trigger bought 9% more concentrated covariate and lost 15% to variance. Net −6%.** Two
+independent causes, both measured:
+
+1. **Merging barely concentrates the covariate, because the triggers do not close most episodes.**
+   The correction's FALLING EDGE closes 44.7% of them in the base leg and **54.7%** in the long one —
+   raising the triggers simply hands more of the closing to a mechanism no constant controls.
+2. **`theta_var` GROWS with episode length.** `rot_model_sigma * rotation` and
+   `fit_model_gain * mean|SDF|` both accumulate over a longer span, so a longer episode is weighted
+   less, and the weighting almost exactly eats the geometric gain.
+
+★★★ **SO §10's CONCLUSION IS QUALIFIED, NOT RETRACTED. Episode duration IS the universal lever in the
+algebra — `T` is a common factor in every row — but it is NOT REACHABLE THROUGH THESE CONSTANTS.**
+The corrector's own timing sets most episode boundaries, and the model-error terms tax whatever
+length the triggers do buy. An information law that is correct about the mechanism can still be
+unactionable, and knowing which is which requires driving.
+
+⚠ **A statistic error of mine, recorded because it nearly reversed the reading.** Mid-run I checked
+`theta_var` by its MEDIAN, saw it FALL (0.00515 -> 0.00453), and concluded the pre-registered
+variance explanation was refuted. The median is the wrong statistic: information is a SUM, so the
+information-weighted effective variance is what matters, and that ROSE 1.15x. Same data, opposite
+conclusion. ★ For any quantity that enters as a sum, summarise it by its sum.
+
+### 12.6 ⚠ A DEFECT FOUND ON THE WAY: duration carries without bound while parked
+
+The base leg's window contained **9 episodes of ~219.6 s each with median `d_theta` = 0.015 rad** —
+essentially stationary. The top 5% of episodes carried **80%** of that leg's summed duration, which
+came to 1991 s for a run containing about 480 s of motion.
+
+The carry mechanism caps translation (2.5 m) and rotation (2.0 rad) but **nothing caps DURATION**. A
+near-stationary robot therefore accumulates an episode for minutes without accumulating information.
+
+★★★ **And duration is `b_omega`'s covariate.** Those 9 episodes handed the gyro-bias channel a
+Jacobian entry of 219.6 s each: `b_omega` information reads **63 787 246** with them and **1 370 993**
+without — a **47x inflation** from 3.6% of the episodes, all of them stationary. The parameter already
+identified as prior-swamped (§10.2) is simultaneously being fed enormous spurious information by
+standing still. ⚠ Both readings of `b_omega` in this document are therefore suspect until this is
+fixed; §10.2's 19.4% data share was computed on a window that may contain the same inflation.
+
+★ The invariant the design states — *"a parked robot must never close an episode"* — is honoured.
+The gap is that a parked robot may CARRY one indefinitely, which the invariant does not cover.
+Cure: cap the carry in TIME as the other two covariates are capped, or exclude duration accumulated
+below a motion threshold. **This is worth fixing regardless of arm 6.**
+
 ## Appendix A — the empty-episode defect (fixed, `96d48bc`)
 
 Necessary because it dates the validity of every calibration number.

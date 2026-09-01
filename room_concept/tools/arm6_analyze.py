@@ -83,11 +83,21 @@ def main():
                  len(th) if th is not None else "no log",
                  "%.3f" % np.median(th) if th is not None and th.size else "-"))
     if epA[0] is not None and epB[0] is not None and epA[0].size and epB[0].size:
-        r = np.median(epB[0]) / max(np.median(epA[0]), 1e-9)
-        print("  median d_theta ratio long/base = %.2fx" % r)
-        if r < 1.5:
-            print("  ⚠ THE TRIGGER DID NOT BIND. 6-long's episodes are not materially longer, so this")
-            print("    arm has not manipulated what it claims to and the endpoint below is void.")
+        # ★ DURATION is the direct measure of episode LENGTH — that is what the trigger sets.
+        # d_theta is a PROXY and a poor one: rotation partly cancels inside a longer episode and
+        # its content varies with the route, so the two ratios differ and conflating them reads a
+        # bound trigger as an unbound one. Judge binding on duration; report d_theta separately,
+        # because the gap between them is itself the result (2.44x duration, 1.38x d_theta).
+        rd = np.median(epB[1]) / max(np.median(epA[1]), 1e-9)
+        rt = np.median(epB[0]) / max(np.median(epA[0]), 1e-9)
+        print("  median DURATION ratio long/base = %.2fx   <- did the trigger bind?" % rd)
+        print("  median d_theta  ratio long/base = %.2fx   <- did the COVARIATE concentrate?" % rt)
+        if rd < 1.5:
+            print("  ⚠ THE TRIGGER DID NOT BIND: episodes are not materially longer, so this arm has")
+            print("    not manipulated what it claims to and the endpoint below is void.")
+        elif rt < 1.5 * 0.8:
+            print("  ★ THE TRIGGER BOUND BUT THE COVARIATE DID NOT FOLLOW. Longer episodes did not")
+            print("    accumulate proportionally more motion — the interesting outcome, not a null.")
     rmatch = min(A['rot'][-1], B['rot'][-1])
     dr = abs(A['rot'][-1] - B['rot'][-1]) / max(rmatch, 1e-9)
     print("  rotation content differs by %.1f%% -> comparisons made at %.1f rad, the shared span."

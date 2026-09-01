@@ -982,8 +982,9 @@ MotionCalibFitModelGain  = 2.0    # x mean |SDF| over the episode, into the posi
 # caps below are a GUESS at where that stops being true. Raising these is the subject of §12, whose
 # pre-registered discriminator is that longer episodes must improve k_omega's SIGMA without moving
 # its VALUE — a value shift on the same robot and route is the signature of linearisation breaking.
-MotionCalibEpisodeMinTrans = 0.25   # m of accumulated forward travel
-MotionCalibEpisodeMinRot   = 0.20   # rad of accumulated rotation (~11 deg)
+MotionCalibEpisodeMinTrans = 1.00   # m of accumulated forward travel
+MotionCalibEpisodeMinRot = 0.80   # rad of accumulated rotation. ⚠ ARM 6 'long' LEG — the baseline
+                                    # is 0.20 rad (~11 deg) with MinTrans 0.25; restore both together.
 MotionCalibYawP0    = 1.0e-4   # (rad)^2 initial uncertainty on the body/mount yaw offset (1σ ≈ 0.57°)
 MotionCalibScaleP0  = 4.0e-4   # fractional² initial uncertainty on both scales (1σ ≈ 2%)
                         # ★ These two are PRIORS, not measurements — how little is known before any
