@@ -747,6 +747,126 @@ episode machinery is throwing away rotation the robot already performs, which is
 and where linearisation actually breaks, which is two constants currently asserted without
 measurement. Both are worth driving for; neither is a manoeuvre.
 
+## 11. The self-model — what these parameters are, in the architecture's own terms
+
+★ **This section is INTERPRETATION, not result.** It is the reading under which §6 and §10 cohere,
+and it should be labelled as such wherever it is quoted. Every number in it is measured; the frame
+around them is not.
+
+### 11.1 Three factors, three timescales, one free energy
+
+The agent's generative model factorises over three things, all minimising the same quantity:
+
+| factor | what it is | timescale | in this system |
+|---|---|---|---|
+| `q(s)` | **states** — where I am now | per cycle | the SDF localiser's pose |
+| `q(θ_world)` | **the world's structure** | slow | the room shape; walls as landmarks |
+| `q(θ_body)` | **my own body** — how action becomes motion | slow | `k_v`, `eps_yaw`, `k_omega`, `b_omega`, `dk_wheel` |
+
+`θ_body` parameterises `p(s_{t+1} | s_t, a_t)`. **The transition model IS the self-model**, so an
+agent carrying a wrong one is systematically surprised by the consequences of its own actions. That
+is what makes calibration a first-class inference problem here rather than a maintenance chore: the
+same free energy is minimised over where-I-am, what-the-room-is, and what-I-am.
+
+### 11.2 The correction load is the free energy that `θ_body` OWNS
+
+§10 justified the endpoint structurally — it is the optimiser's input, so the corrector cannot absorb
+it. The better reason is what it MEANS: `|est − pred|` is the prediction error the BODY-model failed
+to explain, isolated from what the world-model then explains. RPE measures the residual after both
+factors have done their work; the correction load isolates the component attributable to `θ_body`.
+
+That is why it, and nothing else, tracked injected body error monotonically — 17.30, 18.11, 20.24,
+25.59 mm per solve at 0%, 0.8%, 2.9%, 10% (§6). An endpoint that measures the right factor responds
+to a manipulation of that factor. The others were measuring the sum, or the leftovers.
+
+### 11.3 ★★★ FREE ENERGY IS NOT COMPUTE — and assuming otherwise is what produced the retraction
+
+The withdrawn effort claim (§6) rested on reading optimiser firing as *the rate at which the agent
+must do effortful inference because its model failed to predict*. The intuition is right and the
+identification is wrong, and the wrongness is measurable: **iterations per solve are FLAT at
+13.27–13.99 across a body-model error spanning 0% to 10%.**
+
+The agent pays for a bad self-model in **revision magnitude** — the information-theoretic quantity,
+which moved 1.5x — while the COMPUTATION performing that revision is constant. Surprise and FLOPs
+are different currencies, and a Gauss-Newton step converging from 2.2 mm instead of 1.5 mm costs the
+same thirteen iterations.
+
+★ This matters beyond this experiment. Any argument of the form "a better model saves the agent
+work" needs to say which work. Here the model error is paid in how far beliefs must be revised, not
+in the cost of revising them, and an endpoint chosen on the other reading measured nothing for a day.
+
+### 11.4 ★★★ ACTING IS THE EXPERIMENT
+
+§10 showed that a dedicated calibration manoeuvre buys 15–26% on the forward channel and that a
+cluttered room supplies the rotation for free. The reason is structural rather than lucky:
+
+> **A purposeful agent instruments its own body as a by-product of acting, because every action
+> passes through the body. The epistemic value for `θ_body` is already contained in the pragmatic
+> action.**
+
+This is the active-inference statement of the wait-and-watch result. Epistemic action for the SELF is
+rarely needed, because there is no such thing as an action that does not exercise the body.
+
+### 11.5 The asymmetry — the world needs looking at, the body does not
+
+The same argument run over `θ_world` gives the opposite answer, and the contrast is the point:
+
+| | `θ_world` | `θ_body` |
+|---|---|---|
+| sampled | only where the agent happens to look | by **every** action |
+| epistemic action | routinely necessary (NBV, exploration — and this system builds them) | rarely necessary |
+| limit | occlusion, reach | only the covariates the action excites |
+
+**The world is sampled where you look; the body is present in everything you do.** That asymmetry is
+why this architecture correctly carries next-best-view affordances for objects and rooms while
+needing none for the base's kinematics.
+
+★ Its limit is exact, not vague: the body is instrumented only along the covariates a given action
+excites. `k_lat` is never excited on a differential base; rotation is barely excited in open space.
+And §10.3's need/cost coupling closes it — deviating to excite a starved covariate is most expensive
+precisely where it is most starved, so the exception does not readily become an argument for
+manoeuvres.
+
+### 11.6 ⚠ THE SELF-MODEL IS LEARNED THROUGH THE WORLD-MODEL, so map error is charged to the body
+
+The calibrator learns from the localiser's corrections, and those corrections are produced by fitting
+against the map. **`θ_body` is therefore estimated through `θ_world`, and an error in the world-model
+is attributed to the body.** This is a structural hazard of the factorisation, not an implementation
+detail, and it has already produced defects:
+
+- `fit_model_gain` exists precisely for it — an episode is weighted by the FIT that produced its
+  correction, so a poor fit teaches the body-model less.
+- `c71aab9` was this hazard biting: weighting by the drift BEFORE the fit rather than the fit itself
+  meant the largest map failures taught the self-model hardest. Exactly backwards.
+- The `MapMode = "estimate"` regime (§10 blocker) is the extreme case — with the layout itself
+  unconverged, every correction carries world-model error into the body-model's evidence.
+
+★ The general rule: **a factor estimated through another factor inherits that factor's errors, so its
+evidence must be weighted by the other's confidence.** That is what precision-weighting is for, and
+it is the one place in this design where getting the weight wrong is worse than having no estimate.
+
+### 11.7 A prior can place part of the body beyond experience
+
+`b_omega`'s prior of 5e-4 rad/s asserts 4.0e6 of information against 9.6e5 supplied by 220 m of
+driving — a 19.4% data share where every other live parameter reaches 93–98% (§10.2). The agent has
+declared a belief about its own body precise enough that ordinary experience cannot revise it, and
+its `informed` flag can therefore never fire.
+
+★ This is a legitimate modelling choice and it is currently an INHERITED one. A prior that strong is
+a claim that the gyro's bias is known to 0.03 deg/s before the robot has moved; if that is true it
+should be cited, and if it is not the parameter is unlearnable for no reason.
+
+### 11.8 What is measured and what is frame
+
+**Measured**: the correction load's monotone dose-response; iterations per solve flat within 1.05x;
+the rate-headroom ceiling and the 46 rad/100 m the environment supplies; `b_omega`'s 19.4% data
+share; the identifiability structure of §10.1, which is algebra.
+
+**Frame**: the three-factor reading, the identification of the correction load with `θ_body`'s free
+energy, and the epistemic-value asymmetry between body and world. These are the interpretation under
+which the measurements cohere. They are not tested by them, and a reader should be able to reject the
+frame and keep every number.
+
 ## Appendix A — the empty-episode defect (fixed, `96d48bc`)
 
 Necessary because it dates the validity of every calibration number.
