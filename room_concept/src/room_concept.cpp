@@ -2047,6 +2047,8 @@ namespace rc
         wall_stat_births_ += last_wall_frame_.births;
         wall_stat_deaths_ += last_wall_frame_.deaths;
         wall_stat_contained_ += last_wall_frame_.splice_rejected;
+        ++wall_frames_since_rederive_;
+        wall_rejected_since_rederive_ += last_wall_frame_.splice_rejected;
         if (wall_stat_frames_ >= 200)
         {
             // splice_rej counts qualified candidates that found no valid place on the polygon —
@@ -2068,6 +2070,29 @@ namespace rc
     void RoomConcept::wall_slam_after_solve(UpdateResult& res)
     {
         wall_map_.merge_indistinguishable();
+        // GLOBAL re-derivation on the bench's cadence (WallMap::Params::rederive_*): trace the
+        // observed free space around the solved pose and adopt its cycle iff it explains more.
+        // Until 2026-09-02 only the bench ran this — the agent's polygon could only move by the
+        // local splice jumps, and the bench IoU graded an algorithm the agent never executed.
+        if (wall_map_.params.enable_rederive
+            and (wall_frames_since_rederive_ >= wall_map_.params.rederive_every_frames
+                 or wall_rejected_since_rederive_ >= wall_map_.params.rederive_after_rejections))
+        {
+            const int frames = wall_frames_since_rederive_, rejected = wall_rejected_since_rederive_;
+            wall_frames_since_rederive_ = 0;
+            wall_rejected_since_rederive_ = 0;
+            auto newest_cpu = window_mgr_.newest().pose.detach().to(torch::kCPU);
+            const Eigen::Vector2f robot_xy(newest_cpu[0].item<float>(), newest_cpu[1].item<float>());
+            if (wall_map_.re_derive(robot_xy))
+            {
+                ++wall_rederives_;
+                qInfo().noquote() << QString("[room][wall-slam] GLOBAL re-derivation adopted (#%1): %2 walls in the cycle, after %3 frames / %4 rejected splices")
+                                         .arg(wall_rederives_).arg(wall_map_.order.size()).arg(frames).arg(rejected);
+                if (wall_events_csv_.is_open())
+                    wall_events_csv_ << wall_frame_ts_ << ",rederive," << wall_map_.order.size() << ",,,"
+                                     << rejected << ',' << frames << ",,,,\n" << std::flush;
+            }
+        }
         auto poly = wall_map_.build_polygon();
         // The PUBLISHED layout: exactly Manhattan by construction — the output-stage projection
         // on a COPY (WallMap::manhattan_polygon). The raw polygon keeps every in-loop role

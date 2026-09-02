@@ -135,6 +135,13 @@ namespace rc::wallmap
         bool  manhattan_strict = true;
         float manhattan_gate_rad = 10.f * static_cast<float>(M_PI) / 180.f;
         bool  debug_splice = false;         // diagnostic prints from try_splice (bench use)
+        // ── GLOBAL re-derivation cadence (re_derive): the escape hatch from a wrong local topology
+        // runs on a slow clock, or sooner when local jumps are visibly stuck (rejections pile up).
+        // Shared by the bench and the live agent so the bench grades what the agent executes.
+        // ⚠ cadence constants — chosen on the bench, not derived.
+        bool  enable_rederive          = true;
+        int   rederive_every_frames    = 40;
+        int   rederive_after_rejections = 30;
         // ── Existence (the step-back operator), per extent bin — see the header comment ──────────
         float exist_refute_pdet = 0.5f;     // P(detect): weight of a pass-through vs a support ⚠
         float exist_bin_m       = 0.25f;    // m — extent bin width (spatial resolution of refutation)

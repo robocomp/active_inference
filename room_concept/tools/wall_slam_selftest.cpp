@@ -618,7 +618,9 @@ namespace
             // ── GLOBAL re-derivation: when local jumps are stuck (rejections pile up) or on a slow
             // cadence, trace the observed free space and adopt its cycle iff it explains more.
             rejected_since_rederive += fr.splice_rejected;
-            if (f - last_rederive >= 40 or rejected_since_rederive >= 30)
+            if (R.map.params.enable_rederive
+                and (f - last_rederive >= R.map.params.rederive_every_frames
+                     or rejected_since_rederive >= R.map.params.rederive_after_rejections))
             {
                 last_rederive = f;
                 rejected_since_rederive = 0;

@@ -1688,6 +1688,8 @@ private:
     int wall_stat_frames_ = 0, wall_stat_assoc_ = 0, wall_stat_segs_ = 0,
         wall_stat_twins_ = 0, wall_stat_births_ = 0, wall_stat_deaths_ = 0,
         wall_stat_contained_ = 0;   // rate-limited health counters
+    int wall_frames_since_rederive_ = 0, wall_rejected_since_rederive_ = 0,
+        wall_rederives_ = 0;        // global re-derivation cadence (WallMap::Params::rederive_*)
     // Wall-SLAM analysis CSVs (loc thread only; imbued classic — es_ES writes commas otherwise).
     // etc/wall_slam.csv: one row per frame. etc/wall_slam_events.csv: one row per birth/death,
     // carrying the Z DISTRIBUTION of the points the wall was built from — the column that separates

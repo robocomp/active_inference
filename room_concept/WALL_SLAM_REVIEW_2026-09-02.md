@@ -12,7 +12,7 @@ Status column tracks what has been acted on. Findings are ranked most severe fir
 |---|-----|--------|---------|
 | 1 | BLOCKER | fixed 09-02 (host id copied; spur host on a value copy) — bench bit-exact | use-after-free of `E` / `W` in `try_splice` / `try_spur_wraps` |
 | 2 | BLOCKER | fixed 09-02 (collect ids, splice last-born first) — bit-exact; ascending order shifts seed 424242 0.942→0.821, see #18 | out-of-range index in the death sweep after `heal_order` |
-| 3 | MAJOR | open | the live agent never calls `re_derive` — the bench grades a bench-only algorithm |
+| 3 | MAJOR | fixed 09-02 (agent runs re_derive on the bench cadence, cadence moved to WallMap::Params) | the live agent never calls `re_derive` — the bench grades a bench-only algorithm |
 | 4 | MAJOR | open | the annealed Manhattan factor is inert by construction |
 | 5 | MAJOR | open | carried wall information is damping, not a prior (re-centred every solve) |
 | 6 | MAJOR | open | two θ₀ estimators; published polygon rotated w.r.t. the re-anchored frame |
@@ -213,3 +213,9 @@ descending order (validated behaviour). A principled sweep would splice all deat
 0.942, published tilt 0.06° / 0.00° / 0.02°, bit-identical. The one FAILURE (Hausdorff 0.443 m ≥ 0.20 on the
 best seed) is pre-existing at base. Bisect: #1 alone, #7 alone, and #2 (descending) alone are each
 bit-exact; #2 ascending shifts (#18); #8 with a net-of-seed purse costs seed 1001 (0.932).
+
+## Bench record for #3 (re_derive wired live)
+Cadence (40 frames / 30 rejections) moved from bench literals into `WallMap::Params::rederive_*`; the agent
+runs `re_derive` in `wall_slam_after_solve` after `merge_indistinguishable`, before the polygon is derived —
+the bench's order. Bench identical (0.953 / 0.967 / 0.942, tilt 0.06° / 0.00° / 0.02°): the bench already
+executed it; what changed is that the agent now does too. Live effect UNRUN.
