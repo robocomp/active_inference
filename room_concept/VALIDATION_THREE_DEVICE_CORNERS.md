@@ -128,22 +128,46 @@ and a `camera` column, so absence is stated rather than inferred from a column o
 intersects the pixel ray with the corner's own height plane, and a near-parallel ray meets it far
 away. The guard rejects only |d_room.z()| < 1e-3.
 
-### 1.4 ⚠ REFRAMED — the closure test's third relation cannot be measured at all
+### 1.4 ✗✗ RETRACTED TWICE — the third relation exists, is running, and is already measured
 
-The original claim was that the pair log mixes two cameras with no column to separate them. It does
-not mix them: `room_concept` holds a **single `camera_ingestor_`** and `ImageEdge.camera` selects one
-device per run, so each file is one camera throughout. The defect was **provenance and survival**,
-not mixture — a fixed filename means run 2 silently destroys run 1's record of a *different* device.
-★ Note the asymmetry that made this easy to miss: the estimator's own evidence file was already
-keyed correctly (`camera_calib_<robot>_<camera>.txt`); only the diagnostic beside it was not.
+**First version:** "the pair log mixes two cameras with no column to separate them." Wrong — one
+`camera_ingestor_`, one device per file. **Second version (2026-09-02, committed): "`(zed ← ricoh)`
+can never be measured on this agent; a second ingestor is a precondition for stage 2."** ★★★ **Also
+wrong, and wrong for the worse reason: I inferred it from `camera_ingestor_` being a single
+`unique_ptr` and never looked for another ingestor.** There is one.
 
-But reframing it exposes something neither document had stated:
+```
+etc/config.toml:1544   calibCameras = ["zed", "ricoh"]
+```
 
-★★★ **`(zed ← ricoh)` can never be measured on this agent as it stands.** Closure needs that third
-relation estimated INDEPENDENTLY, which requires one corner seen by both cameras in one frame. With
-a single ingestor there is no code path that ever holds a ricoh corner and a zed corner together. A
-second ingestor is real work, and it is a precondition for stage 2 that appears in neither this plan
-nor `DESIGN`.
+Every camera beyond the driving one gets a `CalibChannel` with **its own ingestor, its own extraction
+and its own evidence file**, and `loop_closure_observe()` is called from BOTH paths. The sensor
+triangle is not future work — it has been running.
+
+★ **The evidence was in front of me and I explained it away.** Both `camera_calib_Shadow_*.txt` were
+stamped the same second (sep 1 22:31); I noticed, remarked on it, and moved on. Two evidence files
+written at the same instant means two channels running at once, which is the whole question.
+
+**And the third leg is already recorded**, in `etc/camera_loop.csv` — 98 808 shared-corner
+observations, ricoh↔zed, over 22 shared vertices, differenced only when the two sightings are within
+60 ms so the robot's own motion cannot leak in:
+
+```
+camera-vs-camera du   −0.0115°   naive SEM ±0.0035°   CLUSTER-ROBUST ±0.0573°
+```
+
+⚠ Same defect as §1.1, 16x here: per-vertex spread 0.2625° over 21 vertices. Read honestly, the
+camera-to-camera yaw difference is **consistent with zero**.
+
+★★★ **And it closes.** The two mount solves give ricoh yaw −0.2119° and zed −0.1981°, a difference of
+**−0.0138°**. The loop closure measures that same difference by a completely independent route —
+differencing two cameras on one corner, with no mount, no pose and no model vertex in it — and gets
+**−0.0115°**. The two agree to **0.0023°**. That is the closure test's primary endpoint, already
+satisfied on data in hand.
+
+⚠ Do not over-read it: all three legs share the clustering defect, so the agreement is between two
+quantities whose stated precisions are both wrong. What it establishes is that the three devices tell
+one story about yaw; it does not establish that the story is true (§3).
 
 ### 1.5 ✓ What already exists, and is worth having
 
@@ -328,6 +352,80 @@ which requires a second `camera_ingestor_`** — that is the precondition, and i
 available. ★ And §1.5 narrows the question mode A was built to answer: the pitch/height ridge is
 −0.98 on the zed and −0.12 on the ricoh, so the decision is per camera, and for the panorama the
 motivation is largely absent.
+
+## 2b. ARM 7 — can a WRONG extrinsic be recovered? (pre-registered 2026-09-02)
+
+The question the thesis needs answered: started from a deliberately wrong camera or LiDAR extrinsic —
+the sim2real situation — does the online estimator recover the true value, and can it say WHICH device
+was wrong? ★ Nothing below is run yet. It is written before the data exists, on purpose.
+
+### The design: attribution, not fitting
+
+★★★ **Injecting into a camera's own mount and then recovering it is nearly tautological** — that is the
+same quantity in and out, and it would repeat arm 2's weakness (an injection test that mostly proves
+the injection acted). The experiment that can FAIL uses the third device. Each injection site has a
+DIFFERENT pre-registered signature across the three channels, and the LiDAR row is the one that tests
+attribution:
+
+| injected, +δ yaw | ricoh mount solve | zed mount solve | loop closure (ricoh−zed) |
+|---|---|---|---|
+| **ricoh mount** | −δ | 0 | −δ |
+| **zed mount** | 0 | −δ | +δ |
+| **helios / LiDAR** | −δ | −δ | **0 — unchanged** |
+
+The third row is the claim `specificworker.h` already states and has never tested: *large individual
+residuals with a small difference put the fault in the LiDAR; a large difference puts it between the
+cameras.* ★ If a LiDAR injection moves the loop closure, that attribution logic is wrong, and finding
+that out is worth more than another confirmation.
+
+### Magnitude, set by the honest errors and not by taste
+
+Cluster-honest standard errors, measured: mount yaw **±0.216°**, loop closure **±0.0573°**.
+**δ = 1.0° yaw** is then 4.6σ on the mount solve and 17.5σ on the loop — unambiguous on both, and the
+asymmetry is itself informative. Pitch: 1.0°. Height: 0.05 m.
+
+### ★★★ THE PREDICTION THAT MAKES THIS WORTH RUNNING — recovery will be INCOMPLETE
+
+With the per-vertex nuisance ON, the data's information about yaw drops to the between-corner scale,
+and the prior stops being negligible. The two become comparable:
+
+```
+prior sigma_yaw   0.2005 deg      (ImageEdge.mountYawSigma = 0.0035 rad)
+data, cluster-honest   0.2160 deg
+combined posterior     0.1470 deg
+recovery fraction = data share = 0.463   (ricoh)   0.477 (zed)
+```
+
+★★★ **A 1.0° yaw injection is predicted to come back as ≈0.46°, not 1.0°** — the estimator converging
+to a weighted average of a wrong prior and a weak measurement. That is a sharp, falsifiable number,
+and it answers the user's question with a qualification rather than a yes: **on 23 corners the camera
+yaw cannot be fully calibrated away from a wrong start.** The remedy is more DISTINCT corners, not
+more driving past these ones (§2 stage 1b).
+
+Pre-registered outcomes, in order:
+1. **PRIMARY — recovery fraction per parameter**, nuisance ON. Predicted 0.46 ± 0.10 for yaw;
+   substantially higher for pitch and height, which keep their within-vertex information.
+2. **SECONDARY — the attribution table above**, all three rows. The LiDAR row is the falsifier.
+3. **THIRD — the same run with the nuisance OFF.** Predicted: recovery ≈ 1.0 with a tiny sigma, i.e.
+   the old model APPEARS to succeed completely. ★ That contrast is the point — an estimator that
+   recovers an injection perfectly while overstating its certainty 127x is the failure mode this whole
+   document is about, and arm 7 is where it is shown rather than argued.
+
+### Cost: one drive, not four
+
+★ The injection can be applied OFFLINE. `r = uv_image − uv_lidar`, and an extrinsic perturbation
+changes `uv_lidar` deterministically from `p_robot`; the association is exact-by-index so it does not
+move. **Logging `p_robot` (3 floats) in the pair CSV makes all four legs replays of ONE recorded
+drive** — which also removes route variation, the nuisance that
+[[rgb-corner-calibration-experiment]] found swamps between-run comparisons. ⚠ It is an approximation:
+`cov_lid` also depends on the extrinsic through `Pxy`, and a replay holds it fixed.
+
+So: **replay all four legs offline from one tour, then confirm the single most informative one (the
+helios injection) live.** A replay establishes that the information is present; only a live leg
+establishes that the running estimator uses it.
+
+⚠ Prerequisite: restart on the 2026-09-02 binary, and DELETE `etc/camera_calib_Shadow_*.txt` — they
+are format 1, carry no per-vertex partials, and the nuisance refuses to run on them.
 
 ## 3. What this plan will NOT establish
 
