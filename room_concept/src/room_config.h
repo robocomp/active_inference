@@ -400,6 +400,12 @@ struct RoomConfig
     float IMAGE_EDGE_MOUNT_PITCH_SIGMA = 0.0035f; // ImageEdge.mountPitchSigma (rad, ~0.2°)
     float IMAGE_EDGE_MOUNT_HEIGHT_SIGMA= 0.010f;  // ImageEdge.mountHeightSigma (m)
     float IMAGE_EDGE_MOUNT_YAW_SIGMA   = 0.0035f; // ImageEdge.mountYawSigma (rad)
+    /// Prior sigma on a CORNER'S OWN image offset, in pixels — the per-vertex nuisance that stops the
+    /// mount solve counting one corner's thousands of sightings as thousands of independent
+    /// measurements (mount_lidar_pair.h). 0 = OFF, and OFF is bit-for-bit the pre-2026-09-02 solve.
+    /// ⚠ DEFAULTS OFF DELIBERATELY: turning it on changes every mount sigma the agent reports, and
+    ///   that is the user's call, not a silent upgrade.
+    float IMAGE_EDGE_MOUNT_VERTEX_OFFSET_SIGMA_PX = 0.0f;  // ImageEdge.mountVertexOffsetSigmaPx
     // Local boresight correction applied to the graph's camera<-robot extrinsic. NOT a tuning knob:
     // a measured physical angle. 0 = use the graph's extrinsic unchanged.
     float IMAGE_EDGE_MOUNT_YAW_CORR    = 0.0f;    // ImageEdge.mountYawCorrection (rad)

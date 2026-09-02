@@ -136,6 +136,11 @@ namespace rc::camcal
                  + "_" + camera_ + ".txt"; }
 
         void add(const rc::mount::PairObs& o) { acc_.add(o); }
+        /// Prior sigma on a corner's own image offset, in pixels. 0 = the nuisance is off and the
+        /// solve is the old one exactly. Set it on the pool AND on every calib channel, or two
+        /// cameras would be reported under two different models on the same screen.
+        void set_vertex_offset_sigma_px(double px) noexcept { acc_.offset_sigma_px = px; }
+        [[nodiscard]] double vertex_offset_sigma_px() const noexcept { return acc_.offset_sigma_px; }
         void reset() { acc_.reset(); }
         [[nodiscard]] long pairs() const noexcept { return acc_.n; }
         [[nodiscard]] rc::mount::Accum::Solution solve() const { return acc_.solve(); }
@@ -165,6 +170,26 @@ namespace rc::camcal
             for (int i = 0; i < 4; ++i)
                 for (int j = i; j < 4; ++j) f << "H," << i << ',' << j << ',' << acc_.H(i, j) << '\n';
             for (int i = 0; i < 4; ++i) f << "b," << i << ',' << acc_.b(i) << '\n';
+            // ── PER-VERTEX PARTIALS (format 2) ───────────────────────────────────────────────────
+            // ★ The aggregate above is kept and still written, so an older reader loads this file and
+            //   gets exactly what it got before. What it CANNOT do is marginalise, and `format` is
+            //   how a newer reader knows the difference — an aggregate carries no vertex, and a
+            //   cluster structure cannot be recovered from a sum over clusters.
+            f << "format,2\n";
+            for (const auto& [vtx, v] : acc_.per_vertex)
+            {
+                if (v.n <= 0 or not v.finite()) continue;
+                f << "V," << vtx << ",n," << v.n << '\n';
+                f << "V," << vtx << ",rTr," << v.rTr << '\n';
+                for (int i = 0; i < 4; ++i)
+                    for (int j = i; j < 4; ++j) f << "V," << vtx << ",A," << i << ',' << j << ',' << v.A(i, j) << '\n';
+                for (int i = 0; i < 4; ++i)
+                    for (int j = 0; j < 2; ++j) f << "V," << vtx << ",c," << i << ',' << j << ',' << v.c(i, j) << '\n';
+                for (int i = 0; i < 2; ++i)
+                    for (int j = i; j < 2; ++j) f << "V," << vtx << ",D," << i << ',' << j << ',' << v.D(i, j) << '\n';
+                for (int i = 0; i < 4; ++i) f << "V," << vtx << ",b," << i << ',' << v.b(i) << '\n';
+                for (int i = 0; i < 2; ++i) f << "V," << vtx << ",e," << i << ',' << v.e(i) << '\n';
+            }
             return true;
         }
 
@@ -233,9 +258,48 @@ namespace rc::camcal
                         if (i >= 0 and i < 4) in.b(i) = v;
                     }
                 }
+                // V,<vertex>,<what>,<i>[,<j>],<value> — the per-vertex partials (format 2).
+                else if (tok[0] == "V" and tok.size() >= 5)
+                {
+                    double dv = 0;
+                    if (not num(tok[1], dv)) continue;
+                    rc::mount::VertexBlock& vb = in.per_vertex[static_cast<int>(dv)];
+                    const std::string& what = tok[2];
+                    double di = 0, dj = 0;
+                    if (what == "n"   and tok.size() == 4 and num(tok[3], v)) { vb.n = static_cast<long>(v); continue; }
+                    if (what == "rTr" and tok.size() == 4 and num(tok[3], v)) { vb.rTr = v; continue; }
+                    if (what == "b" and tok.size() == 5 and num(tok[3], di) and num(tok[4], v))
+                    { const int i = static_cast<int>(di); if (i >= 0 and i < 4) vb.b(i) = v; continue; }
+                    if (what == "e" and tok.size() == 5 and num(tok[3], di) and num(tok[4], v))
+                    { const int i = static_cast<int>(di); if (i >= 0 and i < 2) vb.e(i) = v; continue; }
+                    if (tok.size() != 6 or not num(tok[3], di) or not num(tok[4], dj) or not num(tok[5], v))
+                        continue;
+                    const int i = static_cast<int>(di), j = static_cast<int>(dj);
+                    if (what == "A" and i >= 0 and i < 4 and j >= 0 and j < 4) { vb.A(i, j) = v; vb.A(j, i) = v; }
+                    else if (what == "c" and i >= 0 and i < 4 and j >= 0 and j < 2) vb.c(i, j) = v;
+                    else if (what == "D" and i >= 0 and i < 2 and j >= 0 and j < 2) { vb.D(i, j) = v; vb.D(j, i) = v; }
+                }
             }
             if (in.n <= 0 or not in.H.allFinite() or not in.b.allFinite()) return 0;
+            // ⚠ EVIDENCE WRITTEN BEFORE THE PER-VERTEX PARTITION CANNOT BE MARGINALISED. Its rows
+            //   are already summed across corners, and no post-hoc step recovers which corner each
+            //   came from. Flagging it makes the solve REFUSE the nuisance rather than quietly
+            //   returning the old, 127x-overconfident answer under the new model's name.
+            if (in.per_vertex.empty())
+            {
+                in.legacy_unattributed = true;
+                qWarning().nospace()
+                    << "[camcal] " << QString::fromStdString(path) << " is format 1 (no per-vertex "
+                    << "partials): " << in.n << " pairs restored for the aggregate solve, but the "
+                    << "per-vertex offset nuisance CANNOT run on them. Delete the file to "
+                    << "re-accumulate under the new model.";
+            }
+            // ★ `in` is a fresh Accum, so assigning it would reset the nuisance's prior sigma to its
+            //   default and the solve would silently revert to the old model on any run that resumed
+            //   from disk. The knob is CONFIGURATION, not evidence; it must survive a load.
+            const double keep_sigma = acc_.offset_sigma_px;
             acc_ = in;
+            acc_.offset_sigma_px = keep_sigma;
             return static_cast<std::size_t>(acc_.n);
         }
 

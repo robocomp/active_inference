@@ -1477,6 +1477,23 @@ maxSlots     = 1          # newest window slot only, like corners
 mountPitchSigma  = 0.0035   # rad (~0.2 deg)   ⚠ NOT MEASURED ON SHADOW
 mountHeightSigma = 0.010    # m                ⚠ NOT MEASURED ON SHADOW
 mountYawSigma    = 0.0035   # rad              ⚠ NOT MEASURED ON SHADOW
+# ── The per-vertex offset nuisance (mount_lidar_pair.h) ──────────────────────────────────────────
+# Prior sigma on a CORNER'S OWN image offset, in pixels. MEASURED 2026-09-02: per-vertex means reach
+# −17 px and spread sd 5.3 px across 23 corners, while the mount signal being estimated is 1.1 px of
+# yaw. Without this term the solve counts one corner's thousands of sightings as thousands of
+# independent measurements and reports a yaw sigma 127x too small — smaller than its own honest error.
+#   0    = OFF, and OFF is bit-for-bit the pre-2026-09-02 solve. This is the default on purpose:
+#          turning it on changes every mount sigma the agent reports, which is the user's call.
+#   5.3  = the measured between-corner spread. ⚠ Empirical Bayes: measured from the same data it is
+#          applied to, so it is a hyperparameter, NOT a prior the data then confirms.
+# ★ Expect yaw's sigma to open by ~130x (to about 0.216 deg, the between-vertex SEM) and pitch and
+#   height by much less. That asymmetry is the pre-registered prediction, not a side effect: yaw is a
+#   constant pixel shift and is degenerate with a corner's own offset, while pitch and height are
+#   range-dependent and survive. See VALIDATION_THREE_DEVICE_CORNERS.md §2.
+# ⚠ Evidence files written before this existed carry no vertices and CANNOT be marginalised; the
+#   agent says so and refuses rather than reverting silently. Delete etc/camera_calib_*.txt to
+#   re-accumulate under the new model.
+mountVertexOffsetSigmaPx = 0.0
 
 # ── Structural features ported from config_p3bot_webots.toml, 2026-08-29 ───────────────────────
 # ★★ mountYawCorrection is DELIBERATELY ABSENT, i.e. zero. P3Bot's +0.814 deg was measured on

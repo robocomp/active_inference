@@ -873,6 +873,16 @@ void SpecificWorker::mount_pair_update(const rc::ImageEdgeObs &obs,
         //   into one information matrix, which estimates neither. The name keys the file AND is
         //   checked inside it, so a copy or a rename is caught too.
         mp_pool_.set_camera(params.IMAGE_EDGE_CAMERA, params.LIDAR_ROBOT_FRAME);
+        // The per-vertex offset nuisance, on the pool AND on the per-window accumulator, so the two
+        // columns on the same log line are produced by the same model. Set BEFORE load(), which
+        // preserves it. 0 = off = the pre-2026-09-02 solve exactly.
+        const double vox = params.IMAGE_EDGE_MOUNT_VERTEX_OFFSET_SIGMA_PX;
+        mp_pool_.set_vertex_offset_sigma_px(vox);
+        mp_win_.offset_sigma_px = vox;
+        if (vox > 0.0)
+            qInfo().nospace() << "[camcal] per-vertex offset nuisance ON, prior sigma " << vox
+                              << " px — mount sigmas are now cluster-honest and will read LARGER; "
+                                 "yaw approaches the between-vertex SEM by construction";
         const std::string path = mp_pool_.path();
         if (const std::size_t k = mp_pool_.load(path); k > 0)
             qInfo().nospace() << "[camcal] resumed from " << QString::fromStdString(path)
@@ -1007,7 +1017,11 @@ void SpecificWorker::mount_pair_update(const rc::ImageEdgeObs &obs,
                     .arg((win.informed >> i) & 1 ? ", INF" : "");
     qInfo().nospace().noquote()
         << "[mount/pair] window " << mp_wins_ << " (" << win.chi2_dof * 0 + mp_paired_
-        << " pairs of " << mp_seen_ << " triple points)" << body
+        << " pairs of " << mp_seen_ << " triple points"
+        // ★ THE CLUSTER COUNT IS THE REAL SAMPLE SIZE FOR THE MOUNT'S LEVEL, and printing it beside
+        //   the pair count is what stops "395171 pairs" being read as 395171 measurements.
+        << ", " << win.clusters << " corners" << (win.marginalised ? ", offset marginalised" : "")
+        << ")" << body
         << " | chi2/dof " << QString::number(win.chi2_dof, 'f', 2)
         << " | cond " << QString::number(win.cond, 'f', 1)
         << " (" << nm[win.rho_i] << "/" << nm[win.rho_j] << " rho "
@@ -1359,6 +1373,9 @@ void SpecificWorker::pump_calib_channels()
         {
             ch.loaded = true;
             ch.calib.set_camera(ch.name, params.LIDAR_ROBOT_FRAME);
+            // Same model on every camera, or the Calib window would show two mounts judged by two
+            // different notions of uncertainty side by side.
+            ch.calib.set_vertex_offset_sigma_px(params.IMAGE_EDGE_MOUNT_VERTEX_OFFSET_SIGMA_PX);
             const std::string path = ch.calib.path();
             if (const std::size_t k = ch.calib.load(path); k > 0)
                 qInfo().nospace() << "[camcal] " << QString::fromStdString(ch.name)
