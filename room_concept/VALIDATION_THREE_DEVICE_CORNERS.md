@@ -206,10 +206,47 @@ pre-2026-09-02 file rather than printing NaNs), `tools/solve_mount.py` (offline 
   property of THAT corner's geometry, so it belongs in the model as a nuisance with its own prior,
   and the mount then draws information from how a corner's offset varies with viewing geometry
   rather than from how many times it was seen.
-- **Pre-registered prediction.** The mount posterior sigmas inflate by roughly the design effect
-  (≈130x ricoh, ≈50x zed) and the fitted values move by less than the current sigma. ★ If the VALUES
-  move a lot, the pooled estimate was being set by cluster composition and every number in §1.5 is
-  withdrawn; if the SIGMAS do not inflate, the nuisance is not absorbing what it was built for.
+- **What the marginalisation actually is.** `δ_v` gets a prior `N(0, S)` and is INTEGRATED OUT, not
+  estimated — its value is not wanted, only its contamination removed. Per vertex accumulate
+  `A_v = ΣJᵀWJ`, `c_v = ΣJᵀW`, `D_v = ΣW`, `b_v = ΣJᵀWr`, `e_v = ΣWr`, and contribute
+  `A_v − c_v(S⁻¹+D_v)⁻¹c_vᵀ` and `b_v − c_v(S⁻¹+D_v)⁻¹e_v`. ★ This is the **Woodbury common-mode
+  marginalisation `CLAUDE.md` already names** for correlated mask points, applied one level up: a
+  covariance term, not a gate. `S → 0` recovers today's estimator exactly and `S → ∞` removes the
+  level entirely, so it is a continuous knob with the current behaviour at one end.
+  ⚠ The persisted evidence file changes shape: per-vertex partials, not one global `(H, b)`.
+  ⚠ `S` measured from this same data (sd 5.3 px) is an empirical-Bayes hyperparameter. Label it as
+  one; it is not a prior the data then confirms.
+
+- **★★★ PRE-REGISTERED PREDICTION — ASYMMETRIC, not uniform.** (Corrected 2026-09-02; the first
+  version predicted a uniform ≈130x and was wrong for a specific, checkable reason.) As `n_v` grows,
+  `(S⁻¹+D_v)⁻¹ → D_v⁻¹` and the vertex contributes only `A_v − c_vD_v⁻¹c_vᵀ` — its **within-vertex**
+  information. The level is gone; only variation survives. What survives differs per parameter:
+
+  | | within-vertex signature | predicted |
+  |---|---|---|
+  | **yaw** | a constant pixel shift — no range or bearing dependence, so **exactly degenerate with that vertex's own u-offset** | inflates by ~the full design effect, landing at the between-vertex SEM: **0.216° (ricoh)** |
+  | **pitch, height** | range-dependent (`Δd = θ_p·d²/h`), and the median within-vertex range sd is **1.16 m** on a median range of 4.8 m | inflates **strictly less** than the design effect |
+
+  ★ The sharp version: **the marginalised ricoh yaw sigma should come out at 0.216°**, and pitch and
+  height should inflate by visibly less than yaw. If all three inflate equally the nuisance is
+  removing more than the level and `S` is too loose; if yaw does NOT inflate to ≈0.216° the
+  per-vertex accumulation is wrong. ★ If the VALUES move a lot, the pooled estimate was being set by
+  cluster composition and every number in §1.5 is withdrawn.
+
+- **★ Marginalising does not RECOVER yaw precision — it reveals we never had it.** Nothing in this
+  stage improves the mount; it makes the reported uncertainty true. The only routes to a better yaw
+  are more DISTINCT vertices or smaller per-corner offsets, and no amount of driving past the same 23
+  corners is either. ⚠ There is a floor beneath even that: a detector bias common to every corner IS
+  yaw, and no data from this instrument separates them.
+
+- **Where `δ_v` lives — the one real design choice.** In PIXELS it is cheap, fixes the sigma, and
+  assumes nothing about cause. In the ROOM FRAME (metres) it is more physical, since both leading
+  causes — map error and LiDAR corner-extraction bias — live there, and the projection makes it
+  range-aware for free. ★★★ Note what the metric version IS: `δ_v` in the room frame is **landmark
+  position refinement — `DESIGN §7`'s corner-as-landmark design, marginalised instead of estimated.**
+  Same term; integrating it out or solving for it is the only difference between the two designs.
+  Start in pixels, move to metres. ⚠ Measured: a 1/range fit does NOT distinguish the two on this
+  data (both R² ≈ 0), so the pixel choice does not assume what could not be measured.
 - **Margin audit**, on a run recorded with the stage-0 binary: `runnerup_chi2 / assoc_chi2` over
   contested rows. A correspondence is trustworthy when the second-best candidate is FAR, not when the
   best one is close. ★ Report the fraction of rows with `n_rivals` = 0 first: on those the gate made
@@ -223,6 +260,43 @@ pre-2026-09-02 file rather than printing NaNs), `tools/solve_mount.py` (offline 
   would recalibrate against. The pair covariance's own calibration is measured instead (median
   `|r|/sigma` = 0.61, 2.65% over the 2.448 bound), and it is conservative by ~1.3x, which `chi2/dof`
   = 1.75 independently confirms.
+
+### Stage 1b — does TRACKING a matched vertex add information? ⚠ MEASURED, mostly NO
+
+Asked 2026-09-02: if a vertex is tracked over time rather than treated as an independent draw each
+frame, does that recover what §1.1 costs? Two tests, both pre-stated, both on existing data.
+
+**H1 — is the offset a FUNCTION of the corner, not 23 free numbers?** If `δ_v` depended on the corner's
+opening angle it would be a 2–3 parameter detector-bias model, not 23 nuisances, and almost all the
+precision would survive. `angle_deg` is already logged. Over 22 vertices:
+`corr(mean_ru, angle) = −0.28`, `corr(|mean_ru|, angle) = +0.34`; **neither reaches the ±0.41 needed
+for p < 0.05 at n = 22. No evidence.** ⚠ Read as weak: absence of evidence over 22 points, one
+covariate. Other covariates (convex/concave, wall-ceiling vs wall-floor, wall material) are untried
+and cheap, and a hit on any of them would be worth more than everything else in this stage.
+
+**H2 — does the offset move with viewing BEARING within a vertex?** On a panorama `u_img` IS bearing,
+so this is free. Median `|corr(ru, u_img)|` within a vertex = **0.095**; only 1 of 22 vertices exceeds
+0.3. **The offset is close to constant within a vertex** — which CONFIRMS the constant-`δ_v` model is
+the right one, and simultaneously confirms that bearing diversity will not rescue yaw.
+
+★★★ **The design effect is set by the number of DISTINCT vertices, not by how well each is tracked.**
+Tracking adds rows to a cluster; it does not add clusters. It therefore cannot improve yaw, and any
+scheme that reports otherwise has re-introduced the original error.
+
+What tracking DOES buy, and it is worth having:
+
+1. **It separates a mis-association from a detection bias, which is Stage 1's rigidity goal.** A true
+   per-corner offset is CONSTANT along a track; a mis-association is a STEP. The static per-vertex
+   spread cannot tell those apart — a temporal signature can, and it needs no extrinsics and no pose.
+2. **It confirms the nuisance model rather than assuming it** (H2 above is exactly that test).
+3. **It supplies the range diversity pitch and height feed on** — median within-vertex range sd 1.16 m.
+   That variation is the reason those two survive marginalisation while yaw does not.
+
+★ And it names the excitation, in the same form as the motion work: to separate a METRIC offset (map
+error) from a PIXEL offset (detector bias), the informative motion is maximum BEARING sweep on one
+corner at close range — driving PAST a corner, not toward it. Driving toward it varies range, which
+is what pitch and height want. **The two nuisances have different optimal manoeuvres, and an
+apartment tour supplies both.**
 
 ### Stage 2 — the closure test, mode B (needs a second ingestor, then driving)
 
