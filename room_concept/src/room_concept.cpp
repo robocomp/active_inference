@@ -2069,6 +2069,11 @@ namespace rc
     {
         wall_map_.merge_indistinguishable();
         auto poly = wall_map_.build_polygon();
+        // The PUBLISHED layout: exactly Manhattan by construction — the output-stage projection
+        // on a COPY (WallMap::manhattan_polygon). The raw polygon keeps every in-loop role
+        // (re-anchor trigger and bbox, model update, status): six in-loop hard-Manhattan
+        // variants were measured to degrade estimation; only what leaves the agent is projected.
+        auto pub = wall_map_.manhattan_polygon();
         if (poly.closed and poly.verts.size() >= 3)
         {
             if (poly.publishable and not wall_reanchored_)
@@ -2083,6 +2088,7 @@ namespace rc
                 reanchor_map_frame(c, rot);
                 wall_reanchored_ = true;
                 poly = wall_map_.build_polygon();
+                pub  = wall_map_.manhattan_polygon();
                 map_ready_ = true;
                 res.covariance = current_covariance;
                 qInfo() << "[room][wall-slam] polygon CLOSED and publishable:" << poly.verts.size()
@@ -2090,9 +2096,11 @@ namespace rc
                         << "origin moved by (" << c.x() << "," << c.y() << ") m, rotated" << rot * 180.f / static_cast<float>(M_PI) << "deg.";
             }
             if (model_ != nullptr and model_->has_state())
-                model_->update_polygon_vertices(poly.verts);
+                model_->update_polygon_vertices(poly.verts);   // in-loop consumer: RAW on purpose
             std::scoped_lock lk(wall_map_mutex_);
-            derived_polygon_ = poly.verts;
+            // Publish the projected polygon; fall back to the raw one if a projection ever fails
+            // to close (measured 3/3 closed on the bench, but the live map owes nobody a promise).
+            derived_polygon_ = (pub.closed and pub.verts.size() >= 3) ? pub.verts : poly.verts;
         }
         if (poly.status != last_wall_status_)
         {
@@ -2112,7 +2120,7 @@ namespace rc
                 if (in_poly.contains(w.id) or wall_frame_ts_ - w.last_seen_ms <= 2000)
                     res.wall_view.walls.push_back(w);
         }
-        res.wall_view.polygon     = poly;
+        res.wall_view.polygon     = (pub.closed and pub.verts.size() >= 3) ? pub : poly;
         res.wall_view.seg_to_wall = last_wall_frame_.seg_to_wall;
         res.wall_view.theta0_born = wall_map_.theta0_born;
         res.wall_view.theta0      = wall_map_.theta0;
