@@ -1031,8 +1031,12 @@ namespace rc::wallmap
             // against a transient baseline and amputated half a flat (IoU 0.865 → 0.460, seed
             // 1001). The toll is not only an order prior; it is the noise floor of the evidence
             // comparison itself.
-            float cost = params.order_jump_nats * static_cast<float>(std::max(1, (std::abs(dorder) + 1) / 2));
-            if (std::abs(dorder) % 2 == 1) cost += params.parity_jump_nats;
+            // Code length of the lines this move names (Params doc): |dorder| new edges, at least
+            // the replacement's count; an odd jump's extra edge is off-class and names its angle.
+            const int new_edges = std::max(params.replace_code_edges, std::abs(dorder));
+            const bool off_class = std::abs(dorder) % 2 == 1;
+            const float cost = static_cast<float>(new_edges) * edge_code_nats(true)
+                             + (off_class ? edge_code_nats(false) - edge_code_nats(true) : 0.f);
             if (params.debug_splice)
                 std::printf("[splice]   jump dorder=%+d dnats=%.1f cost=%.1f -> %s\n",
                             dorder, dnats, cost, dnats > cost ? "ACCEPT" : "refuse");
@@ -1253,7 +1257,7 @@ namespace rc::wallmap
                         // carved thin body no longer votes against a real spur.
                         const float e_grid = jump_delta_nats(poly, p2, 0);
                         const float dnats = bin_nats + e_grid;
-                        const float cost = 2.f * params.order_jump_nats;
+                        const float cost = static_cast<float>(params.wrap_code_edges) * edge_code_nats(true);
                         if (params.debug_splice)
                             std::printf("[spur]   jump dnats=%.1f (bins %.1f + grid %.1f) cost=%.1f -> %s\n",
                                         dnats, bin_nats, e_grid, cost, dnats > cost ? "ACCEPT" : "refuse");
@@ -1384,8 +1388,7 @@ namespace rc::wallmap
                     and std::find(o.begin(), o.end(), w.id) == o.end())
                     for (const float b : w.exist_bins) dnats -= std::max(0.f, b - params.birth_nats);
             const int dorder = N - static_cast<int>(o.size());
-            const float refund = params.order_keep_fraction * params.order_jump_nats
-                               * static_cast<float>(std::max(1, (dorder + 1) / 2));
+            const float refund = params.order_keep_fraction * static_cast<float>(dorder) * edge_code_nats(true);
             const float margin = dnats + refund;
             if (margin > best_margin + 1e-3f)
             { best_margin = margin; best_o = o; best_removed = dorder; }
@@ -2678,6 +2681,15 @@ namespace rc::wallmap
     }
 
     Polygon WallMap::build_polygon() const { return build_from(order); }
+
+    float WallMap::edge_code_nats(bool manhattan_class) const
+    {
+        const float res  = fgrid.ready() ? fgrid.cell : 0.08f;
+        const float span = 2.f * params.sensor_range;
+        const float offset = std::log(span / res);
+        const float angle  = manhattan_class ? std::log(4.f) : std::log(2.f * kPi * params.sensor_range / res);
+        return offset + angle;
+    }
 
     bool WallMap::repair_if_crossing(bool immediate)
     {

@@ -104,22 +104,32 @@ namespace rc::wallmap
         // provably wraps (only stub variants offered) and below which it provably does not (only
         // boundary variants offered).
         float stub_free_behind_min = 0.25f;
-        // ── ORDER-QUANTIZED GROWTH (user design 2026-09-01) ─────────────────────────────────────
+        // ── ORDER-QUANTIZED GROWTH (user design 2026-09-01), PRICED BY CODE LENGTH (2026-09-02) ──
         // The map starts as the minimal Manhattan polygon (the rectangle) and grows in EVEN order
-        // jumps (+2 corner-cut/direct, +4 notch/spur-wrap). Each jump pays a CONSTANT structural
-        // cost — a geometric prior on polygon order, birth_nats at the topology level — and is
-        // accepted only when the evidence it NEWLY EXPLAINS over the region where the two polygons
-        // disagree (jump_delta_nats: matter cells released from the interior pay FOR it, fresh
-        // free cells released pay AGAINST it) exceeds that cost. Symmetric on down-jumps ⇒ a 2x
-        // hysteresis band that kills commit/death flapping. ⚠ decision constants.
-        float order_jump_nats  = 15.f;      // per +2 edges
-        float parity_jump_nats = 2.f;       // extra for an ODD jump (the class-less chamfer)
+        // jumps (+2 corner-cut/direct, +4 notch/spur-wrap). Each jump pays the DESCRIPTION LENGTH
+        // of the lines it names (Rissanen 1978, two-part code; the model-complexity term of
+        // Floor-SP): a Manhattan edge costs ln(4) for its class plus ln(2·sensor_range / cell) for
+        // its offset at the resolution the data are encoded at (the grid cell) — 7.3 nats at 15 m
+        // and 8 cm, i.e. 14.6 per +2 edges where the bench had settled on a hand-tuned 15. An
+        // off-class edge (an odd, chamfer jump) also names its angle at the same resolution,
+        // ln(2π·sensor_range / cell), instead of ln 4. The jump is accepted only when the evidence
+        // it NEWLY EXPLAINS over the region where the two polygons disagree (jump_delta_nats)
+        // exceeds that length. See WallMap::edge_code_nats(). What the code length cannot derive
+        // is how many NEW lines a move names: a replacement swaps one line for another (1, the
+        // noise floor the free version lacked: measured 0.865 → 0.460 with 0); a spur wrap names
+        // its tip cap and its mirror (2; the mirror's offset is the wall thickness). ⚠ structural
+        // counts, swept on the bench.
+        int   replace_code_edges = 1;
+        int   wrap_code_edges    = 2;
         // Standing structure pays RENT: a down-jump is accepted when the evidence AGAINST removal
-        // (grid delta plus the removed walls' existence-bin nats) is smaller than this fraction of
-        // the order cost it refunds — Occam pushes the polygon down through evidence-neutral
-        // structure (a pocket over unobserved space), while the [keep·cost, cost] band gives the
-        // hysteresis that prevents up/down flapping at the boundary.
-        float order_keep_fraction = 0.7f;
+        // (grid delta plus the removed walls' net existence-bin nats) is smaller than the code
+        // length it refunds — Occam pushes the polygon down through evidence-neutral structure (a
+        // pocket over unobserved space). The two-part code refunds the FULL length (1.0); a
+        // fraction below 1 is a switching cost — the [keep·cost, cost] hysteresis band that once
+        // stopped commit/death flapping (~1000 cycles per run in the pre-existence-bin era). It
+        // measured INERT on the bench at 0.5 / 0.7 / 0.85 / 1.0 (2026-09-02), so the principled
+        // value stands; lower it only against measured flapping.
+        float order_keep_fraction = 1.0f;
         // SURRENDER RULE INSIDE ADOPTION (user design 2026-09-01): a wall backed by OBSERVED
         // existence support (bins above the birth seed) may not be dropped by a contour adoption
         // for free. This is a VETO, not a price — a global trade cannot protect a small structure
@@ -344,6 +354,10 @@ namespace rc::wallmap
         /// grid is not ready or no floodable seed exists nearby. Used by re_derive() and by the
         /// stub discriminator in try_splice.
         std::vector<char> free_component(const Eigen::Vector2f& seed_map) const;
+        /// Description length of one polygon edge in nats (Params doc, "PRICED BY CODE LENGTH"):
+        /// class + offset at the grid's resolution over the sensed span; an off-class edge names
+        /// its angle too. The one number every order jump, wrap and down-jump is priced in.
+        float edge_code_nats(bool manhattan_class) const;
         /// GLOBAL re-derivation: trace the free region's contour, snap its runs to the evidence
         /// lines (walls ∪ candidates, Manhattan preferred), and ADOPT the resulting cycle iff it
         /// explains the observed free space better than the current one. The escape hatch from a

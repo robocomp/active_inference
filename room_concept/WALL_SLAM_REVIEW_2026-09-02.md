@@ -19,7 +19,7 @@ Status column tracks what has been acted on. Findings are ranked most severe fir
 | 7 | MAJOR | fixed 09-02 (immediate repair on the copy, loop to closure; publisher keeps last good, never raw) — bench unchanged | `manhattan_polygon()` repair inert on the copy; publisher flip-flops projected↔raw |
 | 8 | MAJOR | fixed 09-02; strict net-of-seed purse landed with #10 stage 1 (walls inherit their candidate's support, so the real spur still pays) | spur-wrap purse paid with seeded (untested) bins |
 | 9 | MAJOR | open | grid matter never forgets (`hits ≥ 3` is permanent) |
-| 10 | MAJOR | stage 1 done 09-02 (one currency for LINE claims; grid stays the AREA currency — a single scalar measured worse 12 ways, see record) | three incommensurable "nats" currencies against one toll |
+| 10 | MAJOR | stage 1 + MDL toll done 09-02 (one currency for LINE claims; grid stays the AREA currency; the toll is now a derived code length, 7.3 nats/edge) | three incommensurable "nats" currencies against one toll |
 | 11 | MAJOR | open | corner explanation is size-blind; `corner_residue` orphaned and not re-anchored |
 | 12 | MINOR | open | ≥40 unflagged literals in the body; key params not loadable |
 | 13 | MINOR | open | θ₀ M-step weights by `points_seen`, not angular information |
@@ -247,3 +247,24 @@ number per cell. Seed 424242's −0.021 is trajectory chaos: every proposed stub
 76 nats vs 30), the second stub of base's run is never proposed. Still open: the toll is a bench-calibrated
 constant (an MDL vertex cost is the principled replacement); adoption still decides on grid IoU + surrender.
 Bench-only: `WS_ORDER_JUMP_NATS=<v>` overrides the toll for sweeps.
+
+## Record for #10 stage 2 — the toll as a code length (2026-09-02)
+`order_jump_nats = 15`, `parity_jump_nats = 2` and the hand-tuned refund are replaced by
+`WallMap::edge_code_nats()`: a two-part description length per edge (Rissanen 1978; Floor-SP's complexity
+term) — ln 4 for the Manhattan class plus ln(2·sensor_range / grid cell) for the offset at the data's
+resolution = 7.29 nats per edge at 15 m and 8 cm, i.e. 14.6 per +2 edges where the bench had settled on 15
+(the literature doc's prediction: "if it lands near 15 the toll is vindicated"). An off-class edge names its
+angle at the same resolution, ln(2π·range/cell) = 7.07 instead of ln 4 — the odd-jump surcharge becomes 5.7
+nats instead of 2. What the code cannot derive is how many NEW lines a move names, so those are structural
+counts swept on the bench: a replacement names one line (`replace_code_edges = 1`, the noise floor a free
+replacement lacked), a spur wrap names its cap and mirror (`wrap_code_edges = 2`).
+| replacement names | wrap names | seed 7 | 1001 | 424242 |
+|---|---|---|---|---|
+| 1 | 2 (kept) | 0.954 | 0.968 | 0.921 |
+| 1 | 4 | 0.954 | 0.968 | 0.921 |
+| 2 | 2 | 0.545 | 0.967 | 0.921 |
+| 2 | 4 | 0.545 | 0.967 | 0.921 |
+Charging a replacement two lines (14.6, the old 15) puts seed 7 on a knife edge: one replacement with
+14.6 < Δ ≤ 15 nats is accepted and amputates. The refund fraction measured inert at 0.5 / 0.7 / 0.85 / 1.0,
+so it is set to the principled 1.0 and documented as a switching cost. Bench-only overrides:
+`WS_REPLACE_EDGES`, `WS_WRAP_EDGES`, `WS_KEEP`. Still open in #10: adoption decides on grid IoU + veto.

@@ -59,15 +59,21 @@ namespace
 
     // ── Rooms (CCW) ──────────────────────────────────────────────────────────────────────────────
 
-    // Bench-only override of the one order toll, for a sweep: WS_ORDER_JUMP_NATS=<float>.
+    // Bench-only overrides of the structural counts the code length cannot derive, for sweeps.
     static void apply_env_overrides(rc::wallmap::Params& p)
     {
-        if (const char* e = std::getenv("WS_ORDER_JUMP_NATS"))
+        const auto envf = [](const char* name, auto& dst)
         {
-            float v = 0.f;
-            const auto r = std::from_chars(e, e + std::strlen(e), v);
-            if (r.ec == std::errc{}) p.order_jump_nats = v;
-        }
+            if (const char* e = std::getenv(name))
+            {
+                float v = 0.f;
+                const auto r = std::from_chars(e, e + std::strlen(e), v);
+                if (r.ec == std::errc{}) dst = static_cast<std::remove_reference_t<decltype(dst)>>(v);
+            }
+        };
+        envf("WS_REPLACE_EDGES", p.replace_code_edges);   // lines a replacement names (default 1)
+        envf("WS_WRAP_EDGES",    p.wrap_code_edges);      // lines a spur wrap names (default 2)
+        envf("WS_KEEP",          p.order_keep_fraction);  // down-jump refund fraction (default 0.7)
     }
 
     Poly l_room()      { return {{-4.f, -3.f}, {4.f, -3.f}, {4.f, 1.f}, {1.f, 1.f}, {1.f, 3.f}, {-4.f, 3.f}}; }
