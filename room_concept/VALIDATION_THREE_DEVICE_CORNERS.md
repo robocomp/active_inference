@@ -169,6 +169,16 @@ satisfied on data in hand.
 quantities whose stated precisions are both wrong. What it establishes is that the three devices tell
 one story about yaw; it does not establish that the story is true (§3).
 
+⚠⚠ **SUSPENDED 2026-09-02 — the closure leg's px→rad scale was biased.** `px_per_rad()` returns the
+scale at the **principal point**: exact for the ricoh panorama, wrong off-axis for the zed pinhole,
+whose true local scale is `fx·sec²θ`. The closure *differences* the two cameras in radians, so the
+error fell entirely on the comparison — measured at **82% of the leakage a LiDAR error puts into the
+closure** (§2b). Both `−0.0115°` and the `0.0023°` agreement therefore came through a biased channel
+and **must be re-measured** on the next run; how far they move cannot be computed from data in hand,
+because it depends on where the zed's corners sat in its field and the zed channel logged no rows at
+all until this was fixed. Cure: `rc::img::px_per_rad_at()`, used per row at both call sites.
+★ The mount-solve difference `−0.0138°` is unaffected — it never converts pixels to angles.
+
 ### 1.5 ✓ What already exists, and is worth having
 
 Both cameras have accumulated evidence on disk in information form, correctly keyed:

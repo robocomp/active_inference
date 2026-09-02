@@ -520,6 +520,193 @@ J<sub>dt</sub>     = 0                            <span class="c">no observation
   </div>
 </section>
 
+<section>
+  <div class="sec-head"><h2>What the robot learns, and what changes when it does</h2></div>
+  <div class="rule both"></div>
+  <p class="sec-note">
+    The parameters are not the deliverable. A running robot never reads them; it drives, predicts, and is
+    corrected. So the question that matters is where each learned number <em>enters</em> that loop, and
+    which measurable thing moves when it does. Both answers turned out to be different from the ones
+    assumed at the start, and the difference is the most useful thing on this page.
+  </p>
+
+  <div class="panel">
+    <h3>The loop the module lives in</h3>
+    <div class="diagram">
+    <svg viewBox="0 0 700 250" role="img" aria-label="A cycle: driving produces a prediction from the odometry model, the localiser corrects it, and the size of that correction is the residual the calibration block is fitted to; the fitted parameters feed back into the prediction.">
+      <rect class="comp" x="26" y="46" width="112" height="36" rx="5"/>
+      <text x="82" y="69" text-anchor="middle">act · drive</text>
+
+      <rect class="node" x="212" y="46" width="184" height="36" rx="5"/>
+      <text x="304" y="69" text-anchor="middle">predict  p̂ = f(u ; θ)</text>
+
+      <rect class="node" x="470" y="46" width="200" height="36" rx="5"/>
+      <text x="570" y="69" text-anchor="middle">localiser correction</text>
+
+      <rect class="comp" x="212" y="176" width="458" height="36" rx="5"/>
+      <text x="441" y="199" text-anchor="middle">θ ← argmin Σ w · ‖ est − pred ‖²</text>
+
+      <path class="edge b" d="M138 64 L 206 64" marker-end="url(#ar)"/>
+      <path class="edge o" d="M396 64 L 464 64" marker-end="url(#ar)"/>
+      <path class="edge o" d="M570 82 C 570 140, 600 194, 670 194"/>
+      <path class="edge b" d="M240 176 C 200 150, 190 110, 240 82"/>
+      <text class="cov" x="176" y="132" text-anchor="middle" style="fill:var(--base)">θ</text>
+
+      <text class="cov" x="430" y="42" text-anchor="middle">‖ est − pred ‖</text>
+      <text class="cov" x="430" y="28" text-anchor="middle" style="fill:var(--optic)">the correction load</text>
+      <text class="cov" x="648" y="150" text-anchor="end" style="fill:var(--optic)">the free teacher</text>
+
+      <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6"
+        orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--hair)"/></marker></defs>
+    </svg>
+    </div>
+    <p class="caption">
+      Nothing here is a calibration procedure. The localiser is already computing, every cycle, the exact
+      quantity the parameters are fitted to — <em>how far its own correction had to move the prediction.</em>
+      Ordinary driving is the experiment, and the corrector is the teacher.
+    </p>
+  </div>
+
+  <div class="panel">
+    <h3>What one apartment tour teaches, and where the number goes</h3>
+    <div class="tblwrap"><table class="ledger">
+      <thead><tr><th>learned</th><th>moved by</th><th>σ<sub>post</sub>/σ<sub>prior</sub></th><th>what it changes in the running robot</th></tr></thead>
+      <tbody>
+        <tr><td>k_v</td><td>distance</td><td class="num">0.142</td>
+          <td>scales every odometry step, so the pose the localiser starts each cycle from is nearer the truth</td></tr>
+        <tr><td>δk_wheel</td><td>distance</td><td class="num">0.126</td>
+          <td>removes the heading drift that grows with distance — a curved dead-reckoned path becomes straight</td></tr>
+        <tr><td>ε_yaw</td><td>forward travel</td><td class="num">0.162</td>
+          <td>removes a systematic sideways lean in dead reckoning between corrections</td></tr>
+        <tr><td>b_ω</td><td>elapsed time</td><td class="num">0.244</td>
+          <td>stops heading from creeping while the robot stands still — the reason a pause is worth taking</td></tr>
+        <tr><td>k_ω</td><td>rotation</td><td class="num">0.293</td>
+          <td>scales turns, so a commanded 90° arrives as 90°</td></tr>
+        <tr><td style="color:var(--dead)">k_lat</td><td>lateral travel</td><td class="num" style="color:var(--dead)">0.998</td>
+          <td><span class="chip dead">nothing</span> a differential drive never asks the question</td></tr>
+        <tr><td>cam yaw</td><td>corner sightings</td><td class="num">±0.216°</td>
+          <td>where a LiDAR corner is predicted to land in the image — the RGB edge residual and the corner
+              association both read it</td></tr>
+        <tr><td>cam pitch, height</td><td>range diversity</td><td class="num">ρ = −0.98 (zed)</td>
+          <td>the same, in elevation; on the panorama the two separate, on the narrow field they do not</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+
+  <div class="panel">
+    <h3>What moved when calibration was switched on · measured, three campaigns</h3>
+    <div class="tblwrap"><table class="ledger">
+      <thead><tr><th>endpoint</th><th>healthy robot</th><th>robot mis-scaled by 10%</th><th>verdict</th></tr></thead>
+      <tbody>
+        <tr><td>accuracy (RPE)</td>
+          <td>37.6 → 37.2 mm/m, |t| &lt; 1.4 — but d ≈ 0.7 at n = 13/11 is <strong>~39% power</strong>,
+              so a null is the <em>modal</em> outcome of a real effect</td>
+          <td>64.5 → 48.7 mm/m, t = 3.00</td>
+          <td><span class="chip warn">unresolved at 200 m</span></td></tr>
+        <tr><td>optimiser firing</td>
+          <td>4.92% → 1.11% once; <strong>5.41% → 5.08%</strong> on repeat (d = 0.08)</td>
+          <td>5.80% → 6.49%, no change</td>
+          <td><span class="chip dead">did not reproduce</span></td></tr>
+        <tr><td>iterations per solve</td>
+          <td colspan="2">13.29 · 13.27 · 13.90 · 13.48 — flat across a tenfold span of model error</td>
+          <td><span class="chip dead">flat</span></td></tr>
+        <tr><td>correction load<br><span class="mono" style="font-size:12px">‖est − pred‖ per metre</span></td>
+          <td>per solve 22.0 → 17.3 mm, t = 2.41, d = 0.94 — the only significant statistic in that table</td>
+          <td>87.2 → 58.8 mm/m, t = 3.57, d = 1.59</td>
+          <td><span class="chip ok">responds in both</span></td></tr>
+      </tbody>
+    </table></div>
+    <p class="caption">
+      Correction per solve across four conditions on one script definition — native calibrated
+      <span class="mono">17.30</span>, 10% calibrated <span class="mono">18.11</span>, native uncalibrated
+      <span class="mono">20.24</span>, 10% uncalibrated <span class="mono">25.59</span> mm — is
+      <em>monotone in model error over more than an order of magnitude</em>, while iterations per solve stay
+      inside 1.05×. ⚠ Comparisons are within session only: an earlier campaign's correction column was a
+      different computation and its raw logs are gone, so no cross-session level of this quantity is
+      established in either direction.
+    </p>
+  </div>
+
+  <div class="callout">
+    <span class="lede-tag">The result to state, and the one to stop stating</span>
+    <p class="big">
+      Calibration reliably reduces <strong>the error the optimiser must remove</strong>, and reliably does
+      <strong>not</strong> reduce how often or how hard it solves.
+    </p>
+    <p>
+      A healthy robot's accuracy does not improve, and that is the correct outcome rather than a
+      disappointing one: the localiser was already removing the odometry's scale error either way. Grading
+      calibration on corrected output measures <em>the corrector</em>. The endpoint that answers is the
+      optimiser's <em>input</em> — the correction load — because nothing downstream can absorb it and,
+      unlike a firing count, it cannot saturate.
+    </p>
+    <p>
+      The effort reading did not survive repetition. A 4.4× drop in firing appeared once and came back
+      <span class="mono">5.41 → 5.08%</span> under the same conditions; firing sorts by <em>session</em>,
+      not by treatment, and between-session drift exceeds every within-session effect. Iterations per solve
+      — the actual work — never moved at all. <strong>Free energy is not compute:</strong> at 0.5 m/s and
+      10 Hz a 10% scale error makes ~5 mm of drift per cycle, and Gauss–Newton converging from 2.2 mm
+      instead of 1.5 mm takes the same 13 iterations.
+    </p>
+    <p>
+      ★ The two non-significant results above look alike and are not, and their remedies are opposites.
+      <strong>Firing</strong> is a bad endpoint: it counts whether an indicator crossed a threshold, so it
+      discards magnitude and saturates, and no amount of driving repairs it — replace it. <strong>Healthy-robot
+      accuracy</strong> is a sound instrument on too small an arm: ~500 m per leg would give it 80% power —
+      drive further. Discounting an effect for missing significance in an underpowered arm is the exact
+      mirror of believing one because it is large.
+    </p>
+    <p>
+      What survives is sharper than what was claimed: the correction load <em>is</em> the prediction error
+      the self-model failed to account for. Reducing it is the whole of what self-calibration does for a
+      running robot — and on a broken one, that is the difference between 72.6 and 36.0 mm/m as
+      <code>k_v</code> converges, i.e. <strong>a 10%-mis-scaled robot recovering to as-new accuracy while
+      still driving.</strong>
+    </p>
+  </div>
+
+  <div class="callout" style="border-left-color:var(--optic)">
+    <span class="lede-tag" style="color:var(--optic)">How the knowledge is held between runs</span>
+    <p>
+      What persists on disk is <strong>evidence</strong> — the information matrix and its right-hand side —
+      never fitted values. Restoring <span class="mono">(H, b)</span> and re-adding the prior at solve time
+      resumes a measurement; restoring a fitted number would be a ratchet that no later observation could
+      argue with. The same rule sets the shape of a future update: a parameter learned downstream may only
+      <em>loosen</em> the belief it came from, never tighten it.
+    </p>
+    <p>
+      And there is no calibration behaviour to schedule. Every covariate above is supplied by an apartment
+      tour for free — a turn over half a radian every 3.6 m — so the need for a manoeuvre and its cost are
+      the same variable, and an affordance would have to overcome its own justification. The single
+      exception is <code>b_ω</code>, whose only covariate is elapsed time: <strong>the optimal excitation
+      for a gyro bias is to stand still.</strong>
+    </p>
+  </div>
+
+  <div class="callout">
+    <span class="lede-tag">What it will not learn, however long it drives</span>
+    <p>
+      Four limits are structural, and each shows up as a posterior that will not leave its prior:
+      <code>k_lat</code> (no lateral travel to ask with), <code>dt</code> (no edge into any residual), a
+      detector bias common to every corner (<em>it is</em> yaw, and nothing internal separates them), and the
+      absolute mounts (a rotation shared by all three devices is invisible to a test that compares them —
+      closure shows the devices tell one story, never that the story is true).
+    </p>
+    <p class="big">
+      A fifth is quantitative and sharper. With the per-corner offset in the model, the data's information
+      about camera yaw falls to the between-corner scale — <span class="mono">±0.216°</span> of data against
+      a <span class="mono">±0.201°</span> prior. <strong>A 1.0° yaw error is therefore predicted to come back
+      as ≈0.46°, not 1.0°</strong> <span class="chip warn">predicted · not yet run</span>: from a wrong start,
+      on 23 corners, a camera's yaw <em>cannot be fully calibrated away by driving.</em>
+    </p>
+    <p>
+      The remedy that follows is not more driving past the same corners — tracking adds rows to a cluster,
+      never new clusters — but <strong>more distinct corners</strong>. That is a statement about where to
+      take the robot, which is the most actionable thing the whole exercise produced.
+    </p>
+  </div>
+</section>
+
 <footer>
   <p>Sources · base block <code>calibration_estimator.h</code>, episodes from <code>etc/runs/arm6_base_episodes.csv</code> (253 episodes, 203.1 m, 146.4 rad).</p>
   <p>Optical block <code>mount_lidar_pair.h</code> + <code>camera_calibration.h</code>, evidence from <code>etc/camera_calib_Shadow_{ricoh,zed}.txt</code>.</p>

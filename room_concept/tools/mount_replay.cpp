@@ -273,6 +273,13 @@ struct Leg
 struct CamResult
 {
     rc::mount::Accum::Solution sol;
+    /// The raw normal equations, kept so `--verify` can compare the ACCUMULATION against the live
+    /// evidence and not merely the row count. Two runs can agree on how many pairs they saw and
+    /// still be weighting them differently, which is exactly the failure the covariance columns
+    /// were added to rule out.
+    Eigen::Matrix4d H = Eigen::Matrix4d::Zero();
+    Eigen::Vector4d b = Eigen::Vector4d::Zero();
+    double rTr = 0.0;
     long   n = 0;
     long   cov_held = 0;   ///< rows whose nominal Pxy would not invert, so the weight was NOT rebuilt
     /// (key, ts) → residual in RADIANS, the same quantity loop_closure_observe compares.
@@ -366,6 +373,7 @@ CamResult solve_leg(const Camera& c, const Leg& leg, double offset_sigma_px, boo
                                  static_cast<double>(o.r.y() / ppr.y()));
     }
     out.sol = acc.solve();
+    out.H = acc.H; out.b = acc.b; out.rTr = acc.rTr;
     return out;
 }
 
@@ -776,18 +784,51 @@ int main(int argc, char** argv)
             // is the cheap half; comparing the SOLVE is the half that matters, and the caller can do
             // that against the agent's own [camcal] log line for the same run.
             std::string line; long n_live = -1;
+            double rTr_live = 0.0;
+            Eigen::Matrix4d H_live = Eigen::Matrix4d::Zero();
+            Eigen::Vector4d b_live = Eigen::Vector4d::Zero();
             std::vector<std::string_view> tok;
             while (std::getline(f, line))
             {
                 if (line.empty() or line[0] == '#') continue;
                 split(line, tok);
-                double v = 0;
+                double v = 0, i = 0, j = 0;
                 if (tok[0] == "n" and tok.size() > 1 and to_num(tok[1], v)) n_live = static_cast<long>(v);
+                else if (tok[0] == "rTr" and tok.size() > 1) to_num(tok[1], rTr_live);
+                else if (tok[0] == "H" and tok.size() > 3 and to_num(tok[1], i) and to_num(tok[2], j)
+                         and to_num(tok[3], v))
+                    H_live(static_cast<int>(i), static_cast<int>(j)) =
+                        H_live(static_cast<int>(j), static_cast<int>(i)) = v;
+                else if (tok[0] == "b" and tok.size() > 2 and to_num(tok[1], i) and to_num(tok[2], v))
+                    b_live(static_cast<int>(i)) = v;
             }
-            const long n_replay = base.empty() ? 0 : base[0].n;
-            std::printf("  pairs: live %ld, replay %ld  %s\n", n_live, n_replay,
-                        (n_live == n_replay) ? "✓ same rows"
-                                             : "✗ DIFFERENT — the two are not describing one run");
+            const CamResult& r0 = base[0];
+            std::printf("  pairs: live %ld, replay %ld  %s\n", n_live, r0.n,
+                        (n_live == r0.n) ? "✓ same rows"
+                                         : "✗ DIFFERENT — the two are not describing one run");
+            // The accumulation itself. A relative comparison, because H's entries span orders of
+            // magnitude and an absolute tolerance would be a different test on each one.
+            const auto rel = [](double a, double c) {
+                const double d = std::max(std::abs(a), std::abs(c));
+                return (d > 1e-12) ? std::abs(a - c) / d : 0.0;
+            };
+            double worst = 0.0; int wi = 0, wj = 0;
+            for (int i = 0; i < 4; ++i)
+                for (int j = 0; j < 4; ++j)
+                    if (const double e = rel(H_live(i, j), r0.H(i, j)); e > worst) { worst = e; wi = i; wj = j; }
+            double worst_b = 0.0; int wb = 0;
+            for (int i = 0; i < 4; ++i)
+                if (const double e = rel(b_live(i), r0.b(i)); e > worst_b) { worst_b = e; wb = i; }
+            const double worst_r = rel(rTr_live, r0.rTr);
+            std::printf("  worst relative difference:  H(%d,%d) %.3e   b(%d) %.3e   rTr %.3e\n",
+                        wi, wj, worst, wb, worst_b, worst_r);
+            const double tol = 1e-5;   // float rows, double accumulation: the CSV's own printed precision
+            const bool ok = n_live == r0.n and worst < tol and worst_b < tol and worst_r < tol;
+            std::printf("  %s\n", ok
+                ? "✓ the replay reproduces the live accumulation — a leg's numbers can be believed"
+                : "✗ THE REPLAY IS NOT THE LIVE SOLVE. Every injection result below is void until this"
+                  " agrees: a difference here is either a stale evidence file (pool resumed across"
+                  " sessions) or a real divergence between the two paths.");
         }
     }
 
