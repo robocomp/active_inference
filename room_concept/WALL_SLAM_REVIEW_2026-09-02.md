@@ -10,14 +10,14 @@ Status column tracks what has been acted on. Findings are ranked most severe fir
 
 | # | Sev | Status | Finding |
 |---|-----|--------|---------|
-| 1 | BLOCKER | open | use-after-free of `E` / `W` in `try_splice` / `try_spur_wraps` |
-| 2 | BLOCKER | open | out-of-range index in the death sweep after `heal_order` |
+| 1 | BLOCKER | fixed 09-02 (host id copied; spur host on a value copy) — bench bit-exact | use-after-free of `E` / `W` in `try_splice` / `try_spur_wraps` |
+| 2 | BLOCKER | fixed 09-02 (collect ids, splice last-born first) — bit-exact; ascending order shifts seed 424242 0.942→0.821, see #18 | out-of-range index in the death sweep after `heal_order` |
 | 3 | MAJOR | open | the live agent never calls `re_derive` — the bench grades a bench-only algorithm |
 | 4 | MAJOR | open | the annealed Manhattan factor is inert by construction |
 | 5 | MAJOR | open | carried wall information is damping, not a prior (re-centred every solve) |
 | 6 | MAJOR | open | two θ₀ estimators; published polygon rotated w.r.t. the re-anchored frame |
-| 7 | MAJOR | open | `manhattan_polygon()` repair inert on the copy; publisher flip-flops projected↔raw |
-| 8 | MAJOR | open | spur-wrap purse paid with seeded (untested) bins |
+| 7 | MAJOR | fixed 09-02 (immediate repair on the copy, loop to closure; publisher keeps last good, never raw) — bench unchanged | `manhattan_polygon()` repair inert on the copy; publisher flip-flops projected↔raw |
+| 8 | MAJOR | fixed 09-02 (SOLID = b > birth_nats; purse keeps full value) — net-of-seed purse refuses seed 1001's real spur (0.967→0.932): deferred to #10 | spur-wrap purse paid with seeded (untested) bins |
 | 9 | MAJOR | open | grid matter never forgets (`hits ≥ 3` is permanent) |
 | 10 | MAJOR | open | three incommensurable "nats" currencies against one toll |
 | 11 | MAJOR | open | corner explanation is size-blind; `corner_residue` orphaned and not re-anchored |
@@ -27,6 +27,7 @@ Status column tracks what has been acted on. Findings are ranked most severe fir
 | 15 | MINOR | open | `try_down_jumps` O(N²)·bbox; grid fixed ±15 m around the FIRST pose |
 | 16 | MINOR | open | bench PASS is checked on the BEST seed; min 0.942 < 0.95 bar hidden |
 | 17 | NIT | open | `seg_to_wall` indices stale within the same `observe()` (display only) |
+| 18 | MINOR | open (found by fix #2) | the death sweep is ORDER-DEPENDENT: which wall heal collapses depends on which death was spliced first |
 | — | — | ok | thread safety of the live path: no defect found |
 
 ## 1. BLOCKER — use-after-free of `E` (`try_splice`) and `W` (`try_spur_wraps`) (V)
@@ -198,3 +199,17 @@ refusal-counting instrumentation that found the author's own dead ends.
   posterior — what splice / down-jump / adopt approximate without detailed balance.
 - **Line landmarks** (PL-SLAM, orthonormal representation): the 2-D Hesse (φ,d) choice is fine; the defect
   is not the parametrisation but that its information is discarded each solve (5).
+
+## 18. MINOR — the death sweep is order-dependent (V, measured 09-02)
+Found while fixing #2. Splicing the same set of dead walls in ascending index order instead of the old
+descending one moved seed 424242 from IoU 0.942 to 0.821 (deaths 27→48, walls 12→9) and seed 7 from 0.953
+to 0.938; the descending order reproduces the old bench bit-exactly on all three seeds. The set of deaths
+is identical; what differs is which near-parallel adjacency `heal_order` collapses after each splice —
+so a wall's survival depends on the enumeration order of its neighbours' deaths, not on evidence. Kept the
+descending order (validated behaviour). A principled sweep would splice all deaths first and heal once.
+
+## Bench record for commit A (fixes #1, #2, #7, #8)
+`wall_slam_selftest` at 931c67f (base) and after the four fixes: seed 7 / 1001 / 424242 IoU 0.953 / 0.967 /
+0.942, published tilt 0.06° / 0.00° / 0.02°, bit-identical. The one FAILURE (Hausdorff 0.443 m ≥ 0.20 on the
+best seed) is pre-existing at base. Bisect: #1 alone, #7 alone, and #2 (descending) alone are each
+bit-exact; #2 ascending shifts (#18); #8 with a net-of-seed purse costs seed 1001 (0.932).

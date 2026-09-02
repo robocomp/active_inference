@@ -1679,6 +1679,7 @@ private:
     std::mt19937     wall_rng_{12345};
     mutable std::mutex wall_map_mutex_;              // guards derived_polygon_ (read by the main thread)
     std::vector<Eigen::Vector2f> derived_polygon_;   // the published polygon (map frame, CCW)
+    bool projection_failed_logged_ = false;          // one warning per stretch of unclosed projections
     std::atomic<bool> map_ready_{false};
     bool wall_reanchored_ = false;
     std::vector<wallseg::WallSegment> last_wall_segments_;   // this frame's segments (viewer)

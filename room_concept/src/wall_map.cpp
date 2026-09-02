@@ -202,9 +202,12 @@ namespace rc::wallmap
         // strongly tilted wall across a neighbour — both are the copy's problem, healed for free.
         proj.heal_order();
         Polygon p = proj.build_polygon();
-        if (not p.closed)
+        // The copy has no history, so the live 5-frame persistence would never fire on it: repair
+        // immediately, and keep going while a crossing remains (uncrossing one pair can expose the
+        // next). Bounded by the cycle length — every pass removes a wall.
+        for (size_t guard = 0; not p.closed and not p.crossing_edges.empty() and guard < proj.order.size(); ++guard)
         {
-            proj.repair_if_crossing();
+            if (not proj.repair_if_crossing(/*immediate=*/true)) break;
             p = proj.build_polygon();
         }
         return p;
@@ -374,19 +377,27 @@ namespace rc::wallmap
             w.exist_lodds = *std::max_element(w.exist_bins.begin(), w.exist_bins.end());
         }
 
-        // Deaths: refuted through, and spliced OUT so the cycle heals immediately.
-        for (int i = static_cast<int>(walls.size()) - 1; i >= 0; --i)
+        // Deaths: refuted through, and spliced OUT so the cycle heals immediately. Two passes:
+        // splice_out() runs heal_order(), which erases ANY wall the healed order no longer
+        // references — at any index, not only the one that died — so indexing `walls` while
+        // splicing walks off the end. Collect the ids first; a wall heal already removed is a
+        // no-op for splice_out. Spliced LAST-BORN FIRST (descending index), the order the old
+        // loop used: each heal depends on the neighbourhood the previous splice left, and the
+        // bench is bit-exact under this order and shifts (0.942 -> 0.821 on seed 424242) under
+        // the ascending one — the sweep is order-dependent, which is its own open item.
+        std::vector<std::uint64_t> dead;
+        for (const auto& w : walls)
         {
-            if (walls[static_cast<size_t>(i)].exist_lodds > lo_clamp + 1e-3f) continue;
-            const auto& w = walls[static_cast<size_t>(i)];
+            if (w.exist_lodds > lo_clamp + 1e-3f) continue;
             if (params.debug_splice)
                 std::printf("[death-exist] wall %llu phi=%.3f d=%.3f lodds=%.1f frames=%d pts=%d bins=%zu\n",
                             (unsigned long long)w.id, w.phi, w.d, w.exist_lodds,
                             w.frames_seen, w.points_seen, w.exist_bins.size());
             fr.deaths_info.push_back({w.id, w.exist_lodds, w.frames_seen, w.points_seen});
             fr.deaths++;
-            splice_out(w.id);   // erases from walls too — index i is not reused after this
+            dead.push_back(w.id);
         }
+        for (auto it = dead.rbegin(); it != dead.rend(); ++it) splice_out(*it);
     }
 
     void WallMap::splice_out(std::uint64_t id)
@@ -557,6 +568,10 @@ namespace rc::wallmap
         {
             WallLandmark* E = find(order[static_cast<size_t>(i)]);
             if (E == nullptr or not E->has_extent) continue;
+            // `E` points into `walls`; the trial loop below push_backs (may reallocate) and
+            // resizes back (does not restore the old buffer). Nothing may read `E` after the first
+            // trial push — the host id is the only thing needed there, so it is copied out here.
+            const std::uint64_t host_id = E->id;
             const float dphi = wrap_pi(c.phi - E->phi);
             const bool parallel = std::abs(dphi) < kPi / 4.f;
             // Anti-parallel: a face looking the other way is not an edge of THIS boundary — except
@@ -961,14 +976,14 @@ namespace rc::wallmap
                 if (params.debug_splice)
                     std::printf("[splice]   %s-variant nw=%zu ord=%zu why=%s score=%.2f host=%llu\n",
                                 v.is_stub ? "stub" : "bnd",
-                                v.new_walls.size(), v.ord.size(), why, score, (unsigned long long)E->id);
+                                v.new_walls.size(), v.ord.size(), why, score, (unsigned long long)host_id);
                 // Minimal overlap only — the old MAJORITY-of-extent bar froze a whole map: a
                 // collinear-MERGED candidate spanning two spaces can never place a majority on one
                 // edge (measured: 8261 valid variants refused, births 5). Wrong placements are now
                 // refused by the ORDER-QUANTIZED global acceptance below, on evidence, not extent
                 // fractions; the local score remains the RANKING among valid variants.
                 if (ok and score > 0.5f * params.exist_bin_m and better(score, v.new_walls.size()))
-                    best_v = Best{score, v.new_walls, v.ord, E->id, v.is_stub};
+                    best_v = Best{score, v.new_walls, v.ord, host_id, v.is_stub};
             }
         }
         if (best_v.score < 0.f)
@@ -1038,27 +1053,41 @@ namespace rc::wallmap
         for (int e = 0; e < NE; ++e)
         {
             if (poly.wall_of_edge[static_cast<size_t>(e)] != order[static_cast<size_t>(e)]) continue;
-            WallLandmark* W = find(order[static_cast<size_t>(e)]);
-            if (W == nullptr or not W->has_extent or W->exist_bins.empty()) continue;
-            const Eigen::Vector2f tW = W->tangent(), nW = W->normal();
+            const WallLandmark* Wp = find(order[static_cast<size_t>(e)]);
+            if (Wp == nullptr or not Wp->has_extent or Wp->exist_bins.empty()) continue;
+            // A VALUE copy: every (side, resume, tsign) trial below push_backs two walls (may
+            // reallocate `walls`) and resizes back, and the next trial reads the host again — a
+            // pointer into `walls` would be read after free. The host is never mutated here, and
+            // the copy (a few hundred bins at most) is far cheaper than one trial polygon.
+            const WallLandmark W = *Wp;
+            const Eigen::Vector2f tW = W.tangent(), nW = W.normal();
             const float sa = tW.dot(poly.verts[static_cast<size_t>(e)]);
             const float sb = tW.dot(poly.verts[static_cast<size_t>((e + 1) % NE)]);
             const float e_lo = std::min(sa, sb), e_hi = std::max(sa, sb);
             for (int side : {+1, -1})
             {
                 const float corner_s = (side > 0) ? e_hi : e_lo;
-                const float reach    = (side > 0) ? W->s_max - corner_s : corner_s - W->s_min;
+                const float reach    = (side > 0) ? W.s_max - corner_s : corner_s - W.s_min;
                 if (reach < 2.f * params.exist_bin_m) continue;
                 // Contiguous SOLID bins from the corner outward place the tip from evidence — the
                 // existence layer already knows where the matter on this line ENDS.
                 float tip_s = corner_s;
                 float bin_nats = 0.f;   // the overshoot's accumulated existence evidence — the wrap's purse
-                int bi = static_cast<int>((corner_s - W->bins_s0) / params.exist_bin_m) + side;
-                while (bi >= 0 and bi < static_cast<int>(W->exist_bins.size())
-                       and W->exist_bins[static_cast<size_t>(bi)] >= params.birth_nats)
+                int bi = static_cast<int>((corner_s - W.bins_s0) / params.exist_bin_m) + side;
+                // SOLID = observed support ABOVE the seed. Bins grown by extent are filled with the
+                // wall's seed (birth_nats on a confirmed wall) and an untested bin keeps it exactly,
+                // so `>= birth_nats` was true of 6.5 unobserved bins spilling into a doorway — enough
+                // to pay the toll with zero returns. Strictly above ⇒ an untested bin ends the run
+                // and pays nothing. The purse keeps each tested bin's FULL value on purpose: the
+                // 30-nat toll was calibrated in that currency (a confirmed bin holds 2·birth_nats),
+                // and netting the seed out (as surrender does at its own scale) left seed 1001's real
+                // spur with ≤3.1 nats — refused, IoU 0.967 → 0.932. Re-deriving toll and purse in
+                // one currency is review item #10, not this line.
+                while (bi >= 0 and bi < static_cast<int>(W.exist_bins.size())
+                       and W.exist_bins[static_cast<size_t>(bi)] > params.birth_nats)
                 {
-                    tip_s = W->bins_s0 + (static_cast<float>(bi) + (side > 0 ? 1.f : 0.f)) * params.exist_bin_m;
-                    bin_nats += W->exist_bins[static_cast<size_t>(bi)];
+                    tip_s = W.bins_s0 + (static_cast<float>(bi) + (side > 0 ? 1.f : 0.f)) * params.exist_bin_m;
+                    bin_nats += W.exist_bins[static_cast<size_t>(bi)];
                     bi += side;
                 }
                 const float overshoot = (side > 0) ? tip_s - corner_s : corner_s - tip_s;
@@ -1074,7 +1103,7 @@ namespace rc::wallmap
                     for (float s = s0 + 0.5f * ds; s < s1; s += ds)
                         for (float t = t_from + 0.5f * fgrid.cell; t < t_to; t += fgrid.cell)
                         {
-                            const Eigen::Vector2f p = nW * (W->d - t) + tW * s;
+                            const Eigen::Vector2f p = nW * (W.d - t) + tW * s;
                             const int gi = static_cast<int>((p.x() - fgrid.x0) / fgrid.cell);
                             const int gj = static_cast<int>((p.y() - fgrid.y0) / fgrid.cell);
                             if (not fgrid.in(gi, gj)) continue;
@@ -1094,21 +1123,21 @@ namespace rc::wallmap
                 {
                     bool twin_exists = false;
                     for (const auto& w2 : walls)
-                        if (std::abs(wrap_pi(wrap_pi(w2.phi - W->phi) - kPi)) < 0.35f
-                            and std::abs(w2.d + W->d) < 0.35f and w2.has_extent
+                        if (std::abs(wrap_pi(wrap_pi(w2.phi - W.phi) - kPi)) < 0.35f
+                            and std::abs(w2.d + W.d) < 0.35f and w2.has_extent
                             and -w2.s_max < s1 and -w2.s_min > s0)   // overlap in W's tangent coords
                             { twin_exists = true; break; }
                     if (twin_exists) continue;
                 }
                 if (params.debug_splice)
                     std::printf("[spur] wall %llu edge %d side %+d corner_s=%.2f tip_s=%.2f wrap=%.2f\n",
-                                (unsigned long long)W->id, e, side, corner_s, tip_s,
+                                (unsigned long long)W.id, e, side, corner_s, tip_s,
                                 static_cast<float>(net) / static_cast<float>(ntot));
                 // Trial: mirror M (extent = the overshoot, mirrored) and tip cap T (both signs).
                 const Eigen::Matrix2f prior_info =
                     Eigen::Vector2f(1.f / (params.rect_prior_sigma_phi_rad * params.rect_prior_sigma_phi_rad),
                                     1.f / (params.rect_prior_sigma_d * params.rect_prior_sigma_d)).asDiagonal();
-                const std::uint64_t w_id = W->id;
+                const std::uint64_t w_id = W.id;
                 // RESUME first: without it the mirror connects to whatever followed the host, and
                 // the wrap commits as an amputation — measured: the mirror ran 4.9 m to the bottom
                 // wall and cut off the west half of the flat (IoU 0.503). The spur is a narrow
@@ -1117,11 +1146,11 @@ namespace rc::wallmap
                 for (int tsign : {+1, -1})
                 {
                     const size_t walls_before = walls.size();
-                    WallLandmark M = make_wall(wrap_pi(W->phi + kPi), params.stub_thickness - W->d,
+                    WallLandmark M = make_wall(wrap_pi(W.phi + kPi), params.stub_thickness - W.d,
                                                prior_info, 0.5f * params.birth_nats, ts);
                     M.s_min = -s1; M.s_max = -s0; M.has_extent = true;   // t_M = −t_W
-                    const float phi_t = wrap_pi(W->phi + static_cast<float>(tsign) * kPi * 0.5f);
-                    const Eigen::Vector2f p_tip = nW * W->d + tW * tip_s;
+                    const float phi_t = wrap_pi(W.phi + static_cast<float>(tsign) * kPi * 0.5f);
+                    const Eigen::Vector2f p_tip = nW * W.d + tW * tip_s;
                     WallLandmark T = make_wall(phi_t, linefit::normal_of(phi_t).dot(p_tip),
                                                prior_info, 0.5f * params.birth_nats, ts);
                     // T carries a BOUNDED extent from the start — the cap is exactly the thin-wall
@@ -2607,11 +2636,11 @@ namespace rc::wallmap
 
     Polygon WallMap::build_polygon() const { return build_from(order); }
 
-    void WallMap::repair_if_crossing()
+    bool WallMap::repair_if_crossing(bool immediate)
     {
         const Polygon poly = build_from(order);
-        if (poly.crossing_edges.empty()) { crossing_frames_ = 0; return; }
-        if (++crossing_frames_ < 5) return;      // persistence: one bad refinement frame must not amputate
+        if (poly.crossing_edges.empty()) { crossing_frames_ = 0; return false; }
+        if (not immediate and ++crossing_frames_ < 5) return false;   // persistence: one bad refinement frame must not amputate
         crossing_frames_ = 0;
         std::uint64_t weakest = 0; int weakest_pts = std::numeric_limits<int>::max();
         for (int e : poly.crossing_edges)
@@ -2626,7 +2655,9 @@ namespace rc::wallmap
                 std::printf("[death-cross] wall %llu pts=%d spliced out to uncross the cycle\n",
                             (unsigned long long)weakest, weakest_pts);
             splice_out(weakest);
+            return true;
         }
+        return false;
     }
 
     Polygon WallMap::build_from(const std::vector<std::uint64_t>& ord) const

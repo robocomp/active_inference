@@ -405,7 +405,9 @@ namespace rc::wallmap
         /// the weakest edge involved (a wrong commit that beams alone cannot undo: they support it
         /// obliquely from the real walls it was mis-spliced onto). Counts consecutive crossing frames
         /// and removes the least-supported crossing edge after a short persistence.
-        void repair_if_crossing();
+        // Splice out the weakest edge of a self-crossing cycle after 5 persistent frames; `immediate`
+        // skips the persistence (for a copy with no history). Returns true if a wall was removed.
+        bool repair_if_crossing(bool immediate = false);
         int  crossing_frames_ = 0;
         /// Robot position (map frame) at the last observe() — the seed of the stub discriminator's
         /// connectivity flood, whose result is cached per frame timestamp.

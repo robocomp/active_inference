@@ -2098,9 +2098,22 @@ namespace rc
             if (model_ != nullptr and model_->has_state())
                 model_->update_polygon_vertices(poly.verts);   // in-loop consumer: RAW on purpose
             std::scoped_lock lk(wall_map_mutex_);
-            // Publish the projected polygon; fall back to the raw one if a projection ever fails
-            // to close (measured 3/3 closed on the bench, but the live map owes nobody a promise).
-            derived_polygon_ = (pub.closed and pub.verts.size() >= 3) ? pub.verts : poly.verts;
+            // Publish the projected polygon only. Falling back to the raw one would alternate
+            // vertex counts and a 1-2° tilt frame to frame, which the scene graph reports as a
+            // structure change and door_concept re-keys on; a projection that fails to close keeps
+            // the last good published layout instead (logged once per stretch).
+            if (pub.closed and pub.verts.size() >= 3)
+            {
+                derived_polygon_ = pub.verts;
+                projection_failed_logged_ = false;
+            }
+            else if (not projection_failed_logged_)
+            {
+                qWarning().noquote() << "[room][wall-slam] projected polygon did not close"
+                                     << (pub.status.empty() ? "" : QString::fromStdString("— " + pub.status))
+                                     << "; keeping the last published layout";
+                projection_failed_logged_ = true;
+            }
         }
         if (poly.status != last_wall_status_)
         {
