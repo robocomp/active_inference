@@ -121,6 +121,14 @@ namespace rc::wallmap
         // counts, swept on the bench.
         int   replace_code_edges = 1;
         int   wrap_code_edges    = 2;
+        // ── LEVEL 2 — the RESIDUAL PASS (user design 2026-09-02). The coarse cycle above estimates
+        // the room's main lines and lawfully leaves small features whole: a pillar on a wall, an
+        // alcove. On the PUBLISHED COPY only (never in the live map — level 1 stays soft and local),
+        // the residual zones — connected matter INSIDE the polygon, connected free space OUTSIDE
+        // it, each attached to one edge — propose a rectangular step of that edge, priced by the
+        // code length of the edges it adds and paid by the same grid evidence as a level-1 jump.
+        // Recomputed at every publish, so a level-1 correction simply moves the zones under it.
+        bool  enable_level2 = true;
         // Standing structure pays RENT: a down-jump is accepted when the evidence AGAINST removal
         // (grid delta plus the removed walls' net existence-bin nats) is smaller than the code
         // length it refunds — Occam pushes the polygon down through evidence-neutral structure (a
@@ -184,6 +192,7 @@ namespace rc::wallmap
         int   frames_seen = 0;
         int   points_seen = 0;
         std::int64_t last_seen_ms = 0;      // last frame a segment associated to this edge
+        std::int64_t born_ms = 0;           // creation time — the freshness reference for evidence about this edge
         // Existence log-odds (nats), PER extent bin of width Params::exist_bin_m; bins_s0 is bin 0's
         // lower edge. exist_lodds is the summary (max over bins). Seeded at birth with birth_nats; a
         // bin dies below −birth_nats; dead END bins shrink the extent; no testable span ⇒ death.
@@ -288,6 +297,9 @@ namespace rc::wallmap
         /// The model and solver stay soft (six mutating variants measurably degraded pose and
         /// structure); only what is PUBLISHED is exactly Manhattan.
         Polygon manhattan_polygon() const;
+        /// LEVEL 2 (Params doc): decorate a published polygon with the rectangular steps that its
+        /// residual zones pay for. Pure: reads the grid, returns a new polygon.
+        Polygon decorate(const Polygon& pub) const;
         Params params;
 
         bool  theta0_born = false;

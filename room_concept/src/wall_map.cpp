@@ -210,7 +210,165 @@ namespace rc::wallmap
             if (not proj.repair_if_crossing(/*immediate=*/true)) break;
             p = proj.build_polygon();
         }
-        return p;
+        return decorate(p);
+    }
+
+    Polygon WallMap::decorate(const Polygon& pub) const
+    {
+        if (not params.enable_level2 or not pub.closed or pub.verts.size() < 4 or not fgrid.ready()) return pub;
+        const float cell = fgrid.cell;
+        // Residual cells: latched matter inside the polygon, free space outside it, each at least
+        // one and a half cells from every edge (nearer is the wall's own surface and range noise),
+        // outside cells within a margin of the polygon's box.
+        Eigen::Vector2f lo = pub.verts.front(), hi = lo;
+        for (const auto& v : pub.verts) { lo = lo.cwiseMin(v); hi = hi.cwiseMax(v); }
+        const float margin = 1.5f;
+        const int i0 = std::max(0, static_cast<int>((lo.x() - margin - fgrid.x0) / cell));
+        const int i1 = std::min(fgrid.nx - 1, static_cast<int>((hi.x() + margin - fgrid.x0) / cell));
+        const int j0 = std::max(0, static_cast<int>((lo.y() - margin - fgrid.y0) / cell));
+        const int j1 = std::min(fgrid.ny - 1, static_cast<int>((hi.y() + margin - fgrid.y0) / cell));
+        const auto edge_dist = [](const Eigen::Vector2f& p, const std::vector<Eigen::Vector2f>& V, int& emin)
+        {
+            float dmin = std::numeric_limits<float>::infinity(); emin = -1;
+            for (size_t e = 0; e < V.size(); ++e)
+            {
+                const Eigen::Vector2f& a = V[e]; const Eigen::Vector2f ab = V[(e + 1) % V.size()] - a;
+                const float l2 = ab.squaredNorm();
+                const float tt = l2 > 1e-9f ? std::clamp((p - a).dot(ab) / l2, 0.f, 1.f) : 0.f;
+                const float d = (p - (a + tt * ab)).norm();
+                if (d < dmin) { dmin = d; emin = static_cast<int>(e); }
+            }
+            return dmin;
+        };
+        // FRESHNESS (the stub discriminator's rule): free space outside the polygon is evidence
+        // only if it was seen free AFTER the edge it decorates came into existence — the grid never
+        // forgets, so a room change leaves stale free cells where matter now stands (measured: the
+        // notched L-room was extruded back into its old notch, 0.94 m off).
+        const auto born_of_edge = [&](const std::vector<std::uint64_t>& woe, int e)
+        {
+            if (woe.empty()) return std::int64_t{0};
+            const auto* w = find(woe[static_cast<size_t>(e) % woe.size()]);
+            return w == nullptr ? std::int64_t{0} : w->born_ms;
+        };
+        std::vector<std::int8_t> cls(static_cast<size_t>(fgrid.nx * fgrid.ny), 0);   // 1 matter inside, 2 free outside
+        for (int i = i0; i <= i1; ++i)
+            for (int j = j0; j <= j1; ++j)
+            {
+                const Eigen::Vector2f p = fgrid.at(i, j);
+                const bool inside = corner_visibility::point_in_polygon(p, pub.verts);
+                std::int8_t c = 0;
+                if (inside and fgrid.is_occupied(i, j)) c = 1;
+                else if (not inside and fgrid.is_free(i, j)) c = 2;
+                if (c == 0) continue;
+                int e; if (edge_dist(p, pub.verts, e) < 1.5f * cell) continue;
+                if (c == 2 and fgrid.free_ms[static_cast<size_t>(fgrid.idx(i, j))] < born_of_edge(pub.wall_of_edge, e)) continue;
+                cls[static_cast<size_t>(fgrid.idx(i, j))] = c;
+            }
+        // Connected components (4-connected), largest first.
+        std::vector<std::vector<int>> comps;
+        {
+            std::vector<char> seen(cls.size(), 0);
+            for (int i = i0; i <= i1; ++i)
+                for (int j = j0; j <= j1; ++j)
+                {
+                    const int id = fgrid.idx(i, j);
+                    if (cls[static_cast<size_t>(id)] == 0 or seen[static_cast<size_t>(id)]) continue;
+                    const std::int8_t c = cls[static_cast<size_t>(id)];
+                    std::vector<int> comp, stack{id}; seen[static_cast<size_t>(id)] = 1;
+                    while (not stack.empty())
+                    {
+                        const int q = stack.back(); stack.pop_back(); comp.push_back(q);
+                        const int qi = q % fgrid.nx, qj = q / fgrid.nx;
+                        for (const auto& [di, dj] : std::initializer_list<std::pair<int, int>>{{1, 0}, {-1, 0}, {0, 1}, {0, -1}})
+                        {
+                            const int ni = qi + di, nj = qj + dj;
+                            if (not fgrid.in(ni, nj)) continue;
+                            const int nid = fgrid.idx(ni, nj);
+                            if (seen[static_cast<size_t>(nid)] or cls[static_cast<size_t>(nid)] != c) continue;
+                            seen[static_cast<size_t>(nid)] = 1; stack.push_back(nid);
+                        }
+                    }
+                    if (comp.size() >= 4) comps.push_back(std::move(comp));
+                }
+            std::sort(comps.begin(), comps.end(), [](const auto& a, const auto& b) { return a.size() > b.size(); });
+        }
+        // Each component proposes a rectangular step of the edge it is attached to; the step is
+        // accepted when the grid evidence it explains exceeds the code length of the edges it adds.
+        Polygon out = pub;
+        int accepted = 0;
+        for (const auto& comp : comps)
+        {
+            if (accepted >= 8) break;
+            const std::int8_t c = cls[static_cast<size_t>(comp.front())];
+            // The attached edge of the CURRENT polygon: nearest to the component's centroid.
+            Eigen::Vector2f cen = Eigen::Vector2f::Zero();
+            for (const int id : comp) cen += fgrid.at(id % fgrid.nx, id / fgrid.nx);
+            cen /= static_cast<float>(comp.size());
+            int e; edge_dist(cen, out.verts, e);
+            if (e < 0) continue;
+            const size_t E = out.verts.size();
+            const Eigen::Vector2f a = out.verts[static_cast<size_t>(e)], b = out.verts[(static_cast<size_t>(e) + 1) % E];
+            const float len = (b - a).norm();
+            if (len < 3.f * cell) continue;
+            const Eigen::Vector2f t = (b - a) / len, n(-t.y(), t.x());   // n: interior side (CCW)
+            // The component's footprint in the edge's frame; it must touch the edge (a decoration
+            // of the boundary, not a free-standing blob) and lie on the side its class says.
+            float s0 = std::numeric_limits<float>::infinity(), s1 = -s0, h = 0.f, near = s0;
+            bool side_ok = true;
+            for (const int id : comp)
+            {
+                const Eigen::Vector2f d = fgrid.at(id % fgrid.nx, id / fgrid.nx) - a;
+                const float s = t.dot(d), z = n.dot(d) * (c == 1 ? 1.f : -1.f);
+                if (z < 0.f) { side_ok = false; break; }
+                s0 = std::min(s0, s); s1 = std::max(s1, s); h = std::max(h, z); near = std::min(near, z);
+            }
+            if (not side_ok or near > 3.f * cell) continue;
+            s0 = std::max(0.f, s0 - 0.5f * cell); s1 = std::min(len, s1 + 0.5f * cell); h += 0.5f * cell;
+            if (s1 - s0 < 2.f * cell or h < 2.f * cell) continue;
+            // A matter zone steps the boundary INTO the room around it; a free zone steps it OUT.
+            const Eigen::Vector2f off = n * h * (c == 1 ? 1.f : -1.f);
+            std::vector<Eigen::Vector2f> nv;
+            nv.reserve(E + 4);
+            for (size_t k = 0; k <= static_cast<size_t>(e); ++k) nv.push_back(out.verts[k]);
+            for (const Eigen::Vector2f& q : {Eigen::Vector2f(a + t * s0), Eigen::Vector2f(a + t * s0 + off),
+                                             Eigen::Vector2f(a + t * s1 + off), Eigen::Vector2f(a + t * s1)})
+                nv.push_back(q);
+            for (size_t k = static_cast<size_t>(e) + 1; k < E; ++k) nv.push_back(out.verts[k]);
+            // Drop the degenerate edges a step at a corner produces (a zone flush with a corner is
+            // a corner step, +2 edges, not a notch).
+            for (size_t k = 0; k < nv.size() and nv.size() > 3;)
+            {
+                if ((nv[(k + 1) % nv.size()] - nv[k]).norm() < 0.5f * cell) nv.erase(nv.begin() + static_cast<long>((k + 1) % nv.size()));
+                else ++k;
+            }
+            Polygon trial = out;
+            trial.verts = nv;
+            const int added = static_cast<int>(nv.size()) - static_cast<int>(E);
+            if (added <= 0) continue;
+            const float cost = static_cast<float>(added) * edge_code_nats(true);
+            const float gain = jump_delta_nats(out, trial, c == 2 ? born_of_edge(out.wall_of_edge, e) : 0);
+            if (params.debug_splice)
+                std::printf("[level2] %s zone %zu cells on edge %d: s=[%.2f,%.2f] h=%.2f +%d edges gain=%.1f cost=%.1f -> %s\n",
+                            c == 1 ? "matter" : "free", comp.size(), e, s0, s1, h, added, gain, cost,
+                            gain > cost ? "ACCEPT" : "refuse");
+            if (gain <= cost) continue;
+            // Bookkeeping the consumers expect: one wall id and one corner per edge.
+            const std::uint64_t host = out.wall_of_edge.empty() ? 0 : out.wall_of_edge[static_cast<size_t>(e) % out.wall_of_edge.size()];
+            const Corner hc = out.corners.empty() ? Corner{} : out.corners[static_cast<size_t>(e) % out.corners.size()];
+            trial.wall_of_edge.assign(nv.size(), host);
+            trial.corners.assign(nv.size(), hc);
+            for (size_t k = 0; k < nv.size(); ++k)
+            {
+                // Original edges keep their ids where the vertex survived unchanged.
+                for (size_t m = 0; m < E; ++m)
+                    if ((nv[k] - out.verts[m]).norm() < 1e-6f and m < out.wall_of_edge.size())
+                    { trial.wall_of_edge[k] = out.wall_of_edge[m]; if (m < out.corners.size()) trial.corners[k] = out.corners[m]; break; }
+            }
+            out = trial;
+            ++accepted;
+        }
+        if (accepted > 0) out.status += " +L2:" + std::to_string(accepted);
+        return out;
     }
 
     /// THE LINE-EVIDENCE RULE (Params doc, "ONE CURRENCY FOR LINE CLAIMS"): one frame's support
@@ -233,6 +391,7 @@ namespace rc::wallmap
         w.information = info;
         w.exist_lodds = exist_seed;
         w.last_seen_ms = ts;
+        w.born_ms = ts;
         return w;
     }
 

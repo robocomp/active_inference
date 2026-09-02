@@ -1152,6 +1152,7 @@ int main()
     {
         // Local SVG polygon read (std::from_chars — the agents' locale rule; no Qt in the harness).
         Poly room;
+        Eigen::Vector2f room_centre = Eigen::Vector2f::Zero();   // the SVG→truth-frame shift
         {
             std::ifstream in("/home/pbustos/robocomp/components/active_inference/layouts/apartamento_layout.svg");
             std::stringstream ss; ss << in.rdbuf();
@@ -1193,6 +1194,7 @@ int main()
                 for (const auto& v : room) { lo = lo.cwiseMin(v); hi = hi.cwiseMax(v); }
                 const Eigen::Vector2f c0 = 0.5f * (lo + hi);
                 for (auto& v : room) v -= c0;
+                room_centre = c0;
             }
         }
         float a2 = 0.f;
@@ -1266,6 +1268,34 @@ int main()
         // THREE SEEDS: single runs swing 0.89–0.97 IoU on identical configs; a mechanism is judged
         // on the distribution, never on one draw (the unaligned-measurements lesson).
         (void)truth;
+        // ── LEVEL-2 FEATURES of the real layout (SVG coordinates, shifted into the truth frame):
+        // what the coarse Manhattan cycle lawfully leaves for the residual pass. Two pillars on a
+        // wall (matter the polygon must step around) and one alcove (free space it must step
+        // into). Chamfers are not graded yet. The metric is the mis-explained fraction of the
+        // feature's own area: |truth Δ estimate| inside the feature box (5 cm pad) over the box.
+        struct Feature { const char* name; Eigen::Vector2f lo, hi; };
+        const std::vector<Feature> features = {
+            {"left pillar (0.32 x 0.60 m)",  Eigen::Vector2f(0.178f, 0.594f) - room_centre, Eigen::Vector2f(0.511f, 1.194f) - room_centre},
+            {"right pillar (0.38 x 0.60 m)", Eigen::Vector2f(8.110f, 0.610f) - room_centre, Eigen::Vector2f(8.505f, 1.210f) - room_centre},
+            {"alcove (0.45 x 0.85 m)",       Eigen::Vector2f(5.884f, 7.163f) - room_centre, Eigen::Vector2f(6.336f, 8.026f) - room_centre},
+        };
+        const auto feature_miss = [&](const Poly& est, const Feature& f)
+        {
+            if (est.size() < 3) return 1.f;
+            const float pad = 0.05f, step = 0.02f;
+            int miss = 0, n = 0;
+            for (float x = f.lo.x() - pad; x <= f.hi.x() + pad; x += step)
+                for (float y = f.lo.y() - pad; y <= f.hi.y() + pad; y += step)
+                {
+                    const Eigen::Vector2f q(x, y);
+                    const bool it = rc::corner_visibility::point_in_polygon(q, room);
+                    const bool ie = rc::corner_visibility::point_in_polygon(q, est);
+                    if (it != ie) ++miss;
+                    ++n;
+                }
+            const float box = (f.hi.x() - f.lo.x()) * (f.hi.y() - f.lo.y());
+            return static_cast<float>(miss) * step * step / std::max(box, 1e-6f);
+        };
         RunResult R7;
         float best_iou = -1.f;
         std::vector<std::pair<float,float>> per_seed;   // (iou, hausdorff)
@@ -1281,6 +1311,9 @@ int main()
                         seed, Rx.frames, iou_x, h_x, Rx.pose_rmse_xy, Rx.map.walls.size(), Rx.births, Rx.deaths, Rx.rejected);
             std::printf("      verts[%u]:", seed);
             for (const auto& v : ew) std::printf(" (%.2f,%.2f)", v.x(), v.y());
+            std::printf("\n");
+            std::printf("      level-2 features[%u]: mis-explained fraction of each feature's area:", seed);
+            for (const auto& f : features) std::printf("  %s %.2f", f.name, Rx.poly.closed ? feature_miss(ew, f) : 1.f);
             std::printf("\n");
             std::printf("      order[%u]:\n", seed);
             for (const auto oid : Rx.map.order)
@@ -1423,6 +1456,14 @@ int main()
         // smooth over; a real miss (a whole alcove) is metres.
         check("estimate within 20 cm of the real layout (Hausdorff)", h < 0.20f, fmt("%.3f m", h));
         check("estimate overlaps the real layout (IoU >= 0.95)", iou >= 0.95f, fmt("IoU %.3f", iou));
+        // LEVEL-2 pre-registration (2026-09-02): the residual pass is graded on the real layout's own
+        // small features. A feature counts as explained when less than a third of its area is
+        // mis-explained; the coarse cycle alone leaves each of them essentially whole (~1.0).
+        for (const auto& f : features)
+        {
+            const float m = feature_miss(est_world, f);
+            check(fmt("level-2: %s explained", f.name).c_str(), m < 0.33f, fmt("mis-explained %.2f of its area", m));
+        }
         check("pose stayed on track through the tour", R7.pose_rmse_xy < 0.08f,
               fmt("rmse %.3f m, max %.3f m", R7.pose_rmse_xy, R7.pose_max_xy));
     }
