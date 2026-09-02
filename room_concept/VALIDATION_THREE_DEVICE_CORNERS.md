@@ -20,7 +20,10 @@ instrument that does not depend on the extrinsics it is meant to license.
   and the method degrades into hand-eye calibration. Residuals are device↔device only.
 - **The gauge is fixed by parameterisation, not by data.** A rotation common to all three devices
   cancels in every residual and is unobservable. State = 8 parameters (ricoh ×4, zed ×4) relative to
-  the LiDAR. ★ **No output is a physical bolt angle.**
+  the LiDAR. ★ **No output is a physical bolt angle.** ⚠ Measured 2026-09-02: only **6** of the 8 are
+  ever informed — `dt` carries identically zero information in both evidence files (`H[i,3] = b[3] =
+  0`), because the pair residual is formed at one instant and nothing in it varies with a time offset.
+  It is a declared parameter that no observation reaches.
 - **Mode B before mode A.** The closure test is a test only while the cross term is OUT of the cost;
   fold it in and closure is enforced by construction. Improving the estimator would destroy the
   instrument.
@@ -258,8 +261,11 @@ motivation is largely absent.
   that three devices tell one story, never that the story is true. ★ Only an external instrument
   decides that, which is what ground truth is for — and per the lesson from the motion work, an
   internal consistency measure goes quiet exactly when two factors are biased into agreement.
-- **Per-corner detection offsets.** They are per-corner, not global, and belong in a corner-as-
-  landmark design (`DESIGN §7`). A ~1.7 px per-corner bias already converted into heading error once
-  through the `corr(x,θ) = 0.98` ridge.
+- ⚠ **~~Per-corner detection offsets~~ — NO LONGER OUT OF SCOPE.** This bullet said they belong in a
+  corner-as-landmark design (`DESIGN §7`), citing a ~1.7 px bias that once converted into heading
+  error through the `corr(x,θ) = 0.98` ridge. §1.1 measured them at up to **17 px, spread sd 5.3 px
+  across 23 vertices** — five times the mount signal itself — and showed they understate the mount
+  posterior by 127x. ★★★ **A nuisance large enough to swallow the quantity being estimated is not
+  someone else's problem.** They are now stage 1, and stage 2 is blocked behind them.
 - **That `cam_dt` is a time offset.** It is time × `k_v`, so it must never be read without the
   motion block's `k_v` from the same run.
