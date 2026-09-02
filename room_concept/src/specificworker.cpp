@@ -855,6 +855,100 @@ bool SpecificWorker::maybe_publish_corrected_pose()
 // R -> 1 is constant, R -> 0 is uniformly spread. Reported once, on the first few hundred samples.
 // ── STAGE 2: pair each RGB triple point with the LiDAR corner of the SAME polygon vertex ─────────
 // See mount_lidar_pair.h for why the residual has no pose in it and why that is the point.
+void SpecificWorker::open_pair_log(std::ofstream &csv, const std::string &cam,
+                                   const rc::CameraIngestor &ing)
+{
+    // ★ KEYED BY CAMERA, like the evidence file beside it (camera_calib_<robot>_<camera>.txt).
+    //   A fixed filename let a second camera's run destroy the first one's rows; the estimator's
+    //   own evidence was already keyed, only this diagnostic was not.
+    csv.open("etc/image_edge_pair_" + cam + ".csv", std::ios::out | std::ios::trunc);
+    if (not csv.is_open()) return;
+    csv.imbue(std::locale::classic());   // CLAUDE.md: never a comma decimal
+    csv << "ts_ms,camera,vertex,"
+        // WHICH corner of the vertical edge: the loop closure keys on vertex*2 + ceiling, so a
+        // replay without this column would difference a floor corner against a ceiling one and
+        // recompute a closure the agent never measured.
+           "ceiling,"
+           "u_img,v_img,u_lidar,v_lidar,ru,rv,"
+        // sigu/sigv are the DIAGONAL of the pair covariance; cuv is its off-diagonal. All three,
+        // because the solve weights by the full 2x2 inverse: a replay handed only the diagonal
+        // would compute a different H from the same rows, and then a bug in the replay could not be
+        // told apart from that difference. With cuv the zero-injection replay must reproduce the
+        // live solve exactly, which is the only self-check the replay has.
+           "sigu,sigv,cuv,assoc_prob,range_m,angle_deg,assoc_chi2,"
+        // ── the association's INPUTS, beside its verdict ──────────────────────────────────────
+        // assoc_chi2 is TRUNCATED to [0, CornerDetector::Params::assoc_chi2] by the gate itself,
+        // so its distribution cannot be used to judge the gate. These two can: n_rivals is how
+        // many model corners were in gate for this detection (0 = no choice to get wrong), and
+        // runnerup_chi2 is how far away the best loser sat. The MARGIN runnerup_chi2/assoc_chi2 is
+        // the correspondence's real confidence — a match is trustworthy when the second-best
+        // candidate is FAR, not when the best one is CLOSE.
+           "n_rivals,runnerup_chi2,"
+        // The LiDAR corner in the ROBOT frame — what uv_lidar was computed FROM. With it (and the
+        // sidecar's mount) an extrinsic injection is a replay of this file rather than another
+        // 200 m of driving (VALIDATION_THREE_DEVICE_CORNERS §2b, arm 7).
+           "px_robot,py_robot,pz_robot,"
+        // The LIDAR HALF of the covariance, on its own. The other half (the image corner's) is the
+        // remainder. A replay needs the split because the LiDAR half is the part that moves with the
+        // mount: with it the injected weighting is rebuilt exactly instead of held fixed and
+        // apologised for.
+           "cl_uu,cl_uv,cl_vv\n";
+
+    rc::mount::ReplayContext rc_ctx;
+    rc_ctx.robot        = params.LIDAR_ROBOT_FRAME;
+    rc_ctx.camera       = cam;
+    rc_ctx.cam          = ing.model();
+    rc_ctx.cam_R_robot  = ing.cam_R_robot();
+    rc_ctx.cam_t_robot  = ing.cam_t_robot();
+    rc_ctx.sigma_pitch  = params.IMAGE_EDGE_MOUNT_PITCH_SIGMA;
+    rc_ctx.sigma_height = params.IMAGE_EDGE_MOUNT_HEIGHT_SIGMA;
+    rc_ctx.sigma_yaw    = params.IMAGE_EDGE_MOUNT_YAW_SIGMA;
+    rc_ctx.offset_sigma_px = params.IMAGE_EDGE_MOUNT_VERTEX_OFFSET_SIGMA_PX;
+    // The LiDAR's origin in the robot frame: a LiDAR mount error rotates every corner about THAT
+    // point, not about the robot origin, and the parallax that leaves is precisely what decides
+    // whether a LiDAR injection really cancels in the camera-vs-camera closure. If the chain does
+    // not resolve, the flag stays false and the replay REFUSES that leg rather than assuming zero.
+    if (auto inner = G->get_inner_eigen_api())
+        if (const auto T = inner->get_transformation_matrix(params.LIDAR_ROBOT_FRAME,
+                                                            params.LIDAR_HELIOS_NAME, 0, "RT",
+                                                            DSR::RT_API::TimeQuery::Nearest);
+            T.has_value())   // ALWAYS check the optional (CLAUDE.md)
+        {
+            rc_ctx.lidar_t_robot = T.value().matrix().block<3, 1>(0, 3).cast<float>();
+            rc_ctx.lidar_known   = true;
+        }
+    const std::string side = "etc/image_edge_replay_" + cam + ".txt";
+    if (not rc::mount::write_replay_context(side, rc_ctx))
+        qWarning() << "[camcal] could not write" << QString::fromStdString(side)
+                   << "— the pair rows will not be replayable offline";
+    else if (not rc_ctx.lidar_known)
+        qWarning() << "[camcal]" << QString::fromStdString(params.LIDAR_HELIOS_NAME) << "<-"
+                   << QString::fromStdString(params.LIDAR_ROBOT_FRAME)
+                   << "did not resolve; the LiDAR-injection leg of arm 7 will refuse to run";
+}
+
+void SpecificWorker::write_pair_row(std::ofstream &csv, const std::string &cam, std::int64_t ts,
+                                    const rc::mount::PairObs &pr, bool ceiling, float angle_deg,
+                                    float assoc_chi2, int n_rivals, float runnerup_chi2)
+{
+    if (not csv.is_open()) return;
+    csv << ts << ',' << cam << ',' << pr.vertex << ',' << (ceiling ? 1 : 0) << ','
+        << pr.uv_image.x() << ',' << pr.uv_image.y() << ','
+        << pr.uv_lidar.x() << ',' << pr.uv_lidar.y() << ','
+        << pr.r.x() << ',' << pr.r.y() << ','
+        << std::sqrt(std::max(0.f, pr.cov(0, 0))) << ','
+        << std::sqrt(std::max(0.f, pr.cov(1, 1))) << ','
+        << pr.cov(0, 1) << ','
+        << pr.assoc_prob << ',' << pr.range_m << ','
+        << angle_deg << ',' << assoc_chi2 << ','
+        << n_rivals << ','
+        // A match with no rival has an INFINITE margin, not a huge finite one. Writing the 1e9
+        // sentinel would put a number into an average that means "no rival".
+        << (n_rivals > 0 ? runnerup_chi2 : -1.f) << ','
+        << pr.p_robot.x() << ',' << pr.p_robot.y() << ',' << pr.p_robot.z() << ','
+        << pr.cov_lidar(0, 0) << ',' << pr.cov_lidar(0, 1) << ',' << pr.cov_lidar(1, 1) << '\n';
+}
+
 void SpecificWorker::mount_pair_update(const rc::ImageEdgeObs &obs,
                                        const std::vector<rc::CornerDetector::CornerMatch> &matches,
                                        std::int64_t timestamp_ms)
@@ -915,7 +1009,12 @@ void SpecificWorker::mount_pair_update(const rc::ImageEdgeObs &obs,
         // ★ IN RADIANS, not pixels. A pixel is 0.128 deg on the zed and 0.188 on the ricoh, so a
         //   pixel residual cannot be compared across cameras and an angular one can.
         {
-            const Eigen::Vector2f ppr = rc::img::px_per_rad(obs.cam);
+            // ★ AT THE MEASUREMENT, not at the principal point. The closure differences the two
+            //   cameras' residuals in radians; the panorama's scale is constant but the ZED is a
+            //   pinhole, whose true local scale is fx·sec^2(theta). Measured on a synthetic drive of
+            //   the real pair, that constant was 82% of the leakage a LiDAR error puts into the
+            //   closure — a bias in the comparison, not in either camera (mount_replay --selftest).
+            const Eigen::Vector2f ppr = rc::img::px_per_rad_at(obs.cam, pr.uv_image);
             if (ppr.x() > 0.f and ppr.y() > 0.f)
                 loop_closure_observe(params.IMAGE_EDGE_CAMERA, tp.vertex,
                                      tp.from == rc::ContourClass::WallCeiling,
@@ -923,44 +1022,10 @@ void SpecificWorker::mount_pair_update(const rc::ImageEdgeObs &obs,
                                      static_cast<double>(pr.r.y() / ppr.y()), timestamp_ms);
         }
 
-        if (not mp_csv_.is_open())
-        {
-            // ★ KEYED BY CAMERA, like the evidence file beside it (camera_calib_<robot>_<camera>.txt).
-            //   One agent runs ONE camera per run (a single camera_ingestor_), so the closure test's
-            //   two pairwise relations can only be recorded on two SEPARATE runs — and a fixed
-            //   filename means the second run destroys the first. The estimator's own evidence was
-            //   already keyed; only this diagnostic was not.
-            mp_csv_.open("etc/image_edge_pair_" + params.IMAGE_EDGE_CAMERA + ".csv",
-                         std::ios::out | std::ios::trunc);
-            if (mp_csv_.is_open())
-            {
-                mp_csv_.imbue(std::locale::classic());   // CLAUDE.md: never a comma decimal
-                mp_csv_ << "ts_ms,camera,vertex,u_img,v_img,u_lidar,v_lidar,ru,rv,"
-                           "sigu,sigv,assoc_prob,range_m,angle_deg,assoc_chi2,"
-                           // ── the association's INPUTS, beside its verdict ──────────────────────
-                           // assoc_chi2 is TRUNCATED to [0, CornerDetector::Params::assoc_chi2] by
-                           // the gate itself, so its distribution cannot be used to judge the gate.
-                           // These two can: n_rivals is how many model corners were in gate for this
-                           // detection (0 = no choice to get wrong), and runnerup_chi2 is how far
-                           // away the best loser sat. The MARGIN runnerup_chi2/assoc_chi2 is the
-                           // correspondence's real confidence — a match is trustworthy when the
-                           // second-best candidate is FAR, not when the best one is CLOSE.
-                           "n_rivals,runnerup_chi2\n";
-            }
-        }
-        if (mp_csv_.is_open())
-            mp_csv_ << timestamp_ms << ',' << params.IMAGE_EDGE_CAMERA << ',' << pr.vertex << ','
-                    << pr.uv_image.x() << ',' << pr.uv_image.y() << ','
-                    << pr.uv_lidar.x() << ',' << pr.uv_lidar.y() << ','
-                    << pr.r.x() << ',' << pr.r.y() << ','
-                    << std::sqrt(std::max(0.f, pr.cov(0, 0))) << ','
-                    << std::sqrt(std::max(0.f, pr.cov(1, 1))) << ','
-                    << pr.assoc_prob << ',' << pr.range_m << ','
-                    << it->angle_deg << ',' << it->assoc_chi2_val << ','
-                    << it->n_rivals << ','
-                    // A match with no rival has an INFINITE margin, not a huge finite one. Writing
-                    // the 1e9 sentinel would put a number into an average that means "no rival".
-                    << (it->n_rivals > 0 ? it->runnerup_chi2 : -1.f) << '\n';
+        if (not mp_csv_.is_open()) open_pair_log(mp_csv_, params.IMAGE_EDGE_CAMERA, *camera_ingestor_);
+        write_pair_row(mp_csv_, params.IMAGE_EDGE_CAMERA, timestamp_ms, pr,
+                       tp.from == rc::ContourClass::WallCeiling,
+                       it->angle_deg, it->assoc_chi2_val, it->n_rivals, it->runnerup_chi2);
     }
 
     if (timestamp_ms - mp_win_start_ms_ < 5000) return;
@@ -1434,7 +1499,6 @@ void SpecificWorker::pump_calib_channels()
         if (viewer_) viewer_->set_triple_points(obs.triple_points, ch.name);
         if (obs.triple_points.empty() or res->corner_matches.empty()) continue;
 
-        const Eigen::Vector2f ppr = rc::img::px_per_rad(obs.cam);
         for (const auto &tp : obs.triple_points)
         {
             const auto it = std::ranges::find_if(res->corner_matches,
@@ -1449,6 +1513,16 @@ void SpecificWorker::pump_calib_channels()
             if (not pr.ok) continue;
             ch.calib.add(pr);
             ++ch.pairs;
+            // The SAME row the driving camera writes. Without it this channel produced evidence
+            // nobody could re-derive: arm 7 needs both cameras' mounts re-solved under one
+            // injection, and the closure recomputed from the two, all from a single drive.
+            if (not ch.csv.is_open()) open_pair_log(ch.csv, ch.name, *ch.ingestor);
+            write_pair_row(ch.csv, ch.name, static_cast<std::int64_t>(frame.stamp), pr,
+                           tp.from == rc::ContourClass::WallCeiling,
+                           it->angle_deg, it->assoc_chi2_val, it->n_rivals, it->runnerup_chi2);
+            // Per ROW, not per frame: see the note on the driving camera's call — the local
+            // pixel-to-angle scale varies across a pinhole's field, and this channel IS the pinhole.
+            const Eigen::Vector2f ppr = rc::img::px_per_rad_at(obs.cam, pr.uv_image);
             if (ppr.x() > 0.f and ppr.y() > 0.f)
                 loop_closure_observe(ch.name, tp.vertex,
                                      tp.from == rc::ContourClass::WallCeiling,
@@ -1459,6 +1533,7 @@ void SpecificWorker::pump_calib_channels()
         if (ch.pairs % 2000 < 12 and ch.pairs > 0)
         {
             ch.calib.save(ch.calib.path());
+            if (ch.csv.is_open()) ch.csv.flush();   // same cadence as the evidence beside it
             if (const auto sol = ch.calib.solve(); sol.ok)
                 qInfo().nospace().noquote()
                     << "[camcal] " << QString::fromStdString(ch.name) << " " << ch.pairs

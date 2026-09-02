@@ -371,12 +371,34 @@ attribution:
 |---|---|---|---|
 | **ricoh mount** | −δ | 0 | −δ |
 | **zed mount** | 0 | −δ | +δ |
-| **helios / LiDAR** | −δ | −δ | **0 — unchanged** |
+| **helios / LiDAR** | −δ | −δ | **0 ± 0.032·δ — see below** |
 
 The third row is the claim `specificworker.h` already states and has never tested: *large individual
 residuals with a small difference put the fault in the LiDAR; a large difference puts it between the
 cameras.* ★ If a LiDAR injection moves the loop closure, that attribution logic is wrong, and finding
 that out is worth more than another confirmation.
+
+### ★★★ "0 — unchanged" WAS A FALSIFIER WITH NO TOLERANCE (measured 2026-09-02, `mount_replay --selftest`)
+
+Exact cancellation was never the prediction, and writing it as `0` would have fired the falsifier on
+geometry. A LiDAR yaw error rotates every corner about the **LiDAR's own origin**, and the two cameras
+sit at different offsets from it, so a parallax term survives the difference. On a synthetic drive
+built with the real pair (ricoh panorama + zed pinhole, 23 vertices, ~1300 rows each) a **1.0° LiDAR
+yaw injection moves the closure by 0.032°** — 3.2%, or **0.56σ** against the cluster-honest closure SE
+of ±0.0573°. So the row stands, *with a band*: a LiDAR fault is consistent with the closure moving up
+to ~3% of the injection.
+
+⚠ **AND THE FIRST MEASUREMENT OF THAT BAND WAS 0.196° — SIX TIMES LARGER — BECAUSE OF A DEFECT IN THE
+CHANNEL, NOT THE GEOMETRY.** `px_per_rad()` returns the scale at the **principal point**; for a pinhole
+the true local scale is `fx·sec²θ`, so the ZED's residuals converted to angles too large off-axis while
+the panorama's were exact. The closure differences the two, so the error landed entirely in the
+comparison. Split measured: **parallax 0.036°, the `fx` constant 0.161° — 82% of the leakage.**
+Fixed by `rc::img::px_per_rad_at()` (a local jacobian in closed form, not a tuned factor), now used by
+both closure call sites; the selftest's leakage falls to 0.032°, i.e. parallax alone.
+★★★ **Consequence for §1.4: the recorded closure `−0.0115°`, and its 0.0023° agreement with the two
+mount solves, were computed through the biased scale and must be RE-MEASURED on the next run.** The
+size of the shift cannot be computed from data in hand — it depends on where the ZED's corners sat in
+its field, and the ZED channel logged no rows at all until 2026-09-02. That is now fixed too.
 
 ### Magnitude, set by the honest errors and not by taste
 
@@ -417,8 +439,31 @@ Pre-registered outcomes, in order:
 changes `uv_lidar` deterministically from `p_robot`; the association is exact-by-index so it does not
 move. **Logging `p_robot` (3 floats) in the pair CSV makes all four legs replays of ONE recorded
 drive** — which also removes route variation, the nuisance that
-[[rgb-corner-calibration-experiment]] found swamps between-run comparisons. ⚠ It is an approximation:
-`cov_lid` also depends on the extrinsic through `Pxy`, and a replay holds it fixed.
+[[rgb-corner-calibration-experiment]] found swamps between-run comparisons.
+
+✓ **BUILT 2026-09-02: `tools/mount_replay.cpp`** (`make -C build mount_replay`). It calls the agent's
+own `make_pair_from` and `Accum` rather than a python replica, so it grades the estimator instead of a
+copy of it. `--selftest` replays a drive whose truth is set in the tool and checks that the three
+injection signatures come out distinguishable — run it before trusting any leg. ALL PASS at first
+green, including the refusal path.
+
+What the recording drive needs, and what was MISSING when this section was first written:
+- ⚠ **the auxiliary camera wrote no pair CSV at all.** Only the driving camera did, so "one drive, not
+  four" could never have covered both mount legs. Both now go through one `open_pair_log()`.
+- ⚠ **`ceiling` was not logged**, and the closure keys on `vertex*2 + ceiling`: a replay without it
+  differences floor corners against ceiling ones.
+- ⚠ **only the covariance DIAGONAL was logged.** The solve weights by the full 2×2 inverse, so a
+  replay handed `sigu`/`sigv` alone computes a different `H` from the same rows — and then a bug in
+  the replay could not be told apart from that difference. `cuv` closes the δ=0 self-check.
+- ✓ **the "replay holds `cov` fixed" approximation is GONE, not bounded.** `cov_lidar` is now logged
+  on its own, so the replay recovers `cov_xy = Pxy⁻¹·cov_lidar·Pxy⁻ᵀ` at the nominal mount and rebuilds
+  the weight under the injected one exactly. `--fixed-cov` keeps the old behaviour so the size of what
+  would have been assumed away is printed rather than asserted (measured: 0.000% of a 1° injection —
+  it *was* negligible, which is now a result instead of a hope).
+- ⚠ **a run-constants sidecar** (`etc/image_edge_replay_<cam>.txt`) carries the camera model, the
+  nominal mount, the prior sigmas and the LiDAR origin. Without it a replay would hard-code the mount.
+  If the LiDAR origin does not resolve the flag stays false and **the LiDAR leg refuses**: a rotation
+  about the wrong centre is a different experiment, not an approximation of this one.
 
 So: **replay all four legs offline from one tour, then confirm the single most informative one (the
 helios injection) live.** A replay establishes that the information is present; only a live leg

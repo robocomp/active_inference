@@ -281,6 +281,11 @@ class SpecificWorker : public GenericWorker
         std::unique_ptr<rc::CameraIngestor>  ingestor;
         std::unique_ptr<rc::ImageEdgeSource> source;
         rc::camcal::Estimator                calib;
+        /// This channel's own pair rows. ★ Auxiliary channels wrote NONE before 2026-09-02: they
+        /// accumulated evidence but left no replayable record, so arm 7's attribution table — which
+        /// needs BOTH cameras' mount solves under one injection — could not be replayed offline from
+        /// a single drive. One file per camera, exactly like the evidence file beside it.
+        std::ofstream                        csv;
         bool                                 bound = false, loaded = false;
         long                                 pairs = 0;
         /// Last time this channel's solve was pushed to the Calib window (ms, WALL clock). Same
@@ -336,6 +341,17 @@ class SpecificWorker : public GenericWorker
     void mount_pair_update(const rc::ImageEdgeObs& obs,
                            const std::vector<rc::CornerDetector::CornerMatch>& matches,
                            std::int64_t timestamp_ms);
+    /// Opens `etc/image_edge_pair_<cam>.csv` and writes the run-constants sidecar beside it
+    /// (`etc/image_edge_replay_<cam>.txt`: camera model, nominal mount, prior sigmas, LiDAR origin).
+    /// A row alone cannot be rebuilt under a perturbed extrinsic; with the sidecar it can, which is
+    /// what makes arm 7 four analyses of ONE drive instead of four drives. Both the driving camera
+    /// and the auxiliary channels go through here so the two files cannot drift apart.
+    /// ⚠ Reads the RT chain with timestamp 0 — main thread only (CLAUDE.md); both callers are in
+    ///   compute().
+    void open_pair_log(std::ofstream& csv, const std::string& cam, const rc::CameraIngestor& ing);
+    static void write_pair_row(std::ofstream& csv, const std::string& cam, std::int64_t ts,
+                               const rc::mount::PairObs& pr, bool ceiling, float angle_deg,
+                               float assoc_chi2, int n_rivals, float runnerup_chi2);
 
     double gt_sum_diff_c_ = 0, gt_sum_diff_s_ = 0;   ///< circular accumulators for est - gt
     double gt_sum_sum_c_  = 0, gt_sum_sum_s_  = 0;   ///< and for est + gt

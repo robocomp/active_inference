@@ -57,9 +57,13 @@
  */
 
 #include <Eigen/Dense>
+#include <charconv>
 #include <cmath>
 #include <cstdint>
+#include <fstream>
+#include <locale>
 #include <map>
+#include <string>
 #include <vector>
 
 #include "corner_detector.h"
@@ -78,10 +82,91 @@ namespace rc::mount
         Eigen::Matrix2f cov      = Eigen::Matrix2f::Identity();
         Eigen::Matrix<float, 2, IMAGE_EDGE_NUISANCES> J =
             Eigen::Matrix<float, 2, IMAGE_EDGE_NUISANCES>::Zero();  ///< d(uv) / d(nuisance), prior-scaled
+        /// d(uv) / d(p_camera) at this point. Kept because the LiDAR half of `cov` is built from it
+        /// (`Pxy = (P·cam_R_robot).leftCols<2>()`), and keeping it here is what lets make_pair() and
+        /// the offline replay share one projection instead of writing the same algebra twice.
+        Eigen::Matrix<float, 2, 3> P = Eigen::Matrix<float, 2, 3>::Zero();
+        /// The LiDAR half of `cov` alone — `Pxy·cov_xy·Pxyᵀ`. ★ Logged so an offline replay does not
+        /// have to hold the covariance FIXED while the extrinsic moves: `Pxy` depends on the mount,
+        /// and with this term separable the replay recovers `cov_xy = Pxy⁻¹·cov_lidar·Pxy⁻ᵀ` and
+        /// rebuilds the weight under the injected mount EXACTLY. Without it the replay carries a
+        /// stated approximation; with it there is nothing left to state.
+        Eigen::Matrix2f cov_lidar = Eigen::Matrix2f::Zero();
         float assoc_prob = 1.f;
         float range_m    = 0.f;
+        /// The LiDAR corner in the ROBOT frame, before the extrinsic touched it. ★ Logged so an
+        /// extrinsic perturbation can be REPLAYED offline: uv_lidar is a deterministic function of
+        /// this and the mount, and the association is exact-by-index so it does not move. That turns
+        /// arm 7's four injection legs into four analyses of ONE recorded drive, which also removes
+        /// the route variation that swamps between-run comparisons.
+        Eigen::Vector3f p_robot = Eigen::Vector3f::Zero();
         bool  ok         = false;
     };
+
+    /// ── The half of a pair that an extrinsic INJECTION moves ────────────────────────────────────
+    /// Everything downstream of `p_robot` and the mount: the projection, the residual and J. Split
+    /// out of make_pair() so arm 7's offline replay (`tools/mount_replay.cpp`) can perturb the mount
+    /// and rebuild the row through THE ESTIMATOR'S OWN CODE rather than a replica that can silently
+    /// drift from it — the same reason the bench grades the live path and not a copy of it.
+    ///
+    /// `cov` is handed in instead of computed here: the live caller builds it from BOTH sensors'
+    /// uncertainties (which needs the LiDAR corner's information matrix, a thing a CSV row does not
+    /// carry), and a replay reuses the covariance that was recorded at capture time.
+    /// ⚠ So a replay holds `cov` FIXED while the extrinsic moves, and the LiDAR half of it does
+    ///   depend on the extrinsic through `Pxy = (P·cam_R_robot).leftCols<2>()`. `P` is left in the
+    ///   PairObs so a replay can compute how far that approximation reaches instead of asserting it
+    ///   is small (VALIDATION_THREE_DEVICE_CORNERS §2b).
+    inline PairObs make_pair_from(int vertex, float assoc_prob,
+                                  const Eigen::Vector3f& p_robot,
+                                  const Eigen::Vector2f& uv_image,
+                                  const Eigen::Matrix2f& cov,
+                                  const CameraModel& cam,
+                                  const Eigen::Matrix3f& cam_R_robot,
+                                  const Eigen::Vector3f& cam_t_robot,
+                                  float sigma_pitch, float sigma_height, float sigma_yaw)
+    {
+        PairObs o;
+        o.vertex = vertex;
+        o.assoc_prob = assoc_prob;
+
+        const Eigen::Vector3f pc = cam_R_robot * p_robot + cam_t_robot;
+        if (not (pc.norm() > 1e-3f)) return o;
+        o.p_robot = p_robot;
+
+        Eigen::Vector2d uv;
+        if (not rc::img::project_with_model(cam, pc.cast<double>(), uv)) return o;
+        Eigen::Matrix<double, 2, 3> P;
+        if (not rc::img::project_jacobian_model(cam, pc.cast<double>(), P)) return o;
+
+        o.uv_lidar = uv.cast<float>();
+        o.uv_image = uv_image;
+        o.r        = Eigen::Vector2f(
+            static_cast<float>(rc::img::du_wrapped(
+                static_cast<double>(o.uv_image.x()) - static_cast<double>(o.uv_lidar.x()), cam)),
+            o.uv_image.y() - o.uv_lidar.y());
+        o.range_m  = pc.norm();
+
+        const Eigen::Matrix<float, 2, 3> Pf = P.cast<float>();
+        o.P = Pf;
+        // ★ THE CAMERA'S OWN AXES, in camera coordinates — literally (1,0,0) and (0,0,1), exactly as
+        //   image_edge_source.cpp:277 defines them. This previously used cam_R_robot.col(0) and
+        //   .col(2), which are the ROBOT's axes expressed in camera coordinates: a different thing.
+        //   For this mount the up-axes coincide, so the yaw and height columns were unaffected — but
+        //   col(0) is the robot's FORWARD axis, so what was labelled "pitch" was a rotation about the
+        //   optical axis, i.e. a ROLL. Any pitch figure from the pair fit before this is void; the
+        //   yaw result (+0.014 deg) stands, which is why it is worth saying which is which rather
+        //   than quietly re-running everything.
+        const Eigen::Vector3f x_cam(1.f, 0.f, 0.f);
+        const Eigen::Vector3f z_cam(0.f, 0.f, 1.f);
+        o.J.col(0) = sigma_pitch  * (Pf * x_cam.cross(pc));
+        o.J.col(1) = sigma_height * (Pf * z_cam);
+        o.J.col(2) = sigma_yaw    * (Pf * z_cam.cross(pc));
+        // column 3 (dt) deliberately zero — see the note above.
+
+        o.cov = cov;
+        o.ok  = o.cov.allFinite() and o.J.allFinite() and o.r.allFinite();
+        return o;
+    }
 
     /// Builds the pose-free pair for one (triple point, corner match) with the same model_index.
     ///
@@ -98,10 +183,6 @@ namespace rc::mount
                              const Eigen::Vector3f& cam_t_robot,
                              float sigma_pitch, float sigma_height, float sigma_yaw)
     {
-        PairObs o;
-        o.vertex = tp.vertex;
-        o.assoc_prob = cm.assoc_prob;
-
         // ★ z comes from the TRIPLE POINT, not from a constant: the same vertical wall-wall edge
         //   yields a corner at floor level and another at ceiling level, and this pairs with either.
         //   The LiDAR corner is a 2-D (x, y) at sensor height, but it is the SAME vertical edge, so
@@ -110,37 +191,14 @@ namespace rc::mount
         //   (This codebase's robot frame has its origin on the floor: the projection path forms
         //    e = p_room - pose with e.z() = p_room.z(), and P3Bot->body is identity.)
         const Eigen::Vector3f p_robot(cm.detected.x(), cm.detected.y(), tp.p_room.z());
-        const Eigen::Vector3f pc = cam_R_robot * p_robot + cam_t_robot;
-        if (not (pc.norm() > 1e-3f)) return o;
-
-        Eigen::Vector2d uv;
-        if (not rc::img::project_with_model(cam, pc.cast<double>(), uv)) return o;
-        Eigen::Matrix<double, 2, 3> P;
-        if (not rc::img::project_jacobian_model(cam, pc.cast<double>(), P)) return o;
-
-        o.uv_lidar = uv.cast<float>();
-        o.uv_image = tp.uv_meas;
-        o.r        = Eigen::Vector2f(
-            static_cast<float>(rc::img::du_wrapped(
-                static_cast<double>(o.uv_image.x()) - static_cast<double>(o.uv_lidar.x()), cam)),
-            o.uv_image.y() - o.uv_lidar.y());
-        o.range_m  = pc.norm();
-
-        const Eigen::Matrix<float, 2, 3> Pf = P.cast<float>();
-        // ★ THE CAMERA'S OWN AXES, in camera coordinates — literally (1,0,0) and (0,0,1), exactly as
-        //   image_edge_source.cpp:277 defines them. This previously used cam_R_robot.col(0) and
-        //   .col(2), which are the ROBOT's axes expressed in camera coordinates: a different thing.
-        //   For this mount the up-axes coincide, so the yaw and height columns were unaffected — but
-        //   col(0) is the robot's FORWARD axis, so what was labelled "pitch" was a rotation about the
-        //   optical axis, i.e. a ROLL. Any pitch figure from the pair fit before this is void; the
-        //   yaw result (+0.014 deg) stands, which is why it is worth saying which is which rather
-        //   than quietly re-running everything.
-        const Eigen::Vector3f x_cam(1.f, 0.f, 0.f);
-        const Eigen::Vector3f z_cam(0.f, 0.f, 1.f);
-        o.J.col(0) = sigma_pitch  * (Pf * x_cam.cross(pc));
-        o.J.col(1) = sigma_height * (Pf * z_cam);
-        o.J.col(2) = sigma_yaw    * (Pf * z_cam.cross(pc));
-        // column 3 (dt) deliberately zero — see the note above.
+        // The covariance needs this pair's own projection jacobian, so the geometry runs FIRST with
+        // a placeholder covariance and the real one is installed below. Zero is finite, so the `ok`
+        // flag computed there is exactly the geometry's own verdict.
+        PairObs o = make_pair_from(tp.vertex, cm.assoc_prob, p_robot, tp.uv_meas,
+                                   Eigen::Matrix2f::Zero(), cam, cam_R_robot, cam_t_robot,
+                                   sigma_pitch, sigma_height, sigma_yaw);
+        if (not o.ok) return o;
+        const Eigen::Matrix<float, 2, 3> Pf = o.P;
 
         // ── Covariance: BOTH sensors' uncertainty, in pixels ─────────────────────────────────────
         // The image half comes from the triple point's own line-intersection covariance. The LiDAR
@@ -161,9 +219,123 @@ namespace rc::mount
             const Eigen::Matrix<float, 2, 2> Pxy = (Pf * cam_R_robot).leftCols<2>();
             cov_lid = Pxy * cov_xy * Pxy.transpose();
         }
+        o.cov_lidar = cov_lid;
         o.cov = cov_img + cov_lid + 0.01f * Eigen::Matrix2f::Identity();   // 0.1 px numerical floor
         o.ok  = o.cov.allFinite() and o.J.allFinite() and o.r.allFinite();
         return o;
+    }
+
+    /// ── THE CONSTANTS A RECORDED DRIVE NEEDS TO BE REPLAYABLE ───────────────────────────────────
+    /// A pair CSV row is not self-sufficient. Rebuilding it under a PERTURBED extrinsic needs the
+    /// camera model, the nominal mount, and the three prior sigmas that J's columns are scaled by —
+    /// and, for the LiDAR leg of arm 7's attribution table, where the LiDAR sits in the robot frame,
+    /// because a LiDAR yaw error rotates every corner about THAT point and not about the origin.
+    /// These are constants of the run, so they are written once beside the CSV rather than on every
+    /// row. ★ Without them a replay has to hard-code the mount, which is exactly how an offline tool
+    /// and the agent come to disagree about the same drive while both look right.
+    struct ReplayContext
+    {
+        std::string     robot, camera;
+        CameraModel     cam;
+        Eigen::Matrix3f cam_R_robot = Eigen::Matrix3f::Identity();
+        Eigen::Vector3f cam_t_robot = Eigen::Vector3f::Zero();
+        float sigma_pitch = 0.f, sigma_height = 0.f, sigma_yaw = 0.f;
+        double offset_sigma_px = 0.0;   ///< what the agent's own solve was using, for comparison
+        /// The LiDAR's origin in the robot frame. ⚠ `lidar_known == false` means it could not be
+        /// resolved at write time; a replay must then REFUSE the LiDAR-injection leg rather than
+        /// assume the origin — that leg's whole point is where the rotation centre is.
+        Eigen::Vector3f lidar_t_robot = Eigen::Vector3f::Zero();
+        bool            lidar_known = false;
+    };
+
+    /// One `key,value...` per line, C locale on both sides. CLAUDE.md: these machines run es_ES, so
+    /// the writer imbues classic() and the reader uses from_chars — never `>>` or strtof.
+    inline bool write_replay_context(const std::string& path, const ReplayContext& c)
+    {
+        std::ofstream f(path, std::ios::out | std::ios::trunc);
+        if (not f.is_open()) return false;
+        f.imbue(std::locale::classic());
+        f << "# the run constants an offline replay needs (arm 7). Written when the pair CSV opens.\n"
+          << "robot," << c.robot << "\ncamera," << c.camera << '\n'
+          << "cam_kind," << static_cast<int>(c.cam.kind) << '\n'
+          << "cam_intrinsics," << c.cam.fx << ',' << c.cam.fy << ',' << c.cam.cx << ',' << c.cam.cy
+          << ',' << c.cam.width << ',' << c.cam.height << ',' << c.cam.azimuth_sign << ','
+          << c.cam.azimuth_offset << '\n'
+          << "cam_R_robot";
+        for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) f << ',' << c.cam_R_robot(i, j);
+        f << "\ncam_t_robot," << c.cam_t_robot.x() << ',' << c.cam_t_robot.y() << ','
+          << c.cam_t_robot.z() << '\n'
+          << "prior_sigmas," << c.sigma_pitch << ',' << c.sigma_height << ',' << c.sigma_yaw << '\n'
+          << "offset_sigma_px," << c.offset_sigma_px << '\n';
+        if (c.lidar_known)
+            f << "lidar_t_robot," << c.lidar_t_robot.x() << ',' << c.lidar_t_robot.y() << ','
+              << c.lidar_t_robot.z() << '\n';
+        else
+            f << "# lidar_t_robot UNRESOLVED at write time — the LiDAR injection leg must refuse\n";
+        return f.good();
+    }
+
+    inline bool read_replay_context(const std::string& path, ReplayContext& c)
+    {
+        std::ifstream f(path);
+        if (not f.is_open()) return false;
+        std::string line;
+        int seen = 0;
+        while (std::getline(f, line))
+        {
+            if (line.empty() or line[0] == '#') continue;
+            std::vector<std::string> tok;
+            for (std::size_t a = 0, b; a <= line.size(); a = b + 1)
+            {
+                b = line.find(',', a);
+                if (b == std::string::npos) b = line.size();
+                tok.emplace_back(line.substr(a, b - a));
+            }
+            const auto num = [&](std::size_t i, auto& out) {
+                if (i >= tok.size()) return false;
+                const char* p = tok[i].data();
+                const char* e = p + tok[i].size();
+                while (p < e and *p == ' ') ++p;
+                return std::from_chars(p, e, out).ec == std::errc{};
+            };
+            const std::string& k = tok[0];
+            if      (k == "robot"  and tok.size() > 1) { c.robot = tok[1]; }
+            else if (k == "camera" and tok.size() > 1) { c.camera = tok[1]; }
+            else if (k == "cam_kind")
+            {
+                int kind = 0;
+                if (num(1, kind)) { c.cam.kind = static_cast<CameraModel::Kind>(kind); ++seen; }
+            }
+            else if (k == "cam_intrinsics")
+            {
+                bool ok = num(1, c.cam.fx) and num(2, c.cam.fy) and num(3, c.cam.cx)
+                          and num(4, c.cam.cy) and num(5, c.cam.width) and num(6, c.cam.height)
+                          and num(7, c.cam.azimuth_sign) and num(8, c.cam.azimuth_offset);
+                if (ok) { c.cam.valid = true; ++seen; }
+            }
+            else if (k == "cam_R_robot")
+            {
+                bool ok = true;
+                for (int i = 0; i < 3; ++i)
+                    for (int j = 0; j < 3; ++j) ok = ok and num(static_cast<std::size_t>(1 + i * 3 + j), c.cam_R_robot(i, j));
+                if (ok) ++seen;
+            }
+            else if (k == "cam_t_robot")
+            {
+                if (num(1, c.cam_t_robot.x()) and num(2, c.cam_t_robot.y()) and num(3, c.cam_t_robot.z())) ++seen;
+            }
+            else if (k == "prior_sigmas")
+            {
+                if (num(1, c.sigma_pitch) and num(2, c.sigma_height) and num(3, c.sigma_yaw)) ++seen;
+            }
+            else if (k == "offset_sigma_px") { num(1, c.offset_sigma_px); }
+            else if (k == "lidar_t_robot")
+            {
+                if (num(1, c.lidar_t_robot.x()) and num(2, c.lidar_t_robot.y()) and num(3, c.lidar_t_robot.z()))
+                    c.lidar_known = true;
+            }
+        }
+        return seen == 5;   // kind, intrinsics, R, t, sigmas — everything a projection needs
     }
 
     /// ── THE PER-VERTEX OFFSET NUISANCE ──────────────────────────────────────────────────────────

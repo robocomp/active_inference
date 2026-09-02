@@ -329,4 +329,44 @@ namespace rc::img
                 return {m.fx, m.fy};      // exact at the principal point, the usual small-angle form
         }
     }
+
+    /// ── px per rad AT A GIVEN IMAGE POINT ───────────────────────────────────────────────────────
+    /// px_per_rad() below returns the scale at the PRINCIPAL POINT, and says so. That is exact for a
+    /// panorama, where the mapping is linear in azimuth, and wrong everywhere off-axis for a pinhole:
+    /// u = fx·x/y + cx with theta = atan(x/y) gives du/dtheta = fx·sec^2(theta), so a residual measured
+    /// near the image edge converts to an angle that is too LARGE. Same for a cylindrical model's
+    /// elevation, whose v is planar (tan) rather than angular.
+    ///
+    /// ★ WHY IT MATTERS HERE AND NOT ELSEWHERE: the camera-vs-camera loop closure differences the two
+    ///   cameras' residuals IN RADIANS, so a scale that is right for one camera and approximate for
+    ///   the other biases the difference — which is the quantity the three-device closure test reports.
+    ///   MEASURED on a synthetic drive with the real pair (panorama + pinhole): of the leakage a 1 deg
+    ///   LiDAR yaw injection puts into the closure, 0.036 deg is unavoidable parallax and 0.161 deg —
+    ///   82% — was this constant (tools/mount_replay.cpp --selftest).
+    /// ★ It is a local jacobian, not a correction factor: for u the pinhole's own model gives it in
+    ///   closed form, so nothing is being tuned.
+    inline Eigen::Vector2f px_per_rad_at(const CameraModel& m, const Eigen::Vector2f& uv)
+    {
+        switch (m.kind)
+        {
+            case CameraModel::Kind::Pinhole:
+            {
+                // u depends only on x/y and v only on z/y, so the two scales are independent and
+                // each is EXACT — not a small-angle patch on the value at the centre.
+                const float tu = (m.fx > 0.f) ? (uv.x() - m.cx) / m.fx : 0.f;
+                const float tv = (m.fy > 0.f) ? (uv.y() - m.cy) / m.fy : 0.f;
+                return {m.fx * (1.f + tu * tu), m.fy * (1.f + tv * tv)};
+            }
+            case CameraModel::Kind::Cylindrical:
+            {
+                // Azimuth is linear; elevation is planar (v carries tan(el)), so it needs sec^2 too.
+                const float s = m.width / (2.f * static_cast<float>(M_PI));
+                const float te = (s > 0.f) ? (0.5f * m.height - uv.y()) / s : 0.f;
+                return {s, s * (1.f + te * te)};
+            }
+            case CameraModel::Kind::Equirect:
+            default:
+                return px_per_rad(m);   // linear in both angles: the constant IS the local scale
+        }
+    }
 }  // namespace rc::img
