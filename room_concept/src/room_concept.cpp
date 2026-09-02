@@ -4806,19 +4806,27 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         if (obs.triple_points.empty()) return;
         if (not triple_csv_.is_open())
         {
-            triple_csv_.open("etc/image_edge_triple.csv", std::ios::out | std::ios::trunc);
+            // Keyed by camera for the same reason the pair log is: one camera per run, and a fixed
+            // filename means run 2 destroys run 1's record of a DIFFERENT device.
+            triple_csv_.open("etc/image_edge_triple_" + (obs.camera.empty() ? "unknown" : obs.camera)
+                                 + ".csv", std::ios::out | std::ios::trunc);
             if (triple_csv_.is_open())
             {
                 triple_csv_.imbue(std::locale::classic());   // CLAUDE.md: never a comma decimal
-                triple_csv_ << "ts_ms,vertex,at_ceiling,u_pred,v_pred,u_meas,v_meas,du,dv,"
+                triple_csv_ << "ts_ms,camera,vertex,at_ceiling,u_pred,v_pred,u_meas,v_meas,du,dv,"
                                "suu,svv,suv,cond,n_corner,n_floor,"
                                // depth_raw as published; pred_fwd and pred_range are what the MODEL
                                // says at this pose. depth_raw ~= pred_fwd means the value is the
                                // forward coordinate (assumed); depth_raw ~= pred_range, with the
                                // excess growing toward the image edge, means it is range along the
                                // ray and xyz_from_pixel_depth needs the other formula.
+                               // ★ depth_raw / range_sigma / depth_dt_ms are −1/−1/0 for EVERY row
+                               //   of a camera that advertises no depth stream (the ricoh panorama
+                               //   is one). That is a correct report of an ABSENT channel, not a
+                               //   failed measurement — `has_depth` says which of the two it is, so
+                               //   an analysis is never left to guess from a column of sentinels.
                                "depth_raw,pred_fwd,pred_range,range_m,range_sigma,depth_dt_ms,"
-                               "pose_x,pose_y,pose_theta\n";
+                               "has_depth,pose_x,pose_y,pose_theta\n";
             }
         }
         if (not triple_csv_.is_open()) return;
@@ -4835,7 +4843,7 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         const auto pred_range = [&](const TriplePoint& t) { return to_cam(t.p_room).norm(); };
         for (const auto& t : obs.triple_points)
         {
-            triple_csv_ << timestamp_ms << ',' << t.vertex << ','
+            triple_csv_ << timestamp_ms << ',' << obs.camera << ',' << t.vertex << ','
                         << (t.from == ContourClass::WallCeiling ? 1 : 0) << ','
                         << t.uv_pred.x() << ',' << t.uv_pred.y() << ','
                         << t.uv_meas.x() << ',' << t.uv_meas.y() << ','
@@ -4846,6 +4854,7 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
                         << t.depth_raw << ',' << pred_fwd(t) << ',' << pred_range(t) << ','
                         << t.range_m << ',' << t.range_sigma << ','
                         << (obs.depth_stamp_ms ? obs.depth_stamp_ms - timestamp_ms : 0) << ','
+                        << (obs.depth_stamp_ms ? 1 : 0) << ','
                         << pose.x() << ',' << pose.y() << ',' << pose.z() << '\n';
             ++triple_rows_;
             if (t.from == ContourClass::WallCeiling) ++triple_ceil_; else ++triple_floor_;

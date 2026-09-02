@@ -25,6 +25,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -301,6 +302,13 @@ namespace rc
         /// The projection model, carried WITH the evidence so the factor needs no DSR and no Input
         /// plumbing. Plain numbers, verified against CameraAPI::project() at bring-up.
         CameraModel     cam;
+        /// WHICH camera produced this observation ("zed", "ricoh", ...). Provenance, not a knob.
+        /// ★ It travels with the evidence rather than being read from config at the point of use,
+        ///   because `ImageEdge.camera` is runtime-overridable: a consumer that asks the config
+        ///   answers with the camera selected NOW, not the one this observation came from. The
+        ///   diagnostic logs key their filenames on this, so a second run cannot silently
+        ///   overwrite the first run's record of a DIFFERENT camera.
+        std::string     camera;
 
         [[nodiscard]] std::size_t sample_count() const noexcept
         {

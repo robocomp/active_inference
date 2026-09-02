@@ -915,23 +915,42 @@ void SpecificWorker::mount_pair_update(const rc::ImageEdgeObs &obs,
 
         if (not mp_csv_.is_open())
         {
-            mp_csv_.open("etc/image_edge_pair.csv", std::ios::out | std::ios::trunc);
+            // ★ KEYED BY CAMERA, like the evidence file beside it (camera_calib_<robot>_<camera>.txt).
+            //   One agent runs ONE camera per run (a single camera_ingestor_), so the closure test's
+            //   two pairwise relations can only be recorded on two SEPARATE runs — and a fixed
+            //   filename means the second run destroys the first. The estimator's own evidence was
+            //   already keyed; only this diagnostic was not.
+            mp_csv_.open("etc/image_edge_pair_" + params.IMAGE_EDGE_CAMERA + ".csv",
+                         std::ios::out | std::ios::trunc);
             if (mp_csv_.is_open())
             {
                 mp_csv_.imbue(std::locale::classic());   // CLAUDE.md: never a comma decimal
-                mp_csv_ << "ts_ms,vertex,u_img,v_img,u_lidar,v_lidar,ru,rv,"
-                           "sigu,sigv,assoc_prob,range_m,angle_deg,assoc_chi2\n";
+                mp_csv_ << "ts_ms,camera,vertex,u_img,v_img,u_lidar,v_lidar,ru,rv,"
+                           "sigu,sigv,assoc_prob,range_m,angle_deg,assoc_chi2,"
+                           // ── the association's INPUTS, beside its verdict ──────────────────────
+                           // assoc_chi2 is TRUNCATED to [0, CornerDetector::Params::assoc_chi2] by
+                           // the gate itself, so its distribution cannot be used to judge the gate.
+                           // These two can: n_rivals is how many model corners were in gate for this
+                           // detection (0 = no choice to get wrong), and runnerup_chi2 is how far
+                           // away the best loser sat. The MARGIN runnerup_chi2/assoc_chi2 is the
+                           // correspondence's real confidence — a match is trustworthy when the
+                           // second-best candidate is FAR, not when the best one is CLOSE.
+                           "n_rivals,runnerup_chi2\n";
             }
         }
         if (mp_csv_.is_open())
-            mp_csv_ << timestamp_ms << ',' << pr.vertex << ','
+            mp_csv_ << timestamp_ms << ',' << params.IMAGE_EDGE_CAMERA << ',' << pr.vertex << ','
                     << pr.uv_image.x() << ',' << pr.uv_image.y() << ','
                     << pr.uv_lidar.x() << ',' << pr.uv_lidar.y() << ','
                     << pr.r.x() << ',' << pr.r.y() << ','
                     << std::sqrt(std::max(0.f, pr.cov(0, 0))) << ','
                     << std::sqrt(std::max(0.f, pr.cov(1, 1))) << ','
                     << pr.assoc_prob << ',' << pr.range_m << ','
-                    << it->angle_deg << ',' << it->assoc_chi2_val << '\n';
+                    << it->angle_deg << ',' << it->assoc_chi2_val << ','
+                    << it->n_rivals << ','
+                    // A match with no rival has an INFINITE margin, not a huge finite one. Writing
+                    // the 1e9 sentinel would put a number into an average that means "no rival".
+                    << (it->n_rivals > 0 ? it->runnerup_chi2 : -1.f) << '\n';
     }
 
     if (timestamp_ms - mp_win_start_ms_ < 5000) return;
@@ -1507,6 +1526,10 @@ void SpecificWorker::pump_image_edges()
                                            camera_ingestor_->cam_R_robot(),
                                            camera_ingestor_->cam_t_robot(),
                                            pose, res->covariance, twist, dt_ms, &st);
+    // Provenance travels WITH the evidence from here on: every downstream consumer (the pair log,
+    // the triple log, the viewer overlay) then reports the camera this observation actually came
+    // from, not the one the config names at the moment it is asked.
+    obs.camera = params.IMAGE_EDGE_CAMERA;
 
     // ── Range for the triple points, from the ZED depth plane ────────────────────────────────────
     // Zero-copy: the pixel list is known now (the corners were detected from the RGB frame above),

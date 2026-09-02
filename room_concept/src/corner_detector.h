@@ -183,6 +183,15 @@ public:
                                     // this same detection. Large ⇒ the correspondence is unambiguous;
                                     // close to assoc_chi2_val ⇒ a coin flip, which is what makes the
                                     // pose jump. This is the number that identifies WHICH corners alias.
+        int    n_rivals = 0;        // how many OTHER model corners were inside the gate for this same
+                                    // detection. ★ THE ASSOCIATION'S INPUT, LOGGED BESIDE ITS VERDICT:
+                                    // assoc_chi2_val alone cannot be audited, because the gate leaves
+                                    // every over-gate pair INFEASIBLE and so it is TRUNCATED to
+                                    // [0, assoc_chi2] by construction — an emitted match can never
+                                    // exceed the bound, and its distribution therefore says nothing
+                                    // about how often the gate was right. n_rivals and runnerup_chi2
+                                    // are what the gate had to choose BETWEEN, and 0 rivals means
+                                    // there was no choice to get wrong.
     };
 
     /// ── THE ONE "IS THIS CORNER MATCHED?" RULE, SHARED BY EVERY VIEW ────────────────────────────
