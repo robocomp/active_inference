@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
+#include <map>
 #include <queue>
 #include <random>
 #include <charconv>
@@ -253,6 +254,7 @@ namespace
         R.map.params.huber_delta = 0.15f;
         R.map.params.debug_splice = std::getenv("WS_DEBUG_SPLICE") != nullptr;
         apply_env_overrides(R.map.params);
+        R.map.params.forward_referee = std::getenv("WS_NO_REFEREE") == nullptr;
 
         rc::Model model;
         model.init_from_polygon({{-20.f, -20.f}, {20.f, -20.f}, {20.f, 20.f}, {-20.f, 20.f}}, 0.f, 0.f, 0.f, 2.4f);
@@ -514,6 +516,7 @@ namespace
         R.map.params.huber_delta = 0.15f;
         R.map.params.debug_splice = std::getenv("WS_DEBUG_SPLICE") != nullptr;
         apply_env_overrides(R.map.params);
+        R.map.params.forward_referee = std::getenv("WS_NO_REFEREE") == nullptr;
 
         rc::Model model;
         model.init_from_polygon({{-20.f, -20.f}, {20.f, -20.f}, {20.f, 20.f}, {-20.f, 20.f}}, 0.f, 0.f, 0.f, 2.4f);
@@ -1299,6 +1302,8 @@ int main()
         RunResult R7;
         float best_iou = -1.f;
         std::vector<std::pair<float,float>> per_seed;   // (iou, hausdorff)
+        struct RefereeRow { std::string site; bool oracle, inc, fwd; float diou, evidence, cost, fwd_dll, fwd_cost; };
+        std::vector<RefereeRow> referee_rows;
         for (unsigned seed : {7u, 1001u, 424242u})
         {
             std::mt19937 rng7(seed);
@@ -1394,7 +1399,53 @@ int main()
                 for (auto id : Rx.map.order) std::printf(" %llu", (unsigned long long)id);
                 std::printf("\n");
             }
+            // ── THE REFEREE'S REPORT CARD: every judged structure change, both judges against the
+            // truth. The oracle is the IoU with the real layout: a trial was RIGHT iff it raised it.
+            {
+                struct Tally { int n = 0, inc_ok = 0, fwd_ok = 0, disagree = 0, fwd_right_inc_wrong = 0, inc_right_fwd_wrong = 0; };
+                std::map<std::string, Tally> tally;
+                const Eigen::Vector3f org(path[0].x(), path[0].y(), 0.f);
+                for (const auto& d : Rx.map.decisions)
+                {
+                    const float iou_c = polygon_iou(to_world(d.cur, org), room);
+                    const float iou_t = polygon_iou(to_world(d.trial, org), room);
+                    const bool oracle = iou_t > iou_c + 1e-4f;
+                    const bool inc = d.accepted, fwd = d.fwd_dll > d.fwd_cost;
+                    auto& t = tally[d.site];
+                    ++t.n; t.inc_ok += (inc == oracle); t.fwd_ok += (fwd == oracle); t.disagree += (inc != fwd);
+                    t.fwd_right_inc_wrong += (fwd == oracle and inc != oracle);
+                    t.inc_right_fwd_wrong += (inc == oracle and fwd != oracle);
+                    referee_rows.push_back({std::string(d.site), oracle, inc, fwd, iou_t - iou_c, d.evidence, d.cost, d.fwd_dll, d.fwd_cost});
+                }
+                std::printf("      referee[%u]: %zu beams stored, %zu decisions\n", seed, Rx.map.beams.size(), Rx.map.decisions.size());
+                for (const auto& [site, t] : tally)
+                    std::printf("        %-7s n=%3d  incumbent right %3d  forward right %3d  disagree %3d  (forward right & incumbent wrong %d, the reverse %d)\n",
+                                site.c_str(), t.n, t.inc_ok, t.fwd_ok, t.disagree, t.fwd_right_inc_wrong, t.inc_right_fwd_wrong);
+            }
             if (iou_x > best_iou) { best_iou = iou_x; R7 = std::move(Rx); }
+        }
+        {
+            // Across seeds: where the judges disagree, who was right, and by how much IoU.
+            int n = 0, inc_ok = 0, fwd_ok = 0, dis = 0, dis_fwd = 0, dis_inc = 0;
+            float iou_when_fwd_right = 0.f, iou_when_inc_right = 0.f;
+            for (const auto& r : referee_rows)
+            {
+                ++n; inc_ok += (r.inc == r.oracle); fwd_ok += (r.fwd == r.oracle);
+                if (r.inc != r.fwd)
+                {
+                    ++dis;
+                    if (r.fwd == r.oracle) { ++dis_fwd; iou_when_fwd_right += std::abs(r.diou); }
+                    else if (r.inc == r.oracle) { ++dis_inc; iou_when_inc_right += std::abs(r.diou); }
+                }
+            }
+            std::printf("    referee across seeds: %d decisions, incumbent right %d (%.0f%%), forward right %d (%.0f%%); disagreements %d — forward right in %d (Σ|ΔIoU| %.3f), incumbent right in %d (Σ|ΔIoU| %.3f)\n",
+                        n, inc_ok, 100.f * inc_ok / std::max(n, 1), fwd_ok, 100.f * fwd_ok / std::max(n, 1),
+                        dis, dis_fwd, iou_when_fwd_right, dis_inc, iou_when_inc_right);
+            std::ofstream csv("/tmp/wall_slam_referee.csv");
+            csv.imbue(std::locale::classic());
+            csv << "site,oracle,incumbent,forward,diou,evidence,cost,fwd_dll,fwd_cost\n";
+            for (const auto& r : referee_rows)
+                csv << r.site << ',' << r.oracle << ',' << r.inc << ',' << r.fwd << ',' << r.diou << ',' << r.evidence << ',' << r.cost << ',' << r.fwd_dll << ',' << r.fwd_cost << '\n';
         }
         float iou_min = 2.f, iou_med = 0.f;
         { std::vector<float> v; for (auto& q : per_seed) v.push_back(q.first);

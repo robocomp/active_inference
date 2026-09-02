@@ -129,6 +129,19 @@ namespace rc::wallmap
         // code length of the edges it adds and paid by the same grid evidence as a level-1 jump.
         // Recomputed at every publish, so a level-1 correction simply moves the zones under it.
         bool  enable_level2 = true;
+        // ── FORWARD-MODEL REFEREE (Thrun 2003, "Learning occupancy grid maps with forward sensor
+        // models"; built 2026-09-03 as a REFEREE, deciding nothing yet). Every stored beam is
+        // scored against a polygon by the likelihood of its measured range given the range the
+        // polygon predicts along its ray (first edge hit): a mixture of a hit near the prediction,
+        // an unexpected short return, and a random return. Every judge site logs, next to its own
+        // verdict, the Δ log-likelihood the forward model assigns the same trial; the bench scores
+        // both against the truth. ⚠ mixture weights and σ are the model's parameters — to be
+        // LEARNED by EM from the robot's own data, as in the paper; hand values until then.
+        bool  forward_referee = false;      // stores beams and logs decisions (bench: on)
+        float beam_w_hit   = 0.80f;
+        float beam_w_short = 0.10f;         // w_rand = 1 − w_hit − w_short
+        float beam_sigma_m = 0.03f;         // hit width — range noise plus the polygon's own error
+        std::size_t beam_store_max = 800000;   // ring: ~1100 frames × 720 rays on the bench
         // Standing structure pays RENT: a down-jump is accepted when the evidence AGAINST removal
         // (grid delta plus the removed walls' net existence-bin nats) is smaller than the code
         // length it refunds — Occam pushes the polygon down through evidence-neutral structure (a
@@ -297,6 +310,31 @@ namespace rc::wallmap
         /// The model and solver stay soft (six mutating variants measurably degraded pose and
         /// structure); only what is PUBLISHED is exactly Manhattan.
         Polygon manhattan_polygon() const;
+        /// One stored range measurement in the map frame (forward-model referee).
+        struct Beam { Eigen::Vector2f o, d; float r; };
+        std::vector<Beam> beams;
+        std::size_t beam_next_ = 0;
+        int frames_observed_ = 0;
+        /// A judged structure change, both polygons in the map frame, with the incumbent judge's
+        /// evidence and cost, and the forward model's Δ log-likelihood and the code-length cost it
+        /// would apply. The bench compares both verdicts with the truth.
+        struct Decision
+        {
+            const char* site = "";
+            int frame = 0;
+            bool accepted = false;
+            float evidence = 0.f, cost = 0.f;   // the incumbent judge: accepted ⇔ evidence > cost
+            float fwd_dll = 0.f, fwd_cost = 0.f; // the forward referee's verdict ⇔ fwd_dll > fwd_cost
+            std::vector<Eigen::Vector2f> cur, trial;
+        };
+        mutable std::vector<Decision> decisions;
+        /// log p(z | polygon) of one beam: ray-cast to the first edge, then the beam mixture.
+        float beam_loglik(const Beam& b, const std::vector<Eigen::Vector2f>& poly) const;
+        /// Σ over beams crossing the disagreement box of [log p(z | trial) − log p(z | cur)].
+        float forward_delta(const std::vector<Eigen::Vector2f>& cur, const std::vector<Eigen::Vector2f>& trial) const;
+        /// Log one decision with both judges' verdicts (no-op unless Params::forward_referee).
+        void referee(const char* site, bool accepted, float evidence, float cost, float fwd_cost,
+                     const std::vector<Eigen::Vector2f>& cur, const std::vector<Eigen::Vector2f>& trial) const;
         /// LEVEL 2 (Params doc): decorate a published polygon with the rectangular steps that its
         /// residual zones pay for. Pure: reads the grid, returns a new polygon.
         Polygon decorate(const Polygon& pub) const;

@@ -351,6 +351,7 @@ namespace rc::wallmap
                 std::printf("[level2] %s zone %zu cells on edge %d: s=[%.2f,%.2f] h=%.2f +%d edges gain=%.1f cost=%.1f -> %s\n",
                             c == 1 ? "matter" : "free", comp.size(), e, s0, s1, h, added, gain, cost,
                             gain > cost ? "ACCEPT" : "refuse");
+            referee("level2", gain > cost, gain, cost, cost, out.verts, trial.verts);
             if (gain <= cost) continue;
             // Bookkeeping the consumers expect: one wall id and one corner per edge.
             const std::uint64_t host = out.wall_of_edge.empty() ? 0 : out.wall_of_edge[static_cast<size_t>(e) % out.wall_of_edge.size()];
@@ -1199,6 +1200,7 @@ namespace rc::wallmap
             if (params.debug_splice)
                 std::printf("[splice]   jump dorder=%+d dnats=%.1f cost=%.1f -> %s\n",
                             dorder, dnats, cost, dnats > cost ? "ACCEPT" : "refuse");
+            referee("splice", dnats > cost, dnats, cost, cost, poly_cur.verts, trial.verts);
             if (dnats <= cost)
             {
                 walls.resize(walls.size() - best_v.new_walls.size());
@@ -1420,6 +1422,7 @@ namespace rc::wallmap
                         if (params.debug_splice)
                             std::printf("[spur]   jump dnats=%.1f (bins %.1f + grid %.1f) cost=%.1f -> %s\n",
                                         dnats, bin_nats, e_grid, cost, dnats > cost ? "ACCEPT" : "refuse");
+                        referee("wrap", dnats > cost, dnats, cost, cost, poly.verts, p2.verts);
                         if (dnats <= cost)
                         {
                             walls.resize(walls_before);
@@ -1513,6 +1516,8 @@ namespace rc::wallmap
                     if (qualifies(j)) props.push_back({i, j});
             }
         float best_margin = 0.f;
+        float best_refund = 0.f;
+        std::vector<Eigen::Vector2f> best_t;
         std::vector<std::uint64_t> best_o;
         int best_removed = 0;
         for (const auto& pr : props)
@@ -1550,9 +1555,10 @@ namespace rc::wallmap
             const float refund = params.order_keep_fraction * static_cast<float>(dorder) * edge_code_nats(true);
             const float margin = dnats + refund;
             if (margin > best_margin + 1e-3f)
-            { best_margin = margin; best_o = o; best_removed = dorder; }
+            { best_margin = margin; best_o = o; best_removed = dorder; best_refund = refund; best_t = t.verts; }
         }
         if (best_o.empty()) return -1;
+        referee("down", true, best_margin - best_refund, -best_refund, -best_refund, cur.verts, best_t);
         if (params.debug_splice)
             std::printf("[down] removing %d order entries, margin=%.1f nats\n", best_removed, best_margin);
         order = std::move(best_o);
@@ -1603,6 +1609,18 @@ namespace rc::wallmap
             for (const auto& pr : pts_robot)
                 pm.push_back(Rm * pr + pose.head<2>());
             fgrid.mark(pose.head<2>(), pm, timestamp_ms);
+            ++frames_observed_;
+            if (params.forward_referee)
+            {
+                for (const auto& pr : pts_robot)
+                {
+                    const float r = pr.norm();
+                    if (r < 1e-3f) continue;
+                    const Beam b{pose.head<2>(), Rm * (pr / r), r};
+                    if (beams.size() < params.beam_store_max) beams.push_back(b);
+                    else { beams[beam_next_] = b; beam_next_ = (beam_next_ + 1) % beams.size(); }
+                }
+            }
         }
         update_existence(pts_robot, pose, fr);
 
@@ -2809,6 +2827,9 @@ namespace rc::wallmap
                                 iou_old, iou_new);
             }
         }
+        referee("adopt", adopt_ok and surrender <= params.adopt_surrender_nats, iou_new - iou_old, 0.02f,
+                (static_cast<float>(pnew.verts.size()) - static_cast<float>(pold.verts.size())) * edge_code_nats(true),
+                pold.verts, pnew.verts);
         if (adopt_ok and surrender <= params.adopt_surrender_nats)
         {
             order = new_order;
@@ -2964,5 +2985,78 @@ namespace rc::wallmap
         }
         for (auto& cd : candidates) xf(cd.phi, cd.d, cd.information, &cd.s_min, &cd.s_max);
         if (theta0_born) theta0 = wrap_pi(theta0 - rot);
+        // Stored beams move with the frame: p' = R(−rot)(p − c).
+        const Eigen::Matrix2f Rb = rot2(-rot);
+        for (auto& b : beams) { b.o = Rb * (b.o - c); b.d = Rb * b.d; }
+    }
+
+    float WallMap::beam_loglik(const Beam& b, const std::vector<Eigen::Vector2f>& poly) const
+    {
+        float r_pred = params.sensor_range;
+        for (size_t e = 0; e < poly.size(); ++e)
+            if (const auto t = corner_visibility::ray_segment_t(b.o, b.d, poly[e], poly[(e + 1) % poly.size()]); t and *t > 0.f)
+                r_pred = std::min(r_pred, *t);
+        const float sig = params.beam_sigma_m;
+        const float z = b.r, zmax = params.sensor_range;
+        const float w_rand = std::max(0.f, 1.f - params.beam_w_hit - params.beam_w_short);
+        const float dz = (z - r_pred) / sig;
+        const float p_hit   = params.beam_w_hit * std::exp(-0.5f * dz * dz) / (sig * 2.5066283f);
+        const float p_short = (z < r_pred) ? params.beam_w_short / std::max(r_pred, sig) : 0.f;
+        const float p_rand  = w_rand / zmax;
+        return std::log(std::max(p_hit + p_short + p_rand, 1e-30f));
+    }
+
+    float WallMap::forward_delta(const std::vector<Eigen::Vector2f>& cur, const std::vector<Eigen::Vector2f>& trial) const
+    {
+        if (beams.empty() or cur.size() < 3 or trial.size() < 3) return 0.f;
+        // Only beams whose ray enters the box of the vertices the two polygons do not share can
+        // see a different first hit; everything else cancels exactly.
+        Eigen::Vector2f lo(1e9f, 1e9f), hi(-1e9f, -1e9f);
+        const auto unmatched = [&](const std::vector<Eigen::Vector2f>& A, const std::vector<Eigen::Vector2f>& B)
+        {
+            for (const auto& a : A)
+            {
+                bool m = false;
+                for (const auto& q : B) if ((a - q).norm() < 1e-3f) { m = true; break; }
+                if (not m) { lo = lo.cwiseMin(a); hi = hi.cwiseMax(a); }
+            }
+        };
+        unmatched(cur, trial); unmatched(trial, cur);
+        if (lo.x() > hi.x()) return 0.f;
+        lo.array() -= 0.3f; hi.array() += 0.3f;
+        const auto ray_hits_box = [&](const Beam& b)
+        {
+            float t0 = 0.f, t1 = b.r + 3.f * params.beam_sigma_m;
+            for (int k = 0; k < 2; ++k)
+            {
+                const float o = b.o[k], d = b.d[k];
+                if (std::abs(d) < 1e-9f) { if (o < lo[k] or o > hi[k]) return false; continue; }
+                float ta = (lo[k] - o) / d, tb = (hi[k] - o) / d;
+                if (ta > tb) std::swap(ta, tb);
+                t0 = std::max(t0, ta); t1 = std::min(t1, tb);
+                if (t0 > t1) return false;
+            }
+            return true;
+        };
+        float dll = 0.f;
+        for (const auto& b : beams)
+            if (ray_hits_box(b)) dll += beam_loglik(b, trial) - beam_loglik(b, cur);
+        return dll;
+    }
+
+    void WallMap::referee(const char* site, bool accepted, float evidence, float cost, float fwd_cost,
+                          const std::vector<Eigen::Vector2f>& cur, const std::vector<Eigen::Vector2f>& trial) const
+    {
+        if (not params.forward_referee) return;
+        Decision d;
+        d.site = site; d.frame = frames_observed_; d.accepted = accepted;
+        d.evidence = evidence; d.cost = cost; d.fwd_cost = fwd_cost;
+        d.fwd_dll = forward_delta(cur, trial);
+        d.cur = cur; d.trial = trial;
+        if (params.debug_splice)
+            std::printf("[referee] %-6s incumbent %s (%.1f vs %.1f) | forward %s (dll %.1f vs %.1f)\n",
+                        site, accepted ? "ACCEPT" : "refuse", evidence, cost,
+                        d.fwd_dll > fwd_cost ? "ACCEPT" : "refuse", d.fwd_dll, fwd_cost);
+        decisions.push_back(std::move(d));
     }
 } // namespace rc::wallmap
