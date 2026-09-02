@@ -242,6 +242,15 @@ namespace rc::wallmap
     class WallMap
     {
     public:
+        /// Projection EM at the map layer: re-estimate theta0 (weighted mean class-corrected
+        /// orientation — the shared-angle M-step) and project every classified wall onto its class
+        /// axis about its own extent centre. Call after each solve; the published polygon is then
+        /// exactly Manhattan by construction while the solver stays soft.
+        void enforce_manhattan();
+        /// The OUTPUT-stage projection: the same operation on a COPY, returning its polygon.
+        /// The model and solver stay soft (six mutating variants measurably degraded pose and
+        /// structure); only what is PUBLISHED is exactly Manhattan.
+        Polygon manhattan_polygon() const;
         Params params;
 
         bool  theta0_born = false;

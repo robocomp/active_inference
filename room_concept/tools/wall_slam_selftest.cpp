@@ -352,7 +352,7 @@ namespace
             R.frames = static_cast<int>(f) + 1;
         }
         R.pose_rmse_xy = (n_err > 0) ? static_cast<float>(std::sqrt(se / n_err)) : 0.f;
-        R.poly = R.map.build_polygon();
+        R.poly = R.map.manhattan_polygon();   // published layout: exactly Manhattan
         return R;
     }
 
@@ -697,7 +697,7 @@ namespace
         }
         R.pose_rmse_xy = (n_err > 0) ? static_cast<float>(std::sqrt(se / n_err)) : 0.f;
         if (cfg.verbose) std::printf("    global re-derivations adopted: %d\n", rederives);
-        R.poly = R.map.build_polygon();
+        R.poly = R.map.manhattan_polygon();   // published layout: exactly Manhattan
         return R;
     }
 
@@ -1266,6 +1266,28 @@ int main()
                         std::printf("        id=%llu phi=%.3f d=%.3f pts=%d frames=%d lodds=%.1f ext=[%.2f,%.2f]%d\n",
                                     static_cast<unsigned long long>(w.id), w.phi, w.d, w.points_seen,
                                     w.frames_seen, w.exist_lodds, w.s_min, w.s_max, static_cast<int>(w.has_extent));
+            float tilt_max = 0.f;
+            for (const auto oid : Rx.map.order)
+                for (const auto& w : Rx.map.walls)
+                    if (w.id == oid and w.k >= 0)
+                        tilt_max = std::max(tilt_max, std::abs(rc::linefit::wrap_pi(
+                            w.phi - Rx.map.theta0 - static_cast<float>(w.k) * kPi * 0.5f)));
+            std::printf("      tilt[%u]: max |phi - theta0 - k*pi/2| = %.4f rad (%.2f deg)\n",
+                        seed, tilt_max, tilt_max * 180.f / kPi);
+            float pub_tilt = 0.f;
+            for (size_t vi = 0; ew.size() >= 2 and vi < ew.size(); ++vi)
+            {
+                const Eigen::Vector2f e2 = ew[(vi + 1) % ew.size()] - ew[vi];
+                if (e2.norm() < 1e-6f) continue;
+                const float ang = std::atan2(e2.y(), e2.x());
+                float beste = std::numeric_limits<float>::infinity();
+                for (int k2 = 0; k2 < 4; ++k2)
+                    beste = std::min(beste, std::abs(rc::linefit::wrap_pi(
+                        ang - Rx.map.theta0 - static_cast<float>(k2) * kPi * 0.5f)));
+                pub_tilt = std::max(pub_tilt, beste);
+            }
+            std::printf("      published-tilt[%u]: max edge off-axis = %.4f rad (%.2f deg)\n",
+                        seed, pub_tilt, pub_tilt * 180.f / kPi);
             {
                 // Per-seed diagnostics: is the deep spur resolved (grid cells on its two truth
                 // faces; distance of the truth tip vertices to the estimate), and which frontiers

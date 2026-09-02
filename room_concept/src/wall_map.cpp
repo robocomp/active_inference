@@ -156,6 +156,60 @@ namespace rc::wallmap
         }
     }
 
+    void WallMap::enforce_manhattan()
+    {
+        // Projection EM at the MAP layer (the solver stays soft): four solver-level hard-pin
+        // variants were measured worse — yank at birth, wholesale bin invalidation, a bistable
+        // anneal gate. The projection is continuous (walls sit within the annealed factor's 1-2
+        // degrees of their class), touches no solver state, and tilt is structurally impossible
+        // in anything built from the walls afterwards.
+        if (not params.manhattan_strict or not theta0_born) return;
+        float num = 0.f, den = 0.f;
+        for (const auto& w : walls)
+            if (w.k >= 0 and w.points_seen > 0)
+            {
+                const float wgt = static_cast<float>(w.points_seen);
+                num += wgt * wrap_pi(w.phi - theta0 - static_cast<float>(w.k) * kPi * 0.5f);
+                den += wgt;
+            }
+        if (den > 0.f) theta0 = wrap_pi(theta0 + num / den);
+        for (auto& w : walls)
+        {
+            if (w.k < 0) continue;
+            const float phi_new = wrap_pi(theta0 + static_cast<float>(w.k) * kPi * 0.5f);
+            if (std::abs(wrap_pi(phi_new - w.phi)) < 1e-7f) continue;
+            // Pivot about the wall's own extent centre: d and extents co-rotate, geometry moves
+            // only at second order (the origin-pivot alternative swept far extents sideways).
+            const Eigen::Vector2f n_old = w.normal(), t_old = w.tangent();
+            const Eigen::Vector2f pc = n_old * w.d
+                + t_old * (w.has_extent ? 0.5f * (w.s_min + w.s_max) : 0.f);
+            w.phi = phi_new;
+            const Eigen::Vector2f n_new = w.normal(), t_new = w.tangent();
+            w.d = n_new.dot(pc);
+            if (w.has_extent)
+            {
+                const float sc = t_new.dot(pc), half = 0.5f * (w.s_max - w.s_min);
+                w.s_min = sc - half; w.s_max = sc + half;
+            }
+        }
+    }
+
+    Polygon WallMap::manhattan_polygon() const
+    {
+        WallMap proj(*this);            // project a copy; the live model is never touched
+        proj.enforce_manhattan();
+        // Projection makes same-class adjacent walls EXACTLY parallel (no corner) and can fold a
+        // strongly tilted wall across a neighbour — both are the copy's problem, healed for free.
+        proj.heal_order();
+        Polygon p = proj.build_polygon();
+        if (not p.closed)
+        {
+            proj.repair_if_crossing();
+            p = proj.build_polygon();
+        }
+        return p;
+    }
+
     WallLandmark WallMap::make_wall(float phi, float d, const Eigen::Matrix2f& info, float exist_seed,
                                     std::int64_t ts)
     {
