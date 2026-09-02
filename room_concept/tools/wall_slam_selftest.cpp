@@ -24,6 +24,7 @@
 #include <queue>
 #include <random>
 #include <charconv>
+#include <cstring>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -57,6 +58,18 @@ namespace
     }
 
     // ── Rooms (CCW) ──────────────────────────────────────────────────────────────────────────────
+
+    // Bench-only override of the one order toll, for a sweep: WS_ORDER_JUMP_NATS=<float>.
+    static void apply_env_overrides(rc::wallmap::Params& p)
+    {
+        if (const char* e = std::getenv("WS_ORDER_JUMP_NATS"))
+        {
+            float v = 0.f;
+            const auto r = std::from_chars(e, e + std::strlen(e), v);
+            if (r.ec == std::errc{}) p.order_jump_nats = v;
+        }
+    }
+
     Poly l_room()      { return {{-4.f, -3.f}, {4.f, -3.f}, {4.f, 1.f}, {1.f, 1.f}, {1.f, 3.f}, {-4.f, 3.f}}; }
     Poly l_room_notch(){ return {{-4.f, -3.f}, {4.f, -3.f}, {4.f, 1.f}, {1.f, 1.f}, {1.f, 3.f}, {-2.f, 3.f}, {-2.f, 2.f}, {-4.f, 2.f}}; }
     Poly chamfer_room(){ return {{-4.f, -3.f}, {4.f, -3.f}, {4.f, 2.f}, {3.f, 3.f}, {-4.f, 3.f}}; }
@@ -233,6 +246,7 @@ namespace
         R.map.params.obs_sigma = 0.05f;
         R.map.params.huber_delta = 0.15f;
         R.map.params.debug_splice = std::getenv("WS_DEBUG_SPLICE") != nullptr;
+        apply_env_overrides(R.map.params);
 
         rc::Model model;
         model.init_from_polygon({{-20.f, -20.f}, {20.f, -20.f}, {20.f, 20.f}, {-20.f, 20.f}}, 0.f, 0.f, 0.f, 2.4f);
@@ -493,6 +507,7 @@ namespace
         R.map.params.obs_sigma = 0.05f;
         R.map.params.huber_delta = 0.15f;
         R.map.params.debug_splice = std::getenv("WS_DEBUG_SPLICE") != nullptr;
+        apply_env_overrides(R.map.params);
 
         rc::Model model;
         model.init_from_polygon({{-20.f, -20.f}, {20.f, -20.f}, {20.f, 20.f}, {-20.f, 20.f}}, 0.f, 0.f, 0.f, 2.4f);

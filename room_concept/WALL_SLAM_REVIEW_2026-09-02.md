@@ -17,9 +17,9 @@ Status column tracks what has been acted on. Findings are ranked most severe fir
 | 5 | MAJOR | open | carried wall information is damping, not a prior (re-centred every solve) |
 | 6 | MAJOR | open | two θ₀ estimators; published polygon rotated w.r.t. the re-anchored frame |
 | 7 | MAJOR | fixed 09-02 (immediate repair on the copy, loop to closure; publisher keeps last good, never raw) — bench unchanged | `manhattan_polygon()` repair inert on the copy; publisher flip-flops projected↔raw |
-| 8 | MAJOR | fixed 09-02 (SOLID = b > birth_nats; purse keeps full value) — net-of-seed purse refuses seed 1001's real spur (0.967→0.932): deferred to #10 | spur-wrap purse paid with seeded (untested) bins |
+| 8 | MAJOR | fixed 09-02; strict net-of-seed purse landed with #10 stage 1 (walls inherit their candidate's support, so the real spur still pays) | spur-wrap purse paid with seeded (untested) bins |
 | 9 | MAJOR | open | grid matter never forgets (`hits ≥ 3` is permanent) |
-| 10 | MAJOR | open | three incommensurable "nats" currencies against one toll |
+| 10 | MAJOR | stage 1 done 09-02 (one currency for LINE claims; grid stays the AREA currency — a single scalar measured worse 12 ways, see record) | three incommensurable "nats" currencies against one toll |
 | 11 | MAJOR | open | corner explanation is size-blind; `corner_residue` orphaned and not re-anchored |
 | 12 | MINOR | open | ≥40 unflagged literals in the body; key params not loadable |
 | 13 | MINOR | open | θ₀ M-step weights by `points_seen`, not angular information |
@@ -219,3 +219,31 @@ Cadence (40 frames / 30 rejections) moved from bench literals into `WallMap::Par
 runs `re_derive` in `wall_slam_after_solve` after `merge_indistinguishable`, before the polygon is derived —
 the bench's order. Bench identical (0.953 / 0.967 / 0.942, tilt 0.06° / 0.00° / 0.02°): the bench already
 executed it; what changed is that the agent now does too. Live effect UNRUN.
+
+## Record for #10 stage 1 — one currency for line claims (2026-09-02)
+Design: every claim about matter ON A LINE is priced in the same nats — per extent bin, ≤1 nat per frame,
+net of the birth seed, saturating at birth_nats: a candidate accrues `Candidate::bins` (the per-point gain now
+decides birth only; it was 56,472 nats for one 12k-point candidate against a 15-nat toll), a wall born from a
+candidate inherits them on top of its seed, a stub splice pays with them, a spur wrap pays with its overshoot
+bins net of seed PLUS its grid term, a down-jump surrenders net bins, adoption's surrender veto was already
+net. Area claims (boundary splices) keep paying in the grid's cell log-odds.
+Measured (toll 15, IoU seed 7 / 1001 / 424242; base 0.953 / 0.967 / 0.942):
+| variant | 7 | 1001 | 424242 | verdict |
+|---|---|---|---|---|
+| full single scalar (per-frame grid + line in/out + on-line exclusion + strict wrap + net rent) | 0.884 | 0.000 | 0.885 | seed 1001 dies: 133 adoptions, unclosed 4-wall map; toll-independent (same at 8/10/20) |
+| … without per-frame grid | 0.904 | 0.913 | 0.852 | |
+| … without on-line exclusion | 0.949 | 0.928 | 0.933 | 424242 churns 820 births / 811 deaths |
+| … without net rent | 0.891 | 0.916 | 0.960 | |
+| … exclusion restricted to MATTER on a line | 0.884 | 0.000 | 0.932 | 1001 identical ⇒ not the accounting |
+| s1: candidate bins pay the stub; inheritance | 0.954 | 0.967 | 0.921 | KEPT |
+| s1 + line support entering on boundary splices | 0.939 | 0.907 | 0.913 | double counts the grid's matter reward |
+| s1 + support surrendered on boundary splices | 0.927 | 0.967 | 0.928 | |
+| s1 + matter-on-line exclusion from the grid | 0.834 | 0.949 | 0.857 | removes the grid's only line reward |
+| s1 + strict wrap purse + grid term (+ net rent) | 0.954 | 0.967 | 0.921 | bit-identical to s1 — KEPT |
+Why the single scalar fails: `jump_delta_nats` already contains a line term for boundary claims — matter
+released to the exterior IS "the edge sits on matter" — so adding candidate support double counts, and
+excluding on-line matter removes the reward. The coherent split is by CLAIM TYPE (line vs area), not one
+number per cell. Seed 424242's −0.021 is trajectory chaos: every proposed stub is still accepted (1 of 1, at
+76 nats vs 30), the second stub of base's run is never proposed. Still open: the toll is a bench-calibrated
+constant (an MDL vertex cost is the principled replacement); adoption still decides on grid IoU + surrender.
+Bench-only: `WS_ORDER_JUMP_NATS=<v>` overrides the toll for sweeps.

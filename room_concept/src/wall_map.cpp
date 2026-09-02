@@ -213,6 +213,16 @@ namespace rc::wallmap
         return p;
     }
 
+    /// THE LINE-EVIDENCE RULE (Params doc, "ONE CURRENCY FOR LINE CLAIMS"): one frame's support
+    /// and refutation of one extent bin → one increment in [−1, 1] nats. Shared by wall bins and
+    /// candidate bins so their nats mean the same thing and one toll can price them all.
+    static float frame_evidence_delta(float sup, float ref, float p_det)
+    {
+        const float denom = sup + p_det * ref;
+        if (denom <= 0.f) return 0.f;
+        return std::clamp((sup - p_det * ref) / std::max(denom, 1.f), -1.f, 1.f);
+    }
+
     WallLandmark WallMap::make_wall(float phi, float d, const Eigen::Matrix2f& info, float exist_seed,
                                     std::int64_t ts)
     {
@@ -354,9 +364,8 @@ namespace rc::wallmap
             }
             for (int bin = 0; bin < nb; ++bin)
             {
-                const float denom = sup[static_cast<size_t>(bin)] + params.exist_refute_pdet * ref[static_cast<size_t>(bin)];
-                if (denom <= 0.f) continue;
-                const float delta = std::clamp((sup[static_cast<size_t>(bin)] - params.exist_refute_pdet * ref[static_cast<size_t>(bin)]) / std::max(denom, 1.f), -1.f, 1.f);
+                const float delta = frame_evidence_delta(sup[static_cast<size_t>(bin)], ref[static_cast<size_t>(bin)], params.exist_refute_pdet);
+                if (delta == 0.f) continue;
                 w.exist_bins[static_cast<size_t>(bin)] = std::clamp(w.exist_bins[static_cast<size_t>(bin)] + delta, lo_clamp, hi_clamp);
             }
             int first = 0, last = nb - 1;
@@ -647,6 +656,15 @@ namespace rc::wallmap
             WallLandmark C = make_wall(c.phi, c.d, c.information, params.birth_nats, ts);
             C.s_min = c.s_min; C.s_max = c.s_max; C.has_extent = c.npts > 0;
             C.frames_seen = c.frames; C.points_seen = c.npts;
+            // The wall is born with the support its candidate observed, on top of the birth seed:
+            // a bin at exactly the seed is untested, everything above it was seen (one currency).
+            if (not c.bins.empty())
+            {
+                C.bins_s0 = c.bins_s0;
+                C.exist_bins.resize(c.bins.size());
+                for (size_t b = 0; b < c.bins.size(); ++b)
+                    C.exist_bins[b] = std::min(2.f * params.birth_nats, params.birth_nats + c.bins[b]);
+            }
 
             // RUN REPLACEMENT: C substitutes a consecutive RUN of edges starting at E. The single-host
             // moves cannot express "this 8-metre wall replaces the four junk edges currently standing
@@ -1006,7 +1024,7 @@ namespace rc::wallmap
             // exactly the real spurs). Matter claims pay in matter currency: the face candidate's
             // own accumulated point evidence, already in nats. Area claims (every boundary splice)
             // keep paying in grid nats. The discriminator and the geometry gates remain the guards.
-            const float dnats = best_v.is_stub ? c.gain : jump_delta_nats(poly_cur, trial, c.first_ms);
+            const float dnats = best_v.is_stub ? c.evidence() : jump_delta_nats(poly_cur, trial, c.first_ms);   // ONE CURRENCY: bins, not per-point gain
             const int dorder = static_cast<int>(best_v.ord.size()) - static_cast<int>(order.size());
             // A replacement (dorder == 0) changes no order, yet it still pays one pair: the free
             // version was TRIED and measured — with zero toll a noise-level replacement committed
@@ -1087,7 +1105,7 @@ namespace rc::wallmap
                        and W.exist_bins[static_cast<size_t>(bi)] > params.birth_nats)
                 {
                     tip_s = W.bins_s0 + (static_cast<float>(bi) + (side > 0 ? 1.f : 0.f)) * params.exist_bin_m;
-                    bin_nats += W.exist_bins[static_cast<size_t>(bi)];
+                    bin_nats += W.exist_bins[static_cast<size_t>(bi)] - params.birth_nats;
                     bi += side;
                 }
                 const float overshoot = (side > 0) ? tip_s - corner_s : corner_s - tip_s;
@@ -1230,11 +1248,16 @@ namespace rc::wallmap
                         // from the interior went NEGATIVE on exactly the seeds whose spur was real
                         // (measured: dnats −22..0 while 8 solid bins held ~72 nats). Bins are beam-
                         // endpoint evidence, immune to cell carving, and stable — no flap re-entry.
+                        // ONE ENERGY: the overshoot's observed support (net of the seed) plus the
+                        // grid's area term — which excludes the cells on the wrap's own lines, so the
+                        // carved thin body no longer votes against a real spur.
+                        const float e_grid = jump_delta_nats(poly, p2, 0);
+                        const float dnats = bin_nats + e_grid;
                         const float cost = 2.f * params.order_jump_nats;
                         if (params.debug_splice)
-                            std::printf("[spur]   jump bin_nats=%.1f cost=%.1f -> %s\n",
-                                        bin_nats, cost, bin_nats > cost ? "ACCEPT" : "refuse");
-                        if (bin_nats <= cost)
+                            std::printf("[spur]   jump dnats=%.1f (bins %.1f + grid %.1f) cost=%.1f -> %s\n",
+                                        dnats, bin_nats, e_grid, cost, dnats > cost ? "ACCEPT" : "refuse");
+                        if (dnats <= cost)
                         {
                             walls.resize(walls_before);
                             continue;
@@ -1359,7 +1382,7 @@ namespace rc::wallmap
             for (const auto& w : walls)
                 if (std::find(order.begin(), order.end(), w.id) != order.end()
                     and std::find(o.begin(), o.end(), w.id) == o.end())
-                    for (const float b : w.exist_bins) dnats -= std::max(0.f, b);
+                    for (const float b : w.exist_bins) dnats -= std::max(0.f, b - params.birth_nats);
             const int dorder = N - static_cast<int>(o.size());
             const float refund = params.order_keep_fraction * params.order_jump_nats
                                * static_cast<float>(std::max(1, (dorder + 1) / 2));
@@ -1620,15 +1643,35 @@ namespace rc::wallmap
             const Eigen::Vector2f n = linefit::normal_of(c.phi);
             const Eigen::Vector2f tv = linefit::tangent_of(c.phi);
             const float extent = std::max(sg.s_max - sg.s_min, params.obs_sigma);
+            std::vector<float> scs;
+            scs.reserve(sg.inliers.size());
             for (int idx : sg.inliers)
             {
                 const Eigen::Vector2f q = R * pts_robot[static_cast<size_t>(idx)] + t;
                 const float r = n.dot(q) - c.d;
                 c.gain += wallseg::point_gain_nats(r, sg.sigma2(), seg.clutter_area, extent);
                 const float sc = tv.dot(q);
+                scs.push_back(sc);
                 if (c.npts == 0) { c.s_min = c.s_max = sc; }
                 else { c.s_min = std::min(c.s_min, sc); c.s_max = std::max(c.s_max, sc); }
                 c.npts++;
+            }
+            // Line support in the ONE CURRENCY: each extent bin this frame's points touch gains at
+            // most one nat, saturating at birth_nats — the same rule as a wall's existence bins.
+            // c.gain (per point) decides BIRTH; this decides what a splice may SPEND.
+            if (not scs.empty())
+            {
+                const float bw = params.exist_bin_m;
+                if (c.bins.empty()) { c.bins_s0 = std::floor(c.s_min / bw) * bw; c.bins.assign(1, 0.f); }
+                while (c.bins_s0 > c.s_min) { c.bins.insert(c.bins.begin(), 0.f); c.bins_s0 -= bw; }
+                while (c.bins_s0 + bw * static_cast<float>(c.bins.size()) < c.s_max - 0.5f * bw) c.bins.push_back(0.f);
+                const int nb = static_cast<int>(c.bins.size());
+                std::vector<char> touched(static_cast<size_t>(nb), 0);
+                for (const float sc : scs)
+                    touched[static_cast<size_t>(std::clamp(static_cast<int>(std::floor((sc - c.bins_s0) / bw)), 0, nb - 1))] = 1;
+                for (int b = 0; b < nb; ++b)
+                    if (touched[static_cast<size_t>(b)])
+                        c.bins[static_cast<size_t>(b)] = std::min(params.birth_nats, c.bins[static_cast<size_t>(b)] + 1.f);
             }
         }
 

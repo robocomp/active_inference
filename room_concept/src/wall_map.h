@@ -145,6 +145,20 @@ namespace rc::wallmap
         // ── Existence (the step-back operator), per extent bin — see the header comment ──────────
         float exist_refute_pdet = 0.5f;     // P(detect): weight of a pass-through vs a support ⚠
         float exist_bin_m       = 0.25f;    // m — extent bin width (spatial resolution of refutation)
+        // ── ONE CURRENCY FOR LINE CLAIMS (review #10, 2026-09-02). Every claim about MATTER ON A
+        // LINE — a stub face entering the cycle, a spur wrap's overshoot, the support a down-jump
+        // or a contour adoption surrenders — is priced in the SAME nats: per extent bin, at most one
+        // nat per frame (one frame = one observation), net of the birth seed, saturating at
+        // birth_nats of evidence. Candidates accrue it in Candidate::bins; a wall born from a
+        // candidate inherits it. The per-point gain (56k nats for one 12k-point candidate) decides
+        // BIRTH only and buys nothing. AREA claims — every boundary splice — keep paying in the
+        // grid's cell log-odds, which already reward an edge placed on matter (matter released to
+        // the exterior). MEASURED (12 variants, 3 seeds): folding the two into one scalar loses
+        // 0.02-0.15 IoU every way it was tried — adding the line term to boundary splices double
+        // counts the grid's matter reward, excluding on-line matter from the grid removes it, and a
+        // per-frame grid rule starves adoption — so the split is by CLAIM TYPE, not by operator.
+        // ⚠ The 15-nat toll stays a bench-calibrated constant (≈ 3 confirmed bins of line per +2
+        // edges); an MDL description-length cost is the principled replacement (review #10).
     };
 
     struct WallLandmark
@@ -179,8 +193,14 @@ namespace rc::wallmap
         Eigen::Matrix2f information = Eigen::Matrix2f::Zero();
         int   frames = 0;
         int   npts = 0;
-        float gain = 0.f;                   // Σ point_gain_nats of its points about the fused line (nats)
+        float gain = 0.f;                   // Σ point_gain_nats of its points about the fused line (nats) — BIRTH only
         float s_min = 0.f, s_max = 0.f;
+        // Line support in the one currency: per extent bin (width Params::exist_bin_m from bins_s0),
+        // at most one nat per frame, saturating at birth_nats. What a splice may SPEND; a wall born
+        // from this candidate inherits it on top of its seed.
+        std::vector<float> bins;
+        float bins_s0 = 0.f;
+        float evidence() const { float e = 0.f; for (float b : bins) e += b; return e; }
         int   this_frame_seg = -1;          // segment index that updated it THIS frame (−1 none)
         std::int64_t first_ms = 0, last_ms = 0;
     };
