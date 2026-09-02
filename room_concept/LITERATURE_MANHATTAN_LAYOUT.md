@@ -108,7 +108,7 @@ estimation (CVPR 2014).
 3. **Calibrate the grid with a real sensor model** — Elfes (1989) for the inverse form, Thrun (2003)
    for the forward form that removes the per-cell independence artefacts. This one change makes
    review #10 and #9 disappear together: grid nats become log-likelihoods in the same currency as
-   the point factors, so `grid_latch_discount`, the permanent `hits ≥ 3` latch and the ±4 clamp
+   the point factors, so the permanent `hits ≥ 3` latch and the ±4 clamp
    become derived quantities instead of constants.
 4. **Adopt the S-Graphs+ treatment of wall landmarks** (RA-L 2023): keep the keyframe factors, or
    marginalise them at a fixed linearisation point into an information-form accumulator (Λ, Λμ),
@@ -161,7 +161,7 @@ Thrun's forward-model formulation solves the mapping problem in the joint space 
 per-cell-independence artefacts (thin structure carved away, conflicting evidence resolved by
 whichever beam came last). Classical, no training, runs online at 2-D grid scale. *Replaces*:
 **the grid**'s ad-hoc increments (−0.4 per pass, +1.0 per hit, −0.02, clamp ±4, the permanent
-`hits ≥ 3` latch, `grid_latch_discount = 0.05`). The payoff is not accuracy but *commensurability* —
+`hits ≥ 3` latch; a `grid_latch_discount` was tried on 2026-09-02 and reverted). The payoff is not accuracy but *commensurability* —
 once cells hold log-likelihoods, `jump_delta_nats` and the point factors are in the same units and
 review #10 evaporates.
 
