@@ -443,6 +443,49 @@ Pre-registered outcomes, in order:
    recovers an injection perfectly while overstating its certainty 127x is the failure mode this whole
    document is about, and arm 7 is where it is shown rather than argued.
 
+### ✓✓ RESULT 2026-09-03 — MEASURED ON DATA ALREADY ON DISK, NO DRIVE
+
+A camera-mount injection acts entirely in camera coordinates, `pc' = R_inj·pc`, and `pc` is recoverable
+from a pre-2026-09-02 row: `(u_lidar, v_lidar)` is its bearing and `range_m` its magnitude, both logged.
+So the central question — *does this estimator recover a camera extrinsic misalignment* — was answered
+on the 395 319 ricoh rows recorded 09-01, with no driving at all (`mount_replay --legacy-pair`).
+
+The reconstruction is CHECKED, not asserted: recomputing `r` from the reconstructed point reproduces the
+agent's own `ru, rv` to **0.0019 px mean / 0.0100 px worst** across all 395 319 rows.
+
+| injected | recovered, nuisance ON (5.3 px) | recovered, nuisance OFF |
+|---|---|---|
+| pitch 1.0° | **0.999** ± 0.0006 | — |
+| height 0.05 m | **0.972** ± 0.0002 | 0.999 |
+| yaw 1.0° | **0.483** ± 0.164 (2.95σ) | **1.000** ± 0.0017 (573σ) |
+
+★★★ **The pre-registered prediction was 0.463 for yaw. Measured 0.483.** The asymmetry predicted in
+§2 stage 1 — yaw degenerate with a per-corner constant, pitch and height range-dependent and therefore
+safe — is confirmed quantitatively and in the right direction, which validates the marginalisation as
+well as the claim.
+
+★★★ **The two nuisance columns are the whole story.** OFF, yaw comes back at 1.000 with ±0.0017° —
+an estimator that *appears* to succeed completely while overstating its certainty 127×. ON, the same
+data returns 0.483 ± 0.164: half the injection, honestly. Outcome 3 of the pre-registration, measured.
+
+⚠ Legacy-mode caveats, none of which touch a recovery FRACTION (a ratio taken inside one
+reconstruction): the covariance's off-diagonal was not logged; the panorama's azimuth handedness is not
+in the file, so the pitch axis is convention-dependent and the ABSOLUTE baseline values are not
+comparable with the live ones (the fitted baseline yaw arrives sign-flipped, which is itself evidence
+the ricoh's `azimuth_sign` is −1); and the evidence file holds more rows than the CSV.
+
+**What is now proven, and what is not:**
+- ✓ the estimator recovers a camera misalignment: **pitch and height essentially completely**, on real data.
+- ✓ yaw is recoverable only to ~48% on 23 corners, for the structural reason predicted — and the remedy
+  is more DISTINCT corners, not more driving.
+- ✗ **the zed is unmeasured**: the auxiliary channel wrote no per-row file before 09-02, so no injection
+  can be replayed for it. Its predicted recovery from the honest sigmas is 0.477 — the same mechanism,
+  the same 23 corners — but predicted is not measured.
+- ✗ **attribution** (which device is misaligned) needs two cameras and `p_robot`, so it needs the drive.
+
+⇒ The drive's purpose is now narrow and stateable: **the zed leg and the attribution row.** It is no
+longer needed to establish that self-calibration recovers a camera misalignment.
+
 ### Cost: one drive, not four
 
 ★ The injection can be applied OFFLINE. `r = uv_image − uv_lidar`, and an extrinsic perturbation

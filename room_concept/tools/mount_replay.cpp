@@ -224,6 +224,115 @@ bool load_pairs(const std::string& path, Camera& cam, std::string& err)
     return not cam.rows.empty();
 }
 
+/// ── REPLAYING A DRIVE RECORDED BEFORE THE REPLAY EXISTED ────────────────────────────────────────
+/// A pre-2026-09-02 pair CSV has no `p_robot`. It does not need one for a CAMERA-mount leg: that
+/// injection acts entirely in camera coordinates, `pc' = R_inj·pc`, and `pc` is recoverable from the
+/// row — `(u_lidar, v_lidar)` is its bearing and `range_m` its magnitude, both logged. So the
+/// question "can this estimator recover a camera misalignment" is answerable on data already on disk,
+/// without driving. What such a file CANNOT support is stated and enforced below, not glossed:
+///
+///   ✗ the LiDAR leg          — needs `p_robot` and the LiDAR origin; the rotation centre is the
+///                              whole content of that leg, so it refuses rather than approximating.
+///   ✗ the closure channel    — only the driving camera ever wrote rows; there is no second camera.
+///   ⚠ the covariance         — only its diagonal was logged. Baseline and injected legs are weighted
+///                              the SAME way, so a recovery fraction is affected only at second order,
+///                              but the absolute sigmas are not the live ones.
+///   ⚠ the pitch axis         — the panorama's azimuth zero and handedness are not in the file. Yaw
+///                              and height are rotations/translations about the VERTICAL and are
+///                              unaffected by that; pitch turns about x̂_cam, whose direction depends
+///                              on the azimuth convention. Read the pitch leg as indicative.
+///
+/// ★ The reconstruction is CHECKED, not asserted: `r` is recomputed from the reconstructed `pc` and
+///   compared against the `ru, rv` the agent wrote. If the inversion were wrong the two would differ.
+bool load_legacy(const std::string& path, float width, float height, Camera& cam, std::string& err)
+{
+    std::ifstream f(path);
+    if (not f.is_open()) { err = "cannot open " + path; return false; }
+    std::string line;
+    if (not std::getline(f, line)) { err = path + " is empty"; return false; }
+    std::vector<std::string_view> tok;
+    split(line, tok);
+    std::map<std::string, int> col;
+    for (int i = 0; i < static_cast<int>(tok.size()); ++i) col[std::string(tok[static_cast<std::size_t>(i)])] = i;
+    const auto need = [&](const char* k, int& idx) {
+        const auto it = col.find(k);
+        if (it == col.end()) { err = path + ": no '" + std::string(k) + "' column"; return false; }
+        idx = it->second; return true;
+    };
+    int c_ts=0,c_vx=0,c_ui=0,c_vi=0,c_ul=0,c_vl=0,c_ru=0,c_rv=0,c_su=0,c_sv=0,c_ap=0,c_rg=0;
+    if (not (need("ts_ms",c_ts) and need("vertex",c_vx) and need("u_img",c_ui) and need("v_img",c_vi)
+             and need("u_lidar",c_ul) and need("v_lidar",c_vl) and need("ru",c_ru) and need("rv",c_rv)
+             and need("sigu",c_su) and need("sigv",c_sv) and need("assoc_prob",c_ap)
+             and need("range_m",c_rg)))
+        return false;
+
+    cam.ctx.robot = "legacy";
+    cam.ctx.camera = cam.name;
+    cam.ctx.cam.kind = rc::CameraModel::Kind::Equirect;
+    cam.ctx.cam.width = width; cam.ctx.cam.height = height;
+    cam.ctx.cam.cx = 0.5f * width; cam.ctx.cam.cy = 0.5f * height;
+    cam.ctx.cam.azimuth_sign = 1.f; cam.ctx.cam.azimuth_offset = 0.f;
+    cam.ctx.cam.valid = true;
+    cam.ctx.cam_R_robot = Eigen::Matrix3f::Identity();   // the replay works in CAMERA coordinates
+    cam.ctx.cam_t_robot = Eigen::Vector3f::Zero();
+    cam.ctx.sigma_pitch = 0.0035f; cam.ctx.sigma_height = 0.010f; cam.ctx.sigma_yaw = 0.0035f;
+    cam.ctx.lidar_known = false;                         // ⇒ any LiDAR leg refuses
+    cam.has_cov_lidar = false;
+
+    double worst = 0.0, sum = 0.0; long checked = 0, bad = 0;
+    while (std::getline(f, line))
+    {
+        if (line.empty()) continue;
+        split(line, tok);
+        if (static_cast<int>(tok.size()) <= std::max({c_ts,c_vx,c_ui,c_vi,c_ul,c_vl,c_ru,c_rv,c_su,c_sv,c_ap,c_rg}))
+        { ++bad; continue; }
+        double ts=0,vx=0,ui=0,vi=0,ul=0,vl=0,ru=0,rv=0,su=0,sv=0,ap=0,rg=0;
+        if (not (to_num(tok[(size_t)c_ts],ts) and to_num(tok[(size_t)c_vx],vx) and to_num(tok[(size_t)c_ui],ui)
+                 and to_num(tok[(size_t)c_vi],vi) and to_num(tok[(size_t)c_ul],ul) and to_num(tok[(size_t)c_vl],vl)
+                 and to_num(tok[(size_t)c_ru],ru) and to_num(tok[(size_t)c_rv],rv) and to_num(tok[(size_t)c_su],su)
+                 and to_num(tok[(size_t)c_sv],sv) and to_num(tok[(size_t)c_ap],ap) and to_num(tok[(size_t)c_rg],rg)))
+        { ++bad; continue; }
+        if (not (rg > 1e-3)) { ++bad; continue; }
+        // Invert the equirect projection: v carries the elevation, u the azimuth, range_m the norm.
+        const double el = (vl / height - 0.5) * M_PI;      // asin(-z/r)
+        const double z  = -rg * std::sin(el);
+        const double rho = std::sqrt(std::max(0.0, rg * rg - z * z));
+        const double az = (ul / width - 0.5) * 2.0 * M_PI; // atan2(x, y)
+        Row r;
+        r.ts = static_cast<std::int64_t>(ts);
+        r.vertex = static_cast<int>(vx);
+        r.ceiling = false;                                  // not logged; only the closure uses it
+        r.uv_image = Eigen::Vector2f(static_cast<float>(ui), static_cast<float>(vi));
+        r.cov = Eigen::Matrix2f::Zero();
+        r.cov(0,0) = static_cast<float>(su * su);
+        r.cov(1,1) = static_cast<float>(sv * sv);
+        r.assoc_prob = static_cast<float>(ap);
+        r.p_robot = Eigen::Vector3f(static_cast<float>(rho * std::sin(az)),
+                                    static_cast<float>(rho * std::cos(az)),
+                                    static_cast<float>(z));
+        // ★ The check: does the reconstructed point reproduce the residual the agent recorded?
+        const rc::mount::PairObs o = rc::mount::make_pair_from(
+            r.vertex, r.assoc_prob, r.p_robot, r.uv_image, r.cov, cam.ctx.cam,
+            cam.ctx.cam_R_robot, cam.ctx.cam_t_robot,
+            cam.ctx.sigma_pitch, cam.ctx.sigma_height, cam.ctx.sigma_yaw);
+        if (o.ok)
+        {
+            const double d = std::max(std::abs(o.r.x() - ru), std::abs(o.r.y() - rv));
+            worst = std::max(worst, d); sum += d; ++checked;
+        }
+        cam.rows.push_back(r);
+    }
+    if (cam.rows.empty()) { err = path + ": no usable rows"; return false; }
+    std::printf("  %-8s %8zu rows reconstructed from (u_lidar, v_lidar, range_m)\n",
+                cam.name.c_str(), cam.rows.size());
+    std::printf("           residual round-trip vs the agent's own ru/rv: mean %.4f px, worst %.4f px"
+                " over %ld rows%s\n", (checked > 0) ? sum / static_cast<double>(checked) : 0.0, worst,
+                checked, (worst < 0.05) ? "   ✓ the inversion is faithful"
+                                        : "   ✗ CHECK THIS before reading anything below");
+    if (bad > 0) std::printf("           %ld unparsable rows skipped\n", bad);
+    return true;
+}
+
 /// ── The injection ───────────────────────────────────────────────────────────────────────────────
 /// The axes are the SAME ones J is built from (mount_lidar_pair.h): pitch = rotation about the
 /// camera x axis, height = translation along camera z, yaw = rotation about camera z. Injecting on
@@ -670,7 +779,8 @@ void usage()
 
 int main(int argc, char** argv)
 {
-    std::vector<std::string> pair_files;
+    std::vector<std::string> pair_files, legacy_files;
+    float legacy_w = 1920.f, legacy_h = 960.f;
     std::vector<Leg> legs;
     double sigma_px = 0.0;
     bool fixed_cov = false;
@@ -684,6 +794,9 @@ int main(int argc, char** argv)
         if (a == "--help") { usage(); return 0; }
         else if (a == "--selftest") return selftest::run();
         else if (a == "--pair") pair_files.push_back(next());
+        else if (a == "--legacy-pair") legacy_files.push_back(next());
+        else if (a == "--legacy-equirect")
+        { double w = 0, h = 0; if (to_num(next(), w)) legacy_w = (float)w; if (to_num(next(), h)) legacy_h = (float)h; }
         else if (a == "--sigma-px") { double v = 0; if (to_num(next(), v)) sigma_px = v; }
         else if (a == "--closure-ms") { double v = 0; if (to_num(next(), v)) closure_ms = static_cast<std::int64_t>(v); }
         else if (a == "--verify") verify_file = next();
@@ -709,10 +822,24 @@ int main(int argc, char** argv)
         }
         else { std::printf("unknown argument '%s'\n", a.c_str()); usage(); return 2; }
     }
-    if (pair_files.empty()) { usage(); return 2; }
+    if (pair_files.empty() and legacy_files.empty()) { usage(); return 2; }
 
     // ── Load ────────────────────────────────────────────────────────────────────────────────────
     std::vector<Camera> cams;
+    for (const std::string& p : legacy_files)
+    {
+        Camera c;
+        const auto slash = p.find_last_of('/');
+        const std::string base = (slash == std::string::npos) ? p : p.substr(slash + 1);
+        const std::string tag = "image_edge_pair_";
+        c.name = base.starts_with(tag) ? base.substr(tag.size(), base.size() - tag.size() - 4) : "legacy";
+        std::printf("  ⚠ LEGACY MODE on %s — camera-mount legs only: no p_robot (no LiDAR leg), one\n"
+                    "    camera (no closure), covariance diagonal only, pitch axis convention-dependent.\n",
+                    p.c_str());
+        std::string err;
+        if (not load_legacy(p, legacy_w, legacy_h, c, err)) { std::printf("✗ %s\n", err.c_str()); return 1; }
+        cams.push_back(std::move(c));
+    }
     for (const std::string& p : pair_files)
     {
         Camera c;
