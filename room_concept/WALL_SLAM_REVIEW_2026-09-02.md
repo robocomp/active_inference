@@ -351,15 +351,33 @@ re-intersected, so rectilinearity survives) and only then scored.
 | + judged selection online/batch | 0.956 | 0.966 | 0.908 | 0.987 | 0.045 |
 THE FINDING IS NOT THE SELECTOR. Profiling improved IoU on 12 seeds of 12, mean +0.030, best result ever
 measured 0.987 — because the correction is a BIAS, not noise: the signed median offset is negative on every
-seed and essentially every edge, −0.020 to −0.085 m, mean ≈ −0.053. Negative is the exterior side: **the
-published walls sit about 5 cm INSIDE the surface the beams return from**, all of them, every run. Perimeter
-≈ 35 m × 5 cm ≈ 1.8 m² of a 60.5 m² room ≈ 3% of area, which is exactly the IoU gained back. Leading
-hypothesis: the free-space contour sits about one cell inside the wall (the batch polygon's own offset is
-−0.062 to −0.072, i.e. a full cell), walls created or replaced by contour adoption inherit that position,
-and the wall point factors do not pull them all the way back. Cheap next check: compare d for walls born
-from candidates against walls born from adoption, and measure each wall's median residual against its own
-associated points inside the solver. If it is confirmed, it is worth +0.03 IoU on every seed — more than
-any structural change of the campaign.
+seed and essentially every edge, −0.020 to −0.085 m, mean ≈ −0.053, i.e. the published edges sit that far
+inside the surface the beams return from.
+**WHERE THE BIAS LIVES — measured next, and it is NOT the walls.** Per-wall median residual of the returns
+each wall owns: every well-observed wall is on its data to 1-2 mm (+0.001 to +0.002 m at 12k-151k points and
+1000+ frames). The offset comes from two other places. (a) LEVEL-2 DECORATIONS: the published polygon has 38
+edges where the coarse cycle has 22, so 42% of it is level-2 steps, and those were built from 8 cm cells and
+padded half a cell beyond them. (b) THINLY-OBSERVED WALLS: walls with 0-5000 points and 0-35 frames sit 4-11
+cm inside (one at 15.8k points but spanning a recess reads −0.19, an artefact of the measurement's own
+assignment band). So the earlier reading of this table — "every published wall sits 5 cm inside" — was
+wrong, and the cure is not in the solver.
 Secondary result: with the offsets profiled out, the forward beam model becomes usable as a selector for
 the first time (9 of 12 against 7 of 12, and it can now say BATCH — it did so on the worst seed, correctly,
 0.825 → 0.971). Its Δ log-likelihoods are still 10⁵-10⁶, so the sign is all that can be trusted.
+
+## Level 2 fits its three degrees of freedom (2026-09-03)
+Following the correction above: the cluster's cell bounding box now only LOCATES a feature, and the step's
+three parameters — the two ends along the wall and the depth — are fitted to the returns. For an axis-aligned
+step the three decouple into three one-dimensional robust fits (the median of the returns owned by each
+face), so no joint optimisation is needed; `Params::level2_fit`, bench switch `WS_LEVEL2_FIT`.
+| seed 7 / 1001 / 424242 | box only | fitted |
+|---|---|---|
+| published IoU | 0.946 / 0.889 / 0.969 | 0.953 / 0.898 / 0.978 |
+| right pillar mis-explained | 0.38 / 0.38 / 0.18 | 0.09 / 0.31 / 0.11 |
+| alcove mis-explained | 0.32 / 0.37 / 0.21 | 0.14 / 0.21 / 0.11 |
+| left pillar mis-explained | 0.26 / 0.34 / 0.55 | 0.48 / 0.53 / 0.55 |
+| per-edge offset remaining | −0.043 / −0.085 / −0.020 m | −0.001 / −0.018 / +0.013 m |
+IoU improves on every seed and the offset that started this thread is gone, which confirms the diagnosis: it
+was the decorations. Two features improve sharply; the LEFT PILLAR gets worse, and it is the one that sits
+against a corner — its side-face band catches the perpendicular wall's returns. Features at a corner remain
+level 2's known gap (a corner step is +2 edges and is not offered).

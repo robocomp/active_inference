@@ -129,6 +129,13 @@ namespace rc::wallmap
         // code length of the edges it adds and paid by the same grid evidence as a level-1 jump.
         // Recomputed at every publish, so a level-1 correction simply moves the zones under it.
         bool  enable_level2 = true;
+        // The cluster's cell bounding box only LOCATES the feature; its three degrees of freedom —
+        // the two ends along the wall and the depth — are then fitted to the returns themselves.
+        // For an axis-aligned step the three decouple into three one-dimensional robust fits (the
+        // median of the returns owned by each of the three faces), so no joint optimisation is
+        // needed. Without this the rectangle is quantised to the 8 cm cell and padded half a cell
+        // beyond it: measured, a 0.60 x 0.38 m pillar came out 0.88 x 0.53.
+        bool  level2_fit = true;
         // ── FORWARD-MODEL REFEREE (Thrun 2003, "Learning occupancy grid maps with forward sensor
         // models"; built 2026-09-03 as a REFEREE, deciding nothing yet). Every stored beam is
         // scored against a polygon by the likelihood of its measured range given the range the

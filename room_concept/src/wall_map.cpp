@@ -331,6 +331,40 @@ namespace rc::wallmap
             s1 = std::min(len - 0.5f * cell, s1 + 0.5f * cell);
             h += 0.5f * cell;
             if (s1 - s0 < 2.f * cell or h < 2.f * cell) continue;
+            // ── FIT THE THREE DEGREES OF FREEDOM (Params doc). The cell box above is the
+            // initialisation; each of the step's three faces now takes the median of the returns
+            // that lie on it, which is the maximum-likelihood placement of that face under a
+            // symmetric noise model and is robust to the returns of whatever stands beside it.
+            if (params.level2_fit and not beams.empty())
+            {
+                const float sg = (c == 1) ? 1.f : -1.f;   // matter steps into the room, free steps out
+                const float band = 3.f * cell;
+                const float zlo = std::min(0.f, sg * h), zhi = std::max(0.f, sg * h);
+                std::vector<float> front, lo_side, hi_side;
+                for (const auto& bm : beams)
+                {
+                    const Eigen::Vector2f q = bm.o + bm.d * bm.r - a;
+                    const float sq = t.dot(q), zq = n.dot(q);
+                    if (sq > s0 + 0.02f and sq < s1 - 0.02f and std::abs(zq - sg * h) < band)
+                        front.push_back(zq);
+                    if (zq > zlo + 0.02f and zq < zhi - 0.02f)
+                    {
+                        if (std::abs(sq - s0) < band) lo_side.push_back(sq);
+                        if (std::abs(sq - s1) < band) hi_side.push_back(sq);
+                    }
+                }
+                const auto median = [](std::vector<float>& v)
+                { std::nth_element(v.begin(), v.begin() + static_cast<long>(v.size() / 2), v.end()); return v[v.size() / 2]; };
+                if (front.size()   >= 30) h  = std::abs(median(front));
+                if (lo_side.size() >= 30) s0 = median(lo_side);
+                if (hi_side.size() >= 30) s1 = median(hi_side);
+                s0 = std::max(0.5f * cell, s0);
+                s1 = std::min(len - 0.5f * cell, s1);
+                if (params.debug_splice)
+                    std::printf("[level2] fitted from returns: s=[%.3f,%.3f] h=%.3f (front %zu, sides %zu/%zu)\n",
+                                s0, s1, h, front.size(), lo_side.size(), hi_side.size());
+                if (s1 - s0 < 2.f * cell or h < 2.f * cell) continue;
+            }
             // A matter zone steps the boundary INTO the room around it; a free zone steps it OUT.
             const Eigen::Vector2f off = n * h * (c == 1 ? 1.f : -1.f);
             std::vector<Eigen::Vector2f> nv;

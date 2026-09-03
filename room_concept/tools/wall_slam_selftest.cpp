@@ -79,6 +79,7 @@ namespace
         envf("WS_ADOPT_REPAIR",  p.adopt_repair);         // repair self-crossing cycles before judging
         envf("WS_MANHATTAN_GAIN", p.manhattan_gain);      // scale on the in-loop Manhattan factor (#4 test)
         envf("WS_LEVEL2",        p.enable_level2);        // level-2 residual pass on the published copy
+        envf("WS_LEVEL2_FIT",    p.level2_fit);            // fit the step's 3 DoF to the returns
     }
 
     Poly l_room()      { return {{-4.f, -3.f}, {4.f, -3.f}, {4.f, 1.f}, {1.f, 1.f}, {1.f, 3.f}, {-4.f, 3.f}}; }
@@ -1703,6 +1704,54 @@ int main()
         const float sym_diff = (1.f - iou) * 60.5f / std::max(iou, 1e-3f) * iou;   // ≈ union·(1−IoU) m²
         std::printf("    hausdorff=%.3f m; IoU=%.3f (sym diff ~%.1f m2); worst truth vertex #%d off by %.3f m; pose rmse %.3f max %.3f m\n",
                     h, iou, sym_diff, worst_i, worst_v, R7.pose_rmse_xy, R7.pose_max_xy);
+        // ── WHERE DOES THE 5 cm INWARD BIAS LIVE? The published polygon's edges sit ~5 cm inside
+        // the returns. Test the WALL LINES themselves, before projection and decoration: for each
+        // wall in the cycle, the median signed residual of the beam endpoints near its own line and
+        // inside its own extent (the normal points INTO the room, so negative = the returns are
+        // outside the line = the wall is too far in). If the walls are unbiased the bias is made by
+        // the projection or by level 2; if they are biased it is upstream, in association or in what
+        // the contour adoption creates.
+        if (not R7.map.beams.empty())
+        {
+            std::printf("    wall-line bias (best seed): median signed residual of the returns each wall owns\n");
+            std::vector<float> per_wall; std::vector<int> pts_of;
+            for (const auto id : R7.map.order)
+            {
+                const auto* w = R7.map.find(id);
+                if (w == nullptr) continue;
+                if (std::find(R7.map.order.begin(), R7.map.order.end(), id) != std::find(R7.map.order.begin(), R7.map.order.end(), id)) {}
+                const Eigen::Vector2f nn = w->normal(), tv = w->tangent();
+                std::vector<float> res;
+                for (const auto& b : R7.map.beams)
+                {
+                    const Eigen::Vector2f q = b.o + b.d * b.r;
+                    const float r = nn.dot(q) - w->d;
+                    if (std::abs(r) > 0.25f) continue;
+                    const float sc = tv.dot(q);
+                    if (sc < w->s_min or sc > w->s_max) continue;
+                    res.push_back(r);
+                }
+                if (res.size() < 50) continue;
+                std::nth_element(res.begin(), res.begin() + static_cast<long>(res.size() / 2), res.end());
+                const float med = res[res.size() / 2];
+                per_wall.push_back(med); pts_of.push_back(w->points_seen);
+                std::printf("      wall %-6llu k=%d pts=%-7d frames=%-5d beams=%-6zu median residual %+.3f m\n",
+                            static_cast<unsigned long long>(w->id), w->k, w->points_seen, w->frames_seen,
+                            res.size(), med);
+            }
+            if (not per_wall.empty())
+            {
+                std::vector<float> sorted = per_wall;
+                std::sort(sorted.begin(), sorted.end());
+                float mean = 0.f; for (float v : per_wall) mean += v; mean /= static_cast<float>(per_wall.size());
+                int well = 0; float mean_well = 0.f;
+                for (size_t k = 0; k < per_wall.size(); ++k)
+                    if (pts_of[k] > 5000) { ++well; mean_well += per_wall[k]; }
+                std::printf("      %zu walls: mean %+.3f m, median %+.3f m | of these %d have >5000 points, mean %+.3f m\n",
+                            per_wall.size(), mean, sorted[sorted.size() / 2], well,
+                            well > 0 ? mean_well / static_cast<float>(well) : 0.f);
+            }
+        }
         check("polygon closed on the real layout", R7.poly.closed, R7.poly.status);
         // 0.20 m bar: the SVG itself carries 6-15 cm trace artefacts the estimator may lawfully
         // smooth over; a real miss (a whole alcove) is metres.
