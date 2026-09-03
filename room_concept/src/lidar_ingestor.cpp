@@ -458,6 +458,8 @@ void LidarIngestor::update_ceiling_cap(bool startup)
     {
         high_max_z_ = std::clamp(ceil_z - params_->LIDAR_CEILING_MARGIN,
                                  params_->LIDAR_HIGH_MIN_HEIGHT + 0.1f, GEOM_Z_HI);
+        measured_ceiling_z_.store(ceil_z, std::memory_order_relaxed);
+        measured_ceiling_pts_.store(ceil_cnt, std::memory_order_relaxed);
         if (log_now(verdict))
         std::println("[CeilingCheck] CEILING at body z = {:.2f} m ({} pts): r_peak={:.2f} m matches the "
                      "annulus prediction {:.2f} m (inner edge {:.2f} m) better than the wall {:.2f} m "

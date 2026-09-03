@@ -112,6 +112,16 @@ Larger than every other term at close range, and a bookkeeping error, not a sens
 **simulation-only** — the real Theta's gstreamer path is genuinely equirectangular — which is worse, not
 better: the bench would validate a channel that behaves differently on hardware. Settle it first.
 
+★ CONFIRMED 2026-09-03, with the sources separated, because the claim was initially doubted. The
+SIMULATOR really does render cylindrical: `webots-p3bot/protos/P3Bot.proto:102,111` and
+`webots-shadow/protos/Shadow.proto:46,55` say `projection "cylindrical"`, and the proto's own note says
+it was MEASURED on 2026-08-22 (Webots' spherical at fieldOfView 3.14 would not tile at any horizontal
+shift). The GRAPH really does declare equirectangular (`shadow.json:520`, `p3bot.json:1320`), and
+`cortex/api/dsr_camera_api.cpp:32-42` only chooses Cylindrical when a node says so — none does. On the
+REAL camera it is equirectangular: a cylindrical assumption was tried on hardware and did not work.
+A comment in `retina/src/specificworker.cpp` asserted the node declares cylindrical; it does not, and it
+has been corrected.
+
 ## 5. Failure modes in this flat
 
 A ratio to a ceiling height assumed flat and known. It is neither.
@@ -210,3 +220,20 @@ Falsifier: median |Δrow| > 5 px, or failure on the render — the domain gap th
 **Stage 3** (only if 2 passes): ONNX export, a retina session beside the existing YOLO26 / SAM2 / DINOv2
 ones (36 ms headroom, 5070 Ti), and the layout wired into `re_derive` as a priced candidate cycle.
 Nothing enters the solver.
+
+
+## Addendum, 2026-09-03: the LiDAR already measures the ceiling
+Written after the question "why not measure the room's height on start with the LiDAR?". We do. The
+helios hangs inverted and looks 54.5 deg up, so its top layers terminate on the ceiling — the reason the
+wall band has to be capped at all. `LidarIngestor::update_ceiling_cap` locates the ceiling plane in a
+leaky z histogram and decides between two SHAPES: ceiling returns fill an annulus, wall-top returns lie
+at the wall radius, and the check takes whichever prediction the measured radius is closer to. It is a
+likelihood ratio, needs no threshold, and it found the apartamento ceiling at 3.01 m against a stated
+3.00 with 51450 points behind it.
+What was missing is that the number was used only to cap the band and then discarded, while everything
+needing a ceiling read the typed constant. The ingestor now keeps it (`measured_ceiling_z_`,
+`measured_ceiling_pts_`), and the image-edge module — the one that projects the wall-ceiling contour
+this whole study is about — prefers the measurement over the scenario's value and warns when they
+disagree by more than 5 cm. That removes the scale error at the root, and it is a better answer than
+the camera measuring its own ceiling: the LiDAR's estimate needs no calibration of pitch, no assumption
+that the ceiling is flat over the whole room, and it is already running at startup.

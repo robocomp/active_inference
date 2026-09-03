@@ -1647,13 +1647,32 @@ void SpecificWorker::pump_image_edges()
         // samples they stand in front of. Refreshed each tick below, not only at bind: furniture
         // appears, moves and is forgotten while the agent runs.
         image_edge_source_->set_object_anchors(room_concept_.object_anchors());
-        // room_height is read from the graph after construction, so refresh it here too.
+        // room_height is read from the graph after construction, so refresh it here too — and
+        // PREFER THE MEASURED CEILING when the LiDAR has one. The startup geometry check already
+        // locates the ceiling plane with a likelihood test (annulus vs wall-top) and found 3.01 m
+        // against a stated 3.00; until 2026-09-03 that number only capped the wall band and was then
+        // discarded, while the wall-ceiling contour this module projects used the hand-typed
+        // constant. A stated ceiling that is a few cm wrong is a pure SCALE error on every range the
+        // contour implies, and a Manhattan estimator cannot see it.
         auto ic = image_edge_source_->config();
         ic.room_height = params.room_height;
+        float measured_ceiling = 0.f;
+        if (lidar_ingestor_)
+            measured_ceiling = lidar_ingestor_->measured_ceiling_z_.load(std::memory_order_relaxed);
+        if (measured_ceiling > 1.5f)
+        {
+            ic.room_height = measured_ceiling;
+            if (std::abs(measured_ceiling - params.room_height) > 0.05f)
+                qWarning() << "[imgedge] the LiDAR measures the ceiling at" << measured_ceiling
+                           << "m but the scenario states" << params.room_height
+                           << "m; using the measurement. A stated ceiling that is wrong scales every"
+                           << "range the wall-ceiling contour implies.";
+        }
         image_edge_source_->set_config(ic);
         qInfo() << "[imgedge] bound to" << QString::fromStdString(params.IMAGE_EDGE_CAMERA)
                 << "in frame" << QString::fromStdString(params.LIDAR_ROBOT_FRAME)
-                << "| polygon" << room_polygon_.size() << "pts, room_height" << params.room_height;
+                << "| polygon" << room_polygon_.size() << "pts, room_height" << ic.room_height
+                << (measured_ceiling > 1.5f ? "(measured by the LiDAR)" : "(stated in the scenario)");
     }
 
     rc::GrayFrame frame;

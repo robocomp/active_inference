@@ -861,7 +861,17 @@ void SpecificWorker::on_render_tick()
                     {
                         // CameraAPI carries the node's projection model AND its azimuth
                         // sign/offset, so ray_from_pixel() is correct for whichever model the
-                        // ricoh actually declares — cylindrical here, not equirectangular.
+                        // ricoh declares, and it declares EQUIRECTANGULAR (shadow.json:520,
+                        // p3bot.json:1320), so that is the map used here. ⚠ The SIMULATOR does not
+                        // agree: webots-p3bot/protos/P3Bot.proto and webots-shadow/protos/
+                        // Shadow.proto render the 360 cameras with projection "cylindrical", whose
+                        // rows go as tan(elevation) instead of the angle. Azimuth is identical, so
+                        // the corner channel works either way and nobody noticed; elevation is not.
+                        // On the real Theta it is equirectangular — a cylindrical fit was tried and
+                        // did not work — so the mismatch is simulation-only, and anything that
+                        // depends on ELEVATION must settle it before trusting a bench result.
+                        // (This comment previously asserted the node declares cylindrical: it does
+                        // not. Corrected 2026-09-03.)
                         if (not ricoh_camera_api_)
                             if (const auto rn = G->get_node("ricoh"); rn.has_value())
                                 ricoh_camera_api_ = G->get_camera_api(rn.value());
