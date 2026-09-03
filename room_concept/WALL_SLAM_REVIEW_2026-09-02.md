@@ -438,3 +438,28 @@ and the grid term charges for it.
 Apartamento: seed 7 0.955 -> 0.957, the other two unchanged, published polygon still internally
 rectilinear at 0.00 deg. The left pillar of the real flat is still not explained on the graded seed; it is
 0.6 m from its corner, so it is neither a clean mid-edge feature nor a corner one.
+
+## The spur, diagnosed (2026-09-03)
+Why the population finds one spur in eight, traced rather than guessed.
+1. **The level-1 wrap is proposed constantly and refused on geometry.** Over three generated rooms the
+   wrap machinery ran 1985 times and committed 3: of the refused trials, 1043 failed the interior test and
+   508 failed to close. Some produce wild geometry (an edge 26 m long). The grammar is not the bottleneck
+   in the sense of being absent — it is being offered and rejected.
+2. **Level 2 does see spurs**, as thin deep zones — 6 of 48 proposals in those rooms — and the economy
+   judges them correctly given what it is shown: one was accepted at gain 54 against cost 29, one refused
+   at −7.6 because its claimed strip came out 18 matter cells against 19 free.
+3. **The reason the strip is half free: one-sided visibility.** In 13 of 16 fits only ONE side face had
+   returns; a thin protrusion is normally seen from one side. The unseen face then keeps the padded cell
+   box, which is far wider than the wall.
+4. **And the grid cannot fix that, because its cell is the size of the feature.** A 13 cm wall's latched
+   matter cluster measures 0.317 m — an 8 cm grid blurs a thin wall to 2.5x its width. So a WIDTH test
+   cannot separate a spur from a pillar: it either rejects every spur or accepts the real flat's 0.33 m
+   pillars and shrinks them (measured, −0.008 IoU). The discriminator that works is ASPECT: a protrusion
+   more than twice as deep as it is broad is a piece of wall, and the far face of a wall is one thickness
+   away. With that gate the unseen face is placed by `stub_thickness` instead of by the cell grid.
+Measured on the 50-room population, identical rooms: spur 12% -> 13%, **Hausdorff median 1.033 -> 0.894 m**,
+IoU mean 0.911 -> 0.912, everything else unchanged; apartamento unchanged at 0.957 / 0.902 / 0.980.
+The prior therefore improves how well a found spur is SIZED far more than how often one is FOUND. That
+split is the real conclusion: **detection is grid-limited and measurement is beam-limited**. Raising the
+spur rate needs evidence at beam resolution in the detector too — the existence bins along a wall line,
+which is what the level-1 wrap already uses and what item 1 above says is being refused on geometry.

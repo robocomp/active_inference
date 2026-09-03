@@ -323,6 +323,7 @@ namespace rc::wallmap
                 s0 = std::min(s0, s); s1 = std::max(s1, s); h = std::max(h, z); near = std::min(near, z);
             }
             if (not side_ok or near > 3.f * cell) continue;
+            const float raw_width = s1 - s0;   // the matter's own extent, before any padding
             // ── MID-EDGE STEP or CORNER STEP? A zone that reaches an end of its edge is a feature
             // AT THE CORNER, and the corner is where a mid-edge step cannot go: it would have a
             // zero-length side, and collapsing that vertex leaves a diagonal. Such a zone instead
@@ -394,8 +395,33 @@ namespace rc::wallmap
                     if (front.size()   >= 20) h  = std::abs(median(front));
                     // A corner step has only ONE side face; the other end is the corner itself, and
                     // the returns there belong to the neighbouring wall.
-                    if (lo_side.size() >= 20 and not corner_lo) s0 = median(lo_side);
-                    if (hi_side.size() >= 20 and not corner_hi) s1 = median(hi_side);
+                    const bool got_lo = lo_side.size() >= 20 and not corner_lo;
+                    const bool got_hi = hi_side.size() >= 20 and not corner_hi;
+                    if (got_lo) s0 = median(lo_side);
+                    if (got_hi) s1 = median(hi_side);
+                    // ONE-SIDED VISIBILITY. A thin protrusion is normally seen from one side only —
+                    // measured on the generated rooms, 13 of 16 fits found returns on a single side.
+                    // The unseen face then keeps the padded cell box, and the step claims the air
+                    // beside the wall as if it were wall: the disagreement region came out half
+                    // matter and half free and the move was refused at −7.6 nats. When exactly one
+                    // side is seen and the box is wider than a wall, the unseen face is placed by
+                    // the thin-wall prior instead of by the cell grid. Evidence still decides: the
+                    // strip is then mostly matter and pays, or it is not and the move is refused.
+                    // The discriminator is ASPECT, not width. An 8 cm grid cannot measure a 13 cm
+                    // wall: its latched cluster comes out 0.32 m wide, so a width test either
+                    // rejects every spur or also accepts the real flat's 0.33 m pillars and shrinks
+                    // them (measured, −0.008 IoU). What separates them is that a spur is far deeper
+                    // than it is broad. A protrusion more than twice as deep as it is wide is a
+                    // piece of WALL, and the far face of a wall is one thickness away.
+                    if (c == 1 and not corner and got_lo != got_hi
+                        and h > 2.f * raw_width
+                        and s1 - s0 > 1.5f * params.stub_thickness)
+                    {
+                        if (got_hi) s0 = s1 - params.stub_thickness;
+                        else        s1 = s0 + params.stub_thickness;
+                        if (params.debug_splice)
+                            std::printf("[level2] one-sided: unseen face placed by the thin-wall prior, s=[%.3f,%.3f]\n", s0, s1);
+                    }
                     if (params.debug_splice)
                         std::printf("[level2] fit(%.1f cells): s=[%.3f,%.3f] h=%.3f (front %zu, sides %zu/%zu)\n",
                                     band_cells, s0, s1, h, front.size(), lo_side.size(), hi_side.size());
