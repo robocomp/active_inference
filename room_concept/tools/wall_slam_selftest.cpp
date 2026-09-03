@@ -220,6 +220,7 @@ namespace
         float pose_rmse_xy = 0.f, pose_max_xy = 0.f, pose_max_th = 0.f;
         int frames = 0, closed_at = -1, births = 0, deaths = 0, rejected = 0;
         Eigen::Vector2f last_xy = Eigen::Vector2f::Zero();   // final robot position (map frame)
+        long occluded_pts = 0;   // LiDAR returns the camera showed to be on furniture, not on a wall
     };
 
     using Boxes = std::vector<std::pair<Eigen::Vector2f, Eigen::Vector2f>>;   // (lo, hi)
@@ -317,6 +318,69 @@ namespace
             if (not std::isfinite(r) or r < 0.2f or r > 20.f) continue;
             out.emplace_back(r * std::cos(bearing), r * std::sin(bearing));
         }
+        return out;
+    }
+
+    /// ONE SWEEP OF BOTH SENSORS, on a shared bearing grid, with the disagreement between them used
+    /// as evidence rather than discarded. The LiDAR stops at the nearest thing on the ray, furniture
+    /// included; the ceiling junction is above the furniture and stops at the wall. So when the two
+    /// disagree by more than their combined noise on the SAME bearing, that is not conflict to be
+    /// averaged away — it is the signature of an occluder, and it says the near return is not a
+    /// wall. Those LiDAR points are dropped from the wall cloud. Without this the two sensors hand
+    /// the segmenter a furniture face and the true wall behind it competing for one stretch of
+    /// boundary, with nothing in the model to explain the near one away.
+    std::vector<Eigen::Vector2f> scan_fused(const Poly& room, const RunConfig& cfg,
+                                            const Eigen::Vector3f& pose, std::mt19937& rng,
+                                            Eigen::VectorXf& weights, int& n_occluded)
+    {
+        std::normal_distribution<float> rn(0.f, cfg.scan_sigma), an(0.f, cfg.ceiling_sigma_rad);
+        const int N = static_cast<int>(room.size());
+        const int n = cfg.n_rays;
+        std::vector<Eigen::Vector2f> out;
+        std::vector<float> w;
+        n_occluded = 0;
+        const int ceil_every = cfg.ceiling_line ? std::max(1, n / std::max(1, cfg.ceiling_rays)) : 0;
+        for (int i = 0; i < n; ++i)
+        {
+            const float bearing = -kPi + 2.f * kPi * static_cast<float>(i) / static_cast<float>(n);
+            const float wd = pose.z() + bearing;
+            const Eigen::Vector2f d(std::cos(wd), std::sin(wd));
+            float wall = 1e9f;
+            for (int e = 0; e < N; ++e)
+                if (auto t = rc::corner_visibility::ray_segment_t(pose.head<2>(), d, room[e], room[(e + 1) % N]); t and *t < wall)
+                    wall = *t;
+            if (wall > 1e8f) continue;
+            const float occ = std::min(wall, box_range(pose.head<2>(), d, cfg.occluders));
+            const float r_lidar = occ + rn(rng);
+            // The camera, on the bearings it samples.
+            bool have_ceiling = false; float r_ceiling = 0.f, s_ceiling = 0.f;
+            if (cfg.ceiling_line and (i % ceil_every) == 0)
+            {
+                const float alpha = std::atan2(cfg.ceiling_dh, wall) + an(rng);
+                if (alpha > 0.02f)
+                {
+                    const float rr = cfg.ceiling_dh / std::tan(alpha);
+                    if (std::isfinite(rr) and rr > 0.2f and rr < 20.f)
+                    {
+                        have_ceiling = true; r_ceiling = rr;
+                        s_ceiling = (cfg.ceiling_dh * cfg.ceiling_dh + rr * rr) / cfg.ceiling_dh * cfg.ceiling_sigma_rad;
+                    }
+                }
+            }
+            // The occluder test: the camera sees FURTHER than the LiDAR by more than the two of them
+            // can disagree by chance.
+            const bool occluded = have_ceiling
+                and (r_ceiling - r_lidar) > 3.f * std::sqrt(cfg.scan_sigma * cfg.scan_sigma + s_ceiling * s_ceiling);
+            if (occluded) ++n_occluded;
+            else { out.emplace_back(r_lidar * std::cos(bearing), r_lidar * std::sin(bearing)); w.push_back(1.f); }
+            if (have_ceiling)
+            {
+                out.emplace_back(r_ceiling * std::cos(bearing), r_ceiling * std::sin(bearing));
+                w.push_back(std::min(1.f, (cfg.scan_sigma * cfg.scan_sigma) / std::max(s_ceiling * s_ceiling, 1e-9f)));
+            }
+        }
+        weights = Eigen::VectorXf::Zero(static_cast<long>(w.size()));
+        for (size_t k = 0; k < w.size(); ++k) weights[static_cast<long>(k)] = w[k];
         return out;
     }
 
@@ -608,6 +672,7 @@ namespace
     RunResult run_explore(const Poly& room, const RunConfig& cfg, std::mt19937& rng, int max_frames,
                           const Eigen::Vector2f& start)
     {
+        long occluded_total = 0;
         RunResult R;
         Explorer ex(room);
         rc::wallseg::Params sp;
@@ -680,34 +745,13 @@ namespace
             const Eigen::Vector3f pred = (f == 0) ? Eigen::Vector3f::Zero()
                 : Eigen::Vector3f(est.x() + odom.x(), est.y() + odom.y(), wrap(est.z() + odom.z()));
 
-            auto pts = scan_occluded(room, cfg.occluders, tru, cfg.n_rays, cfg.scan_sigma, rng);
-            // HOW THE TWO SENSORS FUSE. Both measure the same thing — a point on a wall — so they
-            // join ONE cloud and go through one segmenter and one association. What differs is only
-            // the precision, so that is what is carried: a per-point weight, the ratio of variances
-            // against the LiDAR's. The camera's range comes from r = dh / tan(alpha), so
-            // sigma_r = (dh^2 + r^2)/dh * sigma_alpha — constant for the LiDAR, quadratic in range
-            // for the camera. Near the robot the two are comparable; far away the camera is an order
-            // worse and the weight says so, which is what stops a distant ceiling point from
-            // dragging a wall the LiDAR already knows well.
-            const size_t n_lidar = pts.size();
-            if (cfg.ceiling_line)
-            {
-                const auto cpts = scan_ceiling(room, tru, cfg.ceiling_rays, cfg.ceiling_dh,
-                                               cfg.ceiling_sigma_rad, rng);
-                pts.insert(pts.end(), cpts.begin(), cpts.end());
-            }
+            // Both sensors in one sweep, with the disagreement between them read as an occluder
+            // rather than averaged away (see scan_fused). With the camera off this is the plain
+            // LiDAR sweep and the weights are all one.
             Eigen::VectorXf pw;
-            if (pts.size() > n_lidar)
-            {
-                pw = Eigen::VectorXf::Ones(static_cast<long>(pts.size()));
-                const float dh = cfg.ceiling_dh, sa = cfg.ceiling_sigma_rad, sl = cfg.scan_sigma;
-                for (size_t k = n_lidar; k < pts.size(); ++k)
-                {
-                    const float r = pts[k].norm();
-                    const float sr = (dh * dh + r * r) / dh * sa;
-                    pw[static_cast<long>(k)] = std::min(1.f, (sl * sl) / std::max(sr * sr, 1e-9f));
-                }
-            }
+            int n_occluded = 0;
+            auto pts = scan_fused(room, cfg, tru, rng, pw, n_occluded);
+            occluded_total += n_occluded;
             if (R.map.walls.empty())
             {
                 // model-first init from the first scan's OBB (same as run_loop)
@@ -853,6 +897,7 @@ namespace
         }
         R.pose_rmse_xy = (n_err > 0) ? static_cast<float>(std::sqrt(se / n_err)) : 0.f;
         R.last_xy = est.head<2>();
+        R.occluded_pts = occluded_total;
         if (cfg.verbose) std::printf("    global re-derivations adopted: %d\n", rederives);
         R.poly = R.map.manhattan_polygon();   // published layout: exactly Manhattan
         return R;

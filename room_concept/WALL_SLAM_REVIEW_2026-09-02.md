@@ -493,3 +493,24 @@ grew a tail. That tail is the next thing to understand, and the likely mechanism
 creates on purpose: the LiDAR sees a furniture FACE as a wall-like segment while the camera sees the true
 wall behind it, so two incompatible lines compete for the same stretch of boundary. The model has no
 furniture in it, so nothing explains the near line away.
+
+## The tail was the two sensors arguing, and the argument is the evidence (2026-09-03)
+The first fusion helped 16 rooms of 20 and destroyed 1, where the polygon stopped closing. The cause was
+the conflict the bench creates on purpose: the LiDAR stops on a cupboard and hands the segmenter a
+wall-like face, while the camera sees the true wall behind it, so two incompatible lines compete for one
+stretch of boundary and nothing in the model explains the near one away.
+The fix is not to arbitrate between them but to READ THE DISAGREEMENT. Both sensors are sampled on one
+bearing grid. When the camera's range exceeds the LiDAR's on the SAME bearing by more than the two can
+differ by chance — 3σ of their combined noise, where the camera's σ is the (dh²+r²)/dh·σ_α it already
+carries — that is the signature of an occluder, and it says the near return is not on a wall. Those LiDAR
+points are dropped from the wall cloud. No threshold beyond the 3σ, and the test costs nothing: it uses
+the variance each sensor already reports.
+| 20 rooms, identical, furniture in all | IoU mean | median | min | Hausdorff median |
+|---|---|---|---|---|
+| LiDAR only | 0.882 | 0.895 | 0.757 | 1.230 m |
+| + ceiling line, sensors merged blindly | 0.878 | 0.932 | **0.000** | 1.275 m |
+| + ceiling line, disagreement read as occlusion | **0.919** | **0.934** | 0.728 | 0.916 m |
+Better in 15 rooms, neutral in 2, worse in 3, worst single loss 0.033, and the room that collapsed to 0.000
+now scores 0.930. Furniture costs 0.068 of median IoU against a clean room; the fused pair gives back
+0.039 of it. The tail is gone, the mean rose by 0.037, and the wall-SLAM bench is untouched at
+0.957 / 0.902 / 0.980.
