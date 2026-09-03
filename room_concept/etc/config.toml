@@ -1678,7 +1678,12 @@ camera             = "ricoh"
 mountPitchSigma    = 0.0017
 mountHeightSigma   = 0.010
 mountYawSigma      = 0.0035
-mountYawCorrection = 0.01421
+# ★ 2026-09-03: MOVED. This is now robot_concept/etc/config_p3bot.toml's
+#   Transforms.boresight_yaw_ricoh, which corrects the body->ricoh RT edge itself, so every agent
+#   reads the corrected extrinsic instead of room_concept holding a private offset. Leaving a value
+#   here as well would apply it TWICE. The key still works if set — it remains the right place to
+#   test an unconfirmed correction without touching the shared description.
+mountYawCorrection = 0.0
 wallPositionSigma  = 0.015
 # ── The rest of P3Bot's own values ─────────────────────────────────────────────────────────────
 Period                          = 16

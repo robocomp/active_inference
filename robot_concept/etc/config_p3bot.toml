@@ -196,6 +196,15 @@ imu_source   = "auto"
 dsr_lidar_fps = -1
 
 [Transforms]
+# ── This robot's camera boresights (rad, about the robot vertical) ────────────────────────────
+# See config_shadow.toml for what these are and why they live per robot.
+# MEASURED 2026-08-28 on P3Bot's ricoh: +0.814 +/- 0.022 deg (0.01421 rad), by joining the
+# image-edge rigid-shift fit against the Webots supervisor across 99 windows and 7 heading bins.
+# Flat across heading (spread 0.058 deg), which is what makes it a BORESIGHT and not the localiser's
+# own heading error. It previously lived in room_concept's [Platform.P3Bot] as a private offset;
+# here it corrects the shared extrinsic instead, which is where its own comment said it belonged.
+boresight_yaw_zed   = 0.0
+boresight_yaw_ricoh = 0.01421
 # Use RT interpolation for timestamped graph transforms. Disable to fall back to nearest sample.
 interpolate_rt = true
 

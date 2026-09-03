@@ -16,12 +16,7 @@
  *    You should have received a copy of the GNU General Public License
  *    along with RoboComp.  If not, see <http://www.gnu.org/licenses/>.
  */
-#include <charconv>
-#include <fstream>
-#include <map>
-#include <QtMath>
 #include "specificworker.h"
-#include "../../common/robot_footprint/robot_footprint.h"
 
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include "../../common/media_transport/media_transport.h"
@@ -32,7 +27,6 @@
 #include "graph_safe.h"   // rc::safe_update_node — guard update_node against exceptions
 #include <QTimer>
 #include <QLabel>
-#include <QSettings>
 #include <QVBoxLayout>
 
 #include <ConfigLoader/ConfigLoader.h>
@@ -44,69 +38,6 @@
 #include <iterator>
 #include <iostream>
 #include <print>
-
-// ── SVD48VBase config reader ──────────────────────────────────────────────────────────────────
-// The base component owns its own kinematics and geometry, and it is the SAME file on the real
-// robot as in simulation — which is the whole point: a capability read from the base is true for
-// both, while a number copied into an agent's config is true only until someone swaps the base.
-//
-// Format is flat `key=value` with optional quotes and a trailing `#comment` (no space required:
-// `port="/dev/Driver_base"#Direcion`). Values are mm and mm/s; callers convert to SI.
-//
-// ★ std::from_chars, NOT stod/stof/strtod. These machines run LANG=es_ES.UTF-8 and Qt calls
-// setlocale(LC_ALL,"") at startup, so the C library reads a decimal COMMA: `axesLength=518.0`
-// would parse as 518 (harmless here) but `maxRotSpeed=1.5` would parse as **1**, a third of the
-// real limit, silently and with no error flag. See CLAUDE.md "Parsing numbers from files".
-namespace
-{
-std::map<std::string, std::string> read_flat_config(const std::string &path)
-{
-    std::map<std::string, std::string> kv;
-    std::ifstream f(path);
-    if (not f) return kv;
-    std::string line;
-    while (std::getline(f, line))
-    {
-        const auto eq = line.find('=');
-        if (eq == std::string::npos or line.find_first_not_of(" \t") == std::string::npos) continue;
-        if (line[line.find_first_not_of(" \t")] == '#') continue;
-        std::string key = line.substr(0, eq);
-        std::string val = line.substr(eq + 1);
-        auto trim = [](std::string &v)
-        {
-            const auto a = v.find_first_not_of(" \t\r\n");
-            const auto b = v.find_last_not_of(" \t\r\n");
-            v = (a == std::string::npos) ? std::string{} : v.substr(a, b - a + 1);
-        };
-        trim(key);
-        trim(val);
-        if (not val.empty() and val.front() == '"')            // quoted: take to the closing quote
-        {
-            const auto close = val.find('"', 1);
-            val = (close == std::string::npos) ? val.substr(1) : val.substr(1, close - 1);
-        }
-        else if (const auto h = val.find('#'); h != std::string::npos)   // else strip the comment
-        {
-            val = val.substr(0, h);
-            trim(val);
-        }
-        if (not key.empty()) kv.emplace(std::move(key), std::move(val));
-    }
-    return kv;
-}
-
-std::optional<float> num(const std::map<std::string, std::string> &kv, const char *key)
-{
-    const auto it = kv.find(key);
-    if (it == kv.end()) return std::nullopt;
-    const char *b = it->second.data();
-    float out{};
-    if (const auto [p, ec] = std::from_chars(b, b + it->second.size(), out); ec == std::errc{})
-        return out;
-    return std::nullopt;
-}
-} // namespace
-
 
 namespace
 {
@@ -181,70 +112,10 @@ SpecificWorker::~SpecificWorker()
 	request_shutdown();
 }
 
-// QSettings group for one graph's window: windows/<agent id>/<graph name>. The id keys it so two agents
-// sharing a config file (different Agent.id) do not fight over one geometry; the empty graph name — the
-// single-graph case, which is ours — is spelled "default", matching what the rest of the fleet writes.
-QString SpecificWorker::settings_group_name(const std::string& graph_name, int agent_id)
-{
-	const QString graph_suffix = graph_name.empty() ? QStringLiteral("default")
-	                                                : QString::fromStdString(graph_name);
-	return QStringLiteral("windows/%1/%2").arg(agent_id).arg(graph_suffix);
-}
-
-// Restore is deliberately tolerant: an absent key leaves Qt's own placement alone, so a first run (or a
-// wiped config) is not a special case. `state` carries the dock/toolbar layout and is versioned — bump
-// kWindowStateVersion if the viewer's dock composition ever changes, and Qt then ignores the stale blob
-// instead of restoring a layout whose widgets no longer exist.
-void SpecificWorker::restore_window_settings()
-{
-	QSettings settings(QStringLiteral("RoboComp"), QString::fromStdString(agent_name));
-
-	for (const auto& [name, window] : windows)
-	{
-		if (window == nullptr)
-			continue;
-
-		settings.beginGroup(settings_group_name(name, agent_id));
-
-		if (const QByteArray geometry = settings.value(QStringLiteral("geometry")).toByteArray();
-		    not geometry.isEmpty())
-			window->restoreGeometry(geometry);
-
-		if (const QByteArray state = settings.value(QStringLiteral("state")).toByteArray();
-		    not state.isEmpty())
-			window->restoreState(state, kWindowStateVersion);
-
-		settings.endGroup();
-	}
-}
-
-void SpecificWorker::save_window_settings() const
-{
-	QSettings settings(QStringLiteral("RoboComp"), QString::fromStdString(agent_name));
-
-	for (const auto& [name, window] : windows)
-	{
-		if (window == nullptr)
-			continue;
-
-		settings.beginGroup(settings_group_name(name, agent_id));
-		settings.setValue(QStringLiteral("geometry"), window->saveGeometry());
-		settings.setValue(QStringLiteral("state"), window->saveState(kWindowStateVersion));
-		settings.endGroup();
-	}
-
-	settings.sync();   // the process may be seconds from exit; do not leave the write to QSettings' timer
-}
-
 void SpecificWorker::request_shutdown()
 {
 	if (shutting_down_.exchange(true))
 		return;
-
-	// FIRST, while the windows still exist: this runs on aboutToQuit (graceful SIGTERM/SIGINT path) and
-	// again from ~SpecificWorker, and the exchange above makes the second call a no-op. A kill -9 saves
-	// nothing — same contract as the owned-node cleanup below.
-	save_window_settings();
 
 	stop_imu_thread = true;
 	stop_lidar_thread = true;
@@ -279,14 +150,6 @@ void SpecificWorker::initialize()
 	// needs no code change. If the key is absent we fall back to the single node of type "robot"
 	// already in the graph rather than guessing a name.
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Agent.robot_name", robot_name);
-	// The MESH's frame, not the robot's shape — see the declaration. P3Bot needs 90.
-	// ★Loaded as double: ConfigLoader's variant carries no float alternative, and asking it for one is a
-	// static_assert, not a conversion.
-	{
-		double yaw_deg = mesh_yaw_deg;
-		rc::ConfigLoaderUtils::load_optional(configLoader, "Agent.mesh_yaw_deg", yaw_deg);
-		mesh_yaw_deg = static_cast<float>(yaw_deg);
-	}
 	rc::ConfigLoaderUtils::load_optional<std::uint64_t, int>(configLoader, "Agent.robot_node_id", canonical_robot_id_);
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Agent.graph_layout", graph_layout_);
 	if (robot_name.empty())
@@ -305,54 +168,6 @@ void SpecificWorker::initialize()
 		qInfo() << "[Agent] robot node =" << QString::fromStdString(robot_name)
 		        << "(canonical id" << canonical_robot_id_ << ")";
 
-	// ── WHERE the robot is, published for everyone ───────────────────────────────────────────────
-	// A robot is not a place: the same P3Bot runs in the WAF room and in the apartment, and the same
-	// apartment hosts P3Bot and Shadow. This agent owns the robot's identity, and it is also the one
-	// component that exists in simulation AND on the real robot — the bridge knows the world too,
-	// but only in simulation — so the scenario belongs here beside robot_name.
-	// room_concept consumes it to pick its layout, and REFUSES TO START without it: it authors the
-	// room polygon every other agent reads, so a wrong floor plan puts the whole fleet in the wrong
-	// building while every number downstream stays self-consistent.
-	rc::ConfigLoaderUtils::load_optional(configLoader, "Agent.scenario", scenario_name_);
-	// WHAT this base can do, as opposed to where it is — read from the BASE COMPONENT's own config,
-	// which is the same file on the real robot as in simulation. An earlier version of this declared
-	// `Agent.holonomic` here by hand; that was a second copy of `baseType`, which SVD48VBase already
-	// states, so it is gone. One fact, one file, owned by the component that owns the hardware.
-	std::string base_config_path;
-	try { base_config_path = configLoader.get<std::string>("Agent.base_config_file"); } catch (...) {}
-	if (base_config_path.empty())
-		qWarning() << "[Agent] Agent.base_config_file is not set: no base capability or geometry will"
-		              " be published. Consumers keep whatever constants they hold today.";
-	else if (const auto kv = read_flat_config(base_config_path); kv.empty())
-		qWarning() << "[Agent] could not read base config"
-		           << QString::fromStdString(base_config_path) << "— nothing published.";
-	else
-	{
-		// Holonomy is DERIVED from baseType rather than declared: the base component already says
-		// which it is, and a second declaration is a second thing to get wrong.
-		if (const auto it = kv.find("baseType"); it != kv.end())
-			holonomic_ = (it->second == "Omnidirectional");
-		else
-			qWarning() << "[Agent] base config has no `baseType`, so `robot_holonomic` stays absent.";
-
-		// mm and mm/s in that file; SI on the graph. Absent stays absent — never defaulted.
-		if (const auto v = num(kv, "maxLinSpeed"))    max_linear_speed_ = *v / 1000.f;
-		if (const auto v = num(kv, "maxRotSpeed"))    max_rot_speed_    = *v;            // already rad/s
-		if (const auto v = num(kv, "maxAcceleration")) max_linear_accel_ = *v / 1000.f;
-		if (const auto v = num(kv, "maxDeceleration")) max_linear_decel_ = *v / 1000.f;
-		if (const auto v = num(kv, "wheelRadius"))    wheel_radius_     = *v / 1000.f;
-		if (const auto v = num(kv, "axesLength"))     axes_length_      = *v / 1000.f;
-
-		qInfo() << "[Agent] base" << QString::fromStdString(base_config_path)
-		        << ": holonomic=" << (holonomic_.has_value() ? (*holonomic_ ? "true" : "false") : "?")
-		        << " v_max=" << (max_linear_speed_ ? *max_linear_speed_ : -1.f) << "m/s"
-		        << " w_max=" << (max_rot_speed_ ? *max_rot_speed_ : -1.f) << "rad/s"
-		        << " track=" << (axes_length_ ? *axes_length_ : -1.f) << "m";
-	}
-	if (scenario_name_.empty())
-		qWarning() << "[Agent] Agent.scenario is not set, so `scenario_name` will not be published."
-		              " room_concept will refuse to start if its config defines scenario overlays.";
-
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Camera.dsr_rgb_fps", params.DSR_RGB_FPS);
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Camera.dsr_depth_fps", params.DSR_DEPTH_FPS);
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Lidar.dsr_lidar_fps", params.DSR_LIDAR_FPS);
@@ -369,8 +184,6 @@ void SpecificWorker::initialize()
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.imu_topic", params.MEDIA_IMU_TOPIC);
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.enable_zed",   params.ENABLE_ZED);
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.enable_ricoh", params.ENABLE_RICOH);
-	rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Transforms.boresight_yaw_zed",   params.BORESIGHT_YAW_ZED);
-	rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Transforms.boresight_yaw_ricoh", params.BORESIGHT_YAW_RICOH);
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.enable_lidar", params.ENABLE_LIDAR);
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.enable_imu",   params.ENABLE_IMU);
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.data_sharing", params.MEDIA_DATA_SHARING);
@@ -384,12 +197,12 @@ void SpecificWorker::initialize()
 	bridge_zed_.store(  params.ZED_SOURCE   != "dds", std::memory_order_relaxed);
 	bridge_ricoh_.store(params.RICOH_SOURCE != "dds", std::memory_order_relaxed);
 	bridge_lidar_.store(params.LIDAR_SOURCE != "dds", std::memory_order_relaxed);
-	bridge_imu_.store(  params.IMU_SOURCE   != "dds", std::memory_order_relaxed);
 	qInfo() << "[Media] sources: zed =" << QString::fromStdString(params.ZED_SOURCE)
 	        << "| ricoh =" << QString::fromStdString(params.RICOH_SOURCE)
 	        << "| lidar =" << QString::fromStdString(params.LIDAR_SOURCE)
 	        << "| imu =" << QString::fromStdString(params.IMU_SOURCE)
-	        << "(auto=negotiate, ice=always bridge, dds=always monitor external)";
+	        << "(auto=negotiate, ice=always bridge, dds=always monitor external;"
+	        << "imu has no producer proxy yet, so auto == ice there)";
 
 	qInfo() << "[DSR Upload Rates] rgb=" << params.DSR_RGB_FPS
 	        << "depth=" << params.DSR_DEPTH_FPS
@@ -413,48 +226,6 @@ void SpecificWorker::initialize()
 		if (!G->get_attrib_by_name<height_m_att>(body_node.value()).has_value())
 		{ G->add_or_modify_attrib_local<height_m_att>(body_node.value(), 1.6f); seeded = true; }
 
-		// ── ★MEASURE THE ROBOT INSTEAD OF DECLARING IT ───────────────────────────────────────────
-		// The 0.47 / 0.47 above are a PLACEHOLDER, and provably so: they are byte-identical in
-		// shadow.json and p3bot.json, i.e. the same numbers for two robots of different shapes. Whoever
-		// reads them plans against a robot that does not exist — room_concept's epistemic planner takes
-		// 0.5*hypot(w, d) = 0.332 m as its collision radius, against P3Bot's true 0.371 m.
-		// This agent is the ONE that knows which robot this is (Agent.robot_name / configFile), and the
-		// mesh named by the robot node's own `path` is the only per-robot statement of its shape. So
-		// measure it here, once, and let every existing consumer of width_m/depth_m read the truth
-		// without changing a line — one producer, rather than a mesh loader in every agent.
-		// ★HEIGHT IS DELIBERATELY NOT TOUCHED. Despite its name, `height_m` is consumed as room_concept's
-		// OBSTACLE CLOUD CEILING (RoomConfig::ROBOT_HEIGHT, "m, obstacle cloud ceiling"), not as the
-		// robot's stature. Setting it to the mesh's true 1.31 m would silently change which LiDAR returns
-		// that agent treats as obstacles — a perception change wearing a geometry change's clothes.
-		const auto robot_node = G->get_node(robot_name);
-		if (const auto path_attr = robot_node.has_value()
-		        ? G->get_attrib_by_name<path_att>(robot_node.value())
-		        : std::optional<std::reference_wrapper<const std::string>>{};
-		    path_attr.has_value())
-		{
-			rc::RobotFootprint::MeshReport rep;
-			const float yaw = mesh_yaw_deg * static_cast<float>(M_PI) / 180.f;
-			if (const auto body = rc::RobotFootprint::from_obj(path_attr.value().get(), yaw, rep);
-			    body.has_value())
-			{
-				const float w = 2.f * rep.x_max, d = 2.f * rep.y_max;
-				const float w_old = G->get_attrib_by_name<width_m_att>(body_node.value()).value_or(0.f);
-				const float d_old = G->get_attrib_by_name<depth_m_att>(body_node.value()).value_or(0.f);
-				G->add_or_modify_attrib_local<width_m_att>(body_node.value(), w);
-				G->add_or_modify_attrib_local<depth_m_att>(body_node.value(), d);
-				qInfo().nospace() << "[body] dimensions MEASURED from '"
-				                  << QString::fromStdString(path_attr.value().get()) << "' (yaw "
-				                  << mesh_yaw_deg << " deg): width " << w_old << " -> " << w
-				                  << " m, depth " << d_old << " -> " << d
-				                  << " m. height_m left at its declared value (it is an obstacle-cloud "
-				                     "ceiling, not the robot's stature).";
-			}
-			else
-				qWarning().nospace() << "[body] could NOT measure the robot from its mesh ("
-				                     << QString::fromStdString(rep.reason)
-				                     << ") — the declared dimensions stand, and they may be a placeholder.";
-		}
-
 		rc::safe_update_node(*G, body_node.value());
 		if (seeded)
 			qInfo() << __FUNCTION__ << "Seeded body node with default dimensions (width=0.47, depth=0.47, height=1.6)";
@@ -463,44 +234,6 @@ void SpecificWorker::initialize()
 	}
 	else
 		qWarning() << __FUNCTION__ << "Body node not found in DSR graph";
-
-	// ── This robot's own camera boresights, written into the SHARED extrinsic ─
-	// ★ Applied HERE and not in each consumer. The body->camera RT edge is the authoritative
-	//   description every agent reads; correcting it once means room_concept, retina and anything
-	//   else all agree, instead of each keeping a private offset that can drift apart.
-	// ★ IDEMPOTENT, and that matters because the graph is persistent: the value is SET, never added,
-	//   so a restart re-applies the same angle rather than compounding it. Both robots' JSONs carry a
-	//   nominal camera rotation of exactly [0,0,0], so setting the yaw component loses nothing; the
-	//   x and y components are preserved regardless.
-	// ⚠ Nothing is written when the configured angle already matches the edge — an unmeasured
-	//   boresight (Shadow's, 0) must not cost an RT write and a graph signal on every start.
-	if (auto rt = G->get_rt_api())
-	{
-		const std::pair<const char*, float> boresights[] = {
-			{"zed",   params.BORESIGHT_YAW_ZED},
-			{"ricoh", params.BORESIGHT_YAW_RICOH}};
-		for (const auto& [cam, yaw] : boresights)
-		{
-			auto cn = G->get_node(cam);
-			auto bn = G->get_node("body");
-			if (not cn.has_value() or not bn.has_value()) continue;   // ALWAYS check (CLAUDE.md)
-			const auto e = G->get_edge(bn.value().id(), cn.value().id(), "RT");
-			if (not e.has_value()) continue;
-			auto rot = G->get_attrib_by_name<rt_rotation_euler_xyz_att>(e.value());
-			auto tr  = G->get_attrib_by_name<rt_translation_att>(e.value());
-			if (not rot.has_value() or not tr.has_value() or rot.value().get().size() < 3) continue;
-			const float cur = rot.value().get()[2];
-			if (std::abs(cur - yaw) < 1e-9f) continue;                // already right: touch nothing
-			std::vector<float> r = rot.value().get();
-			r[2] = yaw;
-			const std::vector<float> tvec = tr.value().get();
-			rt->insert_or_assign_edge_RT(bn.value(), cn.value().id(), tvec, r);
-			qInfo().noquote() << QString::asprintf(
-				"[mount] %s boresight yaw %+.5f rad (%+.3f deg) written into body->%s "
-				"(was %+.5f) — this is the SHARED extrinsic, every agent now reads it",
-				cam, yaw, yaw * 180.0 / M_PI, cam, cur);
-		}
-	}
 
 	// ── One-shot dump of the static mount edges (both directions) ─────────────
 	// Prints <robot>->room and body->kinova_arm_r once at startup so they can be
@@ -575,15 +308,9 @@ void SpecificWorker::initialize()
 	{
 		if (not ad.enabled)
 			continue;                                    // gated OFF: no publisher, no descriptor
-		// Cold start: no driver has spoken yet, so there is no model to carry and the sensor
-		// fields stay ABSENT — which the schema defines as "unknown, keep your own constant",
-		// not as zero. They fill in as soon as a driver advertises one.
-		if (G->get_node(ad.node).has_value())
-		{
-			write_media_descriptor(ad.node, media_.descriptor_json(ad.keys));
+		if (media_.advertise(*G, ad.node, ad.keys))
 			qInfo() << "[Media] descriptor advertised on" << ad.node << ":"
 			        << QString::fromStdString(media_.descriptor_json(ad.keys));
-		}
 		else
 			qWarning() << "[Media]" << ad.node << "node not found at init — media descriptor NOT advertised";
 	}
@@ -699,11 +426,6 @@ void SpecificWorker::initialize()
 		wire_agent_status_overlay();   // colour every agent node by its live health (green/orange/red/grey)
 		check_robot_identity();   // flag a stale/mismatched robot node ingested during bootstrap
 	});
-
-	// Put the viewer window back where the user left it. Queued at the head of the event loop rather than
-	// called inline: GenericWorker::initialize() has created the window, but a geometry set before the
-	// window manager has mapped it is silently overridden by some WMs.
-	QTimer::singleShot(0, this, [this]() { restore_window_settings(); });
 }
 
 // A node was inserted OR an attribute was updated (update_node_signal covers both). Relayout only when the id
@@ -747,45 +469,7 @@ void SpecificWorker::check_robot_identity()
 		           << s->id() << "(expected" << canonical_robot_id_
 		           << ") — likely a stale node from an unclean previous exit; stop agents with SIGTERM, "
 		              "not kill -9, and ensure etc/robot_concept.toml exists so peers reap it.";
-
-	// Publish WHERE this robot is, once, alongside the identity check that already runs here — same
-	// node, same one-shot timing, and it needs the graph to be up for exactly the same reason.
-	// ⚠ update_node is a WHOLE-NODE write: an attribute absent from the copy is ERASED (see
-	//   dsr-node-attr-erasure-hazard). Re-fetch, add, write back — never write a stale copy.
-	if (not scenario_name_.empty() or holonomic_.has_value() or max_linear_speed_.has_value())
-	{
-		if (auto n = G->get_node(robot_name); n.has_value())
-		{
-			if (not scenario_name_.empty())
-				G->add_or_modify_attrib_local<scenario_name_att>(n.value(), scenario_name_);
-			// WHAT this base can do. A differential base cannot move sideways, and nothing in the
-			// graph said so: the controller issues setSpeedBase(side, adv, rot) unconditionally and
-			// room_concept's odometry carries a dx_local = side*dt term, so on the differential Shadow both were
-			// describing motion the robot cannot make. Published on the SAME one-shot write as
-			// scenario_name — same node, same reason to wait for the graph.
-			if (holonomic_.has_value())
-				G->add_or_modify_attrib_local<robot_holonomic_att>(n.value(), *holonomic_);
-			// Base CAPABILITY, not policy. A consumer's own speed limit is a preference and must
-			// assert itself <= these; substituting one for the other is what let the pose clamp
-			// rate-limit real motion by a comfort setting.
-			if (max_linear_speed_) G->add_or_modify_attrib_local<robot_max_linear_speed_att>(n.value(), *max_linear_speed_);
-			if (max_rot_speed_)    G->add_or_modify_attrib_local<robot_max_rot_speed_att>(n.value(), *max_rot_speed_);
-			if (max_linear_accel_) G->add_or_modify_attrib_local<robot_max_linear_accel_att>(n.value(), *max_linear_accel_);
-			if (max_linear_decel_) G->add_or_modify_attrib_local<robot_max_linear_decel_att>(n.value(), *max_linear_decel_);
-			if (wheel_radius_)     G->add_or_modify_attrib_local<robot_wheel_radius_att>(n.value(), *wheel_radius_);
-			if (axes_length_)      G->add_or_modify_attrib_local<robot_axes_length_att>(n.value(), *axes_length_);
-			if (rc::safe_update_node(*G, n.value()))
-				qInfo() << "[graph] scenario_name =" << QString::fromStdString(scenario_name_)
-				        << "| robot_holonomic ="
-				        << (holonomic_.has_value() ? (*holonomic_ ? "true" : "false") : "(absent)")
-				        << "published on" << QString::fromStdString(robot_name);
-			else
-				qWarning() << "[graph] could NOT publish scenario_name — room_concept will refuse to"
-				              " start if its config defines scenario overlays.";
-		}
-	}
 }
-
 
 void SpecificWorker::compute()
 {
@@ -797,7 +481,7 @@ void SpecificWorker::compute()
 
 	static auto   last      = std::chrono::steady_clock::now();
 	static std::uint64_t last_rgbd = 0, last_imu = 0, last_ricoh = 0;
-	static std::uint64_t last_helios = 0, last_bpearl = 0, last_fullpose = 0;
+	static std::uint64_t last_helios = 0, last_bpearl = 0;
 	const auto    now = std::chrono::steady_clock::now();
 	const double  dt  = std::chrono::duration<double>(now - last).count();
 	// The raw estimate is (integer frame delta / dt): over a short window this quantises
@@ -814,12 +498,10 @@ void SpecificWorker::compute()
 		const std::uint64_t c = ricoh_frames_.load(std::memory_order_relaxed);
 		const std::uint64_t hl = helios_frames_.load(std::memory_order_relaxed);
 		const std::uint64_t bp = bpearl_frames_.load(std::memory_order_relaxed);
-		const std::uint64_t fp = fullpose_frames_.load(std::memory_order_relaxed);
 		// Instantaneous window rate → EWMA. Seed on first sample; alpha 0.5 settles in a few
 		// windows after a real rate change while erasing per-window quantisation wobble.
 		constexpr double kAlpha = 0.5;
-		static double ema_rgbd = -1.0, ema_helios = -1.0, ema_bpearl = -1.0, ema_imu = -1.0, ema_ricoh = -1.0,
-		              ema_fullpose = -1.0;
+		static double ema_rgbd = -1.0, ema_helios = -1.0, ema_bpearl = -1.0, ema_imu = -1.0, ema_ricoh = -1.0;
 		const auto ewma = [](double& s, double inst)
 		{ s = (s < 0.0) ? inst : kAlpha * inst + (1.0 - kAlpha) * s; return s; };
 		const double f_rgbd   = ewma(ema_rgbd,   static_cast<double>(r  - last_rgbd)   / dt);
@@ -827,13 +509,12 @@ void SpecificWorker::compute()
 		const double f_ricoh  = ewma(ema_ricoh,  static_cast<double>(c  - last_ricoh)  / dt);
 		const double f_helios = ewma(ema_helios, static_cast<double>(hl - last_helios) / dt);
 		const double f_bpearl = ewma(ema_bpearl, static_cast<double>(bp - last_bpearl) / dt);
-		const double f_fullpose = ewma(ema_fullpose, static_cast<double>(fp - last_fullpose) / dt);
 		// Per-thread heartbeat, one table row each. src label: "off" when the whole path is
 		// gated out (no reader thread), "local" while robot_concept bridges Ice→media itself,
-		// "ext-DDS" once negotiation hands the plane to the external producer (bridge off) — which
-		// now includes the IMU, whose producer is imu_dds. Adding a sensor is one row here. Print
-		// only when a rate moves >= kHzPrintDelta or a src label flips, so steady-state jitter
-		// doesn't reprint every sample.
+		// "ext-DDS" once negotiation hands the plane to the external producer (bridge off). IMU
+		// has no external producer (nullptr bridge) → always "local"/"off". Adding a sensor is
+		// one row here. Print only when a rate moves >= kHzPrintDelta or a src label flips, so
+		// steady-state jitter doesn't reprint every sample.
 		const auto src_label = [](bool enabled, const std::atomic<bool>* bridge) -> const char*
 		{
 			if (not enabled)         return "off";
@@ -845,12 +526,8 @@ void SpecificWorker::compute()
 			{ "ZEDThread",      f_rgbd,   src_label(params.ENABLE_ZED,   &bridge_zed_)   },
 			{ "HeliosThread",   f_helios, src_label(params.ENABLE_LIDAR, &bridge_lidar_) },
 			{ "BpearlThread",   f_bpearl, src_label(params.ENABLE_LIDAR, &bridge_lidar_) },
-			{ "IMUThread",      f_imu,    src_label(params.ENABLE_IMU,   &bridge_imu_)   },
+			{ "IMUThread",      f_imu,    src_label(params.ENABLE_IMU,   nullptr)        },
 			{ "Ricoh360Thread", f_ricoh,  src_label(params.ENABLE_RICOH, &bridge_ricoh_) },
-			// Odometry (FullPoseEstimationPub). Not a thread of ours and not on the media plane: it is
-			// pushed by the producer's Ice callback, so the src is always "ice" — 0.0 Hz here means the
-			// publisher (webots-bridge / base) is silent, not that a reader of ours stalled.
-			{ "FullPoseSub",    f_fullpose, "ice" },
 		};
 		constexpr int NFIELDS = static_cast<int>(std::size(fields));
 		// Print every rate window (~2 s) so the per-stream Hz table is always visible in the terminal,
@@ -863,7 +540,7 @@ void SpecificWorker::compute()
 			qInfo().noquote() << line;
 		}
 		last = now; last_rgbd = r; last_imu = i; last_ricoh = c;
-		last_helios = hl; last_bpearl = bp; last_fullpose = fp;
+		last_helios = hl; last_bpearl = bp;
 
 			// Publish live media-plane throughput onto each sensor's descriptor node (main thread, so
 			// the graph write is safe). The frames travel over zero-copy DDS SHM and never hit the wire,
@@ -881,7 +558,7 @@ void SpecificWorker::compute()
 				{"ricoh",   {"rgb360"},       &ricoh_bytes_,  params.ENABLE_RICOH},
 				{"helios",  {"lidar"},        &helios_bytes_, params.ENABLE_LIDAR},
 				{"bpearl",  {},               &bpearl_bytes_, params.ENABLE_LIDAR},
-				{"imu",     {"imu"},          &imu_bytes_,    params.ENABLE_IMU},
+				{"imu",     {"imu"},          nullptr,        params.ENABLE_IMU},
 			};
 			static std::map<std::string, std::uint64_t> last_ext_bytes;
 			for (const auto& mn : media_nodes)
@@ -1425,14 +1102,16 @@ void SpecificWorker::build_media_groups()
 	add_plane(lidar, "helios", &mediaplanedds2_proxy);
 	add_plane(lidar, "bpearl", &mediaplanedds3_proxy);
 
-	// IMU. That day came: imu_dds (Proxies.MediaPlaneDDS4, port 11891) is the external producer, so
-	// this plane negotiates exactly like the others — "auto" adopts it as soon as it relays a
-	// descriptor, and read_imu_thread then stops pulling over Ice and only subscribes to report the
-	// observed rate. Point MediaPlaneDDS4 at a dead port (or force "ice") to go back to bridging.
+	// IMU. No MediaPlaneDDS proxy exists for an IMU producer, and negotiate() already tolerates that:
+	// it only launches a query when the plane HAS a live proxy, so this plane never reports present,
+	// all_up stays false, and "auto" therefore keeps bridging — the correct reading of
+	// "no external producer was found". Forced "dds" still works, because that branch sets the bridge
+	// flag without consulting any proxy. So the table entry is honest as it stands and gains real
+	// negotiation the day an IMU component grows a MediaPlaneDDS endpoint.
 	auto& imu = media_groups_.emplace_back();
 	imu.tag = "IMU"; imu.bridge = &bridge_imu_; imu.source = &params.IMU_SOURCE;
 	imu.enabled = &params.ENABLE_IMU; imu.advertise_node = "imu"; imu.advertise_streams = {"imu"};
-	add_plane(imu, "imu", &mediaplanedds4_proxy);
+	add_plane(imu, "imu", nullptr);
 
 	// Resolve each plane's MediaPlaneDDS ICE port from its proxy string ("… -p 12002 …") so the mind
 	// view can fuse the SHM producer node with its mediaplanedds:<port> endpoint. Parsed once here.
@@ -1495,26 +1174,10 @@ void SpecificWorker::negotiate(MediaGroup& g)
 			std::string desc;
 			try { desc = p.pending.get(); }
 			catch (const Ice::Exception&) { desc.clear(); }   // peer down/hung -> absent
-			// A descriptor only counts as an adoption signal when the producer says its stream is
-			// actually LIVE. ready=false means "plane advertised, no data flowing" — adopting that
-			// stops our bridge and hands the sensor to a silent producer, taking it dark. Seen for
-			// real: an imu_dds pointed at the wrong IMU port had its DDS writer up (so it answered
-			// with a descriptor) while every getDataImu() was refused. Unparseable JSON is treated
-			// the same as absent, which keeps us bridging — the safe side.
-			p.present = false;
-			if (not desc.empty())
-				if (const auto d = rc::media::MediaDescriptor::from_json(desc); d.has_value())
-				{
-					p.present = d->ready;
-					// Latch the physics whenever the driver states it, INDEPENDENTLY of `ready`.
-					// A producer that is up but not yet streaming still knows its own geometry and
-					// noise, and that fact does not expire when the stream does.
-					if (not d->model.empty())
-						p.model = d->model;
-				}
+			p.present = not desc.empty();
 			if (p.present and desc != p.last_relayed)
 			{
-				write_media_descriptor(p.node, desc);
+				relay_media_descriptor(p.node, desc);
 				p.last_relayed = desc;
 			}
 		}
@@ -1553,20 +1216,11 @@ void SpecificWorker::negotiate(MediaGroup& g)
 		for (auto& p : g.planes)
 			if (not p.last_relayed.empty()) { p.last_relayed.clear(); had_relay = true; }
 		if (had_relay)
-		{
-			// Carry the physics across the transport switch: our own bridged descriptor
-			// re-states whatever model this node's driver last advertised, so geometry and
-			// noise do not blink out of the graph at the moment the sensor path degrades.
-			const rc::media::SensorModel* m = nullptr;
-			for (const auto& p : g.planes)
-				if (p.node == g.advertise_node and not p.model.empty()) { m = &p.model; break; }
-			write_media_descriptor(g.advertise_node,
-			                       media_.descriptor_json(g.advertise_streams, m));
-		}
+			media_.advertise(*G, g.advertise_node, g.advertise_streams);
 	}
 }
 
-void SpecificWorker::write_media_descriptor(const std::string& node_name, const std::string& descriptor_json)
+void SpecificWorker::relay_media_descriptor(const std::string& node_name, const std::string& descriptor_json)
 {
 	auto node = G->get_node(node_name);
 	if (not node.has_value())
@@ -1577,36 +1231,6 @@ void SpecificWorker::write_media_descriptor(const std::string& node_name, const 
 	}
 	G->add_or_modify_attrib_local<media_descriptor_att>(node.value(), descriptor_json);
 	rc::safe_update_node(*G, node.value());
-}
-
-// body<-sensor from the sensor's incoming RT edge. Returns identity (and says so) when the edge or
-// its attributes are missing, which is the safe answer: the viewer then shows the device frame, the
-// way it always did, instead of silently drawing a wrong pose.
-QMatrix4x4 SpecificWorker::body_from_sensor(const std::string& sensor)
-{
-	QMatrix4x4 m;   // Qt default-constructs to the identity
-	const auto node = G->get_node(sensor);
-	if (not node.has_value()) { qWarning() << "[view-data] no node" << QString::fromStdString(sensor); return m; }
-	const auto parent_id = G->get_attrib_by_name<parent_att>(node.value());
-	if (not parent_id.has_value()) { qWarning() << "[view-data] no parent for" << QString::fromStdString(sensor); return m; }
-	const auto edge = G->get_edge(parent_id.value(), node->id(), "RT");
-	if (not edge.has_value()) { qWarning() << "[view-data] no RT edge for" << QString::fromStdString(sensor); return m; }
-	const auto rot = G->get_attrib_by_name<rt_rotation_euler_xyz_att>(edge.value());
-	const auto tr  = G->get_attrib_by_name<rt_translation_att>(edge.value());
-	if (not rot.has_value() or not tr.has_value() or rot->get().size() != 3 or tr->get().size() != 3)
-	{
-		qWarning() << "[view-data] RT edge for" << QString::fromStdString(sensor) << "has no rt_* attributes";
-		return m;
-	}
-	// Same composition the rest of the fleet uses for rt_rotation_euler_xyz: Rx * Ry * Rz, then translate.
-	m.translate(tr->get()[0], tr->get()[1], tr->get()[2]);
-	m.rotate(qRadiansToDegrees(rot->get()[0]), 1, 0, 0);
-	m.rotate(qRadiansToDegrees(rot->get()[1]), 0, 1, 0);
-	m.rotate(qRadiansToDegrees(rot->get()[2]), 0, 0, 1);
-	qInfo().noquote() << QString::asprintf("[view-data] %s body<-sensor: euler (%.3f %.3f %.3f) rad, t (%.3f %.3f %.3f) m",
-	                                       sensor.c_str(), rot->get()[0], rot->get()[1], rot->get()[2],
-	                                       tr->get()[0], tr->get()[1], tr->get()[2]);
-	return m;
 }
 
 void SpecificWorker::trigger_graph_layout()
@@ -1714,15 +1338,9 @@ void SpecificWorker::open_stream_viewer(std::uint64_t node_id, const std::string
 		std::unique_ptr<rc::media::LidarSubscriber> helios, bpearl;
 		if (node_name != "bpearl") helios = rc::media::make_lidar_subscriber_from_graph(*G, "helios", "lidar");
 		if (node_name != "helios") bpearl = rc::media::make_lidar_subscriber_from_graph(*G, "bpearl", "lidar");
-		// Draw in the ROBOT frame, not the sensor's. A cloud arrives in the DEVICE frame, and for an
-		// INVERTED sensor that frame is the body turned over — so an untransformed window shows the
-		// room x-flipped and two differently-mounted lidars disagree on screen while both are
-		// correct. Read here, on the main thread, from the RT edge (static mounts, so once is enough).
-		const QMatrix4x4 hx = body_from_sensor("helios"), bx = body_from_sensor("bpearl");
 		if (helios or bpearl)
 			viewer = new rc::viewers::LidarStreamViewer(std::move(helios), std::move(bpearl),
-			                                            QString::fromStdString(node_name + " — points (media plane, ROBOT frame)"),
-			                                            hx, bx);
+			                                            QString::fromStdString(node_name + " — points (media plane)"));
 	}
 	else if (node_name == "imu")
 	{
@@ -1918,11 +1536,11 @@ void SpecificWorker::read_ricoh_thread()
 
 void SpecificWorker::read_imu_thread()
 {
-	// A null IMU proxy no longer kills this thread — it only rules out BRIDGING. When imu_dds owns
-	// the plane the monitor branch below needs no proxy at all, and reporting that external rate is
-	// precisely what this thread is for then.
 	if (imu_proxy == nullptr)
-		qWarning() << "[read_imu] no IMU proxy configured — Ice bridging disabled (external DDS producer only)";
+	{
+		qWarning() << "[read_imu] no IMU proxy configured — IMU media stream disabled";
+		return;
+	}
 	bool error_logged = false;
 	// Pace by the measured IMU interval (NOT the Compute period, which hard-capped it). Start small
 	// so it ramps up to the source rate rather than down from a slow 10 Hz.
@@ -1936,50 +1554,8 @@ void SpecificWorker::read_imu_thread()
 		           ? static_cast<std::uint64_t>(t / 1'000'000)   // ns -> ms
 		           : static_cast<std::uint64_t>(t);              // already ms
 	};
-	// External-publisher monitor (only used while imu_dds owns the plane).
-	std::unique_ptr<rc::media::ImuSubscriber> ext_imu_sub;
-	// Throttle the discovery retry to ~1 Hz. Once the subscriber is live the loop paces on its
-	// wait_and_poll; the sleep below only fires while it does NOT exist, so an un-throttled retry
-	// would re-ask the factory five times a second and each miss speaks. Mirrors the lidar monitor.
-	auto next_imu_sub_attempt = std::chrono::steady_clock::time_point{};
 	while (!stop_imu_thread && !shutting_down_.load())
 	{
-		if (not bridge_imu_.load(std::memory_order_relaxed))
-		{
-			// imu_dds is the external DDS producer (its descriptor was relayed onto the "imu" node by
-			// negotiate()). Don't pull over Ice and don't publish — the samples pass straight through
-			// from imu_dds to the consumers. SUBSCRIBE only to note the observed frequency, so the
-			// [IMUThread] heartbeat reads the live topic instead of a misleading 0.0 Hz.
-			if (const auto now = std::chrono::steady_clock::now();
-			    not ext_imu_sub and now >= next_imu_sub_attempt)
-			{
-				next_imu_sub_attempt = now + std::chrono::seconds(1);
-				ext_imu_sub = rc::media::make_imu_subscriber_from_graph(*G, "imu", "imu");
-			}
-			if (ext_imu_sub)   // wait_and_poll paces the loop (blocks up to 100 ms)
-				imu_frames_.fetch_add(
-					ext_imu_sub->wait_and_poll([this](const rc::media::ImuFrame&, std::int64_t)
-						{
-							// ImuFrame is bounded+plain (is_plain()==true), so its sizeof IS the
-							// per-sample wire cost — no length field to read like the image/lidar planes.
-							imu_bytes_.fetch_add(sizeof(rc::media::ImuFrame), std::memory_order_relaxed);
-						}, 100),
-					std::memory_order_relaxed);
-			else
-				std::this_thread::sleep_for(std::chrono::milliseconds(200));   // descriptor not ready yet
-			continue;
-		}
-		if (ext_imu_sub)
-		{
-			ext_imu_sub.reset();       // we are bridging again -> stop monitoring
-			last_imu_stamp_ms = 0;     // the monitoring gap is not a source period; don't feed the EMA
-			imu_src_period_ms = -1.0;
-		}
-		if (imu_proxy == nullptr)
-		{
-			std::this_thread::sleep_for(std::chrono::milliseconds(500));   // nothing to bridge from
-			continue;
-		}
 		RoboCompIMU::DataImu data;
 		try
 		{
@@ -2055,9 +1631,6 @@ void SpecificWorker::read_imu_thread()
 			// consumer needs; the gyro covariance is diagonal and isotropic, so m22 is its variance.
 			v.sim_stamp_ms = static_cast<std::uint64_t>(std::max<long>(0, data.gyro.simTimestamp));
 			v.gyro_var     = data.gyro.cov.m22;
-			// The accelerometer covariance is diagonal and isotropic like the gyro's; m00 is the
-			// horizontal variance, which is the pair a consumer integrates for a velocity change.
-			v.acc_var      = data.acc.cov.m00;
 			media_.publish_imu(v);
 		}
 		media_.maybe_report_stats(SensorMediaPublisher::StatsGroup::Imu, std::chrono::seconds(5));
@@ -2076,10 +1649,6 @@ void SpecificWorker::FullPoseEstimationPub_newFullPose(RoboCompFullPoseEstimatio
 	if (shutting_down_.load())
 		return;
 
-	// Count the ARRIVAL, before any graph work: this measures the producer's publication rate, so a
-	// sample that finds no robot node still counts as received.
-	fullpose_frames_.fetch_add(1, std::memory_order_relaxed);
-
 	// we do not add any noise here. It is up to the users.
 	if (auto pose_node = G->get_node(robot_name); pose_node.has_value())
 	{
@@ -2095,71 +1664,6 @@ void SpecificWorker::FullPoseEstimationPub_newFullPose(RoboCompFullPoseEstimatio
 		// config setting means each consumer reads the answer off the sample itself.
 		G->add_or_modify_attrib_local<robot_current_speed_sim_timestamp_att>(pose_node.value(), static_cast<unsigned long>(pose.simTimestamp));
 		G->add_or_modify_attrib_local<robot_current_speed_simulated_att>(pose_node.value(), pose.simulated);
-
-		// ── Per-sample velocity VARIANCE, as the producer states it ───────────────────────────────
-		// FullPoseEuler has always carried this in velCov and this function used to DROP it, which is
-		// why every consumer downstream falls back on an asserted constant. Forwarding it is what lets
-		// a preintegrator weight a segment by the noise the sensor actually has rather than by a config
-		// value that may describe a different robot — and it is the only channel through which a FASTER
-		// odometry stream can tighten anything at all, because a noise DENSITY is invariant to sample
-		// rate: only a smaller per-sample variance, or a shorter dt_sample, moves it.
-		//
-		// ★ FRAME, AND IT IS THE TRAP HERE. velCov is a BODY-frame quantity, and it could not be
-		// anything else: it is written by the base driver, a component that has no notion of a room or
-		// a world at all. It cannot express a covariance in a frame it does not know exists. (The same
-		// conclusion from the physics: a world-frame velocity covariance would rotate with the robot and
-		// fold the heading's own uncertainty into what is meant to be a property of the SENSOR.)
-		// So its linear block is indexed on the BODY axes (m00 = x, m11 = y, m55 = yaw rate).
-		// ⚠ The `// vx` / `// vy` labels beside the writes in webots-bridge are cosmetic and prove
-		// nothing either way — it stores one nominal value into both slots, so they never disagree.
-		//
-		// ★★ AND THE INDICES CROSS OVER, because this robot's forward axis is +Y:
-		//        adv  = forward = body +Y  ⇒  var_adv  = m11
-		//        side = lateral = body +X  ⇒  var_side = m00
-		// Verified against the producer, which builds the same pair the same way (webots-bridge:
-		// `adv = velocity_local(1)` i.e. y, `side = -velocity_local(0)` i.e. -x; the sign is irrelevant
-		// to a variance). Writing m00 into adv would silently hand the forward channel the lateral
-		// channel's noise — which on a mecanum, where roller slip makes lateral much the worse of the
-		// two, is precisely the swap that would go unnoticed while quietly mis-weighting every segment.
-		//
-		// A negative entry means "this producer does not know" for that channel, matching the .idsl's
-		// m00 = -1 convention and ImuFrame's gyro_var/acc_var. Each channel is independent: a producer
-		// may know its yaw rate noise and not its linear noise. When NOTHING is known the attribute is
-		// not written at all, so "never published" stays distinguishable from "published as unknown" —
-		// a zero would read downstream as INFINITE CONFIDENCE, which is the trap the .idsl warns about.
-		{
-			const auto stated = [](float v) { return v >= 0.f ? v : -1.f; };   // NaN also reads as unknown
-			const float var_adv  = stated(pose.velCov.m11);   // forward, body +Y
-			const float var_side = stated(pose.velCov.m00);   // lateral, body +X
-			const float var_rot  = stated(pose.velCov.m55);   // yaw rate, frame-independent
-			if (var_adv >= 0.f or var_side >= 0.f or var_rot >= 0.f)
-			{
-				const std::vector<float> vel_var{ var_adv, var_side, var_rot };
-				G->add_or_modify_attrib_local<robot_current_speed_variance_att>(pose_node.value(), vel_var);
-			}
-		}
-
-		// ── GROUND TRUTH, SIMULATION ONLY ────────────────────────────────────────────────────────
-		// pose.x/y/rz come straight off the Webots supervisor node (robotNode->getPosition() /
-		// getOrientation() in the bridge), so in simulation they ARE the truth. Everything above is
-		// odometry; this is the only thing on this message that no estimator produced. Published so
-		// a localiser can be graded against a witness OUTSIDE itself: a wrong pose fitted well
-		// scores exactly like a right one on the residual, which is how a 0.35 rad yaw error sat
-		// behind an SDF of 0.009 for a whole session (2026-08-22).
-		//
-		// The GATE IS THE DATA, not a config key: written only while the producer says simulated.
-		// On the real robot these attributes are never written at all, so a consumer reads nothing
-		// rather than something plausible and stale — and there is no flag anyone can forget to
-		// flip. ⚠ For validation only. Feeding this back into an estimator would make every
-		// accuracy number self-fulfilling.
-		if (pose.simulated)
-		{
-			G->add_or_modify_attrib_local<robot_gt_x_att>(pose_node.value(), pose.x);
-			G->add_or_modify_attrib_local<robot_gt_y_att>(pose_node.value(), pose.y);
-			G->add_or_modify_attrib_local<robot_gt_angle_att>(pose_node.value(), pose.rz);
-			G->add_or_modify_attrib_local<robot_gt_timestamp_att>(pose_node.value(),
-			                                                     static_cast<std::uint64_t>(pose.timestamp));
-		}
 		// pose_node is not read after this; move it so update_node forwards
 		// the rvalue into the engine (no deep blob copy under the graph mutex).
 		rc::safe_update_node(*G, std::move(pose_node.value()));
