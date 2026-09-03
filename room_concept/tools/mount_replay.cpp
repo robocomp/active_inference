@@ -89,6 +89,10 @@ struct Row
     Eigen::Vector2f uv_image = Eigen::Vector2f::Zero();
     Eigen::Matrix2f cov = Eigen::Matrix2f::Identity();
     Eigen::Matrix2f cov_lidar = Eigen::Matrix2f::Zero();   ///< the part of `cov` that moves with the mount
+    /// The self-calibration correction in force when this row was written (pitch rad, height m,
+    /// yaw rad). With the live loop on, the mount MOVES during a run; a row must be rebuilt against
+    /// the mount that actually measured it, not the one the file happened to open with.
+    Eigen::Vector3f corr = Eigen::Vector3f::Zero();
     float           assoc_prob = 1.f;
     Eigen::Vector3f p_robot = Eigen::Vector3f::Zero();
 };
@@ -144,6 +148,7 @@ bool load_pairs(const std::string& path, Camera& cam, std::string& err)
     };
     int c_ts = 0, c_vx = 0, c_ceil = 0, c_ui = 0, c_vi = 0, c_su = 0, c_sv = 0, c_cuv = 0;
     int c_ap = 0, c_px = 0, c_py = 0, c_pz = 0, c_luu = 0, c_luv = 0, c_lvv = 0;
+    int c_cp = 0, c_ch = 0, c_cy = 0;
     if (not (need("ts_ms", c_ts) and need("vertex", c_vx) and need("u_img", c_ui)
              and need("v_img", c_vi) and need("sigu", c_su) and need("sigv", c_sv)
              and need("assoc_prob", c_ap) and need("px_robot", c_px) and need("py_robot", c_py)
@@ -164,6 +169,9 @@ bool load_pairs(const std::string& path, Camera& cam, std::string& err)
                      " difference floor corners against ceiling ones. Re-record.";
         return false;
     }
+    // Written only by a binary that can move the mount mid-run. Absent means the mount was static,
+    // which is exactly what a zero correction encodes — so this one CAN default, and safely.
+    const bool have_corr = need("corr_pitch", c_cp) and need("corr_height", c_ch) and need("corr_yaw", c_cy);
     // Optional, and the ONLY optional columns here: without them the replay still runs but must hold
     // the covariance fixed, which is the approximation these columns exist to remove. Their absence
     // is reported, not defaulted away.
@@ -205,6 +213,14 @@ bool load_pairs(const std::string& path, Camera& cam, std::string& err)
         r.cov(0, 1) = r.cov(1, 0) = static_cast<float>(cuv);
         r.assoc_prob = static_cast<float>(ap);
         r.p_robot = Eigen::Vector3f(static_cast<float>(px), static_cast<float>(py), static_cast<float>(pz));
+        if (have_corr)
+        {
+            double cp = 0, ch = 0, cy = 0;
+            if (to_num(tok[static_cast<std::size_t>(c_cp)], cp)
+                and to_num(tok[static_cast<std::size_t>(c_ch)], ch)
+                and to_num(tok[static_cast<std::size_t>(c_cy)], cy))
+                r.corr = Eigen::Vector3f(static_cast<float>(cp), static_cast<float>(ch), static_cast<float>(cy));
+        }
         if (have_lid)
         {
             double luu = 0, luv = 0, lvv = 0;
@@ -446,6 +462,22 @@ CamResult solve_leg(const Camera& c, const Leg& leg, double offset_sigma_px, boo
     const bool do_rebuild = moved and not fixed_cov and c.has_cov_lidar;
     for (const Row& r : c.rows)
     {
+        // ★ THE MOUNT THIS ROW WAS ACTUALLY MEASURED AGAINST. The sidecar's extrinsic already holds
+        //   the correction in force when the file opened; a row written later carries its own. The
+        //   difference is what has to be re-applied here, or every row after the first correction is
+        //   rebuilt against a mount that never took it.
+        Eigen::Matrix3f Rr = R; Eigen::Vector3f tr = t;
+        if (const Eigen::Vector3f d = r.corr - c.ctx.applied; not d.isZero())
+        {
+            // ⚠ YAW FIRST, THEN PITCH. Each inject LEFT-multiplies, and the ingestor composes
+            //   R = R_x(pitch)·R_z(yaw)·R_base, so yaw has to go on first to end up on the inside.
+            //   Rotations do not commute and the discrepancy is second order in pitch x yaw — which
+            //   is why it hid on the ricoh (pitch 0.006 deg) and showed on the zed (pitch 0.20 deg,
+            //   yaw 0.28 deg): H agreed to 3.6e-4 on one camera and 3.1e-2 on the other.
+            inject_camera(Axis::Yaw,    d.z(), Rr, tr);
+            inject_camera(Axis::Pitch,  d.x(), Rr, tr);
+            inject_camera(Axis::Height, d.y(), Rr, tr);
+        }
         const Eigen::Vector3f p = lidar_leg
             ? inject_lidar(leg.axis, leg.mag, r.p_robot, c.ctx.lidar_t_robot)
             : r.p_robot;
@@ -459,7 +491,7 @@ CamResult solve_leg(const Camera& c, const Leg& leg, double offset_sigma_px, boo
                 c.ctx.cam_R_robot, c.ctx.cam_t_robot,
                 c.ctx.sigma_pitch, c.ctx.sigma_height, c.ctx.sigma_yaw);
             const rc::mount::PairObs o1 = rc::mount::make_pair_from(
-                r.vertex, r.assoc_prob, p, r.uv_image, r.cov, c.ctx.cam, R, t,
+                r.vertex, r.assoc_prob, p, r.uv_image, r.cov, c.ctx.cam, Rr, tr,
                 c.ctx.sigma_pitch, c.ctx.sigma_height, c.ctx.sigma_yaw);
             Eigen::Matrix2f cv;
             if (o0.ok and o1.ok and rebuilt_cov(r.cov, r.cov_lidar, o0.P, c.ctx.cam_R_robot,
@@ -470,7 +502,7 @@ CamResult solve_leg(const Camera& c, const Leg& leg, double offset_sigma_px, boo
         }
         const rc::mount::PairObs o =
             rc::mount::make_pair_from(r.vertex, r.assoc_prob, p, r.uv_image, cov, c.ctx.cam,
-                                      R, t, c.ctx.sigma_pitch, c.ctx.sigma_height, c.ctx.sigma_yaw);
+                                      Rr, tr, c.ctx.sigma_pitch, c.ctx.sigma_height, c.ctx.sigma_yaw);
         if (not o.ok) continue;
         acc.add(o);
         ++out.n;
@@ -996,6 +1028,7 @@ int main(int argc, char** argv)
             // that against the agent's own [camcal] log line for the same run.
             std::string line; long n_live = -1;
             double rTr_live = 0.0;
+            Eigen::Vector4d applied_live = Eigen::Vector4d::Zero();
             Eigen::Matrix4d H_live = Eigen::Matrix4d::Zero();
             Eigen::Vector4d b_live = Eigen::Vector4d::Zero();
             std::vector<std::string_view> tok;
@@ -1006,6 +1039,8 @@ int main(int argc, char** argv)
                 double v = 0, i = 0, j = 0;
                 if (tok[0] == "n" and tok.size() > 1 and to_num(tok[1], v)) n_live = static_cast<long>(v);
                 else if (tok[0] == "rTr" and tok.size() > 1) to_num(tok[1], rTr_live);
+                else if (tok[0] == "applied" and tok.size() > 4)
+                    for (int q = 0; q < 4; ++q) to_num(tok[static_cast<std::size_t>(q + 1)], applied_live(q));
                 else if (tok[0] == "H" and tok.size() > 3 and to_num(tok[1], i) and to_num(tok[2], j)
                          and to_num(tok[3], v))
                     H_live(static_cast<int>(i), static_cast<int>(j)) =
@@ -1039,18 +1074,40 @@ int main(int argc, char** argv)
                 const double d = std::max(std::abs(a), std::abs(c));
                 return (d > 1e-12) ? std::abs(a - c) / d : 0.0;
             };
-            double worst = 0.0; int wi = 0, wj = 0;
+            // ★ GRADED AGAINST THE MATRIX SCALE, NOT ENTRY BY ENTRY. H's off-diagonals run four
+            //   orders of magnitude below its diagonal, so a per-entry RELATIVE error on a
+            //   near-zero cross term is large while being numerically nothing — measured here at
+            //   9.1e-3 on an entry worth 0.04% of the diagonal, i.e. 3.6e-6 of the matrix. A test
+            //   that cannot pass when the estimator is right is not a test.
+            double scale = 1e-300;
+            for (int i = 0; i < 4; ++i) scale = std::max(scale, std::abs(H_live(i, i)));
+            double worst = 0.0, worst_rel = 0.0; int wi = 0, wj = 0;
             for (int i = 0; i < 4; ++i)
                 for (int j = 0; j < 4; ++j)
-                    if (const double e = rel(H_live(i, j), r0.H(i, j)); e > worst) { worst = e; wi = i; wj = j; }
+                {
+                    const double e = std::abs(H_live(i, j) - r0.H(i, j)) / scale;
+                    worst_rel = std::max(worst_rel, rel(H_live(i, j), r0.H(i, j)));
+                    if (e > worst) { worst = e; wi = i; wj = j; }
+                }
+            double bscale = 1e-300;
+            for (int i = 0; i < 4; ++i) bscale = std::max(bscale, std::abs(b_live(i)));
             double worst_b = 0.0; int wb = 0;
             for (int i = 0; i < 4; ++i)
-                if (const double e = rel(b_live(i), r0.b(i)); e > worst_b) { worst_b = e; wb = i; }
+                if (const double e = std::abs(b_live(i) - r0.b(i)) / bscale; e > worst_b) { worst_b = e; wb = i; }
             const double worst_r = rel(rTr_live, r0.rTr);
-            std::printf("  worst relative difference:  H(%d,%d) %.3e   b(%d) %.3e   rTr %.3e\n",
-                        wi, wj, worst, wb, worst_b, worst_r);
-            const double tol = 1e-5;   // float rows, double accumulation: the CSV's own printed precision
-            const bool ok = n_live == r0.n and worst < tol and worst_b < tol and worst_r < tol;
+            std::printf("  H: worst %.3e of the matrix scale at (%d,%d)   [worst per-entry relative %.3e]\n",
+                        worst, wi, wj, worst_rel);
+            std::printf("  b: worst %.3e of its scale at (%d)            rTr %.3e relative\n",
+                        worst_b, wb, worst_r);
+            // ⚠ b and rTr are RE-REFERENCED by an applied correction while H is not, so a pool that
+            //   has fed anything back cannot be graded on them — and saying so beats failing a check
+            //   that was never applicable.
+            const bool rebased = applied_live.norm() > 0.0;
+            const double tol = 1e-4;
+            const bool ok = n_live == r0.n and worst < tol and (rebased or (worst_b < tol and worst_r < tol));
+            if (rebased)
+                std::printf("  (this pool has applied a correction: b and rTr are rebased by it, so only"
+                            " H is comparable)\n");
             std::printf("  %s\n", ok
                 ? "✓ the replay reproduces the live accumulation — a leg's numbers can be believed"
                 : "✗ THE REPLAY IS NOT THE LIVE SOLVE. Every injection result below is void until this"

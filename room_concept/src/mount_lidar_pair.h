@@ -241,10 +241,12 @@ namespace rc::mount
         Eigen::Vector3f cam_t_robot = Eigen::Vector3f::Zero();
         float sigma_pitch = 0.f, sigma_height = 0.f, sigma_yaw = 0.f;
         double offset_sigma_px = 0.0;   ///< what the agent's own solve was using, for comparison
-        /// The correction the agent had already applied to this mount when the row was written,
-        /// in prior-sigma units. A replay injects on top of the mount that ACTUALLY produced the
-        /// rows, so it needs to know the mount was not the graph's.
-        Eigen::Vector4d applied = Eigen::Vector4d::Zero();
+        /// The self-calibration correction in force when this file was OPENED — (pitch rad,
+        /// height m, yaw rad), the same units and axes as the CSV's `corr_*` columns. `cam_R_robot`
+        /// above already includes it, so a row is reconstructed against
+        /// `sidecar mount ⊕ (row's corr − this)`. Without it every row after the first applied
+        /// correction is rebuilt against a mount it was never measured with.
+        Eigen::Vector3f applied = Eigen::Vector3f::Zero();
         /// The LiDAR's origin in the robot frame. ⚠ `lidar_known == false` means it could not be
         /// resolved at write time; a replay must then REFUSE the LiDAR-injection leg rather than
         /// assume the origin — that leg's whole point is where the rotation centre is.
@@ -271,6 +273,7 @@ namespace rc::mount
           << c.cam_t_robot.z() << '\n'
           << "prior_sigmas," << c.sigma_pitch << ',' << c.sigma_height << ',' << c.sigma_yaw << '\n'
           << "offset_sigma_px," << c.offset_sigma_px << '\n';
+        f << "applied," << c.applied.x() << ',' << c.applied.y() << ',' << c.applied.z() << '\n';
         if (c.lidar_known)
             f << "lidar_t_robot," << c.lidar_t_robot.x() << ',' << c.lidar_t_robot.y() << ','
               << c.lidar_t_robot.z() << '\n';
@@ -333,6 +336,8 @@ namespace rc::mount
                 if (num(1, c.sigma_pitch) and num(2, c.sigma_height) and num(3, c.sigma_yaw)) ++seen;
             }
             else if (k == "offset_sigma_px") { num(1, c.offset_sigma_px); }
+            else if (k == "applied")
+            { num(1, c.applied.x()); num(2, c.applied.y()); num(3, c.applied.z()); }
             else if (k == "lidar_t_robot")
             {
                 if (num(1, c.lidar_t_robot.x()) and num(2, c.lidar_t_robot.y()) and num(3, c.lidar_t_robot.z()))

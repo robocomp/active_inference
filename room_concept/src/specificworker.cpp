@@ -977,6 +977,7 @@ void SpecificWorker::open_pair_log(std::ofstream &csv, const std::string &cam,
     rc_ctx.sigma_height = params.IMAGE_EDGE_MOUNT_HEIGHT_SIGMA;
     rc_ctx.sigma_yaw    = params.IMAGE_EDGE_MOUNT_YAW_SIGMA;
     rc_ctx.offset_sigma_px = params.IMAGE_EDGE_MOUNT_VERTEX_OFFSET_SIGMA_PX;
+    rc_ctx.applied         = ing.mount_correction();   // cam_R_robot above already includes it
     // The LiDAR's origin in the robot frame: a LiDAR mount error rotates every corner about THAT
     // point, not about the robot origin, and the parallax that leaves is precisely what decides
     // whether a LiDAR injection really cancels in the camera-vs-camera closure. If the chain does
@@ -1810,12 +1811,17 @@ void SpecificWorker::compute()
     QElapsedTimer compute_timer;
     compute_timer.start();
     auto init_time = std::chrono::steady_clock::now();
-    qint64 t_affordance_ms = 0;
-    qint64 t_loc_fetch_ms = 0;
-    qint64 t_viewer_ms = 0;
-    qint64 t_dsr_ms = 0;
-    qint64 t_ui_ms = 0;
-    qint64 t_health_ms = 0;
+    // MICROSECONDS, not milliseconds. These were qint64 *_ms read off QElapsedTimer::elapsed(),
+    // which is integer ms — and every stage here is sub-millisecond, so every section column in
+    // etc/compute_timing.csv had been exactly 0 for the life of the file. The CSV could report that
+    // compute() cost ~3 ms but never which stage, which is precisely the split any decoupling work
+    // needs to judge itself on. nsecsElapsed() costs the same and resolves it.
+    qint64 t_affordance_us = 0;
+    qint64 t_loc_fetch_us = 0;
+    qint64 t_viewer_us = 0;
+    qint64 t_dsr_us = 0;
+    qint64 t_ui_us = 0;
+    qint64 t_health_us = 0;
     bool   did_publish = false;   // a corrected RT block was published this tick (for compute_timing.csv)
 
     if (last_affordance_monitor_ms_ == 0 || now_ms - last_affordance_monitor_ms_ >= 200)
@@ -1823,7 +1829,7 @@ void SpecificWorker::compute()
         QElapsedTimer section_timer;
         section_timer.start();
         scene_graph_->monitor_affordance();
-        t_affordance_ms = section_timer.elapsed();
+        t_affordance_us = section_timer.nsecsElapsed() / 1000;
         last_affordance_monitor_ms_ = now_ms;
     }
 
@@ -1880,7 +1886,7 @@ void SpecificWorker::compute()
     section_timer.start();
     const auto loc_res  = room_concept_.get_last_result();
     const bool have_loc = loc_res.has_value() && loc_res->ok;
-    t_loc_fetch_ms = section_timer.elapsed();
+    t_loc_fetch_us = section_timer.nsecsElapsed() / 1000;
 
     const Eigen::Affine2f pose_for_draw = viewer_->best_available_pose(loc_res, have_loc);
     
@@ -1904,7 +1910,7 @@ void SpecificWorker::compute()
         section_timer.restart();
         viewer_->update_viewer(loc_res, have_loc, pose_for_draw, lidar_for_canvas, loc_pose, use_loc);
         viewer_->draw_landmarks(scene_graph_->pinned_landmarks(), scene_graph_->pinned_measured(), pose_for_draw);
-        t_viewer_ms = section_timer.elapsed();
+        t_viewer_us = section_timer.nsecsElapsed() / 1000;
     }
 
     // ── DSR graph update (only on fresh localization frames) ──────────────
@@ -1921,7 +1927,7 @@ void SpecificWorker::compute()
         // usually no-ops — but it stays here so a compute() tick still publishes if the immediate hop
         // was ever missed.
         did_publish = maybe_publish_corrected_pose();
-        t_dsr_ms = section_timer.elapsed();
+        t_dsr_us = section_timer.nsecsElapsed() / 1000;
     }
 
     // Visual RT-rate monitor: refresh the custom-widget readout once per second (low freq, cheap).
@@ -1938,14 +1944,14 @@ void SpecificWorker::compute()
                                  scene_graph_->stable_frames(),
                                  params.STABLE_FRAMES_REQUIRED,
                                  room_concept_.is_grid_searching());
-        t_ui_ms = section_timer.elapsed();
+        t_ui_us = section_timer.nsecsElapsed() / 1000;
     }
 
-    t_health_ms = 0;
+    t_health_us = 0;
 
     const auto total_ms = compute_timer.elapsed();
-    // Sub-millisecond resolution total (compute() typically ~0.3 ms → the integer-ms section timers above
-    // all read 0). This is MICROSECONDS — printed as total_us so it's not mistaken for milliseconds.
+    // Sub-millisecond resolution total. MICROSECONDS — named total_us everywhere it is emitted so it
+    // cannot be mistaken for milliseconds. total_ms below is kept ONLY for the >50 ms stall trigger.
     const auto elapsed_since_init_us = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - init_time).count();
 
@@ -1956,12 +1962,12 @@ void SpecificWorker::compute()
         compute_csv_open_attempted_ = true;
         compute_csv_.open("etc/compute_timing.csv", std::ios::out | std::ios::trunc);
         if (compute_csv_.is_open())
-            compute_csv_ << "wall_ms,total_ms,affordance_ms,loc_fetch_ms,viewer_ms,dsr_ms,ui_ms,did_publish,gui_thread\n";
+            compute_csv_ << "wall_ms,total_us,affordance_us,loc_fetch_us,viewer_us,dsr_us,ui_us,did_publish,gui_thread\n";
     }
     if (compute_csv_.is_open())
     {
-        compute_csv_ << now_ms << ',' << total_ms << ',' << t_affordance_ms << ',' << t_loc_fetch_ms
-                     << ',' << t_viewer_ms << ',' << t_dsr_ms << ',' << t_ui_ms << ','
+        compute_csv_ << now_ms << ',' << elapsed_since_init_us << ',' << t_affordance_us << ',' << t_loc_fetch_us
+                     << ',' << t_viewer_us << ',' << t_dsr_us << ',' << t_ui_us << ','
                      << (did_publish ? 1 : 0) << ',' << (on_gui_thread ? 1 : 0) << '\n';
         compute_csv_.flush();
     }
@@ -1970,13 +1976,13 @@ void SpecificWorker::compute()
     {
         last_compute_timing_log_ms_ = now_ms;
         qInfo() << "[Timing][compute]"
-                << "total_us=" << elapsed_since_init_us   // MICROSECONDS (≈0.3 ms); sections below are integer ms
-                << "affordance_ms=" << t_affordance_ms
-                << "loc_fetch_ms=" << t_loc_fetch_ms
-                << "viewer_ms=" << t_viewer_ms
-                << "dsr_ms=" << t_dsr_ms
-                << "ui_ms=" << t_ui_ms
-                << "health_ms=" << t_health_ms
+                << "total_us=" << elapsed_since_init_us   // MICROSECONDS, as are every section below
+                << "affordance_us=" << t_affordance_us
+                << "loc_fetch_us=" << t_loc_fetch_us
+                << "viewer_us=" << t_viewer_us
+                << "dsr_us=" << t_dsr_us
+                << "ui_us=" << t_ui_us
+                << "health_us=" << t_health_us
                 << "gui_thread=" << on_gui_thread;
     }
     fps_counter_.print("[Compute]", 3000);

@@ -243,6 +243,11 @@ class SpecificWorker : public GenericWorker
 
         // Per-tick compute-timing CSV (etc/compute_timing.csv): exposes WHERE compute() stalls (viewer
         // vs dsr vs loc_fetch) so we can see why the corrected publish drops below the optimizer rate.
+        // ★ Every duration column is MICROSECONDS (2026-09-03). They were integer milliseconds off
+        //   QElapsedTimer::elapsed(), and since every stage is sub-ms the section columns had read
+        //   exactly 0 for the life of the file — the CSV bounded compute() at ~3 ms but could never
+        //   say which stage owned it. Any older compute_timing.csv on disk is in the ms schema and
+        //   its section columns are all zeros; do not compare the two files column-for-column.
         std::ofstream compute_csv_;
         bool          compute_csv_open_attempted_ = false;
 
