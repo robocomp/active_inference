@@ -338,3 +338,28 @@ constant predictor. The reason is now clear: the grid contour's walls sit about 
 returns while the online walls are line-fitted to a centimetre, and 792k beams at σ = 3 cm make that
 sub-cell placement worth 10⁴× more than the whole topology. A structural comparison must first profile out
 each candidate's edge offsets (re-fit its edges to the beams), which is the next experiment.
+
+## Profiling out the edge offsets — the experiment, and what it found (2026-09-03, 12 seeds)
+The saturation comparison was dominated by where edges SIT, not by structure, so each candidate polygon's
+edges were slid along their own normals onto the returns assigned to them (per-edge nuisance offset,
+median of the perpendicular residuals of beam endpoints within 25 cm; directions kept, vertices
+re-intersected, so rectilinearity survives) and only then scored.
+| | mean | median | min | max | std |
+|---|---|---|---|---|---|
+| online | 0.914 | 0.923 | 0.805 | 0.969 | 0.041 |
+| + offset profiling | 0.944 | 0.954 | 0.825 | 0.987 | 0.047 |
+| + judged selection online/batch | 0.956 | 0.966 | 0.908 | 0.987 | 0.045 |
+THE FINDING IS NOT THE SELECTOR. Profiling improved IoU on 12 seeds of 12, mean +0.030, best result ever
+measured 0.987 — because the correction is a BIAS, not noise: the signed median offset is negative on every
+seed and essentially every edge, −0.020 to −0.085 m, mean ≈ −0.053. Negative is the exterior side: **the
+published walls sit about 5 cm INSIDE the surface the beams return from**, all of them, every run. Perimeter
+≈ 35 m × 5 cm ≈ 1.8 m² of a 60.5 m² room ≈ 3% of area, which is exactly the IoU gained back. Leading
+hypothesis: the free-space contour sits about one cell inside the wall (the batch polygon's own offset is
+−0.062 to −0.072, i.e. a full cell), walls created or replaced by contour adoption inherit that position,
+and the wall point factors do not pull them all the way back. Cheap next check: compare d for walls born
+from candidates against walls born from adoption, and measure each wall's median residual against its own
+associated points inside the solver. If it is confirmed, it is worth +0.03 IoU on every seed — more than
+any structural change of the campaign.
+Secondary result: with the offsets profiled out, the forward beam model becomes usable as a selector for
+the first time (9 of 12 against 7 of 12, and it can now say BATCH — it did so on the worst seed, correctly,
+0.825 → 0.971). Its Δ log-likelihoods are still 10⁵-10⁶, so the sign is all that can be trusted.

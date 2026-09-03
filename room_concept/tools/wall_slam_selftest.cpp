@@ -1495,6 +1495,7 @@ int main()
             // answer, because there every verdict fed back into the map's dynamics.
             if (not Rx.map.beams.empty())
             {
+                float prof_moved = 0.f, prof_signed = 0.f;
                 rc::wallmap::WallMap mb = Rx.map;
                 mb.params.adopt_judge = 2; mb.params.adopt_repair = true;
                 mb.params.forward_referee = false; mb.beams.clear(); mb.decisions.clear();
@@ -1514,6 +1515,83 @@ int main()
                                 iou_x, iou_b, dll, code, judge_takes_batch ? "BATCH " : "online",
                                 truth_prefers_batch ? "BATCH " : "online",
                                 judge_takes_batch == truth_prefers_batch ? "AGREE" : "WRONG");
+
+                    // ── PROFILE OUT THE OFFSETS, then compare again. A polygon's beam likelihood is
+                    // dominated by where its edges SIT (the grid contour's walls are a cell off the
+                    // returns, the online walls are line-fitted), which buries the topology by four
+                    // orders of magnitude. So slide every edge along its own normal onto the returns
+                    // assigned to it — a nuisance parameter per edge, profiled out in the likelihood
+                    // sense — and only then score. Rectilinearity is preserved: the lines keep their
+                    // directions and the vertices are re-intersected.
+                    const auto profile = [&](const Poly& poly)
+                    {
+                        const size_t N = poly.size();
+                        if (N < 3) return poly;
+                        std::vector<Eigen::Vector2f> nrm(N);
+                        std::vector<float> cst(N);
+                        for (size_t e = 0; e < N; ++e)
+                        {
+                            const Eigen::Vector2f dvec = poly[(e + 1) % N] - poly[e];
+                            const float L = dvec.norm();
+                            nrm[e] = L > 1e-9f ? Eigen::Vector2f(-dvec.y() / L, dvec.x() / L) : Eigen::Vector2f(1.f, 0.f);
+                            cst[e] = nrm[e].dot(poly[e]);
+                        }
+                        std::vector<std::vector<float>> res(N);
+                        for (const auto& b : Rx.map.beams)
+                        {
+                            const Eigen::Vector2f q = b.o + b.d * b.r;
+                            int best = -1; float bd = 0.25f;
+                            for (size_t e = 0; e < N; ++e)
+                            {
+                                const Eigen::Vector2f a = poly[e], ab = poly[(e + 1) % N] - a;
+                                const float l2 = ab.squaredNorm();
+                                const float tt = l2 > 1e-9f ? std::clamp((q - a).dot(ab) / l2, 0.f, 1.f) : 0.f;
+                                const float d2 = (q - (a + tt * ab)).norm();
+                                if (d2 < bd) { bd = d2; best = static_cast<int>(e); }
+                            }
+                            if (best >= 0) res[static_cast<size_t>(best)].push_back(nrm[static_cast<size_t>(best)].dot(q) - cst[static_cast<size_t>(best)]);
+                        }
+                        float moved = 0.f, signed_sum = 0.f; int nmoved = 0;
+                        for (size_t e = 0; e < N; ++e)
+                            if (res[e].size() >= 20)
+                            {
+                                std::nth_element(res[e].begin(), res[e].begin() + static_cast<long>(res[e].size() / 2), res[e].end());
+                                const float off = res[e][res[e].size() / 2];
+                                cst[e] += off; moved += std::abs(off); signed_sum += off; ++nmoved;
+                            }
+                        Poly out(N);
+                        for (size_t e = 0; e < N; ++e)
+                        {
+                            const size_t pv = (e + N - 1) % N;
+                            const float cr = nrm[pv].x() * nrm[e].y() - nrm[pv].y() * nrm[e].x();
+                            if (std::abs(cr) < 1e-6f) { out[e] = poly[e]; continue; }
+                            out[e] = Eigen::Vector2f((cst[pv] * nrm[e].y() - cst[e] * nrm[pv].y()) / cr,
+                                                     (cst[e] * nrm[pv].x() - cst[pv] * nrm[e].x()) / cr);
+                        }
+                        prof_moved = nmoved > 0 ? moved / static_cast<float>(nmoved) : 0.f;
+                        // Sign convention: nrm is left-of-travel on a CCW cycle, i.e. the INTERIOR
+                        // side. A positive median residual means the returns lie inside the edge —
+                        // the polygon is too big there; negative means it is too small.
+                        prof_signed = nmoved > 0 ? signed_sum / static_cast<float>(nmoved) : 0.f;
+                        return out;
+                    };
+                    const auto score = [&](const Poly& poly)
+                    {
+                        double sum = 0.0;
+                        for (const auto& b : Rx.map.beams) sum += static_cast<double>(Rx.map.beam_loglik(b, poly));
+                        return sum;
+                    };
+                    const Poly on_p = profile(Rx.poly.verts);  const float mv_on = prof_moved, sg_on = prof_signed;
+                    const Poly ba_p = profile(pb.verts);       const float mv_ba = prof_moved, sg_ba = prof_signed;
+                    const float iou_on_p = polygon_iou(to_world(on_p, org3), room);
+                    const float iou_ba_p = polygon_iou(to_world(ba_p, org3), room);
+                    const double dll_p = score(ba_p) - score(on_p);
+                    const bool takes_batch_p = dll_p > static_cast<double>(code);
+                    const bool truth_p = iou_ba_p > iou_on_p;
+                    std::printf("        profiled:          online %.3f vs batch %.3f | edges moved %.3f (signed %+.3f) / %.3f (signed %+.3f) m | dll %+.1f vs code %+.1f -> take %s | truth prefers %s | %s\n",
+                                iou_on_p, iou_ba_p, mv_on, sg_on, mv_ba, sg_ba, dll_p, code,
+                                takes_batch_p ? "BATCH " : "online", truth_p ? "BATCH " : "online",
+                                takes_batch_p == truth_p ? "AGREE" : "WRONG");
                 }
             }
             // ── THE REFEREE'S REPORT CARD: every judged structure change, both judges against the
