@@ -276,7 +276,14 @@ namespace rc::camcal
                     }
                 }
                 // V,<vertex>,<what>,<i>[,<j>],<value> — the per-vertex partials (format 2).
-                else if (tok[0] == "V" and tok.size() >= 5)
+                // ⚠ >= 4, NOT >= 5. `V,<vertex>,n,<count>` and `V,<vertex>,rTr,<value>` are FOUR
+                //   tokens; the A/c/D rows are six and b/e are five. With the bound at 5 the two
+                //   4-token lines never reached their branches, so every RESTORED block came back
+                //   with n = 0 — and solve() skips a block with n <= 0, which meant resumed evidence
+                //   was silently dropped from the marginalisation while its rows stayed in the
+                //   aggregate H. A fresh start always worked, so nothing ever pointed at it; the
+                //   coverage check above is what made it visible (2026-09-03).
+                else if (tok[0] == "V" and tok.size() >= 4)
                 {
                     double dv = 0;
                     if (not num(tok[1], dv)) continue;
