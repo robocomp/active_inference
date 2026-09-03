@@ -17,6 +17,7 @@
  *    along with RoboComp.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "specificworker.h"
+#include <limits>
 #include "../../common/robot_capability/robot_capability.h"
 
 #include "image_edge_ops.h"   // xyz_from_pixel_depth(): model-aware, unlike cortex's pinhole-only version
@@ -864,6 +865,15 @@ void SpecificWorker::open_pair_log(std::ofstream &csv, const std::string &cam,
     csv.open("etc/image_edge_pair_" + cam + ".csv", std::ios::out | std::ios::trunc);
     if (not csv.is_open()) return;
     csv.imbue(std::locale::classic());   // CLAUDE.md: never a comma decimal
+    // ★ FULL float precision, for the reason camera_calibration.h::save already gives about the
+    //   evidence file — and this file needed it MORE, not less. The solve weights by cov^-1, and a
+    //   near-singular 2x2 amplifies input error by its condition number. MEASURED on the 09-03 tour
+    //   at the default 6 significant figures: typical cond 17 (harmless), but 259 of 91152 rows above
+    //   1e6 and 9 rows that came back NOT positive-definite once rounded — those were dropped by a
+    //   replay though they counted live, leaving H off by 6% on the yaw-height cross term while b and
+    //   rTr agreed to 1e-2. 9 digits round-trips a float exactly, so the delta=0 replay can be exact
+    //   rather than approximately right.
+    csv << std::setprecision(std::numeric_limits<float>::max_digits10);
     csv << "ts_ms,camera,vertex,"
         // WHICH corner of the vertical edge: the loop closure keys on vertex*2 + ceiling, so a
         // replay without this column would difference a floor corner against a ceiling one and

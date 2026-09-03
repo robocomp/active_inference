@@ -486,6 +486,66 @@ the ricoh's `azimuth_sign` is −1); and the evidence file holds more rows than 
 ⇒ The drive's purpose is now narrow and stateable: **the zed leg and the attribution row.** It is no
 longer needed to establish that self-calibration recovers a camera misalignment.
 
+### ✓✓✓ ARM 7 RUN 2026-09-03 — ALL THREE ROWS MEASURED, THE FALSIFIER PASSED
+
+One tour (`etc/runs/arm7_0903_1104`): ricoh 91 152 rows / 21 corners, zed 11 821 / 20, **20 shared
+corners**. Nuisance 5.3 px, injection 1.0° yaw.
+
+| injected +1.0° | ricoh mount | zed mount | closure (ricoh−zed) |
+|---|---|---|---|
+| **ricoh** | **−0.454** | −0.001 (0.03σ) | **+1.000** |
+| **zed** | +0.000 (0.00σ) | **−0.984** | **−1.002** |
+| **helios / LiDAR** | **−0.444** | **−0.982** | **−0.018** |
+
+★★★ **Every pre-registered row holds, including the one that had never been tested.** A LiDAR error
+moves BOTH mounts and leaves the closure at **1.8% of the injection** — inside the 3.2% parallax band
+predicted from geometry. A camera error moves ONE mount and puts the full injection into the closure,
+with the two cameras' signs opposite. **The attribution logic is validated: the triangle says which
+device is wrong.**
+
+Per axis (nuisance ON), and the contrast with it OFF:
+
+| axis | ricoh | zed |
+|---|---|---|
+| yaw 1.0° | 0.454 ± 0.175 | **0.984 ± 0.018** |
+| pitch 1.0° | 1.006 ± 0.002 | 0.900 ± 0.028 |
+| height 0.05 m | 0.944 ± 0.001 | 0.985 ± 0.001 |
+| yaw, nuisance OFF | 0.998 ± 0.004 | 0.995 ± 0.006 |
+
+### ★★★★ THE ZED PREDICTION WAS WRONG, AND THE REASON IS THE INTERESTING PART
+
+§2b predicted **0.477** for the zed from the design-effect argument. Measured **0.984** — the zed
+recovers its yaw almost completely, with a cluster-honest sigma **ten times tighter than the ricoh's**
+on **eight times fewer rows**. The prediction was not a small miss; it was the wrong model.
+
+The design effect assumes the WITHIN-cluster information about yaw is nil — that seeing one corner
+again tells you nothing new. That is exactly true on a **panorama**, where `u = az·W/2π` makes a yaw
+rotation a CONSTANT pixel shift, identical everywhere in the image and therefore indistinguishable
+from that corner's own constant offset. It is false on a **pinhole**, where `u = fx·x/y + cx` gives
+`du/dδ = fx·sec²θ`: the shift GROWS toward the edges of the field, so one corner seen at several image
+positions separates a yaw from a fixed offset by itself.
+
+★★★ **So the panorama's virtue is precisely what costs it yaw.** The ricoh was chosen because uniform
+angular resolution spreads bearings and breaks the pitch/height ridge (ρ = −0.12 against the zed's
+−0.98) — and that same uniformity makes its yaw degenerate with per-corner detection bias. The two
+cameras are complementary in exactly the way the triangle needs: **the panorama carries pitch and
+height, the pinhole carries yaw.** Measured here on the same tour: ricoh pitch ±0.002° against the
+zed's ±0.032°, and zed yaw ±0.018° against the ricoh's ±0.175°.
+★ The earlier ±0.21° "honest sigma" for the zed is therefore an upper bound that is loose for a
+pinhole, not a measurement of it. §1.1's ricoh number stands (0.454 measured against 0.463 predicted).
+
+⚠ **A logging defect found by the δ=0 check, and bounded.** The pair CSV was written at the default
+6 significant figures. The solve weights by `cov⁻¹`, and a near-singular 2×2 amplifies input error by
+its condition number: typical cond 17, but 259 of 91 152 rows above 1e6 and **9 rows not
+positive-definite once rounded** — dropped by the replay though they counted live, leaving `H` 6% off
+on the yaw–height cross term while `b` and `rTr` agreed to 1e-2. **Bounded by re-running with all 559
+pathological rows removed: every recovery moved by ≤ 0.007** (ricoh yaw 0.454→0.448, zed 0.984→0.986,
+closure leakage unchanged at 0.018), so nothing above depends on it. Fixed for future runs
+(`setprecision(max_digits10)` on the pair CSV) — the same lesson `camera_calibration.h::save`
+already carried two files away, and which this file needed MORE because of the `cov⁻¹` amplification.
+★ `--verify` also learned that a snapshot from a RUNNING agent lags: the pool saves on its own cadence
+while the CSV appends, so it now re-accumulates the CSV's matching prefix instead of refusing.
+
 ### Cost: one drive, not four
 
 ★ The injection can be applied OFFLINE. `r = uv_image − uv_lidar`, and an extrinsic perturbation

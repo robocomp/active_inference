@@ -929,7 +929,23 @@ int main(int argc, char** argv)
                 else if (tok[0] == "b" and tok.size() > 2 and to_num(tok[1], i) and to_num(tok[2], v))
                     b_live(static_cast<int>(i)) = v;
             }
-            const CamResult& r0 = base[0];
+            // ★ A LIVE SNAPSHOT LAGS, AND THAT IS NOT A MISMATCH. The pool is saved on its own
+            //   cadence while the CSV keeps appending, so a file copied from a running agent holds
+            //   FEWER pairs than the CSV. They are appended together and in order — every added pair
+            //   writes its row immediately after — so the saved pool is exactly the CSV's first n
+            //   rows, and re-accumulating that prefix is the comparison the check actually wants.
+            //   Without this the verify can only ever pass on a stopped agent, which is when it is
+            //   least convenient to run it.
+            CamResult r0 = base[0];
+            if (n_live > 0 and n_live < r0.n)
+            {
+                Camera trunc = cams[0];
+                trunc.rows.resize(static_cast<std::size_t>(n_live));
+                bool rf = false; std::string rw;
+                r0 = solve_leg(trunc, Leg{}, sigma_px, fixed_cov, rf, rw);
+                std::printf("  the snapshot was taken from a RUNNING agent: re-accumulated the CSV's"
+                            " first %ld rows to match the saved pool\n", n_live);
+            }
             std::printf("  pairs: live %ld, replay %ld  %s\n", n_live, r0.n,
                         (n_live == r0.n) ? "✓ same rows"
                                          : "✗ DIFFERENT — the two are not describing one run");

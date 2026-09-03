@@ -1588,6 +1588,12 @@ int main()
                     const double dll_p = score(ba_p) - score(on_p);
                     const bool takes_batch_p = dll_p > static_cast<double>(code);
                     const bool truth_p = iou_ba_p > iou_on_p;
+                    {
+                        const Poly ow = to_world(on_p, org3);
+                        std::printf("        profiled-verts[%u]:", seed);
+                        for (const auto& v : ow) std::printf(" (%.3f,%.3f)", v.x(), v.y());
+                        std::printf("\n");
+                    }
                     std::printf("        profiled:          online %.3f vs batch %.3f | edges moved %.3f (signed %+.3f) / %.3f (signed %+.3f) m | dll %+.1f vs code %+.1f -> take %s | truth prefers %s | %s\n",
                                 iou_on_p, iou_ba_p, mv_on, sg_on, mv_ba, sg_ba, dll_p, code,
                                 takes_batch_p ? "BATCH " : "online", truth_p ? "BATCH " : "online",

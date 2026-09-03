@@ -285,14 +285,28 @@ namespace rc::camcal
             //   are already summed across corners, and no post-hoc step recovers which corner each
             //   came from. Flagging it makes the solve REFUSE the nuisance rather than quietly
             //   returning the old, 127x-overconfident answer under the new model's name.
-            if (in.per_vertex.empty())
+            // ★ THE TEST IS COVERAGE, NOT PRESENCE. "No vertex blocks at all" only catches a pure
+            //   format-1 file. A MIXED one — a format-1 pool resumed by the new binary and then saved
+            //   with the partials of the pairs seen since — has blocks, passes a presence check, and
+            //   is the dangerous case: the Schur complement would subtract per-vertex terms from an
+            //   aggregate containing rows those terms do not describe, giving a number that belongs
+            //   to neither model and looks entirely plausible. Every attributed pair increments BOTH
+            //   counters, so sum(V.n) < n is exact evidence of unattributed mass.
+            //   MEASURED 2026-09-03 on a live start: ricoh n=833400 with 2030 attributed, zed
+            //   n=150009 with 90006 — both would have marginalised against 831370 and 60003
+            //   unaccounted rows.
+            long attributed = 0;
+            for (const auto& [vid, vb] : in.per_vertex) attributed += vb.n;
+            if (attributed < in.n)
             {
                 in.legacy_unattributed = true;
                 qWarning().nospace()
-                    << "[camcal] " << QString::fromStdString(path) << " is format 1 (no per-vertex "
-                    << "partials): " << in.n << " pairs restored for the aggregate solve, but the "
-                    << "per-vertex offset nuisance CANNOT run on them. Delete the file to "
-                    << "re-accumulate under the new model.";
+                    << "[camcal] " << QString::fromStdString(path) << ": " << (in.n - attributed)
+                    << " of " << in.n << " pairs carry no per-vertex partials"
+                    << (in.per_vertex.empty() ? " (format 1)" : " (MIXED format-1 and format-2 evidence)")
+                    << ". They are restored for the aggregate solve, but the per-vertex offset nuisance "
+                    << "CANNOT run on them and will REFUSE. Delete the file to re-accumulate under the "
+                    << "new model.";
             }
             // ★ `in` is a fresh Accum, so assigning it would reset the nuisance's prior sigma to its
             //   default and the solve would silently revert to the old model on any run that resumed
