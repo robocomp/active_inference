@@ -313,3 +313,28 @@ has a zero-length side, and collapsing that vertex left a diagonal (seed 424242,
 are now kept half a cell clear of both ends, and any trial that would leave an edge not parallel or
 perpendicular to its host is refused outright. Internal tilt back to 0.00° on all three seeds, IoU and the
 level-2 features unchanged (0.946/0.889/0.969; right pillar 0.18, alcove 0.28 on the best seed).
+
+## Batch pass at saturation — measured on 12 seeds (2026-09-03)
+Question: the between-seed spread is far larger than any algorithmic change; is that a DATA difference or a
+PATH difference? Test: at the end of each run, re-derive the cycle from the final grid and grade it. Bench
+harness `WS_SEEDS=n` (12 seeds, 42 s) and a bench-only `adopt_judge = 2` (adopt any closed cycle).
+| | mean | median | min | max | std |
+|---|---|---|---|---|---|
+| online (12 seeds) | 0.914 | 0.923 | 0.805 | 0.969 | 0.041 |
+| batch, forced, ≤12 iterations | 0.916 | 0.910 | 0.863 | 0.949 | 0.025 |
+| oracle: best of the two per seed | 0.934 | — | 0.882 | 0.969 | — |
+Findings. (1) The incumbent adoption judge adopted NOTHING at saturation on 12 of 12 seeds — the online
+cycle is a fixed point of it, so simply re-running the re-derivation gains exactly zero. (2) With the
+self-crossing repair the judge took one cycle, on the seed that had collapsed to 8 walls: 0.889 → 0.954,
+Hausdorff 2.427 → 0.439 m. The repair that was measured HARMFUL online (churn) is valuable as a one-shot at
+saturation. (3) Forced re-derivation neither helps nor hurts on average: it collapses the variance (std
+0.041 → 0.025) by rescuing the failures (0.805 → 0.943, 0.917 → 0.949) and wrecking the successes (0.969 →
+0.904, 0.946 → 0.904). The final grid carries a common ~0.91 quality regardless of path; the online model
+sometimes beats it, because it integrates evidence the grid discards (existence bins, the candidate bank,
+freshness). (4) So the value is in SELECTING, and the ceiling for a perfect selector is +0.020 mean and
++0.077 on the floor. (5) The forward beam model cannot be that selector as it stands: it chose the online
+cycle 12 times out of 12 with Δ log-likelihood between −7·10⁴ and −2·10⁶ against a code length of ±100 — a
+constant predictor. The reason is now clear: the grid contour's walls sit about one cell (8 cm) off the
+returns while the online walls are line-fitted to a centimetre, and 792k beams at σ = 3 cm make that
+sub-cell placement worth 10⁴× more than the whole topology. A structural comparison must first profile out
+each candidate's edge offsets (re-fit its edges to the beams), which is the next experiment.

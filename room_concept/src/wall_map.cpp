@@ -2859,9 +2859,11 @@ namespace rc::wallmap
             and iou_new >= iou_old
             and pold.worst_corner_sigma > params.publish_corner_sigma
             and pnew.worst_corner_sigma < pold.worst_corner_sigma;
-        const bool adopt_ok = params.adopt_judge == 1
-            ? (pnew.closed and dE > 0.f)
-            : (((iou_new > iou_old + 0.02f) or health_waiver) and surrender <= params.adopt_surrender_nats);
+        const bool adopt_ok = params.adopt_judge == 2
+            ? pnew.closed
+            : params.adopt_judge == 1
+                ? (pnew.closed and dE > 0.f)
+                : (((iou_new > iou_old + 0.02f) or health_waiver) and surrender <= params.adopt_surrender_nats);
         if (params.debug_splice)
         {
             std::printf("[rederive] runs=%zu created=%zu closed=%d dE=%.1f (grid %.1f + in %.1f - out %.1f - code %.1f) iou %.3f->%.3f -> %s [%.70s]\n",
@@ -3156,7 +3158,7 @@ namespace rc::wallmap
     void WallMap::referee(const char* site, bool accepted, float evidence, float cost, float fwd_cost,
                           const std::vector<Eigen::Vector2f>& cur, const std::vector<Eigen::Vector2f>& trial) const
     {
-        if (not params.forward_referee) return;
+        if (not params.referee_log) return;
         Decision d;
         d.site = site; d.frame = frames_observed_; d.accepted = accepted;
         d.evidence = evidence; d.cost = cost; d.fwd_cost = fwd_cost;

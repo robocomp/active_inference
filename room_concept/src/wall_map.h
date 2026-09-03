@@ -137,7 +137,8 @@ namespace rc::wallmap
         // verdict, the Δ log-likelihood the forward model assigns the same trial; the bench scores
         // both against the truth. ⚠ mixture weights and σ are the model's parameters — to be
         // LEARNED by EM from the robot's own data, as in the paper; hand values until then.
-        bool  forward_referee = false;      // stores beams and logs decisions (bench: on)
+        bool  forward_referee = false;      // store beams (cheap: ~20 B each)
+        bool  referee_log     = false;      // ALSO score every judged decision (minutes per seed under churn)
         float beam_w_hit   = 0.80f;
         float beam_w_short = 0.10f;         // w_rand = 1 − w_hit − w_short
         float beam_sigma_m = 0.03f;         // hit width — range noise plus the polygon's own error
@@ -166,6 +167,8 @@ namespace rc::wallmap
         // creates thinly supported walls is adopted, they die, the cycle flaps. The margin and the
         // veto are hysteresis; a self-crossing is a symptom of a wrong contour, not a defect to
         // patch. Kept switchable for the bench (WS_ADOPT_JUDGE, WS_ADOPT_REPAIR).
+        // 2 = adopt ANY closed cycle (bench only: what the free-space contour itself contains,
+        // with no judge in the way — the batch-at-saturation experiment).
         int  adopt_judge  = 0;
         bool adopt_repair = false;
         // ── STRICT MANHATTAN (user directive 2026-09-01): this stage estimates the room's MAIN

@@ -216,6 +216,7 @@ namespace
         rc::wallmap::Polygon poly;
         float pose_rmse_xy = 0.f, pose_max_xy = 0.f, pose_max_th = 0.f;
         int frames = 0, closed_at = -1, births = 0, deaths = 0, rejected = 0;
+        Eigen::Vector2f last_xy = Eigen::Vector2f::Zero();   // final robot position (map frame)
     };
 
     struct RunConfig
@@ -260,7 +261,8 @@ namespace
         apply_env_overrides(R.map.params);
         // The forward-model referee scans every stored beam per judged decision: minutes per seed
         // under churn against 13 s for the whole bench without it. Opt in with WS_REFEREE=1.
-        R.map.params.forward_referee = std::getenv("WS_REFEREE") != nullptr;
+        R.map.params.forward_referee = std::getenv("WS_NO_BEAMS") == nullptr;
+        R.map.params.referee_log     = std::getenv("WS_REFEREE") != nullptr;
 
         rc::Model model;
         model.init_from_polygon({{-20.f, -20.f}, {20.f, -20.f}, {20.f, 20.f}, {-20.f, 20.f}}, 0.f, 0.f, 0.f, 2.4f);
@@ -524,7 +526,8 @@ namespace
         apply_env_overrides(R.map.params);
         // The forward-model referee scans every stored beam per judged decision: minutes per seed
         // under churn against 13 s for the whole bench without it. Opt in with WS_REFEREE=1.
-        R.map.params.forward_referee = std::getenv("WS_REFEREE") != nullptr;
+        R.map.params.forward_referee = std::getenv("WS_NO_BEAMS") == nullptr;
+        R.map.params.referee_log     = std::getenv("WS_REFEREE") != nullptr;
 
         rc::Model model;
         model.init_from_polygon({{-20.f, -20.f}, {20.f, -20.f}, {20.f, 20.f}, {-20.f, 20.f}}, 0.f, 0.f, 0.f, 2.4f);
@@ -730,6 +733,7 @@ namespace
             R.frames = f + 1;
         }
         R.pose_rmse_xy = (n_err > 0) ? static_cast<float>(std::sqrt(se / n_err)) : 0.f;
+        R.last_xy = est.head<2>();
         if (cfg.verbose) std::printf("    global re-derivations adopted: %d\n", rederives);
         R.poly = R.map.manhattan_polygon();   // published layout: exactly Manhattan
         return R;
@@ -1312,7 +1316,20 @@ int main()
         std::vector<std::pair<float,float>> per_seed;   // (iou, hausdorff)
         struct RefereeRow { std::string site; bool oracle, inc, fwd; float diou, evidence, cost, fwd_dll, fwd_cost; };
         std::vector<RefereeRow> referee_rows;
-        for (unsigned seed : {7u, 1001u, 424242u})
+        // Three seeds by default (the campaign's distribution); WS_SEEDS=n extends the list, for
+        // experiments that need more than an anecdote — the batch-at-saturation measurement below.
+        std::vector<unsigned> seed_list{7u, 1001u, 424242u, 5u, 13u, 99u, 777u, 2024u, 31337u, 8675309u, 42u, 6u};
+        {
+            size_t ns = 3;
+            if (const char* e = std::getenv("WS_SEEDS"))
+            {
+                int v = 0;
+                if (std::from_chars(e, e + std::strlen(e), v).ec == std::errc{} and v > 0)
+                    ns = std::min<size_t>(static_cast<size_t>(v), seed_list.size());
+            }
+            seed_list.resize(ns);
+        }
+        for (unsigned seed : seed_list)
         {
             std::mt19937 rng7(seed);
             auto Rx = run_explore(room, cfg, rng7, 1100, path[0]);
@@ -1437,16 +1454,78 @@ int main()
                 for (auto id : Rx.map.order) std::printf(" %llu", (unsigned long long)id);
                 std::printf("\n");
             }
+            // ── BATCH PASS AT SATURATION (experiment 2026-09-03): the run is over, the grid holds
+            // everything the robot ever saw. Re-derive the cycle from that final grid, repeatedly,
+            // until nothing more is adopted, and grade the result. This asks whether the spread
+            // between seeds is a DATA difference or a PATH difference: if a seed that finished at
+            // 0.889 re-derives to ~0.96 from its own final grid, the online commitments were the
+            // cost, not the evidence. Judges: the incumbent (grid-IoU margin + surrender veto),
+            // the same with self-crossing repair, and "adopt any closed cycle" — which shows what
+            // the contour itself contains, with no judge in the way.
+            {
+                const Eigen::Vector3f org(path[0].x(), path[0].y(), 0.f);
+                std::printf("      batch pass on the FINAL grid[%u]  (online result: IoU %.3f, Hausdorff %.3f m)\n",
+                            seed, iou_x, h_x);
+                for (const auto& [name, judge, repair] : std::vector<std::tuple<const char*, int, bool>>{
+                        {"incumbent judge          ", 0, false},
+                        {"incumbent + repair       ", 0, true},
+                        {"adopt any closed cycle   ", 2, false},
+                        {"adopt any closed + repair", 2, true}})
+                {
+                    rc::wallmap::WallMap m = Rx.map;
+                    m.params.adopt_judge = judge;
+                    m.params.adopt_repair = repair;
+                    m.params.forward_referee = false;
+                    m.decisions.clear();
+                    int adopted = 0;
+                    for (int k = 0; k < 12; ++k) { if (not m.re_derive(Rx.last_xy)) break; ++adopted; }
+                    const auto pb = m.manhattan_polygon();
+                    const Poly bw = to_world(pb.verts, org);
+                    const float iou_b = pb.closed ? polygon_iou(bw, room) : 0.f;
+                    const float h_b = pb.closed ? hausdorff(bw, room) : 1e9f;
+                    std::printf("        %s adopted %2d -> IoU %.3f (%+.3f)  Hausdorff %.3f m  walls %2zu\n",
+                                name, adopted, iou_b, iou_b - iou_x, h_b, m.walls.size());
+                }
+            }
+            // ── CAN A JUDGE PICK THE BETTER OF THE TWO AT SATURATION? The run is over, so there
+            // is no churn to fear: this is one static choice between two complete polygons, the
+            // online cycle and the batch cycle re-derived from the final grid. Score both under
+            // the forward beam model against the code length of the extra edges, and compare the
+            // verdict with the truth. This is the question the per-decision referee could not
+            // answer, because there every verdict fed back into the map's dynamics.
+            if (not Rx.map.beams.empty())
+            {
+                rc::wallmap::WallMap mb = Rx.map;
+                mb.params.adopt_judge = 2; mb.params.adopt_repair = true;
+                mb.params.forward_referee = false; mb.beams.clear(); mb.decisions.clear();
+                for (int k = 0; k < 12; ++k) if (not mb.re_derive(Rx.last_xy)) break;
+                const auto pb = mb.manhattan_polygon();
+                if (pb.closed and Rx.poly.closed)
+                {
+                    const Eigen::Vector3f org3(path[0].x(), path[0].y(), 0.f);
+                    const Poly bw = to_world(pb.verts, org3);
+                    const float iou_b = polygon_iou(bw, room);
+                    const float dll = Rx.map.forward_delta(Rx.poly.verts, pb.verts);
+                    const float code = (static_cast<float>(pb.verts.size()) - static_cast<float>(Rx.poly.verts.size()))
+                                     * Rx.map.edge_code_nats(true);
+                    const bool judge_takes_batch = dll > code;
+                    const bool truth_prefers_batch = iou_b > iou_x;
+                    std::printf("        saturation choice: online %.3f vs batch %.3f | forward dll %+.1f vs code %+.1f -> take %s | truth prefers %s | %s\n",
+                                iou_x, iou_b, dll, code, judge_takes_batch ? "BATCH " : "online",
+                                truth_prefers_batch ? "BATCH " : "online",
+                                judge_takes_batch == truth_prefers_batch ? "AGREE" : "WRONG");
+                }
+            }
             // ── THE REFEREE'S REPORT CARD: every judged structure change, both judges against the
             // truth. The oracle is the IoU with the real layout: a trial was RIGHT iff it raised it.
             {
                 struct Tally { int n = 0, inc_ok = 0, fwd_ok = 0, disagree = 0, fwd_right_inc_wrong = 0, inc_right_fwd_wrong = 0; };
                 std::map<std::string, Tally> tally;
-                const Eigen::Vector3f org(path[0].x(), path[0].y(), 0.f);
+                const Eigen::Vector3f org2(path[0].x(), path[0].y(), 0.f);
                 for (const auto& d : Rx.map.decisions)
                 {
-                    const float iou_c = polygon_iou(to_world(d.cur, org), room);
-                    const float iou_t = polygon_iou(to_world(d.trial, org), room);
+                    const float iou_c = polygon_iou(to_world(d.cur, org2), room);
+                    const float iou_t = polygon_iou(to_world(d.trial, org2), room);
                     const bool oracle = iou_t > iou_c + 1e-4f;
                     const bool inc = d.accepted, fwd = d.fwd_dll > d.fwd_cost;
                     auto& t = tally[d.site];
