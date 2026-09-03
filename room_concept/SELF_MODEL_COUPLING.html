@@ -422,6 +422,177 @@ J<sub>dt</sub>     = 0                            <span class="c">no observation
 </section>
 
 <section>
+  <div class="sec-head"><span class="tag optic">Block II · extended</span><h2>Recovering a wrong extrinsic, and naming the device</h2></div>
+  <div class="rule optic"></div>
+  <p class="sec-note">
+    ★ <strong>Two different relations live on one corner, and they do not measure the same thing.</strong>
+    Everything above is the <em>camera against the LiDAR</em>. What follows adds the <em>camera against
+    the camera</em>, states the algebra that decides whether a deliberately wrong mount can be recovered
+    at all, and reports the test — run 2026-09-03 on one tour: ricoh 91 152 pairs over 21 corners, zed
+    11 821 over 20, twenty corners seen by both.
+  </p>
+
+  <div class="panel">
+    <h3>The two relations, and what each one is blind to</h3>
+    <div class="tblwrap"><table class="ledger">
+      <thead><tr><th>&nbsp;</th><th>camera ← LiDAR (the pair)</th><th>camera ← camera (the closure)</th></tr></thead>
+      <tbody>
+        <tr><td>residual</td>
+          <td><code>r = uv_image − uv_lidar</code>, one camera through its own mount</td>
+          <td><code>Δ = r<sub>a</sub>/s<sub>a</sub> − r<sub>b</sub>/s<sub>b</sub></code>, the two cameras differenced in <em>angle</em></td></tr>
+        <tr><td>what it measures</td>
+          <td>a hand–eye disagreement, per camera</td>
+          <td>only the two cameras' disagreement</td></tr>
+        <tr><td>the LiDAR's own corner error</td>
+          <td><span class="chip warn">inside the estimate</span> indistinguishable from a mount error</td>
+          <td><span class="chip ok">cancels exactly</span> it is common to both</td></tr>
+        <tr><td>blind to</td>
+          <td>a rotation shared by camera and LiDAR</td>
+          <td>which camera carries what; any rotation shared by all three</td></tr>
+      </tbody>
+    </table></div>
+    <p class="caption">
+      Complementary, not redundant. The pair gives each mount but cannot exclude a shared fault; the
+      closure excludes the shared fault but cannot attribute it. Three devices are what turn
+      <em>disagreement</em> into <em>attribution</em> — and that had never been tested against a fault
+      whose location was known in advance.
+    </p>
+  </div>
+
+  <div class="panel">
+    <h3>Marginalising the corner's own offset · the Schur complement</h3>
+<div class="eq">r<sub>i</sub> = −J<sub>i</sub> θ + <u>δ<sub>v(i)</sub></u> + ε<sub>i</sub>          <u>δ<sub>v</sub></u> ~ N(0, S),  S = σ<sub>δ</sub>² I     <span class="c">σ<sub>δ</sub> = 5.3 px, measured</span>
+
+per corner:  A<sub>v</sub> = Σ JᵀWJ    c<sub>v</sub> = Σ JᵀW    D<sub>v</sub> = Σ W    b<sub>v</sub> = Σ JᵀWr    e<sub>v</sub> = Σ Wr
+
+M<sub>v</sub> = ( S⁻¹ + D<sub>v</sub> )⁻¹
+<i>H̃</i> = Σ<sub>v</sub> ( A<sub>v</sub> − c<sub>v</sub> M<sub>v</sub> c<sub>v</sub>ᵀ )        <i>b̃</i> = Σ<sub>v</sub> ( b<sub>v</sub> − c<sub>v</sub> M<sub>v</sub> e<sub>v</sub> )</div>
+    <p class="caption">
+      A covariance term, not a rejection rule: σ<sub>δ</sub> → 0 recovers the old estimator exactly,
+      σ<sub>δ</sub> → ∞ removes the level entirely. <strong>The limit is the point</strong> — as a corner
+      is seen more often <code>M<sub>v</sub> → D<sub>v</sub>⁻¹</code> and it contributes only its
+      <em>within</em>-corner information, so the effective sample size becomes the number of
+      <em>distinct</em> corners, not the number of sightings.
+    </p>
+  </div>
+
+  <div class="panel">
+    <h3>What decides whether a wrong mount comes back</h3>
+<div class="eq"><span class="c">inject θ₀ into the mount ⇒ the prediction moves by Jθ₀ ⇒ r → r − Jθ₀ ⇒ b → b − Hθ₀</span>
+
+Δθ̂ = ( <i>H</i> + I )⁻¹ <i>H</i> θ₀          <span class="c">per eigendirection:  λ / (1 + λ)</span>
+
+<b>recovery = 1 − ( σ<sub>post</sub> / σ<sub>prior</sub> )²</b>       <span class="c">the fraction of prior variance the data removed</span></div>
+    <dl class="gloss">
+      <dt>consequence 1</dt><dd>Recoverability is a property of the <em>information</em>, not the amount of data. A corner seen again from the same place raises no λ and buys no recovery.</dd>
+      <dt>consequence 2</dt><dd>The injection experiment is <strong>predictable from the posterior alone</strong>. Measured: the identity predicts <strong>0.454</strong> for the ricoh against <strong>0.454</strong> recovered, and 0.992 for the zed against 0.984 — so injecting is a consistency check on the estimator, not a second independent fact.</dd>
+    </dl>
+  </div>
+
+  <div class="panel">
+    <h3>Why a panorama loses its yaw and a pinhole does not</h3>
+<div class="eq"><span class="c">equirect:  u = (α/2π + ½)·W</span>
+∂u/∂δ = <i>W / 2π</i>                    <span class="c">CONSTANT across the image</span>
+
+<span class="c">pinhole:   u = f<sub>x</sub>·x/y + c<sub>x</sub>,   θ = atan(x/y)</span>
+∂u/∂δ = <b>f<sub>x</sub> · sec²θ</b>                 <span class="c">GROWS toward the edge of the field</span></div>
+    <div class="diagram">
+    <svg viewBox="0 0 700 230" role="img" aria-label="Plot: the pixel shift produced by one degree of yaw, normalised to its value at the image centre. The panorama's is a flat line; the pinhole's rises by 84 percent toward both edges of the field.">
+      <text class="lbl" x="24" y="20">∂u/∂δ, relative to the image centre</text>
+      <line class="edge" x1="60" y1="190" x2="650" y2="190"/>
+      <line class="edge" x1="60" y1="190" x2="60" y2="50"/>
+      <text class="cov" x="52" y="154" text-anchor="end">1.0</text>
+      <text class="cov" x="52" y="120" text-anchor="end">1.5</text>
+      <text class="cov" x="60" y="208" text-anchor="middle">left edge</text>
+      <text class="cov" x="350" y="208" text-anchor="middle">centre of the field</text>
+      <text class="cov" x="640" y="208" text-anchor="middle">right edge</text>
+      <polyline class="edge o" points="60,150 132,150 205,150 277,150 350,150 422,150 495,150 567,150 640,150"/>
+      <text class="cov" x="350" y="142" text-anchor="middle" style="fill:var(--optic)">panorama — flat</text>
+      <polyline class="edge b" points="60,116 132,131 205,142 277,148 350,150 422,148 495,142 567,131 640,116"/>
+      <text class="cov" x="120" y="106" text-anchor="middle" style="fill:var(--base)">pinhole — sec²θ</text>
+      <text class="cov" x="640" y="106" text-anchor="end" style="fill:var(--base)">+84%</text>
+    </svg>
+    </div>
+    <p class="caption">
+      A constant shift is <em>exactly the signature of</em> <code>δ<sub>v</sub></code>. So on the panorama
+      yaw and a corner's own offset are degenerate and only the spread across distinct corners separates
+      them; on the pinhole one corner seen at several places in the image separates them by itself.
+      ★★★ <strong>The panorama's virtue is what costs it yaw</strong> — the uniform angular resolution
+      chosen to break the pitch/height ridge is the same property that creates the yaw degeneracy.
+    </p>
+  </div>
+
+  <div class="panel">
+    <h3>Attribution · inject 1.0° of yaw at one site, read all three channels</h3>
+    <div class="tblwrap"><table class="ledger">
+      <thead><tr><th>injected into</th><th>ricoh mount</th><th>zed mount</th><th>closure</th><th>predicted?</th></tr></thead>
+      <tbody>
+        <tr><td>ricoh mount</td><td><strong>−0.454</strong></td><td>−0.001 <span style="color:var(--muted)">(0.03σ)</span></td><td><strong>+1.000</strong></td><td><span class="chip ok">as written</span></td></tr>
+        <tr><td>zed mount</td><td>+0.000 <span style="color:var(--muted)">(0.00σ)</span></td><td><strong>−0.984</strong></td><td><strong>−1.002</strong></td><td><span class="chip ok">as written</span></td></tr>
+        <tr><td><strong>LiDAR</strong></td><td><strong>−0.444</strong></td><td><strong>−0.982</strong></td><td><strong>−0.018</strong></td><td><span class="chip ok">the falsifier</span></td></tr>
+      </tbody>
+    </table></div>
+    <p class="caption">
+      A camera fault moves <em>one</em> mount and puts the whole injection into the closure, the two
+      cameras opposite in sign. A LiDAR fault moves <em>both</em> and leaves the closure at 1.8% — inside
+      the 3.2% band that parallax predicts, because a LiDAR error rotates corners about the LiDAR's own
+      origin and the two cameras sit at different offsets from it. ★ Pre-registering that row as exactly
+      zero would have made it fire at 3.4σ on a fault that was not there.
+    </p>
+  </div>
+
+  <div class="grid2">
+    <div class="panel">
+      <div class="tblwrap"><table><caption>Recovered fraction, per axis</caption>
+        <thead><tr><th>&nbsp;</th><th>ricoh · panorama</th><th>zed · pinhole</th></tr></thead>
+        <tbody>
+          <tr><td>yaw 1.0°</td><td class="num">0.454 ± 0.175</td><td class="num" style="color:var(--optic)">0.984 ± 0.018</td></tr>
+          <tr><td>pitch 1.0°</td><td class="num" style="color:var(--optic)">1.006 ± 0.002</td><td class="num">0.900 ± 0.028</td></tr>
+          <tr><td>height 5 cm</td><td class="num">0.944 ± 0.001</td><td class="num">0.985 ± 0.001</td></tr>
+          <tr><td>yaw, nuisance OFF</td><td class="num" style="color:var(--dead)">0.998 ± 0.004</td><td class="num" style="color:var(--dead)">0.995 ± 0.006</td></tr>
+        </tbody>
+      </table></div>
+      <p class="caption" style="margin-top:12px">
+        The last row is why the nuisance exists: the same rows return the injection almost perfectly with
+        a standard error of four thousandths of a degree — succeeding completely while overstating its
+        certainty by two orders of magnitude.
+      </p>
+    </div>
+    <div class="panel">
+      <div class="tblwrap"><table><caption>The complementarity, on one tour</caption>
+        <thead><tr><th>&nbsp;</th><th>ricoh</th><th>zed</th></tr></thead>
+        <tbody>
+          <tr><td>σ(yaw)</td><td class="num">±0.175°</td><td class="num" style="color:var(--optic)">±0.018°</td></tr>
+          <tr><td>σ(pitch)</td><td class="num" style="color:var(--optic)">±0.002°</td><td class="num">±0.032°</td></tr>
+          <tr><td>pairs</td><td class="num">91 152</td><td class="num">11 821</td></tr>
+          <tr><td>corners</td><td class="num">21</td><td class="num">20</td></tr>
+        </tbody>
+      </table></div>
+      <p class="caption" style="margin-top:12px">
+        The zed's yaw is <strong>ten times sharper on eight times fewer pairs</strong>. Not sample size —
+        geometry. <strong>The panorama carries pitch and height, the pinhole carries yaw.</strong>
+      </p>
+    </div>
+  </div>
+
+  <div class="callout">
+    <span class="lede-tag">A prediction that failed, and was worth more than one that held</span>
+    <p class="big">
+      The zed's recovery was predicted at <strong>0.477</strong> by the design-effect argument — the same
+      reasoning that gave <strong>0.463</strong> for the ricoh, against 0.454 measured. The zed returned
+      <strong>0.984</strong>.
+    </p>
+    <p>
+      Not a small miss: the wrong model. The design effect assumes the <em>within</em>-corner information
+      about yaw is nil, which is exactly true of a panorama and false of a pinhole. What replaced it is a
+      sharper claim than the one that failed — recoverability is set by the projection's geometry, is
+      readable in advance from σ<sub>post</sub>/σ<sub>prior</sub>, and differs per camera in a way that
+      makes the pair worth more than either alone.
+    </p>
+  </div>
+</section>
+
+<section>
   <div class="sec-head"><h2>Where the two blocks touch</h2></div>
   <div class="rule both"></div>
   <p class="sec-note">
