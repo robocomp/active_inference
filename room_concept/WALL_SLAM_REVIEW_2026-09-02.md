@@ -514,3 +514,28 @@ Better in 15 rooms, neutral in 2, worse in 3, worst single loss 0.033, and the r
 now scores 0.930. Furniture costs 0.068 of median IoU against a clean room; the fused pair gives back
 0.039 of it. The tail is gone, the mean rose by 0.037, and the wall-SLAM bench is untouched at
 0.957 / 0.902 / 0.980.
+
+## The L-shaped rooms lose to COVERAGE, not to the model (2026-09-03)
+L rooms average 0.861 against 0.942 for rectangles, and the cause was traced rather than guessed. A new
+bench column separates the two ways a room can be lost, which no IoU can tell apart: `cover` is the
+fraction of the truth's own interior the robot's grid ever learned anything about, and `excl` is the
+fraction it learned about and still left outside the polygon.
+| room | shape | IoU | cover | excl |
+|---|---|---|---|---|
+| 15 | L | 0.812 | 0.86 | 0.05 |
+| 4 | L | 0.920 | 0.98 | 0.01 |
+| 6 | L | 0.937 | 1.00 | 0.01 |
+| 0 | rect | 0.984 | 1.00 | 0.01 |
+The worst L room never saw 14% of itself; only 5% was seen and excluded. So the polygon is not wrong about
+what it was shown — it was never shown a leg. Geometrically the missed area is one blob of 7.74 m² against
+0.44 m² invented in total, i.e. the estimate is essentially a SUBSET of the truth.
+More time makes it WORSE, not better: 900 / 1800 / 3000 frames give 0.812 / 0.768 / 0.764. The extra frames
+go into churn, not into the leg, which rules out "the explorer is merely slow".
+**The obvious cure was tried and reverted.** Sending every second coverage turn to the FARTHEST frontier
+instead of the nearest (the nearest rule finishes the local region and never commits to the far leg, and
+the mass score divides by distance so the far leg is discounted twice) moved the real flat's worst seed
+0.902 -> 0.966 and its best 0.980 -> 0.966, with a second check failing; across 50 rooms the median fell
+0.947 -> 0.941, the Hausdorff median rose 0.89 -> 1.14 m and spurs fell 13% -> 10%. A far frontier costs a
+long drive whose frames come out of refinement. The coverage problem is real; a nearest-versus-farthest
+heuristic is not its answer. What is, is an objective that prices the drive against what it would reveal —
+mutual-information exploration, rank 6 of the literature review, still unimplemented.

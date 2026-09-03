@@ -859,6 +859,16 @@ namespace
                 // what the good seeds paid for coverage turns before this condition existed.
                 const auto fronts = R.map.frontiers();
                 const bool coverage_turn = (++replan_count % 4 == 0) and fronts.size() > 3;
+                // ⚠ TRIED AND REVERTED 2026-09-03: every second coverage turn to the FARTHEST
+                // frontier instead. It is the obvious cure for what the coverage diagnostic shows —
+                // an L room leaves 14% of its own interior unseen while only 5% is seen and left
+                // outside the polygon — but it does not pay: the real flat's worst seed rose 0.902
+                // to 0.966 while its best fell 0.980 to 0.966 and a second check began to fail, and
+                // over 50 rooms the median fell 0.947 to 0.941, the Hausdorff median rose 0.89 to
+                // 1.14 m and spurs dropped 13% to 10%. A far frontier costs a long drive whose
+                // frames come out of refinement. The coverage problem is real; a nearest/farthest
+                // heuristic is not its answer — an information-gain objective that prices the drive
+                // against what it would reveal is (literature review, rank 6).
                 if (coverage_turn)
                 {
                     float dbest = 1e9f;
@@ -1973,8 +1983,12 @@ int main()
         static const char* kind_name[4] = {"wall column", "alcove", "corner column", "spur"};
         int found[4] = {0, 0, 0, 0}, total[4] = {0, 0, 0, 0};
         std::vector<float> ious, hauss;
+        int only_room = -1;
+        if (const char* e = std::getenv("WS_ROOM_ONLY"))
+        { int v = 0; if (std::from_chars(e, e + std::strlen(e), v).ec == std::errc{}) only_room = v; }
         for (int r = 0; r < n_rooms; ++r)
         {
+            if (only_room >= 0 and r != only_room) continue;
             std::mt19937 rg(9000u + static_cast<unsigned>(r));
             const auto U = [&](float a, float b) { return std::uniform_real_distribution<float>(a, b)(rg); };
             const float W = U(6.f, 11.f), H = U(5.f, 9.f);
@@ -2091,8 +2105,33 @@ int main()
             cfg8.occluders = furniture;
             cfg8.ceiling_line = std::getenv("WS_CEILING") != nullptr;
             std::mt19937 rrun(4242u + static_cast<unsigned>(r));
-            auto Rr = run_explore(room, cfg8, rrun, 900, start);
+            int room_frames = 900;
+            if (const char* e = std::getenv("WS_ROOM_FRAMES"))
+            { int v = 0; if (std::from_chars(e, e + std::strlen(e), v).ec == std::errc{} and v > 0) room_frames = v; }
+            auto Rr = run_explore(room, cfg8, rrun, room_frames, start);
             const Poly ew = to_world(Rr.poly.verts, Eigen::Vector3f(start.x(), start.y(), 0.f));
+            // COVERAGE: of the truth's own interior, how much did the robot's grid ever learn about?
+            // It separates the two ways a room can be lost — never seen, or seen and left outside the
+            // polygon — which no IoU can tell apart.
+            float coverage = 0.f, seen_but_excluded = 0.f;
+            {
+                long known = 0, total = 0, excl = 0;
+                for (float x = -20.f; x < 20.f; x += 0.15f)
+                    for (float y = -20.f; y < 20.f; y += 0.15f)
+                    {
+                        const Eigen::Vector2f w(x, y);
+                        if (not rc::corner_visibility::point_in_polygon(w, room)) continue;
+                        ++total;
+                        const Eigen::Vector2f m = w - start;   // map frame = start-relative
+                        const int gi = static_cast<int>((m.x() - Rr.map.fgrid.x0) / Rr.map.fgrid.cell);
+                        const int gj = static_cast<int>((m.y() - Rr.map.fgrid.y0) / Rr.map.fgrid.cell);
+                        const bool kn = Rr.map.fgrid.in(gi, gj) and not Rr.map.fgrid.is_unknown(gi, gj);
+                        if (kn) ++known;
+                        if (kn and not rc::corner_visibility::point_in_polygon(w, ew)) ++excl;
+                    }
+                if (total > 0) { coverage = static_cast<float>(known) / static_cast<float>(total);
+                                 seen_but_excluded = static_cast<float>(excl) / static_cast<float>(total); }
+            }
             const float iou_r = Rr.poly.closed ? polygon_iou(ew, room) : 0.f;
             const float h_r = Rr.poly.closed ? hausdorff(ew, room) : 1e9f;
             ious.push_back(iou_r); hauss.push_back(h_r);
@@ -2118,8 +2157,9 @@ int main()
                 if (miss < 0.33f) ++found[f.kind];
                 fs += fmt(" %s:%.2f", kind_name[f.kind], miss);
             }
-            std::printf("    room %-3d %5.1f x %4.1f m %s feats %2zu furn %zu  IoU %.3f  Hausdorff %.3f m  walls %2zu |%s\n",
-                        r, W, H, ell ? "L  " : "rect", feats.size(), furniture.size(), iou_r, h_r, Rr.map.walls.size(), fs.c_str());
+            std::printf("    room %-3d %5.1f x %4.1f m %s feats %2zu furn %zu  IoU %.3f  cover %.2f excl %.2f  Hausdorff %.3f m  walls %2zu |%s\n",
+                        r, W, H, ell ? "L  " : "rect", feats.size(), furniture.size(), iou_r, coverage,
+                        seen_but_excluded, h_r, Rr.map.walls.size(), fs.c_str());
             std::printf("      truth[%d]:", r);
             for (const auto& v : room) std::printf(" (%.2f,%.2f)", v.x(), v.y());
             std::printf("\n      est[%d]:", r);
