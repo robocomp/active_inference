@@ -323,7 +323,13 @@ namespace rc::wallmap
                 s0 = std::min(s0, s); s1 = std::max(s1, s); h = std::max(h, z); near = std::min(near, z);
             }
             if (not side_ok or near > 3.f * cell) continue;
-            s0 = std::max(0.f, s0 - 0.5f * cell); s1 = std::min(len, s1 + 0.5f * cell); h += 0.5f * cell;
+            // The step must stay clear of BOTH ends of its edge: a step flush with a corner has
+            // a zero-length side, and collapsing that vertex leaves a diagonal edge — measured, it
+            // put 0.51 deg of tilt into an otherwise exactly rectilinear published polygon. A
+            // feature at a corner is a corner step (+2 edges), which level 2 does not offer.
+            s0 = std::max(0.5f * cell, s0 - 0.5f * cell);
+            s1 = std::min(len - 0.5f * cell, s1 + 0.5f * cell);
+            h += 0.5f * cell;
             if (s1 - s0 < 2.f * cell or h < 2.f * cell) continue;
             // A matter zone steps the boundary INTO the room around it; a free zone steps it OUT.
             const Eigen::Vector2f off = n * h * (c == 1 ? 1.f : -1.f);
@@ -334,12 +340,24 @@ namespace rc::wallmap
                                              Eigen::Vector2f(a + t * s1 + off), Eigen::Vector2f(a + t * s1)})
                 nv.push_back(q);
             for (size_t k = static_cast<size_t>(e) + 1; k < E; ++k) nv.push_back(out.verts[k]);
-            // Drop the degenerate edges a step at a corner produces (a zone flush with a corner is
-            // a corner step, +2 edges, not a notch).
-            for (size_t k = 0; k < nv.size() and nv.size() > 3;)
+            // INVARIANT: level 2 may not make the published polygon less rectilinear than it
+            // found it. Every edge of the trial must be parallel or perpendicular to the host edge
+            // (which the projection has already put on an axis); anything else is refused.
             {
-                if ((nv[(k + 1) % nv.size()] - nv[k]).norm() < 0.5f * cell) nv.erase(nv.begin() + static_cast<long>((k + 1) % nv.size()));
-                else ++k;
+                bool rectilinear = true;
+                for (size_t k = 0; k < nv.size() and rectilinear; ++k)
+                {
+                    const Eigen::Vector2f e2 = nv[(k + 1) % nv.size()] - nv[k];
+                    const float L2 = e2.norm();
+                    if (L2 < 1e-4f) { rectilinear = false; break; }
+                    rectilinear = std::min(std::abs(t.dot(e2)), std::abs(n.dot(e2))) < 1e-3f * L2;
+                }
+                if (not rectilinear)
+                {
+                    if (params.debug_splice)
+                        std::printf("[level2] refused: the step would leave a non-rectilinear edge\n");
+                    continue;
+                }
             }
             Polygon trial = out;
             trial.verts = nv;

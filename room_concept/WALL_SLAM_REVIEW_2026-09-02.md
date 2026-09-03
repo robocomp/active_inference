@@ -15,7 +15,7 @@ Status column tracks what has been acted on. Findings are ranked most severe fir
 | 3 | MAJOR | fixed 09-02 (agent runs re_derive on the bench cadence, cadence moved to WallMap::Params) | the live agent never calls `re_derive` — the bench grades a bench-only algorithm |
 | 4 | MAJOR | measured 09-03, NOT inert: ×0.01 tilts walls 8-13°, ×100 breaks nothing — the factor is what holds in-loop tilt to 1-3°; no change | the annealed Manhattan factor is inert by construction |
 | 5 | MAJOR | fixed 09-03 (information-form prior: Λ, μ from dropped slots only; birth precision kept for gating) — joint solve 0.031→0.023, pose RMSE down on all seeds, 39/40 checks | carried wall information is damping, not a prior (re-centred every solve) |
-| 6 | MAJOR | open | two θ₀ estimators; published polygon rotated w.r.t. the re-anchored frame |
+| 6 | MAJOR | CONFIRMED and quantified 09-03: the published polygon is internally EXACTLY rectilinear (0.00° on 3 seeds); its 0.02-0.41° against the live θ₀ IS θ₀'−θ₀. Still open | two θ₀ estimators; published polygon rotated w.r.t. the re-anchored frame |
 | 7 | MAJOR | fixed 09-02 (immediate repair on the copy, loop to closure; publisher keeps last good, never raw) — bench unchanged | `manhattan_polygon()` repair inert on the copy; publisher flip-flops projected↔raw |
 | 8 | MAJOR | fixed 09-02; strict net-of-seed purse landed with #10 stage 1 (walls inherit their candidate's support, so the real spur still pays) | spur-wrap purse paid with seeded (untested) bins |
 | 9 | MAJOR | open | grid matter never forgets (`hits ≥ 3` is permanent) |
@@ -298,3 +298,18 @@ the next thing to look at, not the prior.
 #4: bench-only `manhattan_gain` (WS_MANHATTAN_GAIN): ×1 tilt 8.4°/2.3°/2.7° (before projection), ×0.01
 2.6°/8.5°/8.5° with IoU 0.935/0.951/0.932, ×100 2.3°/1.1°/1.1° with 0.956/0.934/0.960. The factor is not
 inert; the review's stiffness comparison ignored that point data pull mostly along d. No change.
+
+## Record for #6 (measured 2026-09-03) and level 2's rectilinearity invariant
+A second bench line separates the two questions the old "published tilt" conflated: `internal-tilt` measures
+every published edge against the polygon's OWN axis frame (the length-weighted circular mean of its edge
+directions mod 90°), `published-tilt` against the live θ₀. Result on the three seeds: internal 0.00° / 0.00°
+/ 0.00°, published 0.20° / 0.41° / 0.02°, frame gap θ₀'−θ₀ 0.20° / 0.41° / 0.02°. So the projection does
+exactly what it claims — what leaves the agent is rectilinear by construction — and every degree of
+"published tilt" is the frame gap of #6, not a leaning wall. The gap grew from 0.00-0.06° (39d087e) to
+0.20-0.41° with the information-form prior, which is the same finding from the other side: two estimators
+that used to agree by luck.
+Level 2 was found to be the one thing that could break rectilinearity: a step flush with the end of its edge
+has a zero-length side, and collapsing that vertex left a diagonal (seed 424242, internal tilt 0.51°). Steps
+are now kept half a cell clear of both ends, and any trial that would leave an edge not parallel or
+perpendicular to its host is refused outright. Internal tilt back to 0.00° on all three seeds, IoU and the
+level-2 features unchanged (0.946/0.889/0.969; right pillar 0.18, alcove 0.28 on the best seed).

@@ -78,6 +78,7 @@ namespace
         envf("WS_ADOPT_JUDGE",   p.adopt_judge);          // 0 incumbent (IoU margin + veto), 1 one energy
         envf("WS_ADOPT_REPAIR",  p.adopt_repair);         // repair self-crossing cycles before judging
         envf("WS_MANHATTAN_GAIN", p.manhattan_gain);      // scale on the in-loop Manhattan factor (#4 test)
+        envf("WS_LEVEL2",        p.enable_level2);        // level-2 residual pass on the published copy
     }
 
     Poly l_room()      { return {{-4.f, -3.f}, {4.f, -3.f}, {4.f, 1.f}, {1.f, 1.f}, {1.f, 3.f}, {-4.f, 3.f}}; }
@@ -1356,6 +1357,36 @@ int main()
             }
             std::printf("      published-tilt[%u]: max edge off-axis = %.4f rad (%.2f deg)\n",
                         seed, pub_tilt, pub_tilt * 180.f / kPi);
+            // INTERNAL Manhattan-ness: the same maximum, but against the polygon's OWN axis frame
+            // (the length-weighted circular mean of its edge directions mod 90 deg) instead of the
+            // live theta0. The projection makes the published polygon internally rectilinear; any
+            // gap between these two numbers is the copy's theta0' minus the live theta0 — review #6.
+            {
+                float sx = 0.f, sy = 0.f;
+                for (size_t vi = 0; ew.size() >= 2 and vi < ew.size(); ++vi)
+                {
+                    const Eigen::Vector2f e2 = ew[(vi + 1) % ew.size()] - ew[vi];
+                    const float L2 = e2.norm();
+                    if (L2 < 1e-6f) continue;
+                    const float a4 = 4.f * std::atan2(e2.y(), e2.x());   // mod 90 deg -> full turn
+                    sx += L2 * std::cos(a4); sy += L2 * std::sin(a4);
+                }
+                const float own = std::atan2(sy, sx) / 4.f;
+                float own_tilt = 0.f;
+                for (size_t vi = 0; ew.size() >= 2 and vi < ew.size(); ++vi)
+                {
+                    const Eigen::Vector2f e2 = ew[(vi + 1) % ew.size()] - ew[vi];
+                    if (e2.norm() < 1e-6f) continue;
+                    const float ang = std::atan2(e2.y(), e2.x());
+                    float b2 = std::numeric_limits<float>::infinity();
+                    for (int k2 = -2; k2 <= 2; ++k2)
+                        b2 = std::min(b2, std::abs(rc::linefit::wrap_pi(ang - own - static_cast<float>(k2) * kPi * 0.5f)));
+                    own_tilt = std::max(own_tilt, b2);
+                }
+                std::printf("      internal-tilt[%u]: max edge off its OWN axes = %.4f rad (%.2f deg); frame gap theta0'-theta0 = %.2f deg\n",
+                            seed, own_tilt, own_tilt * 180.f / kPi,
+                            std::abs(rc::linefit::wrap_pi(own - Rx.map.theta0)) * 180.f / kPi);
+            }
             {
                 // Per-seed diagnostics: is the deep spur resolved (grid cells on its two truth
                 // faces; distance of the truth tip vertices to the estimate), and which frontiers
