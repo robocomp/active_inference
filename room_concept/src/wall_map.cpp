@@ -323,13 +323,38 @@ namespace rc::wallmap
                 s0 = std::min(s0, s); s1 = std::max(s1, s); h = std::max(h, z); near = std::min(near, z);
             }
             if (not side_ok or near > 3.f * cell) continue;
-            // The step must stay clear of BOTH ends of its edge: a step flush with a corner has
-            // a zero-length side, and collapsing that vertex leaves a diagonal edge — measured, it
-            // put 0.51 deg of tilt into an otherwise exactly rectilinear published polygon. A
-            // feature at a corner is a corner step (+2 edges), which level 2 does not offer.
-            s0 = std::max(0.5f * cell, s0 - 0.5f * cell);
-            s1 = std::min(len - 0.5f * cell, s1 + 0.5f * cell);
+            // ── MID-EDGE STEP or CORNER STEP? A zone that reaches an end of its edge is a feature
+            // AT THE CORNER, and the corner is where a mid-edge step cannot go: it would have a
+            // zero-length side, and collapsing that vertex leaves a diagonal. Such a zone instead
+            // replaces the corner VERTEX with three, which is +2 edges rather than +4 — a corner
+            // feature is cheaper to describe because it reuses the corner. Only matter at a CONVEX
+            // corner is offered: that is what a column standing in a corner is.
+            const auto convex_at = [&](size_t v)
+            {
+                const size_t E2 = out.verts.size();
+                const Eigen::Vector2f tp = (out.verts[v] - out.verts[(v + E2 - 1) % E2]).normalized();
+                const Eigen::Vector2f tn = (out.verts[(v + 1) % E2] - out.verts[v]).normalized();
+                return tp.x() * tn.y() - tp.y() * tn.x() > 0.f;
+            };
+            const size_t E0 = out.verts.size();
+            // The reach test must be looser than the clearance that produced the footprint: a cell
+            // may not come closer than `level2_clear_cells` to the perpendicular wall, so a genuine
+            // corner column's cells stop that far short of the corner and a tighter test can never
+            // fire (measured: one corner step in a whole run). Twice the clearance. A mid-edge
+            // feature that happens to sit near a corner is not mis-read as one for free — the step
+            // would claim the free gap between them as exterior, and the grid term charges for it.
+            const float reach_tol = 2.f * params.level2_clear_cells * cell;
+            const bool corner_hi = c == 1 and s1 > len - reach_tol and convex_at((static_cast<size_t>(e) + 1) % E0);
+            const bool corner_lo = c == 1 and s0 < reach_tol and not corner_hi and convex_at(static_cast<size_t>(e));
+            const bool corner = corner_hi or corner_lo;
             h += 0.5f * cell;
+            if (corner_hi)      { s0 = std::max(0.5f * cell, s0 - 0.5f * cell); s1 = len; }
+            else if (corner_lo) { s1 = std::min(len - 0.5f * cell, s1 + 0.5f * cell); s0 = 0.f; }
+            else
+            {
+                s0 = std::max(0.5f * cell, s0 - 0.5f * cell);
+                s1 = std::min(len - 0.5f * cell, s1 + 0.5f * cell);
+            }
             if (s1 - s0 < params.level2_min_m or h < params.level2_min_m) continue;
             // ── FIT THE THREE DEGREES OF FREEDOM (Params doc). The cell box above is the
             // initialisation; each of the step's three faces now takes the median of the returns
@@ -367,27 +392,47 @@ namespace rc::wallmap
                         }
                     }
                     if (front.size()   >= 20) h  = std::abs(median(front));
-                    if (lo_side.size() >= 20) s0 = median(lo_side);
-                    if (hi_side.size() >= 20) s1 = median(hi_side);
+                    // A corner step has only ONE side face; the other end is the corner itself, and
+                    // the returns there belong to the neighbouring wall.
+                    if (lo_side.size() >= 20 and not corner_lo) s0 = median(lo_side);
+                    if (hi_side.size() >= 20 and not corner_hi) s1 = median(hi_side);
                     if (params.debug_splice)
                         std::printf("[level2] fit(%.1f cells): s=[%.3f,%.3f] h=%.3f (front %zu, sides %zu/%zu)\n",
                                     band_cells, s0, s1, h, front.size(), lo_side.size(), hi_side.size());
                 };
                 refit(3.f);
                 refit(1.f);
-                s0 = std::max(0.5f * cell, s0);
-                s1 = std::min(len - 0.5f * cell, s1);
+                if (not corner_lo) s0 = std::max(0.5f * cell, s0);
+                if (not corner_hi) s1 = std::min(len - 0.5f * cell, s1);
                 if (s1 - s0 < params.level2_min_m or h < params.level2_min_m) continue;
             }
             // A matter zone steps the boundary INTO the room around it; a free zone steps it OUT.
             const Eigen::Vector2f off = n * h * (c == 1 ? 1.f : -1.f);
             std::vector<Eigen::Vector2f> nv;
             nv.reserve(E + 4);
-            for (size_t k = 0; k <= static_cast<size_t>(e); ++k) nv.push_back(out.verts[k]);
-            for (const Eigen::Vector2f& q : {Eigen::Vector2f(a + t * s0), Eigen::Vector2f(a + t * s0 + off),
-                                             Eigen::Vector2f(a + t * s1 + off), Eigen::Vector2f(a + t * s1)})
-                nv.push_back(q);
-            for (size_t k = static_cast<size_t>(e) + 1; k < E; ++k) nv.push_back(out.verts[k]);
+            if (corner)
+            {
+                // Replace the corner vertex with three: back along this edge to s0 (or forward to
+                // s1), across by the depth, and out to where the next edge resumes.
+                const size_t vrep = corner_hi ? (static_cast<size_t>(e) + 1) % E : static_cast<size_t>(e);
+                const Eigen::Vector2f b_end = out.verts[(static_cast<size_t>(e) + 1) % E];
+                const Eigen::Vector2f P1 = corner_hi ? Eigen::Vector2f(a + t * s0)       : Eigen::Vector2f(a + off);
+                const Eigen::Vector2f P2 = corner_hi ? Eigen::Vector2f(a + t * s0 + off) : Eigen::Vector2f(a + off + t * s1);
+                const Eigen::Vector2f P3 = corner_hi ? Eigen::Vector2f(b_end + off)      : Eigen::Vector2f(a + t * s1);
+                for (size_t k = 0; k < E; ++k)
+                {
+                    if (k == vrep) { nv.push_back(P1); nv.push_back(P2); nv.push_back(P3); }
+                    else nv.push_back(out.verts[k]);
+                }
+            }
+            else
+            {
+                for (size_t k = 0; k <= static_cast<size_t>(e); ++k) nv.push_back(out.verts[k]);
+                for (const Eigen::Vector2f& q : {Eigen::Vector2f(a + t * s0), Eigen::Vector2f(a + t * s0 + off),
+                                                 Eigen::Vector2f(a + t * s1 + off), Eigen::Vector2f(a + t * s1)})
+                    nv.push_back(q);
+                for (size_t k = static_cast<size_t>(e) + 1; k < E; ++k) nv.push_back(out.verts[k]);
+            }
             // INVARIANT: level 2 may not make the published polygon less rectilinear than it
             // found it. Every edge of the trial must be parallel or perpendicular to the host edge
             // (which the projection has already put on an axis); anything else is refused.
@@ -414,8 +459,8 @@ namespace rc::wallmap
             const float cost = static_cast<float>(added) * edge_code_nats(true);
             const float gain = jump_delta_nats(out, trial, c == 2 ? born_of_edge(out.wall_of_edge, e) : 0);
             if (params.debug_splice)
-                std::printf("[level2] %s zone %zu cells on edge %d: s=[%.2f,%.2f] h=%.2f +%d edges gain=%.1f cost=%.1f -> %s\n",
-                            c == 1 ? "matter" : "free", comp.size(), e, s0, s1, h, added, gain, cost,
+                std::printf("[level2] %s %s zone %zu cells on edge %d: s=[%.2f,%.2f] h=%.2f +%d edges gain=%.1f cost=%.1f -> %s\n",
+                            corner ? "CORNER" : "mid-edge", c == 1 ? "matter" : "free", comp.size(), e, s0, s1, h, added, gain, cost,
                             gain > cost ? "ACCEPT" : "refuse");
             referee("level2", gain > cost, gain, cost, cost, out.verts, trial.verts);
             if (gain <= cost) continue;

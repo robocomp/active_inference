@@ -413,3 +413,28 @@ points of spur rate and nothing else. Hausdorff median also rose with the fit (0
 features are found, and a found-but-mis-sized feature puts a vertex where none was before.
 **L-shaped rooms are the harder half**: 19 of the 50 rooms have a reflex corner and average 0.859 IoU
 against 0.942 for the 31 rectangles.
+
+## The corner step (2026-09-03)
+Level 2 could only step the middle of an edge, so a feature standing in a corner had no representation: it
+was 41% of the population's corner columns and the apartamento's left pillar. A residual zone that reaches
+an end of its edge now replaces the corner VERTEX with three instead — **+2 edges, not +4**, so a corner
+feature is cheaper to describe because it reuses the corner, which is the right economy. Only matter at a
+CONVEX corner is offered. The fit skips the face that IS the corner, since the returns there belong to the
+neighbouring wall, and fits the other side and the depth as before.
+One detail decided whether the operator existed at all: the reach test must be LOOSER than the clearance
+that produced the footprint. A residual cell may not come closer than 1.5 cells to the perpendicular wall,
+so a real corner column's cells stop 12 cm short of the corner; testing "reaches within 1.5 cells of the
+end" therefore fired once in an entire run. At twice the clearance it fires 22 times. A mid-edge feature
+near a corner is not mis-read as one for free: the step would claim the free gap between them as exterior
+and the grid term charges for it.
+**Measured on the 50-room population, identical rooms, the corner step the only difference:**
+| | without | with |
+|---|---|---|
+| corner column | 44 of 74 (59%) | 54 of 74 (73%) |
+| wall column | 73 of 138 (53%) | 75 of 138 (54%) |
+| alcove | 109 of 155 (70%) | 109 of 155 (70%) |
+| spur | 12 of 100 (12%) | 12 of 100 (12%) |
+| IoU mean / median | 0.910 / 0.946 | 0.911 / 0.947 |
+Apartamento: seed 7 0.955 -> 0.957, the other two unchanged, published polygon still internally
+rectilinear at 0.00 deg. The left pillar of the real flat is still not explained on the graded seed; it is
+0.6 m from its corner, so it is neither a clean mid-edge feature nor a corner one.
