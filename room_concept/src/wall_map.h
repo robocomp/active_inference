@@ -157,6 +157,17 @@ namespace rc::wallmap
         // inside a big-gain adoption (measured: a 26-bin wrapped face ≈ 120 nats against
         // thousands of area nats). ⚠ threshold ≈ two fully-observed bins.
         float adopt_surrender_nats = 9.f;
+        // ADOPTION JUDGE (measured 2026-09-03, IoU seed 7/1001/424242): 0 = grid-IoU margin 0.02 +
+        // health waiver + surrender veto (the incumbent, 0.951/0.969/0.943); 1 = the one energy
+        // (grid + support in − surrender − code length, 0.926/0.969/0.918). adopt_repair splices
+        // self-crossings out of the re-derived cycle before judging it: 0.936/0.928/0.582 under the
+        // incumbent, 0.940/0.793/0.919 under the energy. Both agree BETTER with the single-step
+        // truth (does this step raise IoU?) and produce WORSE maps: a repaired or +0.01 cycle that
+        // creates thinly supported walls is adopted, they die, the cycle flaps. The margin and the
+        // veto are hysteresis; a self-crossing is a symptom of a wrong contour, not a defect to
+        // patch. Kept switchable for the bench (WS_ADOPT_JUDGE, WS_ADOPT_REPAIR).
+        int  adopt_judge  = 0;
+        bool adopt_repair = false;
         // ── STRICT MANHATTAN (user directive 2026-09-01): this stage estimates the room's MAIN
         // LINES only. Every polygon wall carries a Manhattan class; an off-axis candidate (chamfer,
         // oblique clutter line) may never splice into the cycle — it stays in the candidate bank as

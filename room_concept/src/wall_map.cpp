@@ -2322,6 +2322,8 @@ namespace rc::wallmap
         const int j0 = std::max(0, static_cast<int>((y0 - M - fgrid.y0) / fgrid.cell));
         const int j1 = std::min(fgrid.ny - 1, static_cast<int>((y1 + M - fgrid.y0) / fgrid.cell));
         float dn = 0.f;
+        int n_mat_in = 0, n_mat_out = 0, n_free_in = 0, n_free_out = 0;
+        float e_mat_in = 0.f, e_mat_out = 0.f, e_free_in = 0.f, e_free_out = 0.f;
         for (int i = i0; i <= i1; ++i)
             for (int j = j0; j <= j1; ++j)
             {
@@ -2337,8 +2339,14 @@ namespace rc::wallmap
                 if (matter) w = -std::max(l, 2.f);      // claiming matter as interior costs
                 else if (fresh_free) w = -l;            // claiming fresh free as interior gains (−l > 0)
                 else continue;                          // stale free / unknown: silent
-                dn += in_t ? w : -w;
+                const float e = in_t ? w : -w;
+                dn += e;
+                if (matter and in_t) { ++n_mat_in; e_mat_in += e; } else if (matter) { ++n_mat_out; e_mat_out += e; }
+                else if (in_t) { ++n_free_in; e_free_in += e; } else { ++n_free_out; e_free_out += e; }
             }
+        if (params.debug_splice)
+            std::printf("[gridterm] dn=%.1f | matter->in %d (%.1f) matter->out %d (%.1f) | free->in %d (%.1f) free->out %d (%.1f)\n",
+                        dn, n_mat_in, e_mat_in, n_mat_out, e_mat_out, n_free_in, e_free_in, n_free_out, e_free_out);
         return dn;
     }
 
@@ -2417,6 +2425,7 @@ namespace rc::wallmap
         std::vector<std::uint64_t> new_order;
         std::vector<Eigen::Vector2f> starts;   // edge-start per new_order entry (junction anchors)
         std::vector<WallLandmark> created;
+        float support_in = 0.f;   // line support the created walls bring in (candidate bins, one currency)
         const int M = static_cast<int>(simp.size());
         for (int m = 0; m < M; ++m)
         {
@@ -2567,6 +2576,16 @@ namespace rc::wallmap
                 WallLandmark w = make_wall(c.phi, c.d, c.information, params.birth_nats, c.last_ms);
                 w.s_min = c.s_min; w.s_max = c.s_max; w.has_extent = c.npts > 0;
                 w.frames_seen = c.frames; w.points_seen = c.npts;
+                // Born with the support its candidate observed (one currency), which is also what
+                // the adoption may spend for it.
+                if (not c.bins.empty())
+                {
+                    w.bins_s0 = c.bins_s0;
+                    w.exist_bins.resize(c.bins.size());
+                    for (size_t b = 0; b < c.bins.size(); ++b)
+                        w.exist_bins[b] = std::min(2.f * params.birth_nats, params.birth_nats + c.bins[b]);
+                }
+                support_in += c.evidence();
                 created.push_back(w);
                 id = w.id;
             }
@@ -2748,23 +2767,40 @@ namespace rc::wallmap
                 }
             return (uni > 0) ? static_cast<float>(inter) / static_cast<float>(uni) : -1.f;
         };
+        // A re-derived cycle can self-cross (a stair-step run snapped onto two lines that meet the
+        // wrong way round). Until 2026-09-03 that failed closure and the cycle was refused unjudged
+        // — the referee found 118 of them on three seeds, some 0.5 IoU better than the incumbent.
+        // Repair it the way the published copy repairs itself: splice out the weakest crossing edge
+        // on a COPY, immediately, until it closes or nothing crosses.
+        if (params.adopt_repair)
+        {
+            // The copy needs walls and grid, not the beam store or the decision log: move those
+            // out for the duration of the copy (a const-correct copy without them is not available).
+            auto saved_beams = std::move(beams);
+            auto saved_decisions = std::move(decisions);
+            WallMap fix(*this);
+            beams = std::move(saved_beams);
+            decisions = std::move(saved_decisions);
+            fix.order = new_order;
+            Polygon pf = fix.build_polygon();
+            for (size_t guard = 0; not pf.closed and not pf.crossing_edges.empty() and guard < fix.order.size(); ++guard)
+            {
+                if (not fix.repair_if_crossing(/*immediate=*/true)) break;
+                pf = fix.build_polygon();
+            }
+            if (fix.order.size() != new_order.size() and params.debug_splice)
+                std::printf("[rederive] self-crossing repaired: %zu -> %zu entries\n", new_order.size(), fix.order.size());
+            new_order = fix.order;
+        }
         const Polygon pnew = build_from(new_order);
         const Polygon pold = build_from(order);
         const float iou_new = grid_iou(pnew);
         const float iou_old = grid_iou(pold);
-        // The +0.02 margin protects a HEALTHY incumbent from noise-flapping. An incumbent whose own
-        // corner uncertainty fails the publish bar (e.g. a near-parallel adjacent pair whose corner
-        // is unbounded — measured: sigma 89 m, a 45 m spike vertex the grid-IoU barely sees) gets no
-        // such protection against a strictly healthier challenger that is no worse on IoU. Ordering
-        // on existing model signals, no new constant.
-        const bool health_waiver = pnew.closed and pold.closed
-            and iou_new >= iou_old
-            and pold.worst_corner_sigma > params.publish_corner_sigma
-            and pnew.worst_corner_sigma < pold.worst_corner_sigma;
-        const bool adopt_ok = (iou_new > iou_old + 0.02f) or health_waiver;
-        // SURRENDER RULE: observed existence support the new cycle would erase. Counted once per
-        // wall (duplicate rides skipped), only ABOVE the birth seed, and only for walls whose LINE
-        // the new cycle does not hold anywhere.
+        // SURRENDER: observed existence support the new cycle would erase. Counted once per wall
+        // (duplicate rides skipped), only ABOVE the birth seed, and only for walls whose LINE the
+        // new cycle does not hold anywhere. Until 2026-09-03 this was a VETO beside a grid-IoU
+        // margin of 0.02; the forward-model referee caught that judge refusing 127 re-derived
+        // cycles the truth preferred by 0.03-0.09 IoU. It is now a PRICE inside the one energy.
         float surrender = 0.f;
         for (auto it = order.begin(); it != order.end(); ++it)
         {
@@ -2779,14 +2815,32 @@ namespace rc::wallmap
             if (held) continue;
             for (const float b : w->exist_bins) surrender += std::max(0.f, b - params.birth_nats);
         }
-        if (params.debug_splice and surrender > params.adopt_surrender_nats and adopt_ok)
-            std::printf("[adopt-surrender] VETO: adoption would erase %.1f nats of observed support\n",
-                        surrender);
+        // ONE ENERGY for the adoption, the same as a splice: the grid's area term over the region
+        // where the two cycles disagree, plus the support the created walls bring in, minus the
+        // support surrendered, minus the code length of the vertices the new cycle adds.
+        const float e_grid = pnew.closed and pold.closed ? jump_delta_nats(pold, pnew, 0) : 0.f;
+        const float code   = (static_cast<float>(pnew.verts.size()) - static_cast<float>(pold.verts.size())) * edge_code_nats(true);
+        const float dE     = e_grid + support_in - surrender - code;
+        // The incumbent judge: a +0.02 grid-IoU margin protects a healthy incumbent from noise
+        // flapping; an incumbent whose own corner uncertainty fails the publish bar gets no such
+        // protection against a strictly healthier challenger no worse on IoU; and observed support
+        // above the surrender bar may not be erased. MEASURED 2026-09-03: the one energy agrees
+        // with the single-step truth far better (seed 7: 123/125 vs 42/150) and produces a WORSE
+        // map (0.940/0.793/0.919 vs 0.951/0.969/0.943) — a cycle +0.01 better now that creates 28
+        // thinly supported walls is adopted, they die, the cycle flaps. The margin and the veto are
+        // hysteresis that a single-step criterion cannot see.
+        const bool health_waiver = pnew.closed and pold.closed
+            and iou_new >= iou_old
+            and pold.worst_corner_sigma > params.publish_corner_sigma
+            and pnew.worst_corner_sigma < pold.worst_corner_sigma;
+        const bool adopt_ok = params.adopt_judge == 1
+            ? (pnew.closed and dE > 0.f)
+            : (((iou_new > iou_old + 0.02f) or health_waiver) and surrender <= params.adopt_surrender_nats);
         if (params.debug_splice)
         {
-            std::printf("[rederive] runs=%zu created=%zu closed=%d iou_new=%.3f iou_old=%.3f%s -> %s [%.70s]\n",
+            std::printf("[rederive] runs=%zu created=%zu closed=%d dE=%.1f (grid %.1f + in %.1f - out %.1f - code %.1f) iou %.3f->%.3f -> %s [%.70s]\n",
                         new_order.size(), created.size(), static_cast<int>(pnew.closed),
-                        iou_new, iou_old, health_waiver ? " WAIVER" : "",
+                        dE, e_grid, support_in, surrender, code, iou_old, iou_new,
                         adopt_ok ? "ADOPT" : "keep", pnew.status.c_str());
         }
         // ── ADOPTION-LOSS TRACE: does the adopted cycle LOSE a wrapped thin wall — an
@@ -2827,10 +2881,8 @@ namespace rc::wallmap
                                 iou_old, iou_new);
             }
         }
-        referee("adopt", adopt_ok and surrender <= params.adopt_surrender_nats, iou_new - iou_old, 0.02f,
-                (static_cast<float>(pnew.verts.size()) - static_cast<float>(pold.verts.size())) * edge_code_nats(true),
-                pold.verts, pnew.verts);
-        if (adopt_ok and surrender <= params.adopt_surrender_nats)
+        referee("adopt", adopt_ok, dE, 0.f, code, pold.verts, pnew.verts);
+        if (adopt_ok)
         {
             order = new_order;
             // Erase promoted candidates (largest indices first) and orphaned walls.

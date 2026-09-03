@@ -75,6 +75,8 @@ namespace
         envf("WS_REPLACE_EDGES", p.replace_code_edges);   // lines a replacement names (default 1)
         envf("WS_WRAP_EDGES",    p.wrap_code_edges);      // lines a spur wrap names (default 2)
         envf("WS_KEEP",          p.order_keep_fraction);  // down-jump refund fraction (default 0.7)
+        envf("WS_ADOPT_JUDGE",   p.adopt_judge);          // 0 incumbent (IoU margin + veto), 1 one energy
+        envf("WS_ADOPT_REPAIR",  p.adopt_repair);         // repair self-crossing cycles before judging
     }
 
     Poly l_room()      { return {{-4.f, -3.f}, {4.f, -3.f}, {4.f, 1.f}, {1.f, 1.f}, {1.f, 3.f}, {-4.f, 3.f}}; }
@@ -254,7 +256,9 @@ namespace
         R.map.params.huber_delta = 0.15f;
         R.map.params.debug_splice = std::getenv("WS_DEBUG_SPLICE") != nullptr;
         apply_env_overrides(R.map.params);
-        R.map.params.forward_referee = std::getenv("WS_NO_REFEREE") == nullptr;
+        // The forward-model referee scans every stored beam per judged decision: minutes per seed
+        // under churn against 13 s for the whole bench without it. Opt in with WS_REFEREE=1.
+        R.map.params.forward_referee = std::getenv("WS_REFEREE") != nullptr;
 
         rc::Model model;
         model.init_from_polygon({{-20.f, -20.f}, {20.f, -20.f}, {20.f, 20.f}, {-20.f, 20.f}}, 0.f, 0.f, 0.f, 2.4f);
@@ -516,7 +520,9 @@ namespace
         R.map.params.huber_delta = 0.15f;
         R.map.params.debug_splice = std::getenv("WS_DEBUG_SPLICE") != nullptr;
         apply_env_overrides(R.map.params);
-        R.map.params.forward_referee = std::getenv("WS_NO_REFEREE") == nullptr;
+        // The forward-model referee scans every stored beam per judged decision: minutes per seed
+        // under churn against 13 s for the whole bench without it. Opt in with WS_REFEREE=1.
+        R.map.params.forward_referee = std::getenv("WS_REFEREE") != nullptr;
 
         rc::Model model;
         model.init_from_polygon({{-20.f, -20.f}, {20.f, -20.f}, {20.f, 20.f}, {-20.f, 20.f}}, 0.f, 0.f, 0.f, 2.4f);

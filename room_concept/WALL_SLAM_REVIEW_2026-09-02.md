@@ -268,3 +268,19 @@ Charging a replacement two lines (14.6, the old 15) puts seed 7 on a knife edge:
 14.6 < Δ ≤ 15 nats is accepted and amputates. The refund fraction measured inert at 0.5 / 0.7 / 0.85 / 1.0,
 so it is set to the principled 1.0 and documented as a switching cost. Bench-only overrides:
 `WS_REPLACE_EDGES`, `WS_WRAP_EDGES`, `WS_KEEP`. Still open in #10: adoption decides on grid IoU + veto.
+
+## Record for the adoption judge and the forward-model referee (2026-09-03)
+A forward-model referee (Thrun 2003 beam likelihood against the polygon; `Params::forward_referee`,
+bench `WS_REFEREE=1`) logs every judged structure change next to its own verdict; the bench scores both
+against the single-step truth (did the trial raise IoU with the real layout?). Findings: (1) the forward
+model's Δ log-likelihoods are 10⁴-10⁵ nats (792k beams as independent, σ 3 cm) — its verdict is the bare
+sign, hypersensitive to centimetres of wall offset and blind to area: it would accept 12 amputations of a
+quarter of the flat where a real partial wall collects more hits than pass-throughs; (2) the incumbent
+judges' errors are small (median 0.001 IoU); (3) contour adoption refused 178 cycles the single-step truth
+preferred — 118 of them self-crossing and refused unjudged, the rest with negative grid terms from offset
+noise. Acting on (3) was measured and REJECTED: judging adoption by the one energy (grid + support in −
+surrender − code) gives 0.926/0.969/0.918; repairing self-crossings before judging gives 0.936/0.928/0.582
+under the incumbent and 0.940/0.793/0.919 under the energy, with hundreds of births and deaths — cycles
+the single-step truth likes and the map cannot live with. The single-step oracle is not the long-run
+criterion; the 0.02 margin and the veto are hysteresis against exactly this. Both switches stay in Params
+for the bench. Item #3's adoption criterion therefore stands as it was.
