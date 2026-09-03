@@ -3040,6 +3040,35 @@ namespace rc::wallmap
         // Stored beams move with the frame: p' = R(−rot)(p − c).
         const Eigen::Matrix2f Rb = rot2(-rot);
         for (auto& b : beams) { b.o = Rb * (b.o - c); b.d = Rb * b.d; }
+        // The free-space grid moves with the frame too — until 2026-09-03 it did not, and every
+        // grid read after the agent's one-shot re-anchor (the stub discriminator, jump_delta_nats,
+        // frontiers, the re-derivation, level 2) was off by (c, rot). The bench never re-anchors,
+        // so it never showed. Resampled nearest-cell into a grid of the same size centred on the
+        // new origin: old point of a new cell centre p' is R(rot) p' + c.
+        if (fgrid.ready())
+        {
+            FreeGrid g2;
+            g2.cell = fgrid.cell;
+            g2.nx = fgrid.nx; g2.ny = fgrid.ny;
+            g2.x0 = -0.5f * static_cast<float>(g2.nx) * g2.cell;
+            g2.y0 = -0.5f * static_cast<float>(g2.ny) * g2.cell;
+            g2.lodds.assign(static_cast<size_t>(g2.nx * g2.ny), 0.f);
+            g2.hits.assign(static_cast<size_t>(g2.nx * g2.ny), 0);
+            g2.free_ms.assign(static_cast<size_t>(g2.nx * g2.ny), -1);
+            const Eigen::Matrix2f Rf = rot2(rot);
+            for (int j = 0; j < g2.ny; ++j)
+                for (int i = 0; i < g2.nx; ++i)
+                {
+                    const Eigen::Vector2f p = Rf * g2.at(i, j) + c;
+                    const int oi = static_cast<int>(std::floor((p.x() - fgrid.x0) / fgrid.cell));
+                    const int oj = static_cast<int>(std::floor((p.y() - fgrid.y0) / fgrid.cell));
+                    if (not fgrid.in(oi, oj)) continue;
+                    const size_t o = static_cast<size_t>(fgrid.idx(oi, oj)), n = static_cast<size_t>(g2.idx(i, j));
+                    g2.lodds[n] = fgrid.lodds[o]; g2.hits[n] = fgrid.hits[o]; g2.free_ms[n] = fgrid.free_ms[o];
+                }
+            fgrid = std::move(g2);
+            comp_cache_ts_ = -1;   // the cached free component is in the old frame
+        }
     }
 
     float WallMap::beam_loglik(const Beam& b, const std::vector<Eigen::Vector2f>& poly) const

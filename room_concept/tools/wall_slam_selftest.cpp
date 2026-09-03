@@ -1523,6 +1523,31 @@ int main()
         }
         check("pose stayed on track through the tour", R7.pose_rmse_xy < 0.08f,
               fmt("rmse %.3f m, max %.3f m", R7.pose_rmse_xy, R7.pose_max_xy));
+        // RE-ANCHOR (the agent does this once, the bench never did): the grid must move with the
+        // walls. Measured by the fraction of grid cells inside the published polygon that are free,
+        // before and after a re-anchor by the polygon's centre and 0.3 rad — the agreement of the
+        // grid with the polygon is frame-invariant iff the grid was transformed.
+        {
+            const auto free_inside = [](const rc::wallmap::WallMap& m)
+            {
+                const auto poly = m.manhattan_polygon();
+                long in = 0, fr = 0;
+                for (int i = 0; i < m.fgrid.nx; ++i)
+                    for (int j = 0; j < m.fgrid.ny; ++j)
+                        if (rc::corner_visibility::point_in_polygon(m.fgrid.at(i, j), poly.verts))
+                        { ++in; if (m.fgrid.is_free(i, j)) ++fr; }
+                return in > 0 ? static_cast<float>(fr) / static_cast<float>(in) : 0.f;
+            };
+            rc::wallmap::WallMap m2 = R7.map;
+            const float before = free_inside(m2);
+            Eigen::Vector2f cc = Eigen::Vector2f::Zero();
+            for (const auto& v : R7.poly.verts) cc += v;
+            cc /= static_cast<float>(std::max<size_t>(1, R7.poly.verts.size()));
+            m2.reanchor(cc, 0.3f);
+            const float after = free_inside(m2);
+            check("re-anchor keeps the grid aligned with the walls", std::abs(after - before) < 0.03f,
+                  fmt("free fraction inside the polygon %.3f -> %.3f", before, after));
+        }
     }
     }   // end WS_NO7 skip
 
