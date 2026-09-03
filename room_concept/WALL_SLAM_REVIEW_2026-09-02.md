@@ -463,3 +463,33 @@ The prior therefore improves how well a found spur is SIZED far more than how of
 split is the real conclusion: **detection is grid-limited and measurement is beam-limited**. Raising the
 spur rate needs evidence at beam resolution in the detector too — the existence bins along a wall line,
 which is what the level-1 wrap already uses and what item 1 above says is being refused on geometry.
+
+## Simulating the wall-to-ceiling line, and fusing it with the LiDAR (2026-09-03)
+The bench now contains the thing that makes a ceiling line worth having, and the line itself.
+**Furniture** (`WS_FURNITURE=1`): axis-aligned boxes standing against the walls. The LiDAR band cannot see
+through them; the ceiling junction three metres up is never blocked by them. Structure is unchanged — the
+truth polygon is the same — so the score measures exactly whether the hidden walls were recovered. Without
+occluders the two sensors see the same walls and the camera can only add noise, so a bench without
+furniture cannot answer the question at all.
+**The ceiling line** (`WS_CEILING=1`): for each azimuth, the junction is seen at elevation
+atan(dh / r) with dh the ceiling height above the camera; the camera measures that ANGLE with the scatter
+we measured on the fitted contour (0.065 deg), and the range follows. Grazing directions are dropped.
+**How the two fuse.** Both measure the same thing — a point on a wall — so they join ONE cloud and go
+through one segmenter and one association. Only the precision differs, and that is what is carried: a
+per-point weight equal to the ratio of variances. From r = dh / tan(alpha),
+sigma_r = (dh² + r²)/dh · sigma_alpha, constant for the LiDAR and quadratic in range for the camera. At
+2 m they are comparable, by 8 m the camera is 4 cm against the LiDAR's 2 cm, and the weight says so, which
+is what stops a distant ceiling point from dragging a wall the LiDAR already knows well.
+**Measured, 20 rooms, same seeds and same rooms in every arm:**
+| arm | IoU mean | median |
+|---|---|---|
+| no furniture, LiDAR only | 0.941 | 0.963 |
+| furniture, LiDAR only | 0.882 | 0.895 |
+| furniture, LiDAR + ceiling line | 0.878 | 0.932 |
+Furniture costs 0.068 of median IoU; the ceiling line gives back 0.037 of it, and helps in 16 rooms of 20,
+is neutral in 3, and destroys 1 (room 1: 0.914 -> polygon never closed, 12 walls -> 9). The mean is dragged
+below the LiDAR-only arm by that single collapse while the median rises — the distribution moved up and
+grew a tail. That tail is the next thing to understand, and the likely mechanism is a conflict the bench
+creates on purpose: the LiDAR sees a furniture FACE as a wall-like segment while the camera sees the true
+wall behind it, so two incompatible lines compete for the same stretch of boundary. The model has no
+furniture in it, so nothing explains the near line away.

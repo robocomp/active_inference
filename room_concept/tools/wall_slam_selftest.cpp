@@ -222,6 +222,8 @@ namespace
         Eigen::Vector2f last_xy = Eigen::Vector2f::Zero();   // final robot position (map frame)
     };
 
+    using Boxes = std::vector<std::pair<Eigen::Vector2f, Eigen::Vector2f>>;   // (lo, hi)
+
     struct RunConfig
     {
         int window = 5;
@@ -229,7 +231,94 @@ namespace
         float scan_sigma = 0.02f;
         float odom_sigma_xy = 0.005f, odom_sigma_th = 0.3f * kPi / 180.f;
         bool verbose = false;
+        Boxes occluders;                 // furniture the LiDAR cannot see through
+        bool  ceiling_line = false;      // add the camera's wall-to-ceiling ranges
+        float ceiling_dh = 1.70f;        // ceiling height above the camera (3.0 m room, 1.30 m mount)
+        float ceiling_sigma_rad = 0.0011f;   // 0.065 deg — the measured fitted-contour scatter
+        int   ceiling_rays = 180;
     };
+
+    /// FURNITURE. Axis-aligned boxes standing inside the room. The LiDAR band cuts through them at
+    /// 1-2 m, so a wall behind one is never seen; the wall-to-ceiling junction, three metres up, is
+    /// never blocked by them. That difference is the whole reason to want a ceiling line, and a
+    /// bench without occluders cannot show it — the two sensors would see the same walls and the
+    /// camera would only add noise.
+
+    /// Range to the first box hit along a ray, or infinity.
+    float box_range(const Eigen::Vector2f& o, const Eigen::Vector2f& d, const Boxes& boxes)
+    {
+        float best = std::numeric_limits<float>::infinity();
+        for (const auto& [lo, hi] : boxes)
+        {
+            float t0 = 0.f, t1 = best;
+            bool ok = true;
+            for (int k = 0; k < 2 and ok; ++k)
+            {
+                if (std::abs(d[k]) < 1e-9f) { ok = (o[k] >= lo[k] and o[k] <= hi[k]); continue; }
+                float ta = (lo[k] - o[k]) / d[k], tb = (hi[k] - o[k]) / d[k];
+                if (ta > tb) std::swap(ta, tb);
+                t0 = std::max(t0, ta); t1 = std::min(t1, tb);
+                ok = t0 <= t1;
+            }
+            if (ok and t0 > 1e-3f) best = std::min(best, t0);
+        }
+        return best;
+    }
+
+    /// The LiDAR band, with furniture in the way: the nearer of the wall and the box.
+    std::vector<Eigen::Vector2f> scan_occluded(const Poly& room, const Boxes& boxes,
+                                               const Eigen::Vector3f& pose, int n, float sigma,
+                                               std::mt19937& rng)
+    {
+        std::normal_distribution<float> noise(0.f, sigma);
+        std::vector<Eigen::Vector2f> out;
+        const int N = static_cast<int>(room.size());
+        for (int i = 0; i < n; ++i)
+        {
+            const float bearing = -kPi + 2.f * kPi * static_cast<float>(i) / static_cast<float>(n);
+            const float wd = pose.z() + bearing;
+            const Eigen::Vector2f d(std::cos(wd), std::sin(wd));
+            float best = 1e9f;
+            for (int e = 0; e < N; ++e)
+                if (auto t = rc::corner_visibility::ray_segment_t(pose.head<2>(), d, room[e], room[(e + 1) % N]); t and *t < best)
+                    best = *t;
+            best = std::min(best, box_range(pose.head<2>(), d, boxes));
+            if (best > 1e8f) continue;
+            const float r = best + noise(rng);
+            out.emplace_back(r * std::cos(bearing), r * std::sin(bearing));
+        }
+        return out;
+    }
+
+    /// THE WALL-TO-CEILING LINE, as the 360 camera would deliver it. For each azimuth the junction is
+    /// seen at elevation atan((h_ceil - h_cam) / r); the camera measures that ANGLE, with a scatter
+    /// set by how well the fitted contour is localised in rows, and the range follows from the
+    /// ceiling height. So the error grows with range as (dh^2 + r^2)/dh per radian — the reason this
+    /// is a poor per-column range and a good long-baseline one. Furniture cannot block it.
+    std::vector<Eigen::Vector2f> scan_ceiling(const Poly& room, const Eigen::Vector3f& pose, int n,
+                                              float dh, float sigma_rad, std::mt19937& rng)
+    {
+        std::normal_distribution<float> noise(0.f, sigma_rad);
+        std::vector<Eigen::Vector2f> out;
+        const int N = static_cast<int>(room.size());
+        for (int i = 0; i < n; ++i)
+        {
+            const float bearing = -kPi + 2.f * kPi * static_cast<float>(i) / static_cast<float>(n);
+            const float wd = pose.z() + bearing;
+            const Eigen::Vector2f d(std::cos(wd), std::sin(wd));
+            float best = 1e9f;
+            for (int e = 0; e < N; ++e)
+                if (auto t = rc::corner_visibility::ray_segment_t(pose.head<2>(), d, room[e], room[(e + 1) % N]); t and *t < best)
+                    best = *t;
+            if (best > 1e8f) continue;
+            const float alpha = std::atan2(dh, best) + noise(rng);
+            if (alpha < 0.02f) continue;                    // grazing: the junction is not resolvable
+            const float r = dh / std::tan(alpha);
+            if (not std::isfinite(r) or r < 0.2f or r > 20.f) continue;
+            out.emplace_back(r * std::cos(bearing), r * std::sin(bearing));
+        }
+        return out;
+    }
 
     RunResult run_loop(const std::vector<Poly>& rooms_by_frame, const std::vector<Eigen::Vector3f>& truth,
                        const RunConfig& cfg, std::mt19937& rng, RunResult* resume = nullptr)
@@ -591,7 +680,34 @@ namespace
             const Eigen::Vector3f pred = (f == 0) ? Eigen::Vector3f::Zero()
                 : Eigen::Vector3f(est.x() + odom.x(), est.y() + odom.y(), wrap(est.z() + odom.z()));
 
-            const auto pts = scan(room, tru, cfg.n_rays, cfg.scan_sigma, rng);
+            auto pts = scan_occluded(room, cfg.occluders, tru, cfg.n_rays, cfg.scan_sigma, rng);
+            // HOW THE TWO SENSORS FUSE. Both measure the same thing — a point on a wall — so they
+            // join ONE cloud and go through one segmenter and one association. What differs is only
+            // the precision, so that is what is carried: a per-point weight, the ratio of variances
+            // against the LiDAR's. The camera's range comes from r = dh / tan(alpha), so
+            // sigma_r = (dh^2 + r^2)/dh * sigma_alpha — constant for the LiDAR, quadratic in range
+            // for the camera. Near the robot the two are comparable; far away the camera is an order
+            // worse and the weight says so, which is what stops a distant ceiling point from
+            // dragging a wall the LiDAR already knows well.
+            const size_t n_lidar = pts.size();
+            if (cfg.ceiling_line)
+            {
+                const auto cpts = scan_ceiling(room, tru, cfg.ceiling_rays, cfg.ceiling_dh,
+                                               cfg.ceiling_sigma_rad, rng);
+                pts.insert(pts.end(), cpts.begin(), cpts.end());
+            }
+            Eigen::VectorXf pw;
+            if (pts.size() > n_lidar)
+            {
+                pw = Eigen::VectorXf::Ones(static_cast<long>(pts.size()));
+                const float dh = cfg.ceiling_dh, sa = cfg.ceiling_sigma_rad, sl = cfg.scan_sigma;
+                for (size_t k = n_lidar; k < pts.size(); ++k)
+                {
+                    const float r = pts[k].norm();
+                    const float sr = (dh * dh + r * r) / dh * sa;
+                    pw[static_cast<long>(k)] = std::min(1.f, (sl * sl) / std::max(sr * sr, 1e-9f));
+                }
+            }
             if (R.map.walls.empty())
             {
                 // model-first init from the first scan's OBB (same as run_loop)
@@ -615,7 +731,7 @@ namespace
             }
             const auto seg = rc::wallseg::segment(pts, sp, rng);
             const Eigen::Matrix3f pcov = Eigen::Vector3f(0.05f * 0.05f, 0.05f * 0.05f, 0.03f * 0.03f).asDiagonal();
-            const auto fr = R.map.observe(seg, pts, Eigen::VectorXf{}, pred, pcov, static_cast<std::int64_t>(f) * 50);
+            const auto fr = R.map.observe(seg, pts, pw, pred, pcov, static_cast<std::int64_t>(f) * 50);
             R.births += fr.births; R.deaths += fr.deaths; R.rejected += fr.splice_rejected;
 
             RoomConcept::WindowSlot slot;
@@ -1906,9 +2022,29 @@ int main()
                     const float cl = point_to_poly(q, room);
                     if (cl > best_clear) { best_clear = cl; start = q; }
                 }
+            // FURNITURE, optional (WS_FURNITURE=1): boxes standing against the walls, which the
+            // LiDAR band cannot see through and the ceiling junction is far above. Structure is
+            // unchanged — the truth polygon is the same — so the score measures exactly whether the
+            // walls behind them were recovered.
+            Boxes furniture;
+            if (std::getenv("WS_FURNITURE") != nullptr)
+            {
+                const int nf = 2 + static_cast<int>(U(0.f, 3.99f));
+                for (int k = 0; k < nf; ++k)
+                {
+                    const int w = static_cast<int>(U(0.f, static_cast<float>(NW) - 0.01f));
+                    const float dep = U(0.35f, 0.75f), wid = U(0.7f, 2.0f);
+                    if (LEN[w] < wid + 1.2f) continue;
+                    const float sc = U(0.6f, LEN[w] - wid - 0.6f);
+                    const Eigen::Vector2f a0 = V[w] + T[w] * sc, a1 = V[w] + T[w] * (sc + wid) + N[w] * dep;
+                    furniture.push_back({a0.cwiseMin(a1), a0.cwiseMax(a1)});
+                }
+            }
             RunConfig cfg8;
             cfg8.n_rays = 480;
             cfg8.verbose = false;
+            cfg8.occluders = furniture;
+            cfg8.ceiling_line = std::getenv("WS_CEILING") != nullptr;
             std::mt19937 rrun(4242u + static_cast<unsigned>(r));
             auto Rr = run_explore(room, cfg8, rrun, 900, start);
             const Poly ew = to_world(Rr.poly.verts, Eigen::Vector3f(start.x(), start.y(), 0.f));
@@ -1937,8 +2073,8 @@ int main()
                 if (miss < 0.33f) ++found[f.kind];
                 fs += fmt(" %s:%.2f", kind_name[f.kind], miss);
             }
-            std::printf("    room %-3d %5.1f x %4.1f m %s feats %2zu  IoU %.3f  Hausdorff %.3f m  walls %2zu |%s\n",
-                        r, W, H, ell ? "L  " : "rect", feats.size(), iou_r, h_r, Rr.map.walls.size(), fs.c_str());
+            std::printf("    room %-3d %5.1f x %4.1f m %s feats %2zu furn %zu  IoU %.3f  Hausdorff %.3f m  walls %2zu |%s\n",
+                        r, W, H, ell ? "L  " : "rect", feats.size(), furniture.size(), iou_r, h_r, Rr.map.walls.size(), fs.c_str());
             std::printf("      truth[%d]:", r);
             for (const auto& v : room) std::printf(" (%.2f,%.2f)", v.x(), v.y());
             std::printf("\n      est[%d]:", r);
