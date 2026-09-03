@@ -40,6 +40,7 @@
 #include <charconv>
 #include <iomanip>
 #include <limits>
+#include <cstdio>
 #include <fstream>
 #include <locale>
 #include <string>
@@ -151,9 +152,20 @@ namespace rc::camcal
         [[nodiscard]] rc::mount::Accum::Solution solve() const { return acc_.solve(); }
 
         /// Sufficient statistics only. See the header note on why this is not the fitted values.
+        /// ★ ATOMIC: the evidence is written to a sibling temp file and RENAMED into place. A rename
+        ///   within one directory is atomic on POSIX, so a reader sees either the whole previous file
+        ///   or the whole new one, and a process killed mid-save leaves the previous evidence intact
+        ///   instead of a truncated file.
+        ///   MEASURED 2026-09-03: reading the file during an in-place rewrite returned a header with
+        ///   NO per-vertex blocks — which is exactly the shape the loader now (correctly) refuses, so
+        ///   the old behaviour could turn a mistimed `kill` into a pool that refuses to resume.
+        ///   ⚠ This protects against a kill and against a concurrent reader. It does NOT protect
+        ///     against a power cut: there is no fsync, so the rename may reach the disk first.
         bool save(const std::string& path) const
         {
-            std::ofstream f(path, std::ios::out | std::ios::trunc);
+            const std::string tmp = path + ".tmp";
+            {
+            std::ofstream f(tmp, std::ios::out | std::ios::trunc);
             if (not f.is_open()) return false;
             f.imbue(std::locale::classic());   // CLAUDE.md: never a comma decimal separator
             // ★ FULL precision. The default 6 significant figures silently truncates H, whose
@@ -201,6 +213,12 @@ namespace rc::camcal
                 for (int i = 0; i < 4; ++i) f << "V," << vtx << ",b," << i << ',' << v.b(i) << '\n';
                 for (int i = 0; i < 2; ++i) f << "V," << vtx << ",e," << i << ',' << v.e(i) << '\n';
             }
+            // The write is only now known to have succeeded. The previous version returned true
+            // unconditionally, so a full disk reported a saved pool it had not saved.
+            f.flush();
+            if (not f.good()) { f.close(); std::remove(tmp.c_str()); return false; }
+            }   // f closed here — the rename must not race the stream's own flush
+            if (std::rename(tmp.c_str(), path.c_str()) != 0) { std::remove(tmp.c_str()); return false; }
             return true;
         }
 
