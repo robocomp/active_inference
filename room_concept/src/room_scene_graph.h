@@ -143,6 +143,8 @@ private:
                              const Eigen::Matrix3f& covariance,
                              std::uint64_t timestamp_ms);
     void dsr_create_room_and_reparent(const rc::RoomConcept::UpdateResult& res);
+    float published_room_height_ = 0.f;   // what the room node currently says the ceiling is
+    int   ceiling_disagree_frames_ = 0;   // hysteresis before rewriting a shared attribute
     void dsr_update_affordance(const rc::RoomConcept::UpdateResult& res);
     // ── THE SECOND AFFORDANCE THIS AGENT PUBLISHES ──────────────────────────────────────────────
     // afford_calib: an Orient contract asking the robot to turn 120 degrees on the spot, offered

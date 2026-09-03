@@ -223,6 +223,9 @@ void SpecificWorker::initialize()
     // ── Wire RoomConcept run context ───────────────────────────────────────
     rc::RoomConcept::RunContext run_ctx;
     run_ctx.high_lidar_buffer = &lidar_ingestor_->buffer();
+    // The ceiling the LiDAR measured travels with the model, not through a second wire: the scene
+    // graph publishes it on the room node and the image-edge module projects the contour at it.
+    room_concept_.set_measured_ceiling(lidar_ingestor_->measured_ceiling_z_.load(std::memory_order_relaxed));
     run_ctx.velocity_buffer = &velocity_buffer_;
     run_ctx.odometry_buffer = &odometry_buffer_;
     run_ctx.imu_buffer      = &imu_buffer_;
@@ -1656,9 +1659,7 @@ void SpecificWorker::pump_image_edges()
         // contour implies, and a Manhattan estimator cannot see it.
         auto ic = image_edge_source_->config();
         ic.room_height = params.room_height;
-        float measured_ceiling = 0.f;
-        if (lidar_ingestor_)
-            measured_ceiling = lidar_ingestor_->measured_ceiling_z_.load(std::memory_order_relaxed);
+        const float measured_ceiling = room_concept_.measured_ceiling();
         if (measured_ceiling > 1.5f)
         {
             ic.room_height = measured_ceiling;

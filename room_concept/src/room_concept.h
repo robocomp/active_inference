@@ -1681,6 +1681,15 @@ private:
     std::vector<Eigen::Vector2f> derived_polygon_;   // the published polygon (map frame, CCW)
     bool projection_failed_logged_ = false;          // one warning per stretch of unclosed projections
     std::atomic<bool> map_ready_{false};
+    // THE CEILING THE LIDAR MEASURED (m, body frame; 0 = not measured yet). Set from the ingestor's
+    // startup/running ceiling check, which decides between a ring of ceiling returns and a wall-top
+    // ring by which shape the measured radius fits. Read by the scene graph, which publishes it on
+    // the room node, and by the image-edge module, which projects the wall-ceiling contour.
+    std::atomic<float> measured_ceiling_m_{0.f};
+public:
+    [[nodiscard]] float measured_ceiling() const noexcept { return measured_ceiling_m_.load(std::memory_order_relaxed); }
+    void set_measured_ceiling(float z) noexcept { measured_ceiling_m_.store(z, std::memory_order_relaxed); }
+private:
     bool wall_reanchored_ = false;
     std::vector<wallseg::WallSegment> last_wall_segments_;   // this frame's segments (viewer)
     wallmap::FrameResult last_wall_frame_;
