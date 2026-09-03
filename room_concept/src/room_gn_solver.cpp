@@ -726,7 +726,23 @@ namespace rc::gn
             WallPointFactor f(0, 3, a.pts, a.weights, inv_var, P.rfe_huber_delta, n_slot, a.pda);
             f.linearize(x, sys);
             const Eigen::Matrix2f block = sys.H.block<2, 2>(3, 3);
-            if (block.allFinite()) w->information += block;
+            if (not block.allFinite()) continue;
+            // Information-form fusion (#5): the slot's own optimum for this wall is the Gauss-Newton
+            // step from the linearisation, μ_slot = x_lin − H⁻¹ b, so H μ_slot = H x_lin − b. Fused
+            // with the carried (Λ, μ): Λ' = Λ + H, Λ' μ' = Λ μ + H x_lin − b. φ is unwrapped about
+            // the wall's current estimate before fusing and wrapped after.
+            const Eigen::Vector2f b_block = sys.b.segment<2>(3);
+            const Eigen::Vector2f x_lin(w->phi, w->d);
+            const Eigen::Vector2f mu_old(w->phi + wrap_pi(w->prior_mu.x() - w->phi), w->prior_mu.y());
+            const Eigen::Matrix2f lam_new = w->prior_info + block;
+            const Eigen::Vector2f rhs = w->prior_info * mu_old + block * x_lin - b_block;
+            if (lam_new.determinant() > 1e-12f and lam_new.allFinite())
+            {
+                const Eigen::Vector2f mu_new = lam_new.inverse() * rhs;
+                if (mu_new.allFinite()) w->prior_mu = Eigen::Vector2f(wrap_pi(mu_new.x()), mu_new.y());
+            }
+            w->prior_info = lam_new;
+            w->information += block;   // the gating / corner-sigma precision keeps growing as before
         }
     }
 
@@ -896,10 +912,12 @@ namespace rc::gn
                 const auto& w = in.walls->walls[k];
                 const int o = lay.wall_off[k];
                 if (o < 0) continue;
-                if (w.information.allFinite() and w.information.trace() > 0.f)
-                    fs.push_back(std::make_unique<WallPriorFactor>(o, w.phi, w.d, w.information));
+                // The prior pulls toward what the DROPPED slots said (w.prior_mu), not toward the
+                // wall's current estimate — the latter made carried information mere damping (#5).
+                if (w.prior_info.allFinite() and w.prior_info.trace() > 0.f)
+                    fs.push_back(std::make_unique<WallPriorFactor>(o, w.prior_mu.x(), w.prior_mu.y(), w.prior_info));
                 if (w.k >= 0 and w.manhattan_var > 0.f and lay.theta0 >= 0)
-                    fs.push_back(std::make_unique<RoomWallFactor>(o, lay.theta0, w.k, w.manhattan_var));
+                    fs.push_back(std::make_unique<RoomWallFactor>(o, lay.theta0, w.k, w.manhattan_var / std::max(in.walls->params.manhattan_gain, 1e-6f)));
             }
             if (lay.theta0 >= 0 and in.walls->theta0_information > 0.f)
                 fs.push_back(std::make_unique<Theta0PriorFactor>(lay.theta0, in.walls->theta0, in.walls->theta0_information));

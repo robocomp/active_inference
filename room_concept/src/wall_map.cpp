@@ -390,6 +390,7 @@ namespace rc::wallmap
         w.phi = wrap_pi(phi);
         w.d = d;
         w.information = info;
+        w.prior_mu = Eigen::Vector2f(w.phi, d);
         w.exist_lodds = exist_seed;
         w.last_seen_ms = ts;
         w.born_ms = ts;
@@ -2114,6 +2115,13 @@ namespace rc::wallmap
                     const Eigen::Vector2f r(wrap_pi(A.phi - B.phi), A.d - B.d);
                     const float c2 = chi2_of(r, *ca + *cb + sys_cov(params));
                     if (not (c2 <= params.merge_chi2)) continue;
+                    if (A.prior_info.trace() > 0.f or B.prior_info.trace() > 0.f)
+                    {
+                        float mphi = A.prior_mu.x(), md = A.prior_mu.y();
+                        Eigen::Matrix2f lb = B.prior_info;
+                        fuse(mphi, md, A.prior_info, B.prior_mu.x(), B.prior_mu.y(), lb);   // Λ_A += Λ_B, μ fused
+                        A.prior_mu = Eigen::Vector2f(mphi, md);
+                    }
                     fuse(A.phi, A.d, A.information, B.phi, B.d, B.information);
                     if (B.has_extent)
                     {
@@ -3034,6 +3042,8 @@ namespace rc::wallmap
             const float shift = linefit::tangent_of(w.phi).dot(c);
             xf(w.phi, w.d, w.information, w.has_extent ? &w.s_min : nullptr, w.has_extent ? &w.s_max : nullptr);
             w.bins_s0 -= shift;
+            if (w.prior_info.trace() > 0.f)
+                xf(w.prior_mu.x(), w.prior_mu.y(), w.prior_info, nullptr, nullptr);
         }
         for (auto& cd : candidates) xf(cd.phi, cd.d, cd.information, &cd.s_min, &cd.s_max);
         if (theta0_born) theta0 = wrap_pi(theta0 - rot);

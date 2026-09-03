@@ -176,6 +176,7 @@ namespace rc::wallmap
         // a candidate may lie and still count as structural (measured oblique junk sits 17° off).
         bool  manhattan_strict = true;
         float manhattan_gate_rad = 10.f * static_cast<float>(M_PI) / 180.f;
+        float manhattan_gain = 1.f;         // bench-only scale on the in-loop Manhattan factor (review #4 test)
         bool  debug_splice = false;         // diagnostic prints from try_splice (bench use)
         // ── GLOBAL re-derivation cadence (re_derive): the escape hatch from a wrong local topology
         // runs on a slow clock, or sooner when local jumps are visibly stuck (rejections pile up).
@@ -209,6 +210,16 @@ namespace rc::wallmap
         int   k = -1;                       // Manhattan class, −1 ⇒ no room↔wall factor
         float phi = 0.f, d = 0.f;           // map frame; n(φ) points INTO the room
         Eigen::Matrix2f information = Eigen::Matrix2f::Zero();   // carried (φ, d) precision
+        // THE PRIOR (review #5, 2026-09-03), in information form (Λ, μ): what the DROPPED slots
+        // said the wall is. Zero at birth — the birth-time `information` above is the candidate's
+        // line-fit precision from points still in the live window, and a prior built from it
+        // anchors the wall at its birth estimate (measured: joint-solve loss 0.03 → 39, IoU
+        // 0.969 → 0.889). `information` keeps its gating and corner-sigma roles; only prior_info
+        // enters the solver, and only from gn::absorb_wall_observations. Until now the prior was
+        // re-centred on the wall's current estimate every solve — damping, not a prior. Fused at
+        // merges and transformed at re-anchor like the wall itself.
+        Eigen::Matrix2f prior_info = Eigen::Matrix2f::Zero();
+        Eigen::Vector2f prior_mu = Eigen::Vector2f::Zero();
         float manhattan_var = 0.f;          // σ_ε² in force for this wall's room factor (0 ⇒ off)
         float room_factor_dF = 0.f;         // converged cost of that factor, nats (diagnostic)
         bool  has_extent = false;

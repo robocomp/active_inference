@@ -77,6 +77,7 @@ namespace
         envf("WS_KEEP",          p.order_keep_fraction);  // down-jump refund fraction (default 0.7)
         envf("WS_ADOPT_JUDGE",   p.adopt_judge);          // 0 incumbent (IoU margin + veto), 1 one energy
         envf("WS_ADOPT_REPAIR",  p.adopt_repair);         // repair self-crossing cycles before judging
+        envf("WS_MANHATTAN_GAIN", p.manhattan_gain);      // scale on the in-loop Manhattan factor (#4 test)
     }
 
     Poly l_room()      { return {{-4.f, -3.f}, {4.f, -3.f}, {4.f, 1.f}, {1.f, 1.f}, {1.f, 3.f}, {-4.f, 3.f}}; }

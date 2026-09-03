@@ -13,8 +13,8 @@ Status column tracks what has been acted on. Findings are ranked most severe fir
 | 1 | BLOCKER | fixed 09-02 (host id copied; spur host on a value copy) — bench bit-exact | use-after-free of `E` / `W` in `try_splice` / `try_spur_wraps` |
 | 2 | BLOCKER | fixed 09-02 (collect ids, splice last-born first) — bit-exact; ascending order shifts seed 424242 0.942→0.821, see #18 | out-of-range index in the death sweep after `heal_order` |
 | 3 | MAJOR | fixed 09-02 (agent runs re_derive on the bench cadence, cadence moved to WallMap::Params) | the live agent never calls `re_derive` — the bench grades a bench-only algorithm |
-| 4 | MAJOR | open | the annealed Manhattan factor is inert by construction |
-| 5 | MAJOR | open | carried wall information is damping, not a prior (re-centred every solve) |
+| 4 | MAJOR | measured 09-03, NOT inert: ×0.01 tilts walls 8-13°, ×100 breaks nothing — the factor is what holds in-loop tilt to 1-3°; no change | the annealed Manhattan factor is inert by construction |
+| 5 | MAJOR | fixed 09-03 (information-form prior: Λ, μ from dropped slots only; birth precision kept for gating) — joint solve 0.031→0.023, pose RMSE down on all seeds, 39/40 checks | carried wall information is damping, not a prior (re-centred every solve) |
 | 6 | MAJOR | open | two θ₀ estimators; published polygon rotated w.r.t. the re-anchored frame |
 | 7 | MAJOR | fixed 09-02 (immediate repair on the copy, loop to closure; publisher keeps last good, never raw) — bench unchanged | `manhattan_polygon()` repair inert on the copy; publisher flip-flops projected↔raw |
 | 8 | MAJOR | fixed 09-02; strict net-of-seed purse landed with #10 stage 1 (walls inherit their candidate's support, so the real spur still pays) | spur-wrap purse paid with seeded (untested) bins |
@@ -24,7 +24,7 @@ Status column tracks what has been acted on. Findings are ranked most severe fir
 | 12 | MINOR | open | ≥40 unflagged literals in the body; key params not loadable |
 | 13 | MINOR | open | θ₀ M-step weights by `points_seen`, not angular information |
 | 14 | MINOR | open | `enforce_manhattan` public + desyncs `bins_s0`; ~2 MB grid copied per solve |
-| 15 | MINOR | open | `try_down_jumps` O(N²)·bbox; grid fixed ±15 m around the FIRST pose |
+| 15 | MINOR | grid now re-anchored with the map 09-03 (was never transformed; live-only bug, 0.936→0.378 free-inside without it) | `try_down_jumps` O(N²)·bbox; grid fixed ±15 m around the FIRST pose |
 | 16 | MINOR | open | bench PASS is checked on the BEST seed; min 0.942 < 0.95 bar hidden |
 | 17 | NIT | open | `seg_to_wall` indices stale within the same `observe()` (display only) |
 | 18 | MINOR | open (found by fix #2) | the death sweep is ORDER-DEPENDENT: which wall heal collapses depends on which death was spliced first |
@@ -284,3 +284,17 @@ under the incumbent and 0.940/0.793/0.919 under the energy, with hundreds of bir
 the single-step truth likes and the map cannot live with. The single-step oracle is not the long-run
 criterion; the 0.02 margin and the veto are hysteresis against exactly this. Both switches stay in Params
 for the bench. Item #3's adoption criterion therefore stands as it was.
+
+## Record for #5 (information-form wall prior) and #4 (Manhattan factor), 2026-09-03
+#5: `WallLandmark::prior_info`/`prior_mu` accumulate what the dropped slots said (Λ' = Λ + H, Λ'μ' = Λμ +
+H·x_lin − b, fused at merges, transformed at re-anchor); `WallPriorFactor` pulls toward μ instead of the
+wall's current estimate. First attempt seeded the prior with the birth-time line-fit precision (points still
+in the window): joint-solve loss 0.03 → 39, IoU 0.969 → 0.889 — double counting; the prior now starts at
+zero and `information` keeps its gating / corner-sigma role. Result: joint solve 0.031 → 0.023 in 3 it (7),
+pose RMSE 0.028/0.023/0.057 → 0.022/0.011/0.015, IoU 0.951/0.969/0.943 → 0.946/0.889/0.969, Hausdorff
+0.73/0.35/0.30 → 0.30/2.43/0.20; 39/40 checks (Hausdorff ≤ 0.20 and IoU ≥ 0.95 both PASS on the best seed
+for the first time). Seed 1001's 213 deaths are all zero-point jogs from 34 adoptions — adoption churn,
+the next thing to look at, not the prior.
+#4: bench-only `manhattan_gain` (WS_MANHATTAN_GAIN): ×1 tilt 8.4°/2.3°/2.7° (before projection), ×0.01
+2.6°/8.5°/8.5° with IoU 0.935/0.951/0.932, ×100 2.3°/1.1°/1.1° with 0.956/0.934/0.960. The factor is not
+inert; the review's stiffness comparison ignored that point data pull mostly along d. No change.
