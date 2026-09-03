@@ -1795,6 +1795,128 @@ int main()
     }
     }   // end WS_NO7 skip
 
+    // ═══ 8. RANDOM ROOMS: wall columns, alcoves, corner columns, spurs ══════════════════════════
+    // A separate population test (WS_ROOMS=n, default off so the standard bench stays at ~12 s).
+    // Each room is a rectangle carrying a random set of the four feature kinds the model claims to
+    // handle, all Manhattan and non-overlapping by construction. Every room is graded twice: the
+    // whole layout (IoU, Hausdorff) and each feature on its own (the mis-explained fraction of its
+    // area, the same measure and the same 0.33 bar as the real apartamento's features).
+    if (const char* rooms_env = std::getenv("WS_ROOMS"))
+    {
+        int n_rooms = 50;
+        { int v = 0; if (std::from_chars(rooms_env, rooms_env + std::strlen(rooms_env), v).ec == std::errc{} and v > 0) n_rooms = v; }
+        std::printf("\n8. %d random rooms (wall column, alcove, corner column, spur)\n", n_rooms);
+        struct Feat { int kind; Eigen::Vector2f lo, hi; };   // 0 column, 1 alcove, 2 corner, 3 spur
+        static const char* kind_name[4] = {"wall column", "alcove", "corner column", "spur"};
+        int found[4] = {0, 0, 0, 0}, total[4] = {0, 0, 0, 0};
+        std::vector<float> ious, hauss;
+        for (int r = 0; r < n_rooms; ++r)
+        {
+            std::mt19937 rg(9000u + static_cast<unsigned>(r));
+            const auto U = [&](float a, float b) { return std::uniform_real_distribution<float>(a, b)(rg); };
+            const float W = U(6.f, 11.f), H = U(5.f, 9.f);
+            const Eigen::Vector2f V[4] = {{0.f, 0.f}, {W, 0.f}, {W, H}, {0.f, H}};
+            const Eigen::Vector2f T[4] = {{1.f, 0.f}, {0.f, 1.f}, {-1.f, 0.f}, {0.f, -1.f}};
+            const Eigen::Vector2f N[4] = {{0.f, 1.f}, {-1.f, 0.f}, {0.f, -1.f}, {1.f, 0.f}};
+            const float LEN[4] = {W, H, W, H};
+            float corner[4] = {0.f, 0.f, 0.f, 0.f};
+            std::vector<Feat> feats;
+            for (int k = 0; k < 4; ++k)
+                if (U(0.f, 1.f) < 0.35f) corner[k] = U(0.3f, 0.8f);
+            Poly room;
+            for (int w = 0; w < 4; ++w)
+            {
+                const int wp = (w + 3) % 4;
+                if (corner[w] > 0.f)
+                {
+                    const float c = corner[w];
+                    const Eigen::Vector2f p0 = V[w] - T[wp] * c, p1 = p0 + T[w] * c, p2 = V[w] + T[w] * c;
+                    room.push_back(p0); room.push_back(p1); room.push_back(p2);
+                    feats.push_back({2, p0.cwiseMin(p2), p0.cwiseMax(p2)});
+                }
+                else room.push_back(V[w]);
+                // Features along wall w, left to right, never overlapping and clear of both corners.
+                float s = std::max(corner[w], 0.f) + 0.6f;
+                const float s_end = LEN[w] - std::max(corner[(w + 1) % 4], 0.f) - 0.6f;
+                while (s < s_end - 0.5f)
+                {
+                    const float roll = U(0.f, 1.f);
+                    if (roll > 0.55f) { s += U(0.8f, 2.5f); continue; }   // a plain stretch of wall
+                    int kind; float wid, dep;
+                    if (roll < 0.20f)      { kind = 0; wid = U(0.30f, 0.80f); dep = U(0.20f, 0.50f); }
+                    else if (roll < 0.42f) { kind = 1; wid = U(0.50f, 1.50f); dep = U(0.30f, 0.80f); }
+                    else                   { kind = 3; wid = U(0.10f, 0.16f); dep = U(1.00f, 2.60f); }
+                    dep = std::min(dep, 0.30f * std::min(W, H));
+                    if (s + wid > s_end) break;
+                    const float sg = (kind == 1) ? -1.f : 1.f;   // an alcove steps out, the rest step in
+                    const Eigen::Vector2f a0 = V[w] + T[w] * s, a1 = V[w] + T[w] * (s + wid);
+                    const Eigen::Vector2f b0 = a0 + N[w] * (sg * dep), b1 = a1 + N[w] * (sg * dep);
+                    room.push_back(a0); room.push_back(b0); room.push_back(b1); room.push_back(a1);
+                    feats.push_back({kind, a0.cwiseMin(b1), a0.cwiseMax(b1)});
+                    s += wid + U(0.5f, 1.5f);
+                }
+            }
+            // A start pose well inside: the deepest interior point of a coarse scan of the room.
+            Eigen::Vector2f start(W * 0.5f, H * 0.5f); float best_clear = -1.f;
+            for (float x = 0.5f; x < W; x += 0.25f)
+                for (float y = 0.5f; y < H; y += 0.25f)
+                {
+                    const Eigen::Vector2f q(x, y);
+                    if (not rc::corner_visibility::point_in_polygon(q, room)) continue;
+                    const float cl = point_to_poly(q, room);
+                    if (cl > best_clear) { best_clear = cl; start = q; }
+                }
+            RunConfig cfg8;
+            cfg8.n_rays = 480;
+            cfg8.verbose = false;
+            std::mt19937 rrun(4242u + static_cast<unsigned>(r));
+            auto Rr = run_explore(room, cfg8, rrun, 900, start);
+            const Poly ew = to_world(Rr.poly.verts, Eigen::Vector3f(start.x(), start.y(), 0.f));
+            const float iou_r = Rr.poly.closed ? polygon_iou(ew, room) : 0.f;
+            const float h_r = Rr.poly.closed ? hausdorff(ew, room) : 1e9f;
+            ious.push_back(iou_r); hauss.push_back(h_r);
+            std::string fs;
+            for (const auto& f : feats)
+            {
+                ++total[f.kind];
+                float miss = 1.f;
+                if (Rr.poly.closed)
+                {
+                    const float pad = 0.05f, step = 0.02f;
+                    int bad = 0;
+                    for (float x = f.lo.x() - pad; x <= f.hi.x() + pad; x += step)
+                        for (float y = f.lo.y() - pad; y <= f.hi.y() + pad; y += step)
+                        {
+                            const Eigen::Vector2f q(x, y);
+                            if (rc::corner_visibility::point_in_polygon(q, room)
+                                != rc::corner_visibility::point_in_polygon(q, ew)) ++bad;
+                        }
+                    const float box = std::max((f.hi.x() - f.lo.x()) * (f.hi.y() - f.lo.y()), 1e-6f);
+                    miss = static_cast<float>(bad) * step * step / box;
+                }
+                if (miss < 0.33f) ++found[f.kind];
+                fs += fmt(" %s:%.2f", kind_name[f.kind], miss);
+            }
+            std::printf("    room %-3d %5.1f x %4.1f m  feats %2zu  IoU %.3f  Hausdorff %.3f m  walls %2zu |%s\n",
+                        r, W, H, feats.size(), iou_r, h_r, Rr.map.walls.size(), fs.c_str());
+            std::printf("      truth[%d]:", r);
+            for (const auto& v : room) std::printf(" (%.2f,%.2f)", v.x(), v.y());
+            std::printf("\n      est[%d]:", r);
+            for (const auto& v : ew) std::printf(" (%.2f,%.2f)", v.x(), v.y());
+            std::printf("\n");
+        }
+        std::sort(ious.begin(), ious.end());
+        std::sort(hauss.begin(), hauss.end());
+        float mean = 0.f; for (float v : ious) mean += v; mean /= static_cast<float>(std::max<size_t>(1, ious.size()));
+        std::printf("    %zu rooms: IoU mean %.3f median %.3f min %.3f max %.3f | Hausdorff median %.3f m\n",
+                    ious.size(), mean, ious[ious.size() / 2], ious.front(), ious.back(), hauss[hauss.size() / 2]);
+        for (int k = 0; k < 4; ++k)
+            if (total[k] > 0)
+                std::printf("    %-14s found %3d of %3d (%.0f%%)\n", kind_name[k], found[k], total[k],
+                            100.f * static_cast<float>(found[k]) / static_cast<float>(total[k]));
+        check("random rooms: median IoU >= 0.90", ious[ious.size() / 2] >= 0.90f, fmt("median %.3f", ious[ious.size() / 2]));
+    }
+
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
 }
