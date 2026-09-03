@@ -381,3 +381,35 @@ IoU improves on every seed and the offset that started this thread is gone, whic
 was the decorations. Two features improve sharply; the LEFT PILLAR gets worse, and it is the one that sits
 against a corner — its side-face band catches the perpendicular wall's returns. Features at a corner remain
 level 2's known gap (a corner step is +2 edges and is not offered).
+
+## What the local fits were losing, and what fixing them bought (2026-09-03)
+Three defects in the level-2 fit, each found by asking what a face is allowed to look at:
+1. **A band that reached the host wall.** The front face collected returns within 3 cells (24 cm) of its
+   estimate, so a 20 cm deep column was measured against the wall's own returns at depth 0 and read
+   shallower than it is. Bands are now `min(3 cells, 0.4 x the dimension being measured)`, so a face can
+   never see the structure it is measured against.
+2. **No incidence gate.** A beam nearly parallel to a face has its range error projected ALONG the face;
+   it cannot place it. Returns with |n·d| < 0.2 are dropped.
+3. **One pass.** The fit now runs twice — once wide to find the faces, once at one cell (about 4σ) to
+   measure them — which removes what the wide band admitted.
+And two guards were wrong rather than imprecise: the minimum feature size was two cells (16 cm) applied
+AFTER the fit, so a spur measured correctly at 10-16 cm was thrown away; it is now physical, 7 cm. The
+residual-cell clearance was tried at 1.0 cell and reverted to 1.5: at 1.0 a clean wall's own surface noise
+forms clusters and three synthetic rooms grew spurious steps (notch Hausdorff 0.020 -> 0.141 m).
+**Measured on 50 random rooms, identical population, the only difference being the fit:**
+| | cell box only | fitted |
+|---|---|---|
+| wall column | 35 of 138 (25%) | 73 of 138 (53%) |
+| alcove | 78 of 155 (50%) | 109 of 155 (70%) |
+| corner column | 36 of 74 (49%) | 44 of 74 (59%) |
+| spur | 9 of 100 (9%) | 12 of 100 (12%) |
+| IoU mean / median | 0.901 / 0.936 | 0.910 / 0.946 |
+Apartamento, same seeds: IoU 0.953 / 0.898 / 0.978 -> 0.955 / 0.902 / 0.980, and the left pillar goes from
+0.48 / 0.53 to 0.17 / 0.20 mis-explained on the two seeds where it is not the graded one.
+**A caution about the earlier spur headline.** The 2% -> 12% jump between the two population runs is NOT
+attributable to the algorithm: the generator changed in the same step (L-shaped bases, and a reach cap that
+replaced the old depth limit, so spurs are deeper). On identical rooms the 7 cm size floor is worth 2
+points of spur rate and nothing else. Hausdorff median also rose with the fit (0.783 -> 1.033 m): more
+features are found, and a found-but-mis-sized feature puts a vertex where none was before.
+**L-shaped rooms are the harder half**: 19 of the 50 rooms have a reflex corner and average 0.859 IoU
+against 0.942 for the 31 rectangles.
