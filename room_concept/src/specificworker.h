@@ -349,9 +349,18 @@ class SpecificWorker : public GenericWorker
     /// ⚠ Reads the RT chain with timestamp 0 — main thread only (CLAUDE.md); both callers are in
     ///   compute().
     void open_pair_log(std::ofstream& csv, const std::string& cam, const rc::CameraIngestor& ing);
+    /// Push an accumulated mount correction (prior-sigma units) onto a camera, in radians/metres.
+    void push_mount_correction(rc::CameraIngestor& ing, const Eigen::Vector4d& applied,
+                               const std::string& cam, const char* why);
+    /// Feed a pooled mount solve back into that camera's extrinsic. Refuses an unmarginalised
+    /// solve; see the definition for why that refusal is the safety argument rather than a limit.
+    void apply_mount_solve(rc::camcal::Estimator& pool, rc::CameraIngestor& ing,
+                           const rc::mount::Accum::Solution& sol, const std::string& cam);
+    bool mount_apply_refused_logged_ = false;
     static void write_pair_row(std::ofstream& csv, const std::string& cam, std::int64_t ts,
                                const rc::mount::PairObs& pr, bool ceiling, float angle_deg,
-                               float assoc_chi2, int n_rivals, float runnerup_chi2);
+                               float assoc_chi2, int n_rivals, float runnerup_chi2,
+                               const Eigen::Vector3f& corr);
 
     double gt_sum_diff_c_ = 0, gt_sum_diff_s_ = 0;   ///< circular accumulators for est - gt
     double gt_sum_sum_c_  = 0, gt_sum_sum_s_  = 0;   ///< and for est + gt

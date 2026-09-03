@@ -136,6 +136,17 @@ namespace rc::wallmap
         // needed. Without this the rectangle is quantised to the 8 cm cell and padded half a cell
         // beyond it: measured, a 0.60 x 0.38 m pillar came out 0.88 x 0.53.
         bool  level2_fit = true;
+        // The smallest feature level 2 will keep, in METRES rather than cells. It used to be two
+        // cells (16 cm) applied AFTER the fit, which threw away every spur the fit had just measured
+        // correctly at 10-16 cm — the population test found 2 spurs in 100. The floor is physical:
+        // nothing thinner than the thinnest wall the model represents.
+        float level2_min_m = 0.07f;
+        // How far a residual cell must lie from every published edge before it counts. Measured at
+        // 1.0 and 1.5 cells: 1.0 lets more of a shallow feature through but also lets a clean wall's
+        // own surface noise form clusters — three synthetic rooms grew spurious steps (notch
+        // Hausdorff 0.020 -> 0.141 m). 1.5 stands; the size floor above is what unlocked the small
+        // features, not the clearance.
+        float level2_clear_cells = 1.5f;
         // ── FORWARD-MODEL REFEREE (Thrun 2003, "Learning occupancy grid maps with forward sensor
         // models"; built 2026-09-03 as a REFEREE, deciding nothing yet). Every stored beam is
         // scored against a polygon by the likelihood of its measured range given the range the

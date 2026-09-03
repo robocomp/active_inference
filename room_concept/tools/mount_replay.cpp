@@ -648,6 +648,89 @@ Camera make_camera(const std::string& name, const Eigen::Vector3f& cam_pos,
     return cam;
 }
 
+/// ── THE CLOSED LOOP, SIMULATED ──────────────────────────────────────────────────────────────────
+/// A feedback path into a perception input has to be shown not to run away before it is switched on
+/// in a robot. This drives the real loop: rows are MEASURED against the mount as it currently is,
+/// the pooled solve is applied through Accum::apply_correction, and the next batch is measured
+/// against the mount that results. Two properties are checked, and they are the two ways such a
+/// loop fails.
+///   1. an INFORMED axis converges to the truth and then stays there (no ratchet on repetition)
+///   2. an UNINFORMED axis decays back to the graph value instead of wandering
+int run_loop()
+{
+    std::printf("\nclosed-loop selftest — the feedback path, driven for 12 cycles\n\n");
+    int failures = 0;
+    const Eigen::Vector3f lidar(0.f, 0.f, 1.075f);
+    const double truth_deg = 1.0;                       // the mount really is 1 degree out in yaw
+
+    Camera base = make_camera("zed", Eigen::Vector3f(0.18f, 0.09f, 0.945f), lidar, 23, 20, false);
+    const Eigen::Matrix3f R_nominal = base.ctx.cam_R_robot;
+    const Eigen::Vector3f t_nominal = base.ctx.cam_t_robot;
+
+    rc::mount::Accum acc;
+    acc.offset_sigma_px = 5.3;
+    Eigen::Vector3f corr = Eigen::Vector3f::Zero();     // pitch, height, yaw — what the agent applied
+    double last_total = 0.0, max_step_after_settle = 0.0;
+    for (int cycle = 0; cycle < 12; ++cycle)
+    {
+        // The mount as it now is: nominal, plus what the loop has applied so far.
+        Eigen::Matrix3f R = R_nominal; Eigen::Vector3f t = t_nominal;
+        inject_camera(Axis::Yaw, corr.z(), R, t);
+        // The rows the robot would see: the TRUE mount produced the image, the current mount predicts it.
+        Eigen::Matrix3f R_true = R_nominal; Eigen::Vector3f t_true = t_nominal;
+        inject_camera(Axis::Yaw, static_cast<float>(truth_deg / kRad2Deg), R_true, t_true);
+        for (const Row& r : base.rows)
+        {
+            const rc::mount::PairObs truth = rc::mount::make_pair_from(
+                r.vertex, r.assoc_prob, r.p_robot, r.uv_image, r.cov, base.ctx.cam, R_true, t_true,
+                base.ctx.sigma_pitch, base.ctx.sigma_height, base.ctx.sigma_yaw);
+            if (not truth.ok) continue;
+            // uv_image as the true mount would have placed it, predicted by the mount we have.
+            const rc::mount::PairObs o = rc::mount::make_pair_from(
+                r.vertex, r.assoc_prob, r.p_robot, truth.uv_lidar, r.cov, base.ctx.cam, R, t,
+                base.ctx.sigma_pitch, base.ctx.sigma_height, base.ctx.sigma_yaw);
+            if (o.ok) acc.add(o);
+        }
+        const auto sol = acc.solve();
+        if (not sol.ok) { std::printf("  cycle %2d: solve failed\n", cycle); ++failures; break; }
+        Eigen::Vector4d dp = -sol.p; dp(3) = 0.0;      // see Accum::applied on the sign
+        acc.apply_correction(dp);
+        corr.z() += static_cast<float>(dp(2)) * base.ctx.sigma_yaw;
+        const double total = corr.z() * kRad2Deg;
+        if (cycle >= 4) max_step_after_settle = std::max(max_step_after_settle, std::abs(total - last_total));
+        last_total = total;
+        if (cycle < 3 or cycle == 11)
+            std::printf("  cycle %2d  applied total %+7.4f deg   remaining estimate %+7.4f deg\n",
+                        cycle, total, -dp(2) * base.ctx.sigma_yaw * kRad2Deg);
+    }
+    const double err = std::abs(last_total - truth_deg);
+    std::printf("  %-58s %s   total %+.4f deg vs a truth of %+.4f\n",
+                "informed axis converges to the truth", (err < 0.06) ? "PASS" : "FAIL", last_total, truth_deg);
+    if (err >= 0.06) ++failures;
+    std::printf("  %-58s %s   largest late step %.5f deg\n",
+                "and then STAYS — no ratchet on repetition",
+                (max_step_after_settle < 0.02) ? "PASS" : "FAIL", max_step_after_settle);
+    if (max_step_after_settle >= 0.02) ++failures;
+
+    // An axis with no information at all: height, on rows whose geometry cannot see it, must decay.
+    rc::mount::Accum idle;
+    idle.offset_sigma_px = 5.3;
+    idle.applied = Eigen::Vector4d(0.0, 3.0, 0.0, 0.0);   // as if 3 prior-sigmas had been applied
+    double h = 3.0;
+    for (int cycle = 0; cycle < 12; ++cycle)
+    {
+        const auto sol = idle.solve(0);
+        if (not sol.ok) break;
+        Eigen::Vector4d dp = -sol.p; dp(3) = 0.0;
+        idle.apply_correction(dp);
+        h = idle.applied(1);
+    }
+    std::printf("  %-58s %s   3.000 -> %.4f prior sigmas\n",
+                "uninformed axis DECAYS to the graph value", (std::abs(h) < 0.05) ? "PASS" : "FAIL", h);
+    if (std::abs(h) >= 0.05) ++failures;
+    return failures;
+}
+
 int run()
 {
     std::printf("mount_replay selftest — a drive whose truth is known\n\n");
@@ -748,6 +831,7 @@ int run()
     solve_leg(blind, L2, 0.0, false, refused, why);
     check("a LiDAR leg REFUSES when the sidecar has no lidar origin", refused, why.substr(0, 60));
 
+    failures += run_loop();
     std::printf("\n%s\n", failures == 0 ? "ALL PASS" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

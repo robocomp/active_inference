@@ -856,6 +856,61 @@ bool SpecificWorker::maybe_publish_corrected_pose()
 // R -> 1 is constant, R -> 0 is uniformly spread. Reported once, on the first few hundred samples.
 // ── STAGE 2: pair each RGB triple point with the LiDAR corner of the SAME polygon vertex ─────────
 // See mount_lidar_pair.h for why the residual has no pose in it and why that is the point.
+void SpecificWorker::push_mount_correction(rc::CameraIngestor &ing, const Eigen::Vector4d &applied,
+                                           const std::string &cam, const char *why)
+{
+    // Prior-sigma units -> radians and metres, on the camera's own axes (see set_mount_correction).
+    const float pitch  = static_cast<float>(applied(0)) * params.IMAGE_EDGE_MOUNT_PITCH_SIGMA;
+    const float height = static_cast<float>(applied(1)) * params.IMAGE_EDGE_MOUNT_HEIGHT_SIGMA;
+    const float yaw    = static_cast<float>(applied(2)) * params.IMAGE_EDGE_MOUNT_YAW_SIGMA;
+    if (std::abs(pitch) + std::abs(height) + std::abs(yaw) <= 0.f) return;
+    ing.set_mount_correction(pitch, height, yaw);
+    qInfo().nospace().noquote()
+        << "[camcal] " << QString::fromStdString(cam) << " mount correction " << why << ": pitch "
+        << QString::number(pitch * 180.0 / M_PI, 'f', 4) << " deg, height "
+        << QString::number(height, 'f', 4) << " m, yaw "
+        << QString::number(yaw * 180.0 / M_PI, 'f', 4) << " deg  (total against the graph extrinsic)";
+}
+
+/// Feed the pooled solve back into the camera mount.
+///
+/// ★ THERE IS NO GATE HERE, AND THAT IS THE DESIGN. The increment applied is the POSTERIOR MEAN,
+///   which is already shrunk toward the prior by exactly how much the data informs the axis: the
+///   zed's yaw is 98% data and applies nearly all of itself, the ricoh's is 45% and applies 45%,
+///   and an axis the data says nothing about applies nothing. A threshold on "informed enough"
+///   would be a second, cruder copy of a judgement the posterior has already made.
+/// ★ Accum::apply_correction moves the evidence AND the prior's anchor together, so the total is
+///   always the posterior mean of the error relative to the graph extrinsic and cannot ratchet.
+/// ⚠ It REFUSES unless the solve was marginalised. An estimate taken with the per-vertex nuisance
+///   off has absorbed each corner's own detection bias, and writing that into an extrinsic would
+///   put a detector's error into the robot's geometry — silently, and with a tightening sigma to
+///   go with it. That refusal, not a magnitude limit, is what makes this safe to leave running.
+void SpecificWorker::apply_mount_solve(rc::camcal::Estimator &pool, rc::CameraIngestor &ing,
+                                       const rc::mount::Accum::Solution &sol, const std::string &cam)
+{
+    if (not params.IMAGE_EDGE_MOUNT_APPLY or not sol.ok) return;
+    if (not sol.marginalised)
+    {
+        if (not mount_apply_refused_logged_)
+        {
+            mount_apply_refused_logged_ = true;
+            qWarning() << "[camcal] mountApply is on but the solve is NOT marginalised — set"
+                       << "ImageEdge.mountVertexOffsetSigmaPx > 0, or delete evidence that carries"
+                       << "no per-vertex partials. Refusing to write an unmarginalised estimate"
+                       << "into the extrinsic.";
+        }
+        return;
+    }
+    // ⚠ THE SIGN. `Solution::p` is `-x`, and every place that reports it negates it again, so the
+    //   correction that cancels the reported error is `-p` and not `p`. Applying `+p` runs the loop
+    //   away linearly instead of converging (measured: -53 degrees in 12 cycles on a 1 degree truth).
+    Eigen::Vector4d dp = -sol.p;
+    dp(3) = 0.0;                       // the dt column is not a mount parameter and has no observation
+    if (not dp.allFinite() or dp.isZero()) return;
+    pool.apply_correction(dp);         // evidence first: the ingestor must never lead the evidence
+    push_mount_correction(ing, pool.applied(), cam, "applied");
+}
+
 void SpecificWorker::open_pair_log(std::ofstream &csv, const std::string &cam,
                                    const rc::CameraIngestor &ing)
 {
@@ -898,6 +953,11 @@ void SpecificWorker::open_pair_log(std::ofstream &csv, const std::string &cam,
         // sidecar's mount) an extrinsic injection is a replay of this file rather than another
         // 200 m of driving (VALIDATION_THREE_DEVICE_CORNERS §2b, arm 7).
            "px_robot,py_robot,pz_robot,"
+        // The self-calibration correction in force WHEN THIS ROW WAS WRITTEN. With mountApply on the
+        // mount moves during a run, so the sidecar's single extrinsic describes only the moment the
+        // file opened; a replay that recomputed uv_lidar from it would be reconstructing a mount the
+        // later rows were never measured against. Per row, because that is where the truth is.
+           "corr_pitch,corr_height,corr_yaw,"
         // The LIDAR HALF of the covariance, on its own. The other half (the image corner's) is the
         // remainder. A replay needs the split because the LiDAR half is the part that moves with the
         // mount: with it the injected weighting is rebuilt exactly instead of held fixed and
@@ -939,7 +999,8 @@ void SpecificWorker::open_pair_log(std::ofstream &csv, const std::string &cam,
 
 void SpecificWorker::write_pair_row(std::ofstream &csv, const std::string &cam, std::int64_t ts,
                                     const rc::mount::PairObs &pr, bool ceiling, float angle_deg,
-                                    float assoc_chi2, int n_rivals, float runnerup_chi2)
+                                    float assoc_chi2, int n_rivals, float runnerup_chi2,
+                                    const Eigen::Vector3f &corr)
 {
     if (not csv.is_open()) return;
     csv << ts << ',' << cam << ',' << pr.vertex << ',' << (ceiling ? 1 : 0) << ','
@@ -956,6 +1017,7 @@ void SpecificWorker::write_pair_row(std::ofstream &csv, const std::string &cam, 
         // sentinel would put a number into an average that means "no rival".
         << (n_rivals > 0 ? runnerup_chi2 : -1.f) << ','
         << pr.p_robot.x() << ',' << pr.p_robot.y() << ',' << pr.p_robot.z() << ','
+        << corr.x() << ',' << corr.y() << ',' << corr.z() << ','
         << pr.cov_lidar(0, 0) << ',' << pr.cov_lidar(0, 1) << ',' << pr.cov_lidar(1, 1) << '\n';
 }
 
@@ -992,6 +1054,10 @@ void SpecificWorker::mount_pair_update(const rc::ImageEdgeObs &obs,
             qInfo().nospace() << "[camcal] resumed from " << QString::fromStdString(path)
                               << " (" << k << " pairs, camera "
                               << QString::fromStdString(params.IMAGE_EDGE_CAMERA) << ")";
+        // A correction restored from disk must reach the mount BEFORE the first frame is measured
+        // against it, or this session's first window is referenced to an extrinsic the evidence
+        // does not describe.
+        push_mount_correction(*camera_ingestor_, mp_pool_.applied(), params.IMAGE_EDGE_CAMERA, "resumed");
     }
 
     for (const auto &tp : obs.triple_points)
@@ -1035,7 +1101,8 @@ void SpecificWorker::mount_pair_update(const rc::ImageEdgeObs &obs,
         if (not mp_csv_.is_open()) open_pair_log(mp_csv_, params.IMAGE_EDGE_CAMERA, *camera_ingestor_);
         write_pair_row(mp_csv_, params.IMAGE_EDGE_CAMERA, timestamp_ms, pr,
                        tp.from == rc::ContourClass::WallCeiling,
-                       it->angle_deg, it->assoc_chi2_val, it->n_rivals, it->runnerup_chi2);
+                       it->angle_deg, it->assoc_chi2_val, it->n_rivals, it->runnerup_chi2,
+                       camera_ingestor_->mount_correction());
     }
 
     if (timestamp_ms - mp_win_start_ms_ < 5000) return;
@@ -1044,6 +1111,7 @@ void SpecificWorker::mount_pair_update(const rc::ImageEdgeObs &obs,
 
     const auto win  = mp_win_.solve();
     const auto pool = mp_pool_.solve();
+    apply_mount_solve(mp_pool_, *camera_ingestor_, pool, params.IMAGE_EDGE_CAMERA);
     mp_pool_.save(mp_pool_.path());   // per (robot, camera); a kill -9 costs at most one window
     if (viewer_ and pool.ok)
     {
@@ -1452,10 +1520,12 @@ void SpecificWorker::pump_calib_channels()
             // different notions of uncertainty side by side.
             ch.calib.set_vertex_offset_sigma_px(params.IMAGE_EDGE_MOUNT_VERTEX_OFFSET_SIGMA_PX);
             const std::string path = ch.calib.path();
-            if (const std::size_t k = ch.calib.load(path); k > 0)
+            const std::size_t k_aux = ch.calib.load(path);
+            push_mount_correction(*ch.ingestor, ch.calib.applied(), ch.name, "resumed");
+            if (k_aux > 0)
                 qInfo().nospace() << "[camcal] " << QString::fromStdString(ch.name)
                                   << " resumed from " << QString::fromStdString(path)
-                                  << " (" << k << " pairs)";
+                                  << " (" << k_aux << " pairs)";
         }
 
         // ── This channel's own column in the Calib window ────────────────────────────────────────
@@ -1529,7 +1599,8 @@ void SpecificWorker::pump_calib_channels()
             if (not ch.csv.is_open()) open_pair_log(ch.csv, ch.name, *ch.ingestor);
             write_pair_row(ch.csv, ch.name, static_cast<std::int64_t>(frame.stamp), pr,
                            tp.from == rc::ContourClass::WallCeiling,
-                           it->angle_deg, it->assoc_chi2_val, it->n_rivals, it->runnerup_chi2);
+                           it->angle_deg, it->assoc_chi2_val, it->n_rivals, it->runnerup_chi2,
+                           ch.ingestor->mount_correction());
             // Per ROW, not per frame: see the note on the driving camera's call — the local
             // pixel-to-angle scale varies across a pinhole's field, and this channel IS the pinhole.
             const Eigen::Vector2f ppr = rc::img::px_per_rad_at(obs.cam, pr.uv_image);
@@ -1542,6 +1613,8 @@ void SpecificWorker::pump_calib_channels()
         }
         if (ch.pairs % 2000 < 12 and ch.pairs > 0)
         {
+            if (const auto sol_apply = ch.calib.solve(); sol_apply.ok)
+                apply_mount_solve(ch.calib, *ch.ingestor, sol_apply, ch.name);
             ch.calib.save(ch.calib.path());
             if (ch.csv.is_open()) ch.csv.flush();   // same cadence as the evidence beside it
             if (const auto sol = ch.calib.solve(); sol.ok)

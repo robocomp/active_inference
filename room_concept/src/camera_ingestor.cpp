@@ -118,6 +118,11 @@ bool CameraIngestor::bind_camera(const std::string& robot_frame)
                    mount_yaw_correction_, mount_yaw_correction_ * 180.0 / M_PI,
                    up_cam.x(), up_cam.y(), up_cam.z());
     }
+    // Freeze the base AFTER the configured boresight and BEFORE anything the estimator applies, so
+    // a live correction is always measured from the same place however many times it is revised.
+    cam_R_robot_base_ = cam_R_robot_;
+    cam_t_robot_base_ = cam_t_robot_;
+    rebuild_extrinsic_();
     extrinsic_ok_ = cam_R_robot_.allFinite() and cam_t_robot_.allFinite();
 
     if (extrinsic_ok_)
@@ -408,3 +413,26 @@ std::int64_t CameraIngestor::ms_since_last_frame() const noexcept
 }
 
 }  // namespace rc
+
+void rc::CameraIngestor::rebuild_extrinsic_()
+{
+    // pc' = R_x(pitch) · R_z(yaw) · pc + height · ẑ_cam, exactly the transformation whose derivative
+    // the J columns are — so applying the reported parameter cancels the error it reported.
+    const Eigen::Matrix3f R =
+        Eigen::AngleAxisf(mount_corr_.x(), Eigen::Vector3f::UnitX()).toRotationMatrix() *
+        Eigen::AngleAxisf(mount_corr_.z(), Eigen::Vector3f::UnitZ()).toRotationMatrix();
+    cam_R_robot_ = R * cam_R_robot_base_;
+    // ★ t is rotated TOO. pc = R·p + t, so turning the camera about its own centre takes the whole
+    //   expression: pc' = R_corr(R·p + t). Rotating only the 3x3 would turn the ray directions and
+    //   leave the origin behind, which is a different mount, not a smaller correction.
+    cam_t_robot_ = R * cam_t_robot_base_ + mount_corr_.y() * Eigen::Vector3f::UnitZ();
+}
+
+void rc::CameraIngestor::set_mount_correction(float pitch_rad, float height_m, float yaw_rad)
+{
+    const Eigen::Vector3f next(pitch_rad, height_m, yaw_rad);
+    if (not next.allFinite()) return;
+    mount_corr_ = next;
+    rebuild_extrinsic_();
+    extrinsic_ok_ = cam_R_robot_.allFinite() and cam_t_robot_.allFinite();
+}

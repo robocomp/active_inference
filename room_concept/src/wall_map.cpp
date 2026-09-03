@@ -260,7 +260,7 @@ namespace rc::wallmap
                 if (inside and fgrid.is_occupied(i, j)) c = 1;
                 else if (not inside and fgrid.is_free(i, j)) c = 2;
                 if (c == 0) continue;
-                int e; if (edge_dist(p, pub.verts, e) < 1.5f * cell) continue;
+                int e; if (edge_dist(p, pub.verts, e) < params.level2_clear_cells * cell) continue;
                 if (c == 2 and fgrid.free_ms[static_cast<size_t>(fgrid.idx(i, j))] < born_of_edge(pub.wall_of_edge, e)) continue;
                 cls[static_cast<size_t>(fgrid.idx(i, j))] = c;
             }
@@ -330,7 +330,7 @@ namespace rc::wallmap
             s0 = std::max(0.5f * cell, s0 - 0.5f * cell);
             s1 = std::min(len - 0.5f * cell, s1 + 0.5f * cell);
             h += 0.5f * cell;
-            if (s1 - s0 < 2.f * cell or h < 2.f * cell) continue;
+            if (s1 - s0 < params.level2_min_m or h < params.level2_min_m) continue;
             // ── FIT THE THREE DEGREES OF FREEDOM (Params doc). The cell box above is the
             // initialisation; each of the step's three faces now takes the median of the returns
             // that lie on it, which is the maximum-likelihood placement of that face under a
@@ -338,32 +338,46 @@ namespace rc::wallmap
             if (params.level2_fit and not beams.empty())
             {
                 const float sg = (c == 1) ? 1.f : -1.f;   // matter steps into the room, free steps out
-                const float band = 3.f * cell;
-                const float zlo = std::min(0.f, sg * h), zhi = std::max(0.f, sg * h);
-                std::vector<float> front, lo_side, hi_side;
-                for (const auto& bm : beams)
-                {
-                    const Eigen::Vector2f q = bm.o + bm.d * bm.r - a;
-                    const float sq = t.dot(q), zq = n.dot(q);
-                    if (sq > s0 + 0.02f and sq < s1 - 0.02f and std::abs(zq - sg * h) < band)
-                        front.push_back(zq);
-                    if (zq > zlo + 0.02f and zq < zhi - 0.02f)
-                    {
-                        if (std::abs(sq - s0) < band) lo_side.push_back(sq);
-                        if (std::abs(sq - s1) < band) hi_side.push_back(sq);
-                    }
-                }
                 const auto median = [](std::vector<float>& v)
                 { std::nth_element(v.begin(), v.begin() + static_cast<long>(v.size() / 2), v.end()); return v[v.size() / 2]; };
-                if (front.size()   >= 30) h  = std::abs(median(front));
-                if (lo_side.size() >= 30) s0 = median(lo_side);
-                if (hi_side.size() >= 30) s1 = median(hi_side);
+                // One pass of the fit. A face may only look at returns that could belong to IT: the
+                // band never reaches back to the host wall (which would drag a shallow step's depth
+                // toward zero — a 20 cm column read through a 24 cm band is measured against the
+                // wall's own returns) nor across to the opposite side, and a beam that grazes a face
+                // cannot place it, because its range error projects along the face instead of across
+                // it. Called twice: once wide to find the faces, once narrow to measure them.
+                const auto refit = [&](float band_cells)
+                {
+                    const float zlo = std::min(0.f, sg * h), zhi = std::max(0.f, sg * h);
+                    const float bf = std::min(band_cells * cell, 0.4f * h);
+                    const float bs = std::min(band_cells * cell, 0.4f * (s1 - s0));
+                    const float zin = 0.2f * (zhi - zlo);
+                    std::vector<float> front, lo_side, hi_side;
+                    for (const auto& bm : beams)
+                    {
+                        const Eigen::Vector2f q = bm.o + bm.d * bm.r - a;
+                        const float sq = t.dot(q), zq = n.dot(q);
+                        if (std::abs(n.dot(bm.d)) > 0.2f
+                            and sq > s0 + bs and sq < s1 - bs and std::abs(zq - sg * h) < bf)
+                            front.push_back(zq);
+                        if (std::abs(t.dot(bm.d)) > 0.2f and zq > zlo + zin and zq < zhi - zin)
+                        {
+                            if (std::abs(sq - s0) < bs) lo_side.push_back(sq);
+                            if (std::abs(sq - s1) < bs) hi_side.push_back(sq);
+                        }
+                    }
+                    if (front.size()   >= 20) h  = std::abs(median(front));
+                    if (lo_side.size() >= 20) s0 = median(lo_side);
+                    if (hi_side.size() >= 20) s1 = median(hi_side);
+                    if (params.debug_splice)
+                        std::printf("[level2] fit(%.1f cells): s=[%.3f,%.3f] h=%.3f (front %zu, sides %zu/%zu)\n",
+                                    band_cells, s0, s1, h, front.size(), lo_side.size(), hi_side.size());
+                };
+                refit(3.f);
+                refit(1.f);
                 s0 = std::max(0.5f * cell, s0);
                 s1 = std::min(len - 0.5f * cell, s1);
-                if (params.debug_splice)
-                    std::printf("[level2] fitted from returns: s=[%.3f,%.3f] h=%.3f (front %zu, sides %zu/%zu)\n",
-                                s0, s1, h, front.size(), lo_side.size(), hi_side.size());
-                if (s1 - s0 < 2.f * cell or h < 2.f * cell) continue;
+                if (s1 - s0 < params.level2_min_m or h < params.level2_min_m) continue;
             }
             // A matter zone steps the boundary INTO the room around it; a free zone steps it OUT.
             const Eigen::Vector2f off = n * h * (c == 1 ? 1.f : -1.f);

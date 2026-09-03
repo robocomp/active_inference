@@ -80,6 +80,8 @@ namespace
         envf("WS_MANHATTAN_GAIN", p.manhattan_gain);      // scale on the in-loop Manhattan factor (#4 test)
         envf("WS_LEVEL2",        p.enable_level2);        // level-2 residual pass on the published copy
         envf("WS_LEVEL2_FIT",    p.level2_fit);            // fit the step's 3 DoF to the returns
+        envf("WS_L2_MIN",        p.level2_min_m);         // smallest feature level 2 keeps (m)
+        envf("WS_L2_CLEAR",      p.level2_clear_cells);    // residual-cell clearance from every edge (cells)
     }
 
     Poly l_room()      { return {{-4.f, -3.f}, {4.f, -3.f}, {4.f, 1.f}, {1.f, 1.f}, {1.f, 3.f}, {-4.f, 3.f}}; }
@@ -1815,18 +1817,44 @@ int main()
             std::mt19937 rg(9000u + static_cast<unsigned>(r));
             const auto U = [&](float a, float b) { return std::uniform_real_distribution<float>(a, b)(rg); };
             const float W = U(6.f, 11.f), H = U(5.f, 9.f);
-            const Eigen::Vector2f V[4] = {{0.f, 0.f}, {W, 0.f}, {W, H}, {0.f, H}};
-            const Eigen::Vector2f T[4] = {{1.f, 0.f}, {0.f, 1.f}, {-1.f, 0.f}, {0.f, -1.f}};
-            const Eigen::Vector2f N[4] = {{0.f, 1.f}, {-1.f, 0.f}, {0.f, -1.f}, {1.f, 0.f}};
-            const float LEN[4] = {W, H, W, H};
-            float corner[4] = {0.f, 0.f, 0.f, 0.f};
-            std::vector<Feat> feats;
-            for (int k = 0; k < 4; ++k)
-                if (U(0.f, 1.f) < 0.35f) corner[k] = U(0.3f, 0.8f);
-            Poly room;
-            for (int w = 0; w < 4; ++w)
+            // Base outline: a rectangle, or (40%) an L — a rectangle with one corner quadrant cut
+            // away, both legs at least a third of the room wide, rotated onto a random corner.
+            const bool ell = U(0.f, 1.f) < 0.4f;
+            std::vector<Eigen::Vector2f> base;
+            if (not ell) base = {{0.f, 0.f}, {W, 0.f}, {W, H}, {0.f, H}};
+            else
             {
-                const int wp = (w + 3) % 4;
+                const float cx = U(0.40f, 0.65f) * W, cy = U(0.40f, 0.65f) * H;
+                base = {{0.f, 0.f}, {W, 0.f}, {W, cy}, {cx, cy}, {cx, H}, {0.f, H}};
+                const int turns = std::uniform_int_distribution<int>(0, 3)(rg);
+                for (int q = 0; q < turns; ++q)
+                {
+                    for (auto& v : base) v = Eigen::Vector2f(-v.y(), v.x());   // rotate 90 deg CCW
+                    Eigen::Vector2f mn = base.front();
+                    for (const auto& v : base) mn = mn.cwiseMin(v);
+                    for (auto& v : base) v -= mn;
+                }
+            }
+            const int NW = static_cast<int>(base.size());
+            std::vector<Eigen::Vector2f> V(base), T(NW), N(NW);
+            std::vector<float> LEN(NW);
+            for (int k = 0; k < NW; ++k)
+            {
+                const Eigen::Vector2f d = base[(k + 1) % NW] - base[k];
+                LEN[k] = d.norm(); T[k] = d / LEN[k]; N[k] = Eigen::Vector2f(-T[k].y(), T[k].x());
+            }
+            std::vector<float> corner(NW, 0.f);
+            std::vector<Feat> feats;
+            for (int k = 0; k < NW; ++k)
+            {
+                const Eigen::Vector2f& tp = T[(k + NW - 1) % NW];
+                const bool convex = tp.x() * T[k].y() - tp.y() * T[k].x() > 0.f;   // CCW left turn
+                if (convex and U(0.f, 1.f) < 0.35f) corner[k] = U(0.3f, 0.8f);
+            }
+            Poly room;
+            for (int w = 0; w < NW; ++w)
+            {
+                const int wp = (w + NW - 1) % NW;
                 if (corner[w] > 0.f)
                 {
                     const float c = corner[w];
@@ -1837,7 +1865,7 @@ int main()
                 else room.push_back(V[w]);
                 // Features along wall w, left to right, never overlapping and clear of both corners.
                 float s = std::max(corner[w], 0.f) + 0.6f;
-                const float s_end = LEN[w] - std::max(corner[(w + 1) % 4], 0.f) - 0.6f;
+                const float s_end = LEN[w] - std::max(corner[(w + 1) % NW], 0.f) - 0.6f;
                 while (s < s_end - 0.5f)
                 {
                     const float roll = U(0.f, 1.f);
@@ -1846,8 +1874,20 @@ int main()
                     if (roll < 0.20f)      { kind = 0; wid = U(0.30f, 0.80f); dep = U(0.20f, 0.50f); }
                     else if (roll < 0.42f) { kind = 1; wid = U(0.50f, 1.50f); dep = U(0.30f, 0.80f); }
                     else                   { kind = 3; wid = U(0.10f, 0.16f); dep = U(1.00f, 2.60f); }
-                    dep = std::min(dep, 0.30f * std::min(W, H));
                     if (s + wid > s_end) break;
+                    // An inward feature may not reach across the room (an L's leg can be narrow):
+                    // cast from the middle of its base into the room and keep well short of what it
+                    // hits. Outward features only have to clear the corners, which they already do.
+                    if (kind != 1)
+                    {
+                        const Eigen::Vector2f mid = V[w] + T[w] * (s + 0.5f * wid) + N[w] * 0.01f;
+                        float reach = 1e9f;
+                        for (int q = 0; q < NW; ++q)
+                            if (const auto tt = rc::corner_visibility::ray_segment_t(mid, N[w], base[q], base[(q + 1) % NW]);
+                                tt and *tt > 1e-3f) reach = std::min(reach, *tt);
+                        dep = std::min(dep, 0.6f * reach);
+                        if (dep < 0.18f) { s += wid + 0.4f; continue; }
+                    }
                     const float sg = (kind == 1) ? -1.f : 1.f;   // an alcove steps out, the rest step in
                     const Eigen::Vector2f a0 = V[w] + T[w] * s, a1 = V[w] + T[w] * (s + wid);
                     const Eigen::Vector2f b0 = a0 + N[w] * (sg * dep), b1 = a1 + N[w] * (sg * dep);
@@ -1897,8 +1937,8 @@ int main()
                 if (miss < 0.33f) ++found[f.kind];
                 fs += fmt(" %s:%.2f", kind_name[f.kind], miss);
             }
-            std::printf("    room %-3d %5.1f x %4.1f m  feats %2zu  IoU %.3f  Hausdorff %.3f m  walls %2zu |%s\n",
-                        r, W, H, feats.size(), iou_r, h_r, Rr.map.walls.size(), fs.c_str());
+            std::printf("    room %-3d %5.1f x %4.1f m %s feats %2zu  IoU %.3f  Hausdorff %.3f m  walls %2zu |%s\n",
+                        r, W, H, ell ? "L  " : "rect", feats.size(), iou_r, h_r, Rr.map.walls.size(), fs.c_str());
             std::printf("      truth[%d]:", r);
             for (const auto& v : room) std::printf(" (%.2f,%.2f)", v.x(), v.y());
             std::printf("\n      est[%d]:", r);

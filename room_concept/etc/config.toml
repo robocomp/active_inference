@@ -1493,7 +1493,21 @@ mountYawSigma    = 0.0035   # rad              ⚠ NOT MEASURED ON SHADOW
 # ⚠ Evidence files written before this existed carry no vertices and CANNOT be marginalised; the
 #   agent says so and refuses rather than reverting silently. Delete etc/camera_calib_*.txt to
 #   re-accumulate under the new model.
-mountVertexOffsetSigmaPx = 0.0
+mountVertexOffsetSigmaPx = 5.3
+# ★ 2026-09-03: ARMED. 0 = the pre-2026-09-02 solve, which counted each of a corner's thousands of
+#   sightings as independent and reported a yaw sigma 127x too small. 5.3 px is the measured spread
+#   of the per-corner offsets. It is also a PRECONDITION for mountApply below: an estimate taken
+#   with this off has absorbed each corner's own detection bias, and must not be written into an
+#   extrinsic. The solve REFUSES to be applied unless this is on.
+mountApply = true
+# ★ 2026-09-03: the camera extrinsic is now CLOSED-LOOP. The pooled solve is fed back into the mount
+#   on the camera's own axes (the ones J differentiates), the evidence is re-referenced to the mount
+#   that results, and the prior stays anchored on the GRAPH extrinsic so the total is always the
+#   posterior mean of the error relative to it. No gate and no magnitude limit: the posterior mean is
+#   already shrunk by how much the data informs each axis, so a well-informed axis applies nearly all
+#   of itself (zed yaw, 0.98) and an uninformed one applies nothing and DECAYS back to the graph.
+#   Proven not to run away before being switched on: tools/mount_replay.cpp --selftest drives the
+#   real loop for 12 cycles (converges to 0.984 of a 1.000 truth, late steps 0.006 deg).
 
 # ── Structural features ported from config_p3bot_webots.toml, 2026-08-29 ───────────────────────
 # ★★ mountYawCorrection is DELIBERATELY ABSENT, i.e. zero. P3Bot's +0.814 deg was measured on

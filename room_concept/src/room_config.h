@@ -409,6 +409,12 @@ struct RoomConfig
     // Local boresight correction applied to the graph's camera<-robot extrinsic. NOT a tuning knob:
     // a measured physical angle. 0 = use the graph's extrinsic unchanged.
     float IMAGE_EDGE_MOUNT_YAW_CORR    = 0.0f;    // ImageEdge.mountYawCorrection (rad)
+    // Feed the pooled mount solve back into the camera extrinsic as it is measured.
+    // ⚠ OFF by default: it changes a live perception input, and every camera-mount number recorded
+    //   before 2026-09-03 was taken open-loop. It REFUSES unless the per-vertex nuisance is running
+    //   (ImageEdge.mountVertexOffsetSigmaPx > 0) — an estimate that has absorbed per-corner detector
+    //   bias must not be written into an extrinsic, and that refusal is the whole safety argument.
+    bool  IMAGE_EDGE_MOUNT_APPLY       = false;   // ImageEdge.mountApply
     // Per-CONTOUR map-position uncertainty — nuisance column [4]. Not a mount property: how well any
     // single wall's place in the room polygon is known. MEASURED, see image_edge_types.h.
     float IMAGE_EDGE_WALL_POS_SIGMA    = 0.015f;  // ImageEdge.wallPositionSigma (m)

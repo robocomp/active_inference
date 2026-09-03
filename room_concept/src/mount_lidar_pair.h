@@ -241,6 +241,10 @@ namespace rc::mount
         Eigen::Vector3f cam_t_robot = Eigen::Vector3f::Zero();
         float sigma_pitch = 0.f, sigma_height = 0.f, sigma_yaw = 0.f;
         double offset_sigma_px = 0.0;   ///< what the agent's own solve was using, for comparison
+        /// The correction the agent had already applied to this mount when the row was written,
+        /// in prior-sigma units. A replay injects on top of the mount that ACTUALLY produced the
+        /// rows, so it needs to know the mount was not the graph's.
+        Eigen::Vector4d applied = Eigen::Vector4d::Zero();
         /// The LiDAR's origin in the robot frame. ⚠ `lidar_known == false` means it could not be
         /// resolved at write time; a replay must then REFUSE the LiDAR-injection leg rather than
         /// assume the origin — that leg's whole point is where the rotation centre is.
@@ -404,6 +408,26 @@ namespace rc::mount
         ///   assumes nothing that could not be measured. The metric version IS corner-as-landmark
         ///   refinement (DESIGN §7) and is the next step, not this one.
         double offset_sigma_px = 0.0;
+        /// ── THE TOTAL CORRECTION ALREADY APPLIED TO THE MOUNT ───────────────────────────────────
+        /// In prior-sigma units, in the sign of the SOLVE VECTOR `x` — which is `-Solution::p`, and
+        /// therefore the sign every reporting site prints after negating `p` again. ⚠ Getting this
+        /// backwards does not fail quietly: it drives the loop the wrong way and the correction runs
+        /// away linearly (measured, before the sign was fixed: -53 degrees in 12 cycles on a 1 degree
+        /// truth). The closed-loop selftest in tools/mount_replay.cpp exists to catch exactly that.
+        /// It is not bookkeeping: it is where the PRIOR is centred.
+        ///
+        /// ★★★ WITHOUT IT A FEEDBACK LOOP RATCHETS. Applying the posterior mean and re-centring the
+        ///   prior on the new mount removes the prior's pull, so each cycle applies a fresh shrunk
+        ///   estimate of an error that is mostly prior, and a weakly-informed axis walks away from
+        ///   the graph value one small honest step at a time. Anchoring the prior on the ORIGINAL
+        ///   graph extrinsic makes the objective  ‖r + Jx‖²_W + ‖x − applied‖²  , whose fixed point
+        ///   is the posterior mean of the TOTAL error relative to the graph — reached in one step
+        ///   and then stationary.
+        /// ★ The conservative behaviour falls out rather than being imposed: on an axis the data
+        ///   does not inform (H → 0) the solve returns x → applied, the increment applied is −applied,
+        ///   and the accumulated correction DECAYS BACK TO ZERO. No gate, no threshold — an
+        ///   uninformed parameter simply stops being corrected, which is what its posterior says.
+        Eigen::Vector4d applied = Eigen::Vector4d::Zero();
         /// Set when evidence was restored from a file written before the per-vertex partials existed.
         /// Such evidence cannot be marginalised — its rows carry no vertex — and must not be mixed
         /// with evidence that can, so the solve REFUSES the nuisance while it is set.
@@ -443,8 +467,54 @@ namespace rc::mount
             v.rTr += w * r.dot(W * r);
             ++v.n;
         }
+        /// ── RE-REFERENCE THE EVIDENCE TO A MOUNT THAT HAS JUST BEEN CORRECTED ──────────────────
+        /// Evidence is measured AGAINST a mount. The moment a correction `d` is applied to that
+        /// mount, every residual already accumulated refers to the old one, and re-solving would
+        /// hand back the same error a second time — the double-application that makes a feedback
+        /// loop diverge instead of converge.
+        ///
+        /// Nothing has to be thrown away. The residual is linear in the mount, `r → r − J d`, and
+        /// H, A, c and D do not depend on r at all, so only the right-hand sides move:
+        ///
+        ///     rTr −= 2 dᵀb − dᵀH d      b −= H d      (per vertex: rTr_v, b_v −= A_v d, e_v −= c_vᵀ d)
+        ///
+        /// ★ This is the SAME algebra as an injection (VALIDATION §2b), used in the opposite
+        ///   direction: an injection asks what a wrong mount would do to the evidence, and a rebase
+        ///   tells the evidence that the mount it was measured against has moved. Information is
+        ///   preserved exactly — the posterior after `apply then rebase` is the posterior of a robot
+        ///   that had the corrected mount all along.
+        /// ⚠ `d` is in PRIOR-SIGMA UNITS, like everything else in this block, and carries the sign
+        ///   of `x` (the solved vector) and NOT of the reported parameter `p = −x`.
+        void rebase(const Eigen::Vector4d& d)
+        {
+            if (not d.allFinite() or d.isZero()) return;
+            rTr -= 2.0 * d.dot(b) - d.dot(H * d);      // uses the OLD b, so it goes first
+            b.noalias() -= H * d;
+            for (auto& [vid, v] : per_vertex)
+            {
+                v.rTr -= 2.0 * d.dot(v.b) - d.dot(v.A * d);
+                v.b.noalias() -= v.A * d;
+                v.e.noalias() -= v.c.transpose() * d;
+            }
+        }
+
+        /// Apply a physical correction `m` to the mount: re-reference the evidence to the mount that
+        /// now exists, and move the prior's anchor with it so the total stays measured against the
+        /// ORIGINAL graph extrinsic. The two must happen together — either alone is a bug — so there
+        /// is one entry point.
+        /// `m` is in prior-sigma units and in the sign of `x` (= `-Solution::p`); the increment that
+        /// drives the remaining estimate to zero is exactly `m = x`, after which the loop is
+        /// stationary rather than merely slower.
+        void apply_correction(const Eigen::Vector4d& m)
+        {
+            if (not m.allFinite() or m.isZero()) return;
+            rebase(m);
+            applied += m;
+        }
+
         void reset()
-        { H.setZero(); b.setZero(); rTr = 0.0; n = 0; per_vertex.clear(); legacy_unattributed = false; }
+        { H.setZero(); b.setZero(); rTr = 0.0; n = 0; per_vertex.clear(); legacy_unattributed = false;
+          applied.setZero(); }
 
         /// Returns {parameters in units of prior sigma, posterior sigma, chi2/dof, cond, ok}.
         /// SIGN: r = uv_image - uv_lidar and J = d(uv_pred)/d(nuisance). A mount error of x makes the
@@ -501,8 +571,13 @@ namespace rc::mount
             const Eigen::Matrix4d A = Hm + Eigen::Matrix4d::Identity();
             const Eigen::Matrix4d C = A.inverse();
             if (not C.allFinite()) return s;
-            const Eigen::Vector4d x = C * bm;
-            const double chi2 = std::max(0.0, rm - x.dot(bm));
+            // The prior is centred on `applied`, not on zero — see the member's note. With
+            // `applied` zero this is bit-for-bit the previous solve, which is what every result
+            // recorded before 2026-09-03 rests on.
+            const Eigen::Vector4d x = C * (bm - applied);
+            // Exact for any prior centre, and reduces to `rm - x·bm` when it is zero:
+            //   f(x) = rm − 2xᵀ(b+c) + xᵀ(H+I)x + cᵀc,  and at the optimum (H+I)x = b+c.
+            const double chi2 = std::max(0.0, rm - x.dot(bm - applied) + applied.squaredNorm());
             // The offsets consume degrees of freedom too, and softly — tr(M_v D_v) is how much of
             // each vertex's 2 the data actually paid for. Ignoring it would inflate chi2/dof and
             // then inflate every sigma through `infl` below, hiding the improvement inside the fix.

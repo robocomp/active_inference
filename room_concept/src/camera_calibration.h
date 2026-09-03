@@ -140,6 +140,11 @@ namespace rc::camcal
         /// solve is the old one exactly. Set it on the pool AND on every calib channel, or two
         /// cameras would be reported under two different models on the same screen.
         void set_vertex_offset_sigma_px(double px) noexcept { acc_.offset_sigma_px = px; }
+        /// Apply a correction to the mount this evidence describes: re-references the evidence and
+        /// moves the prior's anchor together, so the accumulated total remains the posterior mean
+        /// of the error relative to the ORIGINAL graph extrinsic. See Accum::applied.
+        void apply_correction(const Eigen::Vector4d& dp) { acc_.apply_correction(dp); }
+        [[nodiscard]] const Eigen::Vector4d& applied() const noexcept { return acc_.applied; }
         [[nodiscard]] double vertex_offset_sigma_px() const noexcept { return acc_.offset_sigma_px; }
         void reset() { acc_.reset(); }
         [[nodiscard]] long pairs() const noexcept { return acc_.n; }
@@ -176,6 +181,12 @@ namespace rc::camcal
             //   how a newer reader knows the difference — an aggregate carries no vertex, and a
             //   cluster structure cannot be recovered from a sum over clusters.
             f << "format,2\n";
+            // ★ THE APPLIED CORRECTION IS PART OF THE EVIDENCE. Restoring H and b without it would
+            //   resume a measurement referenced to a mount the agent no longer has, and the loop
+            //   would re-apply the same correction on every restart — a ratchet across sessions
+            //   rather than within one.
+            f << "applied," << acc_.applied(0) << ',' << acc_.applied(1) << ','
+              << acc_.applied(2) << ',' << acc_.applied(3) << '\n';
             for (const auto& [vtx, v] : acc_.per_vertex)
             {
                 if (v.n <= 0 or not v.finite()) continue;
@@ -240,6 +251,12 @@ namespace rc::camcal
                 }
                 if (tok[0] == "n" and tok.size() == 2 and num(tok[1], v))   in.n = static_cast<long>(v);
                 else if (tok[0] == "rTr" and tok.size() == 2 and num(tok[1], v)) in.rTr = v;
+                else if (tok[0] == "applied" and tok.size() == 5)
+                {
+                    double a0 = 0, a1 = 0, a2 = 0, a3 = 0;
+                    if (num(tok[1], a0) and num(tok[2], a1) and num(tok[3], a2) and num(tok[4], a3))
+                        in.applied = Eigen::Vector4d(a0, a1, a2, a3);
+                }
                 else if (tok[0] == "H" and tok.size() == 4)
                 {
                     double di = 0, dj = 0;
