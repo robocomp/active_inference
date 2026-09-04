@@ -1282,6 +1282,25 @@ public:
         int   n_segments   = 0;
         std::int64_t ts_ms = 0;
     };
+    /// ── FACTOR B of the camera experiment, measured in the shadow ───────────────────────────────
+    /// The same window solved under the mount as it is (calibrated) and as it would be with the
+    /// self-calibration removed (nominal). Both poses are published RAW and never differenced here:
+    /// the pose error each implies needs ground truth, which lives in the agent and not in this
+    /// class, and a pre-combined delta is exactly the pairing that hides a mismatch.
+    struct FactorB
+    {
+        bool  valid = false;
+        std::int64_t ts_ms = 0;
+        Eigen::Vector3f pose_calibrated = Eigen::Vector3f::Zero();
+        Eigen::Vector3f pose_nominal    = Eigen::Vector3f::Zero();
+        Eigen::Vector3f correction      = Eigen::Vector3f::Zero();
+    };
+    FactorB get_factor_b() const
+    {
+        std::scoped_lock lk(factor_b_mutex_);
+        return factor_b_;
+    }
+
     ImageEdgeStats get_image_edge_stats() const
     {
         std::scoped_lock lk(image_edge_stats_mutex_);
@@ -1363,6 +1382,8 @@ private:
    std::vector<ClosureObs> pending_closures_;
    mutable std::mutex image_edge_stats_mutex_;
    ImageEdgeStats     image_edge_stats_{};
+   mutable std::mutex factor_b_mutex_;
+   FactorB            factor_b_{};
    mutable std::mutex image_edges_mutex_;
    ImageEdgeObs       latest_image_edges_;
    std::vector<TriplePoint> latest_triple_points_;   ///< display copy, see triple_points()

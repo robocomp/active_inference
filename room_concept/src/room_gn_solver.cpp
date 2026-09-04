@@ -162,8 +162,23 @@ namespace rc::gn
         class ImageEdgeFactorGn final : public IFactor
         {
         public:
-            ImageEdgeFactorGn(int offset, const ::rc::ImageEdgeObs& obs)
-                : off_(offset), obs_(obs), cam_(obs.cam) {}
+            ImageEdgeFactorGn(int offset, const ::rc::ImageEdgeObs& obs,
+                              const Eigen::Vector3f& mount_delta = Eigen::Vector3f::Zero())
+                : off_(offset), obs_(obs), cam_(obs.cam)
+            {
+                // Fold the requested mount displacement into this factor's own copy of the
+                // extrinsic, ONCE, rather than per sample. Yaw then pitch then height, the order
+                // camera_ingestor.cpp composes and tools/mount_replay.cpp injects — a correction
+                // applied on a different axis or in a different order is a different correction.
+                R_ = obs.cam_R_robot; t_ = obs.cam_t_robot;
+                if (not mount_delta.isZero())
+                {
+                    const Eigen::Matrix3f Rz(Eigen::AngleAxisf(mount_delta.z(), Eigen::Vector3f::UnitZ()));
+                    const Eigen::Matrix3f Rx(Eigen::AngleAxisf(mount_delta.x(), Eigen::Vector3f::UnitX()));
+                    R_ = Rx * Rz * R_;
+                    t_ = Rx * Rz * t_ + mount_delta.y() * Eigen::Vector3f::UnitZ();
+                }
+            }
 
             float evaluate(const State& x) const override { return accumulate(x, nullptr); }
 
@@ -199,7 +214,7 @@ namespace rc::gn
                             const Eigen::Vector3f e(smp.p_room.x() - pose.x(),
                                                     smp.p_room.y() - pose.y(), smp.p_room.z());
                             const Eigen::Vector3f p_robot = Rm * e;
-                            const Eigen::Vector3f p_cam   = obs_.cam_R_robot * p_robot + obs_.cam_t_robot;
+                            const Eigen::Vector3f p_cam   = R_ * p_robot + t_;
 
                             Eigen::Vector2d uv;
                             if (not ::rc::img::project_with_model(cam_, p_cam.cast<double>(), uv))
@@ -240,6 +255,8 @@ namespace rc::gn
 
             int off_ = 0;
             const ::rc::ImageEdgeObs& obs_;
+            Eigen::Matrix3f R_ = Eigen::Matrix3f::Identity();   ///< the extrinsic THIS factor evaluates under
+            Eigen::Vector3f t_ = Eigen::Vector3f::Zero();
             ::rc::CameraModel         cam_;
         };
 
@@ -874,7 +891,8 @@ namespace rc::gn
             {
                 const auto& slot = W[static_cast<size_t>(i)];
                 if (slot.image_edges.empty() or not slot.image_edges.cam.valid) continue;
-                fs.push_back(std::make_unique<ImageEdgeFactorGn>(idx.offset(i), slot.image_edges));
+                fs.push_back(std::make_unique<ImageEdgeFactorGn>(idx.offset(i), slot.image_edges,
+                                                                 P.image_edge.mount_delta));
             }
         }
 

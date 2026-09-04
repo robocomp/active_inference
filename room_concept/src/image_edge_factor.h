@@ -38,6 +38,11 @@ namespace rc
         {
             bool  enable = false;   ///< master switch for the family
             bool  drive  = false;   ///< does it enter the GN factor list (vs shadow-only)?
+            /// Evaluate the term under a mount displaced by this much (pitch rad, height m, yaw rad,
+            /// on the camera's own axes — the same convention the estimator differentiates and the
+            /// ingestor applies). ZERO on the authoritative path, always: it exists so a SHADOW solve
+            /// can ask what the same measurements would have said under a different extrinsic.
+            Eigen::Vector3f mount_delta = Eigen::Vector3f::Zero();
             float search_sigmas = 3.0f;         ///< Gaussian truncation of the derived search window
             float mount_pitch_sigma  = 0.0035f; ///< rad — shared nuisance priors. PHYSICAL, not knobs:
             float mount_height_sigma = 0.010f;  ///< m     they are how well the mount is known, and they

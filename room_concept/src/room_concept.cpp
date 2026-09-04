@@ -4738,6 +4738,30 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
                 dx = b.x() - a.x(); dy = b.y() - a.y();
                 dth = std::atan2(std::sin(b.z() - a.z()), std::cos(b.z() - a.z()));
             }
+
+            // ── FACTOR B: the same window, the same measured points, the NOMINAL mount ───────────
+            // The observation records the self-calibration correction that was inside its extrinsic
+            // when it was extracted, so removing that correction re-creates the mount the robot
+            // would have had with the loop switched off. Both conditions therefore differ ONLY in
+            // the prediction, which is the pairing the experiment asks for — and it is exact rather
+            // than first order, because this re-projects rather than linearising.
+            // ★ Shadow only. The authoritative solve above runs with mount_delta zero, always.
+            if (r_on.ok and not obs.mount_correction.isZero())
+            {
+                Params p_b0 = p_on;
+                p_b0.image_edge.mount_delta = -obs.mount_correction;
+                rc::gn::Input in_b0 = in; in_b0.params = &p_b0;
+                auto poses_b0 = poses_after;
+                if (const auto r_b0 = rc::gn::solve(in_b0, poses_b0, opts); r_b0.ok)
+                {
+                    std::scoped_lock lk(factor_b_mutex_);
+                    factor_b_.valid = true;
+                    factor_b_.ts_ms = timestamp_ms;
+                    factor_b_.pose_calibrated = poses_on.back();   // B1: the mount in force
+                    factor_b_.pose_nominal    = poses_b0.back();   // B0: the correction removed
+                    factor_b_.correction      = obs.mount_correction;
+                }
+            }
         }
 
         // ── The DRIVING term's own consistency ──────────────────────────────────────────────────

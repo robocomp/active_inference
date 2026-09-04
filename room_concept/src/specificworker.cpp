@@ -1359,7 +1359,16 @@ void SpecificWorker::log_ground_truth(const rc::RoomConcept::UpdateResult &res)
                        "calib_k_v,calib_k_w,calib_yaw,calib_eps,calib_carried,calib_dropped,"
                        "calib_sig_kv,calib_sig_kw,calib_sig_yaw,calib_pos_var,"
                        "calib_b_omega,calib_informed,calib_cond,"
-                       "imu_dvx,imu_dvy,wheel_dvx,wheel_dvy,imu_dpx,imu_dpy,imu_lin_segs\n";
+                       "imu_dvx,imu_dvy,wheel_dvx,wheel_dvy,imu_dpx,imu_dpy,imu_lin_segs,"
+                       // ── FACTOR B of the camera-extrinsic experiment ─────────────────────────
+                       // The same window solved twice in the shadow: under the mount as it is, and
+                       // under the mount with the self-calibration removed. Both poses RAW and on
+                       // the SAME ROW as the ground truth, so M1 is a subtraction here rather than
+                       // a join across two files with two clocks. Never pre-differenced: a mean and
+                       // its counterfactual travelling as one number is how a mismatch hides.
+                       // fb_ts = 0 means the shadow did not produce a pair on this cycle.
+                       "fb_ts,fb_cal_x,fb_cal_y,fb_cal_th,fb_nom_x,fb_nom_y,fb_nom_th,"
+                       "fb_corr_pitch,fb_corr_height,fb_corr_yaw\n";
         }
         else
             qWarning() << "[gt] cannot open tmp/sdf_localizer/gt_error.csv";
@@ -1375,6 +1384,10 @@ void SpecificWorker::log_ground_truth(const rc::RoomConcept::UpdateResult &res)
     const float gt_th_raw = ga.value();
     const float gt_th     = -gt_th_raw;
     gt_convention_report(est_th, gt_th_raw);
+    // Fetched once and used raw: the pose error each implies is computed from this row offline,
+    // because the subtraction is the analysis and not the measurement.
+    const auto fb = room_concept_.get_factor_b();
+    const std::int64_t fb_ts = fb.valid ? fb.ts_ms : 0;
     gt_csv_ << res.timestamp_ms
             << ',' << gx.value() << ',' << gy.value() << ',' << gt_th
             << ',' << p.translation().x() << ',' << p.translation().y() << ',' << est_th
@@ -1408,12 +1421,17 @@ void SpecificWorker::log_ground_truth(const rc::RoomConcept::UpdateResult &res)
             // Joint-solve outputs: the gyro bias it can now separate, which parameters this window
             // actually taught, and how collinear the window was.
             << ',' << res.calib_b_omega << ',' << res.calib_informed << ',' << res.calib_condition
-            // Linear IMU channel. imu_dv vs wheel_dv is translation's first independent cross-check;
+            // Linear IMU channel. imu_dv vs wheel_dv is translation's first independent cross-check
             // logged before being fused, because a channel whose covariance is unknown (the ImuFrame
             // IDL has no acc_var) must be shown to agree with something before anything trusts it.
             << ',' << res.imu_dvx << ',' << res.imu_dvy
             << ',' << res.wheel_dvx << ',' << res.wheel_dvy
             << ',' << res.imu_dpx << ',' << res.imu_dpy << ',' << res.imu_lin_segs
+            // ── Factor B: both poses RAW, on this row, never differenced here ────────────────────
+            << ',' << fb_ts
+            << ',' << fb.pose_calibrated.x() << ',' << fb.pose_calibrated.y() << ',' << fb.pose_calibrated.z()
+            << ',' << fb.pose_nominal.x()    << ',' << fb.pose_nominal.y()    << ',' << fb.pose_nominal.z()
+            << ',' << fb.correction.x() << ',' << fb.correction.y() << ',' << fb.correction.z()
             << '\n';
     gt_csv_.flush();
 }
@@ -1722,6 +1740,9 @@ void SpecificWorker::pump_image_edges()
                                            camera_ingestor_->cam_R_robot(),
                                            camera_ingestor_->cam_t_robot(),
                                            pose, res->covariance, twist, dt_ms, &st);
+    // The correction that was inside the extrinsic used above. Recorded on the observation so a
+    // shadow solve can remove it and re-create the nominal mount for THESE measurements — factor B.
+    obs.mount_correction = camera_ingestor_->mount_correction();
     // Provenance travels WITH the evidence from here on: every downstream consumer (the pair log,
     // the triple log, the viewer overlay) then reports the camera this observation actually came
     // from, not the one the config names at the moment it is asked.
