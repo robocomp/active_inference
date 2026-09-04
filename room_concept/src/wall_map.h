@@ -231,6 +231,30 @@ namespace rc::wallmap
         // Confidence level of that margin, in standard deviations. Not a magic cutoff: the same
         // convention as the segmenter's chi2 levels, and the quantity it multiplies is measured
         // from the grid rather than chosen.
+        //
+        // MEASURED 2026-09-04 on the 50 rooms, and judge 3 LOSES to both of the others: mean IoU
+        // 0.9154 against 0.9219 (judge 0) and 0.9279 (judge 1), 15 rooms better and 28 worse, floor
+        // 0.349. It gets the worst of both — it does not protect a healthy map as well as judge 0
+        // (0.953 vs 0.967 over 31 rooms) and does not rescue a sick one as well as judge 1 (0.761
+        // vs 0.841 over 9).
+        //
+        // WHY, and this is the useful part. Room 32 finishes 0.956 under judge 1 and 0.349 under
+        // judge 3, and the two runs are identical for thirteen decisions. The fourteenth is
+        //     dE = 2.5 nats, sigma = 33.4, IoU 0.467 -> 0.745, ADOPT (judge 1)
+        // — a step worth two and a half nats against a thirty-three nat standard deviation, i.e.
+        // statistically indistinguishable from noise, which raises the overlap by 0.28 and unlocks
+        // the next one (dE = 22719, IoU 0.035 -> 0.860). Judge 3 refuses it, precisely because the
+        // margin is doing its job, and the room never escapes.
+        //
+        // So the margin is right about the statistics and wrong about the policy, for a reason that
+        // is now nameable: ESCAPING A WRONG TOPOLOGY TAKES A SEQUENCE OF STEPS, SOME OF WHICH ARE
+        // INDIVIDUALLY WORTHLESS. A per-step significance test forbids exactly that, and no
+        // single-step judge — however well calibrated — can fix room 32; judge 1 only manages it by
+        // being permissive enough to random-walk there. (The same run also shows the grid energy
+        // scoring the RIGHT cycle at −777 nats while it raised IoU 0.458 -> 0.748, so the energy is
+        // not a reliable single-step guide here either.) What this points at is a judge over
+        // SEQUENCES rather than steps — a trial adoption kept only if it survives — which is the
+        // reversible-jump proposal from the literature review, or the batch pass at saturation.
         float adopt_sigma_k = 2.f;
         // The health waiver (see the re-derivation judge) lets a challenger past the IoU margin
         // when the incumbent's own corners are too blunt to publish. Priced: the corner sharpness
