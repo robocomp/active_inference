@@ -514,7 +514,8 @@ Per axis (nuisance ON), and the contrast with it OFF:
 
 ### ★★★★ THE NUISANCE DOES NOT ONLY WIDEN THE INTERVAL — IT MOVES THE ESTIMATE (2026-09-04)
 
-Same rows, nuisance off then on. **Five of the six mount parameters change sign.**
+Same rows, nuisance off then on. **Four of the six mount parameters change sign**, and the two that
+do not are the informative ones.
 
 | | OFF | ON | shift |
 |---|---|---|---|
@@ -524,6 +525,13 @@ Same rows, nuisance off then on. **Five of the six mount parameters change sign.
 | zed yaw | +0.2894 ± 0.0062 | −0.2690 ± 0.0181 | −0.558° **sign** |
 | zed pitch | +0.2790 ± 0.0079 | −0.2167 ± 0.0317 | −0.496° **sign** |
 | zed height | −0.0141 ± 0.0008 | −0.0070 ± 0.0014 | +0.007 m |
+
+★ **The ricoh yaw is the near-miss worth keeping.** It moves 0.144° — 41σ of its dishonest sigma but
+only **0.8σ** of its honest one, because the interval widened by **50x**. On the panorama's worst axis
+the shift disappears inside the new interval, which is exactly what the yaw/offset degeneracy predicts
+and is a better illustration of it than another crossing would have been. Per-parameter shift in
+honest sigmas: ricoh pitch 64.4, zed yaw 30.9, ricoh height 20.1, zed pitch 15.6, zed height 5.1,
+ricoh yaw 0.8.
 
 ★★★ **This corrects how §1.1 and the Atlas had been framing it, mine included** — "marginalising does
 not recover precision, it reveals we never had it" is true and incomplete. The per-corner offsets were
