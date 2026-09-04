@@ -263,6 +263,25 @@ namespace rc::wallmap
         // snapshot is restored. This is the only form of judge that can pass a step which is
         // individually worthless: room 32 escapes through one worth 2.5 nats against a 33-nat
         // standard deviation, which no per-step test can distinguish from noise.
+        //
+        // MEASURED 2026-09-04, 50 random rooms paired, against the three step judges:
+        //                        IoU mean  median   min  | Hausdorff med  mean
+        //   j0 incumbent           0.9219  0.9565  0.517 |     0.767     1.084
+        //   j1 energy              0.9279  0.9510  0.561 |     1.054     1.027
+        //   j3 nats margin         0.9154  0.9485  0.349 |     1.074     1.148
+        //   TRIAL                  0.9333  0.9535  0.554 |     0.770     0.996
+        // and split by how healthy the incumbent map was — which is where the step judges each gave
+        // one end away:
+        //   sick (<0.90, n=9)      0.756   0.841   0.761  |  0.845   <- as good as the permissive one
+        //   healthy (0.95+, n=31)  0.967   0.948   0.953  |  0.960   <- nearly as good as the strict one
+        // It is the first judge to take both ends. It also does not pay j1's shape price: j1 rescues
+        // the tail but pushes the median Hausdorff 0.767 -> 1.054 m, while the trial leaves it at
+        // 0.770 and lowers the mean to 0.996. Room 32 goes 0.517 -> 0.954 and the apartamento's
+        // three seeds go 0.908/0.975/0.945 -> 0.968/0.964/0.977, mean 0.943 -> 0.970. In the bench
+        // the long-standing "estimate within 20 cm of the real layout" check passes for the first
+        // time, 0.325 -> 0.177 m.
+        // The wins are large and the losses small: +0.437 and +0.223 on the two worst rooms against
+        // a worst regression of −0.051. 18 rooms better, 19 worse.
         bool  trial_adoption = true;
         // How long the challenger has to prove itself. Its scale is set by how long it takes the
         // robot to re-observe the region the two cycles disagree about, which at these speeds and
