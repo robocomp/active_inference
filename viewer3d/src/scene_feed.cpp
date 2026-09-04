@@ -74,9 +74,21 @@ void SceneFeed::forward_extrapolate_room_T_robot(Mat::RTMat& room_T_robot, const
     const double th    = std::atan2(R(1, 0), R(0, 0));
     const double raw_x = room_T_robot.translation().x(), raw_y = room_T_robot.translation().y();
     const double dth = rot * dt;
-    const double thm = th + 0.5 * dth;   // midpoint integration
-    const double dx = (adv * std::cos(thm) - side * std::sin(thm)) * dt;
-    const double dy = (adv * std::sin(thm) + side * std::cos(thm)) * dt;
+    const double thm = th + 0.5 * dth;   // midpoint heading
+    // AXIS ASSIGNMENT - this robot's body frame is +Y FORWARD, +X lateral, so the twist array
+    // [adv, side, _] puts the FORWARD rate on the frame's y axis and the lateral rate on its x.
+    // Putting adv on x rotates the predicted displacement by 90 degrees, landing sqrt(2)*|motion|
+    // from the truth - WORSE than not extrapolating at all. Measured on 421 logged forward-driving
+    // cycles (2026-08-04): adv->x p50 25.86 mm, adv->y p50 0.07 mm. Same assignment as the
+    // controller's twist_delta(), which is the reference implementation of this step.
+    const double vx = side, vy = adv;
+    // Exact SE(2) constant-twist step: dp = dt * sinc(dth/2) * R(th + dth/2) * v. The sinc is the
+    // left Jacobian - it turns the body velocity into the CHORD of the arc actually driven; the
+    // midpoint rule alone follows the tangent and cuts the corner by dth^2/24.
+    const double half = 0.5 * dth;
+    const double sinc = std::abs(half) > 1e-9 ? std::sin(half) / half : 1.0;
+    const double dx = sinc * (vx * std::cos(thm) - vy * std::sin(thm)) * dt;
+    const double dy = sinc * (vx * std::sin(thm) + vy * std::cos(thm)) * dt;
     room_T_robot.translation().x() += dx;
     room_T_robot.translation().y() += dy;
     room_T_robot.linear() = (Eigen::AngleAxisd(dth, Eigen::Vector3d::UnitZ()).toRotationMatrix() * R);
