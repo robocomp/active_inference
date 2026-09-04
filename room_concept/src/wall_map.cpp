@@ -2747,12 +2747,17 @@ namespace rc::wallmap
         Polygon pinc; pinc.verts = trial_.inc_verts; pinc.closed = trial_.inc_verts.size() >= 3;
         Polygon pcha; pcha.verts = trial_.cha_verts; pcha.closed = trial_.cha_verts.size() >= 3;
         float var = 0.f;
-        const float dE_now = (pinc.closed and pcha.closed) ? jump_delta_nats(pinc, pcha, 0, &var) : 0.f;
+        const float grid_now = (pinc.closed and pcha.closed) ? jump_delta_nats(pinc, pcha, 0, &var) : 0.f;
+        // The SAME energy the proposal was judged on, with only the grid term re-read. The other
+        // three are properties of the two outlines, not of the evidence, so re-deriving them would
+        // change the question rather than answer it.
+        const float dE_now = grid_now + trial_.support_in - trial_.surrender - trial_.code;
         // A challenger whose cycle has since fallen open has failed outright, whatever the nats say.
         const bool survives = pnow.closed and pinc.closed and pcha.closed and dE_now > 0.f;
         if (params.debug_splice)
-            std::printf("[trial] RESOLVE at frame %d (opened %d, dE was %.1f): now dE %.1f (sigma %.1f), closed %d -> %s\n",
-                        frames_observed_, trial_.opened_at, trial_.dE_at_open, dE_now,
+            std::printf("[trial] RESOLVE at frame %d (opened %d, dE was %.1f): now dE %.1f = grid %.1f + in %.1f - out %.1f - code %.1f (sigma %.1f), closed %d -> %s\n",
+                        frames_observed_, trial_.opened_at, trial_.dE_at_open, dE_now, grid_now,
+                        trial_.support_in, trial_.surrender, trial_.code,
                         std::sqrt(std::max(var, 0.f)), static_cast<int>(pnow.closed),
                         survives ? "KEEP" : "REVERT");
         if (not survives)
@@ -3218,19 +3223,44 @@ namespace rc::wallmap
         // new cycle does not hold anywhere. Until 2026-09-03 this was a VETO beside a grid-IoU
         // margin of 0.02; the forward-model referee caught that judge refusing 127 re-derived
         // cycles the truth preferred by 0.03-0.09 IoU. It is now a PRICE inside the one energy.
+        // A LINE CAN BE HELD AND STILL BE THROWN AWAY. Until now this asked only whether the new
+        // cycle keeps a wall's LINE anywhere, which a cycle that keeps one metre of a four-metre
+        // partition passes cleanly — and that is precisely how the flat lost three metres of its
+        // dividing wall while the price came out at zero. What is surrendered is support on the
+        // EXTENT that is dropped, so the bins are the unit: a bin whose position falls outside the
+        // span the new cycle holds is erased, and pays what it earned above its birth seed.
         float surrender = 0.f;
         for (auto it = order.begin(); it != order.end(); ++it)
         {
             if (std::find(order.begin(), it, *it) != it) continue;   // count each wall once
             const auto* w = find(*it);
             if (w == nullptr) continue;
+            // The span the new cycle holds on this line, over every entry that lies on it.
             bool held = false;
+            float hs_min = std::numeric_limits<float>::infinity();
+            float hs_max = -std::numeric_limits<float>::infinity();
             for (const auto id2 : new_order)
                 if (const auto* w2 = find(id2); w2 != nullptr
                     and std::abs(wrap_pi(w->phi - w2->phi)) < 0.2f
-                    and std::abs(w->d - w2->d) < 0.3f) { held = true; break; }
-            if (held) continue;
-            for (const float b : w->exist_bins) surrender += std::max(0.f, b - params.birth_nats);
+                    and std::abs(w->d - w2->d) < 0.3f)
+                {
+                    held = true;
+                    if (w2->has_extent) { hs_min = std::min(hs_min, w2->s_min); hs_max = std::max(hs_max, w2->s_max); }
+                }
+            if (held and not params.surrender_by_extent) continue;
+            if (held and not w->has_extent) continue;          // nothing testable to compare
+            if (held and hs_min > hs_max) continue;            // held, but the holder has no extent
+            for (size_t bi = 0; bi < w->exist_bins.size(); ++bi)
+            {
+                const float above = std::max(0.f, w->exist_bins[bi] - params.birth_nats);
+                if (above <= 0.f) continue;
+                if (held)
+                {
+                    const float s = w->bins_s0 + (static_cast<float>(bi) + 0.5f) * params.exist_bin_m;
+                    if (s >= hs_min and s <= hs_max) continue;  // this stretch survives
+                }
+                surrender += above;
+            }
         }
         // ONE ENERGY for the adoption, the same as a splice: the grid's area term over the region
         // where the two cycles disagree, plus the support the created walls bring in, minus the
@@ -3360,6 +3390,9 @@ namespace rc::wallmap
             trial_.candidates = candidates;
             trial_.inc_verts = pold.verts;
             trial_.cha_verts = pnew.verts;
+            trial_.support_in = support_in;
+            trial_.surrender = surrender;
+            trial_.code = code;
             trial_.open = true;
             trial_.frames_left = std::max(1, params.trial_frames);
             trial_.opened_at = frames_observed_;

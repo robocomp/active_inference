@@ -90,6 +90,7 @@ namespace
         envf("WS_SIGMA_K",       p.adopt_sigma_k);        // judge 3: margin in standard deviations of dE
         envf("WS_TRIAL",         p.trial_adoption);       // adopt a refused-but-promising cycle ON TRIAL
         envf("WS_TRIAL_FRAMES",  p.trial_frames);         // how long the challenger has to prove itself
+        envf("WS_SURR_EXTENT",   p.surrender_by_extent);  // price support on the extent dropped, not just vanished lines
     }
 
     Poly l_room()      { return {{-4.f, -3.f}, {4.f, -3.f}, {4.f, 1.f}, {1.f, 1.f}, {1.f, 3.f}, {-4.f, 3.f}}; }

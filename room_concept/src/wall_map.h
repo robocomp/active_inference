@@ -191,6 +191,17 @@ namespace rc::wallmap
         // polygons that no longer close at all. Kept because the ASYMMETRY is real and worth
         // revisiting with a looser held-test; the term itself, as written, is not affordable.
         bool  splice_surrender = false;
+        // Charge the re-derivation for support on the EXTENT it drops, not only for lines it makes
+        // vanish entirely. MEASURED HARMFUL, default OFF, and it is the third result of this exact
+        // shape: room 32 falls 0.954 -> 0.349, because a corrective cycle necessarily throws away a
+        // great deal of wrongly-placed support and charging full price for it makes the correction
+        // unaffordable. The observation behind it is still true — a cycle that keeps one metre of a
+        // four-metre partition passes the line test cleanly, which is how the flat lost three metres
+        // of its dividing wall at no charge — but the price cannot be levied on the erased stretch
+        // alone. What is missing is the distinction between support dropped because the wall was in
+        // the WRONG PLACE and support dropped because the wall is simply gone, and neither the line
+        // test nor the extent test can tell those apart.
+        bool  surrender_by_extent = false;
         // ADOPTION JUDGE (measured 2026-09-03, IoU seed 7/1001/424242): 0 = grid-IoU margin 0.02 +
         // health waiver + surrender veto (the incumbent, 0.951/0.969/0.943); 1 = the one energy
         // (grid + support in − surrender − code length, 0.926/0.969/0.918). adopt_repair splices
@@ -514,6 +525,13 @@ namespace rc::wallmap
             // the map did afterwards — the trial decides the question that was asked, not which of
             // two maps had the better window.
             std::vector<Eigen::Vector2f> inc_verts, cha_verts;
+            // The non-grid halves of the energy, as they stood at the proposal. The verdict updates
+            // ONLY the grid term, so it re-asks the same question on better evidence rather than a
+            // different, easier one. Without them the survival test was scored on grid AREA alone,
+            // where a 13 cm partition three metres long is worth almost nothing and is therefore
+            // nearly free to lose — the exact blindness that made the incumbent judge unable to see
+            // the flat's partition in the first place.
+            float support_in = 0.f, surrender = 0.f, code = 0.f;
         };
         Trial trial_;
         /// Decide an open trial: keep the challenger iff it still explains the CURRENT grid better
