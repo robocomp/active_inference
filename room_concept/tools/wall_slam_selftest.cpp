@@ -27,6 +27,8 @@
 #include <charconv>
 #include <cstring>
 #include <fstream>
+#include <locale>
+#include <filesystem>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -82,6 +84,7 @@ namespace
         envf("WS_LEVEL2_FIT",    p.level2_fit);            // fit the step's 3 DoF to the returns
         envf("WS_L2_MIN",        p.level2_min_m);         // smallest feature level 2 keeps (m)
         envf("WS_L2_CLEAR",      p.level2_clear_cells);    // residual-cell clearance from every edge (cells)
+        envf("WS_THETA0_POST",   p.theta0_posterior);     // 1 posterior over all directions, 0 the old OBB+mean
     }
 
     Poly l_room()      { return {{-4.f, -3.f}, {4.f, -3.f}, {4.f, 1.f}, {1.f, 1.f}, {1.f, 3.f}, {-4.f, 3.f}}; }
@@ -238,7 +241,33 @@ namespace
         float ceiling_dh = 1.70f;        // ceiling height above the camera (3.0 m room, 1.30 m mount)
         float ceiling_sigma_rad = 0.0011f;   // 0.065 deg — the measured fitted-contour scatter
         int   ceiling_rays = 180;
+        const char* trace_csv = nullptr;   // per-frame precision trace (WallMap::precisions)
     };
+
+    /// Append one frame's precision snapshot. The file is opened once per run and imbued with the
+    /// classic locale, so a comma decimal separator can never reach it (see CLAUDE.md).
+    void trace_precisions(std::ofstream& f, const rc::wallmap::WallMap& map, float iou, float pose_err)
+    {
+        if (not f.is_open()) return;
+        const auto p = map.precisions();
+        f << p.frame << ',' << p.theta0_deg << ',' << p.theta0_disp_deg << ',' << p.theta0_gate_deg
+          << ',' << p.n_walls << ',' << p.n_cand << ',' << p.n_order
+          << ',' << p.sigma_phi_deg << ',' << p.sigma_d_m << ',' << p.corner_sigma_m
+          << ',' << p.corner_sigma_med_m << ',' << p.corners_over_bar << ',' << p.n_corners
+          << ',' << p.exist_nats << ',' << p.class_err_deg << ',' << iou << ',' << pose_err << '\n';
+    }
+    void trace_open(std::ofstream& f, const char* path)
+    {
+        if (path == nullptr) return;
+        const bool fresh = not std::filesystem::exists(path);
+        f.open(path, std::ios::app);
+        if (not f.is_open()) return;
+        f.imbue(std::locale::classic());
+        if (not fresh) return;
+        f << "frame,theta0_deg,theta0_disp_deg,theta0_gate_deg,walls,cand,order,"
+             "sigma_phi_deg,sigma_d_m,corner_sigma_m,corner_sigma_med_m,corners_over_bar,n_corners,"
+             "exist_nats,class_err_deg,iou,pose_err\n";
+    }
 
     /// FURNITURE. Axis-aligned boxes standing inside the room. The LiDAR band cuts through them at
     /// 1-2 m, so a wall behind one is never seen; the wall-to-ceiling junction, three metres up, is
@@ -420,6 +449,7 @@ namespace
         // under churn against 13 s for the whole bench without it. Opt in with WS_REFEREE=1.
         R.map.params.forward_referee = std::getenv("WS_NO_BEAMS") == nullptr;
         R.map.params.referee_log     = std::getenv("WS_REFEREE") != nullptr;
+        std::ofstream trace; trace_open(trace, cfg.trace_csv);
 
         rc::Model model;
         model.init_from_polygon({{-20.f, -20.f}, {20.f, -20.f}, {20.f, 20.f}, {-20.f, 20.f}}, 0.f, 0.f, 0.f, 2.4f);
@@ -536,6 +566,7 @@ namespace
                             f, seg.segments.size(), R.map.walls.size(), fr.candidates, fr.births,
                             r.ok ? "ok" : "FAIL", r.loss, r.iterations, exy, std::abs(wrap(err.z())) * 180.f / kPi,
                             poly.closed ? "closed" : "open", poly.status.empty() ? "" : (" [" + poly.status + "]").c_str());
+            trace_precisions(trace, R.map, 0.f, exy);
             R.frames = static_cast<int>(f) + 1;
         }
         R.pose_rmse_xy = (n_err > 0) ? static_cast<float>(std::sqrt(se / n_err)) : 0.f;
@@ -783,6 +814,7 @@ namespace
         // under churn against 13 s for the whole bench without it. Opt in with WS_REFEREE=1.
         R.map.params.forward_referee = std::getenv("WS_NO_BEAMS") == nullptr;
         R.map.params.referee_log     = std::getenv("WS_REFEREE") != nullptr;
+        std::ofstream trace; trace_open(trace, cfg.trace_csv);
 
         rc::Model model;
         model.init_from_polygon({{-20.f, -20.f}, {20.f, -20.f}, {20.f, 20.f}, {-20.f, 20.f}}, 0.f, 0.f, 0.f, 2.4f);
@@ -1009,6 +1041,7 @@ namespace
                 std::printf("    f=%3d walls=%zu cand=%d births=%d deaths=%d err=%.3fm poly=%s\n",
                             f, R.map.walls.size(), fr.candidates, fr.births, fr.deaths, exy,
                             R.map.build_polygon().closed ? "closed" : "open");
+            trace_precisions(trace, R.map, 0.f, exy);
             R.frames = f + 1;
         }
         R.pose_rmse_xy = (n_err > 0) ? static_cast<float>(std::sqrt(se / n_err)) : 0.f;
@@ -1421,6 +1454,7 @@ int main()
         std::mt19937 rng6(99);
         RunConfig cfg;
         cfg.verbose = true;
+        cfg.trace_csv = std::getenv("WS_TRACE_SPUR");
         auto R1 = run_loop({room}, truth, cfg, rng6);
         auto R2 = run_loop({room}, truth, cfg, rng6, &R1);   // second lap: steady state
         const Poly ew = to_world(R2.poly.verts, truth[0]);
@@ -1613,6 +1647,10 @@ int main()
         for (unsigned seed : seed_list)
         {
             std::mt19937 rng7(seed);
+            // WS_TRACE7 names a per-frame precision trace; one file per seed keeps them apart.
+            std::string trace7;
+            if (const char* tp = std::getenv("WS_TRACE7"))
+            { trace7 = std::string(tp) + "_" + std::to_string(seed) + ".csv"; cfg.trace_csv = trace7.c_str(); }
             auto Rx = run_explore(room, cfg, rng7, 1100, path[0]);
             const Poly ew = to_world(Rx.poly.verts, Eigen::Vector3f(path[0].x(), path[0].y(), 0.f));
             const float iou_x = Rx.poly.closed ? polygon_iou(ew, room) : 0.f;

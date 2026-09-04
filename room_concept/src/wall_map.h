@@ -57,6 +57,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <array>
 
 #include "wall_segmenter.h"
 
@@ -198,6 +199,16 @@ namespace rc::wallmap
         bool  manhattan_strict = true;
         float manhattan_gate_rad = 10.f * static_cast<float>(M_PI) / 180.f;
         float manhattan_gain = 1.f;         // bench-only scale on the in-loop Manhattan factor (review #4 test)
+        // theta0 from a global mixture search over every observed direction, instead of the first
+        // scan's bounding box refined by a mean inside the current class assignment. See
+        // WallMap::update_theta0 for the model. OFF by default and this is the measured reason:
+        // it does estimate the direction better and sooner — five frames instead of six, and it
+        // cannot be trapped half a class out — but arriving sooner lets STRUCTURE changes in on
+        // frame 1, before there is enough evidence to judge them, and the structure machinery is
+        // what actually sets the score. Paired on the random rooms it lost 0.034 IoU, 7 rooms of
+        // the 8 compared. The tilted bounding box was accidentally acting as a delay. Keep the
+        // estimator; the thing to fix first is upstream of it.
+        bool  theta0_posterior = false;
         bool  debug_splice = false;         // diagnostic prints from try_splice (bench use)
         // ── GLOBAL re-derivation cadence (re_derive): the escape hatch from a wrong local topology
         // runs on a slow clock, or sooner when local jumps are visibly stuck (rejections pile up).
@@ -386,6 +397,36 @@ namespace rc::wallmap
         bool  theta0_born = false;
         float theta0 = 0.f;
         float theta0_information = 0.f;
+        /// One frame's PRECISION SNAPSHOT — how firm the room's estimate has become, in the units
+        /// each quantity is actually held in. The freezing is not one number: the direction, the
+        /// individual walls, the corners they imply and the existence of each wall all settle on
+        /// their own schedules, and a failure usually shows as one of them freezing early.
+        struct Precisions
+        {
+            int   frame = 0;
+            float theta0_deg = 0.f;        // the room's reference direction
+            float theta0_disp_deg = 0.f;   // spread of the observed directions about it
+            float theta0_gate_deg = 0.f;   // half-width the Manhattan gate is running at
+            int   n_walls = 0, n_cand = 0, n_order = 0;
+            float sigma_phi_deg = 0.f;     // median over the cycle's walls
+            float sigma_d_m = 0.f;         // median over the cycle's walls
+            float corner_sigma_m = 0.f;    // worst corner of the cycle — the publishable test
+            float corner_sigma_med_m = 0.f;// median corner: separates one bad corner from all of them
+            int   corners_over_bar = 0;    // corners above corner_sigma_max (how many block publication)
+            int   n_corners = 0;
+            float exist_nats = 0.f;        // median wall existence log-odds
+            float class_err_deg = 0.f;     // median |wall − its class|: how Manhattan it really is
+        };
+        Precisions precisions() const;
+        /// Re-derive theta0 from the accumulated direction evidence (see the .cpp for the model).
+        void update_theta0();
+        // Direction evidence, accumulated from every SEGMENT ever observed, as a histogram over the
+        // QUADRUPLED angle (which folds the four Manhattan classes onto one circle). Weighted by
+        // each segment's own angular precision. orient_off_ carries re-anchor rotations so the
+        // histogram never has to be re-binned. Map frame.
+        static constexpr int kOrientBins = 180;          // 2 deg in the quadrupled angle = 0.5 deg in theta0
+        std::array<double, kOrientBins> orient_hist_{};
+        double orient_off_ = 0.0;
         std::vector<WallLandmark> walls;
         std::vector<Candidate>    candidates;
         /// CORNER RESIDUE: oblique segments the model explains as its own segmenter corner

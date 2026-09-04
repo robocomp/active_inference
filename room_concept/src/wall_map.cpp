@@ -102,6 +102,142 @@ namespace rc::wallmap
              n.x(), n.y(), tv.dot(t);
     }
 
+    // ─────────────────────────────────────────────────────────────────────────────────────────────
+    //  The room's reference direction θ0 — a mixture, searched globally.
+    // ─────────────────────────────────────────────────────────────────────────────────────────────
+    // A Manhattan wall lies at θ0 + kπ/2. QUADRUPLING the angle folds the four classes onto one
+    // circle, so the label k leaves the estimator instead of having to be guessed. What is left is
+    // a two-component mixture on that circle, and BOTH components are needed:
+    //   • a Manhattan component — von Mises about 4θ0, concentration κ = 1/(16 σ_M²), the same
+    //     slack the room↔wall factor allows a real wall;
+    //   • a UNIFORM component with the prior mass classify() already carries as manhattan_off_prior.
+    // A real room is full of directions that are not walls: chamfers, furniture edges, the oblique
+    // chord the segmenter fits across a corner. Without the uniform component they all vote, and on
+    // the real apartamento they drag θ0 from 0.87° to 1.73° and cost 0.075 IoU (measured). With it
+    // they land where they belong and stop voting.
+    //
+    // θ0 is then found by SEARCHING the whole quarter turn, not by descending from wherever the
+    // estimate happens to sit. That is the difference that matters. The old estimator — the first
+    // scan's oriented bounding box, refined by the mean residual INSIDE the current class
+    // assignment — is a local method twice over: the mean cannot cross a half-class (the residuals
+    // cancel there), and the Manhattan gate meanwhile refuses every wall that disagrees, so the
+    // evidence that would correct it never becomes a wall. One of the fifty rooms finished 36.5°
+    // out with 99% of itself observed. A global search over an outlier-tolerant likelihood has no
+    // such trap: the wrong angle is simply not the maximum.
+    void WallMap::update_theta0()
+    {
+        if (not params.theta0_posterior or not theta0_born) return;
+        double tot = 0.0;
+        for (const double w : orient_hist_) tot += w;
+        if (not (tot > 0.0)) return;
+
+        // Mixture terms, up to a common 1/2π: the von Mises is written relative to its own peak so
+        // exp() never overflows, and the uniform is scaled by the same factor.
+        const double kappa = 1.0 / (16.0 * static_cast<double>(params.manhattan_sigma_rad)
+                                         * static_cast<double>(params.manhattan_sigma_rad));
+        const double pi_m = 1.0 - std::clamp(static_cast<double>(params.manhattan_off_prior), 1e-6, 1.0 - 1e-6);
+        // I0(κ) for κ ≫ 1: e^κ/√(2πκ). Written as vM/uniform = √(2πκ)·e^(κ(cos u − 1)).
+        const double amp = std::sqrt(2.0 * kPi * kappa);
+        const double bin = 2.0 * kPi / static_cast<double>(kOrientBins);
+        const auto loglik = [&](double u0)      // u0 = 4·θ0 in the histogram's frame
+        {
+            double L = 0.0;
+            for (int b = 0; b < kOrientBins; ++b)
+            {
+                const double w = orient_hist_[static_cast<size_t>(b)];
+                if (w <= 0.0) continue;
+                const double du = (static_cast<double>(b) + 0.5) * bin - u0;
+                const double ratio = amp * std::exp(kappa * (std::cos(du) - 1.0));
+                L += w * std::log(pi_m * ratio + (1.0 - pi_m));
+            }
+            return L;
+        };
+        // GLOBAL search over the quarter turn (one full period of the quadrupled angle), then one
+        // responsibility-weighted M-step for sub-grid resolution.
+        double best_u = 0.0, best_L = -std::numeric_limits<double>::infinity();
+        for (int g = 0; g < kOrientBins; ++g)
+        {
+            const double u0 = (static_cast<double>(g) + 0.5) * bin;
+            if (const double L = loglik(u0); L > best_L) { best_L = L; best_u = u0; }
+        }
+        double cr = 0.0, ci = 0.0, kk = 0.0;
+        for (int b = 0; b < kOrientBins; ++b)
+        {
+            const double w = orient_hist_[static_cast<size_t>(b)];
+            if (w <= 0.0) continue;
+            const double uc = (static_cast<double>(b) + 0.5) * bin;
+            const double ratio = amp * std::exp(kappa * (std::cos(uc - best_u) - 1.0));
+            const double r = pi_m * ratio / (pi_m * ratio + (1.0 - pi_m));   // responsibility
+            cr += w * r * std::cos(uc); ci += w * r * std::sin(uc); kk += w * r;
+        }
+        const double mag = std::hypot(cr, ci);
+        const double u_hat = (mag > 0.0) ? std::atan2(ci, cr) : best_u;
+        // Back to θ0 in the map frame, then lift to the branch nearest the incumbent so the class
+        // LABELS stay continuous: branches sit π/2 apart, so a real rotation of up to a quarter
+        // class is followed and a mere relabelling never happens.
+        const float mode = static_cast<float>((u_hat - orient_off_) / 4.0);
+        const float step = kPi * 0.5f;
+        theta0 = mode + step * std::round((theta0 - mode) / step);
+        // Reported spread: the resultant length of what the Manhattan component actually claimed.
+        // It is a DISPERSION, not a standard error — it says how much the directions the room owns
+        // disagree with each other, and does not shrink merely because the robot stood still and
+        // re-observed them. (It is not the Manhattan gate's width; see theta0_sigma.)
+        if (kk > 0.0)
+        {
+            const double R = std::clamp(mag / kk, 0.0, 1.0);
+            const float sig = std::sqrt(static_cast<float>((1.0 - R) / 8.0));
+            theta0_information = 1.f / (sig * sig + 1e-12f);
+        }
+    }
+
+    WallMap::Precisions WallMap::precisions() const
+    {
+        Precisions pr;
+        pr.frame = frames_observed_;
+        const float r2d = 180.f / kPi;
+        pr.theta0_deg = wrap_pi(theta0) * r2d;
+        pr.theta0_disp_deg = (theta0_information > 0.f) ? r2d / std::sqrt(theta0_information) : 0.f;
+        pr.theta0_gate_deg = (params.manhattan_gate_rad + 2.f * theta0_sigma()) * r2d;
+        pr.n_walls = static_cast<int>(walls.size());
+        pr.n_cand  = static_cast<int>(candidates.size());
+        pr.n_order = static_cast<int>(order.size());
+        std::vector<float> sp, sd, ex, ce;
+        for (const auto id : order)
+        {
+            const auto* w = find(id);
+            if (w == nullptr) continue;
+            if (const auto c = cov_of(w->information); c)
+            {
+                if ((*c)(0, 0) > 0.f) sp.push_back(std::sqrt((*c)(0, 0)) * r2d);
+                if ((*c)(1, 1) > 0.f) sd.push_back(std::sqrt((*c)(1, 1)));
+            }
+            ex.push_back(w->exist_lodds);
+            if (w->k >= 0)
+                ce.push_back(std::abs(wrap_pi(w->phi - theta0 - static_cast<float>(w->k) * kPi * 0.5f)) * r2d);
+        }
+        const auto med = [](std::vector<float>& v) -> float
+        {
+            if (v.empty()) return 0.f;
+            std::nth_element(v.begin(), v.begin() + static_cast<long>(v.size() / 2), v.end());
+            return v[v.size() / 2];
+        };
+        pr.sigma_phi_deg = med(sp);
+        pr.sigma_d_m     = med(sd);
+        pr.exist_nats    = med(ex);
+        pr.class_err_deg = med(ce);
+        std::vector<float> cs;
+        for (const auto& c : build_polygon().corners)
+        {
+            pr.corner_sigma_m = std::max(pr.corner_sigma_m, c.sigma);
+            if (std::isfinite(c.sigma)) cs.push_back(c.sigma);
+        }
+        pr.n_corners = static_cast<int>(cs.size());
+        pr.corners_over_bar = static_cast<int>(std::count_if(cs.begin(), cs.end(),
+                                  [&](float v){ return v > params.publish_corner_sigma; }));
+        pr.corner_sigma_med_m = med(cs);
+        return pr;
+    }
+
     float WallMap::theta0_sigma() const
     {
         // Trust in θ0 comes from CONFIRMED walls agreeing with it: until a wall has real support,
@@ -111,6 +247,16 @@ namespace rc::wallmap
         // MEDIAN, not max: one confirmed off-axis wall must not hold the trust hostage — an
         // oblique 22k-point junk wall admitted while the gate was annealing-wide kept the gate at
         // 41° for ever through its own 15.6° error, re-admitting exactly its own kind (measured).
+        // With the posterior in force none of that is needed: its curvature already IS the trust,
+        // and it already shrinks when the directions disagree, over ALL of them and not just the
+        // ones this very gate let through.
+        // NOT the direction posterior's own width. The two answer different questions and only one
+        // of them is the gate's. update_theta0 measures how much the OBSERVED directions disagree
+        // with each other, which on an axis-aligned room is near zero from the first frame; the
+        // gate needs to know how far the WALLS still sit from their classes, which during the
+        // tilted-box transient is 15–20° and must stay tolerated until they anneal on. Substituting
+        // the first for the second evicted the box before a single real wall could be born
+        // (measured: the L room culled to 2 walls, no cycle at all).
         std::vector<float> eps_list;
         for (const auto id : order)
             if (const auto* w = find(id); w != nullptr and w->points_seen >= 500 and w->k >= 0)
@@ -142,6 +288,7 @@ namespace rc::wallmap
 
     void WallMap::reclassify_all()
     {
+        update_theta0();
         for (auto& w : walls)
         {
             const auto cls = classify(w.phi);
@@ -164,20 +311,45 @@ namespace rc::wallmap
         // degrees of their class), touches no solver state, and tilt is structurally impossible
         // in anything built from the walls afterwards.
         if (not params.manhattan_strict or not theta0_born) return;
-        float num = 0.f, den = 0.f;
-        for (const auto& w : walls)
-            if (w.k >= 0 and w.points_seen > 0)
-            {
-                const float wgt = static_cast<float>(w.points_seen);
-                num += wgt * wrap_pi(w.phi - theta0 - static_cast<float>(w.k) * kPi * 0.5f);
-                den += wgt;
-            }
-        if (den > 0.f) theta0 = wrap_pi(theta0 + num / den);
+        // The M-step below is the mean residual INSIDE the current class assignment; update_theta0
+        // supersedes it (and is not conditioned on that assignment), so only one of the two runs.
+        if (not params.theta0_posterior)
+        {
+            float num = 0.f, den = 0.f;
+            for (const auto& w : walls)
+                if (w.k >= 0 and w.points_seen > 0)
+                {
+                    const float wgt = static_cast<float>(w.points_seen);
+                    num += wgt * wrap_pi(w.phi - theta0 - static_cast<float>(w.k) * kPi * 0.5f);
+                    den += wgt;
+                }
+            if (den > 0.f) theta0 = wrap_pi(theta0 + num / den);
+        }
+        // A wall is projected onto its class only if it credibly BELONGS to that class — the same
+        // two-component question update_theta0 asks of every segment, asked here of the wall. It
+        // matters only during the transient, and only because θ0 now gets there first: the four
+        // sides of the first scan's bounding box are 38° from their classes by construction, and
+        // projecting them the moment θ0 becomes right swings each one 38° about its own centre.
+        // The polygon that comes out crosses its own free space and the cull retires it — the spur
+        // room lost every wall it had on frame 1 (measured). Once the walls converge the
+        // responsibility is 1 to within float precision and the published polygon is exactly
+        // Manhattan again, which is what level 2 relies on.
+        const double kappa_m = 1.0 / (16.0 * static_cast<double>(params.manhattan_sigma_rad)
+                                           * static_cast<double>(params.manhattan_sigma_rad));
+        const double pi_m = 1.0 - std::clamp(static_cast<double>(params.manhattan_off_prior),
+                                             1e-6, 1.0 - 1e-6);
+        const double amp_m = std::sqrt(2.0 * kPi * kappa_m);
         for (auto& w : walls)
         {
             if (w.k < 0) continue;
             const float phi_new = wrap_pi(theta0 + static_cast<float>(w.k) * kPi * 0.5f);
             if (std::abs(wrap_pi(phi_new - w.phi)) < 1e-7f) continue;
+            if (params.theta0_posterior)
+            {
+                const double du = 4.0 * static_cast<double>(wrap_pi(phi_new - w.phi));
+                const double ratio = amp_m * std::exp(kappa_m * (std::cos(du) - 1.0));
+                if (pi_m * ratio < (1.0 - pi_m)) continue;   // the uniform component explains it better
+            }
             // Pivot about the wall's own extent centre: d and extents co-rotate, geometry moves
             // only at second order (the origin-pivot alternative swept far extents sideways).
             const Eigen::Vector2f n_old = w.normal(), t_old = w.tangent();
@@ -1785,6 +1957,21 @@ namespace rc::wallmap
             J(1, 0) = linefit::tangent_of(sm[s].phi).dot(t);
             sm[s].Sigma = J * (*cov_r) * J.transpose() + H * pose_cov * H.transpose();
             sm[s].ok = sm[s].Sigma.allFinite();
+            // DIRECTION EVIDENCE (update_theta0): every segment votes on the room's reference
+            // direction, whatever the Manhattan gate later does with it. This is the only place
+            // θ0 hears from anything, and segments are the only thing here that is measured.
+            if (sm[s].ok and sm[s].Sigma(0, 0) > 0.f)
+            {
+                const double w = 1.0 / (16.0 * static_cast<double>(sm[s].Sigma(0, 0)));
+                if (std::isfinite(w) and w > 0.0)
+                {
+                    double u = 4.0 * static_cast<double>(sm[s].phi) + orient_off_;
+                    u -= 2.0 * kPi * std::floor(u / (2.0 * kPi));
+                    const int b = std::clamp(static_cast<int>(u * kOrientBins / (2.0 * kPi)),
+                                             0, kOrientBins - 1);
+                    orient_hist_[static_cast<size_t>(b)] += w;
+                }
+            }
         }
 
         // ── CORNER EXPLANATION: the model predicts its own segmenter artifact ─────────────────────
@@ -3186,6 +3373,10 @@ namespace rc::wallmap
         }
         for (auto& cd : candidates) xf(cd.phi, cd.d, cd.information, &cd.s_min, &cd.s_max);
         if (theta0_born) theta0 = wrap_pi(theta0 - rot);
+        // The histogram lives in the map frame like everything else. Rotating the map by −rot
+        // rotates the quadrupled angle by −4·rot; carrying that as an offset avoids re-binning
+        // (and the interpolation error a re-bin would add at every re-anchor).
+        orient_off_ -= 4.0 * static_cast<double>(rot);
         // Stored beams move with the frame: p' = R(−rot)(p − c).
         const Eigen::Matrix2f Rb = rot2(-rot);
         for (auto& b : beams) { b.o = Rb * (b.o - c); b.d = Rb * b.d; }
