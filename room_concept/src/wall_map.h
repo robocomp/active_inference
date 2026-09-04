@@ -490,6 +490,11 @@ namespace rc::wallmap
             std::vector<WallLandmark>  walls;        // the incumbent, as it was
             std::vector<std::uint64_t> order;
             std::vector<Candidate>     candidates;
+            // The two outlines that were actually in dispute, frozen at the moment of the proposal.
+            // The verdict re-scores THESE on the later grid, so neither side gets credit for what
+            // the map did afterwards — the trial decides the question that was asked, not which of
+            // two maps had the better window.
+            std::vector<Eigen::Vector2f> inc_verts, cha_verts;
         };
         Trial trial_;
         /// Decide an open trial: keep the challenger iff it still explains the CURRENT grid better

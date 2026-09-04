@@ -2738,20 +2738,18 @@ namespace rc::wallmap
     {
         if (not trial_.open) return;
         const Polygon pnow = build_polygon();
-        // The snapshot's own outline, built by swapping it in and back — build_from resolves ids
-        // through `walls`, so the incumbent's geometry cannot be recovered any other way.
-        Polygon pinc;
-        {
-            std::vector<WallLandmark>  live_w = std::move(walls);
-            std::vector<std::uint64_t> live_o = std::move(order);
-            walls = trial_.walls; order = trial_.order;
-            pinc = build_polygon();
-            walls = std::move(live_w); order = std::move(live_o);
-        }
+        // RE-SCORE THE ORIGINAL QUESTION on the newer grid. Not "is the evolved map better than the
+        // frozen one" — that comparison hands the challenger every splice, birth and death it
+        // happened to earn during the window and the incumbent none, and it showed: the
+        // apartamento's best seed fell 0.975 to 0.898 with deaths going 5 to 217, because a
+        // challenger only has to out-evolve a corpse. The two outlines that were actually in
+        // dispute are re-scored against the grid as it is now. Only the evidence has changed.
+        Polygon pinc; pinc.verts = trial_.inc_verts; pinc.closed = trial_.inc_verts.size() >= 3;
+        Polygon pcha; pcha.verts = trial_.cha_verts; pcha.closed = trial_.cha_verts.size() >= 3;
         float var = 0.f;
-        const float dE_now = (pnow.closed and pinc.closed) ? jump_delta_nats(pinc, pnow, 0, &var) : 0.f;
-        // A challenger that no longer closes has failed outright, whatever the nats say.
-        const bool survives = pnow.closed and (not pinc.closed or dE_now > 0.f);
+        const float dE_now = (pinc.closed and pcha.closed) ? jump_delta_nats(pinc, pcha, 0, &var) : 0.f;
+        // A challenger whose cycle has since fallen open has failed outright, whatever the nats say.
+        const bool survives = pnow.closed and pinc.closed and pcha.closed and dE_now > 0.f;
         if (params.debug_splice)
             std::printf("[trial] RESOLVE at frame %d (opened %d, dE was %.1f): now dE %.1f (sigma %.1f), closed %d -> %s\n",
                         frames_observed_, trial_.opened_at, trial_.dE_at_open, dE_now,
@@ -3360,6 +3358,8 @@ namespace rc::wallmap
                     { trial_.walls.erase(trial_.walls.begin() + wi); break; }
             trial_.order = order;
             trial_.candidates = candidates;
+            trial_.inc_verts = pold.verts;
+            trial_.cha_verts = pnew.verts;
             trial_.open = true;
             trial_.frames_left = std::max(1, params.trial_frames);
             trial_.opened_at = frames_observed_;
