@@ -512,6 +512,30 @@ Per axis (nuisance ON), and the contrast with it OFF:
 | height 0.05 m | 0.944 ± 0.001 | 0.985 ± 0.001 |
 | yaw, nuisance OFF | 0.998 ± 0.004 | 0.995 ± 0.006 |
 
+### ★★★★ THE NUISANCE DOES NOT ONLY WIDEN THE INTERVAL — IT MOVES THE ESTIMATE (2026-09-04)
+
+Same rows, nuisance off then on. **Five of the six mount parameters change sign.**
+
+| | OFF | ON | shift |
+|---|---|---|---|
+| ricoh yaw | +0.1803 ± 0.0035 | +0.0362 ± 0.1754 | −0.144° |
+| ricoh pitch | +0.1114 ± 0.0012 | −0.0109 ± 0.0019 | −0.122° **sign** |
+| ricoh height | +0.0138 ± 0.0001 | −0.0023 ± 0.0008 | −0.016 m **sign** |
+| zed yaw | +0.2894 ± 0.0062 | −0.2690 ± 0.0181 | −0.558° **sign** |
+| zed pitch | +0.2790 ± 0.0079 | −0.2167 ± 0.0317 | −0.496° **sign** |
+| zed height | −0.0141 ± 0.0008 | −0.0070 ± 0.0014 | +0.007 m |
+
+★★★ **This corrects how §1.1 and the Atlas had been framing it, mine included** — "marginalising does
+not recover precision, it reveals we never had it" is true and incomplete. The per-corner offsets were
+not inflating confidence in a roughly right answer; they were **dominating the point estimate**. The
+zed's yaw moves 0.558°, which is 31σ of its own honest sigma and 90σ of the dishonest one.
+⚠ Read carefully: this says nothing about being nearer the TRUE mount. There is no external reference
+in this experiment (§3), so "moved toward truth" is unavailable in either direction. What is
+established is that the answer depends on the modelling choice far more than on the data's noise —
+so the pre-nuisance numbers are not usable by widening their error bars after the fact.
+★ Seen from the residual side this is the same event as `chi2/dof` 6.99 → 1.41: the fit was
+inconsistent, and the term that fixed the inconsistency also moved the answer.
+
 ### ★★★★ THE ZED PREDICTION WAS WRONG, AND THE REASON IS THE INTERESTING PART
 
 §2b predicted **0.477** for the zed from the design-effect argument. Measured **0.984** — the zed
