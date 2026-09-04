@@ -565,3 +565,28 @@ floor rises and its best falls. The 50-room population is fifty layouts against 
 decides; and the coverage turn now removed was itself introduced to rescue a seed-7 failure on this very
 layout, so the old objective was partly fitted to it. Default is now information gain
 (`WS_NO_INFOGAIN=1` restores the heuristic).
+
+## Giving a spur its own interest, without a hand-set weight (2026-09-04)
+The entropy objective reads a cell's log-odds and nothing else, and that is where a thin wall goes missing.
+The grid deliberately keeps TWO channels — endpoint returns, which localise matter, and traversals, which
+are weak and explicable because a thin wall shares its cell with air. When they disagree, a return saying
+matter and the beams saying free, the entropy of the log-odds alone reads the cell as settled while the map
+plainly does not know. That cell is a suspected thin wall. It is now scored at full ignorance: not a weight
+for "weak matter", but the admission that two channels in conflict carry no information until someone goes
+and looks. It is the evidential-grid idea (Moras & Cherfaoui 2011, literature rank 7) in miniature.
+Applied to every contested cell it was a broad reweighting rather than an interest in spurs, and it cost
+more than it bought: spur 9% -> 10% and corner columns 76% -> 78%, against wall columns 54% -> 49%, mean
+0.920 -> 0.914 and Hausdorff median 0.774 -> 0.954 m. Contested cells are not rare — every wall surface has
+them, where a grazing beam disagrees with the return beside it. Restricting the boost to cells INSIDE the
+polygon and clear of its boundary makes it selective: a conflict on the boundary is the wall's own surface,
+a conflict in the interior is a suspected free-standing or protruding structure, which is what a spur is.
+| 50 rooms, identical | mean | median | Hausdorff med | wall col | alcove | corner col | spur |
+|---|---|---|---|---|---|---|---|
+| information gain | 0.920 | 0.954 | 0.774 m | 54% | 74% | 76% | 9% |
+| + conflict, everywhere | 0.914 | 0.951 | 0.954 m | 49% | 74% | 78% | 10% |
+| + conflict, interior only | **0.922** | **0.957** | 0.774 m | 50% | **77%** | **80%** | 10% |
+Kept: three feature types up, one down, and the aggregate up. The apartamento is untouched at
+0.908 / 0.975 / 0.945, 39 of 40. **But spurs move 9% -> 10%, and that is the honest answer to "give spurs
+extra interest": attention was not the binding constraint.** The earlier diagnosis stands — a thin
+protrusion is seen from one side only, and an 8 cm grid blurs a 13 cm wall into a 32 cm cluster. Those are
+resolution and geometry limits, and no amount of wanting to look at a spur fixes them.

@@ -656,13 +656,50 @@ namespace
     {
         std::vector<Unknown> out;
         // (a) THE GRID. Subsampled so the score loop stays the size it was.
+        const auto poly_now = map.build_polygon();
+        const auto interior_far_from_boundary = [&](const Eigen::Vector2f& q)
+        {
+            if (not poly_now.closed or poly_now.verts.size() < 3) return false;
+            if (not rc::corner_visibility::point_in_polygon(q, poly_now.verts)) return false;
+            const float clear = 2.f * map.fgrid.cell;
+            for (size_t e = 0; e < poly_now.verts.size(); ++e)
+            {
+                const Eigen::Vector2f a = poly_now.verts[e], ab = poly_now.verts[(e + 1) % poly_now.verts.size()] - a;
+                const float l2 = ab.squaredNorm();
+                const float tt = l2 > 1e-9f ? std::clamp((q - a).dot(ab) / l2, 0.f, 1.f) : 0.f;
+                if ((q - (a + tt * ab)).norm() < clear) return false;
+            }
+            return true;
+        };
         if (map.fgrid.ready())
         {
             const int stride = 3;
             for (int i = 0; i < map.fgrid.nx; i += stride)
                 for (int j = 0; j < map.fgrid.ny; j += stride)
                 {
-                    const float h = entropy_nats(map.fgrid.lodds[static_cast<size_t>(map.fgrid.idx(i, j))]);
+                    const size_t id = static_cast<size_t>(map.fgrid.idx(i, j));
+                    float h = entropy_nats(map.fgrid.lodds[id]);
+                    // ★ CONFLICT IS UNCERTAINTY THE LOG-ODDS CANNOT SHOW (the evidential-grid idea,
+                    // Moras & Cherfaoui 2011, in miniature). The grid keeps two channels on purpose:
+                    // endpoint RETURNS, which localise matter, and traversals, which are weak and
+                    // explicable — a thin wall shares its cell with air. When they DISAGREE, a return
+                    // says matter and the beams say free, the entropy of the log-odds alone reads
+                    // that cell as settled when the map plainly does not know. Such a cell is a
+                    // suspected thin wall, and it is the one thing a visit can settle outright, so it
+                    // is scored at full ignorance. This is what gives a spur its interest: not a
+                    // hand-set weight for "weak matter", but the admission that two channels in
+                    // conflict carry no information until someone goes and looks.
+                    // ...but ONLY AWAY FROM THE BOUNDARY. Contested cells are not rare: every wall
+                    // surface has them, because a grazing beam disagrees with the return beside it.
+                    // Promoting all of them measured as a broad reweighting rather than an interest
+                    // in spurs — one more spur and two more corner columns bought with six wall
+                    // columns and 0.18 m of Hausdorff. A conflict ON the boundary is the wall's own
+                    // surface; a conflict INSIDE the room is a suspected free-standing or protruding
+                    // structure, which is what a spur is.
+                    const unsigned short hits = map.fgrid.hits[id];
+                    if (hits >= 1 and hits < 3 and map.fgrid.lodds[id] < 0.f
+                        and interior_far_from_boundary(map.fgrid.at(i, j)))
+                        h = std::max(h, std::log(2.f));
                     if (h > 0.15f) out.push_back({map.fgrid.at(i, j), h * static_cast<float>(stride * stride)});
                 }
         }
@@ -687,8 +724,7 @@ namespace
                                entropy_nats(c.evidence() - map.params.birth_nats)});
         // (d) CORNERS: a position, so its uncertainty is differential entropy — the excess nats of a
         // corner wider than the publish bar, ln(sigma / bar), and nothing once it is inside it.
-        const auto poly = map.build_polygon();
-        for (const auto& c : poly.corners)
+        for (const auto& c : poly_now.corners)
         {
             const float sig = std::isfinite(c.sigma) ? c.sigma : 1e3f;
             if (sig > map.params.publish_corner_sigma)
