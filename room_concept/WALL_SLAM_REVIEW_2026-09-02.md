@@ -539,3 +539,29 @@ the mass score divides by distance so the far leg is discounted twice) moved the
 long drive whose frames come out of refinement. The coverage problem is real; a nearest-versus-farthest
 heuristic is not its answer. What is, is an objective that prices the drive against what it would reveal —
 mutual-information exploration, rank 6 of the literature review, still unimplemented.
+
+## Information-gain exploration (literature rank 6), 2026-09-04
+The L-room diagnosis said the loss is coverage, and that a nearest-versus-farthest heuristic is not the
+answer; an objective that prices a drive against what it would reveal is. That objective is now in.
+Every uncertain thing in the map contributes its OWN entropy, in nats, and the explorer maximises gain per
+metre. A grid cell contributes H(p) from its log-odds. An existence bin IS a log-odds, so its entropy needs
+no conversion. A candidate line contributes the entropy of its own accumulated evidence. A corner
+contributes its differential-entropy excess, ln(sigma / publish bar), and nothing once it is inside the
+bar. A cell the map is already sure about contributes nothing, so the drive stops on its own.
+What that replaced: five hand-set target weights (1.0 unsolid bin, 2.0 candidate, 3.0 uncertain corner,
+1.5 frontier, 2.5 weak matter), a 0.10-per-metre distance discount chosen by taste, and the every-fourth-
+replan coverage turn that existed only because the old objective undervalued far regions. The remaining
+constant is the distance the robot covers between replans, which makes the ratio nats per look.
+| 50 rooms, identical | mean | median | max | Hausdorff median | alcove | corner col | spur |
+|---|---|---|---|---|---|---|---|
+| heuristic targets | 0.912 | 0.947 | 0.988 | 0.894 m | 70% | 73% | 13% |
+| information gain | **0.920** | **0.954** | **0.993** | **0.774 m** | **74%** | **76%** | 9% |
+The L rooms are where it lands: the worst went 0.812 -> 0.944 with coverage 0.86 -> 0.97, and another
+0.920 -> 0.967. Spurs are the one regression, 13% -> 9%: the old list gave weak matter a 2.5 weight to
+force dwelling on thin walls, and entropy disagrees — a wholly unknown cell (0.69 nats) outranks a
+half-known one (0.58), which is correct as information and worse for spurs.
+**The real flat is slightly worse**: 0.957 / 0.902 / 0.980 -> 0.908 / 0.975 / 0.945, still 39 of 40. Its
+floor rises and its best falls. The 50-room population is fifty layouts against three seeds of one, so it
+decides; and the coverage turn now removed was itself introduced to rescue a seed-7 failure on this very
+layout, so the old objective was partly fitted to it. Default is now information gain
+(`WS_NO_INFOGAIN=1` restores the heuristic).

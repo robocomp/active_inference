@@ -233,6 +233,7 @@ namespace
         float odom_sigma_xy = 0.005f, odom_sigma_th = 0.3f * kPi / 180.f;
         bool verbose = false;
         Boxes occluders;                 // furniture the LiDAR cannot see through
+        bool  info_gain = true;          // drive by expected information gain per metre (rank 6)
         bool  ceiling_line = false;      // add the camera's wall-to-ceiling ranges
         float ceiling_dh = 1.70f;        // ceiling height above the camera (3.0 m room, 1.30 m mount)
         float ceiling_sigma_rad = 0.0011f;   // 0.065 deg — the measured fitted-contour scatter
@@ -635,6 +636,67 @@ namespace
     };
 
     struct Unknown { Eigen::Vector2f p; float w; };
+    /// Binary entropy of a variable held at these log-odds, in nats. Zero when the map is certain
+    /// either way, ln 2 at total ignorance. This is the quantity an information-gain explorer
+    /// maximises, and it is what the hand-set target weights below were standing in for.
+    float entropy_nats(float lodds)
+    {
+        const float pp = std::clamp(1.f / (1.f + std::exp(-lodds)), 1e-6f, 1.f - 1e-6f);
+        return -pp * std::log(pp) - (1.f - pp) * std::log(1.f - pp);
+    }
+
+    /// EXPECTED INFORMATION GAIN (Stachniss 2005; Julian & Karaman 2014), in place of a list of
+    /// epistemic targets carrying five hand-set weights. Every uncertain thing in the map — a grid
+    /// cell, an existence bin, a candidate line, a corner — contributes its OWN entropy, in the same
+    /// nats, and the explorer drives to where a scan would remove the most of it per metre of
+    /// travel. A cell the map is already sure about contributes nothing, so the objective terminates
+    /// on its own instead of needing a separate "no frontier left" rule, and a far region full of
+    /// unknown cells outweighs a near sliver without needing a coverage turn to force the issue.
+    std::vector<Unknown> collect_entropy_targets(const rc::wallmap::WallMap& map)
+    {
+        std::vector<Unknown> out;
+        // (a) THE GRID. Subsampled so the score loop stays the size it was.
+        if (map.fgrid.ready())
+        {
+            const int stride = 3;
+            for (int i = 0; i < map.fgrid.nx; i += stride)
+                for (int j = 0; j < map.fgrid.ny; j += stride)
+                {
+                    const float h = entropy_nats(map.fgrid.lodds[static_cast<size_t>(map.fgrid.idx(i, j))]);
+                    if (h > 0.15f) out.push_back({map.fgrid.at(i, j), h * static_cast<float>(stride * stride)});
+                }
+        }
+        // (b) THE EXISTENCE BINS. A bin IS a log-odds, so its entropy needs no conversion.
+        for (const auto& w : map.walls)
+        {
+            const Eigen::Vector2f n = w.normal(), t = w.tangent();
+            for (size_t b = 0; b < w.exist_bins.size(); ++b)
+            {
+                const float h = entropy_nats(w.exist_bins[b] - map.params.birth_nats);
+                if (h > 0.15f)
+                    out.push_back({n * w.d + t * (w.bins_s0 + (static_cast<float>(b) + 0.5f) * map.params.exist_bin_m), h});
+            }
+            if (w.exist_bins.empty() and w.has_extent)
+                out.push_back({n * w.d + t * (0.5f * (w.s_min + w.s_max)), std::log(2.f)});
+        }
+        // (c) CANDIDATE LINES: their existence is exactly what a visit would settle.
+        for (const auto& c : map.candidates)
+            if (c.npts >= 3)
+                out.push_back({rc::linefit::normal_of(c.phi) * c.d
+                               + rc::linefit::tangent_of(c.phi) * (0.5f * (c.s_min + c.s_max)),
+                               entropy_nats(c.evidence() - map.params.birth_nats)});
+        // (d) CORNERS: a position, so its uncertainty is differential entropy — the excess nats of a
+        // corner wider than the publish bar, ln(sigma / bar), and nothing once it is inside it.
+        const auto poly = map.build_polygon();
+        for (const auto& c : poly.corners)
+        {
+            const float sig = std::isfinite(c.sigma) ? c.sigma : 1e3f;
+            if (sig > map.params.publish_corner_sigma)
+                out.push_back({c.p, std::log(sig / map.params.publish_corner_sigma)});
+        }
+        return out;
+    }
+
     std::vector<Unknown> collect_unknowns(const rc::wallmap::WallMap& map)
     {
         std::vector<Unknown> out;
@@ -841,7 +903,7 @@ namespace
             if (--replan_in <= 0 or path.empty())
             {
                 replan_in = 15;
-                const auto unknowns = collect_unknowns(R.map);
+                const auto unknowns = cfg.info_gain ? collect_entropy_targets(R.map) : collect_unknowns(R.map);
                 // Exploration is COMPLETE when free space has no true frontier left; the map may
                 // keep refining, but there is nowhere informative left to drive to.
                 quiet_frames = (f > 60 and R.map.frontiers().empty()) ? quiet_frames + 1 : 0;
@@ -858,7 +920,10 @@ namespace
                 // space is essentially explored, every replan goes back to refinement — that is
                 // what the good seeds paid for coverage turns before this condition existed.
                 const auto fronts = R.map.frontiers();
-                const bool coverage_turn = (++replan_count % 4 == 0) and fronts.size() > 3;
+                // The coverage turn is a patch for an objective that undervalues far regions. An
+                // entropy objective does not need it: a far leg full of unknown cells carries more
+                // nats than a near sliver, and the ratio decides honestly.
+                const bool coverage_turn = not cfg.info_gain and (++replan_count % 4 == 0) and fronts.size() > 3;
                 // ⚠ TRIED AND REVERTED 2026-09-03: every second coverage turn to the FARTHEST
                 // frontier instead. It is the obvious cure for what the coverage diagnostic shows —
                 // an L room leaves 14% of its own interior unseen while only 5% is seen and left
@@ -890,7 +955,12 @@ namespace
                         for (const auto& u : unknowns)
                             if (ex.sees(v, from_map(u.p))) sc += u.w;
                         if (sc <= 0.f) continue;
-                        sc /= (1.f + 0.10f * (v - tru.head<2>()).norm());
+                        // GAIN PER METRE. The constant is not a tuning knob: it is the distance the
+                        // robot covers between replans, so the ratio is nats per look. Without it
+                        // the explorer would teleport-shop; with a hand-set 0.10 discount it valued
+                        // distance by taste.
+                        sc /= (cfg.info_gain ? (1.0f + (v - tru.head<2>()).norm())
+                                             : (1.f + 0.10f * (v - tru.head<2>()).norm()));
                         if (sc > best_sc) { best_sc = sc; best_v = v; }
                     }
                 if (best_sc > 0.f)
@@ -1453,6 +1523,7 @@ int main()
         RunConfig cfg;
         cfg.n_rays = 720;
         cfg.verbose = false;
+        cfg.info_gain = std::getenv("WS_NO_INFOGAIN") == nullptr;
         // EPISTEMIC DRIVE: no scripted tour — the robot goes where the model is uncertain.
         // THREE SEEDS: single runs swing 0.89–0.97 IoU on identical configs; a mechanism is judged
         // on the distribution, never on one draw (the unaligned-measurements lesson).
@@ -2104,6 +2175,7 @@ int main()
             cfg8.verbose = false;
             cfg8.occluders = furniture;
             cfg8.ceiling_line = std::getenv("WS_CEILING") != nullptr;
+            cfg8.info_gain = std::getenv("WS_NO_INFOGAIN") == nullptr;
             std::mt19937 rrun(4242u + static_cast<unsigned>(r));
             int room_frames = 900;
             if (const char* e = std::getenv("WS_ROOM_FRAMES"))
