@@ -177,6 +177,20 @@ namespace rc::wallmap
         // inside a big-gain adoption (measured: a 26-bin wrapped face ≈ 120 nats against
         // thousands of area nats). ⚠ threshold ≈ two fully-observed bins.
         float adopt_surrender_nats = 9.f;
+        // A splice pays the code length of the lines it names. It does NOT yet pay for the
+        // observed existence support it ERASES when its new cycle drops a wall the old one held —
+        // the term the re-derivation judge has carried since 2026-09-03. Measured consequence:
+        // on the apartamento a +2 splice bought 217 free cells for 866 nats and swallowed 61
+        // matter cells of the flat's long partition for 237, and the partition was three metres
+        // shorter for ever after. See WallMap::try_splice.
+        // MEASURED HARMFUL, default OFF: charging a splice the full existence evidence of a wall
+        // its new cycle drops makes legitimate REPLACEMENTS unaffordable — a replacement erases the
+        // wall it replaces by construction, and the line-proximity test that lets the re-derivation
+        // judge recognise "the new cycle still holds this line" is too tight for a splice that
+        // rebuilds the line a little further out. Paired on 7 random rooms: IoU 0.957 -> 0.819 with
+        // polygons that no longer close at all. Kept because the ASYMMETRY is real and worth
+        // revisiting with a looser held-test; the term itself, as written, is not affordable.
+        bool  splice_surrender = false;
         // ADOPTION JUDGE (measured 2026-09-03, IoU seed 7/1001/424242): 0 = grid-IoU margin 0.02 +
         // health waiver + surrender veto (the incumbent, 0.951/0.969/0.943); 1 = the one energy
         // (grid + support in − surrender − code length, 0.926/0.969/0.918). adopt_repair splices
