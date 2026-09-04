@@ -256,6 +256,18 @@ namespace rc::wallmap
         // SEQUENCES rather than steps — a trial adoption kept only if it survives — which is the
         // reversible-jump proposal from the literature review, or the batch pass at saturation.
         float adopt_sigma_k = 2.f;
+        // THE SEQUENCE JUDGE. A cycle the incumbent judge refuses, but which is closed and explains
+        // more grid than it costs, is adopted ON TRIAL: the refused-from state is snapshotted, the
+        // challenger runs the map for trial_frames, and it is kept only if it still explains the
+        // grid better THEN — on evidence that did not exist when it was proposed. Otherwise the
+        // snapshot is restored. This is the only form of judge that can pass a step which is
+        // individually worthless: room 32 escapes through one worth 2.5 nats against a 33-nat
+        // standard deviation, which no per-step test can distinguish from noise.
+        bool  trial_adoption = true;
+        // How long the challenger has to prove itself. Its scale is set by how long it takes the
+        // robot to re-observe the region the two cycles disagree about, which at these speeds and
+        // this sensor range is tens of frames, not hundreds.
+        int   trial_frames = 40;
         // The health waiver (see the re-derivation judge) lets a challenger past the IoU margin
         // when the incumbent's own corners are too blunt to publish. Priced: the corner sharpness
         // it buys must beat the code length of the edges it adds, both in nats. Unpriced, ANY
@@ -465,6 +477,24 @@ namespace rc::wallmap
         /// residual zones pay for. Pure: reads the grid, returns a new polygon.
         Polygon decorate(const Polygon& pub) const;
         Params params;
+
+        /// An outline adopted on trial, with the state to put back if it does not survive. The
+        /// GRID is deliberately not part of it: sensor evidence is never rolled back, and the whole
+        /// point is that the verdict is passed on a later, better grid than the proposal was.
+        struct Trial
+        {
+            bool open = false;
+            int  frames_left = 0;
+            int  opened_at = 0;
+            float dE_at_open = 0.f;
+            std::vector<WallLandmark>  walls;        // the incumbent, as it was
+            std::vector<std::uint64_t> order;
+            std::vector<Candidate>     candidates;
+        };
+        Trial trial_;
+        /// Decide an open trial: keep the challenger iff it still explains the CURRENT grid better
+        /// than the snapshot would, else restore the snapshot. Called once the window runs out.
+        void resolve_trial();
 
         bool  theta0_born = false;
         float theta0 = 0.f;

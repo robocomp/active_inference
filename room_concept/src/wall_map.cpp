@@ -1955,6 +1955,9 @@ namespace rc::wallmap
                 }
             }
         }
+        // A trial adoption is measured in FRAMES of fresh evidence, so the window ticks here and
+        // nowhere else — one tick per scan actually taken in, not per re-derivation attempted.
+        if (trial_.open and --trial_.frames_left <= 0) resolve_trial();
         update_existence(pts_robot, pose, fr);
 
         const int S = static_cast<int>(seg.segments.size());
@@ -2716,6 +2719,56 @@ namespace rc::wallmap
         return dn;
     }
 
+    // ─────────────────────────────────────────────────────────────────────────────────────────────
+    //  Resolving a trial adoption.
+    // ─────────────────────────────────────────────────────────────────────────────────────────────
+    // Both outlines are scored against the grid AS IT IS NOW — which has had the whole trial window
+    // of new beams added to it, including beams aimed at the region the two disagree about, because
+    // the explorer goes where the map is uncertain. That is the entire mechanism: the proposal was
+    // judged on a grid that could not settle it, and the verdict is passed on one that can.
+    //
+    // The comparison is not perfectly fair and it is worth being explicit about how. The challenger
+    // has had the window to evolve — splices, births, deaths — while the snapshot is frozen at the
+    // moment of the proposal, so a challenger is judged in its improved form against an incumbent
+    // in its original one. Running both maps forward would fix that and cost twice the compute for
+    // a difference that is second order over tens of frames: wall refinement in that window is
+    // sub-centimetre against an 8 cm cell, and structural moves the challenger earned are mostly
+    // ones the incumbent would have earned too.
+    void WallMap::resolve_trial()
+    {
+        if (not trial_.open) return;
+        const Polygon pnow = build_polygon();
+        // The snapshot's own outline, built by swapping it in and back — build_from resolves ids
+        // through `walls`, so the incumbent's geometry cannot be recovered any other way.
+        Polygon pinc;
+        {
+            std::vector<WallLandmark>  live_w = std::move(walls);
+            std::vector<std::uint64_t> live_o = std::move(order);
+            walls = trial_.walls; order = trial_.order;
+            pinc = build_polygon();
+            walls = std::move(live_w); order = std::move(live_o);
+        }
+        float var = 0.f;
+        const float dE_now = (pnow.closed and pinc.closed) ? jump_delta_nats(pinc, pnow, 0, &var) : 0.f;
+        // A challenger that no longer closes has failed outright, whatever the nats say.
+        const bool survives = pnow.closed and (not pinc.closed or dE_now > 0.f);
+        if (params.debug_splice)
+            std::printf("[trial] RESOLVE at frame %d (opened %d, dE was %.1f): now dE %.1f (sigma %.1f), closed %d -> %s\n",
+                        frames_observed_, trial_.opened_at, trial_.dE_at_open, dE_now,
+                        std::sqrt(std::max(var, 0.f)), static_cast<int>(pnow.closed),
+                        survives ? "KEEP" : "REVERT");
+        if (not survives)
+        {
+            walls = std::move(trial_.walls);
+            order = std::move(trial_.order);
+            candidates = std::move(trial_.candidates);
+            heal_order();
+            reclassify_all();
+            seed_extents_from_polygon();
+        }
+        trial_ = Trial{};
+    }
+
     bool WallMap::re_derive(const Eigen::Vector2f& robot_map)
     {
         if (not fgrid.ready()) return false;
@@ -3284,7 +3337,40 @@ namespace rc::wallmap
             }
         }
         referee("adopt", adopt_ok, dE, 0.f, code, pold.verts, pnew.verts);
-        if (adopt_ok)
+        // ── THE SEQUENCE JUDGE ───────────────────────────────────────────────────────────────────
+        // Every judge above asks one question of one step, and the measurement says no such judge
+        // can work here: room 32 escapes a 36° error through a step worth 2.5 nats against a 33-nat
+        // standard deviation — indistinguishable from noise, and right. The incumbent judge refuses
+        // it, the energy judge takes it only because it refuses almost nothing, and a significance
+        // margin refuses it precisely because it is calibrated. So stop asking the step to justify
+        // itself and ask the SEQUENCE: adopt on trial, run the map on it, and keep it only if it
+        // still explains the grid better once the robot has looked again. The verdict is then
+        // passed on evidence that did not exist when the proposal was made, which is the one thing
+        // a per-step test can never have.
+        bool trial_open_now = false;
+        if (not adopt_ok and params.trial_adoption and not trial_.open
+            and pnew.closed and pold.closed and dE > 0.f)
+        {
+            trial_.walls = walls;
+            // The trial's own new walls are already in `walls`; the snapshot is the map WITHOUT
+            // them, so a revert leaves no orphans behind.
+            for (const auto& w : created)
+                for (int wi = static_cast<int>(trial_.walls.size()) - 1; wi >= 0; --wi)
+                    if (trial_.walls[static_cast<size_t>(wi)].id == w.id)
+                    { trial_.walls.erase(trial_.walls.begin() + wi); break; }
+            trial_.order = order;
+            trial_.candidates = candidates;
+            trial_.open = true;
+            trial_.frames_left = std::max(1, params.trial_frames);
+            trial_.opened_at = frames_observed_;
+            trial_.dE_at_open = dE;
+            trial_open_now = true;
+            if (params.debug_splice)
+                std::printf("[trial] OPEN at frame %d: dE %.1f, iou %.3f->%.3f, %zu -> %zu edges, %d frames to prove it\n",
+                            frames_observed_, dE, iou_old, iou_new, pold.verts.size(), pnew.verts.size(),
+                            trial_.frames_left);
+        }
+        if (adopt_ok or trial_open_now)
         {
             order = new_order;
             // Erase promoted candidates (largest indices first) and orphaned walls.
@@ -3306,6 +3392,15 @@ namespace rc::wallmap
             heal_order();
             reclassify_all();
             seed_extents_from_polygon();
+            // The conservative judge approving a further change while a trial is open is the map
+            // moving on with its blessing: the trial has served its purpose and its snapshot is
+            // now older than anything worth restoring.
+            if (adopt_ok and trial_.open and not trial_open_now)
+            {
+                if (params.debug_splice)
+                    std::printf("[trial] CLOSED by a judged adoption at frame %d\n", frames_observed_);
+                trial_ = Trial{};
+            }
             return true;
         }
         // Not better: discard the trial walls.
@@ -3440,6 +3535,22 @@ namespace rc::wallmap
                 xf(w.prior_mu.x(), w.prior_mu.y(), w.prior_info, nullptr, nullptr);
         }
         for (auto& cd : candidates) xf(cd.phi, cd.d, cd.information, &cd.s_min, &cd.s_max);
+        // An open trial's snapshot lives in the same frame and must move with it, or reverting
+        // would put the map back in the OLD frame — a silent (c, rot) error appearing tens of
+        // frames after the re-anchor that caused it.
+        if (trial_.open)
+        {
+            for (auto& w : trial_.walls)
+            {
+                const float shift = linefit::tangent_of(w.phi).dot(c);
+                xf(w.phi, w.d, w.information, w.has_extent ? &w.s_min : nullptr,
+                   w.has_extent ? &w.s_max : nullptr);
+                w.bins_s0 -= shift;
+                if (w.prior_info.trace() > 0.f)
+                    xf(w.prior_mu.x(), w.prior_mu.y(), w.prior_info, nullptr, nullptr);
+            }
+            for (auto& cd : trial_.candidates) xf(cd.phi, cd.d, cd.information, &cd.s_min, &cd.s_max);
+        }
         if (theta0_born) theta0 = wrap_pi(theta0 - rot);
         // The histogram lives in the map frame like everything else. Rotating the map by −rot
         // rotates the quadrupled angle by −4·rot; carrying that as an offset avoids re-binning
