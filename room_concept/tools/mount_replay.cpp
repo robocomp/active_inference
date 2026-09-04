@@ -937,6 +937,34 @@ void run_bootstrap(std::vector<Camera>& cams, const std::vector<CamResult>& base
         return a.solve();
     };
 
+    // ── The closure's cluster statistics, computed directly ─────────────────────────────────────
+    // ⚠ Reported because a standard error is exactly the kind of number that can be produced two
+    //   ways that disagree. sd(per sighting)/sqrt(k) is NOT a cluster standard error: it puts the
+    //   WITHIN-corner spread where the BETWEEN-corner spread belongs, and here that is a factor of
+    //   four. The estimator below is the mean of per-corner means, weighted by sightings, with its
+    //   spread taken over the corners themselves.
+    {
+        double wsum = 0, num = 0;
+        std::vector<std::pair<double, double>> cm;   // (corner mean, weight)
+        for (const auto& [v, vc] : by_vertex)
+            if (vc.n > 0)
+            {
+                const double m = vc.du_sum / static_cast<double>(vc.n) * kRad2Deg;
+                cm.emplace_back(m, static_cast<double>(vc.n));
+                num += vc.du_sum * kRad2Deg; wsum += static_cast<double>(vc.n);
+            }
+        const double gm = num / wsum;
+        double var_un = 0, var_w = 0, wtot = 0;
+        for (const auto& [m, w] : cm) { var_un += (m - gm) * (m - gm); var_w += w * (m - gm) * (m - gm); wtot += w; }
+        const double k = static_cast<double>(cm.size());
+        const double sd_corner = std::sqrt(var_un / (k - 1.0));
+        std::printf("  closure by CORNER: %.0f corners, mean %+.4f deg, sd of corner means %.4f,"
+                    " se = sd/sqrt(k) %.4f\n", k, gm, sd_corner, sd_corner / std::sqrt(k));
+        std::printf("                     (sightings-weighted sd %.4f; per-SIGHTING sd %.4f, whose"
+                    " /sqrt(k) is %.4f and is NOT a cluster se)\n",
+                    std::sqrt(var_w / wtot), full.sd_du_deg, full.sd_du_deg / std::sqrt(k));
+    }
+
     std::uint32_t rng = 20260904u;
     const auto rnd = [&] { rng = rng * 1664525u + 1013904223u; return rng >> 8; };
     std::vector<double> dm, dc, dd;             // mount difference, closure, and their difference

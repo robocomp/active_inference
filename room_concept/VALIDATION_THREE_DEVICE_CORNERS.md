@@ -611,7 +611,7 @@ predicted +0.004, measured +0.000. So it also says how much of a correction surv
 the more useful direction for a running robot than the injection it was derived from.
 
 ★★ **The stage-2 closure comparison, restated with honest sigmas.** The two mount solves differ by
-**+0.3052 ± 0.1763**; the closure says **−0.0289 ± 0.1037** (cluster-honest, 20 corners). The two
+**+0.3052 ± 0.1763**; the closure says **−0.0289 ± 0.0237** (see the estimator note below). The two
 routes differ by **+0.3341**, and nothing like the 0.0023° agreement once claimed from the dishonest
 sigmas. **98.9%** of that interval's variance is the ricoh's yaw alone.
 
@@ -624,6 +624,35 @@ the disagreement is **1.60σ** rather than 1.63 — the independence assumption 
 slightly optimistic rather than conservative.
 ★ Cheap because `H`, `b` and `rTr` are sums over the per-vertex blocks: a replicate adds up the
 selected blocks instead of re-reading 100 k rows.
+### ⚠ TWO CLUSTER STANDARD ERRORS FOR THE CLOSURE, DIFFERING 4.3x — AND BOTH ARE DEFENSIBLE
+
+I first quoted the closure as **−0.0289 ± 0.1037**, from `sd(per sighting)/√k`. Measured directly on
+the corner means instead of inferred:
+
+| | value |
+|---|---|
+| sd of the CORNER MEANS, unweighted | 0.4562 → se `/√20` = **0.1020** |
+| sd of the corner means, sightings-weighted | 0.1006 → se ≈ **0.0225** |
+| per-sighting sd | 0.4638 → `/√20` = 0.1037 |
+| bootstrap over corners | **0.0237** |
+
+★★★ **The defect was a MISMATCH, not an inflation.** 0.1037 is within 2% of the honest cluster se of
+the *mean of corner means* — it was very nearly right, for an estimator I was not reporting. The
+reported `−0.0289` is the sightings-**weighted** grand mean, whose cluster se is **0.0237**.
+The factor of four is real and is about unequal corner sizes: corners seen a few times have noisy
+means (hence the 0.4562 unweighted spread), corners seen thousands of times agree closely (hence
+0.1006 weighted), and the weighted mean discounts the noisy ones.
+⇒ **the closure is 1.22σ from zero, and it is the TIGHT route** (0.024) against the mount difference's
+0.205. A reader who infers the closure is the limitation has it backwards; **98.9% is the headline**.
+⚠ A weighted mean is precise because it leans on the most-seen corners, which are not a random sample
+of corners but the ones the tour dwelt on. The corner-democratic version is ±0.102. The two together
+say the corners seen most agree closely about the two cameras and the corners seen rarely do not —
+a statement about the tour as much as about the cameras.
+★★★ **Both halves survive inspection alone; only dividing one by the other exposes it.** Surfaced by
+a thesis session that recomputed and divided. Same rule as [[measurement-tools-that-lied]], arriving
+in the statistics rather than in the estimator. The direct cluster figures now print beside the
+bootstrap so it cannot recur silently.
+
 ⚠ Read 1.60 to one decimal only. A 21-of-21 resample holds ~13.5 DISTINCT corners, and the ricoh's
 yaw shrinks toward the prior in proportion to how many inform it, so replicates shrink harder than
 the full sample — visible as a bootstrap mean of +0.2231 against the sample's +0.3052. Hence centre
