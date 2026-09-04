@@ -611,7 +611,9 @@ predicted +0.004, measured +0.000. So it also says how much of a correction surv
 the more useful direction for a running robot than the injection it was derived from.
 
 ★★ **The stage-2 closure comparison, restated with honest sigmas.** The two mount solves differ by
-**+0.3052 ± 0.1763**; the closure says **−0.0289 ± 0.0237** (see the estimator note below). The two
+**+0.3052 ± 0.2051**; the closure says **−0.0289 ± 0.0237** — ★ BOTH bootstrap, and they must be:
+quoting the mount difference at its FORMAL sigma (±0.1763) beside a bootstrap closure gives 1.88σ,
+which is the same estimator-mismatch one level up, in the arithmetic instead of in the estimator. The two
 routes differ by **+0.3341**, and nothing like the 0.0023° agreement once claimed from the dishonest
 sigmas. **98.9%** of that interval's variance is the ricoh's yaw alone.
 
@@ -652,6 +654,12 @@ a statement about the tour as much as about the cameras.
 a thesis session that recomputed and divided. Same rule as [[measurement-tools-that-lied]], arriving
 in the statistics rather than in the estimator. The direct cluster figures now print beside the
 bootstrap so it cannot recur silently.
+
+★★★ **AND 1.63 WAS RIGHT BY ACCIDENT.** My original pair — formal mount sigma (0.1763, too small) with
+the mismatched closure (0.1037, too large) and ρ assumed 0 — gives 0.2045 against the correct 0.2083,
+so the σ-count moved 1.63 → 1.60 while BOTH its inputs were wrong and one by a factor of four. **A
+final number that barely moves is not evidence its inputs were right**; two errors in opposite
+directions is the ordinary case, not the surprising one.
 
 ⚠ Read 1.60 to one decimal only. A 21-of-21 resample holds ~13.5 DISTINCT corners, and the ricoh's
 yaw shrinks toward the prior in proportion to how many inform it, so replicates shrink harder than
