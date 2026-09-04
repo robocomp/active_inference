@@ -1505,11 +1505,34 @@ namespace rc::wallmap
             // the replacement's count; an odd jump's extra edge is off-class and names its angle.
             const int new_edges = std::max(params.replace_code_edges, std::abs(dorder));
             const bool off_class = std::abs(dorder) % 2 == 1;
-            const float cost = static_cast<float>(new_edges) * edge_code_nats(true)
-                             + (off_class ? edge_code_nats(false) - edge_code_nats(true) : 0.f);
+            float cost = static_cast<float>(new_edges) * edge_code_nats(true)
+                       + (off_class ? edge_code_nats(false) - edge_code_nats(true) : 0.f);
+            // SURRENDER, the same term and the same currency the re-derivation judge uses: the
+            // observed existence support this cycle would erase. Counted once per wall, only for
+            // walls the new cycle does not hold anywhere along their LINE, and only ABOVE the birth
+            // seed — a wall that has merely been born costs nothing to drop, a wall the sensor has
+            // confirmed for a hundred frames costs what it earned.
+            float surrender = 0.f;
+            if (params.splice_surrender)
+                for (auto it = order.begin(); it != order.end(); ++it)
+                {
+                    if (std::find(order.begin(), it, *it) != it) continue;   // once per wall
+                    if (std::find(best_v.ord.begin(), best_v.ord.end(), *it) != best_v.ord.end()) continue;
+                    const auto* w = find(*it);
+                    if (w == nullptr) continue;
+                    bool held = false;
+                    for (const auto id2 : best_v.ord)
+                        if (const auto* w2 = find(id2); w2 != nullptr
+                            and std::abs(wrap_pi(w->phi - w2->phi)) < 0.2f
+                            and std::abs(w->d - w2->d) < 0.3f) { held = true; break; }
+                    if (held) continue;
+                    for (const float b : w->exist_bins) surrender += std::max(0.f, b - params.birth_nats);
+                }
+            cost += surrender;
             if (params.debug_splice)
-                std::printf("[splice]   jump dorder=%+d dnats=%.1f cost=%.1f -> %s\n",
-                            dorder, dnats, cost, dnats > cost ? "ACCEPT" : "refuse");
+                std::printf("[splice]   jump dorder=%+d dnats=%.1f cost=%.1f (code %.1f + surrender %.1f) -> %s\n",
+                            dorder, dnats, cost, cost - surrender, surrender,
+                            dnats > cost ? "ACCEPT" : "refuse");
             referee("splice", dnats > cost, dnats, cost, cost, poly_cur.verts, trial.verts);
             if (dnats <= cost)
             {
@@ -2630,8 +2653,10 @@ namespace rc::wallmap
         return comp;
     }
 
-    float WallMap::jump_delta_nats(const Polygon& cur, const Polygon& trial, std::int64_t fresh_ref_ms) const
+    float WallMap::jump_delta_nats(const Polygon& cur, const Polygon& trial, std::int64_t fresh_ref_ms,
+                                   float* var_out) const
     {
+        if (var_out != nullptr) *var_out = 0.f;
         if (not fgrid.ready() or not cur.closed or not trial.closed) return 0.f;
         // The two claims differ only near vertices one polygon has and the other lacks.
         float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
@@ -2673,6 +2698,15 @@ namespace rc::wallmap
                 else continue;                          // stale free / unknown: silent
                 const float e = in_t ? w : -w;
                 dn += e;
+                if (var_out != nullptr)
+                {
+                    // Two-valued outcome: this cell is really matter with p = sigmoid(l_eff) and
+                    // really free otherwise, and the sign of its contribution follows. The spread
+                    // between the two outcomes is 2|w|, so the variance is (2w)²·p(1−p).
+                    const float l_eff = matter ? std::max(l, 2.f) : l;
+                    const float p = 1.f / (1.f + std::exp(-l_eff));
+                    *var_out += 4.f * w * w * p * (1.f - p);
+                }
                 if (matter and in_t) { ++n_mat_in; e_mat_in += e; } else if (matter) { ++n_mat_out; e_mat_out += e; }
                 else if (in_t) { ++n_free_in; e_free_in += e; } else { ++n_free_out; e_free_out += e; }
             }
@@ -3150,7 +3184,8 @@ namespace rc::wallmap
         // ONE ENERGY for the adoption, the same as a splice: the grid's area term over the region
         // where the two cycles disagree, plus the support the created walls bring in, minus the
         // support surrendered, minus the code length of the vertices the new cycle adds.
-        const float e_grid = pnew.closed and pold.closed ? jump_delta_nats(pold, pnew, 0) : 0.f;
+        float e_var = 0.f;
+        const float e_grid = pnew.closed and pold.closed ? jump_delta_nats(pold, pnew, 0, &e_var) : 0.f;
         const float code   = (static_cast<float>(pnew.verts.size()) - static_cast<float>(pold.verts.size())) * edge_code_nats(true);
         const float dE     = e_grid + support_in - surrender - code;
         // The incumbent judge: a +0.02 grid-IoU margin protects a healthy incumbent from noise
@@ -3183,17 +3218,29 @@ namespace rc::wallmap
             and pold.worst_corner_sigma > params.publish_corner_sigma
             and pnew.worst_corner_sigma < pold.worst_corner_sigma
             and (not params.adopt_waiver_priced or waiver_gain > code);
-        const bool adopt_ok = params.adopt_judge == 2
-            ? pnew.closed
-            : params.adopt_judge == 1
-                ? (pnew.closed and dE > 0.f)
-                : (((iou_new > iou_old + 0.02f) or health_waiver) and surrender <= params.adopt_surrender_nats);
+        // THE MARGIN, IN NATS (judge 3). dE is a difference of grid evidence, and the grid is not
+        // the truth — a beam grazing a wall carves it fresh-free — so dE carries an error of its
+        // own, and jump_delta_nats now reports it. Adopt only when the improvement is larger than
+        // that error can explain. Judge 0 asks for a fixed slice of an overlap that cannot see a
+        // 0.13 m partition; judge 1 asks for nothing at all over a grid that lies. This asks the
+        // question both were reaching for, and its threshold is measured rather than chosen.
+        const float e_sigma = std::sqrt(std::max(e_var, 0.f));
+        const bool adopt_ok = params.adopt_judge == 3
+            ? (pnew.closed and dE > params.adopt_sigma_k * e_sigma)
+            : params.adopt_judge == 2
+                ? pnew.closed
+                : params.adopt_judge == 1
+                    ? (pnew.closed and dE > 0.f)
+                    : (((iou_new > iou_old + 0.02f) or health_waiver) and surrender <= params.adopt_surrender_nats);
         if (params.debug_splice)
         {
             std::printf("[rederive] runs=%zu created=%zu closed=%d dE=%.1f (grid %.1f + in %.1f - out %.1f - code %.1f) iou %.3f->%.3f -> %s [%.70s]\n",
                         new_order.size(), created.size(), static_cast<int>(pnew.closed),
                         dE, e_grid, support_in, surrender, code, iou_old, iou_new,
                         adopt_ok ? "ADOPT" : "keep", pnew.status.c_str());
+            std::printf("[rederive]   margin: dE %.1f vs %.1f x sigma %.1f = %.1f nats -> %s\n",
+                        dE, params.adopt_sigma_k, e_sigma, params.adopt_sigma_k * e_sigma,
+                        dE > params.adopt_sigma_k * e_sigma ? "significant" : "noise");
             std::printf("[rederive]   waiver: corner %.4f -> %.4f, gain %.1f nats vs code %.1f -> %s\n",
                         pold.worst_corner_sigma, pnew.worst_corner_sigma, waiver_gain, code,
                         health_waiver ? "waived" : "no");

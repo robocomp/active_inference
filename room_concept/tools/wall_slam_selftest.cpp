@@ -86,6 +86,8 @@ namespace
         envf("WS_L2_CLEAR",      p.level2_clear_cells);    // residual-cell clearance from every edge (cells)
         envf("WS_THETA0_POST",   p.theta0_posterior);     // 1 posterior over all directions, 0 the old OBB+mean
         envf("WS_WAIVER_PRICED", p.adopt_waiver_priced);  // 1 the health waiver pays its code length, 0 free
+        envf("WS_SPLICE_SURR",   p.splice_surrender);     // 1 a splice pays the existence support it erases
+        envf("WS_SIGMA_K",       p.adopt_sigma_k);        // judge 3: margin in standard deviations of dE
     }
 
     Poly l_room()      { return {{-4.f, -3.f}, {4.f, -3.f}, {4.f, 1.f}, {1.f, 1.f}, {1.f, 3.f}, {-4.f, 3.f}}; }

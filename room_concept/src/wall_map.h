@@ -222,7 +222,16 @@ namespace rc::wallmap
         // in NATS, scaled to what the accumulated per-cell log-odds error can explain, rather than
         // a fixed slice of an IoU that cannot see a 0.13 m partition. That variance is not tracked
         // today; it is the next piece of work here.
+        // 3 = the energy, with a margin sized to the GRID'S OWN ERROR: adopt iff dE exceeds
+        // adopt_sigma_k standard deviations of dE. Judge 0's margin is a fixed slice of an overlap
+        // that cannot see a thin wall; judge 1 has no margin at all over a grid that lies. This one
+        // asks the only question that survives both objections — is the improvement larger than the
+        // grid's own uncertainty can explain?
         int  adopt_judge  = 0;
+        // Confidence level of that margin, in standard deviations. Not a magic cutoff: the same
+        // convention as the segmenter's chi2 levels, and the quantity it multiplies is measured
+        // from the grid rather than chosen.
+        float adopt_sigma_k = 2.f;
         // The health waiver (see the re-derivation judge) lets a challenger past the IoU margin
         // when the incumbent's own corners are too blunt to publish. Priced: the corner sharpness
         // it buys must beat the code length of the edges it adds, both in nats. Unpriced, ANY
@@ -611,7 +620,15 @@ namespace rc::wallmap
         /// unmatched vertices ± margin). Matter cells the trial releases from the interior count
         /// FOR it; FRESH connected free cells it releases count AGAINST it; stale free (free_ms
         /// before `fresh_ref_ms`) and unknown are silent — a sealed room change must stay payable.
-        float jump_delta_nats(const Polygon& cur, const Polygon& trial, std::int64_t fresh_ref_ms) const;
+        /// Grid nats the trial explains over the current cycle, where the two disagree. When
+        /// `var_out` is given it also returns the VARIANCE of that number: each contested cell is a
+        /// two-valued outcome — the cell is really matter with probability sigmoid(l) and really
+        /// free otherwise — so its contribution has variance (a−b)²·p(1−p) and the total is their
+        /// sum. It needs no new constant: a cell the grid is sure about contributes almost nothing,
+        /// an unknown cell contributes its full swing, and a claim spanning many uncertain cells is
+        /// correspondingly less trustworthy than the same number of nats over a few certain ones.
+        float jump_delta_nats(const Polygon& cur, const Polygon& trial, std::int64_t fresh_ref_ms,
+                              float* var_out = nullptr) const;
         /// Remove a dead edge from the order and HEAL the cycle (collapse parallel neighbours).
         void splice_out(std::uint64_t id);
         void heal_order();
