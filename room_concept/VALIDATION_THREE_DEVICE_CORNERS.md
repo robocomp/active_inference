@@ -578,6 +578,43 @@ already carried two files away, and which this file needed MORE because of the `
 ★ `--verify` also learned that a snapshot from a RUNNING agent lags: the pool saves on its own cadence
 while the CSV appends, so it now re-accumulates the CSV's matching prefix instead of refusing.
 
+### ✓ FACTOR B, REPLAYED 2026-09-04 — AND THREE OF FIVE METRICS ARE BLIND TO IT
+
+`--apply CAM:AXIS=VALUE` evaluates the same rows from an already-corrected mount, which is the
+chapter's factor B (B0 = the graph extrinsic, B1 = the self-calibrated one). Same 91 152 ricoh /
+11 821 zed rows in both columns, nuisance 5.3 px.
+
+| | B0 nominal | B1 self-calibrated |
+|---|---|---|
+| ricoh yaw | +0.0362 ± 0.1754 | +0.0198 ± 0.1754 |
+| zed yaw | −0.2690 ± 0.0181 | +0.0000 ± 0.0181 |
+| zed pitch | −0.2167 ± 0.0317 | −0.0065 ± 0.0330 |
+| chi2/dof | 1.40 / 0.75 | 1.40 / 0.75 |
+| closure du | −0.0289 | **+0.2778** |
+
+★★★ **M4, M5 and M3 cannot grade factor B, each for its own reason.**
+- **M4** — σ comes from `H`, and applying a correction moves only `b`. Identical to four figures.
+- **M5** — 1.40 → 1.40 and 0.75 → 0.75. Not a null: it is M5 doing what it was recorded to do, now
+  against a bias of KNOWN size (the zed was 0.269° out in yaw, 0.217° in pitch, and the post-fit
+  chi2 did not notice in the third significant figure).
+- **M3** — moves **by arithmetic**: the closure shifted +0.3067° and the difference of the two
+  applied corrections is +0.3052°, agreeing to 0.0015°. The closure is a difference of the two
+  cameras' residuals and B shifts each by its own camera's correction, so the treatment displaces
+  the endpoint by a quantity fixed in advance. It restates B rather than discriminating it.
+⇒ **The B column needs M1/M2, and those need the localiser.** ⚠ Retracts my own earlier claim that
+the paired comparison needed no new driving: B1 is *reachable* on recorded data, which is not the
+same as *gradeable* on it.
+
+★ **The recovery identity holds in a use it was not derived for.** Applying `p` should leave
+`p·(1 − recovery)`. Ricoh yaw, recovery 0.454: predicted +0.0198, measured **+0.0198**. Zed at 0.984:
+predicted +0.004, measured +0.000. So it also says how much of a correction survives being applied —
+the more useful direction for a running robot than the injection it was derived from.
+
+★★ **The stage-2 closure comparison, restated with honest sigmas.** The two mount solves differ by
+**+0.3052 ± 0.1763**; the closure says **−0.0289 ± 0.1037** (cluster-honest, 20 corners). The two
+routes differ by +0.334 ± 0.205 = **1.63σ** — consistent, dominated entirely by the panorama's yaw,
+and nothing like the 0.0023° agreement once claimed from the dishonest sigmas.
+
 ### Cost: one drive, not four
 
 ★ The injection can be applied OFFLINE. `r = uv_image − uv_lidar`, and an extrinsic perturbation

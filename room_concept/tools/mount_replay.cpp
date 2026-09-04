@@ -99,6 +99,12 @@ struct Row
 
 struct Camera
 {
+    /// A mount correction applied before anything else, so the BASELINE is evaluated under it.
+    /// This is factor B of the chapter's 2x2: B0 leaves it zero (the nominal extrinsic from the
+    /// graph), B1 sets it to the self-calibrated estimate. The rows are the same measured image
+    /// points in both, which is what makes the pairing exact — changing the mount changes the
+    /// PREDICTION and leaves the measurement untouched.
+    Eigen::Vector3f mount_apply = Eigen::Vector3f::Zero();   // pitch rad, height m, yaw rad
     std::string             name;
     rc::mount::ReplayContext ctx;
     std::vector<Row>        rows;     ///< kept per camera; the closure walks them merged by time
@@ -441,6 +447,12 @@ CamResult solve_leg(const Camera& c, const Leg& leg, double offset_sigma_px, boo
     refused = false;
     Eigen::Matrix3f R = c.ctx.cam_R_robot;
     Eigen::Vector3f t = c.ctx.cam_t_robot;
+    if (not c.mount_apply.isZero())   // factor B: yaw then pitch, the ingestor's own order
+    {
+        inject_camera(Axis::Yaw,    c.mount_apply.z(), R, t);
+        inject_camera(Axis::Pitch,  c.mount_apply.x(), R, t);
+        inject_camera(Axis::Height, c.mount_apply.y(), R, t);
+    }
     const bool lidar_leg = (leg.site == "lidar");
     if (lidar_leg and not c.ctx.lidar_known)
     {
@@ -882,6 +894,8 @@ void usage()
         "                     Pass it TWICE-over by running with 0 and with 5.3: the contrast is\n"
         "                     outcome 3 of the pre-registration, not a tuning knob.\n"
         "  --closure-ms N     max stamp difference for a shared corner (default 60, the live rule).\n"
+        "  --apply CAM:AXIS=VALUE     evaluate from a mount already corrected by this much —\n"
+        "                     factor B of the 2x2. Same rows, different prediction.\n"
         "  --fixed-cov        do NOT rebuild the covariance under the injected mount (the old\n"
         "                     approximation). Run it both ways: the difference is the size of what\n"
         "                     §2b was going to assume away.\n"
@@ -898,6 +912,7 @@ int main(int argc, char** argv)
     std::vector<std::string> pair_files, legacy_files;
     float legacy_w = 1920.f, legacy_h = 960.f;
     std::vector<Leg> legs;
+    std::vector<std::tuple<std::string, std::string, double>> applies;
     double sigma_px = 0.0;
     bool fixed_cov = false;
     std::int64_t closure_ms = 60;
@@ -917,6 +932,19 @@ int main(int argc, char** argv)
         else if (a == "--closure-ms") { double v = 0; if (to_num(next(), v)) closure_ms = static_cast<std::int64_t>(v); }
         else if (a == "--verify") verify_file = next();
         else if (a == "--fixed-cov") fixed_cov = true;
+        else if (a == "--apply")
+        {
+            // --apply CAM:AXIS=VALUE, repeatable. Same spelling as --inject, different meaning:
+            // --inject asks what a WRONG mount would do, --apply says which mount to start from.
+            const std::string spec = next();
+            const auto colon = spec.find(':'), eq = spec.find('=');
+            if (colon == std::string::npos or eq == std::string::npos or eq < colon)
+            { std::printf("bad --apply '%s' (want CAM:AXIS=VALUE)\n", spec.c_str()); return 2; }
+            double v = 0;
+            if (not to_num(std::string_view(spec).substr(eq + 1), v))
+            { std::printf("bad --apply value in '%s'\n", spec.c_str()); return 2; }
+            applies.emplace_back(spec.substr(0, colon), spec.substr(colon + 1, eq - colon - 1), v);
+        }
         else if (a == "--inject")
         {
             const std::string spec = next();
@@ -983,6 +1011,26 @@ int main(int argc, char** argv)
                     c.ctx.lidar_known ? "known" : "UNRESOLVED (LiDAR leg will refuse)");
         cams.push_back(std::move(c));
     }
+
+    for (const auto& [cam, ax, v] : applies)
+    {
+        bool hit = false;
+        for (Camera& c : cams)
+        {
+            if (c.name != cam) continue;
+            hit = true;
+            if      (ax == "pitch")  c.mount_apply.x() = static_cast<float>(v / kRad2Deg);
+            else if (ax == "yaw")    c.mount_apply.z() = static_cast<float>(v / kRad2Deg);
+            else if (ax == "height") c.mount_apply.y() = static_cast<float>(v);
+            else { std::printf("bad --apply axis '%s'\n", ax.c_str()); return 2; }
+        }
+        if (not hit) { std::printf("--apply names camera '%s', which was not loaded\n", cam.c_str()); return 2; }
+    }
+    for (const Camera& c : cams)
+        if (not c.mount_apply.isZero())
+            std::printf("  %-8s evaluated under a mount corrected by pitch %+.4f deg, height %+.4f m,"
+                        " yaw %+.4f deg\n", c.name.c_str(), c.mount_apply.x() * kRad2Deg,
+                        c.mount_apply.y(), c.mount_apply.z() * kRad2Deg);
 
     // ── Baseline: delta = 0 ─────────────────────────────────────────────────────────────────────
     std::printf("\n── baseline (no injection), nuisance sigma %.2f px ──\n", sigma_px);
