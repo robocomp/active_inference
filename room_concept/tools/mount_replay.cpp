@@ -412,6 +412,10 @@ struct CamResult
     Eigen::Vector4d b = Eigen::Vector4d::Zero();
     double rTr = 0.0;
     long   n = 0;
+    /// The per-vertex partials, kept so a CLUSTER BOOTSTRAP can rebuild a solve from a resampled set
+    /// of corners without re-reading a single row: H, b and rTr are sums over these blocks, so a
+    /// replicate is an addition rather than a re-accumulation.
+    std::map<int, rc::mount::VertexBlock> per_vertex;
     long   cov_held = 0;   ///< rows whose nominal Pxy would not invert, so the weight was NOT rebuilt
     /// (key, ts) → residual in RADIANS, the same quantity loop_closure_observe compares.
     std::vector<std::tuple<std::int64_t, int, double, double>> obs;   // ts, key, du_rad, dv_rad
@@ -526,7 +530,7 @@ CamResult solve_leg(const Camera& c, const Leg& leg, double offset_sigma_px, boo
                                  static_cast<double>(o.r.y() / ppr.y()));
     }
     out.sol = acc.solve();
-    out.H = acc.H; out.b = acc.b; out.rTr = acc.rTr;
+    out.H = acc.H; out.b = acc.b; out.rTr = acc.rTr; out.per_vertex = acc.per_vertex;
     return out;
 }
 
@@ -534,8 +538,13 @@ CamResult solve_leg(const Camera& c, const Leg& leg, double offset_sigma_px, boo
 /// same corner, different camera, within 60 ms, differenced in radians. Recomputing it (rather than
 /// reading etc/camera_loop.csv) is what makes it respond to an injection at all.
 struct Closure { double du_deg = 0, dv_deg = 0, sd_du_deg = 0, sd_dv_deg = 0; long n = 0; };
+/// Per-CORNER sums of the differenced sightings. The corner is the resampling unit for the bootstrap
+/// below, for the same reason it is the unit everywhere else here: sightings of one corner are not
+/// independent draws.
+struct VertexClosure { double du_sum = 0, dv_sum = 0; long n = 0; };
 
-Closure closure_of(const CamResult& a, const CamResult& b, std::int64_t max_dt_ms)
+Closure closure_of(const CamResult& a, const CamResult& b, std::int64_t max_dt_ms,
+                   std::map<int, VertexClosure>* by_vertex = nullptr)
 {
     // Merge by key, then walk each key's two time series once.
     std::map<int, std::vector<std::pair<std::int64_t, Eigen::Vector2d>>> A, B;
@@ -557,6 +566,11 @@ Closure closure_of(const CamResult& a, const CamResult& b, std::int64_t max_dt_m
             if (std::abs(vb[j].first - ts) > max_dt_ms) continue;
             const double ddu = ra.x() - vb[j].second.x(), ddv = ra.y() - vb[j].second.y();
             su += ddu; sv += ddv; su2 += ddu * ddu; sv2 += ddv * ddv; ++c.n;
+            if (by_vertex != nullptr)
+            {
+                VertexClosure& vc = (*by_vertex)[key / 2];   // fold floor and ceiling into the corner
+                vc.du_sum += ddu; vc.dv_sum += ddv; ++vc.n;
+            }
         }
     }
     if (c.n > 0)
@@ -881,6 +895,96 @@ int run()
 }
 } // namespace selftest
 
+/// ── THE DISAGREEMENT BETWEEN THE TWO ROUTES, WITH THEIR CORRELATION IN IT ───────────────────────
+/// The mount solves and the closure are NOT independent estimates of the camera-vs-camera yaw: both
+/// are computed from the same corner sightings, and the closure is literally a difference of the same
+/// per-camera residuals that drive the solves. Combining their sigmas in quadrature therefore states
+/// an interval for D = (yaw_a − yaw_b) − closure that assumes a covariance of zero, and there is no
+/// reason for it to be zero.
+///
+/// ★ A CLUSTER BOOTSTRAP settles it without needing the covariance in closed form: resample CORNERS
+///   with replacement, recompute BOTH routes on the same resampled corners, and take the spread of
+///   their difference. The correlation is carried along by construction. The corner is the unit for
+///   the reason it is the unit everywhere else here — sightings of one corner are not independent.
+/// ★ It is exact and it is cheap, because H, b and rTr are sums over the per-vertex blocks: a
+///   replicate adds up the selected blocks instead of re-reading 100 000 rows.
+void run_bootstrap(std::vector<Camera>& cams, const std::vector<CamResult>& base,
+                   double sigma_px, std::int64_t closure_ms, int reps)
+{
+    if (cams.size() < 2) { std::printf("  (the bootstrap compares two routes and needs two cameras)\n"); return; }
+    std::map<int, VertexClosure> by_vertex;
+    const Closure full = closure_of(base[0], base[1], closure_ms, &by_vertex);
+
+    std::vector<int> verts;                     // the resampling universe: every corner either saw
+    for (const auto& [v, blk] : base[0].per_vertex) verts.push_back(v);
+    for (const auto& [v, blk] : base[1].per_vertex)
+        if (std::ranges::find(verts, v) == verts.end()) verts.push_back(v);
+    if (verts.size() < 3) { std::printf("  (too few corners to resample)\n"); return; }
+
+    const auto solve_subset = [&](const CamResult& r, const std::vector<int>& pick) {
+        rc::mount::Accum a;
+        a.offset_sigma_px = sigma_px;
+        for (const int v : pick)
+        {
+            const auto it = r.per_vertex.find(v);
+            if (it == r.per_vertex.end()) continue;
+            rc::mount::VertexBlock& d = a.per_vertex[v];
+            // A corner drawn twice contributes twice — that IS the resampling.
+            d.A += it->second.A; d.c += it->second.c; d.D += it->second.D;
+            d.b += it->second.b; d.e += it->second.e; d.rTr += it->second.rTr; d.n += it->second.n;
+            a.n += it->second.n;
+        }
+        return a.solve();
+    };
+
+    std::uint32_t rng = 20260904u;
+    const auto rnd = [&] { rng = rng * 1664525u + 1013904223u; return rng >> 8; };
+    std::vector<double> dm, dc, dd;             // mount difference, closure, and their difference
+    dm.reserve(reps); dc.reserve(reps); dd.reserve(reps);
+    for (int r = 0; r < reps; ++r)
+    {
+        std::vector<int> pick;
+        pick.reserve(verts.size());
+        for (std::size_t k = 0; k < verts.size(); ++k) pick.push_back(verts[rnd() % verts.size()]);
+        const auto sa = solve_subset(base[0], pick), sb = solve_subset(base[1], pick);
+        if (not sa.ok or not sb.ok) continue;
+        double du = 0; long n = 0;
+        for (const int v : pick)
+            if (const auto it = by_vertex.find(v); it != by_vertex.end())
+            { du += it->second.du_sum; n += it->second.n; }
+        if (n == 0) continue;
+        const double mount = param_deg(sa, 2, cams[0].ctx) - param_deg(sb, 2, cams[1].ctx);
+        const double clo   = du / static_cast<double>(n) * kRad2Deg;
+        dm.push_back(mount); dc.push_back(clo); dd.push_back(mount - clo);
+    }
+    const auto stat = [](const std::vector<double>& v) {
+        double m = 0; for (double x : v) m += x; m /= static_cast<double>(v.size());
+        double s = 0; for (double x : v) s += (x - m) * (x - m);
+        return std::pair{m, std::sqrt(s / static_cast<double>(v.size() - 1))};
+    };
+    if (dd.size() < 10) { std::printf("  (bootstrap produced too few usable replicates)\n"); return; }
+    const auto [mm, sm] = stat(dm);
+    const auto [mc, sc] = stat(dc);
+    const auto [md, sd] = stat(dd);
+    double cov = 0;
+    for (std::size_t i = 0; i < dd.size(); ++i) cov += (dm[i] - mm) * (dc[i] - mc);
+    cov /= static_cast<double>(dd.size() - 1);
+    const double rho = cov / (sm * sc);
+
+    std::printf("\n── the two routes to the camera-vs-camera yaw, %zu corners, %zu bootstrap replicates ──\n",
+                verts.size(), dd.size());
+    std::printf("  mount solves differ   %+8.4f deg   bootstrap sd %.4f\n", mm, sm);
+    std::printf("  closure says          %+8.4f deg   bootstrap sd %.4f   (%ld differenced sightings)\n",
+                mc, sc, full.n);
+    std::printf("  correlation between the two routes  rho = %+.3f\n", rho);
+    std::printf("  they differ by        %+8.4f deg   bootstrap sd %.4f   = %.2f sigma\n",
+                md, sd, std::abs(md) / sd);
+    std::printf("  ★ quadrature, which assumes rho = 0, would have said sd %.4f (%.2f sigma) — %s\n",
+                std::hypot(sm, sc), std::abs(md) / std::hypot(sm, sc),
+                (sd < std::hypot(sm, sc)) ? "so independence UNDERSTATES the disagreement"
+                                          : "so independence OVERSTATES the disagreement");
+}
+
 void usage()
 {
     std::printf(
@@ -896,6 +1000,9 @@ void usage()
         "  --closure-ms N     max stamp difference for a shared corner (default 60, the live rule).\n"
         "  --apply CAM:AXIS=VALUE     evaluate from a mount already corrected by this much —\n"
         "                     factor B of the 2x2. Same rows, different prediction.\n"
+        "  --bootstrap N      resample CORNERS with replacement N times and report the mount-solve\n"
+        "                     difference, the closure, their correlation, and the spread of their\n"
+        "                     difference — which combining sigmas in quadrature cannot give.\n"
         "  --fixed-cov        do NOT rebuild the covariance under the injected mount (the old\n"
         "                     approximation). Run it both ways: the difference is the size of what\n"
         "                     §2b was going to assume away.\n"
@@ -915,6 +1022,7 @@ int main(int argc, char** argv)
     std::vector<std::tuple<std::string, std::string, double>> applies;
     double sigma_px = 0.0;
     bool fixed_cov = false;
+    int reps = 0;
     std::int64_t closure_ms = 60;
     std::string verify_file;
 
@@ -932,6 +1040,7 @@ int main(int argc, char** argv)
         else if (a == "--closure-ms") { double v = 0; if (to_num(next(), v)) closure_ms = static_cast<std::int64_t>(v); }
         else if (a == "--verify") verify_file = next();
         else if (a == "--fixed-cov") fixed_cov = true;
+        else if (a == "--bootstrap") { double v = 0; if (to_num(next(), v)) reps = static_cast<int>(v); }
         else if (a == "--apply")
         {
             // --apply CAM:AXIS=VALUE, repeatable. Same spelling as --inject, different meaning:
@@ -1060,6 +1169,8 @@ int main(int argc, char** argv)
     else
         std::printf("  (one camera only — the closure channel, and with it the attribution test,"
                     " needs two)\n");
+
+    if (reps > 0) run_bootstrap(cams, base, sigma_px, closure_ms, reps);
 
     // ── The delta = 0 self-check against the live evidence ──────────────────────────────────────
     if (not verify_file.empty())

@@ -612,8 +612,23 @@ the more useful direction for a running robot than the injection it was derived 
 
 ★★ **The stage-2 closure comparison, restated with honest sigmas.** The two mount solves differ by
 **+0.3052 ± 0.1763**; the closure says **−0.0289 ± 0.1037** (cluster-honest, 20 corners). The two
-routes differ by +0.334 ± 0.205 = **1.63σ** — consistent, dominated entirely by the panorama's yaw,
-and nothing like the 0.0023° agreement once claimed from the dishonest sigmas.
+routes differ by **+0.3341**, and nothing like the 0.0023° agreement once claimed from the dishonest
+sigmas. **98.9%** of that interval's variance is the ricoh's yaw alone.
+
+⚠ Those two routes are NOT independent — both come from the same corner sightings, and the closure is
+a difference of the same per-camera residuals that drive the mount solves — so combining their sigmas
+in quadrature assumes a covariance of zero. **Measured by a cluster bootstrap over corners**
+(`--bootstrap N`; resample the 21 corners, recompute BOTH routes on the same resample, 2000
+replicates): **ρ = −0.079**. Bootstrap sd of the difference **0.2083** against quadrature's 0.2045, so
+the disagreement is **1.60σ** rather than 1.63 — the independence assumption was harmless, and very
+slightly optimistic rather than conservative.
+★ Cheap because `H`, `b` and `rTr` are sums over the per-vertex blocks: a replicate adds up the
+selected blocks instead of re-reading 100 k rows.
+⚠ Read 1.60 to one decimal only. A 21-of-21 resample holds ~13.5 DISTINCT corners, and the ricoh's
+yaw shrinks toward the prior in proportion to how many inform it, so replicates shrink harder than
+the full sample — visible as a bootstrap mean of +0.2231 against the sample's +0.3052. Hence centre
+from the sample, spread from the bootstrap. **With 21 clusters and a shrinkage estimator no sharper
+figure exists from this tour; more DISTINCT corners is the only thing that moves it.**
 
 ### Cost: one drive, not four
 
