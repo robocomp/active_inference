@@ -85,6 +85,7 @@ namespace
         envf("WS_L2_MIN",        p.level2_min_m);         // smallest feature level 2 keeps (m)
         envf("WS_L2_CLEAR",      p.level2_clear_cells);    // residual-cell clearance from every edge (cells)
         envf("WS_THETA0_POST",   p.theta0_posterior);     // 1 posterior over all directions, 0 the old OBB+mean
+        envf("WS_WAIVER_PRICED", p.adopt_waiver_priced);  // 1 the health waiver pays its code length, 0 free
     }
 
     Poly l_room()      { return {{-4.f, -3.f}, {4.f, -3.f}, {4.f, 1.f}, {1.f, 1.f}, {1.f, 3.f}, {-4.f, 3.f}}; }
@@ -1651,7 +1652,10 @@ int main()
             std::string trace7;
             if (const char* tp = std::getenv("WS_TRACE7"))
             { trace7 = std::string(tp) + "_" + std::to_string(seed) + ".csv"; cfg.trace_csv = trace7.c_str(); }
-            auto Rx = run_explore(room, cfg, rng7, 1100, path[0]);
+            int nframes7 = 1100;
+            if (const char* e = std::getenv("WS_FRAMES7"))
+            { int v = 0; if (std::from_chars(e, e + std::strlen(e), v).ec == std::errc{} and v > 0) nframes7 = v; }
+            auto Rx = run_explore(room, cfg, rng7, nframes7, path[0]);
             const Poly ew = to_world(Rx.poly.verts, Eigen::Vector3f(path[0].x(), path[0].y(), 0.f));
             const float iou_x = Rx.poly.closed ? polygon_iou(ew, room) : 0.f;
             const float h_x = Rx.poly.closed ? hausdorff(ew, room) : 1e9f;

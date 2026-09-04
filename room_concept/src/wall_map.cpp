@@ -3161,10 +3161,28 @@ namespace rc::wallmap
         // map (0.940/0.793/0.919 vs 0.951/0.969/0.943) — a cycle +0.01 better now that creates 28
         // thinly supported walls is adopted, they die, the cycle flaps. The margin and the veto are
         // hysteresis that a single-step criterion cannot see.
+        // THE WAIVER, PRICED. What it buys is corner sharpness, and sharpness is a precision, so
+        // the gain has a natural size in nats: a 2-D corner carries two degrees of freedom, and
+        // tightening it from sigma_old to sigma_new is worth 2*ln(sigma_old/sigma_new). The edges
+        // the challenger adds already cost `code` in the same currency. Adopt when the first beats
+        // the second.
+        //
+        // Unpriced — "any improvement at all, however small" — this was the churn. On the
+        // apartamento the waiver fired 30 times on a challenger that moved the IoU by less than a
+        // thousandth and added four edges each time (29.3 nats of code for nothing); the new walls
+        // then died of no support, the down-jump removed the leftovers, and the re-derivation
+        // proposed the very same cycle again. 36 of 38 adoptions had NEGATIVE energy. A strict
+        // inequality on a continuous quantity is not a criterion: two re-derivations always differ
+        // in the fourth decimal, so one of them is always "healthier".
+        float waiver_gain = 0.f;
+        if (pnew.closed and pold.closed and pnew.worst_corner_sigma > 0.f
+            and pold.worst_corner_sigma > 0.f)
+            waiver_gain = 2.f * std::log(pold.worst_corner_sigma / pnew.worst_corner_sigma);
         const bool health_waiver = pnew.closed and pold.closed
             and iou_new >= iou_old
             and pold.worst_corner_sigma > params.publish_corner_sigma
-            and pnew.worst_corner_sigma < pold.worst_corner_sigma;
+            and pnew.worst_corner_sigma < pold.worst_corner_sigma
+            and (not params.adopt_waiver_priced or waiver_gain > code);
         const bool adopt_ok = params.adopt_judge == 2
             ? pnew.closed
             : params.adopt_judge == 1
@@ -3176,6 +3194,9 @@ namespace rc::wallmap
                         new_order.size(), created.size(), static_cast<int>(pnew.closed),
                         dE, e_grid, support_in, surrender, code, iou_old, iou_new,
                         adopt_ok ? "ADOPT" : "keep", pnew.status.c_str());
+            std::printf("[rederive]   waiver: corner %.4f -> %.4f, gain %.1f nats vs code %.1f -> %s\n",
+                        pold.worst_corner_sigma, pnew.worst_corner_sigma, waiver_gain, code,
+                        health_waiver ? "waived" : "no");
         }
         // ── ADOPTION-LOSS TRACE: does the adopted cycle LOSE a wrapped thin wall — an
         // anti-parallel pair at thin separation — that the current cycle holds? Three fence

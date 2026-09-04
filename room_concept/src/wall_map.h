@@ -189,6 +189,11 @@ namespace rc::wallmap
         // 2 = adopt ANY closed cycle (bench only: what the free-space contour itself contains,
         // with no judge in the way — the batch-at-saturation experiment).
         int  adopt_judge  = 0;
+        // The health waiver (see the re-derivation judge) lets a challenger past the IoU margin
+        // when the incumbent's own corners are too blunt to publish. Priced: the corner sharpness
+        // it buys must beat the code length of the edges it adds, both in nats. Unpriced, ANY
+        // improvement in the last decimal licensed the adoption and the map churned.
+        bool adopt_waiver_priced = true;
         bool adopt_repair = false;
         // ── STRICT MANHATTAN (user directive 2026-09-01): this stage estimates the room's MAIN
         // LINES only. Every polygon wall carries a Manhattan class; an off-axis candidate (chamfer,
