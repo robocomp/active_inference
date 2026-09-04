@@ -202,6 +202,26 @@ namespace rc::wallmap
         // patch. Kept switchable for the bench (WS_ADOPT_JUDGE, WS_ADOPT_REPAIR).
         // 2 = adopt ANY closed cycle (bench only: what the free-space contour itself contains,
         // with no judge in the way — the batch-at-saturation experiment).
+        //
+        // RE-MEASURED 2026-09-04 on the full 50 random rooms, paired, and the 3-seed reading above
+        // was hiding the shape of it. Mean IoU 0.9219 -> 0.9279, MEDIAN 0.9565 -> 0.9510, 20 rooms
+        // better against 21 worse — a wash, until you split by how healthy the incumbent was:
+        //     baseline below 0.90 (9 rooms):  0.756 -> 0.841   (+0.085)
+        //     baseline 0.95 and up (31):      0.967 -> 0.948   (−0.020)
+        // The energy judge RESCUES THE TAIL and TAXES THE HEALTHY. Room 32 — which finished 36.5°
+        // out with 99% of itself observed — goes 0.517 -> 0.956, Hausdorff 3.607 -> 0.379 m; so
+        // that whole-room tilt was this judge refusing the correction, not the direction estimator
+        // (see Params::theta0_posterior). Rooms 38, 45 and 22 follow it. Against that, room 28 goes
+        // 0.879 -> 0.561, and the apartamento — healthy on all three seeds — goes 0.908/0.975/0.945
+        // to 0.817/0.975/0.899 with deaths exploding 17 -> 119 on seed 7.
+        //
+        // WHY it is wrong on a healthy map: the grid is not the truth. Grazing beams carve real
+        // surfaces fresh-free, so a cycle that explains the GRID better can be worse than the room,
+        // and the 0.02 IoU margin is hysteresis against exactly that. The energy judge has no such
+        // floor and keeps swapping marginally-better cycles. Neither is right: the margin should be
+        // in NATS, scaled to what the accumulated per-cell log-odds error can explain, rather than
+        // a fixed slice of an IoU that cannot see a 0.13 m partition. That variance is not tracked
+        // today; it is the next piece of work here.
         int  adopt_judge  = 0;
         // The health waiver (see the re-derivation judge) lets a challenger past the IoU margin
         // when the incumbent's own corners are too blunt to publish. Priced: the corner sharpness
