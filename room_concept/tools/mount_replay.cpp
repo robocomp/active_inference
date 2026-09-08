@@ -1326,11 +1326,31 @@ int main(int argc, char** argv)
     }
 
     // ── M4: THE BETWEEN-WINDOW SCATTER AGAINST THE FORMAL SIGMA ─────────────────────────────────
-    // ★★★ TWO RATIOS EXIST AND THEY DIFFER BY sqrt(k). The scatter of window estimates against a
-    //     WINDOW's own sigma asks whether one window's error bar is honest; the same scatter over
-    //     sqrt(k) against the POOLED sigma asks whether the pooled one is. The live [mount/pool]
-    //     line prints window scatter beside the POOLED sigma, which carries that factor by
-    //     construction — so a ratio recorded from that line is not comparable with either of these.
+    // ★★★ TWO RATIOS EXIST, AND sqrt(k) IS NOT A CONVERSION BETWEEN THEM. The scatter of window
+    //     estimates against a WINDOW's own sigma asks whether one window's error bar is honest; the
+    //     same scatter over sqrt(k) against the POOLED sigma asks whether the pooled one is. They
+    //     would differ by exactly sqrt(k) only if pooling k windows shrank sigma by sqrt(k) — i.e.
+    //     only if the windows were independent samples of one static quantity carrying no
+    //     information the others lack. Whether that holds is measurable, and it is what the last
+    //     column reports: pool_gain = sigma_window / (sqrt(k) * sigma_pooled).
+    //
+    //     ★★★ THE POOLED RATIO IS ONLY INTERPRETABLE WHERE pool_gain ~ 1.
+    //       pool_gain >> 1  pooling uses information NO window has — on this pair that is the range
+    //                       diversity across windows breaking the pitch/height ridge, which the live
+    //                       log already announces as "POOLING BROKE THE RIDGE". sd/sqrt(k) is then
+    //                       not the pooled estimator's spread at all, so a large pooled ratio there
+    //                       is the ridge, NOT a dishonest interval.
+    //       pool_gain ~ 1   the windows behave like independent draws and the pooled ratio is a
+    //                       valid honesty test.
+    //       pool_gain << 1  pooling buys nothing, because the axis is limited by the number of
+    //                       DISTINCT CORNERS and every window already sees them (the panorama's
+    //                       yaw). sigma_pooled ~ sigma_window, so dividing the scatter by sqrt(k)
+    //                       drives the ratio far below one for the same invalid reason.
+    //     ⇒ THE PER-WINDOW FORM IS THE ROBUST INSTRUMENT: it assumes nothing about how information
+    //       combines across windows. Quote the pooled form only beside its pool_gain.
+    //
+    //     The live [mount/pool] line prints window scatter beside the POOLED sigma, which is neither
+    //     of these forms — so a ratio recorded from that line is not comparable with either.
     if (do_scatter)
     {
         std::printf("\n── M4 honesty: 5 s windows (the live cadence), ≥3 corners each ──\n");
@@ -1367,11 +1387,12 @@ int main(int argc, char** argv)
                 const double m = su[i] / k;
                 const double sd = std::sqrt(std::max(0.0, su2[i] / k - m * m));
                 const double fw = sf[i] / k, fp = sigma_deg(base[ci].sol, i, c.ctx);
-                std::printf("    %-7s window sd %8.4f | per-window σ %8.4f → %6.2f"
-                            " | pooled σ %8.4f vs sd/√k %8.4f → %6.2f\n",
+                const double rk = std::sqrt(static_cast<double>(k));
+                std::printf("    %-7s window sd %9.5f | per-window σ %9.5f → %6.2f"
+                            " | pooled σ %9.5f vs sd/√k %9.5f → %6.2f | pool_gain %6.2f\n",
                             nm[i], sd, fw, fw > 0 ? sd / fw : 0.0,
-                            fp, sd / std::sqrt(static_cast<double>(k)),
-                            fp > 0 ? (sd / std::sqrt(static_cast<double>(k))) / fp : 0.0);
+                            fp, sd / rk, fp > 0 ? (sd / rk) / fp : 0.0,
+                            fp > 0 ? fw / (rk * fp) : 0.0);
             }
         }
     }
