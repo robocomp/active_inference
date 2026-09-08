@@ -79,6 +79,27 @@ namespace
 {
 constexpr double kRad2Deg = 180.0 / M_PI;
 
+// ── THE PARAMETER PROBE, AND WHY IT BORROWS THE DEAD COLUMN ──────────────────────────────────────
+// The pool estimates 3 of the mount's 6 degrees of freedom: pitch about x̂_cam, height along ẑ_cam,
+// yaw about ẑ_cam. `J`'s fourth column is the `dt` slot, which make_pair_from leaves at zero because
+// the image/LiDAR offset is not a property of the mount. This borrows that slot to carry ONE
+// candidate parameter at a time, so "is a parameter missing?" is answered by the AGENT'S OWN
+// marginalised solve rather than by a replica of it — the same reason every other leg here does.
+//   0 roll      rotation about the camera frame's ŷ (the depth axis of a pinhole; a fixed direction
+//               in the panorama frame, where there is no single optical axis)
+//   1 t_lateral translation along x̂_cam
+//   2 t_depth   translation along ŷ_cam
+//   3 NULL      a deterministic pseudo-random column, the negative control. Whatever the real
+//               candidates score that this scores too is the fit's slack and not a parameter.
+int          g_probe = -1;          ///< -1 = the live 3-parameter model, unchanged
+float        g_probe_sigma = 0.f;   ///< the candidate's prior sigma, so it stays in prior-sigma units
+int          g_skip_vertex = -9999; ///< leave-one-CORNER-out: the corner is the sample unit
+std::int64_t g_win_lo = 0, g_win_hi = 0;   ///< 0,0 = no window filter
+
+const char* probe_name(int i)
+{ return i == 0 ? "roll" : i == 1 ? "t_lateral" : i == 2 ? "t_depth" : i == 3 ? "NULL-control" : "?"; }
+const char* probe_unit(int i) { return i == 0 ? "deg" : i == 3 ? "-" : "m"; }
+
 /// One replayable row. Everything the agent wrote that the rebuild needs, and nothing else.
 struct Row
 {
@@ -478,6 +499,10 @@ CamResult solve_leg(const Camera& c, const Leg& leg, double offset_sigma_px, boo
     const bool do_rebuild = moved and not fixed_cov and c.has_cov_lidar;
     for (const Row& r : c.rows)
     {
+        // The two subsetting filters, before any work: a corner left out for the jackknife, and a
+        // time window for the between-window scatter. Both default to off.
+        if (r.vertex == g_skip_vertex) continue;
+        if (g_win_hi > 0 and (r.ts < g_win_lo or r.ts >= g_win_hi)) continue;
         // ★ THE MOUNT THIS ROW WAS ACTUALLY MEASURED AGAINST. The sidecar's extrinsic already holds
         //   the correction in force when the file opened; a row written later carries its own. The
         //   difference is what has to be re-applied here, or every row after the first correction is
@@ -516,10 +541,32 @@ CamResult solve_leg(const Camera& c, const Leg& leg, double offset_sigma_px, boo
             else
                 ++out.cov_held;
         }
-        const rc::mount::PairObs o =
+        rc::mount::PairObs o =
             rc::mount::make_pair_from(r.vertex, r.assoc_prob, p, r.uv_image, cov, c.ctx.cam,
                                       Rr, tr, c.ctx.sigma_pitch, c.ctx.sigma_height, c.ctx.sigma_yaw);
         if (not o.ok) continue;
+        if (g_probe >= 0)
+        {
+            // The SAME construction the three live columns use (mount_lidar_pair.h): a rotation is
+            // P·(axis × pc) and a translation is P·axis, each scaled by the candidate's prior sigma
+            // so the solve stays in prior-sigma units and Accum's unit prior still applies to it.
+            const Eigen::Vector3f pc = Rr * p + tr;
+            const Eigen::Vector3f x_cam(1.f, 0.f, 0.f), y_cam(0.f, 1.f, 0.f);
+            Eigen::Vector2f col = Eigen::Vector2f::Zero();
+            if      (g_probe == 0) col = o.P * y_cam.cross(pc);
+            else if (g_probe == 1) col = o.P * x_cam;
+            else if (g_probe == 2) col = o.P * y_cam;
+            else if (g_probe == 3)
+            {
+                // Deterministic in the row — a failing probe has to be reproducible — and built
+                // from no geometry, so it can carry nothing a real parameter would carry.
+                const std::uint64_t h = static_cast<std::uint64_t>(r.ts) * 2654435761ull
+                                      + static_cast<std::uint64_t>(r.vertex) * 40503ull;
+                col = Eigen::Vector2f(static_cast<float>((h & 1023ull) / 511.5 - 1.0),
+                                      static_cast<float>(((h >> 10) & 1023ull) / 511.5 - 1.0));
+            }
+            o.J.col(3) = g_probe_sigma * col;
+        }
         acc.add(o);
         ++out.n;
         // The SAME local scale the agent now uses, per row (image_edge_ops.h px_per_rad_at).
@@ -1034,6 +1081,15 @@ void usage()
         "  --fixed-cov        do NOT rebuild the covariance under the injected mount (the old\n"
         "                     approximation). Run it both ways: the difference is the size of what\n"
         "                     §2b was going to assume away.\n"
+        "  --probe            ask whether a FOURTH mount parameter is needed: roll, a lateral\n"
+        "                     translation, a depth translation, and a null control, each in\n"
+        "                     turn in the dead dt column, plus a leave-one-CORNER-out on the\n"
+        "                     strongest. The pooled sigma and the jackknife disagree by ~67x;\n"
+        "                     the jackknife is the one that answers the question.\n"
+        "  --scatter          the M4 honesty check: solve 5 s windows and compare their\n"
+        "                     scatter against the formal sigma, BOTH ways round — against a\n"
+        "                     window's own sigma and against the pooled one. They differ by\n"
+        "                     sqrt(k) and answer different questions.\n"
         "  --verify FILE      check the delta=0 solve against a live evidence file.\n"
         "  --selftest         replay a drive whose truth is set in the tool, and check that the\n"
         "                     three injection signatures come out distinguishable. Run this before\n"
@@ -1050,6 +1106,8 @@ int main(int argc, char** argv)
     std::vector<std::tuple<std::string, std::string, double>> applies;
     double sigma_px = 0.0;
     bool fixed_cov = false;
+    bool do_probe = false;
+    bool do_scatter = false;
     int reps = 0;
     std::int64_t closure_ms = 60;
     std::string verify_file;
@@ -1068,6 +1126,8 @@ int main(int argc, char** argv)
         else if (a == "--closure-ms") { double v = 0; if (to_num(next(), v)) closure_ms = static_cast<std::int64_t>(v); }
         else if (a == "--verify") verify_file = next();
         else if (a == "--fixed-cov") fixed_cov = true;
+        else if (a == "--probe") do_probe = true;
+        else if (a == "--scatter") do_scatter = true;
         else if (a == "--bootstrap") { double v = 0; if (to_num(next(), v)) reps = static_cast<int>(v); }
         else if (a == "--apply")
         {
@@ -1197,6 +1257,124 @@ int main(int argc, char** argv)
     else
         std::printf("  (one camera only — the closure channel, and with it the attribution test,"
                     " needs two)\n");
+
+    // ── IS A FOURTH MOUNT PARAMETER NEEDED? ─────────────────────────────────────────────────────
+    // ★★★ THE POOLED SIGMA AND THE JACKKNIFE GIVE OPPOSITE ANSWERS, AND THE JACKKNIFE IS RIGHT.
+    //     Measured on arm7_0903_1104: a depth translation comes out 62.6 sigma from zero on the
+    //     ricoh by its own posterior, and 1.01 sigma once corners rather than sightings are the
+    //     sample. The per-vertex nuisance does NOT protect against this: it integrates out a
+    //     per-corner CONSTANT offset, and a candidate whose covariate varies WITHIN a corner (range)
+    //     is untouched by it. So the marginalisation makes the three FITTED parameters honest and
+    //     says nothing about a NEW column — a model-selection question needs the leave-one-out.
+    if (do_probe)
+    {
+        std::printf("\n── parameter probe: the live 3 DOF + ONE candidate in the dead dt column ──\n"
+                    "   a candidate the data needs must come out many sigmas from zero, drop"
+                    " chi2/dof,\n   and SURVIVE the jackknife — while the NULL control does none of"
+                    " it.\n");
+        for (size_t ci = 0; ci < cams.size(); ++ci)
+        {
+            const Camera& c = cams[ci];
+            std::printf("  %s: baseline chi2/dof %.4f over %d corners\n",
+                        c.name.c_str(), base[ci].sol.chi2_dof, base[ci].sol.clusters);
+            for (int pi = 0; pi < 4; ++pi)
+            {
+                g_probe = pi;
+                // A rotation is asked on pitch/yaw's own prior and a translation on height's, so the
+                // candidate is asked on the same terms as the parameter it would sit beside.
+                g_probe_sigma = (pi == 0) ? c.ctx.sigma_pitch : (pi == 3) ? 1.f : c.ctx.sigma_height;
+                bool refused = false; std::string why;
+                const CamResult r = solve_leg(c, base_leg, sigma_px, fixed_cov, refused, why);
+                const double sc  = (pi == 0) ? g_probe_sigma * kRad2Deg : (pi == 3) ? 1.0 : g_probe_sigma;
+                const double val = -r.sol.p(3) * sc, sig = r.sol.sigma(3) * sc;
+                std::printf("    %-12s %+9.4f %-3s ± %.4f (%6.2f σ) | chi2/dof %.4f (%+.4f)"
+                            " | cond %5.1f | pitch/height/yaw now %+.4f %+.4f %+.4f\n",
+                            probe_name(pi), val, probe_unit(pi), sig,
+                            sig > 0 ? std::abs(val / sig) : 0.0,
+                            r.sol.chi2_dof, r.sol.chi2_dof - base[ci].sol.chi2_dof, r.sol.cond,
+                            param_deg(r.sol, 0, c.ctx), param_deg(r.sol, 1, c.ctx),
+                            param_deg(r.sol, 2, c.ctx));
+            }
+            // Leave-one-CORNER-out on the strongest candidate. A parameter carried by one corner is
+            // a corner, and no formal sigma computed over sightings can say so.
+            g_probe = 2; g_probe_sigma = c.ctx.sigma_height;
+            double su = 0, su2 = 0, lo = 1e9, hi = -1e9;
+            int k = 0, lo_v = -1, hi_v = -1;
+            for (const auto& [v, blk] : base[ci].per_vertex)
+            {
+                g_skip_vertex = v;
+                bool rf = false; std::string wy;
+                const CamResult r = solve_leg(c, base_leg, sigma_px, fixed_cov, rf, wy);
+                g_skip_vertex = -9999;
+                if (not r.sol.ok) continue;
+                const double val = -r.sol.p(3) * c.ctx.sigma_height;
+                su += val; su2 += val * val; ++k;
+                if (val < lo) { lo = val; lo_v = v; }
+                if (val > hi) { hi = val; hi_v = v; }
+            }
+            if (k > 1)
+            {
+                const double m = su / k;
+                const double sd = std::sqrt(std::max(0.0, su2 / k - m * m));
+                const double se = sd * std::sqrt(static_cast<double>(k) - 1.0);   // jackknife SE
+                std::printf("    t_depth leave-one-corner-out, %d corners: mean %+.4f m,"
+                            " jackknife SE %.4f m ⇒ %.2f σ  (v%d → %+.4f, v%d → %+.4f)\n",
+                            k, m, se, se > 0 ? std::abs(m / se) : 0.0, lo_v, lo, hi_v, hi);
+            }
+            g_probe = -1;
+        }
+    }
+
+    // ── M4: THE BETWEEN-WINDOW SCATTER AGAINST THE FORMAL SIGMA ─────────────────────────────────
+    // ★★★ TWO RATIOS EXIST AND THEY DIFFER BY sqrt(k). The scatter of window estimates against a
+    //     WINDOW's own sigma asks whether one window's error bar is honest; the same scatter over
+    //     sqrt(k) against the POOLED sigma asks whether the pooled one is. The live [mount/pool]
+    //     line prints window scatter beside the POOLED sigma, which carries that factor by
+    //     construction — so a ratio recorded from that line is not comparable with either of these.
+    if (do_scatter)
+    {
+        std::printf("\n── M4 honesty: 5 s windows (the live cadence), ≥3 corners each ──\n");
+        for (size_t ci = 0; ci < cams.size(); ++ci)
+        {
+            const Camera& c = cams[ci];
+            if (c.rows.empty()) continue;
+            std::int64_t t0 = c.rows.front().ts, t1 = t0;
+            for (const Row& r : c.rows) { t0 = std::min(t0, r.ts); t1 = std::max(t1, r.ts); }
+            double su[3] = {0, 0, 0}, su2[3] = {0, 0, 0}, sf[3] = {0, 0, 0};
+            int k = 0;
+            for (std::int64_t w = t0; w < t1; w += 5000)
+            {
+                g_win_lo = w; g_win_hi = w + 5000;
+                bool rf = false; std::string wy;
+                const CamResult r = solve_leg(c, base_leg, sigma_px, fixed_cov, rf, wy);
+                g_win_lo = g_win_hi = 0;
+                // A window holding one or two corners cannot separate a mount from those corners'
+                // own offsets. It is not a poor estimate of the mount; it is not an estimate of it.
+                if (not r.sol.ok or r.sol.clusters < 3) continue;
+                for (int i = 0; i < 3; ++i)
+                {
+                    const double v = param_deg(r.sol, i, c.ctx);
+                    su[i] += v; su2[i] += v * v; sf[i] += sigma_deg(r.sol, i, c.ctx);
+                }
+                ++k;
+            }
+            if (k < 2)
+            { std::printf("  %-8s only %d usable windows\n", c.name.c_str(), k); continue; }
+            const char* nm[3] = {"pitch", "height", "yaw"};
+            std::printf("  %-8s %d windows\n", c.name.c_str(), k);
+            for (int i = 0; i < 3; ++i)
+            {
+                const double m = su[i] / k;
+                const double sd = std::sqrt(std::max(0.0, su2[i] / k - m * m));
+                const double fw = sf[i] / k, fp = sigma_deg(base[ci].sol, i, c.ctx);
+                std::printf("    %-7s window sd %8.4f | per-window σ %8.4f → %6.2f"
+                            " | pooled σ %8.4f vs sd/√k %8.4f → %6.2f\n",
+                            nm[i], sd, fw, fw > 0 ? sd / fw : 0.0,
+                            fp, sd / std::sqrt(static_cast<double>(k)),
+                            fp > 0 ? (sd / std::sqrt(static_cast<double>(k))) / fp : 0.0);
+            }
+        }
+    }
 
     if (reps > 0) run_bootstrap(cams, base, sigma_px, closure_ms, reps);
 
