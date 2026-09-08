@@ -1086,7 +1086,12 @@ void usage()
         "                     turn in the dead dt column, plus a leave-one-CORNER-out on the\n"
         "                     strongest. The pooled sigma and the jackknife disagree by ~67x;\n"
         "                     the jackknife is the one that answers the question.\n"
-        "  --scatter          the M4 honesty check: solve 5 s windows and compare their\n"
+        "  --scatter-sweep    run the window-length ladder and fit sigma_window ~ T^-alpha per\n"
+        "                     axis. alpha = 1/2 is the independent-rows null, and ONLY there\n"
+        "                     is either ratio a property of the estimator rather than of the\n"
+        "                     cadence. Run this before quoting a ratio.\n"
+        "  --scatter[-ms N]   the M4 honesty check: solve N ms windows (default 5000, the live\n"
+        "                     cadence) and compare their\n"
         "                     scatter against the formal sigma, BOTH ways round — against a\n"
         "                     window's own sigma and against the pooled one. They differ by\n"
         "                     sqrt(k) and answer different questions.\n"
@@ -1108,6 +1113,8 @@ int main(int argc, char** argv)
     bool fixed_cov = false;
     bool do_probe = false;
     bool do_scatter = false;
+    std::int64_t scatter_ms = 5000;
+    bool do_sweep = false;
     int reps = 0;
     std::int64_t closure_ms = 60;
     std::string verify_file;
@@ -1128,6 +1135,9 @@ int main(int argc, char** argv)
         else if (a == "--fixed-cov") fixed_cov = true;
         else if (a == "--probe") do_probe = true;
         else if (a == "--scatter") do_scatter = true;
+        else if (a == "--scatter-sweep") do_sweep = true;
+        else if (a == "--scatter-ms")
+        { double v = 0; if (to_num(next(), v) and v > 0) { do_scatter = true; scatter_ms = static_cast<std::int64_t>(v); } }
         else if (a == "--bootstrap") { double v = 0; if (to_num(next(), v)) reps = static_cast<int>(v); }
         else if (a == "--apply")
         {
@@ -1351,20 +1361,22 @@ int main(int argc, char** argv)
     //
     //     The live [mount/pool] line prints window scatter beside the POOLED sigma, which is neither
     //     of these forms — so a ratio recorded from that line is not comparable with either.
-    if (do_scatter)
+    if (do_scatter or do_sweep)
     {
-        std::printf("\n── M4 honesty: 5 s windows (the live cadence), ≥3 corners each ──\n");
-        for (size_t ci = 0; ci < cams.size(); ++ci)
+        // One camera, one window length: the scatter of the window estimates, the mean formal sigma
+        // OF a window, and the pooled sigma. Everything the two ratios and pool_gain are built from.
+        const auto scatter_once = [&](size_t ci, std::int64_t ms,
+                                      double sd[3], double sw[3], double sp[3]) -> int
         {
             const Camera& c = cams[ci];
-            if (c.rows.empty()) continue;
+            if (c.rows.empty()) return 0;
             std::int64_t t0 = c.rows.front().ts, t1 = t0;
             for (const Row& r : c.rows) { t0 = std::min(t0, r.ts); t1 = std::max(t1, r.ts); }
             double su[3] = {0, 0, 0}, su2[3] = {0, 0, 0}, sf[3] = {0, 0, 0};
             int k = 0;
-            for (std::int64_t w = t0; w < t1; w += 5000)
+            for (std::int64_t w = t0; w < t1; w += ms)
             {
-                g_win_lo = w; g_win_hi = w + 5000;
+                g_win_lo = w; g_win_hi = w + ms;
                 bool rf = false; std::string wy;
                 const CamResult r = solve_leg(c, base_leg, sigma_px, fixed_cov, rf, wy);
                 g_win_lo = g_win_hi = 0;
@@ -1378,21 +1390,102 @@ int main(int argc, char** argv)
                 }
                 ++k;
             }
-            if (k < 2)
-            { std::printf("  %-8s only %d usable windows\n", c.name.c_str(), k); continue; }
-            const char* nm[3] = {"pitch", "height", "yaw"};
-            std::printf("  %-8s %d windows\n", c.name.c_str(), k);
+            if (k < 2) return k;
             for (int i = 0; i < 3; ++i)
             {
                 const double m = su[i] / k;
-                const double sd = std::sqrt(std::max(0.0, su2[i] / k - m * m));
-                const double fw = sf[i] / k, fp = sigma_deg(base[ci].sol, i, c.ctx);
+                sd[i] = std::sqrt(std::max(0.0, su2[i] / k - m * m));
+                sw[i] = sf[i] / k;
+                sp[i] = sigma_deg(base[ci].sol, i, c.ctx);
+            }
+            return k;
+        };
+        const char* nm[3] = {"pitch", "height", "yaw"};
+
+        if (do_scatter)
+        {
+            std::printf("\n── M4 honesty: %.1f s windows (the live cadence is 5 s), ≥3 corners each ──\n",
+                        scatter_ms / 1000.0);
+            for (size_t ci = 0; ci < cams.size(); ++ci)
+            {
+                double sd[3], sw[3], sp[3];
+                const int k = scatter_once(ci, scatter_ms, sd, sw, sp);
+                if (k < 2)
+                { std::printf("  %-8s only %d usable windows\n", cams[ci].name.c_str(), k); continue; }
+                std::printf("  %-8s %d windows\n", cams[ci].name.c_str(), k);
                 const double rk = std::sqrt(static_cast<double>(k));
-                std::printf("    %-7s window sd %9.5f | per-window σ %9.5f → %6.2f"
-                            " | pooled σ %9.5f vs sd/√k %9.5f → %6.2f | pool_gain %6.2f\n",
-                            nm[i], sd, fw, fw > 0 ? sd / fw : 0.0,
-                            fp, sd / rk, fp > 0 ? (sd / rk) / fp : 0.0,
-                            fp > 0 ? fw / (rk * fp) : 0.0);
+                for (int i = 0; i < 3; ++i)
+                    std::printf("    %-7s window sd %9.5f | per-window σ %9.5f → %6.2f"
+                                " | pooled σ %9.5f vs sd/√k %9.5f → %6.2f | pool_gain %6.2f\n",
+                                nm[i], sd[i], sw[i], sw[i] > 0 ? sd[i] / sw[i] : 0.0,
+                                sp[i], sd[i] / rk, sp[i] > 0 ? (sd[i] / rk) / sp[i] : 0.0,
+                                sp[i] > 0 ? sw[i] / (rk * sp[i]) : 0.0);
+            }
+        }
+
+        // ── THE ASSUMPTION TEST BEHIND BOTH RATIOS: how a window's own sigma scales with duration ──
+        // ★★★ NEITHER RATIO HAS A WINDOW-LENGTH-FREE VALUE, and the exponent says why.
+        //     Write sigma_window ~ T^-alpha. If a window's rows were independent information,
+        //     doubling T would halve the variance: alpha = 1/2. Then, and ONLY then,
+        //     sigma_window/sqrt(k) is invariant (k ~ 1/T), so pool_gain is invariant and the pooled
+        //     ratio is a property of the estimator rather than of the cadence.
+        //     Measured: pool_gain ∝ T^(1/2 - alpha), which reproduces every axis of this tour to a
+        //     few per cent — so a pool_gain that "drifts with window length" is ARITHMETIC, and a
+        //     drift test cannot classify an axis. The exponent can.
+        //     alpha ~ 1/2   a window's rows carry independent information (ricoh pitch, 0.484)
+        //     alpha < 1/2   information SATURATES: a longer window adds sightings, not distinct
+        //                   corners. Both ratios then grow with T and neither has a fixed value.
+        //     alpha ~ 0     the axis is pinned at its prior and duration buys nothing (ricoh yaw).
+        // ★★★ AND THE per-window RATIO GROWING WITH T IS ITSELF A RESULT: sigma_window falls while
+        //     the SCATTER of the window estimates does not, so the disagreement between windows is
+        //     REAL and not sampling noise. It is a per-window bias field, which no single interval
+        //     can represent, and it is what makes the ratio unbounded in T rather than convergent.
+        if (do_sweep)
+        {
+            static const std::int64_t ladder[] = {1500, 2000, 3000, 4000, 5000,
+                                                  7000, 10000, 15000, 20000, 30000};
+            std::printf("\n── window-length sweep: is either ratio a property of the estimator? ──\n");
+            for (size_t ci = 0; ci < cams.size(); ++ci)
+            {
+                std::printf("  %s\n      T     k |%s\n", cams[ci].name.c_str(),
+                            "   pitch  sd/σ  gain |  height  sd/σ  gain |     yaw  sd/σ  gain");
+                std::vector<double> lt, ls[3];
+                for (std::int64_t ms : ladder)
+                {
+                    double sd[3], sw[3], sp[3];
+                    const int k = scatter_once(ci, ms, sd, sw, sp);
+                    if (k < 2) continue;
+                    const double rk = std::sqrt(static_cast<double>(k));
+                    std::printf("  %6.1f %5d |", ms / 1000.0, k);
+                    for (int i = 0; i < 3; ++i)
+                        std::printf(" %7.5f %5.2f %5.2f |", sw[i], sw[i] > 0 ? sd[i] / sw[i] : 0.0,
+                                    sp[i] > 0 ? sw[i] / (rk * sp[i]) : 0.0);
+                    std::printf("\n");
+                    lt.push_back(std::log(ms / 1000.0));
+                    for (int i = 0; i < 3; ++i) ls[i].push_back(std::log(std::max(1e-12, sw[i])));
+                }
+                if (lt.size() < 3) { std::printf("      (too few usable window lengths)\n"); continue; }
+                const double n = static_cast<double>(lt.size());
+                double mx = 0; for (double v : lt) mx += v; mx /= n;
+                double sxx = 0; for (double v : lt) sxx += (v - mx) * (v - mx);
+                for (int i = 0; i < 3; ++i)
+                {
+                    double my = 0; for (double v : ls[i]) my += v; my /= n;
+                    double sxy = 0;
+                    for (size_t q = 0; q < lt.size(); ++q) sxy += (lt[q] - mx) * (ls[i][q] - my);
+                    const double a = -sxy / sxx;                       // sigma_window ~ T^-a
+                    double sse = 0;
+                    for (size_t q = 0; q < lt.size(); ++q)
+                    { const double e = ls[i][q] - (my - a * (lt[q] - mx)); sse += e * e; }
+                    const double se = std::sqrt((sse / (n - 2)) / sxx);
+                    std::printf("      %-7s alpha = %+.3f ± %.3f   %s\n", nm[i], a, se,
+                                std::abs(a - 0.5) < 3 * se
+                                    ? "consistent with independent rows ⇒ the pooled ratio is"
+                                      " well defined here"
+                                    : (a < 0.05 ? "pinned at the prior ⇒ duration buys nothing"
+                                                : "information SATURATES ⇒ NEITHER ratio has a"
+                                                  " window-length-free value"));
+                }
             }
         }
     }
