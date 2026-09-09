@@ -34,6 +34,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -61,6 +62,13 @@ public:
     /// Samples accepted since the last stats report; for the health line.
     [[nodiscard]] std::uint64_t served() const { return served_.load(std::memory_order_relaxed); }
 
+    /// FIX 2026-09-04: fired on THIS INGESTOR'S OWN THREAD ("imu-ingest"), once per accepted sample,
+    /// with that sample's integration_ts_ms(). Lets a consumer publish a higher-rate predicted pose
+    /// between the lidar-paced corrected ones without polling. The callback must be cheap and must do
+    /// its own locking against anything it shares with other threads -- it runs inline in the ingest
+    /// loop, so a slow or blocking callback delays every subsequent IMU sample's delivery.
+    void set_on_new_sample(std::function<void(std::int64_t)> cb) { on_new_sample_ = std::move(cb); }
+
 private:
     void loop();
     /// One drain. Brings the subscriber up lazily and throttled, exactly as LidarIngestor does: the
@@ -81,5 +89,6 @@ private:
     std::int64_t            last_key_ms_    = 0;
     std::int64_t            last_try_ms_    = 0;
     std::atomic<std::uint64_t> served_{0};
+    std::function<void(std::int64_t)> on_new_sample_;
 };
 } // namespace rc

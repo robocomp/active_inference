@@ -400,6 +400,15 @@ public:
         float base_rotation_noise_fraction = 0.5f;     // Base rotation noise relative to base translation noise
         float stationary_motion_threshold = 0.001f;    // meters; below this = stationary for covariance
         float stationary_speed_threshold = 0.03f;      // m/s; below this = near-stationary for process noise
+        // ZUPT gate for the gyro heading override in integrate_odometry_over_window(): below these
+        // WHEEL-reported rates the segment is treated as truly stopped, so dtheta stays on the wheel
+        // channel (reads ~0 exactly there, no scrubbing to correct for) instead of the gyro. Without
+        // this, a parked robot integrates pure gyro random walk as if it were rotation -- measured
+        // ~0.011 rad accumulated per 5 s window with the robot stationary (see the [ImuInject] guard
+        // comment a few lines below imu_dtheta_sum_'s use).
+        bool  zupt_enabled       = true;
+        float zupt_wheel_rot_eps = 0.002f;             // rad/s
+        float zupt_wheel_lin_eps = 0.001f;             // m/s (adv, side)
         float rotation_position_coupling = 0.15f;      // meters of position uncertainty per radian of rotation
         float rotation_noise_base = 0.01f;             // Base rotation std when no commanded motion
         // Fallback diagonal for the slot motion covariance, used ONLY when no odometry prior is valid.
@@ -1629,6 +1638,7 @@ private:
    // A silently degrading channel (IMU stalls, buffer too shallow, clock map lost) reads as normal in
    // every outcome metric until it has already cost accuracy.
    int          imu_seg_used_ = 0, imu_seg_total_ = 0;
+   int          zupt_segs_ = 0;   // segments where the ZUPT gate blocked the gyro override this window
    double       imu_dtheta_sum_ = 0.0, wheel_dtheta_sum_ = 0.0;  // rad, over IMU-covered segments only
    bool         imu_stats_sim_clock_ = false;
    std::int64_t imu_stats_last_log_ms_ = 0;

@@ -87,7 +87,7 @@ class Vedirect:
 
 
 class BatteryMonitor:
-    def __init__(self, port="/dev/ttyUSB0", v_max_charging=54.0, v_max=52.6, v_min=45.0):
+    def __init__(self, port="/dev/Victron", v_max_charging=54.0, v_max=52.6, v_min=45.0):
         self.port = port
         self.v_max_charging = v_max_charging
         self.v_max = v_max

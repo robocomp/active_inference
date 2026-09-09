@@ -6659,7 +6659,19 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
             // one whose stated variance applies to it; crediting the gyro's noise to a wheel-derived
             // heading would describe a measurement that was never made.
             bool heading_from_imu = false;
-            if (float dth_imu = 0.f; imu_dtheta(effective_start_ms, effective_end_ms, dth_imu))
+            // ZUPT: the wheels read ~0 exactly when actually stopped (no scrubbing error to correct
+            // for there), while the gyro over this same span is pure random-walk noise -- measured
+            // ~0.011 rad accumulated per 5 s window with the robot parked (see the coverage guard
+            // below, imu_dtheta_sum_). Below this, skip the gyro override entirely and let dtheta
+            // stay the wheel-derived value above (already ~0), instead of integrating that noise as
+            // if it were rotation.
+            const bool wheel_stationary = params.zupt_enabled
+                                        and std::abs(odom.rot)  < params.zupt_wheel_rot_eps
+                                        and std::abs(odom.adv)  < params.zupt_wheel_lin_eps
+                                        and std::abs(odom.side) < params.zupt_wheel_lin_eps;
+            if (wheel_stationary)
+                ++zupt_segs_;
+            if (float dth_imu = 0.f; not wheel_stationary and imu_dtheta(effective_start_ms, effective_end_ms, dth_imu))
             {
                 // Keep BOTH on the covered segments: their ratio is how much heading the gyro is
                 // taking out of the wheel estimate, which is the whole point of the injection and the
@@ -6810,10 +6822,12 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
                               << (ratio_valid ? QString::number(ratio, 'f', 4)
                                               : QString("n/a (needs >%1 rad of turning)")
                                                     .arg(kMinRotForRatio, 0, 'f', 1))
-                              << " over " << QString::number(imu_dtheta_sum_, 'f', 3) << " rad";
+                              << " over " << QString::number(imu_dtheta_sum_, 'f', 3) << " rad"
+                              << " zupt=" << zupt_segs_ << "/" << imu_seg_total_ << " seg";
             imu_stats_last_log_ms_ = t_end_ms;
             imu_seg_used_ = imu_seg_total_ = 0;
             imu_dtheta_sum_ = wheel_dtheta_sum_ = 0.0;
+            zupt_segs_ = 0;
         }
 
         if (preint_out != nullptr)

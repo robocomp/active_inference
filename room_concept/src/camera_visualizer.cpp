@@ -11,6 +11,7 @@
 
 #include <QBrush>
 #include <QColor>
+#include <QDateTime>
 #include <QFontMetrics>
 #include <QPainter>
 #include <QPolygonF>
@@ -775,8 +776,31 @@ std::optional<Eigen::Affine3d> CameraVisualizer::predicted_camera_from_room(std:
             && vel_t->get().size() >= 2 && vel_r->get().size() >= 3 && !stamps->get().empty())
         {
             std::uint64_t t_leading = 0;
+            std::uint64_t t_oldest  = std::numeric_limits<std::uint64_t>::max();
             for (const auto s : stamps->get())
+            {
                 t_leading = std::max(t_leading, s);
+                t_oldest  = std::min(t_oldest, s);
+            }
+
+            // TEST 2026-09-07: classify this query against the retained window before doing
+            // anything with it — see the counters' doc comment in the header.
+            ++rt_bracket_total_;
+            if (frame_ts <= t_oldest)
+                ++rt_bracket_before_oldest_;
+            else if (frame_ts > t_leading)
+                ++rt_bracket_after_newest_;
+            if (const auto now_ms = QDateTime::currentMSecsSinceEpoch();
+                now_ms - rt_bracket_diag_last_log_ms_ >= 5000 and rt_bracket_total_ > 0)
+            {
+                rt_bracket_diag_last_log_ms_ = now_ms;
+                qInfo().nospace()
+                    << "[RTBracketDiag] " << rt_bracket_total_ << " queries: "
+                    << QString::number(100.0 * rt_bracket_before_oldest_ / rt_bracket_total_, 'f', 1)
+                    << "% before-oldest (HISTORY_SIZE-limited), "
+                    << QString::number(100.0 * rt_bracket_after_newest_ / rt_bracket_total_, 'f', 1)
+                    << "% after-newest (dead-reckoned below regardless)";
+            }
 
             // Only forward-predict: if the frame predates the leading edge the pose was already
             // bracketed/interpolated exactly, so dt=0. Clamp to the safety horizon.
@@ -794,7 +818,7 @@ std::optional<Eigen::Affine3d> CameraVisualizer::predicted_camera_from_room(std:
                 room_T_robot_pred.linear() =
                     Eigen::AngleAxisd(rot * dt, Eigen::Vector3d::UnitZ()).toRotationMatrix() * R_old;
                 room_T_robot_pred.translation() =
-                    t_old + R_old * Eigen::Vector3d(adv, side, 0.0) * dt;
+                    t_old + R_old * Eigen::Vector3d(side, adv, 0.0) * dt;  // FIX 2026-09-03: era (adv, side) -- body frame +Y forward/+X lateral, ver room_scene_graph.cpp
             }
         }
     }

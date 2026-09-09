@@ -1,4 +1,4 @@
-"""Shared launcher+monitor used by subcognitive_v2 and cognitive_v2.
+"""Shared launcher+monitor used by subcognitive.py and cognitive.py.
 
 Launches the components of a TOML file, keeps a rich console table, and publishes
 their live state to the shared /tmp registry. Whichever launcher grabs the monitor
@@ -26,9 +26,14 @@ from .battery import BatteryMonitor
 from .registry import MonitorLock, RegistryWriter, claim_commands
 from .shm_guard import clean_orphan_shm, preflight_dds
 from .server import MonitorServer
-from .topology import agent_domain, component_dds, parse_endpoint
+from . import term_tmux
+from .topology import agent_domain, component_dds, component_media, parse_endpoint
 
-_FASTDDS_STATISTICS_TOPIC = "_fastdds_statistics_publication_throughput"
+_FASTDDS_STATISTICS_TOPIC = (
+    "_fastdds_statistics_publication_throughput;_fastdds_statistics_subscription_throughput"
+)   # ';'-separated (Fast DDS's own list format); the bridge reads both without touching
+    # the component's source -- consumer-side (subscriber) bandwidth for free, same as
+    # producer-side (see netmon/dds_stats_bridge/main.cpp)
 _DDS_BRIDGE_BIN = os.path.join(os.path.dirname(__file__), "dds_stats_bridge", "build", "dds_stats_bridge")
 _BATTERY_JSON = "/tmp/robocomp_netmon/battery.json"
 
@@ -179,7 +184,46 @@ def _check_shm(console):
         console.print(f"[red]SHM cleanup error: {e}[/red]")
 
 
+_TMUX_AVAILABLE = term_tmux.available()   # checked once; falls back to a bare Popen if tmux is missing
+
+
+class _TmuxProc:
+    """Same shape as the subprocess.Popen the rest of this module (_kill_tree,
+    run_command's p.poll() check) already knows how to drive -- so _launch() only
+    needs to swap out how the process gets started, not every call site that reads
+    proc.pid / proc.poll().
+
+    .pid is the launched COMMAND's pid (bash's foreground child), not the tmux
+    session/pane's own shell -- the shell is meant to outlive the command (see
+    term_tmux.ensure_running), so "is this component running" has to track the
+    command specifically. A user hitting Ctrl-C inside the terminal, or the web UI's
+    🛑 stop (_kill_tree targets exactly this pid), kills the command and leaves the
+    shell sitting at its prompt; .poll() must report that as "not running" so restart/
+    the status table aren't fooled by the still-alive terminal underneath it."""
+    def __init__(self, name, pid):
+        self.name = name
+        self.pid = pid
+
+    def poll(self):
+        return None if psutil.pid_exists(self.pid) else 0
+
+
 def _launch(command, cwd, name, extra_env=None):
+    """Run inside a dedicated tmux session (id = session name) instead of a bare
+    Popen to a log file -- gives the web terminal a real, ANSI-correct screen to
+    snapshot and type into (see netmon/term_tmux.py). Falls back to a plain Popen
+    (_launch_plain) verbatim if tmux isn't installed, so the launcher still runs
+    (just without the terminal panel) rather than failing to launch anything."""
+    if not _TMUX_AVAILABLE:
+        return _launch_plain(command, cwd, name, extra_env)
+
+    pid = term_tmux.ensure_running(name, command, cwd, extra_env)   # already the command's own pid
+    if pid is None:
+        return _launch_plain(command, cwd, name, extra_env)   # tmux session creation failed — don't strand the component
+    return _TmuxProc(name, pid), psutil.Process(pid)
+
+
+def _launch_plain(command, cwd, name, extra_env=None):
     log = os.path.expanduser(f"~/.local/logs/{name}")
     os.makedirs(os.path.dirname(log), exist_ok=True)
     env = dict(os.environ, **extra_env) if extra_env else None
@@ -209,12 +253,40 @@ def _build(name, cwd):
                      stdout=open(log + ".out", "a"), stderr=open(log + ".err", "a"))
 
 
+_LAUNCH_WRAPPERS = {"chrt", "nice", "ionice", "taskset", "vglrun", "env"}
+
+
+def _real_exe(cmd: str) -> str:
+    """
+    Nombre del binario real que acaba ejecutándose, saltando wrappers de
+    scheduling/GPU conocidos (chrt, vglrun, ...) y sus flags, y el patrón de
+    respaldo "wrapper cmd || cmd" (ver chrt en los toml de imu_fusion/Base,
+    sesión 2026-07-29) -- sin esto, _remove_existing() dejaba de reconocer
+    el proceso en cuanto el cmd empezaba por un wrapper (exe pasaba a ser
+    "chrt"/"vglrun" en vez del binario real), y no mataba instancias viejas
+    antes de relanzar.
+    """
+    tail = cmd.split(" || ")[-1].strip()
+    tokens = tail.split()
+    i = 0
+    while i < len(tokens):
+        base = tokens[i].split("/")[-1]
+        if base not in _LAUNCH_WRAPPERS:
+            return base
+        i += 1
+        while i < len(tokens) and tokens[i].startswith("-"):
+            i += 1
+            if i < len(tokens) and tokens[i].lstrip("-").replace(".", "").isdigit():
+                i += 1
+    return tokens[0].split("/")[-1] if tokens else ""
+
+
 def _remove_existing(components, console):
     for comp in components:
         cmd = comp.get("cmd", "")
         if not cmd:
             continue
-        exe = cmd.split()[0].split("/")[-1]
+        exe = _real_exe(cmd)
         cname = comp.get("name", "")
         for p in psutil.process_iter(["name", "cmdline"]):
             try:
@@ -242,9 +314,9 @@ def _kill_tree(proc, timeout=5):
         return
     try:
         parent = psutil.Process(proc.pid)
+        procs = parent.children(recursive=True)
     except psutil.NoSuchProcess:
         return
-    procs = parent.children(recursive=True)
     procs.append(parent)
     for p in procs:
         try:
@@ -297,14 +369,17 @@ def run_launcher(toml_path, launcher, layer, start_webots=False, start_rcnode=Fa
 
     # Components with a [DDS] config get FASTDDS_STATISTICS so they publish real throughput
     # samples; one dds_stats_bridge per distinct domain then turns those into bytes/s the
-    # web monitor can read (see netmon/dds_stats_bridge/).
+    # web monitor can read (see netmon/dds_stats_bridge/). Same treatment for [Media] plane
+    # components (robot_concept as producer, retina/... as consumers) -- FASTDDS_STATISTICS
+    # is a Fast DDS env var read at DomainParticipant construction, so it covers any DDS
+    # participant the process opens, media-plane or not, with no code change on their side.
     dds_domains = set()
     dds_component_names = set()
     for c in components:
-        info = component_dds(c)
-        if info and info.get("domain") is not None:
-            dds_domains.add(info["domain"])
-            dds_component_names.add(c["name"])
+        for info in (component_dds(c), component_media(c)):
+            if info and info.get("domain") is not None:
+                dds_domains.add(info["domain"])
+                dds_component_names.add(c["name"])
     dds_bridges = {dom: _check_dds_bridge(console, dom) for dom in dds_domains}
 
     _remove_existing(components, console)
@@ -466,7 +541,7 @@ def run_launcher(toml_path, launcher, layer, start_webots=False, start_rcnode=Fa
     threading.Thread(target=collector, daemon=True).start()
 
     def build_table():
-        t = Table(title=f"🧠 {launcher} monitor v2 [{layer}]", box=box.SIMPLE_HEAVY)
+        t = Table(title=f"🧠 {launcher} monitor [{layer}]", box=box.SIMPLE_HEAVY)
         for col, kw in [("Name", {"style": "bold cyan"}), ("Endpoint", {"style": "bold blue"}),
                         ("Port", {"style": "bold magenta"}), ("Status", {"style": "bold"}),
                         ("Uptime", {"justify": "right"}), ("Memory", {"justify": "right"}),

@@ -149,4 +149,8 @@ private:
     std::atomic<bool>  ingest_stop_{false};
     std::atomic<bool>  ricoh_wanted_{false};
     std::atomic<std::uint64_t> ricoh_last_stamp_ms_{0};
+    // FPS-drop diagnosis: gates the 5s media_stats_*.json dump in poll_ricoh() (see
+    // drain_media_plane's rx_rgb/rx_depth report for the ZED-side equivalent). Atomic +
+    // CAS because poll_ricoh() may run from more than one thread (see class comment).
+    std::atomic<std::int64_t> ricoh_stats_report_ns_{0};
 };

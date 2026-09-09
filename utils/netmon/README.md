@@ -157,17 +157,23 @@ DDS**, que reporta el throughput real por *DataWriter* independientemente del tr
 
 ### Cómo funciona
 
-1. `netmon/launcher.py` detecta, a partir del `[DDS]` de la config de cada componente (parseado
-   por `topology.component_dds`), cuáles publican por DDS y con qué dominio. A esos procesos les
-   inyecta la variable de entorno `FASTDDS_STATISTICS=_fastdds_statistics_publication_throughput`
+1. `netmon/launcher.py` detecta, a partir del `[DDS]` **y** del `[Media]` de la config de cada
+   componente (parseado por `topology.component_dds`/`component_media`), cuáles publican o
+   consumen por DDS y con qué dominio. A esos procesos les inyecta la variable de entorno
+   `FASTDDS_STATISTICS=_fastdds_statistics_publication_throughput;_fastdds_statistics_subscription_throughput`
    al lanzarlos (y al relanzarlos desde la web) — sin tocar su código fuente. Esto hace que cada
-   uno publique, además de sus datos normales, su propio throughput (bytes/s instantáneos) en un
-   topic interno reservado de Fast DDS.
+   uno publique, además de sus datos normales, su propio throughput de escritura *y de lectura*
+   (bytes/s instantáneos) en sendos topics internos reservados de Fast DDS — así que también
+   se obtiene ancho de banda real del lado **consumidor** (p. ej. `retina` suscrito al media
+   plane) sin instrumentar nada en el propio componente.
 2. Por cada dominio DDS detectado entre los componentes, el launcher arranca (de forma
    idempotente, igual que Webots/rcnode) una instancia de `netmon/dds_stats_bridge/build/dds_stats_bridge --domain N --out /tmp/robocomp_netmon/dds_stats_dN.json`.
-   Este binario C++ standalone se suscribe al topic de estadísticas, resuelve
-   GUID-de-writer → nombre de topic real vía discovery normal de DDS, y vuelca a JSON cada 1 s
-   `{"<topic>": bytes_por_segundo, ...}` (escritura atómica).
+   Este binario C++ standalone se suscribe a ambos topics de estadísticas, resuelve
+   GUID-de-writer/reader → nombre de topic real vía discovery normal de DDS, y vuelca a JSON
+   cada 1 s `{"<topic>": bytes_por_segundo, ...}` (escritura atómica). Si el mismo topic tiene
+   productor y consumidor activos a la vez, comparten una sola clave — no hay forma de
+   distinguir "publicado" de "recibido" en el JSON, ni de separar varios consumidores del mismo
+   topic entre sí (ambos son límites conocidos, no bugs; ver comentario en `main.cpp`).
 3. `netmon/server.py` fusiona todos los `dds_stats_d*.json` que encuentre y los expone como
    `dds_bw` en `GET /api/state`.
 4. `app.js` suma el `dds_bw` de los topics de cada arista DDS del grafo y la anima igual que
@@ -193,10 +199,16 @@ ancho de banda DDS (el resto del mapa no se ve afectado).
 
 ### Notas / limitaciones
 
-- Un componente sin `[DDS] Domain = N` en su config simplemente no participa (no se le inyecta
-  la variable de entorno ni cuenta para decidir qué dominios necesitan bridge).
+- Un componente sin `[DDS] Domain = N` ni `[Media] domain_id = N` en su config simplemente no
+  participa (no se le inyecta la variable de entorno ni cuenta para decidir qué dominios
+  necesitan bridge).
 - Un componente puede tener varios topics DDS (`RGBTopic`/`DepthTopic`, etc.) — cualquier clave
-  de `[DDS]` que termine en `Topic` cuenta.
+  de `[DDS]` que termine en `Topic`, o de `[Media]` que termine en `_topic`, cuenta.
+- Un consumidor del media plane que resuelve su dominio/topic **en runtime** vía el grafo DSR
+  en vez de declararlo en su `etc/*.toml` (p. ej. `room_concept`, ver `topology.py`) no tiene
+  `[Media] domain_id` estático que leer — no se le inyecta la variable de entorno ni aparece
+  como arista en el grafo. Esto es un límite de "leer configs en frío", no algo que el bridge
+  pueda arreglar por su cuenta.
 - No hay throughput hasta que el *DataWriter* real escribe al menos una muestra: si el
   componente aún no está publicando (p. ej. esperando a que conecte la cámara física), su topic
   simplemente no aparece en `dds_bw` — no es un fallo del bridge.

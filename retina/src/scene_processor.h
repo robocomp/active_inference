@@ -97,6 +97,18 @@ public:
                                                       const std::string& room_name,
                                                       const std::string& robot_name,
                                                       std::uint64_t stamp) const;
+    // FIX 2026-09-07: analogue of room_T_zed_extrapolated for ricoh. process_scene_frame() resolves
+    // SceneFrame::room_T_ricoh at frame_ts_ms=0 ("latest" — see its comment, "viewer/boxes don't need
+    // frame-precision here"), which is true for the generic scene context but wrong for the ricoh
+    // model/lidar overlay: that draws onto ONE specific panorama frame and needs the pose AT that
+    // frame's own capture stamp, not "now". `robot_T_ricoh` is the static robot->ricoh mount (already
+    // resolved once by the caller, ts==0 — rigid, never re-queried per frame). No CSV/logging (mirrors
+    // room_T_zed_extrapolated).
+    std::optional<Mat::RTMat> room_T_ricoh_extrapolated(DSR::InnerEigenAPI* eigen,
+                                                        const std::string& room_name,
+                                                        const std::string& robot_name,
+                                                        const Mat::RTMat& robot_T_ricoh,
+                                                        std::uint64_t stamp) const;
     // DSR-native data accessors (no proxy needed)
     std::uint64_t get_frame_timestamp_ms() const;
     // Cheap pre-check for the pull worker — see MediaPlaneSource::pending_rgb_stamp(). One atomic load,

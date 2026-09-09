@@ -257,6 +257,9 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.OdomNoiseBase", room_concept.params.odom_noise_base);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.EncoderRotSlipK", room_concept.params.encoder_rot_slip_k);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.StationaryMotionThreshold", room_concept.params.stationary_motion_threshold);
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.ZuptEnabled", room_concept.params.zupt_enabled);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.ZuptWheelRotEps", room_concept.params.zupt_wheel_rot_eps);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.ZuptWheelLinEps", room_concept.params.zupt_wheel_lin_eps);
 
     // ── Preintegrated motion covariance — see Params::motion_preintegration, se2_preintegration.h ──
     // The densities are DERIVED from the legacy constants just loaded, not hard-coded, so the two
