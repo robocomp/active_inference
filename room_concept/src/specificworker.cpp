@@ -155,19 +155,17 @@ void SpecificWorker::initialize()
 
     // ── Collaborators (constructor injection; worker owns rt_api + shared params) ──
     rt_api_ = G->get_rt_api();
-    // TEST 2026-09-07: widen the RT timestamped history from the library default (5 blocks) so
-    // consumers querying a real acquisition timestamp (camera/lidar, PTP-anchored) more than ~50ms
-    // old do not silently clamp to the newest/oldest retained sample (RT_API::bracketing_blocks
-    // never extrapolates -- see dsr_rt_api.cpp). Since publish_predicted_tick writes this SAME edge
-    // at ~100 Hz, N slots cover roughly N*10ms of history.
-    // TEMP bumped 30->150 (~1.5s at 100Hz) ONLY to let the ricoh_omni_dds time_offset test use a
-    // full-second offset without saturating the clamp at ~300ms -- see the ricoh capture-timestamp
-    // investigation. Revert to something in the 30-50 range once that test is done; 150 is far more
-    // than any real consumer latency needs and only costs a few hundred more floats per edge.
+    // 2026-09-09: widen the RT timestamped history from the library default (5 blocks) so consumers
+    // querying a real acquisition timestamp (camera/lidar, PTP-anchored) more than ~50ms old do not
+    // silently clamp to the newest/oldest retained sample (RT_API::bracketing_blocks never
+    // extrapolates -- see dsr_rt_api.cpp). publish_predicted_tick writes this SAME edge at the IMU
+    // rate (~100 Hz measured, [ImuInject] coverage log), so N slots cover roughly N*10ms of history.
+    // 25 slots -> ~250ms, chosen as a settled production value (was bumped to 150 = ~1.5s only for
+    // the one-off ricoh_omni_dds time_offset test, since reverted -- see debug_pose_sync_sensores.md).
     // Process-local: rt_api_ is this worker's own instance (DSRGraph::get_rt_api() is a factory,
     // never shared -- see dsr_api.h), and this agent is the sole writer of the robot<->room RT edge,
     // so this is the only place that needs it.
-    rt_api_->HISTORY_SIZE = 150;
+    rt_api_->HISTORY_SIZE = 25;
     scene_graph_ = std::make_unique<rc::RoomSceneGraph>(
         G, rt_api_.get(), params, room_concept_, epistemic_controller_,
         [this] { trigger_graph_layout_twopi(); });
