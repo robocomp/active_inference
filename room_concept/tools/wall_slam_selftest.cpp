@@ -19,11 +19,16 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <deque>
+#include <map>
 #include <queue>
 #include <random>
 #include <charconv>
+#include <cstring>
 #include <fstream>
+#include <locale>
+#include <filesystem>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -56,6 +61,38 @@ namespace
     }
 
     // ── Rooms (CCW) ──────────────────────────────────────────────────────────────────────────────
+
+    // Bench-only overrides of the structural counts the code length cannot derive, for sweeps.
+    static void apply_env_overrides(rc::wallmap::Params& p)
+    {
+        const auto envf = [](const char* name, auto& dst)
+        {
+            if (const char* e = std::getenv(name))
+            {
+                float v = 0.f;
+                const auto r = std::from_chars(e, e + std::strlen(e), v);
+                if (r.ec == std::errc{}) dst = static_cast<std::remove_reference_t<decltype(dst)>>(v);
+            }
+        };
+        envf("WS_REPLACE_EDGES", p.replace_code_edges);   // lines a replacement names (default 1)
+        envf("WS_WRAP_EDGES",    p.wrap_code_edges);      // lines a spur wrap names (default 2)
+        envf("WS_KEEP",          p.order_keep_fraction);  // down-jump refund fraction (default 0.7)
+        envf("WS_ADOPT_JUDGE",   p.adopt_judge);          // 0 incumbent (IoU margin + veto), 1 one energy
+        envf("WS_ADOPT_REPAIR",  p.adopt_repair);         // repair self-crossing cycles before judging
+        envf("WS_MANHATTAN_GAIN", p.manhattan_gain);      // scale on the in-loop Manhattan factor (#4 test)
+        envf("WS_LEVEL2",        p.enable_level2);        // level-2 residual pass on the published copy
+        envf("WS_LEVEL2_FIT",    p.level2_fit);            // fit the step's 3 DoF to the returns
+        envf("WS_L2_MIN",        p.level2_min_m);         // smallest feature level 2 keeps (m)
+        envf("WS_L2_CLEAR",      p.level2_clear_cells);    // residual-cell clearance from every edge (cells)
+        envf("WS_THETA0_POST",   p.theta0_posterior);     // 1 posterior over all directions, 0 the old OBB+mean
+        envf("WS_WAIVER_PRICED", p.adopt_waiver_priced);  // 1 the health waiver pays its code length, 0 free
+        envf("WS_SPLICE_SURR",   p.splice_surrender);     // 1 a splice pays the existence support it erases
+        envf("WS_SIGMA_K",       p.adopt_sigma_k);        // judge 3: margin in standard deviations of dE
+        envf("WS_TRIAL",         p.trial_adoption);       // adopt a refused-but-promising cycle ON TRIAL
+        envf("WS_TRIAL_FRAMES",  p.trial_frames);         // how long the challenger has to prove itself
+        envf("WS_SURR_EXTENT",   p.surrender_by_extent);  // price support on the extent dropped, not just vanished lines
+    }
+
     Poly l_room()      { return {{-4.f, -3.f}, {4.f, -3.f}, {4.f, 1.f}, {1.f, 1.f}, {1.f, 3.f}, {-4.f, 3.f}}; }
     Poly l_room_notch(){ return {{-4.f, -3.f}, {4.f, -3.f}, {4.f, 1.f}, {1.f, 1.f}, {1.f, 3.f}, {-2.f, 3.f}, {-2.f, 2.f}, {-4.f, 2.f}}; }
     Poly chamfer_room(){ return {{-4.f, -3.f}, {4.f, -3.f}, {4.f, 2.f}, {3.f, 3.f}, {-4.f, 3.f}}; }
@@ -191,7 +228,11 @@ namespace
         rc::wallmap::Polygon poly;
         float pose_rmse_xy = 0.f, pose_max_xy = 0.f, pose_max_th = 0.f;
         int frames = 0, closed_at = -1, births = 0, deaths = 0, rejected = 0;
+        Eigen::Vector2f last_xy = Eigen::Vector2f::Zero();   // final robot position (map frame)
+        long occluded_pts = 0;   // LiDAR returns the camera showed to be on furniture, not on a wall
     };
+
+    using Boxes = std::vector<std::pair<Eigen::Vector2f, Eigen::Vector2f>>;   // (lo, hi)
 
     struct RunConfig
     {
@@ -200,7 +241,184 @@ namespace
         float scan_sigma = 0.02f;
         float odom_sigma_xy = 0.005f, odom_sigma_th = 0.3f * kPi / 180.f;
         bool verbose = false;
+        Boxes occluders;                 // furniture the LiDAR cannot see through
+        bool  info_gain = true;          // drive by expected information gain per metre (rank 6)
+        bool  ceiling_line = false;      // add the camera's wall-to-ceiling ranges
+        float ceiling_dh = 1.70f;        // ceiling height above the camera (3.0 m room, 1.30 m mount)
+        float ceiling_sigma_rad = 0.0011f;   // 0.065 deg — the measured fitted-contour scatter
+        int   ceiling_rays = 180;
+        const char* trace_csv = nullptr;   // per-frame precision trace (WallMap::precisions)
     };
+
+    /// Append one frame's precision snapshot. The file is opened once per run and imbued with the
+    /// classic locale, so a comma decimal separator can never reach it (see CLAUDE.md).
+    void trace_precisions(std::ofstream& f, const rc::wallmap::WallMap& map, float iou, float pose_err)
+    {
+        if (not f.is_open()) return;
+        const auto p = map.precisions();
+        f << p.frame << ',' << p.theta0_deg << ',' << p.theta0_disp_deg << ',' << p.theta0_gate_deg
+          << ',' << p.n_walls << ',' << p.n_cand << ',' << p.n_order
+          << ',' << p.sigma_phi_deg << ',' << p.sigma_d_m << ',' << p.corner_sigma_m
+          << ',' << p.corner_sigma_med_m << ',' << p.corners_over_bar << ',' << p.n_corners
+          << ',' << p.exist_nats << ',' << p.class_err_deg << ',' << iou << ',' << pose_err << '\n';
+    }
+    void trace_open(std::ofstream& f, const char* path)
+    {
+        if (path == nullptr) return;
+        const bool fresh = not std::filesystem::exists(path);
+        f.open(path, std::ios::app);
+        if (not f.is_open()) return;
+        f.imbue(std::locale::classic());
+        if (not fresh) return;
+        f << "frame,theta0_deg,theta0_disp_deg,theta0_gate_deg,walls,cand,order,"
+             "sigma_phi_deg,sigma_d_m,corner_sigma_m,corner_sigma_med_m,corners_over_bar,n_corners,"
+             "exist_nats,class_err_deg,iou,pose_err\n";
+    }
+
+    /// FURNITURE. Axis-aligned boxes standing inside the room. The LiDAR band cuts through them at
+    /// 1-2 m, so a wall behind one is never seen; the wall-to-ceiling junction, three metres up, is
+    /// never blocked by them. That difference is the whole reason to want a ceiling line, and a
+    /// bench without occluders cannot show it — the two sensors would see the same walls and the
+    /// camera would only add noise.
+
+    /// Range to the first box hit along a ray, or infinity.
+    float box_range(const Eigen::Vector2f& o, const Eigen::Vector2f& d, const Boxes& boxes)
+    {
+        float best = std::numeric_limits<float>::infinity();
+        for (const auto& [lo, hi] : boxes)
+        {
+            float t0 = 0.f, t1 = best;
+            bool ok = true;
+            for (int k = 0; k < 2 and ok; ++k)
+            {
+                if (std::abs(d[k]) < 1e-9f) { ok = (o[k] >= lo[k] and o[k] <= hi[k]); continue; }
+                float ta = (lo[k] - o[k]) / d[k], tb = (hi[k] - o[k]) / d[k];
+                if (ta > tb) std::swap(ta, tb);
+                t0 = std::max(t0, ta); t1 = std::min(t1, tb);
+                ok = t0 <= t1;
+            }
+            if (ok and t0 > 1e-3f) best = std::min(best, t0);
+        }
+        return best;
+    }
+
+    /// The LiDAR band, with furniture in the way: the nearer of the wall and the box.
+    std::vector<Eigen::Vector2f> scan_occluded(const Poly& room, const Boxes& boxes,
+                                               const Eigen::Vector3f& pose, int n, float sigma,
+                                               std::mt19937& rng)
+    {
+        std::normal_distribution<float> noise(0.f, sigma);
+        std::vector<Eigen::Vector2f> out;
+        const int N = static_cast<int>(room.size());
+        for (int i = 0; i < n; ++i)
+        {
+            const float bearing = -kPi + 2.f * kPi * static_cast<float>(i) / static_cast<float>(n);
+            const float wd = pose.z() + bearing;
+            const Eigen::Vector2f d(std::cos(wd), std::sin(wd));
+            float best = 1e9f;
+            for (int e = 0; e < N; ++e)
+                if (auto t = rc::corner_visibility::ray_segment_t(pose.head<2>(), d, room[e], room[(e + 1) % N]); t and *t < best)
+                    best = *t;
+            best = std::min(best, box_range(pose.head<2>(), d, boxes));
+            if (best > 1e8f) continue;
+            const float r = best + noise(rng);
+            out.emplace_back(r * std::cos(bearing), r * std::sin(bearing));
+        }
+        return out;
+    }
+
+    /// THE WALL-TO-CEILING LINE, as the 360 camera would deliver it. For each azimuth the junction is
+    /// seen at elevation atan((h_ceil - h_cam) / r); the camera measures that ANGLE, with a scatter
+    /// set by how well the fitted contour is localised in rows, and the range follows from the
+    /// ceiling height. So the error grows with range as (dh^2 + r^2)/dh per radian — the reason this
+    /// is a poor per-column range and a good long-baseline one. Furniture cannot block it.
+    std::vector<Eigen::Vector2f> scan_ceiling(const Poly& room, const Eigen::Vector3f& pose, int n,
+                                              float dh, float sigma_rad, std::mt19937& rng)
+    {
+        std::normal_distribution<float> noise(0.f, sigma_rad);
+        std::vector<Eigen::Vector2f> out;
+        const int N = static_cast<int>(room.size());
+        for (int i = 0; i < n; ++i)
+        {
+            const float bearing = -kPi + 2.f * kPi * static_cast<float>(i) / static_cast<float>(n);
+            const float wd = pose.z() + bearing;
+            const Eigen::Vector2f d(std::cos(wd), std::sin(wd));
+            float best = 1e9f;
+            for (int e = 0; e < N; ++e)
+                if (auto t = rc::corner_visibility::ray_segment_t(pose.head<2>(), d, room[e], room[(e + 1) % N]); t and *t < best)
+                    best = *t;
+            if (best > 1e8f) continue;
+            const float alpha = std::atan2(dh, best) + noise(rng);
+            if (alpha < 0.02f) continue;                    // grazing: the junction is not resolvable
+            const float r = dh / std::tan(alpha);
+            if (not std::isfinite(r) or r < 0.2f or r > 20.f) continue;
+            out.emplace_back(r * std::cos(bearing), r * std::sin(bearing));
+        }
+        return out;
+    }
+
+    /// ONE SWEEP OF BOTH SENSORS, on a shared bearing grid, with the disagreement between them used
+    /// as evidence rather than discarded. The LiDAR stops at the nearest thing on the ray, furniture
+    /// included; the ceiling junction is above the furniture and stops at the wall. So when the two
+    /// disagree by more than their combined noise on the SAME bearing, that is not conflict to be
+    /// averaged away — it is the signature of an occluder, and it says the near return is not a
+    /// wall. Those LiDAR points are dropped from the wall cloud. Without this the two sensors hand
+    /// the segmenter a furniture face and the true wall behind it competing for one stretch of
+    /// boundary, with nothing in the model to explain the near one away.
+    std::vector<Eigen::Vector2f> scan_fused(const Poly& room, const RunConfig& cfg,
+                                            const Eigen::Vector3f& pose, std::mt19937& rng,
+                                            Eigen::VectorXf& weights, int& n_occluded)
+    {
+        std::normal_distribution<float> rn(0.f, cfg.scan_sigma), an(0.f, cfg.ceiling_sigma_rad);
+        const int N = static_cast<int>(room.size());
+        const int n = cfg.n_rays;
+        std::vector<Eigen::Vector2f> out;
+        std::vector<float> w;
+        n_occluded = 0;
+        const int ceil_every = cfg.ceiling_line ? std::max(1, n / std::max(1, cfg.ceiling_rays)) : 0;
+        for (int i = 0; i < n; ++i)
+        {
+            const float bearing = -kPi + 2.f * kPi * static_cast<float>(i) / static_cast<float>(n);
+            const float wd = pose.z() + bearing;
+            const Eigen::Vector2f d(std::cos(wd), std::sin(wd));
+            float wall = 1e9f;
+            for (int e = 0; e < N; ++e)
+                if (auto t = rc::corner_visibility::ray_segment_t(pose.head<2>(), d, room[e], room[(e + 1) % N]); t and *t < wall)
+                    wall = *t;
+            if (wall > 1e8f) continue;
+            const float occ = std::min(wall, box_range(pose.head<2>(), d, cfg.occluders));
+            const float r_lidar = occ + rn(rng);
+            // The camera, on the bearings it samples.
+            bool have_ceiling = false; float r_ceiling = 0.f, s_ceiling = 0.f;
+            if (cfg.ceiling_line and (i % ceil_every) == 0)
+            {
+                const float alpha = std::atan2(cfg.ceiling_dh, wall) + an(rng);
+                if (alpha > 0.02f)
+                {
+                    const float rr = cfg.ceiling_dh / std::tan(alpha);
+                    if (std::isfinite(rr) and rr > 0.2f and rr < 20.f)
+                    {
+                        have_ceiling = true; r_ceiling = rr;
+                        s_ceiling = (cfg.ceiling_dh * cfg.ceiling_dh + rr * rr) / cfg.ceiling_dh * cfg.ceiling_sigma_rad;
+                    }
+                }
+            }
+            // The occluder test: the camera sees FURTHER than the LiDAR by more than the two of them
+            // can disagree by chance.
+            const bool occluded = have_ceiling
+                and (r_ceiling - r_lidar) > 3.f * std::sqrt(cfg.scan_sigma * cfg.scan_sigma + s_ceiling * s_ceiling);
+            if (occluded) ++n_occluded;
+            else { out.emplace_back(r_lidar * std::cos(bearing), r_lidar * std::sin(bearing)); w.push_back(1.f); }
+            if (have_ceiling)
+            {
+                out.emplace_back(r_ceiling * std::cos(bearing), r_ceiling * std::sin(bearing));
+                w.push_back(std::min(1.f, (cfg.scan_sigma * cfg.scan_sigma) / std::max(s_ceiling * s_ceiling, 1e-9f)));
+            }
+        }
+        weights = Eigen::VectorXf::Zero(static_cast<long>(w.size()));
+        for (size_t k = 0; k < w.size(); ++k) weights[static_cast<long>(k)] = w[k];
+        return out;
+    }
 
     RunResult run_loop(const std::vector<Poly>& rooms_by_frame, const std::vector<Eigen::Vector3f>& truth,
                        const RunConfig& cfg, std::mt19937& rng, RunResult* resume = nullptr)
@@ -231,6 +449,13 @@ namespace
         sp.sensor_sigma = cfg.scan_sigma;
         R.map.params.obs_sigma = 0.05f;
         R.map.params.huber_delta = 0.15f;
+        R.map.params.debug_splice = std::getenv("WS_DEBUG_SPLICE") != nullptr;
+        apply_env_overrides(R.map.params);
+        // The forward-model referee scans every stored beam per judged decision: minutes per seed
+        // under churn against 13 s for the whole bench without it. Opt in with WS_REFEREE=1.
+        R.map.params.forward_referee = std::getenv("WS_NO_BEAMS") == nullptr;
+        R.map.params.referee_log     = std::getenv("WS_REFEREE") != nullptr;
+        std::ofstream trace; trace_open(trace, cfg.trace_csv);
 
         rc::Model model;
         model.init_from_polygon({{-20.f, -20.f}, {20.f, -20.f}, {20.f, 20.f}, {-20.f, 20.f}}, 0.f, 0.f, 0.f, 2.4f);
@@ -347,10 +572,11 @@ namespace
                             f, seg.segments.size(), R.map.walls.size(), fr.candidates, fr.births,
                             r.ok ? "ok" : "FAIL", r.loss, r.iterations, exy, std::abs(wrap(err.z())) * 180.f / kPi,
                             poly.closed ? "closed" : "open", poly.status.empty() ? "" : (" [" + poly.status + "]").c_str());
+            trace_precisions(trace, R.map, 0.f, exy);
             R.frames = static_cast<int>(f) + 1;
         }
         R.pose_rmse_xy = (n_err > 0) ? static_cast<float>(std::sqrt(se / n_err)) : 0.f;
-        R.poly = R.map.build_polygon();
+        R.poly = R.map.manhattan_polygon();   // published layout: exactly Manhattan
         return R;
     }
 
@@ -447,6 +673,103 @@ namespace
     };
 
     struct Unknown { Eigen::Vector2f p; float w; };
+    /// Binary entropy of a variable held at these log-odds, in nats. Zero when the map is certain
+    /// either way, ln 2 at total ignorance. This is the quantity an information-gain explorer
+    /// maximises, and it is what the hand-set target weights below were standing in for.
+    float entropy_nats(float lodds)
+    {
+        const float pp = std::clamp(1.f / (1.f + std::exp(-lodds)), 1e-6f, 1.f - 1e-6f);
+        return -pp * std::log(pp) - (1.f - pp) * std::log(1.f - pp);
+    }
+
+    /// EXPECTED INFORMATION GAIN (Stachniss 2005; Julian & Karaman 2014), in place of a list of
+    /// epistemic targets carrying five hand-set weights. Every uncertain thing in the map — a grid
+    /// cell, an existence bin, a candidate line, a corner — contributes its OWN entropy, in the same
+    /// nats, and the explorer drives to where a scan would remove the most of it per metre of
+    /// travel. A cell the map is already sure about contributes nothing, so the objective terminates
+    /// on its own instead of needing a separate "no frontier left" rule, and a far region full of
+    /// unknown cells outweighs a near sliver without needing a coverage turn to force the issue.
+    std::vector<Unknown> collect_entropy_targets(const rc::wallmap::WallMap& map)
+    {
+        std::vector<Unknown> out;
+        // (a) THE GRID. Subsampled so the score loop stays the size it was.
+        const auto poly_now = map.build_polygon();
+        const auto interior_far_from_boundary = [&](const Eigen::Vector2f& q)
+        {
+            if (not poly_now.closed or poly_now.verts.size() < 3) return false;
+            if (not rc::corner_visibility::point_in_polygon(q, poly_now.verts)) return false;
+            const float clear = 2.f * map.fgrid.cell;
+            for (size_t e = 0; e < poly_now.verts.size(); ++e)
+            {
+                const Eigen::Vector2f a = poly_now.verts[e], ab = poly_now.verts[(e + 1) % poly_now.verts.size()] - a;
+                const float l2 = ab.squaredNorm();
+                const float tt = l2 > 1e-9f ? std::clamp((q - a).dot(ab) / l2, 0.f, 1.f) : 0.f;
+                if ((q - (a + tt * ab)).norm() < clear) return false;
+            }
+            return true;
+        };
+        if (map.fgrid.ready())
+        {
+            const int stride = 3;
+            for (int i = 0; i < map.fgrid.nx; i += stride)
+                for (int j = 0; j < map.fgrid.ny; j += stride)
+                {
+                    const size_t id = static_cast<size_t>(map.fgrid.idx(i, j));
+                    float h = entropy_nats(map.fgrid.lodds[id]);
+                    // ★ CONFLICT IS UNCERTAINTY THE LOG-ODDS CANNOT SHOW (the evidential-grid idea,
+                    // Moras & Cherfaoui 2011, in miniature). The grid keeps two channels on purpose:
+                    // endpoint RETURNS, which localise matter, and traversals, which are weak and
+                    // explicable — a thin wall shares its cell with air. When they DISAGREE, a return
+                    // says matter and the beams say free, the entropy of the log-odds alone reads
+                    // that cell as settled when the map plainly does not know. Such a cell is a
+                    // suspected thin wall, and it is the one thing a visit can settle outright, so it
+                    // is scored at full ignorance. This is what gives a spur its interest: not a
+                    // hand-set weight for "weak matter", but the admission that two channels in
+                    // conflict carry no information until someone goes and looks.
+                    // ...but ONLY AWAY FROM THE BOUNDARY. Contested cells are not rare: every wall
+                    // surface has them, because a grazing beam disagrees with the return beside it.
+                    // Promoting all of them measured as a broad reweighting rather than an interest
+                    // in spurs — one more spur and two more corner columns bought with six wall
+                    // columns and 0.18 m of Hausdorff. A conflict ON the boundary is the wall's own
+                    // surface; a conflict INSIDE the room is a suspected free-standing or protruding
+                    // structure, which is what a spur is.
+                    const unsigned short hits = map.fgrid.hits[id];
+                    if (hits >= 1 and hits < 3 and map.fgrid.lodds[id] < 0.f
+                        and interior_far_from_boundary(map.fgrid.at(i, j)))
+                        h = std::max(h, std::log(2.f));
+                    if (h > 0.15f) out.push_back({map.fgrid.at(i, j), h * static_cast<float>(stride * stride)});
+                }
+        }
+        // (b) THE EXISTENCE BINS. A bin IS a log-odds, so its entropy needs no conversion.
+        for (const auto& w : map.walls)
+        {
+            const Eigen::Vector2f n = w.normal(), t = w.tangent();
+            for (size_t b = 0; b < w.exist_bins.size(); ++b)
+            {
+                const float h = entropy_nats(w.exist_bins[b] - map.params.birth_nats);
+                if (h > 0.15f)
+                    out.push_back({n * w.d + t * (w.bins_s0 + (static_cast<float>(b) + 0.5f) * map.params.exist_bin_m), h});
+            }
+            if (w.exist_bins.empty() and w.has_extent)
+                out.push_back({n * w.d + t * (0.5f * (w.s_min + w.s_max)), std::log(2.f)});
+        }
+        // (c) CANDIDATE LINES: their existence is exactly what a visit would settle.
+        for (const auto& c : map.candidates)
+            if (c.npts >= 3)
+                out.push_back({rc::linefit::normal_of(c.phi) * c.d
+                               + rc::linefit::tangent_of(c.phi) * (0.5f * (c.s_min + c.s_max)),
+                               entropy_nats(c.evidence() - map.params.birth_nats)});
+        // (d) CORNERS: a position, so its uncertainty is differential entropy — the excess nats of a
+        // corner wider than the publish bar, ln(sigma / bar), and nothing once it is inside it.
+        for (const auto& c : poly_now.corners)
+        {
+            const float sig = std::isfinite(c.sigma) ? c.sigma : 1e3f;
+            if (sig > map.params.publish_corner_sigma)
+                out.push_back({c.p, std::log(sig / map.params.publish_corner_sigma)});
+        }
+        return out;
+    }
+
     std::vector<Unknown> collect_unknowns(const rc::wallmap::WallMap& map)
     {
         std::vector<Unknown> out;
@@ -484,12 +807,20 @@ namespace
     RunResult run_explore(const Poly& room, const RunConfig& cfg, std::mt19937& rng, int max_frames,
                           const Eigen::Vector2f& start)
     {
+        long occluded_total = 0;
         RunResult R;
         Explorer ex(room);
         rc::wallseg::Params sp;
         sp.sensor_sigma = cfg.scan_sigma;
         R.map.params.obs_sigma = 0.05f;
         R.map.params.huber_delta = 0.15f;
+        R.map.params.debug_splice = std::getenv("WS_DEBUG_SPLICE") != nullptr;
+        apply_env_overrides(R.map.params);
+        // The forward-model referee scans every stored beam per judged decision: minutes per seed
+        // under churn against 13 s for the whole bench without it. Opt in with WS_REFEREE=1.
+        R.map.params.forward_referee = std::getenv("WS_NO_BEAMS") == nullptr;
+        R.map.params.referee_log     = std::getenv("WS_REFEREE") != nullptr;
+        std::ofstream trace; trace_open(trace, cfg.trace_csv);
 
         rc::Model model;
         model.init_from_polygon({{-20.f, -20.f}, {20.f, -20.f}, {20.f, 20.f}, {-20.f, 20.f}}, 0.f, 0.f, 0.f, 2.4f);
@@ -550,7 +881,13 @@ namespace
             const Eigen::Vector3f pred = (f == 0) ? Eigen::Vector3f::Zero()
                 : Eigen::Vector3f(est.x() + odom.x(), est.y() + odom.y(), wrap(est.z() + odom.z()));
 
-            const auto pts = scan(room, tru, cfg.n_rays, cfg.scan_sigma, rng);
+            // Both sensors in one sweep, with the disagreement between them read as an occluder
+            // rather than averaged away (see scan_fused). With the camera off this is the plain
+            // LiDAR sweep and the weights are all one.
+            Eigen::VectorXf pw;
+            int n_occluded = 0;
+            auto pts = scan_fused(room, cfg, tru, rng, pw, n_occluded);
+            occluded_total += n_occluded;
             if (R.map.walls.empty())
             {
                 // model-first init from the first scan's OBB (same as run_loop)
@@ -574,7 +911,7 @@ namespace
             }
             const auto seg = rc::wallseg::segment(pts, sp, rng);
             const Eigen::Matrix3f pcov = Eigen::Vector3f(0.05f * 0.05f, 0.05f * 0.05f, 0.03f * 0.03f).asDiagonal();
-            const auto fr = R.map.observe(seg, pts, Eigen::VectorXf{}, pred, pcov, static_cast<std::int64_t>(f) * 50);
+            const auto fr = R.map.observe(seg, pts, pw, pred, pcov, static_cast<std::int64_t>(f) * 50);
             R.births += fr.births; R.deaths += fr.deaths; R.rejected += fr.splice_rejected;
 
             RoomConcept::WindowSlot slot;
@@ -615,7 +952,9 @@ namespace
             // ── GLOBAL re-derivation: when local jumps are stuck (rejections pile up) or on a slow
             // cadence, trace the observed free space and adopt its cycle iff it explains more.
             rejected_since_rederive += fr.splice_rejected;
-            if (f - last_rederive >= 40 or rejected_since_rederive >= 30)
+            if (R.map.params.enable_rederive
+                and (f - last_rederive >= R.map.params.rederive_every_frames
+                     or rejected_since_rederive >= R.map.params.rederive_after_rejections))
             {
                 last_rederive = f;
                 rejected_since_rederive = 0;
@@ -638,11 +977,14 @@ namespace
             if (--replan_in <= 0 or path.empty())
             {
                 replan_in = 15;
-                const auto unknowns = collect_unknowns(R.map);
+                const auto unknowns = cfg.info_gain ? collect_entropy_targets(R.map) : collect_unknowns(R.map);
                 // Exploration is COMPLETE when free space has no true frontier left; the map may
                 // keep refining, but there is nowhere informative left to drive to.
                 quiet_frames = (f > 60 and R.map.frontiers().empty()) ? quiet_frames + 1 : 0;
-                if (quiet_frames >= 3 or unknowns.empty()) { R.frames = f + 1; break; }
+                // Termination needs BOTH no frontier AND (nearly) no epistemic targets left: the
+                // bin-latch seals maps early, and stopping on frontier-exhaustion alone forfeited
+                // 310 refinement frames on one seed (IoU 0.841 with the spur still unresolved).
+                if (unknowns.empty() or (quiet_frames >= 3 and unknowns.size() <= 3)) { R.frames = f + 1; break; }
                 float best_sc = -1.f; Eigen::Vector2f best_v = tru.head<2>();
                 // COVERAGE GUARANTEE: greedy argmax-by-visible-mass starves sparse far regions — a
                 // wrong early wall then amputates a whole space for ever, because nothing ever goes
@@ -652,7 +994,20 @@ namespace
                 // space is essentially explored, every replan goes back to refinement — that is
                 // what the good seeds paid for coverage turns before this condition existed.
                 const auto fronts = R.map.frontiers();
-                const bool coverage_turn = (++replan_count % 4 == 0) and fronts.size() > 3;
+                // The coverage turn is a patch for an objective that undervalues far regions. An
+                // entropy objective does not need it: a far leg full of unknown cells carries more
+                // nats than a near sliver, and the ratio decides honestly.
+                const bool coverage_turn = not cfg.info_gain and (++replan_count % 4 == 0) and fronts.size() > 3;
+                // ⚠ TRIED AND REVERTED 2026-09-03: every second coverage turn to the FARTHEST
+                // frontier instead. It is the obvious cure for what the coverage diagnostic shows —
+                // an L room leaves 14% of its own interior unseen while only 5% is seen and left
+                // outside the polygon — but it does not pay: the real flat's worst seed rose 0.902
+                // to 0.966 while its best fell 0.980 to 0.966 and a second check began to fail, and
+                // over 50 rooms the median fell 0.947 to 0.941, the Hausdorff median rose 0.89 to
+                // 1.14 m and spurs dropped 13% to 10%. A far frontier costs a long drive whose
+                // frames come out of refinement. The coverage problem is real; a nearest/farthest
+                // heuristic is not its answer — an information-gain objective that prices the drive
+                // against what it would reveal is (literature review, rank 6).
                 if (coverage_turn)
                 {
                     float dbest = 1e9f;
@@ -674,7 +1029,12 @@ namespace
                         for (const auto& u : unknowns)
                             if (ex.sees(v, from_map(u.p))) sc += u.w;
                         if (sc <= 0.f) continue;
-                        sc /= (1.f + 0.10f * (v - tru.head<2>()).norm());
+                        // GAIN PER METRE. The constant is not a tuning knob: it is the distance the
+                        // robot covers between replans, so the ratio is nats per look. Without it
+                        // the explorer would teleport-shop; with a hand-set 0.10 discount it valued
+                        // distance by taste.
+                        sc /= (cfg.info_gain ? (1.0f + (v - tru.head<2>()).norm())
+                                             : (1.f + 0.10f * (v - tru.head<2>()).norm()));
                         if (sc > best_sc) { best_sc = sc; best_v = v; }
                     }
                 if (best_sc > 0.f)
@@ -687,11 +1047,14 @@ namespace
                 std::printf("    f=%3d walls=%zu cand=%d births=%d deaths=%d err=%.3fm poly=%s\n",
                             f, R.map.walls.size(), fr.candidates, fr.births, fr.deaths, exy,
                             R.map.build_polygon().closed ? "closed" : "open");
+            trace_precisions(trace, R.map, 0.f, exy);
             R.frames = f + 1;
         }
         R.pose_rmse_xy = (n_err > 0) ? static_cast<float>(std::sqrt(se / n_err)) : 0.f;
+        R.last_xy = est.head<2>();
+        R.occluded_pts = occluded_total;
         if (cfg.verbose) std::printf("    global re-derivations adopted: %d\n", rederives);
-        R.poly = R.map.build_polygon();
+        R.poly = R.map.manhattan_polygon();   // published layout: exactly Manhattan
         return R;
     }
 
@@ -710,6 +1073,9 @@ int main()
     torch::set_num_threads(1);
     std::mt19937 rng(7);
 
+    // WS_ONLY7=1 skips the synthetic sections — iteration aid for the (slow) real-layout bench.
+    if (std::getenv("WS_ONLY7") == nullptr)
+    {
     // ═══ 1. Segmenter ═════════════════════════════════════════════════════════════════════════
     std::printf("\n1. Segmenter on one scan of the L room\n");
     {
@@ -909,7 +1275,10 @@ int main()
     }
 
     // ═══ 4. Chamfer ═══════════════════════════════════════════════════════════════════════════
-    std::printf("\n4. A 45-degree chamfer: a wall with no Manhattan class\n");
+    // STRICT MANHATTAN (2026-09-01): this stage estimates the room's MAIN LINES — the polygon is
+    // the Manhattan outline (a square corner where the chamfer is), and the chamfer itself is
+    // preserved as a strong OBLIQUE CANDIDATE for the later refinement stage.
+    std::printf("\n4. A 45-degree chamfer: Manhattan outline now, the chamfer kept for postprocessing\n");
     {
         const Poly room = chamfer_room();
         std::vector<Eigen::Vector3f> truth;
@@ -938,11 +1307,33 @@ int main()
             for (const auto& v : ew) std::printf(" (%.2f,%.2f)", v.x(), v.y());
             std::printf("\n");
         }
-        check("5 walls, one of them class-less (the chamfer)", R.map.walls.size() == 5 and off == 1,
+        check("Manhattan outline: 4 walls, every one classified", R.map.walls.size() == 4 and off == 0,
               fmt("%zu walls, %d without class", R.map.walls.size(), off));
         const Poly est_world = to_world(R.poly.verts, truth[0]);
         const float h = R.poly.closed ? hausdorff(est_world, room) : 1e9f;
-        check("chamfered polygon closed and within 5 cm", R.poly.closed and h < 0.05f, fmt("closed=%d hausdorff=%.3f", R.poly.closed, h));
+        // The square corner lies 0.71 m from the 45-degree chamfer line — that is the lawful cost
+        // of the main-lines stage, not an error.
+        check("closed within the square-corner bound (0.75 m)", R.poly.closed and h < 0.75f,
+              fmt("closed=%d hausdorff=%.3f", R.poly.closed, h));
+        {
+            int strong_oblique = 0;
+            const auto scan_oblique = [&](const auto& pool)
+            {
+                for (const auto& cnd : pool)
+                {
+                    if (cnd.npts < 50) continue;
+                    float eps = std::numeric_limits<float>::infinity();
+                    for (int k = 0; k < 4; ++k)
+                        eps = std::min(eps, std::abs(rc::linefit::wrap_pi(
+                            cnd.phi - R.map.theta0 - static_cast<float>(k) * kPi * 0.5f)));
+                    if (eps > R.map.params.manhattan_gate_rad) ++strong_oblique;
+                }
+            };
+            scan_oblique(R.map.candidates);
+            scan_oblique(R.map.corner_residue);   // silenced corner chords land here for postprocessing
+            check("the chamfer survives as an oblique candidate for postprocessing", strong_oblique >= 1,
+                  fmt("%d strong oblique candidates", strong_oblique));
+        }
     }
 
     // ═══ 5. Structure change after closure ═════════════════════════════════════════════════════
@@ -1019,6 +1410,18 @@ int main()
         Rr.map.order = no;
         const bool wounded = Rr.map.build_polygon().closed;
         auto R2 = run_loop({room}, truth, cfg, rng, &Rr);
+        {
+            const Poly ew6 = to_world(R2.poly.verts, truth[0]);
+            std::printf("    healed verts:");
+            for (const auto& v : ew6) std::printf(" (%.2f,%.2f)", v.x(), v.y());
+            std::printf("\n");
+            for (const auto& w : R2.map.walls)
+                std::printf("    wall %llu k=%d phi=%.3f d=%.3f extent[%.2f,%.2f] frames=%d pts=%d\n",
+                            (unsigned long long)w.id, w.k, w.phi, w.d, w.s_min, w.s_max, w.frames_seen, w.points_seen);
+            std::printf("    order:");
+            for (auto id : R2.map.order) std::printf(" %llu", (unsigned long long)id);
+            std::printf("\n");
+        }
         const bool fake_gone = R2.map.find(999) == nullptr and R2.map.find(998) == nullptr and R2.map.find(997) == nullptr;
         check("the wounded polygon was valid to start", wounded, "");
         check("the fake notch died and was spliced out", fake_gone,
@@ -1029,11 +1432,62 @@ int main()
               fmt("closed=%d hausdorff=%.3f", R2.poly.closed, h));
     }
 
+    }   // end WS_ONLY7 skip
+
+    // ═══ 6b. SPUR: a thin interior wall the boundary must wrap as THREE walls ═══════════════════
+    // The user's grammar: one wall toward the room centre, a small perpendicular cap, one going
+    // back. Deterministic and fast — the development harness for the wrap operators; runs under
+    // WS_ONLY7 too.
+    std::printf("\n6b. Spur room: thin interior wall wrapped as [in, cap, back]\n");
+    {
+        const Poly room = {{-4.f, -3.f}, {4.f, -3.f}, {4.f, 3.f}, {0.08f, 3.f}, {0.08f, 0.5f},
+                           {-0.04f, 0.5f}, {-0.04f, 3.f}, {-4.f, 3.f}};
+        const std::vector<Eigen::Vector2f> wp = {{-2.5f, 1.5f}, {-2.5f, -1.5f}, {0.f, -2.f},
+                                                 {2.5f, -1.5f}, {2.5f, 1.5f}, {1.2f, 2.3f},
+                                                 {0.6f, 1.2f}, {1.2f, 2.3f}, {2.5f, 1.5f},
+                                                 {0.f, -2.f}, {-2.5f, -1.5f}, {-1.2f, 2.3f},
+                                                 {-0.6f, 1.2f}, {-1.2f, 2.3f}, {-2.5f, 1.5f}};
+        std::vector<Eigen::Vector3f> truth;
+        for (size_t l = 0; l + 1 < wp.size(); ++l)
+        {
+            const Eigen::Vector2f e = wp[l + 1] - wp[l];
+            const float th = std::atan2(e.y(), e.x());
+            const int n = std::max(2, static_cast<int>(e.norm() / 0.25f));
+            for (int i = 0; i < n; ++i)
+                truth.emplace_back(wp[l].x() + e.x() * static_cast<float>(i) / static_cast<float>(n),
+                                   wp[l].y() + e.y() * static_cast<float>(i) / static_cast<float>(n), th);
+        }
+        std::mt19937 rng6(99);
+        RunConfig cfg;
+        cfg.verbose = true;
+        cfg.trace_csv = std::getenv("WS_TRACE_SPUR");
+        auto R1 = run_loop({room}, truth, cfg, rng6);
+        auto R2 = run_loop({room}, truth, cfg, rng6, &R1);   // second lap: steady state
+        const Poly ew = to_world(R2.poly.verts, truth[0]);
+        const float h = R2.poly.closed ? hausdorff(ew, room) : 1e9f;
+        const float tip_a = R2.poly.closed ? point_to_poly(room[4], ew) : 1e9f;
+        const float tip_b = R2.poly.closed ? point_to_poly(room[5], ew) : 1e9f;
+        std::printf("    walls=%zu births=%d deaths=%d verts:", R2.map.walls.size(),
+                    R1.births + R2.births, R1.deaths + R2.deaths);
+        for (const auto& v : ew) std::printf(" (%.2f,%.2f)", v.x(), v.y());
+        std::printf("\n");
+        for (const auto& w : R2.map.walls)
+            std::printf("    wall %llu k=%d phi=%.3f d=%.3f extent[%.2f,%.2f] frames=%d pts=%d\n",
+                        (unsigned long long)w.id, w.k, w.phi, w.d, w.s_min, w.s_max, w.frames_seen, w.points_seen);
+        check("spur room closed", R2.poly.closed, R2.poly.status);
+        check("spur wrapped: both truth tips on the estimate (<12 cm)", tip_a < 0.12f and tip_b < 0.12f,
+              fmt("tips %.3f / %.3f m", tip_a, tip_b));
+        check("spur room shape within 12 cm (Hausdorff)", h < 0.12f, fmt("%.3f m", h));
+    }
+
     // ═══ 7. THE REAL LAYOUT: apartamento_layout.svg, toured and estimated to convergence ════════
+    if (std::getenv("WS_NO7") == nullptr)
+    {
     std::printf("\n7. The real apartamento layout (32 vertices incl. trace artefacts)\n");
     {
         // Local SVG polygon read (std::from_chars — the agents' locale rule; no Qt in the harness).
         Poly room;
+        Eigen::Vector2f room_centre = Eigen::Vector2f::Zero();   // the SVG→truth-frame shift
         {
             std::ifstream in("/home/pbustos/robocomp/components/active_inference/layouts/apartamento_layout.svg");
             std::stringstream ss; ss << in.rdbuf();
@@ -1075,6 +1529,7 @@ int main()
                 for (const auto& v : room) { lo = lo.cwiseMin(v); hi = hi.cwiseMax(v); }
                 const Eigen::Vector2f c0 = 0.5f * (lo + hi);
                 for (auto& v : room) v -= c0;
+                room_centre = c0;
             }
         }
         float a2 = 0.f;
@@ -1144,17 +1599,68 @@ int main()
         RunConfig cfg;
         cfg.n_rays = 720;
         cfg.verbose = false;
+        cfg.info_gain = std::getenv("WS_NO_INFOGAIN") == nullptr;
         // EPISTEMIC DRIVE: no scripted tour — the robot goes where the model is uncertain.
         // THREE SEEDS: single runs swing 0.89–0.97 IoU on identical configs; a mechanism is judged
         // on the distribution, never on one draw (the unaligned-measurements lesson).
         (void)truth;
+        // ── LEVEL-2 FEATURES of the real layout (SVG coordinates, shifted into the truth frame):
+        // what the coarse Manhattan cycle lawfully leaves for the residual pass. Two pillars on a
+        // wall (matter the polygon must step around) and one alcove (free space it must step
+        // into). Chamfers are not graded yet. The metric is the mis-explained fraction of the
+        // feature's own area: |truth Δ estimate| inside the feature box (5 cm pad) over the box.
+        struct Feature { const char* name; Eigen::Vector2f lo, hi; };
+        const std::vector<Feature> features = {
+            {"left pillar (0.32 x 0.60 m)",  Eigen::Vector2f(0.178f, 0.594f) - room_centre, Eigen::Vector2f(0.511f, 1.194f) - room_centre},
+            {"right pillar (0.38 x 0.60 m)", Eigen::Vector2f(8.110f, 0.610f) - room_centre, Eigen::Vector2f(8.505f, 1.210f) - room_centre},
+            {"alcove (0.45 x 0.85 m)",       Eigen::Vector2f(5.884f, 7.163f) - room_centre, Eigen::Vector2f(6.336f, 8.026f) - room_centre},
+        };
+        const auto feature_miss = [&](const Poly& est, const Feature& f)
+        {
+            if (est.size() < 3) return 1.f;
+            const float pad = 0.05f, step = 0.02f;
+            int miss = 0, n = 0;
+            for (float x = f.lo.x() - pad; x <= f.hi.x() + pad; x += step)
+                for (float y = f.lo.y() - pad; y <= f.hi.y() + pad; y += step)
+                {
+                    const Eigen::Vector2f q(x, y);
+                    const bool it = rc::corner_visibility::point_in_polygon(q, room);
+                    const bool ie = rc::corner_visibility::point_in_polygon(q, est);
+                    if (it != ie) ++miss;
+                    ++n;
+                }
+            const float box = (f.hi.x() - f.lo.x()) * (f.hi.y() - f.lo.y());
+            return static_cast<float>(miss) * step * step / std::max(box, 1e-6f);
+        };
         RunResult R7;
         float best_iou = -1.f;
         std::vector<std::pair<float,float>> per_seed;   // (iou, hausdorff)
-        for (unsigned seed : {7u, 1001u, 424242u})
+        struct RefereeRow { std::string site; bool oracle, inc, fwd; float diou, evidence, cost, fwd_dll, fwd_cost; };
+        std::vector<RefereeRow> referee_rows;
+        // Three seeds by default (the campaign's distribution); WS_SEEDS=n extends the list, for
+        // experiments that need more than an anecdote — the batch-at-saturation measurement below.
+        std::vector<unsigned> seed_list{7u, 1001u, 424242u, 5u, 13u, 99u, 777u, 2024u, 31337u, 8675309u, 42u, 6u};
+        {
+            size_t ns = 3;
+            if (const char* e = std::getenv("WS_SEEDS"))
+            {
+                int v = 0;
+                if (std::from_chars(e, e + std::strlen(e), v).ec == std::errc{} and v > 0)
+                    ns = std::min<size_t>(static_cast<size_t>(v), seed_list.size());
+            }
+            seed_list.resize(ns);
+        }
+        for (unsigned seed : seed_list)
         {
             std::mt19937 rng7(seed);
-            auto Rx = run_explore(room, cfg, rng7, 1100, path[0]);
+            // WS_TRACE7 names a per-frame precision trace; one file per seed keeps them apart.
+            std::string trace7;
+            if (const char* tp = std::getenv("WS_TRACE7"))
+            { trace7 = std::string(tp) + "_" + std::to_string(seed) + ".csv"; cfg.trace_csv = trace7.c_str(); }
+            int nframes7 = 1100;
+            if (const char* e = std::getenv("WS_FRAMES7"))
+            { int v = 0; if (std::from_chars(e, e + std::strlen(e), v).ec == std::errc{} and v > 0) nframes7 = v; }
+            auto Rx = run_explore(room, cfg, rng7, nframes7, path[0]);
             const Poly ew = to_world(Rx.poly.verts, Eigen::Vector3f(path[0].x(), path[0].y(), 0.f));
             const float iou_x = Rx.poly.closed ? polygon_iou(ew, room) : 0.f;
             const float h_x = Rx.poly.closed ? hausdorff(ew, room) : 1e9f;
@@ -1164,7 +1670,311 @@ int main()
             std::printf("      verts[%u]:", seed);
             for (const auto& v : ew) std::printf(" (%.2f,%.2f)", v.x(), v.y());
             std::printf("\n");
+            std::printf("      level-2 features[%u]: mis-explained fraction of each feature's area:", seed);
+            for (const auto& f : features) std::printf("  %s %.2f", f.name, Rx.poly.closed ? feature_miss(ew, f) : 1.f);
+            std::printf("\n");
+            std::printf("      order[%u]:\n", seed);
+            for (const auto oid : Rx.map.order)
+                for (const auto& w : Rx.map.walls)
+                    if (w.id == oid)
+                        std::printf("        id=%llu phi=%.3f d=%.3f pts=%d frames=%d lodds=%.1f ext=[%.2f,%.2f]%d\n",
+                                    static_cast<unsigned long long>(w.id), w.phi, w.d, w.points_seen,
+                                    w.frames_seen, w.exist_lodds, w.s_min, w.s_max, static_cast<int>(w.has_extent));
+            float tilt_max = 0.f;
+            for (const auto oid : Rx.map.order)
+                for (const auto& w : Rx.map.walls)
+                    if (w.id == oid and w.k >= 0)
+                        tilt_max = std::max(tilt_max, std::abs(rc::linefit::wrap_pi(
+                            w.phi - Rx.map.theta0 - static_cast<float>(w.k) * kPi * 0.5f)));
+            std::printf("      tilt[%u]: max |phi - theta0 - k*pi/2| = %.4f rad (%.2f deg)\n",
+                        seed, tilt_max, tilt_max * 180.f / kPi);
+            float pub_tilt = 0.f;
+            for (size_t vi = 0; ew.size() >= 2 and vi < ew.size(); ++vi)
+            {
+                const Eigen::Vector2f e2 = ew[(vi + 1) % ew.size()] - ew[vi];
+                if (e2.norm() < 1e-6f) continue;
+                const float ang = std::atan2(e2.y(), e2.x());
+                float beste = std::numeric_limits<float>::infinity();
+                for (int k2 = 0; k2 < 4; ++k2)
+                    beste = std::min(beste, std::abs(rc::linefit::wrap_pi(
+                        ang - Rx.map.theta0 - static_cast<float>(k2) * kPi * 0.5f)));
+                pub_tilt = std::max(pub_tilt, beste);
+            }
+            std::printf("      published-tilt[%u]: max edge off-axis = %.4f rad (%.2f deg)\n",
+                        seed, pub_tilt, pub_tilt * 180.f / kPi);
+            // INTERNAL Manhattan-ness: the same maximum, but against the polygon's OWN axis frame
+            // (the length-weighted circular mean of its edge directions mod 90 deg) instead of the
+            // live theta0. The projection makes the published polygon internally rectilinear; any
+            // gap between these two numbers is the copy's theta0' minus the live theta0 — review #6.
+            {
+                float sx = 0.f, sy = 0.f;
+                for (size_t vi = 0; ew.size() >= 2 and vi < ew.size(); ++vi)
+                {
+                    const Eigen::Vector2f e2 = ew[(vi + 1) % ew.size()] - ew[vi];
+                    const float L2 = e2.norm();
+                    if (L2 < 1e-6f) continue;
+                    const float a4 = 4.f * std::atan2(e2.y(), e2.x());   // mod 90 deg -> full turn
+                    sx += L2 * std::cos(a4); sy += L2 * std::sin(a4);
+                }
+                const float own = std::atan2(sy, sx) / 4.f;
+                float own_tilt = 0.f;
+                for (size_t vi = 0; ew.size() >= 2 and vi < ew.size(); ++vi)
+                {
+                    const Eigen::Vector2f e2 = ew[(vi + 1) % ew.size()] - ew[vi];
+                    if (e2.norm() < 1e-6f) continue;
+                    const float ang = std::atan2(e2.y(), e2.x());
+                    float b2 = std::numeric_limits<float>::infinity();
+                    for (int k2 = -2; k2 <= 2; ++k2)
+                        b2 = std::min(b2, std::abs(rc::linefit::wrap_pi(ang - own - static_cast<float>(k2) * kPi * 0.5f)));
+                    own_tilt = std::max(own_tilt, b2);
+                }
+                std::printf("      internal-tilt[%u]: max edge off its OWN axes = %.4f rad (%.2f deg); frame gap theta0'-theta0 = %.2f deg\n",
+                            seed, own_tilt, own_tilt * 180.f / kPi,
+                            std::abs(rc::linefit::wrap_pi(own - Rx.map.theta0)) * 180.f / kPi);
+            }
+            {
+                // Per-seed diagnostics: is the deep spur resolved (grid cells on its two truth
+                // faces; distance of the truth tip vertices to the estimate), and which frontiers
+                // refuse to close (they keep the coverage gate armed for ever).
+                const Eigen::Vector2f o = path[0];
+                int occ = 0, fre = 0, unk = 0, n = 0;
+                for (const auto& pr : {std::make_pair(room[21], room[22]), std::make_pair(room[23], room[24])})
+                    for (int k2 = 0; k2 <= 20; ++k2)
+                    {
+                        const Eigen::Vector2f pt = pr.first + (pr.second - pr.first) * (static_cast<float>(k2) / 20.f) - o;
+                        const int i2 = static_cast<int>((pt.x() - Rx.map.fgrid.x0) / Rx.map.fgrid.cell);
+                        const int j2 = static_cast<int>((pt.y() - Rx.map.fgrid.y0) / Rx.map.fgrid.cell);
+                        if (not Rx.map.fgrid.in(i2, j2)) continue;
+                        ++n;
+                        const float l = Rx.map.fgrid.lodds[static_cast<size_t>(Rx.map.fgrid.idx(i2, j2))];
+                        if (l > 1.f) ++occ; else if (l < -1.f) ++fre; else ++unk;
+                    }
+                const float tip_a = Rx.poly.closed ? point_to_poly(room[22], ew) : 1e9f;
+                const float tip_b = Rx.poly.closed ? point_to_poly(room[23], ew) : 1e9f;
+                const auto fl = Rx.map.frontiers();
+                std::printf("      diag[%u]: spur cells occ/free/unk=%d/%d/%d of %d; tip->est %.2f / %.2f m; frontiers=%zu weak=%zu\n",
+                            seed, occ, fre, unk, n, tip_a, tip_b, fl.size(), Rx.map.weak_matter().size());
+                {
+                    // The SHORT spur (truth verts 2..5): same instrumentation as the deep one.
+                    int occ2 = 0, fre2 = 0, unk2 = 0, n2 = 0;
+                    for (const auto& pr : {std::make_pair(room[2], room[3]), std::make_pair(room[4], room[5])})
+                        for (int k2 = 0; k2 <= 20; ++k2)
+                        {
+                            const Eigen::Vector2f pt = pr.first + (pr.second - pr.first) * (static_cast<float>(k2) / 20.f) - o;
+                            const int i2 = static_cast<int>((pt.x() - Rx.map.fgrid.x0) / Rx.map.fgrid.cell);
+                            const int j2 = static_cast<int>((pt.y() - Rx.map.fgrid.y0) / Rx.map.fgrid.cell);
+                            if (not Rx.map.fgrid.in(i2, j2)) continue;
+                            ++n2;
+                            const float l = Rx.map.fgrid.lodds[static_cast<size_t>(Rx.map.fgrid.idx(i2, j2))];
+                            if (l > 1.f) ++occ2; else if (l < -1.f) ++fre2; else ++unk2;
+                        }
+                    const float stip_a = Rx.poly.closed ? point_to_poly(room[3], ew) : 1e9f;
+                    const float stip_b = Rx.poly.closed ? point_to_poly(room[4], ew) : 1e9f;
+                    std::printf("      diag[%u] SHORT spur: cells occ/free/unk=%d/%d/%d of %d; tip->est %.2f / %.2f m\n",
+                                seed, occ2, fre2, unk2, n2, stip_a, stip_b);
+                }
+                for (const auto& fp : fl)
+                    std::printf("        frontier world(%.2f,%.2f)\n", fp.x() + o.x(), fp.y() + o.y());
+                for (const auto& w : Rx.map.walls)
+                    std::printf("        wall %llu k=%d phi=%.3f d=%.3f extent[%.2f,%.2f] frames=%d pts=%d\n",
+                                (unsigned long long)w.id, w.k, w.phi, w.d, w.s_min, w.s_max, w.frames_seen, w.points_seen);
+                std::printf("        order[%u]:", seed);
+                for (auto id : Rx.map.order) std::printf(" %llu", (unsigned long long)id);
+                std::printf("\n");
+            }
+            // ── BATCH PASS AT SATURATION (experiment 2026-09-03): the run is over, the grid holds
+            // everything the robot ever saw. Re-derive the cycle from that final grid, repeatedly,
+            // until nothing more is adopted, and grade the result. This asks whether the spread
+            // between seeds is a DATA difference or a PATH difference: if a seed that finished at
+            // 0.889 re-derives to ~0.96 from its own final grid, the online commitments were the
+            // cost, not the evidence. Judges: the incumbent (grid-IoU margin + surrender veto),
+            // the same with self-crossing repair, and "adopt any closed cycle" — which shows what
+            // the contour itself contains, with no judge in the way.
+            {
+                const Eigen::Vector3f org(path[0].x(), path[0].y(), 0.f);
+                std::printf("      batch pass on the FINAL grid[%u]  (online result: IoU %.3f, Hausdorff %.3f m)\n",
+                            seed, iou_x, h_x);
+                for (const auto& [name, judge, repair] : std::vector<std::tuple<const char*, int, bool>>{
+                        {"incumbent judge          ", 0, false},
+                        {"incumbent + repair       ", 0, true},
+                        {"adopt any closed cycle   ", 2, false},
+                        {"adopt any closed + repair", 2, true}})
+                {
+                    rc::wallmap::WallMap m = Rx.map;
+                    m.params.adopt_judge = judge;
+                    m.params.adopt_repair = repair;
+                    m.params.forward_referee = false;
+                    m.decisions.clear();
+                    int adopted = 0;
+                    for (int k = 0; k < 12; ++k) { if (not m.re_derive(Rx.last_xy)) break; ++adopted; }
+                    const auto pb = m.manhattan_polygon();
+                    const Poly bw = to_world(pb.verts, org);
+                    const float iou_b = pb.closed ? polygon_iou(bw, room) : 0.f;
+                    const float h_b = pb.closed ? hausdorff(bw, room) : 1e9f;
+                    std::printf("        %s adopted %2d -> IoU %.3f (%+.3f)  Hausdorff %.3f m  walls %2zu\n",
+                                name, adopted, iou_b, iou_b - iou_x, h_b, m.walls.size());
+                }
+            }
+            // ── CAN A JUDGE PICK THE BETTER OF THE TWO AT SATURATION? The run is over, so there
+            // is no churn to fear: this is one static choice between two complete polygons, the
+            // online cycle and the batch cycle re-derived from the final grid. Score both under
+            // the forward beam model against the code length of the extra edges, and compare the
+            // verdict with the truth. This is the question the per-decision referee could not
+            // answer, because there every verdict fed back into the map's dynamics.
+            if (not Rx.map.beams.empty())
+            {
+                float prof_moved = 0.f, prof_signed = 0.f;
+                rc::wallmap::WallMap mb = Rx.map;
+                mb.params.adopt_judge = 2; mb.params.adopt_repair = true;
+                mb.params.forward_referee = false; mb.beams.clear(); mb.decisions.clear();
+                for (int k = 0; k < 12; ++k) if (not mb.re_derive(Rx.last_xy)) break;
+                const auto pb = mb.manhattan_polygon();
+                if (pb.closed and Rx.poly.closed)
+                {
+                    const Eigen::Vector3f org3(path[0].x(), path[0].y(), 0.f);
+                    const Poly bw = to_world(pb.verts, org3);
+                    const float iou_b = polygon_iou(bw, room);
+                    const float dll = Rx.map.forward_delta(Rx.poly.verts, pb.verts);
+                    const float code = (static_cast<float>(pb.verts.size()) - static_cast<float>(Rx.poly.verts.size()))
+                                     * Rx.map.edge_code_nats(true);
+                    const bool judge_takes_batch = dll > code;
+                    const bool truth_prefers_batch = iou_b > iou_x;
+                    std::printf("        saturation choice: online %.3f vs batch %.3f | forward dll %+.1f vs code %+.1f -> take %s | truth prefers %s | %s\n",
+                                iou_x, iou_b, dll, code, judge_takes_batch ? "BATCH " : "online",
+                                truth_prefers_batch ? "BATCH " : "online",
+                                judge_takes_batch == truth_prefers_batch ? "AGREE" : "WRONG");
+
+                    // ── PROFILE OUT THE OFFSETS, then compare again. A polygon's beam likelihood is
+                    // dominated by where its edges SIT (the grid contour's walls are a cell off the
+                    // returns, the online walls are line-fitted), which buries the topology by four
+                    // orders of magnitude. So slide every edge along its own normal onto the returns
+                    // assigned to it — a nuisance parameter per edge, profiled out in the likelihood
+                    // sense — and only then score. Rectilinearity is preserved: the lines keep their
+                    // directions and the vertices are re-intersected.
+                    const auto profile = [&](const Poly& poly)
+                    {
+                        const size_t N = poly.size();
+                        if (N < 3) return poly;
+                        std::vector<Eigen::Vector2f> nrm(N);
+                        std::vector<float> cst(N);
+                        for (size_t e = 0; e < N; ++e)
+                        {
+                            const Eigen::Vector2f dvec = poly[(e + 1) % N] - poly[e];
+                            const float L = dvec.norm();
+                            nrm[e] = L > 1e-9f ? Eigen::Vector2f(-dvec.y() / L, dvec.x() / L) : Eigen::Vector2f(1.f, 0.f);
+                            cst[e] = nrm[e].dot(poly[e]);
+                        }
+                        std::vector<std::vector<float>> res(N);
+                        for (const auto& b : Rx.map.beams)
+                        {
+                            const Eigen::Vector2f q = b.o + b.d * b.r;
+                            int best = -1; float bd = 0.25f;
+                            for (size_t e = 0; e < N; ++e)
+                            {
+                                const Eigen::Vector2f a = poly[e], ab = poly[(e + 1) % N] - a;
+                                const float l2 = ab.squaredNorm();
+                                const float tt = l2 > 1e-9f ? std::clamp((q - a).dot(ab) / l2, 0.f, 1.f) : 0.f;
+                                const float d2 = (q - (a + tt * ab)).norm();
+                                if (d2 < bd) { bd = d2; best = static_cast<int>(e); }
+                            }
+                            if (best >= 0) res[static_cast<size_t>(best)].push_back(nrm[static_cast<size_t>(best)].dot(q) - cst[static_cast<size_t>(best)]);
+                        }
+                        float moved = 0.f, signed_sum = 0.f; int nmoved = 0;
+                        for (size_t e = 0; e < N; ++e)
+                            if (res[e].size() >= 20)
+                            {
+                                std::nth_element(res[e].begin(), res[e].begin() + static_cast<long>(res[e].size() / 2), res[e].end());
+                                const float off = res[e][res[e].size() / 2];
+                                cst[e] += off; moved += std::abs(off); signed_sum += off; ++nmoved;
+                            }
+                        Poly out(N);
+                        for (size_t e = 0; e < N; ++e)
+                        {
+                            const size_t pv = (e + N - 1) % N;
+                            const float cr = nrm[pv].x() * nrm[e].y() - nrm[pv].y() * nrm[e].x();
+                            if (std::abs(cr) < 1e-6f) { out[e] = poly[e]; continue; }
+                            out[e] = Eigen::Vector2f((cst[pv] * nrm[e].y() - cst[e] * nrm[pv].y()) / cr,
+                                                     (cst[e] * nrm[pv].x() - cst[pv] * nrm[e].x()) / cr);
+                        }
+                        prof_moved = nmoved > 0 ? moved / static_cast<float>(nmoved) : 0.f;
+                        // Sign convention: nrm is left-of-travel on a CCW cycle, i.e. the INTERIOR
+                        // side. A positive median residual means the returns lie inside the edge —
+                        // the polygon is too big there; negative means it is too small.
+                        prof_signed = nmoved > 0 ? signed_sum / static_cast<float>(nmoved) : 0.f;
+                        return out;
+                    };
+                    const auto score = [&](const Poly& poly)
+                    {
+                        double sum = 0.0;
+                        for (const auto& b : Rx.map.beams) sum += static_cast<double>(Rx.map.beam_loglik(b, poly));
+                        return sum;
+                    };
+                    const Poly on_p = profile(Rx.poly.verts);  const float mv_on = prof_moved, sg_on = prof_signed;
+                    const Poly ba_p = profile(pb.verts);       const float mv_ba = prof_moved, sg_ba = prof_signed;
+                    const float iou_on_p = polygon_iou(to_world(on_p, org3), room);
+                    const float iou_ba_p = polygon_iou(to_world(ba_p, org3), room);
+                    const double dll_p = score(ba_p) - score(on_p);
+                    const bool takes_batch_p = dll_p > static_cast<double>(code);
+                    const bool truth_p = iou_ba_p > iou_on_p;
+                    {
+                        const Poly ow = to_world(on_p, org3);
+                        std::printf("        profiled-verts[%u]:", seed);
+                        for (const auto& v : ow) std::printf(" (%.3f,%.3f)", v.x(), v.y());
+                        std::printf("\n");
+                    }
+                    std::printf("        profiled:          online %.3f vs batch %.3f | edges moved %.3f (signed %+.3f) / %.3f (signed %+.3f) m | dll %+.1f vs code %+.1f -> take %s | truth prefers %s | %s\n",
+                                iou_on_p, iou_ba_p, mv_on, sg_on, mv_ba, sg_ba, dll_p, code,
+                                takes_batch_p ? "BATCH " : "online", truth_p ? "BATCH " : "online",
+                                takes_batch_p == truth_p ? "AGREE" : "WRONG");
+                }
+            }
+            // ── THE REFEREE'S REPORT CARD: every judged structure change, both judges against the
+            // truth. The oracle is the IoU with the real layout: a trial was RIGHT iff it raised it.
+            {
+                struct Tally { int n = 0, inc_ok = 0, fwd_ok = 0, disagree = 0, fwd_right_inc_wrong = 0, inc_right_fwd_wrong = 0; };
+                std::map<std::string, Tally> tally;
+                const Eigen::Vector3f org2(path[0].x(), path[0].y(), 0.f);
+                for (const auto& d : Rx.map.decisions)
+                {
+                    const float iou_c = polygon_iou(to_world(d.cur, org2), room);
+                    const float iou_t = polygon_iou(to_world(d.trial, org2), room);
+                    const bool oracle = iou_t > iou_c + 1e-4f;
+                    const bool inc = d.accepted, fwd = d.fwd_dll > d.fwd_cost;
+                    auto& t = tally[d.site];
+                    ++t.n; t.inc_ok += (inc == oracle); t.fwd_ok += (fwd == oracle); t.disagree += (inc != fwd);
+                    t.fwd_right_inc_wrong += (fwd == oracle and inc != oracle);
+                    t.inc_right_fwd_wrong += (inc == oracle and fwd != oracle);
+                    referee_rows.push_back({std::string(d.site), oracle, inc, fwd, iou_t - iou_c, d.evidence, d.cost, d.fwd_dll, d.fwd_cost});
+                }
+                std::printf("      referee[%u]: %zu beams stored, %zu decisions\n", seed, Rx.map.beams.size(), Rx.map.decisions.size());
+                for (const auto& [site, t] : tally)
+                    std::printf("        %-7s n=%3d  incumbent right %3d  forward right %3d  disagree %3d  (forward right & incumbent wrong %d, the reverse %d)\n",
+                                site.c_str(), t.n, t.inc_ok, t.fwd_ok, t.disagree, t.fwd_right_inc_wrong, t.inc_right_fwd_wrong);
+            }
             if (iou_x > best_iou) { best_iou = iou_x; R7 = std::move(Rx); }
+        }
+        {
+            // Across seeds: where the judges disagree, who was right, and by how much IoU.
+            int n = 0, inc_ok = 0, fwd_ok = 0, dis = 0, dis_fwd = 0, dis_inc = 0;
+            float iou_when_fwd_right = 0.f, iou_when_inc_right = 0.f;
+            for (const auto& r : referee_rows)
+            {
+                ++n; inc_ok += (r.inc == r.oracle); fwd_ok += (r.fwd == r.oracle);
+                if (r.inc != r.fwd)
+                {
+                    ++dis;
+                    if (r.fwd == r.oracle) { ++dis_fwd; iou_when_fwd_right += std::abs(r.diou); }
+                    else if (r.inc == r.oracle) { ++dis_inc; iou_when_inc_right += std::abs(r.diou); }
+                }
+            }
+            std::printf("    referee across seeds: %d decisions, incumbent right %d (%.0f%%), forward right %d (%.0f%%); disagreements %d — forward right in %d (Σ|ΔIoU| %.3f), incumbent right in %d (Σ|ΔIoU| %.3f)\n",
+                        n, inc_ok, 100.f * inc_ok / std::max(n, 1), fwd_ok, 100.f * fwd_ok / std::max(n, 1),
+                        dis, dis_fwd, iou_when_fwd_right, dis_inc, iou_when_inc_right);
+            std::ofstream csv("/tmp/wall_slam_referee.csv");
+            csv.imbue(std::locale::classic());
+            csv << "site,oracle,incumbent,forward,diou,evidence,cost,fwd_dll,fwd_cost\n";
+            for (const auto& r : referee_rows)
+                csv << r.site << ',' << r.oracle << ',' << r.inc << ',' << r.fwd << ',' << r.diou << ',' << r.evidence << ',' << r.cost << ',' << r.fwd_dll << ',' << r.fwd_cost << '\n';
         }
         float iou_min = 2.f, iou_med = 0.f;
         { std::vector<float> v; for (auto& q : per_seed) v.push_back(q.first);
@@ -1221,13 +2031,306 @@ int main()
         const float sym_diff = (1.f - iou) * 60.5f / std::max(iou, 1e-3f) * iou;   // ≈ union·(1−IoU) m²
         std::printf("    hausdorff=%.3f m; IoU=%.3f (sym diff ~%.1f m2); worst truth vertex #%d off by %.3f m; pose rmse %.3f max %.3f m\n",
                     h, iou, sym_diff, worst_i, worst_v, R7.pose_rmse_xy, R7.pose_max_xy);
+        // ── WHERE DOES THE 5 cm INWARD BIAS LIVE? The published polygon's edges sit ~5 cm inside
+        // the returns. Test the WALL LINES themselves, before projection and decoration: for each
+        // wall in the cycle, the median signed residual of the beam endpoints near its own line and
+        // inside its own extent (the normal points INTO the room, so negative = the returns are
+        // outside the line = the wall is too far in). If the walls are unbiased the bias is made by
+        // the projection or by level 2; if they are biased it is upstream, in association or in what
+        // the contour adoption creates.
+        if (not R7.map.beams.empty())
+        {
+            std::printf("    wall-line bias (best seed): median signed residual of the returns each wall owns\n");
+            std::vector<float> per_wall; std::vector<int> pts_of;
+            for (const auto id : R7.map.order)
+            {
+                const auto* w = R7.map.find(id);
+                if (w == nullptr) continue;
+                if (std::find(R7.map.order.begin(), R7.map.order.end(), id) != std::find(R7.map.order.begin(), R7.map.order.end(), id)) {}
+                const Eigen::Vector2f nn = w->normal(), tv = w->tangent();
+                std::vector<float> res;
+                for (const auto& b : R7.map.beams)
+                {
+                    const Eigen::Vector2f q = b.o + b.d * b.r;
+                    const float r = nn.dot(q) - w->d;
+                    if (std::abs(r) > 0.25f) continue;
+                    const float sc = tv.dot(q);
+                    if (sc < w->s_min or sc > w->s_max) continue;
+                    res.push_back(r);
+                }
+                if (res.size() < 50) continue;
+                std::nth_element(res.begin(), res.begin() + static_cast<long>(res.size() / 2), res.end());
+                const float med = res[res.size() / 2];
+                per_wall.push_back(med); pts_of.push_back(w->points_seen);
+                std::printf("      wall %-6llu k=%d pts=%-7d frames=%-5d beams=%-6zu median residual %+.3f m\n",
+                            static_cast<unsigned long long>(w->id), w->k, w->points_seen, w->frames_seen,
+                            res.size(), med);
+            }
+            if (not per_wall.empty())
+            {
+                std::vector<float> sorted = per_wall;
+                std::sort(sorted.begin(), sorted.end());
+                float mean = 0.f; for (float v : per_wall) mean += v; mean /= static_cast<float>(per_wall.size());
+                int well = 0; float mean_well = 0.f;
+                for (size_t k = 0; k < per_wall.size(); ++k)
+                    if (pts_of[k] > 5000) { ++well; mean_well += per_wall[k]; }
+                std::printf("      %zu walls: mean %+.3f m, median %+.3f m | of these %d have >5000 points, mean %+.3f m\n",
+                            per_wall.size(), mean, sorted[sorted.size() / 2], well,
+                            well > 0 ? mean_well / static_cast<float>(well) : 0.f);
+            }
+        }
         check("polygon closed on the real layout", R7.poly.closed, R7.poly.status);
         // 0.20 m bar: the SVG itself carries 6-15 cm trace artefacts the estimator may lawfully
         // smooth over; a real miss (a whole alcove) is metres.
         check("estimate within 20 cm of the real layout (Hausdorff)", h < 0.20f, fmt("%.3f m", h));
         check("estimate overlaps the real layout (IoU >= 0.95)", iou >= 0.95f, fmt("IoU %.3f", iou));
+        // LEVEL-2 pre-registration (2026-09-02): the residual pass is graded on the real layout's own
+        // small features. A feature counts as explained when less than a third of its area is
+        // mis-explained; the coarse cycle alone leaves each of them essentially whole (~1.0).
+        for (const auto& f : features)
+        {
+            const float m = feature_miss(est_world, f);
+            check(fmt("level-2: %s explained", f.name).c_str(), m < 0.33f, fmt("mis-explained %.2f of its area", m));
+        }
         check("pose stayed on track through the tour", R7.pose_rmse_xy < 0.08f,
               fmt("rmse %.3f m, max %.3f m", R7.pose_rmse_xy, R7.pose_max_xy));
+        // RE-ANCHOR (the agent does this once, the bench never did): the grid must move with the
+        // walls. Measured by the fraction of grid cells inside the published polygon that are free,
+        // before and after a re-anchor by the polygon's centre and 0.3 rad — the agreement of the
+        // grid with the polygon is frame-invariant iff the grid was transformed.
+        {
+            const auto free_inside = [](const rc::wallmap::WallMap& m)
+            {
+                const auto poly = m.manhattan_polygon();
+                long in = 0, fr = 0;
+                for (int i = 0; i < m.fgrid.nx; ++i)
+                    for (int j = 0; j < m.fgrid.ny; ++j)
+                        if (rc::corner_visibility::point_in_polygon(m.fgrid.at(i, j), poly.verts))
+                        { ++in; if (m.fgrid.is_free(i, j)) ++fr; }
+                return in > 0 ? static_cast<float>(fr) / static_cast<float>(in) : 0.f;
+            };
+            rc::wallmap::WallMap m2 = R7.map;
+            const float before = free_inside(m2);
+            Eigen::Vector2f cc = Eigen::Vector2f::Zero();
+            for (const auto& v : R7.poly.verts) cc += v;
+            cc /= static_cast<float>(std::max<size_t>(1, R7.poly.verts.size()));
+            m2.reanchor(cc, 0.3f);
+            const float after = free_inside(m2);
+            check("re-anchor keeps the grid aligned with the walls", std::abs(after - before) < 0.03f,
+                  fmt("free fraction inside the polygon %.3f -> %.3f", before, after));
+        }
+    }
+    }   // end WS_NO7 skip
+
+    // ═══ 8. RANDOM ROOMS: wall columns, alcoves, corner columns, spurs ══════════════════════════
+    // A separate population test (WS_ROOMS=n, default off so the standard bench stays at ~12 s).
+    // Each room is a rectangle carrying a random set of the four feature kinds the model claims to
+    // handle, all Manhattan and non-overlapping by construction. Every room is graded twice: the
+    // whole layout (IoU, Hausdorff) and each feature on its own (the mis-explained fraction of its
+    // area, the same measure and the same 0.33 bar as the real apartamento's features).
+    if (const char* rooms_env = std::getenv("WS_ROOMS"))
+    {
+        int n_rooms = 50;
+        { int v = 0; if (std::from_chars(rooms_env, rooms_env + std::strlen(rooms_env), v).ec == std::errc{} and v > 0) n_rooms = v; }
+        std::printf("\n8. %d random rooms (wall column, alcove, corner column, spur)\n", n_rooms);
+        struct Feat { int kind; Eigen::Vector2f lo, hi; };   // 0 column, 1 alcove, 2 corner, 3 spur
+        static const char* kind_name[4] = {"wall column", "alcove", "corner column", "spur"};
+        int found[4] = {0, 0, 0, 0}, total[4] = {0, 0, 0, 0};
+        std::vector<float> ious, hauss;
+        int only_room = -1;
+        if (const char* e = std::getenv("WS_ROOM_ONLY"))
+        { int v = 0; if (std::from_chars(e, e + std::strlen(e), v).ec == std::errc{}) only_room = v; }
+        for (int r = 0; r < n_rooms; ++r)
+        {
+            if (only_room >= 0 and r != only_room) continue;
+            std::mt19937 rg(9000u + static_cast<unsigned>(r));
+            const auto U = [&](float a, float b) { return std::uniform_real_distribution<float>(a, b)(rg); };
+            const float W = U(6.f, 11.f), H = U(5.f, 9.f);
+            // Base outline: a rectangle, or (40%) an L — a rectangle with one corner quadrant cut
+            // away, both legs at least a third of the room wide, rotated onto a random corner.
+            const bool ell = U(0.f, 1.f) < 0.4f;
+            std::vector<Eigen::Vector2f> base;
+            if (not ell) base = {{0.f, 0.f}, {W, 0.f}, {W, H}, {0.f, H}};
+            else
+            {
+                const float cx = U(0.40f, 0.65f) * W, cy = U(0.40f, 0.65f) * H;
+                base = {{0.f, 0.f}, {W, 0.f}, {W, cy}, {cx, cy}, {cx, H}, {0.f, H}};
+                const int turns = std::uniform_int_distribution<int>(0, 3)(rg);
+                for (int q = 0; q < turns; ++q)
+                {
+                    for (auto& v : base) v = Eigen::Vector2f(-v.y(), v.x());   // rotate 90 deg CCW
+                    Eigen::Vector2f mn = base.front();
+                    for (const auto& v : base) mn = mn.cwiseMin(v);
+                    for (auto& v : base) v -= mn;
+                }
+            }
+            const int NW = static_cast<int>(base.size());
+            std::vector<Eigen::Vector2f> V(base), T(NW), N(NW);
+            std::vector<float> LEN(NW);
+            for (int k = 0; k < NW; ++k)
+            {
+                const Eigen::Vector2f d = base[(k + 1) % NW] - base[k];
+                LEN[k] = d.norm(); T[k] = d / LEN[k]; N[k] = Eigen::Vector2f(-T[k].y(), T[k].x());
+            }
+            std::vector<float> corner(NW, 0.f);
+            std::vector<Feat> feats;
+            for (int k = 0; k < NW; ++k)
+            {
+                const Eigen::Vector2f& tp = T[(k + NW - 1) % NW];
+                const bool convex = tp.x() * T[k].y() - tp.y() * T[k].x() > 0.f;   // CCW left turn
+                if (convex and U(0.f, 1.f) < 0.35f) corner[k] = U(0.3f, 0.8f);
+            }
+            Poly room;
+            for (int w = 0; w < NW; ++w)
+            {
+                const int wp = (w + NW - 1) % NW;
+                if (corner[w] > 0.f)
+                {
+                    const float c = corner[w];
+                    const Eigen::Vector2f p0 = V[w] - T[wp] * c, p1 = p0 + T[w] * c, p2 = V[w] + T[w] * c;
+                    room.push_back(p0); room.push_back(p1); room.push_back(p2);
+                    feats.push_back({2, p0.cwiseMin(p2), p0.cwiseMax(p2)});
+                }
+                else room.push_back(V[w]);
+                // Features along wall w, left to right, never overlapping and clear of both corners.
+                float s = std::max(corner[w], 0.f) + 0.6f;
+                const float s_end = LEN[w] - std::max(corner[(w + 1) % NW], 0.f) - 0.6f;
+                while (s < s_end - 0.5f)
+                {
+                    const float roll = U(0.f, 1.f);
+                    if (roll > 0.55f) { s += U(0.8f, 2.5f); continue; }   // a plain stretch of wall
+                    int kind; float wid, dep;
+                    if (roll < 0.20f)      { kind = 0; wid = U(0.30f, 0.80f); dep = U(0.20f, 0.50f); }
+                    else if (roll < 0.42f) { kind = 1; wid = U(0.50f, 1.50f); dep = U(0.30f, 0.80f); }
+                    else                   { kind = 3; wid = U(0.10f, 0.16f); dep = U(1.00f, 2.60f); }
+                    if (s + wid > s_end) break;
+                    // An inward feature may not reach across the room (an L's leg can be narrow):
+                    // cast from the middle of its base into the room and keep well short of what it
+                    // hits. Outward features only have to clear the corners, which they already do.
+                    if (kind != 1)
+                    {
+                        const Eigen::Vector2f mid = V[w] + T[w] * (s + 0.5f * wid) + N[w] * 0.01f;
+                        float reach = 1e9f;
+                        for (int q = 0; q < NW; ++q)
+                            if (const auto tt = rc::corner_visibility::ray_segment_t(mid, N[w], base[q], base[(q + 1) % NW]);
+                                tt and *tt > 1e-3f) reach = std::min(reach, *tt);
+                        dep = std::min(dep, 0.6f * reach);
+                        if (dep < 0.18f) { s += wid + 0.4f; continue; }
+                    }
+                    const float sg = (kind == 1) ? -1.f : 1.f;   // an alcove steps out, the rest step in
+                    const Eigen::Vector2f a0 = V[w] + T[w] * s, a1 = V[w] + T[w] * (s + wid);
+                    const Eigen::Vector2f b0 = a0 + N[w] * (sg * dep), b1 = a1 + N[w] * (sg * dep);
+                    room.push_back(a0); room.push_back(b0); room.push_back(b1); room.push_back(a1);
+                    feats.push_back({kind, a0.cwiseMin(b1), a0.cwiseMax(b1)});
+                    s += wid + U(0.5f, 1.5f);
+                }
+            }
+            // A start pose well inside: the deepest interior point of a coarse scan of the room.
+            Eigen::Vector2f start(W * 0.5f, H * 0.5f); float best_clear = -1.f;
+            for (float x = 0.5f; x < W; x += 0.25f)
+                for (float y = 0.5f; y < H; y += 0.25f)
+                {
+                    const Eigen::Vector2f q(x, y);
+                    if (not rc::corner_visibility::point_in_polygon(q, room)) continue;
+                    const float cl = point_to_poly(q, room);
+                    if (cl > best_clear) { best_clear = cl; start = q; }
+                }
+            // FURNITURE, optional (WS_FURNITURE=1): boxes standing against the walls, which the
+            // LiDAR band cannot see through and the ceiling junction is far above. Structure is
+            // unchanged — the truth polygon is the same — so the score measures exactly whether the
+            // walls behind them were recovered.
+            Boxes furniture;
+            if (std::getenv("WS_FURNITURE") != nullptr)
+            {
+                const int nf = 2 + static_cast<int>(U(0.f, 3.99f));
+                for (int k = 0; k < nf; ++k)
+                {
+                    const int w = static_cast<int>(U(0.f, static_cast<float>(NW) - 0.01f));
+                    const float dep = U(0.35f, 0.75f), wid = U(0.7f, 2.0f);
+                    if (LEN[w] < wid + 1.2f) continue;
+                    const float sc = U(0.6f, LEN[w] - wid - 0.6f);
+                    const Eigen::Vector2f a0 = V[w] + T[w] * sc, a1 = V[w] + T[w] * (sc + wid) + N[w] * dep;
+                    furniture.push_back({a0.cwiseMin(a1), a0.cwiseMax(a1)});
+                }
+            }
+            RunConfig cfg8;
+            cfg8.n_rays = 480;
+            cfg8.verbose = false;
+            cfg8.occluders = furniture;
+            cfg8.ceiling_line = std::getenv("WS_CEILING") != nullptr;
+            cfg8.info_gain = std::getenv("WS_NO_INFOGAIN") == nullptr;
+            std::mt19937 rrun(4242u + static_cast<unsigned>(r));
+            int room_frames = 900;
+            if (const char* e = std::getenv("WS_ROOM_FRAMES"))
+            { int v = 0; if (std::from_chars(e, e + std::strlen(e), v).ec == std::errc{} and v > 0) room_frames = v; }
+            auto Rr = run_explore(room, cfg8, rrun, room_frames, start);
+            const Poly ew = to_world(Rr.poly.verts, Eigen::Vector3f(start.x(), start.y(), 0.f));
+            // COVERAGE: of the truth's own interior, how much did the robot's grid ever learn about?
+            // It separates the two ways a room can be lost — never seen, or seen and left outside the
+            // polygon — which no IoU can tell apart.
+            float coverage = 0.f, seen_but_excluded = 0.f;
+            {
+                long known = 0, total = 0, excl = 0;
+                for (float x = -20.f; x < 20.f; x += 0.15f)
+                    for (float y = -20.f; y < 20.f; y += 0.15f)
+                    {
+                        const Eigen::Vector2f w(x, y);
+                        if (not rc::corner_visibility::point_in_polygon(w, room)) continue;
+                        ++total;
+                        const Eigen::Vector2f m = w - start;   // map frame = start-relative
+                        const int gi = static_cast<int>((m.x() - Rr.map.fgrid.x0) / Rr.map.fgrid.cell);
+                        const int gj = static_cast<int>((m.y() - Rr.map.fgrid.y0) / Rr.map.fgrid.cell);
+                        const bool kn = Rr.map.fgrid.in(gi, gj) and not Rr.map.fgrid.is_unknown(gi, gj);
+                        if (kn) ++known;
+                        if (kn and not rc::corner_visibility::point_in_polygon(w, ew)) ++excl;
+                    }
+                if (total > 0) { coverage = static_cast<float>(known) / static_cast<float>(total);
+                                 seen_but_excluded = static_cast<float>(excl) / static_cast<float>(total); }
+            }
+            const float iou_r = Rr.poly.closed ? polygon_iou(ew, room) : 0.f;
+            const float h_r = Rr.poly.closed ? hausdorff(ew, room) : 1e9f;
+            ious.push_back(iou_r); hauss.push_back(h_r);
+            std::string fs;
+            for (const auto& f : feats)
+            {
+                ++total[f.kind];
+                float miss = 1.f;
+                if (Rr.poly.closed)
+                {
+                    const float pad = 0.05f, step = 0.02f;
+                    int bad = 0;
+                    for (float x = f.lo.x() - pad; x <= f.hi.x() + pad; x += step)
+                        for (float y = f.lo.y() - pad; y <= f.hi.y() + pad; y += step)
+                        {
+                            const Eigen::Vector2f q(x, y);
+                            if (rc::corner_visibility::point_in_polygon(q, room)
+                                != rc::corner_visibility::point_in_polygon(q, ew)) ++bad;
+                        }
+                    const float box = std::max((f.hi.x() - f.lo.x()) * (f.hi.y() - f.lo.y()), 1e-6f);
+                    miss = static_cast<float>(bad) * step * step / box;
+                }
+                if (miss < 0.33f) ++found[f.kind];
+                fs += fmt(" %s:%.2f", kind_name[f.kind], miss);
+            }
+            std::printf("    room %-3d %5.1f x %4.1f m %s feats %2zu furn %zu  IoU %.3f  cover %.2f excl %.2f  Hausdorff %.3f m  walls %2zu |%s\n",
+                        r, W, H, ell ? "L  " : "rect", feats.size(), furniture.size(), iou_r, coverage,
+                        seen_but_excluded, h_r, Rr.map.walls.size(), fs.c_str());
+            std::printf("      truth[%d]:", r);
+            for (const auto& v : room) std::printf(" (%.2f,%.2f)", v.x(), v.y());
+            std::printf("\n      est[%d]:", r);
+            for (const auto& v : ew) std::printf(" (%.2f,%.2f)", v.x(), v.y());
+            std::printf("\n");
+        }
+        std::sort(ious.begin(), ious.end());
+        std::sort(hauss.begin(), hauss.end());
+        float mean = 0.f; for (float v : ious) mean += v; mean /= static_cast<float>(std::max<size_t>(1, ious.size()));
+        std::printf("    %zu rooms: IoU mean %.3f median %.3f min %.3f max %.3f | Hausdorff median %.3f m\n",
+                    ious.size(), mean, ious[ious.size() / 2], ious.front(), ious.back(), hauss[hauss.size() / 2]);
+        for (int k = 0; k < 4; ++k)
+            if (total[k] > 0)
+                std::printf("    %-14s found %3d of %3d (%.0f%%)\n", kind_name[k], found[k], total[k],
+                            100.f * static_cast<float>(found[k]) / static_cast<float>(total[k]));
+        check("random rooms: median IoU >= 0.90", ious[ious.size() / 2] >= 0.90f, fmt("median %.3f", ious[ious.size() / 2]));
     }
 
     std::printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILURES", failures, failures == 1 ? "" : "s");

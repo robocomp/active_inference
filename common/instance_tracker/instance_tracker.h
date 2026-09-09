@@ -46,7 +46,13 @@ struct TrackerParams
     // centre) → tracks starve and die. R is the measurement spread: centroid jitter + centroid-vs-axis
     // offset. Must be ≥ that offset; default covers a ~6 cm front-arc/de-projection gap.
     float detection_noise_m = 0.05f;
-    int   birth_frames     = 5;       // consecutive frames a detection must stay unassigned to spawn a track
+    // ★A COUNT OF IDEAL OBSERVATIONS, and therefore a REAL number — not a frame count. `streak`
+    // accumulates fractional birth_evidence (confidence x detectability), so an integer threshold could
+    // only ever express whole ideal observations while the thing it is compared against moves in
+    // fractions. It became a real constraint on 2026-09-09: grading the semantic model changed mask
+    // confidence from a constant 1.000 to a median 0.826, and the rescaled threshold (8 x 0.826 = 6.6)
+    // was not expressible. Widening is behaviour-preserving for every agent that passes a whole number.
+    float birth_frames     = 5.0f;    // ideal observations a detection must accumulate to spawn a track
     int   death_frames     = 60;      // consecutive frames a track may go unsupported before retirement
     float birth_min_sep_m  = 0.25f;   // a birth candidate must be ≥ this from every existing track AND from
                                       // every other pending candidate (anti-duplicate)

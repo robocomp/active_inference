@@ -1,0 +1,1039 @@
+<title>Self-Model Coupling Atlas</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Serif:ital,wght@0,400;0,600;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root{
+  --ground:#EDEFF2; --surface:#FFFFFF; --sunk:#E3E7EB;
+  --ink:#121A21; --body:#2E3A44; --muted:#65727E; --hair:#CDD5DC; --hair-soft:#DFE4E9;
+  --base:#B5651F;      /* the motion block: burnt amber */
+  --base-soft:#F2E2CE;
+  --optic:#1F7A80;     /* the optical block: teal */
+  --optic-soft:#D5E8E8;
+  --dead:#A8392F;      /* a parameter no observation reaches */
+  --pos:#1F7A80; --neg:#B5651F;
+  --shadow:0 1px 2px rgba(18,26,33,.06), 0 8px 24px -12px rgba(18,26,33,.18);
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --ground:#0D1317; --surface:#141D23; --sunk:#101821;
+    --ink:#E6ECF0; --body:#BCC8D1; --muted:#8494A0; --hair:#28353F; --hair-soft:#1D2830;
+    --base:#E09A4C; --base-soft:#3A2A17;
+    --optic:#54B8BC; --optic-soft:#133234;
+    --dead:#D9695D; --pos:#54B8BC; --neg:#E09A4C;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px -14px rgba(0,0,0,.7);
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0D1317; --surface:#141D23; --sunk:#101821;
+  --ink:#E6ECF0; --body:#BCC8D1; --muted:#8494A0; --hair:#28353F; --hair-soft:#1D2830;
+  --base:#E09A4C; --base-soft:#3A2A17;
+  --optic:#54B8BC; --optic-soft:#133234;
+  --dead:#D9695D; --pos:#54B8BC; --neg:#E09A4C;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px -14px rgba(0,0,0,.7);
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--ground); color:var(--body);
+  font-family:"IBM Plex Serif",Georgia,"Times New Roman",serif;
+  font-size:16px; line-height:1.62; margin:0;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1140px; margin:0 auto; padding:0 28px 96px}
+h1,h2,h3,.eyebrow,th,.chip,.lede-tag{font-family:"IBM Plex Sans Condensed","Helvetica Neue",Arial,sans-serif}
+code,.mono,.eq,td.num{font-family:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,monospace}
+h1,h2,h3{color:var(--ink); text-wrap:balance; margin:0}
+
+/* ── masthead ───────────────────────────────────────────────────────────── */
+header{padding:76px 0 44px; border-bottom:1px solid var(--hair)}
+.eyebrow{
+  font-size:11.5px; font-weight:600; letter-spacing:.16em; text-transform:uppercase;
+  color:var(--muted); margin:0 0 20px;
+}
+h1{font-size:clamp(38px,5.4vw,62px); font-weight:700; line-height:1.02; letter-spacing:-.018em}
+.standfirst{
+  font-size:19px; line-height:1.58; max-width:62ch; margin:24px 0 0; color:var(--body);
+}
+.standfirst em{font-style:italic; color:var(--ink)}
+.provenance{
+  display:flex; flex-wrap:wrap; gap:8px 28px; margin-top:30px;
+  font-family:"IBM Plex Mono",monospace; font-size:12px; color:var(--muted);
+}
+.provenance span strong{color:var(--ink); font-weight:500}
+
+/* ── sections ───────────────────────────────────────────────────────────── */
+section{padding-top:62px}
+.sec-head{display:flex; align-items:baseline; gap:16px; margin-bottom:8px; flex-wrap:wrap}
+h2{font-size:27px; font-weight:700; letter-spacing:-.01em}
+.rule{height:3px; border-radius:2px; width:52px; margin-bottom:18px}
+.rule.base{background:var(--base)} .rule.optic{background:var(--optic)}
+.rule.both{background:linear-gradient(90deg,var(--base),var(--optic))}
+.sec-note{max-width:66ch; margin:0 0 30px}
+.tag{
+  font-family:"IBM Plex Sans Condensed",sans-serif; font-size:11px; font-weight:600;
+  letter-spacing:.12em; text-transform:uppercase; padding:3px 9px; border-radius:3px;
+}
+.tag.base{background:var(--base-soft); color:var(--base)}
+.tag.optic{background:var(--optic-soft); color:var(--optic)}
+
+/* ── panels ─────────────────────────────────────────────────────────────── */
+.panel{
+  background:var(--surface); border:1px solid var(--hair-soft); border-radius:8px;
+  box-shadow:var(--shadow); padding:28px 30px; margin-bottom:22px;
+}
+.panel h3{
+  font-size:12px; font-weight:600; letter-spacing:.14em; text-transform:uppercase;
+  color:var(--muted); margin-bottom:16px;
+}
+.eq{
+  background:var(--sunk); border-radius:6px; padding:18px 20px; font-size:14.5px; line-height:2.1;
+  overflow-x:auto; white-space:pre; color:var(--ink);
+}
+.eq .c{color:var(--muted)}
+.eq b{color:var(--base); font-weight:600}
+.eq i{color:var(--optic); font-style:normal; font-weight:600}
+.eq u{color:var(--dead); text-decoration:none; font-weight:600}
+.gloss{display:grid; grid-template-columns:auto 1fr; gap:6px 16px; margin-top:18px; font-size:14.5px}
+.gloss dt{font-family:"IBM Plex Mono",monospace; color:var(--ink); font-weight:500; white-space:nowrap}
+.gloss dd{margin:0; color:var(--body)}
+
+/* ── diagram ────────────────────────────────────────────────────────────── */
+.diagram{overflow-x:auto; padding:4px 0 2px}
+svg{display:block; min-width:640px}
+svg text{font-family:"IBM Plex Mono",monospace; font-size:12.5px; fill:var(--ink)}
+svg text.lbl{font-family:"IBM Plex Sans Condensed",sans-serif; font-size:11px; font-weight:600;
+  letter-spacing:.1em; text-transform:uppercase; fill:var(--muted)}
+svg text.cov{font-size:11.5px; fill:var(--muted)}
+svg .node{fill:var(--surface); stroke:var(--hair)}
+svg .comp{fill:var(--sunk); stroke:var(--hair)}
+svg .edge{fill:none; stroke:var(--hair); stroke-width:1.4}
+svg .edge.b{stroke:var(--base); stroke-width:1.8}
+svg .edge.o{stroke:var(--optic); stroke-width:1.8}
+svg .edge.dead{stroke:var(--dead); stroke-dasharray:3 4; stroke-width:1.4}
+.caption{font-size:13.5px; color:var(--muted); margin:14px 0 0; max-width:70ch; font-style:italic}
+
+/* ── matrices ───────────────────────────────────────────────────────────── */
+.grid2{display:grid; grid-template-columns:1fr 1fr; gap:22px}
+@media (max-width:900px){.grid2{grid-template-columns:1fr}}
+table{border-collapse:collapse; width:100%; font-size:13px}
+caption{
+  font-family:"IBM Plex Sans Condensed",sans-serif; font-size:11px; font-weight:600;
+  letter-spacing:.13em; text-transform:uppercase; color:var(--muted);
+  text-align:left; padding-bottom:10px;
+}
+th,td{padding:7px 8px; text-align:right; border-bottom:1px solid var(--hair-soft)}
+th{
+  font-size:11px; font-weight:600; letter-spacing:.05em; color:var(--muted);
+  text-transform:none; border-bottom:1px solid var(--hair);
+}
+th:first-child,td:first-child{text-align:left; font-family:"IBM Plex Mono",monospace; color:var(--ink)}
+td.num{font-variant-numeric:tabular-nums}
+.mtable td.num{border-radius:2px}
+.tblwrap{overflow-x:auto}
+
+/* ── ledger ─────────────────────────────────────────────────────────────── */
+.ledger td:first-child{white-space:nowrap; font-weight:500}
+.ledger td{text-align:left; vertical-align:top; font-size:14px; line-height:1.5}
+.ledger th{text-align:left}
+.chip{
+  display:inline-block; font-size:10.5px; font-weight:600; letter-spacing:.08em;
+  text-transform:uppercase; padding:2px 7px; border-radius:3px; white-space:nowrap;
+}
+.chip.ok{background:var(--optic-soft); color:var(--optic)}
+.chip.warn{background:var(--base-soft); color:var(--base)}
+.chip.dead{background:color-mix(in srgb,var(--dead) 16%,transparent); color:var(--dead)}
+
+/* ── callout ────────────────────────────────────────────────────────────── */
+.callout{
+  border-left:3px solid var(--dead); background:var(--surface);
+  border-radius:0 6px 6px 0; padding:22px 26px; margin:26px 0;
+  box-shadow:var(--shadow);
+}
+.callout .lede-tag{
+  display:block; font-size:11px; font-weight:700; letter-spacing:.14em; text-transform:uppercase;
+  color:var(--dead); margin-bottom:9px;
+}
+.callout p{margin:0; max-width:66ch}
+.callout p + p{margin-top:12px}
+.big{font-size:17px; color:var(--ink)}
+
+footer{
+  margin-top:74px; padding-top:26px; border-top:1px solid var(--hair);
+  font-family:"IBM Plex Mono",monospace; font-size:12px; color:var(--muted);
+}
+footer p{margin:0 0 7px; max-width:74ch}
+a{color:var(--optic)}
+:focus-visible{outline:2px solid var(--optic); outline-offset:2px; border-radius:2px}
+@media (prefers-reduced-motion:no-preference){
+  .panel{transition:border-color .18s ease}
+}
+</style>
+
+<div class="wrap">
+
+<header>
+  <p class="eyebrow">Shadow · online self-calibration · measured 2026-08-31 → 09-02</p>
+  <h1>Self-Model Coupling Atlas</h1>
+  <p class="standfirst">
+    A robot that infers only where it <em>is</em> has learned half of what it needs. The other half is
+    what it <em>is</em> — the scale of its own wheels, the tilt of its own cameras. Both are factors in
+    one generative model, and both are identified the same way: by the covariate that moves them.
+    This page draws the two blocks as Jacobians, and shows which parameters they cannot tell apart.
+  </p>
+  <div class="provenance">
+    <span>base block · <strong>253 episodes / 203 m</strong></span>
+    <span>optical block · <strong>395 171 pairs / 23 corners</strong></span>
+    <span>every correlation below is <strong>measured, not schematic</strong></span>
+  </div>
+</header>
+
+<section>
+  <div class="sec-head"><h2>One model, two blocks</h2></div>
+  <div class="rule both"></div>
+  <p class="sec-note">
+    Each block is a least-squares residual whose Jacobian columns are the parameters and whose rows are
+    the components of a disagreement. Two parameters are <strong>coupled</strong> when they load on the
+    same row, and <strong>degenerate</strong> when their covariates on that row are proportional. So the
+    whole question of what a robot can learn about itself reduces to one thing: <em>which covariates
+    does its own motion supply, and in what mixture.</em>
+  </p>
+</section>
+
+<section>
+  <div class="sec-head"><span class="tag base">Block I</span><h2>The base against the room</h2></div>
+  <div class="rule base"></div>
+  <p class="sec-note">
+    An <em>episode</em> is a stretch of driving between two corrections from the localiser. The residual
+    is what the wheel odometry failed to predict, in the robot's own frame, and it has three components.
+  </p>
+
+  <div class="panel">
+    <h3>Residual and Jacobian · <code>calibration_estimator.h</code></h3>
+<div class="eq">r<sub>along</sub>   = <b>k_v</b> · Δs                                    <span class="c">weight  1/σ²_pos</span>
+r<sub>cross</sub>   = −<b>ε_yaw</b> · Δs   +  <b>k_lat</b> · Δy               <span class="c">weight  1/σ²_pos</span>
+r<sub>head</sub>    =  <b>k_ω</b> · Δθ   +  <b>b_ω</b> · T   +  <b>δk_wheel</b> · Δs   <span class="c">weight  1/σ²_θ</span>
+
+H = Σ<sub>episodes</sub> w · J J<sup>T</sup>          <span class="c">information adds; the prior is one more episode</span></div>
+    <dl class="gloss">
+      <dt>Δs, Δy, Δθ</dt><dd>forward, lateral and heading travel over the episode</dd>
+      <dt>T</dt><dd>elapsed time — the only covariate a <em>bias</em> can have</dd>
+      <dt>Δy ≈ 0</dt><dd>Shadow is differential and cannot translate sideways</dd>
+    </dl>
+  </div>
+
+  <div class="panel">
+    <h3>The Jacobian, drawn</h3>
+    <div class="diagram">
+    <svg viewBox="0 0 700 300" role="img" aria-label="Bipartite diagram: three residual components on the left connect to six base parameters on the right, each edge labelled by its covariate.">
+      <text class="lbl" x="24" y="24">residual component</text>
+      <text class="lbl" x="470" y="24">parameter</text>
+
+      <rect class="comp" x="24" y="44" width="128" height="34" rx="5"/>
+      <text x="88" y="66" text-anchor="middle">r_along</text>
+      <rect class="comp" x="24" y="122" width="128" height="34" rx="5"/>
+      <text x="88" y="144" text-anchor="middle">r_cross</text>
+      <rect class="comp" x="24" y="222" width="128" height="34" rx="5"/>
+      <text x="88" y="244" text-anchor="middle">r_head</text>
+
+      <rect class="node" x="470" y="44" width="118" height="30" rx="5"/>
+      <text x="529" y="64" text-anchor="middle">k_v</text>
+      <rect class="node" x="470" y="104" width="118" height="30" rx="5"/>
+      <text x="529" y="124" text-anchor="middle">ε_yaw</text>
+      <rect class="node" x="470" y="150" width="118" height="30" rx="5"/>
+      <text x="529" y="170" text-anchor="middle" style="fill:var(--dead)">k_lat</text>
+      <rect class="node" x="470" y="200" width="118" height="30" rx="5"/>
+      <text x="529" y="220" text-anchor="middle">k_ω</text>
+      <rect class="node" x="470" y="240" width="118" height="30" rx="5"/>
+      <text x="529" y="260" text-anchor="middle">b_ω</text>
+      <rect class="node" x="470" y="280" width="118" height="16" rx="5" style="opacity:0"/>
+      <rect class="node" x="470" y="278" width="118" height="18" rx="5"/>
+      <text x="529" y="291" text-anchor="middle" style="font-size:11.5px">δk_wheel</text>
+
+      <path class="edge b" d="M152 61 C 300 61, 340 59, 470 59"/>
+      <text class="cov" x="311" y="53" text-anchor="middle">Δs</text>
+
+      <path class="edge b" d="M152 133 C 300 133, 340 119, 470 119"/>
+      <text class="cov" x="311" y="119" text-anchor="middle">−Δs</text>
+      <path class="edge dead" d="M152 141 C 300 141, 340 165, 470 165"/>
+      <text class="cov" x="311" y="169" text-anchor="middle" style="fill:var(--dead)">Δy ≈ 0</text>
+
+      <path class="edge b" d="M152 232 C 300 232, 340 215, 470 215"/>
+      <text class="cov" x="311" y="213" text-anchor="middle">Δθ</text>
+      <path class="edge b" d="M152 239 C 300 239, 340 255, 470 255"/>
+      <text class="cov" x="311" y="249" text-anchor="middle">T</text>
+      <path class="edge b" d="M152 247 C 300 247, 340 287, 470 287"/>
+      <text class="cov" x="311" y="288" text-anchor="middle">Δs</text>
+    </svg>
+    </div>
+    <p class="caption">
+      Three parameters share <code>r_head</code> and are separated only by covariate — a scale by rotation,
+      a bias by elapsed time, a wheel mismatch by distance. No pair of scalar filters could do this, which
+      is the case for solving jointly.
+    </p>
+  </div>
+
+  <div class="grid2">
+    <div class="panel">
+      <div class="tblwrap"><table class="mtable" id="m-base"><caption>Measured correlation · 253 episodes, 203 m</caption></table></div>
+    </div>
+    <div class="panel">
+      <div class="tblwrap"><table id="t-base"><caption>What the tour actually taught</caption>
+        <thead><tr><th>parameter</th><th>σ<sub>post</sub> / σ<sub>prior</sub></th><th>read as</th></tr></thead>
+        <tbody>
+          <tr><td>k_v</td><td class="num">0.142</td><td style="text-align:left">7× sharper than the prior</td></tr>
+          <tr><td>ε_yaw</td><td class="num">0.162</td><td style="text-align:left">6× sharper</td></tr>
+          <tr><td>δk_wheel</td><td class="num">0.126</td><td style="text-align:left">8× sharper</td></tr>
+          <tr><td>b_ω</td><td class="num">0.244</td><td style="text-align:left">4× sharper</td></tr>
+          <tr><td>k_ω</td><td class="num">0.293</td><td style="text-align:left">3× sharper</td></tr>
+          <tr><td style="color:var(--dead)">k_lat</td><td class="num" style="color:var(--dead)">0.998</td><td style="text-align:left"><span class="chip dead">said nothing</span></td></tr>
+        </tbody>
+      </table></div>
+    </div>
+  </div>
+
+  <div class="callout">
+    <span class="lede-tag">The one parameter the robot cannot learn</span>
+    <p class="big">
+      <code>k_lat</code> comes back at <strong>0.998 of its prior</strong> — the data moved it by two parts
+      in a thousand. Its only covariate is lateral travel, and a differential drive has none.
+    </p>
+    <p>
+      This is not a defect and no manoeuvre repairs it. It is the estimator correctly reporting that a
+      question was never asked, and it is the shape every genuinely unidentifiable parameter takes:
+      <em>a posterior indistinguishable from its prior.</em>
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><span class="tag optic">Block II</span><h2>The cameras against the LiDAR</h2></div>
+  <div class="rule optic"></div>
+  <p class="sec-note">
+    A room corner is one physical edge seen twice: the LiDAR finds the wall–wall intersection at sensor
+    height, the camera finds the floor–wall–wall triple point. Push the LiDAR's corner through the
+    camera's mount alone and the localiser's pose never enters the expression — so this block measures a
+    hand–eye disagreement, not a pose error.
+  </p>
+
+  <div class="panel">
+    <h3>Residual and Jacobian · <code>mount_lidar_pair.h</code></h3>
+<div class="eq">uv<sub>lidar</sub> = project( R<sub>cam←robot</sub> · p<sub>robot</sub> + t<sub>cam←robot</sub> )   <span class="c">no pose anywhere</span>
+r        = uv<sub>image</sub> − uv<sub>lidar</sub>
+
+r = − J θ + <u>δ_v</u> + ε        θ = ( <i>pitch</i>, <i>height</i>, <i>yaw</i>, <u>dt</u> )
+
+J<sub>pitch</sub>  = σ_p · P · ( x̂<sub>cam</sub> × p<sub>cam</sub> )     <span class="c">range-dependent,  Δd = θ_p·d²/h</span>
+J<sub>height</sub> = σ_h · P · ẑ<sub>cam</sub>              <span class="c">range-dependent,  ~ 1/d</span>
+J<sub>yaw</sub>    = σ_y · P · ( ẑ<sub>cam</sub> × p<sub>cam</sub> )     <span class="c">a CONSTANT pixel shift</span>
+J<sub>dt</sub>     = 0                            <span class="c">no observation reaches it</span></div>
+    <dl class="gloss">
+      <dt>P</dt><dd>the projection Jacobian ∂uv/∂p<sub>cam</sub></dd>
+      <dt>δ_v</dt><dd>the corner's <em>own</em> image offset — one per vertex, constant however the robot moves</dd>
+      <dt>σ_p, σ_h, σ_y</dt><dd>prior sigmas carried inside J, so θ is dimensionless and the prior is the identity</dd>
+    </dl>
+  </div>
+
+  <div class="panel">
+    <h3>The Jacobian, drawn</h3>
+    <div class="diagram">
+    <svg viewBox="0 0 700 270" role="img" aria-label="Bipartite diagram: two residual components connect to the camera mount parameters; dt has no edge, and the per-vertex offset reaches both components.">
+      <text class="lbl" x="24" y="24">residual component</text>
+      <text class="lbl" x="470" y="24">parameter</text>
+
+      <rect class="comp" x="24" y="52" width="128" height="34" rx="5"/>
+      <text x="88" y="74" text-anchor="middle">r_u</text>
+      <rect class="comp" x="24" y="150" width="128" height="34" rx="5"/>
+      <text x="88" y="172" text-anchor="middle">r_v</text>
+
+      <rect class="node" x="470" y="40" width="130" height="30" rx="5"/>
+      <text x="535" y="60" text-anchor="middle">yaw</text>
+      <rect class="node" x="470" y="88" width="130" height="30" rx="5"/>
+      <text x="535" y="108" text-anchor="middle">pitch</text>
+      <rect class="node" x="470" y="132" width="130" height="30" rx="5"/>
+      <text x="535" y="152" text-anchor="middle">height</text>
+      <rect class="node" x="470" y="180" width="130" height="30" rx="5" style="stroke:var(--dead)"/>
+      <text x="535" y="200" text-anchor="middle" style="fill:var(--dead)">δ_v  (per corner)</text>
+      <rect class="node" x="470" y="224" width="130" height="30" rx="5" style="stroke-dasharray:3 4"/>
+      <text x="535" y="244" text-anchor="middle" style="fill:var(--muted)">dt</text>
+
+      <path class="edge o" d="M152 64 C 300 64, 340 55, 470 55"/>
+      <text class="cov" x="311" y="49" text-anchor="middle">constant</text>
+
+      <path class="edge o" d="M152 158 C 300 158, 340 103, 470 103"/>
+      <text class="cov" x="318" y="126" text-anchor="middle">d² / h</text>
+      <path class="edge o" d="M152 168 C 300 168, 340 147, 470 147"/>
+      <text class="cov" x="318" y="163" text-anchor="middle">1 / d</text>
+
+      <path class="edge dead" d="M152 76 C 320 76, 360 190, 470 192"/>
+      <path class="edge dead" d="M152 178 C 320 178, 360 195, 470 197"/>
+      <text class="cov" x="330" y="212" text-anchor="middle" style="fill:var(--dead)">constant, per corner</text>
+
+      <text class="cov" x="404" y="243" text-anchor="middle" style="fill:var(--muted)">— no edge —</text>
+    </svg>
+    </div>
+    <p class="caption">
+      <code>yaw</code> and <code>δ_v</code> arrive at <code>r_u</code> with the <em>same</em> covariate — a
+      constant. Within one corner they are exactly degenerate, and only the spread of δ across
+      <em>different</em> corners separates them. <code>dt</code> has no edge at all.
+    </p>
+  </div>
+
+  <div class="grid2">
+    <div class="panel">
+      <div class="tblwrap"><table class="mtable" id="m-optic"><caption>Measured correlation · zed, 60 003 pairs</caption></table></div>
+      <p class="caption" style="margin-top:12px">
+        ρ(pitch, height) = −0.98 on the zed against −0.12 on the ricoh. The panorama sees corners in every
+        direction and breaks the ridge by geometry alone — so the ridge is a <em>zed</em> problem, not a
+        system one.
+      </p>
+    </div>
+    <div class="panel">
+      <div class="tblwrap"><table id="t-optic"><caption>Two cameras, same pipeline</caption>
+        <thead><tr><th>&nbsp;</th><th>ricoh</th><th>zed</th></tr></thead>
+        <tbody>
+          <tr><td>pairs</td><td class="num">395 171</td><td class="num">60 003</td></tr>
+          <tr><td>corners</td><td class="num">23</td><td class="num">23</td></tr>
+          <tr><td>χ²/dof</td><td class="num">1.78</td><td class="num">1.74</td></tr>
+          <tr><td>cond</td><td class="num">9.2</td><td class="num">145.5</td></tr>
+          <tr><td>ρ(pitch,height)</td><td class="num">−0.12</td><td class="num" style="color:var(--dead)">−0.98</td></tr>
+          <tr><td>yaw</td><td class="num">−0.212°</td><td class="num">−0.198°</td></tr>
+          <tr><td>honest σ(yaw)</td><td class="num" style="color:var(--dead)">±0.216°</td><td class="num" style="color:var(--dead)">±0.21°</td></tr>
+        </tbody>
+      </table></div>
+    </div>
+  </div>
+
+  <div class="callout">
+    <span class="lede-tag">Why the yaw row carries two sigmas</span>
+    <p class="big">
+      The solve reported <code>±0.0017°</code> from 395 171 pairs. Those pairs are
+      <strong>23 corners sampled thousands of times each</strong>, and the corners disagree with one
+      another by 5.3 px while the mount signal is 1.1 px.
+    </p>
+    <p>
+      Counting them as independent understates the uncertainty by <strong>127×</strong>, against a design
+      effect <span class="mono">√(395 319 / 23) = 131</span> — the two agree, which names the mechanism
+      rather than merely flagging a gap. The fitted yaw is then <em>smaller than its own error</em>.
+      Giving δ<sub>v</sub> a slot in the model and integrating it out does not recover that precision.
+      It reveals we never had it.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><span class="tag optic">Block II · extended</span><h2>Recovering a wrong extrinsic, and naming the device</h2></div>
+  <div class="rule optic"></div>
+  <p class="sec-note">
+    ★ <strong>Two different relations live on one corner, and they do not measure the same thing.</strong>
+    Everything above is the <em>camera against the LiDAR</em>. What follows adds the <em>camera against
+    the camera</em>, states the algebra that decides whether a deliberately wrong mount can be recovered
+    at all, and reports the test — run 2026-09-03 on one tour: ricoh 91 152 pairs over 21 corners, zed
+    11 821 over 20, twenty corners seen by both.
+  </p>
+
+  <div class="panel">
+    <h3>The two relations, and what each one is blind to</h3>
+    <div class="tblwrap"><table class="ledger">
+      <thead><tr><th>&nbsp;</th><th>camera ← LiDAR (the pair)</th><th>camera ← camera (the closure)</th></tr></thead>
+      <tbody>
+        <tr><td>residual</td>
+          <td><code>r = uv_image − uv_lidar</code>, one camera through its own mount</td>
+          <td><code>Δ = r<sub>a</sub>/s<sub>a</sub> − r<sub>b</sub>/s<sub>b</sub></code>, the two cameras differenced in <em>angle</em></td></tr>
+        <tr><td>what it measures</td>
+          <td>a hand–eye disagreement, per camera</td>
+          <td>only the two cameras' disagreement</td></tr>
+        <tr><td>the LiDAR's own corner error</td>
+          <td><span class="chip warn">inside the estimate</span> indistinguishable from a mount error</td>
+          <td><span class="chip ok">cancels exactly</span> it is common to both</td></tr>
+        <tr><td>blind to</td>
+          <td>a rotation shared by camera and LiDAR</td>
+          <td>which camera carries what; any rotation shared by all three</td></tr>
+      </tbody>
+    </table></div>
+    <p class="caption">
+      Complementary, not redundant. The pair gives each mount but cannot exclude a shared fault; the
+      closure excludes the shared fault but cannot attribute it. Three devices are what turn
+      <em>disagreement</em> into <em>attribution</em> — and that had never been tested against a fault
+      whose location was known in advance.
+    </p>
+  </div>
+
+  <div class="panel">
+    <h3>Marginalising the corner's own offset · the Schur complement</h3>
+<div class="eq">r<sub>i</sub> = −J<sub>i</sub> θ + <u>δ<sub>v(i)</sub></u> + ε<sub>i</sub>          <u>δ<sub>v</sub></u> ~ N(0, S),  S = σ<sub>δ</sub>² I     <span class="c">σ<sub>δ</sub> = 5.3 px, measured</span>
+
+per corner:  A<sub>v</sub> = Σ JᵀWJ    c<sub>v</sub> = Σ JᵀW    D<sub>v</sub> = Σ W    b<sub>v</sub> = Σ JᵀWr    e<sub>v</sub> = Σ Wr
+
+M<sub>v</sub> = ( S⁻¹ + D<sub>v</sub> )⁻¹
+<i>H̃</i> = Σ<sub>v</sub> ( A<sub>v</sub> − c<sub>v</sub> M<sub>v</sub> c<sub>v</sub>ᵀ )        <i>b̃</i> = Σ<sub>v</sub> ( b<sub>v</sub> − c<sub>v</sub> M<sub>v</sub> e<sub>v</sub> )</div>
+    <p class="caption">
+      A covariance term, not a rejection rule: σ<sub>δ</sub> → 0 recovers the old estimator exactly,
+      σ<sub>δ</sub> → ∞ removes the level entirely. <strong>The limit is the point</strong> — as a corner
+      is seen more often <code>M<sub>v</sub> → D<sub>v</sub>⁻¹</code> and it contributes only its
+      <em>within</em>-corner information, so the effective sample size becomes the number of
+      <em>distinct</em> corners, not the number of sightings.
+    </p>
+  </div>
+
+  <div class="panel">
+    <h3>What decides whether a wrong mount comes back</h3>
+<div class="eq"><span class="c">inject θ₀ into the mount ⇒ the prediction moves by Jθ₀ ⇒ r → r − Jθ₀ ⇒ b → b − Hθ₀</span>
+
+Δθ̂ = ( <i>H</i> + I )⁻¹ <i>H</i> θ₀          <span class="c">per eigendirection:  λ / (1 + λ)</span>
+
+<b>recovery = 1 − ( σ<sub>post</sub> / σ<sub>prior</sub> )²</b>       <span class="c">the fraction of prior variance the data removed</span></div>
+    <dl class="gloss">
+      <dt>consequence 1</dt><dd>Recoverability is a property of the <em>information</em>, not the amount of data. A corner seen again from the same place raises no λ and buys no recovery.</dd>
+      <dt>consequence 2</dt><dd>The injection experiment is <strong>predictable from the posterior alone</strong>. Measured: the identity predicts <strong>0.454</strong> for the ricoh against <strong>0.454</strong> recovered, and 0.992 for the zed against 0.984 — so injecting is a consistency check on the estimator, not a second independent fact.</dd>
+    </dl>
+  </div>
+
+  <div class="panel">
+    <h3>Why a panorama loses its yaw and a pinhole does not</h3>
+<div class="eq"><span class="c">equirect:  u = (α/2π + ½)·W</span>
+∂u/∂δ = <i>W / 2π</i>                    <span class="c">CONSTANT across the image</span>
+
+<span class="c">pinhole:   u = f<sub>x</sub>·x/y + c<sub>x</sub>,   θ = atan(x/y)</span>
+∂u/∂δ = <b>f<sub>x</sub> · sec²θ</b>                 <span class="c">GROWS toward the edge of the field</span></div>
+    <div class="diagram">
+    <svg viewBox="0 0 700 230" role="img" aria-label="Plot: the pixel shift produced by one degree of yaw, normalised to its value at the image centre. The panorama's is a flat line; the pinhole's rises by 84 percent toward both edges of the field.">
+      <text class="lbl" x="24" y="20">∂u/∂δ, relative to the image centre</text>
+      <line class="edge" x1="60" y1="190" x2="650" y2="190"/>
+      <line class="edge" x1="60" y1="190" x2="60" y2="50"/>
+      <text class="cov" x="52" y="154" text-anchor="end">1.0</text>
+      <text class="cov" x="52" y="120" text-anchor="end">1.5</text>
+      <text class="cov" x="60" y="208" text-anchor="middle">left edge</text>
+      <text class="cov" x="350" y="208" text-anchor="middle">centre of the field</text>
+      <text class="cov" x="640" y="208" text-anchor="middle">right edge</text>
+      <polyline class="edge o" points="60,150 132,150 205,150 277,150 350,150 422,150 495,150 567,150 640,150"/>
+      <text class="cov" x="350" y="142" text-anchor="middle" style="fill:var(--optic)">panorama — flat</text>
+      <polyline class="edge b" points="60,116 132,131 205,142 277,148 350,150 422,148 495,142 567,131 640,116"/>
+      <text class="cov" x="120" y="106" text-anchor="middle" style="fill:var(--base)">pinhole — sec²θ</text>
+      <text class="cov" x="640" y="106" text-anchor="end" style="fill:var(--base)">+84%</text>
+    </svg>
+    </div>
+    <p class="caption">
+      A constant shift is <em>exactly the signature of</em> <code>δ<sub>v</sub></code>. So on the panorama
+      yaw and a corner's own offset are degenerate and only the spread across distinct corners separates
+      them; on the pinhole one corner seen at several places in the image separates them by itself.
+      ★★★ <strong>The panorama's virtue is what costs it yaw</strong> — the uniform angular resolution
+      chosen to break the pitch/height ridge is the same property that creates the yaw degeneracy.
+    </p>
+  </div>
+
+  <div class="panel">
+    <h3>Attribution · inject 1.0° of yaw at one site, read all three channels</h3>
+    <div class="tblwrap"><table class="ledger">
+      <thead><tr><th>injected into</th><th>ricoh mount</th><th>zed mount</th><th>closure</th><th>predicted?</th></tr></thead>
+      <tbody>
+        <tr><td>ricoh mount</td><td><strong>−0.454</strong></td><td>−0.001 <span style="color:var(--muted)">(0.03σ)</span></td><td><strong>+1.000</strong></td><td><span class="chip ok">as written</span></td></tr>
+        <tr><td>zed mount</td><td>+0.000 <span style="color:var(--muted)">(0.00σ)</span></td><td><strong>−0.984</strong></td><td><strong>−1.002</strong></td><td><span class="chip ok">as written</span></td></tr>
+        <tr><td><strong>LiDAR</strong></td><td><strong>−0.444</strong></td><td><strong>−0.982</strong></td><td><strong>−0.018</strong></td><td><span class="chip ok">the falsifier</span></td></tr>
+      </tbody>
+    </table></div>
+    <p class="caption">
+      A camera fault moves <em>one</em> mount and puts the whole injection into the closure, the two
+      cameras opposite in sign. A LiDAR fault moves <em>both</em> and leaves the closure at 1.8% — inside
+      the 3.2% band that parallax predicts, because a LiDAR error rotates corners about the LiDAR's own
+      origin and the two cameras sit at different offsets from it. ★ Pre-registering that row as exactly
+      zero would have made it fire at 3.4σ on a fault that was not there.
+    </p>
+  </div>
+
+  <div class="grid2">
+    <div class="panel">
+      <div class="tblwrap"><table><caption>Recovered fraction, per axis</caption>
+        <thead><tr><th>&nbsp;</th><th>ricoh · panorama</th><th>zed · pinhole</th></tr></thead>
+        <tbody>
+          <tr><td>yaw 1.0°</td><td class="num">0.454 ± 0.175</td><td class="num" style="color:var(--optic)">0.984 ± 0.018</td></tr>
+          <tr><td>pitch 1.0°</td><td class="num" style="color:var(--optic)">1.006 ± 0.002</td><td class="num">0.900 ± 0.028</td></tr>
+          <tr><td>height 5 cm</td><td class="num">0.944 ± 0.001</td><td class="num">0.985 ± 0.001</td></tr>
+          <tr><td>yaw, nuisance OFF</td><td class="num" style="color:var(--dead)">0.998 ± 0.004</td><td class="num" style="color:var(--dead)">0.995 ± 0.006</td></tr>
+        </tbody>
+      </table></div>
+      <p class="caption" style="margin-top:12px">
+        The last row is why the nuisance exists: the same rows return the injection almost perfectly with
+        a standard error of four thousandths of a degree — succeeding completely while overstating its
+        certainty by two orders of magnitude.
+      </p>
+    </div>
+    <div class="panel">
+      <div class="tblwrap"><table><caption>The complementarity, on one tour</caption>
+        <thead><tr><th>&nbsp;</th><th>ricoh</th><th>zed</th></tr></thead>
+        <tbody>
+          <tr><td>σ(yaw)</td><td class="num">±0.175°</td><td class="num" style="color:var(--optic)">±0.018°</td></tr>
+          <tr><td>σ(pitch)</td><td class="num" style="color:var(--optic)">±0.002°</td><td class="num">±0.032°</td></tr>
+          <tr><td>pairs</td><td class="num">91 152</td><td class="num">11 821</td></tr>
+          <tr><td>corners</td><td class="num">21</td><td class="num">20</td></tr>
+        </tbody>
+      </table></div>
+      <p class="caption" style="margin-top:12px">
+        The zed's yaw is <strong>ten times sharper on eight times fewer pairs</strong>. Not sample size —
+        geometry. <strong>The panorama carries pitch and height, the pinhole carries yaw.</strong>
+      </p>
+    </div>
+  </div>
+
+  <div class="callout">
+    <span class="lede-tag">A prediction that failed, and was worth more than one that held</span>
+    <p class="big">
+      The zed's recovery was predicted at <strong>0.477</strong> by the design-effect argument — the same
+      reasoning that gave <strong>0.463</strong> for the ricoh, against 0.454 measured. The zed returned
+      <strong>0.984</strong>.
+    </p>
+    <p>
+      Not a small miss: the wrong model. The design effect assumes the <em>within</em>-corner information
+      about yaw is nil, which is exactly true of a panorama and false of a pinhole. What replaced it is a
+      sharper claim than the one that failed — recoverability is set by the projection's geometry, is
+      readable in advance from σ<sub>post</sub>/σ<sub>prior</sub>, and differs per camera in a way that
+      makes the pair worth more than either alone.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><h2>Where the two blocks touch</h2></div>
+  <div class="rule both"></div>
+  <p class="sec-note">
+    The blocks are estimated separately, but they are not independent. Two couplings cross between them,
+    and each one means a number from one block cannot be read without a number from the other.
+  </p>
+
+  <div class="panel">
+<div class="eq"><span class="c">① the camera's time offset is not a time</span>
+   <i>cam_dt</i>  =  T · <b>k_v</b>
+   <span class="c">→ a dt in pixels is a delay only once the base's own scale is known,
+     and only from the SAME run. Read alone, it is a velocity in disguise.</span>
+
+<span class="c">② the mount's yaw and the corner's own offset arrive identically</span>
+   ∂r_u/∂<i>yaw</i>  =  ∂r_u/∂<u>δ_v</u>  =  constant
+   <span class="c">→ within one corner they cannot be told apart at all. Across corners,
+     only the SPREAD of δ separates them — 23 numbers, not 395 171.</span></div>
+  </div>
+
+  <div class="callout" style="border-left-color:var(--optic)">
+    <span class="lede-tag" style="color:var(--optic)">The excitation is the same question in both blocks</span>
+    <p>
+      Every parameter above is identified by one covariate, so <em>the informative motion is whatever
+      makes that covariate move</em>. Driving <strong>toward</strong> a corner varies range and feeds
+      pitch and height. Driving <strong>past</strong> it sweeps bearing and separates a metric map error
+      from a pixel detector bias. Turning feeds <code>k_ω</code>; distance feeds <code>k_v</code> and
+      <code>δk_wheel</code>.
+    </p>
+    <p class="big">
+      Only one parameter wants something the work does not already supply. <code>b_ω</code>'s covariate
+      is elapsed time alone, so its information-maximising action is the one that spends time and nothing
+      else — <strong>the optimal excitation for a gyro bias is to stand still.</strong> A zero-velocity
+      update, arrived at by derivation rather than adopted as a technique.
+    </p>
+    <p>
+      An apartment tour supplies every other covariate for free: a turn greater than half a radian every
+      3.6 m, 46 rad per 100 m. The need for a calibration manoeuvre and its cost are the same variable,
+      so an affordance must overcome its own justification — and <strong>the only one this platform
+      justifies is a pause.</strong>
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><h2>Degeneracy ledger</h2></div>
+  <div class="rule both"></div>
+  <p class="sec-note">
+    Every pair that shares a residual row, what breaks it, and whether the apartment supplies that.
+  </p>
+  <div class="panel">
+    <div class="tblwrap"><table class="ledger">
+      <thead><tr><th>coupled pair</th><th>shared row</th><th>what separates them</th><th>status</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>k_ω ↔ δk_wheel</td><td>r_head</td>
+          <td>rotation vs distance. Measured ρ = −0.27; a tour mixes both freely.</td>
+          <td><span class="chip ok">broken</span></td>
+        </tr>
+        <tr>
+          <td>k_ω ↔ b_ω</td><td>r_head</td>
+          <td>Δθ vs T — that is, <em>rate diversity</em>. Measured ρ = −0.007: an apartment turns at many
+              different speeds, so this barely couples at all.</td>
+          <td><span class="chip ok">broken</span></td>
+        </tr>
+        <tr>
+          <td>b_ω ↔ δk_wheel</td><td>r_head</td>
+          <td>time vs distance. ρ = −0.09 on short episodes, −0.29 on long ones — lengthening an episode
+              makes this <em>worse</em>, which is what arm 6 measured.</td>
+          <td><span class="chip warn">episode-dependent</span></td>
+        </tr>
+        <tr>
+          <td>ε_yaw ↔ k_lat</td><td>r_cross</td>
+          <td>forward vs lateral travel. Shadow has no lateral travel, so nothing separates them — but
+              nothing needs to: k_lat is unobservable on its own.</td>
+          <td><span class="chip dead">moot</span></td>
+        </tr>
+        <tr>
+          <td>pitch ↔ height</td><td>r_v</td>
+          <td>d²/h vs 1/d — range diversity. ρ = −0.98 on the zed's narrow field, −0.12 on the panorama.</td>
+          <td><span class="chip warn">camera-dependent</span></td>
+        </tr>
+        <tr>
+          <td>yaw ↔ δ_v</td><td>r_u</td>
+          <td>Nothing, within a corner: both are a constant shift. Only the spread across 23 distinct
+              corners, which is 23 measurements and not 395 171.</td>
+          <td><span class="chip dead">limits yaw</span></td>
+        </tr>
+        <tr>
+          <td>yaw ↔ common detector bias</td><td>r_u</td>
+          <td>Nothing at all. A bias shared by every corner <em>is</em> yaw. Only an external instrument
+              decides, which is what ground truth is for.</td>
+          <td><span class="chip dead">unidentifiable</span></td>
+        </tr>
+      </tbody>
+    </table></div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><h2>What the robot learns, and what changes when it does</h2></div>
+  <div class="rule both"></div>
+  <p class="sec-note">
+    The parameters are not the deliverable. A running robot never reads them; it drives, predicts, and is
+    corrected. So the question that matters is where each learned number <em>enters</em> that loop, and
+    which measurable thing moves when it does. Both answers turned out to be different from the ones
+    assumed at the start, and the difference is the most useful thing on this page.
+  </p>
+
+  <div class="panel">
+    <h3>The loop the module lives in</h3>
+    <div class="diagram">
+    <svg viewBox="0 0 700 250" role="img" aria-label="A cycle: driving produces a prediction from the odometry model, the localiser corrects it, and the size of that correction is the residual the calibration block is fitted to; the fitted parameters feed back into the prediction.">
+      <rect class="comp" x="26" y="46" width="112" height="36" rx="5"/>
+      <text x="82" y="69" text-anchor="middle">act · drive</text>
+
+      <rect class="node" x="212" y="46" width="184" height="36" rx="5"/>
+      <text x="304" y="69" text-anchor="middle">predict  p̂ = f(u ; θ)</text>
+
+      <rect class="node" x="470" y="46" width="200" height="36" rx="5"/>
+      <text x="570" y="69" text-anchor="middle">localiser correction</text>
+
+      <rect class="comp" x="212" y="176" width="458" height="36" rx="5"/>
+      <text x="441" y="199" text-anchor="middle">θ ← argmin Σ w · ‖ est − pred ‖²</text>
+
+      <path class="edge b" d="M138 64 L 206 64" marker-end="url(#ar)"/>
+      <path class="edge o" d="M396 64 L 464 64" marker-end="url(#ar)"/>
+      <path class="edge o" d="M570 82 C 570 140, 600 194, 670 194"/>
+      <path class="edge b" d="M240 176 C 200 150, 190 110, 240 82"/>
+      <text class="cov" x="176" y="132" text-anchor="middle" style="fill:var(--base)">θ</text>
+
+      <text class="cov" x="430" y="42" text-anchor="middle">‖ est − pred ‖</text>
+      <text class="cov" x="430" y="28" text-anchor="middle" style="fill:var(--optic)">the correction load</text>
+      <text class="cov" x="648" y="150" text-anchor="end" style="fill:var(--optic)">the free teacher</text>
+
+      <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6"
+        orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--hair)"/></marker></defs>
+    </svg>
+    </div>
+    <p class="caption">
+      Nothing here is a calibration procedure. The localiser is already computing, every cycle, the exact
+      quantity the parameters are fitted to — <em>how far its own correction had to move the prediction.</em>
+      Ordinary driving is the experiment, and the corrector is the teacher.
+    </p>
+  </div>
+
+  <div class="panel">
+    <h3>What one apartment tour teaches, and where the number goes</h3>
+    <div class="tblwrap"><table class="ledger">
+      <thead><tr><th>learned</th><th>moved by</th><th>σ<sub>post</sub>/σ<sub>prior</sub></th><th>what it changes in the running robot</th></tr></thead>
+      <tbody>
+        <tr><td>k_v</td><td>distance</td><td class="num">0.142</td>
+          <td>scales every odometry step, so the pose the localiser starts each cycle from is nearer the truth</td></tr>
+        <tr><td>δk_wheel</td><td>distance</td><td class="num">0.126</td>
+          <td>removes the heading drift that grows with distance — a curved dead-reckoned path becomes straight</td></tr>
+        <tr><td>ε_yaw</td><td>forward travel</td><td class="num">0.162</td>
+          <td>removes a systematic sideways lean in dead reckoning between corrections</td></tr>
+        <tr><td>b_ω</td><td>elapsed time</td><td class="num">0.244</td>
+          <td>stops heading from creeping while the robot stands still — the reason a pause is worth taking</td></tr>
+        <tr><td>k_ω</td><td>rotation</td><td class="num">0.293</td>
+          <td>scales turns, so a commanded 90° arrives as 90°</td></tr>
+        <tr><td style="color:var(--dead)">k_lat</td><td>lateral travel</td><td class="num" style="color:var(--dead)">0.998</td>
+          <td><span class="chip dead">nothing</span> a differential drive never asks the question</td></tr>
+        <tr><td>cam yaw</td><td>corner sightings</td><td class="num">±0.216°</td>
+          <td>where a LiDAR corner is predicted to land in the image — the RGB edge residual and the corner
+              association both read it</td></tr>
+        <tr><td>cam pitch, height</td><td>range diversity</td><td class="num">ρ = −0.98 (zed)</td>
+          <td>the same, in elevation; on the panorama the two separate, on the narrow field they do not</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+
+  <div class="panel">
+    <h3>What moved when calibration was switched on · measured, three campaigns</h3>
+    <div class="tblwrap"><table class="ledger">
+      <thead><tr><th>endpoint</th><th>healthy robot</th><th>robot mis-scaled by 10%</th><th>verdict</th></tr></thead>
+      <tbody>
+        <tr><td>accuracy (RPE)</td>
+          <td>37.6 → 37.2 mm/m, |t| &lt; 1.4 — but d ≈ 0.7 at n = 13/11 is <strong>~39% power</strong>,
+              so a null is the <em>modal</em> outcome of a real effect</td>
+          <td>64.5 → 48.7 mm/m, t = 3.00</td>
+          <td><span class="chip warn">unresolved at 200 m</span></td></tr>
+        <tr><td>optimiser firing</td>
+          <td>4.92% → 1.11% once; <strong>5.41% → 5.08%</strong> on repeat (d = 0.08)</td>
+          <td>5.80% → 6.49%, no change</td>
+          <td><span class="chip dead">did not reproduce</span></td></tr>
+        <tr><td>iterations per solve</td>
+          <td colspan="2">13.29 · 13.27 · 13.90 · 13.48 — flat across a tenfold span of model error</td>
+          <td><span class="chip dead">flat</span></td></tr>
+        <tr><td>correction load<br><span class="mono" style="font-size:12px">‖est − pred‖ per metre</span></td>
+          <td>per solve 22.0 → 17.3 mm, t = 2.41, d = 0.94 — the only significant statistic in that table</td>
+          <td>87.2 → 58.8 mm/m, t = 3.57, d = 1.59</td>
+          <td><span class="chip ok">responds in both</span></td></tr>
+      </tbody>
+    </table></div>
+    <p class="caption">
+      Correction per solve across four conditions on one script definition — native calibrated
+      <span class="mono">17.30</span>, 10% calibrated <span class="mono">18.11</span>, native uncalibrated
+      <span class="mono">20.24</span>, 10% uncalibrated <span class="mono">25.59</span> mm — is
+      <em>monotone in model error over more than an order of magnitude</em>, while iterations per solve stay
+      inside 1.05×. ⚠ Comparisons are within session only: an earlier campaign's correction column was a
+      different computation and its raw logs are gone, so no cross-session level of this quantity is
+      established in either direction.
+    </p>
+  </div>
+
+  <div class="callout">
+    <span class="lede-tag">The result to state, and the one to stop stating</span>
+    <p class="big">
+      Calibration reliably reduces <strong>the error the optimiser must remove</strong>, and reliably does
+      <strong>not</strong> reduce how often or how hard it solves.
+    </p>
+    <p>
+      A healthy robot's accuracy does not improve, and that is the correct outcome rather than a
+      disappointing one: the localiser was already removing the odometry's scale error either way. Grading
+      calibration on corrected output measures <em>the corrector</em>. The endpoint that answers is the
+      optimiser's <em>input</em> — the correction load — because nothing downstream can absorb it and,
+      unlike a firing count, it cannot saturate.
+    </p>
+    <p>
+      The effort reading did not survive repetition. A 4.4× drop in firing appeared once and came back
+      <span class="mono">5.41 → 5.08%</span> under the same conditions; firing sorts by <em>session</em>,
+      not by treatment, and between-session drift exceeds every within-session effect. Iterations per solve
+      — the actual work — never moved at all. <strong>Free energy is not compute:</strong> at 0.5 m/s and
+      10 Hz a 10% scale error makes ~5 mm of drift per cycle, and Gauss–Newton converging from 2.2 mm
+      instead of 1.5 mm takes the same 13 iterations.
+    </p>
+    <p>
+      ★ The two non-significant results above look alike and are not, and their remedies are opposites.
+      <strong>Firing</strong> is a bad endpoint: it counts whether an indicator crossed a threshold, so it
+      discards magnitude and saturates, and no amount of driving repairs it — replace it. <strong>Healthy-robot
+      accuracy</strong> is a sound instrument on too small an arm: ~500 m per leg would give it 80% power —
+      drive further. Discounting an effect for missing significance in an underpowered arm is the exact
+      mirror of believing one because it is large.
+    </p>
+    <p>
+      What survives is sharper than what was claimed: the correction load <em>is</em> the prediction error
+      the self-model failed to account for. Reducing it is the whole of what self-calibration does for a
+      running robot — and on a broken one, that is the difference between 72.6 and 36.0 mm/m as
+      <code>k_v</code> converges, i.e. <strong>a 10%-mis-scaled robot recovering to as-new accuracy while
+      still driving.</strong>
+    </p>
+  </div>
+
+  <div class="callout" style="border-left-color:var(--optic)">
+    <span class="lede-tag" style="color:var(--optic)">How the knowledge is held between runs</span>
+    <p>
+      What persists on disk is <strong>evidence</strong> — the information matrix and its right-hand side —
+      never fitted values. Restoring <span class="mono">(H, b)</span> and re-adding the prior at solve time
+      resumes a measurement; restoring a fitted number would be a ratchet that no later observation could
+      argue with. The same rule sets the shape of a future update: a parameter learned downstream may only
+      <em>loosen</em> the belief it came from, never tighten it.
+    </p>
+    <p>
+      And there is no calibration behaviour to schedule. Every covariate above is supplied by an apartment
+      tour for free — a turn over half a radian every 3.6 m — so the need for a manoeuvre and its cost are
+      the same variable, and an affordance would have to overcome its own justification. The single
+      exception is <code>b_ω</code>, whose only covariate is elapsed time: <strong>the optimal excitation
+      for a gyro bias is to stand still.</strong>
+    </p>
+  </div>
+
+  <div class="callout">
+    <span class="lede-tag">What it will not learn, however long it drives</span>
+    <p>
+      Four limits are structural, and each shows up as a posterior that will not leave its prior:
+      <code>k_lat</code> (no lateral travel to ask with), <code>dt</code> (no edge into any residual), a
+      detector bias common to every corner (<em>it is</em> yaw, and nothing internal separates them), and the
+      absolute mounts (a rotation shared by all three devices is invisible to a test that compares them —
+      closure shows the devices tell one story, never that the story is true).
+    </p>
+    <p class="big">
+      A fifth is quantitative and sharper. With the per-corner offset in the model, the data's information
+      about camera yaw falls to the between-corner scale — <span class="mono">±0.216°</span> of data against
+      a <span class="mono">±0.201°</span> prior. <strong>A 1.0° yaw error is therefore predicted to come back
+      as ≈0.46°, not 1.0°</strong> <span class="chip warn">predicted · not yet run</span>: from a wrong start,
+      on 23 corners, a camera's yaw <em>cannot be fully calibrated away by driving.</em>
+    </p>
+    <p>
+      The remedy that follows is not more driving past the same corners — tracking adds rows to a cluster,
+      never new clusters — but <strong>more distinct corners</strong>. That is a statement about where to
+      take the robot, which is the most actionable thing the whole exercise produced.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><span class="tag optic">Block II · closed</span><h2>Applying it, without the loop running away</h2></div>
+  <div class="rule optic"></div>
+  <p class="sec-note">
+    Everything above measures. Until 2026-09-03 none of it was <em>applied</em>: the camera block
+    estimated its mount continuously and wrote the result nowhere, because the correction was a static
+    configuration value read once at start-up. Closing that path is a short piece of code and a long
+    piece of care — a feedback loop into a perception input has two ways to fail quietly, and both had
+    to be designed out rather than tuned around.
+  </p>
+
+  <div class="panel">
+    <h3>The two failures, and the fixed point that removes them</h3>
+<div class="eq"><span class="c">① evidence is measured AGAINST a mount. Correct the mount and it describes one that is gone.</span>
+   r → r − J m            <i>H</i> unchanged        b → b − <i>H</i> m        <span class="c">rebase: exact, nothing discarded</span>
+
+<span class="c">② re-centring the prior on each new mount removes the prior's pull, and a weakly</span>
+<span class="c">   informed axis then walks away one small honest step at a time.</span>
+   minimise  ‖r + Jx‖²_W  +  ‖x − <b>applied</b>‖²      <span class="c">the prior stays anchored on the GRAPH extrinsic</span>
+
+<span class="c">apply the increment x, rebase, accumulate — and the loop is stationary in ONE step:</span>
+   Σ m  =  ( <i>H</i> + I )⁻¹ b₀   <span class="c">= the posterior mean of the error relative to the graph</span></div>
+    <dl class="gloss">
+      <dt>informed axis</dt><dd>converges to the truth and stays: measured <strong>0.984 of a 1.000° truth</strong> over 12 cycles, late steps 0.006°.</dd>
+      <dt>uninformed axis</dt><dd>H → 0 gives x → <code>applied</code>, so the increment is <em>−applied</em> and the accumulated correction <strong>decays back to zero</strong>. The conservative behaviour is a consequence, not a rule that was added.</dd>
+      <dt>no gate</dt><dd>the increment is the posterior mean, already shrunk by how much the data informs the axis. A threshold on "informed enough" would be a cruder second copy of a judgement the posterior has already made.</dd>
+      <dt>one refusal</dt><dd>it will not run on an <em>unmarginalised</em> solve. An estimate that has absorbed each corner's own detection bias must not be written into an extrinsic — that refusal, and not a magnitude limit, is the safety argument.</dd>
+    </dl>
+  </div>
+
+  <div class="grid2">
+    <div class="panel">
+      <div class="tblwrap"><table><caption>What the loop has applied · live</caption>
+        <thead><tr><th>&nbsp;</th><th>ricoh</th><th>zed</th></tr></thead>
+        <tbody>
+          <tr><td>pitch</td><td class="num">+0.030°</td><td class="num">−0.240°</td></tr>
+          <tr><td>height</td><td class="num">+0.002 m</td><td class="num">−0.008 m</td></tr>
+          <tr><td>yaw</td><td class="num">+0.166°</td><td class="num">−0.338°</td></tr>
+        </tbody>
+      </table></div>
+      <p class="caption" style="margin-top:12px">
+        The zed's applied correction lands where the offline injection experiment independently put its
+        mount error (pitch −0.217°, yaw −0.269°), which is the fixed point doing what it claims.
+      </p>
+    </div>
+    <div class="panel">
+      <div class="tblwrap"><table><caption>and whether it stays there · ricoh yaw, 25 s apart</caption>
+        <thead><tr><th>sample</th><th>applied yaw</th><th>pool</th></tr></thead>
+        <tbody>
+          <tr><td>t1</td><td class="num">+0.159°</td><td class="num">108 619</td></tr>
+          <tr><td>t2</td><td class="num">+0.197°</td><td class="num">117 202</td></tr>
+          <tr><td>t3</td><td class="num">+0.204°</td><td class="num">124 931</td></tr>
+          <tr><td>t4</td><td class="num">+0.183°</td><td class="num">132 875</td></tr>
+          <tr><td>t5</td><td class="num">+0.178°</td><td class="num">142 526</td></tr>
+          <tr><td>t6</td><td class="num">+0.166°</td><td class="num">150 270</td></tr>
+        </tbody>
+      </table></div>
+      <p class="caption" style="margin-top:12px">
+        It rises, turns, and comes back — range 0.046°, or <strong>0.26σ</strong> of its own ±0.175°.
+        A ratchet is monotone and does not turn around; this is an estimate breathing as evidence
+        arrives, which the anchored prior is there to permit.
+      </p>
+    </div>
+  </div>
+
+  <div class="callout">
+    <span class="lede-tag">The sign, and why a closed-loop test is not optional</span>
+    <p class="big">
+      The first run of the loop simulator <strong>diverged to −53° on a 1.0° truth in twelve cycles.</strong>
+    </p>
+    <p>
+      <code>Solution::p</code> is <code>−x</code>, and every place that reports it negates it again, so
+      the correction that cancels the reported error is <code>−p</code>. Applying <code>+p</code> drives
+      the loop the wrong way — <em>linearly</em>, a little more each cycle, each step individually
+      plausible. No static test sees this: the estimator is right, the algebra is right, and the sign is
+      only wrong once the output is fed back to the input. It would have walked the camera extrinsic out
+      of the building over an afternoon.
+    </p>
+  </div>
+
+  <div class="callout" style="border-left-color:var(--optic)">
+    <span class="lede-tag" style="color:var(--optic)">Where the correction stops, deliberately</span>
+    <p>
+      It corrects the agent's <em>own</em> camera model — how it projects a LiDAR corner into the image,
+      and therefore what it contributes to localisation. It does <strong>not</strong> write the shared
+      <code>body→camera</code> transform in the scene graph, so every other consumer still reads the
+      uncalibrated mount. That containment is the same one the static boresight was given: a private
+      offset is how you test a correction without a wrong sign propagating to everything at once.
+    </p>
+    <p>
+      It is a stage and not the destination. The mechanism to publish already exists — the per-robot
+      boresight is written into that shared transform at start-up — so what remains is a judgement about
+      trust, and the criterion is the one this page can supply: <em>the corrections settling across
+      sessions, not merely within one.</em>
+    </p>
+  </div>
+</section>
+
+<footer>
+  <p>Sources · base block <code>calibration_estimator.h</code>, episodes from <code>etc/runs/arm6_base_episodes.csv</code> (253 episodes, 203.1 m, 146.4 rad).</p>
+  <p>Optical block <code>mount_lidar_pair.h</code> + <code>camera_calibration.h</code>, evidence from <code>etc/camera_calib_Shadow_{ricoh,zed}.txt</code>.</p>
+  <p>Correlations computed by re-assembling each Fisher matrix from the persisted sufficient statistics — no value on this page is illustrative.</p>
+  <p>Feedback path <code>mount_lidar_pair.h</code> (<code>rebase</code>, <code>apply_correction</code>) + <code>camera_ingestor.cpp</code>; the loop is driven for 12 cycles by <code>tools/mount_replay.cpp --selftest</code> before it is allowed near a robot.</p>
+  <p style="margin-top:14px">Plan and pre-registration · <code>VALIDATION_THREE_DEVICE_CORNERS.md</code> · <code>EXPERIMENT.md</code> §10–12</p>
+</footer>
+
+</div>
+
+<script>
+// The two correlation matrices, measured. Rendered here rather than hand-written as cells so the
+// numbers and their shading can never drift apart.
+const BASE = {
+  names:["k_v","ε_yaw","k_ω","b_ω","k_lat","δk_w"],
+  m:[[1,0,0,0,0,0],
+     [0,1,0,0,-0.006,0],
+     [0,0,1,-0.007,0,-0.270],
+     [0,0,-0.007,1,0,-0.089],
+     [0,-0.006,0,0,1,0],
+     [0,0,-0.270,-0.089,0,1]]
+};
+const OPTIC = {
+  names:["pitch","height","yaw"],
+  m:[[1,-0.981,-0.017],
+     [-0.981,1,0.018],
+     [-0.017,0.018,1]]
+};
+function shade(v){
+  if (Math.abs(v) >= 0.999) return "transparent";
+  const a = Math.min(Math.abs(v), 1) * 0.55;
+  const hue = v < 0 ? "var(--neg)" : "var(--pos)";
+  return `color-mix(in srgb, ${hue} ${(a*100).toFixed(0)}%, transparent)`;
+}
+function render(id, data){
+  const t = document.getElementById(id);
+  if (!t) return;
+  const head = document.createElement("thead");
+  const hr = document.createElement("tr");
+  hr.appendChild(document.createElement("th"));
+  for (const n of data.names){ const th = document.createElement("th"); th.textContent = n; hr.appendChild(th); }
+  head.appendChild(hr); t.appendChild(head);
+  const body = document.createElement("tbody");
+  data.m.forEach((row, i) => {
+    const tr = document.createElement("tr");
+    const lab = document.createElement("td"); lab.textContent = data.names[i]; tr.appendChild(lab);
+    row.forEach((v, j) => {
+      const td = document.createElement("td");
+      td.className = "num";
+      td.textContent = i === j ? "1" : v.toFixed(3).replace("-", "−");
+      if (i !== j) td.style.background = shade(v);
+      if (i === j) td.style.color = "var(--muted)";
+      tr.appendChild(td);
+    });
+    body.appendChild(tr);
+  });
+  t.appendChild(body);
+}
+render("m-base", BASE);
+render("m-optic", OPTIC);
+</script>

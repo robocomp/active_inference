@@ -25,6 +25,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -298,9 +299,23 @@ namespace rc
         /// factor may take from the graph — room<-robot is the STATE VARIABLE. See image_edge_source.h.
         Eigen::Matrix3f cam_R_robot = Eigen::Matrix3f::Identity();
         Eigen::Vector3f cam_t_robot = Eigen::Vector3f::Zero();
+        /// The live self-calibration correction ALREADY INSIDE cam_R_robot/cam_t_robot when this
+        /// observation was extracted (pitch rad, height m, yaw rad, camera axes). Recorded per
+        /// observation because it is what makes factor B of the experiment answerable: removing it
+        /// re-creates the nominal mount for THESE measurements, so the two conditions are the same
+        /// image points differing only in the prediction — the pairing the design asks for, and
+        /// exact rather than first order because the shadow RE-PROJECTS instead of linearising.
+        Eigen::Vector3f mount_correction = Eigen::Vector3f::Zero();
         /// The projection model, carried WITH the evidence so the factor needs no DSR and no Input
         /// plumbing. Plain numbers, verified against CameraAPI::project() at bring-up.
         CameraModel     cam;
+        /// WHICH camera produced this observation ("zed", "ricoh", ...). Provenance, not a knob.
+        /// ★ It travels with the evidence rather than being read from config at the point of use,
+        ///   because `ImageEdge.camera` is runtime-overridable: a consumer that asks the config
+        ///   answers with the camera selected NOW, not the one this observation came from. The
+        ///   diagnostic logs key their filenames on this, so a second run cannot silently
+        ///   overwrite the first run's record of a DIFFERENT camera.
+        std::string     camera;
 
         [[nodiscard]] std::size_t sample_count() const noexcept
         {

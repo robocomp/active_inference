@@ -1291,6 +1291,25 @@ public:
         int   n_segments   = 0;
         std::int64_t ts_ms = 0;
     };
+    /// ── FACTOR B of the camera experiment, measured in the shadow ───────────────────────────────
+    /// The same window solved under the mount as it is (calibrated) and as it would be with the
+    /// self-calibration removed (nominal). Both poses are published RAW and never differenced here:
+    /// the pose error each implies needs ground truth, which lives in the agent and not in this
+    /// class, and a pre-combined delta is exactly the pairing that hides a mismatch.
+    struct FactorB
+    {
+        bool  valid = false;
+        std::int64_t ts_ms = 0;
+        Eigen::Vector3f pose_calibrated = Eigen::Vector3f::Zero();
+        Eigen::Vector3f pose_nominal    = Eigen::Vector3f::Zero();
+        Eigen::Vector3f correction      = Eigen::Vector3f::Zero();
+    };
+    FactorB get_factor_b() const
+    {
+        std::scoped_lock lk(factor_b_mutex_);
+        return factor_b_;
+    }
+
     ImageEdgeStats get_image_edge_stats() const
     {
         std::scoped_lock lk(image_edge_stats_mutex_);
@@ -1372,6 +1391,8 @@ private:
    std::vector<ClosureObs> pending_closures_;
    mutable std::mutex image_edge_stats_mutex_;
    ImageEdgeStats     image_edge_stats_{};
+   mutable std::mutex factor_b_mutex_;
+   FactorB            factor_b_{};
    mutable std::mutex image_edges_mutex_;
    ImageEdgeObs       latest_image_edges_;
    std::vector<TriplePoint> latest_triple_points_;   ///< display copy, see triple_points()
@@ -1689,7 +1710,17 @@ private:
     std::mt19937     wall_rng_{12345};
     mutable std::mutex wall_map_mutex_;              // guards derived_polygon_ (read by the main thread)
     std::vector<Eigen::Vector2f> derived_polygon_;   // the published polygon (map frame, CCW)
+    bool projection_failed_logged_ = false;          // one warning per stretch of unclosed projections
     std::atomic<bool> map_ready_{false};
+    // THE CEILING THE LIDAR MEASURED (m, body frame; 0 = not measured yet). Set from the ingestor's
+    // startup/running ceiling check, which decides between a ring of ceiling returns and a wall-top
+    // ring by which shape the measured radius fits. Read by the scene graph, which publishes it on
+    // the room node, and by the image-edge module, which projects the wall-ceiling contour.
+    std::atomic<float> measured_ceiling_m_{0.f};
+public:
+    [[nodiscard]] float measured_ceiling() const noexcept { return measured_ceiling_m_.load(std::memory_order_relaxed); }
+    void set_measured_ceiling(float z) noexcept { measured_ceiling_m_.store(z, std::memory_order_relaxed); }
+private:
     bool wall_reanchored_ = false;
     std::vector<wallseg::WallSegment> last_wall_segments_;   // this frame's segments (viewer)
     wallmap::FrameResult last_wall_frame_;
@@ -1697,6 +1728,8 @@ private:
     int wall_stat_frames_ = 0, wall_stat_assoc_ = 0, wall_stat_segs_ = 0,
         wall_stat_twins_ = 0, wall_stat_births_ = 0, wall_stat_deaths_ = 0,
         wall_stat_contained_ = 0;   // rate-limited health counters
+    int wall_frames_since_rederive_ = 0, wall_rejected_since_rederive_ = 0,
+        wall_rederives_ = 0;        // global re-derivation cadence (WallMap::Params::rederive_*)
     // Wall-SLAM analysis CSVs (loc thread only; imbued classic — es_ES writes commas otherwise).
     // etc/wall_slam.csv: one row per frame. etc/wall_slam_events.csv: one row per birth/death,
     // carrying the Z DISTRIBUTION of the points the wall was built from — the column that separates

@@ -903,7 +903,7 @@ MotionCalibEnabled  = true
 # With apply=false the covariate stays raw and the residual stays the FULL error, so recovery should
 # jump toward 100%. Any account not involving feedback predicts no change.
 # ⚠ TRUE for all normal operation. The robot drives UNCALIBRATED while this is false.
-MotionCalibApply    = true    # normal operation. false = open-loop arm (estimate, do not apply).
+MotionCalibApply = true    # normal operation. false = open-loop arm (estimate, do not apply).
 # Which parameters may ACT, bitmask: 1=k_v 2=eps_yaw 4=k_omega 8=b_omega 16=k_lat 32=dk_wheel.
 # -1 = all (normal). 1 = forward scale only. Estimation and logging are unaffected either way.
 # ⚠ THE FINDING THAT PUT THIS AT 1 WAS RETRACTED, 2026-08-31. It read: "with everything applied
@@ -967,6 +967,24 @@ MotionCalibFitModelGain  = 2.0    # x mean |SDF| over the episode, into the posi
                         # makes Shadow's calibrator uniformly MORE conservative than P3Bot's, which is
                         # the safe direction, but it means the P3Bot tuning story does not transfer
                         # and the value should be revisited once Shadow has episodes to look at.
+# ── HOW MUCH MOTION CLOSES AN EPISODE — the episode LENGTH, and the dominant lever ──────────────
+# An episode closes once EITHER threshold is met, carrying whatever correction accumulated over that
+# span. They are IDENTIFIABILITY triggers, not sensitivity knobs: below them the Jacobian rows are ~0
+# and the episode teaches nothing whatever its residual says (a parked robot must never close one).
+# ★★★ BUT THEY ALSO SET HOW MUCH A GIVEN MOTION TEACHES, which is why they are here. Information in a
+# channel goes as (accumulated covariate)^2 while episodes arrive at 1/T, so information per unit of
+# motion is LINEAR in the trigger. Measured 2026-09-01: episodes close at the MINIMUM
+# (0.25 m / 0.43 m/s = 0.58 s against an observed 0.55 s median), so the estimator sits at the floor
+# of its dominant lever; controlling for speed, information per second rises 16x from the shortest to
+# the longest duration bin. A 3.14 rad hairpin closing as ONE episode is worth 1580 against 103 for
+# the same hairpin chopped into sixteen 0.20 rad pieces — 15.4x.
+# ⚠ NOT free: the Jacobian linearises the whole accumulated motion as one increment, and the carry
+# caps below are a GUESS at where that stops being true. Raising these is the subject of §12, whose
+# pre-registered discriminator is that longer episodes must improve k_omega's SIGMA without moving
+# its VALUE — a value shift on the same robot and route is the signature of linearisation breaking.
+MotionCalibEpisodeMinTrans = 1.00   # m of accumulated forward travel
+MotionCalibEpisodeMinRot = 0.80   # rad of accumulated rotation. ⚠ ARM 6 'long' LEG — the baseline
+                                    # is 0.20 rad (~11 deg) with MinTrans 0.25; restore both together.
 MotionCalibYawP0    = 1.0e-4   # (rad)^2 initial uncertainty on the body/mount yaw offset (1σ ≈ 0.57°)
 MotionCalibScaleP0  = 4.0e-4   # fractional² initial uncertainty on both scales (1σ ≈ 2%)
                         # ★ These two are PRIORS, not measurements — how little is known before any
@@ -1083,7 +1101,7 @@ BoundaryMuQualityThreshold      = 0.084
 #                After closure the walls stay variables (their precision only grows) and a new wall
 #                can still be born by model comparison — there is no second gate inside this mode.
 [RoomShape]
-MapMode              = "given"
+MapMode = "given"
 # σ_ε of the hierarchical Manhattan prior φᵢ − θ₀ − kπ/2 ~ N(0, σ_ε²) — a tight PRIOR, not a hard
 # constraint: a chamfer is born class-less (no factor) when no class beats ManhattanOffPrior.
 ManhattanSigmaDeg    = 2.0
@@ -1459,6 +1477,37 @@ maxSlots     = 1          # newest window slot only, like corners
 mountPitchSigma  = 0.0035   # rad (~0.2 deg)   ⚠ NOT MEASURED ON SHADOW
 mountHeightSigma = 0.010    # m                ⚠ NOT MEASURED ON SHADOW
 mountYawSigma    = 0.0035   # rad              ⚠ NOT MEASURED ON SHADOW
+# ── The per-vertex offset nuisance (mount_lidar_pair.h) ──────────────────────────────────────────
+# Prior sigma on a CORNER'S OWN image offset, in pixels. MEASURED 2026-09-02: per-vertex means reach
+# −17 px and spread sd 5.3 px across 23 corners, while the mount signal being estimated is 1.1 px of
+# yaw. Without this term the solve counts one corner's thousands of sightings as thousands of
+# independent measurements and reports a yaw sigma 127x too small — smaller than its own honest error.
+#   0    = OFF, and OFF is bit-for-bit the pre-2026-09-02 solve. This is the default on purpose:
+#          turning it on changes every mount sigma the agent reports, which is the user's call.
+#   5.3  = the measured between-corner spread. ⚠ Empirical Bayes: measured from the same data it is
+#          applied to, so it is a hyperparameter, NOT a prior the data then confirms.
+# ★ Expect yaw's sigma to open by ~130x (to about 0.216 deg, the between-vertex SEM) and pitch and
+#   height by much less. That asymmetry is the pre-registered prediction, not a side effect: yaw is a
+#   constant pixel shift and is degenerate with a corner's own offset, while pitch and height are
+#   range-dependent and survive. See VALIDATION_THREE_DEVICE_CORNERS.md §2.
+# ⚠ Evidence files written before this existed carry no vertices and CANNOT be marginalised; the
+#   agent says so and refuses rather than reverting silently. Delete etc/camera_calib_*.txt to
+#   re-accumulate under the new model.
+mountVertexOffsetSigmaPx = 5.3
+# ★ 2026-09-03: ARMED. 0 = the pre-2026-09-02 solve, which counted each of a corner's thousands of
+#   sightings as independent and reported a yaw sigma 127x too small. 5.3 px is the measured spread
+#   of the per-corner offsets. It is also a PRECONDITION for mountApply below: an estimate taken
+#   with this off has absorbed each corner's own detection bias, and must not be written into an
+#   extrinsic. The solve REFUSES to be applied unless this is on.
+mountApply = true
+# ★ 2026-09-03: the camera extrinsic is now CLOSED-LOOP. The pooled solve is fed back into the mount
+#   on the camera's own axes (the ones J differentiates), the evidence is re-referenced to the mount
+#   that results, and the prior stays anchored on the GRAPH extrinsic so the total is always the
+#   posterior mean of the error relative to it. No gate and no magnitude limit: the posterior mean is
+#   already shrunk by how much the data informs each axis, so a well-informed axis applies nearly all
+#   of itself (zed yaw, 0.98) and an uninformed one applies nothing and DECAYS back to the graph.
+#   Proven not to run away before being switched on: tools/mount_replay.cpp --selftest drives the
+#   real loop for 12 cycles (converges to 0.984 of a 1.000 truth, late steps 0.006 deg).
 
 # ── Structural features ported from config_p3bot_webots.toml, 2026-08-29 ───────────────────────
 # ★★ mountYawCorrection is DELIBERATELY ABSENT, i.e. zero. P3Bot's +0.814 deg was measured on
@@ -1629,7 +1678,12 @@ camera             = "ricoh"
 mountPitchSigma    = 0.0017
 mountHeightSigma   = 0.010
 mountYawSigma      = 0.0035
-mountYawCorrection = 0.01421
+# ★ 2026-09-03: MOVED. This is now robot_concept/etc/config_p3bot.toml's
+#   Transforms.boresight_yaw_ricoh, which corrects the body->ricoh RT edge itself, so every agent
+#   reads the corrected extrinsic instead of room_concept holding a private offset. Leaving a value
+#   here as well would apply it TWICE. The key still works if set — it remains the right place to
+#   test an unconfirmed correction without touching the shared description.
+mountYawCorrection = 0.0
 wallPositionSigma  = 0.015
 # ── The rest of P3Bot's own values ─────────────────────────────────────────────────────────────
 Period                          = 16

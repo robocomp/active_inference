@@ -400,9 +400,21 @@ struct RoomConfig
     float IMAGE_EDGE_MOUNT_PITCH_SIGMA = 0.0035f; // ImageEdge.mountPitchSigma (rad, ~0.2°)
     float IMAGE_EDGE_MOUNT_HEIGHT_SIGMA= 0.010f;  // ImageEdge.mountHeightSigma (m)
     float IMAGE_EDGE_MOUNT_YAW_SIGMA   = 0.0035f; // ImageEdge.mountYawSigma (rad)
+    /// Prior sigma on a CORNER'S OWN image offset, in pixels — the per-vertex nuisance that stops the
+    /// mount solve counting one corner's thousands of sightings as thousands of independent
+    /// measurements (mount_lidar_pair.h). 0 = OFF, and OFF is bit-for-bit the pre-2026-09-02 solve.
+    /// ⚠ DEFAULTS OFF DELIBERATELY: turning it on changes every mount sigma the agent reports, and
+    ///   that is the user's call, not a silent upgrade.
+    float IMAGE_EDGE_MOUNT_VERTEX_OFFSET_SIGMA_PX = 0.0f;  // ImageEdge.mountVertexOffsetSigmaPx
     // Local boresight correction applied to the graph's camera<-robot extrinsic. NOT a tuning knob:
     // a measured physical angle. 0 = use the graph's extrinsic unchanged.
     float IMAGE_EDGE_MOUNT_YAW_CORR    = 0.0f;    // ImageEdge.mountYawCorrection (rad)
+    // Feed the pooled mount solve back into the camera extrinsic as it is measured.
+    // ⚠ OFF by default: it changes a live perception input, and every camera-mount number recorded
+    //   before 2026-09-03 was taken open-loop. It REFUSES unless the per-vertex nuisance is running
+    //   (ImageEdge.mountVertexOffsetSigmaPx > 0) — an estimate that has absorbed per-corner detector
+    //   bias must not be written into an extrinsic, and that refusal is the whole safety argument.
+    bool  IMAGE_EDGE_MOUNT_APPLY       = false;   // ImageEdge.mountApply
     // Per-CONTOUR map-position uncertainty — nuisance column [4]. Not a mount property: how well any
     // single wall's place in the room polygon is known. MEASURED, see image_edge_types.h.
     float IMAGE_EDGE_WALL_POS_SIGMA    = 0.015f;  // ImageEdge.wallPositionSigma (m)

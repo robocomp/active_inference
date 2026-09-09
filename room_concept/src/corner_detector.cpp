@@ -468,10 +468,16 @@ CornerDetector::DetectionResult CornerDetector::detect(
         //    guess was a coin flip.
         float denom = 0.f;
         float runnerup = INFEASIBLE;
+        int   n_rivals = 0;
         for (int rr = 0; rr < R; ++rr)
         {
             denom += lik[rr][c];
-            if (rr != r) runnerup = std::min(runnerup, cost[rr][c]);   // best RIVAL for this detection
+            if (rr == r) continue;
+            runnerup = std::min(runnerup, cost[rr][c]);                // best RIVAL for this detection
+            // In gate at all? Count it. This is what the association had to CHOOSE BETWEEN, and it
+            // is the only part of the decision that survives into the log: the winning cost is
+            // truncated at the gate by construction, so it cannot report how hard the choice was.
+            if (cost[rr][c] < INFEASIBLE * 0.5f) ++n_rivals;
         }
         // ── NO EVIDENCE ⇒ NO FACTOR ────────────────────────────────────────────────────────────
         // The posterior can legitimately reach 0 (every in-gate likelihood underflowed) and NaN if any
@@ -495,6 +501,7 @@ CornerDetector::DetectionResult CornerDetector::detect(
         m.assoc_prob     = w;
         m.assoc_chi2_val = cost[r][c];
         m.runnerup_chi2  = runnerup;
+        m.n_rivals       = n_rivals;
         // Precision IS the confidence in the correspondence: an ambiguous match carries proportionally
         // less information into the loss. The loss needs no change — it already consumes `information`.
         m.information   *= w;

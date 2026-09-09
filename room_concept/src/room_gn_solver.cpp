@@ -162,8 +162,23 @@ namespace rc::gn
         class ImageEdgeFactorGn final : public IFactor
         {
         public:
-            ImageEdgeFactorGn(int offset, const ::rc::ImageEdgeObs& obs)
-                : off_(offset), obs_(obs), cam_(obs.cam) {}
+            ImageEdgeFactorGn(int offset, const ::rc::ImageEdgeObs& obs,
+                              const Eigen::Vector3f& mount_delta = Eigen::Vector3f::Zero())
+                : off_(offset), obs_(obs), cam_(obs.cam)
+            {
+                // Fold the requested mount displacement into this factor's own copy of the
+                // extrinsic, ONCE, rather than per sample. Yaw then pitch then height, the order
+                // camera_ingestor.cpp composes and tools/mount_replay.cpp injects — a correction
+                // applied on a different axis or in a different order is a different correction.
+                R_ = obs.cam_R_robot; t_ = obs.cam_t_robot;
+                if (not mount_delta.isZero())
+                {
+                    const Eigen::Matrix3f Rz(Eigen::AngleAxisf(mount_delta.z(), Eigen::Vector3f::UnitZ()));
+                    const Eigen::Matrix3f Rx(Eigen::AngleAxisf(mount_delta.x(), Eigen::Vector3f::UnitX()));
+                    R_ = Rx * Rz * R_;
+                    t_ = Rx * Rz * t_ + mount_delta.y() * Eigen::Vector3f::UnitZ();
+                }
+            }
 
             float evaluate(const State& x) const override { return accumulate(x, nullptr); }
 
@@ -199,7 +214,7 @@ namespace rc::gn
                             const Eigen::Vector3f e(smp.p_room.x() - pose.x(),
                                                     smp.p_room.y() - pose.y(), smp.p_room.z());
                             const Eigen::Vector3f p_robot = Rm * e;
-                            const Eigen::Vector3f p_cam   = obs_.cam_R_robot * p_robot + obs_.cam_t_robot;
+                            const Eigen::Vector3f p_cam   = R_ * p_robot + t_;
 
                             Eigen::Vector2d uv;
                             if (not ::rc::img::project_with_model(cam_, p_cam.cast<double>(), uv))
@@ -240,6 +255,8 @@ namespace rc::gn
 
             int off_ = 0;
             const ::rc::ImageEdgeObs& obs_;
+            Eigen::Matrix3f R_ = Eigen::Matrix3f::Identity();   ///< the extrinsic THIS factor evaluates under
+            Eigen::Vector3f t_ = Eigen::Vector3f::Zero();
             ::rc::CameraModel         cam_;
         };
 
@@ -726,7 +743,23 @@ namespace rc::gn
             WallPointFactor f(0, 3, a.pts, a.weights, inv_var, P.rfe_huber_delta, n_slot, a.pda);
             f.linearize(x, sys);
             const Eigen::Matrix2f block = sys.H.block<2, 2>(3, 3);
-            if (block.allFinite()) w->information += block;
+            if (not block.allFinite()) continue;
+            // Information-form fusion (#5): the slot's own optimum for this wall is the Gauss-Newton
+            // step from the linearisation, μ_slot = x_lin − H⁻¹ b, so H μ_slot = H x_lin − b. Fused
+            // with the carried (Λ, μ): Λ' = Λ + H, Λ' μ' = Λ μ + H x_lin − b. φ is unwrapped about
+            // the wall's current estimate before fusing and wrapped after.
+            const Eigen::Vector2f b_block = sys.b.segment<2>(3);
+            const Eigen::Vector2f x_lin(w->phi, w->d);
+            const Eigen::Vector2f mu_old(w->phi + wrap_pi(w->prior_mu.x() - w->phi), w->prior_mu.y());
+            const Eigen::Matrix2f lam_new = w->prior_info + block;
+            const Eigen::Vector2f rhs = w->prior_info * mu_old + block * x_lin - b_block;
+            if (lam_new.determinant() > 1e-12f and lam_new.allFinite())
+            {
+                const Eigen::Vector2f mu_new = lam_new.inverse() * rhs;
+                if (mu_new.allFinite()) w->prior_mu = Eigen::Vector2f(wrap_pi(mu_new.x()), mu_new.y());
+            }
+            w->prior_info = lam_new;
+            w->information += block;   // the gating / corner-sigma precision keeps growing as before
         }
     }
 
@@ -858,7 +891,8 @@ namespace rc::gn
             {
                 const auto& slot = W[static_cast<size_t>(i)];
                 if (slot.image_edges.empty() or not slot.image_edges.cam.valid) continue;
-                fs.push_back(std::make_unique<ImageEdgeFactorGn>(idx.offset(i), slot.image_edges));
+                fs.push_back(std::make_unique<ImageEdgeFactorGn>(idx.offset(i), slot.image_edges,
+                                                                 P.image_edge.mount_delta));
             }
         }
 
@@ -896,10 +930,12 @@ namespace rc::gn
                 const auto& w = in.walls->walls[k];
                 const int o = lay.wall_off[k];
                 if (o < 0) continue;
-                if (w.information.allFinite() and w.information.trace() > 0.f)
-                    fs.push_back(std::make_unique<WallPriorFactor>(o, w.phi, w.d, w.information));
+                // The prior pulls toward what the DROPPED slots said (w.prior_mu), not toward the
+                // wall's current estimate — the latter made carried information mere damping (#5).
+                if (w.prior_info.allFinite() and w.prior_info.trace() > 0.f)
+                    fs.push_back(std::make_unique<WallPriorFactor>(o, w.prior_mu.x(), w.prior_mu.y(), w.prior_info));
                 if (w.k >= 0 and w.manhattan_var > 0.f and lay.theta0 >= 0)
-                    fs.push_back(std::make_unique<RoomWallFactor>(o, lay.theta0, w.k, w.manhattan_var));
+                    fs.push_back(std::make_unique<RoomWallFactor>(o, lay.theta0, w.k, w.manhattan_var / std::max(in.walls->params.manhattan_gain, 1e-6f)));
             }
             if (lay.theta0 >= 0 and in.walls->theta0_information > 0.f)
                 fs.push_back(std::make_unique<Theta0PriorFactor>(lay.theta0, in.walls->theta0, in.walls->theta0_information));

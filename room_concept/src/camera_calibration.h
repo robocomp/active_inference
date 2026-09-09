@@ -40,6 +40,7 @@
 #include <charconv>
 #include <iomanip>
 #include <limits>
+#include <cstdio>
 #include <fstream>
 #include <locale>
 #include <string>
@@ -136,14 +137,35 @@ namespace rc::camcal
                  + "_" + camera_ + ".txt"; }
 
         void add(const rc::mount::PairObs& o) { acc_.add(o); }
+        /// Prior sigma on a corner's own image offset, in pixels. 0 = the nuisance is off and the
+        /// solve is the old one exactly. Set it on the pool AND on every calib channel, or two
+        /// cameras would be reported under two different models on the same screen.
+        void set_vertex_offset_sigma_px(double px) noexcept { acc_.offset_sigma_px = px; }
+        /// Apply a correction to the mount this evidence describes: re-references the evidence and
+        /// moves the prior's anchor together, so the accumulated total remains the posterior mean
+        /// of the error relative to the ORIGINAL graph extrinsic. See Accum::applied.
+        void apply_correction(const Eigen::Vector4d& dp) { acc_.apply_correction(dp); }
+        [[nodiscard]] const Eigen::Vector4d& applied() const noexcept { return acc_.applied; }
+        [[nodiscard]] double vertex_offset_sigma_px() const noexcept { return acc_.offset_sigma_px; }
         void reset() { acc_.reset(); }
         [[nodiscard]] long pairs() const noexcept { return acc_.n; }
         [[nodiscard]] rc::mount::Accum::Solution solve() const { return acc_.solve(); }
 
         /// Sufficient statistics only. See the header note on why this is not the fitted values.
+        /// ★ ATOMIC: the evidence is written to a sibling temp file and RENAMED into place. A rename
+        ///   within one directory is atomic on POSIX, so a reader sees either the whole previous file
+        ///   or the whole new one, and a process killed mid-save leaves the previous evidence intact
+        ///   instead of a truncated file.
+        ///   MEASURED 2026-09-03: reading the file during an in-place rewrite returned a header with
+        ///   NO per-vertex blocks — which is exactly the shape the loader now (correctly) refuses, so
+        ///   the old behaviour could turn a mistimed `kill` into a pool that refuses to resume.
+        ///   ⚠ This protects against a kill and against a concurrent reader. It does NOT protect
+        ///     against a power cut: there is no fsync, so the rename may reach the disk first.
         bool save(const std::string& path) const
         {
-            std::ofstream f(path, std::ios::out | std::ios::trunc);
+            const std::string tmp = path + ".tmp";
+            {
+            std::ofstream f(tmp, std::ios::out | std::ios::trunc);
             if (not f.is_open()) return false;
             f.imbue(std::locale::classic());   // CLAUDE.md: never a comma decimal separator
             // ★ FULL precision. The default 6 significant figures silently truncates H, whose
@@ -165,6 +187,38 @@ namespace rc::camcal
             for (int i = 0; i < 4; ++i)
                 for (int j = i; j < 4; ++j) f << "H," << i << ',' << j << ',' << acc_.H(i, j) << '\n';
             for (int i = 0; i < 4; ++i) f << "b," << i << ',' << acc_.b(i) << '\n';
+            // ── PER-VERTEX PARTIALS (format 2) ───────────────────────────────────────────────────
+            // ★ The aggregate above is kept and still written, so an older reader loads this file and
+            //   gets exactly what it got before. What it CANNOT do is marginalise, and `format` is
+            //   how a newer reader knows the difference — an aggregate carries no vertex, and a
+            //   cluster structure cannot be recovered from a sum over clusters.
+            f << "format,2\n";
+            // ★ THE APPLIED CORRECTION IS PART OF THE EVIDENCE. Restoring H and b without it would
+            //   resume a measurement referenced to a mount the agent no longer has, and the loop
+            //   would re-apply the same correction on every restart — a ratchet across sessions
+            //   rather than within one.
+            f << "applied," << acc_.applied(0) << ',' << acc_.applied(1) << ','
+              << acc_.applied(2) << ',' << acc_.applied(3) << '\n';
+            for (const auto& [vtx, v] : acc_.per_vertex)
+            {
+                if (v.n <= 0 or not v.finite()) continue;
+                f << "V," << vtx << ",n," << v.n << '\n';
+                f << "V," << vtx << ",rTr," << v.rTr << '\n';
+                for (int i = 0; i < 4; ++i)
+                    for (int j = i; j < 4; ++j) f << "V," << vtx << ",A," << i << ',' << j << ',' << v.A(i, j) << '\n';
+                for (int i = 0; i < 4; ++i)
+                    for (int j = 0; j < 2; ++j) f << "V," << vtx << ",c," << i << ',' << j << ',' << v.c(i, j) << '\n';
+                for (int i = 0; i < 2; ++i)
+                    for (int j = i; j < 2; ++j) f << "V," << vtx << ",D," << i << ',' << j << ',' << v.D(i, j) << '\n';
+                for (int i = 0; i < 4; ++i) f << "V," << vtx << ",b," << i << ',' << v.b(i) << '\n';
+                for (int i = 0; i < 2; ++i) f << "V," << vtx << ",e," << i << ',' << v.e(i) << '\n';
+            }
+            // The write is only now known to have succeeded. The previous version returned true
+            // unconditionally, so a full disk reported a saved pool it had not saved.
+            f.flush();
+            if (not f.good()) { f.close(); std::remove(tmp.c_str()); return false; }
+            }   // f closed here — the rename must not race the stream's own flush
+            if (std::rename(tmp.c_str(), path.c_str()) != 0) { std::remove(tmp.c_str()); return false; }
             return true;
         }
 
@@ -215,6 +269,12 @@ namespace rc::camcal
                 }
                 if (tok[0] == "n" and tok.size() == 2 and num(tok[1], v))   in.n = static_cast<long>(v);
                 else if (tok[0] == "rTr" and tok.size() == 2 and num(tok[1], v)) in.rTr = v;
+                else if (tok[0] == "applied" and tok.size() == 5)
+                {
+                    double a0 = 0, a1 = 0, a2 = 0, a3 = 0;
+                    if (num(tok[1], a0) and num(tok[2], a1) and num(tok[3], a2) and num(tok[4], a3))
+                        in.applied = Eigen::Vector4d(a0, a1, a2, a3);
+                }
                 else if (tok[0] == "H" and tok.size() == 4)
                 {
                     double di = 0, dj = 0;
@@ -233,9 +293,69 @@ namespace rc::camcal
                         if (i >= 0 and i < 4) in.b(i) = v;
                     }
                 }
+                // V,<vertex>,<what>,<i>[,<j>],<value> — the per-vertex partials (format 2).
+                // ⚠ >= 4, NOT >= 5. `V,<vertex>,n,<count>` and `V,<vertex>,rTr,<value>` are FOUR
+                //   tokens; the A/c/D rows are six and b/e are five. With the bound at 5 the two
+                //   4-token lines never reached their branches, so every RESTORED block came back
+                //   with n = 0 — and solve() skips a block with n <= 0, which meant resumed evidence
+                //   was silently dropped from the marginalisation while its rows stayed in the
+                //   aggregate H. A fresh start always worked, so nothing ever pointed at it; the
+                //   coverage check above is what made it visible (2026-09-03).
+                else if (tok[0] == "V" and tok.size() >= 4)
+                {
+                    double dv = 0;
+                    if (not num(tok[1], dv)) continue;
+                    rc::mount::VertexBlock& vb = in.per_vertex[static_cast<int>(dv)];
+                    const std::string& what = tok[2];
+                    double di = 0, dj = 0;
+                    if (what == "n"   and tok.size() == 4 and num(tok[3], v)) { vb.n = static_cast<long>(v); continue; }
+                    if (what == "rTr" and tok.size() == 4 and num(tok[3], v)) { vb.rTr = v; continue; }
+                    if (what == "b" and tok.size() == 5 and num(tok[3], di) and num(tok[4], v))
+                    { const int i = static_cast<int>(di); if (i >= 0 and i < 4) vb.b(i) = v; continue; }
+                    if (what == "e" and tok.size() == 5 and num(tok[3], di) and num(tok[4], v))
+                    { const int i = static_cast<int>(di); if (i >= 0 and i < 2) vb.e(i) = v; continue; }
+                    if (tok.size() != 6 or not num(tok[3], di) or not num(tok[4], dj) or not num(tok[5], v))
+                        continue;
+                    const int i = static_cast<int>(di), j = static_cast<int>(dj);
+                    if (what == "A" and i >= 0 and i < 4 and j >= 0 and j < 4) { vb.A(i, j) = v; vb.A(j, i) = v; }
+                    else if (what == "c" and i >= 0 and i < 4 and j >= 0 and j < 2) vb.c(i, j) = v;
+                    else if (what == "D" and i >= 0 and i < 2 and j >= 0 and j < 2) { vb.D(i, j) = v; vb.D(j, i) = v; }
+                }
             }
             if (in.n <= 0 or not in.H.allFinite() or not in.b.allFinite()) return 0;
+            // ⚠ EVIDENCE WRITTEN BEFORE THE PER-VERTEX PARTITION CANNOT BE MARGINALISED. Its rows
+            //   are already summed across corners, and no post-hoc step recovers which corner each
+            //   came from. Flagging it makes the solve REFUSE the nuisance rather than quietly
+            //   returning the old, 127x-overconfident answer under the new model's name.
+            // ★ THE TEST IS COVERAGE, NOT PRESENCE. "No vertex blocks at all" only catches a pure
+            //   format-1 file. A MIXED one — a format-1 pool resumed by the new binary and then saved
+            //   with the partials of the pairs seen since — has blocks, passes a presence check, and
+            //   is the dangerous case: the Schur complement would subtract per-vertex terms from an
+            //   aggregate containing rows those terms do not describe, giving a number that belongs
+            //   to neither model and looks entirely plausible. Every attributed pair increments BOTH
+            //   counters, so sum(V.n) < n is exact evidence of unattributed mass.
+            //   MEASURED 2026-09-03 on a live start: ricoh n=833400 with 2030 attributed, zed
+            //   n=150009 with 90006 — both would have marginalised against 831370 and 60003
+            //   unaccounted rows.
+            long attributed = 0;
+            for (const auto& [vid, vb] : in.per_vertex) attributed += vb.n;
+            if (attributed < in.n)
+            {
+                in.legacy_unattributed = true;
+                qWarning().nospace()
+                    << "[camcal] " << QString::fromStdString(path) << ": " << (in.n - attributed)
+                    << " of " << in.n << " pairs carry no per-vertex partials"
+                    << (in.per_vertex.empty() ? " (format 1)" : " (MIXED format-1 and format-2 evidence)")
+                    << ". They are restored for the aggregate solve, but the per-vertex offset nuisance "
+                    << "CANNOT run on them and will REFUSE. Delete the file to re-accumulate under the "
+                    << "new model.";
+            }
+            // ★ `in` is a fresh Accum, so assigning it would reset the nuisance's prior sigma to its
+            //   default and the solve would silently revert to the old model on any run that resumed
+            //   from disk. The knob is CONFIGURATION, not evidence; it must survive a load.
+            const double keep_sigma = acc_.offset_sigma_px;
             acc_ = in;
+            acc_.offset_sigma_px = keep_sigma;
             return static_cast<std::size_t>(acc_.n);
         }
 

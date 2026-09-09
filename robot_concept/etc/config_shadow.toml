@@ -195,6 +195,18 @@ dsr_lidar_fps = -1
 # Use RT interpolation for timestamped graph transforms. Disable to fall back to nearest sample.
 interpolate_rt = true
 
+# ── This robot's camera boresights (rad, about the robot vertical) ────────────────────────────
+# The angle between where a camera actually looks and where its body->camera RT edge says it does.
+# Written into that edge at startup, so the SHARED extrinsic is the corrected one and every agent
+# reads the same geometry. Idempotent: the value is set, never accumulated.
+# ⚠ NOT MEASURED ON SHADOW, hence zero. P3Bot's ricoh is +0.814 deg, measured against the Webots
+#   supervisor on P3BOT'S mount; copying that number here would be fabricating an extrinsic for a
+#   different camera on a different robot. Shadow's is to be measured from scratch — the camera
+#   self-calibration in room_concept now estimates exactly this quantity, so the number should come
+#   from there once its corrections are trusted enough to publish.
+boresight_yaw_zed   = 0.0
+boresight_yaw_ricoh = 0.0
+
 [Component.Debug]
 Verbose = false
 

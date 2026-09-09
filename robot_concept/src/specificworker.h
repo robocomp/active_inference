@@ -114,6 +114,18 @@ private:
 		//   "ice" : always bridge via the Camera360RGB Ice proxy (never defer to an external DDS producer).
 		//   "dds" : never bridge; always treat ricoh_omni_dds as the external DDS producer and only monitor.
 		std::string RICOH_SOURCE  = "auto";
+		// ── PER-CAMERA BORESIGHT, this robot's own ─────────────────────────────────────────────
+		// The angle between where a camera actually looks and where its RT edge says it looks, about
+		// the ROBOT VERTICAL, in radians. It lives HERE, beside the robot it belongs to, because it
+		// is a property of one physical mount: P3Bot's ricoh was measured at +0.814 deg and Shadow's
+		// has never been measured, so a single shared number would be a fabricated extrinsic on one
+		// of the two. Applied by this agent to the body->camera RT edge, which makes the corrected
+		// extrinsic the SHARED one every consumer reads, instead of each consumer carrying a private
+		// copy (room_concept's ImageEdge.mountYawCorrection was exactly that, and its own header
+		// said the value "belongs in the robot geometry" once confirmed).
+		// 0 = leave the graph's extrinsic untouched.
+		float       BORESIGHT_YAW_ZED   = 0.f;   // Transforms.boresight_yaw_zed   (rad)
+		float       BORESIGHT_YAW_RICOH = 0.f;   // Transforms.boresight_yaw_ricoh (rad)
 		bool        ENABLE_LIDAR  = true;   // 3D LiDAR cloud    (rc/lidar3d/points)
 		// LiDAR source selector (Media.lidar_source): mirror of the above for the two lidar3d_dds
 		// producers (helios + bpearl). "auto" negotiate, "ice" always bridge, "dds" never bridge.

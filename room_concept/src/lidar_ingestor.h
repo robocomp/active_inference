@@ -120,6 +120,16 @@ private:
     // Runtime upper bound of the high band (m, body frame). Starts at LIDAR_HIGH_MAX_HEIGHT and is
     // lowered to (detected ceiling - margin) by the startup check. Ingest-thread only, so plain float.
     float high_max_z_ = 0.f;
+public:
+    /// THE MEASURED CEILING HEIGHT (m, body frame) and how many returns voted for it, or 0 when the
+    /// check has not yet said CEILING. The check already locates the plane — it found 3.01 m against
+    /// a stated 3.00 on the apartamento — but until 2026-09-03 the number was used only to cap the
+    /// wall band and was then discarded, while everything that needs a ceiling read a hand-typed
+    /// constant. Written by the ingest thread, read by anyone: atomic, and only ever set to a value
+    /// the likelihood test accepted.
+    std::atomic<float> measured_ceiling_z_{0.f};
+    std::atomic<int>   measured_ceiling_pts_{0};
+private:
     // Startup geometry-check state (ingest thread only; re-armed by start()).
     bool  geom_check_done_ = false;
     int   geom_sweeps_     = 0;

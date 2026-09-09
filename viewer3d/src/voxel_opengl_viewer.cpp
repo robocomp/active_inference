@@ -1075,7 +1075,7 @@ void VoxelOpenGLViewer::paintGL()
         room_vbo_.bind();
         room_vbo_.allocate(lidar_draw_vertices.data(), static_cast<int>(lidar_draw_vertices.size() * sizeof(Vertex)));
         program_.setUniformValue("u_round_points", 1);
-        program_.setUniformValue("u_point_size", 5.5f);
+        program_.setUniformValue("u_point_size", 2.5f);
         glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(lidar_draw_vertices.size()));
         program_.setUniformValue("u_point_size", 4.5f);
         room_vbo_.release();

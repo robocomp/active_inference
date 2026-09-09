@@ -2047,6 +2047,8 @@ namespace rc
         wall_stat_births_ += last_wall_frame_.births;
         wall_stat_deaths_ += last_wall_frame_.deaths;
         wall_stat_contained_ += last_wall_frame_.splice_rejected;
+        ++wall_frames_since_rederive_;
+        wall_rejected_since_rederive_ += last_wall_frame_.splice_rejected;
         if (wall_stat_frames_ >= 200)
         {
             // splice_rej counts qualified candidates that found no valid place on the polygon —
@@ -2068,7 +2070,35 @@ namespace rc
     void RoomConcept::wall_slam_after_solve(UpdateResult& res)
     {
         wall_map_.merge_indistinguishable();
+        // GLOBAL re-derivation on the bench's cadence (WallMap::Params::rederive_*): trace the
+        // observed free space around the solved pose and adopt its cycle iff it explains more.
+        // Until 2026-09-02 only the bench ran this — the agent's polygon could only move by the
+        // local splice jumps, and the bench IoU graded an algorithm the agent never executed.
+        if (wall_map_.params.enable_rederive
+            and (wall_frames_since_rederive_ >= wall_map_.params.rederive_every_frames
+                 or wall_rejected_since_rederive_ >= wall_map_.params.rederive_after_rejections))
+        {
+            const int frames = wall_frames_since_rederive_, rejected = wall_rejected_since_rederive_;
+            wall_frames_since_rederive_ = 0;
+            wall_rejected_since_rederive_ = 0;
+            auto newest_cpu = window_mgr_.newest().pose.detach().to(torch::kCPU);
+            const Eigen::Vector2f robot_xy(newest_cpu[0].item<float>(), newest_cpu[1].item<float>());
+            if (wall_map_.re_derive(robot_xy))
+            {
+                ++wall_rederives_;
+                qInfo().noquote() << QString("[room][wall-slam] GLOBAL re-derivation adopted (#%1): %2 walls in the cycle, after %3 frames / %4 rejected splices")
+                                         .arg(wall_rederives_).arg(wall_map_.order.size()).arg(frames).arg(rejected);
+                if (wall_events_csv_.is_open())
+                    wall_events_csv_ << wall_frame_ts_ << ",rederive," << wall_map_.order.size() << ",,,"
+                                     << rejected << ',' << frames << ",,,,\n" << std::flush;
+            }
+        }
         auto poly = wall_map_.build_polygon();
+        // The PUBLISHED layout: exactly Manhattan by construction — the output-stage projection
+        // on a COPY (WallMap::manhattan_polygon). The raw polygon keeps every in-loop role
+        // (re-anchor trigger and bbox, model update, status): six in-loop hard-Manhattan
+        // variants were measured to degrade estimation; only what leaves the agent is projected.
+        auto pub = wall_map_.manhattan_polygon();
         if (poly.closed and poly.verts.size() >= 3)
         {
             if (poly.publishable and not wall_reanchored_)
@@ -2083,6 +2113,7 @@ namespace rc
                 reanchor_map_frame(c, rot);
                 wall_reanchored_ = true;
                 poly = wall_map_.build_polygon();
+                pub  = wall_map_.manhattan_polygon();
                 map_ready_ = true;
                 res.covariance = current_covariance;
                 qInfo() << "[room][wall-slam] polygon CLOSED and publishable:" << poly.verts.size()
@@ -2090,9 +2121,24 @@ namespace rc
                         << "origin moved by (" << c.x() << "," << c.y() << ") m, rotated" << rot * 180.f / static_cast<float>(M_PI) << "deg.";
             }
             if (model_ != nullptr and model_->has_state())
-                model_->update_polygon_vertices(poly.verts);
+                model_->update_polygon_vertices(poly.verts);   // in-loop consumer: RAW on purpose
             std::scoped_lock lk(wall_map_mutex_);
-            derived_polygon_ = poly.verts;
+            // Publish the projected polygon only. Falling back to the raw one would alternate
+            // vertex counts and a 1-2° tilt frame to frame, which the scene graph reports as a
+            // structure change and door_concept re-keys on; a projection that fails to close keeps
+            // the last good published layout instead (logged once per stretch).
+            if (pub.closed and pub.verts.size() >= 3)
+            {
+                derived_polygon_ = pub.verts;
+                projection_failed_logged_ = false;
+            }
+            else if (not projection_failed_logged_)
+            {
+                qWarning().noquote() << "[room][wall-slam] projected polygon did not close"
+                                     << (pub.status.empty() ? "" : QString::fromStdString("— " + pub.status))
+                                     << "; keeping the last published layout";
+                projection_failed_logged_ = true;
+            }
         }
         if (poly.status != last_wall_status_)
         {
@@ -2112,7 +2158,7 @@ namespace rc
                 if (in_poly.contains(w.id) or wall_frame_ts_ - w.last_seen_ms <= 2000)
                     res.wall_view.walls.push_back(w);
         }
-        res.wall_view.polygon     = poly;
+        res.wall_view.polygon     = (pub.closed and pub.verts.size() >= 3) ? pub : poly;
         res.wall_view.seg_to_wall = last_wall_frame_.seg_to_wall;
         res.wall_view.theta0_born = wall_map_.theta0_born;
         res.wall_view.theta0      = wall_map_.theta0;
@@ -4692,6 +4738,30 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
                 dx = b.x() - a.x(); dy = b.y() - a.y();
                 dth = std::atan2(std::sin(b.z() - a.z()), std::cos(b.z() - a.z()));
             }
+
+            // ── FACTOR B: the same window, the same measured points, the NOMINAL mount ───────────
+            // The observation records the self-calibration correction that was inside its extrinsic
+            // when it was extracted, so removing that correction re-creates the mount the robot
+            // would have had with the loop switched off. Both conditions therefore differ ONLY in
+            // the prediction, which is the pairing the experiment asks for — and it is exact rather
+            // than first order, because this re-projects rather than linearising.
+            // ★ Shadow only. The authoritative solve above runs with mount_delta zero, always.
+            if (r_on.ok and not obs.mount_correction.isZero())
+            {
+                Params p_b0 = p_on;
+                p_b0.image_edge.mount_delta = -obs.mount_correction;
+                rc::gn::Input in_b0 = in; in_b0.params = &p_b0;
+                auto poses_b0 = poses_after;
+                if (const auto r_b0 = rc::gn::solve(in_b0, poses_b0, opts); r_b0.ok)
+                {
+                    std::scoped_lock lk(factor_b_mutex_);
+                    factor_b_.valid = true;
+                    factor_b_.ts_ms = timestamp_ms;
+                    factor_b_.pose_calibrated = poses_on.back();   // B1: the mount in force
+                    factor_b_.pose_nominal    = poses_b0.back();   // B0: the correction removed
+                    factor_b_.correction      = obs.mount_correction;
+                }
+            }
         }
 
         // ── The DRIVING term's own consistency ──────────────────────────────────────────────────
@@ -4798,19 +4868,27 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         if (obs.triple_points.empty()) return;
         if (not triple_csv_.is_open())
         {
-            triple_csv_.open("etc/image_edge_triple.csv", std::ios::out | std::ios::trunc);
+            // Keyed by camera for the same reason the pair log is: one camera per run, and a fixed
+            // filename means run 2 destroys run 1's record of a DIFFERENT device.
+            triple_csv_.open("etc/image_edge_triple_" + (obs.camera.empty() ? "unknown" : obs.camera)
+                                 + ".csv", std::ios::out | std::ios::trunc);
             if (triple_csv_.is_open())
             {
                 triple_csv_.imbue(std::locale::classic());   // CLAUDE.md: never a comma decimal
-                triple_csv_ << "ts_ms,vertex,at_ceiling,u_pred,v_pred,u_meas,v_meas,du,dv,"
+                triple_csv_ << "ts_ms,camera,vertex,at_ceiling,u_pred,v_pred,u_meas,v_meas,du,dv,"
                                "suu,svv,suv,cond,n_corner,n_floor,"
                                // depth_raw as published; pred_fwd and pred_range are what the MODEL
                                // says at this pose. depth_raw ~= pred_fwd means the value is the
                                // forward coordinate (assumed); depth_raw ~= pred_range, with the
                                // excess growing toward the image edge, means it is range along the
                                // ray and xyz_from_pixel_depth needs the other formula.
+                               // ★ depth_raw / range_sigma / depth_dt_ms are −1/−1/0 for EVERY row
+                               //   of a camera that advertises no depth stream (the ricoh panorama
+                               //   is one). That is a correct report of an ABSENT channel, not a
+                               //   failed measurement — `has_depth` says which of the two it is, so
+                               //   an analysis is never left to guess from a column of sentinels.
                                "depth_raw,pred_fwd,pred_range,range_m,range_sigma,depth_dt_ms,"
-                               "pose_x,pose_y,pose_theta\n";
+                               "has_depth,pose_x,pose_y,pose_theta\n";
             }
         }
         if (not triple_csv_.is_open()) return;
@@ -4827,7 +4905,7 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         const auto pred_range = [&](const TriplePoint& t) { return to_cam(t.p_room).norm(); };
         for (const auto& t : obs.triple_points)
         {
-            triple_csv_ << timestamp_ms << ',' << t.vertex << ','
+            triple_csv_ << timestamp_ms << ',' << obs.camera << ',' << t.vertex << ','
                         << (t.from == ContourClass::WallCeiling ? 1 : 0) << ','
                         << t.uv_pred.x() << ',' << t.uv_pred.y() << ','
                         << t.uv_meas.x() << ',' << t.uv_meas.y() << ','
@@ -4838,6 +4916,7 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
                         << t.depth_raw << ',' << pred_fwd(t) << ',' << pred_range(t) << ','
                         << t.range_m << ',' << t.range_sigma << ','
                         << (obs.depth_stamp_ms ? obs.depth_stamp_ms - timestamp_ms : 0) << ','
+                        << (obs.depth_stamp_ms ? 1 : 0) << ','
                         << pose.x() << ',' << pose.y() << ',' << pose.z() << '\n';
             ++triple_rows_;
             if (t.from == ContourClass::WallCeiling) ++triple_ceil_; else ++triple_floor_;

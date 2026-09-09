@@ -235,6 +235,27 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
                 }
             }
         }
+        // The ceiling can only be measured once the robot has seen enough of it, which may be after
+        // the room node was born. Republish when the measurement and the published value disagree by
+        // more than 5 cm, and only after the disagreement has held for a while: an attribute rewritten
+        // every frame is how a CRDT dot cloud grows without bound.
+        if (const float mz = room_concept_->measured_ceiling(); mz > 1.5f)
+        {
+            if (std::abs(mz - published_room_height_) > 0.05f) ++ceiling_disagree_frames_;
+            else ceiling_disagree_frames_ = 0;
+            if (ceiling_disagree_frames_ >= 60)
+            {
+                if (auto rn = G_->get_node(dsr_room_id_); rn.has_value())
+                {
+                    G_->add_or_modify_attrib_local<room_height_att>(rn.value(), mz);
+                    G_->update_node(rn.value());
+                    qInfo() << "[room] room_height republished:" << published_room_height_ << "m ->" << mz
+                            << "m (the LiDAR's ceiling; every agent reading the attribute follows)";
+                    published_room_height_ = mz;
+                }
+                ceiling_disagree_frames_ = 0;
+            }
+        }
         if (write_rt)
             dsr_update_pose(res);   // robot->room RT (skipped when the odometry publisher owns it)
         if (params_->PUBLISH_AFFORDANCE)
@@ -544,8 +565,17 @@ void RoomSceneGraph::dsr_create_room_and_reparent(const rc::RoomConcept::UpdateR
     DSR::Node room_node = DSR::Node::create<room_node_type>("room");
     room_node.attrs()[delimiting_polygon_x_str.data()] = DSR::Attribute{polygon_x, 0, 0};
     room_node.attrs()[delimiting_polygon_y_str.data()] = DSR::Attribute{polygon_y, 0, 0};
-    room_node.attrs()[room_height_str.data()] = DSR::Attribute{params_->room_height, 0, 0};
-    // TODO: change to add_or_modify_attrib_local once available
+    // THE CEILING, MEASURED WHEN WE HAVE ONE. Six agents read this attribute and nothing wrote it
+    // but this line, from a hand-typed scenario constant. The LiDAR locates the ceiling plane at
+    // startup and while running (annulus vs wall-top likelihood, no threshold) and measured 3.01 m
+    // against a stated 3.00 on the apartamento; publishing it here is what makes that measurement
+    // reach the fleet instead of only capping our own wall band.
+    const float ceiling_at_birth = room_concept_->measured_ceiling() > 1.5f
+                                 ? room_concept_->measured_ceiling() : params_->room_height;
+    G_->add_or_modify_attrib_local<room_height_att>(room_node, ceiling_at_birth);
+    published_room_height_ = ceiling_at_birth;
+    qInfo() << "[room] room node born with room_height" << ceiling_at_birth << "m"
+            << (room_concept_->measured_ceiling() > 1.5f ? "(measured by the LiDAR)" : "(stated in the scenario)");
 
     rc::provenance::stamp_creation(*G_, room_node);   // birth stamp: epoch ms + local ISO-8601
     const auto room_id_opt = G_->insert_node(room_node);

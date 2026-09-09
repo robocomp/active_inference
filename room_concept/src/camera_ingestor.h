@@ -93,6 +93,18 @@ public:
     /// localiser's own heading error (that ran ~0.18 deg sd and correlated at +0.816 with the shift).
     void set_mount_yaw_correction(float rad) noexcept { mount_yaw_correction_ = rad; }
 
+    /// ── THE LIVE CORRECTION, on the axes the ESTIMATOR differentiates ───────────────────────────
+    /// Separate from the configured boresight above, and deliberately so. That one is measured on
+    /// the ROBOT's vertical; this one uses the CAMERA's own axes — pitch about x̂_cam, height along
+    /// ẑ_cam, yaw about ẑ_cam — because those are literally the columns of `J` in mount_lidar_pair.h,
+    /// and a correction applied on a different axis than the one estimated is not that correction.
+    /// (mount_lidar_pair.h records that using the robot's axes here was a bug once already: what was
+    /// labelled "pitch" was a roll.)
+    /// Safe to call at any time: the graph extrinsic is kept untouched and the mount is rebuilt from
+    /// it, so corrections replace rather than accumulate and there is no drift through re-application.
+    void set_mount_correction(float pitch_rad, float height_m, float yaw_rad);
+    [[nodiscard]] Eigen::Vector3f mount_correction() const noexcept { return mount_corr_; }
+
     /// Convert at most one frame per `ms`. 0 = every delivered frame (the old behaviour).
     ///
     /// ★ THIS THROTTLES THE CONVERSION, NEVER THE DRAIN. The reader is RELIABLE: if its SHM pool is
@@ -190,6 +202,13 @@ private:
     bool            depth_absent_warned_ = false;
     long            depth_polls_ = 0, depth_hits_ = 0;
     float           mount_yaw_correction_ = 0.f;   ///< rad, applied about the ROBOT VERTICAL at bind
+    /// (pitch rad, height m, yaw rad) on the CAMERA's own axes — the live self-calibration term.
+    Eigen::Vector3f mount_corr_ = Eigen::Vector3f::Zero();
+    /// The graph's extrinsic with the CONFIGURED boresight already in it, and nothing else. Kept so
+    /// the live correction can be re-applied from a fixed base instead of composed onto itself.
+    Eigen::Matrix3f cam_R_robot_base_ = Eigen::Matrix3f::Identity();
+    Eigen::Vector3f cam_t_robot_base_ = Eigen::Vector3f::Zero();
+    void rebuild_extrinsic_();
     int  min_convert_ms_ = 0;      ///< see set_min_convert_interval_ms
     std::int64_t last_convert_ms_ = 0;
     long conv_seen_ = 0, conv_done_ = 0;

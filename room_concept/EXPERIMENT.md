@@ -359,6 +359,111 @@ re-cut, or given a t-statistic, and it is a different session. It is a strong hi
 look, NOT a measurement — which is an argument for pre-registering correction load in arm 5, not for
 rewriting arm 3 around it.
 
+### Arm 3R — arm 3 REPEATED with an instrument that measures work. 2026-09-01. IT DOES NOT REPRODUCE.
+
+Arm 3's conditions exactly: no injection, the native robot, `mask = 1`, calibration off then on,
+back to back in one session, bridge never restarted between legs. 219.9 m and 216.0 m, 13 and 11
+windows. Injection absence verified from behaviour: odometry/GT 1.0001 and 0.9789.
+
+| endpoint | 3R-OFF | 3R-ON | t | z | d |
+|---|---|---|---|---|---|
+| **correction per solve, mm** | **22.04** | **17.33** | **2.41** | **2.17** | **0.94** |
+| correction load, mm/m | 50.11 | 36.96 | 1.09 | 0.96 | 0.42 |
+| RPE translation, mm/m | 41.33 | 34.98 | 1.85 | 1.48 | 0.72 |
+| aligned ATE, mm | 45.2 | 43.0 | 0.53 | 0.32 | 0.22 |
+| **optimiser firing, %** | **5.41** | **5.08** | **0.20** | −0.20 | **0.08** |
+
+★★★ **ARM 3'S HEADLINE RESULT DOES NOT REPRODUCE.** Arm 3 recorded 4.92% -> 1.11%, a 4.4x drop, and
+that number is what the effort claim in the thesis rests on. Repeated under its own conditions,
+firing goes 5.41% -> 5.08%: t = 0.20, d = 0.08, nothing. What DOES move is the correction per solve,
+down 21% with the only significant statistic in the table.
+
+#### The two native-error runs are COMPATIBLE, not contradictory — and what may be quoted beside what
+
+**RPE: same code, verifiably, so arm 3 and arm 3R may be quoted side by side.** Every functional
+change to `calib_localization_ab.py` since `7f4f572` (2026-08-30 11:58, before arm 3 was driven) is
+additive — new dict keys, blocks that only append to them, print formatting, new entries in the
+pairwise loop. Nothing touches `rpe()`, `load()`, `windows()`, `aligned_ate()`, the `trans`/`rot`/`ate`
+accumulation, or `DS_TRANS`/`DTH_ROT`/`WINDOW_S`/`PARKED_MPS`/`BURST_FRAC`, and the burst/parked
+exclusions still precede the RPE computation.
+
+★ **The CORRECTION column is the opposite case and is STRONGER than "unknown definition": the script
+had no correction column until 2026-09-01** — the old header was `arm, wins, dist_m, RPE mm/m,
+RPE d/rad, ATE mm`. Arm 3's 48.99 therefore did NOT come from this tool and is definitely not the
+same computation. **Never quote it beside arm 3R's or arm 4's correction figures.**
+
+**The contrasts differ by 1.85 SE — compatible.** Levels agree: 37.56 vs 41.33 OFF (10%), 37.86 vs
+34.98 ON (8%). Contrasts differ: −0.30 vs +6.35 mm/m. But arm 3R's per-window scatter is OFF sd 10.70
+(n=13), ON sd 5.73 (n=11), pooled **8.79**, so the SE of a single run's contrast is **3.60 mm/m** and
+the two runs sit **1.85 SE** apart — routine for two runs sampling one effect.
+
+★★★ **So the statement is not "two matched runs disagree". It is that the treatment contrast at the
+native error is small relative to run-to-run variation, so a single 200 m arm cannot resolve its
+sign.** One run put it slightly negative, the other moderately positive, and neither had the
+precision to distinguish those. Same lesson as the firing channel, one level less severe: there the
+instrument could not resolve what it was quoted for at all; here the instrument is sound and the arm
+is too small for the question.
+
+★ **Sizing the confirmatory arm**: at pooled SD 8.79 and a 6.35 mm/m contrast, ~32 windows per leg
+reaches 80% power — roughly **500 m per leg**, not 200.
+
+⚠ **DO NOT CALL THE Pose-ERROR RESULT HERE "UNCHANGED" — IT IS UNDERPOWERED, NOT NULL.** RPE
+translation is 41.33 → 34.98 mm/m at **d = 0.72**, and the power to detect d = 0.72 at n = 13/11
+windows is about **39%**. A non-significant result is therefore the MODAL outcome even if the effect
+is entirely real. Arm 4's d = 1.34 at n = 10/10 had ~81% power, which is why it separated. ★ The
+claim to make is that the EFFECT SIZE grows with the dose — 0.72 at the native error, 1.34 at four
+times it — because effect size does not depend on how many windows an arm happened to yield.
+Treating a 39%-power non-detection as a measurement of zero is the mirror image of the error this
+section convicts the experiment of: discounting an effect for missing significance, having earlier
+believed one for being large. ⚠ This applies ONLY to arm 3R. Arm 3's own registered null is a
+different measurement in a different session and stands as recorded.
+
+⚠ **A CROSS-SESSION CLAIM MADE EARLIER TODAY IS WITHDRAWN.** It was reported that the correction load
+"reproduces across sessions within 8% (48.99 vs 45.27) while firing drifts 60%". The 45.27 was
+computed over ALL rows including parked ones; on the moving-only basis the instrument uses, that leg
+is 24.99 mm/m. Arm 3's raw CSVs are gone, so its 48.99 cannot be re-derived on a matching basis and
+NO cross-session comparison of correction load is established in either direction. The within-session
+arm 3R comparison above is unaffected — both its legs use one definition.
+
+#### The four conditions on one basis — what responds and what does not
+
+| condition | model error | firing % | iters/solve | **corr/solve, mm** |
+|---|---|---|---|---|
+| native, calibrated | ~0% | 5.60 | 13.64 | **17.30** |
+| injected 10%, calibrated | ~0.8% | 8.17 | 13.27 | **18.11** |
+| native, uncalibrated | ~2.9% | 5.57 | 13.99 | **20.24** |
+| injected 10%, uncalibrated | ~10% | 7.80 | 13.90 | **25.59** |
+
+★★★ **Correction per solve is MONOTONE in the model error** — 17.30, 18.11, 20.24, 25.59 against
+0%, 0.8%, 2.9%, 10%. Across a range of model error spanning more than an order of magnitude:
+
+- **`iters/solve` is FLAT within 1.05x** (13.27–13.99). The per-solve work is a constant of the
+  solver, not a function of how wrong the motion model is.
+- **Firing sorts by SESSION, not by treatment** — ~5.6% in both arm 3R legs, ~8.0% in both arm 4
+  legs. Between-session drift (1.47x) exceeds every within-session treatment effect measured, and it
+  is the documented 5x `opt/m` spread showing up again.
+
+⚠ **THAT DOES NOT EXPLAIN ARM 3, and an earlier draft of this section claimed it did.** Session
+sorting explains why the absolute LEVELS differ between arms. It cannot explain a 4.4x difference
+between two legs PAIRED INSIDE ONE SESSION, because within-session pairing evidently controls firing
+well in both arms measured here. **Arm 3's within-session 4.4x is unexplained, and its raw CSVs are
+gone, so it cannot be explained.** What is established is narrower and sufficient: the endpoint
+cannot support the interpretation placed on it, and the result does not reproduce. ★ An unexplained
+non-reproducing result reported AS unexplained is stronger than one handed a cause it cannot carry —
+which is the same error as believing a 4.4x from an instrument documented to spread fivefold.
+
+**Conclusion, stated for the thesis.** Calibration reliably reduces the ERROR THE OPTIMISER MUST
+REMOVE and reliably does not reduce how often or how hard it solves. The effort result came from a
+binary over a threshold and does not reproduce; whether it is a property of calibration is settled
+(it is not), why the original run produced it is not.
+
+★★★ **BURST-WINDOW RATE IS NULL EVERYWHERE**: 0/16 and 0/12 in arm 4, 0/13 and 0/13 in arm 3R. Zero
+burst windows in all four legs across a model error from ~0% to 10%. The localiser never lost
+tracking under any condition produced, which quantifies the corrector's slack: a 10% odometry scale
+error, 4x the robot's native error, is absorbed without one lost window. The registered third
+endpoint returns empty and that is a result, not a gap. ★ The claim that survives is about the correction load, it has a
+monotone dose-response, and it is the one to carry.
+
 ### Arm 5 — DOES THE COST APPEAR WHEN THE CORRECTOR IS SCARCE? Pre-registered 2026-09-01, not run.
 
 **The question.** Arm 4 established that an uncalibrated model raises the correction LOAD by ~1.5x
@@ -446,6 +551,565 @@ This rule exists because we broke it: the plan mutated three times on 2026-08-30
 nearly never ran.
 
 ---
+
+## 10. Optimal excitation — the analytic design, and what it says about active calibration
+
+Derived 2026-09-01, tool `tools/excitation.py` (`74f42d5`). This section replaces the question "what
+experiment identifies each parameter?" with an answer that is mostly algebra: the model is LINEAR in
+the parameters, so the Fisher information has a closed form and the optimal motion falls out of it.
+
+### 10.1 The information rate, in one line
+
+Per episode the residual is `r = J p + noise`, `J` built from the covariates (§2). For a motion held
+at constant `(v, w)` for duration `T`, every Jacobian entry is a rate times `T`, so information per
+EPISODE goes as `(rate * T)^2 / sigma^2`, and since episodes arrive at `1/T`:
+
+| parameter | Jacobian entry | information per SECOND | maximise |
+|---|---|---|---|
+| `k_v` | `v*T` (along) | `v^2 T / sigma_p^2` | **v and T** |
+| `eps_yaw` | `-v*T` (cross) | `v^2 T / sigma_p^2` | **v and T** — identical to `k_v` |
+| `k_omega` | `w*T` (head) | `w^2 T / sigma_th^2` | **w and T** |
+| `b_omega` | **`T`** (head) | **`T / sigma_th^2`** | **T only** |
+| `dk_wheel` | `v*T` (head) | `v^2 T / sigma_th^2` | **v and T** |
+| `k_lat` | `l*T` (cross) | zero on a differential base | — |
+
+Everything below follows from that table without any data:
+
+- **`k_v` and `eps_yaw` have IDENTICAL optimal designs** — same covariate, different component. A
+  numerical search "discovering" this is reproducing algebra.
+- ★★★ **`b_omega`'s Jacobian contains no rate at all.** No manoeuvre can help it; the only lever is
+  episode duration. This is why its column sits at 1.00 for every candidate the tool scores, single
+  or combined. ★ A score column stuck at 1.00 is the theory being right, not the library being short.
+- **`T` is a common factor in EVERY row.** Episode duration is the universal lever, and it is the one
+  a rate-mixture search cannot see if it holds `T` fixed. Mine did, which is why its designs lost to
+  ordinary driving until `T` was freed.
+- Two degeneracies share the heading component and have DIFFERENT cures: a single-rate pivot makes
+  every `(w, 1, v)` parallel so `k_omega`/`b_omega` go rank 1 (cured by rate diversity, cond
+  inf -> 12.4), while `dk_wheel` needs FORWARD DISTANCE, which no pivot at any rate supplies (cured
+  only by adding straights, cond inf -> 51.6 -> 32.5 with arcs). Turning separates the gyro pair;
+  DRIVING reveals the wheel mismatch.
+
+**What is NOT derivable:** `sigma^2` as a function of the motion. The formulas take it as given, but
+`pos_var` is the localiser's posterior plus the model-error terms, and its behaviour is a property of
+the localiser and the route. Measured here it FALLS with duration (log-log slope −0.20), so
+information per second scales as `T^1.20` — superlinear, and that exponent is empirical.
+
+★ **And one thing the algebra gets WRONG by construction:** information per second grows with `T`
+without bound, so the formulas say make episodes infinitely long. That must break, because the
+Jacobian linearises the whole accumulated motion as one increment. Nothing in the inverse model knows
+this; it is why `episode_carry_max_trans = 2.5 m` and `episode_carry_max_rot = 2.0 rad` exist as
+separate guards. **The design question the algebra cannot answer is how long an episode may get
+before linearisation breaks, and that is the one thing worth driving for.**
+
+### 10.2 What a dedicated manoeuvre can buy — the ceiling, from the platform
+
+A manoeuvre can only raise the rate and the episode length, both capped by the base
+(`MaxAdvSpeed = 0.7 m/s`, `MaxRotSpeed = 1.0 rad/s`). So its value is bounded by a ratio of squares
+against what purposeful driving already does. Measured over a 220 m apartment window:
+
+| channel | ordinary driving | platform max | rate headroom | measured gain |
+|---|---|---|---|---|
+| forward (`k_v`, `eps_yaw`, `dk_wheel`) | v p90 = 0.68 m/s | 0.70 | **1.05x** | 1.15–1.26x |
+| heading (`k_omega`) | w p90 = 0.51 rad/s | 1.00 | **3.81x** | **8.74x** |
+
+Shrink against the prior over a matched 600 s budget:
+
+| design | `k_v` | `eps_yaw` | `k_omega` | `dk_wheel` | `b_omega` |
+|---|---|---|---|---|---|
+| ordinary driving (observed) | 7.07 | 6.20 | 4.18 | 8.11 | 1.06 |
+| rate-mixture search, `T` fixed at 0.55 s | 2.65 | 2.37 | 1.85 | 1.97 | 1.00 |
+| analytic: max v, straight, `T` = 0.55 s | 2.65 | 2.37 | 1.00 | 2.60 | 1.00 |
+| analytic: max v, straight, `T` = 5 s | 11.19 | 9.80 | 1.00 | 11.69 | 1.00 |
+| analytic: + sustained max turn, `T` = 5 s | 7.94 | 6.96 | **12.36** | 8.68 | 1.00 |
+
+★ At fixed `T` the analytic design and the numerical search agree exactly (2.65 vs 2.65). Freeing `T`
+is the whole difference. Ordinary driving was never beating a good design — it was beating a search
+that had the wrong free variable.
+
+### 10.3 ★★★ WHEN TO CALIBRATE, NOT WHETHER — and why wait-and-watch wins in a cluttered room
+
+> A parameter is excited for free exactly to the extent that its covariate is ALIGNED with what the
+> task already wants to do.
+
+Forward speed **is** what navigation wants: going fast in straight lines is the job, so `k_v`,
+`eps_yaw` and `dk_wheel` are excited as a by-product, at 0.68 of a 0.70 m/s ceiling, during exactly
+the long corridor runs that dominate the information. A dedicated manoeuvre buys 15–26%. **No
+calibration affordance is justified for the forward channel, and that follows from the platform
+limits rather than from this dataset.**
+
+Rotation looks like the opposite: turning is a COST the planner minimises, so the heading channel
+ought to be systematically starved by purposeful behaviour. **In an apartment it is not**, and this
+is what closes the argument:
+
+| how often the apartment supplies rotation, measured over 185 m / 464 s of motion |
+|---|
+| a turn > 0.5 rad **every 3.6 m** (every 9.1 s of motion) |
+| a turn > 1.0 rad **every 6.4 m** (every 16.0 s) |
+| a turn > 1.5 rad every 18.5 m |
+| **46.2 rad of turning per 100 m driven, for free** |
+
+★★★ **And it is already enough.** After ONE ordinary window `k_omega` is `informed` at 3.70x shrink:
+sigma 0.0054 on a 0.02 prior, i.e. **the rotation scale is known to ±0.54%**. A dedicated pivot would
+sustain 1.0 rad/s against the 0.184 rad/s the apartment averages — 5.4x the rate — and would tighten
+±0.54% to perhaps ±0.2%. There is no evidence that difference changes anything, and the finding that
+heading corrections improve the pose at all was RETRACTED (§6, arm 3R).
+
+★★★ **CONCLUSION: NOTHING HERE JUSTIFIES INTERRUPTING A TASK TO CALIBRATE.** Translation because
+purposeful navigation already runs at 0.68 of a 0.70 m/s ceiling during the long runs that dominate
+the information. Rotation because a cluttered apartment forces a hairpin every few metres, and
+geometry the robot cannot avoid is excitation it does not have to pay for. **Wait-and-watch is not the
+fallback here; it is the optimum.**
+
+⚠ Note the shape of that claim, which is NARROWER than a prohibition — see the idleness rule below. An
+earlier draft of this section read "no calibration affordance is justified", and the two statements
+drifted apart the moment the idleness exception was added. The generalisation, and the part that
+transfers off this robot:
+
+> An affordance is worth its cost only where the task's own motion does NOT already span the
+> parameter's covariate. Compute that span before building the affordance — it is a ratio of squared
+> rates against the platform limits, and it needs no experiment.
+
+⚠ The scope is real and should be stated wherever this is quoted: a LARGE open environment would
+invert the rotation half. Long gentle arcs and few hairpins would starve `k_omega` exactly as the
+rate-headroom figure (3.81x) predicts. The apartment is not a limitation of this result — it is a
+condition of it.
+
+★★★ **NEED AND COST ARE THE SAME VARIABLE, which is why the rule bites.** The rule above states the
+BENEFIT side. The COST side is not independent of it: a planner avoids a motion BECAUSE that motion
+costs it something, so the degree to which a route lacks rotation is precisely the degree to which
+inserting rotation deviates from that route. Cluttered — excitation free AND a manoeuvre would be
+cheap, and it is unnecessary. Open — the parameter genuinely starved AND the manoeuvre must override
+a route the planner considered optimal. **An affordance must overcome its own justification.** That
+is why the answer comes out against affordances in general and not merely in this apartment.
+
+★★★ **THE ONE EXCEPTION, AND IT IS THE PRACTICAL CONCLUSION: the anti-correlation holds only while
+the robot is EXECUTING A TASK.** It vanishes when the robot is idle — a manoeuvre performed during
+idle time has near-zero opportunity cost and undiminished benefit. So the design rule is not "build
+no affordance", it is:
+
+> **A calibration affordance should compete with IDLENESS, never with a task.**
+
+★ Which is what `afford_calib` already does (passive estimation live, manoeuvre off) — arrived at
+empirically before this derivation existed. See [[base-self-calibration-affordance]].
+
+`b_omega` sits outside the argument: no rate appears in its Jacobian, so wait-and-watch is trivially
+optimal there in the sense that nothing else works either. Separately it is PRIOR-SWAMPED — its
+`5e-4 rad/s` asserts 4e6 of information against 9.6e5 from 220 m of driving, a **19.4% data share**
+where every other live parameter gets 93–98%. Halving its sigma would need ~49 HOURS. The question
+there is whether 0.03 deg/s is a justified prior, not which route to drive.
+
+⚠ **The awkward part.** The one parameter a manoeuvre could materially improve is `k_omega`, and it
+is the one with the least evidence that applying it helps at all — the heading finding was RETRACTED
+on 2026-08-31 (§6, arm 3R). Real in information terms, unproven in outcome terms.
+
+### 10.4 Hairpins already do most of this, and the episode machinery is damaging them
+
+The apartment's hairpins ARE the rotation excitation: the top 10% of episodes carry **82.4%** of
+`k_omega`'s information, with median `d_theta` = **1.37 rad** over **3.73 s**. Purposeful driving is
+not starving the heading channel as badly as the rate headroom alone suggests — it is producing good
+turns and then losing them twice:
+
+- **16.7% of episodes close exactly at `episode_min_rot = 0.20 rad`.** Information goes as
+  `(d_theta)^2`, so a 3.14 rad hairpin taken as ONE episode is worth 1580 while the same hairpin
+  chopped into sixteen 0.20 rad pieces is worth 103 — **15.4x less**.
+- **No episode exceeds 1.984 rad**, sitting hard against `episode_carry_max_rot = 2.0`. A 180 deg
+  hairpin is 3.14 rad, so the largest turns are clipped or dropped at the linearisation guard —
+  and by `(d_theta)^2` those are the highest-information episodes in the window.
+
+★★★ So a large part of the `k_omega` gap is NOT a missing manoeuvre. It is the episode machinery
+destroying turns the robot is already performing. That is a config question before it is an
+affordance question, and the two are confounded in every number in §10.2 — the 8.74x is measured
+against driving whose hairpins were being chopped.
+
+### 10.5 ⚠ ROTATION EXPERIMENTS STILL NEEDED — this section is not self-sufficient
+
+The translation conclusion stands on the algebra plus the platform limits. **The rotation conclusion
+does not, and must not be quoted as settled.** Three things are unmeasured:
+
+1. **How much of the 8.74x is chopping rather than starvation.** Re-run the same route with
+   `episode_min_rot` raised so a hairpin survives as one episode, and re-measure `k_omega`'s shrink.
+   If most of the gap closes, the affordance is not needed and a constant was the whole story.
+2. **Where linearisation actually breaks.** The algebra says `T` without bound; the carry caps are a
+   GUESS at where that stops being true. The endpoint is per-parameter sigma per metre against
+   episode length, watching for the point where longer episodes stop paying — the first measurement
+   of a limit currently asserted by two constants.
+3. **Whether a sustained-rotation manoeuvre delivers its predicted 12.36x in practice.** Predicted
+   from a model whose `sigma_th^2` is assumed to hold at rates the robot rarely sustains; a fast
+   sustained pivot may degrade the localiser's own fit and inflate `sigma_th^2`, which would eat the
+   gain. The prediction is untested and it is the one the affordance's case rests on.
+
+⚠ Do not build a rotation affordance before (1). The cheapest experiment is a constant, not a
+manoeuvre, and it may remove the reason for the manoeuvre entirely.
+
+★ Note what these three experiments are now FOR. They are no longer deciding whether to build an
+affordance — §10.3 answers that with geometry and the platform limits. They are asking whether the
+episode machinery is throwing away rotation the robot already performs, which is a defect question,
+and where linearisation actually breaks, which is two constants currently asserted without
+measurement. Both are worth driving for; neither is a manoeuvre.
+
+## 11. The self-model — what these parameters are, in the architecture's own terms
+
+★ **This section is INTERPRETATION, not result.** It is the reading under which §6 and §10 cohere,
+and it should be labelled as such wherever it is quoted. Every number in it is measured; the frame
+around them is not.
+
+### 11.1 Three factors, three timescales, one free energy
+
+The agent's generative model factorises over three things, all minimising the same quantity:
+
+| factor | what it is | timescale | in this system |
+|---|---|---|---|
+| `q(s)` | **states** — where I am now | per cycle | the SDF localiser's pose |
+| `q(θ_world)` | **the world's structure** | slow | the room shape; walls as landmarks |
+| `q(θ_body)` | **my own body** — how action becomes motion | slow | `k_v`, `eps_yaw`, `k_omega`, `b_omega`, `dk_wheel` |
+
+`θ_body` parameterises `p(s_{t+1} | s_t, a_t)`. **The transition model IS the self-model**, so an
+agent carrying a wrong one is systematically surprised by the consequences of its own actions. That
+is what makes calibration a first-class inference problem here rather than a maintenance chore: the
+same free energy is minimised over where-I-am, what-the-room-is, and what-I-am.
+
+### 11.2 The correction load is the free energy that `θ_body` OWNS
+
+§10 justified the endpoint structurally — it is the optimiser's input, so the corrector cannot absorb
+it. The better reason is what it MEANS: `|est − pred|` is the prediction error the BODY-model failed
+to explain, isolated from what the world-model then explains. RPE measures the residual after both
+factors have done their work; the correction load isolates the component attributable to `θ_body`.
+
+That is why it, and nothing else, tracked injected body error monotonically — 17.30, 18.11, 20.24,
+25.59 mm per solve at 0%, 0.8%, 2.9%, 10% (§6). An endpoint that measures the right factor responds
+to a manipulation of that factor. The others were measuring the sum, or the leftovers.
+
+### 11.3 ★★★ FREE ENERGY IS NOT COMPUTE — and assuming otherwise is what produced the retraction
+
+The withdrawn effort claim (§6) rested on reading optimiser firing as *the rate at which the agent
+must do effortful inference because its model failed to predict*. The intuition is right and the
+identification is wrong, and the wrongness is measurable: **iterations per solve are FLAT at
+13.27–13.99 across a body-model error spanning 0% to 10%.**
+
+The agent pays for a bad self-model in **revision magnitude** — the information-theoretic quantity,
+which moved 1.5x — while the COMPUTATION performing that revision is constant. Surprise and FLOPs
+are different currencies, and a Gauss-Newton step converging from 2.2 mm instead of 1.5 mm costs the
+same thirteen iterations.
+
+★ This matters beyond this experiment. Any argument of the form "a better model saves the agent
+work" needs to say which work. Here the model error is paid in how far beliefs must be revised, not
+in the cost of revising them, and an endpoint chosen on the other reading measured nothing for a day.
+
+### 11.4 ★★★ ACTING IS THE EXPERIMENT
+
+§10 showed that a dedicated calibration manoeuvre buys 15–26% on the forward channel and that a
+cluttered room supplies the rotation for free. The reason is structural rather than lucky:
+
+> **A purposeful agent instruments its own body as a by-product of acting, because every action
+> passes through the body. The epistemic value for `θ_body` is already contained in the pragmatic
+> action.**
+
+This is the active-inference statement of the wait-and-watch result. Epistemic action for the SELF is
+rarely needed, because there is no such thing as an action that does not exercise the body.
+
+### 11.5 The asymmetry — the world needs looking at, the body does not
+
+The same argument run over `θ_world` gives the opposite answer, and the contrast is the point:
+
+| | `θ_world` | `θ_body` |
+|---|---|---|
+| sampled | only where the agent happens to look | by **every** action |
+| epistemic action | routinely necessary (NBV, exploration — and this system builds them) | rarely necessary |
+| limit | occlusion, reach | only the covariates the action excites |
+
+**The world is sampled where you look; the body is present in everything you do.** That asymmetry is
+why this architecture correctly carries next-best-view affordances for objects and rooms while
+needing none for the base's kinematics.
+
+★ Its limit is exact, not vague: the body is instrumented only along the covariates a given action
+excites. `k_lat` is never excited on a differential base; rotation is barely excited in open space.
+And §10.3's need/cost coupling closes it — deviating to excite a starved covariate is most expensive
+precisely where it is most starved, so the exception does not readily become an argument for
+manoeuvres.
+
+### 11.6 ⚠ THE SELF-MODEL IS LEARNED THROUGH THE WORLD-MODEL, so map error is charged to the body
+
+The calibrator learns from the localiser's corrections, and those corrections are produced by fitting
+against the map. **`θ_body` is therefore estimated through `θ_world`, and an error in the world-model
+is attributed to the body.** This is a structural hazard of the factorisation, not an implementation
+detail, and it has already produced defects:
+
+- `fit_model_gain` exists precisely for it — an episode is weighted by the FIT that produced its
+  correction, so a poor fit teaches the body-model less.
+- `c71aab9` was this hazard biting: weighting by the drift BEFORE the fit rather than the fit itself
+  meant the largest map failures taught the self-model hardest. Exactly backwards.
+- The `MapMode = "estimate"` regime (§10 blocker) is the extreme case — with the layout itself
+  unconverged, every correction carries world-model error into the body-model's evidence.
+
+★ The general rule: **a factor estimated through another factor inherits that factor's errors, so its
+evidence must be weighted by the other's confidence.** That is what precision-weighting is for, and
+it is the one place in this design where getting the weight wrong is worse than having no estimate —
+because an unweighted body-model update does not merely learn SLOWLY, **it learns the world's
+mistakes as facts about itself.** The failure is a bias, not a variance.
+
+★★★★ **AND THE CORRECTION LOAD CANNOT SEE IT — a scope limit on §11.2's endpoint, not a defect in it.**
+Follow the bias one step further. Once the body-model has absorbed the map's distortion, its
+predictions match what the distorted map will say the motion was, so `|est − pred|` SHRINKS. The two
+factors settle into a state that is internally consistent and externally wrong, and the endpoint this
+work makes central **reports that as an improvement**. It is measured entirely inside the agent, so a
+bias shared between the body-model and the world-model is invisible to it: the failure mode is not
+divergence but **silent self-consistency**, and the instrument that best measures the body-model in
+normal operation is precisely the one that cannot see it.
+
+> The correction load isolates the body-model's contribution to prediction error, but only RELATIVE
+> to the world-model that produced the correction. It therefore measures the self-model's fit to the
+> agent's own world-model, not to the world, and must be read alongside a measure referenced OUTSIDE
+> the agent.
+
+★ Which is the real justification for carrying ground truth (`robot_gt_*`) rather than "it is
+available": the two measures fail in different directions, so neither alone is sufficient. In one
+line — **a factor estimated through another can be biased into agreement with it, and internal error
+measures go quiet exactly when that happens.**
+
+### 11.7 A prior can place part of the body beyond experience
+
+`b_omega`'s prior of 5e-4 rad/s asserts 4.0e6 of information against 9.6e5 supplied by 220 m of
+driving — a 19.4% data share where every other live parameter reaches 93–98% (§10.2). The agent has
+declared a belief about its own body precise enough that ordinary DRIVING cannot revise it, and its
+`informed` flag can therefore never fire on a driving window.
+
+⚠ **CORRECTED 2026-09-01 — see §12.6.** That reading treats the data share as a property of the
+parameter. It is a property of the WINDOW: measured across arm 6's two legs, `b_omega`'s data share
+is **94.1%** in the leg containing a parked stretch and **47.3%** in the one without. Its covariate
+is elapsed time alone, so **the action that informs it is standing still** — which the robot was
+simply not being asked to do. It is not beyond experience; it is beyond experience *of the kind this
+route supplies*.
+
+★ This is a legitimate modelling choice and it is currently an INHERITED one. A prior that strong is
+a claim that the gyro's bias is known to 0.03 deg/s before the robot has moved; if that is true it
+should be cited, and if it is not the parameter is unlearnable for no reason.
+
+### 11.8 What is measured and what is frame
+
+**Measured**: the correction load's monotone dose-response; iterations per solve flat within 1.05x;
+the rate-headroom ceiling and the 46 rad/100 m the environment supplies; `b_omega`'s 19.4% data
+share; the identifiability structure of §10.1, which is algebra.
+
+**Frame**: the three-factor reading, the identification of the correction load with `θ_body`'s free
+energy, and the epistemic-value asymmetry between body and world. These are the interpretation under
+which the measurements cohere. They are not tested by them, and a reader should be able to reject the
+frame and keep every number.
+
+## 12. Arm 6 — does episode LENGTH buy information, and where does linearisation break?
+
+Pre-registered 2026-09-01. NOT RUN. Driver `tools/arm6_setup.sh`.
+
+**Why this and not a manoeuvre.** §10 established that `T` is a common factor in every row of the
+information table — episode duration is the universal lever — and that the estimator sits at its
+FLOOR: `episode_min_trans` = 0.25 m at 0.43 m/s is 0.58 s against an observed 0.55 s median, so
+episodes close the instant they are allowed to. §11 established that no affordance is justified here.
+So the question that remains is not which motion to perform but **how much of the motion the robot
+already performs is being thrown away**, and that is a constant, not a manoeuvre.
+
+The rotation channel is where it bites hardest, because information goes as the SQUARE of the
+accumulated covariate. Measured over the arm 3R window: **16.7% of episodes close exactly at
+`episode_min_rot` = 0.20 rad**, and a 3.14 rad hairpin taken as ONE episode is worth 1580 against 103
+for the same hairpin chopped into sixteen — **15.4x**. Meanwhile the surviving long turns (median
+1.37 rad over 3.73 s) already carry **82.4%** of `k_omega`'s information.
+
+**Design.** Two legs, same route, ~220 m each to match arm 3R, back to back in one session, cold each,
+UNINJECTED (the native robot). `MotionCalibEpisodeMinRot` is the ONLY thing that varies:
+
+| leg | `MotionCalibEpisodeMinTrans` | `MotionCalibEpisodeMinRot` |
+|---|---|---|
+| 6-base | **0.25 m** | **0.20 rad** (the current values) |
+| 6-long | **1.00 m** | **0.80 rad** (both 4x) |
+
+★★★ **BOTH TRIGGERS SCALE TOGETHER, and an earlier version of this arm raised only the rotation one.
+It would have measured nothing.** The two are a `min()`: an episode closes when EITHER is met, so
+raising one is simply defeated by the other. Measured on the arm 3R window BEFORE driving —
+
+| what closed the episode | share of episodes | share of `k_omega`'s information |
+|---|---|---|
+| translation trigger (0.25 m) | 43.3% | **98.8%** |
+| rotation trigger (0.20 rad) | 9.0% | **1.0%** |
+| a correction's falling edge | 47.8% | 0.2% |
+
+The robot TURNS WHILE DRIVING: at the observed 0.43 m/s and 0.27 rad/s, 0.25 m arrives in 0.58 s and
+0.20 rad in 0.74 s, so translation fires first and cuts the episode short — its rotation content
+included. **The hairpins are being chopped, but by the wrong knob.** Raising `min_rot` alone would
+have lengthened 9% of episodes carrying 1% of the information: a 1.04x total gain, indistinguishable
+from noise. Raising `min_trans` alone inverts the problem — at 1.00 m the rotation trigger fires
+first instead.
+
+★ Note the third row: **48% of episodes close on a correction's falling edge, which no trigger
+controls.** That bounds what this arm can buy — at most the 52% that are trigger-closed — and it is
+the reason the predicted effect is stated as a ceiling rather than a target.
+
+Everything else is pinned to arm 3R's conditions — `MotionCalibEpisodeMinTrans` = 0.25,
+`MotionCalibApply` = true, `mask` = 1, `StableSdfMseMax` = 0.076, `MapMode` = "given" — so a
+difference cannot be attributed to anything but the trigger.
+
+★ 1.00 rad is chosen against two bounds, not guessed: it must stay well below
+`episode_carry_max_rot` = 2.0, or episodes would be DROPPED at the carry cap rather than closed; and
+it must sit below a typical hairpin so that turns still close on rotation rather than being carried.
+The observed `d_theta` p90 is 1.066 rad and the maximum is 1.984 — hard against the carry cap.
+
+★★ 4x on both, not 5x, because `min_rot` = 1.00 rad would sit too close to the 2.0 rad carry cap
+once episodes are actually allowed to grow: 0.80 leaves margin for an episode to accumulate without
+being dropped. `min_trans` = 1.00 m against a 2.5 m carry cap has the same margin.
+
+### 12.1 Pre-registered endpoints, in order
+
+1. **PRIMARY — `k_omega` posterior sigma at MATCHED ROTATION.** Not per metre and not per run: this
+   arm is about information per radian TURNED, so the legs must be compared at equal cumulative
+   rotation or the comparison is against the route. Predicted: 6-long lower. The information law says
+   information per unit motion is LINEAR in the trigger, so a 4x trigger is 4x more information on
+   the episodes it governs — but only 52% of episodes are trigger-closed (48% close on a correction's
+   falling edge, which no knob controls), so the whole-window ceiling is ~2.6x and sigma falls by at
+   most sqrt(2.6) = 1.6x. ★ Anything ABOVE that ceiling is not this mechanism and needs another
+   explanation. Anything approaching it closes the rotation gap and
+   removes the last argument for a rotation affordance.
+2. **SECONDARY — the heading block's lambda_min and condition number**, from
+   `tools/excitation.py` on each leg's episode log. Predicted: lambda_min up in 6-long,
+   condition number roughly unchanged (the trigger scales the block, it does not re-orient it).
+3. **DIAGNOSTIC — episode bookkeeping**: emitted, carried and DROPPED counts, median `d_theta` and
+   duration. 6-long must show a larger median `d_theta`; if it does not, the trigger is not binding
+   and the arm has not manipulated what it claims to.
+
+### 12.2 ★★★ THE DISCRIMINATOR: sigma must improve while the VALUE must not move
+
+This is the pre-registered test for the linearisation limit, and it is the reason this arm is worth
+driving rather than reasoning about.
+
+Both legs observe **the same robot on the same route**, so `k_omega`'s TRUE value is identical. A
+longer episode should therefore buy PRECISION and nothing else:
+
+- **sigma falls, value agrees within its sigma** ⇒ the trigger was throwing information away and
+  raising it is free. The rotation gap was a constant all along.
+- **sigma falls but the VALUE SHIFTS** ⇒ ★ **the signature of linearisation breaking.** The Jacobian
+  treats the whole accumulated motion as one small increment; when that stops being true the estimate
+  acquires a BIAS, and a bias is exactly what a shift in the value on an unchanged robot means. This
+  is the first measurement of a limit currently asserted by two constants and never tested.
+- **neither moves** ⇒ the trigger was not the binding constraint; look at `theta_var` instead, since
+  the weight may be growing with the episode as fast as the covariate does.
+
+⚠ **Report the value comparison BEFORE the sigma comparison.** A precision improvement bought with a
+bias is worse than no improvement, and reporting sigma first invites reading the arm as a success.
+
+### 12.3 What would make this arm uninterpretable
+
+- **Unmatched rotation content.** The endpoint is per radian turned; if the legs differ much in total
+  rotation the primary comparison is against the route. Drive the same circuit.
+- **A change in dropped-episode count.** If 6-long drops many more episodes at the carry cap, it is
+  not measuring longer episodes but fewer of them, and the two effects are confounded. `dropped_`
+  is logged; report it.
+- **Window lag.** Fewer, longer episodes mean the 512-episode window spans more distance, so the
+  estimator adapts more slowly. On a static parameter this only affects the transient, but it is the
+  reason not to raise the trigger further than this arm tests.
+
+### 12.4 Parked, and deliberately
+
+The translation trigger. `MotionCalibEpisodeMinTrans` is now config-exposed alongside the rotation
+one and the same argument applies to `k_v`, `eps_yaw` and `dk_wheel` — but those three are already
+`informed` at 5.5-7.3x shrink from ordinary driving, so the headroom that matters is in the channel
+that is not. Raise it only if arm 6 shows the mechanism is real.
+
+### Arm 6 — RESULTS, 2026-09-01. The trigger binds, the information does not follow.
+
+Two legs, one session, uninjected, cold each: 205.5 m / 153.2 rad and 219.3 m / 159.3 rad — rotation
+content 4.0% apart, so the comparison is at the shared 153.2 rad span.
+
+| endpoint | 6-base (0.25 m / 0.20 rad) | 6-long (1.00 m / 0.80 rad) | ratio |
+|---|---|---|---|
+| median episode DURATION | 0.93 s | 2.27 s | **2.07–2.44x** |
+| median `d_theta` | 0.125 rad | 0.174 rad | 1.38x |
+| **`k_omega` VALUE** | **0.99541 ± 0.00586** | **0.99400 ± 0.00590** | **0.17 sigma apart** |
+| sigma(`k_omega`) | 0.00586 | 0.00590 | **0.99x — no gain** |
+
+**The value held.** 0.17 combined sigmas on the same robot and route. ★ **So linearisation is NOT
+breaking at 1.00 m / 0.80 rad** — a useful negative, and the first evidence about a limit that
+`episode_carry_max_trans` and `episode_carry_max_rot` have been asserting without measurement. The
+caps are more conservative than they need to be.
+
+**The trigger bound and the information did not follow.** Decomposing, with runaway carried episodes
+excluded (§12.6):
+
+| | base | long | ratio |
+|---|---|---|---|
+| `sum (d_theta)^2` — the GEOMETRY | 83.45 | 90.80 | **1.09x** |
+| `sum (d_theta)^2 / theta_var` — the INFORMATION | 29 021 | 27 345 | **0.94x** |
+| effective `theta_var` | 0.00288 | 0.00332 | **1.15x** |
+
+**A 4x trigger bought 9% more concentrated covariate and lost 15% to variance. Net −6%.** Two
+independent causes, both measured:
+
+1. **Merging barely concentrates the covariate, because the triggers do not close most episodes.**
+   The correction's FALLING EDGE closes 44.7% of them in the base leg and **54.7%** in the long one —
+   raising the triggers simply hands more of the closing to a mechanism no constant controls.
+2. **`theta_var` GROWS with episode length.** `rot_model_sigma * rotation` and
+   `fit_model_gain * mean|SDF|` both accumulate over a longer span, so a longer episode is weighted
+   less, and the weighting almost exactly eats the geometric gain.
+
+★★★ **SO §10's CONCLUSION IS QUALIFIED, NOT RETRACTED. Episode duration IS the universal lever in the
+algebra — `T` is a common factor in every row — but it is NOT REACHABLE THROUGH THESE CONSTANTS.**
+The corrector's own timing sets most episode boundaries, and the model-error terms tax whatever
+length the triggers do buy. An information law that is correct about the mechanism can still be
+unactionable, and knowing which is which requires driving.
+
+⚠ **A statistic error of mine, recorded because it nearly reversed the reading.** Mid-run I checked
+`theta_var` by its MEDIAN, saw it FALL (0.00515 -> 0.00453), and concluded the pre-registered
+variance explanation was refuted. The median is the wrong statistic: information is a SUM, so the
+information-weighted effective variance is what matters, and that ROSE 1.15x. Same data, opposite
+conclusion. ★ For any quantity that enters as a sum, summarise it by its sum.
+
+### 12.6 ⚠ A "DEFECT" I CLAIMED AND THEN REFUTED — and the real result underneath it
+
+**Retracted 2026-09-01, same day, before any code was changed.** The claim was that the carry
+mechanism has a defect: it caps translation (2.5 m) and rotation (2.0 rad) but nothing caps DURATION,
+so the base leg accumulated **9 episodes of ~219.6 s each with median `d_theta` = 0.015 rad**, and
+since duration is `b_omega`'s covariate these inflated its information from 1 370 993 to
+**63 787 246** — a 47x factor from 3.6% of the episodes, all stationary. I called it a defect and
+proposed capping the carry in time.
+
+**It is not a defect, and the cap would have deleted the best evidence about `b_omega` there is.**
+Three things check out against the code and the physics:
+
+- **The emission guard holds.** `if (acc_measured_) flush()` — an episode with no correction is never
+  emitted. 7 of the 9 carry a real correction; the other two have a residual that rounds to zero.
+- **The carry is deliberate and documented**: *"The motion is CARRIED, not discarded: the covariate
+  survives, and the next real correction simply explains a longer span."*
+- **`T` is the correct covariate.** A gyro bias genuinely integrates across the whole span, and the
+  correction that ends the episode absorbs the drift it produced. Measured on those rows,
+  `r_theta / T` gives `b_omega` ~1e-6 rad/s with `sigma = sqrt(theta_var)/T ~ 2e-4` — tighter than
+  the 5e-4 prior and consistent with zero. That is a real measurement, not an artefact.
+
+★★★ **THE RESULT UNDERNEATH: THE OPTIMAL EXCITATION FOR `b_omega` IS TO STAND STILL.** §10.1 derived
+that its Jacobian is `T` and contains no rate at all, and then read that as "no manoeuvre can help
+it". The stronger reading was there and I missed it: if the covariate is elapsed time alone, then the
+information-maximising action is the one that spends time without spending anything else —
+**stillness**. Those parked episodes are the estimator doing exactly the right thing, and it is what
+a ZUPT is.
+
+★★★★ **WHICH CLOSES THE AFFORDANCE ARGUMENT RATHER THAN CONTRADICTING IT.** §11.5 concluded that a
+calibration affordance should compete with idleness and never with a task. `b_omega` is the one
+parameter that needs a deliberate action, that action is *to do nothing*, and doing nothing is
+exactly free when the robot is already idle. **The only justified calibration affordance on this
+platform is a pause** — and it costs nothing precisely where §10.3's need/cost coupling says a
+manoeuvre would cost most.
+
+⚠ **AND IT CORRECTS §10.2.** That section reports `b_omega` at a 19.4% data share and calls it
+prior-swamped, treating it as a structural property. It is not — it is a property of how much the
+robot happened to stand still in that window. Measured across arm 6's two legs, same robot and same
+code: **94.1% data share in the leg containing a parked stretch, 47.3% in the leg without one.**
+`b_omega` is not beyond experience; it is reachable by an action the robot was not being asked to
+take. ★ Read §10.2's figure as one window's accident, not as a fact about the parameter.
+
+★ **What survives as a real, smaller concern:** those 9 episodes are consecutive windows within ONE
+parked period, so they are not 9 independent observations — the bias is constant and the localiser's
+heading error across them is likely correlated by scene and fit. Treating them as independent
+overstates the resulting precision. That is a correlation question and it is not measured here.
+
+★★★ **The method lesson, which is why this section stays in rather than being deleted.** I found an
+anomaly, built a causal story for it, quantified it at 47x, wrote it into the results, and was one
+step from changing code — before checking the anomaly against the emission guard and the physics.
+The check took two commands. **A number that is 47x larger than its neighbours is a reason to ask
+what it is, not evidence that something is broken.**
 
 ## Appendix A — the empty-episode defect (fixed, `96d48bc`)
 
