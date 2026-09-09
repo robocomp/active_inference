@@ -48,13 +48,6 @@
     #sel.hidden { display: none; }
     #sel b { color: #7fd1ff; }
     #sel .btn { padding: 2px 8px; }
-    #logs { position: fixed; left: 0; right: 0; bottom: 0; height: 40%; background: #0d0f13;
-            border-top: 1px solid #2c313c; display: flex; flex-direction: column; z-index: 20; }
-    #logs.hidden { display: none; }
-    #logshead { display: flex; gap: 8px; align-items: center; padding: 6px 12px;
-                background: #1c1f26; border-bottom: 1px solid #2c313c; font-size: 12px; }
-    #logtext { flex: 1; margin: 0; padding: 8px 12px; overflow: auto; font-size: 12px;
-               color: #cbd3de; white-space: pre-wrap; word-break: break-word; }
     #cfg { position: fixed; left: 0; right: 0; bottom: 0; height: 45%; background: #0d0f13;
            border-top: 1px solid #2c313c; display: flex; flex-direction: column; z-index: 21; }
     #cfg.hidden { display: none; }
@@ -64,7 +57,7 @@
     #cfgtext { flex: 1; margin: 0; padding: 8px 12px; overflow: auto; font-size: 12px;
                font-family: inherit; color: #cbd3de; background: #0d0f13; border: 0; resize: none;
                white-space: pre; tab-size: 4; }
-    #live { position: fixed; right: 16px; bottom: 16px; width: 380px; height: 280px;
+    #live { position: fixed; right: 16px; bottom: 16px; width: 720px; height: 480px;
             min-width: 220px; min-height: 160px; background: #0d0f13; border: 1px solid #2c313c;
             border-radius: 8px; display: flex; flex-direction: column; z-index: 25;
             resize: both; overflow: hidden; box-shadow: 0 4px 18px rgba(0,0,0,.5); }
@@ -74,7 +67,67 @@
     #liveUrl { flex: 1; min-width: 0; background: #14161a; color: #cfd6e0; border: 1px solid #39414d;
                border-radius: 4px; padding: 3px 6px; font: inherit; font-size: 12px; }
     #liveBody { flex: 1; position: relative; background: #000; }
-    #liveFrame { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #000; }
+    #liveVideo { position: absolute; inset: 0; width: 100%; height: 100%; background: #000; object-fit: contain; }
+    #liveOverlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+                   text-align: center; padding: 16px; font-size: 13px; font-weight: bold;
+                   background: rgba(61, 22, 24, .82); color: #ffb3ae; }
+    #liveOverlay.hidden { display: none; }
+
+    /* ── web joystick (control remoto real del robot) ────────────────────── */
+    #joy { position: fixed; left: 16px; bottom: 16px; width: 280px; background: #0d0f13;
+           border: 1px solid #2c313c; border-radius: 8px; z-index: 26;
+           box-shadow: 0 4px 18px rgba(0,0,0,.5); user-select: none; }
+    #joy.hidden { display: none; }
+    #joyhead { display: flex; gap: 6px; align-items: center; padding: 6px 8px;
+               background: #1c1f26; border-bottom: 1px solid #2c313c; font-size: 12px;
+               border-radius: 8px 8px 0 0; }
+    #joybody { padding: 12px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+    #joyArmBtn { width: 100%; padding: 10px; font-size: 13px; font-weight: bold; border-radius: 6px;
+                 border: 1px solid #39414d; cursor: pointer; background: #262b34; color: #cfd6e0; }
+    #joyArmBtn.armed { background: #16351c; border-color: #3fb950; color: #8fe6a3; }
+    #joyArmBtn.disarmed { background: #3d1618; border-color: #f85149; color: #ffb3ae; }
+    #joypad { position: relative; width: 200px; height: 200px; border-radius: 50%;
+              background: #14161a; border: 1px solid #2c313c; touch-action: none; }
+    #joyknob { position: absolute; width: 56px; height: 56px; border-radius: 50%;
+               background: #262b34; border: 2px solid #7fd1ff; left: 72px; top: 72px;
+               pointer-events: none; }
+    #joyrotwrap { width: 200px; display: flex; align-items: center; gap: 8px; font-size: 11px; color: #8a94a2; }
+    #joyrot { flex: 1; height: 34px; border-radius: 6px; background: #14161a; border: 1px solid #2c313c;
+              position: relative; touch-action: none; }
+    #joyrotknob { position: absolute; width: 34px; height: 30px; border-radius: 5px; top: 1px; left: 83px;
+                  background: #262b34; border: 2px solid #7fd1ff; pointer-events: none; }
+    #joystatus { font-size: 11px; color: #8a94a2; text-align: center; }
+    #joyStopBtn { width: 100%; padding: 10px; font-size: 13px; font-weight: bold; border-radius: 6px;
+                  border: 1px solid #f85149; cursor: pointer; background: #3d1618; color: #ffb3ae; }
+
+    /* ── real terminal (tmux-backed) ─────────────────────────────────────── */
+    #tty { position: fixed; left: 0; right: 0; bottom: 0; height: 50%; background: #0a0c0f;
+           border-top: 1px solid #2c313c; display: flex; flex-direction: column; z-index: 22; }
+    #tty.hidden { display: none; }
+    #ttyhead { display: flex; gap: 8px; align-items: center; padding: 6px 12px;
+               background: #1c1f26; border-bottom: 1px solid #2c313c; font-size: 12px; }
+    #ttystatus { color: #8a94a2; }
+    #ttyscreen { flex: 1; margin: 0; padding: 8px 12px; overflow: auto; font-size: 12px;
+                 line-height: 1.35; color: #cbd3de; white-space: pre; cursor: text; }
+    #ttyinput { display: flex; gap: 6px; align-items: center; padding: 6px 12px;
+                background: #12151a; border-top: 1px solid #23272f; }
+    #ttyline { flex: 1; background: #0a0c0f; color: #e6e6e6; border: 1px solid #39414d;
+               border-radius: 4px; padding: 4px 8px; font: inherit; font-size: 12px; }
+    #ttyinput .btn { padding: 2px 8px; }
+
+    /* ── per-component window (x11vnc -id + noVNC) ───────────────────────── */
+    #winview { position: fixed; left: 16px; top: 60px; width: 640px; height: 480px;
+               min-width: 240px; min-height: 180px; background: #0d0f13; border: 1px solid #2c313c;
+               border-radius: 8px; display: flex; flex-direction: column; z-index: 27;
+               resize: both; overflow: hidden; box-shadow: 0 4px 18px rgba(0,0,0,.5); }
+    #winview.hidden { display: none; }
+    #winviewhead { display: flex; gap: 8px; align-items: center; padding: 6px 8px;
+                   background: #1c1f26; border-bottom: 1px solid #2c313c; font-size: 12px; }
+    #winviewstatus { color: #8a94a2; }
+    #winviewPicker { background: #262b34; color: #cfd6e0; border: 1px solid #39414d;
+                      border-radius: 4px; padding: 2px 6px; font: inherit; font-size: 12px; }
+    #winviewPicker.hidden { display: none; }
+    #winviewbody { flex: 1; position: relative; background: #000; overflow: hidden; }
   </style>
 </head>
 <body>
@@ -98,10 +151,12 @@
       <button class="btn" id="selRestart" title="reiniciar">🔄 relaunch</button>
       <button class="btn" id="selStop" title="parar">🛑 stop</button>
       <button class="btn" id="selBuild" title="cbuild (cmake -B build && make -C build -j32) en su directorio">🔨 build</button>
-      <button class="btn" id="selTerm" title="ver logs">📜 terminal</button>
+      <button class="btn" id="selTty" title="terminal real (tmux) — interactiva">🖥 tty</button>
+      <button class="btn" id="selWindow" title="ver + interactuar con la ventana X11 del componente (VNC)">🪟 ventana</button>
       <button class="btn" id="selConfig" title="editar archivo de configuración">⚙ config</button>
     </span>
-    <button id="liveBtn" class="btn" style="margin-left:auto">🎥 Live view</button>
+    <button id="joyBtn" class="btn" style="margin-left:auto" title="control remoto del robot">🕹 Joystick</button>
+    <button id="liveBtn" class="btn">🎥 Live view</button>
     <button id="layoutBtn" class="btn">Vista: Orgánico por nivel</button>
     <button id="fitBtn" class="btn">Reorganizar</button>
     <button id="tableBtn" class="btn">Tabla</button>
@@ -121,16 +176,6 @@
       </table>
     </div>
   </div>
-  <div id="logs" class="hidden">
-    <div id="logshead">
-      <b id="logtitle">logs</b>
-      <button class="btn" id="logOut">stdout</button>
-      <button class="btn" id="logErr">stderr</button>
-      <span id="logstream" style="color:#8a94a2"></span>
-      <button class="btn" id="logClose" style="margin-left:auto">✕ cerrar</button>
-    </div>
-    <pre id="logtext"></pre>
-  </div>
   <div id="cfg" class="hidden">
     <div id="cfghead">
       <b id="cfgtitle">config</b>
@@ -140,16 +185,57 @@
     </div>
     <textarea id="cfgtext" spellcheck="false"></textarea>
   </div>
+  <div id="winview" class="hidden">
+    <div id="winviewhead">
+      <b id="winviewtitle">ventana</b>
+      <select id="winviewPicker" class="hidden" title="este componente tiene varias ventanas"></select>
+      <span id="winviewstatus"></span>
+      <button class="btn" id="winviewClose" style="margin-left:auto">✕ cerrar</button>
+    </div>
+    <div id="winviewbody"></div>
+  </div>
+  <div id="tty" class="hidden">
+    <div id="ttyhead">
+      <b id="ttytitle">tty</b>
+      <span id="ttystatus"></span>
+      <button class="btn" id="ttyCtrlC" title="Ctrl-C">^C</button>
+      <button class="btn" id="ttyCtrlD" title="Ctrl-D">^D</button>
+      <button class="btn" id="ttyClose" style="margin-left:auto">✕ cerrar</button>
+    </div>
+    <pre id="ttyscreen"></pre>
+    <div id="ttyinput">
+      <input id="ttyline" type="text" autocomplete="off" autocapitalize="off" spellcheck="false"
+             placeholder="escribe…">
+    </div>
+  </div>
+  <div id="joy" class="hidden">
+    <div id="joyhead">
+      <b>🕹 joystick</b>
+      <button class="btn" id="joyClose" style="margin-left:auto">✕</button>
+    </div>
+    <div id="joybody">
+      <button id="joyArmBtn" class="disarmed">🔓 DESARMADO — pulsa para armar</button>
+      <div id="joypad" title="vertical: avance · horizontal: girar"><div id="joyknob"></div></div>
+      <div id="joyrotwrap">lateral
+        <div id="joyrot"><div id="joyrotknob"></div></div>
+      </div>
+      <button id="joyStopBtn">🛑 STOP (corta motores)</button>
+      <div id="joystatus">—</div>
+    </div>
+  </div>
   <div id="live" class="hidden">
     <div id="livehead">
       <b>🎥 live view</b>
-      <input id="liveUrl" type="text" placeholder="http://host:8889/theta (mediamtx WebRTC)">
+      <input id="liveUrl" type="text" placeholder="http://host:8889/theta (mediamtx WHEP)">
       <button class="btn" id="liveLoad">Cargar</button>
       <button class="btn" id="liveClose">✕</button>
     </div>
-    <div id="liveBody"><iframe id="liveFrame" allow="autoplay; fullscreen" referrerpolicy="no-referrer"></iframe></div>
+    <div id="liveBody">
+      <video id="liveVideo" autoplay playsinline muted></video>
+      <div id="liveOverlay" class="hidden"></div>
+    </div>
   </div>
   <div id="toast"></div>
-  <script src="/app.js"></script>
+  <script type="module" src="/app.js"></script>
 </body>
 </html>

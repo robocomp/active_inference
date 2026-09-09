@@ -1,11 +1,18 @@
-// dds_stats_bridge: subscribes to Fast DDS's built-in PUBLICATION_THROUGHPUT_TOPIC
-// statistics topic and dumps {topic_name: bytes_per_second} to a JSON file, so a
-// stdlib-only monitor (no DDS bindings) can display real DDS publish bandwidth even
-// when the actual data plane uses SharedMemoryOnly transport (no bytes on the wire).
+// dds_stats_bridge: subscribes to Fast DDS's built-in PUBLICATION_THROUGHPUT_TOPIC and
+// SUBSCRIPTION_THROUGHPUT_TOPIC statistics topics and dumps {topic_name: bytes_per_second}
+// to a JSON file, so a stdlib-only monitor (no DDS bindings) can display real DDS
+// publish/receive bandwidth even when the actual data plane uses SharedMemoryOnly transport
+// (no bytes on the wire). This is how netmon gets consumer-side (subscriber) throughput
+// without any code in the consumer itself -- Fast DDS's own statistics module already
+// tracks it per DataReader, same mechanism as the writer side, just a second topic + a
+// second discovery callback (on_data_reader_discovery) to resolve reader GUID -> topic
+// name. It's a coarser signal than the app-level StreamStats in media_transport.h (bytes/s
+// only, no frame_id-gap "drops" or capture-to-receive latency), but "is this consumer
+// actually receiving bytes" needs zero changes to the consumer's source.
 //
 // Requires the monitored process(es) to be started with
-//   FASTDDS_STATISTICS=_fastdds_statistics_publication_throughput
-// so they actually publish this statistics topic (set once, before their
+//   FASTDDS_STATISTICS=_fastdds_statistics_publication_throughput;_fastdds_statistics_subscription_throughput
+// so they actually publish these statistics topics (set once, before their
 // DomainParticipant is constructed).
 //
 // The monitored components here use SharedMemoryOnly transport, which also carries
@@ -158,6 +165,29 @@ public:
         }
     }
 
+    // Mirror of on_data_writer_discovery for the reader side, so a GUID carried inside a
+    // SUBSCRIPTION_THROUGHPUT_TOPIC sample can be mapped back to its topic the same way.
+    // Writer and reader GUIDs never collide (the entity id half differs), so both sides
+    // share guid_to_topic safely.
+    void on_data_reader_discovery(
+            DomainParticipant*,
+            eprosima::fastdds::rtps::ReaderDiscoveryStatus reason,
+            const SubscriptionBuiltinTopicData& info,
+            bool& should_be_ignored) override
+    {
+        should_be_ignored = false;
+        std::string key = guid_to_key(info.guid);
+        std::lock_guard<std::mutex> lock(state_.mtx);
+        if (reason == eprosima::fastdds::rtps::ReaderDiscoveryStatus::REMOVED_READER)
+        {
+            state_.guid_to_topic.erase(key);
+        }
+        else
+        {
+            state_.guid_to_topic[key] = info.topic_name.to_string();
+        }
+    }
+
 private:
     SharedState& state_;
 };
@@ -234,21 +264,23 @@ int main(
     TypeSupport type(new EntityDataPubSubType());
     type.register_type(participant);
 
-    Topic* topic = participant->create_topic(
-            eprosima::fastdds::statistics::PUBLICATION_THROUGHPUT_TOPIC,
-            type.get_type_name(), TOPIC_QOS_DEFAULT);
-    if (nullptr == topic)
-    {
-        std::cerr << "Failed to create statistics Topic\n";
-        return 1;
-    }
-
     Subscriber* subscriber = participant->create_subscriber(SUBSCRIBER_QOS_DEFAULT, nullptr);
     DataReaderQos rqos = DATAREADER_QOS_DEFAULT;
-    DataReader* reader = subscriber->create_datareader(topic, rqos, nullptr, StatusMask::none());
-    if (nullptr == reader)
+
+    // Publication and subscription throughput share the exact same EntityData sample shape
+    // (Fast DDS handles both through the same code path internally) -- one topic+reader
+    // pair each, both draining into the same guid_to_bps/guid_to_topic maps.
+    Topic* pub_topic = participant->create_topic(
+            eprosima::fastdds::statistics::PUBLICATION_THROUGHPUT_TOPIC, type.get_type_name(), TOPIC_QOS_DEFAULT);
+    Topic* sub_topic = participant->create_topic(
+            eprosima::fastdds::statistics::SUBSCRIPTION_THROUGHPUT_TOPIC, type.get_type_name(), TOPIC_QOS_DEFAULT);
+    DataReader* pub_reader = (nullptr != pub_topic)
+            ? subscriber->create_datareader(pub_topic, rqos, nullptr, StatusMask::none()) : nullptr;
+    DataReader* sub_reader = (nullptr != sub_topic)
+            ? subscriber->create_datareader(sub_topic, rqos, nullptr, StatusMask::none()) : nullptr;
+    if (nullptr == pub_reader && nullptr == sub_reader)
     {
-        std::cerr << "Failed to create statistics DataReader\n";
+        std::cerr << "Failed to create any statistics DataReader\n";
         return 1;
     }
 
@@ -270,14 +302,35 @@ int main(
     while (g_running)
     {
         std::this_thread::sleep_for(std::chrono::seconds(1));
-        drain_throughput_samples(reader, state);
+        if (nullptr != pub_reader)
+        {
+            drain_throughput_samples(pub_reader, state);
+        }
+        if (nullptr != sub_reader)
+        {
+            drain_throughput_samples(sub_reader, state);
+        }
         state.write_json(out_path);
     }
 
     std::cerr << "dds_stats_bridge: shutting down\n";
-    subscriber->delete_datareader(reader);
+    if (nullptr != pub_reader)
+    {
+        subscriber->delete_datareader(pub_reader);
+    }
+    if (nullptr != sub_reader)
+    {
+        subscriber->delete_datareader(sub_reader);
+    }
     participant->delete_subscriber(subscriber);
-    participant->delete_topic(topic);
+    if (nullptr != pub_topic)
+    {
+        participant->delete_topic(pub_topic);
+    }
+    if (nullptr != sub_topic)
+    {
+        participant->delete_topic(sub_topic);
+    }
     DomainParticipantFactory::get_instance()->delete_participant(participant);
     return 0;
 }

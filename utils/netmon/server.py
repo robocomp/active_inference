@@ -19,6 +19,9 @@ import psutil
 from .bandwidth import connection_edges
 from .registry import merged_components, push_command
 from .topology import build_full_topology
+from . import term_tmux
+from .joystick_bridge import JoystickBridge
+from .window_vnc import WindowManager
 
 _STATIC = os.path.join(os.path.dirname(__file__), "static")
 _LOGS_DIR = os.path.expanduser("~/.local/logs")
@@ -83,6 +86,11 @@ class MonitorServer:
         self._httpd = None
         self._topo = None
         self._topo_ts = 0.0
+        # Same IceStorm TopicManager every profile on this robot uses (see any etc/config's
+        # Proxies.TopicManager) -- connects once here; degrades to a no-op bridge (reported
+        # via "available") if rcnode isn't up yet rather than failing MonitorServer startup.
+        self.joystick = JoystickBridge()
+        self.windows = WindowManager()
 
     def topology(self):
         now = time.time()
@@ -116,7 +124,11 @@ class MonitorServer:
         # "up" means the process is alive but the ICE ping failed -- for DDS-only publishers
         # that's a false alarm if they're visibly moving real bytes/s, so real DDS traffic
         # is treated as a stronger liveness signal than the ICE ping and promotes to "alive".
-        dds_topics_by_name = {n["id"]: (n.get("dds") or {}).get("topics") or []
+        # Covers both the raw [DDS] hardware producers and the [Media] plane (producer or
+        # consumer -- a consumer with no ICE endpoint at all, e.g. retina, is exactly the
+        # case this promotion exists for).
+        dds_topics_by_name = {n["id"]: ((n.get("dds") or {}).get("topics") or [])
+                                       + ((n.get("media") or {}).get("topics") or [])
                               for n in topo.get("nodes", [])}
 
         nodes = []
@@ -208,6 +220,128 @@ class MonitorServer:
             return {"ok": False, "error": str(e), "text": ""}
         return {"ok": True, "name": name, "stream": stream, "text": text}
 
+    # ── real terminal (tmux-backed, see netmon/term_tmux.py) ────────────────────
+    # Deliberately stateless here: every call is a single one-shot tmux CLI invocation.
+    # No background polling loop lives in the server -- the client only calls these
+    # while a terminal panel is actually open (see openTty()/closeTty() in app.js),
+    # so idle components cost nothing beyond the tmux session itself sitting there.
+    _TERM_TEXT_MAX = 4096   # a paste, not a file upload -- reject anything past "generous"
+    _TERM_KEY_ALLOWED = {
+        "Enter", "Tab", "BSpace", "Escape", "Space",
+        "Up", "Down", "Left", "Right", "Home", "End", "PPage", "NPage", "DC", "IC",
+        *(f"C-{c}" for c in "abcdefghijklmnopqrstuvwxyz"),
+        *(f"F{n}" for n in range(1, 13)),
+    }
+
+    def term_snapshot(self, name, lines):
+        if name not in self._known_names():
+            return {"ok": False, "error": "componente desconocido", "text": "", "alive": False}
+        if not term_tmux.alive(name):
+            return {"ok": True, "text": "", "alive": False}
+        text = term_tmux.capture(name, lines=lines)
+        if text is None:
+            return {"ok": False, "error": "fallo al capturar la sesión tmux", "text": "", "alive": False}
+        return {"ok": True, "text": text, "alive": True}
+
+    def term_input(self, name, text):
+        if name not in self._known_names():
+            return {"ok": False, "error": "componente desconocido"}
+        if not isinstance(text, str) or not text or len(text) > self._TERM_TEXT_MAX:
+            return {"ok": False, "error": "texto inválido o demasiado largo"}
+        if not term_tmux.send_text(name, text):
+            return {"ok": False, "error": "sesión tmux no disponible"}
+        return {"ok": True}
+
+    def term_key(self, name, key):
+        if name not in self._known_names():
+            return {"ok": False, "error": "componente desconocido"}
+        if key not in self._TERM_KEY_ALLOWED:
+            return {"ok": False, "error": "tecla no permitida"}
+        if not term_tmux.send_key(name, key):
+            return {"ok": False, "error": "sesión tmux no disponible"}
+        return {"ok": True}
+
+    def term_resize(self, name, cols, rows):
+        if name not in self._known_names():
+            return {"ok": False, "error": "componente desconocido"}
+        try:
+            cols, rows = int(cols), int(rows)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "cols/rows inválidos"}
+        if not (1 <= cols <= 500 and 1 <= rows <= 200):
+            return {"ok": False, "error": "cols/rows fuera de rango"}
+        term_tmux.resize(name, cols, rows)   # best-effort; a detached session may ignore it
+        return {"ok": True}
+
+    # ── web joystick -> JoystickAdapter bridge (see netmon/joystick_bridge.py) ──────
+    # All the actual safety logic (armed-state gating, motor disable) lives on the
+    # robot in SVD48VBase.JoystickAdapter_sendData -- this just forwards intent and
+    # validates the wire values defensively before they ever leave this process
+    # (SVD48VBase also clamps to maxLinSpeed/maxRotSpeed and NaN-guards on its side,
+    # this is belt-and-suspenders, not the real limit). Per-axis sanity bounds are
+    # generous on purpose -- the client scales "advance" to roughly match
+    # python_xbox_controller's etc/config_shadow (Axis_0 min/max -750..750), "side"/
+    # "rotate" stay in that config's native -1..1; SVD48VBase's own clamp is what
+    # actually caps real robot speed, not these numbers.
+    _JOY_AXIS_BOUNDS = {"advance": 1000.0, "side": 5.0, "rotate": 10.0}
+
+    def joystick_tick(self, body):
+        axes = body.get("axes") or {}
+        clean_axes = {}
+        for k, bound in self._JOY_AXIS_BOUNDS.items():
+            try:
+                v = float(axes.get(k, 0.0))
+            except (TypeError, ValueError):
+                return {"ok": False, "error": f"eje '{k}' inválido"}
+            if not (v == v and abs(v) != float("inf")):   # NaN != NaN; reject inf too
+                return {"ok": False, "error": f"eje '{k}' no finito"}
+            clean_axes[k] = max(-bound, min(bound, v))
+        arm = body.get("arm")
+        if arm is not None and not isinstance(arm, bool):
+            return {"ok": False, "error": "arm debe ser bool o null"}
+        state = self.joystick.tick(clean_axes, arm=arm,
+                                   stop=bool(body.get("stop")), block=bool(body.get("block")))
+        return {"ok": True, **state}
+
+    # ── per-component window capture (x11vnc -id + websockify, see window_vnc.py) ──
+    def window_list(self, name):
+        c = self._component(name)
+        if not c:
+            return {"ok": False, "error": "componente desconocido", "windows": []}
+        pid = c.get("pid")
+        if not pid:
+            return {"ok": False, "error": "componente sin PID (¿está parado?)", "windows": []}
+        wins = self.windows.list_windows(pid)
+        return {"ok": True, "windows": [
+            {"id": wid, "title": title, "width": w, "height": h} for wid, title, w, h in wins
+        ]}
+
+    def window_open(self, name, window_id=None):
+        c = self._component(name)
+        if not c:
+            return {"ok": False, "error": "componente desconocido"}
+        pid = c.get("pid")
+        if not pid:
+            return {"ok": False, "error": "componente sin PID (¿está parado?)"}
+        if window_id is not None:
+            try:
+                window_id = int(window_id)
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "window_id inválido"}
+            # Only accept an id that's genuinely one of THIS component's own windows --
+            # never let the browser point x11vnc at an arbitrary window id on the display.
+            valid_ids = {w[0] for w in self.windows.list_windows(pid)}
+            if window_id not in valid_ids:
+                return {"ok": False, "error": "esa ventana no pertenece a este componente"}
+        port = self.windows.open(name, pid, window_id=window_id)
+        if port is None:
+            return {"ok": False, "error": "no se encontró ninguna ventana para este componente"}
+        return {"ok": True, "ws_port": port}
+
+    def window_close(self, name):
+        self.windows.close(name)
+        return {"ok": True}
+
     def _handler(self):
         server = self
 
@@ -237,6 +371,25 @@ class MonitorServer:
                     self._file("index.html", "text/html; charset=utf-8")
                 elif route == "/app.js":
                     self._file("app.js", "application/javascript")
+                elif route.startswith("/novnc/"):
+                    # Generic static passthrough for the vendored noVNC client -- app.js's
+                    # `import RFB from "/novnc/core/rfb.js"` pulls this file plus everything
+                    # IT imports (relative paths like "./util/..." resolve to further /novnc/...
+                    # requests), not just the one entry point. Missing this route 404s the
+                    # import, which is fatal for an ES module -- it takes the WHOLE script down,
+                    # not just the window-view feature (see session notes: this is exactly what
+                    # broke the graph/table after adding the noVNC import).
+                    rel = route[1:]
+                    if ".." in rel.split("/"):
+                        self._send(403, "forbidden", "text/plain")
+                        return
+                    ctype = "application/javascript" if rel.endswith(".js") else "application/octet-stream"
+                    self._file(rel, ctype)
+                elif route == "/api/term/snapshot":
+                    q = parse_qs(urlparse(self.path).query)
+                    name = (q.get("name") or [""])[0]
+                    lines = int((q.get("lines") or ["2000"])[0])
+                    self._send(200, json.dumps(server.term_snapshot(name, lines)), "application/json")
                 elif route == "/api/topology":
                     self._send(200, json.dumps(server.topology()), "application/json")
                 elif route == "/api/state":
@@ -251,6 +404,10 @@ class MonitorServer:
                     q = parse_qs(urlparse(self.path).query)
                     name = (q.get("name") or [""])[0]
                     self._send(200, json.dumps(server.config_get(name)), "application/json")
+                elif route == "/api/window/list":
+                    q = parse_qs(urlparse(self.path).query)
+                    name = (q.get("name") or [""])[0]
+                    self._send(200, json.dumps(server.window_list(name)), "application/json")
                 else:
                     self._send(404, "not found", "text/plain")
 
@@ -269,6 +426,18 @@ class MonitorServer:
                     res = server.action(body.get("action"), body.get("name"))
                 elif route == "/api/config":
                     res = server.config_set(body.get("name"), body.get("text", ""))
+                elif route == "/api/term/input":
+                    res = server.term_input(body.get("name"), body.get("text", ""))
+                elif route == "/api/term/key":
+                    res = server.term_key(body.get("name"), body.get("key", ""))
+                elif route == "/api/term/resize":
+                    res = server.term_resize(body.get("name"), body.get("cols"), body.get("rows"))
+                elif route == "/api/joystick":
+                    res = server.joystick_tick(body)
+                elif route == "/api/window/open":
+                    res = server.window_open(body.get("name"), body.get("window_id"))
+                elif route == "/api/window/close":
+                    res = server.window_close(body.get("name"))
                 else:
                     self._send(404, "not found", "text/plain")
                     return
@@ -284,3 +453,5 @@ class MonitorServer:
     def stop(self):
         if self._httpd:
             self._httpd.shutdown()
+        self.joystick.shutdown()
+        self.windows.shutdown()
