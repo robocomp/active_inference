@@ -218,7 +218,11 @@ std::optional<Mat::RTMat> SceneProcessor::get_room_robot_transform(FPSCounter& c
         return std::nullopt;
     }
 
-    auto room_T_robot = inner_eigen_api_->get_transformation_matrix(room_name, robot_name, timestamp_ms);
+    // Pose at the CAPTURE stamp, extrapolated past the RT ring's leading edge by the query itself —
+    // see room_T_robot_at. `diag` is filled here (and only here) because this is the path that owns
+    // the CSV; the worker paths pass nullptr and skip its extra query.
+    PoseExtrapDiag diag;
+    auto room_T_robot = room_T_robot_at(inner_eigen_api_, room_name, robot_name, timestamp_ms, &diag);
     if (!room_T_robot.has_value())
     {
         static auto last = std::chrono::steady_clock::time_point{};
@@ -234,14 +238,10 @@ std::optional<Mat::RTMat> SceneProcessor::get_room_robot_transform(FPSCounter& c
         return std::nullopt;
     }
 
-    // DSR's InterpolatedRT clamps the pose to the newest RT block, which lags the camera capture stamp by
-    // ~100 ms — so masks would deproject against a stale robot pose. Roll it FORWARD to the capture stamp
-    // via the shared helper (efference copy off the robot→room RT-edge velocity), then log raw vs
-    // extrapolated for analysis. The masks worker path uses the same helper (room_T_zed_extrapolated).
-    if (mask_pose_extrapolate_)
+    // A plain interpolated query CLAMPS to the newest RT block, which lags the camera capture stamp by
+    // ~100 ms, so masks would deproject against a stale robot pose. The query above already rolled it
+    // forward; what is left here is logging raw vs extrapolated for analysis.
     {
-        PoseExtrapDiag diag;
-        forward_extrapolate_room_T_robot(room_T_robot.value(), room_name, robot_name, timestamp_ms, diag);
         if (diag.applied)
         {
             if (!pose_extrap_csv_open_attempted_)
@@ -268,58 +268,97 @@ std::optional<Mat::RTMat> SceneProcessor::get_room_robot_transform(FPSCounter& c
     return room_T_robot;
 }
 
-void SceneProcessor::forward_extrapolate_room_T_robot(Mat::RTMat& room_T_robot, const std::string& room_name,
-                                                      const std::string& robot_name, std::uint64_t timestamp_ms,
-                                                      PoseExtrapDiag& diag) const
+// ── room←robot AT A STAMP, EXTRAPOLATED BY THE QUERY ITSELF (2026-09-09) ────────────────────────
+// This replaces forward_extrapolate_room_T_robot(), which was this file's copy of the SE(2) twist step.
+// There were FOUR across the fleet — here, viewer3d, the controller and common/media_transport — and
+// the axis-assignment bug had to be fixed in three of them on 2026-09-04. RT_API::TimeQuery::
+// Extrapolated is now the single implementation: Interpolated inside the RT ring and, past its ends,
+// a walk along the twist room_concept publishes in that same ring slot, read in AXIS order so no
+// consumer re-encodes a body-frame convention.
+//
+// ★THE HORIZON CAP IS OURS TO APPLY. Cortex will not invent one — it reports how far it walked, and
+// past mask_pose_extrap_max_dt_s_ we take the un-extrapolated pose rather than predict across a
+// stalled producer.
+// ★`diag` COSTS AN EXTRA QUERY and is therefore opt-in (nullptr on the worker paths): the only honest
+// way to report "what the extrapolation changed" is to ask for the un-extrapolated pose too and
+// difference them. The old version got that for free because it did the arithmetic itself; it is not
+// free now, and pretending otherwise would mean logging a number derived from the same call.
+std::optional<Mat::RTMat> SceneProcessor::room_T_robot_at(DSR::InnerEigenAPI* eigen,
+                                                          const std::string& room_name,
+                                                          const std::string& robot_name,
+                                                          std::uint64_t stamp,
+                                                          PoseExtrapDiag* diag) const
 {
-    if (graph_ == nullptr || graph_->get_rt_api() == nullptr)
-        return;
-    const auto robot_node = graph_->get_node(robot_name);
-    const auto room_node  = graph_->get_node(room_name);
-    if (!robot_node.has_value() || !room_node.has_value())
-        return;
-    const auto edge = graph_->get_rt_api()->get_edge_RT(robot_node.value(), room_node.value().id());
-    if (!edge.has_value())
-        return;
-    const auto ts = graph_->get_attrib_by_name<rt_timestamps_att>(edge.value());
-    const auto tv = graph_->get_attrib_by_name<rt_translation_velocity_att>(edge.value());
-    const auto rv = graph_->get_attrib_by_name<rt_rotation_euler_xyz_velocity_att>(edge.value());
-    if (!ts.has_value() || !tv.has_value() || tv->get().size() < 2 || !rv.has_value() || rv->get().size() < 3)
-        return;
-
-    std::uint64_t newest = 0;
-    for (const auto t : ts->get())
-        newest = std::max(newest, t);
-    if (newest == 0 || timestamp_ms <= newest)
-        return;
-
-    float dt = static_cast<float>(timestamp_ms - newest) * 1e-3f;
-    dt = std::min(dt, mask_pose_extrap_max_dt_s_);
-    const double adv = tv->get()[0], side = tv->get()[1], rot = rv->get()[2];
-    const Eigen::Matrix3d R = room_T_robot.linear();
-    const double th    = std::atan2(R(1, 0), R(0, 0));
-    const double raw_x = room_T_robot.translation().x(), raw_y = room_T_robot.translation().y();
-    const double dth = rot * dt;
-    const double thm = th + 0.5 * dth;   // midpoint heading
-    // AXIS ASSIGNMENT - this robot's body frame is +Y FORWARD, +X lateral, so the twist array
-    // [adv, side, _] puts the FORWARD rate on the frame's y axis and the lateral rate on its x.
-    // Putting adv on x rotates the predicted displacement by 90 degrees, landing sqrt(2)*|motion|
-    // from the truth - WORSE than not extrapolating at all. Measured on 421 logged forward-driving
-    // cycles (2026-08-04): adv->x p50 25.86 mm, adv->y p50 0.07 mm. Same assignment as the
-    // controller's twist_delta(), which is the reference implementation of this step.
-    const double vx = side, vy = adv;
-    // Exact SE(2) constant-twist step: dp = dt * sinc(dth/2) * R(th + dth/2) * v. The sinc is the
-    // left Jacobian - it turns the body velocity into the CHORD of the arc actually driven; the
-    // midpoint rule alone follows the tangent and cuts the corner by dth^2/24.
-    const double half = 0.5 * dth;
-    const double sinc = std::abs(half) > 1e-9 ? std::sin(half) / half : 1.0;
-    const double dx = sinc * (vx * std::cos(thm) - vy * std::sin(thm)) * dt;
-    const double dy = sinc * (vx * std::sin(thm) + vy * std::cos(thm)) * dt;
-    room_T_robot.translation().x() += dx;
-    room_T_robot.translation().y() += dy;
-    room_T_robot.linear() = (Eigen::AngleAxisd(dth, Eigen::Vector3d::UnitZ()).toRotationMatrix() * R);
-
-    diag = PoseExtrapDiag{ newest, dt, adv, side, rot, raw_x, raw_y, th, dx, dy, dth, /*applied=*/true };
+    if (eigen == nullptr)
+        return std::nullopt;
+    const auto tq = mask_pose_extrapolate_ ? DSR::RT_API::TimeQuery::Extrapolated
+                                           : DSR::RT_API::TimeQuery::Interpolated;
+    DSR::RT_API::TimeQueryInfo info;
+    auto pose = eigen->get_transformation_matrix(room_name, robot_name, stamp, "RT", tq, &info);
+    if (!pose.has_value())
+        return std::nullopt;
+    const std::int64_t applied_dt_ms = info.applied_dt_ms;
+    const bool capped = std::abs(applied_dt_ms)
+                      > static_cast<std::int64_t>(mask_pose_extrap_max_dt_s_ * 1000.f);
+    if (capped)
+    {
+        pose = eigen->get_transformation_matrix(room_name, robot_name, stamp, "RT",
+                                                DSR::RT_API::TimeQuery::Interpolated);
+        if (!pose.has_value())
+            return std::nullopt;
+    }
+    if (diag != nullptr)
+    {
+        diag->applied = (applied_dt_ms != 0) and not capped;
+        diag->dt_s = static_cast<float>(applied_dt_ms) * 1e-3f;
+        if (diag->applied)
+        {
+            if (const auto raw = eigen->get_transformation_matrix(room_name, robot_name, stamp, "RT",
+                                                                  DSR::RT_API::TimeQuery::Interpolated);
+                raw.has_value())
+            {
+                const Eigen::Matrix3d R0 = raw->linear();
+                diag->raw_x  = raw->translation().x();
+                diag->raw_y  = raw->translation().y();
+                diag->raw_th = std::atan2(R0(1, 0), R0(0, 0));
+                const Eigen::Matrix3d R1 = pose->linear();
+                diag->dx  = pose->translation().x() - diag->raw_x;
+                diag->dy  = pose->translation().y() - diag->raw_y;
+                diag->dth = std::remainder(std::atan2(R1(1, 0), R1(0, 0)) - diag->raw_th, 2.0 * M_PI);
+            }
+            // ★THE VELOCITY COLUMNS NOW READ THE RING, AND THEIR MEANING CHANGED WITH IT. They used to
+            // be [adv, side] — ARRAY order off the deprecated rt_translation_velocity. rt_twist_linear
+            // is AXIS order, so on this +Y-forward robot the advance rate is now in `side`'s old column
+            // and vice versa. The CSV header says so; a script that indexes these positionally against
+            // an older file will read a turn as a lurch.
+            if (graph_ != nullptr and graph_->get_rt_api() != nullptr)
+                if (const auto robot_node = graph_->get_node(robot_name),
+                               room_node  = graph_->get_node(room_name);
+                    robot_node.has_value() and room_node.has_value())
+                    if (const auto edge = graph_->get_rt_api()->get_edge_RT(robot_node.value(),
+                                                                            room_node.value().id());
+                        edge.has_value())
+                    {
+                        const auto ts  = graph_->get_attrib_by_name<rt_timestamps_att>(edge.value());
+                        const auto twl = graph_->get_attrib_by_name<rt_twist_linear_att>(edge.value());
+                        const auto twa = graph_->get_attrib_by_name<rt_twist_angular_att>(edge.value());
+                        if (ts.has_value() and twl.has_value() and twa.has_value())
+                        {
+                            std::uint64_t newest = 0; std::size_t slot = 0;
+                            for (std::size_t k = 0; k < ts->get().size(); ++k)
+                                if (ts->get()[k] > newest) { newest = ts->get()[k]; slot = k; }
+                            diag->newest_block_ms = newest;
+                            if (twl->get().size() >= 3 * (slot + 1) and twa->get().size() >= 3 * (slot + 1))
+                            {
+                                diag->adv  = twl->get()[slot * 3];       // vx (lateral on this robot)
+                                diag->side = twl->get()[slot * 3 + 1];   // vy (FORWARD on this robot)
+                                diag->rot  = twa->get()[slot * 3 + 2];   // wz
+                            }
+                        }
+                    }
+        }
+    }
+    return pose;
 }
 
 std::optional<Mat::RTMat> SceneProcessor::room_T_zed_extrapolated(DSR::InnerEigenAPI* eigen,
@@ -332,14 +371,9 @@ std::optional<Mat::RTMat> SceneProcessor::room_T_zed_extrapolated(DSR::InnerEige
 
     // room←robot at the capture stamp (ts!=0 → no InnerEigenAPI cache), then forward-extrapolate to beat
     // the RT lag — the same correction the voxel path applies.
-    auto room_T_robot = eigen->get_transformation_matrix(room_name, robot_name, stamp);
+    auto room_T_robot = room_T_robot_at(eigen, room_name, robot_name, stamp, nullptr);
     if (!room_T_robot.has_value())
         return std::nullopt;
-    if (mask_pose_extrapolate_)
-    {
-        PoseExtrapDiag diag;   // discarded — no CSV logging off the worker thread
-        forward_extrapolate_room_T_robot(room_T_robot.value(), room_name, robot_name, stamp, diag);
-    }
 
     // robot→zed is the rigid, static camera extrinsic → query "latest" (ts==0) on the CALLER's own instance,
     // so the ts==0 cache stays per-thread; the extrinsic never changes so a stale cache is harmless.
@@ -361,14 +395,9 @@ std::optional<Mat::RTMat> SceneProcessor::room_T_ricoh_extrapolated(DSR::InnerEi
 
     // room←robot at the RICOH FRAME'S OWN capture stamp (ts!=0 → no InnerEigenAPI cache), then
     // forward-extrapolate to beat the RT lag — same correction as room_T_zed_extrapolated.
-    auto room_T_robot = eigen->get_transformation_matrix(room_name, robot_name, stamp);
+    auto room_T_robot = room_T_robot_at(eigen, room_name, robot_name, stamp, nullptr);
     if (!room_T_robot.has_value())
         return std::nullopt;
-    if (mask_pose_extrapolate_)
-    {
-        PoseExtrapDiag diag;   // discarded — no CSV logging off this secondary path
-        forward_extrapolate_room_T_robot(room_T_robot.value(), room_name, robot_name, stamp, diag);
-    }
 
     // robot→ricoh is the rigid, static mount — already resolved once by the caller at ts==0.
     return room_T_robot.value() * robot_T_ricoh;

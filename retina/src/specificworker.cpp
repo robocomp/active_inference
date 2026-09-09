@@ -24,7 +24,6 @@
 #include <QDateTime>
 #include <fstream>   // [perf-probe] CSV timing logs (remove with the probes)
 #include "scene_processor.h"
-#include "../../common/media_transport/rt_extrapolate.h"
 #include "yolo_processor.h"
 #include "yolo_human.h"
 #include "yolo_semantic.h"
@@ -1854,25 +1853,38 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
         Mat::RTMat room_T_robot_lidar = room_T_robot.value();
         if (inner_eigen_api != nullptr && lidar_data->timestamp_ms > 0)
         {
-            const auto time_query = params.TRANSFORMS_INTERPOLATE_RT
-                ? DSR::RT_API::TimeQuery::Interpolated
-                : DSR::RT_API::TimeQuery::Nearest;
-            if (auto interpolated = inner_eigen_api->get_transformation_matrix(
+            // ── ONE QUERY: INTERPOLATE IN THE RING, EXTRAPOLATE PAST ITS EDGE (2026-09-09) ──────
+            // TimeQuery::Extrapolated walks the pose along the twist room_concept publishes in the
+            // same ring slot, replacing the rc::media::extrapolate_room_T_robot call that used to
+            // follow this — one of FOUR copies of that SE(2) step in this fleet, three of which had
+            // to have the same axis-assignment bug fixed on 2026-09-04.
+            // ★NO-OP WHEN THE ROBOT IS STATIC (twist ~ 0 => zero correction). The ~90 ms clamp only
+            // shifts the cloud when MOVING, worst under rotation.
+            // ★The 0.25 s horizon the old call carried is enforced here: cortex reports how far it
+            // walked and refuses to invent a cap, so past it we take the interpolated pose rather
+            // than predict across a stalled producer.
+            const auto time_query = not params.TRANSFORMS_INTERPOLATE_RT
+                ? DSR::RT_API::TimeQuery::Nearest
+                : DSR::RT_API::TimeQuery::Extrapolated;
+            DSR::RT_API::TimeQueryInfo rt_info;
+            if (auto pinned = inner_eigen_api->get_transformation_matrix(
                     room_name,
                     robot_name,
                     lidar_data->timestamp_ms,
                     "RT",
-                    time_query); interpolated.has_value())
+                    time_query,
+                    &rt_info); pinned.has_value())
             {
-                room_T_robot_lidar = interpolated.value();
+                if (std::abs(rt_info.applied_dt_ms) > 250)
+                {
+                    if (const auto plain = inner_eigen_api->get_transformation_matrix(
+                            room_name, robot_name, lidar_data->timestamp_ms, "RT",
+                            DSR::RT_API::TimeQuery::Interpolated); plain.has_value())
+                        pinned = plain;
+                }
+                room_T_robot_lidar = pinned.value();
             }
         }
-
-        // Efference-copy: extrapolate room<-robot FORWARD to the scan stamp over the RT-clamp gap using the
-        // RT-edge velocities. NO-OP when the robot is STATIC (velocities≈0 ⇒ zero correction) — the ~90 ms
-        // clamp only shifts the cloud when MOVING (displacement = velocity·lag, worst under rotation).
-        rc::media::extrapolate_room_T_robot(G, room_name, robot_name, lidar_data->timestamp_ms,
-                                            0.25f, room_T_robot_lidar, room_T_robot_lidar);
 
         // Ceiling crop: drop LiDAR returns at/above the room ceiling. Room-frame z is height above
         // the floor, so the ceiling is z == room_height (a float attribute the room agent writes on
