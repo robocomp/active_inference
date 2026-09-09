@@ -259,7 +259,7 @@ struct ControllerParams
     // OUTSIDE the ring and the tree could only clamp to an end block. That clamp is the normal case
     // for a freshly-arrived scan — the pose is derived FROM a scan, so it always trails one — and it
     // registers the whole cloud with a pose |Δt| ms off, which shows up as a bulk ω·Δt rotation the
-    // moment the robot turns and vanishes at rest. See ControllerObstacleTracker::twist_corrected.
+    // moment the robot turns and vanishes at rest. Done by RT_API::TimeQuery::Extrapolated.
     // It repairs the clamp the RT ring cannot avoid:
     // the correction is exact where the buffer was merely patient, and drops a full lidar period of
     // latency from the obstacle path. Turn OFF to A/B against the buffered-only behaviour.

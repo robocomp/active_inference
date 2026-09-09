@@ -43,57 +43,8 @@ std::string object_class_of(DSR::DSRGraph& g, const DSR::Node& node)
 }
 }   // namespace
 
-void SceneFeed::forward_extrapolate_room_T_robot(Mat::RTMat& room_T_robot, const std::string& room_name,
-                                                 const std::string& robot_name, std::uint64_t timestamp_ms) const
-{
-    if (graph_ == nullptr || graph_->get_rt_api() == nullptr)
-        return;
-    const auto robot_node = graph_->get_node(robot_name);
-    const auto room_node  = graph_->get_node(room_name);
-    if (!robot_node.has_value() || !room_node.has_value())
-        return;
-    const auto edge = graph_->get_rt_api()->get_edge_RT(robot_node.value(), room_node.value().id());
-    if (!edge.has_value())
-        return;
-    const auto ts = graph_->get_attrib_by_name<rt_timestamps_att>(edge.value());
-    const auto tv = graph_->get_attrib_by_name<rt_translation_velocity_att>(edge.value());
-    const auto rv = graph_->get_attrib_by_name<rt_rotation_euler_xyz_velocity_att>(edge.value());
-    if (!ts.has_value() || !tv.has_value() || tv->get().size() < 2 || !rv.has_value() || rv->get().size() < 3)
-        return;
-
-    std::uint64_t newest = 0;
-    for (const auto t : ts->get())
-        newest = std::max(newest, t);
-    if (newest == 0 || timestamp_ms <= newest)
-        return;
-
-    float dt = static_cast<float>(timestamp_ms - newest) * 1e-3f;
-    dt = std::min(dt, mask_pose_extrap_max_dt_s_);
-    const double adv = tv->get()[0], side = tv->get()[1], rot = rv->get()[2];
-    const Eigen::Matrix3d R = room_T_robot.linear();
-    const double th    = std::atan2(R(1, 0), R(0, 0));
-    const double raw_x = room_T_robot.translation().x(), raw_y = room_T_robot.translation().y();
-    const double dth = rot * dt;
-    const double thm = th + 0.5 * dth;   // midpoint heading
-    // AXIS ASSIGNMENT - this robot's body frame is +Y FORWARD, +X lateral, so the twist array
-    // [adv, side, _] puts the FORWARD rate on the frame's y axis and the lateral rate on its x.
-    // Putting adv on x rotates the predicted displacement by 90 degrees, landing sqrt(2)*|motion|
-    // from the truth - WORSE than not extrapolating at all. Measured on 421 logged forward-driving
-    // cycles (2026-08-04): adv->x p50 25.86 mm, adv->y p50 0.07 mm. Same assignment as the
-    // controller's twist_delta(), which is the reference implementation of this step.
-    const double vx = side, vy = adv;
-    // Exact SE(2) constant-twist step: dp = dt * sinc(dth/2) * R(th + dth/2) * v. The sinc is the
-    // left Jacobian - it turns the body velocity into the CHORD of the arc actually driven; the
-    // midpoint rule alone follows the tangent and cuts the corner by dth^2/24.
-    const double half = 0.5 * dth;
-    const double sinc = std::abs(half) > 1e-9 ? std::sin(half) / half : 1.0;
-    const double dx = sinc * (vx * std::cos(thm) - vy * std::sin(thm)) * dt;
-    const double dy = sinc * (vx * std::sin(thm) + vy * std::cos(thm)) * dt;
-    room_T_robot.translation().x() += dx;
-    room_T_robot.translation().y() += dy;
-    room_T_robot.linear() = (Eigen::AngleAxisd(dth, Eigen::Vector3d::UnitZ()).toRotationMatrix() * R);
-
-}
+// (forward_extrapolate_room_T_robot() lived here — this file's copy of the SE(2) twist step.
+// Removed 2026-09-09: RT_API::TimeQuery::Extrapolated does it. See the note in room_T_zed_extrapolated.)
 
 std::optional<Mat::RTMat> SceneFeed::room_T_zed_extrapolated(DSR::InnerEigenAPI* eigen,
                                                                   const std::string& room_name,
@@ -103,14 +54,34 @@ std::optional<Mat::RTMat> SceneFeed::room_T_zed_extrapolated(DSR::InnerEigenAPI*
     if (eigen == nullptr || room_name.empty() || robot_name.empty())
         return std::nullopt;
 
-    // room←robot at the capture stamp (ts!=0 → no InnerEigenAPI cache), then forward-extrapolate to beat
-    // the RT lag — the same correction the voxel path applies.
-    auto room_T_robot = eigen->get_transformation_matrix(room_name, robot_name, stamp);
+    // ── THE RT QUERY EXTRAPOLATES NOW (2026-09-09) ────────────────────────────────────────────
+    // TimeQuery::Extrapolated is Interpolated inside the RT ring and, past its ends, walks the pose
+    // along the twist room_concept publishes in that same ring slot. This file used to carry its own
+    // copy of that SE(2) step; there were FOUR across the fleet (here, retina, the controller and
+    // common/media_transport), and the axis-assignment bug had to be fixed in three of them on
+    // 2026-09-04. One implementation now, in RT_API, reading the twist in AXIS order so no consumer
+    // re-encodes a body-frame convention.
+    // ★THE HORIZON CAP IS THE CALLER'S, and cortex will not invent one: it reports how far it walked
+    // and this decides. Past the cap we want the UN-extrapolated pose, not a prediction across a dead
+    // producer, so the query is simply repeated without it — rare enough that the second call costs
+    // nothing on the healthy path.
+    // room←robot at the capture stamp (ts!=0 → no InnerEigenAPI cache).
+    DSR::RT_API::TimeQueryInfo info;
+    const auto tq = mask_pose_extrapolate_ ? DSR::RT_API::TimeQuery::Extrapolated
+                                           : DSR::RT_API::TimeQuery::Interpolated;
+    auto room_T_robot = eigen->get_transformation_matrix(room_name, robot_name, stamp, "RT", tq, &info);
     if (!room_T_robot.has_value())
         return std::nullopt;
-    if (mask_pose_extrapolate_)
+    // ★A CLAMPED POSE IS NOT A POSE AT THIS STAMP, and this draws the world. Cortex now says so, and
+    // the honest thing for a VIEWER is to draw it anyway (a stale frame beats a blank one) but never
+    // to pretend: the caller sees it through the returned info. Extrapolation past the caller's own
+    // horizon is refused here — cortex will not invent a cap.
+    if (std::abs(info.applied_dt_ms) > static_cast<std::int64_t>(mask_pose_extrap_max_dt_s_ * 1000.f))
     {
-        forward_extrapolate_room_T_robot(room_T_robot.value(), room_name, robot_name, stamp);
+        room_T_robot = eigen->get_transformation_matrix(room_name, robot_name, stamp, "RT",
+                                                        DSR::RT_API::TimeQuery::Interpolated);
+        if (!room_T_robot.has_value())
+            return std::nullopt;
     }
 
     // robot→zed is the rigid, static camera extrinsic → query "latest" (ts==0) on the CALLER's own instance,

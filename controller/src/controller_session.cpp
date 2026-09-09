@@ -552,7 +552,7 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
                        "# raw_minus_rt  = raw_lidar_ts - newest_rt_ts. POSITIVE is expected and is the\n"
                        "#   whole point: the pose is DERIVED from a scan, so the freshest scan must lead\n"
                        "#   the freshest pose by at least room_concept's processing time. That lead is\n"
-                       "#   what twist_corrected() walks the pose across; the one-frame hold used to wait\n"
+                       "#   what the extrapolating RT query walks the pose across; the one-frame hold used to wait\n"
                        "#   it out instead, at ~48 ms of reaction latency.\n"
                        "t_ms,cloud_ts,pose_ts,dt_ms,omega,cloud_yaw,icon_yaw,dyaw_deg,implied_deg,"
                        "raw_lidar_ts,newest_rt_ts,raw_minus_rt\n";

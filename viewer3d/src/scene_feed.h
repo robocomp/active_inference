@@ -91,8 +91,6 @@ private:
     // Forward-extrapolate room←robot over the RT lag, then compose the static robot←zed mount. Same
     // correction the retina applies to its own transforms; without it the mask cloud is drawn
     // against a pose ~90 ms stale, which reads as shimmer under rotation.
-    void forward_extrapolate_room_T_robot(Mat::RTMat& room_T_robot, const std::string& room_name,
-                                          const std::string& robot_name, std::uint64_t timestamp_ms) const;
     std::optional<Mat::RTMat> room_T_zed_extrapolated(DSR::InnerEigenAPI* eigen,
                                                       const std::string& room_name,
                                                       const std::string& robot_name,

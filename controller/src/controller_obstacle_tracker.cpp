@@ -1791,49 +1791,20 @@ void ControllerObstacleTracker::update_rt_block_lead(std::uint64_t scan_ts)
     }
 }
 
-// Bring a room←robot pose that the RT tree could only CLAMP onto the instant the scan was actually
-// taken, by walking the robot along its own published twist.
+// (twist_corrected() lived here. It composed a clamped room<-robot pose with the published body twist
+// to land it on the scan instant, and it was ONE OF FOUR copies of that SE(2) step in this fleet.
+// Removed 2026-09-09: RT_API::TimeQuery::Extrapolated does it, once, inside the transform query — see
+// the note at the query site in handle_lidar_points.)
 //
-// The identity is exact and direction-free:
-//     room←robot(t_scan) = room←robot(t_block) · robot(t_block)←robot(t_scan)
-//                                                └─ Exp(ξ·Δt), Δt = t_scan − t_block ─┘
-// so "extrapolate the pose forward" and "move the cloud back onto the pose" are the same single
-// matrix compose — this does it on the pose side, once per plane, instead of per point.
-//
-// Applied ONLY when the query fell outside the ring and the returned pose is therefore a clamped
-// end block: that is the case the RT API gets wrong and the one we can detect (inside the ring its
-// own interpolation is already exact and is left alone). Δt of either sign works — beyond the
-// leading edge it walks forward, before the trailing edge it walks back.
-//
-// NO horizon cap, deliberately. Skipping the correction is not the neutral choice it looks like: it
-// is the same extrapolation with the velocity assumed to be ZERO, which is strictly worse than
-// integrating a twist that was actually measured. A stale pose feed is already handled where it
-// belongs — as growing covariance in the speed throttle, and by the LiDAR stall hold.
-Eigen::Matrix4d ControllerObstacleTracker::twist_corrected(const Eigen::Matrix4d &room_T_robot,
-                                                           std::uint64_t target_ts,
-                                                           std::int64_t *applied_dt_ms) const
-{
-    if (applied_dt_ms) *applied_dt_ms = 0;
-    if (!params_ || !params_->rt_twist_compensation || !rt_twist_valid_
-        || !rt_block_newest_ts_.has_value() || !rt_block_oldest_ts_.has_value() || target_ts == 0)
-        return room_T_robot;
-
-    // Inside the ring the RT API interpolated properly — nothing to repair.
-    std::int64_t dt_ms = 0;
-    if (target_ts > *rt_block_newest_ts_)
-        dt_ms = static_cast<std::int64_t>(target_ts) - static_cast<std::int64_t>(*rt_block_newest_ts_);
-    else if (target_ts < *rt_block_oldest_ts_)
-        dt_ms = static_cast<std::int64_t>(target_ts) - static_cast<std::int64_t>(*rt_block_oldest_ts_);
-    if (dt_ms == 0)
-        return room_T_robot;
-
-    if (applied_dt_ms) *applied_dt_ms = dt_ms;
-    return room_T_robot * twist_delta(dt_ms);   // right-multiply: delta is in the robot frame at t_block
-}
-
-// Exp(ξ·Δt) for the cached body twist — the robot's own motion over Δt, expressed in the robot frame
-// it started in. Δt may be negative (walk back). Split out of twist_corrected() so the accuracy probe
-// exercises the SAME arithmetic the correction relies on, rather than a re-derivation of it.
+// Exp(xi*dt) for the cached body twist — the robot's own motion over dt, in the robot frame it started
+// in. dt may be negative (walk back).
+// ★★★THIS IS NOW A DELIBERATE SECOND IMPLEMENTATION, AND THAT IS THE POINT. It used to be shared with
+// twist_corrected() so the probe below "exercised the same arithmetic the correction relies on". That
+// reasoning inverted the moment the correction moved into RT_API: a probe that calls the code under
+// test cannot detect that code being wrong. So this stays here, reading the LEGACY [adv, side] array
+// pair, while production reads the AXIS-order ring through cortex — two implementations, two attribute
+// layouts, one expected answer. If they diverge, twist_pred_err_m says so per cycle.
+// ⚠It follows that this must NOT be "simplified" by calling the API. Its value is that it does not.
 Eigen::Matrix4d ControllerObstacleTracker::twist_delta(std::int64_t dt_ms) const
 {
     const double dt = static_cast<double>(dt_ms) * 1e-3;
@@ -1871,7 +1842,7 @@ Eigen::Matrix4d ControllerObstacleTracker::twist_delta(std::int64_t dt_ms) const
 //
 // This is the number the one-frame buffer decision turns on. Keeping the buffer means registering an
 // exact pose 78 ms late; dropping it means registering a fresh scan whose pose was walked forward by
-// twist_corrected() over ~one period. Which is better is not a matter of opinion — it is whether the
+// the RT query's own extrapolation over ~one period. Which is better is not a matter of opinion — it is whether the
 // twist predicts that interval to better than the ω·Δt error the buffer exists to avoid. Nobody had
 // measured it, in either simulation or the robot, so the flag was being argued from assumption.
 //
@@ -1993,8 +1964,8 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
     // ── THE NEWEST SCAN IS REGISTERED DIRECTLY (the one-frame hold was removed 2026-09-09) ────────
     // What the hold was for, and why neither reason survives:
     //  1. REGISTRATION. Waiting a frame let room_concept publish that scan's room←robot pose, so
-    //     InterpolatedRT bracketed it instead of clamping at the leading edge. twist_corrected()
-    //     below does that job directly, reproducing the pose at the scan instant to 0.22 cm p50
+    //     InterpolatedRT bracketed it instead of clamping at the leading edge. The extrapolating RT
+    //     query below does that job directly, reproducing the pose at the scan instant to 0.22 cm p50
     //     against the 2.8 cm of obstacle lag the wait cost. Superseded, and measured.
     //  2. SMOOTHING. The stated beneficiary was the MPPI safety gate, which fired in 1-cycle pulses
     //     and had no temporal state of its own: dropping the hold took safety_guard_cycles to 124
@@ -2020,13 +1991,31 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
     update_rt_block_lead(proc_ts);            // caches the ring bounds + twist the two calls below use
     update_twist_prediction_error(proc_ts);
 
-    const auto interp = params_->interpolate_rt ? DSR::RT_API::TimeQuery::Interpolated
-                                                : DSR::RT_API::TimeQuery::Nearest;
+    // ── THE RT QUERY DOES THE EXTRAPOLATION NOW (2026-09-09) ─────────────────────────────────
+    // TimeQuery::Extrapolated is Interpolated inside the ring and, past its ends, walks the pose along
+    // the twist room_concept publishes in that same ring slot. This used to be twist_corrected() here,
+    // one of FOUR copies of the same SE(2) step across this fleet — retina, viewer3d and
+    // media_transport carried the others, and the axis-assignment bug had to be fixed in three of them
+    // on 2026-09-04. Now there is one implementation, in RT_API, and it reads the twist in AXIS order
+    // so no consumer re-encodes a body-frame convention.
+    // ★rt_twist_compensation still selects it, so the A/B against plain interpolation is unchanged.
+    const auto interp = params_->rt_twist_compensation ? DSR::RT_API::TimeQuery::Extrapolated
+                      : params_->interpolate_rt        ? DSR::RT_API::TimeQuery::Interpolated
+                                                       : DSR::RT_API::TimeQuery::Nearest;
+    // ★AND IT NOW SAYS WHETHER IT CLAMPED. A timestamped RT query that falls outside the ring used
+    // to return the end block and look exactly like a success, so a whole cloud could be registered
+    // against a pose from another instant with nothing to show for it. rt_query_clamped_ is that
+    // admission, logged per cycle beside the fix dt.
+    DSR::RT_API::TimeQueryInfo rt_info;
     const auto room_from_lidar = inner_eigen_api_->get_transformation_matrix(graph_state_->room_name,
                                                                              lidar_node_name,
                                                                              proc_ts,
                                                                              "RT",
-                                                                             interp);
+                                                                             interp,
+                                                                             &rt_info);
+    rt_twist_fix_dt_ms_ = rt_info.applied_dt_ms;
+    rt_query_clamped_ = rt_info.clamped();
+    rt_query_gap_ms_ = rt_info.gap_ms;
     const auto robot_from_lidar = inner_eigen_api_->get_transformation_matrix(graph_state_->robot_name,
                                                                                lidar_node_name,
                                                                                proc_ts,
@@ -2042,8 +2031,7 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
     if (room_from_lidar.has_value() and robot_from_lidar.has_value())
     {
         const Eigen::Matrix4d room_T_robot =
-            twist_corrected(room_from_lidar->matrix(), proc_ts)
-            * robot_from_lidar->matrix().inverse();
+            room_from_lidar->matrix() * robot_from_lidar->matrix().inverse();
         last_cloud_yaw_ = static_cast<float>(std::atan2(room_T_robot(1, 0), room_T_robot(0, 0)));
         last_cloud_ts_ = proc_ts;
     }
@@ -2055,12 +2043,11 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
     if (raw_count == 0)
         return false;
 
-    // Repair the leading-edge clamp before anything is registered: the freshest scan is normally
-    // NEWER than the freshest pose block (the pose is computed FROM a scan, so it can only arrive
-    // after one), which is precisely when InterpolatedRT silently returns the newest block instead.
-    rt_twist_fix_dt_ms_ = 0;
-    const Eigen::Matrix4d room_from_lidar_matrix =
-        twist_corrected(room_from_lidar->matrix(), proc_ts, &rt_twist_fix_dt_ms_);
+    // The leading-edge clamp is already repaired: the freshest scan is normally NEWER than the
+    // freshest pose block (the pose is computed FROM a scan, so it can only arrive after one), which
+    // is precisely when a plain interpolated query silently returns the newest block instead — and
+    // rt_twist_fix_dt_ms_, set by the query above, is how far it had to walk to fix that.
+    const Eigen::Matrix4d room_from_lidar_matrix = room_from_lidar->matrix();
     const auto robot_from_lidar_matrix = robot_from_lidar->matrix();
 
     // ── PER-PLANE REGISTRATION ────────────────────────────────────────────────────────────────────
@@ -2084,8 +2071,7 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
                     graph_state_->room_name, lidar_node_name,
                     static_cast<std::uint64_t>(stamp), "RT", interp);
                 plane_T.has_value())
-                room_from_plane[k] = twist_corrected(plane_T->matrix(),
-                                                     static_cast<std::uint64_t>(stamp));
+                room_from_plane[k] = plane_T->matrix();
         }
     }
     // NOTE: the RoboComp Lidar3D source already returns points in the robot/base frame (floor ≈ z=0),

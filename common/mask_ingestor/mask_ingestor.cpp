@@ -21,7 +21,6 @@
 
 #include <QDateTime>   // wall-clock ms source for the producer-liveness probes (kept out of the header)
 
-#include "../media_transport/rt_extrapolate.h"   // efference-copy forward-extrapolation over the RT lag
 
 namespace rc {
 
@@ -132,13 +131,35 @@ std::optional<Eigen::Matrix4d> MaskIngestor::resolve_transform(std::uint64_t sta
     if (robot_name_.empty() or robot_name_ == src_frame_)
         return direct();
 
-    // tgt←robot at the capture stamp (CLAMPED by DSR when the mask outruns the RT), then predicted forward.
-    const auto base = inner_eigen_->get_transformation_matrix(tgt_frame_, robot_name_, stamp);
+    // ── tgt←robot AT THE CAPTURE STAMP, EXTRAPOLATED BY THE QUERY ITSELF (2026-09-09) ─────────
+    // TimeQuery::Extrapolated is Interpolated inside the RT ring and, past its ends, walks the pose
+    // along the twist room_concept publishes in that same ring slot. This replaces
+    // rc::media::extrapolate_room_T_robot, one of FOUR copies of that SE(2) step across the fleet.
+    // ★TWO BEHAVIOUR CHANGES, BOTH DELIBERATE, SAY THEM RATHER THAN LET THEM BE FOUND:
+    //   1. Inside the ring this was NEAREST (the old call passed no TimeQuery, and the default is
+    //      Nearest); it is now interpolated. Strictly better — Nearest snaps to a block up to half a
+    //      publish period away — but it is a change, and mask reprojection is what it moves.
+    //   2. The horizon cap is enforced here rather than inside the helper. Cortex will not invent a
+    //      cap; it reports how far it walked, and past the cap we take the un-extrapolated pose
+    //      instead of predicting across a stalled producer.
+    DSR::RT_API::TimeQueryInfo info;
+    auto base = inner_eigen_->get_transformation_matrix(tgt_frame_, robot_name_, stamp, "RT",
+                                                        DSR::RT_API::TimeQuery::Extrapolated,
+                                                        &info);
     if (not base.has_value())
         return direct();
-    Mat::RTMat tgt_T_robot = base.value();
-    rc::media::extrapolate_room_T_robot(G_, tgt_frame_, robot_name_, stamp, pose_extrap_max_dt_s_,
-                                        base.value(), tgt_T_robot);
+    //   3. A CLAMPED query is now visible (info.clamped()). A mask baked against a pose from another
+    //      instant lands off its object, which is the symptom this whole path exists to remove — so
+    //      the condition is surfaced rather than absorbed. It is not treated as a failure: a clamp
+    //      still returns the nearest measured pose, which beats dropping the frame.
+    if (std::abs(info.applied_dt_ms) > static_cast<std::int64_t>(pose_extrap_max_dt_s_ * 1000.f))
+    {
+        base = inner_eigen_->get_transformation_matrix(tgt_frame_, robot_name_, stamp, "RT",
+                                                       DSR::RT_API::TimeQuery::Interpolated);
+        if (not base.has_value())
+            return direct();
+    }
+    const Mat::RTMat tgt_T_robot = base.value();
 
     // robot←src is the RIGID camera mount: it carries only its bootstrap timestamp, so a stamp-pinned
     // query FAILS on it — ask for "latest" (ts==0). Safe on the ts==0 cache because this instance is the
