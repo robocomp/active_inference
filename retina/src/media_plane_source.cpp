@@ -166,6 +166,7 @@ void MediaPlaneSource::drain_media_plane() const
                     return;
                 const float* p = reinterpret_cast<const float*>(f.data().data());
                 depth.depth.assign(p, p + npix);
+                for (auto& d : depth.depth) d *= 0.001f;   // mm -> m (ZED publishes in sl::UNIT::MILLIMETER)
             }
             else if (f.format() == rc::media::FORMAT_Z16)
             {
@@ -203,6 +204,16 @@ void MediaPlaneSource::drain_media_plane() const
         probe_wall_hist_.fill(0);
         rx_rgb = rx_depth = 0;
         last_rx_report = now_rx;
+
+        // FPS-drop diagnosis: fps/drops(frame_id gaps)/latency/sample_lost for the netmon web
+        // dashboard (server.py glob-merges every media_stats_*.json). Labeled per-component so
+        // this final-consumer view never collides with robot_concept's ingest-side view of the
+        // same topic name (see write_media_stats_json in media_transport.h).
+//         rc::media::write_media_stats_json(
+//             "/tmp/robocomp_netmon/media_stats_retina_zed.json",
+//             { { "retina:zed:rgb",   media_rgb_sub_   ? media_rgb_sub_->combined_stats()   : rc::media::StreamStats{} },
+//               { "retina:zed:depth", media_depth_sub_ ? media_depth_sub_->combined_stats() : rc::media::StreamStats{} } });
+        // rc::media::write_media_stats_json removed upstream (f1e7d7c) -- rewrite against the current descriptor writer if this netmon output is wanted back.
     }
 }
 
@@ -262,6 +273,21 @@ void MediaPlaneSource::poll_ricoh(bool force)
         media_ricoh_.frame_id = f.frame_id();
         media_ricoh_.valid    = true;
     });
+
+    // FPS-drop diagnosis: same media_stats_*.json dump as the ZED side (drain_media_plane),
+    // gated to once every 5s via an atomic timestamp since poll_ricoh() may run from more than
+    // one thread (see class comment on ricoh_stats_report_ns_).
+    const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (auto last = ricoh_stats_report_ns_.load(std::memory_order_relaxed);
+        now_ns - last >= 5'000'000'000LL &&
+        ricoh_stats_report_ns_.compare_exchange_strong(last, now_ns, std::memory_order_relaxed))
+    {
+//         rc::media::write_media_stats_json(
+//             "/tmp/robocomp_netmon/media_stats_retina_ricoh.json",
+//             { { "retina:ricoh:rgb360", media_ricoh_sub_->combined_stats() } });
+        // rc::media::write_media_stats_json removed upstream (f1e7d7c) -- rewrite against the current descriptor writer if this netmon output is wanted back.
+    }
 }
 
 cv::Mat MediaPlaneSource::ricoh_bgr_copy() const
@@ -376,8 +402,13 @@ std::optional<LidarData> MediaPlaneSource::get_lidar3D(const std::string& robot_
     const auto now = std::chrono::steady_clock::now();
     if (now - last_report >= std::chrono::seconds(5))
     {
-        std::println("[LidarSrc] 5s media fresh={} served={} ({} pts)",
-                     fresh, served, out ? out->xs.size() : 0u);
+        const std::uint64_t lidar_stamp = out ? out->timestamp_ms : 0;
+        const std::uint64_t rgb_stamp   = latest_rgb_stamp_.load(std::memory_order_relaxed);
+        const std::int64_t  skew_ms     = (lidar_stamp && rgb_stamp)
+            ? static_cast<std::int64_t>(lidar_stamp) - static_cast<std::int64_t>(rgb_stamp)
+            : 0;
+        std::println("[LidarSrc] 5s media fresh={} served={} ({} pts) lidar_stamp={} rgb_stamp={} skew(lidar-rgb)={}ms",
+                     fresh, served, out ? out->xs.size() : 0u, lidar_stamp, rgb_stamp, skew_ms);
         fresh = served = 0;
         last_report = now;
     }

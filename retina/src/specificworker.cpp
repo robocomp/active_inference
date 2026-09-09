@@ -17,6 +17,7 @@
  *    along with RoboComp.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "specificworker.h"
+#include <QDateTime>
 #include <fstream>   // [perf-probe] CSV timing logs (remove with the probes)
 #include "scene_processor.h"
 #include "../../common/media_transport/rt_extrapolate.h"
@@ -778,11 +779,67 @@ void SpecificWorker::on_render_tick()
                     if ((ricoh_model_overlay_enabled_ or ricoh_lidar_overlay_enabled_)
                         and ricoh_model_overlay_ and ricoh_scene_.valid)
                     {
+                        // FIX 2026-09-07: ricoh_scene_.room_T_ricoh was resolved by process_scene_frame()
+                        // at frame_ts_ms=0 ("latest" — see its comment), decoupled from when THIS
+                        // panorama (rres->frame.stamp) was actually captured. That mismatch is exactly
+                        // the offset reported between the projected model/lidar wireframe and the
+                        // panorama during motion. Recompute at the panorama's own capture stamp instead
+                        // (same forward pose-extrapolation the ZED masks path already gets); fall back
+                        // to the cached "latest" pose only if that resolution fails.
+                        Mat::RTMat room_T_ricoh_draw = ricoh_scene_.room_T_ricoh;
+                        bool ricoh_pose_resolved_at_stamp = false;
+                        if (robot_T_ricoh_.has_value())
+                        {
+                            const auto [room_name, robot_name] = scene_processor->get_room_robot_names_for_compute();
+                            if (const auto rt = scene_processor->room_T_ricoh_extrapolated(
+                                    inner_eigen_api.get(), room_name, robot_name,
+                                    robot_T_ricoh_.value(), rres->frame.stamp))
+                            {
+                                room_T_ricoh_draw = *rt;
+                                ricoh_pose_resolved_at_stamp = true;
+                            }
+                        }
+                        // TEST 2026-09-07: quantify (a) whether the at-stamp resolution is actually firing
+                        // or silently falling back to the stale "latest" pose, (b) how far apart the two
+                        // poses are (the fix's actual effect size), and (c) the pipeline latency between
+                        // the panorama's OWN capture stamp and wall-clock "now" -- if THAT is large, the
+                        // remaining offset may be decode/DDS lag baked into ricoh_omni_dds's stamp_ms
+                        // itself, which no pose-interpolation fix downstream can correct.
+                        {
+                            static std::int64_t last_diag_ms = 0;
+                            const std::int64_t now_ms = QDateTime::currentMSecsSinceEpoch();
+                            if (now_ms - last_diag_ms >= 3000)
+                            {
+                                last_diag_ms = now_ms;
+                                const double disp_m = (room_T_ricoh_draw.translation()
+                                                       - ricoh_scene_.room_T_ricoh.translation()).norm();
+                                // Yaw delta too: a translation-only metric UNDER-reports the fix's real
+                                // effect on an equirectangular 360 panorama, where a small yaw error
+                                // becomes a large horizontal pixel shift (360deg maps to the full image
+                                // width) -- much more visible than the same-magnitude translation error.
+                                const Eigen::Matrix3d R_new = room_T_ricoh_draw.linear();
+                                const Eigen::Matrix3d R_old = ricoh_scene_.room_T_ricoh.linear();
+                                const double yaw_new = std::atan2(R_new(1, 0), R_new(0, 0));
+                                const double yaw_old = std::atan2(R_old(1, 0), R_old(0, 0));
+                                const double yaw_delta_deg = std::abs(std::remainder(yaw_new - yaw_old,
+                                                                                     2.0 * M_PI)) * 180.0 / M_PI;
+                                // Panorama width in pixels per degree of yaw -- turns the angular delta
+                                // above into the actual horizontal pixel shift this would cause.
+                                const double px_per_deg = pano.cols > 0 ? pano.cols / 360.0 : 0.0;
+                                std::println("[RicohPoseDiag] resolved_at_stamp={} pipeline_lag_ms={} "
+                                            "pose_delta_vs_latest_mm={:.1f} yaw_delta_vs_latest_deg={:.2f} "
+                                            "(~{:.0f}px @ {}w) panorama_stamp={} robot_T_ricoh_valid={}",
+                                            ricoh_pose_resolved_at_stamp,
+                                            now_ms - static_cast<std::int64_t>(rres->frame.stamp),
+                                            disp_m * 1000.0, yaw_delta_deg, yaw_delta_deg * px_per_deg,
+                                            pano.cols, rres->frame.stamp, robot_T_ricoh_.has_value());
+                            }
+                        }
                         pano = pano.clone();
                         if (ricoh_lidar_overlay_enabled_)
-                            ricoh_model_overlay_->draw_lidar_points(pano, ricoh_scene_.lidar_room, ricoh_scene_.room_T_ricoh);
+                            ricoh_model_overlay_->draw_lidar_points(pano, ricoh_scene_.lidar_room, room_T_ricoh_draw);
                         if (ricoh_model_overlay_enabled_)
-                            ricoh_model_overlay_->draw(pano, ricoh_scene_.boxes, ricoh_scene_.room_T_ricoh,
+                            ricoh_model_overlay_->draw(pano, ricoh_scene_.boxes, room_T_ricoh_draw,
                                                        ricoh_scene_.poly_x, ricoh_scene_.poly_y, ricoh_scene_.room_height);
                     }
                     // Monocular-depth ramp UNDER the seg silhouettes: it is a dense full-band layer, so

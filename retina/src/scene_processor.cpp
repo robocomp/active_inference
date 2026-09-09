@@ -301,8 +301,8 @@ void SceneProcessor::forward_extrapolate_room_T_robot(Mat::RTMat& room_T_robot, 
     const double raw_x = room_T_robot.translation().x(), raw_y = room_T_robot.translation().y();
     const double dth = rot * dt;
     const double thm = th + 0.5 * dth;   // midpoint integration
-    const double dx = (adv * std::cos(thm) - side * std::sin(thm)) * dt;
-    const double dy = (adv * std::sin(thm) + side * std::cos(thm)) * dt;
+    const double dx = (side * std::cos(thm) - adv * std::sin(thm)) * dt;  // FIX 2026-09-03: adv/side estaban intercambiados
+    const double dy = (side * std::sin(thm) + adv * std::cos(thm)) * dt;  // body frame +Y forward/+X lateral, ver room_scene_graph.cpp
     room_T_robot.translation().x() += dx;
     room_T_robot.translation().y() += dy;
     room_T_robot.linear() = (Eigen::AngleAxisd(dth, Eigen::Vector3d::UnitZ()).toRotationMatrix() * R);
@@ -336,6 +336,30 @@ std::optional<Mat::RTMat> SceneProcessor::room_T_zed_extrapolated(DSR::InnerEige
         return std::nullopt;
 
     return room_T_robot.value() * robot_T_zed.value();
+}
+
+std::optional<Mat::RTMat> SceneProcessor::room_T_ricoh_extrapolated(DSR::InnerEigenAPI* eigen,
+                                                                    const std::string& room_name,
+                                                                    const std::string& robot_name,
+                                                                    const Mat::RTMat& robot_T_ricoh,
+                                                                    std::uint64_t stamp) const
+{
+    if (eigen == nullptr || room_name.empty() || robot_name.empty())
+        return std::nullopt;
+
+    // room←robot at the RICOH FRAME'S OWN capture stamp (ts!=0 → no InnerEigenAPI cache), then
+    // forward-extrapolate to beat the RT lag — same correction as room_T_zed_extrapolated.
+    auto room_T_robot = eigen->get_transformation_matrix(room_name, robot_name, stamp);
+    if (!room_T_robot.has_value())
+        return std::nullopt;
+    if (mask_pose_extrapolate_)
+    {
+        PoseExtrapDiag diag;   // discarded — no CSV logging off this secondary path
+        forward_extrapolate_room_T_robot(room_T_robot.value(), room_name, robot_name, stamp, diag);
+    }
+
+    // robot→ricoh is the rigid, static mount — already resolved once by the caller at ts==0.
+    return room_T_robot.value() * robot_T_ricoh;
 }
 
 std::optional<Mat::RTMat> SceneProcessor::get_room_zed_transform(FPSCounter& compute_fps,
