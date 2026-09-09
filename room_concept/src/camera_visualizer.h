@@ -238,6 +238,20 @@ class CameraVisualizer : public QDialog
         std::optional<Eigen::Affine3d> predicted_camera_from_room(std::uint64_t frame_ts) const;
         bool overlay_predict_pose_ = true;   // toggle the dead-reckoning latency compensation
 
+        // TEST 2026-09-07: quantify how often the RT edge's retained history (RoomConcept's
+        // rt_api_->HISTORY_SIZE, see specificworker.cpp) is deep enough to bracket this frame's
+        // capture stamp, vs. the two clamp cases RT_API::bracketing_blocks falls back to silently
+        // (dsr_rt_api.cpp — it never extrapolates). before_oldest_ is the one HISTORY_SIZE controls:
+        // frame_ts predates every retained sample, so the "Interpolated" lookup at line ~750
+        // returned the OLDEST retained pose instead of a real interpolation. after_newest_ is the
+        // OTHER clamp case, already compensated by the dead-reckoning below (dt>0 branch) regardless
+        // of HISTORY_SIZE. Logged (throttled) rather than asserted so this can be deleted once
+        // HISTORY_SIZE is settled.
+        mutable std::uint64_t rt_bracket_total_        = 0;
+        mutable std::uint64_t rt_bracket_before_oldest_ = 0;   // HISTORY_SIZE-limited clamp
+        mutable std::uint64_t rt_bracket_after_newest_  = 0;   // needs the dead-reckon below (any HISTORY_SIZE)
+        mutable std::int64_t  rt_bracket_diag_last_log_ms_ = 0;
+
         void draw_projections(QImage& image, std::uint64_t rt_timestamp);
         void draw_status_overlay(QImage& image) const;
         void reset_timing_window();

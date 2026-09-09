@@ -155,6 +155,19 @@ void SpecificWorker::initialize()
 
     // ── Collaborators (constructor injection; worker owns rt_api + shared params) ──
     rt_api_ = G->get_rt_api();
+    // TEST 2026-09-07: widen the RT timestamped history from the library default (5 blocks) so
+    // consumers querying a real acquisition timestamp (camera/lidar, PTP-anchored) more than ~50ms
+    // old do not silently clamp to the newest/oldest retained sample (RT_API::bracketing_blocks
+    // never extrapolates -- see dsr_rt_api.cpp). Since publish_predicted_tick writes this SAME edge
+    // at ~100 Hz, N slots cover roughly N*10ms of history.
+    // TEMP bumped 30->150 (~1.5s at 100Hz) ONLY to let the ricoh_omni_dds time_offset test use a
+    // full-second offset without saturating the clamp at ~300ms -- see the ricoh capture-timestamp
+    // investigation. Revert to something in the 30-50 range once that test is done; 150 is far more
+    // than any real consumer latency needs and only costs a few hundred more floats per edge.
+    // Process-local: rt_api_ is this worker's own instance (DSRGraph::get_rt_api() is a factory,
+    // never shared -- see dsr_api.h), and this agent is the sole writer of the robot<->room RT edge,
+    // so this is the only place that needs it.
+    rt_api_->HISTORY_SIZE = 150;
     scene_graph_ = std::make_unique<rc::RoomSceneGraph>(
         G, rt_api_.get(), params, room_concept_, epistemic_controller_,
         [this] { trigger_graph_layout_twopi(); });
@@ -163,6 +176,10 @@ void SpecificWorker::initialize()
     // option would select a path with nothing on it — a dead config of exactly the kind this
     // codebase keeps rediscovering. The escape hatch is git, not a flag that cannot work.
     imu_ingestor_ = std::make_unique<rc::ImuIngestor>(G, imu_buffer_, sim_clock_);
+    // FIX 2026-09-04: publish a predicted pose on every IMU sample -- see publish_predicted_tick().
+    // Runs on the imu-ingest thread; the callback itself takes publish_mutex_ before touching anything
+    // shared with maybe_publish_corrected_pose().
+    imu_ingestor_->set_on_new_sample([this](std::int64_t imu_ts_ms) { publish_predicted_tick(imu_ts_ms); });
     // RGB edge alignment. Constructed ONLY when enabled: with ImageEdge.enable = false there is no
     // subscriber, no thread and no extraction, so the feature is exactly free when off.
     if (params.IMAGE_EDGE_ENABLE)
@@ -344,15 +361,18 @@ void SpecificWorker::initialize()
     // connect(G.get(), &DSR::DSRGraph::del_edge_signal,         this, &SpecificWorker::del_edge_slot);
     // connect(G.get(), &DSR::DSRGraph::del_node_signal,         this, &SpecificWorker::del_node_slot);
 
-    // Publish corrections the INSTANT the localizer produces them, not on the next compute() tick.
-    // The callback runs on the LOCALIZER thread, so it only marshals the actual graph write to the
-    // MAIN thread via a Qt::QueuedConnection (maybe_publish_corrected_pose touches the DSR graph and
-    // must stay on the main thread). Removes ~one compute-period of lidar→RT-publish latency; the
-    // timestamp dedup keeps it idempotent with compute()'s own publish call.
-    room_concept_.set_on_result_ready([this]()
-    {
-        QMetaObject::invokeMethod(this, [this]() { maybe_publish_corrected_pose(); }, Qt::QueuedConnection);
-    });
+    // Publish corrections the INSTANT the localizer produces them, on the LOCALIZER thread itself.
+    // FIX 2026-09-03: was marshalled to the main thread via Qt::QueuedConnection under the belief
+    // that DSR writes must happen there. DSR's own API (dsr_api.h) guards the graph with an internal
+    // std::shared_mutex and is written to be called from any thread/process concurrently -- the
+    // marshal was a local caution, not a real requirement. Removed here to stop this publish waiting
+    // behind whatever the main thread's Qt event loop is doing that tick (viewer redraw, image-edge
+    // pumping, camera projection) before external consumers (controller, retina, ...) can see it.
+    // compute()'s own redundant call to maybe_publish_corrected_pose() is REMOVED below (see FIX
+    // 2026-09-03 there) -- keeping both would race on this callback's now-direct thread against
+    // compute()'s main-thread one, hitting the same non-atomic dedup state and the same ofstream
+    // members inside dsr_update_calibration/dsr_update_affordance without a lock.
+    room_concept_.set_on_result_ready([this]() { maybe_publish_corrected_pose(); });
 
     // LiDAR is pumped synchronously from compute() (no ingest thread); just start the localizer.
     room_concept_.start();
@@ -661,11 +681,19 @@ void SpecificWorker::log_pose_trace(int type, std::int64_t valid_ts_ms,
 
 bool SpecificWorker::maybe_publish_corrected_pose()
 {
-    // Main-thread only (compute() directly, or the localizer's on_result_ready callback marshalled here
-    // via QueuedConnection). In PreserveBootstrapRoom mode the room is a static prior — the localizer
-    // still runs for the viewer, but we never touch the graph.
+    // Called from the LOCALIZER thread directly (on_result_ready, no marshal since the 2026-09-03
+    // concurrency fix -- see set_on_result_ready) and, redundantly, is NOT also called from compute()
+    // any more (see the FIX note there) precisely because two threads landing here would race on the
+    // dedup state below and on the ofstream members inside dsr_update_calibration/dsr_update_affordance.
+    // In PreserveBootstrapRoom mode the room is a static prior — the localizer still runs for the
+    // viewer, but we never touch the graph.
     if (shutting_down_.load() || params.PRESERVE_BOOTSTRAP_ROOM)
         return false;
+
+    // FIX 2026-09-04: held for the rest of this function. Shared with publish_predicted_tick(), which
+    // runs on the imu-ingest thread and reads last_published_pose_/last_pub_adv_/_side_/_rot_/
+    // last_published_cov_ -- all written below -- and calls into the same scene_graph_.
+    std::lock_guard<std::mutex> publish_lock(publish_mutex_);
 
     // NOT const: get_last_result() returns a by-value copy, and the kinematic clamp below rewrites
     // robot_pose/covariance in place before this frame is handed to the scene graph.
@@ -821,9 +849,50 @@ bool SpecificWorker::maybe_publish_corrected_pose()
     room_concept_.note_published_covariance(loc_res->covariance(0, 0), loc_res->covariance(2, 2),
                                             clamp_fired);
 
+    // FIX 2026-09-04: publish the CORRECTED twist, not the raw wheel-odometry snapshot.
+    // last_robot_adv_speed_/_side_/_rot_ (kept as fallback below) is
+    // -- the latest single sample of robot_concept's robot_current_speed attribute (wheel odometry,
+    // ~10 Hz, uncorrected), cached in specificworker.cpp and forwarded here unchanged. Two problems
+    // with that as the twist consumers extrapolate with (camera_visualizer.cpp, retina/scene_processor,
+    // controller_obstacle_tracker): it can be up to ~100 ms stale (odometry at 10 Hz vs publish at
+    // ~20 Hz), and it never received any of the corrections integrate_odometry_over_window() applies
+    // to the localiser's OWN prediction -- gyro preference over wheel yaw (measured 8.2% over-report,
+    // see room_concept.cpp:5991), the k_w/b_w scale+bias from the online calibrator, or the IMU linear
+    // injection. This computes the same corrected quantity room_concept already trusts for its own
+    // prediction, from the fields that quantity is already exposed through:
+    //   loc_res->dy_local / dx_local -- BODY frame (dy=+Y forward, dx=+X lateral), the k_v/k_lat-scaled,
+    //     IMU-injected translation accumulated THIS cycle (see room_concept.cpp:2916-2917/3512-3513).
+    //   loc_res->imu_dtheta + wheel_dtheta -- the total rotation entered into the prior this cycle,
+    //     whichever channel (gyro or wheel) supplied each segment (same fields motion_calib_.observe()
+    //     already sums this way, room_concept.cpp:5732).
+    // Divided by dt since the LAST PUBLISH (not a differentiated pose -- differentiating the published,
+    // SDF-corrected pose is exactly the correction-induced velocity spike this twist channel was
+    // introduced to avoid; see the frame-note in room_scene_graph.cpp). Falls back to the raw wheel
+    // snapshot only when there is no previous publish to difference against (first frame) or the
+    // interval is degenerate.
+    float pub_adv = last_robot_adv_speed_, pub_side = last_robot_side_speed_, pub_rot = last_robot_rot_speed_;
+    if (last_published_ts_ms_ > 0 and loc_res->timestamp_ms > last_published_ts_ms_)
+    {
+        const float dt_s = static_cast<float>(loc_res->timestamp_ms - last_published_ts_ms_) * 1e-3f;
+        if (dt_s > 1e-4f)
+        {
+            pub_adv  = loc_res->dy_local / dt_s;                        // forward, body +Y
+            pub_side = loc_res->dx_local / dt_s;                        // lateral, body +X
+            pub_rot  = (loc_res->imu_dtheta + loc_res->wheel_dtheta) / dt_s;
+        }
+    }
+
     // Publish (corrected pose → robot↔room RT) at the optimizer rate.
-    scene_graph_->update(*loc_res, last_robot_adv_speed_, last_robot_side_speed_, last_robot_rot_speed_);
+    scene_graph_->update(*loc_res, pub_adv, pub_side, pub_rot);
     last_published_pose_ = loc_res->robot_pose;
+    // Cache for publish_predicted_tick(): the twist and covariance an IMU-rate tick should extrapolate
+    // with/report until the NEXT real publish replaces them. covariance is loc_res->covariance
+    // (post-clamp, same one every other consumer of this publish sees -- see the note above on
+    // note_published_covariance).
+    last_pub_adv_       = pub_adv;
+    last_pub_side_      = pub_side;
+    last_pub_rot_        = pub_rot;
+    last_published_cov_ = loc_res->covariance;
     // Anchor for the NEXT frame's measured-motion difference: the localiser's own estimate for this
     // frame, which is the base its next prediction is built on. Taken pre-clamp, so the difference
     // stays a pure sensor increment however hard the clamp bit here.
@@ -838,6 +907,68 @@ bool SpecificWorker::maybe_publish_corrected_pose()
                    loc_res->robot_pose, loc_res->innovation_norm);
     log_ground_truth(*loc_res);
     return true;
+}
+
+// FIX 2026-09-04: called from ImuIngestor's ingest thread, once per accepted IMU sample (~100 Hz on
+// this robot, see imu_ingestor.cpp), so the graph is never more than one IMU period behind instead of
+// waiting on the next lidar-paced correction (~20 Hz). Publishes a DEAD-RECKONED pose only -- it never
+// touches last_published_pose_/_ts_ms_/_est_ (those anchor the kinematic clamp and the NEXT real
+// prediction's measured-motion difference, and must only ever move on a real SDF-validated result) --
+// so every tick extrapolates from the SAME last real publish with a growing dt, rather than compounding
+// error by extrapolating from the previous tick's own guess.
+//
+// Deliberately narrow: calls dsr_publish_predicted_pose() (-> write_robot_room_rt(), the same
+// NaN-guarded, ring-buffer-safe writer maybe_publish_corrected_pose() uses), NOT scene_graph_->update().
+// update() also drives dsr_update_calibration()/dsr_update_affordance() -- CSV writers and DSR node
+// churn sized for ~20 Hz -- which must stay on the real, lidar-paced path only.
+void SpecificWorker::publish_predicted_tick(std::int64_t imu_ts_ms)
+{
+    if (shutting_down_.load() || params.PRESERVE_BOOTSTRAP_ROOM || !scene_graph_)
+        return;
+
+    std::lock_guard<std::mutex> publish_lock(publish_mutex_);
+
+    if (!last_published_pose_.has_value() || last_published_ts_ms_ <= 0 || imu_ts_ms <= last_published_ts_ms_)
+        return;   // nothing real published yet, or this sample predates it
+
+    const float dt_s = static_cast<float>(imu_ts_ms - last_published_ts_ms_) * 1e-3f;
+    // Reuses POSE_CLAMP_MAX_DT_S rather than a new config key: same question ("how long a gap is
+    // guessing still better than silence for"), same answer. Past it, a stalled lidar feed means the
+    // cached twist is itself stale, and ticking anyway would run the extrapolation away unbounded at
+    // ~100 Hz -- worse than just not publishing until a real correction arrives.
+    if (dt_s <= 0.f || dt_s > params.POSE_CLAMP_MAX_DT_S)
+        return;
+
+    const Eigen::Affine2f& base = last_published_pose_.value();
+    const float base_th = std::atan2(base.linear()(1, 0), base.linear()(0, 0));
+    const float phi = last_pub_rot_ * dt_s;
+
+    // Body-frame twist -> SE(2) chord. Same exponential map as
+    // controller_obstacle_tracker.cpp::twist_delta() (this codebase's original, verified-correct
+    // reference for this exact composition, 2026-08-04) -- the left Jacobian V turns v*dt into the
+    // CHORD of the arc actually swept instead of cutting the corner. +Y forward = adv (last_pub_adv_),
+    // +X lateral = side (last_pub_side_); see the frame note in room_scene_graph.cpp.
+    const float vx = last_pub_side_ * dt_s;
+    const float vy = last_pub_adv_  * dt_s;
+    float dx = vx, dy = vy;
+    if (std::abs(phi) > 1e-6f)
+    {
+        const float s = std::sin(phi), c = std::cos(phi);
+        dx = (s * vx - (1.f - c) * vy) / phi;
+        dy = ((1.f - c) * vx + s * vy) / phi;
+    }
+
+    Eigen::Affine2f predicted = Eigen::Affine2f::Identity();
+    predicted.linear()      = Eigen::Rotation2Df(base_th + phi).toRotationMatrix();
+    predicted.translation() = base.translation() + base.linear() * Eigen::Vector2f(dx, dy);
+
+    // last_published_cov_ reused as-is (not grown with dt_s) -- a known simplification. A consumer
+    // reading this between two real corrections currently sees the same sigma the last real one
+    // reported, not an inflated one reflecting the extra dead-reckoned distance since. Revisit if a
+    // consumer needs "how much am I trusting this specific sample" rather than just the freshest pose.
+    scene_graph_->dsr_publish_predicted_pose(predicted, last_published_cov_,
+                                             static_cast<std::uint64_t>(imu_ts_ms));
+    log_pose_trace(/*type=predicted*/1, imu_ts_ms, predicted, 0.f);
 }
 
 // Localiser pose beside the Webots supervisor pose, one row per published correction.
@@ -1698,11 +1829,17 @@ void SpecificWorker::compute()
     // clamping to a stale block. Steady RT updates on one edge — not join/leave churn — so low risk.
     {
         section_timer.restart();
-        // Publish the fresh correction now (idempotent by timestamp). The localizer also triggers this
-        // the instant it finishes, via a QueuedConnection, so whichever fires first wins and this call
-        // usually no-ops — but it stays here so a compute() tick still publishes if the immediate hop
-        // was ever missed.
-        did_publish = maybe_publish_corrected_pose();
+        // FIX 2026-09-03: this redundant call REMOVED. The localizer's own on_result_ready callback
+        // now calls maybe_publish_corrected_pose() directly (no more QueuedConnection marshal to this
+        // thread — see the FIX note at set_on_result_ready), so it is no longer guaranteed to run on
+        // the main thread. Calling it again from here would race the localizer thread's call on the
+        // dedup state (last_dsr_publish_try_ms_/last_dsr_published_ts_ms_, not atomic) and on the
+        // ofstream members touched inside dsr_update_calibration/dsr_update_affordance — exactly the
+        // class of bug the old comment's "whichever fires first wins" was quietly relying on both
+        // firing on the same thread to make safe. did_publish is no longer meaningful per compute()
+        // tick now that publishing is fully decoupled from the compute cadence; see pose_trace.csv /
+        // optimizer_timing.csv for the real publish timing.
+        did_publish = false;
         t_dsr_ms = section_timer.elapsed();
     }
 

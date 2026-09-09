@@ -173,12 +173,22 @@ class SpecificWorker : public GenericWorker
         std::string pose_file_path() const;
 
         // Publish the latest corrected pose (robot↔room RT) to the DSR graph if it is fresh. Called
-        // both from compute() and — the instant the localizer produces a result — from a
-        // Qt::QueuedConnection posted by room_concept_'s on_result_ready callback. Both run on the MAIN
-        // thread (the queued hop marshals the localizer-thread trigger), so the publish bookkeeping is
-        // race-free and the timestamp dedup makes whichever path fires second a no-op. Returns true iff
-        // it actually published this call.
+        // ONLY from room_concept_'s on_result_ready callback, on the LOCALIZER thread (2026-09-03: the
+        // old Qt::QueuedConnection marshal to the main thread, and compute()'s own redundant call, are
+        // both removed -- see the FIX notes at set_on_result_ready and in compute()). Returns true iff
+        // it actually published this call. Takes publish_mutex_, shared with publish_predicted_tick().
         bool maybe_publish_corrected_pose();
+
+        // FIX 2026-09-04: publish a dead-reckoned pose on EVERY IMU sample (~100 Hz on this robot,
+        // vs the lidar-paced ~20 Hz of maybe_publish_corrected_pose), so the graph is never more than
+        // one IMU period stale for consumers that read it directly rather than extrapolating the
+        // twist themselves. Extrapolates from the last REAL (SDF-corrected) publish using the
+        // corrected twist cached at that publish (last_pub_adv_/_side_/_rot_) -- NOT from the previous
+        // predicted tick, so small per-tick errors cannot compound between real corrections. Takes
+        // publish_mutex_: a real correction landing mid-tick must never be overwritten by a stale
+        // prediction, and the two run on different threads (localizer vs imu-ingest) so this is a
+        // genuine race, not a formality. Wired from ImuIngestor::set_on_new_sample() in initialize().
+        void publish_predicted_tick(std::int64_t imu_ts_ms);
 
         // ── Localizer ──────────────────────────────────────────────────────────
         rc::RoomConcept room_concept_;
@@ -231,11 +241,28 @@ class SpecificWorker : public GenericWorker
         // the previous frame's correction through unbounded. See the clamp block.
         std::optional<Eigen::Vector3f> last_published_est_;
 
+        // Shared between maybe_publish_corrected_pose() (localizer thread) and publish_predicted_tick()
+        // (imu-ingest thread): both read/write last_published_pose_/_ts_ms_/_est_ above and both call
+        // into scene_graph_, so both must hold this for their whole critical section.
+        std::mutex publish_mutex_;
+        // The corrected twist from the last REAL publish (see the FIX note on maybe_publish_corrected_
+        // pose in specificworker.cpp), cached here so publish_predicted_tick() has something to
+        // extrapolate with between lidar cycles without recomputing it.
+        float last_pub_adv_  = 0.f;
+        float last_pub_side_ = 0.f;
+        float last_pub_rot_  = 0.f;
+        // Covariance from the last REAL publish, reused as-is for predicted ticks (not grown with
+        // dt yet -- a known simplification; see the FIX note in publish_predicted_tick()).
+        Eigen::Matrix3f last_published_cov_ = Eigen::Matrix3f::Identity();
 
-        // Pose trace CSV (etc/pose_trace.csv): logs CORRECTED (20 Hz, compute) and PREDICTED (60 Hz,
-        // tick) poses with timestamps so the intermediate dead-reckoned poses can be compared against
-        // the optimizer corrections (diagnose the noise predict-publish injects). Both writers run on
-        // this->thread() → single ofstream, no lock. type: 0=corrected, 1=predicted.
+
+        // Pose trace CSV (etc/pose_trace.csv): logs CORRECTED (~20 Hz, localizer thread, via
+        // maybe_publish_corrected_pose) and PREDICTED (~100 Hz, imu-ingest thread, via
+        // publish_predicted_tick -- wired 2026-09-04) poses with timestamps so the intermediate
+        // dead-reckoned poses can be compared against the optimizer corrections (diagnose the noise
+        // predict-publish injects). Both writers now run on DIFFERENT threads, serialized by
+        // publish_mutex_ (NOT thread-affinity -- that assumption held only until the predicted writer
+        // existed). type: 0=corrected, 1=predicted.
         std::ofstream pose_trace_;
         bool          pose_trace_open_attempted_ = false;
         void log_pose_trace(int type, std::int64_t valid_ts_ms,
@@ -356,7 +383,7 @@ class SpecificWorker : public GenericWorker
         bool          pose_clamp_from_capability_ = false;
 
         // RT publish-rate monitor (shown in the window title at ~1 Hz so it can be watched visually).
-        int          rt_corr_count_           = 0;   // corrected RT publishes this window
+        std::atomic<int> rt_corr_count_        {0};   // corrected RT publishes this window -- atomic 2026-09-03: written from the localiser thread now, read/reset from compute() on the main thread
         std::int64_t rt_rate_window_start_ms_ = 0;
         void update_rt_rate_readout(std::int64_t now_ms, bool on_gui_thread);
 

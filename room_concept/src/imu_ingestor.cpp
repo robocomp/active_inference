@@ -93,6 +93,10 @@ bool ImuIngestor::pump()
 
         buffer_->put<0>(std::move(r), static_cast<std::uint64_t>(key));
         served_.fetch_add(1, std::memory_order_relaxed);
+        // FIX 2026-09-04: on THIS thread (imu-ingest), after the sample is safely in the buffer. Must
+        // stay cheap -- see the warning on set_on_new_sample().
+        if (on_new_sample_)
+            on_new_sample_(key);
     }, /*timeout_ms=*/20);
 
     return n > 0;
