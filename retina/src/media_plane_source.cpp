@@ -165,8 +165,19 @@ void MediaPlaneSource::drain_media_plane() const
                 if (f.size() < npix * sizeof(float))
                     return;
                 const float* p = reinterpret_cast<const float*>(f.data().data());
+                // ★NO UNIT CONVERSION ON THIS BRANCH. A mm->m scale was added here (uncommitted, arrived
+                // with a pull) on the assumption that "ZED publishes in sl::UNIT::MILLIMETER". The
+                // producer on this setup publishes FORMAT_DEPTH_F32 already in METRES, so it was a
+                // SECOND conversion: measured 2026-09-09 across the retina restart that first built it,
+                // the door's depth went 2.6128 m -> 0.0026128 m, exactly x0.001. Every deprojected mask
+                // then collapsed to a 2 mm-tall slab at 4.5 mm, no door could pass the min-height prior,
+                // and the whole door pipeline died for a reason that had nothing to do with doors.
+                // ⚠The Z16 branch below DOES scale, and that is correct: Z16 is integer millimetres by
+                // definition. F32 carries whatever unit the producer chose, which is why hardcoding one
+                // here is the bug rather than the value 0.001 being wrong. The unit belongs in the media
+                // descriptor the producer authors; until it is declared there, this branch must not
+                // assume one.
                 depth.depth.assign(p, p + npix);
-                for (auto& d : depth.depth) d *= 0.001f;   // mm -> m (ZED publishes in sl::UNIT::MILLIMETER)
             }
             else if (f.format() == rc::media::FORMAT_Z16)
             {

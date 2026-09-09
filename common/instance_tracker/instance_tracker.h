@@ -116,6 +116,8 @@ struct DetectionView
     // crosses the birth boundary in fewer frames, while an un-corroborated/phantom detection (evidence 1.0)
     // still serves the full debounce. Birth becomes evidence-accumulation-to-a-boundary, not a fixed counter.
     float           birth_evidence = 1.0f;
+    float           dbg_size_w = 1.0f;   // diagnostic passenger: a candidate observation weight that
+                                        // is NOT applied, carried so the agent can log it beside the det
 };
 
 // One cycle's decision: det→track assignment + which detections birth + which tracks die.

@@ -18,6 +18,7 @@
 #include <unordered_set>
 #include <utility>
 #include <array>
+#include <opencv2/imgproc.hpp>   // fillConvexPoly / bitwise_and — the rasterised phi score
 
 namespace rc {
 
@@ -796,35 +797,96 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
                 door_cells.insert(key(pkt.mask_pixels[i].x(), pkt.mask_pixels[i].y()));
         }
 
-    // Fraction of the leaf face that lands on door-labelled pixels at a given phi.
+    // ★PRECISION ALONE DOES NOT IDENTIFY PHI — it must also EXPLAIN THE MASK.
+    // The first version scored only "what fraction of the predicted leaf lands on door pixels". A leaf
+    // rotated to 45 deg projects to a narrow band that still falls INSIDE the real door's mask, so it
+    // scored ~1.0 while explaining a third of it. Measured 2026-09-09 on a door that was SHUT: support
+    // 0.97-0.99 at every angle from 5 to 70 deg, i.e. a likelihood flat in phi, so the argmax picked
+    // noise — and the silhouette was then projected out into the room, occ went to 0, and the door was
+    // removed for being where the model had wrongly put it.
+    // So the score is an INTERSECTION OVER UNION between the projected leaf and the door mask: a pose
+    // that covers part of the mask is penalised for the part it leaves unexplained, exactly as one that
+    // spills outside is penalised for the part that is not door. Only the pose that accounts for the
+    // whole observation wins.
+    // ⚠A genuine partial mask (32.5% of them are sub-metre fragments, measured) caps IoU for EVERY
+    // pose including the true one — but it caps them all, so the ARGMAX is still right, and the low
+    // absolute value correctly reports that the frame did not resolve phi well.
+    // Rasterise the projected leaf FACE and compare it with the mask as a REGION.
+    //
+    // ★WHY NOT A SAMPLED SCORE — both previous attempts failed for the same reason, and neither failure
+    // was about doors:
+    //   1. hit/seen, then hit/total: measured only PRECISION (what fraction of the prediction lands on
+    //      door pixels). A leaf rotated to 45 deg projects a narrow band INSIDE the real mask and scores
+    //      ~1.0 while explaining a third of it. Measured on a SHUT door: 0.97-0.99 at every angle from
+    //      5 to 70 deg — a likelihood flat in phi, so the argmax picked noise.
+    //   2. IoU between a 9x13 = 117-sample point set and a mask of thousands of pixels. At CELL = 6 px a
+    //      31042-pixel mask occupies ~860 cells while the prediction can occupy at most 117, so
+    //      IoU <= 117/860 ~ 0.14 whatever phi is. The 0.18-0.25 band observed was the SAMPLING DENSITY,
+    //      not the door. I read it as "the mask is 4x the model area", which was wrong: the fit is fine
+    //      (w 0.76-0.86, h 2.04-2.09 against an observed mask height of 2.08 m).
+    // Both compared a sparse prediction against a dense observation. The comparison has to be dense on
+    // BOTH sides or the number describes the instrument.
+    //
+    // So: fill the projected quad into a mask image at the same resolution as the door pixels, and take
+    // region IoU. No sampling grid, no cell hashing, no cap, and no tuned constant — the score is 1 when
+    // the predicted leaf and the observed door coincide and falls away as either spills outside the
+    // other. That is what makes phi identifiable if it is identifiable at all.
+    const int RW = static_cast<int>(W), RH = static_cast<int>(Himg);
+    cv::Mat door_img(RH, RW, CV_8UC1, cv::Scalar(0));
+    long door_px = 0;
+    if (pkt.valid)
+        for (const auto& sl : pkt.slices)
+        {
+            if (sl.label != "door") continue;
+            const std::size_t b = std::min(sl.pixel_begin, pkt.mask_pixels.size());
+            const std::size_t e = std::min(sl.pixel_end,   pkt.mask_pixels.size());
+            for (std::size_t k = b; k < e; ++k)
+            {
+                const int c = static_cast<int>(pkt.mask_pixels[k].x());
+                const int r = static_cast<int>(pkt.mask_pixels[k].y());
+                if (c < 0 or r < 0 or c >= RW or r >= RH) continue;
+                if (door_img.at<std::uint8_t>(r, c) == 0) { door_img.at<std::uint8_t>(r, c) = 255; ++door_px; }
+            }
+        }
+
     const auto support_at = [&](float phi) -> float
     {
+        if (door_px == 0)
+            return -1.0f;   // no door mask at all: this frame cannot resolve phi. Not a score of zero.
         door::LeafState ls = inst.leaf;
         ls.phi = phi;
         const door::LeafPose L = door::leaf_pose(inst.aperture, ls);
-        int hit = 0, seen = 0;
-        constexpr int NX = 9, NZ = 13;
-        for (int ix = 0; ix < NX; ++ix)
-            for (int iz = 0; iz < NZ; ++iz)
-            {
-                const float lx = (-1.0f + 2.0f * ix / (NX - 1)) * L.half_w;
-                const float lz = L.centre_z + (-1.0f + 2.0f * iz / (NZ - 1)) * L.half_h;
-                const Eigen::Vector3f P = door::leaf_point(L, lx, 0.0f, lz);
-                const Eigen::Vector4d Pc = zed_T_room * Eigen::Vector4d(P.x(), P.y(), P.z(), 1.0);
-                if (Pc.y() <= 0.20) continue;
-                const Eigen::Vector2d uv = camera_api_->project(Eigen::Vector3d(Pc.x(), Pc.y(), Pc.z()));
-                const float col = static_cast<float>(uv.x()), row = static_cast<float>(uv.y());
-                if (col < 0.f or col >= W or row < 0.f or row >= Himg) continue;
-                ++seen;
-                if (door_cells.contains(key(col, row))) ++hit;
-            }
-        // ★DIVIDE BY THE WHOLE FACE, NOT BY WHAT HAPPENED TO BE VISIBLE. hit/seen lets a candidate that
-        // is almost entirely out of frame score 1.000 off a five-pixel sliver of leaf edge, and beat a
-        // candidate whose whole face is visible and 80% lit. Measured 2026-09-09: phi jumped to 51-69
-        // deg with phi_support ~1.0 while the existence channel saw occ=5 of 178 detectable samples —
-        // the two disagreed because one was scoring a sliver. hit/total is coverage-weighted: a mostly
-        // invisible pose cannot win, which is correct, because we are less sure of it.
-        return seen > 0 ? static_cast<float>(hit) / static_cast<float>(NX * NZ) : -1.0f;
+
+        // The leaf face as a QUAD, projected. Corner order is a closed loop so fillConvexPoly gets a
+        // rectangle and not a bow-tie whose interior is meaningless.
+        const float half_h = L.half_h, cz = L.centre_z;
+        const std::array<std::pair<float,float>,4> corners{{
+            {-L.half_w, cz - half_h}, { L.half_w, cz - half_h},
+            { L.half_w, cz + half_h}, {-L.half_w, cz + half_h}}};
+        std::vector<cv::Point> quad;
+        quad.reserve(4);
+        for (const auto& [lx, lz] : corners)
+        {
+            const Eigen::Vector3f P = door::leaf_point(L, lx, 0.0f, lz);
+            const Eigen::Vector4d Pc = zed_T_room * Eigen::Vector4d(P.x(), P.y(), P.z(), 1.0);
+            if (Pc.y() <= 0.20) return -1.0f;          // a corner behind the camera: pose unprojectable
+            const Eigen::Vector2d uv = camera_api_->project(Eigen::Vector3d(Pc.x(), Pc.y(), Pc.z()));
+            if (not std::isfinite(uv.x()) or not std::isfinite(uv.y())) return -1.0f;
+            quad.emplace_back(static_cast<int>(std::lround(uv.x())), static_cast<int>(std::lround(uv.y())));
+        }
+
+        // Rasterise into the same lattice as the mask, then count. Clipped to the image on both sides,
+        // so a pose half out of frame is judged only where BOTH are defined — it cannot win by hiding.
+        cv::Mat pred_img(RH, RW, CV_8UC1, cv::Scalar(0));
+        cv::fillConvexPoly(pred_img, quad, cv::Scalar(255), cv::LINE_8);
+        const long pred_px = cv::countNonZero(pred_img);
+        if (pred_px == 0)
+            return -1.0f;
+        cv::Mat inter_img;
+        cv::bitwise_and(pred_img, door_img, inter_img);
+        const long inter = cv::countNonZero(inter_img);
+        const long uni   = pred_px + door_px - inter;
+        return uni > 0 ? static_cast<float>(inter) / static_cast<float>(uni) : -1.0f;
     };
 
     // 1-D search over the physically possible range. Coarse then refined: the leaf swings one way only
@@ -1041,7 +1103,29 @@ DoorSilhouette DoorFitter::compute_silhouette_existence(const DoorInstance& inst
         // Kept even when partly out of frame: the edge scorer skips off-image samples itself, and a door
         // whose lintel is clipped is exactly the close-range case this channel exists for. Only a corner
         // BEHIND the camera invalidates the quad, because its projection is meaningless.
-        out.face_px = std::move(quad);
+        out.face_px = quad;
+
+        // The same quad slid along the leaf's own width, +-1 and +-1.6 leaf-widths. Far enough not to
+        // overlap the leaf, near enough to be the same surface and the same lighting.
+        for (const float kmul : {-1.6f, -1.0f, 1.0f, 1.6f})
+        {
+            std::vector<cv::Point> c;
+            c.reserve(4);
+            bool ok = not quad.empty();
+            for (const auto& [lx, lz] : corners)
+            {
+                if (not ok) break;
+                const Eigen::Vector3f Ps =
+                    door::leaf_point(inst.leaf_pose, lx + kmul * 2.0f * hw, 0.0f, lz);
+                const Eigen::Vector4d Pc = zed_T_room * Eigen::Vector4d(Ps.x(), Ps.y(), Ps.z(), 1.0);
+                if (Pc.y() <= 0.20) { ok = false; break; }
+                const Eigen::Vector2d uv = camera_api_->project(Eigen::Vector3d(Pc.x(), Pc.y(), Pc.z()));
+                if (not std::isfinite(uv.x()) or not std::isfinite(uv.y())) { ok = false; break; }
+                c.emplace_back(static_cast<int>(std::lround(uv.x())), static_cast<int>(std::lround(uv.y())));
+            }
+            if (ok and c.size() == 4)
+                out.face_px_controls.push_back(std::move(c));
+        }
     }
     if (field != nullptr and field->valid())
         out.field_bg = field->background_mean();

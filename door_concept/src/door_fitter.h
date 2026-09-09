@@ -69,6 +69,16 @@ struct DoorSilhouette
     // close, never identical, and a defence measured on a not-quite-right contour is not a defence.
     // Empty when any corner fell behind the camera or off-frame.
     std::vector<cv::Point> face_px;
+    // ★CONTROLS BUILT IN 3-D, ALONG THE LEAF'S OWN PLANE, then projected — not displaced in image
+    // pixels. The RGB contour check needs a null of the form "the same shape somewhere it could equally
+    // have been". Displacing along the wall IN THE IMAGE is that null only while the leaf lies in the
+    // wall; once it swings, the displaced copies stop sampling wall and start sampling the open doorway
+    // and the room beyond, both edge-rich, so s_true < s_control and the channel votes to DELETE the
+    // door precisely when it is open (measured: dL -1.4 to -2.6 per cycle at phi 35-45 deg).
+    // Displacing along the leaf's OWN +x (hinge -> free edge) and reprojecting is the same null at
+    // phi = 0 and stays valid at every other angle, so the channel never has to stand down. That
+    // removes the abstention rule, which was gating on a phi that is not reliable enough to gate on.
+    std::vector<std::vector<cv::Point>> face_px_controls;
     int   n_occluded   = 0;    // in-frustum samples hidden behind a nearer NON-door mask
     int   n_cells      = 0;    // DISTINCT pixel cells the detectable silhouette covers (see resolvability)
     float mean_range_m = 0.0f; // mean camera→sample distance over the detectable samples

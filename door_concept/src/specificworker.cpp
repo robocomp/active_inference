@@ -1212,6 +1212,60 @@ void SpecificWorker::run_instance_tracker()
                 // at; it may not move one. See MaskIngestor::MaskSlice::may_fit_geometry.
             if (sl.label != "door" or sl.support_end <= sl.support_begin
                 or not sl.may_fit_geometry()) continue;
+
+            // ★A `door` LABEL IS NOT A DOOR-SIZED THING. YOLO-sem sometimes returns a positive door mask
+            // delimiting a much smaller region — a jamb, a panel edge, a fragment of the leaf. It is a
+            // TRUE positive for the class and a false one for the object, and accepting it is worse than
+            // dropping it: assigned to a live door it covers a fraction of the predicted silhouette, so
+            // occ comes out small and free large, and the door is REMOVED on the strength of having been
+            // detected. Observed live 2026-09-09.
+            //
+            // The prior is already here and already strong — DoorModel prior_h 2.00 +-0.08 m — it was
+            // just never used as a test on the observation, only inside the fit.
+            //
+            // ★ONLY THE "TOO SMALL" DIRECTION, and only on an UNTRUNCATED view. A mask clipped by the
+            // image border, or partly occluded, has a height that is a LOWER BOUND, so judging it would
+            // reject the real door exactly when the robot is close enough for it to overflow the frame.
+            // Nothing is rejected for being too LARGE either: that is a merge/clutter question, not a
+            // size one, and the fit already handles it.
+            // ⚠MEASURED, NOT APPLIED. Two attempts at a size prior on the MASK have now been backed out:
+            //   1. `if (h < prior_h - 3*sigma) continue;` — a magic cutoff, against the modelling rule.
+            //   2. the same thing as a Gaussian in the state prior's own sigma — which merely HID the
+            //      cutoff: at sigma 0.08 m a 1.80 m mask scores 0.044 and a 1.60 m mask 0.000, so any
+            //      real door slightly clipped at the floor datum or partly occluded stopped being born
+            //      at all. Observed immediately: births blocked.
+            // The error was using the prior's uncertainty about the DOOR'S TRUE HEIGHT as the noise model
+            // for a MASK'S MEASURED height. They are different quantities: a mask height is noisy and
+            // systematically UNDER-estimates (partial segmentation, occlusion, the floor datum), so its
+            // likelihood is wide and skewed, and I have not measured it.
+            // So: log mask_h, decide the observation model from the distribution, apply nothing until
+            // then. The reported failure — a small positive mask ending up REMOVING the door — also has
+            // no established mechanism yet; a size prior may not even be the right instrument for it.
+            // ★A LIKELIHOOD, NOT A CUTOFF. The first version of this was `if (h < prior_h - 3*sigma)
+            // continue;` — a magic threshold built out of a prior that is already a distribution, which
+            // is precisely the shape this project's modelling rule says not to add. The prior IS the
+            // model; the observation's weight should fall out of it continuously.
+            //
+            // One-sided on purpose: a mask TALLER than the prior is not penalised (that is a merge or
+            // clutter question the fit already owns), and a TRUNCATED mask is not penalised at all,
+            // because a clipped or occluded height is a LOWER BOUND — judging it would discount the real
+            // door exactly when the robot is close enough for it to overflow the frame. So the weight
+            // only expresses "this is too short to be a whole door, seen whole".
+            //
+            // Nothing is rejected. A 0.7 m fragment simply carries a small fraction of an observation's
+            // worth, in the same units as every other factor in birth_evidence (confidence x range x
+            // unclaimed), and a full-height mask carries all of it.
+            float size_w = 1.0f;
+            {
+                const float untrunc = 1.0f - std::clamp(sl.trunc_frac, 0.0f, 1.0f);
+                const float mask_h  = sl.bbox_max.z() - sl.bbox_min.z();
+                if (sl.has_depth and sl.bbox_max.allFinite() and sl.bbox_min.allFinite()
+                    and untrunc > 0.5f and mask_h > 0.0f and mask_h < cfg_.door_prior_h_m)
+                {
+                    const float z = (cfg_.door_prior_h_m - mask_h) / std::max(1e-3f, cfg_.door_prior_h_std);
+                    size_w = std::exp(-0.5f * z * z);
+                }
+            }
             rc::DetectionView dv;
             dv.xy = Eigen::Vector2f(sl.centroid.x(), sl.centroid.y());
             dv.slice_index = i;
@@ -1226,6 +1280,8 @@ void SpecificWorker::run_instance_tracker()
             // One admissible, reliable observation — never a cycle. See birth_evidence.h.
             dv.birth_evidence = rc::birth::evidence({sl.confidence, sl.range}, birth_detect,
                                                     birth_new_obs, fitter_->frame_admissible(sl));
+            // ⚠size_w deliberately NOT multiplied in — see the note above. Carried only to be logged.
+            dv.dbg_size_w = size_w;
 
             // ★MUTUAL EXCLUSION — no two objects occupy the same space (SHARED, common/exclusion).
             // A continuous support multiplied into the birth evidence exactly like the others above, so a
@@ -1258,7 +1314,8 @@ void SpecificWorker::run_instance_tracker()
         static std::ofstream dcsv = []
         {
             std::ofstream f; rc::diag::open_rotating(f, "etc/door_dets_log.csv");
-            f << "cycle,n_door_slices,slice_idx,npts,conf,cx,cy,range,trunc_frac,motion_var\n";
+            f << "cycle,n_door_slices,slice_idx,npts,conf,cx,cy,range,trunc_frac,motion_var,"
+                 "mask_h,size_w\n";   // mask_h: measured slice height (m). size_w: candidate weight, UNAPPLIED
             return f;
         }();
         static int dcyc = 0;
@@ -1273,7 +1330,8 @@ void SpecificWorker::run_instance_tracker()
                 const std::size_t n = (sl.support_end > sl.support_begin) ? (sl.support_end - sl.support_begin) : 0;
                 dcsv << dcyc << ',' << dets.size() << ',' << d.slice_index << ',' << n << ',' << sl.confidence
                      << ',' << sl.centroid.x() << ',' << sl.centroid.y() << ',' << sl.range << ','
-                     << sl.trunc_frac << ',' << sl.motion_var << '\n';
+                     << sl.trunc_frac << ',' << sl.motion_var << ','
+                     << (sl.bbox_max.z() - sl.bbox_min.z()) << ',' << d.dbg_size_w << '\n';
             }
             dcsv.flush();
         }
@@ -2057,16 +2115,20 @@ void SpecificWorker::update_existence_beliefs()
         // where this measurement is defined, not a way of ignoring inconvenient evidence.
         // ⚠The proper fix is a null built from the leaf's OWN kinematics — the same leaf at a DIFFERENT
         // phi — which is valid at any angle and is the same comparison estimate_phi already makes.
-        const bool leaf_in_wall =
-            std::abs(std::sin(inst.phi_est)) * inst.leaf_pose.half_w <= inst.leaf_pose.half_t;
+        // ★NO ABSTENTION ANY MORE. It was introduced because the controls were displaced along the wall
+        // IN IMAGE SPACE, a null valid only for a flush leaf — but it was gated on phi, and phi wanders
+        // to 20-31 deg on a door that is shut, so the channel stood down almost always and stopped
+        // defending the door it was built for. (It DID defend it before phi became a DOF: dL +2.83
+        // through 180 fully-blind cycles, which is the behaviour this restores.)
+        // The controls now come from door_fitter, built by sliding the quad along the LEAF'S OWN plane
+        // in 3-D and reprojecting — identical at phi = 0, still valid at any angle. So the null holds
+        // open or shut, and there is nothing to gate.
         rc::edges::ContourEdgeScore edge{};
-        if (cfg_.rgb_contour_check and leaf_in_wall
-            and rgb_ingestor_ and not rgb_ingestor_->frame().empty()
-            and sil.face_px.size() >= 4)
+        if (cfg_.rgb_contour_check and rgb_ingestor_ and not rgb_ingestor_->frame().empty()
+            and sil.face_px.size() >= 4 and not sil.face_px_controls.empty())
         {
             const cv::Mat& img = rgb_ingestor_->frame();
-            edge = rc::edges::contour_edge_support(
-                img, sil.face_px, rc::edges::make_side_controls(sil.face_px, img.cols, img.rows));
+            edge = rc::edges::contour_edge_support(img, sil.face_px, sil.face_px_controls);
         }
         inst.dbg_edge_support = edge.support;
         inst.dbg_edge_excess  = edge.excess;
@@ -2163,7 +2225,24 @@ void SpecificWorker::update_existence_beliefs()
         // in_fov_frac() below, and passing it twice would square it.
         const rc::detect::DetectorEnvelope env{cfg_.detect_min_fill, cfg_.detect_max_fill, cfg_.detect_soft};
         const float p_env = rc::detect::p_detect(inst.roi_fill, 1.0f, env);
-        float p_detect = p_env * sil.resolvability() * sil.in_fov_frac() * sil.central_frac();
+        // ★OBLIQUITY OF THE LEAF, which only became a live variable when phi did. A panel seen edge-on
+        // presents almost no area to segment: |ray . leaf face normal| falls from 0.99 at phi=5 deg to
+        // 0.43 at 60 deg and 0.21 at 85 deg. door_view_obliquity() has computed exactly this all along —
+        // against inst.leaf_pose.ey, so it follows the leaf — and was labelled "diagnostic only" and
+        // never used. With phi pinned at 0 that was harmless: a flush door is always face-on, the term
+        // is ~1, and it changed nothing. The moment the leaf can swing it becomes the dominant
+        // detectability factor, and leaving it out charges a full-strength absence against a look that
+        // physically could not have resolved the door.
+        //
+        // Measured 2026-09-09 on the deaths: absence was charged at p_detect 0.55 with the leaf at 37
+        // deg and 0.28 at 60 deg; with obliquity those become 0.39 and 0.12.
+        //
+        // ⚠It cuts BOTH ways, as every p_detect does: an edge-on leaf can no longer refute the door,
+        // and also can no longer defend it. That is the honest reading of an unresolvable view, but it
+        // is the same shape as the documented hood failure, so a door believed permanently edge-on
+        // would be hard to remove. The aperture-side evidence is what has to keep that in check.
+        const float leaf_oblq = fitter_->door_view_obliquity(inst);
+        float p_detect = p_env * leaf_oblq * sil.resolvability() * sil.in_fov_frac() * sil.central_frac();
 
         // ★THE CONTOUR CHECK. Everything above is geometry: it says how well the camera could have
         // resolved the door IN PRINCIPLE. This asks what the classifier actually computed AT the door's
