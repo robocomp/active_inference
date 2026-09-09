@@ -40,9 +40,6 @@ class Viewer2D : public QObject
         ControllerPolygon waypoints;      // the plan's turning points, drawn as dots
         ControllerObstacleVisuals obstacle_polys;
         ControllerPolygons obstacle_rfe_points;
-        ControllerPolygons candidate_trajectories;
-        ControllerPolygon average_trajectory;
-        int best_trajectory_idx = -1;
     };
 
     explicit Viewer2D(QWidget *parent, const QRectF &grid_dim, bool show_axis = true);
@@ -58,7 +55,6 @@ class Viewer2D : public QObject
     void draw_room_polygon(const std::vector<Eigen::Vector2f> &verts);
     void set_lidar_buffer(LidarPointBuffer *buffer);
     void set_lidar_visible(bool visible);
-    void set_mppi_paths_visible(bool visible);
     void set_lidar_draw_correction(const Eigen::Affine2f &correction) { lidar_draw_correction_ = correction; }
     void draw_lidar_points_from_buffer(int max_points);
     void draw_path(const PathDrawData &data);
@@ -120,7 +116,6 @@ private:
     LidarPointBuffer *lidar_buffer_ = nullptr;
     Eigen::Affine2f lidar_draw_correction_ = Eigen::Affine2f::Identity();   // overlay dead-reckoning (room→room)
     bool lidar_visible_ = true;
-    bool mppi_paths_visible_ = false;
     std::vector<QGraphicsEllipseItem *> lidar_items_;
     std::vector<QGraphicsItem *> room_axis_items_;
     std::vector<QGraphicsItem *> path_draw_items_;

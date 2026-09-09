@@ -13,8 +13,10 @@
 //   FieldWorld — the live ESDF built from lidar each cycle. Obstacle measurement.
 // A tracker asks for the half it needs. PlainTracker takes PathWorld and therefore CANNOT query an
 // obstacle even by accident: the premise "the path is self-adjusting and safe" stops being a comment
-// in a header and becomes something the compiler checks. PD and MPPI take both, because they do their
-// own avoidance.
+// in a header and becomes something the compiler checks. PD takes both, for its bumper and its gate.
+// ★The split was designed with three trackers; the sampler was deleted 2026-09-09 and the split is
+// MORE useful now, not less: with two trackers it is the only thing that says, without reading either
+// control law, that exactly one of them can see an obstacle.
 //
 // ★PlainTracker reads NO obstacle data of any kind — not a handle, not a scalar, nothing. It is given a
 // path and a pose and must follow the path. Safety belongs to the planner's footprint predicate, to the

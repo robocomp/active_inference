@@ -89,9 +89,6 @@ public:
                 const ControllerObstacleVisuals &obstacle_polys,
                 const ControllerPolygons &obstacle_rfe_points,
                 const std::optional<Eigen::Vector2f> &current_target_room,
-                const std::vector<ControllerPolygon> &last_mppi_trajectories,
-                const ControllerPolygon &last_mppi_average_trajectory,
-                int last_best_mppi_trajectory_idx,
                 int last_display_wp_index,
                 int max_lidar_draw_points,
                 const std::optional<Eigen::Affine2f> &lidar_correction = std::nullopt);
@@ -205,9 +202,6 @@ private:
         ControllerObstacleVisuals obstacle_polys;
         ControllerPolygons obstacle_rfe_points;
         std::optional<Eigen::Vector2f> current_target_room;
-        std::vector<ControllerPolygon> last_mppi_trajectories;
-        ControllerPolygon last_mppi_average_trajectory;
-        int last_best_mppi_trajectory_idx = -1;
         int last_display_wp_index = 0;
         int max_lidar_draw_points = 0;
         std::optional<Eigen::Affine2f> lidar_correction;   // room(now)←room(scan) overlay dead-reckoning
@@ -226,7 +220,7 @@ private:
         bool selected_affordance_text_pending = false;
         bool clear_trajectory_pending = false;
         bool stuck_active = false;   // stuck-recovery indicator (pushed every cycle; widget dedups)
-        // Remaining distance to target, shown beside the MPPI-paths button. nullopt = no active plan.
+        // Remaining distance to target, shown in the toolbar. nullopt = no active plan.
         // goal_yaw_err_rad is nullopt when the target carries no commanded facing yaw.
         std::optional<float> goal_dist_m;
         std::optional<float> goal_yaw_err_rad;

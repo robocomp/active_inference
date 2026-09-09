@@ -30,7 +30,7 @@ public:
 private:
     const PathWorld&  path_;
     const FieldWorld& world_;
-    // ★These were members of TrajectoryController shared with the MPPI path. Only one mode runs in a
+    // ★These were members of TrajectoryController shared with the sampler. Only one mode runs in a
     // session, so nothing changes behaviourally by giving PD its own — but sharing smoothing state
     // between two different control laws was a latent bug waiting for someone to switch modes live.
     Eigen::Vector3f smoothed_vel_ = Eigen::Vector3f::Zero();

@@ -5,12 +5,12 @@ WHY. On 2026-08-19 six separate wrong conclusions were drawn from fields whose N
 something the field did not carry. A constant column is indistinguishable, at a glance, from a
 measurement that happens to be steady — and it reads as evidence:
 
-  n_collisions = 0        read as "no collisions"        -> never written (MPPI is not the live tracker)
+  (n_collisions was the worked example here; the column was removed outright 2026-09-09)
   path_kappa   = -999     read as a curvature            -> "not computed" sentinel
   gate_min_esdf = -1      read as "no clearance"         -> the gate did not run
   yaw_err_deg  = 0        read as "no heading error"     -> not applicable to a Reach target
   min_esdf vs clear_now   compared directly              -> different reference points (0.273 m apart)
-  file "mppi_diag.csv"    read as MPPI telemetry         -> the live tracker is PLAIN
+  (the file itself was renamed tracker_diag.csv 2026-08-19 for exactly this reason)
 
 Run this on any diagnostic file BEFORE using a column as evidence. A column that never varies is not
 evidence; it is either a constant of the configuration or a field nobody fills in.
@@ -60,7 +60,7 @@ def scan(path):
     print(f"   ✓ {live} columns carry varying data\n")
 
 def main():
-    args = sys.argv[1:] or ["tracker_diag.csv", "mppi_diag.csv", "approach_diag.csv",
+    args = sys.argv[1:] or ["tracker_diag.csv", "approach_diag.csv",
                             "band_diag.csv", "proximity_obstacles.csv", "stall_events.csv"]
     for a in args:
         scan(a)

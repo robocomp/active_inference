@@ -159,7 +159,7 @@ void SpecificWorker::initialize()
 	    .on_operating_loop = [this]()
 	    {
 	        // Do NOT run compute() here: this hook executes on the presence-SM /
-	        // GUI thread and compute() (MPPI) can block for hundreds of ms. Just
+	        // GUI thread and compute() can block for hundreds of ms. Just
 	        // wake the control thread, which runs compute() asynchronously.
 	        control_operating_.store(true, std::memory_order_release);
 	        operating_latched_.store(true, std::memory_order_release);
@@ -441,9 +441,8 @@ void SpecificWorker::initialize()
 			    // The tuned gain and the mode it belongs to, so a run's error can be attributed to the
 			    // configuration that produced it. An adaptation policy reads exactly these two columns.
 			    .plain_L = path_controller_.params.plain_L,
-			    .control_mode = path_controller_.control_mode() == rc::TrajectoryController::ControlMode::PLAIN ? "plain"
-			                  : path_controller_.control_mode() == rc::TrajectoryController::ControlMode::PD    ? "pd"
-			                                                                                                    : "mppi",
+			    .control_mode = path_controller_.control_mode() == rc::TrajectoryController::ControlMode::PLAIN
+			                        ? "plain" : "pd",
 			    // The other half of the arm identity: which GEOMETRY the follower was handed. Taken from
 			    // the params the run is actually using, not re-read from config, so an edit made mid-run
 			    // cannot be credited to laps that never saw it.
@@ -527,18 +526,17 @@ void SpecificWorker::initialize()
 		});
 	};
 
-	// ★THE VIEWER READS THE DISPLAY BUFFER, NOT THE CONTROL ONE. It carries the NEWEST scan instead of
-	// the one-frame-held one, so the overlay stops lagging the robot through a fast pivot. The control
-	// path (path_controller_ above) keeps the held buffer, because that frame of smoothing is what the
-	// safety gate's 1-cycle pulses depend on — see the fill site in controller_obstacle_tracker.cpp.
-	display_.initialize(obstacle_tracker_.display_lidar_buffer(), std::move(gui));
+	// ★ONE BUFFER. The viewer and the control path (path_controller_ above) read the same registered
+	// room cloud. They were split while the control path held its scan back a frame and the overlay
+	// should not pay that lag; the hold is gone, so the split would now only cost a second transform.
+	display_.initialize(obstacle_tracker_.lidar_buffer(), std::move(gui));
 	// The Stick <-> Loose slider must open on the L the tracker is actually running (load_params ran
 	// long before this). Its predecessor opened at a hard-coded midpoint that disagreed with the config.
 	display_.set_plain_l(path_controller_.params.plain_L);
 	session_.mission().set_csv_path(params.mission_csv_path);
 	session_.mission().set_run_dir(params.mission_run_dir);
-	// Keep the per-cycle MPPI diagnostics with the run they describe. Written live to a fixed path and
-	// truncated by the next run, so without this a comparison destroys its own baseline.
+	// Keep the per-cycle tracker diagnostics with the run they describe. Written live to a fixed path
+	// and truncated by the next run, so without this a comparison destroys its own baseline.
 	session_.mission().archive_on_stop("tracker_diag.csv");
 	session_.mission().archive_on_stop("band_diag.csv");
 	session_.mission().archive_on_stop("route_events.csv");
@@ -550,8 +548,6 @@ void SpecificWorker::initialize()
 	// read as a regression. Archiving it under the run stamp makes every offline number reproducible
 	// against the exact route it came from, and lets an old run be re-benched after a code change.
 	session_.mission().archive_on_stop("route_world.txt");
-	session_.mission().archive_on_stop("mppi_cycle.txt");
-	session_.mission().archive_on_stop("mppi_reversal.txt");
 	session_.mission().load(missions_path_);
 	refresh_mission_list();
 	update_custom_widget(std::nullopt);
@@ -563,7 +559,7 @@ void SpecificWorker::initialize()
 
 	// GUI-thread render timer: draws the latest snapshot staged by the control
 	// thread. Decoupled from compute(), so rendering and the event loop stay
-	// responsive even while MPPI is busy.
+	// responsive even while compute() is busy.
 	render_timer_ = new QTimer(this);
 	connect(render_timer_, &QTimer::timeout, this, [this]() { display_.present(); });
 	render_timer_->start(33);
@@ -931,12 +927,6 @@ void SpecificWorker::load_params()
 	load_optional_cast<double>("Controller.TemporaryObstacleMaxHeight", params.temporary_obstacle_max_height_m);
 	load_optional_cast<double>("Controller.UnmodelledScanMinZ", params.unmodelled_scan_min_z_m);
 	load_optional_cast<double>("Controller.UnmodelledScanMaxZ", params.unmodelled_scan_max_z_m);
-	load_optional_cast<double>("Controller.GoalClearanceRelaxDist", params.goal_clearance_relax_dist_m);
-	load_optional_cast<double>("Controller.GoalObstacleMargin", params.goal_obstacle_margin_m);
-	load_optional_cast<double>("Controller.GoalClearanceMinRatio", params.goal_clearance_min_ratio);
-	load_optional_cast<double>("Controller.StraightSpeedHeadingThreshold", params.straight_speed_heading_threshold_rad);
-	load_optional_cast<double>("Controller.StraightSpeedClearanceMargin", params.straight_speed_clearance_margin_m);
-	load_optional_cast<double>("Controller.StraightSpeedMinGoalDist", params.straight_speed_min_goal_dist_m);
 	// Controller-side LiDAR obstacle creation (false ⇒ residual_concept is the sole obstacle source).
 	load_optional("Controller.ObstacleCreationEnabled", params.obstacle_creation_enabled);
 
@@ -996,7 +986,7 @@ void SpecificWorker::load_params()
 
 	path_controller_.params.max_adv = params.max_adv_speed_mps;
 	path_controller_.params.max_rot = params.max_rot_speed_rps;
-	// No robot_radius: the MPPI derives every body extent from the footprint itself. d_safe is the ONE
+	// No robot_radius: every body extent is derived from the footprint itself. d_safe is the ONE
 	// standoff knob, and it is comfort only — the hard constraint is the footprint test.
 	path_controller_.params.d_safe = params.comfort_standoff_m;
 	load_optional("Controller.PathHorizonWaypoints", params.path_horizon_waypoints);
@@ -1025,27 +1015,17 @@ void SpecificWorker::load_params()
 
 	load_optional_cast<double>("Controller.LambdaContinuity", params.lambda_continuity);
 	load_optional_cast<double>("Controller.ContinuityRotFactor", params.continuity_rot_factor);
-	// ── "NAV2 REGIME" A/B (all default off; see TrajectoryController::Params::bounded_costs) ──
-	// Config rather than compile-time so switching regimes is a restart, not a rebuild — three runs today
-	// were confounded by a binary that did not match what was believed to be running.
-	load_optional("Controller.MppiBoundedCosts", path_controller_.params.bounded_costs);
-	load_optional("Controller.MppiLambdaFixed", path_controller_.params.lambda_fixed);
-	load_optional_cast<double>("Controller.MppiLambda", path_controller_.params.mppi_lambda);
-	load_optional("Controller.MppiInjectionSeeds", path_controller_.params.enable_injection_seeds);
-	path_controller_.params.lambda_continuity = std::max(0.f, params.lambda_continuity);
-	path_controller_.params.continuity_rot_factor = std::max(0.f, params.continuity_rot_factor);
+	// ★EIGHT ASSIGNMENTS WERE HERE AND EVERY ONE OF THEM WAS WRITE-ONLY (removed 2026-09-09 with the
+	// sampler that had been their only reader): lambda_continuity, continuity_rot_factor,
+	// goal_clearance_relax_dist, goal_obstacle_margin, goal_clearance_min_ratio and the three
+	// straight_speed_*. They kept loading from config, clamping, and landing in a struct field nobody
+	// read — which is the failure mode this file warns about elsewhere: a knob that looks live in the
+	// config, the log and the code, and cannot move the robot. Their config keys are gone too.
 	path_controller_.params.min_adv_cmd = 0.f;
-	path_controller_.params.goal_clearance_relax_dist = std::max(0.05f, params.goal_clearance_relax_dist_m);
-	path_controller_.params.goal_obstacle_margin = std::max(0.f, params.goal_obstacle_margin_m);
-	path_controller_.params.goal_clearance_min_ratio = std::clamp(params.goal_clearance_min_ratio, 0.5f, 1.f);
-	path_controller_.params.straight_speed_heading_threshold = std::max(0.f, params.straight_speed_heading_threshold_rad);
-	path_controller_.params.straight_speed_clearance_margin = std::max(0.f, params.straight_speed_clearance_margin_m);
-	path_controller_.params.straight_speed_min_goal_dist = std::max(0.f, params.straight_speed_min_goal_dist_m);
-	// ── STAGE 2 A/B: which controller drives ──
-	// MPPI samples K rollouts and scores them, doing obstacle avoidance itself. PD follows the carrot
-	// geometrically and does NOT — it relies on the route already being clear, which is the local
-	// elastic band's job. So "pd" is only a coherent choice with BandEnabled=true: together they are
-	// the band-plus-tracker architecture, separately they are half of one.
+	// ── WHICH CONTROLLER DRIVES ──
+	// Neither remaining tracker does its own avoidance: PLAIN follows the fitted curve and PD follows
+	// the carrot geometrically, and both rely on the route already being clear, which is the local
+	// elastic band's job. So either mode is only coherent with BandEnabled=true.
 	// Cross-track feedback for the PD tracker. Without it the tracker is pure pursuit and cuts corners:
 	// it converges to the carrot's direction, not to the route the band just optimised.
 	load_optional_cast<double>("Controller.PlainTrackerL", path_controller_.params.plain_L);
@@ -1075,20 +1055,22 @@ void SpecificWorker::load_params()
 	// alongside the real one — see build_esdf.
 	load_optional_cast<double>("Controller.ModelMergeRadius", path_controller_.params.model_merge_radius_m);
 	{
-		std::string mode = "mppi";
+		std::string mode = "plain";
 		load_optional("Controller.ControlMode", mode);
 		std::ranges::transform(mode, mode.begin(), [](unsigned char c) { return std::tolower(c); });
-		const bool plain = (mode == "plain");
 		const bool pd = (mode == "pd" or mode == "pursuit" or mode == "tracker");
+		const bool plain = not pd;
 		// WARN on an unrecognised value rather than silently falling back. This switch's entire purpose
-		// is that one printed line settles which arm ran; a typo ("mpi", "PD-tracker", a trailing space)
-		// would otherwise produce a confident "mode = MPPI" and a mislabelled lap.
-		if (not pd and not plain and mode != "mppi")
-			std::println("[control] ⚠ unrecognised Controller.ControlMode '{}' — falling back to MPPI. "
-			             "Valid: mppi | pd (aliases: pursuit, tracker) | plain (the route-following tracker).", mode);
+		// is that one printed line settles which arm ran; a typo ("PD-tracker", a trailing space) would
+		// otherwise produce a confident "mode = PLAIN" and a mislabelled lap.
+		// ★"mppi" IS NOW UNRECOGNISED, and warning about it is the point: the sampler was deleted
+		// 2026-09-09, so a config still asking for it must not be silently given a different law.
+		if (not pd and mode != "plain")
+			std::println("[control] ⚠ unrecognised Controller.ControlMode '{}' — falling back to PLAIN. "
+			             "Valid: plain (the route-following tracker) | pd (aliases: pursuit, tracker). "
+			             "'mppi' was removed 2026-09-09.", mode);
 		path_controller_.set_control_mode(plain ? rc::TrajectoryController::ControlMode::PLAIN
-		                                 : pd    ? rc::TrajectoryController::ControlMode::PD
-		                                         : rc::TrajectoryController::ControlMode::MPPI);
+		                                        : rc::TrajectoryController::ControlMode::PD);
 		session_.set_route_tracker(plain, path_controller_.params.plain_rot_headroom);
 		if (plain)
 			std::println("[control] mode = PLAIN tracker (curvature FF + Frenet feedback; NO avoidance — "
@@ -1099,9 +1081,8 @@ void SpecificWorker::load_params()
 		if (pd and not params.band_enabled)
 			std::println("[control] ⚠ ControlMode=pd with BandEnabled=false: NOTHING is doing obstacle "
 			             "avoidance except the safety gate. This is not the stage-2 architecture.");
-		if (not plain)
-			std::println("[control] mode = {}", pd ? "PD carrot tracker (avoidance delegated to the band)"
-			                                       : "MPPI (samples and scores its own avoidance)");
+		if (pd)
+			std::println("[control] mode = PD carrot tracker (avoidance delegated to the band)");
 	}
 	// Say which way the robot will be driven, at startup, unconditionally. Two attempts at diagnosing
 	// "it still does the old thing" were spent reasoning about whether a flag had arrived; one printed
@@ -1111,13 +1092,6 @@ void SpecificWorker::load_params()
 	             params.route_continuous ? "CONTINUOUS (one C2 curve, arc-length)" : "WAYPOINTS (per-leg)",
 	             params.route_continuous, params.route_spacing_m, params.route_smoothing_m,
 	             params.path_horizon_waypoints, params.lambda_continuity, params.smooth_planned_path);
-	// Same reason, for the MPPI scoring regime: the three A/B flags are the difference between an
-	// adaptive temperature of ~234 and a fixed 1, and nothing else in the log says which one is running.
-	std::println("[mppi] regime = {}   (BoundedCosts={}, LambdaFixed={}, Lambda={:.2f}, InjectionSeeds={})",
-	             (path_controller_.params.bounded_costs and path_controller_.params.lambda_fixed)
-	                 ? "NAV2 (bounded costs, fixed temperature)" : "BASELINE (adaptive lambda floor)",
-	             path_controller_.params.bounded_costs, path_controller_.params.lambda_fixed,
-	             path_controller_.params.mppi_lambda, path_controller_.params.enable_injection_seeds);
 	// Same reason again: the band silently reshapes the route the robot is driving, so "is it on" must
 	// never be a question answered by reading a config file and hoping it was the one that was loaded.
 	std::println("[band] local elastic band = {}   (iterations={}, lead={:.2f} m, window={:.2f} m, every {} cycles)",
@@ -1364,7 +1338,7 @@ void SpecificWorker::control_loop()
 			}
 		}
 
-		// 3) Heavy pipeline (planning + MPPI + command emission), guarded by the LiDAR
+		// 3) Heavy pipeline (planning + tracking + command emission), guarded by the LiDAR
 		//    stream watchdog: if the stream stalls, hold the robot in a local emergency
 		//    state and wait for recovery rather than planning on stale perception.
 		// ── WHAT TRIGGERS A DECISION: A FRESH SCAN ────────────────────────────────────────────

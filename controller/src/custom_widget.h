@@ -91,8 +91,8 @@ public:
                            "time over a ~2 s window.\n"
                            "NOT the sensor's nominal rate, and not the stamp-spacing estimate — those "
                            "are blind to dropped frames.\n"
-                           "The overlay is registered ONE FRAME OLD, so this number IS the display "
-                           "lag: 20 Hz = 50 ms, 10 Hz = 100 ms.\n"
+                           "The overlay is registered at the newest scan's own stamp, so this rate "
+                           "bounds how stale the drawn cloud can be: 20 Hz = 50 ms, 10 Hz = 100 ms.\n"
                            "Decays toward 0 during a stall rather than freezing at the last good value."));
         pose_row->addWidget(lidar_hz_lcd_);
         pose_row->addWidget(new QLabel("Hz", pose_panel));
@@ -171,11 +171,6 @@ public:
         toolbar_layout->addWidget(lidar_toggle_btn);
         toolbar_layout_ = toolbar_layout;
 
-
-        mppi_paths_toggle_btn = new QPushButton("MPPI paths", toolbar);
-        mppi_paths_toggle_btn->setCheckable(true);
-        mppi_paths_toggle_btn->setChecked(false);
-        toolbar_layout->addWidget(mppi_paths_toggle_btn);
 
         toolbar_layout->addStretch();
 
@@ -460,7 +455,6 @@ public:
     rc::TimeSeriesPlot *affordance_efe_plot = nullptr;
     rc::TimeSeriesPlot *mission_j_plot = nullptr;   // commanded adv/rot trace, below the EFE panel
     QPushButton *lidar_toggle_btn = nullptr;
-    QPushButton *mppi_paths_toggle_btn = nullptr;
 
 protected:
     // QLabel carries no clicked() signal and this widget has no Q_OBJECT (the fleet dashboard

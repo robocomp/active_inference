@@ -437,7 +437,7 @@ bool MissionRunner::write_profile_csv(const std::string &dir, const std::string 
       << "# pose_xy_std_m/pose_theta_std_rad = localisation sigma the speed limiter saw; -1 = the RT edge\n"
       << "#   carried NO covariance, so the limiter was INERT that cycle (not the same as a small sigma)\n"
       << "# unc_adv_scale/unc_rot_scale = multipliers it actually applied; 1.0 = no throttling.\n"
-      << "#   adv_mps is POST-scale, so cmd_adv(mppi_diag) * unc_adv_scale should reproduce it\n";
+      << "#   adv_mps is POST-scale, so cmd_adv(tracker_diag) * unc_adv_scale should reproduce it\n";
     if (truncated)
         o << "# ** TRUNCATED at " << kMaxProfileRows << " rows — the run outlasted the buffer **\n";
     o << "t_ms,lap,adv_mps,side_mps,rot_rps,freshness,v_meas_mps,v_meas_fresh,route_s_m,"
@@ -831,8 +831,8 @@ void MissionRunner::stop(const std::string &reason, std::uint64_t now_ms)
             std::error_code ec;
             const std::filesystem::path folder = std::filesystem::path(run_dir_) / active_.name;
             std::filesystem::create_directories(folder, ec);
-            // Keep the source's own name and extension: these are not all CSVs (mppi_cycle.txt is a
-            // replay snapshot), and renaming an artefact to a format it is not is how a reader ends up
+            // Keep the source's own name and extension: these are not all CSVs (route_world.txt is a
+            // world snapshot), and renaming an artefact to a format it is not is how a reader ends up
             // parsing it as one.
             const std::filesystem::path name = std::filesystem::path(src).filename();
             std::filesystem::copy_file(src, folder / (stamp + "_" + name.string()),

@@ -200,7 +200,7 @@ private:
 		AgentPresenceCoordinator presence_coordinator_;
 
 		// ─── Control thread: runs compute() off the GUI / presence-SM thread ───
-		// The MPPI optimisation in compute() can take hundreds of ms to seconds.
+		// The planning + tracking pipeline in compute() can take hundreds of ms to seconds.
 		// Running it here keeps the presence heartbeat loop and the Qt event loop
 		// responsive. The GUI thread only renders (display_.present()) and feeds
 		// user commands through command_queue_.

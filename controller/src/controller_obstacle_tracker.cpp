@@ -1990,39 +1990,32 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
         }
     }
 
-    // ── ONE-FRAME HOLD (not optional; was Transforms.overlay_draw_one_frame_old until 2026-08-04) ──
-    // Register the PREVIOUS scan, not the newest one. Two things come of the delay, and only the first
-    // is obvious:
-    //  1. REGISTRATION. room_concept has had a full frame to publish that scan's room←robot pose, so
-    //     InterpolatedRT brackets it exactly instead of clamping at the leading edge.
-    //  2. SMOOTHING. A one-frame-old cloud is also a temporally smoothed one, and the safety gate
-    //     downstream is exquisitely sensitive to transient returns.
-    // ★A/B'd and SETTLED, do not re-litigate without reading this. twist_corrected() made (1)
-    // unnecessary — it reproduces the pose at the scan instant to 0.22 cm p50, against the 2.8 cm of
-    // obstacle lag the wait costs — so the hold was removed to reclaim ~48 ms of reaction latency.
-    // Measured with it off (gap_ms 78 → 30 ms, so the change demonstrably took): cross-track and
-    // clearance UNCHANGED exactly as predicted, but safety_guard_cycles 124 vs a 16-61 baseline (2x the
-    // worst lap), lin_jerk_effort 92.6 vs 17.5-55.0, rot_reversals 54 vs 17-28, and the slowest lap of
-    // the nine. The freshest scan puts more transient returns in front of a gate that already fires in
-    // 1-cycle pulses, and it fired three times as often — so the 12x-favourable registration trade was
-    // real and measured the axis that did not matter.
-    // ★To reclaim the latency, fix the GATE (TRACKER_REVIEW.md R2: move the safety cut inside the speed
-    // profile so it stops emitting 1-cycle pulses). Once the gate is continuous, (2) is redundant and
-    // this hold can go. n=1, Webots — but 2x clear of the baseline spread on three consistent metrics.
-    if (!pending_lidar_scan_.has_value())
-    {
-        pending_lidar_scan_ = PendingLidarScan{std::move(xs), std::move(ys), std::move(zs), timestamp_ms,
-                                              std::move(plane_ids), std::move(plane_stamps)};
-        return true;   // first frame: nothing held back yet
-    }
-    std::vector<float> proc_xs = std::move(pending_lidar_scan_->xs);
-    std::vector<float> proc_ys = std::move(pending_lidar_scan_->ys);
-    std::vector<float> proc_zs = std::move(pending_lidar_scan_->zs);
-    const std::uint64_t proc_ts = pending_lidar_scan_->ts;
-    std::vector<std::uint8_t> proc_plane_ids = std::move(pending_lidar_scan_->plane_ids);
-    std::vector<std::int64_t> proc_plane_stamps = std::move(pending_lidar_scan_->plane_stamps);
-    pending_lidar_scan_ = PendingLidarScan{std::move(xs), std::move(ys), std::move(zs), timestamp_ms,
-                                          std::move(plane_ids), std::move(plane_stamps)};
+    // ── THE NEWEST SCAN IS REGISTERED DIRECTLY (the one-frame hold was removed 2026-09-09) ────────
+    // What the hold was for, and why neither reason survives:
+    //  1. REGISTRATION. Waiting a frame let room_concept publish that scan's room←robot pose, so
+    //     InterpolatedRT bracketed it instead of clamping at the leading edge. twist_corrected()
+    //     below does that job directly, reproducing the pose at the scan instant to 0.22 cm p50
+    //     against the 2.8 cm of obstacle lag the wait cost. Superseded, and measured.
+    //  2. SMOOTHING. The stated beneficiary was the MPPI safety gate, which fired in 1-cycle pulses
+    //     and had no temporal state of its own: dropping the hold took safety_guard_cycles to 124
+    //     against a 16-61 baseline, lin_jerk_effort to 92.6 against 17.5-55.0, rot_reversals to 54
+    //     against 17-28 (2026-08-04, n=1, Webots). ★THAT GATE NO LONGER EXISTS. ControlMode became
+    //     "plain" one day after that A/B, and the MPPI sampler is now deleted outright. The live
+    //     consumers of this buffer are detect_path_blockage → replan, which already debounces with
+    //     blockage_streak_/blockage_confirm_cycles + a cooldown; the temporary-obstacle tracker,
+    //     which fuses temporary_obstacle_history_scans (5) frames; and the footprint predicate along
+    //     the carrot chord. None of them turns a single transient scan into a command pulse.
+    // ★So the hold was paying ~48 ms of reaction latency to protect a consumer that had been retired.
+    // ★WHAT TO WATCH on the first runs, and what to score it on: the August numbers CANNOT be the
+    // baseline — safety_guard_cycles is structurally 0 in plain mode, so a run comparing it against
+    // 16-61 is comparing against a tracker that no longer runs. Score this on `replans`,
+    // blockage_streak behaviour and clearance instead, and expect gap_ms to fall ~78 → ~30.
+    std::vector<float> proc_xs = std::move(xs);
+    std::vector<float> proc_ys = std::move(ys);
+    std::vector<float> proc_zs = std::move(zs);
+    const std::uint64_t proc_ts = timestamp_ms;
+    std::vector<std::uint8_t> proc_plane_ids = std::move(plane_ids);
+    std::vector<std::int64_t> proc_plane_stamps = std::move(plane_stamps);
     last_lidar_timestamp_ms_ = proc_ts;
     update_rt_block_lead(proc_ts);            // caches the ring bounds + twist the two calls below use
     update_twist_prediction_error(proc_ts);
@@ -2216,72 +2209,14 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
             }
         });
 
-    // ── THE DISPLAY GETS THE FRESHEST SCAN; THE ROBOT KEEPS THE HELD ONE ─────────────────────────
-    // ★★★TWO CONSUMERS, TWO DIFFERENT QUESTIONS, AND THE ONE-FRAME HOLD WAS ANSWERING BOTH THE SAME.
-    // The hold above is NOT about registration — twist_corrected reproduces the pose at the scan
-    // instant to 0.22 cm p50, so registering the newest scan is just as exact. It survives because a
-    // one-frame-old cloud is a temporally SMOOTHED one, and the safety gate fires in 1-cycle pulses:
-    // measured with the hold off, safety_guard_cycles went 124 against a 16-61 baseline, lin_jerk_effort
-    // 92.6 against 17.5-55.0, rot_reversals 54 against 17-28. That cost is real and it belongs to the
-    // CONTROL path.
-    // ★The OVERLAY pays that cost for nothing. It does not brake, it does not plan; it only has to show
-    // where the world is now, and a frame of smoothing is a frame of visible lag — 4-6 deg of cloud
-    // swing at 0.9 rad/s, which is the symptom this exists to remove. Measured on the live robot: the
-    // freshest scan already leads the newest pose by p50 32 ms, and in 43% of frames a pose stamped at
-    // that very scan ALREADY EXISTS, so the wait buys the display nothing at all in those.
-    // So: the room buffer (ESDF, obstacle set, safety gate) keeps the held scan, unchanged. This second
-    // buffer carries the NEWEST scan, registered at its own stamp, and only the viewer reads it.
-    // ★Deliberately NOT per-plane. The per-plane registration above exists because helios and bpearl
-    // can be a full lidar period apart, which matters to a gate that brakes on it; for a drawn overlay
-    // one transform is the right cost. Anything that reasons about the world must read the other buffer.
-    if (room_from_lidar.has_value() and robot_from_lidar.has_value() and timestamp_ms != 0)
-    {
-        const auto fresh_T = inner_eigen_api_->get_transformation_matrix(graph_state_->room_name,
-                                                                        lidar_node_name,
-                                                                        timestamp_ms, "RT", interp);
-        if (fresh_T.has_value() and pending_lidar_scan_.has_value())
-        {
-            // twist_corrected is what makes this exact when the ring does not yet reach the newest
-            // scan — the case the hold was invented to avoid and this one is allowed to walk into.
-            const auto m = twist_corrected(fresh_T->matrix(), timestamp_ms);
-            const std::array<double, 12> c{m(0,0), m(0,1), m(0,2), m(0,3),
-                                           m(1,0), m(1,1), m(1,2), m(1,3),
-                                           m(2,0), m(2,1), m(2,2), m(2,3)};
-            const std::size_t fresh_count = std::min({pending_lidar_scan_->xs.size(),
-                                                      pending_lidar_scan_->ys.size(),
-                                                      pending_lidar_scan_->zs.size()});
-            display_room_buffer_.put<0>(
-                rc::RawLidarPointVectors{.xs = pending_lidar_scan_->xs,
-                                         .ys = pending_lidar_scan_->ys,
-                                         .zs = pending_lidar_scan_->zs},
-                timestamp_ms,
-                [c, robot_from_lidar_matrix, robot_from_lidar_is_identity, fresh_count, min_h, max_h]
-                (rc::RawLidarPointVectors &&raw_points, rc::LidarPointVectors &room_points)
-                {
-                    auto &[room_xs, room_ys, room_zs] = room_points;
-                    const auto &xs_in = raw_points.xs;
-                    const auto &ys_in = raw_points.ys;
-                    const auto &zs_in = raw_points.zs;
-                    const std::size_t n = std::min({fresh_count, xs_in.size(), ys_in.size(), zs_in.size()});
-                    room_xs.reserve(n); room_ys.reserve(n); room_zs.reserve(n);
-                    const double r20 = robot_from_lidar_matrix(2, 0), r21 = robot_from_lidar_matrix(2, 1);
-                    const double r22 = robot_from_lidar_matrix(2, 2), r23 = robot_from_lidar_matrix(2, 3);
-                    for (std::size_t i = 0; i < n; ++i)
-                    {
-                        const float x = xs_in[i], y = ys_in[i], z = zs_in[i];
-                        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) continue;
-                        // Same z-band cut as the room buffer: the overlay must not start drawing
-                        // returns the rest of the system has already decided are floor or ceiling.
-                        const float robot_z = robot_from_lidar_is_identity
-                            ? z : static_cast<float>(r20 * x + r21 * y + r22 * z + r23);
-                        if (robot_z < min_h || robot_z > max_h) continue;
-                        room_xs.push_back(static_cast<float>(c[0] * x + c[1] * y + c[2]  * z + c[3]));
-                        room_ys.push_back(static_cast<float>(c[4] * x + c[5] * y + c[6]  * z + c[7]));
-                        room_zs.push_back(static_cast<float>(c[8] * x + c[9] * y + c[10] * z + c[11]));
-                    }
-                });
-        }
-    }
+    // ── ONE BUFFER, BOTH CONSUMERS (the display buffer was removed 2026-09-09) ───────────────────
+    // This used to fill a SECOND buffer with the newest scan for the viewer, because the control path
+    // was holding its own scan back a frame and the overlay should not pay that frame of visible lag
+    // (4-6 deg of cloud swing at 0.9 rad/s). With the hold gone the two buffers would carry the SAME
+    // scan, and the display copy was the worse of the two: it registered the whole sweep with one
+    // transform where the room buffer resolves room←lidar PER PLANE, which is the term that grows with
+    // turn rate. So the viewer now reads lidar_buffer() directly and a full cloud transform + copy per
+    // cycle goes away with it.
 
     return true;
 }

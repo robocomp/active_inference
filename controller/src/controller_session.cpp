@@ -96,9 +96,6 @@ void ControllerSession::set_graph(std::shared_ptr<DSR::DSRGraph> graph)
 
 void ControllerSession::clear_tracking_state()
 {
-    last_mppi_trajectories_.clear();
-    last_mppi_average_trajectory_.clear();
-    last_best_mppi_trajectory_idx_ = -1;
     last_display_wp_index_ = 0;
 }
 
@@ -501,7 +498,7 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     // ★★★SEVEN HYPOTHESES HAVE DIED HERE, EVERY ONE OF THEM KILLED BY READING THE PLUMBING RATHER
     // THAN THE PICTURE: the residual publish rate, TimeQuery::Nearest, the localiser, a clock offset,
     // interleaved RT writers, the cloud/icon pairing, and the one-frame hold (removed for the display
-    // and the swing did not change). What none of them measured is the thing actually complained
+    // first, and the swing did not change; removed outright 2026-09-09). What none of them measured is the thing actually complained
     // about — how far the DRAWN cloud is rotated off the walls it should be lying on.
     // This fits a yaw: rotate the cloud about the robot by delta and find the delta that best puts its
     // points on the room polygon. dtheta_deg is then the swing, in the units it is seen in, and its
@@ -513,8 +510,8 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     // ★It reports resid_before/resid_after so a poor fit cannot masquerade as a confident angle.
     log_cloud_wall_fit(timestamp_ms, obstacle_tracker, *robot_pose);
     // The rate the row shows. Fed from the tracker, which counts it where a scan is ACCEPTED — see
-    // ControllerObstacleTracker::lidar_processed_hz(). ★It is the display lag too: the overlay is
-    // registered one frame old on purpose, so 20 Hz is 50 ms of it and 10 Hz is 100 ms.
+    // ControllerObstacleTracker::lidar_processed_hz(). ★It bounds the display lag too: the overlay is
+    // registered at the newest scan's stamp, so 20 Hz is at most 50 ms of it and 10 Hz at most 100 ms.
     display.set_lidar_rate_hz(obstacle_tracker.lidar_processed_hz());
 
     // ── IS THE DRAWN CLOUD ANCHORED TO THE POSE THE ICON IS DRAWN AT? ────────────────────────────
@@ -549,12 +546,14 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
                        "#   display's theta convention). Read the VARIATION with omega, not the value.\n"
                        "# implied_deg = dt_ms * omega, the disagreement the timestamp gap alone predicts.\n"
                        "#   dyaw tracking implied ⇒ a pure pairing lag; dyaw exceeding it ⇒ something else.\n"
-                       "# raw_lidar_ts = the scan that JUST ARRIVED, before the one-frame hold.\n"
+                       "# raw_lidar_ts = the scan that JUST ARRIVED (= the registered one, unless a\n"
+                       "#   frame was dropped or deduped since the one-frame hold was removed).\n"
                        "# newest_rt_ts  = newest room<-robot RT block at that instant.\n"
                        "# raw_minus_rt  = raw_lidar_ts - newest_rt_ts. POSITIVE is expected and is the\n"
                        "#   whole point: the pose is DERIVED from a scan, so the freshest scan must lead\n"
                        "#   the freshest pose by at least room_concept's processing time. That lead is\n"
-                       "#   what the one-frame hold spends to buy exact registration.\n"
+                       "#   what twist_corrected() walks the pose across; the one-frame hold used to wait\n"
+                       "#   it out instead, at ~48 ms of reaction latency.\n"
                        "t_ms,cloud_ts,pose_ts,dt_ms,omega,cloud_yaw,icon_yaw,dyaw_deg,implied_deg,"
                        "raw_lidar_ts,newest_rt_ts,raw_minus_rt\n";
         }
@@ -1594,14 +1593,13 @@ void ControllerSession::log_cloud_wall_fit(std::uint64_t t_ms,
     if (t_ms < cloud_fit_last_ms_ + 200) return;         // 5 Hz; this searches, so it is not free
     cloud_fit_last_ms_ = t_ms;
     if (room_polygon_.size() < 3) return;
-    // ★★★BOTH BUFFERS, BECAUSE THE ANSWER DECIDES WHETHER THIS IS COSMETIC. The display buffer is
-    // what the overlay draws; the CONTROL buffer is what the ESDF, the obstacle set and the safety gate
-    // read. If only the first is off, a swinging cloud is an eyesore. If BOTH are off, the robot's own
-    // model of where the walls are rotates away during every pivot, and that is not a drawing problem.
+    // The ONE room buffer — what the overlay draws AND what the ESDF, the obstacle set and blockage
+    // detection read. It used to be measured against a separate display buffer to tell "the drawing
+    // swings" from "the robot's own model of where the walls are swings"; with a single buffer that
+    // question is answered by construction and the second read is gone.
     // Measured on the buffer contents in room coordinates against the room polygon — this function
     // never touches the viewer, which is also why it can answer "is it just a drawing bug" at all.
-    auto *buf = obstacle_tracker.display_lidar_buffer();
-    auto *ctrl_buf = obstacle_tracker.lidar_buffer();
+    auto *buf = obstacle_tracker.lidar_buffer();
     if (buf == nullptr) return;
     const auto [cloud] = buf->read_last();
     if (not cloud.has_value()) return;
@@ -1656,11 +1654,13 @@ void ControllerSession::log_cloud_wall_fit(std::uint64_t t_ms,
                    "#   ~1 when the cloud is registered; COLLAPSING is the large-excursion signal, and\n"
                    "#   a row with empty fit columns means too few wall points to fit at all — which is\n"
                    "#   itself the measurement, not a gap in it.\n"
-                   "# ctrl_near = the SAME near-wall fraction for the CONTROL buffer (ESDF /\n"
-                   "#   obstacle set / safety gate). If it tracks near_frac, the robot's own world model\n"
-                   "#   rotates off during a pivot too and this was never a drawing problem. -1 = not\n"
-                   "#   enough points to say.\n"
-                   "t_ms,omega,dtheta_deg,dx,dy,resid_before,resid_after,n_pts,near_frac,ctrl_near\n";
+                   "# ★ctrl_near WAS HERE and is gone (2026-09-09). It repeated the near-wall fraction\n"
+                   "#   for the CONTROL buffer, to answer 'is this only a drawing problem or does the\n"
+                   "#   robot\'s own world model swing too'. The display buffer has been removed: both\n"
+                   "#   consumers now read ONE buffer, so that column could only echo near_frac by\n"
+                   "#   construction. A column that cannot disagree is not evidence — near_frac now\n"
+                   "#   answers for the control cloud as well, because it IS the control cloud.\n"
+                   "t_ms,omega,dtheta_deg,dx,dy,resid_before,resid_after,n_pts,near_frac\n";
     }
 
     // ★★★A SPARSE ROW IS THE SIGNAL, NOT A REASON TO STAY SILENT. The previous version returned here
@@ -1674,7 +1674,7 @@ void ControllerSession::log_cloud_wall_fit(std::uint64_t t_ms,
     if (pts.size() < 30)
     {
         if (cloud_fit_csv_open_ and cloud_fit_csv_.is_open())
-            cloud_fit_csv_ << std::format("{},{:.4f},,,,{:.4f},,{},{:.3f},\n",
+            cloud_fit_csv_ << std::format("{},{:.4f},,,,{:.4f},,{},{:.3f}\n",
                                           t_ms, room_vel_.omega, -1.f, pts.size(), near_frac);
         return;
     }
@@ -1772,35 +1772,12 @@ void ControllerSession::log_cloud_wall_fit(std::uint64_t t_ms,
     // above turning, to land on the walls.
     const Eigen::Vector2f slide = (R_tot * robot + t_tot) - robot;
 
-    // The same near-wall test on the CONTROL cloud. Sampled the same way so the two are comparable.
-    float ctrl_near = -1.f;
-    if (ctrl_buf != nullptr)
-    {
-        if (const auto [c2] = ctrl_buf->read_last(); c2.has_value())
-        {
-            const auto &[cx, cy, cz] = c2.value();
-            const std::size_t n2 = std::min({cx.size(), cy.size(), cz.size()});
-            if (n2 > 50)
-            {
-                const std::size_t st2 = std::max<std::size_t>(1, n2 / 400);
-                std::size_t seen = 0, near = 0;
-                for (std::size_t i = 0; i < n2; i += st2)
-                {
-                    ++seen;
-                    if (dist_to_wall(Eigen::Vector2f(cx[i], cy[i])) < 0.50f) ++near;
-                }
-                if (seen > 0) ctrl_near = static_cast<float>(near) / static_cast<float>(seen);
-            }
-        }
-    }
-
     if (cloud_fit_csv_.is_open())
     {
-        cloud_fit_csv_ << std::format("{},{:.4f},{:.3f},{:.4f},{:.4f},{:.4f},{:.4f},{},{:.3f},{:.3f}\n",
+        cloud_fit_csv_ << std::format("{},{:.4f},{:.3f},{:.4f},{:.4f},{:.4f},{:.4f},{},{:.3f}\n",
                                       t_ms, room_vel_.omega,
                                       best_dth * 180.f / static_cast<float>(M_PI),
-                                      slide.x(), slide.y(), before, best_res, pts.size(), near_frac,
-                                      ctrl_near);
+                                      slide.x(), slide.y(), before, best_res, pts.size(), near_frac);
         cloud_fit_csv_.flush();
     }
 }
@@ -1916,7 +1893,7 @@ void ControllerSession::dump_route_world(const Eigen::Vector2f &start,
     grid_planner_.write_grid(f);
 }
 
-void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
+void ControllerSession::log_tracker_diagnostics(std::uint64_t t_ms,
                                              const rc::TrajectoryController::ControlOutput &o,
                                              float commanded_adv, float measured_speed,
                                              float path_kappa, float track_s, float measured_rot,
@@ -1925,7 +1902,7 @@ void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
                                              const ControllerMotionCommander::OutputRateStats &ors,
                                              float pose_stamp_age)
 {
-    if (!mppi_csv_open_)
+    if (!tracker_csv_open_)
     {
         // ★RENAMED 2026-08-19: this is the TRACKER's per-cycle log, and the tracker is PLAIN, not MPPI.
         // The old name cost a real misdiagnosis — a 19 s off-path excursion with 39 rotation-cap
@@ -1933,16 +1910,20 @@ void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
         // because the file said mppi. A filename is a claim like any column name, and this one was
         // false. (Five columns misread the same way today: yaw_err_deg, min_esdf vs clear_now,
         // rob_facing_deg, d_arrival vs the gate's operand, path_kappa's -999 sentinel.)
-        mppi_csv_.open("tracker_diag.csv", std::ios::out | std::ios::trunc);
-        mppi_csv_.imbue(std::locale::classic());  // decimal POINT regardless of LANG (CLAUDE.md)
-        if (mppi_csv_.is_open())
-            mppi_csv_ << "# per-cycle control record. The ess/lambda/g_* columns describe the MPPI SAMPLER\n"
-                         "# and are ZERO when ControlMode=pd — that is the sampler not running, not a bug.\n"
-                         "# The gate_* columns are the SAFETY GATE. In pd mode it is the ONLY thing between\n"
-                         "# the tracker and an obstacle, and all six are populated. In mppi mode the gate has a\n"
-                         "# different shape (a ladder plus backup manoeuvres, and it is ARMED by a frontal-lidar\n"
-                         "# cone, so it does not run every cycle) — there only sg_trig, gate_horizon, gate_min_esdf\n"
-                         "# and gate_hard_coll are written; gate_scale/gate_hard_stop keep their defaults.\n"
+        tracker_csv_.open("tracker_diag.csv", std::ios::out | std::ios::trunc);
+        tracker_csv_.imbue(std::locale::classic());  // decimal POINT regardless of LANG (CLAUDE.md)
+        if (tracker_csv_.is_open())
+            tracker_csv_ << "# per-cycle control record.\n"
+                         "# ★17 COLUMNS WERE DROPPED 2026-09-09 (ess, ess_K, ess_ratio, lambda_used,\n"
+                         "#   lambda_adaptive, cost_range, cost_best, g_goal, g_obs, g_vel, g_smooth, g_lat,\n"
+                         "#   g_cbf, n_collisions, explore, p_free, steer_conc, side_asym). They described the\n"
+                         "#   MPPI sampler's rollout set; the sampler is gone, and they had been constants\n"
+                         "#   since ControlMode became plain on 2026-08-05. A parser that indexes by POSITION\n"
+                         "#   will misread every older file against this one — read by column NAME.\n"
+                         "# The gate_* columns are the SAFETY GATE, which runs in pd mode only (PLAIN has no\n"
+                         "# gate at all: safety is the planner footprint predicate, the band, and\n"
+                         "# blockage->replan). In PLAIN they hold their defaults every cycle, and sg_trig is\n"
+                         "# structurally 0 — do NOT read a zero here as \"nothing came close\".\n"
                          "#   gate_scale   = fraction of commanded adv it let through (1 = untouched, pd only)\n"
                          "#   gate_horizon = its lookahead this cycle (speed-dependent: v/a_decel + 0.15)\n"
                          "#   gate_min_esdf= worst clearance along the PREDICTED arc; -1 = gate did not run\n"
@@ -1957,7 +1938,7 @@ void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
                          "#   path in the ROBOT frame (+ = path to the right), from the polyline projection.\n"
                          "#   ★NOT the run JSON's cross_track_rms_m, which the session computes against the\n"
                          "#   SPLINE with the OPPOSITE sign and for both modes. Two different estimators; do\n"
-                         "#   not mix them. This one is 0 in mppi mode (the law does not run).\n"
+                         "#   not mix them.\n"
                          "#   With path_kappa this is the pair a gain self-tuner needs: under-gain shows\n"
                          "#   as e correlated with kappa, over-gain as e oscillating about zero.\n"
                          "# pose_stamp_age = END-TO-END perception latency in ms: wall clock now minus the\n"
@@ -1996,24 +1977,17 @@ void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
                          "# meas_rot = SIGNED measured angular rate (rad/s), EMA-smoothed and differenced\n"
                          "#   from the localiser pose (~5 Hz) — so it LAGS. Adequate to identify a plant lag\n"
                          "#   of order 0.2-0.5 s; do not read faster dynamics out of it.\n"
-                         "t_ms,ess,ess_K,ess_ratio,lambda_used,lambda_adaptive,cost_range,cost_best,"
-                         "g_goal,g_obs,g_vel,g_smooth,g_lat,g_cbf,n_collisions,"
-                         "cmd_adv,cmd_rot,meas_speed,min_esdf,explore,p_free,steer_conc,side_asym,"
+                         "t_ms,cmd_adv,cmd_rot,meas_speed,min_esdf,"
                          "sg_trig,gate_scale,gate_horizon,gate_min_esdf,gate_hard_stop,gate_hard_coll,"
                          "pd_cross_err_m,path_kappa,track_s,meas_rot,bump_push,gap_l,gap_r,pose_xy_std,"
                          "pose_theta_std,carrot_bear,carrot_dist,pose_x,pose_y,pose_th,model_dropped,"
                          "out_ticks,out_period_ms,out_period_max,ice_ms,ice_max,cmd_age_max,fresh_min,"
                          "pose_stamp_age,path_gen\n";
-        mppi_csv_open_ = true;
+        tracker_csv_open_ = true;
     }
-    if (!mppi_csv_.is_open()) return;
-    const float ratio = o.ess_K > 0 ? o.ess / static_cast<float>(o.ess_K) : 0.f;
-    mppi_csv_ << t_ms << ',' << o.ess << ',' << o.ess_K << ',' << ratio << ','
-              << o.lambda_used << ',' << o.lambda_adaptive << ',' << o.cost_range << ',' << o.cost_best << ','
-              << o.g_goal << ',' << o.g_obs << ',' << o.g_vel << ',' << o.g_smooth << ','
-              << o.g_lat << ',' << o.g_cbf << ',' << o.n_collisions << ','
-              << commanded_adv << ',' << o.rot << ',' << measured_speed << ',' << o.min_esdf << ',' << o.explore << ','
-              << o.p_free << ',' << o.steering_concentration << ',' << o.side_asymmetry << ','
+    if (!tracker_csv_.is_open()) return;
+    tracker_csv_ << t_ms << ','
+              << commanded_adv << ',' << o.rot << ',' << measured_speed << ',' << o.min_esdf << ','
               << (o.safety_guard_triggered ? 1 : 0) << ',' << o.gate_speed_scale << ','
               << o.gate_horizon_s << ',' << o.gate_min_esdf << ','
               << (o.gate_hard_stop ? 1 : 0) << ',' << (o.gate_hard_collision ? 1 : 0) << ','
@@ -3886,9 +3860,6 @@ void ControllerSession::update_display(const std::optional<ControllerRobotPose> 
                    obstacle_polys,
                    obstacle_rfe_points,
                    current_target_room_,
-                   last_mppi_trajectories_,
-                   last_mppi_average_trajectory_,
-                   last_best_mppi_trajectory_idx_,
                    last_display_wp_index_,
                    max_lidar_draw_points,
                    lidar_correction);
@@ -4276,9 +4247,6 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     display.set_session_totals(session_distance_m_, session_elapsed_s());
     display.set_goal_distance(control_output.dist_to_goal, control_output.goal_yaw_err_rad,
                               control_output.aligning);
-    last_mppi_trajectories_ = control_output.trajectories_room;
-    last_mppi_average_trajectory_ = control_output.average_trajectory_room;
-    last_best_mppi_trajectory_idx_ = control_output.best_trajectory_idx;
     last_display_wp_index_ = std::max(0, control_output.current_wp_index);
 
     // Mission instrumentation. Sampled from the SAME control output the robot is about to execute, so the
@@ -4320,56 +4288,37 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         // Only this one drives the control law, and it had never been recorded, so every "projection
         // jump" measured before now described the session's projection instead of the tracker's.
         // ★Read from the tracker, not reconstructed. It used to be route_length - dist_to_goal, which is
-        // s only because PlainTracker happens to put s_remaining in dist_to_goal; in PD/MPPI that field
-        // is a EUCLIDEAN norm, so the same CSV column meant two different things by mode.
+        // s only because PlainTracker happens to put s_remaining in dist_to_goal; in PD that field is a
+        // EUCLIDEAN norm, so the same CSV column meant two different things by mode.
         const float track_s = path_controller.tracker_arc_length().value_or(-1.f);
         log_approach_diagnostics(overlay_now_ms_, control_output, robot_pose, path_controller);
-        log_mppi_diagnostics(overlay_now_ms_, control_output, control_output.adv, base_speed_lin_,
+        log_tracker_diagnostics(overlay_now_ms_, control_output, control_output.adv, base_speed_lin_,
                              kappa_here, track_s, room_vel_.omega, ud.xy_std_m, ud.theta_std_rad, robot_pose,
                              motion_commander.last_output_rate_stats(),
                              world_model_pose_stamp_age_ms_);
-        // CAPTURE THE HARDEST CYCLE OF THE RUN for offline replay (tools/mppi_bench). "Hardest" is where
-        // the controller had the least room to choose: every rollout infeasible, or the tightest the
-        // horizon ever got. A snapshot from open floor proves nothing — measured, a cost term that is
-        // load-bearing near contact is completely inert two metres away, so a comfortable cycle replays
-        // identically under every setting and answers no question at all.
-        const bool all_infeasible = control_output.ess_K > 0
-                                and control_output.n_collisions >= control_output.ess_K;
-        if (all_infeasible and tightest_cycle_clearance_ > -1.f)
-        {
-            tightest_cycle_clearance_ = -1.f;      // nothing beats this; stop re-requesting
-            path_controller.request_snapshot("mppi_cycle.txt");
-        }
+        // (THE HARDEST-CYCLE SNAPSHOT lived here, and the reversal snapshot below it. Both requested a
+        // cycle dump for tools/mppi_bench to replay; both are gone with the sampler, 2026-09-09. Their
+        // trigger — "every rollout infeasible" — was itself a statement about rollouts, and there are
+        // none. ★The finding that outlives them: a snapshot taken on open floor proves nothing, because
+        // a term that is load-bearing near contact is inert two metres away. Any future capture must
+        // still select the cycle where the robot had the LEAST room, not a comfortable one.)
 
         // ── CAPTURE A REVERSAL ITSELF ─────────────────────────────────────────────────────────────
         // The reversal count is the loudest defect in this stack and three hypotheses for it have now
         // been falsified by measuring PROXIES: route geometry (the optimiser removed 3 of 4 tight corners
-        // and the count did not move), sampling dither (at an open cycle the command is 65x its own
-        // seed-to-seed noise), and mode averaging (which predicts flips clustered at obstacles, while
-        // measurement shows them spread over 83% of the lap). So capture the EVENT, not a proxy for it:
-        // the cycle on which the commanded rotation actually changes sign. Replaying that cycle with
-        // several seeds says immediately whether the flip was noise, a mode swap, or a real decision.
+        // and the count did not move), sampling dither, and mode averaging (which predicts flips
+        // clustered at obstacles, while measurement shows them spread over 83% of the lap).
+        // ★THE SNAPSHOT THIS ONCE REQUESTED IS GONE (2026-09-09): it existed to replay the flipping
+        // cycle under several RNG seeds and ask whether the flip was sampling noise, and both the seeds
+        // and the sampler are removed. The SIGN TRACKING stays — it is what rot_reversals counts, and
+        // that metric is how this change and the hold removal both get scored.
         // ★Same deadband as TrajectoryStats::rot_reversals (0.05 rad/s) — a different one would count a
-        // different thing and the snapshot would not correspond to the metric it is meant to explain.
-        // ★OFF BY ONE CYCLE, deliberately not fixed: a request is served at the end of the NEXT compute,
-        // so the snapshot is the cycle AFTER the flip (100 ms later), not the flip itself. Capturing the
-        // exact cycle would mean buffering every cycle's cloud on the chance it turns out interesting.
-        // For the question being asked — is this command noise-dominated — the successor cycle answers it
-        // just as well, because the rollouts are resampled from scratch either way. If the question ever
-        // becomes "what CHANGED between the two cycles", this is no longer good enough and the buffering
-        // has to be built.
+        // different thing.
         constexpr float kRotDeadband = 0.05f;
         const int rot_sign = control_output.rot > kRotDeadband ? 1
                            : (control_output.rot < -kRotDeadband ? -1 : 0);
         if (rot_sign != 0)
-        {
-            if (prev_cmd_rot_sign_ != 0 and rot_sign != prev_cmd_rot_sign_ and not reversal_captured_)
-            {
-                reversal_captured_ = true;         // the first one; later ones would overwrite it
-                path_controller.request_snapshot("mppi_reversal.txt");
-            }
             prev_cmd_rot_sign_ = rot_sign;
-        }
     }
 
     if (route_active_ and mission_.running())
@@ -4417,17 +4366,13 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         // rewritten to remove, reintroduced in the measurement instead of the model. It made every
         // recorded run report 1-5 cm of clearance and fail the safety constraint.
         const float body_clearance = esdf_here - path_controller.body_extent_here();
-        // SNAPSHOT THE CYCLE WHERE THE ROBOT WAS CLOSEST TO SOMETHING — this quantity, the gap between the
-        // BODY and the nearest obstacle right now, and not min_esdf. min_esdf is the minimum over the best
-        // rollout's WHOLE horizon, which is dominated by the 5 s tail every plan has; triggering on it
-        // selected the cycle whose prediction dipped lowest rather than the cycle where the robot was
-        // actually in trouble, and the snapshot it produced had 0.40 m of room. A trigger has to mean what
-        // its name says, for the same reason a metric does.
+        // ★tightest_cycle_clearance_ is still TRACKED (it is the run's closest approach, and the mission
+        // stats read it) but no longer REQUESTS a snapshot — see the note at the reversal capture.
+        // It measures the gap between the BODY and the nearest obstacle right now, deliberately not
+        // min_esdf: that was a minimum over a whole predicted horizon, so it named the cycle whose
+        // PREDICTION dipped lowest rather than the cycle where the robot was actually in trouble.
         if (mission_.running() and body_clearance < tightest_cycle_clearance_)
-        {
             tightest_cycle_clearance_ = body_clearance;
-            path_controller.request_snapshot("mppi_cycle.txt");
-        }
         // Deviation from the reference curve — the continuous tracking signal. NaN when there is no
         // reference (a click target has no route), and the stats skip it rather than inventing a zero.
         float cross_track = std::numeric_limits<float>::quiet_NaN();

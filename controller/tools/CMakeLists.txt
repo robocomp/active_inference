@@ -57,27 +57,7 @@ endif()
 set_target_properties(tracker_sim PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}/../bin")
 
-# Replays ONE recorded control cycle through the real TrajectoryController. It links the controller
-# itself, which is possible only because that class depends on Eigen and robot_footprint and nothing
-# else — no Qt, no Ice, no DSR.
-add_executable(mppi_bench
-  mppi_bench.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/../src/trajectory_controller.cpp
-  # TrajectoryController dispatches to these, so linking it means linking them.
-  ${CMAKE_CURRENT_LIST_DIR}/../src/trackers/plain_tracker.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/../src/trackers/pd_tracker.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/../src/trackers/mppi_tracker.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/../src/route_spline.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/../src/route_optimizer.cpp
-)
-target_compile_features(mppi_bench PRIVATE cxx_std_23)
-target_compile_options(mppi_bench PRIVATE -O3 -fno-char8_t)
-target_link_libraries(mppi_bench PRIVATE ai_common::geometry)
-if (TARGET Eigen3::Eigen)
-  target_link_libraries(mppi_bench PRIVATE Eigen3::Eigen)
-else()
-  target_include_directories(mppi_bench PRIVATE /usr/include/eigen3)
-endif()
-target_include_directories(mppi_bench PRIVATE /home/robocomp/robocomp/classes)
-set_target_properties(mppi_bench PROPERTIES
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}/../bin")
+# (mppi_bench lived here: it replayed ONE recorded control cycle through the real
+# TrajectoryController to sweep MPPI cost terms offline. Removed 2026-09-09 with the sampler and the
+# cycle snapshot it replayed. tracker_sim above is the surviving offline harness — a closed loop
+# against the identified plant, which is the question that outlived the open-loop replay.)

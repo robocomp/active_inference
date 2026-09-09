@@ -398,14 +398,17 @@ private:
                          const rc::TrajectoryController &path_controller,
                          float window_m);
 
-    // MPPI BLACK BOX. One row per control cycle: the temperature actually applied, the cost spread it had
-    // to discriminate on, the effective sample size, and which term owns the cost. Written because the
-    // question "is the optimiser choosing, or averaging?" is not answerable from behaviour — a robot that
-    // creeps looks identical whether every rollout is genuinely bad or the softmax simply cannot tell them
-    // apart. Cheap (a few floats at 10 Hz) and only while a mission is running.
-    std::ofstream mppi_csv_;
-    bool mppi_csv_open_ = false;
-    void log_mppi_diagnostics(std::uint64_t t_ms, const rc::TrajectoryController::ControlOutput &o,
+    // THE PER-CYCLE CONTROL RECORD (tracker_diag.csv). One row per control cycle: the command issued,
+    // the clearance it was issued against, the tracker's own Frenet error and arc length, the safety
+    // gate's verdict, the pose it was computed from, and the actuation path's timing.
+    // ★It began as the sampler's black box — temperature, cost spread, effective sample size, which
+    // term owned the cost — to answer "is the optimiser choosing or averaging?". Those 17 columns went
+    // with the sampler on 2026-09-09. What survives is the question that outlived it: a robot that
+    // creeps looks identical from outside whatever the cause, so the cause has to be written down per
+    // cycle. Cheap (a few floats at 10 Hz) and only while a mission is running.
+    std::ofstream tracker_csv_;
+    bool tracker_csv_open_ = false;
+    void log_tracker_diagnostics(std::uint64_t t_ms, const rc::TrajectoryController::ControlOutput &o,
                               float commanded_adv, float measured_speed,
                               float path_kappa, float track_s, float measured_rot,
                               float pose_xy_std, float pose_theta_std,
@@ -451,9 +454,6 @@ private:
     std::optional<Eigen::Vector2f> manual_target_room_;
     std::optional<Eigen::Vector2f> manual_target_origin_room_;
     std::optional<ControllerTargetInfo> last_target_info_;
-    std::vector<ControllerPolygon> last_mppi_trajectories_;
-    ControllerPolygon last_mppi_average_trajectory_;
-    int last_best_mppi_trajectory_idx_ = -1;
     int last_display_wp_index_ = 0;
     bool manual_target_dirty_ = false;
     std::uint64_t active_target_id_ = 0;

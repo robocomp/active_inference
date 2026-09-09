@@ -28,11 +28,11 @@ class ControllerObstacleTracker
                             const ControllerGraphState *graph_state);
         void set_graph_layout_callback(std::function<void()> callback);
 
+        // The ONE registered room cloud: the ESDF, the obstacle set, blockage detection and the
+        // viewer all read this. There used to be a second, display-only buffer holding a fresher
+        // scan; the one-frame hold that made it necessary is gone, so both consumers read this one
+        // (which is also the better of the two — it registers room←lidar per plane).
         rc::LidarPointBuffer *lidar_buffer() { return &lidar_room_buffer_; }
-        // ★DISPLAY ONLY. The NEWEST scan, registered at its own stamp — one frame fresher than
-        // lidar_buffer(), which the control path keeps for the smoothing the safety gate depends on.
-        // Nothing that decides where the robot goes may read this; see the note at the fill site.
-        rc::LidarPointBuffer *display_lidar_buffer() { return &display_room_buffer_; }
         const ControllerPolygons &obstacle_polygons() const { return obstacle_polygons_; }
         const ControllerObstacleVisuals &display_obstacle_polygons() const { return display_obstacle_polygons_; }
         // residual_concept's occupancy, as CELLS — what the planner marks directly (see the decode
@@ -51,10 +51,11 @@ class ControllerObstacleTracker
         // stamp it belongs to. The display draws that cloud (read_last) and the robot icon from a
         // separately-read pose; these let the two be compared instead of assumed equal.
         // ── THE THREE STAMPS, RAW, SO A TABLE CAN SHOW THE ACTUAL PATH ──────────────────────────
-        // newest_raw_lidar_ts  the scan that JUST ARRIVED (before the one-frame hold). This is the
-        //                      freshest thing the controller holds, and it must be NEWER than any RT
-        //                      pose, because room_concept derives the pose FROM a scan.
-        // last_lidar_timestamp the scan actually registered and drawn (the previous one, held).
+        // newest_raw_lidar_ts  the scan that JUST ARRIVED. It must be NEWER than any RT pose,
+        //                      because room_concept derives the pose FROM a scan.
+        // last_lidar_timestamp the scan actually registered and drawn. Since the one-frame hold was
+        //                      removed these two are the SAME scan; they are kept apart because a
+        //                      dropped or deduped frame still separates them.
         // rt_block_newest_ts   the newest room←robot block in the RT ring at that moment.
         const std::optional<std::uint64_t> &newest_raw_lidar_ts() const { return newest_raw_lidar_ts_; }
         const std::optional<std::uint64_t> &rt_block_newest_ts() const { return rt_block_newest_ts_; }
@@ -120,9 +121,10 @@ class ControllerObstacleTracker
         // query was inside the ring, so nothing needed repairing). Pairs with rt_block_lead_ms().
         std::int64_t rt_twist_fix_dt_ms() const { return rt_twist_fix_dt_ms_; }
         // Twist-accuracy probe over one lidar period: the horizon used (0 = probe did not run this
-        // scan) and the position / heading residual against the RT tree. This is what says whether
-        // the one-frame hold in handle_lidar_points can eventually be dropped (it cannot yet — see
-        // the note there; the hold also smooths, which this does not measure).
+        // scan) and the position / heading residual against the RT tree. This is the evidence that
+        // retired the one-frame hold — it measures exactly the registration error registering the
+        // NEWEST scan introduces, and it came back at 0.22 cm p50. Keep it: it is the standing check
+        // that twist_corrected is still doing the job the hold used to do.
         std::int64_t twist_pred_dt_ms() const { return twist_pred_dt_ms_; }
         const std::optional<float> &twist_pred_err_m() const { return twist_pred_err_m_; }
         const std::optional<float> &twist_pred_err_deg() const { return twist_pred_err_deg_; }
@@ -217,17 +219,6 @@ class ControllerObstacleTracker
             ControllerObstacleKind kind = ControllerObstacleKind::Obstacle;
         };
 
-        // Raw scan held back one frame for the "draw one frame old" overlay path.
-        struct PendingLidarScan
-        {
-            std::vector<float> xs, ys, zs;
-            std::uint64_t ts = 0;
-            // Carried with the held-back scan: the per-plane registration below must use the stamps
-            // of the frame it actually processes, not the one that arrived meanwhile.
-            std::vector<std::uint8_t> plane_ids;
-            std::vector<std::int64_t> plane_stamps;
-        };
-
         // Read the room←robot RT ring (newest/oldest block stamps) and the body twist published on
         // that same edge, and record how far the newest block leads `scan_ts`. The lead itself is a
         // diagnostic; the ring bounds + twist are what twist_corrected() below acts on.
@@ -317,7 +308,6 @@ class ControllerObstacleTracker
         const ControllerGraphState *graph_state_ = nullptr;
         std::function<void()> graph_layout_callback_;
         rc::LidarPointBuffer lidar_room_buffer_{5};
-        rc::LidarPointBuffer display_room_buffer_;   // newest scan, viewer only (see display_lidar_buffer)
         RawCloudProximity raw_cloud_proximity_;   // measured on the raw sweep, pre z-band (see the struct)
         std::vector<GraphObstacleRecord> known_graph_obstacles_;
         ControllerPolygons obstacle_polygons_;
@@ -358,7 +348,6 @@ class ControllerObstacleTracker
         std::int64_t rt_twist_fix_dt_ms_ = 0;                            // Δt the last correction walked
         std::int64_t twist_pred_dt_ms_ = 0;                              // horizon the probe used (0 = not run)
         std::optional<float> twist_pred_err_m_, twist_pred_err_deg_;     // twist-vs-RT residual over it
-        std::optional<PendingLidarScan> pending_lidar_scan_;             // held-back frame (draw-one-frame-old)
         mutable std::uint64_t lidar_period_ms_ = 100;
         mutable std::string obstacle_debug_report_;
         mutable std::string graph_object_debug_report_;

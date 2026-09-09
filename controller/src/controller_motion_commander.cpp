@@ -145,7 +145,7 @@ void ControllerMotionCommander::apply_uncertainty_speed_limit(float &adv_mps, fl
     // belongs in whatever inflated sigma — not here.
     // ★The diagnostic below records the SCALE ACTUALLY APPLIED, so a run at 0 reports 1.000 throughout
     // and profile.csv keeps meaning "what the robot obeyed". The raw ramp is still visible as the gap
-    // between cmd_adv (mppi_diag) and adv_mps (profile).
+    // between cmd_adv (tracker_diag) and adv_mps (profile).
     if (params_->pose_uncertainty_coupling < 1.f)
     {
         const float k = std::clamp(params_->pose_uncertainty_coupling, 0.f, 1.f);

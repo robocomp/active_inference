@@ -95,7 +95,7 @@ ControlOutput& PdTracker::compute(ControlOutput& out, const TrackerInput& in, co
     float cmd_adv = p.max_adv * alignment * dist_factor;
     cmd_adv = std::clamp(cmd_adv, p.min_adv_cmd, p.max_adv);
 
-    // Smoothing + Gaussian brake (same as MPPI path)
+    // Smoothing + Gaussian brake
     Eigen::Vector3f raw(cmd_adv, 0.f, cmd_rot);
     if (has_prev_vel_)
         smoothed_vel_ = p.velocity_smoothing * smoothed_vel_
@@ -109,11 +109,15 @@ ControlOutput& PdTracker::compute(ControlOutput& out, const TrackerInput& in, co
     out.side = smoothed_vel_[1];
     out.rot  = smoothed_vel_[2];
 
-    // Safety gate (same ESDF-based forward prediction as MPPI mode)
+    // ── SAFETY GATE ── ESDF-based forward prediction along the commanded arc.
+    // ★THE ONLY GATE LEFT IN THE AGENT, and it runs in PD mode only — which since 2026-08-05 means the
+    // no-fitted-curve fallback. PLAIN has none by design. The MPPI gate this one was written against
+    // (a quantised ladder plus backup manoeuvres) was deleted with the sampler on 2026-09-09; the
+    // divergence note that used to sit below is therefore settled by deletion, not by unification.
     {
         // ── HOW FAR AHEAD THE GATE MUST LOOK ──
-        // In MPPI mode this gate is a backstop behind a controller that scores its own rollouts. In PD
-        // mode it is the LAST line of defence, so a fixed 0.30 s is not defensible: at 0.376 m/s that is
+        // This gate is the LAST line of defence in the mode it runs in, so a fixed 0.30 s is not
+        // defensible: at 0.376 m/s that is
         // 0.11 m of lookahead, less than the body's own reach, and it can only report a collision the
         // robot can no longer avoid. The horizon is therefore the time to STOP plus one control period
         // of reaction — derived from the braking model already used by the CBF, not chosen.
@@ -164,9 +168,8 @@ ControlOutput& PdTracker::compute(ControlOutput& out, const TrackerInput& in, co
             out.safety_guard_triggered = true;
             // ── LARGEST ADMISSIBLE SPEED, not the first of three guesses ──
             // {0.5, 0.25, 0} quantises the response: a situation needing 0.9 gets 0.5, and one needing
-            // 0.45 gets 0.25. In MPPI mode that coarseness is hidden because the sampler is already
-            // slowing down via its obstacle cost; in PD mode this IS the speed control near obstacles,
-            // and quantising it is what "crawl or slam" feels like. Six bisections resolve the scale to
+            // 0.45 gets 0.25. Here this IS the speed control near obstacles, and quantising it is what
+            // "crawl or slam" feels like. Six bisections resolve the scale to
             // ~1.6% using the SAME predicate, so the gate stays exactly as conservative as it was.
             if (not eval_risk(0.f, out.rot, gate_horizon_s).trigger)
             {
@@ -189,7 +192,7 @@ ControlOutput& PdTracker::compute(ControlOutput& out, const TrackerInput& in, co
         }
     }
 
-    // No per-cycle print: this path populates the same ControlOutput the session logs to mppi_diag.csv
+    // No per-cycle print: this path populates the same ControlOutput the session logs to tracker_diag.csv
     // every cycle, so a terminal line would be a second, worse copy of a record that already exists —
     // and one nobody can compare across runs.
     return out;
@@ -197,7 +200,7 @@ ControlOutput& PdTracker::compute(ControlOutput& out, const TrackerInput& in, co
 
 // ============================================================================
 // Nominal control: simple proportional control toward carrot
-// Used as the base for MPPI warm-start blending
+// (Was also the base for the sampler's warm start, until 2026-09-09.)
 // ============================================================================
 
 }   // namespace rc

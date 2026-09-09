@@ -182,7 +182,7 @@ ControlOutput& PlainTracker::compute(ControlOutput& out, const TrackerInput& in,
     // ★No new parameter: max_rot and g_dc already exist, and this is omega = v*kappa read backwards.
     // ── THE STEERING FLOOR MUST DIE WITH THE ROUTE, OR THE ROBOT TURNS WHERE IT ARRIVES ──────────
     // Reported from the robot: "it advances OK but upon arriving it turns some 45 degrees, and it was
-    // not commanded to". Confirmed in mppi_diag.csv — position frozen to the centimetre at (0.51,-1.25)
+    // not commanded to". Confirmed in tracker_diag.csv — position frozen to the centimetre at (0.51,-1.25)
     // while cmd_rot sat on the -0.800 cap and the heading swept 1.612 -> 1.953 rad, still going.
     // ★THE SPEED TAPERS TO ZERO AND THE ROTATION AUTHORITY DOES NOT. v_profile = sqrt(2*a*s_remaining)
     // reaches zero at the endpoint, but the feedback is evaluated at max(v_profile, kSteerFloorMps), a
@@ -430,7 +430,7 @@ ControlOutput& PlainTracker::compute(ControlOutput& out, const TrackerInput& in,
     holding_ = holding;
 
     // ── A PIVOT MUST CARRY THE ARC LENGTH WITH IT, OR THE FEEDBACK UNDOES IT NEXT CYCLE ──────────
-    // MEASURED 2026-08-13 (mppi_diag.csv, 4900 cycles / 246 s): the robot sat at s = 0.000 — the very
+    // MEASURED 2026-08-13 (tracker_diag.csv, 4900 cycles / 246 s): the robot sat at s = 0.000 — the very
     // start of its path — with cmd_rot alternating -0.800 / +0.800 every 8 cycles (0.40 s) and its
     // heading oscillating inside a 0.15 rad band. It never turned at all. The base's identified lag is
     // 0.42 s on top of 0.20 s of transport, so every command was reversed before the wheels had

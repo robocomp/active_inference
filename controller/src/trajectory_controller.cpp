@@ -41,15 +41,11 @@ void TrajectoryController::refresh_active_params()
     active_params_ = params;
     const float safety_priority = std::max(1.f, params.safety_priority_scale);
 
+    // safety_priority_scale used to inflate three things: d_safe, the sampler's obstacle weight and
+    // its collision penalty. Only d_safe is left, so this is now exactly "how far beyond the body do
+    // we stand off, scaled by priority".
     const float base_d_safe_priority = std::max(0.01f, params.d_safe * safety_priority);
-    const float base_lambda_obstacle = std::max(1e-5f, params.lambda_obstacle);
-    const float base_close_obstacle_gain = std::max(1e-5f, params.close_obstacle_gain);
-    const float base_collision_penalty_priority = std::max(1.f, params.collision_penalty * safety_priority);
-
     active_params_.d_safe = base_d_safe_priority;
-    active_params_.lambda_obstacle = base_lambda_obstacle;
-    active_params_.close_obstacle_gain = base_close_obstacle_gain;
-    active_params_.collision_penalty = base_collision_penalty_priority;
 
     if (params.enable_mood)
     {
@@ -73,27 +69,18 @@ void TrajectoryController::refresh_active_params()
         if (params.mood_scales_goal_threshold)   // off by design — see the flag's comment
             active_params_.goal_threshold = scale_with_gain(params.goal_threshold, speed_gain * 0.5f, 0.01f);
 
-        // Reactivity family: output smoothing, warm-start inertia, brake
+        // Reactivity family: output smoothing and the PD brake. (It also retuned the sampler's
+        // warm-start inertia; that half went with the sampler, 2026-09-09.)
         active_params_.velocity_smoothing = std::clamp(
             params.velocity_smoothing * (1.f - reactivity_gain * n), 0.f, 0.98f);
-        active_params_.warm_start_adv_weight = std::clamp(
-            params.warm_start_adv_weight * (1.f - reactivity_gain * n), 0.f, 0.98f);
-        active_params_.warm_start_rot_weight = std::clamp(
-            params.warm_start_rot_weight * (1.f - reactivity_gain * n), 0.f, 0.98f);
         active_params_.gauss_k = scale_with_gain(params.gauss_k, -reactivity_gain, 1e-5f);
 
-        // Caution family: safety margins (calm side only)
+        // Caution family: safety margins (calm side only). Was d_safe AND the collision penalty; the
+        // penalty was a cost weight and is gone.
         const float calm_factor = std::max(0.f, -n);  // 0 at neutral/excited, 1 at calm
         active_params_.d_safe = std::max(base_d_safe_priority,
                                          base_d_safe_priority * (1.f + caution_gain * calm_factor));
-        active_params_.collision_penalty = std::max(base_collision_penalty_priority,
-                                                    base_collision_penalty_priority * (1.f + 0.5f * caution_gain * calm_factor));
     }
-
-    active_params_.K_min = std::max(1, std::min(active_params_.K_min, active_params_.K_max));
-    active_params_.T_min = std::max(1, std::min(active_params_.T_min, active_params_.T_max));
-    active_params_.num_samples = std::clamp(active_params_.num_samples, active_params_.K_min, active_params_.K_max);
-    active_params_.trajectory_steps = std::clamp(active_params_.trajectory_steps, active_params_.T_min, active_params_.T_max);
     // d_safe is a standoff BEYOND the body, so it is meaningless below the body's own worst-case reach.
     active_params_.d_safe = std::max(active_params_.d_safe, body_extent_max() + 0.01f);
     // The curvature ceiling is applied AFTER mood and the priority scaling, so it bounds whatever those
@@ -103,7 +90,6 @@ void TrajectoryController::refresh_active_params()
         active_params_.max_adv = std::clamp(*speed_limit_, 0.05f, active_params_.max_adv);
     active_params_.max_back_adv = std::clamp(active_params_.max_back_adv, 0.f, active_params_.max_adv);
     active_params_.min_adv_cmd = std::clamp(active_params_.min_adv_cmd, 0.f, active_params_.max_adv);
-    active_params_.mppi_lambda = std::clamp(active_params_.mppi_lambda, active_params_.lambda_min, active_params_.lambda_max);
 }
 
 float TrajectoryController::body_extent_here() const { return body_extent_toward_obstacle(0.f, 0.f, 0.f); }
@@ -130,7 +116,7 @@ float TrajectoryController::body_extent_toward_obstacle(float rx, float ry, floa
 // instant a route is installed.
 // `wp_index_` is deliberately NOT set here: the two callers disagree about it (set_path starts at 1,
 // set_path_presmoothed at 0) and each owns its own answer.
-void TrajectoryController::reset_mppi_state(const std::vector<Eigen::Vector2f>& path_room)
+void TrajectoryController::reset_path_state(const std::vector<Eigen::Vector2f>& path_room)
 {
     refresh_active_params();
 
@@ -140,9 +126,6 @@ void TrajectoryController::reset_mppi_state(const std::vector<Eigen::Vector2f>& 
     carrot_seg_hint_ = 0;   // a fresh path starts at the robot; the caller re-seeds it if it does not
     has_last_carrot_ = false;   // a NEW route may legitimately put the carrot somewhere else entirely
 
-    // Initialize MPPI state (warm start, adaptive K/T/λ/σ, ESS, output smoothing — all of it now
-    // lives in the tracker that uses it).
-    mppi_tracker_.reset_state(active_params_);
     carrot_curve_active_ = false;
 
     // Reset blockage detection
@@ -156,7 +139,7 @@ void TrajectoryController::reset_mppi_state(const std::vector<Eigen::Vector2f>& 
 void TrajectoryController::set_path(const std::vector<Eigen::Vector2f>& path_room)
 {
     reset_arrival_watch();
-    reset_mppi_state(path_room);
+    reset_path_state(path_room);
     wp_index_ = (path_room.size() > 1) ? 1 : 0;
 
     // Push waypoints away from walls/furniture toward center of free space
@@ -173,13 +156,13 @@ void TrajectoryController::set_path_presmoothed(const std::vector<Eigen::Vector2
     // and smooth_path_spline are not merely unnecessary here, they are harmful (see the header).
     // This used to call set_path() and then overwrite path_room_, which RAN both passes in full
     // and threw the result away.
-    reset_mppi_state(path_room);
+    reset_path_state(path_room);
     wp_index_ = 0;
 }
 
 void TrajectoryController::update_path_geometry(const std::vector<Eigen::Vector2f>& path_room)
 {
-    // Deliberately NOT reset_mppi_state — see the header. Everything the sampler carries between cycles
+    // Deliberately NOT reset_path_state — see the header. Everything the follower carries between cycles
     // survives; only the geometry it is measured against changes.
     if (path_room.size() < 2) return;
     path_room_ = path_room;
@@ -203,7 +186,6 @@ void TrajectoryController::stop()
     active_ = false;
     path_room_.clear();
     wp_index_ = 0;
-    mppi_tracker_.clear_state();
     // ★2026-08-05 — STOP MUST INVALIDATE THE ARC-LENGTH PROJECTION. PlainTracker carries s_hint_, a
     // monotone-forward projection, and nothing was resetting it. After a mission stop it still held the
     // arc length where the robot left off — near the END of the route — so on START the 2 m search
@@ -475,7 +457,7 @@ void TrajectoryController::smooth_path_spline()
 }
 
 // ============================================================================
-// Main compute — Proper MPPI with warm-start + Gaussian perturbations
+// Main compute — carrot, ESDF, arrival, blockage, and dispatch to the active tracker
 // ============================================================================
 
 // The live entry point: read the cloud, then solve. Split from the solver below so that a cycle is a
@@ -610,7 +592,6 @@ TrajectoryController::ControlOutput TrajectoryController::compute(
                 active_ = false;
                 out.goal_reached = true;
                 reset_arrival_watch();
-                mppi_tracker_.forget_executed_command();   // arrived: nothing to be continuous with
                 return out;
             }
             aligning_ = true;
@@ -642,10 +623,6 @@ TrajectoryController::ControlOutput TrajectoryController::compute(
             sent_rot = std::clamp(sent_rot, -no_overshoot, no_overshoot);
             out.rot = -sent_rot;
             out.goal_reached = false;
-            // The alignment path bypasses the MPPI but still commands the base, so it must leave the
-            // continuity reference pointing at what was actually sent. Otherwise the first MPPI cycle
-            // after alignment would be scored for continuity against a command from before the turn.
-            mppi_tracker_.note_executed_command(out.adv, out.rot);
             return out;
         }
         active_ = false;
@@ -759,32 +736,19 @@ TrajectoryController::ControlOutput TrajectoryController::compute(
         // from here. A third control mode, or removing this early return, breaks that silently.
         detect_path_blockage(out, robot_pose);
         // The tracker writes through its ControlOutput& and returns the same object; no copy needed.
-        // last_cmd_* is deliberately NOT set here: it feeds the MPPI continuity cost only, which never
-        // runs in this mode, and writing it would imply a coupling that does not exist.
         return pd_tracker_.compute(out, make_tracker_input(robot_pose, carrot_robot, goal_robot),
                                   active_params_);
     }
 
-    // ---- MPPI: the sampler in trackers/mppi_tracker.h. It queries the field itself, so unlike the
-    // two branches above it does NOT need blockage detection to run before it — step 15 below still
-    // runs on this path. ----
-    // The cloud is lent for the duration of the call: the Safety-Guard ramp and the gate arming count
-    // frontal returns rather than reading the ESDF, and that input has no place in TrackerInput (see
-    // the header). Cleared straight afterwards so it can never be read stale.
-    mppi_tracker_.set_cycle_cloud(&lidar_points);
-    mppi_tracker_.compute(out, make_tracker_input(robot_pose, carrot_robot, goal_robot), active_params_);
-    mppi_tracker_.set_cycle_cloud(nullptr);
-
-    if (not snapshot_path_.empty())
-    {
-        write_snapshot(robot_pose, lidar_points);
-        snapshot_path_.clear();      // one request, one snapshot
-    }
-
-    // ── 15. Path blockage detection ──────────────────────────────────
-    // Runs for BOTH control modes — see detect_path_blockage, called before the PD branch returns.
+    // ★UNREACHABLE, AND DELIBERATELY LEFT AS A HARD STOP. ControlMode has exactly two values and the
+    // branch above takes both, so falling through here means someone added a third and did not give it
+    // a dispatch — the MPPI sampler used to be that third, and its silent selection on an unreadable
+    // config key is precisely the failure this guards against. Returning `out` unchanged would command
+    // a zero the caller could not distinguish from a legitimate stop.
+    std::println("[controller] ⚠ BUG: control mode has no dispatch — commanding zero. This is not a "
+                 "recoverable state; a ControlMode was added without a branch in compute().");
+    out.adv = 0.f; out.side = 0.f; out.rot = 0.f;
     detect_path_blockage(out, robot_pose);
-
     return out;
 }
 
@@ -794,8 +758,7 @@ TrajectoryController::ControlOutput TrajectoryController::compute(
 // rot = Kp * angle_error + Kd * d(angle_error)/dt
 // adv = max_adv * cos(angle_error) * dist_factor
 //
-// Uses the same ESDF, carrot, safety gate, gaussian brake and smoothing
-// as the MPPI mode but replaces all the sampling/weighting logic.
+// Uses the shared ESDF, carrot, safety gate, gaussian brake and smoothing.
 // ============================================================================
 
 // Look ahead along the planned path in room frame and query the ESDF at each sample. If several
@@ -1121,74 +1084,6 @@ void TrajectoryController::advance_waypoints(const Eigen::Affine2f& robot_pose)
 // ============================================================================
 // ESDF
 // ============================================================================
-
-// ── CYCLE SNAPSHOT ───────────────────────────────────────────────────────────────────────────────
-// Text, not binary: a snapshot is something a person greps while working out why a cycle went the way it
-// did, and a few thousand points cost nothing. Only what compute() actually consumes is written — the
-// ESDF is NOT among it, because the replay rebuilds it with this same build_esdf from these same inputs.
-void TrajectoryController::write_snapshot(const Eigen::Affine2f &robot_pose,
-                                          const std::vector<Eigen::Vector3f> &lidar_points) const
-{
-    std::ofstream f(snapshot_path_, std::ios::out | std::ios::trunc);
-    if (not f.is_open()) return;
-    f << std::setprecision(9);
-    f << "# MPPI cycle snapshot — replay with tools/mppi_bench\n";
-    f << "version 1\n";
-    const Eigen::Rotation2Df rot(robot_pose.linear());
-    f << "pose " << robot_pose.translation().x() << ' ' << robot_pose.translation().y() << ' '
-      << rot.angle() << '\n';
-    // The knobs a replay must reproduce to be the same cycle. Anything absent falls back to the
-    // constructor default, which is the same thing the live agent would have used.
-    f << "params " << active_params_.max_adv << ' ' << active_params_.max_rot << ' '
-      << active_params_.d_safe << ' ' << active_params_.mppi_lambda << ' '
-      << active_params_.num_samples << ' ' << active_params_.trajectory_steps << ' '
-      << active_params_.trajectory_dt << ' ' << active_params_.lambda_obstacle << ' '
-      << active_params_.lambda_goal << ' ' << active_params_.lambda_lateral_clearance << ' '
-      << active_params_.lambda_lateral_bumper << ' ' << active_params_.lambda_cbf << '\n';
-    for (const auto &p : path_room_) f << "path " << p.x() << ' ' << p.y() << '\n';
-    for (const auto &p : lidar_points) f << "lidar " << p.x() << ' ' << p.y() << ' ' << p.z() << '\n';
-    for (const auto &p : static_obstacle_points_room_) f << "obs " << p.x() << ' ' << p.y() << '\n';
-    for (const auto &p : room_boundary_points_room_) f << "wall " << p.x() << ' ' << p.y() << '\n';
-    std::printf("[mppi] cycle snapshot written to %s (%zu lidar, %zu obstacle, %zu wall points)\n",
-                snapshot_path_.c_str(), lidar_points.size(),
-                static_obstacle_points_room_.size(), room_boundary_points_room_.size());
-    std::fflush(stdout);
-}
-
-bool TrajectoryController::load_snapshot(std::istream &is, Eigen::Affine2f &pose_out,
-                                         std::vector<Eigen::Vector3f> &lidar_out)
-{
-    std::vector<Eigen::Vector2f> path;
-    lidar_out.clear();
-    static_obstacle_points_room_.clear();
-    room_boundary_points_room_.clear();
-    bool have_pose = false;
-    std::string line;
-    while (std::getline(is, line))
-    {
-        if (line.empty() or line[0] == '#') continue;
-        std::istringstream ls(line);
-        std::string key; ls >> key;
-        if (key == "pose")
-        {
-            float x, y, th; ls >> x >> y >> th;
-            pose_out = Eigen::Translation2f(x, y) * Eigen::Rotation2Df(th);
-            have_pose = true;
-        }
-        else if (key == "params")
-            ls >> params.max_adv >> params.max_rot >> params.d_safe >> params.mppi_lambda
-               >> params.num_samples >> params.trajectory_steps >> params.trajectory_dt
-               >> params.lambda_obstacle >> params.lambda_goal >> params.lambda_lateral_clearance
-               >> params.lambda_lateral_bumper >> params.lambda_cbf;
-        else if (key == "path")  { Eigen::Vector2f p; ls >> p.x() >> p.y(); path.push_back(p); }
-        else if (key == "lidar") { Eigen::Vector3f p; ls >> p.x() >> p.y() >> p.z(); lidar_out.push_back(p); }
-        else if (key == "obs")   { Eigen::Vector2f p; ls >> p.x() >> p.y(); static_obstacle_points_room_.push_back(p); }
-        else if (key == "wall")  { Eigen::Vector2f p; ls >> p.x() >> p.y(); room_boundary_points_room_.push_back(p); }
-    }
-    if (not have_pose or path.size() < 2) return false;
-    set_path_presmoothed(path);      // the route is already smoothed and feasibility-checked upstream
-    return true;
-}
 
 void TrajectoryController::build_esdf(const std::vector<Eigen::Vector3f>& lidar_points,
                                       const Eigen::Affine2f& robot_pose)

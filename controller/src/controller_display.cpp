@@ -102,14 +102,6 @@ void ControllerDisplay::initialize(rc::LidarPointBuffer *lidar_buffer, Callbacks
                          if (viewer_2d_)
                              viewer_2d_->set_lidar_visible(checked);
                      });
-    QObject::connect(custom_widget_->mppi_paths_toggle_btn, &QPushButton::toggled,
-                     custom_widget_.get(),
-                     [this](bool checked)
-                     {
-                         if (viewer_2d_)
-                             viewer_2d_->set_mppi_paths_visible(checked);
-                     });
-
     mission_panel_ = std::make_unique<rc::MissionPanel>(custom_widget_.get(), callbacks.mission);
     // The affordance program window. Constructed hidden and fed every cycle; clicking the affordance
     // name in the toolbar shows it. It is a QDialog with the Tool flag, so it floats over the 2D view
@@ -168,9 +160,6 @@ void ControllerDisplay::update(const std::optional<ControllerRobotPose> &robot_p
                                const ControllerObstacleVisuals &obstacle_polys,
                                const ControllerPolygons &obstacle_rfe_points,
                                const std::optional<Eigen::Vector2f> &current_target_room,
-                               const std::vector<ControllerPolygon> &last_mppi_trajectories,
-                               const ControllerPolygon &last_mppi_average_trajectory,
-                               int last_best_mppi_trajectory_idx,
                                int last_display_wp_index,
                                int max_lidar_draw_points,
                                const std::optional<Eigen::Affine2f> &lidar_correction)
@@ -183,9 +172,6 @@ void ControllerDisplay::update(const std::optional<ControllerRobotPose> &robot_p
     snapshot_.obstacle_polys = obstacle_polys;
     snapshot_.obstacle_rfe_points = obstacle_rfe_points;
     snapshot_.current_target_room = current_target_room;
-    snapshot_.last_mppi_trajectories = last_mppi_trajectories;
-    snapshot_.last_mppi_average_trajectory = last_mppi_average_trajectory;
-    snapshot_.last_best_mppi_trajectory_idx = last_best_mppi_trajectory_idx;
     snapshot_.last_display_wp_index = last_display_wp_index;
     snapshot_.max_lidar_draw_points = max_lidar_draw_points;
     snapshot_.lidar_correction = lidar_correction;
@@ -552,9 +538,6 @@ void ControllerDisplay::present()
                          ? snap.current_plan->room_path : ControllerPolygon{},
         .obstacle_polys = snap.obstacle_polys,
         .obstacle_rfe_points = snap.obstacle_rfe_points,
-        .candidate_trajectories = snap.last_mppi_trajectories,
-        .average_trajectory = snap.last_mppi_average_trajectory,
-        .best_trajectory_idx = snap.last_best_mppi_trajectory_idx
     });
     // ★See Viewer2D::force_repaint. The scene is rebuilt above; this makes sure it reaches the screen.
     viewer_2d_->force_repaint();

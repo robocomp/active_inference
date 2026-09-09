@@ -13,18 +13,18 @@
 #include "controller_types.h"
 #include "trackers/plain_tracker.h"
 #include "trackers/pd_tracker.h"
-#include "trackers/mppi_tracker.h"
 
 namespace rc { class RouteSpline; }   // set_route: non-owning, the session's RouteFollower owns it
 
 namespace rc
 {
 /**
- * TrajectoryController — MPPI-based local controller with ESDF.
+ * TrajectoryController — the local control cycle: carrot, ESDF, blockage detection, arrival, and
+ * dispatch to ONE of the two trackers in trackers/ (PLAIN by default; PD when a route has no fitted
+ * curve). It owns everything the trackers share and none of the control laws themselves.
  *
- * Proper MPPI: warm-start + Gaussian perturbations + AR(1) noise.
- * All K samples are perturbations of the previous optimal sequence.
- * Weighted average over the FULL T-step sequence (not just first step).
+ * It was an MPPI sampler with those pieces attached; the sampler was deleted 2026-09-09, having been
+ * unreachable since ControlMode became "plain" on 2026-08-05.
  */
 class TrajectoryController : public PathWorld, public FieldWorld
 {
@@ -32,7 +32,7 @@ public:
     // PLAIN = the route-following tracker in trackers/plain_tracker.h. Curvature feedforward previewed
     // by the identified actuator lag, plus critically-damped feedback on the Frenet error pair
     // (e_y, e_psi). It performs NO avoidance — that belongs to the band and the planner.
-    enum class ControlMode { MPPI, PD, PLAIN };
+    enum class ControlMode { PD, PLAIN };
 
     // ── Params and ControlOutput now live in controller_types.h at namespace scope ──────────
     // so a tracker can name them without including this header. These aliases keep every existing
@@ -52,10 +52,11 @@ public:
     /// Swap the path GEOMETRY without resetting the follower — for a continuously deformed route
     /// (the local elastic band), which hands over a slightly different curve every cycle.
     ///
-    /// set_path/set_path_presmoothed both go through reset_mppi_state, which is correct for a NEW route
-    /// and catastrophic at control rate: it clears prev_optimal_ (the warm start the whole sampler leans
-    /// on), the adaptive lambda/K/T, smoothed_vel_, last_cmd_valid_ and carrot_seg_hint_. Calling it
-    /// every cycle would restart the optimisation from scratch 10 times a second.
+    /// set_path/set_path_presmoothed both go through reset_path_state, which is correct for a NEW route
+    /// and wrong at control rate: it clears the carrot anchor (carrot_seg_hint_/has_last_carrot_), the
+    /// blockage streak and the alignment watch, and — through PlainTracker::reset() — the monotone
+    /// arc-length projection the tracker follows the curve with. Calling it every cycle would make the
+    /// tracker re-acquire its own position 10 times a second.
     ///
     /// SAFE ONLY FOR A DEFORMATION, not a re-route: the caller must guarantee the new curve is the same
     /// route, still starts behind the robot, and has not moved under it — which is what freezing the
@@ -111,13 +112,12 @@ public:
     [[nodiscard]] float goal_threshold() const { return active_params_.goal_threshold; }
 
     // CURVATURE-LIMITED SPEED. A ceiling on max_adv for this cycle, supplied by whoever owns the
-    // reference curve. The MPPI cannot derive it: its horizon is ~1.4 s of travel and its nominal seed
-    // scales speed by carrot DISTANCE and alignment, neither of which knows how sharp the turn ahead is.
-    // The route does know — it is C2, so kappa(s) is continuous — and v = sqrt(a_lat_max / kappa) is the
-    // physical relation between lateral acceleration and turn radius, not a tuning threshold.
+    // reference curve. A tracker cannot derive it from what it sees locally; the route does know — it
+    // is C2, so kappa(s) is continuous — and v = sqrt(a_lat_max / kappa) is the physical relation
+    // between lateral acceleration and turn radius, not a tuning threshold.
     //
     // It must be a CEILING ON THE PLAN, not a clamp on the output: clamping the command after the fact
-    // would leave the MPPI planning trajectories it is not allowed to execute, and the resulting
+    // leaves the tracker steering for a speed it is not allowed to execute, and the resulting
     // commanded-vs-measured gap is exactly what the wedge detector reads as being stuck.
     // nullopt clears it (a click target has no curve, so it keeps the full speed envelope).
     void set_speed_limit(std::optional<float> v_max_mps) { speed_limit_ = v_max_mps; }
@@ -170,26 +170,12 @@ public:
     ControlOutput compute(const Eigen::Affine2f& robot_pose,
                           const std::vector<Eigen::Vector3f>& lidar_points);
 
-    /// Seed the sampler. The default seeds from std::random_device, so two runs with IDENTICAL inputs
-    /// produce DIFFERENT commands — which is correct for a robot and useless for a comparison: it puts
-    /// sampling noise inside every A/B, on top of the 14.5% the world already contributes. Setting a seed
-    /// makes a cycle reproducible, which is what tools/mppi_bench needs to answer "what would this cost
-    /// change have done" without driving.
-    void set_seed(std::uint32_t seed) { mppi_tracker_.set_seed(seed); }
-
-    /// Write everything the NEXT compute() consumes to `path`: pose, the lidar points it actually used,
-    /// the obstacle and boundary polygons, the path, and the parameters. Replaying it rebuilds the ESDF
-    /// with the SAME build_esdf on the SAME inputs, so nothing is re-derived by a second implementation
-    /// (the trap route_bench avoids by recording the planner's raster).
-    /// ★Snapshots the INPUTS, not the ESDF: here the producer and the replayer are the same function, so
-    /// the inputs are the smaller, more honest artefact.
-    void request_snapshot(std::string path) { snapshot_path_ = std::move(path); }
-
-    /// Restore a snapshot: parameters, path, obstacle and boundary points are set on THIS controller,
-    /// and the cycle's pose and cloud are handed back so the caller can replay it with
-    /// compute(pose, lidar). Returns false on a malformed stream.
-    bool load_snapshot(std::istream &is, Eigen::Affine2f &pose_out,
-                       std::vector<Eigen::Vector3f> &lidar_out);
+    // ★THE CYCLE SNAPSHOT (request_snapshot / load_snapshot / write_snapshot) AND ITS REPLAY TOOL
+    // (tools/mppi_bench) WERE REMOVED WITH THE SAMPLER, 2026-09-09. They existed to answer "if I change
+    // a cost term, does the command change" without driving, and both halves of that question belonged
+    // to MPPI: the cost terms, and the seeded RNG that made a replay repeatable at all. The remaining
+    // trackers are deterministic, and the offline harness for them is tools/tracker_sim, which drives a
+    // closed loop against the identified plant rather than replaying one open-loop cycle.
     void stop();
     void set_lidar_buffer(LidarPointBuffer *buffer) { lidar_buffer_ = buffer; }
 
@@ -265,7 +251,10 @@ private:
     Params active_params_;
 
     bool active_ = false;
-    ControlMode control_mode_ = ControlMode::MPPI;
+    // ★DEFAULTS TO PLAIN, and that default is now load-bearing rather than cosmetic: it used to be
+    // MPPI, so an unreadable or missing Controller.ControlMode silently selected a THIRD law. There are
+    // two, and an unrecognised value falls back to this one loudly (see specificworker.cpp).
+    ControlMode control_mode_ = ControlMode::PLAIN;
     PlainTracker plain_tracker_{*this};
     bool plain_no_curve_logged_ = false;   // the PD-fallback notice is worth saying once, not at 20 Hz
     // How long the PD fallback has been driving. A latch alone made "one cycle" and "the whole session"
@@ -273,7 +262,6 @@ private:
     // tracker swap survives a validation run.
     int  plain_no_curve_cycles_ = 0;
     PdTracker    pd_tracker_{*this, *this};
-    MppiTracker  mppi_tracker_{*this, *this};
     // Fills the fields every tracker reads. One place, so a new tracker cannot be handed a stale carrot.
     TrackerInput make_tracker_input(const Eigen::Affine2f& robot_pose,
                                     const Eigen::Vector2f& carrot_robot,
@@ -339,12 +327,6 @@ private:
     // not the removal of the bound that happens to be shaping the approach.
     float align_worst_cycle_s_ = 1.0f;
 
-    // Pending snapshot request (see request_snapshot). Written at the END of compute(), when the cycle's
-    // inputs and its outcome are both known.
-    std::string snapshot_path_;
-    void write_snapshot(const Eigen::Affine2f &robot_pose,
-                        const std::vector<Eigen::Vector3f> &lidar_points) const;
-
     // ---- ESDF ----
     std::vector<float> esdf_data_;
     int esdf_N_ = 0;
@@ -370,11 +352,11 @@ private:
 
     void refresh_active_params();
 
-    // Installs `path_room` and resets ALL per-path controller state (MPPI warm start, adaptive
-    // K/T/λ/σ, ESS, smoothing, blockage, alignment) WITHOUT any geometry conditioning. Both
-    // set_path and set_path_presmoothed go through this; only set_path then relaxes + splines.
+    // Installs `path_room` and resets ALL per-path controller state (carrot, blockage, alignment)
+    // WITHOUT any geometry conditioning. Both set_path and set_path_presmoothed go through this; only
+    // set_path then relaxes + splines.
     // Does NOT set wp_index_ — the two callers legitimately differ, so each sets its own.
-    void reset_mppi_state(const std::vector<Eigen::Vector2f>& path_room);
+    void reset_path_state(const std::vector<Eigen::Vector2f>& path_room);
     // Path-blockage detector. Called from BOTH control modes (the PD branch returns before step 15).
     void detect_path_blockage(ControlOutput& out, const Eigen::Affine2f& robot_pose);
 
@@ -416,7 +398,7 @@ private:
     // The furthest point along the chord that IS admissible, so the carrot can be pulled back to it.
     Eigen::Vector2f clip_carrot_to_reachable(const Eigen::Vector2f& carrot_robot) const;
 
-    // PD carrot-follower (alternative to MPPI)
+    // PD carrot-follower — the fallback when PLAIN has no fitted curve
 
     static float clamp01(float x);
     static float smoothstep01(float x);

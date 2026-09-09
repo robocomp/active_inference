@@ -87,179 +87,33 @@ struct TrackerParams
     float align_kp          = 1.5f;    // P gain on yaw error -> rot command
     float align_min_rot     = 0.10f;   // rad/s floor to overcome stiction while aligning
 
-    // MPPI sampling — initial / baseline values (adapted by ESS)
-    int   num_samples      = 100;       // K baseline
-    int   trajectory_steps = 50;       // T baseline
-    float trajectory_dt    = 0.1f;     // dt per step
-
-    // Command floors to avoid degenerate zero-motion plans
-    float min_adv_cmd = 0.05f;
-    // Three deterministic seeds — stop, and pivot in place either way — added because the sampler
-    // cannot otherwise propose them (adv is clamped at >= 0 around a forward nominal, so "stop" needs
-    // ~12 consecutive noise draws to land on the clamp). ★DEFAULT OFF: they were added mid-session on
-    // an argument, they did not change either offline snapshot (one did not need them, the other was
-    // already overlapping), and the first lap that carried them came back slower. Unmeasured code
-    // does not get to ride along in the baseline. Switch on to measure.
-    bool  enable_stop_pivot_seeds = false;
-
-    // Discount and numerical epsilons
-    float cost_discount = 0.95f;          // per-step discount in rollout scoring
-    float weights_epsilon = 1e-10f;       // minimum normalized-weight sum / weight threshold
-    float ess_den_epsilon = 1e-20f;       // ESS denominator guard
-
-    // Debug/diagnostics
-    int debug_print_period = 50;          // print MPPI diagnostics every N compute cycles
-
-    // ESS-based adaptive ranges
-    int   K_min = 20,  K_max = 300;    // adaptive K bounds
-    int   T_min = 15,  T_max = 120;     // adaptive T bounds
-    float lambda_min = 1.0f, lambda_max = 500.0f;  // adaptive λ bounds
-    // DIAGNOSTIC ONLY (default off): bypass `lambda_used = max(adaptive, cost_range/5)` and use the
-    // configured mppi_lambda directly. The floor makes the temperature a function of whichever term
-    // has the widest spread, so no lambda sweep can ever be run while it is active — measured, a
-    // 30x sweep of mppi_lambda changed the closed-loop result by nothing at all. This exists to ask
-    // one question: is the range floor amplifying a term's instability, or merely reporting it?
-    bool  lambda_fixed = false;
-    // ── "NAV2-STYLE" SCORING (default off) ────────────────────────────────────────────────────
-    // Nav2's MPPI is a configuration that demonstrably works, and it is coherent in a way ours is
-    // not: every critic is bounded and O(1), the temperature is a small FIXED number (0.3), and the
-    // collision cost is a huge finite value. Those three facts are one mechanism — exp(-1e5/0.3) is
-    // zero, so a big collision cost IS hard rejection. Copying any one of them alone breaks: our
-    // measured cost spread is ~1400, so their lambda would put ESS at 0.03 (measured: 23-37 rotation
-    // flips per 10 s and 0.93 m covered in ten seconds).
-    // So this flag changes the SCALES, which is the precondition for a small fixed lambda to mean
-    // anything: every per-step term is clamped to obstacle_cost_cap, and the accumulated terms are
-    // divided by the number of steps actually simulated, so a total is a per-step average and does
-    // not grow with the horizon. Set with lambda_fixed + a small mppi_lambda to get nav2's regime.
-    bool  bounded_costs = false;
-    // Nav2 has no structured exploration seeds — only i.i.d. noise around the warm start. Ours
-    // inject 6 fixed wide-angle turns, and the closed-loop trace showed the winning seed alternating
-    // between those and the random ones (28 changes in 59 cycles), with the commanded rotation
-    // disagreeing in SIGN with the best rollout. They are a manufactured second mode.
-    bool  enable_injection_seeds = true;
-    float ess_smoothing = 0.25f;       // EMA alpha for ESS (faster response to drops)
-    float ess_initial_ratio = 0.5f;    // initial ESS / K used when a new path starts
-
-    // MPPI temperature (initial, adapted by ESS)
-    float mppi_lambda       = 8.0f;
-
-    // Noise standard deviations (for Gaussian perturbations)
-    float sigma_adv   = 0.12f;
-    float sigma_rot   = 0.15f;
-
-    // AR(1) temporal noise correlation
-    // Adaptive sigma limits
-    float sigma_min_adv   = 0.04f;
-    float sigma_min_rot   = 0.08f;
-    float sigma_max_adv   = 0.25f;
-    float sigma_max_rot   = 0.25f;
-
-    // Nominal control blending (warm start weights)
-    float warm_start_adv_weight = 0.5f;
-    float warm_start_rot_weight = 0.3f;
-
-    // Gradient optimization (post-processing refinement)
-    int   optim_iterations = 0;
-    float optim_lr         = 0.05f;
-    float optimize_goal_pull_dist_cap = 1.0f;     // cap for goal-pull distance in seed refinement
-    float optimize_obstacle_cap_ratio = 2.0f;     // max obstacle correction / goal correction ratio
-    float optimize_goal_min_norm = 1e-4f;         // minimum goal correction norm for ratio gating
-    float optimize_remaining_cap_steps = 3.0f;    // cap remaining-time Jacobian factor in dt units
-
-    // EFE weights (scoring)
-    float lambda_goal      = 5.0f;
-    float lambda_obstacle  = 8.0f;   // global obstacle weight (single multiplier)
-    float lambda_smooth    = 0.1f;  // smoothness cost multiplier (penalizes control changes between steps)
-    float lambda_velocity  = 0.01f;  // velocity cost multiplier (penalizes excessive speed, encourages earlier arrival) 
-    float lambda_delta_vel = 0.18f;  // extra penalty on changes in velocity (oscillation penalty)
-    float lambda_heading   = 0.6f;   // heading term multiplier relative to lambda_goal
-    // ── CONTROL CONTINUITY (cross-cycle) ──────────────────────────────────────────────────────
-    // Penalises how far a rollout's FIRST control sits from the command actually EXECUTED last
-    // cycle. This is the term the measured stutter says is missing: the documented failure is a
-    // near-full-scale reversal BETWEEN cycles (+0.456 -> -0.457 rad/s in 100 ms), and nothing in
-    // the objective sees that. G_smooth looks like it should, but it references
-    // prev_optimal_[0] — the previously PLANNED first step, not what the base was told (the
-    // executed command is a 3-step mean, then possibly the straight-speed override, then the
-    // output smoother, then the slew limiter) — and at lambda_smooth = 0.1 a full reversal costs
-    // ~0.08 against goal/obstacle terms in the 5-400 range, i.e. nothing.
-    //
-    // Deviations are NORMALISED by the kinematic limits, so the two channels are commensurate and
-    // this weight is scale-free (a full-scale reversal costs exactly lambda_continuity per channel)
-    // rather than depending on the units the base happens to use.
-    //
-    // DEFAULT 0 = OFF. The A/B must be exactly one change, and a baseline recorded before this
-    // existed has to stay comparable.
-    // ⚠ This buys smoothness with REACTION LAG: a high weight makes the robot reluctant to change
-    // what it is doing, including when it should. The CBF, the safety guard and the footprint test
-    // are all downstream of it and unaffected, so the failure mode is sluggishness, not collision —
-    // but that is the axis to watch when raising it.
-    float lambda_continuity = 0.0f;
-    float continuity_rot_factor = 1.0f;   // relative weight of the rotation channel (where the stutter is)
-    float lambda_progress  = 1.0f;   // moving-away penalty multiplier relative to lambda_goal
-
-    // Obstacle model (simple 2-stage quadratic)
-    float close_obstacle_margin = 0.02f;  // hard zone width over robot radius
-    float close_obstacle_gain   = 3.0f;   // hard-zone multiplier (inside close_obstacle_margin)
-    float obstacle_cost_cap     = 8.0f;   // per-step obstacle cost cap (prevents ESS collapse in narrow passages)
-
-    // Lateral clearance shaping (pre-SG): penalize trajectories that run
-    // too close to side obstacles, helping recentring in narrow passages.
-    float lambda_lateral_clearance = 5.0f;
-    float lateral_probe_offset = 0.22f;         // side probe offset from trajectory centerline
-    float lateral_probe_front_offset = 0.22f;   // forward longitudinal probe station
-    float lateral_probe_rear_offset = 0.18f;    // rear longitudinal probe station
-    float lateral_clearance_margin = 0.25;     // desired extra side clearance over robot radius
-    float lateral_balance_gain = 1.5f;          // penalize left-right side imbalance while passing obstacles
-    float lateral_bumper_margin = 0.14f;        // hard side repulsion band over robot radius
-    float lambda_lateral_bumper = 18.0f;        // hard penalty inside side repulsion band
-    float lateral_corner_bias_gain = 2.5f;      // emphasize front-side grazing near corners
-    float lateral_closing_gain = 0.0f;          // extra penalty when side clearance is decreasing
-                                                // (disabled: replaced by CBF term below)
-
-    // Control Barrier Function (CBF) — velocity-aware safety barrier
-    // h(x,v) = d_ESDF - r_robot - v²/(2*a_max)
-    // Penalises rollout steps where ḣ + α·h < 0 (barrier decreasing too fast)
-    bool  enable_cbf          = true;
-    float lambda_cbf          = 6.0f;   // weight for CBF violation cost
-    float cbf_alpha           = 1.5f;   // class-K decay rate  (larger = more conservative)
-    float cbf_max_decel       = 1.0f;   // assumed max braking deceleration  (m/s²)
-    float cbf_cost_cap        = 10.0f;  // per-step CBF cost cap
-
-    // Continuous clearance relaxation near final goal (no hard switch):
-    // relax only in the last segment of the approach and never below a
-    // fixed fraction of d_safe, so the robot does not shave obstacles.
-    float goal_clearance_relax_dist = 0.6f;
-    float goal_obstacle_margin = 0.08f;
-    float goal_clearance_min_ratio = 0.85f;
-
-    // Collision and velocity-shape penalties in rollout score
-    float collision_penalty = 400.0f;
-    float hard_collision_horizon_s = 1.2f;  // only collisions within this lookahead are treated as hard-infeasible
-    float far_collision_penalty_scale = 0.5f; // extra soft penalty for collisions beyond hard horizon
-    float rot_cost_factor = 5.0f;         // relative cost multiplier for rotational effort
-
-    // Exploration gating by Safety-Guard proximity (sigmoid on frontal distance)
-    float sg_explore_pre_distance = 0.40f; // start increasing exploration this much before SG activation distance
-    float sg_explore_sigmoid_width = 0.12f; // transition softness (meters)
-
-    // Nominal and injected seed shaping
-    float nominal_alignment_floor = 0.1f; // minimum forward alignment when turning toward carrot
+    // ── THE SAMPLER'S PARAMETERS WERE HERE (~170 lines). REMOVED 2026-09-09 WITH THE SAMPLER. ───
+    // K/T/lambda and their adaptive bounds, the ESS machinery, the Gaussian sigmas, the gradient
+    // post-optimiser, every EFE cost weight (goal / obstacle / smooth / velocity / heading / progress /
+    // continuity / lateral clearance / lateral bumper / CBF / collision / rot effort), the structured
+    // injection-seed offsets, and the Safety-Guard exploration ramp. Nothing read them after
+    // ControlMode became "plain" on 2026-08-05.
+    // ★WHAT SURVIVES, AND WHY — these five sat inside that block and are NOT sampler parameters:
+    //   trajectory_dt           the safety gate's integration step (pd_tracker)
+    //   min_adv_cmd             the command floor (pd_tracker)
+    //   lateral_probe_offset    the PD bumper's side-probe offset
+    //   cbf_max_decel           the braking model. ★MISLEADING NAME, KEPT DELIBERATELY: the CBF cost it
+    //                           was named for is gone, but this is now the assumed deceleration used by
+    //                           BOTH remaining trackers' braking bounds — plain's end-of-route and
+    //                           pivot-approach tapers and pd's gate horizon — which makes it about the
+    //                           most load-bearing number in this file. Renaming it is a separate change
+    //                           with its own config-key migration; do not fold it into a deletion.
+    //   nominal_goal_dist_scale the PD speed law's distance normaliser
+    // ★AND WHAT WAS SILENTLY WRITE-ONLY, so removing it changes nothing: goal_clearance_relax_dist,
+    // goal_obstacle_margin, goal_clearance_min_ratio, the three straight_speed_* and lambda_continuity /
+    // continuity_rot_factor were all still LOADED FROM CONFIG into this struct and read by nobody. Their
+    // config keys go too; the ControllerParams mirrors that fed them stay where another consumer reads
+    // them (LambdaContinuity is still printed in the [route] startup line, for instance).
+    float trajectory_dt    = 0.1f;        // dt per step of the safety gate's forward integration
+    float min_adv_cmd = 0.05f;            // command floor, to avoid degenerate zero-motion plans
+    float lateral_probe_offset = 0.22f;   // PD bumper: side probe offset from the trajectory centreline
+    float cbf_max_decel = 1.0f;           // assumed max braking deceleration (m/s^2) — see note above
     float nominal_goal_dist_scale = 1.0f; // distance at which nominal speed reaches full scale
-    float injection_adv_scale = 0.7f;     // forward speed scale used by structured injection seeds
-    float straight_speed_heading_threshold = 0.08f; // rad; below this, treat path as straight
-    float straight_speed_clearance_margin = 0.20f; // extra ESDF clearance over d_safe to allow max speed
-    float straight_speed_min_goal_dist = 1.5f;     // only force max speed while still far from goal
-
-    // Structured exploration offsets (radians)
-    float inject_offset_30 = 0.5f;
-    float inject_offset_60 = 1.05f;
-    float inject_offset_90 = 1.57f;
-
-    // ESS adaptation thresholds and gains
-
-    // Low-ESS decisiveness: blend weighted MPPI command with best seed
-    // when ESS ratio collapses, preventing over-conservative averaging.
-
     // ESDF grid
     float grid_resolution  = 0.05f;
     float grid_half_size   = 4.0f;
@@ -281,9 +135,6 @@ struct TrackerParams
     // Path progression heuristics
     float waypoint_advance_lookahead_factor = 0.5f;
     float segment_length_epsilon = 1e-3f;
-
-    // Goal/heading numerical thresholds
-    float heading_norm_epsilon = 0.01f;
 
     // Output smoothing
     float velocity_smoothing = 0.60f;
@@ -364,7 +215,7 @@ struct TrackerParams
     float pd_cross_track_gain = 1.0f;
     float pd_cross_track_soft_mps = 0.30f;
     // ── LATERAL BUMPER for the PD tracker ────────────────────────────────────────────────────
-    // In MPPI mode lambda_lateral_bumper pushes the body off things it is passing too close to. In
+    // The sampler had lambda_lateral_bumper to push the body off things it passed too close to. In
     // PD mode that term does not run: the band shapes the route DELIBERATIVELY and the safety gate
     // only BRAKES, so nothing pushes sideways. With measured p05 body clearance ~0.08 m and mean
     // tracking error ~0.08 m the robot rides the margin and has no way to recover from it — which
@@ -409,7 +260,7 @@ struct ControlOutput
     float rot  = 0.f;
     bool  safety_guard_triggered = false;
     // ── Safety-gate record, per cycle ──
-    // In MPPI mode the gate is a backstop behind a controller that scores its own rollouts. In PD
+    // The sampler had its own gate, as a backstop behind rollout scoring. In PD
     // mode it is the ONLY thing between the tracker and an obstacle, and none of it was observable:
     // safety_guard_triggered is a bool and the run JSON keeps only a total, so a lap the gate saved
     // forty times and a lap where it never fired read identically. These say what it actually did.
@@ -473,53 +324,14 @@ struct ControlOutput
     // which is measurably blind to jumps (sigma ratio 1.12 at jumps, 2026-08-02).
     int   esdf_model_dropped = 0;
 
-    // ESS diagnostics for UI
-    float ess = 0.f;          // current ESS value
-    int   ess_K = 1;          // current K (to compute ratio)
-    float explore = 0.f;      // exploration signal [0,1]
-
-    // ── WHY THE SOFTMAX CHOSE WHAT IT CHOSE ───────────────────────────────────────────────────
-    // ESS alone says the weights are flat but not WHY. These say whether the temperature was the
-    // configured one or the adaptive floor, how much cost spread there was to discriminate on, and
-    // which term owns the cost — which is the difference between "the optimiser is averaging" and
-    // "every rollout really is equally good". Diagnostics only: nothing reads them to decide.
-    float lambda_used = 0.f;      // temperature actually applied in the softmax
-    float lambda_adaptive = 0.f;  // the controller's own adaptive temperature, before the floor
-    float cost_range = 0.f;       // g_max - g_min over non-colliding rollouts
-    float cost_best = 0.f;        // G_total of the best rollout
-    // Per-term cost of the BEST rollout, so "which term dominates" is answerable per cycle.
-    float g_goal = 0.f, g_obs = 0.f, g_vel = 0.f, g_smooth = 0.f, g_lat = 0.f, g_cbf = 0.f;
-    int   n_collisions = 0;
-    // Rollout-set shape, from the block that used to print all of this to a terminal every second and
-    // was commented out (removed 2026-08-01 — mppi_diag.csv records it per cycle to a file instead).
-    // p_free is the fraction of rollouts that survive the feasibility test; steering_concentration is
-    // how aligned the surviving ones are. Together they say whether there IS a dominant way through,
-    // which is a different question from whether the softmax can tell (that is ESS).
-    float p_free = 0.f;
-    float steering_concentration = 0.f;
-    // The lateral balance term's OWN INPUT, measured at the robot's current pose: the left/right
-    // difference of the normalised side-clearance deficits, in [-1,1]. Positive means the left side is
-    // the tighter one. g_lat is a total and cannot say whether the centring sub-term is what is
-    // steering; this can. If the commanded rotation tracks this with a lag, the weave is a centring
-    // servo with gain and delay — a control problem, not a cost-structure one.
-    float side_asymmetry = 0.f;
-    // WHICH SEED WON, as an index into the sampled set — not into the drawn/ranked list, which is
-    // what best_trajectory_idx reports and which is always 0 by construction. Seeds are generated in
-    // a fixed order (nominal, 6 structured injections, then the random ones), so the index says which
-    // FAMILY the winner came from, and watching it across cycles says whether the solver is switching
-    // between families or refining one.
-    int   best_seed_idx = -1;
-    // Rotation of that winning seed's first step. If the commanded rotation is a weighted mean that
-    // sits far from the best rollout's own value, the mean is not representing any single plan.
-    float best_seed_rot = 0.f;
-
+    // ★THE SAMPLER'S 17 DIAGNOSTIC FIELDS WERE HERE and went with it (2026-09-09): ess, ess_K,
+    // explore, lambda_used, lambda_adaptive, cost_range, cost_best, the six g_* per-term costs,
+    // n_collisions, p_free, steering_concentration, side_asymmetry. Every one described a rollout set,
+    // and there are no rollouts. They had been written as their defaults on every cycle since
+    // ControlMode became "plain" (2026-08-05), so tracker_diag.csv carried 17 columns of constants —
+    // exactly the "column that cannot disagree" tools/dead_columns.py exists to find.
     Eigen::Vector2f carrot_room = Eigen::Vector2f::Zero();
     int current_wp_index = 0;
-
-    // All candidate trajectories in room frame (fresh every tick)
-    std::vector<std::vector<Eigen::Vector2f>> trajectories_room;
-    std::vector<Eigen::Vector2f> average_trajectory_room;
-    int best_trajectory_idx = -1;
 
     // Path blockage detection output
     bool  blockage_detected_ahead = false;   // true when a blocked path segment is visible but not yet confirmed
