@@ -34,6 +34,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "depth_processor.h"   // rc::depth::DepthMap (ricoh 360 monocular depth diagnostic)
@@ -41,6 +42,7 @@
 #include "depth_enrichment.h"  // rc::depth::RoomGeometry / DatasetEnricher (offline room-belief pass)
 #include "strip_schedule.h"  // which panorama strips this frame looks at (shared by the 360 stages)
 #include "rgbd_data.h"
+#include "door_approach_log.h"
 #include "retina_params.h"
 #include "stream_rate_monitor.h"
 #include "model_projection_overlay.h"   // rc::ModelProjectionOverlay + GraphObjectBox (SceneFrame value member)
@@ -139,6 +141,7 @@ class SpecificWorker : public GenericWorker
         // Semantic-seg decimation counter (period read from params.SEMANTIC_SEG_DECIMATION).
         int semantic_frame_counter_ = 0;
         std::chrono::steady_clock::time_point last_semantic_pub_{};   // rate cap for the semantic-node publish
+        std::chrono::steady_clock::time_point last_semantic_probs_pub_{};  // and for the graded posterior field
         std::chrono::steady_clock::time_point last_waiting_log_{};    // throttle the "waiting for required peers" log
         // Reverse room-stability gate: debounce room-node disappearance while Operating so a transient
         // graph-resync gap (peer join/CRDT re-import) doesn't drop us; nullopt while the room is present.
@@ -224,6 +227,15 @@ class SpecificWorker : public GenericWorker
         QWidget* ricoh_window_ = nullptr;            // Ricoh 360 popup (hidden until the top-bar button toggles it)
         bool yolo_window_needs_image_size_ = false;  // size the RGB window to the image on first frame
         bool semantic_overlay_enabled_ = false;      // YOLO-window toggle: run + draw the semantic overlay (starts OFF)
+        // Graded class-posterior overlay. -1 = OFF; otherwise an index into prob_classes_, the (id, name)
+        // list the LOADED MODEL declares (never config — a reordered export against a stale config key
+        // would draw P(door) out of the cabinet plane with nothing to catch it). One index per popup so
+        // the two windows can show different classes at once, which is how you see a door compete.
+        std::vector<std::pair<int, std::string>> prob_classes_;
+        int  zed_prob_class_idx_   = -1;
+        int  ricoh_prob_class_idx_ = -1;
+        // Cycle a popup's selection OFF → class 0 → … → OFF and return the button label.
+        QString cycle_prob_class(int& idx, const char* prefix);
         bool sam2_overlay_enabled_ = false;          // ZED-window "SAM2" toggle: run + draw SAM2-refined masks (starts OFF)
         bool yolo_overlay_enabled_ = true;           // ZED-window "YOLO" toggle: draw the seg detections (starts ON)
         bool model_overlay_enabled_ = false;         // ZED-window "Models" toggle: project graph model-instance BBs (starts OFF)
@@ -315,6 +327,13 @@ class SpecificWorker : public GenericWorker
         // Joins to each agent's etc/detect_probe.csv on the frame stamp.
         void log_detect_drops(std::uint64_t stamp_ms, bool is_360);
         std::ofstream detect_drops_csv_;
+
+        // ── Approach instrumentation (etc/door_approach.csv) ────────────────────────────────────
+        // The companion to detect_drops.csv, answering a different question: not "what did we throw
+        // away on this frame" but "how did this class's evidence evolve as we drove toward it".
+        // Range is the independent variable and it is MEASURED (ZED depth at the peak pixel), never
+        // taken from a belief the instrument would then be auditing. See door_approach_log.h.
+        rc::diag::DoorApproachLog door_approach_log_;
 
         // ── Depth-correction dataset (Ricoh popup: "Collect" / "Rebuild map") ───────────────────
         // Collection is a DELIBERATE act, not background logging: the fit is only as good as its

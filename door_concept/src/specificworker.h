@@ -70,6 +70,16 @@
 
 // ─── SpecificWorker ──────────────────────────────────────────────────────────
 
+#include "door_semantic_field.h"   // rc::SemanticProbField
+#include "door_actuator.h"          // rc::DoorActuator (RoboCompDoorControl client)
+#include "door_world_registration.h" // rc::DoorWorldRegistration (room→world from named doors)
+#include "../../common/rgb_ingestor/rgb_ingestor.h"   // rc::RgbIngestor (SHARED media-plane RGB)
+
+#include <QLabel>
+#include <QComboBox>
+
+#include <QPushButton>
+
 class SpecificWorker : public GenericWorker
 {
 Q_OBJECT
@@ -264,6 +274,47 @@ private:
     std::unique_ptr<DSR::InnerEigenAPI>                inner_eigen_;     // for room↔body↔zed extrinsic (silhouette)
     std::unique_ptr<DSR::InnerGaussianAPI>            gaussian_api_;    // Part B: chain covariance propagation
     std::unique_ptr<rc::MaskIngestor>                   mask_ingestor_;   // perception (masks-only)
+
+    // rc::probe row per live door: viewpoint + framing + detector outcome. See the definition for why
+    // the ROBOT POSE is the point — absence is integrated as if each frame were an independent trial,
+    // and a parked robot manufactures ~100 refutations of one look. Measured in retina on 2026-09-08:
+    // while the robot is stopped only 5.1% of frames carry a NEW image (99.6% while moving), so the
+    // duplicates are not merely correlated, they are the same pixels. Any fit over these rows must
+    // de-duplicate by viewpoint or it will repeat the August failure of a confident fit on copies.
+    // retina's graded class posterior, refreshed once per cycle and sampled under each door's own
+    // projected contour. Invalid (and inert) whenever retina publishes no posterior.
+    rc::SemanticProbField semantic_field_;
+
+    // ── Door actuation (RoboCompDoorControl client) ────────────────────────────────────────────────
+    // Ask a provider — Webots supervisor, home automation, or a person over TTS — to move a door. The
+    // robot never learns from the reply that the door IS open: `Delivered` says the provider acted, and
+    // whether the world changed stays a perceptual question. A protocol event is not evidence.
+    rc::DoorActuator                    door_actuator_;
+    // room→world learned from doors the OPERATOR has identified by name. Place-matching needs the two
+    // frames registered and they are not (measured: 6.45 m apart, ~90.3° rotated), so every successful
+    // by-name request donates a labelled correspondence and the transform falls out of ordinary use.
+    rc::DoorWorldRegistration           door_registration_;
+    std::optional<rc::DoorActuator::Pending> door_pending_;
+    QPushButton* door_act_open_btn_  = nullptr;
+    QPushButton* door_act_close_btn_ = nullptr;
+    QLabel*      door_act_state_     = nullptr;
+    QComboBox*   door_actuation_pick_ = nullptr;   // which PROVIDER door id to quote; index 0 = by place
+    QLabel*      door_phi_label_      = nullptr;   // the target door's LEAF ANGLE, and whether it is fitted
+    // The door a button press would act on: nearest believed instance to the robot, named in the UI so
+    // a wrong pick is visible BEFORE the request goes out.
+    struct ActuationTarget { std::string name; Eigen::Vector2f xy; float yaw; float width_m; float range_m;
+                             float phi; bool phi_fitted; };
+    [[nodiscard]] std::optional<ActuationTarget> nearest_door_for_actuation() const;
+    void refresh_door_actuation_ui();
+
+    // ZED RGB off the media plane, so this agent can check its OWN projected contour against the image.
+    // ★It must be computed HERE and not in retina: retina draws a similar rectangle from the DSR node's
+    // oriented box with a transform pinned to a different stamp, and a defence measured on a not-quite-
+    // right contour is not a defence. The belief predicts the shape, so the belief tests for it.
+    std::unique_ptr<rc::RgbIngestor> rgb_ingestor_;
+
+    void log_detect_probe();
+    std::ofstream detect_probe_csv_;
     std::unique_ptr<rc::DoorSceneGraph>               scene_graph_;     // DSR node/RT I/O
     rc::InstanceTracker                                tracker_;         // multi-instance (Tracker.Enabled)
     // Last mask frame_id that CONTRIBUTED birth evidence. Agents feed the tracker every compute cycle on

@@ -46,6 +46,22 @@ struct DoorInstance
     // disagree, and the disagreement deleted doors.
     door::Aperture aperture{};
     door::LeafState leaf{};
+
+    // ── PHI: the leaf's opening angle, now estimated (M1) ─────────────────────────────────────────
+    // ★ANTICIPATE WHAT WE OURSELVES CAUSED. When this agent asks a provider to open a door, the change
+    // that follows is the one thing it should predict perfectly — the command, the target angle and the
+    // provider's swing rate are all known to the requester. Treating it as a surprise is what made the
+    // existence channel read "the door opened" as "the door is gone": with phi pinned at 0 the predicted
+    // silhouette stayed in the doorway the leaf had just left, all 420 samples went dark, and the door
+    // was deleted BECAUSE it obeyed. The command therefore enters as a PRIOR on phi, not as a licence to
+    // suppress evidence — the estimate is still scored against the image every cycle and can refute it.
+    float phi_est      = 0.0f;    // current estimate (rad)
+    float phi_cmd_from = 0.0f;    // where the commanded swing started
+    float phi_cmd_to   = 0.0f;    // where it was asked to end
+    float phi_cmd_rate = 0.0f;    // rad/s the provider advertised; 0 ⇒ no swing model, jump to target
+    std::chrono::steady_clock::time_point phi_cmd_t0{};
+    bool  phi_cmd_active = false; // a commanded swing is in flight (or just finished and unconfirmed)
+    float phi_support  = 0.0f;    // fraction of leaf-face samples lit by a door mask at phi_est
     door::LeafPose  leaf_pose{};
 
     // ── AI2 belief ────────────────────────────────────────────────────────────────
@@ -136,6 +152,22 @@ struct DoorInstance
     float dbg_sil_occ = 0.0f, dbg_sil_free = 0.0f, dbg_sil_free_eff = 0.0f;
     int   dbg_sil_ndet = 0, dbg_sil_ntotal = 0, dbg_sil_noccl = 0, dbg_sil_ncells = 0;
     float dbg_sil_pdetect = 0.0f, dbg_sil_central = 0.0f, dbg_sil_resolv = 0.0f;
+    // Contour check against retina's graded posterior (see specificworker.cpp). Logged so the channel
+    // can be audited from outside: dbg_field_n == 0 means the field was unavailable and this cycle behaved
+    // exactly as it did before the channel existed — which is a different fact from "no support found".
+    float dbg_field_support = 0.5f;   // 0.5 = the contour is no more door-like than the rest of the frame
+    // RGB contour check (common/contour_edge): support = across-boundary gradient on the believed
+    // contour vs the same shape displaced along the wall. 0.5 = indistinguishable from a displaced copy.
+    // ★dbg_edge_n == 0 means NOT MEASURED (no frame, contour behind the camera) — not "no support".
+    float dbg_edge_support = 0.5f;
+    float dbg_edge_true = 0.0f, dbg_edge_ctrl = 0.0f;
+    int   dbg_edge_n = 0;
+    float dbg_edge_delta = 0.0f;   // log-odds this channel contributed this cycle (signed)
+    float dbg_edge_excess = 0.0f;  // (s_true - s_ctrl) / frame mean gradient — THE evidence quantity
+    int   dbg_edge_nctl = 0;       // control placements that survived; 0 ⇒ nothing to compare against,
+                                   // which happens at close range as the controls fall off-frame
+    float dbg_field_mean = 0.0f, dbg_field_bg = 0.0f;
+    int   dbg_field_n = 0;
     // The fit's own admissibility verdict for the last processed frame (truncated mask, or the robot moving
     // with the mask off-centre ⇒ predict-only). Read by the existence channel: a frame that may not MOVE the
     // geometry may not DESTROY the door either. See specificworker.cpp's absence term.
@@ -212,6 +244,12 @@ struct DoorInstance
     float roi_offset_x = 0.0f;   // [-1,1], 0 = horizontally centred in the image
     float roi_offset_y = 0.0f;   // [-1,1], 0 = vertically centred
     float roi_fill     = 0.0f;   // max(w/W, h/H): projected extent as a fraction of the image
+    // The two axes the max() above collapses. Kept because the detector envelope's two shoulders test
+    // DIFFERENT axes — the short axis decides whether there are enough pixels to segment, the long axis
+    // whether it still fits with context — so a single max() cannot express either. common/detectability's
+    // fit_envelope REQUIRES both, which is why door could not be fitted at all until now.
+    float roi_fill_h   = 0.0f;   // (max_col-min_col)/W
+    float roi_fill_v   = 0.0f;   // (max_row-min_row)/H
 };
 
 }  // namespace rc

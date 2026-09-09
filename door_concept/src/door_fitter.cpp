@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <array>
 
 namespace rc {
 
@@ -70,6 +71,11 @@ DoorBeliefParams DoorFitter::make_belief_params() const
 // per-cycle write-back — the only three places a door's shape can change.
 void DoorFitter::refresh_geometry(DoorInstance& inst)
 {
+    // ★PHI FIRST. Every projection below is built from the leaf pose, and the leaf pose is a function of
+    // phi — so the angle has to be estimated before anything reads it, or the whole cycle runs on last
+    // cycle's door.
+    estimate_phi(inst);
+
     DoorState ms = inst.model.state();
     if (inst.ai2_initialized)
     {
@@ -82,6 +88,7 @@ void DoorFitter::refresh_geometry(DoorInstance& inst)
         ms.thickness = inst.ai2_belief.thickness();
         const Eigen::Vector2f ap = inst.ai2_belief.center_xy();
         ms.ap_cx = ap.x(); ms.ap_cy = ap.y(); ms.ap_yaw = inst.ai2_belief.yaw();
+        ms.phi   = inst.phi_est;   // no longer pinned: the UI and the graph report what is estimated
     }
     else
     {
@@ -717,7 +724,152 @@ float DoorFitter::periphery_penalty(const DoorInstance& inst) const
 // This is what makes turning the robot around harmless: the old scheme asked a bearing-free range term how
 // detectable the door was and got ≈0.4 for a door squarely BEHIND the camera, then charged absence evidence
 // against it every frame until it died. Here the frustum test is the detectability.
-DoorSilhouette DoorFitter::compute_silhouette_existence(const DoorInstance& inst)
+// ─── M1: PHI AS A FITTED DOF ─────────────────────────────────────────────────────────────────────
+//
+// Score candidate leaf angles against the door mask that is actually in the image, and take the best.
+// Three things make this honest rather than a way of believing whatever we commanded:
+//
+//  1. ★THE COMMAND IS A PRIOR, NOT AN ANSWER. While a swing we requested is in flight, the expected
+//     angle is known exactly — start, target and the provider's advertised rate — so it centres the
+//     search and wins ties. But every candidate is still scored against the image, and if the door did
+//     not move the evidence says so and the estimate stays put. That is the difference between
+//     anticipating a change you caused and asserting it.
+//
+//  2. ★NO EVIDENCE ⇒ NO MOVEMENT OF THE ESTIMATE. With no door mask in the frame every candidate
+//     scores 0 and the search is uninformative; the estimate then follows the command prior if one is
+//     live, and otherwise holds. It must never drift on an empty scoreboard — a flat likelihood is not
+//     a measurement.
+//
+//  3. ★RATE-LIMITED. A leaf is a rigid body on a hinge: it cannot jump 90 degrees between frames. The
+//     step cap is the provider's own swing rate (or a generic bound when nobody is actuating), so a
+//     single bad frame cannot teleport the model onto a spurious match.
+void DoorFitter::estimate_phi(DoorInstance& inst)
+{
+    if (not inst.ai2_initialized or not camera_api_ or not mask_ingestor_)
+        return;
+    const auto Mopt = room_T_zed_matrix();
+    if (not Mopt.has_value())
+        return;
+    const Eigen::Matrix4d zed_T_room = Mopt.value().inverse();
+    const float W    = static_cast<float>(camera_api_->get_width());
+    const float Himg = static_cast<float>(camera_api_->get_height());
+    if (W <= 0.f or Himg <= 0.f)
+        return;
+
+    const auto& pkt = mask_ingestor_->packet();
+
+    // Where the command says the leaf should be right now. Pure prediction from our own request.
+    const auto now = std::chrono::steady_clock::now();
+    float phi_prior = inst.phi_est;
+    bool  have_prior = false;
+    if (inst.phi_cmd_active)
+    {
+        const float dt = std::chrono::duration<float>(now - inst.phi_cmd_t0).count();
+        const float span = inst.phi_cmd_to - inst.phi_cmd_from;
+        if (inst.phi_cmd_rate > 1e-3f and std::abs(span) > 1e-3f)
+        {
+            const float travelled = std::min(std::abs(span), inst.phi_cmd_rate * dt);
+            phi_prior = inst.phi_cmd_from + std::copysign(travelled, span);
+            if (travelled >= std::abs(span) - 1e-4f)
+                inst.phi_cmd_active = false;   // the swing should be over; evidence owns it from here
+        }
+        else
+            phi_prior = inst.phi_cmd_to;
+        have_prior = true;
+    }
+
+    // Door-labelled pixel cells, same hashing as the silhouette channel (a cell absorbs mask jitter).
+    constexpr float CELL = 6.0f;
+    const auto key = [&](float col, float row) -> std::int64_t
+    {
+        return (static_cast<std::int64_t>(std::floor(col / CELL)) << 32)
+             ^ (static_cast<std::int64_t>(std::floor(row / CELL)) & 0xffffffffLL);
+    };
+    std::unordered_set<std::int64_t> door_cells;
+    if (pkt.valid)
+        for (const auto& sl : pkt.slices)
+        {
+            if (sl.label != "door") continue;
+            const std::size_t b = std::min(sl.pixel_begin, pkt.mask_pixels.size());
+            const std::size_t e = std::min(sl.pixel_end,   pkt.mask_pixels.size());
+            for (std::size_t i = b; i < e; ++i)
+                door_cells.insert(key(pkt.mask_pixels[i].x(), pkt.mask_pixels[i].y()));
+        }
+
+    // Fraction of the leaf face that lands on door-labelled pixels at a given phi.
+    const auto support_at = [&](float phi) -> float
+    {
+        door::LeafState ls = inst.leaf;
+        ls.phi = phi;
+        const door::LeafPose L = door::leaf_pose(inst.aperture, ls);
+        int hit = 0, seen = 0;
+        constexpr int NX = 9, NZ = 13;
+        for (int ix = 0; ix < NX; ++ix)
+            for (int iz = 0; iz < NZ; ++iz)
+            {
+                const float lx = (-1.0f + 2.0f * ix / (NX - 1)) * L.half_w;
+                const float lz = L.centre_z + (-1.0f + 2.0f * iz / (NZ - 1)) * L.half_h;
+                const Eigen::Vector3f P = door::leaf_point(L, lx, 0.0f, lz);
+                const Eigen::Vector4d Pc = zed_T_room * Eigen::Vector4d(P.x(), P.y(), P.z(), 1.0);
+                if (Pc.y() <= 0.20) continue;
+                const Eigen::Vector2d uv = camera_api_->project(Eigen::Vector3d(Pc.x(), Pc.y(), Pc.z()));
+                const float col = static_cast<float>(uv.x()), row = static_cast<float>(uv.y());
+                if (col < 0.f or col >= W or row < 0.f or row >= Himg) continue;
+                ++seen;
+                if (door_cells.contains(key(col, row))) ++hit;
+            }
+        // ★DIVIDE BY THE WHOLE FACE, NOT BY WHAT HAPPENED TO BE VISIBLE. hit/seen lets a candidate that
+        // is almost entirely out of frame score 1.000 off a five-pixel sliver of leaf edge, and beat a
+        // candidate whose whole face is visible and 80% lit. Measured 2026-09-09: phi jumped to 51-69
+        // deg with phi_support ~1.0 while the existence channel saw occ=5 of 178 detectable samples —
+        // the two disagreed because one was scoring a sliver. hit/total is coverage-weighted: a mostly
+        // invisible pose cannot win, which is correct, because we are less sure of it.
+        return seen > 0 ? static_cast<float>(hit) / static_cast<float>(NX * NZ) : -1.0f;
+    };
+
+    // 1-D search over the physically possible range. Coarse then refined: the leaf swings one way only
+    // (swing sets which), and phi is bounded by the aperture.
+    // ★best_s is the RAW image support; best_score carries the prior bonus and is used ONLY to choose.
+    // Reporting the bonused value as `phi_support` produced 1.018 in the log — a fraction above 1, which
+    // is the kind of impossible number that reveals a quantity has been contaminated by something it
+    // should never contain.
+    float best_phi = inst.phi_est, best_s = -1.0f, best_score = -1.0f;
+    constexpr int  NSTEP = 19;
+    constexpr float PHI_MIN = 0.0f, PHI_MAX = static_cast<float>(M_PI) / 2.0f;
+    for (int i = 0; i < NSTEP; ++i)
+    {
+        const float phi = PHI_MIN + (PHI_MAX - PHI_MIN) * i / (NSTEP - 1);
+        const float sc = support_at(phi);
+        if (sc < 0.0f) continue;
+        // The command prior breaks ties and only ties: a tiny bonus proportional to closeness, far too
+        // small to overturn a real difference in image support.
+        const float prior_bonus = have_prior ? 0.02f * std::exp(-std::abs(phi - phi_prior) / 0.2f) : 0.0f;
+        if (sc + prior_bonus > best_score) { best_score = sc + prior_bonus; best_s = sc; best_phi = phi; }
+    }
+
+    if (best_s <= 0.0f)
+    {
+        // Nothing to see. Follow the command if one is live (that is the anticipation), else hold.
+        inst.phi_est = have_prior ? phi_prior : inst.phi_est;
+        inst.phi_support = 0.0f;
+    }
+    else
+    {
+        // Rate limit: a hinge cannot jump. Cap by the commanded rate, or a generic 2 rad/s.
+        const float rate = inst.phi_cmd_rate > 1e-3f ? inst.phi_cmd_rate : 2.0f;
+        const float max_step = rate * 0.10f;   // ~one compute period; conservative
+        const float d = std::clamp(best_phi - inst.phi_est, -max_step, max_step);
+        inst.phi_est += d;
+        inst.phi_support = best_s;
+    }
+    inst.phi_est = std::clamp(inst.phi_est, PHI_MIN, PHI_MAX);
+    inst.leaf.phi = inst.phi_est;
+    if (inst.ai2_initialized)
+        inst.ai2_belief.set_leaf_phi(inst.phi_est);
+}
+
+DoorSilhouette DoorFitter::compute_silhouette_existence(const DoorInstance& inst,
+                                                        const rc::SemanticProbField* field)
 {
     DoorSilhouette out;
     if (not inner_eigen_ or not inst.ai2_initialized)
@@ -832,6 +984,18 @@ DoorSilhouette DoorFitter::compute_silhouette_existence(const DoorInstance& inst
         // where the whole visible object sits, not only the part already inside the box.
         out.sum_col += col;
         out.sum_row += row;
+
+        // Sample the graded posterior right here, at a pixel we have just established the camera could
+        // actually see. Doing it in this loop rather than from a bounding box is the point: the contour
+        // is the door's own projected shape, so the statistic is about the door and not about the
+        // rectangle around it.
+        if (field != nullptr and field->valid())
+            if (const float p = field->at(static_cast<int>(col), static_cast<int>(row)); p >= 0.0f)
+            {
+                out.field_sum += p;
+                out.field_max = std::max(out.field_max, p);
+                ++out.field_n;
+            }
         out.img_w = static_cast<int>(W);
         out.img_h = static_cast<int>(Himg);
         if (col > f * W and col < g * W and row > f * Himg and row < g * Himg)
@@ -852,6 +1016,35 @@ DoorSilhouette DoorFitter::compute_silhouette_existence(const DoorInstance& inst
     out.n_cells = static_cast<int>(covered_cells.size());
     if (out.n_detectable > 0)
         out.mean_range_m = static_cast<float>(range_sum / out.n_detectable);
+
+    // ★THE LEAF-FACE QUAD, projected with the SAME camera and the SAME transform as every sample above.
+    // This is what the RGB edge check is scored on, so the thing being defended and the thing being
+    // measured are one contour. Order is a closed loop (bottom-hinge, bottom-free, top-free, top-hinge)
+    // — a polygon whose points are not in loop order produces a bow-tie whose "edges" cross the object
+    // and would score whatever happens to lie under the diagonals.
+    {
+        const float half_h = inst.leaf_pose.half_h;
+        const float cz     = inst.leaf_pose.centre_z;
+        const std::array<std::pair<float, float>, 4> corners{{
+            {-hw, cz - half_h}, { hw, cz - half_h}, { hw, cz + half_h}, {-hw, cz + half_h}}};
+        std::vector<cv::Point> quad;
+        quad.reserve(4);
+        for (const auto& [lx, lz] : corners)
+        {
+            const Eigen::Vector3f Ps = door::leaf_point(inst.leaf_pose, lx, 0.0f, lz);
+            const Eigen::Vector4d Pc = zed_T_room * Eigen::Vector4d(Ps.x(), Ps.y(), Ps.z(), 1.0);
+            if (Pc.y() <= 0.20) { quad.clear(); break; }          // a corner behind the camera
+            const Eigen::Vector2d uv = camera_api_->project(Eigen::Vector3d(Pc.x(), Pc.y(), Pc.z()));
+            if (not std::isfinite(uv.x()) or not std::isfinite(uv.y())) { quad.clear(); break; }
+            quad.emplace_back(static_cast<int>(std::lround(uv.x())), static_cast<int>(std::lround(uv.y())));
+        }
+        // Kept even when partly out of frame: the edge scorer skips off-image samples itself, and a door
+        // whose lintel is clipped is exactly the close-range case this channel exists for. Only a corner
+        // BEHIND the camera invalidates the quad, because its projection is meaningless.
+        out.face_px = std::move(quad);
+    }
+    if (field != nullptr and field->valid())
+        out.field_bg = field->background_mean();
     return out;
 }
 
@@ -999,6 +1192,8 @@ void DoorFitter::compute_projected_roi(DoorInstance& inst)
     inst.roi_offset_x = std::clamp(off_x, -3.0f, 3.0f);
     inst.roi_offset_y = std::clamp(off_y, -3.0f, 3.0f);
     inst.roi_fill     = std::clamp(fill, 0.0f, 4.0f);
+    inst.roi_fill_h   = std::clamp((max_col - min_col) / W, 0.0f, 4.0f);
+    inst.roi_fill_v   = std::clamp((max_row - min_row) / H, 0.0f, 4.0f);
     inst.roi_valid    = sane;
 }
 

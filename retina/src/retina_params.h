@@ -129,6 +129,36 @@ struct RetinaParams
     int         SEMANTIC_SEG_DECIMATION = 1;
     bool        SEMANTIC_PUBLISH_NODE   = false;   // publish the dense label map to a 'semantic' DSR node under 'zed'
     float       SEMANTIC_PUBLISH_MIN_INTERVAL_S = 0.5f;   // rate cap for the (large) semantic-node publish
+    // Publish the GRADED CLASS POSTERIOR field on the same 'semantic' node (semantic_class_probs +
+    // ids/size). INDEPENDENT of publish_node: the label blob is ~1.8 MB and is the thing that has to be
+    // rate-capped hard, this field is ~128 kB, and a consumer wants the posterior far more than the
+    // argmax. Self-disabling — a no-op unless the loaded model exposes class_probs (the "-probs"
+    // export), so leaving it on costs nothing with the plain model. Shares the rate cap above.
+    bool        SEMANTIC_PUBLISH_PROBS  = true;
+
+    // ── Approach instrumentation (etc/door_approach.csv) ────────────────────────────────────────
+    // Follow ONE semantic class's evidence against RANGE, one row per semantic frame INCLUDING the
+    // frames where nothing was found — see door_approach_log.h for why a detections-only log cannot
+    // show a detection appearing. Defaults ON: a diagnostic that defaults off produces a file nobody
+    // has on the day the question is finally asked.
+    bool        DOOR_APPROACH_LOG       = true;
+    std::string DOOR_APPROACH_LOG_PATH  = "etc/door_approach.csv";
+    std::string DOOR_APPROACH_LABEL     = "door";   // must be an ADE20K name the loaded model exposes
+
+    // ── Door SECOND OPINION (door_specialist_stage.h) ──────────────────────────────────────────────
+    // A model trained on doors, run only on frames where the ADE20K path produced no door mask. It
+    // exists because that path's posterior collapses as the robot approaches (P(door) 0.995 at 5.5 m →
+    // 0.110 at 3.5-4 m on a plainly visible closed door), and no reweighting of an output recovers
+    // information it does not contain. Default OFF until its live cost on this box is measured.
+    bool        DOOR_SPECIALIST_ENABLED   = false;
+    std::string DOOR_SPECIALIST_MODEL     = "models/doors/doors_yolo11s_end2end.onnx";
+    int         DOOR_SPECIALIST_INPUT_SIZE = 640;
+    bool        DOOR_SPECIALIST_USE_GPU   = false;  // ⚠an 8th CUDA session aborts retina — see door_specialist.cpp
+    bool        DOOR_SPECIALIST_USE_TRT   = false;
+    float       DOOR_SPECIALIST_SCORE_FLOOR = 0.05f;   // a reporting floor, never a decision
+    // Counts SILENT frames only. 1 = every silent frame (~37% duty measured); 4 ≈ 12% duty with the
+    // first call inside 0.62 s at 4.8 Hz — well within door_concept's ~1.6 s removal budget.
+    int         DOOR_SPECIALIST_DECIMATION = 1;
 
     // Semantic-derived instance masks (semantic_mask_stage): turn the dense ADE20K class field into per-
     // connected-region SegDetections for furniture classes YOLO-seg misses (cabinet/hood/shelf/door),
@@ -294,6 +324,32 @@ struct RetinaParams
     // RGB360 Lidar overlay (e.g. 2 or -3), then bake the total into the ricoh node's
     // cam_equirect_azimuth_offset in shadow.json and set this to 0. Restart retina only to change it.
     float       RICOH_AZIMUTH_TUNE_DEG     = 0.0f;    // Ricoh.azimuth_tune_deg (DEGREES, not radians)
+
+    // ── [PlaceMemory] panoramic appearance keyframes -> a pose mixture ───────────────────────────
+    // Producer half of the place-memory channel. See common/place_memory/place_map.h for what the
+    // map IS, and retina/tools/place_eval.cpp for how every number below gets measured.
+    bool        PLACE_ENABLED              = false;  // PlaceMemory.enabled
+    std::string PLACE_MODEL_PATH           = "models/dinov2/dinov2_vits14_reg_448x224.onnx";
+    bool        PLACE_USE_GPU              = true;
+    bool        PLACE_USE_TRT              = true;   // first run BUILDS a TRT engine: 30-60 s stall
+    int         PLACE_INPUT_W              = 448;    // asserted against the session, not just documented
+    int         PLACE_INPUT_H              = 224;
+    int         PLACE_N_SECTORS            = 16;     // 22.5 deg; finer than the 90 deg lattice it seeds
+    float       PLACE_POOL_P               = 3.0f;   // MEASURED (see place_encoder.h), not chosen
+    int         PLACE_BAND_LO              = 6;      // patch rows kept: excludes ceiling AND the robot
+    int         PLACE_BAND_HI              = 12;
+    bool        PLACE_CENTER               = true;   // per-frame mean subtraction; rotation-invariant
+    float       PLACE_SECTOR_SOFT          = 0.0f;   // 0 = hard bins; 2.0 = raised-cosine overlap
+    int         PLACE_DECIMATION           = 10;     // ~2 Hz on the 50 ms ricoh worker
+    bool        PLACE_BUILD_MAP            = false;  // ON only for a mapping run
+    float       PLACE_INSERT_MIN_DIST_M    = 0.5f;   // map DENSITY, not a belief gate
+    int         PLACE_SAVE_EVERY_N         = 20;
+    std::string PLACE_MAP_PATH             = "etc/place_map.csv";
+    std::string PLACE_MAP_BLOB_PATH        = "etc/place_map.bin";
+    bool        PLACE_LOG_QUERIES          = false;
+    bool        PLACE_LOG_GRID             = false;  // raw 16x32x384 fp16, 393 KB/frame; capture only
+    int         PLACE_LOG_STRIDE           = 1;
+    std::string PLACE_LOG_DIR              = "etc/place_log";
     // NOTE: the panorama azimuth calibration (mirror sign + seam zero) now lives in the GRAPH as the
     // ricoh node's cam_equirect_azimuth_sign / cam_equirect_azimuth_offset intrinsics, applied by the
     // shared CameraAPI equirectangular model. Both the 360 projection overlay AND the detection→bearing
@@ -314,3 +370,22 @@ struct RetinaParams
 
 // Fill a RetinaParams from the RoboComp ConfigLoader (every key optional).
 RetinaParams load_retina_params(const ConfigLoader& configLoader);
+
+/*
+ * Verify that every ONNX model whose config flag is ON actually exists on disk.
+ *
+ * ★ A MISSING MODEL IS FATAL, NOT A WARNING. The alternative -- log it and carry on with that stage
+ * disabled -- is strictly worse than not starting: the agent looks healthy, joins the graph, publishes
+ * a partial world, and the missing capability surfaces days later as "the fridge is never detected".
+ * A channel that was configured ON and is silently OFF is the hardest kind of defect to trace back to
+ * its cause, and this fleet has paid for that pattern more than once.
+ *
+ * Returns true if everything required is present. On failure it prints a banner naming each missing
+ * file, the config flag that demanded it, and the RESOLVED ABSOLUTE PATH -- because model paths are
+ * relative to the working directory, and launching from the wrong directory is the usual cause of a
+ * preflight failure on an otherwise correct install.
+ *
+ * Call it BEFORE GenericWorker::initialize(), i.e. before the DSR graph exists: exiting there leaks
+ * nothing, whereas exiting later would abandon an agent node in the shared persistent graph.
+ */
+[[nodiscard]] bool preflight_models(const RetinaParams& params);

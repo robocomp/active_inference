@@ -81,6 +81,26 @@ struct OccGridParams
     // a beam's position is uncertain and may pass BESIDE the obstacle, not through it — so an obstacle PERSISTS
     // until the robot is close enough to confirm free space. Occluded cells are never traversed → held. 0 ⇒ off.
     float hit_reliable_range_m = 2.5f;   // range where an observation's evidence halves (precision ∝ 1/(1+(r/r0)²))
+    // ...and the SAME argument applied to the covariate w(r) leaves out: the POSE the sweep was registered
+    // through. w(r) carries the sensor's own geometry (angular footprint, lever arm) and `reliability` carries
+    // the robot's SPEED, but neither carries how well the robot is LOCALISED — and those are not the same
+    // quantity. A robot standing still gets reliability = 1.0, which at t=0 is exactly backwards: the stillest
+    // sweeps of a run are the ones the localiser has not converged for yet, so the least trustworthy returns
+    // arrive with the highest weight and l_hit·w(r) > occ_set latches them in ONE frame (every range under
+    // ~2.65 m). That is where a startup floor of phantoms comes from, and no amount of clearing removes it
+    // afterwards: forget_can_unlatch is false, so a cell born in second one leaves only by a see-through beam
+    // through its own z-band (measured 2026-09-03: median release age 371 cycles ≈ 37 s, and 0-5 latch/release
+    // events per cycle after cycle 150 — the map is what the first two seconds wrote).
+    // The cure is not a burn-in timer: the covariate is MEASURED and already published. room_concept writes the
+    // SE(2) pose covariance on the room→robot RT edge, so a return at horizontal range r has room-frame
+    // position variance σ_pos² + (r·σ_θ)² on top of the sensor's own, and the weight is the same precision
+    // ratio the file uses everywhere else: σ_ref² / (σ_ref² + σ_pos² + (r·σ_θ)²). Converged pose ⇒ 1.0 and
+    // the one-frame latch for a near hit is preserved bit-for-bit (the safety property this grid exists for);
+    // uncertain pose ⇒ far returns weigh almost nothing and need many consistent frames to latch.
+    // HITS AND MISSES ALIKE, like every other precision term here — a mis-registered beam is no better at
+    // refuting than at confirming, and weighting only one side would bias the map toward free or toward
+    // occupied instead of simply slowing it down. See set_pose_sigma().
+    bool  pose_precision = true;         // false = the pre-2026-09-03 behaviour (pose uncertainty ignored), for A/B
     // Nav band (the floor/ceiling "explainer" at the sensor model). A return is an obstacle only in this band.
     float floor_z0    = 0.06f;      // floor height at the sensor
     float floor_slope = 0.04f;      // + per metre of horizontal range (grazing)
@@ -162,6 +182,58 @@ struct OccGridParams
     // of the map as unknown and hand the planner a wall of risk. The question the discount asks is "did we look
     // at this height REGION", which a sub-band answers and a voxel does not.
     static constexpr int COLLISION_GROUPS = 4;  // cap on the no-clear run before the endpoint (0 ⇒ endpoint voxel only)
+    // ── A CROSSING REFUTES THE BEAM'S FOOTPRINT, NOT A 3 cm PENCIL ───────────────────────────────────────────
+    // The sub-band note directly above states the fact and then only ever used it on the FREE-side discount: a
+    // 32-layer lidar spanning 70 deg has its rings 2.26 deg apart, so at 2 m they are 8 cm apart and at 3 m
+    // 12 cm — against a 3.125 cm voxel. Refutation was left as a pencil, and that asymmetry is the whole disease:
+    //   · MARKING deposits a return into ONE 3 cm voxel — a point measurement, correctly sharp.
+    //   · CLEARING demanded that a ray pass through that SAME 3 cm voxel — which, between two ring lines 8 cm
+    //     apart, most rays never do.
+    // So a voxel, once marked, is refutable only from the narrow band of poses that puts a ring line through it.
+    // MEASURED on the probe (real helios fan, robot orbiting, 12.5 cm box at 1.5-2.8 m): after the obstacle was
+    // carried away its cell sat at lo = +5.79 with thickness 1, BIT-IDENTICAL for 150 cycles while the map as a
+    // whole applied 320 000 refutations a cycle — not one of them touched that voxel. It then collapsed in 40
+    // cycles the moment the orbit brought a ring line through it. Removal was geometry-limited, not evidence-
+    // limited: l_clamp, stable_gain and occ_clear all moved it by less than 5%.
+    // Live, this is all three reported failures at once: single-cell speckle that never dies, an obstacle that
+    // is "removed" minutes late, and a footprint that accretes over half a minute instead of appearing.
+    // THE MODEL-LEVEL STATEMENT: the free-space claim's support is the beam's angular SAMPLING footprint, and
+    // that footprint grows linearly with range — the same covariate every other term here already carries. A
+    // crossing at height z and slant range t therefore refutes the bins within +-(beam_spacing_rad*t)/2 of z,
+    // not the single bin containing z. Occupancy stays a point claim (a return IS a point), so the read-out band
+    // and the explainers keep their 3 cm resolution.
+    // Hit precedence does the protecting: a bin that received a return THIS cycle is never refuted (see
+    // update_bins), so a surface still being struck cannot be widened away — it is only material nothing is
+    // returning from any more that the wider footprint reaches.
+    // 0 ⇒ the old pencil behaviour, for A/B. Set per sweep with set_sensor_beam_spacing().
+    float beam_spacing_rad    = 0.0394f; // vertical angle between adjacent samples (helios: 70 deg / 31 rings)
+    // ── SPECKLE: a lone cell nothing is returning from any more ──────────────────────────────────────────────
+    // Asked for directly by the user 2026-08-29, after the live steady state was 8 residual cells in components
+    // of ONE (`resid=8 ncomp=0`), each published to the controller as an obstacle with nothing behind it.
+    // ★THE COST, STATED PLAINLY, because this IS a size threshold and the model cannot derive it: a chair leg,
+    // a table leg or a pole narrower than the 5 cm cell occupies exactly one cell, and this rule deletes it. It
+    // is a deliberate trade of completeness for a map the planner can cross — the opposite of every other rule
+    // in this file, which trade the other way.
+    // What keeps it defensible is the EXEMPTION, which is the honest discriminator between the two cases: a real
+    // thin obstacle is being STRUCK, cycle after cycle, while a phantom is merely un-refuted. So a lone cell
+    // survives for as long as a return has recently landed in it. That is a statement about evidence arriving,
+    // not about size, and it is what stops this being a blanket "small things are noise".
+    // 0 ⇒ off (every residual cell ships, the pre-2026-08-29 behaviour).
+    int   speckle_min_neighbours = 1;   // residual 8-neighbours a cell needs to ship; 0 ⇒ filter off
+    int   speckle_grace_cycles   = 10;  // ...unless a return landed in it within this many cycles (~1 s at 10 Hz)
+    // ── ...AND THE SAME RULE ONE STEP UP: AN ISOLATED CLUMP ─────────────────────────────────────────────────
+    // speckle_min_neighbours asks "is this cell alone?", which by construction only ever removes a SINGLETON:
+    // a diagonal pair defends itself, and so does every 3-cell L. Measured 2026-09-03 on a 5.4-minute run, the
+    // published set held 27-33 connected components for a steady 553-673 cells — a scatter of small clumps, of
+    // which ~300 cells sat more than 0.75 m from any wall. A clump the robot cannot be shown to collide with
+    // still shreds the free space the planner searches, and the singleton test cannot see it.
+    // Same rule, same exemption, one scale up: a component smaller than this is dropped UNLESS one of its cells
+    // has a return in it within speckle_grace_cycles. The exemption is what keeps a real thin obstacle — a chair
+    // leg is 2-3 cells and is STRUCK every cycle, a phantom clump is merely un-refuted — and it is applied per
+    // COMPONENT, not per cell, so an obstacle whose cells are struck in alternation is not eaten from the edges.
+    // Like its neighbour above this trades completeness for a crossable map, and it is the only pair of rules in
+    // this file that trade that way. 0 ⇒ off (only the singleton test runs).
+    int   speckle_min_component_cells = 3;   // residual cells a connected clump needs to ship; 0 ⇒ off
     float bin_span_m          = 2.0f;   // height covered by the 32 support bins (0 ⇒ fall back to the zmn/zmx hull)
     // ── ...and ONE CONTINUOUS SURFACE may explain both the skim and the return ──
     // p_block alone did not save the table: it cut the killing weight from 0.87 to 0.48 for beams 5 cm over the
@@ -430,6 +502,10 @@ struct SweepDiag
                                   // no amount of clearing evidence could ever have reached. 0 for a whole run
                                   // with forget_half_life_s>0 ⇒ nothing is going stale (or the decay is too slow).
     long self_hits_damped = 0;    // returns whose HIT weight was attenuated by the self-body term (<0.99×)
+    long pose_damped = 0;         // returns whose evidence the POSE-PRECISION term attenuated (<0.99×). It must be
+                                  // LARGE early in a run and fall toward 0 as the localiser converges; a whole run
+                                  // at 0 means the robot RT edge carries no rt_covariance (see set_pose_sigma) and
+                                  // the term is silently inert — which is the failure it exists to prevent.
     long floor_damped_hits = 0;   // in-band returns whose HIT weight the FLOOR RESPONSIBILITY cut (<0.9×) — these
                                   // are the near-floor returns that used to latch a cell outright. 0 for a whole
                                   // run ⇒ the term is not engaging (check floor_responsibility / the fit's rms).
@@ -555,6 +631,19 @@ public:
     // The sweep's own range-noise model, sigma(r) = s0 + quad·r². Governs how much clearing authority it gets
     // and how far short of its endpoint it must stop. See OccGridParams::reference_sigma_m.
     void set_sensor_noise(float s0, float quad) { sens_s0_ = s0; sens_quad_ = quad; }
+    // ...and its VERTICAL SAMPLING interval, which sets how much of a column one crossing may refute. See
+    // OccGridParams::beam_spacing_rad. Set per device before that device's integrate_sweep; persists until
+    // changed. <0 ⇒ fall back to the params default.
+    void set_sensor_beam_spacing(float rad) { beam_rad_ = rad >= 0.0f ? rad : p_.beam_spacing_rad; }
+    // THE POSE THIS SWEEP IS REGISTERED THROUGH, as the localiser's own σ — not a guess. `sigma_pos_m` is the
+    // robot's room-frame position std and `sigma_theta_rad` its heading std, i.e. sqrt of the (0,0)/(1,1) and
+    // (5,5) slots of rt_covariance on the room→robot RT edge. Both 0 ⇒ the term is off and every weight is
+    // unchanged. Set once per cycle before integrate_sweep; persists until changed.
+    // See OccGridParams::pose_precision for why this covariate is the missing one.
+    void set_pose_sigma(float sigma_pos_m, float sigma_theta_rad)
+    { pose_sig_pos_ = std::max(0.0f, sigma_pos_m); pose_sig_theta_ = std::max(0.0f, sigma_theta_rad); }
+    float pose_sigma_pos() const { return pose_sig_pos_; }
+    float pose_sigma_theta() const { return pose_sig_theta_; }
     // Tag the sweep about to be integrated, so a release can name the sensor that finished the cell.
     void set_sensor_id(std::uint8_t id) { sensor_id_ = id; }
     float device_floor_z0() const { return dev_floor_z0_ >= 0.0f ? dev_floor_z0_ : p_.floor_z0; }
@@ -701,6 +790,12 @@ public:
                                            const CellExplained& explained = {}) const;
 
     const SweepDiag& last_sweep_diag() const { return sd_; }
+    // How many residual cells the last read-out dropped as speckle. Watch it against residual_count(): if it
+    // is the same order as what ships, the map is mostly lone cells and the filter is carrying the map.
+    long speckle_dropped() const { return speckle_dropped_; }
+    // The read-out mask itself (occupied ∧ ¬explained ∧ ¬speckle), for tools that must assert on what SHIPS
+    // rather than on raw occupancy. See tools/grid_dynamics_probe.cpp.
+    std::vector<std::uint8_t> residual_mask_for_test() const { return residual_mask({}); }
     // Every cell released by the cycle just committed, with the evidence that finished it. The instrument for
     // "the table's residual vanished": a release with a large age_cycles and a clear_z outside [zmn, zmx] — or a
     // range small enough that the sensor could not have seen that height at all — is a wrongful removal.
@@ -727,7 +822,10 @@ private:
         zlo = std::min(zmn_[i], zhi);
     }
     void mark_hit_voxel (int ix, int iy, int iz, float z, float w);   // a return landed IN this voxel
-    void mark_free_voxel(int ix, int iy, int iz, float z, float w);   // a beam passed THROUGH this voxel
+    // a beam passed THROUGH this voxel. half_h = half the beam's vertical sampling footprint here (m):
+    // the crossing refutes every bin it covers, because nothing thicker than that could have hidden
+    // between two adjacent ring lines. 0 ⇒ the single bin containing z (the old pencil).
+    void mark_free_voxel(int ix, int iy, int iz, float z, float w, float half_h = 0.0f);
     // Height-support bin of z, clamped into [0, OccGridParams::Z_BINS). See OccGridParams::bin_span_m.
     int z_bin(float z) const
     { const float bw = p_.bin_span_m / OccGridParams::Z_BINS;
@@ -735,7 +833,11 @@ private:
     // A beam that TERMINATED on the floor in this cell: free evidence gated on SUPPORT (is the cell's own lowest
     // evidence floor-standing, hence refuted, or floating, hence merely passed under?) rather than on z-overlap,
     // which a floor return can never satisfy. See the long note at the definition.
-    std::vector<std::uint8_t> residual_mask(const CellExplained& explained) const;   // occupied ∧ ¬explained
+    // occupied ∧ ¬explained ∧ ¬speckle. `speckle_out`, if given, is filled with 1 for each cell the SPECKLE
+    // rule alone withheld — the explainer's own drops are NOT in it, because the field collapses those
+    // softly (by p_explained) and must keep doing so.
+    std::vector<std::uint8_t> residual_mask(const CellExplained& explained,
+                                            std::vector<std::uint8_t>* speckle_out = nullptr) const;
     std::vector<std::uint8_t> dilate_mask(const std::vector<std::uint8_t>& m, int radius_cells) const;
 
     OccGridParams p_;
@@ -778,14 +880,25 @@ private:
     std::vector<float>        shz_lo_, shz_hi_;    // this cycle: accumulated hit z-band for shit_ cells
     std::vector<float>        shit_w_;             // this cycle: MAX precision weight of the hits on this cell (range×motion)
     std::vector<float>        smiss_w_;            // this cycle: MAX precision weight of the see-throughs on this cell
+    // this cycle: the WIDEST beam footprint (half-height, m) any see-through brought to this cell. Hit
+    // precedence is applied over the SAME footprint, so a return still landing on a surface protects the
+    // whole band the sensor cannot resolve it within - otherwise widening the refutation erases the very
+    // surfaces it is still measuring (measured: a standing box fell from 33 of 64 cells to 11).
+    std::vector<float>        smiss_half_;
     std::vector<std::uint8_t> shit_src_;            // which sweep delivered this cycle's hit (birth trace)
     std::vector<std::uint8_t> smiss_src_;           // which sweep set smiss_w_ (for the release trace)
     std::uint8_t              sensor_id_ = 0;      // the sweep currently being integrated
     float                     sensor_min_r_ = 0.0f; // ...and its dead shell (no returns closer than this)
     float                     sens_s0_ = 0.0f, sens_quad_ = 0.0f;   // its range-noise model (0 ⇒ the reference)
+    float beam_rad_ = 0.0f;                       // this sweep's vertical sampling interval (rad); see set_sensor_beam_spacing
     float                     clear_r2_ = 0.0f;      // lidar clearance radius, squared (see lidar_clearance_m)
+    float pose_sig_pos_ = 0.0f, pose_sig_theta_ = 0.0f;   // the localiser's σ for this cycle (see set_pose_sigma)
     std::vector<float>        smiss_z_;            // this cycle: height of the see-through beam that set smiss_w_
     std::vector<std::uint32_t> occ_since_;         // cycle index at which this cell latched (release age, for the trace)
+    // cycle index of the last return that landed in this cell. The speckle filter's exemption reads it: a
+    // thin obstacle the sensor is still striking is not speckle, however few neighbours it has.
+    std::vector<std::uint32_t> hit_since_;
+    mutable long speckle_dropped_ = 0;             // residual cells the speckle filter removed, last read-out
     std::uint32_t             cycle_ = 0;          // committed-cycle counter (ages the release trace)
     std::vector<LatchEvent>   latches_;            // this cycle's births, with the reason for each
     std::vector<ReleaseEvent> releases_;           // this cycle's releases, with the reason for each

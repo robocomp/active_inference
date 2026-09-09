@@ -127,7 +127,10 @@ decimation = 1              # run pose every Nth cycle; 1 = every frame (no skel
 #   yolo export model=yolo26l-sem-ade20k.pt format=onnx   (gives yolo26l-sem-ade20k.onnx).
 enabled = true   # OFF (2026-07-12: not used currently) — no model load, no overlay toggle, no semantic-node
                   # publish. Flip true to bring the dense ADE20K branch + "Semantic" ZED toggle back.
-model_path = "models/yolo26/yolo26l-sem-ade20k.onnx"
+model_path = "models/yolo26/yolo26l-sem-ade20k-probs.onnx"  # graded build: exposes class_probs [1,5,80,80]
+                            # for wall,cabinet,door,shelf,hood (prob_class_ids in the model metadata). The plain
+                            # ...-ade20k.onnx has no class_probs output -> SemanticMap::graded()==false and every
+                            # published mask confidence collapses back to 1.000.
 conf_thresh = 0.25          # per-pixel argmax-softmax floor; below it the pixel is "ignore" (255)
 input_size = 640
 use_trt = true             # dense model; CUDA EP avoids the TRT version lock
@@ -145,6 +148,12 @@ publish_node = true        # RE-ENABLED 2026-07-25: the crash was NOT this blob 
                             # triggered). TRADE-OFF: residual_concept loses its 'semantic' node input while this is
                             # off. Real fix = cortex/DSR-level or throttle/shrink the blob — TODO before flipping on.
 publish_min_interval_s = 0.5  # min seconds between semantic-node publishes (rate cap; ~2 Hz). The map is big.
+publish_probs = true        # publish the GRADED CLASS POSTERIOR field (semantic_class_probs + ids/size) on the
+                            # same 'semantic' node. This is the channel that lets a concept agent price an ABSENCE:
+                            # it samples max P(class) over its own projected silhouette and weights the absence by
+                            # how decisively the classifier lost, instead of reading silence as "not there".
+                            # ~128 kB (5 x 80 x 80 floats) vs the label map's ~1.8 MB, hence a separate gate.
+                            # Self-disabling: a no-op unless model_path points at a "-probs" export.
 
 # Semantic-derived INSTANCE masks: turn the dense class field into per-connected-region masks for furniture
 # classes YOLO-seg misses (cabinet/hood/shelf/door), score them, drop anything already covered by a YOLO-seg
@@ -391,3 +400,133 @@ Warn.Connections = "0"
 Trace.Network = "0"
 Trace.Protocol = "0"
 MessageSizeMax = "20004800"
+
+# ── [PlaceMemory] panoramic appearance keyframes → a pose mixture ──────────────────────────────────
+# WHAT IT IS FOR. When room_concept loses the robot, RoomConcept::grid_search_initial_pose falls back
+# to a blind lattice over the whole room (≥1 m / 90° ⇒ ~360 candidates in the 8.5 × 9.3 m apartamento),
+# carrying nothing over from the hundreds of times the robot has already stood in those places. This
+# encodes each ricoh panorama with DINOv2 ViT-S/14, keyed to the room pose it was captured at, so a
+# query panorama can propose WHERE — as a distribution, not an answer.
+#
+# ★ THIS PASS BUILDS THE MAP AND THE MEASUREMENT, NOT THE BEHAVIOUR. Nothing consumes the output yet;
+# the designed consumer is grid_search Stage 1 (room_concept.cpp:1764-1808), where mixture.sample(rng, 8)
+# replaces the lattice and feeds the unchanged Stage 2 → moment_match contract. Turning this on costs
+# GPU time and produces files; it changes no robot behaviour.
+#
+# ★ ORDER OF OPERATIONS: logger BEFORE map. tau/decay_r/insert_min_dist_m are OUTPUTS of
+# tools/place_eval, not inputs to it. So: log_queries=true → drive → place_eval → write the measured
+# numbers back here WITH provenance → build_map=true.
+[PlaceMemory]
+enabled            = false
+model_path         = "models/dinov2/dinov2_vits14_reg_448x224.onnx"
+use_gpu            = true
+use_trt            = true   # ★ the FIRST run with a cold .trt_cache BUILDS an engine and stalls this
+                            # worker 30-60 s with no output of its own. A red line says so before it
+                            # happens, so it is not mistaken for a hang.
+input_w            = 448    # 2:1, matching the 1920x960 equirect ⇒ no aspect distortion.
+input_h            = 224    # ★ ASSERTED against the ONNX session's own input shape; a mismatch
+                            # refuses to run rather than silently producing wrong descriptors.
+n_sectors          = 16     # 22.5° per sector. 8 (45°) is coarser than the parallax scale and barely
+                            # beats the 90° lattice this is meant to replace.
+
+# ── The three pooling parameters below are MEASURED, and the obvious defaults are WRONG ────────────
+# Sweep over 5 panoramas x 15 rolls, 2026-08-28 (tools/export_dinov2.py):
+#     band     centre  pool_p |  roll acc   peak margin
+#     (0,16)   no      1.0    |    0.57       +0.017     ← "just mean-pool the whole image"
+#     (6,12)   no      1.0    |    1.00       +0.066
+#     (6,12)   yes     3.0    |    1.00       +0.354     ← shipped
+# The ranking is IDENTICAL for place discrimination (similarity contrast between frames <2 s and >60 s
+# apart, 90 frames / 2399 s: +0.046 naive vs +0.169 tuned), so it is not a trade-off.
+band_lo            = 6      # ★ patch rows kept, of 16. Measured |mean over azimuth| per row (1.0 = that
+band_hi            = 12     # elevation is CONSTANT around the circle, so carries no bearing info):
+                            #   rows 0-4   0.88-0.93  ceiling
+                            #   rows 7-11  0.70-0.77  horizon + near floor  ← the information
+                            #   rows 14-15 0.92-0.95  THE ROBOT'S OWN BODY — the ricoh looks down onto
+                            #              it, so the same rigid object is in every panorama from every
+                            #              position in the room. Half the image was nuisance.
+center             = true   # ★ per-frame mean subtraction. |mean token| over a frame is 0.656: DINOv2
+                            # tokens share a large common component carrying no positional information,
+                            # and a mean over L2-normalised tokens inherits it, so every sector-to-sector
+                            # cosine starts near 0.9 and the match peak drowns. Per-FRAME on purpose —
+                            # rolling a panorama leaves the frame mean unchanged, so centering is exactly
+                            # rotation-invariant and cannot break the circular shift.
+pool_p             = 3.0    # sign-preserving GeM. The usual objection (GeM assumes non-negative
+                            # features, ViT tokens are signed) is handled by the sign-preserving form.
+
+decimation         = 10     # ~2 Hz on the 50 ms ricoh worker ⇒ <1 ms/frame amortised against ~35 ms
+                            # of measured headroom. The map does not need 20 Hz.
+build_map          = false  # ON only for a mapping run, and only after place_eval has been run.
+insert_min_dist_m  = 0.5    # ★ MAP DENSITY, NOT A BELIEF GATE. This decides which samples to STORE —
+                            # the same kind of choice as a grid resolution. No evidence is discarded:
+                            # the pose that would have made a redundant keyframe is already represented
+                            # by its neighbour plus that neighbour's covariance. Falsifiable offline via
+                            # place_eval --sweep-dm. ★ There is deliberately NO yaw clause: one keyframe
+                            # already covers every heading, because a yaw-displaced view is a cyclic
+                            # permutation of descriptors already stored.
+save_every_n       = 20     # never write the map from inside a frame
+map_path           = "etc/place_map.csv"
+map_blob_path      = "etc/place_map.bin"
+
+log_queries        = false  # turn this on FIRST — it is what feeds tools/place_eval
+log_grid           = false  # ★ raw 16x32x384 patch grid, fp16, 393 KB/frame (~470 MB per 10 min at
+                            # 2 Hz). Logging the GRID rather than the pooled vector is what makes
+                            # n_sectors / pool_p / band an OFFLINE ablation instead of one robot drive
+                            # per option. Capture sessions only.
+log_stride         = 1
+log_dir            = "etc/place_log"
+sector_soft        = 0.0    # ★ 0 = hard sector bins. > 0 = raised-cosine windows of half-width
+                            # sector_soft x cols_per_sector, so adjacent sectors OVERLAP.
+                            # WHY IT EXISTS (measured 2026-08-28): rolling ONE panorama — position
+                            # identical by construction, so every drop is pure quantisation — gives a
+                            # SCALLOP in peak similarity, maxima at integer sector multiples and a
+                            # minimum at the half-sector offset:
+                            #     roll     0.00°  5.62°  11.25°  16.88°  22.50°   depth
+                            #     hard     1.000  0.830   0.773   0.800   0.912   0.227
+                            #     2.0x     1.000  0.878   0.906   0.856   0.923   0.144
+                            # This is why P1 (yaw INVARIANCE) fails on real data — 0.977 co-located
+                            # same-heading vs 0.653 co-located different-heading — while P2 (yaw
+                            # RECOVERY) passes at 99%: the argmax still lands right, the peak VALUE is
+                            # depressed. ★ It is not cosmetic: rho(sim) maps similarity to a POSITIONAL
+                            # spread, so a query sitting mid-sector is treated as if it were further
+                            # away than it is.
+                            # ★ DEFAULT 0 ON PURPOSE: the preliminary decay/tau constants in
+                            # common/place_memory/place_map.h were measured with HARD bins, and
+                            # shipping a different default would silently invalidate them. Setting this
+                            # to 2.0 is the FIRST thing to try in the Phase-3 ablation — then re-run
+                            # place_eval --decay --calibrate. The residual scallop after that is
+                            # patch-grid quantisation (a ViT is not shift-equivariant below its 14 px
+                            # patch) and no pooling choice removes it.
+
+# ── Approach instrumentation → etc/door_approach.csv ───────────────────────────────────────────────
+# Follows ONE semantic class against RANGE so the evolution of its evidence along an approach can be
+# read afterwards: p_class (what the model computed) and argmax_px (what the live pipeline believed)
+# on the same row, against range_m measured from ZED depth at the peak pixel.
+# ★One row per semantic frame INCLUDING frames where nothing was found — a detections-only log starts
+# at the moment of success and cannot show a detection appearing.
+[DoorApproach]
+enabled = true
+path    = "etc/door_approach.csv"
+label   = "door"            # must be an ADE20K class the loaded model exposes (see prob_class_ids)
+
+# ── Door SECOND OPINION → a model trained on doors, asked only when the cheap channel is silent ────
+# WHY: the ADE20K path's posterior collapses as the robot closes on a door — median P(door) 0.995 at
+# 5.5-6 m, 0.450 at 4.0-4.5 m, 0.110 at 3.5-4.0 m on a plainly visible CLOSED door, which it calls
+# `wall` at 0.676. No reweighting recovers information an output does not contain, so the only cure is
+# an independent model. It runs ONLY on frames where the semantic path produced no door mask (~37% of
+# frames; decimation 4 -> ~12% duty, first call within 0.62 s).
+# ★It must be allowed to DENY: "ran, found nothing" is evidence and weighs as much as a detection.
+#   The log records eligible/ran/n separately so a denial is never confused with never having asked.
+# Default OFF until the per-call cost on this box is measured with the real execution provider.
+[DoorSpecialist]
+enabled     = true
+model_path  = "models/doors/doors_yolo11s_end2end.onnx"
+input_size  = 640
+# ⚠CPU. An 8th CUDA session aborted retina outright on the specialist's first inference:
+#   "Invalid handle. Cannot load symbol cublasLtGetVersion" -> SIGABRT (uncatchable).
+# retina already holds seven CUDA ONNX sessions. Re-enable the GPU only once that is understood.
+use_gpu     = false
+use_trt     = false
+score_floor = 0.05          # a REPORTING floor; nothing here decides whether a door exists
+# Counts SILENT frames only. At ~40 fps with ~37% silence, 8 gives ~1.8 calls/s — the 1.5-2 Hz the
+# offline study recommended, first call within ~0.5 s, inside door_concept's ~1.6 s removal budget.
+decimation  = 8

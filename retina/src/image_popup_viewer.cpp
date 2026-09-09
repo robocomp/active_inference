@@ -1,5 +1,7 @@
 #include "image_popup_viewer.h"
 
+#include "yolo_semantic.h"   // rc::semantic::SemanticMap (graded posteriors)
+
 #include <opencv2/imgproc.hpp>
 #include <QImage>
 #include <QMouseEvent>
@@ -74,22 +76,51 @@ void ImagePopupViewer::set_depth_readout(const cv::Mat& room_log_range,
         // no special casing here — mouseMoveEvent asks each field whether it exists.
         room_log_range_  = room_log_range.clone();
         model_log_range_ = model_log_range.clone();
-        setMouseTracking(true);    // fire mouseMoveEvent with no button pressed
     }
     else
     {
         room_log_range_.release();
         model_log_range_.release();
-        setMouseTracking(false);
         QToolTip::hideText();
     }
+    sync_mouse_tracking();
+}
+
+ImagePopupViewer::~ImagePopupViewer() = default;
+
+void ImagePopupViewer::sync_mouse_tracking()
+{
+    setMouseTracking(depth_active_ or probs_active_);   // fire mouseMoveEvent with no button pressed
+}
+
+void ImagePopupViewer::set_prob_readout(const rc::semantic::SemanticMap& map, bool active)
+{
+    probs_active_ = active and map.graded();
+    if (probs_active_)
+    {
+        auto owned = std::make_unique<rc::semantic::SemanticMap>();
+        owned->prob_class_ids = map.prob_class_ids;
+        owned->probs_src_size = map.probs_src_size;
+        owned->probs.reserve(map.probs.size());
+        for (const auto& plane : map.probs)
+            owned->probs.push_back(plane.empty() ? cv::Mat{} : plane.clone());
+        probs_map_ = std::move(owned);
+    }
+    else
+    {
+        probs_map_.reset();
+        QToolTip::hideText();
+    }
+    sync_mouse_tracking();
 }
 
 void ImagePopupViewer::mouseMoveEvent(QMouseEvent* event)
 {
     QLabel::mouseMoveEvent(event);
-    if (not depth_active_ or last_pixmap_.isNull()
-        or (room_log_range_.empty() and model_log_range_.empty()))
+    const bool want_depth = depth_active_ and (not room_log_range_.empty()
+                                               or not model_log_range_.empty());
+    const bool want_probs = probs_active_ and probs_map_ and probs_map_->graded();
+    if ((not want_depth and not want_probs) or last_pixmap_.isNull())
     {
         QToolTip::hideText();
         return;
@@ -128,15 +159,34 @@ void ImagePopupViewer::mouseMoveEvent(QMouseEvent* event)
     // outside the envelope the ray escapes the room. Saying so beats printing a number that looks
     // like a measurement. A field that was never HANDED to us is simply not mentioned.
     QStringList lines;
-    if (not room_log_range_.empty())
+
+    if (want_probs)
+    {
+        const cv::Size fs = probs_map_->probs_src_size;
+        const int ix = std::clamp(static_cast<int>(rx * fs.width),  0, std::max(0, fs.width  - 1));
+        const int iy = std::clamp(static_cast<int>(ry * fs.height), 0, std::max(0, fs.height - 1));
+        const auto ranked = probs_map_->probs_at(ix, iy);
+        for (const auto& [id, prob] : ranked)
+        {
+            const QString name = (id >= 0 and id < static_cast<int>(class_names_.size()))
+                                     ? QString::fromStdString(class_names_[static_cast<std::size_t>(id)])
+                                     : QString("class %1").arg(id);
+            lines << (std::isnan(prob) ? QString("P(%1)  —  not looked at").arg(name)
+                                       : QString("P(%1)  %2").arg(name).arg(prob, 0, 'f', 3));
+        }
+        if (ranked.size() >= 2 and not std::isnan(ranked[0].second) and not std::isnan(ranked[1].second))
+            lines << QString("margin %1").arg(ranked[0].second - ranked[1].second, 0, 'f', 3);
+    }
+
+    if (want_depth and not room_log_range_.empty())
         lines << (std::isfinite(room) ? QString("room   %1 m").arg(room, 0, 'f', 2)
                                       : QStringLiteral("room   —"));
-    if (not model_log_range_.empty())
+    if (want_depth and not model_log_range_.empty())
         lines << (std::isfinite(model) ? QString("model  %1 m").arg(model, 0, 'f', 2)
                                        : QStringLiteral("model  —"));
     // Sign matches compose_difference (model − reference): + ⇒ the model reads FARTHER than the room
     // believes, which is the same thing the red channel of the DIFF overlay is showing.
-    if (std::isfinite(room) and std::isfinite(model))
+    if (want_depth and std::isfinite(room) and std::isfinite(model))
         lines << QString("Δ      %1%2 m").arg(model - room >= 0.f ? "+" : "")
                                          .arg(model - room, 0, 'f', 2);
 

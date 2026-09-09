@@ -102,6 +102,35 @@ AI2GnIters = 4                   # Gauss-Newton iterations per frame
 AI2ExtentStd = 0.05              # extent-observation noise (m) for the coverage/extent likelihood
 
 [DoorConcept]
+# Detector truth table → etc/detect_probe.csv (shared schema, common/detect_probe/detect_probe.h).
+# One row per cycle per live door: robot pose, how the door projected, what p_detect predicted, and
+# whether a mask actually arrived. ★The robot pose is the point: absence is integrated as if each frame
+# were an independent trial, and while the robot is stopped only ~5% of camera frames carry a new image
+# — so a parked robot re-integrates the SAME PIXELS thousands of times. De-duplicate by viewpoint before
+# fitting anything over these rows. Empty path disables.
+DetectProbeCsvPath = "etc/detect_probe.csv"
+
+# RGB CONTOUR CHECK — score this door's OWN projected leaf face against image edges (common/contour_edge).
+# ★Classifier-free, which is the entire point. The ADE20K posterior over a plainly visible closed door
+# falls 0.995 -> 0.138 -> 0.048 as the robot closes and the network calls it `wall` at 0.676 — but the
+# door's jamb and lintel are still in the RGB. This asks whether the image has a boundary where the
+# belief predicts one, scored against the same quad displaced along the wall so there is no per-scene
+# constant. Computed HERE and not in retina: retina projects the DSR node's box with a transform pinned
+# to a different stamp, and a defence measured on a not-quite-right contour is not a defence.
+# ⚠DIAGNOSTIC ONLY today — logged (terminal + door_existence_log.csv), wired into no belief.
+RgbContourCheck = true
+
+# DOOR ACTUATION — ask a provider to open/close a door (RoboCompDoorControl), from the strip UI buttons.
+# ★A CAPABILITY, NOT A SIMULATOR. The provider may be the Webots supervisor, home automation, or a
+# person asked over TTS; on the real robot there is no Webots, so this must never be a dependency on one.
+# ⚠ENDPOINT: webots-bridge listens on 10017 (etc/config.toml, the file it is actually run with). An
+#   older note recorded 10008; the bridge's own config comment documents that disagreement and says
+#   10017 wins. Empty string disables the feature and the UI says so.
+# ⚠The bridge currently reports canActuate = FALSE: its [DoorControl] Doors list is commented out, which
+#   is the honest answer for a world whose doors are scenery. The buttons stay DISABLED until that list
+#   names real actuable hinge DEFs — deliberately, so a button never offers what always fails.
+DoorControlEndpoint = "doorcontrol:tcp -h localhost -p 10017"
+
 StateEps = 0.04             # Σ|Δstate| threshold between cycles for convergence (m+rad)
 KStable = 30                # consecutive stable frames before model_stable
 DetectionAliveMaxFrames = 40 # cycles without a fresh door mask before detection_alive=false
@@ -124,7 +153,17 @@ RtCovAddChain = true        # Part B: add the localization/chain cov J·Σ_chain
 GateMahalanobis = 9.0     # χ²₂ gate (~3σ) for a mask↔instance match once it has a cov
 GateFallbackM = 0.40     # metric XY gate (m) before an instance has a usable covariance
 DetectionNoiseM = 0.20   # R in the association innovation cov S=P+R²I (≥ centroid-vs-fit offset)
-BirthFrames = 8          # frames a mask must stay unexplained before spawning a door
+BirthFrames = 6.6        # ideal OBSERVATIONS of unexplained evidence before spawning a door.
+                         # ★RETUNED 2026-09-09 for the graded semantic model. Every semantic mask used to
+                         # report conf = 1.000 exactly (the ADE20K export emitted an argmax with no scores),
+                         # so this constant was calibrated against evidence worth 1.0 x range_term per look.
+                         # The "-probs" export gives real confidences: measured over 45623 door slices this
+                         # run, median 0.826 (p10 0.676, p90 0.910). Birth evidence is proportional to
+                         # confidence, so 8 became ~33% slower to reach at the p10 end for no modelled
+                         # reason. 8 x 0.826 = 6.6 restores the SAME time-to-birth at the median.
+                         # ⚠This is a rescaling, not a relaxation: a weak mask is still worth less than a
+                         # strong one, which is the point of grading them. It does NOT lower the bar for a
+                         # low-confidence blob — that blob just contributes its own smaller share.
 BirthMinSepM = 0.70      # a birth must be ≥ this (m) from every existing door (anti-duplicate)
 MergeOverlap = 0.20      # collapse two instances whose seat footprints overlap ≥ this fraction of the smaller, keeping the more-observed. 0 disables.
 # Stillbirth prune — a phantom born from association churn starves once the real instance reclaims its

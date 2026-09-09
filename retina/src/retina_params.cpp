@@ -4,6 +4,11 @@
 
 #include "retina_params.h"
 
+#include <filesystem>
+#include <print>
+#include <string>
+#include <vector>
+
 RetinaParams load_retina_params(const ConfigLoader& configLoader)
 {
     RetinaParams params;
@@ -58,6 +63,30 @@ RetinaParams load_retina_params(const ConfigLoader& configLoader)
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Ricoh.azimuth_tune_deg", params.RICOH_AZIMUTH_TUNE_DEG);
 
     // [RicohDepth] — monocular depth on the panorama (default OFF; display-only, see depth_processor.h).
+    // ── [PlaceMemory] ────────────────────────────────────────────────────────────────────────────
+    rc::ConfigLoaderUtils::load_optional(configLoader, "PlaceMemory.enabled", params.PLACE_ENABLED);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "PlaceMemory.model_path", params.PLACE_MODEL_PATH);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "PlaceMemory.use_gpu", params.PLACE_USE_GPU);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "PlaceMemory.use_trt", params.PLACE_USE_TRT);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "PlaceMemory.input_w", params.PLACE_INPUT_W);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "PlaceMemory.input_h", params.PLACE_INPUT_H);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "PlaceMemory.n_sectors", params.PLACE_N_SECTORS);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "PlaceMemory.pool_p", params.PLACE_POOL_P);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "PlaceMemory.band_lo", params.PLACE_BAND_LO);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "PlaceMemory.band_hi", params.PLACE_BAND_HI);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "PlaceMemory.center", params.PLACE_CENTER);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "PlaceMemory.sector_soft", params.PLACE_SECTOR_SOFT);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "PlaceMemory.decimation", params.PLACE_DECIMATION);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "PlaceMemory.build_map", params.PLACE_BUILD_MAP);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "PlaceMemory.insert_min_dist_m", params.PLACE_INSERT_MIN_DIST_M);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "PlaceMemory.save_every_n", params.PLACE_SAVE_EVERY_N);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "PlaceMemory.map_path", params.PLACE_MAP_PATH);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "PlaceMemory.map_blob_path", params.PLACE_MAP_BLOB_PATH);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "PlaceMemory.log_queries", params.PLACE_LOG_QUERIES);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "PlaceMemory.log_grid", params.PLACE_LOG_GRID);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "PlaceMemory.log_stride", params.PLACE_LOG_STRIDE);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "PlaceMemory.log_dir", params.PLACE_LOG_DIR);
+
     rc::ConfigLoaderUtils::load_optional(configLoader, "RicohDepth.enabled", params.RICOH_DEPTH_ENABLED);
     rc::ConfigLoaderUtils::load_optional(configLoader, "RicohDepth.model_path", params.RICOH_DEPTH_MODEL_PATH);
     rc::ConfigLoaderUtils::load_optional(configLoader, "RicohDepth.input_size", params.RICOH_DEPTH_INPUT_SIZE);
@@ -120,6 +149,17 @@ RetinaParams load_retina_params(const ConfigLoader& configLoader)
     rc::ConfigLoaderUtils::load_optional(configLoader, "Semantic.use_trt", params.SEMANTIC_SEG_USE_TRT);
     rc::ConfigLoaderUtils::load_optional(configLoader, "Semantic.decimation", params.SEMANTIC_SEG_DECIMATION);
     rc::ConfigLoaderUtils::load_optional(configLoader, "Semantic.publish_node", params.SEMANTIC_PUBLISH_NODE);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Semantic.publish_probs", params.SEMANTIC_PUBLISH_PROBS);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "DoorApproach.enabled", params.DOOR_APPROACH_LOG);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "DoorApproach.path", params.DOOR_APPROACH_LOG_PATH);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "DoorApproach.label", params.DOOR_APPROACH_LABEL);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "DoorSpecialist.enabled", params.DOOR_SPECIALIST_ENABLED);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "DoorSpecialist.model_path", params.DOOR_SPECIALIST_MODEL);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "DoorSpecialist.input_size", params.DOOR_SPECIALIST_INPUT_SIZE);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "DoorSpecialist.use_gpu", params.DOOR_SPECIALIST_USE_GPU);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "DoorSpecialist.use_trt", params.DOOR_SPECIALIST_USE_TRT);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "DoorSpecialist.score_floor", params.DOOR_SPECIALIST_SCORE_FLOOR);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "DoorSpecialist.decimation", params.DOOR_SPECIALIST_DECIMATION);
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Semantic.publish_min_interval_s", params.SEMANTIC_PUBLISH_MIN_INTERVAL_S);
     rc::ConfigLoaderUtils::load_optional(configLoader, "Semantic.publish_masks", params.SEMANTIC_PUBLISH_MASKS);
     rc::ConfigLoaderUtils::load_optional(configLoader, "Semantic.accepted_labels", params.SEMANTIC_ACCEPTED_LABELS);
@@ -153,4 +193,84 @@ RetinaParams load_retina_params(const ConfigLoader& configLoader)
     rc::ConfigLoaderUtils::load_optional(configLoader, "Component.Debug.Verbose", params.VERBOSE_DEBUG);
 
     return params;
+}
+
+bool preflight_models(const RetinaParams& params)
+{
+    // One row per model the configuration actually asks for. `required` mirrors the gate in
+    // SpecificWorker::initialize() that constructs the stage -- if the two ever disagree, this check
+    // is either blocking a valid config or waving a broken one through, so they are worth re-reading
+    // together when a stage moves.
+    struct Need { bool required; const std::string& path; const char* flag; const char* purpose; };
+    const bool ricoh = params.RICOH_YOLO_ENABLED;
+    const std::vector<Need> needs{
+        { true,
+          params.YOLO_MODEL_PATH,        "(always)",
+          "instance segmentation - the ZED and ricoh seg stages" },
+        { params.HUMAN_POSE_ENABLED,
+          params.HUMAN_POSE_MODEL_PATH,  "HumanPose.enabled",
+          "human pose" },
+        { params.SEMANTIC_SEG_ENABLED or (ricoh and params.RICOH_SEMANTIC_ENABLED),
+          params.SEMANTIC_SEG_MODEL_PATH,"Semantic.enabled / Ricoh.semantic_enabled",
+          "ADE20K semantic segmentation" },
+        { params.SAM2_ENABLED,
+          params.SAM2_ENCODER_PATH,      "Sam2.enabled",
+          "SAM2 mask refinement (encoder)" },
+        { params.SAM2_ENABLED,
+          params.SAM2_DECODER_PATH,      "Sam2.enabled",
+          "SAM2 mask refinement (decoder)" },
+        { params.ZED_DEPTH_ENABLED or (ricoh and params.RICOH_DEPTH_ENABLED),
+          params.RICOH_DEPTH_MODEL_PATH, "ZedDepth.yolo_depth_enabled / RicohDepth.enabled",
+          "monocular depth" },
+        { ricoh and params.PLACE_ENABLED,
+          params.PLACE_MODEL_PATH,       "PlaceMemory.enabled",
+          "DINOv2 panoramic place memory" },
+    };
+
+    std::vector<const Need*> missing;
+    for (const auto& n : needs)
+    {
+        if (not n.required) continue;
+        if (n.path.empty())                          // configured ON with no path at all
+        { missing.push_back(&n); continue; }
+        std::error_code ec;
+        if (not std::filesystem::is_regular_file(n.path, ec)) missing.push_back(&n);
+    }
+    if (missing.empty()) return true;
+
+    std::error_code ec;
+    const auto cwd = std::filesystem::current_path(ec);
+    std::print("\n"
+        "[models] ══════════════════════════════════════════════════════════════════════════════════\n"
+        "[models] ★★ retina REFUSES TO START: {} required model file(s) are missing.\n"
+        "[models]\n", missing.size());
+    for (const auto* n : missing)
+    {
+        std::print("[models]   {}\n"
+                   "[models]       needed by : {}\n"
+                   "[models]       purpose   : {}\n",
+                   n->path.empty() ? "<no path configured>" : n->path, n->flag, n->purpose);
+        if (not n->path.empty())
+        {
+            const std::filesystem::path p(n->path);
+            std::print("[models]       looked at : {}\n",
+                       (p.is_absolute() ? p : cwd / p).lexically_normal().string());
+        }
+    }
+    std::print(
+        "[models]\n"
+        "[models]   Models are NOT shipped in this repository -- you download the upstream weights and\n"
+        "[models]   export them to ONNX yourself. See the \"Models\" section of README.md for the\n"
+        "[models]   directory layout, the flag -> file table, and the export commands.\n"
+        "[models]\n"
+        "[models]   ★ Paths are relative to the WORKING DIRECTORY you launched from, not to the binary.\n"
+        "[models]     Current working directory: {}\n"
+        "[models]     If the files exist but are listed above, you are almost certainly running from\n"
+        "[models]     the wrong directory -- launch from the component root.\n"
+        "[models]\n"
+        "[models]   Or set the corresponding flag to false, and the capability stays off ON PURPOSE\n"
+        "[models]   rather than by accident.\n"
+        "[models] ══════════════════════════════════════════════════════════════════════════════════\n\n",
+        cwd.string());
+    return false;
 }

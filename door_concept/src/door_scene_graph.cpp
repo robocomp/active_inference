@@ -44,16 +44,24 @@ LocalPose door_in_wall(float cx, float cy, float yaw_room,
 }
 }  // namespace
 
-// Pick the "wall_*" node whose segment is nearest the door centre. Each wall node carries a room→wall RT
-// edge (midpoint + tangent yaw) and width_m (length); we clamp-project the door centre onto every wall
-// segment and keep the closest. ok=false ⇒ no wall nodes yet (room_concept not up) → caller hangs from room.
+// Pick the "wall_*" node whose segment is nearest the door centre. Each wall node carries an RT edge from
+// its parent (midpoint + tangent yaw) and width_m (length); we clamp-project the door centre onto every
+// wall segment and keep the closest. ok=false ⇒ no wall nodes yet (room_concept not up) → caller hangs from room.
+//
+// ★ The parent is read off the wall, NOT assumed to be the room. room_concept now hangs its walls from a
+//   "floor" node, and hard-coding get_edge(room_id, ...) made every wall unresolvable overnight — silently,
+//   because "no wall nodes yet" and "the edge moved" arrive here as the same empty optional. The midpoint
+//   still reads in ROOM coordinates: floor→room is the identity RT, which is the whole point of that node.
 DoorSceneGraph::WallRef DoorSceneGraph::resolve_wall(std::uint64_t room_id, const Eigen::Vector2f& door_xy) const
 {
     WallRef best;
     float best_d2 = std::numeric_limits<float>::max();
     for (const auto& wn : G_->get_nodes_by_type("wall"))
     {
-        const auto edge = G_->get_edge(room_id, wn.id(), "RT");
+        const auto parent_id = G_->get_attrib_by_name<parent_att>(wn).value_or(room_id);
+        auto edge = G_->get_edge(parent_id, wn.id(), "RT");
+        if (not edge.has_value() and parent_id != room_id)
+            edge = G_->get_edge(room_id, wn.id(), "RT");   // pre-floor graphs
         if (not edge.has_value()) continue;
         const auto tr  = G_->get_attrib_by_name<rt_translation_att>(edge.value());
         const auto rot = G_->get_attrib_by_name<rt_rotation_euler_xyz_att>(edge.value());

@@ -22,9 +22,13 @@
 #include <onnxruntime_cxx_api.h>
 #include <opencv2/opencv.hpp>
 
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace rc::semantic
@@ -52,6 +56,90 @@ struct SemanticMap
     // SemanticMaskStage::run, where a hood-sized region was the thing it silently cost).
     // A pixel COUNT, not a rect: the scheduled strips need not be contiguous.
     long long inferred_area_px = 0;
+
+    // ─── GRADED CLASS POSTERIORS (empty unless the model exposes them) ────────────────────────────
+    // ★WHY. A *-sem export collapses its 150-way softmax to a uint8 argmax INSIDE the ONNX graph, so
+    // a door at P(door)=0.44 losing to P(wall)=0.45 is emitted identically to one the model never
+    // saw. Measured on 1108 apartment frames: on frames yielding NO door mask the median margin
+    // P(wall)-P(door) at the winning pixel is 0.0084, and 69% are within 0.10. The argmax reports a
+    // coin flip as certainty, and the existence channel then charges that silence as confident
+    // absence. `probs` is the recovered posterior (see tools/expose_semantic_logits.py).
+    //
+    // ★NOT frame-sized, ON PURPOSE. These stay at the MODEL's native resolution (the classifier head
+    // is 80x80 for a 640 letterbox), already cropped to the active non-padded region. Frame-sizing
+    // K channels would be ~37 MB/frame of allocation churn for information the model never had at
+    // that resolution; at native it is ~128 kB. Sample with prob_at(), which owns the mapping - the
+    // writer and the reader are in different files and this is only coherent if they agree.
+    //
+    // ★The channel order is declared BY THE MODEL (metadata "prob_class_ids"), never by config: a
+    // reordered export against a stale config key would silently read P(door) out of the cabinet
+    // channel with nothing to catch it.
+    std::vector<int>     prob_class_ids;   // ADE20K class id of each channel of `probs`
+    std::vector<cv::Mat> probs;            // CV_32FC1, native res, active region only. May be empty.
+    cv::Size             probs_src_size;   // the frame size `probs` maps onto (== labels.size())
+
+    // Channel index of `class_id` in `probs`, or -1 if this model does not expose it.
+    [[nodiscard]] int prob_channel(int class_id) const
+    {
+        for (std::size_t i = 0; i < prob_class_ids.size(); ++i)
+            if (prob_class_ids[i] == class_id)
+                return static_cast<int>(i);
+        return -1;
+    }
+
+    // Posterior of `class_id` at FRAME pixel (x, y), bilinear. Returns `fallback` when the model
+    // exposes no posterior for it — so a caller written against a graded model still runs, at the
+    // old behaviour, against the ungraded one.
+    [[nodiscard]] float prob_at(int class_id, int x, int y, float fallback = -1.0f) const
+    {
+        const int c = prob_channel(class_id);
+        if (c < 0 or probs.empty() or probs[static_cast<std::size_t>(c)].empty()
+            or probs_src_size.width <= 0 or probs_src_size.height <= 0)
+            return fallback;
+        const cv::Mat& m = probs[static_cast<std::size_t>(c)];
+        // Map frame -> native with the same convention decode() used to resize `labels`: the active
+        // region spans the full frame, so it is a straight scale, sampled at pixel centres.
+        const float fx = (static_cast<float>(x) + 0.5f) * static_cast<float>(m.cols)
+                       / static_cast<float>(probs_src_size.width) - 0.5f;
+        const float fy = (static_cast<float>(y) + 0.5f) * static_cast<float>(m.rows)
+                       / static_cast<float>(probs_src_size.height) - 0.5f;
+        const int x0 = std::clamp(static_cast<int>(std::floor(fx)), 0, m.cols - 1);
+        const int y0 = std::clamp(static_cast<int>(std::floor(fy)), 0, m.rows - 1);
+        const int x1 = std::min(x0 + 1, m.cols - 1);
+        const int y1 = std::min(y0 + 1, m.rows - 1);
+        const float ax = std::clamp(fx - static_cast<float>(x0), 0.0f, 1.0f);
+        const float ay = std::clamp(fy - static_cast<float>(y0), 0.0f, 1.0f);
+        const float v00 = m.at<float>(y0, x0), v01 = m.at<float>(y0, x1);
+        const float v10 = m.at<float>(y1, x0), v11 = m.at<float>(y1, x1);
+        return (v00 * (1.0f - ax) + v01 * ax) * (1.0f - ay)
+             + (v10 * (1.0f - ax) + v11 * ax) * ay;
+    }
+
+    // Every exposed class at FRAME pixel (x, y) as (class_id, P), sorted most-probable first. Empty
+    // when the model is ungraded. This is the readout that makes the actual defect visible: at a pixel
+    // the argmax calls `wall`, it shows by HOW MUCH door lost — a 0.443/0.378 coin flip and a 0.99/0.01
+    // landslide are indistinguishable in the label map, and only the first should ever be read as
+    // "the classifier did not resolve this". A NaN entry means "not looked at" (a 360 strip that did
+    // not run this frame) and is deliberately NOT the same as a low probability.
+    [[nodiscard]] std::vector<std::pair<int, float>> probs_at(int x, int y) const
+    {
+        std::vector<std::pair<int, float>> out;
+        if (not graded())
+            return out;
+        out.reserve(prob_class_ids.size());
+        for (std::size_t i = 0; i < prob_class_ids.size(); ++i)
+            out.emplace_back(prob_class_ids[i], prob_at(prob_class_ids[i], x, y));
+        std::ranges::sort(out, [](const auto& a, const auto& b)
+        {
+            if (std::isnan(a.second)) return false;   // NaN ("not looked at") sinks to the bottom
+            if (std::isnan(b.second)) return true;
+            return a.second > b.second;
+        });
+        return out;
+    }
+
+    // True when this map carries recovered posteriors (i.e. a graded export is loaded).
+    [[nodiscard]] bool graded() const noexcept { return not probs.empty(); }
 };
 
 class YoloSemanticSegmenter
@@ -94,6 +182,9 @@ private:
     float conf_thresh_;
     int   input_size_;
     mutable bool logged_layout_ = false;   // one-shot output-layout diagnostic (see segment())
+    // ADE20K class id per channel of the model's `class_probs` output, read from the model's own
+    // metadata at load time. Empty ⇒ an ungraded export ⇒ everything below degrades to the old path.
+    std::vector<int> prob_class_ids_;
 
     struct LetterboxResult
     {
@@ -105,6 +196,19 @@ private:
 
     [[nodiscard]] LetterboxResult preprocess(const cv::Mat& rgb_image) const;
 
+    // Optional graded outputs, located by NAME in segment() (never by index — output order is an
+    // exporter detail). Default-constructed ⇒ ungraded model ⇒ decode() takes exactly the old path.
+    // ★No default ARGUMENT on decode(): there is one call site, and a silent "" default would let a
+    // future caller drop the posteriors without the compiler saying so.
+    struct GradedOutputs
+    {
+        const void* class_probs = nullptr;          // [1,K,h,w]
+        const void* top_prob    = nullptr;          // [1,1,h,w], max over ALL classes
+        ONNXTensorElementDataType elem_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+        int k = 0, h = 0, w = 0;
+        [[nodiscard]] bool valid() const { return class_probs and k > 0 and h > 0 and w > 0; }
+    };
+
     // Turn the model output (a float logit volume OR an integer dense class-id map — dispatched on
     // `elem_type`) into a label (+ optional score) map at letterbox resolution, then crop the active
     // (non-padded) region and resize back to `orig_size`.
@@ -113,7 +217,8 @@ private:
                                      const std::vector<int64_t>& shape,
                                      const cv::Size& orig_size,
                                      float scale, int pad_left, int pad_top,
-                                     bool want_scores) const;
+                                     bool want_scores,
+                                     const GradedOutputs& graded) const;
 
     [[nodiscard]] static std::vector<std::string> default_class_names();
 };
@@ -161,5 +266,22 @@ private:
     std::optional<YoloSemanticSegmenter> segmenter_;
     SemanticMap last_map_;
 };
+
+// Heat overlay of ONE class's posterior on `img` (CV_8UC3). Returns a fresh Mat; `img` is never
+// written. `img_is_rgb` says which order the CALLER's canvas is in — the ZED popup works in RGB and
+// the panorama popup in BGR, and applyColorMap always emits BGR, so without being told the two
+// windows would paint the same probability in two different colours and only one of them would be
+// the colormap. It is not cosmetic: the point of a fixed colormap is that a colour means a number.
+//
+// ★ALPHA IS THE PROBABILITY ITSELF, not a constant. A fixed blend would paint a P=0.05 pixel and a
+// P=0.95 pixel with equal conviction, which is the very confusion this channel exists to remove: the
+// point of the graded export is that the image should look uncertain where the model is. So a pixel
+// is tinted in proportion to how strongly the class is believed there, and the underlying frame shows
+// through untouched where it is not believed at all.
+// ★NaN ⇒ NOT LOOKED AT, drawn as a visible hatch rather than as zero. On the 360 panorama only the
+// strips scheduled this frame carry a posterior; painting the rest as P=0 would show the model
+// confidently denying a door in a place it never inspected.
+[[nodiscard]] cv::Mat compose_prob_canvas(const cv::Mat& img, const SemanticMap& map, int class_id,
+                                          bool img_is_rgb);
 
 }  // namespace rc::semantic

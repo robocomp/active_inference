@@ -33,6 +33,7 @@ ResidualConfig load_residual_config(const ConfigLoader& cfg)
     out.K_stable               = geti("ResidualConcept.KStable",             20);
     out.diverged_retire_frames = geti("ResidualConcept.DivergedRetireFrames", 0);
     out.log_period_frames      = geti("ResidualConcept.LogPeriodFrames",     30);
+    out.grid_publish_every_n   = geti("ResidualConcept.GridPublishEveryN",   1);
     out.write_threshold_m      = getf("ResidualConcept.WriteThresholdM",     0.02f);
 
     // ── belief ──
@@ -117,6 +118,12 @@ ResidualConfig load_residual_config(const ConfigLoader& cfg)
     out.helios_min_range_m        = getf("LidarModel.HeliosMinRangeM", 0.40f); // dead shells: no returns closer
     out.bpearl_min_range_m        = getf("LidarModel.BpearlMinRangeM", 0.10f);
     out.zed_min_range_m           = getf("LidarModel.ZedMinRangeM",    0.30f);
+    out.helios_beam_spacing_rad   = getf("LidarModel.HeliosBeamSpacingRad", 0.0394f);  // vertical sampling
+    out.bpearl_beam_spacing_rad   = getf("LidarModel.BpearlBeamSpacingRad", 0.0506f);  // interval per device
+    out.zed_beam_spacing_rad      = getf("LidarModel.ZedBeamSpacingRad",    0.0068f);
+    out.grid_speckle_min_neighbours = geti("Grid.SpeckleMinNeighbours", 1);   // lone-cell filter (a size
+    out.grid_speckle_grace_cycles   = geti("Grid.SpeckleGraceCycles",  10);   // threshold — see the header)
+    out.grid_speckle_min_component_cells = geti("Grid.SpeckleMinComponentCells", 3);  // isolated-clump filter
     out.release_csv_path      = gets("Grid.ReleaseCsvPath", "etc/residual_releases.csv");
     out.birth_csv_path        = gets("Grid.BirthCsvPath",   "etc/residual_births.csv");
     out.sweep_csv_path        = gets("Grid.SweepCsvPath",   "etc/residual_sweep.csv");
@@ -125,6 +132,7 @@ ResidualConfig load_residual_config(const ConfigLoader& cfg)
     out.grid_inflate_radius_m   = getf("Grid.InflateRadiusM",    0.0f);    // 0: controller does exact footprint
     out.grid_self_body_radius_m = getf("Grid.SelfBodyRadiusM",   0.55f);   // body envelope for the sensor-model term
     out.grid_self_body_sigma_m  = getf("Grid.SelfBodySigmaM",    0.08f);   // its positional uncertainty
+    out.grid_pose_precision     = getb("Grid.PosePrecision",    true);    // localiser σ as an evidence weight
     out.grid_floor_responsibility = getb("Grid.FloorResponsibility", true); // floor in the per-return mixture
     out.grid_floor_return_clears  = getb("Grid.FloorReturnClears",   true); // a floor return frees its own cell
     out.grid_floor_sigma_min_m    = getf("Grid.FloorSigmaMinM",      0.03f);// sensor range noise (σ floor)

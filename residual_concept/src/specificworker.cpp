@@ -686,7 +686,11 @@ void SpecificWorker::compute()
             gp.clear_stop_max_m     = cfg_.grid_clear_stop_max_m;
             gp.collision_band_top_m = cfg_.grid_collision_band_top_m;
             gp.lidar_clearance_m    = cfg_.grid_lidar_clearance_m;
+            gp.speckle_min_neighbours = cfg_.grid_speckle_min_neighbours;
+            gp.speckle_grace_cycles   = cfg_.grid_speckle_grace_cycles;
+            gp.speckle_min_component_cells = cfg_.grid_speckle_min_component_cells;
             gp.self_body_sigma_m   = cfg_.grid_self_body_sigma_m;
+            gp.pose_precision      = cfg_.grid_pose_precision;
             // NO C-SPACE INFLATION. The controller now collides its ACTUAL footprint polygon against the grid
             // (common/robot_footprint + controller/src/grid_planner), so inflating here is double-counted: a
             // 0.25 m dilation plus the robot's own 0.28 m inscribed radius demands ~0.53 m of clearance from
@@ -708,6 +712,21 @@ void SpecificWorker::compute()
         if (grid_ready_)   // integrate now (needs no explainers); read-out + publish happen after explainers below
         {
             ego_reliability_ = compute_ego_reliability();   // <1 while moving → down-weight the whole sweep
+            // ...and the covariate ego_reliability_ cannot carry: how well the robot is LOCALISED. A standing
+            // robot scores reliability 1.0, which at startup is exactly backwards — see OccGridParams::
+            // pose_precision. room_concept publishes its own σ on the room→robot RT edge; hand it to the grid so
+            // a sweep registered through an unconverged pose cannot latch a cell in one frame.
+            {
+                const auto [sp, st] = compute_pose_sigma();
+                grid_.set_pose_sigma(sp, st);
+                static int psc = 0;
+                if ((psc++ % 40) == 0 and (sp > 0.0f or st > 0.0f))
+                    std::println("[pose-prec] sigma_pos {:.3f} m  sigma_theta {:.4f} rad  -> weight {:.2f} at 1 m, "
+                                 "{:.2f} at 3 m {}", sp, st,
+                                 (0.03f * 0.03f) / (0.03f * 0.03f + sp * sp + st * st * 1.0f),
+                                 (0.03f * 0.03f) / (0.03f * 0.03f + sp * sp + st * st * 9.0f),
+                                 cfg_.grid_pose_precision ? "[APPLIED]" : "[log-only, flag off]");
+            }
             // DATA-DRIVEN FLOOR PLANE: fit the floor from the RAW LiDAR (best floor coverage) and reference the
             // grid's obstacle band to it, so a new scenario's offset/tilted floor never latches as phantoms. The
             // estimator always runs+logs (so the offset is visible); the grid uses it only when the flag is on.
@@ -854,8 +873,12 @@ void SpecificWorker::compute()
         if ((gc++ % 20) == 0)
         {
             std::size_t maxc = 0; for (const auto& c : comps) maxc = std::max<std::size_t>(maxc, c.n_cells);
-            std::println("[grid] residual components={} max_cells={} (walls/specialists subtracted at read-out)",
-                         comps.size(), maxc);
+            // `speckle` = lone residual cells the read-out withheld (Grid.SpeckleMinNeighbours). Read it against
+            // the components: if it is the same order as what ships, the map is mostly lone cells and the filter
+            // is carrying it — which is a reason to look at why they are being born, not to raise the filter.
+            std::println("[grid] residual components={} max_cells={} speckle_dropped={} "
+                         "(walls/specialists subtracted at read-out)",
+                         comps.size(), maxc, grid_.speckle_dropped());
         }
         // `grid` node under room: residual cells + inflated border (display) + inflated component hulls
         // (`grid_polygons`, encoded) which the controller reads and plans against alongside the known objects.
@@ -1259,7 +1282,8 @@ bool SpecificWorker::integrate_lidar_per_device()
     grid_.set_device_floor_z0(keep ? cfg_.cluster.bpearl_floor_z0 : -1.0f);
     grid_.set_sensor_min_range(cfg_.bpearl_min_range_m);   // its dead shell: no free evidence inside it
     grid_.set_sensor_noise(0.0f, 0.0f);                    // lidar-grade: full clearing authority
-    grid_.set_sensor_id(1);
+    grid_.set_sensor_beam_spacing(cfg_.bpearl_beam_spacing_rad);   // ...and how much of a column one
+    grid_.set_sensor_id(1);                                        // crossing may refute (see beam_spacing_rad)
     grid_.integrate_sweep(lidar_ingestor_->origin_room(), bpearl_pts, /*begin_cycle=*/true, ego_reliability_);
 
     const auto& he = device_sweep(0, keep);          // re-derive: unfiltered when the flag is on
@@ -1267,6 +1291,7 @@ bool SpecificWorker::integrate_lidar_per_device()
     grid_.set_device_floor_z0(keep ? cfg_.cluster_helios_floor_z0 : -1.0f);
     grid_.set_sensor_min_range(cfg_.helios_min_range_m);
     grid_.set_sensor_noise(0.0f, 0.0f);
+    grid_.set_sensor_beam_spacing(cfg_.helios_beam_spacing_rad);
     grid_.set_sensor_id(2);
     grid_.integrate_sweep(lidar_ingestor_->origin_room(), he, /*begin_cycle=*/false, ego_reliability_);
     log_sweep(he, "helios");   // the returns themselves, in the frame the grid works in
@@ -1279,6 +1304,7 @@ bool SpecificWorker::integrate_lidar_per_device()
     // precision it actually has: full weight up close, a few percent at 4 m, where its endpoint is uncertain by
     // 13 cm and an overestimated depth would send the ray through the tabletop it really hit.
     grid_.set_sensor_noise(cfg_.zed_infra.sigma0_m, cfg_.zed_infra.sigma_quad);
+    grid_.set_sensor_beam_spacing(cfg_.zed_beam_spacing_rad);   // dense depth: a pencil, unlike the rings
     grid_.set_sensor_id(3);
 
     static int dc = 0;
@@ -1385,6 +1411,32 @@ float SpecificWorker::compute_ego_reliability() const
     return 1.0f / (1.0f + v / v0 + w / w0);
 }
 
+// THE LOCALISER'S OWN SIGMA, as (sigma_pos_m, sigma_theta_rad), from rt_covariance on the room<-robot RT edge.
+// room_concept writes a 6x6 ROW-MAJOR SE3 block ordered [x, y, z, rx, ry, rz] with its SE(2) (x, y, theta) mapped
+// to slots 0, 1 and 5 — so the heading variance is at (5,5) = [35], NOT at (2,2) = [14], which is var_Z. That
+// exact confusion made the controller's rotation throttle read an identically-zero yaw sigma over 20817 samples
+// (room_scene_graph.cpp), so the slot is worth naming here rather than indexing by eye.
+// Absent attribute / short vector / non-finite ⇒ (0, 0) ⇒ the grid's pose term is off and every weight is
+// unchanged. Silent inertness is the failure mode, so `pose_damped` in grid_diag.csv is the thing to read.
+std::pair<float, float> SpecificWorker::compute_pose_sigma() const
+{
+    if (not rt_api_ or not G) return {0.0f, 0.0f};
+    const auto robots = G->get_nodes_by_type("robot");
+    if (robots.empty()) return {0.0f, 0.0f};
+    auto e = rt_api_->get_edge_RT(robots.front(), room_node_id_);
+    if (not e.has_value()) return {0.0f, 0.0f};
+    const auto cov = G->get_attrib_by_name<rt_covariance_att>(e.value());
+    if (not cov.has_value() or cov->get().size() < 36) return {0.0f, 0.0f};
+    const auto& C = cov->get();
+    const float vxx = C[0 * 6 + 0], vyy = C[1 * 6 + 1], vth = C[5 * 6 + 5];
+    if (not (std::isfinite(vxx) and std::isfinite(vyy) and std::isfinite(vth))) return {0.0f, 0.0f};
+    // One isotropic position sigma: the grid's term is a scalar variance, and the trace is the right summary of
+    // a 2x2 block for it (mean variance per axis), not the larger eigenvalue — which would double-count an
+    // anisotropy the range-dependent term already dominates.
+    const float var_pos = 0.5f * (std::max(0.0f, vxx) + std::max(0.0f, vyy));
+    return {std::sqrt(var_pos), std::sqrt(std::max(0.0f, vth))};
+}
+
 void SpecificWorker::dump_residual_cells(const rc::OccupancyGrid::CellExplained& explained)
 {
     // WHERE the residual cells are, not just how tall they are. The height histogram says 13% of the published
@@ -1467,6 +1519,7 @@ void SpecificWorker::log_grid_diag()
         f << "cycle,occupied,hits,misses,miss_blocked_zaware,latched,released,hit_then_cleared,"
              "forgotten,self_damped,floor_damped,floor_clears,"
              "floor_rets,floor_blocked,marks_suppr,floor_dropped,decayed,zheld,held,unseen,decay_w,"
+             "pose_damped,pose_sig_pos,pose_sig_th,speckle,"
         // ★ This header MUST match the write below field for field. It drifted once (two columns were added to
         //   the row and not to the header) and every column after decay_w was then read as its neighbour —
         //   including by me, while diagnosing. Count them if you touch either.
@@ -1481,6 +1534,8 @@ void SpecificWorker::log_grid_diag()
       << d.marks_suppressed << ',' << last_device_floor_dropped_ << ','
       << d.cells_decayed << ',' << d.cells_zheld << ',' << d.cells_held << ',' << d.cells_unseen << ','
       << (d.cells_decayed > 0 ? d.decay_weight_sum / d.cells_decayed : 0.0) << ','
+      << d.pose_damped << ',' << grid_.pose_sigma_pos() << ',' << grid_.pose_sigma_theta() << ','
+      << grid_.speckle_dropped() << ','
       << d.clear_damped << ',' << d.clear_surface_damped << ',' << d.clear_blind << ','
       << d.clear_stopped << ',' << d.clear_blind_shell << ','
       << d.bad_points << ',' << d.cells_repaired << ','
@@ -1618,7 +1673,11 @@ void SpecificWorker::publish_grid_display(const rc::OccupancyGrid::CellExplained
                                           const std::vector<rc::OccComponent>& comps)
 {
     static int t = 0;
-    if ((t++ % 5) != 0) return;                         // ~2 Hz display update (attr-only; no node churn)
+    // ★WAS A HARDCODED `% 5` (2 Hz), CALLED A "display update" — which it was, until the controller
+    // started planning against this grid. See ResidualConfig::grid_publish_every_n for why it moved
+    // to 10 Hz and what it costs. Attr-only either way: no node churn.
+    const int every_n = std::max(1, cfg_.grid_publish_every_n);
+    if ((t++ % every_n) != 0) return;
     if (not G or room_node_id_ == 0 or not rt_api_) return;
     auto room = G->get_node(room_node_id_);
     if (not room.has_value()) return;

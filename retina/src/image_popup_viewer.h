@@ -5,8 +5,13 @@
 #include <opencv2/core.hpp>
 
 #include <chrono>
+#include <memory>
+#include <string>
+#include <vector>
 
 class QResizeEvent;
+class QMouseEvent;
+namespace rc::semantic { struct SemanticMap; }
 
 namespace rc
 {
@@ -20,6 +25,7 @@ class ImagePopupViewer final : public QLabel
     Q_OBJECT
 public:
     explicit ImagePopupViewer(QWidget* parent = nullptr);
+    ~ImagePopupViewer() override;   // out-of-line: probs_map_ holds an incomplete SemanticMap here
 
     // Update with a BGR (CV_8UC3) frame. Empty frames are ignored. Draws a small
     // display-rate FPS chip so a live/stalled stream is obvious at a glance.
@@ -38,17 +44,33 @@ public:
     // buffers it rewrites per frame.
     void set_depth_readout(const cv::Mat& room_log_range, const cv::Mat& model_log_range, bool active);
 
+    // Graded-posterior hover-readout, the panorama twin of YoloViewer's. Every class the model exposes
+    // with its probability at the cursor and the top-two MARGIN, which is what the argmax discards.
+    // ★On the 360 path only the strips scheduled this frame carry a posterior; the rest read NaN and
+    // are reported as "not looked at", never as a low probability.
+    void set_class_names(std::vector<std::string> names) { class_names_ = std::move(names); }
+    void set_prob_readout(const rc::semantic::SemanticMap& map, bool active);
+
 protected:
     void resizeEvent(QResizeEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
 
 private:
+    // Mouse tracking = the OR of the readouts that need hover events, never one readout's own opinion.
+    // Setting it per-readout is a bug this codebase has already paid for once: in YoloViewer the depth
+    // readout, reached first each frame, turned tracking off on the semantic readout's behalf and the
+    // semantic hover went silent for good (yolo_viewer.cpp:144).
+    void sync_mouse_tracking();
+
     QPixmap last_pixmap_;
     std::chrono::steady_clock::time_point last_frame_time_{};
     float fps_ema_ = 0.f;
     cv::Mat room_log_range_;       // CV_32FC1, ln(metres) — room-belief envelope
     cv::Mat model_log_range_;      // CV_32FC1, ln(metres) — anchored monocular model
     bool    depth_active_ = false;
+    std::unique_ptr<rc::semantic::SemanticMap> probs_map_;   // posterior planes only (cloned per frame)
+    bool    probs_active_ = false;
+    std::vector<std::string> class_names_;                   // ADE20K-150 id → name, for the readout
 };
 
 } // namespace rc

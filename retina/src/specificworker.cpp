@@ -17,6 +17,10 @@
  *    along with RoboComp.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "specificworker.h"
+
+#include "place_stage.h"
+
+#include <cstdlib>   // std::exit — model preflight
 #include <fstream>   // [perf-probe] CSV timing logs (remove with the probes)
 #include "scene_processor.h"
 #include "../../common/media_transport/rt_extrapolate.h"
@@ -36,6 +40,7 @@
 #include "../../common/diag_log/rotating_csv.h"   // rc::diag::open_rotating (SHARED)
 #include "pose_stage.h"
 #include "semantic_stage.h"
+#include "door_specialist_stage.h"
 #include "semantic_stage_360.h"
 #include "semantic_mask_stage.h"
 #include "sam2_stage.h"
@@ -130,11 +135,22 @@ void SpecificWorker::request_shutdown()
 void SpecificWorker::initialize()
 {
     qInfo() << "initialize retina worker";
-    GenericWorker::initialize();
 
     // --- Configuration ---
+    // Loaded BEFORE GenericWorker::initialize() so the model preflight below can run before the DSR
+    // graph exists.
     params = load_retina_params(configLoader);
     verbose_debug_ = params.VERBOSE_DEBUG;
+
+    // --- Model preflight: a capability configured ON whose model is missing is FATAL ---
+    // ★ THE EXIT MUST HAPPEN HERE, before GenericWorker::initialize() joins the graph. This agent owns
+    // nodes in a SHARED, PERSISTENT graph, and cleanup runs only from the destructor on a graceful
+    // exit; bailing out after the join would abandon the agent node for the next run's stale-sweep to
+    // reap. Before the join there is nothing to leak, so a plain exit is the correct and safe thing.
+    if (not preflight_models(params))
+        std::exit(EXIT_FAILURE);
+
+    GenericWorker::initialize();
 
     // Cap OpenCV's implicit thread pool. The per-cycle preprocessing (resize/split/convertTo of the
     // YOLO frames) otherwise fans out across ALL cores in short bursts, inflating the process's
@@ -293,6 +309,21 @@ void SpecificWorker::initialize()
         zed_stages.push_back(std::move(zdepth));
     }
 
+    // ── Door second opinion, LAST in the ZED chain ────────────────────────────────────────────────
+    // Order is load-bearing: it self-gates on whether the cheap channel produced a door mask THIS frame,
+    // so it must run after seg and semantic_masks have filled out.masks. Pushed last for that reason.
+    if (params.DOOR_SPECIALIST_ENABLED and not params.DOOR_SPECIALIST_MODEL.empty())
+    {
+        rc::doors::DoorSpecialist::Config dcfg;
+        dcfg.model_path  = params.DOOR_SPECIALIST_MODEL;
+        dcfg.input_size  = params.DOOR_SPECIALIST_INPUT_SIZE;
+        dcfg.use_gpu     = params.DOOR_SPECIALIST_USE_GPU;
+        dcfg.use_trt     = params.DOOR_SPECIALIST_USE_TRT;
+        dcfg.score_floor = params.DOOR_SPECIALIST_SCORE_FLOOR;
+        zed_stages.push_back(std::make_unique<rc::DoorSpecialistStage>(
+            dcfg, params.DOOR_SPECIALIST_DECIMATION));
+    }
+
     // Custom drawing windows (Voxel3D GL + YOLO raster), each in its own top-level window — see
     // specificworker_viewers.cpp. Both config-gated (Voxel.show_voxel_viewer / show_yolo_viewer).
     setup_custom_viewers();
@@ -330,6 +361,23 @@ void SpecificWorker::initialize()
             if (auto* s = dynamic_cast<rc::SemanticStage*>(zed_worker_ ? zed_worker_->stage("semantic") : nullptr);
                 s and s->processor())
                 yolo_viewer_->set_class_names(s->processor()->class_names());
+    }
+    door_approach_log_.configure(params.DOOR_APPROACH_LOG_PATH, params.DOOR_APPROACH_LABEL,
+                                 params.DOOR_APPROACH_LOG);
+
+    // Same table for the panorama popup's posterior readout — it names ADE20K ids, so it is the ZED
+    // stage's list when that one exists and the 360 stage's otherwise (they are the same 150 names).
+    if (ricoh_viewer_)
+    {
+        const rc::semantic::YoloSemanticProcessor* proc = nullptr;
+        if (auto* z = dynamic_cast<rc::SemanticStage*>(zed_worker_ ? zed_worker_->stage("semantic") : nullptr);
+            z and z->processor())
+            proc = z->processor();
+        else if (auto* r = dynamic_cast<rc::SemanticStage360*>(ricoh_worker_ ? ricoh_worker_->stage("semantic360") : nullptr);
+                 r and r->processor())
+            proc = r->processor();
+        if (proc)
+            ricoh_viewer_->set_class_names(proc->class_names());
     }
     // ZED-image model-instance projection overlay (gated by the "Models" toggle in the ZED popup).
     // Does NO live graph traversal at draw time (caches the zed CameraAPI once); all geometry is fed
@@ -464,6 +512,41 @@ void SpecificWorker::initialize()
             // does NO work while nobody is looking (same contract as the ZED semantic stage).
             depth_stage->set_enabled(ricoh_depth_overlay_enabled_);
             ricoh_stages.push_back(std::move(depth_stage));
+        }
+
+        // ── PlaceMemory: panoramic appearance keyframes -> a pose mixture ────────────────────────
+        // Runs LAST on the ricoh worker: it reads only in.rgbd.bgr and in.room_T_sensor, so it is
+        // independent of every other stage and cannot perturb them. It fills NO PerceptionResult slot
+        // -- in this pass nothing reads it, and the outputs go to files the stage owns. See
+        // place_stage.h for why that deviation from the "Stage + slot + Publisher" recipe is deliberate.
+        if (params.PLACE_ENABLED)
+        {
+            rc::PlaceStageConfig pcfg;
+            pcfg.encoder.model_path = params.PLACE_MODEL_PATH;
+            pcfg.encoder.use_gpu    = params.PLACE_USE_GPU;
+            pcfg.encoder.use_trt    = params.PLACE_USE_TRT;
+            pcfg.encoder.input_w    = params.PLACE_INPUT_W;
+            pcfg.encoder.input_h    = params.PLACE_INPUT_H;
+            pcfg.encoder.n_sectors  = params.PLACE_N_SECTORS;
+            pcfg.encoder.pool_p     = params.PLACE_POOL_P;
+            pcfg.encoder.band_lo    = params.PLACE_BAND_LO;
+            pcfg.encoder.band_hi    = params.PLACE_BAND_HI;
+            pcfg.encoder.center     = params.PLACE_CENTER;
+            pcfg.encoder.sector_soft = params.PLACE_SECTOR_SOFT;
+            pcfg.decimation         = params.PLACE_DECIMATION;
+            pcfg.build_map          = params.PLACE_BUILD_MAP;
+            pcfg.insert_min_dist_m  = params.PLACE_INSERT_MIN_DIST_M;
+            pcfg.save_every_n       = params.PLACE_SAVE_EVERY_N;
+            pcfg.map_path           = params.PLACE_MAP_PATH;
+            pcfg.map_blob_path      = params.PLACE_MAP_BLOB_PATH;
+            pcfg.log_queries        = params.PLACE_LOG_QUERIES;
+            pcfg.log_grid           = params.PLACE_LOG_GRID;
+            pcfg.log_stride         = params.PLACE_LOG_STRIDE;
+            pcfg.log_dir            = params.PLACE_LOG_DIR;
+            // ★ Recorded into the map header: this yaw is baked into room_T_sensor by the RicohSource,
+            // so a map built at one tune and queried at another is silently ROTATED.
+            pcfg.azimuth_tune_deg   = params.RICOH_AZIMUTH_TUNE_DEG;
+            ricoh_stages.push_back(std::make_unique<rc::PlaceStage>(pcfg, G));
         }
 
         auto ricoh_src = std::make_shared<rc::RicohSource>(scene_processor.get(), G, params.RICOH_AZIMUTH_TUNE_DEG);
@@ -1044,6 +1127,33 @@ void SpecificWorker::on_render_tick()
                             cv::rectangle(pano, cv::Rect(x0, 0, w, 4), cv::Scalar(95, 211, 160), cv::FILLED);
                         }
                     }
+                    // Graded class posteriors on the panorama. Drawn from THIS frame's map only, never
+                    // from the echoed argmax canvas: the strips that did not run carry NaN and are
+                    // hatched, so the picture says "not looked at" instead of "no door here".
+                    if (rres->semantic and rres->semantic->graded() and prob_classes_.empty())
+                        if (auto* r360 = dynamic_cast<rc::SemanticStage360*>(
+                                ricoh_worker_ ? ricoh_worker_->stage("semantic360") : nullptr);
+                            r360 and r360->processor())
+                        {
+                            const auto& rn = r360->processor()->class_names();
+                            for (const int id : rres->semantic->prob_class_ids)
+                                prob_classes_.emplace_back(id, (id >= 0 and id < static_cast<int>(rn.size()))
+                                                                   ? rn[static_cast<std::size_t>(id)]
+                                                                   : std::to_string(id));
+                        }
+                    if (rres->semantic and rres->semantic->graded()
+                        and ricoh_prob_class_idx_ >= 0
+                        and ricoh_prob_class_idx_ < static_cast<int>(prob_classes_.size()))
+                    {
+                        if (pano.data == rres->frame.rgbd.bgr.data)
+                            pano = pano.clone();   // never draw into the worker's frame
+                        pano = rc::semantic::compose_prob_canvas(
+                            pano, *rres->semantic,
+                            prob_classes_[static_cast<std::size_t>(ricoh_prob_class_idx_)].first,
+                            /*img_is_rgb=*/false);   // the panorama popup canvas is BGR
+                    }
+                    if (rres->semantic)
+                        ricoh_viewer_->set_prob_readout(*rres->semantic, rres->semantic->graded());
                     ricoh_viewer_->update_image(pano);
                 }
             }
@@ -1179,6 +1289,32 @@ void SpecificWorker::compute()
     // Detector accountability for THIS frame, keyed on the same stamp the masks node carries, so it
     // joins directly to every agent's detect_probe.csv row for the same cycle.
     log_detect_drops(zed_res->frame.stamp, /*is_360=*/false);
+    // Approach row for THIS frame. Gated on semantic_fresh only — never on "a door was found", which
+    // would leave the file starting at the moment of success with the whole approach missing.
+    if (door_approach_log_.enabled() and zed_res->semantic_fresh and zed_res->semantic)
+        if (auto* sst = dynamic_cast<rc::SemanticStage*>(
+                zed_worker_ ? zed_worker_->stage("semantic") : nullptr);
+            sst and sst->processor())
+        {
+            int se = -1, sr = -1, sn = -1; float sc = -1.0f; std::string sl;
+            if (zed_res->door_specialist)
+            {
+                const auto& ds = *zed_res->door_specialist;
+                se = ds.eligible ? 1 : 0;
+                sr = ds.ran ? 1 : 0;
+                sn = ds.ran ? static_cast<int>(ds.detections.size()) : -1;
+                if (not ds.detections.empty())
+                {
+                    const auto best = std::max_element(ds.detections.begin(), ds.detections.end(),
+                        [](const auto& a, const auto& b){ return a.confidence < b.confidence; });
+                    sc = best->confidence; sl = best->label;
+                }
+            }
+            door_approach_log_.log(zed_res->frame.stamp, /*is_360=*/false, zed_res->frame.room_T_sensor,
+                                   zed_res->frame.rgbd, *zed_res->semantic,
+                                   zed_res->masks ? *zed_res->masks : std::vector<SegDetection>{},
+                                   sst->processor()->class_names(), se, sr, sn, sc, sl);
+        }
 
     static const std::vector<SegDetection> kNoSegDetections;
     static const std::vector<rc::human_pose::PoseDetection> kNoPoses;
@@ -1205,6 +1341,26 @@ void SpecificWorker::compute()
         if (sem_stage and sem_stage->processor() and semantic_overlay_enabled_
             and sem_map and not sem_map->labels.empty())
             viewer_rgb = sem_stage->processor()->compose_semantic_canvas(viewer_rgb, *sem_map);
+        // Graded class posteriors. The (id, name) list comes from the MAP, i.e. from the model's own
+        // metadata, so the buttons cannot outlive a re-export that changed the channel order.
+        if (sem_map and sem_map->graded() and sem_stage and sem_stage->processor())
+        {
+            const auto& names = sem_stage->processor()->class_names();
+            if (prob_classes_.size() != sem_map->prob_class_ids.size())
+            {
+                prob_classes_.clear();
+                for (const int id : sem_map->prob_class_ids)
+                    prob_classes_.emplace_back(id, (id >= 0 and id < static_cast<int>(names.size()))
+                                                       ? names[static_cast<std::size_t>(id)]
+                                                       : std::to_string(id));
+                zed_prob_class_idx_ = ricoh_prob_class_idx_ = -1;   // indices into a list that just changed
+            }
+            if (zed_prob_class_idx_ >= 0
+                and zed_prob_class_idx_ < static_cast<int>(prob_classes_.size()))
+                viewer_rgb = rc::semantic::compose_prob_canvas(
+                    viewer_rgb, *sem_map, prob_classes_[static_cast<std::size_t>(zed_prob_class_idx_)].first,
+                    /*img_is_rgb=*/true);
+        }
         // Draw the detected skeletons (green bones, red joints, orange bbox) under the seg overlay.
         // The pose model lives in the ZED worker's PoseStage now; reach it for the compose passthrough.
         if (auto* ps = dynamic_cast<rc::PoseStage*>(zed_worker_ ? zed_worker_->stage("pose") : nullptr);
@@ -1217,8 +1373,15 @@ void SpecificWorker::compute()
             if (viewer_rgb.data == zed_res->frame.rgbd.bgr.data)
                 viewer_rgb = viewer_rgb.clone();   // don't scribble on the shared source frame
             // boxes/polygon from the main-thread scene gather; room<-zed from the worker's own frame.
+            // Pass the graded posterior + this frame's masks so a projected DOOR can be drawn as
+            // "seen" or "believed only, and here is what the classifier says there" — see
+            // EvidenceState in model_projection_overlay.cpp. 14 = ADE20K `door`.
             model_overlay_->draw(viewer_rgb, frame->graph_object_boxes, zed_res->frame.room_T_sensor,
-                                 frame->room_poly_x, frame->room_poly_y, frame->room_height);
+                                 frame->room_poly_x, frame->room_poly_y, frame->room_height,
+                                 (sem_map and sem_map->graded()) ? sem_map : nullptr,
+                                 zed_res->masks ? std::span<const SegDetection>{*zed_res->masks}
+                                                : std::span<const SegDetection>{},
+                                 /*field_class_id=*/14, /*field_class_name=*/"door");
         }
         // SAM2-refined masks (magenta) when the ZED-window "SAM2" toggle is on — for eyeballing SAM2
         // vs the raw YOLO masks. compose_canvas returns a fresh Mat, so the shared frame is untouched.
@@ -1317,6 +1480,11 @@ void SpecificWorker::compute()
         // Feed the dense label map for the hover readout (cleared internally when not active).
         if (sem_map)
             yolo_viewer_->update_semantic(sem_map->labels, semantic_overlay_enabled_);
+        // The per-class readout is worth having whenever a graded map exists, independently of which
+        // class the heat overlay is drawing — reading the numbers at one pixel is what shows a 0.44 /
+        // 0.44 coin flip, and that is invisible in any single-class tint.
+        if (sem_map)
+            yolo_viewer_->update_probs(*sem_map, sem_map->graded());
         // Size the RGB window to the image once (only when no saved geometry was restored).
         if (yolo_window_needs_image_size_ and yolo_window_ != nullptr and not viewer_rgb.empty())
         {
@@ -1376,6 +1544,15 @@ void SpecificWorker::compute()
                 // full-canvas bug that was deleting the hood) unlogged. Placed on the PUBLISH path, not in
                 // the viewer block, so it records every frame rather than only while a popup is open.
                 log_detect_drops(rres->frame.stamp, /*is_360=*/true);
+                if (door_approach_log_.enabled() and rres->semantic_fresh and rres->semantic)
+                    if (auto* r360 = dynamic_cast<rc::SemanticStage360*>(
+                            ricoh_worker_ ? ricoh_worker_->stage("semantic360") : nullptr);
+                        r360 and r360->processor())
+                        door_approach_log_.log(rres->frame.stamp, /*is_360=*/true,
+                                               rres->frame.room_T_sensor, rres->frame.rgbd,
+                                               *rres->semantic,
+                                               rres->masks ? *rres->masks : std::vector<SegDetection>{},
+                                               r360->processor()->class_names());
                 ricoh_dets   = std::move(*rres->masks);       // 1:1 with bearings (BearingStage order)
                 bearing_dets = std::move(*rres->bearings);
             }
@@ -1497,6 +1674,20 @@ void SpecificWorker::compute()
             {
                 graph_publisher_->publish_semantic(zed_res->semantic->labels, zed_res->frame.stamp);
                 last_semantic_pub_ = now;
+            }
+        }
+
+        // Graded class-posterior field → the SAME 'semantic' node. Its own gate and its own timer, so
+        // the small field survives the label blob being off; no-op unless a "-probs" model is loaded.
+        if (params.SEMANTIC_PUBLISH_PROBS and zed_res->semantic_fresh
+            and zed_res->semantic and zed_res->semantic->graded())
+        {
+            using namespace std::chrono;
+            const auto now = steady_clock::now();
+            if (duration<double>(now - last_semantic_probs_pub_).count() >= params.SEMANTIC_PUBLISH_MIN_INTERVAL_S)
+            {
+                graph_publisher_->publish_semantic_probs(*zed_res->semantic, zed_res->frame.stamp);
+                last_semantic_probs_pub_ = now;
             }
         }
     }

@@ -42,6 +42,8 @@
 #include "../../common/mask_ingestor/mask_ingestor.h"
 #include "../../common/occlusion/occlusion.h"   // rc::occlusion::{cone_blocks, walls_block} — shared LoS occlusion
 #include "door_scene_graph.h"
+#include "door_semantic_field.h"   // rc::SemanticProbField (retina's graded posterior)
+#include <opencv2/core.hpp>
 
 namespace rc {
 
@@ -60,9 +62,27 @@ struct DoorSilhouette
     // cannot drag the centroid toward a region the camera never saw.
     double sum_col = 0.0, sum_row = 0.0;
     int    img_w = 0, img_h = 0;
+    // ★THE BELIEF'S OWN PROJECTED CONTOUR, in image pixels: the four corners of the leaf face as THIS
+    // agent projected them, with THIS agent's camera and transform. Retained so the RGB edge check is
+    // run on exactly the contour the existence channel is defending. retina draws a similar rectangle
+    // for the human, but from the DSR node's oriented box and a transform pinned to a different stamp —
+    // close, never identical, and a defence measured on a not-quite-right contour is not a defence.
+    // Empty when any corner fell behind the camera or off-frame.
+    std::vector<cv::Point> face_px;
     int   n_occluded   = 0;    // in-frustum samples hidden behind a nearer NON-door mask
     int   n_cells      = 0;    // DISTINCT pixel cells the detectable silhouette covers (see resolvability)
     float mean_range_m = 0.0f; // mean camera→sample distance over the detectable samples
+    // ── POSTERIOR SAMPLED UNDER THE CONTOUR (retina's semantic_class_probs) ──────────────────────
+    // Accumulated over the DETECTABLE samples only: a sample the camera could not have seen carries no
+    // information about what the classifier thought there. `field_n` 0 ⇒ the field was unavailable
+    // (ungraded model, or retina down) and every consumer must behave exactly as it did before.
+    double field_sum = 0.0;    // Σ P(door) over detectable samples
+    float  field_max = 0.0f;   // max P(door) over detectable samples
+    int    field_n   = 0;
+    float  field_bg  = 0.0f;   // mean P(door) over the WHOLE field this frame — the comparison population
+    // Mean P(door) under the contour. Absolute value is NOT the signal (the classifier reads a plainly
+    // visible door at 0.265 while calling it a wall at 0.676); the CONTRAST against field_bg is.
+    float field_mean() const { return field_n > 0 ? static_cast<float>(field_sum / field_n) : 0.0f; }
     // How much of the door the sensor could actually have seen from here. Absence is evidence of removal only
     // in proportion to this — the rest is epistemic surprise ("I cannot resolve this from here"), not absence.
     float in_fov_frac() const { return n_total > 0 ? static_cast<float>(n_detectable) / n_total : 0.0f; }
@@ -166,7 +186,16 @@ public:
     // samples into occupancy / absence / occluded / out-of-frustum. See DoorSilhouette + DoorInstance::existence.
     // This is the ONLY channel that may remove a door — it is the only one that can tell "looked and found
     // nothing" from "never looked".
-    DoorSilhouette compute_silhouette_existence(const DoorInstance& inst);
+    // `field` may be null / invalid, in which case the silhouette's field_* accumulators stay 0 and the
+    // existence channel is bit-for-bit what it was before this channel existed.
+    // ★M1 — PHI AS A REAL DOF. Estimated per cycle by scoring candidate leaf angles against the door
+    // mask actually present in the image, with the agent's own actuation command as the prior. Returns
+    // the chosen phi and writes phi_est / phi_support onto the instance. Must run BEFORE the leaf pose
+    // is read, since every projection downstream is built from it.
+    void estimate_phi(DoorInstance& inst);
+
+    DoorSilhouette compute_silhouette_existence(const DoorInstance& inst,
+                                                const rc::SemanticProbField* field = nullptr);
     // Central-image box fraction: a detectable sample inside [f, 1-f]² of the image counts as "central" (the
     // robot is looking AT the door, not merely clipping the wide frustum edge). Set once from config.
     void set_central_region_frac(float f) { central_region_frac_ = f; }

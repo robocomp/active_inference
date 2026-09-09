@@ -1,5 +1,7 @@
 #include "semantic_stage_360.h"
 
+#include <limits>
+
 #include <algorithm>
 #include <print>
 
@@ -71,6 +73,17 @@ void SemanticStage360::run(const PerceptionFrame& in, PerceptionResult& out)
     // downstream size test even on a partial frame.
     long long inferred_px = 0;
 
+    // ★GRADED POSTERIOR PLANES, one per exposed class, at a strip-tiled NATIVE resolution: each strip
+    // contributes its own classifier-head block, so plane column [s*bw, (s+1)*bw) is strip s and the
+    // straight-scale mapping prob_at() assumes still holds across the whole panorama.
+    // Initialised to NaN, not 0. Only the strips scheduled this frame are looked at, and a zero would
+    // say "the model considered a door here and found none" about a place it never inspected — the
+    // exact confusion between silence and absence this channel exists to remove. The block size is
+    // taken from the first strip that actually runs, since only the model knows its head resolution.
+    std::vector<cv::Mat> prob_planes;
+    std::vector<int>     prob_ids;
+    int                  prob_bw = 0, prob_bh = 0;
+
     for (const int s : strips)
     {
         if (s < 0 or s >= n_strips_)
@@ -89,6 +102,31 @@ void SemanticStage360::run(const PerceptionFrame& in, PerceptionResult& out)
         m.labels.copyTo(labels(roi));   // copyTo into a ROI is a deep write into OUR buffer
         if (want_scores_ and not m.scores.empty() and m.scores.size() == m.labels.size())
             m.scores.copyTo(scores(roi));
+
+        if (m.graded())
+        {
+            if (prob_planes.empty())
+            {
+                prob_ids = m.prob_class_ids;
+                prob_bw  = m.probs.front().cols;
+                prob_bh  = m.probs.front().rows;
+                prob_planes.assign(prob_ids.size(),
+                                   cv::Mat(prob_bh, prob_bw * n_strips_, CV_32FC1,
+                                           cv::Scalar(std::numeric_limits<float>::quiet_NaN())));
+                for (auto& pl : prob_planes)     // assign() copies ONE Mat header n times: unshare them
+                    pl = pl.clone();
+            }
+            // A later strip disagreeing about the head geometry or the class set would misalign every
+            // plane; drop that strip's posterior rather than paste it at the wrong offset.
+            if (m.prob_class_ids == prob_ids and m.probs.size() == prob_planes.size())
+                for (std::size_t k = 0; k < prob_planes.size(); ++k)
+                {
+                    const cv::Mat& src = m.probs[k];
+                    if (src.empty() or src.cols != prob_bw or src.rows != prob_bh)
+                        continue;
+                    src.copyTo(prob_planes[k](cv::Rect(s * prob_bw, 0, prob_bw, prob_bh)));
+                }
+        }
         inferred_px += static_cast<long long>(w) * H;
     }
 
@@ -98,7 +136,14 @@ void SemanticStage360::run(const PerceptionFrame& in, PerceptionResult& out)
     // ★inferred_area_px travels WITH the map, not as a separate field on the result, because it is a
     // property OF this map: any consumer that has the labels has the area they were inferred over, and
     // cannot accidentally size against the canvas instead.
-    out.semantic = rc::semantic::SemanticMap{std::move(labels), std::move(scores), inferred_px};
+    rc::semantic::SemanticMap map{std::move(labels), std::move(scores), inferred_px};
+    if (not prob_planes.empty())
+    {
+        map.prob_class_ids = std::move(prob_ids);
+        map.probs          = std::move(prob_planes);
+        map.probs_src_size = cv::Size(W, H);   // the planes map onto the WHOLE panorama, strip-tiled
+    }
+    out.semantic = std::move(map);
     out.semantic_fresh = true;
 }
 

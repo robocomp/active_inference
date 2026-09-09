@@ -1,4 +1,6 @@
 #include "yolo_viewer.h"
+
+#include "yolo_semantic.h"   // rc::semantic::SemanticMap (graded posteriors)
 #include "yolo_processor.h"
 
 #include <opencv2/imgproc.hpp>
@@ -147,7 +149,7 @@ void YoloViewer::resizeEvent(QResizeEvent* event)
 // update_semantic had ever announced itself, and the semantic hover went silent for good.)
 void YoloViewer::sync_mouse_tracking()
 {
-    setMouseTracking(semantic_active_ or depth_active_);
+    setMouseTracking(semantic_active_ or depth_active_ or probs_active_);
 }
 
 void YoloViewer::update_semantic(const cv::Mat& labels, bool active)
@@ -177,12 +179,35 @@ void YoloViewer::update_depth(const cv::Mat& measured_m, const cv::Mat& model_m,
     sync_mouse_tracking();
 }
 
+YoloViewer::~YoloViewer() = default;
+
+void YoloViewer::update_probs(const rc::semantic::SemanticMap& map, bool active)
+{
+    probs_active_ = active and map.graded();
+    if (probs_active_)
+    {
+        // Own the planes: the source map is rebuilt each (decimated) cycle, and on the 360 path it is
+        // the stage's buffer. Only the posterior fields are kept — labels/scores have their own copies.
+        auto owned = std::make_unique<rc::semantic::SemanticMap>();
+        owned->prob_class_ids = map.prob_class_ids;
+        owned->probs_src_size = map.probs_src_size;
+        owned->probs.reserve(map.probs.size());
+        for (const auto& plane : map.probs)
+            owned->probs.push_back(plane.empty() ? cv::Mat{} : plane.clone());
+        probs_map_ = std::move(owned);
+    }
+    else
+        probs_map_.reset();
+    sync_mouse_tracking();
+}
+
 void YoloViewer::mouseMoveEvent(QMouseEvent* event)
 {
     QLabel::mouseMoveEvent(event);
 
     const bool want_depth = depth_active_ and not depth_measured_.empty();
-    if ((!semantic_active_ or semantic_labels_.empty()) and not want_depth)
+    const bool want_probs = probs_active_ and probs_map_ and probs_map_->graded();
+    if ((!semantic_active_ or semantic_labels_.empty()) and not want_depth and not want_probs)
     {
         QToolTip::hideText();
         return;
@@ -218,6 +243,28 @@ void YoloViewer::mouseMoveEvent(QMouseEvent* event)
         lines << ((id >= 0 and id < static_cast<int>(class_names_.size()))
                       ? QString::fromStdString(class_names_[static_cast<std::size_t>(id)])
                       : QStringLiteral("(unlabelled)"));   // IGNORE_LABEL (255) / below confidence
+    }
+
+    if (want_probs)
+    {
+        const cv::Size fs = probs_map_->probs_src_size;
+        const int ix = std::clamp(static_cast<int>(rx * fs.width),  0, std::max(0, fs.width  - 1));
+        const int iy = std::clamp(static_cast<int>(ry * fs.height), 0, std::max(0, fs.height - 1));
+        const auto ranked = probs_map_->probs_at(ix, iy);
+        for (const auto& [id, prob] : ranked)
+        {
+            const QString name = (id >= 0 and id < static_cast<int>(class_names_.size()))
+                                     ? QString::fromStdString(class_names_[static_cast<std::size_t>(id)])
+                                     : QString("class %1").arg(id);
+            // NaN is "this strip was not looked at this frame", which is not a small probability.
+            lines << (std::isnan(prob) ? QString("P(%1)  —  not looked at").arg(name)
+                                       : QString("P(%1)  %2").arg(name).arg(prob, 0, 'f', 3));
+        }
+        // The margin between the top two. ★This is the number the argmax throws away: a door losing
+        // to wall by 0.02 and by 0.90 are byte-identical in the label map, and only the first should
+        // ever be read as "the classifier did not resolve this".
+        if (ranked.size() >= 2 and not std::isnan(ranked[0].second) and not std::isnan(ranked[1].second))
+            lines << QString("margin %1").arg(ranked[0].second - ranked[1].second, 0, 'f', 3);
     }
 
     if (want_depth)

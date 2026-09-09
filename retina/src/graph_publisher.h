@@ -26,6 +26,7 @@
 
 struct SegDetection;
 namespace rc::human_pose { struct PoseDetection; }
+namespace rc::semantic { struct SemanticMap; }
 
 // A detection from the RGB-360 (ricoh) panorama. Published into the SAME "masks" node. Two flavours:
 //   - bearing-only (has_lidar_depth=false): a no-depth slice (has_depth=0) tagged with a room-frame
@@ -72,6 +73,25 @@ public:
     // ids at the ZED IMAGE resolution (already unletterboxed), so a consumer reads
     // label = semantic_labels[v*semantic_width + u] directly. Large blob → call LOW-FREQUENCY.
     void publish_semantic(const cv::Mat& labels, std::uint64_t stamp);
+
+    // Publish the GRADED CLASS POSTERIOR field on that same 'semantic' node — the small companion to
+    // the label map above, and the channel that lets a consumer price an ABSENCE.
+    //
+    // ★WHY IT IS A FIELD AND NOT AN ANSWER. To damp a wrongly-confident absence, a concept agent needs
+    // max P(class) over ITS OWN projected silhouette, which retina cannot compute: it does not know
+    // where any agent believes its object is, and a top-down channel that told it was built once,
+    // limit-cycled and removed (IMPLEMENTATION_PLAN_decouple_retina.md). So retina publishes the field
+    // forward, consumer-agnostic, and every agent samples it where it needs to. One producer, many
+    // consumers — the existing contract, unchanged.
+    //
+    // Layout matches the four cortex attrs: K planes of prob_height x prob_width, row-major,
+    // plane-major (plane k at k*h*w), each in [0,1]. The planes map onto the SAME frame as
+    // semantic_labels, so a consumer samples at normalised (u/width, v/height) — a straight scale, as
+    // SemanticMap::prob_at does. Class ids come from the MODEL's metadata, never config, and ride
+    // along in semantic_prob_class_ids so a reordered export cannot silently read P(door) out of the
+    // cabinet plane. No-op when the map is not graded (ungraded export ⇒ nothing published).
+    // ~128 kB at 5x80x80 — 14x under the label blob, but still call it rate-capped.
+    void publish_semantic_probs(const rc::semantic::SemanticMap& map, std::uint64_t stamp);
 
     // Delete every "semantic_grid" node this agent left in the graph + reset ready flags.
     void cleanup_semantic_grid_nodes();

@@ -29,6 +29,18 @@ struct ResidualConfig
     int   K_stable              = 20;      // consecutive converged frames before "settled"
     int   diverged_retire_frames = 0;      // legacy no-data-fit counter; 0 = OFF (removal is now evidence-based)
     int   log_period_frames     = 30;
+    // ── HOW OFTEN THE GRID REACHES THE GRAPH ─────────────────────────────────────────────────────
+    // Compute cycles per publish of `grid_occupied_cells` (Period.Compute = 100 ms, so 1 = 10 Hz,
+    // 5 = 2 Hz). ★RAISED 5 -> 1 on 2026-08-28. It was a DISPLAY rate when nothing planned against
+    // it; it is now the only channel that carries near-field obstacles, because the H32F70 cannot
+    // see a 0.45 m box inside 0.57 m and the controller's ESDF has no memory. At 2 Hz the map the
+    // robot avoids things with is up to 500 ms stale — 0.25 m of travel at 0.5 m/s, which is larger
+    // than the whole unobservable ring the map exists to cover.
+    // ⚠THE COST IS CRDT DOTS. This attribute is the largest in the graph (~1600-2400 cells x 3
+    // floats) and cortex accumulates a dot per write; the dot cloud is already known to grow without
+    // bound and has pinned an agent at 100% CPU in compact(). 5x the rate is 5x the growth. If an
+    // agent starts burning CPU with no obvious cause, put this back to 5 FIRST.
+    int   grid_publish_every_n  = 1;
     float write_threshold_m     = 0.02f;   // geometry dead-band: republish only past this centre/size change
 
     // ── belief (the AI2 box-footprint fit) ──
@@ -98,6 +110,18 @@ struct ResidualConfig
     float helios_min_range_m = 0.40f;   // RS-Helios datasheet minimum
     float bpearl_min_range_m = 0.10f;   // RS-Bpearl is a near-field dome
     float zed_min_range_m    = 0.30f;   // matches ZedBoost.MinDepthM
+    // Each device's VERTICAL SAMPLING interval (rad) — how much of a column one see-through may refute.
+    // See OccGridParams::beam_spacing_rad: a 3 cm voxel is finer than a 32-ring lidar can sample at 2 m, so a
+    // pencil-thin refutation could never reach most marked voxels and nothing was ever removed. 0 ⇒ pencil.
+    float helios_beam_spacing_rad = 0.0394f;  // RS-Helios-32: 70 deg over 31 gaps
+    float bpearl_beam_spacing_rad = 0.0506f;  // RS-Bpearl-32: ~90 deg dome over 31 gaps
+    float zed_beam_spacing_rad    = 0.0068f;  // dense depth at stride 4 — effectively a pencil
+    // ── SPECKLE (see OccGridParams::speckle_min_neighbours) ──
+    // A residual cell with no neighbour and no recent return is not shipped. ★A SIZE THRESHOLD, flagged: it
+    // deletes a genuinely thin obstacle (a chair leg in one cell) unless the sensor is still striking it.
+    int   grid_speckle_min_neighbours = 1;   // 0 ⇒ off
+    int   grid_speckle_grace_cycles   = 10;  // cycles a lone cell keeps shipping after its last return
+    int   grid_speckle_min_component_cells = 3;   // isolated-clump filter: cells a connected clump needs; 0 ⇒ off
     // ── the LiDAR field: where each device can physically see, so its silence there is not absence ──
     // Mount z comes from the frame tree, NOT from here (ROBOT_GEOMETRY.md: helios 1.075, bpearl 0.670); these
     // are the device's own optical limits, which the graph does not publish yet. `enabled=false` ⇒ term inert.
@@ -131,6 +155,7 @@ struct ResidualConfig
     float grid_inflate_radius_m = 0.0f;
     float grid_self_body_radius_m = 0.55f;
     float grid_self_body_sigma_m  = 0.08f;  // positional uncertainty of the body surface (probit width)
+    bool  grid_pose_precision     = true;   // weight evidence by the localiser's own σ (see OccGridParams)
     // ── TIGHTENING THE OCCUPIED CONDITION (see OccGridParams for the derivations) ──
     // The nav band was a hard step and a single return one millimetre above it latched a cell for good, while the
     // floor's own MEASURED scatter (the plane fit's residual RMS, ≈7 cm here) was thrown away. These put the floor

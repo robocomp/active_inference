@@ -100,6 +100,9 @@ DoorConfig load_door_config(const ConfigLoader& cfg)
     out.ai2_gn_iters             = geti("DoorModel.AI2GnIters",              4);
     out.ai2_extent_std           = getf("DoorModel.AI2ExtentStd",            0.05f);
     out.ai2_csv_path             = gets("DoorModel.AI2CsvPath",              "");
+    out.detect_probe_csv_path    = gets("DoorConcept.DetectProbeCsvPath", out.detect_probe_csv_path);
+    out.rgb_contour_check        = getb("DoorConcept.RgbContourCheck", out.rgb_contour_check);
+    out.door_control_endpoint    = gets("DoorConcept.DoorControlEndpoint", out.door_control_endpoint);
 
     out.rt_cov_upload                 = getb("DoorConcept.RtCovUpload",         true);
     out.rt_cov_scale                  = getf("DoorConcept.RtCovScale",          1.0f);
@@ -108,7 +111,7 @@ DoorConfig load_door_config(const ConfigLoader& cfg)
     out.tracker_gate_mahalanobis = getf("Tracker.GateMahalanobis",  9.0f);
     out.tracker_gate_fallback_m  = getf("Tracker.GateFallbackM",    0.40f);
     out.tracker_detection_noise_m = getf("Tracker.DetectionNoiseM", 0.20f);
-    out.tracker_birth_frames     = geti("Tracker.BirthFrames",      8);
+    out.tracker_birth_frames     = getf("Tracker.BirthFrames",      out.tracker_birth_frames);
     out.tracker_birth_min_sep_m  = getf("Tracker.BirthMinSepM",     0.70f);
     out.tracker_merge_overlap    = getf("Tracker.MergeOverlap",     0.20f);
     out.exist_enabled            = getb("Existence.Enabled",          true);

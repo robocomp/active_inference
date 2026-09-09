@@ -23,6 +23,7 @@
 #include "yolo_semantic.h"        // rc::semantic::SemanticMap
 #include "depth_processor.h"      // rc::depth::DepthMap (ricoh 360 monocular depth)
 #include "graph_publisher.h"      // BearingDetection (ricoh 360 bearing channel)
+#include "door_specialist.h"   // rc::doors::DoorDetection
 
 namespace rc
 {
@@ -37,6 +38,14 @@ struct PerceptionFrame
     bool           is_360 = false;                        // equirect source → 3-strip seg / bearing publish
 };
 
+// Outcome of the door second-opinion channel for one frame. See door_specialist_stage.h.
+struct DoorSpecialistResult
+{
+    bool eligible = false;   // the cheap channel produced no door mask this frame
+    bool ran      = false;   // the specialist actually inferred (eligible AND not decimated away)
+    std::vector<rc::doors::DoorDetection> detections;   // empty WITH ran==true is a denial
+};
+
 // Everything a worker produced for one frame. One optional slot per map type; *_fresh marks whether the
 // model actually ran this frame (vs a held-last cache) so decimated publishes can gate on it.
 struct PerceptionResult
@@ -48,6 +57,13 @@ struct PerceptionResult
     bool                                                      poses_fresh = false;
     std::optional<rc::semantic::SemanticMap>                  semantic;
     bool                                                      semantic_fresh = false;
+
+    // Second opinion on doors (DoorSpecialistStage). ★THREE STATES, and collapsing them loses the
+    // channel's meaning: `eligible` false = the cheap channel already found a door, so nothing was
+    // asked; `eligible` true with `ran` false = a silent frame the decimation skipped; `ran` true with
+    // an empty list = THE SPECIALIST LOOKED AND DENIED, which must weigh as much as a confirmation or
+    // the channel is a shield rather than a test.
+    std::optional<DoorSpecialistResult>                       door_specialist;
     // Which panorama strips this frame actually looked at (empty = all of them, the Detection360Config
     // convention). ★Carried HERE rather than read back from the shared StripSchedule, because that
     // object is single-threaded by construction — every panorama stage runs in sequence on the one

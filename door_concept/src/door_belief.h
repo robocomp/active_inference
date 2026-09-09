@@ -175,6 +175,13 @@ public:
     door::Aperture aperture()   const { return aperture_at(state_); }
     door::LeafPose leaf_pose_at(const DoorBeliefState& s) const { return door::leaf_pose(aperture_at(s), params_.leaf); }
     door::LeafPose leaf_pose()  const { return leaf_pose_at(state_); }
+    // ★M1: phi is no longer a pinned construction constant. It is estimated per cycle (DoorFitter::
+    // estimate_phi) from silhouette agreement, with the robot's OWN actuation command as its prior —
+    // so a door the robot asked to be opened is ANTICIPATED rather than experienced as the object
+    // disappearing. It stays outside theta: the belief remains 3-DOF [s, w, h] and the shared inference
+    // engine is untouched, exactly as door_geometry.h's header anticipated.
+    void  set_leaf_phi(float phi) { params_.leaf.phi = phi; }
+    float leaf_phi() const { return params_.leaf.phi; }
     Eigen::Vector2f leaf_centre_xy() const { return leaf_pose().centre_xy; }
     float           leaf_yaw()       const { return leaf_pose().yaw(); }
 

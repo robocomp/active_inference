@@ -51,6 +51,24 @@ bool restore_external_window_geometry(QWidget* win, const QString& key)
 }
 } // namespace
 
+
+// Cycle one popup's posterior-overlay selection: OFF → the first class the model exposes → … → OFF.
+// The list comes from prob_classes_, refreshed from each graded map, so a model that exposes nothing
+// leaves the button saying so rather than silently drawing an empty overlay.
+QString SpecificWorker::cycle_prob_class(int& idx, const char* prefix)
+{
+    if (prob_classes_.empty())
+    {
+        idx = -1;
+        return QString("%1: —").arg(prefix);   // no graded model loaded (or no frame yet)
+    }
+    idx = (idx + 1 >= static_cast<int>(prob_classes_.size())) ? -1 : idx + 1;
+    if (idx < 0)
+        return QString("%1: OFF").arg(prefix);
+    return QString("%1: %2").arg(prefix,
+                                 QString::fromStdString(prob_classes_[static_cast<std::size_t>(idx)].second));
+}
+
 void SpecificWorker::save_external_window_geometry() const
 {
     QSettings settings(kWinSettingsOrg, kWinSettingsApp);
@@ -321,6 +339,25 @@ void SpecificWorker::setup_custom_viewers()
             });
         }
 
+        // Graded class-posterior heat overlay on the panorama — the Sem360 twin of the ZED window's.
+        // ★Only the strips the scheduler ran THIS frame carry a posterior; the rest are drawn as a
+        // hatch, never as P=0, so the picture cannot claim the model denied a door where it never
+        // looked. That is also why this overlay is not echoed across frames the way Sem360's argmax
+        // canvas is: an echoed posterior would age into a confident-looking claim.
+        QPushButton* rprob_btn = nullptr;
+        if (params.RICOH_SEMANTIC_ENABLED)
+        {
+            rprob_btn = new QPushButton("P: OFF", ricoh_panel);
+            rprob_btn->setCursor(Qt::PointingHandCursor);
+            rprob_btn->setStyleSheet(QString(
+                "QPushButton { border: 2px solid %1; border-radius: 4px; padding: 3px 8px; }"
+                "QPushButton:checked { background-color: %1; color: #101010; }").arg("#FF9E4A"));
+            connect(rprob_btn, &QPushButton::clicked, this, [this, rprob_btn]
+            {
+                rprob_btn->setText(cycle_prob_class(ricoh_prob_class_idx_, "P"));
+            });
+        }
+
         // Seg overlay: the YOLO-seg + semantic silhouettes drawn on the panorama. Worth its own switch
         // because it is the layer that OCCLUDES everything under it — with masks on you cannot judge the
         // raw image, the depth ramp, or the ADE20K map beneath them.
@@ -349,6 +386,8 @@ void SpecificWorker::setup_custom_viewers()
             controls->addWidget(rroom_btn);
         if (rsem_btn != nullptr)
             controls->addWidget(rsem_btn);
+        if (rprob_btn != nullptr)
+            controls->addWidget(rprob_btn);
         if (collect_btn != nullptr)
             controls->addWidget(collect_btn);
         if (rebuild_btn != nullptr)
@@ -611,6 +650,25 @@ void SpecificWorker::setup_custom_viewers()
                 sem_btn->setText(checked ? "Semantic: ON" : "Semantic: OFF");
             });
             controls->addWidget(sem_btn);
+
+            // Graded class-posterior heat overlay. NOT a second display of the same thing: the Semantic
+            // button draws the ARGMAX, which is exactly the representation that cannot tell a door
+            // losing by 0.02 from one the model never saw. This draws the posterior the argmax discards,
+            // one class at a time (click to cycle), tinted in proportion to P — plus the per-class hover
+            // readout with the top-two margin. No-op unless a "-probs" export is loaded.
+            auto* prob_btn = new QPushButton("P: OFF", yolo_panel);
+            prob_btn->setCursor(Qt::PointingHandCursor);
+            accent(prob_btn, "#FF9E4A");
+            connect(prob_btn, &QPushButton::clicked, this, [this, prob_btn]
+            {
+                prob_btn->setText(cycle_prob_class(zed_prob_class_idx_, "P"));
+                // The posterior only exists on cycles the model runs, so the overlay needs the stage on
+                // for the same reason the argmax overlay does.
+                if (zed_prob_class_idx_ >= 0 and zed_worker_)
+                    if (auto* s = dynamic_cast<rc::SemanticStage*>(zed_worker_->stage("semantic")))
+                        s->set_enabled(true);
+            });
+            controls->addWidget(prob_btn);
         }
 
         // SAM2 mask-refinement overlay (magenta). Toggle gates the Sam2Stage's enabled flag → the heavy

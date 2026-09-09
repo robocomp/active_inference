@@ -57,6 +57,91 @@ cmake -S . -B build -DONNXRUNTIME_ROOT=/opt/onnxruntime
 
 If you use a CPU-only build of ONNX Runtime, point `ONNXRUNTIME_ROOT` to that installation instead.
 
+## Models — you must supply these yourself
+
+**The ONNX model files are NOT in this repository.** They are large binaries; you download the
+upstream weights, export them to ONNX yourself, and drop the result under `models/`. A fresh clone
+will not run until you do.
+
+```
+retina/
+└── models/
+    ├── yolo26/
+    │   ├── yolo26x-seg.onnx           instance segmentation   (ALWAYS required)
+    │   ├── yolo26l-pose.onnx          human pose
+    │   ├── yolo26l-sem-ade20k.onnx    ADE20K semantic
+    │   └── yolo26l-depth.onnx         monocular depth
+    ├── sam2/
+    │   ├── sam2.1_hiera_tiny.encoder.onnx
+    │   └── sam2.1_hiera_tiny.decoder.onnx
+    └── dinov2/
+        └── dinov2_vits14_reg_448x224.onnx   panoramic place memory
+```
+
+### Which model does each config flag require?
+
+The agent **refuses to start** if a flag is on and its model is missing — see *Startup preflight*
+below. `Yolo.model_path` has no flag because the segmentation stage always runs.
+
+| Config flag | Model path key | Notes |
+|---|---|---|
+| *(always)* | `Yolo.model_path` | both the ZED and the ricoh segmentation stages |
+| `HumanPose.enabled` | `HumanPose.model_path` | |
+| `Semantic.enabled` **or** `Ricoh.semantic_enabled` | `Semantic.model_path` | one file, two consumers |
+| `Sam2.enabled` | `Sam2.encoder_path` **and** `Sam2.decoder_path` | both, or neither |
+| `ZedDepth.yolo_depth_enabled` **or** `RicohDepth.enabled` | `RicohDepth.model_path` | one file, two consumers |
+| `PlaceMemory.enabled` | `PlaceMemory.model_path` | also needs `Ricoh.yolo_enabled` |
+
+The ricoh-side flags additionally require `Ricoh.yolo_enabled = true`, since those stages are built
+inside that block.
+
+### Exporting
+
+**YOLO26 family** — download the `.pt` weights from the Ultralytics releases and export:
+
+```bash
+pip install ultralytics
+yolo export model=yolo26x-seg.pt format=onnx opset=17 simplify=True
+mkdir -p models/yolo26 && mv yolo26x-seg.onnx models/yolo26/
+```
+
+Export each variant you intend to enable (`-seg`, `-pose`, `-sem-ade20k`, `-depth`). Keep the
+filenames above, or point the matching config key at whatever you produce.
+
+**SAM2** — clone `facebookresearch/sam2`, fetch the `sam2.1_hiera_tiny` checkpoint, and export the
+encoder and decoder as two separate graphs (the `samexporter` project does this). Both files are
+required together.
+
+**DINOv2 (place memory)** — this one has a script in the repo, because the export is not a plain
+dump: the positional embedding has to be baked in for the fixed 448x224 input (ONNX opset 17 has no
+antialiased-bicubic op), and the patch grid is reshaped inside the graph so the C++ side cannot get
+the axis order wrong.
+
+```bash
+python3 tools/export_dinov2.py --pano etc/depth_frames/<some>.jpg
+```
+
+It downloads `facebook/dinov2-with-registers-small`, exports to
+`models/dinov2/dinov2_vits14_reg_448x224.onnx`, and then **verifies itself**: torch-vs-ONNX parity,
+the bake being numerically identical to the runtime path, and a roll test that a yaw change really is
+a clean cyclic shift of the sector array. It prints `ALL CHECKS PASS` or tells you which check failed.
+Do not ship a model that failed the roll test — a scrambled patch grid produces entirely plausible
+numbers and nothing crashes.
+
+### Startup preflight — a missing model is FATAL, not a warning
+
+On startup retina resolves every model path whose flag is on and **refuses to start** if one is
+missing, naming the file, the flag that demanded it, and the absolute path it looked at.
+
+This is deliberate. The alternative — carrying on with the stage disabled — is worse than not
+starting: the agent looks healthy, publishes a partial world, and the missing channel shows up much
+later as an object that is never detected. A capability that was configured ON and is silently OFF is
+the hardest kind of defect to trace back to its cause.
+
+★ **Model paths are relative to the working directory you launch from**, not to the binary. The usual
+cause of a preflight failure on a correct install is launching from the wrong directory; the error
+message prints the resolved absolute path so this is visible rather than guessed at.
+
 ## YOLO Setup
 
 The component uses ONNX-based YOLO segmentation through `YoloSegDetector`.
@@ -64,10 +149,11 @@ The component uses ONNX-based YOLO segmentation through `YoloSegDetector`.
 By default, the code expects the model path to be:
 
 ```text
-yolo26l-seg.onnx
+models/yolo26/yolo26x-seg.onnx
 ```
 
-This file is already present in the repository root. If you want to use another model, either replace that file or set the config entry:
+**This file is not in the repository** — see *Models* above for how to produce it. To use a different
+model, either put it at that path or set the config entry:
 
 ```toml
 [Yolo]

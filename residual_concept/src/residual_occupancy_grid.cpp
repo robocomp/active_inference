@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <memory>
 #include <queue>
 #include <unordered_map>
 #include <unordered_set>
@@ -39,6 +40,7 @@ void OccupancyGrid::reset(float xmin, float ymin, float xmax, float ymax, const 
 {
     p_ = p;
     clear_r2_ = p.lidar_clearance_m * p.lidar_clearance_m;
+    beam_rad_ = p.beam_spacing_rad;      // until a device declares its own (set_sensor_beam_spacing)
     const float cs = std::max(0.01f, p.cell_size_m);
     xmin_ = xmin; ymin_ = ymin; inv_cell_ = 1.0f / cs;
     w_ = std::max(1, static_cast<int>(std::ceil((xmax - xmin) / cs)));
@@ -62,11 +64,13 @@ void OccupancyGrid::reset(float xmin, float ymin, float xmax, float ymax, const 
     shz_hi_.assign(lo_.size(), 0.0f);
     shit_w_.assign(lo_.size(), 0.0f);
     smiss_w_.assign(lo_.size(), 0.0f);
+    smiss_half_.assign(lo_.size(), 0.0f);
     smiss_z_.assign(lo_.size(), 0.0f);
     smiss_src_.assign(lo_.size(), 0);
     shit_src_.assign(lo_.size(), 0);
     seenf_.assign(lo_.size(), 0.0f);
     occ_since_.assign(lo_.size(), 0u);
+    hit_since_.assign(lo_.size(), 0u);
 }
 
 bool OccupancyGrid::world_to_cell(float x, float y, int& ix, int& iy) const
@@ -137,12 +141,27 @@ void OccupancyGrid::mark_hit_voxel(int ix, int iy, int iz, float z, float w)
            shit_w_[i] = std::max(shit_w_[i], w); }
 }
 
-void OccupancyGrid::mark_free_voxel(int ix, int iy, int iz, float z, float w)
+void OccupancyGrid::mark_free_voxel(int ix, int iy, int iz, float z, float w, float half_h)
 {
     if (not in_bounds(ix, iy) or iz < 0 or iz >= OccGridParams::Z_BINS) return;
     const int i = idx(ix, iy);
     slook_[i] = 1;
-    smbits_[i] |= (1ull << iz);
+    // THE BEAM'S SAMPLING FOOTPRINT, not a 3 cm pencil. Adjacent ring lines are beam_spacing_rad apart, so at
+    // slant range t nothing thinner than beam_spacing_rad·t can hide between them: a crossing at z refutes the
+    // whole band it covers. Without this a marked voxel is refutable only from the narrow set of poses that puts
+    // a ring line through its own 3 cm slice, and an obstacle that has gone stays on the map until the robot
+    // happens to reach one — measured at 150+ cycles with the ledger BIT-IDENTICAL throughout.
+    // Hit precedence (update_bins) keeps this honest: a bin a return landed in this cycle is never refuted, so a
+    // surface still being struck cannot be widened away.
+    const float bw = p_.bin_span_m / OccGridParams::Z_BINS;
+    const int   nb = (half_h > 0.0f and bw > 1e-6f)
+                   ? std::min(static_cast<int>(half_h / bw), OccGridParams::Z_BINS - 1) : 0;
+    const int   b0 = std::max(0, iz - nb), b1 = std::min(OccGridParams::Z_BINS - 1, iz + nb);
+    const int   nbits = b1 - b0 + 1;                       // contiguous run: one shift, not a loop (this runs
+    const std::uint64_t band = nbits >= 64                 // ~300 000 times a cycle)
+                             ? ~0ull : (((1ull << nbits) - 1ull) << b0);
+    smbits_[i] |= band;
+    smiss_half_[i] = std::max(smiss_half_[i], half_h);
     if (not smiss_[i] or w > smiss_w_[i])
     { smiss_[i] = 1; smiss_w_[i] = w; smiss_z_[i] = z; smiss_src_[i] = sensor_id_; }
 }
@@ -170,15 +189,30 @@ bool OccupancyGrid::voxel_has_material(int ix, int iy, int iz) const
 
 void OccupancyGrid::update_bins(std::size_t i, float w_hit, float w_miss)
 {
-    const std::uint64_t hb = shbits_[i], mb = smbits_[i];
+    std::uint64_t hb = shbits_[i];
+    const std::uint64_t mb = smbits_[i];
     if (hb == 0ull and mb == 0ull) return;
+    // HIT PRECEDENCE OVER THE SAME FOOTPRINT the crossings claimed. A return at 0.60 m seen from 3 m does not
+    // localise the surface to a 3 cm slice any more than a crossing at 0.66 m refutes one, so protecting only
+    // the exact bin lets the wider refutation erase a surface the sensor is still returning from. Widen the
+    // precedence mask - NOT the ledger: the deposit stays in the measured bin, so the read-out band, the plate
+    // test and the explainers keep their full resolution.
+    if (const float half = smiss_half_[i]; half > 0.0f and hb != 0ull)
+    {
+        const float bw = p_.bin_span_m / OccGridParams::Z_BINS;
+        const int nb = bw > 1e-6f ? std::min(static_cast<int>(half / bw), OccGridParams::Z_BINS - 1) : 0;
+        for (int k = 0; k < nb; ++k) hb |= (hb << 1) | (hb >> 1);
+    }
     float* sup = &zsup_[i * OccGridParams::Z_BINS];
     float* stb = &zstab_[i * OccGridParams::Z_BINS];
+    bool any_confirm = false, touched_material = false;
     for (int b = 0; b < OccGridParams::Z_BINS; ++b)
     {
         const std::uint64_t bit = 1ull << b;
         const bool confirm = (hb & bit) != 0ull, refute = not confirm and (mb & bit) != 0ull;
         if (not confirm and not refute) continue;
+        if (confirm) any_confirm = true;
+        else if (sup[b] > 0.0f) touched_material = true;   // ...a crossing that DID meet what we believe is here
         // CONSISTENCY: does this observation agree with what the voxel already believes? Agreement earns
         // stiffness slowly, contradiction spends it fast. A voxel with no belief yet (sup == 0) is not yet
         // consistent about anything, so its first observation only starts the count.
@@ -188,6 +222,12 @@ void OccupancyGrid::update_bins(std::size_t i, float w_hit, float w_miss)
         if (confirm) { sup[b] = std::clamp(sup[b] + w_hit  * p_.l_hit,  -cap, cap); ++sd_.bins_confirmed; }
         else         { sup[b] = std::clamp(sup[b] - w_miss * p_.l_miss, -cap, cap); ++sd_.bins_refuted; }
     }
+    // ...and the counter the forgetting work asked for and never wired up: an OCCUPIED cell whose beams this
+    // cycle all flew over or under the material it holds. It read 0 for every run since the voxel rewrite, which
+    // invited exactly the wrong reading — this grid is mostly that traffic. It is now the measurement of how
+    // much of the clearing stream the geometry keeps away from what it would refute, i.e. of the very asymmetry
+    // beam_spacing_rad exists to close: it must FALL when the footprint is on.
+    if (occ_[i] and not any_confirm and not touched_material) ++sd_.cells_zheld;
 }
 
 void OccupancyGrid::clear_bins(std::size_t i)
@@ -246,7 +286,8 @@ void OccupancyGrid::commit_cycle(float dt_s)
         if (touched)
         {
             update_bins(i, shit_w_[i], smiss_w_[i]);        // the per-voxel log-odds update
-            if (shit_[i]) ++sd_.hits; else if (smiss_[i]) ++sd_.misses;
+            if (shit_[i]) { ++sd_.hits; hit_since_[i] = cycle_; }   // ...and when a return last LANDED here,
+            else if (smiss_[i]) ++sd_.misses;                       // which is the speckle filter's exemption
         }
         else if (not occ_[i] and lo_[i] == 0.0f) continue;  // never observed and not latched: nothing to project
 
@@ -416,6 +457,12 @@ void OccupancyGrid::occupancy_fields(std::vector<float>& prob_out, std::vector<f
 {
     const std::size_t n = kobs_.size();
     prob_out.assign(n, 0.0f); var_out.assign(n, 0.0f);
+    // ONE read-out, one answer: a cell the speckle filter withholds from the published set must not still carry
+    // full residual risk in the FIELD, or the two channels disagree about the same cell and a consumer planning
+    // over the field routes around an obstacle the cell list says is not there. Same treatment as an explained
+    // cell — keep = 0. (Cells that are free or unknown are untouched: the mask only ever drops OCCUPIED ones.)
+    std::vector<std::uint8_t> withheld;
+    (void)residual_mask(explained, &withheld);
     for (int y = 0; y < h_; ++y)
         for (int x = 0; x < w_; ++x)
         {
@@ -427,6 +474,8 @@ void OccupancyGrid::occupancy_fields(std::vector<float>& prob_out, std::vector<f
                 float zlo, zhi; readout_zband(i, zlo, zhi);
                 keep = 1.0f - std::clamp(explained(wx, wy, zlo, zhi), 0.0f, 1.0f);
             }
+            if (withheld[i]) keep = 0.0f;                        // ...withheld as SPECKLE (the explainer's
+                                                                 // own drops stay soft, above)
             float a, b; cell_belief(x, y, a, b);
             const float k = a + b;
             prob_out[i] = keep * (a / std::max(1e-9f, k));      // an object owns this cell (keep→0) ⇒ no residual risk
@@ -452,6 +501,7 @@ void OccupancyGrid::integrate_sweep(const Eigen::Vector3f& origin, const std::ve
         std::fill(smbits_.begin(), smbits_.end(), 0ull);
         std::fill(shit_w_.begin(), shit_w_.end(), 0.0f);
         std::fill(smiss_w_.begin(), smiss_w_.end(), 0.0f);
+        std::fill(smiss_half_.begin(), smiss_half_.end(), 0.0f);
         std::fill(smiss_z_.begin(), smiss_z_.end(), 0.0f);
         std::fill(smiss_src_.begin(), smiss_src_.end(), 0);
         std::fill(shit_src_.begin(), shit_src_.end(), 0);
@@ -461,7 +511,24 @@ void OccupancyGrid::integrate_sweep(const Eigen::Vector3f& origin, const std::ve
     const float ox = origin.x(), oy = origin.y(), oz = origin.z();
     const float r0 = p_.hit_reliable_range_m;              // precision falloff scale (0 ⇒ uniform full weight)
     const float rel = std::clamp(reliability, 0.0f, 1.0f); // global ego-motion trust for this sweep
-    const auto hit_w = [&](float r) { return r0 > 0.0f ? rel * (r0 * r0) / (r0 * r0 + r * r) : rel; };
+    // POSE PRECISION: the localiser's own uncertainty, carried as a range-dependent variance exactly like the
+    // sensor's. A return at horizontal range r lands in the room frame with an extra σ_pos² + (r·σ_θ)² of
+    // position variance, and the weight is the usual precision ratio against the reference sigma. Both σ zero
+    // (no rt_covariance on the edge, or pose_precision off) ⇒ 1.0 and nothing below changes.
+    // See OccGridParams::pose_precision. Applied to HITS AND MISSES alike, inside hit_w, because a sweep
+    // registered through a bad pose is no better at refuting than at confirming.
+    const float sref_p = p_.reference_sigma_m;
+    const float pvar0  = pose_sig_pos_ * pose_sig_pos_;      // pose position variance (range-independent part)
+    const float pvar_r = pose_sig_theta_ * pose_sig_theta_;  // ...and the heading lever arm, per m² of range
+    const bool  pose_on = p_.pose_precision and (pvar0 > 0.0f or pvar_r > 0.0f) and sref_p > 0.0f;
+    const auto pose_w = [&](float r)
+    {
+        if (not pose_on) return 1.0f;
+        const float s2 = sref_p * sref_p;
+        return s2 / (s2 + pvar0 + pvar_r * r * r);
+    };
+    const auto hit_w = [&](float r)
+    { return (r0 > 0.0f ? rel * (r0 * r0) / (r0 * r0 + r * r) : rel) * pose_w(r); };
     // SELF-BODY term: P(this return came from the WORLD, not off our own body) = Φ(s/σ). HITS only — freeing
     // space is always safe, and the sensor's own voxel already emits a traversal.
     const auto world_w = [&](float px, float py)
@@ -491,6 +558,7 @@ void OccupancyGrid::integrate_sweep(const Eigen::Vector3f& origin, const std::ve
 
         const float self_w = world_w(px, py);
         if (self_w < 0.99f) ++sd_.self_hits_damped;
+        if (pose_on and pose_w(range) < 0.99f) ++sd_.pose_damped;
         const float floor_w = floor_obstacle_responsibility(px, py, pz, range);
         if (in_band and floor_w < 0.9f) ++sd_.floor_damped_hits;
         const float w_hit = hit_w(range) * self_w * floor_w * (use_scale ? (*hit_weight_scale)[pi] : 1.0f);
@@ -507,7 +575,8 @@ void OccupancyGrid::integrate_sweep(const Eigen::Vector3f& origin, const std::ve
             // A BELOW-BAND return is not neutral: the beam reached the floor inside this cell, so the voxel it
             // landed in was empty. It marks nothing and clears its own voxel — which is all that
             // mark_floor_endpoint_flag and its support gate used to have to reconstruct by hand.
-            else { mark_free_voxel(ex, ey, ez, pz, hit_w(range)); ++sd_.floor_endpoint_clears; }
+            else { mark_free_voxel(ex, ey, ez, pz, hit_w(range), 0.5f * beam_rad_ * range);
+                   ++sd_.floor_endpoint_clears; }
         };
 
         const float L = std::sqrt(dx * dx + dy * dy + dz * dz);             // 3-D ray length
@@ -542,8 +611,12 @@ void OccupancyGrid::integrate_sweep(const Eigen::Vector3f& origin, const std::ve
         // range the device returns nothing whatever is there. (This used to be marked free at hit_w(0) — the
         // largest weight in the grid.)
         if (sensor_min_r_ <= 0.0f and clear_r2_ <= 0.0f)
-            mark_free_voxel(cx, cy, cz, oz, hit_w(0.0f) * prec_w);   // the sensor's own cell is inside the disc
-        else ++sd_.clear_blind_shell;
+            mark_free_voxel(cx, cy, cz, oz, hit_w(0.0f) * prec_w);   // no shell declared: clear our own voxel
+        // ...otherwise the sensor's own voxel simply carries no free evidence. That skip used to be counted in
+        // clear_blind_shell, which made the column ~= the ray count and therefore trivially nonzero — and the
+        // note telling a future reader to check "blind_shell must be NONZERO" was reading an instrument that
+        // could not say no. The counter now records only CROSSINGS REFUSED by a dead shell or the clearance
+        // disc, which is the quantity that was meant.
 
         // What did this beam stop ON? A thin endpoint column is a horizontal surface it may have skimmed; a tall
         // one is a wall, which it cannot have. See OccGridParams::plate_bins_max.
@@ -598,15 +671,18 @@ void OccupancyGrid::integrate_sweep(const Eigen::Vector3f& origin, const std::ve
             if (L - t_here < d_stop) { ++sd_.clear_stopped; continue; }      // ...and costmap_2d's endpoint rule
             const float rr = t_here * (range / std::max(1e-6f, L));          // its horizontal range
             if (prec_w < 0.99f) ++sd_.clear_imprecise;
-            mark_free_voxel(cx, cy, cz, oz + t_here * uz, hit_w(rr) * prec_w);
+            mark_free_voxel(cx, cy, cz, oz + t_here * uz, hit_w(rr) * prec_w,
+                            0.5f * beam_rad_ * t_here);   // ...over the footprint it samples here
         }
         place_endpoint();
     }
 }
 
 
-std::vector<std::uint8_t> OccupancyGrid::residual_mask(const CellExplained& explained) const
+std::vector<std::uint8_t> OccupancyGrid::residual_mask(const CellExplained& explained,
+                                                      std::vector<std::uint8_t>* speckle_out) const
 {
+    if (speckle_out) speckle_out->assign(lo_.size(), 0);
     std::vector<std::uint8_t> m(lo_.size(), 0);
     for (int y = 0; y < h_; ++y)
         for (int x = 0; x < w_; ++x)
@@ -621,6 +697,74 @@ std::vector<std::uint8_t> OccupancyGrid::residual_mask(const CellExplained& expl
             }
             m[idx(x, y)] = 1;
         }
+    // ── SPECKLE: drop a cell with nothing beside it and nothing returning from it (see speckle_min_neighbours) ──
+    // ONE pass over a snapshot, never iterated: erosion applied to its own output would eat a two-cell pair, then
+    // a three-cell line, and so on down. With min_neighbours = 1 a PAIR survives, which is the intent — the rule
+    // is "alone", not "small".
+    // The exemption is what keeps a real thin obstacle: a chair leg the sensor is still striking has a return in
+    // it this cycle or the last few, while a phantom has only failed to be refuted. Deleting on size alone would
+    // delete the leg too, and this filter is the one rule in the file that trades completeness away.
+    speckle_dropped_ = 0;
+    if (p_.speckle_min_neighbours > 0)
+    {
+        const auto seed = m;                                   // the snapshot the neighbour count is read from
+        for (int y = 0; y < h_; ++y)
+            for (int x = 0; x < w_; ++x)
+            {
+                const int i = idx(x, y);
+                if (not seed[i]) continue;
+                const long age = static_cast<long>(cycle_) - static_cast<long>(hit_since_[i]);
+                if (hit_since_[i] != 0u and age <= p_.speckle_grace_cycles) continue;   // still being STRUCK
+                int nb = 0;
+                for (int dy = -1; dy <= 1; ++dy)
+                    for (int dx = -1; dx <= 1; ++dx)
+                    {
+                        if (dx == 0 and dy == 0) continue;
+                        const int nx = x + dx, ny = y + dy;
+                        if (in_bounds(nx, ny) and seed[idx(nx, ny)]) ++nb;
+                    }
+                if (nb < p_.speckle_min_neighbours)
+                { m[i] = 0; ++speckle_dropped_; if (speckle_out) (*speckle_out)[i] = 1; }
+            }
+    }
+    // ── ...AND THE ISOLATED CLUMP (see speckle_min_component_cells) ───────────────────────────────────────────
+    // One flood fill per component over what SURVIVED the singleton pass, 8-connected — the same connectivity
+    // the neighbour count uses, so the two rules agree about what "beside" means. A component ships if it is big
+    // enough OR if any of its cells is still being struck; the exemption is evaluated over the whole component
+    // before anything is dropped, so a real obstacle is never eroded cell by cell.
+    if (p_.speckle_min_component_cells > 1)
+    {
+        std::vector<std::uint8_t> seen(m.size(), 0);
+        std::vector<int> stack, comp;
+        for (int y0 = 0; y0 < h_; ++y0)
+            for (int x0 = 0; x0 < w_; ++x0)
+            {
+                const int i0 = idx(x0, y0);
+                if (not m[i0] or seen[i0]) continue;
+                comp.clear(); stack.clear(); stack.push_back(i0); seen[i0] = 1;
+                bool struck = false;
+                while (not stack.empty())
+                {
+                    const int i = stack.back(); stack.pop_back();
+                    comp.push_back(i);
+                    const long age = static_cast<long>(cycle_) - static_cast<long>(hit_since_[i]);
+                    if (hit_since_[i] != 0u and age <= p_.speckle_grace_cycles) struck = true;
+                    const int cx = i % w_, cy = i / w_;
+                    for (int dy = -1; dy <= 1; ++dy)
+                        for (int dx = -1; dx <= 1; ++dx)
+                        {
+                            if (dx == 0 and dy == 0) continue;
+                            const int nx = cx + dx, ny = cy + dy;
+                            if (not in_bounds(nx, ny)) continue;
+                            const int j = idx(nx, ny);
+                            if (m[j] and not seen[j]) { seen[j] = 1; stack.push_back(j); }
+                        }
+                }
+                if (struck or static_cast<int>(comp.size()) >= p_.speckle_min_component_cells) continue;
+                for (const int i : comp)
+                { m[i] = 0; ++speckle_dropped_; if (speckle_out) (*speckle_out)[i] = 1; }
+            }
+    }
     return m;
 }
 
@@ -1774,6 +1918,219 @@ bool OccupancyGrid::self_test()
         check(n_when < 0, "a cell INSIDE the lidar clearance radius must never be cleared - nothing can see it");
         check(f_when >= 0, "...while the same cell observed from outside the radius must still clear");
         check(c_when >= 0, "with the rule OFF the close pass DOES delete it - the radius is the variable");
+    }
+    // ── (24) A CROSSING REFUTES THE BEAM'S FOOTPRINT, NOT A 3 cm PENCIL ──
+    // The defect this pins was measured on tools/grid_dynamics_probe.cpp with the real helios fan: after an
+    // obstacle was carried away its cell sat at lo = +5.79 with ONE material voxel, bit-identical for 150
+    // cycles, while the map as a whole applied 320 000 refutations a cycle — not one of them touched that voxel.
+    // A voxel is 3.125 cm tall; helios's rings are 2.26 deg apart, so at 2 m they are 8 cm apart. A return can
+    // land anywhere; a crossing could only ever arrive on a ring line. Marking is therefore an OR over the
+    // column and clearing an AND over voxels most rays never enter — which is floor speckle that never dies, an
+    // obstacle removed minutes late, and a footprint that accretes over half a minute, all from one asymmetry.
+    // The observer MOVES between marking and clearing, because that is what orphans a voxel: the ring line that
+    // deposited the evidence no longer passes through it from the new pose.
+    // Both halves are asserted. A term that merely refuses to look is not a fix, and one that erodes a standing
+    // surface is worse than the disease.
+    {
+        constexpr float BX0 = 1.60f, BX1 = 2.60f, BY = 0.30f, BTOP = 0.60f;
+        // a helios fan from `eye`, raycast against the floor, the far wall and (optionally) the box
+        const auto fan = [&](const Eigen::Vector3f& eye, bool box)
+        {
+            std::vector<Eigen::Vector3f> out;
+            for (int L = 0; L < 32; ++L)
+            {
+                const float el = (-55.0f + 70.0f * L / 31.0f) * 3.14159265f / 180.0f;
+                for (int A = -60; A <= 60; ++A)
+                {
+                    const float az = A * 0.010f;
+                    const Eigen::Vector3f d(std::cos(el) * std::cos(az), std::cos(el) * std::sin(az),
+                                            std::sin(el));
+                    float t = 6.0f;
+                    if (d.z() < -1e-6f) t = std::min(t, -eye.z() / d.z());          // floor
+                    if (d.x() >  1e-6f) t = std::min(t, (4.5f - eye.x()) / d.x());  // far wall
+                    if (box)
+                    {
+                        if (d.x() > 1e-6f)                                           // the near FACE
+                        {
+                            const float tf = (BX0 - eye.x()) / d.x();
+                            const float fy = eye.y() + tf * d.y(), fz = eye.z() + tf * d.z();
+                            if (tf > 0.05f and tf < t and std::abs(fy) < BY and fz > 0.0f and fz < BTOP) t = tf;
+                        }
+                        if (d.z() < -1e-6f)                                          // ...and the TOP face
+                        {
+                            const float tt = (BTOP - eye.z()) / d.z();
+                            const float hx = eye.x() + tt * d.x(), hy = eye.y() + tt * d.y();
+                            if (tt > 0.05f and tt < t and hx > BX0 and hx < BX1 and std::abs(hy) < BY) t = tt;
+                        }
+                    }
+                    if (t < 6.0f) out.push_back(eye + t * d);
+                }
+            }
+            return out;
+        };
+        const Eigen::Vector3f mark_eye(0.00f, 0.00f, 1.075f);
+        const Eigen::Vector3f move_eye(0.20f, 0.90f, 1.075f);   // the robot has driven on: new ring geometry
+        const auto run = [&](float spacing)
+        {
+            OccGridParams Q = P; Q.beam_spacing_rad = spacing; Q.forget_half_life_s = 0.0f;
+            OccupancyGrid g; g.reset(-1.0f, -3.0f, 5.0f, 3.0f, Q);
+            const auto n_box = [&]
+            {
+                long n = 0;
+                for (float x = BX0 + 0.03f; x < BX1; x += 0.05f)
+                    for (float y = -BY + 0.03f; y < BY; y += 0.05f)
+                    { int ix, iy; if (g.world_to_cell(x, y, ix, iy) and g.occupied(ix, iy)) ++n; }
+                return n;
+            };
+            g.set_self_body(mark_eye.x(), mark_eye.y(), 0.30f);
+            for (int k = 0; k < 40; ++k) { g.integrate_sweep(mark_eye, fan(mark_eye, true)); g.commit_cycle(0.1f); }
+            const long marked = n_box();
+            // (a) it is STILL THERE and the robot has moved: the wider refutation must not erode it
+            g.set_self_body(move_eye.x(), move_eye.y(), 0.30f);
+            for (int k = 0; k < 150; ++k) { g.integrate_sweep(move_eye, fan(move_eye, true)); g.commit_cycle(0.1f); }
+            const long standing = n_box();
+            // (b) ...and now it is GONE: how long until the map says so?
+            long cleared = -1;
+            for (int k = 0; k < 400; ++k)
+            { g.integrate_sweep(move_eye, fan(move_eye, false)); g.commit_cycle(0.1f);
+              if (cleared < 0 and n_box() * 5 <= marked) cleared = k; }
+            return std::tuple{marked, standing, cleared, n_box()};
+        };
+        const auto [w_mark, w_stand, w_clear, w_left] = run(0.0394f);   // helios's real ring spacing
+        const auto [p_mark, p_stand, p_clear, p_left] = run(0.0f);      // control: the old 3 cm pencil
+        std::printf("  beam-footprint: FOOTPRINT marked=%ld standing=%ld 80%%-gone@%ld left=%ld | "
+                    "PENCIL marked=%ld standing=%ld 80%%-gone@%ld left=%ld\n",
+                    w_mark, w_stand, w_clear, w_left, p_mark, p_stand, p_clear, p_left);
+        check(w_mark > 10 and p_mark > 10, "the obstacle must be on the map in both arms before the robot moves");
+        check(w_stand * 10 >= p_stand * 9,
+              "a STANDING surface must survive the wider refutation - hit precedence carries the same footprint, "
+              "so material still being struck cannot be widened away");
+        check(w_clear >= 0, "...and one that has been CARRIED AWAY must clear from the new pose");
+        check(p_clear < 0 or w_clear < p_clear,
+              "with the pencil the same obstacle is orphaned and outlives it - the footprint is the variable");
+        check(w_left < p_left or w_left == 0,
+              "...and the pencil must leave more of it behind: an orphan voxel no ray enters is immortal");
+    }
+    // ── (25) A LONE CELL NOTHING IS RETURNING FROM IS NOT SHIPPED ──
+    // Asked for directly after the live steady state read `resid=8 ncomp=0`: eight residual cells in components
+    // of ONE, each published to the controller as an obstacle. ★It IS a size threshold — the point of this
+    // property is that the EXEMPTION is what makes it survivable, so all four arms are asserted, including the
+    // one that would fail if the filter were the blanket "small things are noise" it must not be.
+    {
+        const auto build = [&](int n_cells, int quiet_cycles, int min_nb)
+        {
+            // The CLUMP rule is pinned off here: this property is about the singleton rule alone, and with the
+            // default min_component_cells the 'a PAIR is not alone' arm would pass/fail for the other rule's
+            // reason. Property (26) below exercises the clump rule on its own.
+            OccGridParams Q = P; Q.speckle_min_neighbours = min_nb; Q.forget_half_life_s = 0.0f;
+            Q.speckle_min_component_cells = 0;
+            auto g = std::make_unique<OccupancyGrid>();
+            g->reset(-1, -1, 6, 6, Q);
+            // n_cells ADJACENT cells, all at 0.60 m. Aimed at cell CENTRES: returns straddling a boundary make
+            // a "lone" cell into a pair and the property then passes for the wrong reason.
+            std::vector<Eigen::Vector3f> obst;
+            const float cs = P.cell_size_m;
+            int sx, sy; { OccupancyGrid probe; probe.reset(-1, -1, 6, 6, Q); probe.world_to_cell(2.0f, 0.0f, sx, sy); }
+            for (int c = 0; c < n_cells; ++c)
+                for (int i = 0; i < 12; ++i)
+                    obst.push_back({-1.0f + (sx + c + 0.5f) * cs, -1.0f + (sy + 0.5f) * cs, 0.60f});
+            for (int k = 0; k < 12; ++k) { g->integrate_sweep({0.0f, 0.0f, 0.60f}, obst); g->commit_cycle(0.1f); }
+            // ...and then the returns STOP, without any beam contradicting the cells (empty sweeps only advance
+            // the clock). This is the phantom's signature: un-refuted, but nothing is arriving from it either.
+            for (int k = 0; k < quiet_cycles; ++k) { g->integrate_sweep({0.0f, 0.0f, 0.60f}, {}); g->commit_cycle(0.1f); }
+            return g;
+        };
+        const int quiet = P.speckle_grace_cycles + 5;
+        const auto lone_quiet = build(1, quiet, 1);      // one cell, silent  → speckle
+        const auto pair_quiet = build(2, quiet, 1);      // two cells, silent → a PAIR is not alone
+        const auto lone_fresh = build(1, 0,     1);      // one cell, still being struck → the exemption
+        const auto lone_off   = build(1, quiet, 0);      // control: filter off
+        const long a = lone_quiet->residual_count(), b = pair_quiet->residual_count();
+        const long c = lone_fresh->residual_count(), d = lone_off->residual_count();
+        std::printf("  speckle: lone+silent ships %ld (dropped %ld) | pair+silent ships %ld | lone+STRUCK ships "
+                    "%ld | control (filter off) ships %ld\n",
+                    a, lone_quiet->speckle_dropped(), b, c, d);
+        check(d >= 1, "with the filter OFF the lone cell must ship - the filter is provably the variable");
+        check(a == 0 and lone_quiet->speckle_dropped() >= 1,
+              "a lone residual cell nothing has returned from must be withheld");
+        check(b >= 2, "...but a PAIR must ship: the rule is ALONE, not SMALL, and it must never erode its own "
+                      "output down a line of cells");
+        check(c >= 1, "...and a lone cell the sensor is STILL STRIKING must ship - that is the exemption that "
+                      "keeps a chair leg, and without it this is a blanket size filter");
+    }
+    // ── (26) AN ISOLATED CLUMP GOES THE SAME WAY, AND THE EXEMPTION STILL SAVES A REAL ONE ──
+    // The singleton rule cannot remove a 2-cell pair or a 3-cell L, and those are what the published map is
+    // actually made of (27-33 components for ~590 cells, live). Same four arms, one scale up.
+    {
+        const auto build = [&](int n_cells, int quiet_cycles, int min_comp)
+        {
+            OccGridParams Q = P; Q.speckle_min_neighbours = 0; Q.forget_half_life_s = 0.0f;
+            Q.speckle_min_component_cells = min_comp;      // the singleton rule is pinned OFF: one variable
+            auto g = std::make_unique<OccupancyGrid>();
+            g->reset(-1, -1, 6, 6, Q);
+            std::vector<Eigen::Vector3f> obst;
+            const float cs = P.cell_size_m;
+            int sx, sy; { OccupancyGrid probe; probe.reset(-1, -1, 6, 6, Q); probe.world_to_cell(2.0f, 0.0f, sx, sy); }
+            for (int c = 0; c < n_cells; ++c)
+                for (int i = 0; i < 12; ++i)
+                    obst.push_back({-1.0f + (sx + c + 0.5f) * cs, -1.0f + (sy + 0.5f) * cs, 0.60f});
+            for (int k = 0; k < 12; ++k) { g->integrate_sweep({0.0f, 0.0f, 0.60f}, obst); g->commit_cycle(0.1f); }
+            for (int k = 0; k < quiet_cycles; ++k) { g->integrate_sweep({0.0f, 0.0f, 0.60f}, {}); g->commit_cycle(0.1f); }
+            return g;
+        };
+        const int quiet = P.speckle_grace_cycles + 5;
+        const auto clump_quiet = build(2, quiet, 3);   // 2-cell clump, silent      → below the size, dropped
+        const auto big_quiet   = build(4, quiet, 3);   // 4-cell clump, silent      → big enough, ships
+        const auto clump_fresh = build(2, 0,     3);   // 2-cell clump, still STRUCK → the exemption
+        const auto clump_off   = build(2, quiet, 0);   // control: clump rule off
+        const long a2 = clump_quiet->residual_count(), b2 = big_quiet->residual_count();
+        const long c2 = clump_fresh->residual_count(), d2 = clump_off->residual_count();
+        std::printf("  clump: 2-cell+silent ships %ld (dropped %ld) | 4-cell+silent ships %ld | 2-cell+STRUCK "
+                    "ships %ld | control (rule off) ships %ld\n",
+                    a2, clump_quiet->speckle_dropped(), b2, c2, d2);
+        check(d2 >= 2, "with the clump rule OFF the 2-cell clump must ship - the rule is provably the variable");
+        check(a2 == 0 and clump_quiet->speckle_dropped() >= 2,
+              "an isolated clump below the size, nothing returning from it, must be withheld ENTIRELY - a "
+              "partial drop would mean the component was eroded cell by cell instead of judged as one");
+        check(b2 >= 4, "...but a clump at or above the size must ship untouched");
+        check(c2 >= 2, "...and a clump the sensor is STILL STRIKING must ship whatever its size - the exemption "
+                       "is evaluated per COMPONENT, so a real small obstacle is never eaten from its edges");
+    }
+    // ── (27) A SWEEP REGISTERED THROUGH AN UNCONVERGED POSE MAY NOT LATCH IN ONE FRAME ──
+    // The startup phantom floor, as a property. Same returns, same range, same everything else: only the
+    // localiser's sigma differs. With sigma 0 the near hit must still latch in ONE frame (the safety property
+    // this grid exists for, preserved bit-for-bit); with a startup-sized sigma it must take several consistent
+    // frames, and it must still get there — this weights evidence, it does not gate it.
+    {
+        const auto run = [&](float s_pos, float s_th, int cycles)
+        {
+            OccGridParams Q = P; Q.forget_half_life_s = 0.0f;
+            OccupancyGrid g; g.reset(-1, -1, 6, 6, Q);
+            g.set_pose_sigma(s_pos, s_th);
+            std::vector<Eigen::Vector3f> obst;
+            for (int i = 0; i < 12; ++i) obst.push_back({2.0f, 0.0f, 0.60f});   // 2 m out, inside the 2.65 m latch range
+            int first = -1;
+            for (int k = 0; k < cycles; ++k)
+            {
+                g.integrate_sweep({0.0f, 0.0f, 0.60f}, obst); g.commit_cycle(0.1f);
+                int ix, iy; g.world_to_cell(2.0f, 0.0f, ix, iy);
+                if (first < 0 and g.occupied(ix, iy)) first = k + 1;
+            }
+            return first;
+        };
+        const int sharp = run(0.0f,  0.0f,  120);    // converged localiser: the old behaviour, unchanged
+        // A CONVERGING localiser, not a wild one: 5 cm / 0.05 rad is 10 cm of lever arm at this 2 m range, which
+        // is what room_concept's own sigma looks like before it settles (measured sigma_theta 0.023 -> 0.0046).
+        // Deliberately not a startup-sized 0.10 rad: that weights a 2 m return at 0.018 and takes ~44 frames to
+        // latch, which is correct behaviour but makes the property read as a gate. The claim is about ORDER.
+        const int fuzzy = run(0.05f, 0.05f, 120);
+        std::printf("  pose-precision: latched on frame %d (sigma 0) vs frame %d (sigma 0.05 m / 0.05 rad)\n",
+                    sharp, fuzzy);
+        check(sharp == 1, "with a converged pose a NEAR hit must still latch in ONE frame - the completeness "
+                          "property is not negotiable and this term must not touch it");
+        check(fuzzy > sharp, "...but the same return through an unconverged pose must NOT latch in one frame: "
+                             "that is the startup phantom floor, and speed-trust alone cannot see it");
+        check(fuzzy > 0, "...and it must still latch eventually - this weights evidence, it does not gate it");
     }
     std::printf("OccupancyGrid::self_test %s\n", ok ? "PASS" : "FAIL");
     return ok;

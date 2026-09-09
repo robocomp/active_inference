@@ -108,6 +108,8 @@ private:
     // Ego-motion evidence trust (0..1): 1 when still, <1 while the robot moves (pose jitter + blur). Scales the
     // whole sweep's grid evidence so the stable accumulated field dominates during motion (motion-stability).
     float compute_ego_reliability() const;
+    // The localiser's (sigma_pos_m, sigma_theta_rad) for this cycle — see OccGridParams::pose_precision.
+    std::pair<float, float> compute_pose_sigma() const;
     // LiDAR sweep with the LOW bpearl lidar's floor-grazing returns removed (device-specific floor band), so
     // bpearl keeps its low-obstacle value without ringing the robot with phantom floor. Buffered in lidar_filtered_.
     // BPEARL-ONLY sweep for the floor-plane fit. helios is an upright lidar whose floor returns are all

@@ -19,11 +19,13 @@ parser.add_argument("--web-host", default="0.0.0.0", help="Bind address for the 
 parser.add_argument("--iface", default="lo", help="Interface to sniff for bandwidth")
 parser.add_argument("--no-bw", action="store_true", help="Disable loopback bandwidth capture")
 parser.add_argument("--no-webots", dest="webots", action="store_false", help="Do not autostart Webots")
+parser.add_argument("--no-rcnode", dest="rcnode", action="store_false", help="Do not check/autostart rcnode (icebox)")
 parser.add_argument("--battery-port", default="/dev/ttyUSB0", help="Victron VE.Direct serial port for battery monitoring")
 parser.add_argument("--no-battery", action="store_true", help="Disable battery monitoring")
 args = parser.parse_args()
 
 run_launcher(args.file_name, launcher="subcognitive", layer="sensorimotor",
-             start_webots=args.webots, web=args.web, web_port=args.web_port,
+             start_webots=args.webots, start_rcnode=args.rcnode,
+             web=args.web, web_port=args.web_port,
              web_host=args.web_host, iface=args.iface, no_bw=args.no_bw,
              battery_port=None if args.no_battery else args.battery_port)

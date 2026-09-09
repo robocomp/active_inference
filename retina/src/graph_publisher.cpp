@@ -7,6 +7,7 @@
 // mangles TBB's profiling.h and it fails to compile.
 #include "yolo_processor.h"   // SegDetection
 #include "yolo_human.h"       // rc::human_pose::PoseDetection, BODY18_FROM_COCO
+#include "yolo_semantic.h"    // rc::semantic::SemanticMap (graded posteriors)
 
 #include "graph_publisher.h"
 
@@ -110,6 +111,59 @@ void GraphPublisher::publish_semantic(const cv::Mat& labels, std::uint64_t stamp
     G_->add_or_modify_attrib_local<semantic_height_att>(node, h);
     G_->add_or_modify_attrib_local<semantic_timestamp_ms_att>(node, stamp);
     G_->add_or_modify_attrib_local<semantic_frame_id_att>(node, ++semantic_seq_);
+    G_->update_node(std::move(node));
+}
+
+void GraphPublisher::publish_semantic_probs(const rc::semantic::SemanticMap& map, std::uint64_t stamp)
+{
+    if (not map.graded() or map.prob_class_ids.empty())
+        return;   // ungraded export: the model exposes no posterior. Publish nothing, say nothing.
+
+    // Every plane must be present and the SAME size. A short or ragged stack would still deserialise
+    // on the far side and be read plane-major at the wrong offsets — P(door) sampled out of the
+    // cabinet plane, with nothing downstream able to notice. Refuse the frame instead.
+    if (map.probs.size() != map.prob_class_ids.size())
+        return;
+    const cv::Size ps = map.probs.front().size();
+    for (const auto& plane : map.probs)
+        if (plane.empty() or plane.size() != ps or plane.type() != CV_32FC1)
+            return;
+    if (ps.width <= 0 or ps.height <= 0)
+        return;
+
+    if (!ensure_node("semantic", "Teal", semantic_ready_, /*relayout=*/true))
+        return;
+    auto node_opt = G_->get_node("semantic");
+    if (!node_opt.has_value())
+        return;
+    auto& node = node_opt.value();
+
+    // Flatten plane-major; a cv::Mat row may be padded, so copy row by row.
+    const std::size_t plane_n = static_cast<std::size_t>(ps.width) * static_cast<std::size_t>(ps.height);
+    std::vector<float> buf;
+    buf.reserve(plane_n * map.probs.size());
+    for (const auto& plane : map.probs)
+        for (int r = 0; r < ps.height; ++r)
+        {
+            const float* rp = plane.ptr<float>(r);
+            buf.insert(buf.end(), rp, rp + ps.width);
+        }
+
+    // float ids: cortex registers no int-vector attribute type (mask_label_ids is the precedent).
+    std::vector<float> ids;
+    ids.reserve(map.prob_class_ids.size());
+    for (int id : map.prob_class_ids)
+        ids.push_back(static_cast<float>(id));
+
+    G_->add_or_modify_attrib_local<semantic_class_probs_att>(node, buf);
+    G_->add_or_modify_attrib_local<semantic_prob_class_ids_att>(node, ids);
+    G_->add_or_modify_attrib_local<semantic_prob_width_att>(node, ps.width);
+    G_->add_or_modify_attrib_local<semantic_prob_height_att>(node, ps.height);
+    // The frame the planes map onto — a consumer needs it to normalise, and it is NOT the plane size.
+    // Set here too (not only in publish_semantic) because the label blob may be gated off entirely.
+    G_->add_or_modify_attrib_local<semantic_width_att>(node, map.probs_src_size.width);
+    G_->add_or_modify_attrib_local<semantic_height_att>(node, map.probs_src_size.height);
+    G_->add_or_modify_attrib_local<semantic_timestamp_ms_att>(node, stamp);
     G_->update_node(std::move(node));
 }
 

@@ -123,6 +123,23 @@ struct DoorConfig
     int   ai2_gn_iters           = 4;
     float ai2_extent_std         = 0.05f;   // extent-observation noise (m) for the coverage/extent likelihood
     std::string ai2_csv_path     = "";
+    // Detector truth table (rc::probe, shared schema — common/detect_probe/detect_probe.h): one row per
+    // cycle per live door recording WHERE the robot stood, HOW the door projected, and what the detector
+    // did. door had none of this: the ai2 log can say "no mask this cycle" but not from how many DISTINCT
+    // viewpoints, so the correlated-absence question could not even be posed for a door.
+    // ★Default ON. A diagnostic that defaults off produces a file nobody has on the day it is needed.
+    std::string detect_probe_csv_path = "etc/detect_probe.csv";
+
+    // RGB contour check: score the door's own projected silhouette against image edges (common/contour_edge).
+    // Independent of every classifier, which is the point — the semantic posterior collapses from 0.995 to
+    // 0.048 on a plainly visible closed door as the robot closes, while its jamb and lintel stay in the RGB.
+    bool  rgb_contour_check = true;
+
+    // RoboCompDoorControl provider endpoint. Empty ⇒ the feature is off and the UI says so.
+    // ⚠The webots-bridge listens on 10017 (its etc/config.toml, which is the file it is run with).
+    // An older note recorded 10008; the bridge's own config comment documents that disagreement and
+    // says etc/config's 10017 wins.
+    std::string door_control_endpoint = "doorcontrol:tcp -h localhost -p 10017";
 
     // Upload the door pose covariance onto the room→door RT edge (rt_covariance_att, 6×6 SE3), built
     // from the belief's full Σ over [cx,cy,cz,yaw,...]: x←cx, y←cy, z←cz, yaw←ψ; roll/pitch are
@@ -138,7 +155,8 @@ struct DoorConfig
     float tracker_gate_mahalanobis = 9.0f;    // χ²₂ gate (~3σ) for a mask↔instance match once it has a cov
     float tracker_gate_fallback_m  = 0.40f;   // metric XY gate (m) before an instance has a usable covariance
     float tracker_detection_noise_m = 0.20f;  // R in the association innovation cov S=P+R²I (≥ centroid-vs-fit offset)
-    int   tracker_birth_frames     = 8;       // frames a mask must stay unexplained before spawning a door
+    float tracker_birth_frames     = 6.6f;    // IDEAL OBSERVATIONS of unexplained evidence before a birth
+                                              // (8 rescaled by the graded model's median conf 0.826 — see config.toml)
     float tracker_birth_min_sep_m  = 0.70f;   // a birth must be ≥ this (m) from every existing door (anti-dup)
     float tracker_merge_overlap    = 0.20f;   // merge two instances whose seat footprints overlap ≥ this
                                               // fraction of the smaller, keeping the more-observed. 0 disables.

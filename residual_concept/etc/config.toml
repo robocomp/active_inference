@@ -50,6 +50,26 @@ KStable = 20
 DivergedRetireFrames = 0      # OFF — removal is now the evidence-based occupancy carve (see [Carve]), not a
                               # no-data-fit counter (failing to fit ≠ compelling evidence the obstacle is gone)
 LogPeriodFrames = 30
+# Compute cycles per publish of the occupancy grid to the DSR graph (Period.Compute = 100 ms, so
+# 1 = 10 Hz, 5 = 2 Hz). RAISED 5 -> 1 on 2026-08-28: this grid is no longer a display, it is the only
+# channel carrying near-field obstacles (the H32F70 cannot see a 0.45 m box inside 0.57 m, and the
+# controller's ESDF has no memory). At 2 Hz the map is up to 500 ms stale = 0.25 m of travel at
+# 0.5 m/s, wider than the unobservable ring it exists to cover.
+# ⚠ROLLBACK FIRST IF AN AGENT PINS A CPU: this is the largest attribute in the graph and cortex keeps
+# a CRDT dot per write, so 5x the rate is 5x the dot growth (a known unbounded-growth path).
+# ★★★A/B 2026-08-28, REVERTED 1 -> 5 WHILE THE COST IS MEASURED. At 1 (10 Hz) the controller's
+# pose went stale in a 50 ms comb recurring every 101 ms — the same period as this publish — with
+# 56% of cycles driving on a pose 50-324 ms old, against a room_concept that computes at 16 ms and
+# should be feeding it far faster. Symptom seen by eye: the LiDAR overlay lags behind during a fast
+# pivot in the CONTROLLER's view but NOT in room_concept's, which is exactly the signature of a DSR
+# round-trip delay rather than a sensor one — room_concept computes the pose locally, the controller
+# reads it back through the graph. This attribute is the largest in the graph, so writing it 5x more
+# often puts every RT-edge update behind a ~28 KB broadcast in the subscriber's reader thread.
+# ★If reverting this does NOT collapse the comb, the cause is elsewhere and this should go back up:
+# the map is the only channel carrying near-field obstacles and 2 Hz means 0.25 m of staleness at
+# 0.5 m/s, wider than the unobservable ring it exists to cover. 2 (5 Hz) is the likely compromise —
+# 0.10 m of staleness at 40% of the traffic — but pick it on the measurement, not on taste.
+GridPublishEveryN = 5 
 WriteThresholdM = 0.03        # geometry dead-band: republish only past this centre/size change (m)
 # Conservative publish — LiDAR sees only NEAR faces, so the raw fit UNDER-sizes obstacles (far side occluded).
 # For safe navigation the published footprint must err LARGER: grow w/d by k·σ of the extent (occlusion
@@ -305,6 +325,51 @@ CollisionBandTopM = 0.50
 # one body model. Watch `blind_shell` in grid_diag.csv — it must be NONZERO whenever the robot is moving.
 LidarClearanceM = 0.55
 
+# ── SPECKLE: a lone residual cell nothing is returning from any more ──────────────────────────────────────────
+# The live steady state was `resid=8 ncomp=0` — eight residual cells in components of ONE, each shipped to the
+# controller as an obstacle with nothing behind it. See residual-grid-polygons-per-cell-fence: 65 "obstacles",
+# all smaller than the robot footprint, shred free space rather than blocking it.
+# ★THIS IS A SIZE THRESHOLD and the model cannot derive it — flagged, as the rule requires. The cost is real: a
+# chair leg, a table leg or a pole narrower than the 5 cm cell occupies exactly one cell and this deletes it.
+# What makes it defensible is the EXEMPTION, which is the honest discriminator: a real thin obstacle is being
+# STRUCK cycle after cycle, while a phantom has merely failed to be refuted. A lone cell therefore ships for as
+# long as a return has recently landed in it — a statement about evidence arriving, not about size.
+# One pass over a snapshot, never iterated (erosion applied to its own output would eat a pair, then a line, and
+# so on down). At MinNeighbours = 1 a two-cell pair survives: the rule is "alone", not "small".
+# Watch `speckle` in the [grid] log against the residual count. 0 ⇒ off, every residual cell ships.
+SpeckleMinNeighbours = 1    # residual 8-neighbours a cell needs to ship; 0 ⇒ filter off
+SpeckleGraceCycles   = 10   # ...unless a return landed in it within this many cycles (~1 s at Period.Compute=100 ms)
+# ...and the same rule one scale up: an ISOLATED CLUMP. MinNeighbours can only ever remove a SINGLETON — a
+# diagonal pair defends itself and so does every 3-cell L — but the map that stops the planner is not made of
+# singletons. Measured 2026-09-03 over a 5.4-minute run: the published set held 27-33 connected components for a
+# steady 553-673 cells, ~300 of them more than 0.75 m from any wall. A component smaller than this is dropped
+# UNLESS one of its cells is still being STRUCK (same exemption, evaluated per COMPONENT so a real obstacle is
+# never eroded from its edges). Raise it to sweep harder; the cost is that a genuine object returning fewer than
+# this many cells AND not currently struck stops shipping, so it trades completeness — read `speckle` in
+# grid_diag.csv against `resid` in floor_diag.csv before raising it further. 0 or 1 ⇒ off (singleton test only).
+SpeckleMinComponentCells = 3
+# ── EVIDENCE IS WEIGHTED BY HOW WELL THE ROBOT IS LOCALISED ───────────────────────────────────────────────────
+# w(r) carries the sensor's geometry and MotionVel0/MotionOmega0 carry the robot's SPEED, but until now nothing
+# carried the POSE the sweep was registered through — and a standing robot scores speed-trust 1.0, which at
+# startup is exactly backwards: the stillest sweeps of a run are the ones the localiser has not converged for.
+# With l_hit·w(r) > occ_set at every range under ~2.65 m, one mis-registered return latches a cell in ONE frame,
+# and ForgetCanUnlatch=false means it then leaves only by a see-through beam through its own z-band (measured
+# median release age 371 cycles ≈ 37 s). That is where a startup floor of phantoms comes from.
+# No burn-in timer: the covariate is measured and already published. room_concept writes the SE(2) pose
+# covariance on the room→robot RT edge, so a return at range r carries σ_pos² + (r·σ_θ)² of extra room-frame
+# position variance and is weighted σ_ref²/(σ_ref² + that) — the same precision ratio as every other term here.
+# Converged pose ⇒ 1.0, so the one-frame latch for a NEAR hit (the safety property) is preserved bit-for-bit.
+# Hits and misses alike: a sweep through a bad pose is no better at refuting than at confirming.
+# ★Watch `pose_damped` in grid_diag.csv: it must be LARGE early and fall toward 0 as the localiser converges. A
+# whole run at 0 with pose_sig_pos/pose_sig_th also 0 means the RT edge carries no rt_covariance and the term is
+# silently inert — that is the failure it exists to prevent, not a null result. false = the old behaviour, for A/B.
+PosePrecision = true
+# Per-cell residual geometry (x, y, z, inside_poly, dist_wall_m, obj_sdf_m) → etc/residual_cells.csv every N
+# cycles. ↓600→25 on 2026-09-03: at 600 the FIRST dump was cycle 600, so the file could say nothing whatever
+# about the startup burst it was needed for (222 cells latched in cycle 0, ~2000 within two seconds). 25 covers
+# cycles 0-150 at ~600 rows each. Put it back to 600 once the startup window has been read. 0 = off.
+CellDumpEveryN = 25
+
 # Per-released-cell trace: which residual went, and what killed it. A standing table must produce NO rows inside
 # its footprint. Empty = off.
 ReleaseCsvPath = "etc/residual_releases.csv"
@@ -320,6 +385,22 @@ ReleaseCsvPath = "etc/residual_releases.csv"
 HeliosMinRangeM = 0.40   # RS-Helios datasheet minimum
 BpearlMinRangeM = 0.10   # RS-Bpearl is a near-field dome
 ZedMinRangeM    = 0.30   # matches ZedBoost.MinDepthM
+# ── EACH DEVICE'S VERTICAL SAMPLING INTERVAL: how much of a column ONE crossing may refute ────────────────────
+# See OccGridParams::beam_spacing_rad. A voxel is 3.125 cm tall; helios's rings are 2.26 deg apart, which is
+# 8 cm at 2 m and 12 cm at 3 m. Marking a return into one 3 cm voxel is right — a return is a point measurement.
+# Demanding that a CLEARING ray pass through that same 3 cm voxel is not: between two ring lines 8 cm apart most
+# rays never do, so a voxel once marked was refutable only from the narrow band of poses that puts a ring line
+# through it. MEASURED on tools/grid_dynamics_probe.cpp (real helios fan, robot orbiting): after the obstacle was
+# carried away its cell sat at lo = +5.79 BIT-IDENTICAL for 150 cycles while the map applied 320 000 refutations
+# a cycle — none of them touched that voxel. That one asymmetry is all three live complaints at once: floor
+# speckle that never dies, an obstacle removed minutes late, a footprint that accretes over half a minute.
+# A crossing now refutes the bins within ±(spacing·t)/2 of its height, and HIT PRECEDENCE is applied over the
+# same footprint so a surface still being struck cannot be widened away.
+# A/B on the probe (0 = the old pencil): standing obstacle 33 → 39 of 64 cells · removal 19.5 → 3.7 s to half ·
+# a person who stood 3 s left 21 phantom cells NEVER cleared in 90 s → gone in 15.4 s. 0 ⇒ old behaviour.
+HeliosBeamSpacingRad = 0.0394   # RS-Helios-32: 70 deg over 31 gaps
+BpearlBeamSpacingRad = 0.0506   # RS-Bpearl-32: ~90 deg dome over 31 gaps
+ZedBeamSpacingRad    = 0.0068   # dense depth at ZedBoost.FovSubsample=4 — effectively a pencil, as it should be
 
 [ZedBoost]
 Enabled = true
@@ -416,3 +497,4 @@ ClutterProb = 0.05            # P(a beam through an EMPTY box returns from insid
 RemovalProb = 0.12            # remove when P(occupied) < this (log-odds ≈ −2). RISK tolerance: smaller ⇒ more
                               # compelling evidence required before deleting (fewer false removals, slower clear)
 OccupancyLogOddsMax = 4.0     # ± clamp on the accumulated log-odds (keeps evidence finite AND recoverable)
+

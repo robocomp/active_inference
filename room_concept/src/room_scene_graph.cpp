@@ -460,47 +460,70 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose,
     // (p50 100 ms, 47% over 100 ms, 10% over 200 ms) — a factor of 2.2, i.e. about every second update
     // invisible. Writing the twist FIRST and letting the timestamped RT write land LAST means the
     // ring-buffer advance is the final word on this edge for this frame and nothing can write over it.
+    // 6x6 row-major SE3 [x,y,z,rx,ry,rz]. Yaw-rate variance belongs at (5,5) = [35], not at [14] =
+    // var_Z; the old comment claimed it matched the pose covariance and it did — both were wrong in
+    // the same way, which is exactly what made the pair look self-consistent.
+    // ★NOW RING-PACKED BY THE RT WRITE BELOW, not written raw here. It used to be a FLAT 36 written
+    // through this same round trip, which meant it had no slot: RT_API::get_edge_RT_covariance fell
+    // back to block 0 for every timestamp, so the velocity covariance was the same number whatever
+    // instant you asked about. Passing it in the RTBlock lands it in the slot its twist belongs to.
+    std::vector<float> vel_cov(36, 0.f);
+    if (params_)
+    {
+        vel_cov[0]  = params_->ROBOT_VEL_COV_ADV;    // (0,0) var_x
+        vel_cov[7]  = params_->ROBOT_VEL_COV_SIDE;   // (1,1) var_y
+        vel_cov[35] = params_->ROBOT_VEL_COV_ROT;    // (5,5) var_yaw
+    }
+
+    // ── LEGACY TWIST ATTRIBUTES, FOR THE CONSUMERS THAT HAVE NOT MIGRATED ────────────────────
+    // ★DEPRECATED. rt_twist_linear / rt_twist_angular in the ring below supersede these; they are
+    // still written so the four agents that read the old pair keep working during the migration
+    // (controller, retina, viewer3d, common/media_transport/rt_extrapolate.h). Delete this block the
+    // day the last of them moves, and delete the attributes from cortex with it.
+    // ★NOTE THE LAYOUT DIFFERENCE, it is the reason for the replacement: this pair is ARRAY order
+    // [adv, side, _] in a +Y-forward body frame, while the ring pair is AXIS order [x, y, z] — so the
+    // same two numbers appear SWAPPED between them, on purpose.
     if (auto edge = G_->get_edge(parent_opt.value().id(), child_id, "RT"); edge.has_value())
     {
         G_->add_or_modify_attrib_local<rt_translation_velocity_att>(
             edge.value(), std::vector<float>{last_adv_, last_side_, 0.f});
         G_->add_or_modify_attrib_local<rt_rotation_euler_xyz_velocity_att>(
             edge.value(), std::vector<float>{0.f, 0.f, last_rot_});
-        // 6×6 row-major SE3 [x,y,z,rx,ry,rz], same convention as the pose covariance above — the
-        // velocity twist beside it is already written that way (rt_rotation_euler_xyz_velocity puts
-        // yaw rate in the THIRD slot of an xyz triple, i.e. rz). The yaw-rate variance therefore
-        // belongs at (5,5) = [35], not at [14] = var_Z. The old comment claimed it matched the pose
-        // covariance and it did — both were wrong in the same way, which is exactly what made the
-        // pair look self-consistent.
-        std::vector<float> vel_cov(36, 0.f);
-        if (params_)
-        {
-            vel_cov[0]  = params_->ROBOT_VEL_COV_ADV;    // (0,0) var_x
-            vel_cov[7]  = params_->ROBOT_VEL_COV_SIDE;   // (1,1) var_y
-            vel_cov[35] = params_->ROBOT_VEL_COV_ROT;    // (5,5) var_yaw — was [14] = var_Z
-        }
-        // Written raw rather than through RT_API::insert_or_assign_edge_RT_covariance so all three
-        // twist attributes ride ONE get_edge/insert_or_assign_edge round trip: the API call would
-        // fetch and re-publish the edge a second time per odometry cycle, and every extra edge
-        // write-back on this path is another chance to re-publish stale ring state (see above).
-        G_->add_or_modify_attrib_local<rt_covariance_velocity_att>(edge.value(), vel_cov);
         G_->insert_or_assign_edge(edge.value());
     }
 
-    // ── Timestamped RT write ────────────────────────────────────────────────
-    // Write via the RT_API covariance+timestamp overload so the edge keeps a proper TIMESTAMPED
-    // HISTORY ring buffer (rt_timestamps / rt_head_index). The previous code overwrote a single
-    // untimestamped block, so consumers' InterpolatedRT could never interpolate to a requested
-    // time — it always returned the latest pose (RTdelta=0), freezing the controller's lidar
-    // overlay between the ~5 Hz pose publishes. res.timestamp_ms is the pose's validity time (the
-    // localization stamp). DSR interpolates pose between blocks; it does NOT extrapolate the velocity
-    // attrs (written below) — those are for consumers to read directly.
+    // ── Timestamped RT write: pose AND twist into the SAME ring slot ────────────────────────
+    // Write via the RT_API RTBlock overload so the edge keeps a proper TIMESTAMPED HISTORY ring
+    // buffer (rt_timestamps / rt_head_index). The previous code overwrote a single untimestamped
+    // block, so consumers' InterpolatedRT could never interpolate to a requested time — it always
+    // returned the latest pose (RTdelta=0), freezing the controller's lidar overlay between the
+    // ~5 Hz pose publishes. res.timestamp_ms is the pose's validity time (the localization stamp).
+    //
+    // ★THE TWIST NOW RIDES IN THE SAME BLOCK, and that is what makes it usable. Written as loose
+    // attributes (rt_translation_velocity, above) it had no slot and NO STAMP: a consumer could read
+    // a velocity but not learn which pose it belonged to, nor that it was stale. In the ring it
+    // inherits this block's timestamp, so RT_API can extrapolate a clamped query forward with it and
+    // a reader can tell a fresh twist from a dead producer's last one.
+    // ★AND IT IS WRITTEN IN AXIS ORDER, WHICH THE OLD PAIR WAS NOT. rt_twist_linear is [vx,vy,vz] in
+    // the CHILD frame's own axes; this robot's body frame is +Y FORWARD, so the advance rate goes in
+    // slot 1 and the lateral rate in slot 0. The deprecated rt_translation_velocity is ARRAY order
+    // ([adv, side, 0]) and every consumer had to re-encode that convention by hand — three of them
+    // re-encoded it wrong, putting adv on x, which rotates the prediction 90 degrees and lands
+    // sqrt(2)*|motion| from the truth. Measured over 421 forward-driving cycles (2026-08-04):
+    // adv->x p50 25.86 mm, adv->y p50 0.07 mm.
+    // ★BOTH PAIRS ARE WRITTEN during the migration. The legacy attributes below still feed the four
+    // consumers that have not moved to the ring yet; they go once those do.
     try
     {
         rt_api_->insert_or_assign_edge_RT(parent_opt.value(), child_id,
-                                          std::vector<float>{x, y, 0.f},
-                                          std::vector<float>{0.f, 0.f, theta},
-                                          cov_flat,
+                                          DSR::RT_API::RTBlock{
+                                              .translation     = {x, y, 0.f},
+                                              .rotation_euler  = {0.f, 0.f, theta},
+                                              .covariance      = cov_flat,
+                                              // AXIS order: x lateral, y FORWARD (see above)
+                                              .twist_linear    = std::vector<float>{last_side_, last_adv_, 0.f},
+                                              .twist_angular   = std::vector<float>{0.f, 0.f, last_rot_},
+                                              .twist_covariance = vel_cov},
                                           timestamp_ms);
     }
     catch (const std::exception &error)

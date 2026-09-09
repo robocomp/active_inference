@@ -21,11 +21,17 @@ LIST(APPEND LIBS
 
 # Sources set
 LIST(APPEND SOURCES
+  ../src/place_encoder.cpp
+  ../src/place_stage.cpp
   ../src/specificworker.cpp
   ../src/specificworker_presence.cpp
   ../src/specificworker_viewers.cpp
   ../src/retina_params.cpp
   ../src/graph_publisher.cpp
+  ../src/door_approach_log.cpp
+  ../../common/contour_edge/contour_edge_check.cpp
+  ../src/door_specialist.cpp
+  ../src/door_specialist_stage.cpp
   ../src/scene_processor.cpp
   ../src/media_plane_source.cpp
   ../src/zed_frame_aligner.cpp
@@ -56,6 +62,8 @@ LIST(APPEND SOURCES
 
 # Headers set
 LIST(APPEND HEADERS
+  ../src/place_encoder.h
+  ../src/place_stage.h
   ../src/specificworker.h
   ../src/retina_params.h
   ../src/graph_publisher.h

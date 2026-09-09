@@ -642,12 +642,19 @@ std::vector<CameraVisualizer::ObjectBox> CameraVisualizer::get_dsr_object_boxes(
                 subtype = s.value();
             const auto name_is = [&](std::string_view p) { return std::string_view(node.name()).starts_with(p); };
 
-            // Floor-standing furniture (tables, chairs, fridges) anchors its node origin at the base → box
-            // extends upward [0, h]; free objects are center-anchored → [-h/2, h/2]. Matches the retina.
-            const bool stands_on_floor = subtype == "table" || subtype == "chair" || subtype == "refrigerator"
-                                         || name_is("table") || name_is("chair") || name_is("refrigerator");
-            const float z_lo = stands_on_floor ? 0.f     : -hh;
-            const float z_hi = stands_on_floor ? height  :  hh;
+            // ★ BASE-ANCHORED IS THE DEFAULT; the EXCEPTION is what gets named. Every concept agent
+            // publishes its RT origin at the object's BASE, box = [origin, origin+height]:
+            // table/chair/refrigerator write z=0, cabinet the carcass base z0, hood the BODY base
+            // (z_top−extent, not the floor), door the aperture base. The one producer that publishes a
+            // CENTRE is bottle_concept (bottle_scene_graph.cpp: p_parent.z = s.cz, mesh spans cz ± h/2),
+            // because a bottle's support is resolved per instance (bottle.concept.toml).
+            // This was a WHITELIST of three classes, so every concept that arrived after it was written —
+            // the door first — drew itself centre-anchored: sunk half its height into the floor with its
+            // top at the object's mid-height. A whitelist is wrong by default for everything new; naming
+            // the single exception is right by default instead.
+            const bool centre_anchored = subtype == "bottle" || subtype == "cylinder" || name_is("bottle");
+            const float z_lo = centre_anchored ? -hh : 0.f;
+            const float z_hi = centre_anchored ?  hh : height;
 
             const std::array<Eigen::Vector3d, 8> local = {
                 Eigen::Vector3d{-hw, -hd, z_lo}, Eigen::Vector3d{ hw, -hd, z_lo},

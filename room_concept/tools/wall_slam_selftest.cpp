@@ -26,6 +26,11 @@
 #include <random>
 #include <charconv>
 #include <cstring>
+#include <unordered_map>
+#include <unistd.h>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 #include <fstream>
 #include <locale>
 #include <filesystem>
@@ -248,6 +253,7 @@ namespace
         float ceiling_sigma_rad = 0.0011f;   // 0.065 deg — the measured fitted-contour scatter
         int   ceiling_rays = 180;
         const char* trace_csv = nullptr;   // per-frame precision trace (WallMap::precisions)
+        const char* poly_csv  = nullptr;   // per-frame PUBLISHED layout + its per-corner/per-edge sigma
     };
 
     /// Append one frame's precision snapshot. The file is opened once per run and imbued with the
@@ -821,6 +827,22 @@ namespace
         R.map.params.forward_referee = std::getenv("WS_NO_BEAMS") == nullptr;
         R.map.params.referee_log     = std::getenv("WS_REFEREE") != nullptr;
         std::ofstream trace; trace_open(trace, cfg.trace_csv);
+        // PER-FRAME LAYOUT TRACE: the published polygon exactly as the world would receive it that
+        // frame, with the uncertainty the model attaches to it — per corner the σ of its position
+        // (Corner::sigma, from the two edges' information), per edge the σ of its own offset
+        // (1/√Λ_dd). One line per frame; the origin is on the header line because the map frame is
+        // start-relative. Semicolon-separated so the vertex list can keep its commas.
+        std::ofstream ptrace;
+        if (cfg.poly_csv != nullptr)
+        {
+            ptrace.open(cfg.poly_csv);
+            if (ptrace.is_open())
+            {
+                ptrace.imbue(std::locale::classic());
+                ptrace << "# origin " << start.x() << ' ' << start.y() << '\n'
+                       << "# frame;est_x,est_y,est_th;tru_x,tru_y,tru_th;verts;corner_sigma;edge_sigma_d;closed,publishable\n";
+            }
+        }
 
         rc::Model model;
         model.init_from_polygon({{-20.f, -20.f}, {20.f, -20.f}, {20.f, 20.f}, {-20.f, 20.f}}, 0.f, 0.f, 0.f, 2.4f);
@@ -856,6 +878,35 @@ namespace
         int replan_in = 0;
         int quiet_frames = 0;
         int last_rederive = 0, rejected_since_rederive = 0, rederives = 0, replan_count = 0;
+        // ── ATTENTION MEMORY: which BEARINGS each place has already been looked at from ──────────
+        // Subtracting only "what is visible from where I stand" gave the objective no memory, and a
+        // robot with no memory shuttles: standing at A, everything visible only from B is new;
+        // arriving at B, everything visible only from A is new again. Measured on this bench:
+        // 154.9 m walked inside a 0.65 m² corridor — 1.1% of a 60.5 m² flat — 102 cells visited a
+        // mean of 10.8 times each, 29 crossings of the corridor's own midpoint.
+        // What makes a look NEW is not a new position but a new ANGLE: a cell already seen from
+        // this bearing has nothing more to say to a second look from the same side, while the same
+        // cell seen from a different side is exactly what an unresolved corner needs (its two walls
+        // must be seen well TOGETHER). So each 8 cm place keeps 16 bits, one per 22.5° bearing
+        // sector it has been looked at from, and a candidate viewpoint earns a target only through
+        // a sector still unmarked.
+        // ⚠ THE ONE CONSTANT: 16 sectors. It is a discretisation of "a different look", of the same
+        // kind as the 8 cm cell and the 0.25 m existence bin, not a tuning knob — but it is a
+        // choice, and WS_SECTORS exists so it can be moved and the result measured.
+        int n_sectors = 16;
+        if (const char* e = std::getenv("WS_SECTORS"))
+        { int v = 0; if (std::from_chars(e, e + std::strlen(e), v).ec == std::errc{} and v > 0 and v <= 16) n_sectors = v; }
+        std::unordered_map<long long, unsigned short> looked;
+        const auto akey = [](const Eigen::Vector2f& p)
+        { return (static_cast<long long>(std::lround(p.x() / 0.08f)) << 22)
+               ^  static_cast<long long>(std::lround(p.y() / 0.08f)); };
+        const auto sector_of = [&](const Eigen::Vector2f& d)
+        {
+            float a = std::atan2(d.y(), d.x());
+            if (a < 0.f) a += 2.f * kPi;
+            const int k = static_cast<int>(a / (2.f * kPi) * static_cast<float>(n_sectors));
+            return std::min(k, n_sectors - 1);
+        };
 
         for (int f = 0; f < max_frames; ++f)
         {
@@ -973,19 +1024,130 @@ namespace
             R.pose_max_xy = std::max(R.pose_max_xy, exy);
             R.pose_max_th = std::max(R.pose_max_th, std::abs(wrap(err.z())));
 
-            // ── perceive → decide: replan toward the largest visible unknown ──────────────────
+            // ── perceive → decide: replan toward the largest EXPECTED INFORMATION GAIN ───────
             if (--replan_in <= 0 or path.empty())
             {
+                // ═══ WHAT A LOOK FROM v WOULD ACTUALLY TEACH, predicted through the model ═══════
+                // The previous objective summed the entropy VISIBLE from a viewpoint, with
+                // visibility ray-cast against the TRUE room. Two things were wrong with that and
+                // both were visible in the robot's behaviour. It used an oracle: it knew what it
+                // would see from a place it had never been. And it scored H(x), not the expected
+                // reduction H(x) − E_o[H(x|o)], so a cell it could see but could not RESOLVE — one
+                // behind a wall the estimate already knows about, or past the beam's reach — paid
+                // its full ignorance for ever and never paid it back. That is what parked the robot
+                // (3.4 m, then 1077 stationary frames) and, once patched by hand, what made it
+                // shuttle (154.9 m inside 1.1% of the floor).
+                //
+                // This is the expectation itself, taken with the same beam model the estimator
+                // uses, through the ESTIMATED polygon and the occupancy grid — never the true room:
+                //   · cast the scan the robot would take from v, stopping at the model's own walls,
+                //     so everything behind them contributes nothing because it would not be seen;
+                //   · per traversed grid cell, the expected entropy drop under the grid's OWN
+                //     update rule: H(p) − [p·H(σ(l+1.0)) + (1−p)·H(σ(l−0.4))], which is ~0 for a
+                //     cell already certain and largest for one that is genuinely unknown;
+                //   · per beam that lands on a wall, the Fisher information that point adds to that
+                //     wall's (φ, d) — h = [s, −1], J = h·hᵀ/σ² — and then the CORNERS: a corner's
+                //     σ is recomputed from its two walls' augmented information with the model's own
+                //     intersect_walls, and the look earns ln(σ_before/σ_after) nats for it.
+                // The last term is what a corner needs and no visibility count can express: the
+                // gain is large only where a viewpoint sees a long stretch of BOTH walls that meet.
+                // Nothing here is a weight; the units are nats throughout, and the ratio to
+                // distance stays what it was — nats per metre.
+                const auto eig_of = [&](const Eigen::Vector2f& v_world) -> float
+                {
+                    const Eigen::Vector2f v = to_map(Eigen::Vector3f(v_world.x(), v_world.y(), 0.f)).head<2>();
+                    const auto poly = R.map.build_polygon();
+                    if (not poly.closed or poly.verts.size() < 3) return 0.f;
+                    const auto& fg = R.map.fgrid;
+                    if (not fg.ready()) return 0.f;
+                    const int NB = 36;
+                    const bool occl_pred = std::getenv("WS_NO_OCCL_PRED") == nullptr;
+                    const float sig2 = R.map.params.obs_sigma * R.map.params.obs_sigma;
+                    std::unordered_map<std::uint64_t, Eigen::Matrix2f> J;   // wall id → added information
+                    float gain = 0.f;
+                    for (int b = 0; b < NB; ++b)
+                    {
+                        const float a = 2.f * kPi * static_cast<float>(b) / static_cast<float>(NB);
+                        const Eigen::Vector2f dir(std::cos(a), std::sin(a));
+                        // range predicted by the MODEL's own boundary
+                        float r_pred = R.map.params.sensor_range; int hit = -1;
+                        for (size_t e = 0; e < poly.verts.size(); ++e)
+                            if (const auto t = rc::corner_visibility::ray_segment_t(
+                                    v, dir, poly.verts[e], poly.verts[(e + 1) % poly.verts.size()]);
+                                t and *t > 1e-3f and *t < r_pred) { r_pred = *t; hit = static_cast<int>(e); }
+                        // Every cell the beam would cross — and it STOPS at the first matter the
+                        // grid already holds, not only at the polygon. Predicting through the
+                        // boundary alone made furniture invisible to the planner while it stays
+                        // decisive for the sensor: the prediction sent beams sailing past a cupboard
+                        // to the wall behind it and credited every cell on the way, the real beam
+                        // stopped at the cupboard, and the uncollected promise was re-offered from
+                        // the other side next replan. Measured: two cells 0.6 m apart, ~125 nats
+                        // each, alternating for hundreds of frames. A prediction must be made
+                        // through everything the model believes, or it is not an expectation.
+                        bool blocked = false;
+                        for (float rr = fg.cell; rr < r_pred; rr += fg.cell)
+                        {
+                            const Eigen::Vector2f q = v + dir * rr;
+                            const int i = static_cast<int>((q.x() - fg.x0) / fg.cell);
+                            const int j = static_cast<int>((q.y() - fg.y0) / fg.cell);
+                            if (not fg.in(i, j)) continue;
+                            const float l = fg.lodds[static_cast<size_t>(fg.idx(i, j))];
+                            const float p = 1.f / (1.f + std::exp(-l));
+                            const float h_now = entropy_nats(l);
+                            const float h_after = p * entropy_nats(std::min(4.f, l + 1.0f))
+                                                + (1.f - p) * entropy_nats(std::max(-4.f, l - 0.4f));
+                            gain += std::max(0.f, h_now - h_after);
+                            // WS_NO_OCCL_PRED=1 restores the polygon-only prediction, so the
+                            // occlusion term can be measured on its own rather than against a run
+                            // taken under a different address layout.
+                            if (occl_pred and fg.is_occupied(i, j)) { blocked = true; break; }
+                        }
+                        // what the returning point would tell the wall it lands on — only if it gets there
+                        if (not blocked and hit >= 0 and static_cast<size_t>(hit) < poly.wall_of_edge.size())
+                        {
+                            const auto* w = R.map.find(poly.wall_of_edge[static_cast<size_t>(hit)]);
+                            if (w != nullptr)
+                            {
+                                const Eigen::Vector2f q = v + dir * r_pred;
+                                const float sc_ = w->tangent().dot(q);
+                                Eigen::Vector2f h(sc_, -1.f);
+                                J[w->id] += (h * h.transpose()) / sig2;
+                            }
+                        }
+                    }
+                    // corners: the model's own σ, recomputed with the information the look would add
+                    for (const auto& c : poly.corners)
+                    {
+                        if (not std::isfinite(c.sigma) or c.sigma <= R.map.params.publish_corner_sigma) continue;
+                        const auto* wa = R.map.find(c.wall_a); const auto* wb = R.map.find(c.wall_b);
+                        if (wa == nullptr or wb == nullptr) continue;
+                        const auto ja = J.find(wa->id), jb = J.find(wb->id);
+                        if (ja == J.end() and jb == J.end()) continue;     // this look says nothing about it
+                        rc::wallmap::WallLandmark a2 = *wa, b2 = *wb;
+                        if (ja != J.end()) a2.information += ja->second;
+                        if (jb != J.end()) b2.information += jb->second;
+                        const auto c2 = rc::wallmap::WallMap::intersect_walls(a2, b2, c.inferred);
+                        if (std::isfinite(c2.sigma) and c2.sigma > 0.f and c2.sigma < c.sigma)
+                            gain += std::log(c.sigma / c2.sigma);          // differential entropy, nats
+                    }
+                    return gain;
+                };
                 replan_in = 15;
                 const auto unknowns = cfg.info_gain ? collect_entropy_targets(R.map) : collect_unknowns(R.map);
                 // Exploration is COMPLETE when free space has no true frontier left; the map may
                 // keep refining, but there is nowhere informative left to drive to.
-                quiet_frames = (f > 60 and R.map.frontiers().empty()) ? quiet_frames + 1 : 0;
-                // Termination needs BOTH no frontier AND (nearly) no epistemic targets left: the
-                // bin-latch seals maps early, and stopping on frontier-exhaustion alone forfeited
-                // 310 refinement frames on one seed (IoU 0.841 with the spur still unresolved).
-                if (unknowns.empty() or (quiet_frames >= 3 and unknowns.size() <= 3)) { R.frames = f + 1; break; }
+                // ── THE GUARD: a run may only declare itself finished with a CLOSED polygon ──
+                // "Nothing left worth looking at" and "the map is done" are different statements,
+                // and conflating them cost a whole run: with an honest predictor the offers fall to
+                // fractions of a nat, the no-path condition starts firing, and the run stopped at
+                // frame 803 holding an OPEN cycle — which publishes nothing and scores 0.000. An
+                // open polygon is itself the loudest thing the map can say about its own state, so
+                // exploration is not over while it stands, whatever the information ledger says.
+                // The frame budget remains the outer bound; nothing here can run for ever.
+                const bool closed_now = R.map.build_polygon().closed;
+                if (unknowns.empty() and closed_now) { R.frames = f + 1; break; }
                 float best_sc = -1.f; Eigen::Vector2f best_v = tru.head<2>();
+                const bool dbg_plan = std::getenv("WS_DEBUG_PLAN") != nullptr;
                 // COVERAGE GUARANTEE: greedy argmax-by-visible-mass starves sparse far regions — a
                 // wrong early wall then amputates a whole space for ever, because nothing ever goes
                 // where it would be contradicted (seed-7: one diagonal cut off the SE space for 1100
@@ -1018,7 +1180,41 @@ namespace
                         if (dd < dbest) { dbest = dd; best_v = ft; best_sc = 1.f; }
                     }
                 }
-                // score viewpoints on the free grid (subsampled) by visible unknown mass
+                // ── WHAT A LOOK WOULD ADD, not what happens to be in view ────────────────────
+                // The old score summed every target VISIBLE from a candidate cell, and the robot's
+                // own cell is a candidate: it sees whatever it already sees, divides by 1 + 0 m,
+                // and wins. Worse, a target it cannot resolve from here — occluded, or past the
+                // beam's reach — keeps its entropy for ever, so the score never decayed and the
+                // drive never resumed. Measured before this rewrite: 3.40 m travelled on every one
+                // of twelve apartamento seeds, motion ending at frame 23, 97.9% of all frames
+                // stationary, 13-63 frontiers still open, and the population's worst room (22)
+                // replanning 898 times having moved once.
+                //
+                // A look is worth the entropy it would NEWLY expose, so everything already in view
+                // from where the robot stands is subtracted first. This carries no constant and no
+                // radius: the robot's own cell scores exactly zero by construction, and so does any
+                // cell that merely re-sees this standpoint's view. When every cell scores zero
+                // there is nothing left to learn by moving — which is the honest definition of a
+                // finished exploration, and what "stabilised" should mean.
+                // Everything the robot can see FROM HERE is now recorded against the bearing it is
+                // seeing it from, so this standpoint — and every standpoint it has already used —
+                // stops paying. The record is what the old version lacked.
+                const bool use_eig = std::getenv("WS_NO_EIG") == nullptr;
+                std::vector<Eigen::Vector2f> tp(unknowns.size());
+                std::vector<unsigned short>  tmask(unknowns.size(), 0);
+                const unsigned short full = static_cast<unsigned short>((1u << n_sectors) - 1u);
+                for (size_t k = 0; k < unknowns.size() and not use_eig; ++k)
+                {
+                    tp[k] = from_map(unknowns[k].p);
+                    if (ex.sees(tru.head<2>(), tp[k]))
+                        looked[akey(tp[k])] |= static_cast<unsigned short>(1u << sector_of(tru.head<2>() - tp[k]));
+                }
+                for (size_t k = 0; k < unknowns.size() and not use_eig; ++k)
+                    if (const auto it = looked.find(akey(tp[k])); it != looked.end()) tmask[k] = it->second;
+                // Keep the best few, not just the argmax: a viewpoint A* cannot reach used to end
+                // the plan silently and park the robot for the rest of the run (room 22: 898
+                // replans, `path=0` every time). An unreachable winner now yields to the next.
+                std::vector<std::pair<float, Eigen::Vector2f>> cands;
                 if (best_sc < 0.f)
                 for (int i = 0; i < ex.nx; i += 2)
                     for (int j = 0; j < ex.ny; j += 2)
@@ -1026,8 +1222,15 @@ namespace
                         if (not ex.is_free(i, j)) continue;
                         const Eigen::Vector2f v = ex.at(i, j);
                         float sc = 0.f;
-                        for (const auto& u : unknowns)
-                            if (ex.sees(v, from_map(u.p))) sc += u.w;
+                        if (use_eig) sc = eig_of(v);
+                        else
+                        for (size_t k = 0; k < unknowns.size(); ++k)
+                        {
+                            // ── the hand-built stand-in this replaces (WS_NO_EIG=1 to compare) ──
+                            if (tmask[k] == full) continue;
+                            if (tmask[k] != 0 and (tmask[k] & static_cast<unsigned short>(1u << sector_of(v - tp[k])))) continue;
+                            if (ex.sees(v, tp[k])) sc += unknowns[k].w;
+                        }
                         if (sc <= 0.f) continue;
                         // GAIN PER METRE. The constant is not a tuning knob: it is the distance the
                         // robot covers between replans, so the ratio is nats per look. Without it
@@ -1035,19 +1238,67 @@ namespace
                         // distance by taste.
                         sc /= (cfg.info_gain ? (1.0f + (v - tru.head<2>()).norm())
                                              : (1.f + 0.10f * (v - tru.head<2>()).norm()));
-                        if (sc > best_sc) { best_sc = sc; best_v = v; }
+                        cands.emplace_back(sc, v);
                     }
-                if (best_sc > 0.f)
+                std::sort(cands.begin(), cands.end(),
+                          [](const auto& a, const auto& b) { return a.first > b.first; });
+                if (cands.size() > 16) cands.resize(16);
+                if (best_sc > 0.f)   // a coverage turn already chose one
                 {
                     path = ex.astar(tru.head<2>(), best_v);
-                    if (path.size() > 1) path.erase(path.begin());   // skip the cell we stand in
+                    if (path.size() > 1) path.erase(path.begin());
+                    else path.clear();
                 }
+                else
+                    for (const auto& [sc, v] : cands)
+                    {
+                        path = ex.astar(tru.head<2>(), v);
+                        if (path.size() > 1) { path.erase(path.begin()); best_sc = sc; best_v = v; break; }
+                        path.clear();
+                    }
+                // STABILISED: no reachable viewpoint anywhere would show the map anything it has
+                // not already seen from here. Counted over consecutive replans for the same reason
+                // the old test was — one replan can fall in a moment when the targets are briefly
+                // all in view — and only after the map has had a chance to exist.
+                quiet_frames = (f > 60 and path.empty()) ? quiet_frames + 1 : 0;
+                if (quiet_frames >= 3 and closed_now) { R.frames = f + 1; break; }
+                if (dbg_plan)
+                    std::printf("[plan] f=%4d targets=%zu frontiers=%zu best_sc=%.3f best_v=(%.2f,%.2f) "
+                                "here=(%.2f,%.2f) path=%zu quiet=%d\n",
+                                f, unknowns.size(), R.map.frontiers().size(), best_sc, best_v.x(), best_v.y(),
+                                tru.x(), tru.y(), path.size(), quiet_frames);
             }
             if (cfg.verbose and (f % 25 == 0 or fr.births > 0))
                 std::printf("    f=%3d walls=%zu cand=%d births=%d deaths=%d err=%.3fm poly=%s\n",
                             f, R.map.walls.size(), fr.candidates, fr.births, fr.deaths, exy,
                             R.map.build_polygon().closed ? "closed" : "open");
             trace_precisions(trace, R.map, 0.f, exy);
+            if (ptrace.is_open())
+            {
+                const auto pub = R.map.manhattan_polygon();
+                ptrace << f << ';' << est.x() << ',' << est.y() << ',' << est.z()
+                       << ';' << tru.x() << ',' << tru.y() << ',' << tru.z() << ';';
+                for (size_t v = 0; v < pub.verts.size(); ++v)
+                    ptrace << (v ? " " : "") << pub.verts[v].x() << ',' << pub.verts[v].y();
+                ptrace << ';';
+                for (size_t v = 0; v < pub.corners.size(); ++v)
+                    ptrace << (v ? " " : "") << pub.corners[v].sigma;
+                ptrace << ';';
+                for (size_t e = 0; e < pub.wall_of_edge.size(); ++e)
+                {
+                    const auto* w = R.map.find(pub.wall_of_edge[e]);
+                    const float lam = (w != nullptr) ? w->information(1, 1) : 0.f;
+                    ptrace << (e ? " " : "") << ((lam > 1e-9f) ? 1.f / std::sqrt(lam) : -1.f);
+                }
+                std::string st = pub.status;
+                for (char& ch : st) if (ch == ';' or ch == '\n') ch = ' ';
+                const auto raw = R.map.build_polygon();
+                std::string st_raw = raw.status;
+                for (char& ch : st_raw) if (ch == ';' or ch == '\n') ch = ' ';
+                ptrace << ';' << (pub.closed ? 1 : 0) << ',' << (pub.publishable ? 1 : 0)
+                       << ';' << R.map.walls.size() << ',' << R.map.order.size() << ',' << (raw.closed ? 1 : 0)
+                       << ';' << st << ';' << st_raw << '\n';
+            }
             R.frames = f + 1;
         }
         R.pose_rmse_xy = (n_err > 0) ? static_cast<float>(std::sqrt(se / n_err)) : 0.f;
@@ -1070,6 +1321,34 @@ namespace
 
 int main()
 {
+    // ── DETERMINISM. torch::set_num_threads(1) alone was NOT enough: the same command returned
+    // 0.974 / 0.906 / 0.906 / 0.923 / 0.932 on one room, and 0.000 inside a loaded sweep, because
+    // OTHER OpenMP-parallel code in the process (Eigen's GEMM among it) still took its team size
+    // from the machine — so the reduction ORDER, and therefore the answer, followed the load.
+    // Setting OMP_NUM_THREADS in the environment fixed it 3/3, which is the same statement made
+    // from outside; these two calls make it from inside, so the guarantee travels with the binary.
+    // A bench whose result depends on what else the machine is doing cannot referee anything.
+    // The in-process calls are NOT enough on their own: the OpenMP runtime and the BLAS pools size
+    // themselves before main(), so shrinking them here leaves the reduction order already chosen.
+    // Only the ENVIRONMENT is read early enough — so if it is not set, set it and re-exec ourselves
+    // once. Verified: with it, four identical invocations of the room that exposed this return the
+    // same IoU; without it they returned 0.974 / 0.906 / 0.906 / 0.923 / 0.932 and 0.000 in a loaded
+    // sweep. WS_THREADS=n opts out deliberately, trading the guarantee for speed.
+    if (std::getenv("OMP_NUM_THREADS") == nullptr and std::getenv("WS_THREADS") == nullptr)
+    {
+        ::setenv("OMP_NUM_THREADS", "1", 1);
+        ::setenv("MKL_NUM_THREADS", "1", 1);
+        ::setenv("OPENBLAS_NUM_THREADS", "1", 1);
+        char self[4096];
+        const ssize_t n = ::readlink("/proc/self/exe", self, sizeof self - 1);
+        if (n > 0) { self[n] = '\0'; char* av[] = {self, nullptr}; ::execv(self, av); }
+        // exec failed: carry on unpinned rather than not run at all, and say so.
+        std::printf("[warn] could not re-exec to pin the thread pools; results may not be reproducible\n");
+    }
+    Eigen::setNbThreads(1);
+#ifdef _OPENMP
+    omp_set_num_threads(1);
+#endif
     torch::set_num_threads(1);
     std::mt19937 rng(7);
 
@@ -1657,9 +1936,71 @@ int main()
             std::string trace7;
             if (const char* tp = std::getenv("WS_TRACE7"))
             { trace7 = std::string(tp) + "_" + std::to_string(seed) + ".csv"; cfg.trace_csv = trace7.c_str(); }
+            std::string poly7;
+            if (const char* pp = std::getenv("WS_POLY7"))
+            { poly7 = std::string(pp) + "_" + std::to_string(seed) + ".csv"; cfg.poly_csv = poly7.c_str(); }
             int nframes7 = 1100;
             if (const char* e = std::getenv("WS_FRAMES7"))
             { int v = 0; if (std::from_chars(e, e + std::strlen(e), v).ec == std::errc{} and v > 0) nframes7 = v; }
+            // ── OBSTACLES (WS_OBSTACLES=1): furniture the LiDAR cannot see through ────────────
+            // Half of them stand in the open floor, half sit FLUSH AGAINST a wall — the second kind
+            // is what actually tests the estimator, because a wall behind a cabinet is never seen at
+            // all in the band, while the room's truth polygon is unchanged. So the score still asks
+            // exactly one question: did the walls come back? Placement is deterministic (its own
+            // stream, seeded from the run) and rejected unless the whole box lies inside the room.
+            cfg.occluders.clear();
+            if (std::getenv("WS_OBSTACLES") != nullptr)
+            {
+                std::mt19937 rgo(31415u);
+                const auto U = [&](float a, float b) { return std::uniform_real_distribution<float>(a, b)(rgo); };
+                const auto inside_all = [&](const Eigen::Vector2f& lo, const Eigen::Vector2f& hi)
+                {
+                    for (int c = 0; c < 4; ++c)
+                    {
+                        const Eigen::Vector2f q((c & 1) ? hi.x() : lo.x(), (c & 2) ? hi.y() : lo.y());
+                        if (not rc::corner_visibility::point_in_polygon(q, room)) return false;
+                    }
+                    return true;
+                };
+                const auto clear_of_others = [&](const Eigen::Vector2f& lo, const Eigen::Vector2f& hi)
+                {
+                    for (const auto& [l2, h2] : cfg.occluders)
+                        if (lo.x() < h2.x() + 0.3f and l2.x() < hi.x() + 0.3f and
+                            lo.y() < h2.y() + 0.3f and l2.y() < hi.y() + 0.3f) return false;
+                    return true;
+                };
+                // free-standing: tables, sofas, a bed
+                for (int k = 0, tries = 0; k < 5 and tries < 4000; ++tries)
+                {
+                    const Eigen::Vector2f lo(U(-4.0f, 3.4f), U(-4.4f, 4.2f));
+                    const Eigen::Vector2f hi = lo + Eigen::Vector2f(U(0.5f, 1.2f), U(0.5f, 1.2f));
+                    if (not inside_all(lo, hi) or not clear_of_others(lo, hi)) continue;
+                    cfg.occluders.push_back({lo, hi}); ++k;
+                }
+                // against a wall: cupboards and shelves, which HIDE the wall behind them
+                for (int k = 0, tries = 0; k < 5 and tries < 6000; ++tries)
+                {
+                    const size_t e = static_cast<size_t>(U(0.f, static_cast<float>(room.size()) - 0.01f));
+                    const Eigen::Vector2f a = room[e], b = room[(e + 1) % room.size()];
+                    const float L = (b - a).norm();
+                    if (L < 1.4f) continue;
+                    const Eigen::Vector2f t = (b - a) / L;
+                    const Eigen::Vector2f nn(-t.y(), t.x());               // one side or the other
+                    const float w = U(0.6f, 1.3f), dpt = U(0.30f, 0.55f), sc_ = U(0.3f, L - w - 0.3f);
+                    const Eigen::Vector2f p0 = a + t * sc_, p1 = p0 + t * w;
+                    for (float sgn : {1.f, -1.f})
+                    {
+                        const Eigen::Vector2f q0 = p0 + nn * (sgn * 0.02f), q1 = p1 + nn * (sgn * dpt);
+                        const Eigen::Vector2f lo = q0.cwiseMin(q1), hi = q0.cwiseMax(q1);
+                        if (not inside_all(lo, hi) or not clear_of_others(lo, hi)) continue;
+                        cfg.occluders.push_back({lo, hi}); ++k; break;
+                    }
+                }
+                std::printf("      obstacles[%u]: %zu boxes (5 free-standing + those that fit against a wall)\n",
+                            seed, cfg.occluders.size());
+                for (const auto& [lo, hi] : cfg.occluders)
+                    std::printf("        box %.2f,%.2f %.2f,%.2f\n", lo.x(), lo.y(), hi.x(), hi.y());
+            }
             auto Rx = run_explore(room, cfg, rng7, nframes7, path[0]);
             const Poly ew = to_world(Rx.poly.verts, Eigen::Vector3f(path[0].x(), path[0].y(), 0.f));
             const float iou_x = Rx.poly.closed ? polygon_iou(ew, room) : 0.f;
@@ -2255,7 +2596,10 @@ int main()
             }
             RunConfig cfg8;
             cfg8.n_rays = 480;
-            cfg8.verbose = false;
+            cfg8.verbose = std::getenv("WS_ROOM_VERBOSE") != nullptr;
+            std::string poly8;
+            if (const char* pp = std::getenv("WS_POLY_ROOM"))
+            { poly8 = std::string(pp) + "_" + std::to_string(r) + ".csv"; cfg8.poly_csv = poly8.c_str(); }
             cfg8.occluders = furniture;
             cfg8.ceiling_line = std::getenv("WS_CEILING") != nullptr;
             cfg8.info_gain = std::getenv("WS_NO_INFOGAIN") == nullptr;

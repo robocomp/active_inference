@@ -31,6 +31,9 @@
 namespace DSR { class DSRGraph; class CameraAPI; }
 using DSRGraph = DSR::DSRGraph;
 
+namespace rc::semantic { struct SemanticMap; }
+struct SegDetection;
+
 namespace rc
 {
 
@@ -54,10 +57,16 @@ class ModelProjectionOverlay
         // translucent meshes. `room_T_zed` is the zed pose in the room frame at the capture time
         // (maps zed→room); its inverse gives the room→camera basis. No-op until the polygon and the
         // cached zed intrinsics are available.
+        // `field` + `local_masks` are OPTIONAL and drive the belief-vs-perception annotation described
+        // in EvidenceState below. Passing neither reproduces the previous drawing exactly.
         void draw(cv::Mat& canvas, std::span<const GraphObjectBox> boxes,
                   const Mat::RTMat& room_T_zed,
                   std::span<const float> room_poly_x, std::span<const float> room_poly_y,
-                  float room_height);
+                  float room_height,
+                  const rc::semantic::SemanticMap* field = nullptr,
+                  std::span<const SegDetection> local_masks = {},
+                  int field_class_id = -1,
+                  const char* field_class_name = "");
 
     private:
         bool ensure_camera_api();   // lazily create + cache the zed CameraAPI (one-time graph touch)

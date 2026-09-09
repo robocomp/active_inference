@@ -10,6 +10,11 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include "yolo_semantic.h"
+#include "yolo_seg_detector.h"
+#include <format>
+#include <limits>
+#include "../../common/contour_edge/contour_edge_check.h"   // rc::edges — classifier-free silhouette verification
 
 namespace rc
 {
@@ -139,6 +144,28 @@ std::optional<std::vector<cv::Point>> project_ring(DSR::CameraAPI& cam_api,
     return poly;
 }
 
+// Is a projected box supported by a live detection, or is it the belief's unrefuted claim?
+enum class EvidenceState { Unknown, Seen, Projected };
+
+// Dashed line: the visual grammar for "this is asserted, not observed". Drawn by hand because
+// OpenCV has no dashed primitive.
+void draw_dashed(cv::Mat& canvas, cv::Point a, cv::Point b, const cv::Scalar& col)
+{
+    const double len = cv::norm(b - a);
+    if (len < 1.0)
+        return;
+    constexpr double kDash = 9.0, kGap = 6.0;
+    const cv::Point2d dir((b.x - a.x) / len, (b.y - a.y) / len);
+    for (double t = 0.0; t < len; t += kDash + kGap)
+    {
+        const double t2 = std::min(t + kDash, len);
+        cv::line(canvas,
+                 cv::Point(static_cast<int>(a.x + dir.x * t),  static_cast<int>(a.y + dir.y * t)),
+                 cv::Point(static_cast<int>(a.x + dir.x * t2), static_cast<int>(a.y + dir.y * t2)),
+                 col, 2, cv::LINE_AA);
+    }
+}
+
 // A translucent mesh face queued for a single blended draw pass.
 struct MeshFace
 {
@@ -173,7 +200,11 @@ bool ModelProjectionOverlay::ensure_camera_api()
 void ModelProjectionOverlay::draw(cv::Mat& canvas, std::span<const GraphObjectBox> boxes,
                                   const Mat::RTMat& room_T_zed,
                                   std::span<const float> room_poly_x, std::span<const float> room_poly_y,
-                                  float room_height)
+                                  float room_height,
+                                  const rc::semantic::SemanticMap* field,
+                                  std::span<const SegDetection> local_masks,
+                                  int field_class_id,
+                                  const char* field_class_name)
 {
     if (canvas.empty() or not ensure_camera_api())
         return;
@@ -300,13 +331,116 @@ void ModelProjectionOverlay::draw(cv::Mat& canvas, std::span<const GraphObjectBo
             corners_cam[i] = basis.to_camera(p_room);
         }
 
-        const cv::Scalar col = color_for_category(box.category);
+        // ── EVIDENCE STATE: is this box being SEEN, or only BELIEVED? ────────────────────────────
+        // ★The distinction the picture was missing. Until now every projected box was drawn the same
+        // way whether the perception pipeline had just segmented that object or whether nothing had
+        // been detected there for a thousand cycles. Those are opposite epistemic situations — one is
+        // a measurement, the other is a claim awaiting refutation — and on 2026-09-09 a door sat at
+        // p_exists 0.03 for minutes while its projection looked exactly as authoritative as a live
+        // detection. A projection that cannot be told from an observation invites the reader to treat
+        // a belief as data, which is the same confusion the whole existence channel exists to police.
+        //
+        //   SEEN      solid box, name only     — a local mask of this class overlaps the projection.
+        //   PROJECTED dashed box + P(class)    — NO local mask here; this is the belief's own claim,
+        //                                        annotated with what the classifier actually says at
+        //                                        those pixels, which is the number that decides whether
+        //                                        the belief survives.
+        EvidenceState ev = EvidenceState::Unknown;
+        float mean_p = std::numeric_limits<float>::quiet_NaN();
+        std::vector<cv::Point> face_px;   // the projected FRONT face, for sampling and for the hatch
+        if (field_class_id >= 0 and box.node_name.starts_with(field_class_name))
+        {
+            // Front face = corners 0,1,5,4 (bottom-left, bottom-right, top-right, top-left).
+            std::array<int, 4> face{0, 1, 5, 4};
+            bool ok = true;
+            for (const int ci : face)
+            {
+                if (corners_cam[static_cast<std::size_t>(ci)].y() <= kNearY) { ok = false; break; }
+                const Eigen::Vector2d uv = cam.project(corners_cam[static_cast<std::size_t>(ci)]);
+                if (not std::isfinite(uv.x()) or not std::isfinite(uv.y())) { ok = false; break; }
+                face_px.emplace_back(static_cast<int>(std::lround(uv.x())),
+                                     static_cast<int>(std::lround(uv.y())));
+            }
+            if (not ok)
+                face_px.clear();
+
+            if (not face_px.empty())
+            {
+                // Mean P(class) over the projected face. Sampled on a coarse lattice inside the
+                // polygon rather than per pixel: the field is 80x80 natively, so a denser sample would
+                // read the same cells repeatedly and cost time for no information.
+                const cv::Rect bb = cv::boundingRect(face_px) & cv::Rect(0, 0, canvas.cols, canvas.rows);
+                if (field != nullptr and bb.width > 1 and bb.height > 1)
+                {
+                    double sum = 0.0; int n_s = 0;
+                    const int step = std::max(2, std::min(bb.width, bb.height) / 16);
+                    for (int y = bb.y; y < bb.y + bb.height; y += step)
+                        for (int x = bb.x; x < bb.x + bb.width; x += step)
+                            if (cv::pointPolygonTest(face_px, cv::Point2f(static_cast<float>(x),
+                                                                         static_cast<float>(y)), false) >= 0)
+                                if (const float p = field->prob_at(field_class_id, x, y, -1.0f); p >= 0.0f)
+                                { sum += p; ++n_s; }
+                    if (n_s > 0)
+                        mean_p = static_cast<float>(sum / n_s);
+                }
+                // Does a LOCAL mask of this class cover the projection? Centroid containment, the same
+                // cheap test the consumer would use; it fails safely when two doors are in view.
+                cv::Point cen(0, 0);
+                for (const auto& p : face_px) cen += p;
+                cen /= static_cast<int>(face_px.size());
+                ev = EvidenceState::Projected;
+                for (const auto& m : local_masks)
+                    if (m.label == field_class_name and m.bbox.contains(cen))
+                    { ev = EvidenceState::Seen; break; }
+            }
+        }
+
+        const cv::Scalar base_col = color_for_category(box.category);
+        // Amber for a projection with no supporting mask — deliberately NOT the category colour, so a
+        // believed-only object never looks like a detected one at a glance.
+        const cv::Scalar col = (ev == EvidenceState::Projected) ? cv::Scalar{255, 170, 40} : base_col;
         for (const auto& e : box_edges)
         {
             cv::Point p0, p1;
             if (project_clipped_segment(corners_cam[e[0]], corners_cam[e[1]], p0, p1)
                 and cv::clipLine(canvas.size(), p0, p1))
-                cv::line(canvas, p0, p1, col, 2, cv::LINE_AA);
+            {
+                if (ev == EvidenceState::Projected)
+                    draw_dashed(canvas, p0, p1, col);   // dashed = a claim, not a measurement
+                else
+                    cv::line(canvas, p0, p1, col, 2, cv::LINE_AA);
+            }
+        }
+        // The number that decides the belief's fate, drawn where it is being measured.
+        if (ev == EvidenceState::Projected and not face_px.empty())
+        {
+            cv::Point cen(0, 0);
+            for (const auto& p : face_px) cen += p;
+            cen /= static_cast<int>(face_px.size());
+            // ★THE TWO NUMBERS SIDE BY SIDE, and they answer different questions.
+            //   P(class) — what the CLASSIFIER says these pixels are. Collapses as the robot closes
+            //              (0.995 at 5.5 m -> 0.048 at 2 m on a plainly visible closed door).
+            //   edge     — whether the IMAGE has a boundary where the silhouette predicts one, scored
+            //              against the same shape displaced along the wall. No classifier involved, so
+            //              it has no reason to collapse with one.
+            // Showing them together is the whole point: when they disagree, the disagreement is the
+            // finding, and until now it was only visible by joining two CSVs after the fact.
+            const auto es = rc::edges::contour_edge_support(
+                canvas, face_px, rc::edges::make_side_controls(face_px, canvas.cols, canvas.rows));
+            const std::string txt = std::format("no mask | P({})={} | edge={}",
+                field_class_name,
+                std::isfinite(mean_p) ? std::format("{:.3f}", mean_p) : std::string{"n/a"},
+                es.n_samples > 0 ? std::format("{:.2f}", es.support) : std::string{"n/a"});
+            cv::putText(canvas, txt, cen, cv::FONT_HERSHEY_SIMPLEX, 0.5, col, 2, cv::LINE_AA);
+            // Draw the control placements the score is taken against, faintly. A number whose reference
+            // is invisible invites trusting it; seeing WHERE it compared makes a bad control obvious
+            // (one landing on a second door, or off the wall entirely).
+            for (const auto& c : rc::edges::make_side_controls(face_px, canvas.cols, canvas.rows))
+            {
+                const cv::Point* cp = c.data();
+                const int cn = static_cast<int>(c.size());
+                cv::polylines(canvas, &cp, &cn, 1, true, cv::Scalar{140, 140, 140}, 1, cv::LINE_AA);
+            }
         }
 
         // Name label at the projected top-front corner (corner 4), in front of the camera and in-bounds.

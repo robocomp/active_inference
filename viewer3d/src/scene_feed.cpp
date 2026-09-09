@@ -223,9 +223,15 @@ std::optional<GraphObjectBox> SceneFeed::build_graph_object_box(const DSR::Node&
     // A metaconcept's RT origin is on the floor too (ring_metaconcept publishes z=0 with a 0.02 m
     // nominal height), so it uses the same upward-extending convention — its outline lies ON the
     // floor rather than straddling it.
-    const bool stands_on_floor = (node.type() == "table") or (node.name().rfind("table", 0) == 0)
-                              or (node.name().rfind("cabinet_", 0) == 0)
-                              or (node.type() == "object") or (node.type() == "metaconcept");
+    // The ONE producer that anchors its origin at the CENTRE is bottle_concept (bottle_scene_graph.cpp:
+    // p_parent.z = s.cz, mesh spans cz ± h/2) — a bottle's support is resolved per instance
+    // (bottle.concept.toml), so it cannot use the base convention. Boxing it upward from cz drew every
+    // bottle half its height ABOVE its own support.
+    const bool centre_anchored = (object_class_of(*graph_, node) == "bottle") or (node.type() == "cylinder");
+    const bool stands_on_floor = not centre_anchored
+                              and ((node.type() == "table") or (node.name().rfind("table", 0) == 0)
+                                or (node.name().rfind("cabinet_", 0) == 0)
+                                or (node.type() == "object") or (node.type() == "metaconcept"));
     const float z_lo = stands_on_floor ? 0.f : -half_height;
     const float z_hi = stands_on_floor ? height : half_height;
 

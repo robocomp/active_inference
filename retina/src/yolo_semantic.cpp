@@ -5,7 +5,9 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <charconv>
 #include <cstring>
+#include <string_view>
 #include <iostream>
 #include <limits>
 #include <print>
@@ -54,9 +56,41 @@ YoloSemanticSegmenter::YoloSemanticSegmenter(const std::string& model_path,
             output_names_.push_back(strdup(name.get()));
             output_names_cstr_.push_back(output_names_.back());
         }
+        // ★THE MODEL DECLARES ITS OWN CHANNEL MAP (tools/expose_semantic_logits.py writes it).
+        // Read here rather than from config: a re-export with a different --classes order against a
+        // stale config key would read P(door) out of the cabinet channel with nothing to catch it.
+        // Absent ⇒ an ungraded export ⇒ prob_class_ids_ stays empty ⇒ the old path, unchanged.
+        try
+        {
+            auto meta = session_->GetModelMetadata();
+            if (auto v = meta.LookupCustomMetadataMapAllocated("prob_class_ids", allocator); v)
+            {
+                const std::string csv{v.get()};
+                for (std::size_t b = 0, e = 0; b <= csv.size(); b = e + 1)
+                {
+                    e = csv.find(',', b);
+                    if (e == std::string::npos) e = csv.size();
+                    int id = -1;
+                    const auto* first = csv.data() + b;
+                    if (std::from_chars(first, csv.data() + e, id).ec == std::errc{} and id >= 0)
+                        prob_class_ids_.push_back(id);
+                }
+            }
+        }
+        catch (const Ort::Exception&) { /* no metadata map ⇒ ungraded model, not an error */ }
+
         std::cout << "[YoloSemanticSegmenter] Loaded: " << model_path
                   << "  inputs=" << n_in << "  outputs=" << n_out
-                  << "  classes=" << class_names_.size() << '\n';
+                  << "  classes=" << class_names_.size();
+        if (prob_class_ids_.empty())
+            std::cout << "  graded=NO (argmax only; P(class) unavailable)\n";
+        else
+        {
+            std::cout << "  graded=YES channels=[";
+            for (std::size_t i = 0; i < prob_class_ids_.size(); ++i)
+                std::cout << (i ? "," : "") << label_for(prob_class_ids_[i]);
+            std::cout << "]\n";
+        }
     }
     catch (const Ort::Exception& e)
     {
@@ -107,12 +141,37 @@ YoloSemanticSegmenter::LetterboxResult YoloSemanticSegmenter::preprocess(const c
     return {std::move(tensor), scale, pad_l, pad_t};
 }
 
+// Wrap a graded ONNX tensor plane as CV_32FC1. The export is float16 by default (it is 4x smaller
+// and the values are probabilities, so 3 decimal digits is ample); float32 is accepted too.
+// ★Always materialises a NEW Mat - the ORT buffer dies with `outputs` at the end of segment(),
+// so a view would dangle the moment the map crossed to the worker's result.
+static cv::Mat graded_plane(const void* base, ONNXTensorElementDataType t, int h, int w, int plane)
+{
+    cv::Mat out32;
+    if (t == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16)
+    {
+        const cv::Mat h16(h, w, CV_16FC1,
+                          const_cast<void*>(static_cast<const void*>(
+                              static_cast<const std::uint16_t*>(base) + std::size_t(plane) * h * w)));
+        h16.convertTo(out32, CV_32F);
+    }
+    else if (t == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
+    {
+        const cv::Mat f32(h, w, CV_32FC1,
+                          const_cast<void*>(static_cast<const void*>(
+                              static_cast<const float*>(base) + std::size_t(plane) * h * w)));
+        out32 = f32.clone();
+    }
+    return out32;
+}
+
 SemanticMap YoloSemanticSegmenter::decode(const void* data,
                                           ONNXTensorElementDataType elem_type,
                                           const std::vector<int64_t>& shape,
                                           const cv::Size& orig_size,
                                           float scale, int pad_left, int pad_top,
-                                          bool want_scores) const
+                                          bool want_scores,
+                                          const GradedOutputs& graded) const
 {
     // Accepted output layouts (the *-sem exports differ by dtype):
     //   float  [1,C,h,w] / [C,h,w]  → per-class LOGIT volume; label = argmax over the class axis.
@@ -251,8 +310,54 @@ SemanticMap YoloSemanticSegmenter::decode(const void* data,
 
     SemanticMap out;
     cv::resize(lb_labels(active), out.labels, orig_size, 0, 0, cv::INTER_NEAREST);
+
+    // ─── GRADED OUTPUTS ───────────────────────────────────────────────────────────────────────────
+    // The probability planes come from the classifier head at ITS resolution (80x80 for a 640
+    // letterbox), not from the 640x640 label map, so their active region has to be recomputed in
+    // their own units — same fractions, different denominator.
+    const bool has_graded = graded.valid()
+                        and graded.k == static_cast<int>(prob_class_ids_.size());
+    cv::Rect g_active;
+    if (has_graded)
+    {
+        const float gfx = static_cast<float>(graded.w) / static_cast<float>(input_size_);
+        const float gfy = static_cast<float>(graded.h) / static_cast<float>(input_size_);
+        g_active = cv::Rect(static_cast<int>(std::round(pad_left * gfx)),
+                            static_cast<int>(std::round(pad_top  * gfy)),
+                            static_cast<int>(std::round(new_w    * gfx)),
+                            static_cast<int>(std::round(new_h    * gfy)));
+        g_active &= cv::Rect(0, 0, graded.w, graded.h);
+        if (g_active.width <= 0 or g_active.height <= 0)
+            g_active = cv::Rect(0, 0, graded.w, graded.h);
+
+        out.prob_class_ids = prob_class_ids_;
+        out.probs_src_size = orig_size;
+        out.probs.reserve(prob_class_ids_.size());
+        for (int c = 0; c < graded.k; ++c)
+        {
+            cv::Mat plane = graded_plane(graded.class_probs, graded.elem_type,
+                                         graded.h, graded.w, c);
+            // clone(): keep only the active window, and own the memory — see graded_plane().
+            out.probs.push_back(plane.empty() ? cv::Mat{} : plane(g_active).clone());
+        }
+    }
+
     if (want_scores)
-        cv::resize(lb_scores(active), out.scores, orig_size, 0, 0, cv::INTER_LINEAR);
+    {
+        // ★`top_prob` is the max over ALL 150 classes, i.e. the argmax's own confidence, so with a
+        // graded model `scores` is finally the real thing for EVERY class — not just the handful in
+        // prob_class_ids_. Without it the dense-int path below writes 1.0 everywhere, which is what
+        // made mask confidence carry zero information for every semantic-path agent (door, hood,
+        // cabinet, shelf) and left [Semantic].conf_thresh an inoperative knob.
+        if (has_graded and graded.top_prob)
+        {
+            cv::Mat top = graded_plane(graded.top_prob, graded.elem_type, graded.h, graded.w, 0);
+            if (not top.empty())
+                cv::resize(top(g_active), out.scores, orig_size, 0, 0, cv::INTER_LINEAR);
+        }
+        if (out.scores.empty())
+            cv::resize(lb_scores(active), out.scores, orig_size, 0, 0, cv::INTER_LINEAR);
+    }
     return out;
 }
 
@@ -300,6 +405,39 @@ SemanticMap YoloSemanticSegmenter::segment(const cv::Mat& image, bool is_rgb, bo
         return {};
     }
 
+    // Locate the graded outputs BY NAME (output order is an exporter detail, never an interface).
+    // Absent ⇒ ungraded model ⇒ `graded` stays invalid and decode() takes exactly the old path.
+    GradedOutputs graded;
+    for (std::size_t i = 0; i < outputs.size() and i < output_names_.size(); ++i)
+    {
+        if (not outputs[i].IsTensor())
+            continue;
+        const auto gi = outputs[i].GetTensorTypeAndShapeInfo();
+        const auto gs = gi.GetShape();
+        if (gs.size() != 4)
+            continue;
+        const std::string_view nm{output_names_[i]};
+        if (nm == "class_probs")
+        {
+            graded.class_probs = outputs[i].GetTensorData<void>();
+            graded.elem_type   = gi.GetElementType();
+            graded.k = static_cast<int>(gs[1]);
+            graded.h = static_cast<int>(gs[2]);
+            graded.w = static_cast<int>(gs[3]);
+        }
+        else if (nm == "top_prob")
+            graded.top_prob = outputs[i].GetTensorData<void>();
+    }
+    // A channel map that does not match the tensor is a mis-paired export: refuse the posteriors
+    // rather than silently attributing one class's probability to another.
+    if (graded.class_probs and graded.k != static_cast<int>(prob_class_ids_.size()))
+    {
+        std::cerr << "[YoloSemanticSegmenter] class_probs has " << graded.k
+                  << " channels but metadata declares " << prob_class_ids_.size()
+                  << " — ignoring the graded outputs\n";
+        graded = {};
+    }
+
     const auto info = outputs[0].GetTensorTypeAndShapeInfo();
     const auto out_shape = info.GetShape();
     const auto elem_type = info.GetElementType();
@@ -318,7 +456,8 @@ SemanticMap YoloSemanticSegmenter::segment(const cv::Mat& image, bool is_rgb, bo
 
     try
     {
-        return decode(out_data, elem_type, out_shape, orig_size, scale, pad_l, pad_t, want_scores);
+        return decode(out_data, elem_type, out_shape, orig_size, scale, pad_l, pad_t, want_scores,
+                      graded);
     }
     catch (const std::exception& e)
     {
@@ -442,6 +581,55 @@ cv::Mat YoloSemanticProcessor::compose_semantic_canvas(const cv::Mat& rgb_frame,
     cv::Mat blended;
     cv::addWeighted(canvas, 0.55, color_layer, 0.45, 0.0, blended);
     blended.copyTo(canvas, valid);
+    return canvas;
+}
+
+cv::Mat compose_prob_canvas(const cv::Mat& img, const SemanticMap& map, int class_id, bool img_is_rgb)
+{
+    if (img.empty() or img.type() != CV_8UC3)
+        return img.clone();
+    cv::Mat canvas = img.clone();
+    const int ch = map.prob_channel(class_id);
+    if (ch < 0 or not map.graded() or map.probs[static_cast<std::size_t>(ch)].empty())
+        return canvas;
+
+    // Sample the native-resolution plane up to frame size through prob_at's own convention, so what is
+    // drawn and what a consumer reads are the same number by construction (the writer and the reader
+    // are in different files; this is the only thing that keeps them coherent).
+    const cv::Mat& plane = map.probs[static_cast<std::size_t>(ch)];
+    cv::Mat p;
+    cv::resize(plane, p, canvas.size(), 0, 0, cv::INTER_LINEAR);
+
+    // Colormap over the FULL [0,1] range, fixed — never per-frame normalised. An auto-scaled heat map
+    // would make a frame whose best pixel is 0.05 look identical to one whose best is 0.95, which
+    // would defeat the entire purpose of showing a posterior.
+    cv::Mat p8, heat;
+    p.convertTo(p8, CV_8UC1, 255.0, 0.0);
+    cv::applyColorMap(p8, heat, cv::COLORMAP_INFERNO);   // emits BGR
+    if (img_is_rgb)
+        cv::cvtColor(heat, heat, cv::COLOR_BGR2RGB);
+
+    // Per-pixel alpha = P. Done by hand rather than with addWeighted, which takes a scalar weight.
+    for (int r = 0; r < canvas.rows; ++r)
+    {
+        const float*    pr = p.ptr<float>(r);
+        const cv::Vec3b* hr = heat.ptr<cv::Vec3b>(r);
+        cv::Vec3b*       cr = canvas.ptr<cv::Vec3b>(r);
+        for (int c = 0; c < canvas.cols; ++c)
+        {
+            if (std::isnan(pr[c]))
+            {
+                // "Not looked at" — a diagonal hatch, so absence of evidence never renders as evidence
+                // of absence. Visibly different from any probability, including zero.
+                if (((r + c) % 16) < 2)
+                    cr[c] = cv::Vec3b(90, 90, 90);
+                continue;
+            }
+            const float a = std::clamp(pr[c], 0.0f, 1.0f);
+            for (int k = 0; k < 3; ++k)
+                cr[c][k] = cv::saturate_cast<unsigned char>((1.0f - a) * cr[c][k] + a * hr[c][k]);
+        }
+    }
     return canvas;
 }
 
