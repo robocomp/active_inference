@@ -28,6 +28,7 @@
 
 #include <dsr/api/dsr_api.h>
 #include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
+#include "../../common/rt_twist/rt_twist.h"             // rc::rt::newest_twist — the ring, not the deprecated pair
 
 SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check)
     : GenericWorker(configLoader, tprx)
@@ -784,12 +785,9 @@ void SpecificWorker::compute()
 
     // Robot yaw rate (rad/s) from the room<-robot RT edge, for the ego-motion point-reliability term.
     float rot_rate = 0.0f;
-    if (rt_api_)
-        if (const auto robots = G->get_nodes_by_type("robot"); not robots.empty())
-            if (auto e = rt_api_->get_edge_RT(robots.front(), room_node_id_); e.has_value())
-                if (auto rv = G->get_attrib_by_name<rt_rotation_euler_xyz_velocity_att>(e.value());
-                    rv.has_value() and rv->get().size() >= 3)
-                    rot_rate = std::abs(rv->get()[2]);
+    if (const auto robots = G->get_nodes_by_type("robot"); not robots.empty())
+        if (const auto tw = rc::rt::newest_twist(*G, rt_api_.get(), robots.front(), room_node_id_); tw.has_value())
+            rot_rate = std::abs(tw->yaw_rate());
     fitter_->set_sensor_context(lidar_ingestor_->origin_room(), rot_rate);
     scene_graph_->set_sensor_origin(lidar_ingestor_->origin_room());   // directional inflation (grow away from sensor)
     const auto specialists = build_specialist_sdfs();                    // object SDFs (for the dissolve test)
@@ -1396,17 +1394,12 @@ float SpecificWorker::compute_ego_reliability() const
     // EGO-MOTION precision: the room<-robot RT edge carries the robot's body twist. Fast translation/rotation
     // means more pose jitter + motion blur this sweep → trust it less: 1/(1 + |v|/vel0 + |ω|/omega0). Still → 1.
     float v = 0.0f, w = 0.0f;
-    if (rt_api_)
-        if (const auto robots = G->get_nodes_by_type("robot"); not robots.empty())
-            if (auto e = rt_api_->get_edge_RT(robots.front(), room_node_id_); e.has_value())
-            {
-                if (auto tv = G->get_attrib_by_name<rt_translation_velocity_att>(e.value());
-                    tv.has_value() and tv->get().size() >= 2)
-                    v = std::hypot(tv->get()[0], tv->get()[1]);
-                if (auto rv = G->get_attrib_by_name<rt_rotation_euler_xyz_velocity_att>(e.value());
-                    rv.has_value() and rv->get().size() >= 3)
-                    w = std::abs(rv->get()[2]);
-            }
+    if (const auto robots = G->get_nodes_by_type("robot"); not robots.empty())
+        if (const auto tw = rc::rt::newest_twist(*G, rt_api_.get(), robots.front(), room_node_id_); tw.has_value())
+        {
+            v = tw->speed();
+            w = std::abs(tw->yaw_rate());
+        }
     const float v0 = std::max(1e-3f, cfg_.motion_vel0_mps), w0 = std::max(1e-3f, cfg_.motion_omega0_rps);
     return 1.0f / (1.0f + v / v0 + w / w0);
 }

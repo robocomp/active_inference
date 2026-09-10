@@ -510,16 +510,17 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose,
     // ★MIGRATION STATUS (2026-09-10), because the original list here has gone stale twice:
     //   done   common/media_transport/rt_extrapolate.h — deleted, its SE(2) step is now in cortex
     //   done   viewer3d, retina — their copies are gone; retina's only mention is a comment
-    //   OPEN   residual_concept/src/specificworker.cpp:790,1403 — the last real unmigrated reader,
-    //          and it was never on this list. It takes MAGNITUDES ONLY (hypot of the first two
-    //          components, |yaw rate|), which are identical in array and axis order, so it is
-    //          immune to the 90-degree bug and its swap to the ring pair is mechanical.
+    //   done   residual_concept — migrated to rc::rt::newest_twist (common/rt_twist/rt_twist.h). It
+    //          took MAGNITUDES ONLY (hypot of the first two components, |yaw rate|), which are
+    //          identical in array and axis order, so it never carried the 90-degree bug.
     //   keep   controller controller_obstacle_tracker.cpp:1785 and common/rt_query_probe — these
     //          read the legacy pair ON PURPOSE. They are the independent check on the ring path:
     //          a second implementation off a second attribute cannot be fooled by the same bug
     //          twice, which is what held twist_pred_err_m at 0.03 mm p50 through the whole change.
-    // So this block goes when residual_concept moves AND the verifiers are retired deliberately —
-    // not merely when the last consumer stops reading it. Delete the cortex attributes with it.
+    // ★SO THE ONLY READERS LEFT ARE THE TWO VERIFIERS, AND THIS BLOCK NOW OUTLIVES ITS MIGRATION ON
+    // PURPOSE. Deleting it is no longer a cleanup waiting on a consumer; it is the decision to stop
+    // cross-checking the ring against an independent implementation. Make that call deliberately, and
+    // delete the cortex attributes in the same change.
     // ★NOTE THE LAYOUT DIFFERENCE, it is the reason for the replacement: this pair is ARRAY order
     // [adv, side, _] in a +Y-forward body frame, while the ring pair is AXIS order [x, y, z] — so the
     // same two numbers appear SWAPPED between them, on purpose.
