@@ -43,7 +43,6 @@
 #include <string>
 #include <vector>
 
-#include "graph_safe.h"   // rc::safe_update_node — guard update_node against exceptions
 
 #include "../../common/media_transport/media_transport.h"
 
@@ -137,16 +136,11 @@ public:
     // That also collapses the two former descriptor writers into ONE site, which is what
     // makes "fill the sensor model on both paths" a single change rather than two.
     //
-    // (advertise_stats below still uses the runtime_checked form. It is currently UNUSED
-    // and `media_bps_att` is not registered in cortex, so converting it would mean adding
-    // a cortex attribute for dead code. Left as-is deliberately.)
-
-    // Write the live media throughput (bytes/s, summed over the node's streams) onto the same sensor
-    // node as its descriptor, as the `media_bps` attribute. Call ~1 Hz from the graph/main thread.
-    // Returns false if the node is absent. Non-const: advances the per-stream sampling window.
-    template <class Graph>
-    bool advertise_stats(Graph& graph, const std::string& node_name,
-                         const std::vector<std::string>& keys = {});
+    // advertise_stats() used to live here and wrote media_bps the same runtime_checked way. It had
+    // no callers, and the live writer -- SpecificWorker's ~1 Hz media-stats pass -- already writes
+    // that attribute with the typed <media_bps_att> form. Removed rather than converted: keeping it
+    // meant a second writer to one attribute, which is exactly the shape that lets two sites
+    // disagree. current_bps() stays; that is what the surviving writer samples.
 
     // `keys` selects which streams to describe: empty ⇒ all (single-node bundle), or a
     // subset so each sensor node carries just its own stream(s) — {"rgb","depth"} on
@@ -239,19 +233,3 @@ private:
     std::atomic<std::int64_t> status_report_next_ns_{0};
 };
 
-// ── advertise_stats() is templated on the DSR graph, so it stays in the header ──
-template <class Graph>
-bool SensorMediaPublisher::advertise_stats(Graph& graph, const std::string& node_name,
-                                           const std::vector<std::string>& keys)
-{
-    auto node = graph.get_node(node_name);
-    if (not node.has_value())
-        return false;
-    // NOTE: runtime_checked (not the typed <media_bps_att> form) on purpose — this header stays
-    // DSR-att-header-free (it receives DSRGraph& from its includer and includes no dsr/ headers),
-    // so the typed alias isn't in scope here. See CONCEPT_AGENT_RECIPE.md §"Attribute access".
-    graph.runtime_checked_add_or_modify_attrib_local(node.value(), "media_bps",
-                                                      static_cast<float>(current_bps(keys)));
-    rc::safe_update_node(graph, node.value());
-    return true;
-}
