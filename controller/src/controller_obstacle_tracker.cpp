@@ -1902,6 +1902,65 @@ void ControllerObstacleTracker::update_twist_prediction_error(std::uint64_t scan
     twist_pred_err_deg_ = static_cast<float>(std::abs(dyaw) * 180.0 / M_PI);
 }
 
+// ── SETTLE: ANSWER AN OLD QUESTION WITH MEASUREMENT INSTEAD OF PREDICTION ───────────────────────
+// For each parked pose, re-ask for the SAME instant with plain interpolation. Once the ring holds real
+// blocks either side of that instant, the answer is measured rather than predicted, and the difference
+// from what we guessed at the time is the error of the guess. Reported per cycle; at most one settles
+// per call, so this costs one extra transform query and never loops on a backlog.
+//
+// ★A "NO" FROM THE RE-QUERY IS AMBIGUOUS AND IS TREATED AS SUCH. It can mean the ring has not reached
+// the instant yet (wait) or that it has already scrolled past it (give up). The outcome of the
+// re-query distinguishes them, which is why this checks it instead of trusting elapsed time: an entry
+// is settled ONLY if the re-query itself reports Exact or Interpolated. Anything else -- a walk, a
+// clamp, a stale verdict -- means the answer would be another prediction, and grading a prediction
+// against a prediction measures nothing.
+void ControllerObstacleTracker::settle_extrapolation_checks(const std::string &lidar_node_name,
+                                                            std::uint64_t now_ts)
+{
+    extrap_check_err_m_.reset();
+    extrap_check_err_deg_.reset();
+    extrap_check_dt_ms_.reset();
+    if (inner_eigen_api_ == nullptr or graph_state_ == nullptr)
+        return;
+
+    while (not pending_extrap_checks_.empty())
+    {
+        const auto pending = pending_extrap_checks_.front();
+        // Too old to ever be bracketed again: the ring is finite and has scrolled past it.
+        if (now_ts > pending.ask_ts + 3000)
+        {
+            pending_extrap_checks_.pop_front();
+            continue;
+        }
+
+        DSR::RT_API::TimeQueryInfo info;
+        const auto measured = inner_eigen_api_->get_transformation_matrix(graph_state_->room_name,
+                                                                          lidar_node_name,
+                                                                          pending.ask_ts, "RT",
+                                                                          DSR::RT_API::TimeQuery::Interpolated,
+                                                                          &info);
+        const bool answered_by_measurement =
+            measured.has_value()
+            and (info.outcome == DSR::RT_API::TimeQueryInfo::Outcome::Interpolated
+                 or info.outcome == DSR::RT_API::TimeQueryInfo::Outcome::Exact);
+        if (not answered_by_measurement)
+            return;   // the ring has not reached this instant yet; entries are in time order
+
+        const auto &truth = measured->matrix();
+        const double dx = pending.x - truth(0, 3);
+        const double dy = pending.y - truth(1, 3);
+        double dyaw = pending.yaw - std::atan2(truth(1, 0), truth(0, 0));
+        while (dyaw >  M_PI) dyaw -= 2.0 * M_PI;
+        while (dyaw < -M_PI) dyaw += 2.0 * M_PI;
+
+        extrap_check_err_m_   = static_cast<float>(std::hypot(dx, dy));
+        extrap_check_err_deg_ = static_cast<float>(std::abs(dyaw) * 180.0 / M_PI);
+        extrap_check_dt_ms_   = pending.applied_dt_ms;
+        pending_extrap_checks_.pop_front();
+        return;
+    }
+}
+
 bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_node_name,
                                                     std::vector<float> xs,
                                                     std::vector<float> ys,
@@ -2020,6 +2079,25 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
     rt_query_outcome_ = static_cast<int>(rt_info.outcome);
     rt_query_gap_ms_ = rt_info.gap_ms;
     rt_query_stale_edges_ = rt_info.stale_edges;
+
+    // Settle any earlier forward-nudged pose whose instant the ring has now caught up with, THEN park
+    // this one. In that order, so a pose is never graded against itself.
+    settle_extrapolation_checks(lidar_node_name, proc_ts);
+    if (rt_info.outcome == DSR::RT_API::TimeQueryInfo::Outcome::Extrapolated
+        and rt_info.applied_dt_ms != 0 and room_from_lidar.has_value())
+    {
+        const auto &nudged = room_from_lidar->matrix();
+        pending_extrap_checks_.push_back(PendingExtrapCheck{
+            .ask_ts        = proc_ts,
+            .x             = nudged(0, 3),
+            .y             = nudged(1, 3),
+            .yaw           = std::atan2(nudged(1, 0), nudged(0, 0)),
+            .applied_dt_ms = rt_info.applied_dt_ms});
+        // Bounded: the settle step drops anything the ring has already run past, but a producer that
+        // stops publishing would otherwise let this grow for the life of the run.
+        while (pending_extrap_checks_.size() > 128)
+            pending_extrap_checks_.pop_front();
+    }
     const auto robot_from_lidar = inner_eigen_api_->get_transformation_matrix(graph_state_->robot_name,
                                                                                lidar_node_name,
                                                                                proc_ts,

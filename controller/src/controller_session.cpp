@@ -5275,7 +5275,17 @@ void ControllerSession::update_overlay_extrapolation(const ControllerWorldModel 
                                 // which is also what this column reads when TrackerUsesLatestPose is
                                 // false. Multiply by the (1/L^2)=2.78 rad/s per metre feedback gain to
                                 // read it as the demand the loop is no longer making on stale evidence.
-                                "tracker_pose_lead_m\n";
+                                "tracker_pose_lead_m,"
+                                // ★THE FORWARD GUESS, GRADED. Three cycles in four the pose used here
+                                // was not measured at the scan instant — it was the last measured pose
+                                // nudged along the robot's velocity. These columns are that nudge
+                                // marked against the real pose for the SAME instant, once the ring
+                                // caught up: err_m/err_deg are how far the guess was off, dt_ms is how
+                                // far it had been nudged. Blank on cycles where nothing settled (no
+                                // guess was outstanding, or the ring has not reached it yet) — blank
+                                // means "not measured this cycle", NEVER zero, which would read as a
+                                // perfect guess.
+                                "extrap_check_dt_ms,extrap_check_err_m,extrap_check_err_deg\n";
             // Announce the resolved absolute path (it's a relative path → lands in the process CWD,
             // which is easy to miss), or the failure — so this is never silently a no-op again.
             std::error_code ec;
@@ -5321,6 +5331,19 @@ void ControllerSession::update_overlay_extrapolation(const ControllerWorldModel 
                          << ',' << obstacle_tracker.rt_query_gap_ms()
                          << ',' << obstacle_tracker.rt_query_stale_edges();
             overlay_csv_ << ',' << tracker_pose_lead_m_;
+
+            // extrap_check_* — appended at the END of header and row, edited together, for the reason
+            // spelled out above: the one time these were inserted mid-row the shift made a column read
+            // 1.8e6 m. Empty when nothing settled this cycle.
+            overlay_csv_ << ',';
+            if (obstacle_tracker.extrap_check_dt_ms().has_value())
+                overlay_csv_ << *obstacle_tracker.extrap_check_dt_ms();
+            overlay_csv_ << ',';
+            if (obstacle_tracker.extrap_check_err_m().has_value())
+                overlay_csv_ << *obstacle_tracker.extrap_check_err_m();
+            overlay_csv_ << ',';
+            if (obstacle_tracker.extrap_check_err_deg().has_value())
+                overlay_csv_ << *obstacle_tracker.extrap_check_err_deg();
 
             overlay_csv_ << '\n';
             overlay_csv_.flush();

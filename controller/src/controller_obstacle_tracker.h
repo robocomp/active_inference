@@ -121,6 +121,10 @@ class ControllerObstacleTracker
         // query was inside the ring, so nothing needed repairing). Pairs with rt_block_lead_ms().
         std::int64_t rt_twist_fix_dt_ms() const { return rt_twist_fix_dt_ms_; }
         int rt_query_outcome() const { return rt_query_outcome_; }
+        // How well the forward-nudged pose matched the real one, once the real one arrived.
+        const std::optional<float> &extrap_check_err_m() const { return extrap_check_err_m_; }
+        const std::optional<float> &extrap_check_err_deg() const { return extrap_check_err_deg_; }
+        const std::optional<std::int64_t> &extrap_check_dt_ms() const { return extrap_check_dt_ms_; }
         std::int64_t rt_query_gap_ms() const { return rt_query_gap_ms_; }
         int rt_query_stale_edges() const { return rt_query_stale_edges_; }
         // Twist-accuracy probe over one lidar period: the horizon used (0 = probe did not run this
@@ -357,6 +361,28 @@ class ControllerObstacleTracker
         // magnitude longer than its own span, which on a static mount is simply what static looks
         // like. Log the outcome, not the collapse of it.
         int rt_query_outcome_ = 0;
+
+        // ── GRADING THE FORWARD GUESS AGAINST WHAT ACTUALLY HAPPENED ────────────────────────────
+        // Three cycles in four, the pose handed to this tracker was not measured at the scan instant:
+        // it was the last measured pose nudged forward along the robot's velocity. Everything we know
+        // about how good that nudge is has been INDIRECT — the ingredients check out, and a similar
+        // calculation lands within a millimetre — but nothing ever compared a nudged pose against the
+        // real one for the SAME instant. This does. A nudged pose is parked here with the time it was
+        // asked for; a few cycles later the ring has real blocks either side of that time, so the same
+        // query can be answered by measurement instead of prediction, and the two are subtracted.
+        // ★IT IS A FAIR COMPARISON ONLY WHEN THE RING GENUINELY BRACKETS THE INSTANT, which is why
+        // the settle step checks the outcome of its own re-query rather than assuming enough time has
+        // passed. If the answer would itself be a prediction or a clamp, the entry is not settled.
+        struct PendingExtrapCheck
+        {
+            std::uint64_t ask_ts = 0;      // instant the nudged pose claimed to describe
+            double x = 0.0, y = 0.0, yaw = 0.0;
+            std::int64_t applied_dt_ms = 0;   // how far it was nudged
+        };
+        std::deque<PendingExtrapCheck> pending_extrap_checks_;
+        std::optional<float>        extrap_check_err_m_, extrap_check_err_deg_;
+        std::optional<std::int64_t> extrap_check_dt_ms_;
+        void settle_extrapolation_checks(const std::string &lidar_node_name, std::uint64_t now_ts);
         std::int64_t rt_query_gap_ms_ = 0;   // how far outside the ring it fell (0 = inside)
         // Edges in the chain that opted out of time altogether (bootstrap-written mounts, or a dead
         // producer). Expected to be a small CONSTANT for a given tree — a CHANGE is the signal.
