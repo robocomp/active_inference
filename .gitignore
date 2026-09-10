@@ -57,3 +57,40 @@ caca/
 **/models.tar.gz
 # Captured frame dumps (retina/etc/depth_frames held 1108 jpgs).
 **/etc/depth_frames/
+
+# ── Diagnostics written to the AGENT'S CWD, which is the COMPONENT ROOT, not etc/ ──────────────
+# An agent launched as `bin/controller etc/config.toml` has its component directory as CWD, so a
+# relative path like "tracker_diag.csv" lands in controller/, NOT controller/etc/. The `**/etc/*.csv`
+# rules above therefore never matched them, and 39 run logs in controller/ plus 8 in room_concept/
+# sat untracked in every `git status` — 130 lines of noise that a real untracked source file would
+# have hidden in.
+# ★ANCHORED WITH A LEADING SLASH AND EXACTLY ONE LEVEL: `/*/` matches <component>/ and nothing
+# deeper, so it cannot swallow common/**, etc/**, or anything a subdirectory legitimately tracks.
+/*/*.csv
+/*/*.csv.*
+/*/*.jsonl
+
+# Self-calibration output and last-known state. These are RUNTIME ESTIMATES the agents rewrite as
+# they run, not configuration: committing one is committing an arbitrary instant of a continuously
+# moving value, and it is dirty again the moment the robot does. Named individually rather than as
+# `**/etc/*.txt`, which would also catch real config (retina/etc/tsan_suppressions.txt) and the
+# world snapshots the offline benches replay (route_world.txt).
+/room_concept/etc/camera_calib_*.txt
+/room_concept/etc/image_edge_replay_*.txt
+/room_concept/etc/last_robot_pose.txt
+
+# In-source cmake droppings. The build* / CMakeFiles rules above miss the top-level Makefile that an
+# in-source `cmake .` leaves in the component root and in generated/.
+/*/Makefile
+/*/generated/Makefile
+
+# Dated/labelled backups. `*.bak` above does not match `p3bot.json.bak.pre-body` or
+# `shadow.json.before.lidar.change` — the suffix continues past the extension.
+*.bak.*
+*.before.*
+*.before-*
+*.orig
+
+# Per-run archives created by ControllerMission::archive_on_stop (a timestamped copy of each
+# diagnostic beside the run). The live files are ignored above; these are their history.
+**/etc/runs/
