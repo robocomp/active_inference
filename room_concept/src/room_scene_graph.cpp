@@ -506,9 +506,20 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose,
 
     // ── LEGACY TWIST ATTRIBUTES, FOR THE CONSUMERS THAT HAVE NOT MIGRATED ────────────────────
     // ★DEPRECATED. rt_twist_linear / rt_twist_angular in the ring below supersede these; they are
-    // still written so the four agents that read the old pair keep working during the migration
-    // (controller, retina, viewer3d, common/media_transport/rt_extrapolate.h). Delete this block the
-    // day the last of them moves, and delete the attributes from cortex with it.
+    // still written so the consumers that read the old pair keep working during the migration.
+    // ★MIGRATION STATUS (2026-09-10), because the original list here has gone stale twice:
+    //   done   common/media_transport/rt_extrapolate.h — deleted, its SE(2) step is now in cortex
+    //   done   viewer3d, retina — their copies are gone; retina's only mention is a comment
+    //   OPEN   residual_concept/src/specificworker.cpp:790,1403 — the last real unmigrated reader,
+    //          and it was never on this list. It takes MAGNITUDES ONLY (hypot of the first two
+    //          components, |yaw rate|), which are identical in array and axis order, so it is
+    //          immune to the 90-degree bug and its swap to the ring pair is mechanical.
+    //   keep   controller controller_obstacle_tracker.cpp:1785 and common/rt_query_probe — these
+    //          read the legacy pair ON PURPOSE. They are the independent check on the ring path:
+    //          a second implementation off a second attribute cannot be fooled by the same bug
+    //          twice, which is what held twist_pred_err_m at 0.03 mm p50 through the whole change.
+    // So this block goes when residual_concept moves AND the verifiers are retired deliberately —
+    // not merely when the last consumer stops reading it. Delete the cortex attributes with it.
     // ★NOTE THE LAYOUT DIFFERENCE, it is the reason for the replacement: this pair is ARRAY order
     // [adv, side, _] in a +Y-forward body frame, while the ring pair is AXIS order [x, y, z] — so the
     // same two numbers appear SWAPPED between them, on purpose.
