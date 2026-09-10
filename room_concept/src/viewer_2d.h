@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <optional>
 #include <vector>
+#include <deque>
 #include <memory>
 #include <unordered_map>
 #include "corner_detector.h"
@@ -174,10 +175,13 @@ class Viewer2D : public QObject
         /// frame through `robot_pose`), the wall landmarks clipped to their observed extents with
         /// their class, the derived corners (filled = observed, hollow = inferred) and the derived
         /// polygon (dashed until it is published, solid after).
+        /// `publish_bar` is Params::publish_corner_sigma — the σ every corner must reach to be
+        /// publishable. It is drawn, not just tested: a corner disc is green under it and orange
+        /// over it, so "is the layout trustworthy yet" is answered on the canvas rather than in a log.
         void draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segments,
                            const std::vector<rc::wallmap::WallLandmark>& walls,
                            const rc::wallmap::Polygon& polygon, bool map_ready,
-                           const Eigen::Affine2f& robot_pose);
+                           const Eigen::Affine2f& robot_pose, float publish_bar = 0.06f);
 
         /// Draw the epistemic score grid as semi-transparent coloured cells.
         /// cell_size is in world-frame meters.
@@ -231,6 +235,19 @@ class Viewer2D : public QObject
         std::vector<QGraphicsEllipseItem*>    wall_corner_items_;
         std::vector<QGraphicsSimpleTextItem*> wall_label_items_;
         QGraphicsPolygonItem*                 wall_poly_item_ = nullptr;
+        // ── UNCERTAINTY LAYER: what the model knows about the outline it is drawing ──────────────
+        // A corner is never measured — it is where two estimated lines cross — so it inherits their
+        // covariance, and a corner whose two walls are never seen well together keeps a large σ no
+        // matter how long the robot looks. Drawn as a disc of radius σ. The edge bands are each
+        // wall's own offset σ_d = 1/√Λ_dd, so a thinly-observed wall visibly blurs. The ghosts are
+        // the last few published outlines, which is how CHURN becomes visible on a live canvas:
+        // a settled map shows one outline, a churning one shows a fan.
+        std::vector<QGraphicsEllipseItem*>    wall_sigma_items_;
+        std::vector<QGraphicsLineItem*>       wall_band_items_;
+        std::vector<QGraphicsPolygonItem*>    wall_ghost_items_;
+        std::deque<QPolygonF>                 wall_ghosts_;
+        QGraphicsSimpleTextItem*              wall_hud_item_ = nullptr;
+        int                                   wall_ghost_tick_ = 0;
         QGraphicsPolygonItem* polygon_item_         = nullptr;
         QGraphicsPolygonItem* polygon_fill_item_    = nullptr;   // warm floor fill (interior only)
         QGraphicsPolygonItem* polygon_item_backup_  = nullptr;

@@ -1029,7 +1029,7 @@ void Viewer2D::draw_landmark_lines(const std::vector<Eigen::Vector2f>& landmarks
 void Viewer2D::draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segments,
                              const std::vector<rc::wallmap::WallLandmark>& walls,
                              const rc::wallmap::Polygon& polygon, bool map_ready,
-                             const Eigen::Affine2f& robot_pose)
+                             const Eigen::Affine2f& robot_pose, float publish_bar)
 {
     auto resize_pool = [&](auto& pool, size_t count, auto make_item)
     {
@@ -1112,6 +1112,108 @@ void Viewer2D::draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segmen
     }
     else
         wall_poly_item_->setVisible(false);
+
+    // ── THE UNCERTAINTY LAYER ────────────────────────────────────────────────────────────────────
+    // Ghosts of the last published outlines: a settled map draws one line, a churning one draws a
+    // fan. Sampled rather than kept per frame, so the trail spans seconds of estimation, not
+    // milliseconds of redraw.
+    constexpr int kGhosts = 6;
+    if (polygon.closed and polygon.verts.size() >= 3 and (++wall_ghost_tick_ % 15) == 0)
+    {
+        QPolygonF g;
+        for (const auto& v : polygon.verts) g << QPointF(v.x(), v.y());
+        g << QPointF(polygon.verts.front().x(), polygon.verts.front().y());
+        wall_ghosts_.push_back(std::move(g));
+        while (wall_ghosts_.size() > kGhosts) wall_ghosts_.pop_front();
+    }
+    resize_pool(wall_ghost_items_, wall_ghosts_.size(), [&]() {
+        auto* item = agv_->scene.addPolygon(QPolygonF(), QPen(QColor(200, 0, 200, 60), 0.03), QBrush(Qt::NoBrush));
+        item->setZValue(8);
+        return item;
+    });
+    for (size_t i = 0; i < wall_ghosts_.size(); ++i)
+    {
+        // oldest faintest: the fade IS the age
+        const int alpha = 25 + static_cast<int>(45.0 * (static_cast<double>(i) / std::max<size_t>(1, kGhosts - 1)));
+        wall_ghost_items_[i]->setPolygon(wall_ghosts_[i]);
+        wall_ghost_items_[i]->setPen(QPen(QColor(200, 0, 200, alpha), 0.03));
+    }
+
+    // Per-edge band: half-width = that wall's own offset σ_d (1/√Λ_dd). A well-observed wall draws a
+    // hairline; one held by a handful of points draws a stripe you cannot miss.
+    const size_t n_edges = (polygon.closed and polygon.verts.size() >= 3) ? polygon.verts.size() : 0;
+    resize_pool(wall_band_items_, n_edges, [&]() {
+        auto* item = agv_->scene.addLine(0, 0, 0, 0, QPen(QColor(14, 116, 144, 70), 0.05));
+        item->setZValue(7);
+        return item;
+    });
+    for (size_t e = 0; e < n_edges; ++e)
+    {
+        const Eigen::Vector2f a = polygon.verts[e], b = polygon.verts[(e + 1) % polygon.verts.size()];
+        float sigma_d = -1.f;
+        if (e < polygon.wall_of_edge.size())
+            for (const auto& w : walls)
+                if (w.id == polygon.wall_of_edge[e])
+                {
+                    const float lam = w.information(1, 1);
+                    sigma_d = (lam > 1e-9f) ? 1.f / std::sqrt(lam) : -1.f;
+                    break;
+                }
+        wall_band_items_[e]->setLine(a.x(), a.y(), b.x(), b.y());
+        const float width = (sigma_d > 0.f) ? std::min(2.f * sigma_d, 0.6f) : 0.02f;
+        wall_band_items_[e]->setPen(QPen(QColor(14, 116, 144, 70), std::max(width, 0.02f)));
+        wall_band_items_[e]->setVisible(sigma_d > 0.f);
+    }
+
+    // Per-corner disc of radius σ, GREEN under the publish bar and ORANGE over it. This is the
+    // model's own readiness test, drawn where the failure is rather than summarised in a number:
+    // the corners that block publication are almost always a specific two or three, whose walls are
+    // never seen well together, and on the canvas you can see which.
+    resize_pool(wall_sigma_items_, polygon.corners.size(), [&]() {
+        auto* item = agv_->scene.addEllipse(-0.1, -0.1, 0.2, 0.2, QPen(Qt::NoPen), QBrush(Qt::NoBrush));
+        item->setZValue(6);
+        return item;
+    });
+    float worst = 0.f, med = 0.f;
+    std::vector<float> sig;
+    for (size_t i = 0; i < polygon.corners.size(); ++i)
+    {
+        const float sg = polygon.corners[i].sigma;
+        const bool ok = std::isfinite(sg) and sg > 0.f;
+        const float r = ok ? std::min(sg, 1.5f) : 1.5f;         // clipped so one wild corner cannot fill the view
+        if (ok) { worst = std::max(worst, sg); sig.push_back(sg); }
+        const QColor c = (ok and sg <= publish_bar) ? QColor(23, 114, 69, 90) : QColor(194, 65, 12, 70);
+        wall_sigma_items_[i]->setRect(-r, -r, 2 * r, 2 * r);
+        wall_sigma_items_[i]->setPos(polygon.corners[i].p.x(), polygon.corners[i].p.y());
+        wall_sigma_items_[i]->setBrush(QBrush(c));
+        wall_sigma_items_[i]->setPen(QPen(c.darker(140), 0.02));
+    }
+    if (not sig.empty())
+    {
+        std::sort(sig.begin(), sig.end());
+        med = sig[sig.size() / 2];
+    }
+
+    // The same line the offline videos carry, so the live canvas and the bench read alike.
+    if (wall_hud_item_ == nullptr)
+    {
+        wall_hud_item_ = agv_->scene.addSimpleText("");
+        wall_hud_item_->setZValue(40);
+        QFont f = wall_hud_item_->font(); f.setPointSizeF(0.30); wall_hud_item_->setFont(f);
+        wall_hud_item_->setBrush(QBrush(QColor(31, 35, 40)));
+        wall_hud_item_->setTransform(QTransform::fromScale(1, -1));
+    }
+    {
+        const int over = static_cast<int>(std::count_if(polygon.corners.begin(), polygon.corners.end(),
+            [&](const rc::wallmap::Corner& c) { return not(std::isfinite(c.sigma) and c.sigma <= publish_bar); }));
+        wall_hud_item_->setText(QString("walls %1  edges %2  corner sigma worst %3 m  median %4 m  over bar %5  %6")
+            .arg(walls.size()).arg(n_edges)
+            .arg(worst, 0, 'f', 3).arg(med, 0, 'f', 3).arg(over)
+            .arg(polygon.closed ? (polygon.publishable ? "PUBLISHABLE" : "not publishable") : "OPEN"));
+        const QRectF br = agv_->scene.sceneRect();
+        wall_hud_item_->setPos(br.left() + 0.2, br.top() + 0.6);
+        wall_hud_item_->setVisible(map_ready or polygon.closed);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
