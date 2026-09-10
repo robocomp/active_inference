@@ -1734,7 +1734,10 @@ ControllerPolygon ControllerObstacleTracker::make_obstacle_polygon(const Eigen::
 // pose the tree returns at "now" with the one at the scan stamp, and reports 0 both when the ring
 // is bracketing perfectly (the newest block IS the scan's block) and when it has nothing newer to
 // offer and clamps — opposite situations with the same reading. The RT ring is only
-// RT_API::HISTORY_SIZE (5) blocks deep and never extrapolates, so the sign of this lead is what
+// RT_API::HISTORY_SIZE blocks deep and never extrapolates, so the sign of this lead is what
+// ★NOT 5 ON THIS ROBOT: room_concept sets rt_api_->HISTORY_SIZE = 25 (specificworker.cpp:169), and
+// HISTORY_SIZE is a plain data member, not a constant — so the ring is as deep as whoever WROTE the
+// edge made it, and reading the header's default to reason about it gives the wrong answer.
 // decides which case you are in:
 //   lead > 0  the pose feed is ahead of the scan; InterpolatedRT can bracket it → registration exact.
 //   lead ≈ 0  the newest block IS this scan's pose; correct, but nothing to interpolate against.
@@ -2014,8 +2017,9 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
                                                                              interp,
                                                                              &rt_info);
     rt_twist_fix_dt_ms_ = rt_info.applied_dt_ms;
-    rt_query_clamped_ = rt_info.clamped();
+    rt_query_outcome_ = static_cast<int>(rt_info.outcome);
     rt_query_gap_ms_ = rt_info.gap_ms;
+    rt_query_stale_edges_ = rt_info.stale_edges;
     const auto robot_from_lidar = inner_eigen_api_->get_transformation_matrix(graph_state_->robot_name,
                                                                                lidar_node_name,
                                                                                proc_ts,

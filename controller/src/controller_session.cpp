@@ -2420,8 +2420,14 @@ bool ControllerSession::drive_mission_route(const ControllerPlanningStep &step,
     // was SELF-FULFILLING: out of the route means the robot never drives toward it, so the close-range
     // evidence that would free it is never gathered. Now it is deferred and re-offered here.
     // Rate-limited to ~1 Hz because a successful recovery re-authors a window; the test itself is nearly
-    // free, since reinstate_deferred only plans for a waypoint the robot is BOTH near and still short of.
-    // Costs exactly nothing on the overwhelmingly common route with nothing deferred.
+    // free, since reinstate_deferred only plans for a waypoint the robot is near, still short of, AND
+    // materially closer to than at its last try. Costs exactly nothing on the overwhelmingly common
+    // route with nothing deferred.
+    // ★THIS TIMER DOES NOT SPEND THE RETRY BUDGET — the approach does. It used to: four tries at 1 Hz
+    // were gone within four seconds of entering the 4 m radius, i.e. across 4.0 -> 2.0 m, and the
+    // waypoint was retired for the run before the robot was ever close enough for the map about it to
+    // have changed. reinstate_deferred now charges an attempt only on a step of approach, so the four
+    // tries span 4.0 -> 1.0 m and the last one is made where the evidence actually is.
     if (route_active_ and route_.deferred_count() > 0
         and time_source() - last_reinstate_ms_ >= 1000)
     {
@@ -5240,6 +5246,28 @@ void ControllerSession::update_overlay_extrapolation(const ControllerWorldModel 
                 overlay_csv_ << "t_ms,lidar_ts,gap_ms,pose_age_ms,vx,vy,omega,RTdelta_m,"
                                 "cmd_adv,cmd_rot,cur_adv,cur_rot,rt_lead_ms,rt_fix_dt_ms,"
                                 "twist_pred_dt_ms,twist_pred_err_m,twist_pred_err_deg,"
+                                // ── DID THE REGISTRATION QUERY COME FROM AN INSTANT NOBODY MEASURED? ──
+                                // rt_outcome = what the RT query for THIS scan actually did:
+                                //   0 Exact  1 Interpolated  2 Extrapolated  3 Clamped  4 Stale
+                                //   Until RT_API reported it there was no way to ask — a clamped query
+                                //   and a healthy one return the same shape of matrix, and the difference
+                                //   only surfaces downstream as a bulk omega*dt rotation that appears
+                                //   when the robot turns and vanishes at rest, which has been chased as
+                                //   a sensor fault, a calibration error and a localiser problem in turn.
+                                //   ★EXPECT 4 (Stale) ON THIS ROBOT AND DO NOT READ IT AS A FAULT. The
+                                //   chain reports its WORST edge, and room<-robot crosses root->Shadow,
+                                //   which robot_concept writes once at bootstrap and never again. 3
+                                //   (Clamped) is the one that means something: a LIVE ring that failed
+                                //   to bracket the query. This column was a boolean for one build and
+                                //   read 1 on 139/139 rows, which is what a collapsed distinction looks
+                                //   like from the outside.
+                                // rt_gap_ms = how far outside the ring it fell, signed (+ past the newest
+                                //   block). ★NON-ZERO WITH rt_clamped=0 IS THE HEALTHY CASE: it means the
+                                //   query was outside the ring and the twist walked it back onto the scan
+                                //   instant, which is rt_fix_dt_ms. rt_clamped=1 means it could not — no
+                                //   twist on the edge, or further out than the ring's own span, so the
+                                //   pose is stale by rt_gap_ms and the cloud is registered against it.
+                                "rt_outcome,rt_gap_ms,rt_stale_edges,"
                                 // ★THE PER-CONSUMER POSE SPLIT, MEASURED. How far the FRESH pose given
                                 // to the control law sits from the SCAN-ALIGNED one everything else
                                 // uses — i.e. the correction the split actually applies, in metres.
@@ -5284,6 +5312,14 @@ void ControllerSession::update_overlay_extrapolation(const ControllerWorldModel 
             overlay_csv_ << ',';
             if (obstacle_tracker.twist_pred_err_deg().has_value())
                 overlay_csv_ << *obstacle_tracker.twist_pred_err_deg();
+            // rt_clamped,rt_gap_ms — position must match the header exactly. ★THE FIRST ATTEMPT AT
+            // THIS PUT THEM AFTER twist_pred_err_deg IN THE HEADER AND BEFORE twist_pred_dt_ms IN THE
+            // ROW, which shifted every later column by two and made twist_pred_err_m read 1.8e6 m. A
+            // shifted column does not look absent, it looks like data — the exact failure this file
+            // warns about for decimal commas two lines up. Header and row are edited together.
+            overlay_csv_ << ',' << obstacle_tracker.rt_query_outcome()
+                         << ',' << obstacle_tracker.rt_query_gap_ms()
+                         << ',' << obstacle_tracker.rt_query_stale_edges();
             overlay_csv_ << ',' << tracker_pose_lead_m_;
 
             overlay_csv_ << '\n';

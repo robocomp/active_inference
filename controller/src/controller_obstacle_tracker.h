@@ -120,8 +120,9 @@ class ControllerObstacleTracker
         // Signed ms the twist correction walked the pose for the last registered scan (0 = the RT
         // query was inside the ring, so nothing needed repairing). Pairs with rt_block_lead_ms().
         std::int64_t rt_twist_fix_dt_ms() const { return rt_twist_fix_dt_ms_; }
-        bool rt_query_clamped() const { return rt_query_clamped_; }
+        int rt_query_outcome() const { return rt_query_outcome_; }
         std::int64_t rt_query_gap_ms() const { return rt_query_gap_ms_; }
+        int rt_query_stale_edges() const { return rt_query_stale_edges_; }
         // Twist-accuracy probe over one lidar period: the horizon used (0 = probe did not run this
         // scan) and the position / heading residual against the RT tree. This is the evidence that
         // retired the one-frame hold — it measures exactly the registration error registering the
@@ -345,12 +346,21 @@ class ControllerObstacleTracker
         float rt_twist_adv_ = 0.f, rt_twist_side_ = 0.f, rt_twist_rot_ = 0.f;    // body twist, robot frame
         bool rt_twist_valid_ = false;
         std::int64_t rt_twist_fix_dt_ms_ = 0;                            // Δt the last correction walked
-        // Did the last registration query CLAMP — i.e. is the cloud registered against a pose from an
-        // instant nobody measured? Before cortex reported this there was no way to ask: a clamped
-        // query and a bracketed one return the same shape of matrix, and the difference only surfaces
-        // downstream as a bulk rotation that appears when the robot turns.
-        bool rt_query_clamped_ = false;
+        // What the last registration query DID, as RT_API::TimeQueryInfo::Outcome (0 Exact,
+        // 1 Interpolated, 2 Extrapolated, 3 Clamped, 4 Stale).
+        // ★NOT A BOOLEAN, AND THAT WAS MEASURED THE HARD WAY. This began as `clamped()`, which lumps
+        // Clamped with Stale — and the room<-robot chain crosses root->Shadow, a STATIC edge written
+        // once at bootstrap and never again. Every query is therefore ~34 minutes past its ring, so
+        // the chain's worst-outcome aggregation pinned the boolean at 1 on 139/139 rows and said
+        // nothing. The distinction is the whole content: Clamped means a LIVE ring failed to bracket
+        // the query, which is a real defect; Stale means the ring has not been written in orders of
+        // magnitude longer than its own span, which on a static mount is simply what static looks
+        // like. Log the outcome, not the collapse of it.
+        int rt_query_outcome_ = 0;
         std::int64_t rt_query_gap_ms_ = 0;   // how far outside the ring it fell (0 = inside)
+        // Edges in the chain that opted out of time altogether (bootstrap-written mounts, or a dead
+        // producer). Expected to be a small CONSTANT for a given tree — a CHANGE is the signal.
+        int rt_query_stale_edges_ = 0;
         std::int64_t twist_pred_dt_ms_ = 0;                              // horizon the probe used (0 = not run)
         std::optional<float> twist_pred_err_m_, twist_pred_err_deg_;     // twist-vs-RT residual over it
         mutable std::uint64_t lidar_period_ms_ = 100;

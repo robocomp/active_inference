@@ -150,6 +150,13 @@ RouteFollower::ReinstateResult RouteFollower::reinstate_deferred(const Eigen::Ve
     ReinstateResult r;
     if (deferred_.empty() or not spline_.valid() or not plan) return r;
 
+    // ── THE BUDGET IS SPENT IN RANGE, NOT IN TIME ────────────────────────────────────────────────
+    // One step of approach buys one try, so the kMaxReinstateAttempts tries are laid out evenly over
+    // the whole `ahead_m` run-in and the LAST of them is made at the closest the robot ever gets.
+    // Charging them on the caller's clock instead spent the whole budget in the first few seconds
+    // inside the radius — see Deferred::last_try_m.
+    const float step_m = std::max(0.05f, ahead_m / static_cast<float>(kMaxReinstateAttempts));
+
     // erase_if rather than an index cursor: five branches, two of which remove and three of which do
     // not, is exactly the shape where a hand-rolled `++d` gets forgotten and the loop spins forever.
     // The predicate runs once per element in order and repair() never touches deferred_, so the side
@@ -161,8 +168,9 @@ RouteFollower::ReinstateResult RouteFollower::reinstate_deferred(const Eigen::Ve
         // with known_useless_spot().
         if (dw.attempts >= kMaxReinstateAttempts)
         {
-            std::printf("[route] waypoint (%.2f,%.2f) stays OUT of the tour: %d approaches and still "
-                        "unreachable. Not asking again this run.\n", dw.pos.x(), dw.pos.y(), dw.attempts);
+            std::printf("[route] waypoint (%.2f,%.2f) stays OUT of the tour: %d approaches, closest "
+                        "%.2f m, and still unreachable. Not asking again this run.\n",
+                        dw.pos.x(), dw.pos.y(), dw.attempts, dw.closest_m);
             std::fflush(stdout);
             ++r.retired;
             return true;
@@ -172,10 +180,22 @@ RouteFollower::ReinstateResult RouteFollower::reinstate_deferred(const Eigen::Ve
         // also what says whether the waypoint is still ahead of the robot at all.
         const float s_next = dw.after_index < wp_s_.size() ? wp_s_[dw.after_index] : spline_.length();
         if (s_next <= progress_ + 0.10f) return false;                       // already driven past it
-        if ((robot_pos - dw.pos).norm() > ahead_m) return false;             // not near enough yet
+
+        // Recorded for every cycle the waypoint is still ahead, INCLUDING the ones too far to test, so
+        // the retirement line above can say whether the robot ever actually came near it.
+        const float d = (robot_pos - dw.pos).norm();
+        dw.closest_m = std::min(dw.closest_m, d);
+        if (d > ahead_m) return false;                                       // not near enough yet
+        // ★AND NOT NEARER THAN LAST TIME MEANS NOTHING NEW TO ASK. The map about a waypoint changes
+        // because the robot moved toward it and looked; standing still, or drifting in at 5 cm a
+        // second, gathers no evidence that a fresh A* could use. Skipping here costs no search AND
+        // costs no attempt, which is the whole point: the four tries now span 4.0 -> 1.0 m of approach
+        // instead of the first four seconds of it.
+        if (d > dw.last_try_m - step_m) return false;
 
         ++r.tested;
         ++dw.attempts;
+        dw.last_try_m = d;
         if (const auto hop = plan(robot_pos, dw.pos); not hop.has_value() or hop->size() < 2)
             return false;                       // still blocked; it keeps its place and its counter
 
@@ -1052,10 +1072,26 @@ bool RouteFollower::self_test()
         check(r.build({0.f, 0.f}, wps, 1, walled, all_free), "the tour must build");
         const int after_build = calls;
         r.advance({4.f, 2.0f});
+
+        // ★A ROBOT THAT IS NOT CLOSING MUST NOT SPEND THE BUDGET. This is the regression the range gate
+        // exists for: the caller polls at a fixed rate, so a waypoint sitting inside `ahead_m` while the
+        // robot idles beside it (holding, aligning, or simply driving the stretch of curve that bypasses
+        // it) used to burn all four tries on the clock — and it burned them at the FAR end of the
+        // approach, where the map is still the one that deferred the waypoint. One try is fair: the
+        // first look from this range is new. Twenty are not.
+        for (int i = 0; i < 20; ++i) r.reinstate_deferred({4.f, 0.1f}, 4.0f, walled, all_free);
+        std::printf("  standing still: %d plan call(s) over 20 polls (must be 1)\n", calls - after_build);
+        check(calls - after_build == 1,
+              "★polling from ONE range must cost ONE search — an attempt is spent on approach, not on time");
+        check(r.deferred_count() == 1, "and the waypoint must still be waiting, not retired on a clock");
+
+        // Now walk in. Each step of `ahead_m / kMaxReinstateAttempts` = 1.0 m buys one try, so the last
+        // one is made at 0.9 m — the range at which the close-up evidence would actually be in.
         int rounds = 0;
-        while (r.deferred_count() > 0 and rounds < 20)
-        { r.reinstate_deferred({4.f, 2.6f}, 4.0f, walled, all_free); ++rounds; }
-        std::printf("  retirement: gave up after %d rounds, %d extra plan calls (cap %d)\n",
+        for (float y = 1.1f; r.deferred_count() > 0 and rounds < 20; y += 1.0f, ++rounds)
+            for (int poll = 0; poll < 5; ++poll)          // the caller polls faster than the robot moves
+                r.reinstate_deferred({4.f, y}, 4.0f, walled, all_free);
+        std::printf("  retirement: gave up after %d approach step(s), %d extra plan calls (cap %d)\n",
                     rounds, calls - after_build, kMaxReinstateAttempts);
         check(r.deferred_count() == 0, "a permanently blocked waypoint must be RETIRED, not retried forever");
         check(calls - after_build <= kMaxReinstateAttempts,

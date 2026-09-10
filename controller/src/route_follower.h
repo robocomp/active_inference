@@ -113,15 +113,33 @@ public:
         Eigen::Vector2f pos;      // the authored waypoint, as recorded
         std::size_t after_index;  // where it belongs in wp_pos_ — the tour order survives the drop
         int attempts = 0;         // re-entry tries, so a permanently blocked one stops costing searches
+        // ★AN ATTEMPT IS SPENT ON DISTANCE, NOT ON TIME — see reinstate_deferred. The budget used to
+        // burn at the caller's rate (1 Hz) from the moment the robot entered `ahead_m`, so a 4 m radius
+        // approached at 0.5 m/s spent all four tries in the first four seconds, between 4.0 m and 2.0 m
+        // — the far half of the approach, which is exactly where the map is still the one that deferred
+        // the waypoint in the first place. The waypoint was then retired for the rest of the run BEFORE
+        // the close-range evidence that would free it had been gathered: the same self-fulfilling drop
+        // the deferral exists to prevent, arrived at more slowly.
+        // So a try is only made when the robot has come materially CLOSER than at the last one. This is
+        // the range at which the last try was actually charged.
+        float last_try_m = std::numeric_limits<float>::infinity();
+        // The closest the robot has EVER come while this waypoint was still ahead of it. Retirement
+        // reports it, so "retired at 3.2 m" (never actually approached) reads differently from
+        // "retired at 0.4 m" (genuinely walled off). A give-up that cannot say how near the robot got
+        // is not evidence of anything.
+        float closest_m = std::numeric_limits<float>::infinity();
     };
     int deferred_count() const { return static_cast<int>(deferred_.size()); }
 
     // Re-test the deferred waypoints the robot is now approaching and splice back any that have become
-    // reachable. Cheap to call often — it only plans for a waypoint that is BOTH within `ahead_m` of the
-    // robot and still ahead of it on the route — but the caller should still rate-limit, because a
-    // successful recovery re-authors a window and that is not free.
+    // reachable. Cheap to call often — it only plans for a waypoint that is within `ahead_m` of the
+    // robot, still ahead of it on the route, AND at least one range step nearer than the last try — but
+    // the caller should still rate-limit, because a successful recovery re-authors a window and that is
+    // not free.
     // After kMaxReinstateAttempts refusals a waypoint is retired: at some point "blocked" is the answer,
-    // and re-planning to it every approach is a search per cycle that buys nothing.
+    // and re-planning to it every approach is a search per cycle that buys nothing. The budget is spent
+    // in EQUAL STEPS OF RANGE (ahead_m / kMaxReinstateAttempts), never on a clock, so the last try is
+    // always made at the closest the robot actually gets — see Deferred::last_try_m for what that fixed.
     static constexpr int kMaxReinstateAttempts = 4;
     struct ReinstateResult { int tested = 0, recovered = 0, retired = 0; };
     ReinstateResult reinstate_deferred(const Eigen::Vector2f &robot_pos,
