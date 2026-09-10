@@ -494,7 +494,18 @@ void SpecificWorker::initialize()
 			std::vector<float> r = rot.value().get();
 			r[2] = yaw;
 			const std::vector<float> tvec = tr.value().get();
-			rt->insert_or_assign_edge_RT(bn.value(), cn.value().id(), tvec, r);
+			// ★STATIC, NOT TIMESTAMPED: this is a camera EXTRINSIC — a fixed physical mount whose
+			// estimate is being refined, not a state that varies with time. The newest estimate is
+			// the best answer for EVERY frame, including ones captured before it was computed, so
+			// there is nothing a history could usefully answer: an old frame fetching the old
+			// boresight would fetch the WORSE number on purpose.
+			// ★AND A RING HERE POISONS EVERY CHAIN THIS EDGE SITS IN. A timestamped write stamps the
+			// blocks with the moment of calibration, so from then on every timestamped query through
+			// body->cam falls outside the ring — for ever, by a margin growing one second per second
+			// — and reports a clamp it did not earn. Measured on this robot in room_concept's camera
+			// path: one creation-stamped mount produced a 64% Stale share and stale_edges=2, drowning
+			// the ~25% real clamp rate of the live edge beside it.
+			rt->insert_or_assign_edge_RT_static(bn.value(), cn.value().id(), tvec, r);
 			qInfo().noquote() << QString::asprintf(
 				"[mount] %s boresight yaw %+.5f rad (%+.3f deg) written into body->%s "
 				"(was %+.5f) — this is the SHARED extrinsic, every agent now reads it",
