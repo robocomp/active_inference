@@ -226,9 +226,20 @@ struct DoorConfig
     // while w,h are STRONG template priors — a standard leaf ≈ 0.70 m × 2.00 m. Realised as tight seed
     // Σ + tiny process noise (rc::ai's prior is temporal), so w,h stay near template unless sustained
     // consistent evidence moves them. thickness is fixed (across-wall extent, not a DOF). No gate.
-    float door_prior_w_m   = 0.70f;   // width prior mean (m)
+    // ★MEASURED AGAINST THE DOORS THAT ARE ACTUALLY HERE, not a generic guess. piso.wbt's Door PROTO
+    // is `size 0.1 1 2.1` and `frameHeight 2.1`: 1.00 m wide, 2.10 m tall. The old 0.70 +- 0.06 put the
+    // real door FIVE SIGMA out on a prior its own comment calls "strong", so the fit crawled to ~0.75
+    // and was held there for ever — the projected leaf stayed ~25% narrower than the door it was
+    // looking at, which is visible as the model box being smaller than the mask.
+    // ⚠That also capped the phi measurement: IoU between a 1.52 m^2 model and a 2.10 m^2 door cannot
+    // exceed 0.72 however right phi is, so the score was flattened before phi even entered. The width
+    // was upstream of the phi instability, not a separate cosmetic complaint.
+    // ⚠These are apartment facts, and they belong in etc/config.toml per deployment (Door.PriorWidthM /
+    // Door.PriorHeightM) rather than compiled in. The defaults are moved because a default that is 5
+    // sigma from every door in the only world we run is not a useful prior.
+    float door_prior_w_m   = 1.00f;   // width prior mean (m)
     float door_prior_w_std = 0.06f;   // width prior std (m) — strong
-    float door_prior_h_m   = 2.00f;   // height prior mean (m)
+    float door_prior_h_m   = 2.10f;   // height prior mean (m)
     float door_prior_h_std = 0.08f;   // height prior std (m) — strong
     float door_prior_s_std = 0.60f;   // along-wall offset prior std (m) — broad (the fit localises s)
     float door_thickness_m = 0.05f;   // fixed panel thickness (m, across the wall)

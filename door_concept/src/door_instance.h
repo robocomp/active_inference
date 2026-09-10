@@ -9,6 +9,7 @@
 #pragma once
 
 #include <chrono>
+#include <utility>
 #include "../../common/exclusion/exclusion.h"        // rc::exclusion::Seniority (SHARED)
 #include <cstdint>
 #include <limits>
@@ -61,7 +62,23 @@ struct DoorInstance
     float phi_cmd_rate = 0.0f;    // rad/s the provider advertised; 0 ⇒ no swing model, jump to target
     std::chrono::steady_clock::time_point phi_cmd_t0{};
     bool  phi_cmd_active = false; // a commanded swing is in flight (or just finished and unconfirmed)
+    // Provenance of the silhouette occ/free split, copied from DoorSilhouette for the log: was the
+    // absence marginalised over the opening angle, and how concentrated that posterior was. w_max near
+    // 1/n_hyp means the frame did not identify phi at all and the absence was averaged away almost
+    // entirely — which is the intended behaviour, and must be visible as such rather than inferred.
+    bool  dbg_phi_marg  = false;
+    int   dbg_phi_nhyp  = 0;
+    float dbg_phi_wmax  = 0.0f;
     float phi_support  = 0.0f;    // fraction of leaf-face samples lit by a door mask at phi_est
+    // ★THE WHOLE LIKELIHOOD CURVE, NOT ONLY ITS ARGMAX. estimate_phi scores every candidate angle and
+    // then throws all but the best away; the silhouette channel — the ONLY channel allowed to remove a
+    // door — was then rendered at that single angle. Measured 2026-09-10 the peak support is 0.007-0.245,
+    // i.e. the curve is nearly FLAT and the argmax is noise: the leaf was projected out into the room,
+    // occ went 207 -> 0, free_eff 0 -> 33, and L fell +4.00 -> -4.00 in 13 cycles twice on one approach.
+    // A parameter the data does not identify must not be able to drive a removal. Keeping the curve lets
+    // the absence be MARGINALISED over phi instead of conditioned on a point estimate, so a flat curve
+    // charges almost no absence and a peaked one charges it in full — without any gate on "flatness".
+    std::vector<std::pair<float, float>> phi_curve;   // (phi rad, raw IoU support >= 0), unnormalised
     door::LeafPose  leaf_pose{};
 
     // ── AI2 belief ────────────────────────────────────────────────────────────────

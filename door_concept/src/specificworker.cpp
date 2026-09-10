@@ -1315,7 +1315,13 @@ void SpecificWorker::run_instance_tracker()
         {
             std::ofstream f; rc::diag::open_rotating(f, "etc/door_dets_log.csv");
             f << "cycle,n_door_slices,slice_idx,npts,conf,cx,cy,range,trunc_frac,motion_var,"
-                 "mask_h,size_w\n";   // mask_h: measured slice height (m). size_w: candidate weight, UNAPPLIED
+                 // mask_h: slice height SPAN (m). size_w: candidate weight, UNAPPLIED.
+                 // ★mask_z0 / mask_z1: the ABSOLUTE height band, which the span alone cannot give. It
+                 // decides what a split door means: pieces at 0.0-0.92 and 0.9-2.2 TILE one panel and
+                 // should be merged for association; two pieces both starting at 0.0 are competing
+                 // claims about the same lower half, which would mean the segmenter can only ever see
+                 // the bottom — and then downgrading them is right rather than merging them.
+                 "mask_h,size_w,mask_z0,mask_z1\n";
             return f;
         }();
         static int dcyc = 0;
@@ -1331,7 +1337,8 @@ void SpecificWorker::run_instance_tracker()
                 dcsv << dcyc << ',' << dets.size() << ',' << d.slice_index << ',' << n << ',' << sl.confidence
                      << ',' << sl.centroid.x() << ',' << sl.centroid.y() << ',' << sl.range << ','
                      << sl.trunc_frac << ',' << sl.motion_var << ','
-                     << (sl.bbox_max.z() - sl.bbox_min.z()) << ',' << d.dbg_size_w << '\n';
+                     << (sl.bbox_max.z() - sl.bbox_min.z()) << ',' << d.dbg_size_w << ','
+                     << sl.bbox_min.z() << ',' << sl.bbox_max.z() << '\n';
             }
             dcsv.flush();
         }
@@ -2137,10 +2144,15 @@ void SpecificWorker::update_existence_beliefs()
         inst.dbg_edge_ctrl    = edge.s_control;
         inst.dbg_edge_n       = edge.n_samples;
         inst.dbg_sil_occ = sil.e_occ;     inst.dbg_sil_free  = sil.e_free;
+        inst.dbg_phi_marg = sil.phi_marginalised; inst.dbg_phi_nhyp = sil.phi_n_hyp;
+        inst.dbg_phi_wmax = sil.phi_w_max;
         inst.dbg_sil_ndet = sil.n_detectable; inst.dbg_sil_ntotal = sil.n_total;
         inst.dbg_sil_noccl = sil.n_occluded;  inst.dbg_sil_ncells = sil.n_cells;
         inst.dbg_sil_central = sil.central_frac(); inst.dbg_sil_resolv = sil.resolvability();
-        if (sil.n_detectable == 0)
+        // ★"WAS IT LOOKED AT" IS A QUESTION ABOUT THE DOOR, NOT ABOUT ONE GUESS AT ITS HINGE ANGLE.
+        // probed() answers it under the phi posterior, so a leaf the fit happened to swing out of frame
+        // is not mistaken for a door the camera never pointed at. See DoorSilhouette::probed().
+        if (not sil.probed())
         {
             // NOT PROBED this frame — behind the robot, out of the frustum, or fully occluded. rc::exist HOLDs.
             // This branch is the whole fix for "the door disappears when the robot turns around": there is no
@@ -2381,11 +2393,35 @@ void SpecificWorker::update_existence_beliefs()
                        rc::exist::unfalsifiable_note(inst.node_name, inst.existence, verdict));
     }
 
-    // Throttled existence readout so a "why is this phantom still here?" case is diagnosable from the log.
+    // Existence readout. Throttled to 1-in-60 so a "why is this phantom still here?" case stays
+    // diagnosable without flooding — but ★THE THROTTLE MUST NOT SWALLOW THE EVENT THE FILE EXISTS FOR.
+    //
+    // Three removals tonight were invisible: the last sampled row read L +4.00, occ 420, free 0,
+    // free_eff 0.00, won 1, edge_dL +2.83 — every channel positive — and 60 cycles later the door was
+    // gone at L -4.00. Eight nats crossed INSIDE one sampling interval, so the transition that actually
+    // did it was never written down, and the min-height and room-containment priors could only be
+    // eliminated by inference rather than read off. A log that samples uniformly is the wrong shape for
+    // a question about a transient: it records the steady states either side of the thing you want.
+    //
+    // So a row is forced whenever the belief MOVES sharply (|dL| > 1 nat in one cycle) or is about to
+    // be removed, regardless of the counter. Rare by construction — a healthy door sits at its clamp —
+    // and it costs nothing on the cycles where nothing happens.
     static int ex_dbg = 0;
-    if (++ex_dbg % 60 == 0)
-        for (const auto& [id, inst] : fitter_->instances())
-            if (not inst.is_bearing_hypothesis)
+    ++ex_dbg;
+    static std::unordered_map<std::uint64_t, float> last_L;
+    std::unordered_set<std::uint64_t> force_row;
+    for (const auto& [id, inst] : fitter_->instances())
+    {
+        if (inst.is_bearing_hypothesis) continue;
+        const float L = inst.existence.logodds();
+        if (const auto it = last_L.find(id); it != last_L.end() and std::abs(L - it->second) > 1.0f)
+            force_row.insert(id);
+        last_L[id] = L;
+    }
+    for (const auto id : to_remove)     // the removal cycle itself, always
+        force_row.insert(id);
+    for (const auto& [id, inst] : fitter_->instances())
+        if (not inst.is_bearing_hypothesis and (ex_dbg % 60 == 0 or force_row.contains(id)))
             {
                 const auto& ms = inst.model.state();
                 const bool has_poly = fitter_->has_room_polygon();
@@ -2441,7 +2477,11 @@ void SpecificWorker::update_existence_beliefs()
                          // M1: the leaf angle is estimated now, not pinned. phi_support is how much of
                          // the leaf face the image actually backs at that angle; phi_cmd=1 means a swing
                          // WE commanded is being anticipated, which is legitimately evidence-free.
-                         "phi,phi_support,phi_cmd\n"; return f; }();
+                         // phi_marg=1 ⇒ the occ/free split above is the MARGINAL over the opening
+                         // angle, not a single-angle rendering. phi_wmax is the largest normalised
+                         // weight: ~1/phi_nhyp means the frame could not identify the angle at all, so
+                         // the absence was averaged across hypotheses and is correctly near zero.
+                         "phi,phi_support,phi_cmd,phi_marg,phi_nhyp,phi_wmax\n"; return f; }();
                 if (ex_csv)
                 {
                     ex_csv << ex_dbg << ',' << inst.node_name << ',' << inst.existence.logodds() << ','
@@ -2463,7 +2503,9 @@ void SpecificWorker::update_existence_beliefs()
                            << ',' << inst.dbg_edge_delta << ',' << inst.dbg_edge_excess
                            << ',' << inst.dbg_edge_nctl
                            << ',' << inst.phi_est << ',' << inst.phi_support
-                           << ',' << (inst.phi_cmd_active ? 1 : 0) << '\n';
+                           << ',' << (inst.phi_cmd_active ? 1 : 0)
+                           << ',' << (inst.dbg_phi_marg ? 1 : 0) << ',' << inst.dbg_phi_nhyp
+                           << ',' << inst.dbg_phi_wmax << '\n';
                     ex_csv.flush();
                 }
             }

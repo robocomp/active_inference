@@ -140,9 +140,9 @@ DoorConfig load_door_config(const ConfigLoader& cfg)
     out.openable_hinge_side  = geti("Openable.HingeSide",   0);
     out.openable_swing_dir   = getf("Openable.SwingDir",    1.0f);
     out.openable_phi_max_rad = getf("Openable.PhiMaxRad",   1.5707963f);
-    out.door_prior_w_m           = getf("Door.PriorWidthM",         0.70f);
+    out.door_prior_w_m           = getf("Door.PriorWidthM",         out.door_prior_w_m);
     out.door_prior_w_std         = getf("Door.PriorWidthStd",       0.06f);
-    out.door_prior_h_m           = getf("Door.PriorHeightM",        2.00f);
+    out.door_prior_h_m           = getf("Door.PriorHeightM",        out.door_prior_h_m);
     out.door_prior_h_std         = getf("Door.PriorHeightStd",      0.08f);
     out.door_prior_s_std         = getf("Door.PriorAlongWallStd",   0.60f);
     out.door_thickness_m         = getf("Door.ThicknessM",          0.05f);

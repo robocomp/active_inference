@@ -80,6 +80,28 @@ struct DoorSilhouette
     // removes the abstention rule, which was gating on a phi that is not reliable enough to gate on.
     std::vector<std::vector<cv::Point>> face_px_controls;
     int   n_occluded   = 0;    // in-frustum samples hidden behind a nearer NON-door mask
+    // ── PROVENANCE OF THE OCC/FREE SPLIT ────────────────────────────────────────────────────────────
+    // Whether e_occ/e_free above are the marginal over the phi posterior or a single-angle rendering,
+    // and how concentrated that posterior was. Reported because a consumer must be able to tell an
+    // absence the model is confident about from one it could only average over — and because a silent
+    // switch between the two would make every earlier log incomparable with every later one.
+    // ★THE MARGINAL COUNTS ARE KEPT SEPARATE FROM THE MODAL ONES ON PURPOSE. `n_detectable`,
+    // `n_central`, `n_cells` and the centroid sums all describe ONE rendering — the leaf at phi_est —
+    // and resolvability()/central_frac() divide by them. Overwriting n_detectable with a weighted
+    // average across angles while leaving n_cells and the centroid at the modal pose would put a
+    // numerator and a denominator from two different measurements into one ratio, which is the exact
+    // shape of error that has produced three false findings in this project. So the marginal lives in
+    // its own fields and is consulted only where absence is weighed.
+    bool  phi_marginalised = false;
+    int   phi_n_hyp        = 0;      // opening angles carrying weight
+    float phi_w_max        = 0.0f;   // largest normalised weight; ~1/n_hyp = flat, ~1 = identified
+    float n_det_marg   = -1.0f;      // E[detectable samples] over the phi posterior; <0 = not computed
+    float n_total_marg = -1.0f;      // E[attempted samples]  over the phi posterior; <0 = not computed
+    // Did the sensor look at this door AT ALL — under any opening angle the data still permits? The
+    // HOLD branch turns on this and not on the modal count: a leaf whose fitted angle happens to point
+    // it out of frame has not thereby become unobserved, and charging that as "not probed" would freeze
+    // a phantom just as surely as charging it as absence would delete a real door.
+    bool probed() const { return phi_marginalised ? n_det_marg > 0.5f : n_detectable > 0; }
     int   n_cells      = 0;    // DISTINCT pixel cells the detectable silhouette covers (see resolvability)
     float mean_range_m = 0.0f; // mean camera→sample distance over the detectable samples
     // ── POSTERIOR SAMPLED UNDER THE CONTOUR (retina's semantic_class_probs) ──────────────────────
@@ -95,7 +117,12 @@ struct DoorSilhouette
     float field_mean() const { return field_n > 0 ? static_cast<float>(field_sum / field_n) : 0.0f; }
     // How much of the door the sensor could actually have seen from here. Absence is evidence of removal only
     // in proportion to this — the rest is epistemic surprise ("I cannot resolve this from here"), not absence.
-    float in_fov_frac() const { return n_total > 0 ? static_cast<float>(n_detectable) / n_total : 0.0f; }
+    float in_fov_frac() const
+    {
+        if (phi_marginalised and n_total_marg > 0.0f)
+            return std::clamp(n_det_marg / n_total_marg, 0.0f, 1.0f);
+        return n_total > 0 ? static_cast<float>(n_detectable) / n_total : 0.0f;
+    }
     // ★★CENTRALITY IS ABOUT WHERE THE OBJECT IS, NOT HOW MUCH OF IT FITS IN A BOX.
     // The old form counted the FRACTION of silhouette samples landing inside a 50%x50% central box, which
     // is a SIZE measurement wearing an attention label: an object bigger than the box can never score well

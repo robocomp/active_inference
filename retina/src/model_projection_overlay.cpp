@@ -432,15 +432,13 @@ void ModelProjectionOverlay::draw(cv::Mat& canvas, std::span<const GraphObjectBo
                 std::isfinite(mean_p) ? std::format("{:.3f}", mean_p) : std::string{"n/a"},
                 es.n_samples > 0 ? std::format("{:.2f}", es.support) : std::string{"n/a"});
             cv::putText(canvas, txt, cen, cv::FONT_HERSHEY_SIMPLEX, 0.5, col, 2, cv::LINE_AA);
-            // Draw the control placements the score is taken against, faintly. A number whose reference
-            // is invisible invites trusting it; seeing WHERE it compared makes a bad control obvious
-            // (one landing on a second door, or off the wall entirely).
-            for (const auto& c : rc::edges::make_side_controls(face_px, canvas.cols, canvas.rows))
-            {
-                const cv::Point* cp = c.data();
-                const int cn = static_cast<int>(c.size());
-                cv::polylines(canvas, &cp, &cn, 1, true, cv::Scalar{140, 140, 140}, 1, cv::LINE_AA);
-            }
+            // ★THE CONTROL PLACEMENTS ARE NOT DRAWN. They were, faintly, so the reference behind `edge`
+            // was visible rather than asserted. But door_concept's controls moved into 3-D along the
+            // LEAF'S OWN PLANE, while this overlay still built them by displacing in image space — so
+            // the rectangles showed a null that coincides with the real one only at phi = 0 and drifts
+            // from it at every other angle. A picture that is nearly right is worse than none: it
+            // invites checking the number against the wrong reference.
+            // To bring them back, publish door_concept's face_px_controls and draw THOSE.
         }
 
         // Name label at the projected top-front corner (corner 4), in front of the camera and in-bounds.
