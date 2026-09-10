@@ -155,7 +155,15 @@ private:
     struct PoseExtrapDiag {
         std::uint64_t newest_block_ms = 0;
         float  dt_s = 0.0f;
+        // ★TWO DIFFERENT TWISTS, LOGGED SIDE BY SIDE ON PURPOSE. adv/side/rot are the ROBOT's own
+        // body twist off its node attributes (the producer's measurement). ring_* is what the RT
+        // ring carries on the localisation edge — the ROOM's apparent motion, which is what the
+        // extrapolation actually integrates. They are related by the SE(2) adjoint and they are NOT
+        // interchangeable: a near-parked robot wobbling in yaw puts two orders of magnitude more
+        // linear rate in the ring than it has body speed. Having both in one row is what makes a
+        // frame error visible at a glance instead of after a day of derivation.
         double adv = 0.0, side = 0.0, rot = 0.0;
+        double ring_vx = 0.0, ring_vy = 0.0, ring_wz = 0.0;
         double raw_x = 0.0, raw_y = 0.0, raw_th = 0.0;   // pose before extrapolation
         double dx = 0.0, dy = 0.0, dth = 0.0;            // applied displacement
         bool   applied = false;

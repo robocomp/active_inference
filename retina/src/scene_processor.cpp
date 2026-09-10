@@ -252,12 +252,14 @@ std::optional<Mat::RTMat> SceneProcessor::get_room_robot_transform(FPSCounter& c
                 pose_extrap_csv_.open("etc/pose_extrap_log.csv", std::ios::out | std::ios::trunc);
                 if (pose_extrap_csv_.is_open())
                     pose_extrap_csv_ << "frame_ts_ms,newest_block_ms,dt_s,adv,side,rot,"
+                                        "ring_vx,ring_vy,ring_wz,"
                                         "raw_x,raw_y,raw_th,ext_x,ext_y,ext_th,disp_m,dtheta_rad\n";
             }
             if (pose_extrap_csv_.is_open())
             {
                 pose_extrap_csv_ << timestamp_ms << ',' << diag.newest_block_ms << ',' << diag.dt_s << ','
                                  << diag.adv << ',' << diag.side << ',' << diag.rot << ','
+                                 << diag.ring_vx << ',' << diag.ring_vy << ',' << diag.ring_wz << ','
                                  << diag.raw_x << ',' << diag.raw_y << ',' << diag.raw_th << ','
                                  << (diag.raw_x + diag.dx) << ',' << (diag.raw_y + diag.dy) << ','
                                  << (diag.raw_th + diag.dth) << ','
@@ -347,15 +349,27 @@ std::optional<Mat::RTMat> SceneProcessor::room_T_robot_at(DSR::InnerEigenAPI* ei
                     robot_node.has_value() and room_node.has_value())
                     // get_rt_api() hands back a FRESH unique_ptr per call, so it has to be held for
                     // the duration of the call rather than used as a temporary.
-                    if (const auto rt_api = graph_->get_rt_api();
-                        const auto twist = rc::rt::newest_twist_of_parent(*graph_, rt_api.get(),
-                                                                          robot_node.value(),
-                                                                          room_node.value().id()))
                     {
-                        diag->newest_block_ms = twist->stamp_ms;
-                        diag->adv  = twist->linear.y();    // +Y is FORWARD on this robot
-                        diag->side = twist->linear.x();    // +X is lateral
-                        diag->rot  = twist->yaw_rate();
+                        // The robot's OWN motion, from the channel the producer publishes for it.
+                        if (const auto body = rc::rt::robot_body_twist(*graph_, robot_node.value());
+                            body.has_value())
+                        {
+                            diag->adv  = body->linear.y();    // +Y is FORWARD on this robot
+                            diag->side = body->linear.x();    // +X is lateral
+                            diag->rot  = body->yaw_rate();
+                        }
+                        // And the ring's own twist — the quantity the extrapolation integrates.
+                        // get_rt_api() hands back a FRESH unique_ptr per call, so hold it.
+                        if (const auto rt_api = graph_->get_rt_api();
+                            const auto ring = rc::rt::newest_twist(*graph_, rt_api.get(),
+                                                                   robot_node.value(),
+                                                                   room_node.value().id()))
+                        {
+                            diag->newest_block_ms = ring->stamp_ms;
+                            diag->ring_vx = ring->linear.x();
+                            diag->ring_vy = ring->linear.y();
+                            diag->ring_wz = ring->yaw_rate();
+                        }
                     }
         }
     }

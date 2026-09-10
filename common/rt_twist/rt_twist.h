@@ -81,52 +81,6 @@ struct Twist
     return t;
 }
 
-// ── THE RECIPROCAL: THE PARENT'S OWN BODY TWIST, FROM AN EDGE THAT STORES THE CHILD'S ──────────
-// ★READ THIS BEFORE USING newest_twist() TO ASK "HOW FAST IS THE ROBOT MOVING?". On this fleet the
-// localisation edge is anchored parent=ROBOT, child=ROOM -- the room hangs off the robot because the
-// robot is the RT root -- so the twist stored on it is the ROOM's apparent motion, which is not the
-// robot's speed. It differs by the SE(2) adjoint, and the lever-arm term is not small: a robot
-// turning in place at distance |t| from the room origin makes the room sweep an arc about it, so the
-// stored linear rate can be large while the robot is not translating at all.
-//
-// The conversion needs no extra data: xi_parent = -Ad_T(xi_child) where T is the edge's OWN stored
-// matrix, and Ad_(R,t)(v, w) = (R*v + w*(t_y, -t_x), w). So an agent asking for ego-motion gets a
-// correct answer from the same edge, and nobody has to re-derive the anchoring.
-[[nodiscard]] inline std::optional<Twist> newest_twist_of_parent(DSR::DSRGraph &G, const DSR::Edge &edge)
-{
-    const auto child = newest_twist(G, edge);
-    if (not child.has_value())
-        return std::nullopt;
-
-    const auto ts  = G.get_attrib_by_name<rt_timestamps_att>(edge);
-    const auto tr  = G.get_attrib_by_name<rt_translation_att>(edge);
-    const auto rot = G.get_attrib_by_name<rt_rotation_euler_xyz_att>(edge);
-    if (not ts.has_value() or not tr.has_value() or not rot.has_value())
-        return std::nullopt;
-
-    std::uint64_t newest = 0;
-    std::size_t   slot   = 0;
-    for (std::size_t k = 0; k < ts->get().size(); ++k)
-        if (ts->get()[k] > newest) { newest = ts->get()[k]; slot = k; }
-    const std::size_t base = slot * 3;
-    if (tr->get().size() < base + 3 or rot->get().size() < base + 3)
-        return std::nullopt;
-
-    const float tx = tr->get()[base], ty = tr->get()[base + 1];
-    const float th = rot->get()[base + 2];
-    const float c = std::cos(th), s = std::sin(th);
-
-    Twist parent;
-    parent.stamp_ms = child->stamp_ms;
-    const float w = child->angular.z();
-    // Ad_T applied to the child twist, then negated.
-    parent.linear.x() = -(c * child->linear.x() - s * child->linear.y() + w * ty);
-    parent.linear.y() = -(s * child->linear.x() + c * child->linear.y() - w * tx);
-    parent.linear.z() = 0.f;
-    parent.angular    = {0.f, 0.f, -w};
-    return parent;
-}
-
 // Convenience for the usual shape: the twist of `child` relative to `parent`.
 [[nodiscard]] inline std::optional<Twist> newest_twist(DSR::DSRGraph &G, DSR::RT_API *rt_api,
                                                        const DSR::Node &parent, std::uint64_t child_id)
@@ -137,15 +91,41 @@ struct Twist
     return e.has_value() ? newest_twist(G, e.value()) : std::nullopt;
 }
 
-// The parent's own body twist off the same edge — what an agent means by "how fast am I moving?"
-// when the robot is the PARENT of the frame it localises against.
-[[nodiscard]] inline std::optional<Twist> newest_twist_of_parent(DSR::DSRGraph &G, DSR::RT_API *rt_api,
-                                                                 const DSR::Node &parent, std::uint64_t child_id)
+
+// ── THE PRODUCER'S OWN EGO-MOTION CHANNEL, AND THE FIRST PLACE TO LOOK ─────────────────────────
+// ★IF THE QUESTION IS "HOW FAST IS THE ROBOT MOVING?", DO NOT READ THE RING FOR IT. The robot node
+// carries robot_current_advance_speed / _side_speed / _angular_speed, published by robot_concept off
+// the FullPoseEstimation stream (odometry fused with the IMU upstream in the base bridge, which is
+// where the two are actually combined). That channel is strictly better for ego-motion than anything
+// derived from an RT edge:
+//   - it is the producer's own measurement, not a quantity recovered through a frame conversion;
+//   - it is STAMPED (robot_current_speed_timestamp), so staleness is checkable;
+//   - it carries a per-sample VARIANCE (robot_current_speed_variance, [var_adv, var_side, var_rot]);
+//   - it does not depend on a room existing, or on which way the RT edge happens to be anchored.
+//
+// ★AND THE RING IS NOT A SUBSTITUTE, because on this fleet the localisation edge is anchored
+// parent=ROBOT child=ROOM, so its twist is the ROOM's apparent motion. That differs from the robot's
+// by the SE(2) adjoint, and the lever-arm term is not small: measured live 2026-09-10, a near-parked
+// robot wobbling at 0.02 rad/s put 0.038 m/s in the ring against a true body twist of 0.0003 m/s.
+// Two orders of magnitude. Use newest_twist() only when the ring itself is what you are asking about
+// -- diagnosing an extrapolation, say -- and this function whenever you mean the robot's own motion.
+[[nodiscard]] inline std::optional<Twist> robot_body_twist(DSR::DSRGraph &G, const DSR::Node &robot)
 {
-    if (rt_api == nullptr)
+    const auto adv  = G.get_attrib_by_name<robot_current_advance_speed_att>(robot);
+    const auto side = G.get_attrib_by_name<robot_current_side_speed_att>(robot);
+    const auto rot  = G.get_attrib_by_name<robot_current_angular_speed_att>(robot);
+    if (not adv.has_value() or not side.has_value() or not rot.has_value())
         return std::nullopt;
-    const auto e = rt_api->get_edge_RT(parent, child_id);
-    return e.has_value() ? newest_twist_of_parent(G, e.value()) : std::nullopt;
+
+    Twist t;
+    // ★The attributes are named SEMANTICALLY (advance / side); Twist is AXIS order. On this
+    // +Y-forward robot the advance rate is the y component and the lateral rate the x one. This is
+    // the same crossover that was mis-encoded in three consumers when it was left to each of them.
+    t.linear  = {side.value(), adv.value(), 0.f};
+    t.angular = {0.f, 0.f, rot.value()};
+    if (const auto ts = G.get_attrib_by_name<robot_current_speed_timestamp_att>(robot); ts.has_value())
+        t.stamp_ms = static_cast<std::uint64_t>(ts.value());
+    return t;
 }
 
 }   // namespace rc::rt
