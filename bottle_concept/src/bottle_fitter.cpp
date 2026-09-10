@@ -19,6 +19,7 @@
 #include <print>
 #include <unordered_map>
 #include <utility>
+#include "../../common/rt_query_probe/rt_query_probe.h"
 
 namespace rc {
 
@@ -546,8 +547,32 @@ std::optional<Eigen::Matrix4d> BottleFitter::room_T_zed_matrix(std::uint64_t tim
     // Pin to the frame's capture stamp (0 = latest): with the robot rotating, the LATEST camera pose
     // differs from the one at capture, so a latest-pose de-projection swings the measurement (~±12 cm)
     // and makes a STATIC bottle drift + split. Using the capture pose keeps it stable.
-    const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", timestamp_ms);
-    const auto btz = inner_eigen_->get_transformation_matrix("body", "zed", timestamp_ms);
+    // ★LISTENING ONLY — no behaviour change. Asks cortex what this query DID (see
+    // common/rt_query_probe/rt_query_probe.h). A timestamped query that falls outside the ring
+    // returns the end block and is indistinguishable from a success, so a fitter cannot currently
+    // tell whether it is placing detections at the pose the camera actually had. One throttled line
+    // per 15 s appends a row to etc/rt_query_probe.csv saying whether this call site ever clamps,
+    // by how much, and — the column that makes it readable — how fast the robot was moving in the
+    // same window. A clamp only costs geometry while the robot moves; the controller's rate goes
+    // 1-3% parked to 35% moving, so a clamp share without a motion column cannot be interpreted.
+    static rc::rtprobe::Probe rt_probe{"bottle_fitter room<-body"};
+    DSR::RT_API::TimeQueryInfo rt_info;
+    const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", timestamp_ms, "RT",
+                                                             DSR::RT_API::TimeQuery::Interpolated,
+                                                             &rt_info);
+    rt_probe.note(rt_info, G_);
+    // ★LATEST (ts=0), NOT THE CAPTURE STAMP, AND THE DIFFERENCE IS A CATEGORY ONE. body<-zed is the
+    // camera EXTRINSIC: a fixed physical quantity being ESTIMATED, not a state that varies with time.
+    // Self-calibration produces successively better estimates of one constant, so the newest estimate
+    // is the best estimate for EVERY frame, including ones captured earlier — there is no "the
+    // extrinsic it had at capture". Pinning it to timestamp_ms (which this line used to do, alone
+    // among the seven fitters) is harmless only while that edge carries no history: it has one block
+    // and no rt_timestamps today, so both forms return the same transform. The moment self-calibration
+    // writes a ring there, the timestamped form would fetch the estimate in force at capture — an
+    // older, worse one — and this fitter would quietly de-project with stale calibration while its
+    // siblings used the refined value.
+    // ★CONTRAST with room<-body above, which IS a state and MUST be pinned to the capture stamp.
+    const auto btz = inner_eigen_->get_transformation_matrix("body", "zed", 0);
     if (not (rtb.has_value() and btz.has_value()))
         return std::nullopt;
     const auto to_mat4 = [](const Mat::RTMat& T)

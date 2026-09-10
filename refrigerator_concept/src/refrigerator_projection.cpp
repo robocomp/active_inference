@@ -22,6 +22,7 @@
 
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
+#include "../../common/rt_query_probe/rt_query_probe.h"
 
 namespace rc {
 
@@ -120,7 +121,20 @@ std::optional<Eigen::Matrix4d> RefrigeratorProjection::room_T_zed_matrix(std::ui
         return std::nullopt;
     // Pin the moving room→body hop to the frame's capture stamp (Nearest); keep the rigid body→zed mount
     // at latest (it carries only a bootstrap stamp — a pinned query would fail). ts=0 → current pose.
-    const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", pose_ts_ms);
+    // ★LISTENING ONLY — no behaviour change. Asks cortex what this query DID (see
+    // common/rt_query_probe/rt_query_probe.h). A timestamped query that falls outside the ring
+    // returns the end block and is indistinguishable from a success, so a fitter cannot currently
+    // tell whether it is placing detections at the pose the camera actually had. One throttled line
+    // per 15 s appends a row to etc/rt_query_probe.csv saying whether this call site ever clamps,
+    // by how much, and — the column that makes it readable — how fast the robot was moving in the
+    // same window. A clamp only costs geometry while the robot moves; the controller's rate goes
+    // 1-3% parked to 35% moving, so a clamp share without a motion column cannot be interpreted.
+    static rc::rtprobe::Probe rt_probe{"refrigerator_projection room<-body"};
+    DSR::RT_API::TimeQueryInfo rt_info;
+    const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", pose_ts_ms, "RT",
+                                                             DSR::RT_API::TimeQuery::Interpolated,
+                                                             &rt_info);
+    rt_probe.note(rt_info, G_);
     const auto btz = inner_eigen_->get_transformation_matrix("body", "zed", 0);
     if (not (rtb.has_value() and btz.has_value()))
         return std::nullopt;

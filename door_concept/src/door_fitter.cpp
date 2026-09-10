@@ -19,6 +19,7 @@
 #include <utility>
 #include <array>
 #include <opencv2/imgproc.hpp>   // fillConvexPoly / bitwise_and — the rasterised phi score
+#include "../../common/rt_query_probe/rt_query_probe.h"
 
 namespace rc {
 
@@ -340,10 +341,28 @@ DoorFitter::DoorObservation DoorFitter::observe(DoorInstance& inst, const DSR::N
             inst.last_range       = slice.range;
             inst.last_centroid_radius = slice.centroid_radius;   // image-centredness (moving-update exception)
             inst.last_depth_var   = slice.depth_var;             // 0=ZED, >0=ricoh LiDAR-depth → downweights the fit (added to R)
-            // MINIMUM-HEIGHT evidence: the top of the observed support (room frame; floor = 0), accumulated
-            // ONLY from views that actually saw the top. A border-clipped mask (trunc_frac → 1) reports a
-            // top that is merely a lower bound, so it carries no height information — weight it out
-            // continuously rather than gating, and never let it drag obs_top_z down. See DoorInstance.
+            // MINIMUM-HEIGHT evidence: the top of the observed support (room frame; floor = 0).
+            //
+            // ★A MASK'S TOP IS A LOWER BOUND ON THE DOOR'S TOP, AND THE ESTIMATOR MUST BE ONE-SIDED.
+            // Every way of seeing less than the whole object — border clipping, occlusion, and (the one
+            // that bit us) the segmenter returning the door in PIECES — pushes the observed top DOWN.
+            // Nothing pushes it up: you cannot see more door than there is. So a low reading is evidence
+            // about the view, never about the door, and it must not move the estimate.
+            //
+            // The comment here already said "never let it drag obs_top_z down" — the symmetric EWMA
+            // below did exactly that, and it is what killed door_17 on 2026-09-09. YOLO-sem split the
+            // door into two masks; the assigned slice was the LOWER piece, topping out at ~1.27 m;
+            // obs_top_z decayed 2.09 -> 2.03 -> 1.91 -> 1.78 -> ... -> 1.47, crossed MinHeightM 1.80,
+            // and the min-height prior then removed a door in plain view at exactly -1.5 nats/cycle
+            // (exist_short_gain) — while the silhouette channel was charging ZERO absence
+            // (free_eff 0.00) and the RGB contour channel was affirming it at +2.83 every cycle. Only
+            // trunc_frac was guarded, and a fragment is not border-clipped: it is complete and small.
+            //
+            // ⚠THE TRADE, stated: a one-sided estimator cannot come back down, so a single spurious
+            // tall mask pins the door tall for ever and this prior can no longer fire on it. That is
+            // the correct direction to fail — the prior exists to reject things DEMONSTRABLY too short
+            // to walk through, and shortness can only be demonstrated by seeing the whole object.
+            // Believing a fragment about the top is how it deletes real doors.
             if (slice.has_depth and slice.bbox_max.allFinite())
             {
                 const float top = slice.bbox_max.z();
@@ -353,7 +372,13 @@ DoorFitter::DoorObservation DoorFitter::observe(DoorInstance& inst, const DSR::N
                 {
                     constexpr float kEwma = 0.05f;   // smoothing over untruncated views (a measurement filter)
                     const float a = kEwma * wgt;
-                    inst.obs_top_z    = std::isnan(inst.obs_top_z) ? top : (1.0f - a) * inst.obs_top_z + a * top;
+                    // Rises toward a taller observation, never falls toward a shorter one.
+                    if (std::isnan(inst.obs_top_z) or top > inst.obs_top_z)
+                        inst.obs_top_z = std::isnan(inst.obs_top_z)
+                                         ? top : (1.0f - a) * inst.obs_top_z + a * top;
+                    // Confidence still accumulates on EVERY untruncated look: we did examine the door,
+                    // whatever the piece showed. Otherwise a run of fragments would leave the prior
+                    // unable to act at all, which is a different failure from the one being fixed.
                     inst.obs_top_conf = (1.0f - a) * inst.obs_top_conf + a;
                 }
             }
@@ -654,7 +679,20 @@ std::optional<Eigen::Matrix4d> DoorFitter::room_T_zed_matrix(std::uint64_t pose_
         return std::nullopt;
     // Pin the moving room→body hop to the frame's capture stamp (Nearest); keep the rigid body→zed mount
     // at latest (it carries only a bootstrap stamp — a pinned query would fail). ts=0 → current pose.
-    const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", pose_ts_ms);
+    // ★LISTENING ONLY — no behaviour change. Asks cortex what this query DID (see
+    // common/rt_query_probe/rt_query_probe.h). A timestamped query that falls outside the ring
+    // returns the end block and is indistinguishable from a success, so a fitter cannot currently
+    // tell whether it is placing detections at the pose the camera actually had. One throttled line
+    // per 15 s appends a row to etc/rt_query_probe.csv saying whether this call site ever clamps,
+    // by how much, and — the column that makes it readable — how fast the robot was moving in the
+    // same window. A clamp only costs geometry while the robot moves; the controller's rate goes
+    // 1-3% parked to 35% moving, so a clamp share without a motion column cannot be interpreted.
+    static rc::rtprobe::Probe rt_probe{"door_fitter room<-body"};
+    DSR::RT_API::TimeQueryInfo rt_info;
+    const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", pose_ts_ms, "RT",
+                                                             DSR::RT_API::TimeQuery::Interpolated,
+                                                             &rt_info);
+    rt_probe.note(rt_info, G_);
     const auto btz = inner_eigen_->get_transformation_matrix("body", "zed", 0);
     if (not (rtb.has_value() and btz.has_value()))
         return std::nullopt;
@@ -746,6 +784,11 @@ float DoorFitter::periphery_penalty(const DoorInstance& inst) const
 //     single bad frame cannot teleport the model onto a spurious match.
 void DoorFitter::estimate_phi(DoorInstance& inst)
 {
+    // ★CLEAR FIRST, BEFORE ANY EARLY RETURN. The curve is consumed by the silhouette channel in the
+    // SAME cycle; leaving last cycle's behind on a frame that could not score phi would marginalise
+    // this frame's absence over a stale posterior — evidence carried forward under the name of a
+    // measurement that was never taken. An empty curve is the honest state and the consumer handles it.
+    inst.phi_curve.clear();
     if (not inst.ai2_initialized or not camera_api_ or not mask_ingestor_)
         return;
     const auto Mopt = room_T_zed_matrix();
@@ -834,10 +877,20 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
     const int RW = static_cast<int>(W), RH = static_cast<int>(Himg);
     cv::Mat door_img(RH, RW, CV_8UC1, cv::Scalar(0));
     long door_px = 0;
+    // ★THIS DOOR'S MASK, NOT ALL DOOR-NESS IN THE FRAME. Filling every slice labelled `door` put
+    // fragments and any second door into the UNION, so the denominator grew while the intersection
+    // could not: measured, the best score was 0.245, implying a denominator of ~6.2 m^2 — three doors'
+    // worth — against a model of 1.52 m^2. That both depressed the score and FLATTENED it, which is
+    // fatal for the one measurement whose whole job is to be peaked. When the tracker has assigned a
+    // slice to this instance, that slice is the observation; only with no assignment do we fall back to
+    // every door slice, because then we genuinely do not know which one is ours.
+    const int assigned = inst.assigned_mask_idx;
     if (pkt.valid)
-        for (const auto& sl : pkt.slices)
+        for (std::size_t si = 0; si < pkt.slices.size(); ++si)
         {
+            const auto& sl = pkt.slices[si];
             if (sl.label != "door") continue;
+            if (assigned >= 0 and static_cast<int>(si) != assigned) continue;
             const std::size_t b = std::min(sl.pixel_begin, pkt.mask_pixels.size());
             const std::size_t e = std::min(sl.pixel_end,   pkt.mask_pixels.size());
             for (std::size_t k = b; k < e; ++k)
@@ -898,11 +951,20 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
     float best_phi = inst.phi_est, best_s = -1.0f, best_score = -1.0f;
     constexpr int  NSTEP = 19;
     constexpr float PHI_MIN = 0.0f, PHI_MAX = static_cast<float>(M_PI) / 2.0f;
+    // ★KEEP THE CURVE. The argmax below is still what `phi_est` tracks — it is the leaf pose everything
+    // DRAWS and reports — but the silhouette channel marginalises the absence over this whole curve
+    // rather than conditioning on the winner. See DoorInstance::phi_curve for why: the peak support
+    // measured 0.007-0.245, so the winner is chosen from a likelihood that is essentially flat, and
+    // rendering the leaf at it deleted a door that was plainly there. An unprojectable candidate
+    // (support < 0) is simply not a member of the curve — that is "this pose cannot be seen from here",
+    // not "this pose is refuted", and the two must not be conflated.
+    inst.phi_curve.reserve(NSTEP);
     for (int i = 0; i < NSTEP; ++i)
     {
         const float phi = PHI_MIN + (PHI_MAX - PHI_MIN) * i / (NSTEP - 1);
         const float sc = support_at(phi);
         if (sc < 0.0f) continue;
+        inst.phi_curve.emplace_back(phi, sc);
         // The command prior breaks ties and only ties: a tiny bonus proportional to closeness, far too
         // small to overturn a real difference in image support.
         const float prior_bonus = have_prior ? 0.02f * std::exp(-std::abs(phi - phi_prior) / 0.2f) : 0.0f;
@@ -998,10 +1060,16 @@ DoorSilhouette DoorFitter::compute_silhouette_existence(const DoorInstance& inst
     // yields the identical samples; when phi becomes a fitted DOF in M1 it follows the leaf for free.
     std::unordered_set<std::int64_t> covered_cells;   // distinct cells the DETECTABLE silhouette occupies
     double range_sum = 0.0;
-    const auto classify = [&](float lx, float lz)
+    // ★PARAMETERISED BY THE LEAF POSE, AND BY WHERE IT ACCUMULATES. One pass renders the panel at ONE
+    // opening angle; the caller runs it once per candidate phi and combines. `extras` marks the pass
+    // whose by-products describe the scene for everybody else (centroid, semantic field, covered cells,
+    // range) — those are reported at the modal pose, because they answer "where is it on screen", which
+    // is a statement about one drawing and not something to average over hypotheses.
+    const auto classify = [&](const door::LeafPose& L, DoorSilhouette& out, bool extras,
+                              float lx, float lz)
     {
         ++out.n_total;                                                  // one sample of the WHOLE panel
-        const Eigen::Vector3f Ps = door::leaf_point(inst.leaf_pose, lx, 0.0f, lz);   // face at mid-thickness
+        const Eigen::Vector3f Ps = door::leaf_point(L, lx, 0.0f, lz);   // face at mid-thickness
         const Eigen::Vector4d Pr(Ps.x(), Ps.y(), Ps.z(), 1.0);
         const Eigen::Vector4d Pc = zed_T_room * Pr;
         const double X = Pc.x(), Y = Pc.y(), Z = Pc.z();
@@ -1039,7 +1107,7 @@ DoorSilhouette DoorFitter::compute_silhouette_existence(const DoorInstance& inst
             }
         }
         ++out.n_detectable;
-        covered_cells.insert(k);
+        if (extras) covered_cells.insert(k);
         const float f = central_region_frac_, g = 1.0f - central_region_frac_;
         // Silhouette centroid over ALL detectable samples — the size-invariant input to
         // central_frac(). Deliberately OUTSIDE the central-box test below: it must describe
@@ -1051,7 +1119,7 @@ DoorSilhouette DoorFitter::compute_silhouette_existence(const DoorInstance& inst
         // actually see. Doing it in this loop rather than from a bounding box is the point: the contour
         // is the door's own projected shape, so the statistic is about the door and not about the
         // rectangle around it.
-        if (field != nullptr and field->valid())
+        if (extras and field != nullptr and field->valid())
             if (const float p = field->at(static_cast<int>(col), static_cast<int>(row)); p >= 0.0f)
             {
                 out.field_sum += p;
@@ -1062,7 +1130,7 @@ DoorSilhouette DoorFitter::compute_silhouette_existence(const DoorInstance& inst
         out.img_h = static_cast<int>(Himg);
         if (col > f * W and col < g * W and row > f * Himg and row < g * Himg)
             ++out.n_central;                                            // the robot is looking AT it
-        range_sum += std::sqrt(X * X + Y * Y + Z * Z);
+        if (extras) range_sum += std::sqrt(X * X + Y * Y + Z * Z);
         if (door_cells.contains(k)) out.e_occ  += 1.0f;                 // still there
         else                        out.e_free += 1.0f;                 // predicted-but-absent
     };
@@ -1071,11 +1139,71 @@ DoorSilhouette DoorFitter::compute_silhouette_existence(const DoorInstance& inst
     // occupancy/detectability counts), not decision thresholds — denser is smoother at linear cost. A door is
     // much taller than wide, so the vertical grid is finer.
     constexpr int NX = 14, NZ = 30;
-    for (int ix = 0; ix < NX; ++ix)
-        for (int iz = 0; iz < NZ; ++iz)
-            classify((-1.0f + 2.0f * (ix + 0.5f) / NX) * hw, s.cz + s.h * (iz + 0.5f) / NZ);
+    const auto sweep = [&](const door::LeafPose& L, DoorSilhouette& acc, bool extras)
+    {
+        for (int ix = 0; ix < NX; ++ix)
+            for (int iz = 0; iz < NZ; ++iz)
+                classify(L, acc, extras,
+                         (-1.0f + 2.0f * (ix + 0.5f) / NX) * hw, s.cz + s.h * (iz + 0.5f) / NZ);
+    };
 
+    // The modal pass: the leaf where phi_est puts it. This is the drawing — face_px, the centroid, the
+    // semantic-field statistics and the covered cells all come from here, and so does everything the UI
+    // and the logs show.
+    sweep(inst.leaf_pose, out, /*extras=*/true);
     out.n_cells = static_cast<int>(covered_cells.size());
+
+    // ── ABSENCE IS MARGINALISED OVER phi, NOT CONDITIONED ON ITS ARGMAX ──────────────────────────────
+    // ★WHY. The silhouette is the only channel permitted to remove a door, and until now it rendered the
+    // leaf at a single fitted angle. Measured 2026-09-10 over one approach, the phi likelihood peaks at
+    // 0.007-0.245 — flat — so that angle is chosen from noise; twice on that run the leaf was projected
+    // where the panel was not, occ fell 207 -> 0, free_eff rose 0 -> 33 and L ran +4.00 -> -4.00 in 13
+    // cycles. The door was not gone; the model had merely guessed its hinge angle wrong. Charging a
+    // removal to an unidentified nuisance parameter is the defect, and picking the peak better, or
+    // smoothing it, would not fix it — the information is not there to be extracted.
+    // ★THE FIX IS THE STANDARD ONE: integrate the nuisance out. e_free under P(phi | mask) instead of
+    // e_free at phi-hat. A sample counts as absent to the extent that it is absent at EVERY angle the
+    // data still permits, so a flat curve nearly cancels the absence (the panel is SOMEWHERE, we just
+    // cannot say where) while a sharply-peaked one charges it in full. There is no flatness test and no
+    // angle gate: the sharpness of the curve does the weighting by itself, which is what makes this a
+    // model term and not another threshold.
+    // ★THE WEIGHTS ARE THE SAME SCORE THE ARGMAX ALREADY TRUSTED, only used as a weight instead of a
+    // maximum — a strictly weaker assumption than the one it replaces. An empty curve means the frame
+    // carried no door mask to score phi against, and then there is nothing to marginalise: the modal
+    // pass stands, which is exactly the old behaviour on exactly the frames where it was never at fault
+    // (with no mask anywhere, every angle is equally unlit and the marginal equals the point estimate).
+    double w_sum = 0.0;
+    for (const auto& [phi, sup] : inst.phi_curve)
+        w_sum += std::max(0.0f, sup);
+    if (inst.phi_curve.size() > 1 and w_sum > 0.0)
+    {
+        double m_occ = 0.0, m_free = 0.0, m_total = 0.0, m_det = 0.0;
+        for (const auto& [phi, sup] : inst.phi_curve)
+        {
+            const double w = std::max(0.0f, sup) / w_sum;
+            if (w <= 0.0) continue;
+            door::LeafState ls = inst.leaf;
+            ls.phi = phi;
+            DoorSilhouette acc;
+            sweep(door::leaf_pose(inst.aperture, ls), acc, /*extras=*/false);
+            m_occ     += w * acc.e_occ;
+            m_free    += w * acc.e_free;
+            m_total   += w * acc.n_total;
+            m_det     += w * acc.n_detectable;
+        }
+        // Only the ABSENCE/OCCUPANCY evidence is replaced. The modal counts stay as the modal pass left
+        // them, because resolvability() and central_frac() are ratios built from that one rendering.
+        out.e_occ  = static_cast<float>(m_occ);
+        out.e_free = static_cast<float>(m_free);
+        out.n_det_marg   = static_cast<float>(m_det);
+        out.n_total_marg = static_cast<float>(m_total);
+        out.phi_marginalised = true;
+        out.phi_n_hyp = static_cast<int>(inst.phi_curve.size());
+        out.phi_w_max = 0.0f;
+        for (const auto& [phi, sup] : inst.phi_curve)
+            out.phi_w_max = std::max(out.phi_w_max, static_cast<float>(std::max(0.0f, sup) / w_sum));
+    }
+
     if (out.n_detectable > 0)
         out.mean_range_m = static_cast<float>(range_sum / out.n_detectable);
 
