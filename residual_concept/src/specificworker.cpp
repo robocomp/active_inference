@@ -28,7 +28,7 @@
 
 #include <dsr/api/dsr_api.h>
 #include "../../common/graph_provenance/creation_stamp.h"   // rc::provenance::stamp_creation
-#include "../../common/rt_twist/rt_twist.h"             // rc::rt::newest_twist — the ring, not the deprecated pair
+#include "../../common/rt_twist/rt_twist.h"             // rc::rt::newest_twist_of_parent — EGO-motion off a room-as-child edge
 
 SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check)
     : GenericWorker(configLoader, tprx)
@@ -786,7 +786,7 @@ void SpecificWorker::compute()
     // Robot yaw rate (rad/s) from the room<-robot RT edge, for the ego-motion point-reliability term.
     float rot_rate = 0.0f;
     if (const auto robots = G->get_nodes_by_type("robot"); not robots.empty())
-        if (const auto tw = rc::rt::newest_twist(*G, rt_api_.get(), robots.front(), room_node_id_); tw.has_value())
+        if (const auto tw = rc::rt::newest_twist_of_parent(*G, rt_api_.get(), robots.front(), room_node_id_); tw.has_value())
             rot_rate = std::abs(tw->yaw_rate());
     fitter_->set_sensor_context(lidar_ingestor_->origin_room(), rot_rate);
     scene_graph_->set_sensor_origin(lidar_ingestor_->origin_room());   // directional inflation (grow away from sensor)
@@ -1395,7 +1395,7 @@ float SpecificWorker::compute_ego_reliability() const
     // means more pose jitter + motion blur this sweep → trust it less: 1/(1 + |v|/vel0 + |ω|/omega0). Still → 1.
     float v = 0.0f, w = 0.0f;
     if (const auto robots = G->get_nodes_by_type("robot"); not robots.empty())
-        if (const auto tw = rc::rt::newest_twist(*G, rt_api_.get(), robots.front(), room_node_id_); tw.has_value())
+        if (const auto tw = rc::rt::newest_twist_of_parent(*G, rt_api_.get(), robots.front(), room_node_id_); tw.has_value())
         {
             v = tw->speed();
             w = std::abs(tw->yaw_rate());

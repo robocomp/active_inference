@@ -507,13 +507,56 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose,
     // and a differential-drive base has far less lateral velocity uncertainty than forward -- the
     // bug would have appeared as a mysterious rotation of the uncertainty ellipse. Fixed first, on
     // purpose, so that change cannot be the thing that reveals it.
-    std::vector<float> vel_cov(36, 0.f);
+    Eigen::Matrix3f body_vel_cov = Eigen::Matrix3f::Zero();
     if (params_)
     {
-        vel_cov[0]  = params_->ROBOT_VEL_COV_SIDE;   // (0,0) var_x  = LATERAL rate
-        vel_cov[7]  = params_->ROBOT_VEL_COV_ADV;    // (1,1) var_y  = ADVANCE rate (+Y forward)
-        vel_cov[35] = params_->ROBOT_VEL_COV_ROT;    // (5,5) var_yaw
+        body_vel_cov(0, 0) = params_->ROBOT_VEL_COV_SIDE;   // var of the LATERAL rate
+        body_vel_cov(1, 1) = params_->ROBOT_VEL_COV_ADV;    // var of the ADVANCE rate (+Y forward)
+        body_vel_cov(2, 2) = params_->ROBOT_VEL_COV_ROT;    // var of the yaw rate
     }
+
+    // ── THE TWIST BELONGS TO THE CHILD, AND ON THIS EDGE THE CHILD IS THE ROOM ──────────────────
+    // ★MEASURED DEFECT, 2026-09-10. This edge is anchored parent=ROBOT, child=ROOM (the room hangs
+    // off the robot because the robot is the RT root), so the stored matrix is T_robot<-room. The RT
+    // API's contract is that twist_linear/twist_angular describe the CHILD's motion in the CHILD's
+    // own axes, because TimeQuery::Extrapolated walks the stored matrix by RIGHT-composing them:
+    // T <- T * exp(xi*dt). We were writing the ROBOT's body twist -- the PARENT's -- so cortex
+    // right-composed the wrong quantity onto the wrong frame.
+    // ★IT WAS WORSE THAN NOT EXTRAPOLATING AT ALL, which is the same signature as the adv->x bug
+    // this ring was built to end. Driving a synthetic robot on a known arc (phi0 0.6 rad, omega
+    // 0.4 rad/s, V 0.5 m/s) through cortex's own code, position error against ground truth:
+    //        dt      as written      contract-correct      clamped (no walk)
+    //      20 ms      14.90 mm            0.00 mm             12.12 mm
+    //      60 ms      45.08 mm            0.00 mm             36.36 mm
+    //     100 ms      75.77 mm            0.00 mm             60.60 mm
+    // The control closing to 0.00 is what says cortex is right and the producer was wrong.
+    // ★THE CONVERSION IS THE SE(2) ADJOINT, and the lever-arm term is the half that is easy to miss:
+    // xi_child = -Ad_{T_room<-robot}(v_b, w), and Ad_(R,t)(v, w) = (R*v + w*(t_y, -t_x), w). The
+    // rotation alone is not enough -- a robot turning in place at a distance t from the room origin
+    // makes the room sweep an arc about it, and that is the w*(t_y,-t_x) term.
+    // ★AND THE COVARIANCE TAKES THE SAME MAP, Ad * Sigma * Ad^T. The sign drops out (it is a
+    // quadratic form) but the rotation and lever arm do not, and the result is DENSE: on this edge
+    // the velocity uncertainty is no longer the body-fixed diagonal it is in the robot's own frame,
+    // because how fast the room appears to move depends on where the robot is standing in it. That
+    // is a true consequence of the room being the child, not an approximation -- and it is one more
+    // argument for making the room the root, where the robot would be the child and the twist would
+    // simply be its own (see the pending root-removal note).
+    const Eigen::Vector2f v_body{last_side_, last_adv_};          // axis order: x lateral, y forward
+    Eigen::Matrix3f adjoint = Eigen::Matrix3f::Identity();
+    adjoint.topLeftCorner<2, 2>() = R;
+    adjoint(0, 2) =  t.y();
+    adjoint(1, 2) = -t.x();
+    const Eigen::Vector2f v_child = -(R * v_body + last_rot_ * Eigen::Vector2f{t.y(), -t.x()});
+    const float           w_child = -last_rot_;
+    const Eigen::Matrix3f child_vel_cov = adjoint * body_vel_cov * adjoint.transpose();
+
+    // Pack the SE(2) block into the 6x6 row-major SE(3) layout [x, y, z, rx, ry, rz]: rows/cols
+    // 0, 1, 5. Cross terms come along -- the adjoint produced them and they are the whole point.
+    static constexpr int se3_of_se2_vel[3] = {0, 1, 5};
+    std::vector<float> vel_cov(36, 0.f);
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            vel_cov[se3_of_se2_vel[r] * 6 + se3_of_se2_vel[c]] = child_vel_cov(r, c);
 
     // ── LEGACY TWIST ATTRIBUTES, FOR THE CONSUMERS THAT HAVE NOT MIGRATED ────────────────────
     // ★DEPRECATED. rt_twist_linear / rt_twist_angular in the ring below supersede these; they are
@@ -532,9 +575,14 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose,
     // PURPOSE. Deleting it is no longer a cleanup waiting on a consumer; it is the decision to stop
     // cross-checking the ring against an independent implementation. Make that call deliberately, and
     // delete the cortex attributes in the same change.
-    // ★NOTE THE LAYOUT DIFFERENCE, it is the reason for the replacement: this pair is ARRAY order
-    // [adv, side, _] in a +Y-forward body frame, while the ring pair is AXIS order [x, y, z] — so the
-    // same two numbers appear SWAPPED between them, on purpose.
+    // ★THIS PAIR AND THE RING NO LONGER HOLD THE SAME QUANTITY, so do not "check" one against the
+    // other by comparing numbers. This pair is the ROBOT's body twist in ARRAY order [adv, side, _],
+    // which is what the controller's independent verifier right-composes onto room<-robot. The ring
+    // holds the CHILD's twist -- the ROOM's apparent motion -- in AXIS order, because that is what
+    // the RT API right-composes onto the stored robot<-room matrix. They differ by the SE(2) adjoint
+    // (see the note below), so only the YAW RATE still matches up to sign. Reading the robot's own
+    // motion out of the ring is rc::rt::newest_twist_of_parent, which inverts that adjoint using the
+    // edge's own pose.
     if (auto edge = G_->get_edge(parent_opt.value().id(), child_id, "RT"); edge.has_value())
     {
         G_->add_or_modify_attrib_local<rt_translation_velocity_att>(
@@ -556,13 +604,14 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose,
     // a velocity but not learn which pose it belonged to, nor that it was stale. In the ring it
     // inherits this block's timestamp, so RT_API can extrapolate a clamped query forward with it and
     // a reader can tell a fresh twist from a dead producer's last one.
-    // ★AND IT IS WRITTEN IN AXIS ORDER, WHICH THE OLD PAIR WAS NOT. rt_twist_linear is [vx,vy,vz] in
-    // the CHILD frame's own axes; this robot's body frame is +Y FORWARD, so the advance rate goes in
-    // slot 1 and the lateral rate in slot 0. The deprecated rt_translation_velocity is ARRAY order
-    // ([adv, side, 0]) and every consumer had to re-encode that convention by hand — three of them
-    // re-encoded it wrong, putting adv on x, which rotates the prediction 90 degrees and lands
-    // sqrt(2)*|motion| from the truth. Measured over 421 forward-driving cycles (2026-08-04):
-    // adv->x p50 25.86 mm, adv->y p50 0.07 mm.
+    // ★AND IT IS WRITTEN IN AXIS ORDER AND IN THE CHILD'S FRAME, neither of which the old pair was.
+    // rt_twist_linear is [vx,vy,vz] in the CHILD frame's own axes. The deprecated
+    // rt_translation_velocity is ARRAY order ([adv, side, 0]) in the ROBOT's frame, and every
+    // consumer had to re-encode that convention by hand — three of them re-encoded it wrong, putting
+    // adv on x, which rotates the prediction 90 degrees and lands sqrt(2)*|motion| from the truth.
+    // Measured over 421 forward-driving cycles (2026-08-04): adv->x p50 25.86 mm, adv->y p50 0.07 mm.
+    // The frame half of the same class of error is the adjoint above, and it cost the same shape of
+    // failure: an extrapolation worse than not extrapolating.
     // ★BOTH PAIRS ARE WRITTEN during the migration. The legacy attributes below still feed the four
     // consumers that have not moved to the ring yet; they go once those do.
     try
@@ -572,9 +621,10 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose,
                                               .translation     = {x, y, 0.f},
                                               .rotation_euler  = {0.f, 0.f, theta},
                                               .covariance      = cov_flat,
-                                              // AXIS order: x lateral, y FORWARD (see above)
-                                              .twist_linear    = std::vector<float>{last_side_, last_adv_, 0.f},
-                                              .twist_angular   = std::vector<float>{0.f, 0.f, last_rot_},
+                                              // The CHILD's motion in CHILD axes -- the adjoint above,
+                                              // NOT the robot's body twist. See the note there.
+                                              .twist_linear    = std::vector<float>{v_child.x(), v_child.y(), 0.f},
+                                              .twist_angular   = std::vector<float>{0.f, 0.f, w_child},
                                               .twist_covariance = vel_cov},
                                           timestamp_ms);
     }

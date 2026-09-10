@@ -8,11 +8,15 @@ ring slot as the pose it was measured with, and therefore inherits that block's 
 is not visible from the agent's own logs and it fails SILENTLY: a twist packed against the wrong slot
 is a well-formed 3-vector attached to the wrong instant. So it gets its own check.
 
-It also verifies the ★AXIS ORDER swap, which is the other half of the change and the one that has
-already cost the same 90-degree bug in three consumers: the ring pair is [x, y, z] in the child's own
-axes while the legacy pair is ARRAY order [adv, side, _]. On a +Y-forward robot the first two numbers
-must therefore appear SWAPPED between the two attributes. If they match instead, the producer wrote
-array order into an axis-order attribute and every future consumer inherits the bug this replaced.
+It also verifies the ★FRAME AND AXIS conversion, which is the other half of the change and the one
+that has already cost the same class of bug twice. The ring holds the CHILD's twist in the CHILD's
+own axes; on this fleet the localisation edge is anchored parent=ROBOT child=ROOM, so that is the
+ROOM's apparent motion, not the robot's. The legacy pair is the ROBOT's body twist in ARRAY order
+[adv, side, _]. They are related by the SE(2) adjoint of the edge's own pose, so the check is a
+ROUND TRIP: convert the ring twist back to the robot's frame and it must reproduce the legacy pair.
+A plain "are these the same two numbers swapped" comparison was the OLD check and is now wrong --
+it was written when the producer put the robot's twist straight into the ring, which is exactly the
+defect fixed on 2026-09-10 (extrapolation was then WORSE than not extrapolating).
 
   usage:  python3 rt_twist_ring_check.py [--agent-id 900] [--seconds 6]
 
@@ -73,6 +77,7 @@ def sample():
     twl  = attr(e, "rt_twist_linear")
     twa  = attr(e, "rt_twist_angular")
     tr   = attr(e, "rt_translation")
+    rot  = attr(e, "rt_rotation_euler_xyz")
     leg  = attr(e, "rt_translation_velocity")
 
     if twl is None:
@@ -98,17 +103,29 @@ def sample():
             print("      (%d slot(s) still unused — the ring fills over the first %d publishes)"
                   % (unused, HIST))
 
-    if leg is not None and len(leg) >= 2:
+    if leg is not None and len(leg) >= 2 and twa is not None and tr is not None and rot is not None:
+        import math
         adv, side = leg[0], leg[1]
         slot = (head.value // BLOCK - 1) % HIST if head is not None else 0
         vx, vy = twl[slot * BLOCK], twl[slot * BLOCK + 1]
-        swapped = abs(vx - side) < 1e-6 and abs(vy - adv) < 1e-6
-        same    = abs(vx - adv)  < 1e-6 and abs(vy - side) < 1e-6
-        verdict = ("AXIS ORDER ✓ (legacy [adv,side] appears swapped, as designed)" if swapped
-                   else "★ARRAY ORDER LEAKED INTO AN AXIS-ORDER ATTRIBUTE" if same
-                   else "inconclusive — the robot is probably still (adv≈side≈0)")
-        print("    legacy [adv,side]=[% .4f % .4f]  vs ring slot %d [vx,vy]=[% .4f % .4f]"
-              % (adv, side, slot, vx, vy))
+        wz = twa[slot * BLOCK + 2]
+        # The stored matrix is parent<-child; xi_parent = -Ad_T(xi_child), Ad_(R,t)(v,w) = (Rv + w(ty,-tx), w).
+        tx, ty = tr[slot * BLOCK], tr[slot * BLOCK + 1]
+        th = rot[slot * BLOCK + 2]
+        c, sn = math.cos(th), math.sin(th)
+        back_x = -(c * vx - sn * vy + wz * ty)
+        back_y = -(sn * vx + c * vy - wz * tx)
+        # legacy is ARRAY order [adv, side]; the recovered body twist is AXIS order [lateral, forward]
+        moving = max(abs(adv), abs(side), abs(wz)) > 0.02
+        err = math.hypot(back_x - side, back_y - adv)
+        verdict = ("ROUND TRIP ✓ (ring -> adjoint -> robot frame reproduces the legacy pair)" if err < 1e-3
+                   else "★RING AND LEGACY PAIR DISAGREE by %.4f m/s — the adjoint or the anchoring is wrong" % err)
+        if not moving:
+            verdict = "inconclusive — the robot is not moving; at rest every convention agrees"
+        print("    legacy [adv,side]=[% .4f % .4f]   ring slot %d [vx,vy,wz]=[% .4f % .4f % .4f]"
+              % (adv, side, slot, vx, vy, wz))
+        print("    recovered body [lateral,forward]=[% .4f % .4f]   round-trip err %.5f m/s"
+              % (back_x, back_y, err))
         print("    -> %s" % verdict)
 
     seen.append(tuple(ts[:HIST]) if ts else ())
