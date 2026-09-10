@@ -207,8 +207,24 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
         // Estimate mode: also wait for the learnt polygon to close and be re-anchored (map_ready).
         if (stable_frames_ >= params_->STABLE_FRAMES_REQUIRED and room_concept_->map_ready())
             dsr_create_room_and_reparent(res);
-        else if (write_rt)
-            dsr_update_pose(res);   // world->robot RT while waiting for stable room creation
+        // ★NOTHING IS PUBLISHED WHILE WAITING, AND THAT IS THE POINT. This used to call
+        // dsr_update_pose(res) here, writing the estimate onto root->robot every frame until the room
+        // node appeared. The value was a room<-robot pose stored on an edge whose endpoints say
+        // root<-robot: `root` is a dummy node that exists only because cortex looks up a node NAMED
+        // root, so it was silently standing in for a room frame that did not exist yet. Geometrically
+        // it worked — the room's origin IS the optimiser's frame — but the edge claimed a quantity it
+        // was not carrying, which is the same category error as stamping a fixed mount with a
+        // creation time, in a third guise.
+        // ★AND IT LEFT A RING BEHIND. The writes stopped the instant the room was created and never
+        // resumed, so root->robot kept an ageing timestamped history on an edge that sits in EVERY
+        // chain (all 50 nodes hang off the robot). Its value cancels in any composition under the
+        // robot; its CLAMP VERDICT does not, so one abandoned edge gave every timestamped query in the
+        // fleet a Stale verdict with a gap reaching 744 seconds.
+        // ★WHAT IS LOST: the robot's pose is not published at all until the room node exists. That is
+        // honest rather than degraded — the estimate is expressed in a frame that has no node yet, so
+        // there is nowhere truthful to put it. Consumers already handle its absence: the only reader
+        // in the fleet, retina place_stage.cpp:124, falls back to a conservative default covariance
+        // when the edge yields nothing.
     }
     else
     {
@@ -417,8 +433,17 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose,
     const Eigen::Vector2f t_robot_to_room = -(R.transpose() * t);
     const float theta_robot_to_room = -theta_room_to_robot;
 
-    const uint64_t parent_id = room_node_created_ ? dsr_robot_id_ : dsr_world_id_;
-    const uint64_t child_id  = room_node_created_ ? dsr_room_id_  : dsr_robot_id_;
+    // robot->room, unconditionally. The pre-room alternative (root->robot) is gone — see the note at
+    // the caller. Guarded rather than assumed: reaching here without a room node is now a defect, not
+    // a mode, so it says so instead of silently writing to the dummy world frame.
+    if (!room_node_created_)
+    {
+        qWarning() << "dsr_update_pose called before the room node exists — this agent no longer has a"
+                   << "pre-room publication mode; skipping rather than writing to root->robot.";
+        return;
+    }
+    const uint64_t parent_id = dsr_robot_id_;
+    const uint64_t child_id  = dsr_room_id_;
 
     auto parent_opt = G_->get_node(parent_id);
     if (!parent_opt.has_value()) return;
@@ -440,9 +465,12 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose,
         return;
     }
 
-    const float x     = room_node_created_ ? t_robot_to_room.x() : t.x();
-    const float y     = room_node_created_ ? t_robot_to_room.y() : t.y();
-    const float theta = room_node_created_ ? theta_robot_to_room : theta_room_to_robot;
+    // Always the robot->room form now: this function is only reached once the room node exists (the
+    // pre-room caller above is gone), so the ternaries that used to select the root<-robot quantity
+    // were dead and, worse, documented a mode this agent no longer has.
+    const float x     = t_robot_to_room.x();
+    const float y     = t_robot_to_room.y();
+    const float theta = theta_robot_to_room;
 
     // ── Covariance (SE2 3×3 packed into 6×6 flat row-major) ───────────────
     Eigen::Matrix3f cov_se2 = Eigen::Matrix3f::Identity();
