@@ -20,6 +20,8 @@
 #include <string_view>
 #include <variant>
 
+#include "../../common/rt_twist/rt_twist.h"   // rc::rt::newest_twist_of_parent — EGO-motion off a room-as-child edge
+
 namespace
 {
 // Schema migration: every concept publishes its object as a generic type "object" node with the class in
@@ -326,35 +328,34 @@ std::optional<Mat::RTMat> SceneProcessor::room_T_robot_at(DSR::InnerEigenAPI* ei
                 diag->dy  = pose->translation().y() - diag->raw_y;
                 diag->dth = std::remainder(std::atan2(R1(1, 0), R1(0, 0)) - diag->raw_th, 2.0 * M_PI);
             }
-            // ★THE VELOCITY COLUMNS NOW READ THE RING, AND THEIR MEANING CHANGED WITH IT. They used to
-            // be [adv, side] — ARRAY order off the deprecated rt_translation_velocity. rt_twist_linear
-            // is AXIS order, so on this +Y-forward robot the advance rate is now in `side`'s old column
-            // and vice versa. The CSV header says so; a script that indexes these positionally against
-            // an older file will read a turn as a lurch.
-            if (graph_ != nullptr and graph_->get_rt_api() != nullptr)
+            // ★THESE COLUMNS MEAN WHAT THEY SAY AGAIN — adv IS THE ADVANCE RATE. Read the history
+            // before comparing this CSV with an older one, because the meaning has moved twice:
+            //   (a) originally [adv, side] in ARRAY order off the deprecated rt_translation_velocity;
+            //   (b) then raw ring slots, which are AXIS order, so `adv` silently held the LATERAL
+            //       rate and `side` the forward one — the header said so, but positionally indexed
+            //       scripts read a turn as a lurch;
+            //   (c) now the ROBOT's own body twist, recovered from the ring, with adv = forward.
+            // ★AND (b) WAS WORSE THAN A SWAPPED LABEL. The ring on this edge holds the CHILD's twist,
+            // and the child here is the ROOM — so those columns carried the room's APPARENT motion,
+            // which includes a lever-arm term: measured live on 2026-09-10, a near-parked robot
+            // wobbling at 0.02 rad/s produced a ring linear rate of 0.038 m/s against a true body
+            // twist of 0.0003 m/s. Two orders of magnitude, from a robot that was not translating.
+            // rc::rt::newest_twist_of_parent inverts that adjoint using the edge's own pose.
+            if (graph_ != nullptr)
                 if (const auto robot_node = graph_->get_node(robot_name),
                                room_node  = graph_->get_node(room_name);
                     robot_node.has_value() and room_node.has_value())
-                    if (const auto edge = graph_->get_rt_api()->get_edge_RT(robot_node.value(),
-                                                                            room_node.value().id());
-                        edge.has_value())
+                    // get_rt_api() hands back a FRESH unique_ptr per call, so it has to be held for
+                    // the duration of the call rather than used as a temporary.
+                    if (const auto rt_api = graph_->get_rt_api();
+                        const auto twist = rc::rt::newest_twist_of_parent(*graph_, rt_api.get(),
+                                                                          robot_node.value(),
+                                                                          room_node.value().id()))
                     {
-                        const auto ts  = graph_->get_attrib_by_name<rt_timestamps_att>(edge.value());
-                        const auto twl = graph_->get_attrib_by_name<rt_twist_linear_att>(edge.value());
-                        const auto twa = graph_->get_attrib_by_name<rt_twist_angular_att>(edge.value());
-                        if (ts.has_value() and twl.has_value() and twa.has_value())
-                        {
-                            std::uint64_t newest = 0; std::size_t slot = 0;
-                            for (std::size_t k = 0; k < ts->get().size(); ++k)
-                                if (ts->get()[k] > newest) { newest = ts->get()[k]; slot = k; }
-                            diag->newest_block_ms = newest;
-                            if (twl->get().size() >= 3 * (slot + 1) and twa->get().size() >= 3 * (slot + 1))
-                            {
-                                diag->adv  = twl->get()[slot * 3];       // vx (lateral on this robot)
-                                diag->side = twl->get()[slot * 3 + 1];   // vy (FORWARD on this robot)
-                                diag->rot  = twa->get()[slot * 3 + 2];   // wz
-                            }
-                        }
+                        diag->newest_block_ms = twist->stamp_ms;
+                        diag->adv  = twist->linear.y();    // +Y is FORWARD on this robot
+                        diag->side = twist->linear.x();    // +X is lateral
+                        diag->rot  = twist->yaw_rate();
                     }
         }
     }
