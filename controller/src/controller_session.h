@@ -447,7 +447,10 @@ private:
     std::uint64_t proximity_csv_last_ms_ = 0;      // throttle for proximity CSV rows
     std::optional<ControllerRobotPose> prev_robot_pose_;   // last pose at which the value actually changed
     std::uint64_t prev_robot_ts_ms_ = 0;                   // timestamp of that change (velocity dt base)
-    std::uint64_t last_pose_change_ms_ = 0;                // = prev_robot_ts_ms_; pose-value age reference
+    // Stamped when the pose VALUE moves by more than an epsilon. Feeds the overlay's
+    // pose_unchanged_ms column, which is time-since-the-estimate-moved and NOT pose latency —
+    // it reads largest when the robot is nearly still. See the note at the computation.
+    std::uint64_t last_pose_change_ms_ = 0;
     ControllerPolygon room_polygon_;
     std::optional<ControllerPathPlan> current_plan_;
     std::optional<Eigen::Vector2f> current_target_room_;

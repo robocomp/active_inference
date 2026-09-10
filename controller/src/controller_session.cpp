@@ -5208,7 +5208,16 @@ void ControllerSession::update_overlay_extrapolation(const ControllerWorldModel 
     const std::uint64_t gap_ms = timestamp_ms - *overlay_lidar_ts_ms_;   // lidar staleness
     // The room←robot value updates coarser than the lidar, so the cloud's anchor pose is as old as
     // the time since that value last changed. Reported, not acted on.
-    const std::uint64_t pose_age_ms = timestamp_ms >= last_pose_change_ms_ ? timestamp_ms - last_pose_change_ms_ : 0;
+    // ★THIS IS NOT THE AGE OF THE POSE, AND IT USED TO BE CALLED THAT. last_pose_change_ms_ is stamped
+    // whenever the pose VALUE moves by more than an epsilon, so this measures how long the estimate has
+    // sat effectively still -- which reads LARGE precisely when the robot is barely moving, i.e. when
+    // the pose is freshest. The latency it was mistaken for is a different quantity entirely: the
+    // newest RT block carries the LIDAR CAPTURE time, so pose latency is (now - that stamp), and on
+    // 2026-09-10 the two read 150 ms and 68 ms on the same robot at the same moment.
+    // ⚠The misreading already happened: HANDOFF_delay_and_feedforward.md quoted this column as "age of
+    // the pose the tracker used" and drew 49/102/400 ms from it. Renamed so the next reader cannot
+    // repeat it. For real latency use gap_ms (t_ms - lidar_ts) or common/tools/pose_lag_anatomy.py.
+    const std::uint64_t pose_unchanged_ms = timestamp_ms >= last_pose_change_ms_ ? timestamp_ms - last_pose_change_ms_ : 0;
 
     // RT-staleness probe: the room←robot pose the tree returns at "now" vs at the lidar stamp. If
     // RTdelta≈0 while the robot moves, the upstream pose feed is stale/clamped — the real lag source.
@@ -5243,7 +5252,7 @@ void ControllerSession::update_overlay_extrapolation(const ControllerWorldModel 
             overlay_csv_.open(params_->overlay_csv_path, std::ios::out | std::ios::trunc);
             overlay_csv_.imbue(std::locale::classic());  // decimal POINT regardless of LANG (CLAUDE.md)
             if (overlay_csv_.is_open())
-                overlay_csv_ << "t_ms,lidar_ts,gap_ms,pose_age_ms,vx,vy,omega,RTdelta_m,"
+                overlay_csv_ << "t_ms,lidar_ts,gap_ms,pose_unchanged_ms,vx,vy,omega,RTdelta_m,"
                                 "cmd_adv,cmd_rot,cur_adv,cur_rot,rt_lead_ms,rt_fix_dt_ms,"
                                 "twist_pred_dt_ms,twist_pred_err_m,twist_pred_err_deg,"
                                 // ── DID THE REGISTRATION QUERY COME FROM AN INSTANT NOBODY MEASURED? ──
@@ -5296,7 +5305,7 @@ void ControllerSession::update_overlay_extrapolation(const ControllerWorldModel 
         }
         if (overlay_csv_.is_open())
         {
-            overlay_csv_ << timestamp_ms << ',' << *overlay_lidar_ts_ms_ << ',' << gap_ms << ',' << pose_age_ms << ','
+            overlay_csv_ << timestamp_ms << ',' << *overlay_lidar_ts_ms_ << ',' << gap_ms << ',' << pose_unchanged_ms << ','
                          << room_vel_.vx << ',' << room_vel_.vy << ',' << room_vel_.omega << ','
                          << rt_delta << ','
                          << cmd_adv << ',' << cmd_rot << ',' << cur_adv << ',' << cur_rot << ','

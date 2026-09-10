@@ -75,7 +75,16 @@ deliberately declined. Measured over 6000 cycles of `overlay_lag_eval.csv`:
 
 | quantity | p50 | p90 | max |
 |---|---|---|---|
-| `pose_age_ms` — age of the pose the tracker used | 49 ms | 102 ms | 400 ms |
+| ~~`pose_age_ms` — age of the pose the tracker used~~ **MISREAD, see below** | 49 ms | 102 ms | 400 ms |
+
+> ⚠ **Correction (2026-09-10).** That column never held pose age. It is time since the pose VALUE
+> last moved by more than an epsilon, so it reads *largest* when the robot is nearly still — the
+> opposite of a latency. The figures above measure stillness, not delay, and no conclusion about
+> delay should rest on them. It is now called `pose_unchanged_ms`. Real pose latency, measured the
+> same day: **68 ms**, of which ~37 ms is the lidar scan already being that old on arrival, ~16 ms
+> is half a publish period at 31 Hz, and the rest is queueing and compute. Use `gap_ms`
+> (`t_ms - lidar_ts`) or `common/tools/pose_lag_anatomy.py`.
+
 | `rt_lead_ms` — how much fresher the NEWEST RT block already is | **33 ms** | **68 ms** | 121 ms |
 | twist-probe position residual over a ~49 ms horizon | **1.1 mm** | 2.3 mm | 37 mm |
 | twist-probe heading residual over the same | **0.059°** | 0.146° | 1.30° |
