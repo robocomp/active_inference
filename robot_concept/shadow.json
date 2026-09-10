@@ -306,29 +306,6 @@
         "id": "250",
         "links": [
           {
-            "dst": "210",
-            "label": "RT",
-            "linkAttribute": {
-              "rt_rotation_euler_xyz": {
-                "type": 3,
-                "value": [
-                  0,
-                  0,
-                  0
-                ]
-              },
-              "rt_translation": {
-                "type": 3,
-                "value": [
-                  0,
-                  0,
-                  0
-                ]
-              }
-            },
-            "src": "250"
-          },
-          {
             "dst": "220",
             "label": "RT",
             "linkAttribute": {
