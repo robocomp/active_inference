@@ -21,6 +21,7 @@
 #include "../../common/robot_capability/robot_capability.h"
 
 #include "image_edge_ops.h"   // xyz_from_pixel_depth(): model-aware, unlike cortex's pinhole-only version
+#include <filesystem>
 #include <locale>
 
 #include <algorithm>
@@ -676,9 +677,102 @@ void SpecificWorker::log_pose_trace(int type, std::int64_t valid_ts_ms,
     const float x = pose.translation().x();
     const float y = pose.translation().y();
     const float th = std::atan2(pose.linear()(1, 0), pose.linear()(0, 0));
-    pose_trace_ << QDateTime::currentMSecsSinceEpoch() << ',' << type << ',' << valid_ts_ms << ','
+    const std::int64_t wall_ms = QDateTime::currentMSecsSinceEpoch();
+    pose_trace_ << wall_ms << ',' << type << ',' << valid_ts_ms << ','
                 << x << ',' << y << ',' << th << ',' << innov_norm << '\n';
     pose_trace_.flush();
+
+    // ── AND, IF THIS STEP WAS PHYSICALLY IMPOSSIBLE, RECORD IT SOMEWHERE THAT SURVIVES ──────────
+    if (type < 0 or type > 1)
+        return;
+    TracePoint now{wall_ms, valid_ts_ms, x, y, th, innov_norm, true};
+    const TracePoint before = prev_trace_[type];
+    prev_trace_[type] = now;
+    if (not before.set)
+        return;
+
+    const double dt_s = static_cast<double>(wall_ms - before.wall_ms) * 1e-3;
+    if (dt_s <= 1e-3 or dt_s > 1.0)     // first row after a gap: nothing to compare against
+        return;
+
+    // The bound is what the BASE SAYS IT CAN DO, read off the robot node. No capability published ⇒
+    // say so once and stay quiet, rather than inventing a number and calling its output evidence.
+    rc::BaseCapability cap;
+    if (G != nullptr)
+        if (const auto robots = G->get_nodes_by_type("robot"); not robots.empty())
+            cap = rc::read_base_capability(*G, robots.front().id());
+    // ★EACH BOUND IS USED IF PUBLISHED, AND THE ABSENCE OF ONE DOES NOT DISABLE THE OTHER. On this
+    // robot only the rotational bound exists today: the base config (SVD48VBase config_diferential)
+    // declares maxRotSpeed=2 rad/s, baseType, wheelRadius and axesLength, but NO maximum linear
+    // speed. A first version of this required the linear bound and would therefore have logged
+    // nothing, for ever, while looking like it was working -- an empty file reads as "no jumps".
+    // ★THE ROTATIONAL BOUND ALONE IS ENOUGH TO CATCH WHAT WAS SEEN. Both 2026-09-10 events carried
+    // 43.6 and 89.2 degrees of heading step (89 deg in 34 ms is ~46 rad/s against a 2 rad/s base),
+    // so either bound would have flagged them. A pure translation jump on a robot that publishes no
+    // linear bound is the one case still missed, and the `trigger` column makes that visible rather
+    // than leaving a reader to assume both were checked.
+    if (not cap.max_linear_speed_mps.has_value() and not cap.max_rot_speed_rps.has_value())
+    {
+        if (not pose_jump_no_capability_warned_)
+        {
+            pose_jump_no_capability_warned_ = true;
+            qWarning() << "[pose_jumps] the base publishes NEITHER a linear nor a rotational speed"
+                       << "capability, so no step can be called impossible — etc/pose_jumps.csv will"
+                       << "stay empty. That is a MISSING CHANNEL, not an absence of jumps.";
+        }
+        return;
+    }
+
+    const double step_m      = std::hypot(now.x - before.x, now.y - before.y);
+    const double implied_mps = step_m / dt_s;
+    const double dtheta      = std::remainder(static_cast<double>(now.th - before.th), 2.0 * M_PI);
+    const double implied_rps = std::abs(dtheta) / dt_s;
+    const bool   too_fast    = cap.max_linear_speed_mps.has_value()
+                               and implied_mps > cap.max_linear_speed_mps.value();
+    const bool   too_spinny  = cap.max_rot_speed_rps.has_value()
+                               and implied_rps > cap.max_rot_speed_rps.value();
+    if (not too_fast and not too_spinny)
+        return;
+    const char *trigger = (too_fast and too_spinny) ? "both" : too_fast ? "linear" : "rotational";
+
+    if (not pose_jump_log_attempted_)
+    {
+        pose_jump_log_attempted_ = true;
+        pose_jump_run_id_ = wall_ms;
+        // ★APPEND, never truncate. The header goes in only when the file is new, so a week of runs
+        // accumulates into one file and run_id_ms separates them.
+        const bool fresh = not std::filesystem::exists("etc/pose_jumps.csv")
+                           or std::filesystem::file_size("etc/pose_jumps.csv") == 0;
+        pose_jump_log_.open("etc/pose_jumps.csv", std::ios::out | std::ios::app);
+        if (pose_jump_log_.is_open())
+        {
+            pose_jump_log_.imbue(std::locale::classic());   // never emit a decimal comma under es_ES
+            if (fresh)
+                pose_jump_log_ << "run_id_ms,wall_ms,type,dt_ms,trigger,"
+                                  "x_before,y_before,th_before,valid_ts_before,innov_before,"
+                                  "x_after,y_after,th_after,valid_ts_after,innov_after,"
+                                  "step_m,implied_mps,dtheta_rad,implied_rps,cap_mps,cap_rps\n";
+            qInfo() << "[pose_jumps] recording localiser discontinuities to etc/pose_jumps.csv"
+                    << "(append-only; run id" << pose_jump_run_id_ << ")";
+        }
+    }
+    if (not pose_jump_log_.is_open())
+        return;
+
+    // An unpublished bound is written EMPTY, never 0 — a zero here would read as a real capability
+    // of zero, i.e. every step impossible, which is the opposite of what absence means.
+    pose_jump_log_ << pose_jump_run_id_ << ',' << wall_ms << ',' << type << ','
+                   << static_cast<std::int64_t>(dt_s * 1000.0) << ',' << trigger << ','
+                   << before.x << ',' << before.y << ',' << before.th << ','
+                   << before.valid_ts_ms << ',' << before.innov << ','
+                   << now.x << ',' << now.y << ',' << now.th << ','
+                   << now.valid_ts_ms << ',' << now.innov << ','
+                   << step_m << ',' << implied_mps << ',' << dtheta << ',' << implied_rps << ',';
+    if (cap.max_linear_speed_mps.has_value()) pose_jump_log_ << cap.max_linear_speed_mps.value();
+    pose_jump_log_ << ',';
+    if (cap.max_rot_speed_rps.has_value())    pose_jump_log_ << cap.max_rot_speed_rps.value();
+    pose_jump_log_ << '\n';
+    pose_jump_log_.flush();
 }
 
 bool SpecificWorker::maybe_publish_corrected_pose()

@@ -268,6 +268,34 @@ class SpecificWorker : public GenericWorker
         void log_pose_trace(int type, std::int64_t valid_ts_ms,
                             const Eigen::Affine2f& pose, float innov_norm);
 
+        // ── APPEND-ONLY RECORD OF LOCALISER DISCONTINUITIES (etc/pose_jumps.csv) ─────────────────
+        // ★IT IS APPEND-ONLY BECAUSE THAT IS THE ENTIRE POINT. pose_trace.csv is truncated on every
+        // start, and so is the controller's overlay log. On 2026-09-10 two corrections of 1.4 m and
+        // 2.0 m were observed, and by the time anyone went back for them both files had been
+        // rewritten by later runs -- the events were real, unrecoverable, and could not be quoted.
+        // A failure this rare cannot be gone back for; it has to be caught the first time.
+        // ★THE TRIGGER IS THE BASE'S OWN DECLARED CAPABILITY, NOT A TUNED NUMBER. A step is recorded
+        // when the pose moves faster than the machine can physically move (common/robot_capability:
+        // max_linear_speed_mps / max_rot_speed_rps, published by robot_concept off the base config).
+        // That is a physical fact about the robot, so it cannot be quietly mis-set, and it cannot
+        // discard a real error the way a magnitude cutoff would. If the capability channel is not up
+        // the log stays SILENT and says so once -- guessing a bound would produce either a flood or
+        // an empty file, and both would read as evidence.
+        // ★Compared only against the previous point of the SAME type: a corrected pose following a
+        // predicted one is entitled to step, and that is a correction, not a discontinuity.
+        // Runs on both writer threads, serialized by publish_mutex_ exactly as pose_trace_ is.
+        struct TracePoint
+        {
+            std::int64_t wall_ms = 0, valid_ts_ms = 0;
+            float x = 0.f, y = 0.f, th = 0.f, innov = 0.f;
+            bool  set = false;
+        };
+        std::ofstream pose_jump_log_;
+        bool          pose_jump_log_attempted_ = false;
+        bool          pose_jump_no_capability_warned_ = false;
+        std::int64_t  pose_jump_run_id_ = 0;          // distinguishes runs inside one appended file
+        TracePoint    prev_trace_[2];                 // indexed by type: 0 corrected, 1 predicted
+
         // Per-tick compute-timing CSV (etc/compute_timing.csv): exposes WHERE compute() stalls (viewer
         // vs dsr vs loc_fetch) so we can see why the corrected publish drops below the optimizer rate.
         // ★ Every duration column is MICROSECONDS (2026-09-03). They were integer milliseconds off
