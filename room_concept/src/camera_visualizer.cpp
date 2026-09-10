@@ -26,6 +26,7 @@
 #include <print>
 #include <string>
 #include <string_view>
+#include "../../common/rt_query_probe/rt_query_probe.h"
 
 namespace rc {
 
@@ -754,8 +755,25 @@ std::optional<Eigen::Affine3d> CameraVisualizer::predicted_camera_from_room(std:
     const std::string robot_name = robot_node.name();
 
     // room←robot at the frame time (DSR clamps/interpolates), and the static robot←zed mount.
+    // ★LISTENING ONLY — no behaviour change, and deliberately placed BESIDE the hand-rolled
+    // prediction below rather than replacing it. rt_bracket_total_/before_oldest_/after_newest_ (the
+    // "TEST 2026-09-07" counters in the header) already classify this query by hand; cortex now
+    // reports the same thing natively through TimeQueryInfo. Running BOTH for a while is the point:
+    // if they disagree, one of them is wrong, and finding that out is cheaper than trusting either.
+    // ★WHY NOT JUST SWITCH TO TimeQuery::Extrapolated AND DELETE predicted_camera_from_room(). That
+    // swap bundles THREE changes — the extrapolation itself, a different horizon (cortex bounds by
+    // the edge's own ring span, ~1.2 s here, where this file caps at kMaxPredictHorizonS), and a
+    // BACKWARD walk this file explicitly refuses ("Only forward-predict"). The camera overlay is what
+    // would shift, and with three changes at once a shift is uninterpretable. before_oldest_ is the
+    // only existing record of how often the backward case even fires — and HISTORY_SIZE = 25 was set
+    // to suppress it — so deleting the counter that produces that number, in the same commit that
+    // starts relying on it, is the wrong order.
+    static rc::rtprobe::Probe rt_probe{"room_concept camera room<-robot"};
+    DSR::RT_API::TimeQueryInfo rt_info;
     const auto room_T_robot = inner_eigen_api_->get_transformation_matrix(
-        room_frame_name_, robot_name, frame_ts, "RT", DSR::RT_API::TimeQuery::Interpolated);
+        room_frame_name_, robot_name, frame_ts, "RT", DSR::RT_API::TimeQuery::Interpolated,
+        &rt_info);
+    rt_probe.note(rt_info, graph_);
     const auto robot_T_zed = inner_eigen_api_->get_transformation_matrix(
         robot_name, camera_node_name_, 0, "RT", DSR::RT_API::TimeQuery::Nearest);
     if (!room_T_robot.has_value() || !robot_T_zed.has_value())
