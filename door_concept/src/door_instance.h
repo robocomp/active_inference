@@ -72,6 +72,10 @@ struct DoorInstance
     // When phi was last estimated, so the persistence prior's width is the swing the leaf could
     // ACTUALLY have made in the elapsed time rather than a per-cycle constant. Zero = never.
     std::chrono::steady_clock::time_point phi_last_t{};
+    // Depth half of the contour channel. ★n == 0 is NOT MEASURED, a different state from a verdict of 0.
+    float dbg_depth_verdict = 0.0f;   // signed, [-1,+1]
+    float dbg_depth_bias_m  = 0.0f;   // mean (observed − predicted) depth, SIGNED: a fit error, not an absence
+    int   dbg_depth_n       = 0;
     float phi_support  = 0.0f;    // fraction of leaf-face samples lit by a door mask at phi_est
     // ★THE WHOLE LIKELIHOOD CURVE, NOT ONLY ITS ARGMAX. estimate_phi scores every candidate angle and
     // then throws all but the best away; the silhouette channel — the ONLY channel allowed to remove a

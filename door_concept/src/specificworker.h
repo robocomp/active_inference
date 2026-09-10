@@ -73,7 +73,8 @@
 #include "door_semantic_field.h"   // rc::SemanticProbField
 #include "door_actuator.h"          // rc::DoorActuator (RoboCompDoorControl client)
 #include "door_world_registration.h" // rc::DoorWorldRegistration (room→world from named doors)
-#include "../../common/rgb_ingestor/rgb_ingestor.h"   // rc::RgbIngestor (SHARED media-plane RGB)
+#include "../../common/rgb_ingestor/rgb_ingestor.h"
+#include "../../common/rgb_ingestor/depth_ingestor.h"   // rc::RgbIngestor (SHARED media-plane RGB)
 
 #include <QLabel>
 #include <QComboBox>
@@ -312,6 +313,10 @@ private:
     // oriented box with a transform pinned to a different stamp, and a defence measured on a not-quite-
     // right contour is not a defence. The belief predicts the shape, so the belief tests for it.
     std::unique_ptr<rc::RgbIngestor> rgb_ingestor_;
+    // The DEPTH plane's metric half of the same channel: "is there a surface at the distance I predict,
+    // with space behind its edge?" — the question that separates a door from a photograph of one, which
+    // no amount of RGB gradient can answer.
+    std::unique_ptr<rc::DepthIngestor> depth_ingestor_;
 
     void log_detect_probe();
     std::ofstream detect_probe_csv_;

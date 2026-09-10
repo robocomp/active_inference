@@ -36,6 +36,8 @@
 #include <dsr/api/dsr_inner_gaussian_api.h>   // Part B: chain covariance propagation
 #include <dsr/api/dsr_camera_api.h>
 
+#include "../../common/contour_edge/contour_edge_project.h"   // rc::edges::ContourSet — the shared silhouette + its null
+
 #include "door_config.h"        // rc::DoorConfig
 #include "door_instance.h"      // rc::DoorInstance, DoorState
 #include "door_model.h"         // DoorModel / DoorModelParams
@@ -62,23 +64,26 @@ struct DoorSilhouette
     // cannot drag the centroid toward a region the camera never saw.
     double sum_col = 0.0, sum_row = 0.0;
     int    img_w = 0, img_h = 0;
-    // ★THE BELIEF'S OWN PROJECTED CONTOUR, in image pixels: the four corners of the leaf face as THIS
-    // agent projected them, with THIS agent's camera and transform. Retained so the RGB edge check is
-    // run on exactly the contour the existence channel is defending. retina draws a similar rectangle
-    // for the human, but from the DSR node's oriented box and a transform pinned to a different stamp —
-    // close, never identical, and a defence measured on a not-quite-right contour is not a defence.
-    // Empty when any corner fell behind the camera or off-frame.
-    std::vector<cv::Point> face_px;
-    // ★CONTROLS BUILT IN 3-D, ALONG THE LEAF'S OWN PLANE, then projected — not displaced in image
-    // pixels. The RGB contour check needs a null of the form "the same shape somewhere it could equally
-    // have been". Displacing along the wall IN THE IMAGE is that null only while the leaf lies in the
-    // wall; once it swings, the displaced copies stop sampling wall and start sampling the open doorway
-    // and the room beyond, both edge-rich, so s_true < s_control and the channel votes to DELETE the
-    // door precisely when it is open (measured: dL -1.4 to -2.6 per cycle at phi 35-45 deg).
-    // Displacing along the leaf's OWN +x (hinge -> free edge) and reprojecting is the same null at
-    // phi = 0 and stays valid at every other angle, so the channel never has to stand down. That
-    // removes the abstention rule, which was gating on a phi that is not reliable enough to gate on.
-    std::vector<std::vector<cv::Point>> face_px_controls;
+    // ★THE BELIEF'S OWN PROJECTED CONTOUR — the four corners of the leaf face as THIS agent projected
+    // them, with THIS agent's camera and transform, plus the null it is scored against and the DEPTH it
+    // predicted at each corner. Retained so the contour checks run on exactly the contour the existence
+    // channel is defending. retina draws a similar rectangle for the human, but from the DSR node's
+    // oriented box and a transform pinned to a different stamp — close, never identical, and a defence
+    // measured on a not-quite-right contour is not a defence.
+    //
+    // ★THE CONTROLS ARE BUILT IN 3-D, ALONG THE LEAF'S OWN PLANE, then projected — not displaced in
+    // image pixels. The contour check needs a null of the form "the same shape somewhere it could
+    // equally have been". Displacing along the wall IN THE IMAGE is that null only while the leaf lies
+    // in the wall; once it swings, the displaced copies stop sampling wall and start sampling the open
+    // doorway and the room beyond, both edge-rich, so s_true < s_control and the channel votes to DELETE
+    // the door precisely when it is open (measured: dL −1.4 to −2.6 per cycle at phi 35-45°). Displacing
+    // along the leaf's OWN +x (hinge → free edge) and reprojecting is the same null at phi = 0 and stays
+    // valid at every other angle, so the channel never has to stand down. That removes the abstention
+    // rule, which was gating on a phi that is not reliable enough to gate on.
+    //
+    // Empty `contour.face` when any corner fell behind the camera ⇒ NOT MEASURED, never a refutation.
+    // Construction is shared: common/contour_edge/contour_edge_project.h.
+    rc::edges::ContourSet contour;
     int   n_occluded   = 0;    // in-frustum samples hidden behind a nearer NON-door mask
     // ── PROVENANCE OF THE OCC/FREE SPLIT ────────────────────────────────────────────────────────────
     // Whether e_occ/e_free above are the marginal over the phi posterior or a single-angle rendering,

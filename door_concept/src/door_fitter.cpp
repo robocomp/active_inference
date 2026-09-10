@@ -1247,52 +1247,45 @@ DoorSilhouette DoorFitter::compute_silhouette_existence(const DoorInstance& inst
         out.mean_range_m = static_cast<float>(range_sum / out.n_detectable);
 
     // ★THE LEAF-FACE QUAD, projected with the SAME camera and the SAME transform as every sample above.
-    // This is what the RGB edge check is scored on, so the thing being defended and the thing being
-    // measured are one contour. Order is a closed loop (bottom-hinge, bottom-free, top-free, top-hinge)
-    // — a polygon whose points are not in loop order produces a bow-tie whose "edges" cross the object
-    // and would score whatever happens to lie under the diagonals.
+    // This is what the RGB and depth contour checks are scored on, so the thing being defended and the
+    // thing being measured are one contour. Order is a closed loop (bottom-hinge, bottom-free, top-free,
+    // top-hinge) — a polygon whose points are not in loop order produces a bow-tie whose "edges" cross
+    // the object and would score whatever happens to lie under the diagonals.
+    //
+    // ★THE CONSTRUCTION NOW LIVES IN common/contour_edge/contour_edge_project.h, unchanged in behaviour:
+    // the same four corners, the same ±1/±1.6 slide along the leaf's OWN plane in 3-D, the same
+    // all-or-nothing rejection when a corner falls behind the camera. It moved because the trap it
+    // encodes is not door-specific — a control displaced in IMAGE pixels stops being a like-for-like
+    // comparison the moment the object leaves the surface its neighbours are made of, and every concept
+    // agent adopting this channel would otherwise rediscover that the expensive way (we did: the channel
+    // voted to DELETE the door, hardest when it was open). It also returns the per-vertex DEPTH the
+    // projection already computed, which is what the depth channel tests the belief against.
     {
+        const auto project = [&](const Eigen::Vector3d& Pr) -> std::optional<rc::edges::ProjectedVertex>
+        {
+            const Eigen::Vector4d Pc = zed_T_room * Pr.homogeneous();
+            if (Pc.y() <= 0.20) return std::nullopt;                       // a corner behind the camera
+            const Eigen::Vector2d uv = camera_api_->project(Eigen::Vector3d(Pc.x(), Pc.y(), Pc.z()));
+            if (not std::isfinite(uv.x()) or not std::isfinite(uv.y())) return std::nullopt;
+            rc::edges::ProjectedVertex v;
+            v.px = cv::Point2f(static_cast<float>(uv.x()), static_cast<float>(uv.y()));
+            // The ZED depth plane stores the camera-frame FORWARD coordinate, not the Euclidean norm
+            // (retina deprojects with `py = depth`). Handing back a norm here would read high off-axis
+            // and look exactly like a door believed slightly too far away.
+            v.depth_m = static_cast<float>(Pc.y());
+            return v;
+        };
         const float half_h = inst.leaf_pose.half_h;
         const float cz     = inst.leaf_pose.centre_z;
-        const std::array<std::pair<float, float>, 4> corners{{
-            {-hw, cz - half_h}, { hw, cz - half_h}, { hw, cz + half_h}, {-hw, cz + half_h}}};
-        std::vector<cv::Point> quad;
-        quad.reserve(4);
-        for (const auto& [lx, lz] : corners)
-        {
-            const Eigen::Vector3f Ps = door::leaf_point(inst.leaf_pose, lx, 0.0f, lz);
-            const Eigen::Vector4d Pc = zed_T_room * Eigen::Vector4d(Ps.x(), Ps.y(), Ps.z(), 1.0);
-            if (Pc.y() <= 0.20) { quad.clear(); break; }          // a corner behind the camera
-            const Eigen::Vector2d uv = camera_api_->project(Eigen::Vector3d(Pc.x(), Pc.y(), Pc.z()));
-            if (not std::isfinite(uv.x()) or not std::isfinite(uv.y())) { quad.clear(); break; }
-            quad.emplace_back(static_cast<int>(std::lround(uv.x())), static_cast<int>(std::lround(uv.y())));
-        }
-        // Kept even when partly out of frame: the edge scorer skips off-image samples itself, and a door
-        // whose lintel is clipped is exactly the close-range case this channel exists for. Only a corner
-        // BEHIND the camera invalidates the quad, because its projection is meaningless.
-        out.face_px = quad;
-
-        // The same quad slid along the leaf's own width, +-1 and +-1.6 leaf-widths. Far enough not to
-        // overlap the leaf, near enough to be the same surface and the same lighting.
-        for (const float kmul : {-1.6f, -1.0f, 1.0f, 1.6f})
-        {
-            std::vector<cv::Point> c;
-            c.reserve(4);
-            bool ok = not quad.empty();
-            for (const auto& [lx, lz] : corners)
-            {
-                if (not ok) break;
-                const Eigen::Vector3f Ps =
-                    door::leaf_point(inst.leaf_pose, lx + kmul * 2.0f * hw, 0.0f, lz);
-                const Eigen::Vector4d Pc = zed_T_room * Eigen::Vector4d(Ps.x(), Ps.y(), Ps.z(), 1.0);
-                if (Pc.y() <= 0.20) { ok = false; break; }
-                const Eigen::Vector2d uv = camera_api_->project(Eigen::Vector3d(Pc.x(), Pc.y(), Pc.z()));
-                if (not std::isfinite(uv.x()) or not std::isfinite(uv.y())) { ok = false; break; }
-                c.emplace_back(static_cast<int>(std::lround(uv.x())), static_cast<int>(std::lround(uv.y())));
-            }
-            if (ok and c.size() == 4)
-                out.face_px_controls.push_back(std::move(c));
-        }
+        const auto corner = [&](float lx, float lz) -> Eigen::Vector3d
+        { return door::leaf_point(inst.leaf_pose, lx, 0.0f, lz).cast<double>(); };
+        const std::array<Eigen::Vector3d, 4> quad{
+            corner(-hw, cz - half_h), corner(hw, cz - half_h),
+            corner( hw, cz + half_h), corner(-hw, cz + half_h)};
+        // Slide direction: the leaf's own +x (hinge → free edge), so a displaced copy stays in the leaf's
+        // plane at any phi. Span is the leaf's full width.
+        const Eigen::Vector3d along = corner(1.0f, cz) - corner(0.0f, cz);
+        out.contour = rc::edges::project_quad(quad, along, 2.0f * hw, project);
     }
     if (field != nullptr and field->valid())
         out.field_bg = field->background_mean();

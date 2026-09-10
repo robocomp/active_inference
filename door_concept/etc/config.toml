@@ -117,7 +117,11 @@ DetectProbeCsvPath = "etc/detect_probe.csv"
 # belief predicts one, scored against the same quad displaced along the wall so there is no per-scene
 # constant. Computed HERE and not in retina: retina projects the DSR node's box with a transform pinned
 # to a different stamp, and a defence measured on a not-quite-right contour is not a defence.
-# ⚠DIAGNOSTIC ONLY today — logged (terminal + door_existence_log.csv), wired into no belief.
+# LIVE: the delta it produces is integrated into the existence log-odds (rc::exist MODALITY 3). It also
+# brings up the ZED DEPTH plane, which asks the metric half of the same question — is there a surface at
+# the distance the belief predicts, with space behind its edge — and that is what a poster of a door
+# cannot pass. Logged per cycle as edge_* (RGB) and dep_* (depth) in door_existence_log.csv, where a
+# count of 0 means NOT MEASURED and is not the same as a verdict of 0.
 RgbContourCheck = true
 
 # DOOR ACTUATION — ask a provider to open/close a door (RoboCompDoorControl), from the strip UI buttons.

@@ -19,6 +19,13 @@
  * MODALITY 2 — mask occupancy (mask_evidence): the SAME log-odds math on projected-silhouette evidence the
  * agent supplies (predicted-detectable pixels that ARE / ARE NOT lit). See mask_evidence() below.
  *
+ * MODALITY 3 — RGB/depth contour agreement (contour_evidence): the CLASSIFIER-FREE channel. The believed
+ * silhouette is scored against the image's own gradient and against the depth plane's agreement with the
+ * range the belief predicts, both relative to the same shape displaced along its support plane. It is the
+ * only channel that still carries information when the segmentation network goes blind on a close object —
+ * which is the failure that removes objects that are plainly there. See contour_evidence() below and
+ * common/contour_edge/.
+ *
  * Header-only (like lidar_ray_factor.h): pure geometry + Eigen, no DDS/DSR/torch — unit-testable in isolation.
  */
 
@@ -324,6 +331,60 @@ inline Evidence mask_evidence(float e_occ, float e_free, int n_detectable, const
     const float llr_occ  = std::log(pd / pc);
     const float llr_free = std::log((1.0f - pd) / (1.0f - pc));
     ev.log_odds_delta = saturate(e_occ * llr_occ + e_free * llr_free, llr_occ);
+    return ev;
+}
+
+// ── MODALITY 3: RGB / depth CONTOUR agreement ──────────────────────────────────────────────────────────────
+// The classifier-free existence channel. The belief projects its own silhouette into the camera and asks the
+// IMAGE — not a network — whether a boundary is there (intensity gradient across the predicted line) and
+// whether a surface is there at the predicted distance (depth agreement + recession behind the edge). Both are
+// scored against the SAME shape slid along its support plane, so the statistic is "better than placements it
+// could equally have had", in this frame, under this exposure. See common/contour_edge/.
+//
+// ★WHY THIS MODALITY EXISTS AT ALL. Every other existence channel here ends at a classifier, and they go blind
+// TOGETHER because they are derived from one another. Measured 2026-09-09 on a plainly visible closed door,
+// P(door) fell 0.995 → 0.138 → 0.048 as the robot closed in, while the network called it `wall` at 0.676 —
+// the mask channel therefore charged confident ABSENCE at the exact range where the object filled the frame.
+// A geometric boundary is in the RGB whatever a network chooses to call those pixels.
+//
+// ★THE ARGUMENT IS AN EXCESS / VERDICT, NOT A `support` RATIO, and this signature is the scar of that.
+// The ratio form s_true/(s_true+s_control) discards magnitude, so a near-blank region (s_true 5.2 against
+// controls 7.8) produced support = 0.400 — read as a confident refutation, and it deleted a door in plain
+// view. The excess for that same frame is −0.26: weak, which is the truth. An absence of measurement must not
+// be able to wear a refutation's clothes.
+//
+// ★AND IT MUST NOT GO THROUGH mask_evidence(). Routed there, the sample counts (75-182) sat so far past the
+// tanh knee that EVERY cycle clipped to the identical ±2.83: the graded weight was in fact a binary vote on
+// the sign, and the log contained exactly two distinct ΔL values across a whole run. Here the cycle is scaled
+// by ONE confident observation's worth — log(pd/pc), the unit every other channel is denominated in — with
+// tanh bounding the cycle rather than quantising it.
+//
+// ★SYMMETRIC, which is what makes it a test and not a shield: a contour over blank wall scores below its own
+// controls and is REFUTED, at the same weight it would have been confirmed. And it is bounded ONE modality's
+// worth even when both channels speak, because RGB and depth agreement on the same boundary are correlated by
+// construction — both are consequences of the object being there. Summing the two excesses inside a single
+// tanh is that common-mode treatment, and it is why this takes one `excess`, not two.
+//
+// ★`verdict` IS THE SUM OF WHICHEVER CHANNELS WERE ENTITLED TO SPEAK, and deciding that is the CALLER's
+// job, not this function's. The two channels have different preconditions — the RGB one is meaningless
+// without a surviving control (its statistic is relative), the depth one is absolute and needs none —
+// so a single gate here would have to be wrong for one of them. Include a channel's term only when its
+// own precondition holds; both are already dimensionless and bounded, so they simply add.
+//
+// n_samples == 0 ⇒ nothing was measured ⇒ n_reached 0 ⇒ HOLD. That is not a refutation, it is the
+// channel declining to speak, and the two must not look alike to the consumer.
+inline Evidence contour_evidence(float verdict, int n_samples, const SensorModel& p)
+{
+    Evidence ev;
+    if (n_samples <= 0 or not std::isfinite(verdict))
+        return ev;                                               // not measured ⇒ HOLD
+    ev.n_reached = n_samples;
+    const float pd = std::clamp(p.detection_prob, 1e-3f, 1.0f - 1e-3f);
+    const float pc = std::clamp(p.clutter_prob,   1e-3f, 1.0f - 1e-3f);
+    const float llr_occ = std::log(pd / pc);                     // > 0: the value of one confident hit
+    ev.log_odds_delta = llr_occ * std::tanh(verdict);
+    if (ev.log_odds_delta >= 0.0f) ev.e_occ  =  ev.log_odds_delta;
+    else                           ev.e_free = -ev.log_odds_delta;
     return ev;
 }
 

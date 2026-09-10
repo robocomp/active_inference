@@ -35,6 +35,7 @@
 
 #include "../../common/detectability/detectability.h"   // rc::detect — the YOLO inverse model
 #include "../../common/contour_edge/contour_edge_check.h"   // rc::edges — classifier-free check
+#include "../../common/contour_edge/contour_depth_check.h"  // rc::edges — its metric half
 #include "../../common/detect_probe/detect_probe.h"   // rc::probe — the detector's truth table (SHARED)
 
 #include "../../common/diag_log/rotating_csv.h"   // keep the previous run instead of wiping it
@@ -435,6 +436,7 @@ void SpecificWorker::initialize()
     // ZED RGB consumer for the contour check. Lazily brought up inside pump() once the descriptor exists
     // (media-plane consumer pattern); dormant while DoorConcept.RgbContourCheck is false.
     rgb_ingestor_ = std::make_unique<rc::RgbIngestor>(G, &cfg_.rgb_contour_check, "zed");
+    depth_ingestor_ = std::make_unique<rc::DepthIngestor>(G, &cfg_.rgb_contour_check, "zed");
 
     // DoorControl client. The endpoint is config, not compiled in: the provider is whatever can move a
     // door here — a Webots supervisor today, home automation or a person tomorrow.
@@ -1460,6 +1462,8 @@ void SpecificWorker::run_instance_tracker()
     // One RGB frame per cycle, deep-copied out of the loaned SHM view by the ingestor.
     if (rgb_ingestor_)
         rgb_ingestor_->pump();
+    if (depth_ingestor_)
+        depth_ingestor_->pump();
     refresh_door_actuation_ui();
 
     log_detect_probe();
@@ -2105,8 +2109,9 @@ void SpecificWorker::update_existence_beliefs()
         // classifier is asked, so this does not go blind when ADE20K does — which is the entire reason
         // it exists. Scored against the same quad displaced along the wall, so the number is "better
         // than its own neighbours", not an absolute that would need a per-scene constant.
-        // ★DIAGNOSTIC ONLY for now: measured and logged, wired into no belief. The two channels have to
-        // be seen disagreeing on a real approach before one is allowed to defend a door.
+        // ★LIVE, not diagnostic: the delta computed below is integrated into inst.existence. (This line
+        // said "DIAGNOSTIC ONLY, wired into no belief" long after that stopped being true — it was
+        // written when the channel was first measured and never updated when it was armed.)
         // ★THE CONTOUR CHECK ABSTAINS ONCE THE LEAF LEAVES THE WALL PLANE.
         // Its null is "the same quad displaced sideways ALONG THE WALL", which is only a comparison
         // between like and like while the contour lies IN that wall. A swung leaf is out of the wall,
@@ -2132,11 +2137,37 @@ void SpecificWorker::update_existence_beliefs()
         // open or shut, and there is nothing to gate.
         rc::edges::ContourEdgeScore edge{};
         if (cfg_.rgb_contour_check and rgb_ingestor_ and not rgb_ingestor_->frame().empty()
-            and sil.face_px.size() >= 4 and not sil.face_px_controls.empty())
+            and sil.contour.face.valid() and not sil.contour.controls.empty())
         {
             const cv::Mat& img = rgb_ingestor_->frame();
-            edge = rc::edges::contour_edge_support(img, sil.face_px, sil.face_px_controls);
+            std::vector<std::vector<cv::Point>> ctl;
+            ctl.reserve(sil.contour.controls.size());
+            for (const auto& c : sil.contour.controls)
+                ctl.push_back(c.px);
+            edge = rc::edges::contour_edge_support(img, sil.contour.face.px, ctl);
         }
+        // ── THE METRIC HALF ─────────────────────────────────────────────────────────────────────────
+        // The RGB check confirms "a rectangular thing with these borders is here" — its own header says
+        // so, and a poster, a door-shaped panel or a cupboard front all pass it. Depth is the observable
+        // that separates them: a photograph of a door has the borders and none of the step. It asks the
+        // model's own question rather than an edge detector's — is the surface at the DISTANCE the belief
+        // predicts, and does the world recede behind its boundary — so it is absolute where the RGB
+        // statistic is relative, and it needs no control to refute.
+        rc::edges::ContourDepthScore depth{};
+        if (cfg_.rgb_contour_check and depth_ingestor_ and not depth_ingestor_->frame().empty()
+            and sil.contour.face.valid())
+        {
+            rc::edges::ContourDepthParams dp;
+            const cv::Mat& dimg = depth_ingestor_->frame();
+            const int fc = rgb_ingestor_ ? rgb_ingestor_->frame().cols : dimg.cols;
+            const int fr = rgb_ingestor_ ? rgb_ingestor_->frame().rows : dimg.rows;
+            dp.depth_scale_x = (fc > 0) ? static_cast<float>(dimg.cols) / fc : 1.0f;
+            dp.depth_scale_y = (fr > 0) ? static_cast<float>(dimg.rows) / fr : 1.0f;
+            depth = rc::edges::contour_depth_support(dimg, sil.contour.face, sil.contour.controls, dp);
+        }
+        inst.dbg_depth_verdict = depth.verdict;
+        inst.dbg_depth_bias_m  = depth.mean_bias_m;
+        inst.dbg_depth_n       = depth.n_samples;
         inst.dbg_edge_support = edge.support;
         inst.dbg_edge_excess  = edge.excess;
         inst.dbg_edge_nctl    = edge.n_controls;
@@ -2339,7 +2370,7 @@ void SpecificWorker::update_existence_beliefs()
         // (as the mask-point Woodbury marginalisation does for sigma) is the right long-term fix.
         if (inst.dbg_edge_n > 0 and edge.n_controls > 0)
         {
-            // ★DIFFERENCE, NOT RATIO, and NOT through mask_evidence.
+            // ★DIFFERENCE, NOT RATIO, and NOT through mask_evidence. Both halves are scars:
             //  · The ratio form threw away magnitude, so a near-blank frame (s_true 5.2 against controls
             //    7.8) produced support 0.400 and a full-strength refutation that deleted a live door.
             //    The excess for that same frame is -0.26: weak, which is the truth.
@@ -2347,23 +2378,35 @@ void SpecificWorker::update_existence_beliefs()
             //    (75-182) sat so far past its knee that EVERY cycle clipped to the identical +-2.83.
             //    The graded weight I thought I had was a binary vote on the sign. Measured: the log
             //    contained exactly two distinct dL values across the whole run.
-            // So the delta is computed here, scaled by ONE confident observation's worth taken from the
-            // sensor model itself — log(pd/pc), the same quantity every other channel is denominated in.
-            // tanh bounds a single cycle to that one observation; the sign and the grading survive.
-            const float pd = std::clamp(sm.detection_prob, 1e-3f, 1.0f - 1e-3f);
-            const float pc = std::clamp(sm.clutter_prob,   1e-3f, 1.0f - 1e-3f);
-            const float llr_occ = std::log(pd / pc);          // > 0; the value of one confident hit
-            rc::exist::Evidence ev_rgb;
-            ev_rgb.n_reached = inst.dbg_edge_n;
-            ev_rgb.log_odds_delta = llr_occ * std::tanh(edge.excess);
-            if (ev_rgb.log_odds_delta >= 0.0f) ev_rgb.e_occ  = ev_rgb.log_odds_delta;
-            else                               ev_rgb.e_free = -ev_rgb.log_odds_delta;
+            // The conversion is now rc::exist::contour_evidence (MODALITY 3), which is that reasoning
+            // written once for the fleet: scaled by ONE confident observation's worth, log(pd/pc), the
+            // same quantity every other channel is denominated in, with tanh bounding the cycle rather
+            // than quantising it. The gate stays HERE because it is this channel's own precondition —
+            // the RGB statistic is relative and means nothing without a surviving control.
+            // ★THE TWO HALVES SUM INSIDE ONE tanh, and that IS the common-mode treatment. A boundary in
+            // the image and a step in the depth at the same place are not independent events — both are
+            // consequences of the door being there — so letting each contribute a full observation's
+            // worth would count one fact twice. Both are dimensionless and bounded, so the sum is well
+            // defined, and one confident observation still bounds the cycle.
+            const float verdict = edge.excess + depth.verdict;
+            const rc::exist::Evidence ev_rgb =
+                rc::exist::contour_evidence(verdict, std::max(inst.dbg_edge_n, depth.n_samples), sm);
             inst.existence.integrate(ev_rgb, 1.0f);
             inst.dbg_edge_delta = ev_rgb.log_odds_delta;
         }
+        else if (depth.n_samples > 0)
+        {
+            // ★THE DEPTH HALF STANDS ALONE when the RGB half cannot speak — no surviving control, or no
+            // RGB frame at all. Its statistic is absolute, so it does not need the null the gradient
+            // check does, and making it wait for one would silence the only channel that can say "we are
+            // looking straight through the place the door is supposed to be".
+            const rc::exist::Evidence ev_d =
+                rc::exist::contour_evidence(depth.verdict, depth.n_samples, sm);
+            inst.existence.integrate(ev_d, 1.0f);
+            inst.dbg_edge_delta = ev_d.log_odds_delta;
+        }
         else
-            inst.dbg_edge_delta = 0.0f;   // not measured, no surviving control, or the leaf is out of
-                                          // the wall plane where this channel's null does not hold
+            inst.dbg_edge_delta = 0.0f;   // not measured, and no surviving control — NOT a refutation
 
         // Debounce on consecutive EVIDENCE cycles (not wall-clock), so a transient hiccup cannot delete a real
         // door, and removal always reflects sustained agreement across frames.
@@ -2474,6 +2517,13 @@ void SpecificWorker::update_existence_beliefs()
                          "fld_sup,fld_in,fld_bg,fld_n,"
                          // RGB contour check (classifier-free). edge_n==0 ⇒ NOT MEASURED.
                          "edge_sup,edge_true,edge_ctrl,edge_n,edge_dL,edge_exc,edge_nctl,"
+                         // DEPTH half of the same channel — the one a poster of a door cannot pass.
+                         // dep_n==0 ⇒ NOT MEASURED (no depth plane, or no valid reads along the
+                         // contour), which is NOT the same as dep_v==0 (measured, and it says nothing:
+                         // a surface at the predicted distance with nothing behind it, i.e. flat wall).
+                         // dep_bias is SIGNED (observed − predicted, m): a channel scoring low with a
+                         // large bias is a FIT error, not an absence, and only this column separates them.
+                         "dep_v,dep_bias,dep_n,"
                          // M1: the leaf angle is estimated now, not pinned. phi_support is how much of
                          // the leaf face the image actually backs at that angle; phi_cmd=1 means a swing
                          // WE commanded is being anticipated, which is legitimately evidence-free.
@@ -2502,6 +2552,8 @@ void SpecificWorker::update_existence_beliefs()
                            << ',' << inst.dbg_edge_ctrl << ',' << inst.dbg_edge_n
                            << ',' << inst.dbg_edge_delta << ',' << inst.dbg_edge_excess
                            << ',' << inst.dbg_edge_nctl
+                           << ',' << inst.dbg_depth_verdict << ',' << inst.dbg_depth_bias_m
+                           << ',' << inst.dbg_depth_n
                            << ',' << inst.phi_est << ',' << inst.phi_support
                            << ',' << (inst.phi_cmd_active ? 1 : 0)
                            << ',' << (inst.dbg_phi_marg ? 1 : 0) << ',' << inst.dbg_phi_nhyp

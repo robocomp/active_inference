@@ -26,6 +26,9 @@ LIST(APPEND SOURCES
   ../src/door_world_registration.cpp
   ../generated/DoorControl.cpp
   ../../common/contour_edge/contour_edge_check.cpp
+  ../../common/contour_edge/contour_edge_project.cpp
+  ../../common/contour_edge/contour_depth_check.cpp
+  ../../common/rgb_ingestor/depth_ingestor.cpp
   ../../common/rgb_ingestor/rgb_ingestor.cpp
   ../src/door_model.cpp
   ../src/door_belief.cpp

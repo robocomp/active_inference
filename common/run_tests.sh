@@ -10,13 +10,19 @@
 set -u
 cd "$(dirname "$0")" || exit 1
 EIGEN=$(pkg-config --cflags eigen3 2>/dev/null || echo -I/usr/include/eigen3)
+# ★OpenCV is added for EVERY test, not only the ones that need it. common/contour_edge is the first unit
+# here that includes <opencv2/...> — it breaks the old "nothing under common/ includes OpenCV" invariant —
+# and a per-test opt-in list is one more place to forget to add a line. The flags are inert for a test that
+# includes no OpenCV header, and empty if OpenCV is absent, in which case only those tests fail to build.
+OPENCV_CFLAGS=$(pkg-config --cflags opencv4 2>/dev/null || echo "")
+OPENCV_LIBS=$(pkg-config --libs opencv4 2>/dev/null || echo "")
 BIN=$(mktemp -d)
 trap 'rm -rf "$BIN"' EXIT
 
 fails=0
 for src in */*_test.cpp; do
     name=$(basename "$src" .cpp)
-    if ! g++ -std=c++23 -O1 $EIGEN "$src" -o "$BIN/$name" 2>"$BIN/$name.log"; then
+    if ! g++ -std=c++23 -O1 $EIGEN $OPENCV_CFLAGS "$src" -o "$BIN/$name" $OPENCV_LIBS 2>"$BIN/$name.log"; then
         echo "BUILD FAILED: $src"; sed -n '1,20p' "$BIN/$name.log"; fails=$((fails + 1)); continue
     fi
     if ! "$BIN/$name"; then fails=$((fails + 1)); fi
