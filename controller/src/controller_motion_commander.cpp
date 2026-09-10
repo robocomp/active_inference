@@ -70,7 +70,8 @@ std::uint64_t ControllerMotionCommander::current_time_ms()
         std::chrono::system_clock::now().time_since_epoch()).count());
 }
 
-void ControllerMotionCommander::apply_uncertainty_speed_limit(float &adv_mps, float &side_mps, float &rot_rps) const
+void ControllerMotionCommander::apply_uncertainty_speed_limit(float &adv_mps, float &side_mps, float &rot_rps,
+                                                              std::uint64_t timestamp_ms) const
 {
     // Both early exits mean NO limiting happened. Record that explicitly rather than leaving the previous
     // cycle's numbers standing, or the diagnostic would report a throttle that is not being applied.
@@ -78,7 +79,7 @@ void ControllerMotionCommander::apply_uncertainty_speed_limit(float &adv_mps, fl
     if (!world_model_ || !params_)
         return;
 
-    const auto uncertainty = world_model_->read_pose_uncertainty();
+    const auto uncertainty = world_model_->read_pose_uncertainty(timestamp_ms);
     if (!uncertainty.has_value())
         return;
 

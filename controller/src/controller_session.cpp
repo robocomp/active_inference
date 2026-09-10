@@ -4873,7 +4873,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // made a robot frozen by its own speed limit indistinguishable from a robot with nowhere to go —
     // see stall_judge.h.
     const float asked_lin_mps = std::hypot(adv_mps, side_mps);
-    motion_commander.apply_uncertainty_speed_limit(adv_mps, side_mps, rot_rps);
+    motion_commander.apply_uncertainty_speed_limit(adv_mps, side_mps, rot_rps, time_source());
     // Publish what the limiter did into the actuation stream. It sits between the MPPI's command and the
     // wheels, and until now a lap could show a 17% gap between the two with no way to say whether this
     // was the cause or whether it was inert for want of a covariance on the RT edge.

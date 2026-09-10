@@ -184,7 +184,7 @@ std::optional<std::uint64_t> ControllerWorldModel::pose_stamp_age_ms(std::uint64
     return now_ms - newest;
 }
 
-std::optional<ControllerPoseUncertainty> ControllerWorldModel::read_pose_uncertainty() const
+std::optional<ControllerPoseUncertainty> ControllerWorldModel::read_pose_uncertainty(std::uint64_t timestamp_ms) const
 {
     if (!graph_ || !graph_state_.ready())
         return std::nullopt;
@@ -212,7 +212,21 @@ std::optional<ControllerPoseUncertainty> ControllerWorldModel::read_pose_uncerta
     // packing changes.
     if (rt_api_ == nullptr)
         return std::nullopt;
-    const auto cov = rt_api_->get_edge_RT_covariance(rt_edge.value());   // defaults: newest block, Nearest
+    // ── THE UNCERTAINTY MUST DESCRIBE THE POSE BEING ACTED ON, NOT A DIFFERENT ONE ──────────────
+    // This used to call with the defaults -- newest block, Nearest -- while the pose these numbers
+    // throttle is read by read_robot_pose_latest(timestamp_ms), pinned to an instant and interpolated.
+    // So a pose from one moment was being paired with a confidence from another. Nothing complains:
+    // both are well-formed, and the mismatch shows up only as a speed limiter reacting to the wrong
+    // uncertainty, which looks like tuning.
+    // ★SAME INSTANT AND SAME MODE AS THE POSE READ. interpolate_rt picks Interpolated exactly as
+    // pose_from_rt does, so the two answers come from the same place in the ring.
+    // ★NOT Extrapolated, deliberately. Cortex will widen a covariance to account for a pose it walked
+    // forward, but the pose here is NOT walked -- it is interpolated inside the ring. Asking for the
+    // widened version would attach the cost of a prediction that never happened.
+    const auto time_query = (params_ != nullptr and params_->interpolate_rt)
+                            ? DSR::RT_API::TimeQuery::Interpolated
+                            : DSR::RT_API::TimeQuery::Nearest;
+    const auto cov = rt_api_->get_edge_RT_covariance(rt_edge.value(), timestamp_ms, time_query);
     if (not cov.has_value())
         return std::nullopt;
 

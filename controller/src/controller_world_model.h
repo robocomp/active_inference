@@ -38,7 +38,10 @@ public:
     // ★It is the SAME query chain with the scan pin removed, so the fallbacks (exact ts, then 0) and the
     // Interpolated/Nearest choice are unchanged; only the instant asked for differs.
     std::optional<ControllerRobotPose> read_robot_pose_latest(std::uint64_t timestamp_ms) const;
-    std::optional<ControllerPoseUncertainty> read_pose_uncertainty() const;
+    // ★ASK AT THE SAME INSTANT THE POSE WAS ASKED FOR. Passing 0 keeps the old behaviour (whatever
+    // block is newest), which is what this did unconditionally and which pairs a pose pinned to one
+    // instant with an uncertainty from another. See the note at the implementation.
+    std::optional<ControllerPoseUncertainty> read_pose_uncertainty(std::uint64_t timestamp_ms = 0) const;
 
     /// Age, in ms, of the pose currently on the room<-robot RT edge, measured against ITS OWN validity
     /// stamp rather than against when we noticed it change.

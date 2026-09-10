@@ -34,7 +34,8 @@ public:
 
     ~ControllerMotionCommander();
 
-    void apply_uncertainty_speed_limit(float &adv_mps, float &side_mps, float &rot_rps) const;
+    void apply_uncertainty_speed_limit(float &adv_mps, float &side_mps, float &rot_rps,
+                                       std::uint64_t timestamp_ms = 0) const;
 
     // What apply_uncertainty_speed_limit ACTUALLY did on its last call. The limiter is the only place the
     // robot's own localisation covariance is allowed to bound its speed, and none of it was observable:
