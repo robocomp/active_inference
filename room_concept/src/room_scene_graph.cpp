@@ -496,11 +496,22 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose,
     // through this same round trip, which meant it had no slot: RT_API::get_edge_RT_covariance fell
     // back to block 0 for every timestamp, so the velocity covariance was the same number whatever
     // instant you asked about. Passing it in the RTBlock lands it in the slot its twist belongs to.
+    // ★THE VARIANCES GO ON THE AXES THE TWIST USES, NOT IN THE ORDER THEY ARE NAMED. twist_linear
+    // below is written {last_side_, last_adv_, 0} -- AXIS order, because this body frame is +Y
+    // FORWARD -- so the ADVANCE variance belongs at (1,1) = [7] and the LATERAL one at (0,0) = [0].
+    // This block had them the other way round: array order in a covariance that sits beside an
+    // axis-order twist, the same 90-degree mismatch that cost three consumers a wrong prediction.
+    // ★IT WAS INVISIBLE, AND ONLY BY COINCIDENCE: ADV and SIDE are both 0.0025 in the defaults, and
+    // swapping two equal numbers changes nothing. The day either becomes speed-dependent -- which is
+    // the whole point of not publishing a constant process noise (CONCEPT_AGENT_LIFECYCLE.md 4.1),
+    // and a differential-drive base has far less lateral velocity uncertainty than forward -- the
+    // bug would have appeared as a mysterious rotation of the uncertainty ellipse. Fixed first, on
+    // purpose, so that change cannot be the thing that reveals it.
     std::vector<float> vel_cov(36, 0.f);
     if (params_)
     {
-        vel_cov[0]  = params_->ROBOT_VEL_COV_ADV;    // (0,0) var_x
-        vel_cov[7]  = params_->ROBOT_VEL_COV_SIDE;   // (1,1) var_y
+        vel_cov[0]  = params_->ROBOT_VEL_COV_SIDE;   // (0,0) var_x  = LATERAL rate
+        vel_cov[7]  = params_->ROBOT_VEL_COV_ADV;    // (1,1) var_y  = ADVANCE rate (+Y forward)
         vel_cov[35] = params_->ROBOT_VEL_COV_ROT;    // (5,5) var_yaw
     }
 
