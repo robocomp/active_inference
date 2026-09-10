@@ -69,6 +69,9 @@ struct DoorInstance
     bool  dbg_phi_marg  = false;
     int   dbg_phi_nhyp  = 0;
     float dbg_phi_wmax  = 0.0f;
+    // When phi was last estimated, so the persistence prior's width is the swing the leaf could
+    // ACTUALLY have made in the elapsed time rather than a per-cycle constant. Zero = never.
+    std::chrono::steady_clock::time_point phi_last_t{};
     float phi_support  = 0.0f;    // fraction of leaf-face samples lit by a door mask at phi_est
     // ★THE WHOLE LIKELIHOOD CURVE, NOT ONLY ITS ARGMAX. estimate_phi scores every candidate angle and
     // then throws all but the best away; the silhouette channel — the ONLY channel allowed to remove a
@@ -78,7 +81,10 @@ struct DoorInstance
     // A parameter the data does not identify must not be able to drive a removal. Keeping the curve lets
     // the absence be MARGINALISED over phi instead of conditioned on a point estimate, so a flat curve
     // charges almost no absence and a peaked one charges it in full — without any gate on "flatness".
-    std::vector<std::pair<float, float>> phi_curve;   // (phi rad, raw IoU support >= 0), unnormalised
+    // (phi rad, unnormalised POSTERIOR weight = image support x persistence/command prior). It carries
+    // the prior because both consumers need the same thing: the angle we actually believe, not the one
+    // the image alone would pick off a curve with no peak in it.
+    std::vector<std::pair<float, float>> phi_curve;
     door::LeafPose  leaf_pose{};
 
     // ── AI2 belief ────────────────────────────────────────────────────────────────

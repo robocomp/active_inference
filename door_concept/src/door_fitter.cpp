@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <cstdint>
 #include <print>
 #include <unordered_map>
@@ -806,6 +807,23 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
     const auto now = std::chrono::steady_clock::now();
     float phi_prior = inst.phi_est;
     bool  have_prior = false;
+    // ★HOW FAR COULD THE LEAF HAVE SWUNG SINCE WE LAST LOOKED? That, and nothing else, is the width of
+    // the prior. A door is a passive object: between two frames it moves by at most (its own maximum
+    // rate) x (the elapsed time), whether the mover is our actuator or a person. So sigma comes from the
+    // rate the provider advertised — or the same generic 2 rad/s the step limiter below already uses —
+    // times a MEASURED interval, not a per-cycle constant. Long gap, wide prior; fast loop, tight one;
+    // first ever look, no prior at all.
+    const float swing_rate = inst.phi_cmd_rate > 1e-3f ? inst.phi_cmd_rate : 2.0f;
+    const float dt_phi = inst.phi_last_t.time_since_epoch().count() == 0
+                       ? std::numeric_limits<float>::infinity()
+                       : std::chrono::duration<float>(now - inst.phi_last_t).count();
+    inst.phi_last_t = now;
+    // Never tighter than the search grid can resolve (that would be a claim about phi finer than the
+    // measurement) and never wider than the full range (which is the same as having no prior at all).
+    const float sigma_phi = std::isfinite(dt_phi)
+        ? std::clamp(swing_rate * dt_phi, static_cast<float>(M_PI) / 2.0f / 18.0f,
+                     static_cast<float>(M_PI) / 2.0f)
+        : static_cast<float>(M_PI) / 2.0f;
     if (inst.phi_cmd_active)
     {
         const float dt = std::chrono::duration<float>(now - inst.phi_cmd_t0).count();
@@ -964,11 +982,16 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
         const float phi = PHI_MIN + (PHI_MAX - PHI_MIN) * i / (NSTEP - 1);
         const float sc = support_at(phi);
         if (sc < 0.0f) continue;
-        inst.phi_curve.emplace_back(phi, sc);
-        // The command prior breaks ties and only ties: a tiny bonus proportional to closeness, far too
-        // small to overturn a real difference in image support.
-        const float prior_bonus = have_prior ? 0.02f * std::exp(-std::abs(phi - phi_prior) / 0.2f) : 0.0f;
-        if (sc + prior_bonus > best_score) { best_score = sc + prior_bonus; best_s = sc; best_phi = phi; }
+        // ★THE PRIOR MULTIPLIES THE LIKELIHOOD; IT DOES NOT ADD A BONUS TO IT.
+        // It used to be `+ 0.02 * exp(-|dphi|/0.2)`, described as breaking ties "and only ties". Against a
+        // likelihood whose peak measured 0.02-0.23 that bonus is not a tie-break, it is noise, and the
+        // argmax of a nearly-flat curve is then noise too. A flat likelihood must LEAVE THE PRIOR
+        // STANDING — that is the whole content of the word prior — and only a genuinely peaked one may
+        // move it. Multiplying is what does that, with no constant to choose: the two shapes decide.
+        const float d = (phi - phi_prior) / sigma_phi;
+        const float w = sc * std::exp(-0.5f * d * d);
+        inst.phi_curve.emplace_back(phi, w);
+        if (w > best_score) { best_score = w; best_s = sc; best_phi = phi; }
     }
 
     if (best_s <= 0.0f)
@@ -979,12 +1002,27 @@ void DoorFitter::estimate_phi(DoorInstance& inst)
     }
     else
     {
-        // Rate limit: a hinge cannot jump. Cap by the commanded rate, or a generic 2 rad/s.
-        const float rate = inst.phi_cmd_rate > 1e-3f ? inst.phi_cmd_rate : 2.0f;
-        const float max_step = rate * 0.10f;   // ~one compute period; conservative
-        const float d = std::clamp(best_phi - inst.phi_est, -max_step, max_step);
-        inst.phi_est += d;
-        inst.phi_support = best_s;
+        // ★THE POSTERIOR MEAN, NOT THE ARGMAX. Measured 2026-09-10 the argmax jumped 20 -> 61.5 deg
+        // between neighbouring frames on a curve whose peak weight was 0.067 against a flat-curve value
+        // of 0.053 — it was reading noise off a likelihood with no peak in it. Every one of those jumps
+        // was paid for by the APERTURE sliding along the wall to keep the swung leaf on the mask: the
+        // correlation between the slide and phi came out r = -1.000 over 27 rows, a 34 cm slide against
+        // a 41 deg swing. That is not two estimates disagreeing, it is ONE degree of freedom being
+        // estimated twice by two procedures that then chase each other along a degenerate valley.
+        // The mean of the posterior cannot do that: a flat curve returns the prior (the leaf stays
+        // where it was, which for a shut door is shut), and only a curve with a real peak moves it.
+        double num = 0.0, den = 0.0;
+        for (const auto& [phi, w] : inst.phi_curve) { num += static_cast<double>(phi) * w; den += w; }
+        const float phi_post = den > 0.0 ? static_cast<float>(num / den) : best_phi;
+        // Rate limit kept: a hinge cannot jump. Same swing model as the prior's width, so the two agree.
+        const float max_step = swing_rate * (std::isfinite(dt_phi) ? dt_phi : 0.10f);
+        const float step = std::clamp(phi_post - inst.phi_est, -max_step, max_step);
+        inst.phi_est += step;
+        // Report the RAW image support at the angle we are actually claiming — not the argmax's, which
+        // would flatter an estimate that did not come from there.
+        inst.phi_support = support_at(inst.phi_est);
+        if (not std::isfinite(inst.phi_support) or inst.phi_support < 0.0f)
+            inst.phi_support = best_s;
     }
     inst.phi_est = std::clamp(inst.phi_est, PHI_MIN, PHI_MAX);
     inst.leaf.phi = inst.phi_est;
@@ -1167,8 +1205,9 @@ DoorSilhouette DoorFitter::compute_silhouette_existence(const DoorInstance& inst
     // cannot say where) while a sharply-peaked one charges it in full. There is no flatness test and no
     // angle gate: the sharpness of the curve does the weighting by itself, which is what makes this a
     // model term and not another threshold.
-    // ★THE WEIGHTS ARE THE SAME SCORE THE ARGMAX ALREADY TRUSTED, only used as a weight instead of a
-    // maximum — a strictly weaker assumption than the one it replaces. An empty curve means the frame
+    // ★THE WEIGHTS ARE THE POSTERIOR the angle estimate itself is drawn from — image support times the
+    // persistence/command prior — so the absence is marginalised over exactly what this agent believes
+    // about the leaf, and the two consumers of phi cannot disagree. An empty curve means the frame
     // carried no door mask to score phi against, and then there is nothing to marginalise: the modal
     // pass stands, which is exactly the old behaviour on exactly the frames where it was never at fault
     // (with no mask anywhere, every angle is equally unlit and the marginal equals the point estimate).
