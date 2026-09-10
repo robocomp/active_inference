@@ -48,3 +48,14 @@ add_executable(lidar_probe
 )
 target_include_directories(lidar_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(lidar_probe PRIVATE fastdds fastcdr)
+
+# End-to-end frame-age probe: prints the LAG distribution on a live media plane plus the stamp-delta
+# shape that tells a producer's polling phase from a producer that is dropping frames. The headless
+# twin of the viewers' lag readout (common/viewers/frame_lag.h) — same quantity, no Qt.
+add_executable(lag_probe
+  bench/lag_probe.cpp
+  media_transport.cpp
+  ${AI_COMMON_IDL_SOURCES}
+)
+target_include_directories(lag_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(lag_probe PRIVATE fastdds fastcdr)

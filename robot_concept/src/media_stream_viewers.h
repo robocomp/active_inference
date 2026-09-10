@@ -31,6 +31,7 @@
 #include <QVector3D>
 #include <QMatrix4x4>
 #include <QMetaObject>
+#include <QTimer>
 #include <QDebug>
 
 #include <algorithm>
@@ -44,6 +45,7 @@
 #include <vector>
 
 #include "../../common/media_transport/media_transport.h"
+#include "../../common/viewers/frame_lag.h"
 #include "../../common/viewers/gl_point_cloud_viewer.h"
 #include "../../common/viewers/gl_imu_viewer.h"
 
@@ -107,6 +109,9 @@ public:
 		label_.setMinimumSize(320, 240);
 		label_.setText("waiting for frames…");
 		resize(720, 480);
+		lag_refresh_.setInterval(200);
+		QObject::connect(&lag_refresh_, &QTimer::timeout, this, [this] { repaint_label(); });
+		lag_refresh_.start();
 
 		// Arrival-driven: block for a frame, decode off-thread, post to GUI.
 		poller_ = std::jthread([this](std::stop_token st) { this->run(st); });
@@ -153,25 +158,44 @@ private:
 				}
 			}
 			if(stamp != 0) { last_stamp_ = stamp; have_last_ = true; }
-			// One arrival → one repaint on the GUI thread.
+			// One arrival → one repaint on the GUI thread. The capture stamp travels with the frame so
+			// the overlay can age it against wall-clock time at PAINT time (end-to-end lag, transport +
+			// queueing included), not against the moment the worker decoded it.
 			const float fps = fps_;
-			QMetaObject::invokeMethod(this, [this, frame, fps]() { render(frame, fps); }, Qt::QueuedConnection);
+			QMetaObject::invokeMethod(this, [this, frame, fps, stamp]() { render(frame, fps, stamp); }, Qt::QueuedConnection);
 		}
 	}
 
-	void render(const QImage &frame, float fps)   // GUI thread
+	void render(const QImage &frame, float fps, std::uint64_t stamp)   // GUI thread
 	{
-		QImage shown = frame.scaled(label_.size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
+		shown_ = frame; shown_fps_ = fps;
+		lag_.sample(stamp);   // one lag sample per ARRIVAL; the timer below only re-renders
+		repaint_label();
+	}
+
+	// Redraws the last frame with a freshly computed lag. Called on each arrival AND on the refresh
+	// timer, so that when the stream stalls the number keeps growing instead of freezing at the last
+	// good value — the stall is precisely what the readout is for.
+	void repaint_label()   // GUI thread
+	{
+		if(shown_.isNull())
+			return;
+		QImage shown = shown_.scaled(label_.size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
 		QPainter p(&shown);
-		p.fillRect(QRect(6, 6, 190, 22), QColor(0, 0, 0, 160));
+		p.fillRect(QRect(6, 6, 300, 22), QColor(0, 0, 0, 160));
 		p.setPen(Qt::white);
-		p.drawText(QRect(12, 6, 180, 22), Qt::AlignLeft | Qt::AlignVCenter,
-		           QString::asprintf("FPS: %.1f   %dx%d", fps, frame.width(), frame.height()));
+		p.drawText(QRect(12, 6, 290, 22), Qt::AlignLeft | Qt::AlignVCenter,
+		           QString::asprintf("FPS: %.1f   %dx%d   ", shown_fps_, shown_.width(), shown_.height())
+		               + lag_.text());
 		label_.setPixmap(QPixmap::fromImage(shown));
 	}
 
 	std::unique_ptr<Subscriber> sub_;
 	QLabel label_;
+	QImage shown_;                   // last decoded frame, re-drawn by the lag refresh timer
+	float shown_fps_ = 0.0f;
+	LagMeter lag_;                   // smoothed frame-age readout (see frame_lag.h)
+	QTimer lag_refresh_;
 	float fps_ = 0.0f;
 	std::uint64_t last_stamp_ = 0;   // last source capture stamp (ms) used for the FPS estimate
 	bool have_last_ = false;

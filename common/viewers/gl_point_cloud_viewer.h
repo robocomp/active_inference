@@ -24,9 +24,13 @@
 #include <QOpenGLVertexArrayObject>
 #include <QOpenGLWidget>
 #include <QPainter>
+#include <QString>
+#include <QTimer>
 #include <QVector2D>
 #include <QVector3D>
 #include <QWheelEvent>
+
+#include "frame_lag.h"
 
 #include <algorithm>
 #include <chrono>
@@ -49,6 +53,13 @@ public:
 		setWindowTitle("point cloud");
 		setFocusPolicy(Qt::StrongFocus);
 		axis_vertices_ = makeAxes(1.0f);
+		// The lag readout must keep counting UP while the stream is stalled, and a repaint is otherwise
+		// driven only by set_points() — i.e. by the very arrivals that have stopped. So tick the overlay
+		// independently; a stalled window then shows a growing lag instead of freezing on the last good
+		// value, which is exactly the case the readout exists to expose.
+		lag_refresh_.setInterval(200);
+		QObject::connect(&lag_refresh_, &QTimer::timeout, this, [this] { update(); });
+		lag_refresh_.start();
 	}
 
 	~GLPointCloudViewer() override
@@ -71,6 +82,8 @@ public:
 	void set_points(std::span<const QVector3D> group_a, std::span<const QVector3D> group_b = {},
 	                std::uint64_t src_stamp_ms = 0)
 	{
+		lag_.sample(src_stamp_ms);   // one lag sample per ARRIVAL, before any early return
+
 		point_vertices_.clear();
 		point_vertices_.reserve(group_a.size() + group_b.size());
 
@@ -235,9 +248,10 @@ protected:
 		painter.setRenderHint(QPainter::TextAntialiasing, true);
 		painter.setPen(QColor(255, 255, 255));
 		painter.drawText(QRect(10, 10, width() - 20, 24), Qt::AlignLeft | Qt::AlignTop,
-		                 QString("Points: %1    %2 Hz    [drag=rotate  right/mid=pan  wheel=zoom  R=reset]")
+		                 QString("Points: %1    %2 Hz    %3    [drag=rotate  right/mid=pan  wheel=zoom  R=reset]")
 		                     .arg(static_cast<qulonglong>(point_vertices_.size()))
-		                     .arg(fps_, 0, 'f', 1));
+		                     .arg(fps_, 0, 'f', 1)
+		                     .arg(lag_.text()));
 	}
 
 	void mousePressEvent(QMouseEvent *event) override
@@ -335,6 +349,8 @@ private:
 	bool have_last_ = false;
 	std::uint64_t last_stamp_ = 0;                    // last source capture stamp (ms) for the FPS estimate
 	bool have_last_stamp_ = false;
+	LagMeter lag_;                                    // smoothed frame-age readout (see frame_lag.h)
+	QTimer lag_refresh_;                              // repaints the overlay so a stalled stream still speaks
 
 	QOpenGLShaderProgram program_;
 	QOpenGLVertexArrayObject vao_;

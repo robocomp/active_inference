@@ -21,6 +21,9 @@
 #include <QOpenGLWidget>
 #include <QPainter>
 #include <QRect>
+#include <QTimer>
+
+#include "frame_lag.h"
 
 #include <algorithm>
 #include <array>
@@ -42,6 +45,12 @@ public:
 		resize(920, 620);
 		setWindowTitle("IMU data");
 		setFocusPolicy(Qt::StrongFocus);
+		// Repaint the overlay independently of arrivals, so the lag readout keeps counting up when the
+		// stream stalls instead of freezing on its last good value — the stall being the case the
+		// readout exists to expose. Same 200 ms tick as the image and point-cloud viewers.
+		lag_refresh_.setInterval(200);
+		QObject::connect(&lag_refresh_, &QTimer::timeout, this, [this] { update(); });
+		lag_refresh_.start();
 	}
 
 	~GLImuViewer() override
@@ -62,6 +71,7 @@ public:
 	{
 		if(ts != 0 and ts == last_timestamp_ms_)
 			return;
+		lag_.sample(ts);   // one lag sample per ARRIVAL — see frame_lag.h
 		appendSample(plots_[0], ax, ay, az);
 		appendSample(plots_[1], gx, gy, gz);
 		appendSample(plots_[2], roll, pitch, yaw);
@@ -145,8 +155,9 @@ protected:
 		painter.setRenderHint(QPainter::TextAntialiasing, true);
 		painter.setPen(QColor(240, 240, 240));
 		painter.drawText(QRect(10, 10, width() - 20, 24), Qt::AlignLeft | Qt::AlignTop,
-		                 QString("IMU samples: %1    Last ts: %2")
+		                 QString("IMU samples: %1    %2    Last ts: %3")
 		                     .arg(static_cast<int>(sample_count_))
+		                     .arg(lag_.text())
 		                     .arg(last_timestamp_ms_ > 0 ? QString::number(last_timestamp_ms_) : QStringLiteral("--")));
 
 		const auto layout = computePlotLayout();
@@ -180,6 +191,8 @@ private:
 
 	static constexpr std::size_t history_size = 360;
 	std::uint64_t last_timestamp_ms_ = 0;
+	LagMeter lag_;        // smoothed age of the newest sample (see frame_lag.h)
+	QTimer lag_refresh_;  // keeps the overlay alive when the stream is not
 	std::size_t sample_count_ = 0;
 
 	std::array<Plot, 3> plots_{{
