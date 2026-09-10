@@ -1,0 +1,213 @@
+% LIFECYCLE.tex — Chapter 3: the concept-agent lifecycle contract read against the factorization
+% of Chapter 2 (FACTORIZATION.tex).
+%
+% Build standalone:  pdflatex LIFECYCLE.tex   (twice, for cross-references)
+%
+\documentclass[11pt,a4paper]{report}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=2.6cm]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{empheq}
+\usepackage{pifont}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{microtype}
+
+\newcommand{\given}{\,|\,}
+\newcommand{\R}{\mathbb{R}}
+
+\begin{document}
+
+\setcounter{chapter}{2}
+\chapter{The lifecycle contract}
+
+\begin{flushleft}
+\textit{No\'e Zapata}
+\end{flushleft}
+
+\vspace{4pt}
+
+\section{Introduction}
+
+Every \texttt{<obj>\_concept} agent must satisfy a normative behavioural contract
+(\texttt{CONCEPT\_\allowbreak AGENT\_\allowbreak LIFECYCLE.md}): what an agent may do to the shared
+scene graph, and on
+what evidence. Its five stages are \textsc{create}, \textsc{update}, \textsc{remove},
+\textsc{history} and \textsc{ownership}.
+
+That contract was written from experience rather than from theory. It exists because the same
+defect class was found and fixed three separate times in three different agents, and because a
+threshold that deleted objects the sensor provably could not see survived inside a hand-rolled
+copy of a stage that already had a shared, correct implementation. Its purpose is that a stage
+stated once is a stage a new agent cannot forget.
+
+The previous chapter arrived at the same system from the opposite direction, by writing down the
+joint distribution the agents approximate and the seven assumptions that make it computable. The
+two descriptions were produced independently, which makes their comparison worth something: where
+they agree, the contract has a derivation; where they disagree, one of them is missing a piece.
+
+They agree in four stages out of five. The fifth, \textsc{create}, has no counterpart in the model
+at all --- and neither does one clause of \textsc{update}. Those two gaps are the subject of
+\S\ref{sec:create-gap} and \S\ref{sec:admissibility}, and they are, not coincidentally, where the
+system's remaining hard thresholds are concentrated.
+
+\section{The four stages that restate the factorization}
+
+Writing $\theta_i$ for an instance's geometry, $e_i$ for its existence, $M$ for the per-cycle
+mask-to-instance matching, and A1--A7 for the assumptions of Chapter~2:
+
+\begin{center}
+\begin{tabular}{@{}l l p{7.5cm}@{}}
+\toprule
+Stage & In the model & \\
+\midrule
+\textsc{update} & likelihood, A2, A5, A7 &
+  ``a frame must earn the right to move geometry'' is the admissibility side of the measurement
+  likelihood; the module the contract mandates is the recursive-Laplace engine itself \\[3pt]
+\textsc{remove} & $e_i$, A6 &
+  ``evidence, never a miss-counter'' requires removal to be driven by the existence factor, and A6
+  is what makes that factor separable from geometry in the first place \\[3pt]
+\textsc{history} & A7 &
+  ``no constant may stand in for experience'' refines the Markov transition: it forbids a constant
+  process noise $Q$ and requires an inferred, covariate-dependent one \\[3pt]
+\textsc{ownership} & A4 &
+  one agent owns the instances of one class, which is well defined only because A4 made the
+  classes independent \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+\textsc{history} is the clearest case of the contract being ahead of a naive reading of the model.
+A7 as stated permits any transition $P(\theta_i^t\given\theta_i^{t-1})$; the contract observes that
+a \emph{constant} $Q$ applied every frame, observed or not, inflates covariance on the agent's
+clock rather than on evidence, and requires the covariance growth to depend on what actually
+happened. That is a strictly better model, arrived at from the symptom.
+
+\section{\textsc{create} has no factor}
+\label{sec:create-gap}
+
+Birth adds an index to $\mathcal{I}_c$, and therefore adds a term to the product
+$\prod_{i\in\mathcal{I}_c}$ in the assembled posterior of Chapter~2. Nothing in that posterior
+decides that the term should be added.
+
+\subsection{What the question actually is}
+
+Deciding whether an object exists is a comparison between two models of different order: the world
+with $n$ instances of this class, and the world with $n+1$. Under the variational treatment of
+Chapter~2 that comparison has a definite form. Writing $F^{(n)}$ for the total free energy of the
+class under $n$ instances,
+\begin{align}
+\Delta F \;=\; F^{(n+1)}-F^{(n)}
+\;=\;&
+\underbrace{\mathbb{E}_{q}\big[-\ln P(\bar Z\given\theta_{1:n+1})\big]
+          -\mathbb{E}_{q}\big[-\ln P(\bar Z\given\theta_{1:n})\big]}_{\text{accuracy gained by explaining those points}}
+\nonumber\\[4pt]
+&+\;
+\underbrace{\mathrm{KL}\!\left[\,q(\theta_{n+1})\,\|\,P(\theta_{n+1}\given e)\,\right]}_{\text{complexity paid for the new object}} .
+\label{eq:deltaF}
+\end{align}
+The new instance is warranted exactly when $\Delta F<0$: when the measurements it claims are
+explained better by a new object than by the clutter component and the existing ones, by more than
+the cost of instantiating a new set of parameters. The second term is not a penalty bolted on for
+regularisation --- it is the same complexity term that already appears in every per-instance free
+energy, and it is what stops the model from explaining every stray mask with a new fridge.
+
+\subsection{What is computed instead}
+
+The contract requires that birth be evidence-accumulating rather than a counter, and mandates a
+single shared implementation so it cannot be re-derived per agent. A detection matures a
+\emph{pending candidate} over some number of frames, each frame contributing a weight. In the
+refrigerator agent that weight is a product of several factors, each of which is a proxy for
+something in \eqref{eq:deltaF}:
+
+\begin{center}
+\begin{tabular}{@{}l p{9.4cm}@{}}
+\toprule
+Factor & What it stands in for \\
+\midrule
+detector confidence & the likelihood's weight on the class label \\
+range attenuation   & measurement precision, which falls with distance \\
+frame admissibility & whether this frame may move geometry at all \\
+shape plausibility  & the prior term $P(\theta_{n+1}\given e)$, evaluated on the raw cloud \\
+room-envelope support & the same prior, evaluated against the wall polygon \\
+residual surprise (optional) & unexplained occupancy under the detection: the accuracy term \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+The list is a reasonable decomposition. Every entry corresponds to a term that would appear in
+$\Delta F$, and the shared implementation means all agents birth on the same terms.
+
+\subsection{What the surrogate costs}
+
+Three things are lost by accumulating a weighted count rather than evaluating \eqref{eq:deltaF}.
+
+\paragraph{The units are gone.} A streak is a dimensionless number compared against a frame count.
+$\Delta F$ is in nats, and can therefore be traded against any other quantity in the model --- the
+existence log-odds, a merge decision, the cost of a viewpoint. Because the birth score is not in
+nats, birth cannot participate in any of those trades, and the boundary it is compared against is
+a threshold with no principled value.
+
+\paragraph{Birth and death are not the same currency.} Removal is driven by an existence log-odds
+accumulated from occupancy carve and silhouette evidence. Birth is driven by a streak. The two
+decisions concern the same proposition --- does this object exist --- and are taken in
+incommensurable units, so an object can be born on evidence that would not have kept it alive, and
+the asymmetry is invisible to both mechanisms.
+
+\paragraph{The comparison is available and not made.} $\Delta F$ is not out of reach. A candidate
+that has matured has an associated set of measurements; instantiating a provisional instance,
+fitting it, and reading off the resulting free energy against the null is the same computation the
+agent already performs every cycle for its live instances. What is missing is the plumbing, not
+the theory.
+
+\subsection{Where this shows up}
+
+The refrigerator agent carries a subsystem whose sole purpose is to undo births that should not
+have happened: shape plausibility accumulated into the existence channel, plus a soft singleton
+inhibition so a strongly-supported instance suppresses weaker duplicates. It works, and it is
+carefully built. It is also a corrective loop that exists because the birth decision could not
+weigh the evidence properly at the time it was taken --- and its own criterion is, again, in
+different units from the one that created the object.
+
+A birth gate that computed \eqref{eq:deltaF} on the candidate's accumulated measurements would
+subsume the plausibility multiplier, the envelope support, the residual-surprise fusion and the
+retraction subsystem, because all four are estimating parts of the same scalar.
+
+\section{The \textsc{update} admissibility gate}
+\label{sec:admissibility}
+
+The second gap is smaller and of the same kind. The contract requires a frame to be
+\emph{resolvable}, and the robot \emph{still} or the mask \emph{well-centred}, before that frame
+may move the geometric mean.
+
+In the model there is no such switch. A poor frame should carry a large observation covariance and
+lose to the prior on its own, continuously and without a boundary. The gate exists because the
+covariance model is not yet trusted to do that unaided: motion corruption, truncation and
+off-centre bias are known to inflate the error in ways the current $R$ under-reports, so a hard
+predicate stands in for the missing precision.
+
+This one is closer to being closed than \textsc{create}. Each condition in the predicate names a
+covariate that already has a measured proxy --- ego-motion magnitude, truncated fraction, centroid
+radius --- and each is already carried on the mask. Folding them into $R$ instead of into an
+\texttt{if} is a change of the same shape as the one \textsc{history} made for $Q$: replace a
+constant-or-switch with a covariate-dependent term and let the inference do the gating.
+
+\section{Summary}
+
+Four of the five lifecycle stages are assumptions of the factorization wearing operational
+clothes, and one of them --- \textsc{history} --- improves on the assumption as stated. The two
+remaining rules, the birth criterion and the update admissibility gate, are doing work the model
+has no term for, and are correspondingly the places where the project's own preference for a
+continuous covariance over a threshold is not yet satisfied.
+
+Both gaps have the same remedy in outline: compute the quantity the heuristic is approximating.
+For \textsc{update} that means moving three known covariates into the observation covariance. For
+\textsc{create} it means evaluating a free-energy difference that the agent is already equipped to
+compute, and letting birth, retraction and removal be decided in one currency instead of three.
+
+\end{document}

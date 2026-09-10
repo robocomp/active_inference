@@ -1,0 +1,92 @@
+
+# --- Common Agent Data ---
+[Agent]
+id = 9
+name = "retina"
+
+# --- Single Instance Configuration ---
+# Use this if you only have one graph.
+configFile = ""
+domain = 0
+tree = false
+graph = false  # MUST be false. retina is a heavy GPU perception worker (YOLO/ONNX/CUDA + cv::Mat).
+                # The shared DSR node-link graph viewer corrupts the process heap during bottle
+                # join/leave churn — it surfaces as random SEGVs in paintAndFlush / cv::Mat::release /
+                # onnxruntime::Run (all confirmed via gdb+ASan). With graph=false retina is rock
+                # solid (20/20 start/stop cycles). View the DSR graph on robot_concept/room_concept
+                # instead (both stable with graph=true). Re-enabling here re-introduces the crash.
+2d = false
+3d = false
+
+# --- Multiple Instance Template ---
+# If you define multiple instances, the single instance config above will be ignored.
+# [Agent.instance_name]
+# configFile = ""
+# domain = 1
+# tree = true
+# graph = true
+# 2d = true
+# 3d = true
+
+# Zero-copy RGBD media plane (consumer). DEDICATED DDS domain, isolated from the
+# DSR Agent.domain = 0 so media discovery churn never perturbs cortex/DSR resync.
+# Must MATCH the robot_concept producer.
+[Media]
+domain_id   = 7
+rgb_topic   = "rc/zed/rgb"
+depth_topic = "rc/zed/depth"
+
+[Period]
+Compute = 100
+Emergency = 500
+
+[Presence]
+required_agent_names = ["robot_concept", "room_concept"]
+optional_agent_names = ["bottle_concept"]
+config_dir           = "etc"
+monitor_period_ms    = 500
+heartbeat_timeout_ms = 3000
+rejoin_grace_ms      = 1500
+stale_grace_ms       = 120000
+agent_info_period_ms = 1000
+
+[Owns]
+nodes    = []   # "voxels" was vestigial (never created)
+
+
+[Component.Debug]
+Verbose = false
+
+[Voxel]
+# Custom drawing windows. The Voxel3D viewer is a QOpenGLWidget; a GL surface compositing under the
+# DSR graph view's churn-driven repaints (bottle join/leave) corrupts the backing store and crashes
+# the process. room_concept's raster QGraphicsView custom widget does not. DIAGNOSTIC/ROBUST setting:
+# GL voxel window OFF (graph viewer still available for debugging), YOLO (raster QLabel) ON.
+show_voxel_viewer = false
+show_yolo_viewer  = true
+
+[Yolo]
+# TSan run: force CPU inference. TSan + CUDA/TensorRT abort on the GPU driver's VA reservations and
+# private threading; the bottle-join data race we are hunting is in the cortex DSR layer, not YOLO,
+# so CPU inference reproduces it without the GPU sanitizer conflicts.
+use_gpu = false
+use_trt = false
+accepted_labels = ["table", "chair", "monitor", "tv", "bottle"]
+mask_tray = true
+tray_mask_ref_width  = 1280
+tray_mask_ref_height = 720
+# Crescent polygon bounding the robot tray (flat x,y pairs, referenced to 1280×720).
+# Traces the outer arc from the left image-bottom intersection clockwise to the right,
+# then closes along the image bottom edge.  Adjust if the camera mount changes.
+tray_mask_polygon = [
+    195, 720,  230, 694,  286, 664,  353, 640,  428, 621,
+    510, 608,  596, 601,  640, 600,  684, 601,  770, 608,
+    852, 621,  927, 640,  994, 664, 1050, 694, 1086, 720,
+    1280, 720,  0, 720
+]
+
+[Ice]
+Warn.Connections = "0"
+Trace.Network = "0"
+Trace.Protocol = "0"
+MessageSizeMax = "20004800"

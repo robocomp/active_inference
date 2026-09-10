@@ -1,0 +1,90 @@
+[Proxies]
+# No required Ice interfaces (DSR is the comms plane).
+
+[Agent]
+id = 13   # MUST be unique across the shared graph: room=5 robot=6 table=7 retina=9 bottle=10 controller=11. A collision = CRDT actor-id clash → SIGSEGV.
+name = "human_concept"
+configFile = ""
+domain = 0
+tree = true
+graph = true
+"2d" = true
+"3d" = true
+
+[Period]
+Compute = 50      # 20 Hz — also drives the kinematic speed/accel-limit dt (HumanModel.dt)
+Emergency = 500
+
+[Component.Debug]
+Verbose = false
+
+[Ice]
+Warn.Connections = "0"
+Trace.Network = "0"
+Trace.Protocol = "0"
+MessageSizeMax = "20004800"
+
+[Presence]
+# Replay-first standalone bring-up: no required peers, so the agent reaches Operating alone.
+# Live mode (ZED / media-plane source) should add ["robot_concept", "room_concept"].
+#required_agent_names = []
+monitor_period_ms = 500
+heartbeat_timeout_ms = 25000
+rejoin_grace_ms = 8000
+stale_grace_ms = 120000
+
+[Owns]
+# Owned graph nodes torn down on shutdown / peer-loss. "person_*" matches every scaffolded person node.
+nodes = ["human_concept 13", "person_*"]
+
+# ── human_concept agent ───────────────────────────────────────────────────────
+[HumanConcept]
+PriorsPath = "etc/object_priors.toml"
+SourceKind = "dsr"               # "replay" (CSV) | "dsr"/"live" (retina 'skeleton' node, camera→room)
+ReplayPath = "etc/skeleton_replay.csv"   # frame[,id],54 kp[,18 conf]; see cpp/harness CSV format
+ReplayLoop = true
+MinValid = 12                    # fewer valid joints ⇒ raise the look affordance
+UncertaintyThresh = 0.05         # tr(cov) above this ⇒ raise the look affordance
+PoseCovScale = 0.02              # room→person RT covariance proxy = scale·tr(cov)
+
+[HumanModel]
+Anchors = "1,2,5,8,11"           # neck, shoulders, hips
+SigmaObs = 0.06
+SigmaDyn = 0.25
+SigmaMin = 0.02
+SigmaMax = 0.15
+MinKpConf = 15.0                 # [0,100] hard floor: keypoints below this are dropped from fit + calibration
+WLimits = 5.0
+WSym = 1.0
+GnSteps = 2
+Damping = 0.001
+FisherCsvPath = ""               # non-empty → per-cycle belief CSV (note: currently no writer)
+
+# Anti arm-cross (sidedness) prior — filters YOLO L/R wrist swaps; soft, allows folded arms.
+WCross = 3.0
+ArmCrossMargin = 0.05            # m past the opposite shoulder before it penalises
+WNeutral = 1.0                   # weak pull of arm DOFs toward rest — pins under-observed DOFs (anti-drift)
+MaxInnovation = 1.0              # rad — reject+hold a per-frame angle jump bigger than this (glitch filter)
+
+# Speed/accel limits — applied by the OUTPUT CONTROLLER (smooth, natural motion + jump filter), NOT
+# inside the fit. WVel/WAcc (the old in-fit penalties) stay 0; the controller uses Omega/Alpha/VLin/ALin.
+WVel = 0.0
+WAcc = 0.0
+OmegaMax = 3.0                   # max angular speed (rad/s ~170°/s) — natural limb speed
+AlphaMax = 12.0                  # max angular acceleration (rad/s^2) — gentle ease-in/out
+PoseSmooth = 0.2                 # global-pose EMA (Kabsch R,t) weight on new sample — lower = steadier facing
+CalibrateBones = true            # online per-person bone-length calibration (matches proportions → lower FE)
+CalibSmooth = 0.05               # EMA weight on each new measured segment length — lower = steadier
+VLinMax = 3.0                    # max lower-body linear speed (m/s)
+ALinMax = 30.0                   # max lower-body linear acceleration (m/s^2)
+# Per-cycle fit-diagnostics CSV (the gate). Empty = off. Columns: cycle,node,dt,fe,valid,tr_cov,
+# mu0..mu10, sig_l_elbow/r_elbow/l_wrist/r_wrist (mm), vel_clamped, acc_clamped.
+FitCsvPath = "etc/human_fit_log.csv"
+
+[Epistemic]
+ObsDistance = 1.5                # stand-off (m) from the person at the look viewpoint
+ViewInfo = 50.0                  # Fisher precision a clearer view adds (ΔH scale)
+CooldownCycles = 120
+CsvPath = ""
+StillVel = 0.10                  # contract .still: hold base ≤ this (m/s) for a clean look
+StillOmega = 0.15                # …and ≤ this (rad/s) — the term that matters most (blur/pose-smear)

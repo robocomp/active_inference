@@ -1,0 +1,1015 @@
+% FACTORIZATION_ANCHORS.tex — VARIANT of Chapter 2.
+%
+% Identical to FACTORIZATION.tex except that assumption A1 is relaxed: converged objects are fed
+% back to the room localiser as SE(2) landmarks, closing the loop the baseline chapter cuts.
+% Diff against FACTORIZATION.tex to see exactly what changes.
+%
+% Build:  pdflatex FACTORIZATION.tex   (twice, for cross-references)
+%
+\documentclass[11pt,a4paper]{report}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}          % scalable Latin Modern — microtype needs a scalable face
+\usepackage[margin=2.6cm]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{empheq}
+\usepackage{pifont}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{microtype}
+
+\newcommand{\Ind}{\perp\!\!\!\perp}          % conditional independence
+\newcommand{\given}{\,|\,}
+\newcommand{\R}{\mathbb{R}}
+\theoremstyle{definition}   % roman body: assumptions carry prose, not one-line claims
+\newtheorem{assumption}{Assumption}
+\renewcommand{\theassumption}{A\arabic{assumption}}   % A1 … A7, flat, not per-section
+
+\begin{document}
+
+\setcounter{chapter}{1}
+\chapter{The generative model of the concept-agents\\[4pt]
+         \large\normalfont\itshape variant: objects as localisation landmarks}
+
+\begin{flushleft}
+\textit{No\'e Zapata}
+\end{flushleft}
+
+\vspace{4pt}
+
+\section{Introduction}
+\label{sec:intro}
+
+
+
+The \textsf{active\_inference} scene understanding runs as a set of concurrent processes: one
+localiser, and one \emph{concept agent} per object class, each maintaining its own instances in a
+shared graph. That split is usually described in engineering terms --- separation of
+concerns, independent failure, parallelism.
+
+It also admits a probabilistic reading, and that reading is the subject of this chapter. Taken
+together, the processes compute an approximation to one posterior, and the way they are divided
+\emph{is} a factorization of it. Each process boundary corresponds to a conditional-independence
+assumption; each quantity that crosses a boundary is what survived a marginalisation; and several
+behaviours that present as bugs turn out to be factors that were dropped deliberately and later
+needed. Read this way, the architecture carries its failure modes on its face: they are readable
+off the factors.
+
+The chapter therefore writes that model down. It states the joint distribution over objects, room,
+trajectory, association and sensor data (\S\ref{sec:joint}), conditions it on the data, says what
+we are actually solving for (\S\ref{sec:problem}), and then states, one at a time, the seven
+approximations that turn it into something the deployed processes compute
+(\S\ref{sec:derivation}). Each is given with its justification, its cost, and the code that
+implements it. Two of those costs are measured on the running system (\S\ref{sec:consequences}).
+
+\medskip\noindent
+\textbf{This is a variant chapter.} It differs from the baseline in one assumption, \ref{as:meanfield}.
+There, the localiser is computed from odometry and LiDAR alone and the objects never inform it.
+Here that channel is closed: a converged object is published back as an SE(2) landmark and enters
+the localiser's own free energy. Everything else --- the joint, the conditioning, the other six
+assumptions --- is unchanged, which is the point of keeping the two chapters parallel. The
+consequences are concentrated in \S\ref{sec:derivation} and \S\ref{sec:fe}, and one of them is
+serious enough to have kept the feature switched off (\S\ref{sec:incest}).
+
+\medskip\noindent
+One result is worth the effort on its own. The single exactly-solvable factor
+(\S\ref{sec:exact}) produces a ceiling on how much one camera frame can ever contribute, which
+accounts for a class of ``more data did not help'' outcomes. The lifecycle contract that every
+agent must satisfy stands in a close relation to these seven assumptions, and is taken up
+separately in the next chapter.
+
+\section{Notation}
+\label{sec:notation}
+
+Everything below uses these, and nothing else. Every index set is finite.
+
+\paragraph{Index sets.}
+\begin{align*}
+t &\in \{1,\dots,T\}    && \text{compute cycle (a mask frame with its capture stamp)}\\
+c &\in \mathcal{C}       && \text{object \emph{class} — one concept agent per class:}\\
+  &                      && \quad \mathcal{C}=\{\textsf{refrigerator},\textsf{table},\textsf{chair},\textsf{cabinet},\dots\}\\
+i &\in \mathcal{I}_c     && \text{object \emph{instance} of class }c\text{ (a DSR node)}\\
+j &\in \mathcal{J}_t     && \text{mask slice within frame }t\\
+k &\in \mathcal{K}       && \text{\emph{burst} of measurements — \S\ref{sec:batch} only; unused in the deployed system}
+\end{align*}
+
+\paragraph{Unknowns.} What we are solving for, or must account for:
+\begin{align*}
+\theta_i &\in \R^{6}   && \text{geometry of instance }i:\ (c_x,c_y,H,w,h,\text{yaw})\\
+e_i      &\in \R       && \text{existence of instance }i\text{, as log-odds}\\
+M_t      &             && \text{\emph{matching} at cycle }t:\ \text{slice } j \mapsto \text{instance } i,\ \text{or } \varnothing\\
+X        &=\{X_t\}     && \text{robot trajectory},\ X_t\in SE(2)\\
+R        &             && \text{room geometry (the wall polygon)}
+\end{align*}
+
+\noindent
+Five unknowns, not six: $\Delta=\{\delta_t\}$ appears throughout but is a \emph{coordinate} for
+integrating $X$ out, not a degree of freedom of its own. It is defined in \S\ref{sec:deltaisx}
+and used only in the per-frame marginalisation of \S\ref{sec:derivation}.
+
+\noindent
+$M$ ranges over assignments of slices to instances, one per cycle. It is \emph{not} an
+association between accumulated groups of measurements and objects; no such variable exists here
+(cf.\ \S\ref{sec:khronos}).
+
+\paragraph{Given.}
+\begin{align*}
+Z &=\{Z_t\}       && \text{semantic masks from the camera, with 3-D support points}\\
+L &=\{L_t\}       && \text{LiDAR sweeps}\\
+\Phi &=\{\Phi_t\} && \text{odometry, } \Phi_t\sim (X_{t-1})^{-1}X_t
+\end{align*}
+We write $Z_t^{(i)}$ for the slice that $M_t$ assigns to instance $i$ (empty if none).
+
+\paragraph{Covariances.} Three distinct objects, kept apart:
+\begin{align*}
+\Sigma_X^t  &&& \text{localization covariance of }X_t\text{, published by \textsf{room\_concept}}\\
+\Sigma_\delta^t &&& \text{common-mode covariance of }\delta_t\ \text{(note: subscript }\delta,\ \text{not }c)\\
+\Sigma_{\theta_i} &&& \text{posterior covariance of instance }i\text{'s geometry}
+\end{align*}
+with
+\begin{equation}
+\Sigma_\delta^t \;=\; \underbrace{\Sigma_{\mathrm{cm}}}_{\text{constant prior}}
+\;+\; \underbrace{J\,\Sigma_X^t\,J^{\!\top}}_{\text{chain, capture-stamp pinned}} .
+\label{eq:sigmadelta}
+\end{equation}
+$\Sigma_{\mathrm{cm}}$ is \texttt{common\_mode\_pos/size/yaw\_std}${}^2$; the second term is
+\texttt{frame.chain\_cov\_*}. This is the \emph{only} place the foreign trajectory estimate
+enters the object problem.
+
+\section{The full joint, and where the conditional comes from}
+\label{sec:joint}
+
+\subsection{The generative model}
+
+Before any conditioning, write the joint over \emph{everything} — unknowns and data alike — in
+the order the world generates them. Each factor is a physical statement.
+
+\begin{empheq}[box=\fbox]{align}
+P\!\left(e,\theta,R,X,\Phi,L,M,Z\right)
+\;=\;&
+\underbrace{P(e)}_{\text{\ding{192} objects exist}}\;
+\underbrace{P(\theta\given e)}_{\text{\ding{193} and have shape}}\;
+\underbrace{P(R)}_{\text{\ding{194} the room has walls}}\;
+\underbrace{P(X)}_{\text{\ding{195} robot moves}}
+\nonumber\\[5pt]
+\times\;&
+\underbrace{P(\Phi\given X)}_{\text{\ding{196} wheels report it}}\;
+\underbrace{P(L\given X,R,\theta)}_{\text{\ding{197} LiDAR hits walls \emph{and} objects}}
+\nonumber\\[5pt]
+\times\;&
+\underbrace{P(M\given \theta,e,X)}_{\text{\ding{198} what is visible from where}}\;
+\underbrace{P(Z\given \theta,M,X)}_{\text{\ding{199} surfaces become masks}}
+\label{eq:fulljoint}
+\end{empheq}
+
+\noindent
+Read as a story: objects exist \ding{192} and have geometry \ding{193}; the room has walls
+\ding{194}; independently of both, the robot follows a trajectory \ding{195}, which the wheels
+measure noisily \ding{196} and which the LiDAR measures far better by sweeping the walls
+\ding{197}. From a given pose some objects are in the frustum and unoccluded, which is what a
+matching can range over \ding{198}, and the visible surfaces project into mask points \ding{199}.
+
+Three structural facts fall straight out of \eqref{eq:fulljoint}, and they matter more than the
+algebra:
+
+\begin{enumerate}[label=(\alph*),leftmargin=1.9em]
+\item \textbf{Objects and pose are \emph{a priori} independent}: $P(e)P(\theta\given e)$ and
+      $P(R)P(X)$ factorise exactly, with no assumption. Objects do not know where the robot is.
+\item \textbf{They are coupled through \emph{two} channels, not one.} The obvious one is
+      \ding{199}: masks are generated by object surfaces viewed from a pose. The less obvious one
+      is \ding{197} --- \textbf{the LiDAR sweep contains the objects as well as the walls}. A
+      refrigerator standing against a wall returns range in the very scan used to localise
+      against that wall. In this variant \emph{both} bridges carry traffic: the mask bridge
+      informs the objects, and the LiDAR bridge is supplemented by an explicit landmark channel
+      that informs the localiser.
+\item \textbf{$\Phi$ and $L$ are observations of $X$, not priors on it} --- factors \ding{196}
+      and \ding{197}. They sit on the data side of the conditioning bar for that reason. Odometry
+      ties consecutive poses together; the LiDAR, through $R$, is what stops the pose drifting
+      without bound, and is therefore what makes $\Sigma_X$ small enough that
+      \eqref{eq:sigmadelta} is dominated by its constant term.
+\end{enumerate}
+
+\subsection{$\Delta$ is a coordinate, not an unknown}
+\label{sec:deltaisx}
+
+Equation~\eqref{eq:fulljoint} has eight factors and no $\Delta$, and nothing below adds one. The
+trajectory enters the problem exactly once, as $X$. What changes is the coordinate system in
+which we eventually integrate it out.
+
+That marginalisation is over a whole trajectory --- a large, strongly correlated object. But $X$
+is never handed to us; what \textsf{room\_concept} publishes is an estimate $\hat X$ with
+covariance $\Sigma_X$. It is therefore natural to integrate in the \emph{error} coordinate
+\begin{equation}
+\delta_t \;:=\; \hat X_t \ominus X_t \;\in\;\R^{6},
+\qquad \Delta=\{\delta_t\}_{t=1}^{T},
+\label{eq:deltadef}
+\end{equation}
+which, for the fixed known $\hat X$, is a bijection with unit Jacobian, so that for any $f$
+\begin{equation}
+\int f(X)\,\mathrm{d}X \;=\; \int f\!\left(\hat X\ominus\Delta\right)\,\mathrm{d}\Delta .
+\label{eq:changeofvar}
+\end{equation}
+
+\begin{quote}
+$\Delta$ carries no degree of freedom and appears in no factor of the model. It is a change of
+integration variable, adopted for two reasons and no others: $\Sigma_X$ is expressed in it
+(eq.~\ref{eq:sigmadelta}), and the \emph{per-frame} structure of the approximation
+the per-frame approximation of \S\ref{sec:derivation} is visible in it while being invisible in
+$X$. Treating $X$ and $\Delta$ as two
+unknowns would double-count the same uncertainty.
+\end{quote}
+
+\noindent
+Accordingly $\Delta$ does not appear again until \S\ref{sec:derivation}, where the integral is
+actually performed. Everything between here and there is written in $X$.
+
+\subsection{Conditioning}
+
+The posterior is the joint over the evidence:
+\begin{equation}
+P\!\left(e,\theta,R,M,X\given Z,\Phi,L\right)
+\;=\;
+\frac{P\!\left(e,\theta,R,X,\Phi,L,M,Z\right)}{P(Z,\Phi,L)},
+\qquad
+P(Z,\Phi,L)=P(Z,L\given\Phi)\,P(\Phi).
+\label{eq:conditioning}
+\end{equation}
+The denominator does not depend on any unknown, so it never affects the $\arg\max$ and is dropped
+everywhere below. It is not inert, though: $-\log P(Z,\Phi,L)$ is the quantity the variational free
+energy upper-bounds, so every assumption of \S\ref{sec:derivation} is paid for in exactly that
+currency.
+
+Substituting~\eqref{eq:fulljoint} into~\eqref{eq:conditioning} gives the posterior as an exact
+equality --- the normaliser is written out, so nothing is hidden in a $\propto$:
+\begin{align}
+&P\!\left(e,\theta,R,M,X\given Z,\Phi,L\right)\;=\;\frac{1}{P(Z,\Phi,L)}\;\times
+\nonumber\\[5pt]
+&\qquad
+\underbrace{P(e)\,P(\theta\given e)}_{\text{\ding{192}\ding{193}\; what objects are}}
+\;\cdot\;
+\underbrace{P(R)\,P(X)\,P(\Phi\given X)\,P(L\given X,R,\theta)}_{\text{\ding{194}--\ding{197}\; where the robot is}}
+\nonumber\\[7pt]
+&\qquad\times\;
+\underbrace{P(M\given\theta,e,X)}_{\text{\ding{198}\; whose mask is whose}}
+\;\cdot\;
+\underbrace{P(Z\given\theta,M,X)}_{\text{\ding{199}\; how masks arise}}
+\label{eq:posterior-raw}
+\end{align}
+
+\noindent
+Everything so far is exact. \emph{No} approximation has been made: \eqref{eq:posterior-raw} is
+just \eqref{eq:fulljoint} divided by its own marginal. The rest of this document consists of
+replacing three of its four numerator blocks with something computable. Read as a roadmap:
+
+\begin{description}[style=nextline,leftmargin=1.4em,itemsep=9pt,parsep=2pt]
+
+\item[\normalfont \ding{192}\ding{193}\; $P(e)\,P(\theta\given e)$ \;---\; \textbf{what objects are}]
+That a refrigerator exists at all, and that if it does, it is about $0.60\pm0.08$ deep and
+$1.90\pm0.30$ tall. This is the one block we do \emph{not} approximate: these are the configured
+priors, and the measurements in \S\ref{sec:consequences} argue they do more work than is usually
+credited.
+
+\item[\normalfont \ding{194}--\ding{197}\; $P(R)P(X)P(\Phi\given X)P(L\given X,R,\theta)$ \;---\; \textbf{where the robot is}]
+Where the robot went and what the room looks like, constrained by the wheels, by the LiDAR
+sweeping the walls, and --- in this variant --- by the converged objects themselves, fed back as
+interior landmarks. Computed by \textsf{room\_concept}, but no longer independently of $\theta$:
+the $\theta$ in the last factor is now honoured rather than dropped.
+
+\item[\normalfont \ding{198}\; $P(M\given\theta,e,X)$ \;---\; \textbf{whose mask is whose}]
+Properly a distribution over assignments: from this pose, with these objects, several matchings
+are possible and some are likelier than others. Replaced by its single most likely value,
+computed greedily.
+
+\item[\normalfont \ding{199}\; $P(Z\given\theta,M,X)$ \;---\; \textbf{how masks arise}]
+The second of the two bridges between objects and pose, and the one dealt with carefully.
+Everything difficult lives here, and it is broken up along four different axes: across object
+classes, across instances within a class, across time, and finally the trajectory is integrated
+out of each frame separately.
+
+\end{description}
+
+\section{The problem}
+\label{sec:problem}
+
+What the agents have to publish is the geometry and existence of the objects: $\theta$ and $e$,
+and nothing else. The room model, the robot trajectory and the mask-to-instance matching are all
+things we are obliged to reason about --- the data cannot be explained without them --- but none
+of them is a result. They are nuisance parameters.
+
+The way to get from a distribution over everything to an answer about $\theta$ and $e$ is to
+\emph{marginalise}: integrate the nuisance parameters out of the posterior~\eqref{eq:posterior-raw},
+leaving a distribution over the two quantities we actually want, and take its maximum.
+
+\begin{equation}
+\boxed{\;
+\theta^\star,\,e^\star
+\;=\;
+\underbrace{\arg\max_{\theta,\,e}}_{\text{maximised}}\;
+\sum_{M}\;
+\underbrace{\int}_{\text{marginalised}}
+P\!\left(\theta,e,M,X,R \given Z,\Phi,L\right)\,
+\mathrm{d}X\,\mathrm{d}R \; }
+\label{eq:problem}
+\end{equation}
+
+\noindent
+Written out, the marginalisation step alone is
+\begin{equation}
+P\!\left(\theta,e\given Z,\Phi,L\right)\;=\;\sum_M\iint
+P\!\left(\theta,e,M,X,R\given Z,\Phi,L\right)\mathrm{d}X\,\mathrm{d}R ,
+\label{eq:marginalpost}
+\end{equation}
+and \eqref{eq:problem} is its maximum. Note the structure here, since it is easy to read as a
+posterior of a posterior, which it is not:
+conditioning happened once, in \eqref{eq:conditioning}, and summing over $M$ and integrating over
+$(X,R)$ merely removes variables from a distribution that is \emph{already} conditioned on
+$(Z,\Phi,L)$. Both sides of \eqref{eq:marginalpost} are conditioned on the same thing.
+
+What \eqref{eq:problem} maximises is therefore the \emph{marginal} posterior, not the joint one:
+it is a marginal-MAP estimate. Maximising the joint instead --- reporting the $(\theta,e,M,X,R)$ that
+jointly maximise~\eqref{eq:posterior-raw} --- is a different and generally non-equivalent
+estimator, and it is the one a monolithic SLAM system computes.
+
+Three treatments, three reasons:
+\begin{center}
+\begin{tabular}{@{}llp{8.1cm}@{}}
+\toprule
+Unknown & Treatment & Why \\
+\midrule
+$\theta,e$ & maximised & they are the answer; they are what we publish to DSR \\[2pt]
+$X$, $R$   & marginalised & nuisance: needed to explain $Z$ and $L$, never reported by us. The
+                            $X$ integral is carried out in the coordinate $\Delta$
+                            (\S\ref{sec:deltaisx}) \\[2pt]
+$M$        & \emph{collapsed} & neither maximised nor summed --- see \S\ref{sec:derivation} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+The third row is the one to watch. Maximising and marginalising are both principled; collapsing
+$M$ to its mode is neither, and it is the only place where a variable is treated as known when it
+demonstrably is not. Its cost surfaces in \S\ref{sec:derivation}.
+
+A system that reports its own trajectory --- a SLAM system --- would put $X$ in the first row
+instead of the second. That single reassignment is what separates this factorization from a
+monolithic one, and most of the derivation in \S\ref{sec:derivation} follows from it.
+
+\section{Perception as free-energy minimisation}
+\label{sec:fe}
+
+Equation~\eqref{eq:posterior-raw} is exact and unusable: the marginal
+\eqref{eq:marginalpost} has no closed form, and the joint has no representation an agent could
+hold. What each agent holds instead is a Gaussian, and what it does each cycle is take a step
+downhill on a bound.
+
+\subsection{The bound}
+
+For any distribution $q$ over the unknowns, the \emph{variational free energy}
+\begin{equation}
+F[q]\;=\;\mathbb{E}_{q}\!\left[-\ln P(\text{unknowns},\text{data})\right]-\mathbb{H}[q]
+\;=\;\underbrace{\mathrm{KL}\!\left[\,q\,\|\,P(\text{unknowns}\given\text{data})\,\right]}_{\ge 0}
+\;-\;\ln P(\text{data})
+\label{eq:F}
+\end{equation}
+upper-bounds the surprise $-\ln P(Z,\Phi,L)$, with equality only when $q$ is the exact posterior.
+Minimising $F$ over $q$ therefore does two things at once: it tightens the bound on the evidence,
+and it drags $q$ towards the posterior we cannot compute. Everything the agents do to $\theta$ and
+$e$ is an instance of this.
+
+The choice of \emph{which} family $q$ is drawn from is not incidental --- it is the content of
+\S\ref{sec:derivation}. Read as a statement about $q$ rather than about $P$, the seven assumptions
+say:
+\begin{equation}
+q\!\left(\theta,e,M,X,R\right)\;=\;
+\underbrace{q(X,R)}_{\text{foreign, but variable}}\;
+\underbrace{\mathbb{1}\!\left[M=\hat M\right]}_{\text{degenerate}}\;
+\prod_{c\in\mathcal{C}}\prod_{i\in\mathcal{I}_c}
+\underbrace{q(\theta_i)}_{\mathcal{N}(\mu_i,\Sigma_{\theta_i})}\;
+\underbrace{q(e_i)}_{\text{log-odds}} .
+\label{eq:qfamily}
+\end{equation}
+Each factor of \eqref{eq:qfamily} that is narrower than the truth adds a non-negative amount to the
+KL term of \eqref{eq:F}, and that amount is the cost quoted with each assumption.
+
+\subsection{What each block of the posterior contributes}
+
+Substituting \eqref{eq:qfamily} into \eqref{eq:F} and using the four blocks of
+\eqref{eq:posterior-raw}:
+
+\begin{center}
+\begin{tabular}{@{}l l p{6.9cm}@{}}
+\toprule
+Block of \eqref{eq:posterior-raw} & Contributes to $F$ & \\
+\midrule
+\ding{192}\ding{193} objects &
+$\mathrm{KL}\!\left[q(\theta_i)\|P(\theta_i\given e_i)\right]$ &
+the \emph{complexity} term: how far this instance's posterior has been dragged from the
+class prior. Minimised by us. \\[4pt]
+\ding{194}--\ding{197} localisation &
+$\mathbb{E}_{q}\!\left[-\ln P(L\given X,R,\theta)\right]$ &
+no longer inert. The object's pose enters the localiser's accuracy term, so moving
+$\theta$ moves this block too --- which is what the landmark channel transmits. \\[4pt]
+\ding{198} matching &
+zero &
+a delta contributes no entropy and no expectation. The matching is free, in the
+literal sense that $F$ cannot see it. \\[4pt]
+\ding{199} masks &
+$\mathbb{E}_{q}\!\left[-\ln P(\bar Z_i\given\theta_i,\hat X)\right]$ &
+the \emph{accuracy} term. All the data enter here. Minimised by us. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+Only the matching block is inert now. Each side still minimises a \emph{partial} free energy
+holding the other fixed --- for an object agent,
+\begin{equation}
+F_i\;=\;
+\underbrace{\mathbb{E}_{q}\!\left[-\ln P\!\left(\bar Z_i\given\theta_i,\hat X\right)\right]}_{\text{accuracy}}
+\;+\;
+\underbrace{\mathrm{KL}\!\left[\,q(\theta_i)\,\|\,P(\theta_i\given e_i)\,\right]}_{\text{complexity}} ,
+\label{eq:freeenergy}
+\end{equation}
+summed over instances within a class --- and, by \ref{as:class}, never summed across classes. The
+localiser minimises its own partial free energy over $(X,R)$, in which \eqref{eq:anchormsg} appears
+as one factor per anchor. Alternating the two is coordinate descent on their sum: each step lowers
+the joint free energy, and the pair converges to a fixed point of the factorised problem.
+
+The accuracy term deserves one remark, because it is where the robustness lives. It is not a
+least-squares residual over the mask points but the negative log of a \emph{mixture}: each point is
+explained either by the object's surface, by a uniform clutter component, or by a known wall. A
+point that fits nothing costs a bounded amount and stops pulling, so an outlier degrades the fit by
+a finite quantity instead of dragging it. That bound is a modelled probability, not a rejection
+threshold.
+
+\subsection{How the minimisation is carried out}
+
+$q(\theta_i)$ is Gaussian, so minimising \eqref{eq:freeenergy} reduces to finding its mode and
+curvature. The engine takes a few Gauss--Newton steps on $F_i$, then adopts the Hessian at the
+optimum as $\Sigma_{\theta_i}$ --- which is what makes the result a \emph{Laplace} posterior rather
+than a point estimate. Between observations the transition prior of \ref{as:markov} is applied on
+its own, so an unobserved instance loses precision rather than holding a stale certainty.
+
+\subsection{The same quantity scores action}
+
+Perception minimises $F$ with respect to $q$. The other half of the active-inference formulation
+minimises \emph{expected} free energy with respect to what the robot does next, and the agents
+implement its epistemic term directly: the next-best-view planner scores each face of the fitted
+box by the D-optimal expected entropy reduction on $\Sigma_{\theta_i}$, and proposes the standoff
+pose that observes the winner. The covariance produced by the Hessian in the previous paragraph is
+the same object the planner differentiates to choose where to look. Belief and behaviour are scored
+in one currency.
+
+\subsection{What free energy is not used for}
+
+One decision is conspicuously outside this scheme. Whether an instance should exist at all is a
+comparison between models of different order, and it has a free-energy form --- but no such
+comparison is computed. Birth is decided by an accumulated weight in different units, and the
+mismatch is taken up in the next chapter.
+
+\section{The derivation}
+\label{sec:derivation}
+
+Start from the exact posterior~\eqref{eq:posterior-raw}. Each assumption below replaces one of its
+numerator blocks; none of them touches the denominator. There are seven, and this is the first
+place they are named:
+
+\begin{center}
+\begin{tabular}{@{}>{\bfseries}l l p{7.6cm}@{}}
+\toprule
+\normalfont Assumption & Acts on & What it assumes \\
+\midrule
+\ref{as:meanfield} & \ding{194}--\ding{197} & localisation and objects are updated alternately, each holding the other fixed \\
+\ref{as:frames}    & \ding{199} & the trajectory marginal factorises frame by frame \\
+\ref{as:hard}      & \ding{198} & one matching, not a distribution over matchings \\
+\ref{as:class}     & \ding{199} & object classes are independent --- one agent each \\
+\ref{as:inst}      & \ding{199} & instances within a class are independent \\
+\ref{as:geomexist} & \ding{199} & geometry and existence factorise \\
+\ref{as:markov}    & \ding{199} & the state is Markov in time \\
+\bottomrule
+\end{tabular}
+\label{tbl:assumptions}
+\end{center}
+
+\noindent
+Five of the seven act on \ding{199} alone. That concentration is expected: \ding{199} is where
+objects and pose meet, and it is the only block large enough to need breaking up. Block \ding{192}\ding{193} ---
+the object priors --- appears nowhere in the table, because nothing is done to it.
+
+\begin{assumption}[Structured exchange — objects as landmarks]\label{as:meanfield}
+\begin{equation}
+q\!\left(\theta,e,X,R\right)\;=\;q(X,R)\;\prod_{c}\prod_{i}q(\theta_i)\,q(e_i),
+\end{equation}
+with both factors \emph{variable}. Neither is computed from the other in one pass; they are
+updated alternately, each holding the other fixed. The posterior itself is unchanged --- the
+objects were always inside $P(L\given X,R,\theta)$ --- and what is dropped is only the
+\emph{correlation} between the two blocks, not the dependence.
+
+\smallskip
+This is coordinate descent on the joint free energy, and it is a strictly weaker assumption than a
+one-way cut: each block still assumes the other is a point-mass-with-covariance rather than a
+correlated partner, but information now flows in both directions.
+\end{assumption}
+
+\noindent\textit{Justification.} Walls constrain pose well in a closed room and badly in two
+common situations: a long corridor, where position along the axis is weakly observable, and an open
+area where the nearest wall is far enough that its angular resolution is poor. Furniture sits in the
+interior. A converged, well-localised object is exactly the landmark those geometries lack, and the
+information is already being computed --- \S\ref{sec:derivation} produces $\Sigma_{\theta_i}$ for
+every instance whether or not anyone consumes it.
+
+\smallskip\noindent\textit{Cost.} One is structural and one is dangerous.
+\begin{enumerate}[label=(\roman*),leftmargin=1.9em,topsep=3pt,itemsep=3pt]
+\item The mean-field form still discards $\mathrm{Cov}(\theta,X)$, so both blocks remain
+      overconfident. Alternating updates converge to a fixed point of the factorised problem, not
+      to the true joint posterior.
+\item Errors become \emph{correlated across agents}. A mis-localised fridge now perturbs $X$, which
+      perturbs every chair, table and cabinet in the room. \ref{as:inst} assumes instances own
+      disjoint measurement sets and are therefore independent; with the loop closed they share a
+      common pose, and that independence is no longer even approximately true. The cost of one bad
+      object stops being local.
+\end{enumerate}
+
+\smallskip\noindent\textit{Computed as.} Two messages, one per direction.
+
+\emph{Localiser $\to$ objects}, as before: $(\hat X,\Sigma_X)$, consumed through
+\texttt{InnerGaussianAPI} at the mask's capture stamp and folded into $\Sigma_\delta^t$ by
+\eqref{eq:sigmadelta}.
+
+\emph{Objects $\to$ localiser}: each agent publishes, per cycle, its instance's pose in the
+\emph{robot} frame together with an information matrix,
+\begin{equation}
+z_o\;=\;\big(x,y,\mathrm{yaw}\big)_{\text{robot}},
+\qquad
+\Lambda\;=\;\big(\Sigma_o\oplus R_o\big)^{-1},
+\label{eq:anchormsg}
+\end{equation}
+where $\Sigma_o$ is the object's own map covariance and $R_o$ this frame's measurement covariance.
+The localiser adds one factor per anchor to its window. Three guards are already in place: an
+anchor is only emitted once its map covariance is below a validation bound, its weight decays with
+staleness, and only the newest few window slots receive object factors. A symmetric object
+contributes position only --- the yaw row and column of $\Lambda$ are zeroed rather than the yaw
+residual being trusted.
+
+The machinery for this exists in full: the object side publishes today
+(\texttt{PublishObjectObs}), and the room side carries the matching factor. What is off is the
+room-side switch, for the reason in \S\ref{sec:incest}.
+
+\subsection{Why this is not simply switched on}
+\label{sec:incest}
+
+The object's belief was formed \emph{using} $\hat X$. Sending $z_o$ back to the localiser, which
+produces $\hat X'$, which updates the object, circulates the same evidence: the LiDAR sweep that
+localised the robot also carried the returns from the fridge, and the mask that fitted the fridge
+was de-projected with the pose that sweep produced. Iterating a mean-field exchange over shared
+evidence makes both blocks progressively more confident without any new observation --- the
+estimate becomes consistent with itself rather than with the room.
+
+The formal requirement is that $\Lambda$ in \eqref{eq:anchormsg} carry only the \emph{innovation}:
+the information the object contributes beyond what it received. The published form,
+$(\Sigma_o\oplus R_o)^{-1}$, is an attempt at that --- inflating by this frame's measurement
+covariance before inverting --- but it is not a marginalisation of the prior that came from
+$\hat X$, and under repeated exchange the residual overlap accumulates.
+
+Doing this properly is a known problem with known answers, and they differ in what they choose to
+represent. The next section takes them in turn.
+
+\subsection{Handling the correlation properly}
+\label{sec:correlation}
+
+Three treatments, and a fourth that mixes them.
+
+\paragraph{(a) Represent it: one joint Gaussian.} Stop factorising. Let
+$\xi=(X,R,\theta_1,\dots,\theta_n)$ and keep $q(\xi)=\mathcal{N}(\mu,\Sigma)$ with dense
+cross-blocks. The free energy \eqref{eq:F} is unchanged, but its KL term no longer decomposes:
+there is no per-instance $F_i$ to hand to an agent, only one objective and one Gauss--Newton step
+over the whole state. In practice one works in information form, because $\Lambda=\Sigma^{-1}$ is
+sparse exactly where factors couple variables --- a mask couples $(X_t,\theta_i)$, a sweep couples
+$(X_t,R)$, odometry couples $(X_t,X_{t-1})$ --- and the system is solved by sparse Cholesky. This
+is graph SLAM with object landmarks.
+
+Double counting cannot occur: each measurement appears once, as one factor, and is never re-sent.
+Loop closure deforms the objects automatically. What it costs is the architecture. \ref{as:class}
+and \ref{as:inst} both dissolve --- once the information matrix couples classes through shared
+poses, no single process can own a class --- and bounding the window requires marginalising old
+poses, which produces \emph{fill-in}: every landmark seen from a marginalised pose becomes directly
+correlated with every other. The usual repairs (sparsification, generic linear constraints, a
+Chow--Liu approximation of the dense block) are themselves approximations, so one approximation is
+traded for another.
+
+\paragraph{(b) Keep the factorisation, make the messages honest.} Retain
+$q(X,R)\prod_i q(\theta_i)$ and repair the \emph{messages} instead. Before instance $i$ sends its
+anchor to the localiser, divide out the message it sent previously, so what it transmits is only
+the information it has added since. In natural parameters this is a subtraction, so it is cheap.
+This is the cavity construction of expectation propagation, and it removes the pathology of
+\S\ref{sec:incest} directly: evidence can no longer circulate, because no factor is ever counted
+twice.
+
+The process separation survives intact --- each agent still owns its block, and the protocol still
+carries only $(\hat X,\Sigma_X)$ one way and $(z_o,\Lambda)$ the other. What it does \emph{not}
+recover is the correlation itself: both marginals remain overconfident, they simply stop becoming
+progressively more so. The new cost is bookkeeping: each agent must store its outstanding message
+per consumer, which is bounded and small.
+
+\paragraph{(c) Assume nothing: fuse conservatively.} Covariance intersection combines two estimates
+of unknown correlation as
+\begin{equation}
+\Lambda_{\text{ci}}\;=\;\omega\,\Lambda_a+(1-\omega)\,\Lambda_b,
+\qquad \omega\in[0,1],
+\end{equation}
+with $\omega$ chosen to minimise the trace or determinant of the result. The fused estimate is
+guaranteed never optimistic, whatever the true correlation, and it requires no provenance, no
+cross-covariance and no change of protocol. The price is tightness: information is discarded to
+stay safe. Since the motivation for anchors is precisely to \emph{tighten} the pose where walls
+constrain it poorly, conservative fusion may return much of what the anchors were introduced to
+buy --- a real tension, not a detail.
+
+\paragraph{(d) A structured middle.} The correlation that matters is between an object and the
+handful of poses it was actually observed from, over a short interval. Keeping a dense block over
+$(X_{t-k:t},\theta_i)$ while factorising across everything else is a \emph{structured} mean field:
+exact where the dependence is strong, factorised where it is weak. The bounded-window idea appears
+here applied to the correlation rather than to the measurements.
+
+\medskip\noindent
+Of the four, (a) is the correct answer and the wrong project: it replaces the concept-agent
+architecture with a monolithic estimator, and the chapter it belongs to is a different one. (c) is
+safe and may be self-defeating for the reason just given. \textbf{(b) is the one that fits} --- it
+preserves every process boundary, adds one stored message per consumer and nothing else, and
+removes exactly the failure that keeps the room-side switch off today. It is the prerequisite this
+variant should acquire before being enabled.
+
+\begin{assumption}[The marginalisation over $X$ factorises per frame]\label{as:frames}
+Carrying out $\int(\cdot)\,q(X)\,\mathrm{d}X$ in the coordinate $\Delta$ of~\eqref{eq:changeofvar},
+\begin{equation}
+\int P\!\left(Z\given\theta,M,X\right)q(X)\,\mathrm{d}X
+\;\approx\;
+\prod_t \int P\!\left(Z_t\given\theta,M,\hat X_t\ominus\delta_t\right)
+\mathcal{N}\!\left(\delta_t;\,0,\,\Sigma_\delta^t\right)\mathrm{d}\delta_t
+\label{eq:perframe}
+\end{equation}
+with $\Sigma_\delta^t$ as in~\eqref{eq:sigmadelta}. This is the \emph{only} place $\Delta$ is
+used, and the first place it was needed.
+\end{assumption}
+\noindent\textit{Justification.} Each frame is de-projected with its own capture-stamp transform,
+so its offset is drawn afresh. \textit{Cost.} \textbf{False across short windows.} Localisation
+error does not resample every $100$\,ms; over a fraction of a second the true $\delta_t$ are
+strongly correlated, and over a short enough window they are near-constant. Sequential per-frame
+updates never expose this, because each frame is consumed alone and its offset integrated out
+immediately. Any procedure that \emph{pools} several frames' raw points into one estimate does
+expose it, and breaks --- measured in \S\ref{sec:consequences}(b).
+
+
+\smallskip\noindent\textit{Computed as.} By never instantiating $\delta_t$. The integral in \eqref{eq:perframe} is Gaussian, so Woodbury
+turns it into a cap on how much a single frame may contribute: \texttt{recursive\_laplace.h} sets
+$\Sigma_c^{-1}\leftarrow$ \texttt{m.common\_mode\_inv\_diag(frame)} and folds it into the
+information sum, which is \eqref{eq:sat}. The entire cost of the trajectory's uncertainty is thus
+one $6$-vector per frame, and no pose variable is ever touched by the object agent.
+
+\begin{assumption}[Hard matching]\label{as:hard}
+\begin{equation}
+P(M\given X,Z,\Phi)\;\approx\;\mathbb{1}\!\left[M=\hat M\right],
+\qquad
+\hat M=\arg\max_M P(M\given \hat X,Z)
+\end{equation}
+computed greedily, by lowest squared Mahalanobis distance over gated pairs, in the shared
+\texttt{InstanceTracker} with gate $\chi^2_2=9$.
+\end{assumption}
+\noindent\textit{Justification.} Tractability only. \textit{Cost.} The sum over $M$
+in~\eqref{eq:problem} collapses to one term, so a wrong match is unrecoverable within the cycle;
+the merge operator and the existence channel are the repair, and they act after the damage.
+
+
+\smallskip\noindent\textit{Computed as.} By \texttt{rc::InstanceTracker::update()}. For every (detection, instance) pair it forms the
+innovation covariance $S=P+R^2I$ from the instance's own posterior $\Sigma_{\theta_i}$, gates on
+squared Mahalanobis distance $\le\chi^2_2=9$, and assigns greedily, lowest cost first, one-to-one.
+$\hat M$ then does nothing but route slice indices onto instances. No cost of the matching enters
+$F_i$ --- which is exactly why a mis-assignment is invisible to the free energy that would
+otherwise have caught it.
+
+\begin{assumption}[Class partition]\label{as:class}
+\begin{equation}
+P(\theta,e\given \hat M,X,Z,\Phi)\;=\;\prod_{c\in\mathcal{C}}
+P\!\left(\theta_{\mathcal{I}_c},e_{\mathcal{I}_c}\given \hat M,X,Z,\Phi\right)
+\end{equation}
+\end{assumption}
+\noindent\textit{Justification.} Architectural: one agent per class, and the label is fixed by
+which binary you are, not inferred. \textit{Cost.} The sharpest hole in the whole scheme. A
+cabinet mis-labelled \textsf{refrigerator} cannot be resolved by comparing the two classes'
+likelihoods, because \textsf{refrigerator\_concept} and \textsf{cabinet\_concept} never see each
+other's. \texttt{apply\_fridge\_filter} (singleton inhibition $+$ shape-plausibility decay) is a
+\emph{within-class} substitute for what should be across-class model comparison.
+
+
+\smallskip\noindent\textit{Computed as.} By running one process per class. Every concept agent subscribes to the same \texttt{"masks"}
+node in the graph and keeps only the slices whose label matches its own, so each minimises its own
+$\sum_i F_i$ over a disjoint set of measurements. No term anywhere compares the free energy a
+cabinet hypothesis would achieve against the one a refrigerator hypothesis achieves: both numbers
+exist, in two different processes, and are never brought together.
+
+\begin{assumption}[Instance independence given the matching]\label{as:inst}
+\begin{equation}
+\prod_{c}P(\theta_{\mathcal{I}_c},e_{\mathcal{I}_c}\given\cdot)
+\;=\;\prod_{c}\prod_{i\in\mathcal{I}_c}P(\theta_i,e_i\given\cdot)
+\end{equation}
+\end{assumption}
+\noindent\textit{Justification.} $\hat M$ is one-to-one, so instances own disjoint measurement
+sets. \textit{Cost.} Exact given \ref{as:hard} \emph{except} for physical exclusion — two
+fridges cannot occupy one volume — which is a genuine coupling reintroduced procedurally by
+\texttt{merge\_overlapping\_instances}.
+
+
+\smallskip\noindent\textit{Computed as.} This is where the whole scheme actually runs, so it is
+worth following in full. Each cycle, \texttt{process\_refrigerator\_node()} is called once per
+live instance, and the body is:
+
+\begin{quote}
+\ttfamily\small
+for (idx : inst.assigned\_mask\_idxs)\\
+\hspace*{2em}obs = observe\_slice(inst, idx);\\
+\hspace*{2em}F = run\_inference(inst, obs);
+\end{quote}
+
+\noindent
+Four properties of that loop are modelling decisions, though they read as implementation
+detail.
+
+\emph{One update per slice, not one per instance.} If a fridge is seen by two sensors in the same
+cycle, the loop runs twice. Sequential Bayesian updates compose into the joint likelihood, so this
+is exact --- but the reason it is done this way rather than by concatenating both clouds into one
+frame is \ref{as:frames}: each slice carries its \emph{own} $\Sigma_\delta^t$, because two sensors
+do not share a registration error. Concatenation would force one common-mode term on both and
+silently over-count their agreement.
+
+\emph{The instance must earn its update.} The loop is entered only when the mask packet is fresh
+in \emph{two} senses: a new \texttt{frame\_id} \emph{and} a new capture timestamp. The publish
+counter alone is not enough --- it advances on every republish even when the camera is frozen, and
+re-integrating one capture as if it were independent evidence makes the belief ratchet: geometry
+rotates and reshapes with both robot and scene stationary. The second gate is the difference
+between $T$ genuine observations and one observation counted $T$ times, which is exactly the
+distinction $\prod_t$ in \eqref{eq:result} presumes.
+
+\emph{Classify, don't destroy.} \texttt{observe\_slice()} splits the assigned cloud by signed
+distance into points that lie on the current surface and points that do not. Both are kept: the
+first drive the fit, the second are the residual that later evidence --- a second face, a
+neighbouring object, a mis-association --- may claim. Nothing is discarded on the strength of the
+current estimate.
+
+\emph{No cross terms, by construction.} $F$ for the class is the plain sum $\sum_i F_i$. Two
+instances that overlap in space produce no penalty in the free energy at all, because their
+likelihoods are computed over disjoint measurement sets and never compared. Physical exclusion ---
+two refrigerators cannot occupy one volume --- is therefore restored \emph{outside} the model, by
+an operator that deletes one of any two instances whose oriented footprints overlap. That operator
+is the visible scar of this assumption: it exists because \eqref{eq:result} has nowhere to put the
+constraint.
+
+When no slice was assigned, the loop body never runs and only the predict step of
+\ref{as:markov} fires, so an unobserved instance ages rather than freezes.
+
+\begin{assumption}[Geometry/existence mean-field]\label{as:geomexist}
+\begin{equation}
+P(\theta_i,e_i\given\cdot)\;\approx\;q(\theta_i)\,q(e_i)
+\end{equation}
+\end{assumption}
+\noindent\textit{Justification.} None, strictly — this one is convenience. \textit{Cost.} Shape
+and existence \emph{are} coupled: an implausible shape is evidence of non-existence. The coupling
+survives as a one-way channel (plausibility $\rightarrow$ existence log-odds), not as a joint.
+
+
+\smallskip\noindent\textit{Computed as.} By keeping two separate objects on the instance: \texttt{ai2\_belief}, the Gaussian over
+geometry, and an existence log-odds accumulated from LiDAR occupancy carve and mask-silhouette
+evidence. They meet in one direction only --- the fitted shape's plausibility becomes a bounded
+log-evidence ratio that is added to the existence channel, so a badly-shaped object decays. The
+reverse, existence tightening the geometry, has no path.
+
+\begin{assumption}[Markov time, conditionally independent frames]\label{as:markov}
+\begin{equation}
+q(\theta_i)\;\propto\;\prod_t
+\Big[\textstyle\int P\!\left(Z_t^{(i)}\given\theta_i^t,\hat X_t\ominus\delta_t\right)
+\mathcal{N}\!\left(\delta_t;0,\Sigma_\delta^t\right)\mathrm{d}\delta_t\Big]\;
+P\!\left(\theta_i^t\given\theta_i^{t-1}\right)
+\end{equation}
+\end{assumption}
+\noindent\textit{Justification.} Rigid static furniture; small process noise. \textit{Cost.}
+Negligible here. Note what this factor commits us to: estimation is \emph{recursive and
+immediate}. Each measurement is folded in as it arrives and then discarded, so there is no point
+at which a decision can be deferred until more evidence is in. That is a real design choice with
+real consequences, measured in \S\ref{sec:consequences}.
+
+
+\smallskip\noindent\textit{Computed as.} By the \texttt{predict()} half of the recursive-Laplace filter: the mean is held and
+$\Sigma_{\theta_i}\!\leftarrow\!\Sigma_{\theta_i}+Q$ with a small per-frame $Q$. The
+\texttt{update()} half then takes a few Gauss--Newton steps on \eqref{eq:freeenergy} and adopts
+the Hessian at the optimum as the new $\Sigma_{\theta_i}$ --- which is what makes the posterior a
+\emph{Laplace} one. On a stale cycle only \texttt{predict()} runs, on the agent's own clock, so a
+dead sensor shows up as growing covariance instead of unchanged confidence.
+
+\subsection*{The assembled result}
+
+Substituting \ref{as:meanfield}--\ref{as:markov} into~\eqref{eq:posterior-raw} and marginalising $X$
+by~\eqref{eq:perframe} leaves a posterior over the objects and the matching alone:
+
+\begin{empheq}[box=\fbox]{align}
+P\!\left(\theta,e,M\given Z,\Phi\right)
+\;\propto\;
+&\underbrace{\mathbb{1}\!\left[M=\hat M\right]}_{\text{\ref{as:hard}}}\;
+\prod_{c\in\mathcal{C}}\;\prod_{i\in\mathcal{I}_c}
+\underbrace{q(e_i)}_{\text{\ref{as:geomexist}}}
+\nonumber\\[2pt]
+\times\;\prod_t\;
+&\underbrace{\int P\!\left(Z_t^{(i)}\given\theta_i^t,\hat X_t\ominus\delta_t\right)
+\mathcal{N}\!\left(\delta_t;0,\Sigma_\delta^t\right)\mathrm{d}\delta_t}_{\text{\ref{as:frames}}}
+\;\underbrace{P\!\left(\theta_i^t\given\theta_i^{t-1}\right)}_{\text{\ref{as:markov}}}
+\label{eq:result}
+\end{empheq}
+
+\noindent
+Note where each assumption ended up. Three are \emph{visible} as factors
+(\ref{as:hard}, \ref{as:geomexist}, \ref{as:markov}) and one as the integral
+(\ref{as:frames}). The other three act \emph{structurally} and leave no factor of their own:
+\ref{as:class} and \ref{as:inst} are the two products $\prod_c\prod_i$, and
+\ref{as:meanfield} --- the trajectory --- survives only inside $\Sigma_\delta^t$, having been
+integrated away. That last point is worth dwelling on: the foreign estimate does not appear in
+the object posterior as a factor at all. It appears as a \emph{covariance}, and nowhere else.
+Every symbol in~\eqref{eq:result} was introduced in \S\ref{sec:notation}.
+
+\section{The one factor that is exact}
+\label{sec:exact}
+
+Only the $\delta_t$ integral is done without approximation (given a linearisation). It is worth
+seeing why, because it produces the ceiling that governs everything downstream.
+
+For frame $t$, stack the $N$ point residuals of one mask. Writing $G\in\R^{N\times 6}$ for the
+Jacobian of those residuals with respect to the shared offset, and $\varepsilon\sim
+\mathcal{N}(0,\sigma^2 I)$ for the independent per-point noise,
+\begin{equation}
+r \;=\; r_0 + G\,\delta_t + \varepsilon,
+\qquad \delta_t\sim\mathcal{N}(0,\Sigma_\delta^t).
+\end{equation}
+Marginalising $\delta_t$ gives $r\sim\mathcal{N}\!\left(r_0,\ \sigma^2 I+G\Sigma_\delta^t G^{\!\top}\right)$,
+so the frame's Fisher information about $\theta_i$ is
+\begin{equation}
+\mathcal{I}_t \;=\; G^{\!\top}\!\left(\sigma^2 I+G\Sigma_\delta^t G^{\!\top}\right)^{-1}\!G
+\;\overset{\text{Woodbury}}{=}\;
+\left(\sigma^2\left(G^{\!\top}G\right)^{-1}+\Sigma_\delta^t\right)^{-1}
+\;\xrightarrow[\ N\to\infty\ ]{}\;
+\left(\Sigma_\delta^t\right)^{-1}.
+\label{eq:sat}
+\end{equation}
+using $A-A(B+A)^{-1}A=(A^{-1}+B^{-1})^{-1}$ with $A=G^{\!\top}G$, $B=\sigma^2(\Sigma_\delta^t)^{-1}$.
+
+Two readings of~\eqref{eq:sat}, both load-bearing:
+\begin{enumerate}[leftmargin=1.6em]
+\item \textbf{A denser mask stops helping.} Information saturates at $(\Sigma_\delta^t)^{-1}$.
+      That ceiling --- exactly $1/(\sigma^2_{\mathrm{cm}}+\Sigma_{\text{chain}})$ per degree of
+      freedom --- is what \texttt{common\_\allowbreak mode\_\allowbreak inv\_\allowbreak diag()}
+      returns.
+\item \textbf{$\delta_t$ is never computed, because it cannot be.} The residual depends on
+      $\theta_i$ and $\delta_t$ only through their sum, so the joint information for
+      $(\theta_i,\delta_t)$ has rank $6$, not $12$. Only the ceiling is computable. What
+      \emph{is} estimated is $\hat X$ — that is what localisation is; $\delta_t$ is its residual
+      error, and if it were knowable it would already have been removed.
+\end{enumerate}
+
+\clearpage
+\appendix
+\renewcommand{\thesection}{\Alph{section}}
+\setcounter{section}{0}
+
+\begin{center}
+{\Large\bfseries Appendices}\\[4pt]
+\rule{0.32\textwidth}{0.4pt}
+\end{center}
+
+\medskip\noindent
+The body above is the model and its derivation. What follows is everything empirical or
+comparative: two measurements that test the assumptions (\S\ref{sec:consequences}), the shape a
+batch layer would have to take if the model ever outgrew them (\S\ref{sec:batch}), and the
+correspondence with the formulation this one was derived against (\S\ref{sec:khronos}).
+
+\section{Two consequences, both measured}
+\label{sec:consequences}
+
+Both follow from factors of~\eqref{eq:result}, and both were checked on the running system rather
+than argued.
+
+\paragraph{(a) A batch layer would buy nothing at this model complexity.}
+A recurring proposal is to insert an intermediate layer between measurements and objects: hold a
+burst of measurements while they accumulate, commit to an object only at the end. The ceiling
+in~\eqref{eq:sat} says when that pays. It binds only when $\theta_i$ has more degrees of freedom
+than one frame can determine. A non-parametric surface --- a mesh or a TSDF, thousands of DOF, no
+shape prior --- is far past that line and \emph{must} accumulate. Our $\theta_i$ is six
+parameters with tight priors ($0.60\pm0.08$ footprint, $1.90\pm0.30$ height), and it is not:
+live, an instance born from a single $8\,000$-point mask starts at $w=0.669$, $h=0.600$ and
+converges to $w=0.674$, $h=0.604$. The priors already do the work the accumulation was meant to
+do. This is a property of the \emph{model}, not of the tuning.
+
+\paragraph{(b) Pooling frames violates \ref{as:frames}, and it shows.}
+Feeding a burst of $8$ frames' raw points to one geometric moment asks the data to separate eight
+different $\delta_t$ from geometry --- impossible by the identifiability argument of \S\ref{sec:exact}(2), and with no per-burst
+offset for them to land in. Live A/B on the same object:
+
+\begin{center}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+& single frame & pooled burst & converged \\
+\midrule
+$w$ at birth        & $0.669$ & $\mathbf{0.915}$ & $0.673$ \\
+$h$ at birth        & $0.600$ (prior) & $\mathbf{0.494}$ & $0.626$ \\
+$\sigma_H$ at birth & $0.300$ & $0.190$ & --- \\
+cycles to settle $w$ & $\sim 0$ & $\sim 255$ & --- \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+Note the third row: the pooled estimate was \emph{more confident} about a worse answer, which is
+the mean-field signature of \ref{as:meanfield} compounding with \ref{as:frames}. The diagnostic
+that separates the two hypotheses is that \emph{both} footprint extents inflated: a genuine
+second face of the object raises the minor axis and leaves the major axis at the true width,
+whereas pose-error blur stretches both. Reverted; see the $\star$ note in
+\texttt{RefrigeratorFitter::run\_inference}.
+
+\section{When a batch layer would be worth adding}
+\label{sec:batch}
+
+Should the model ever outgrow \S\ref{sec:consequences}(a), \eqref{eq:result} says exactly what the
+extra layer must carry. Group the measurements into bursts $\bar Z_k$, $k\in\mathcal{K}$, and give
+each burst its own pose $T_k$ --- a nuisance at \emph{burst} granularity rather than frame
+granularity:
+\begin{equation}
+\prod_{k\in\mathcal{K}} \int P\!\left(\bar Z_k\given\theta_i,T_k\right)\,P\!\left(T_k\right)\,\mathrm{d}T_k .
+\label{eq:burstnuisance}
+\end{equation}
+Three requirements, none currently met:
+\begin{enumerate}[leftmargin=1.6em]
+\item bank the burst in \emph{camera} frame and chain it internally by odometry. Only the
+      relative pose inside a short window is trustworthy; absolute room-frame coordinates bake in
+      $\hat X(t)$ and cannot be un-baked
+      (\texttt{MaskIngestor::enable\_frame\_transform} already provides this path);
+\item lift the common-mode nuisance from per-frame to per-burst, i.e.\ give $T_k$ a prior and
+      integrate it out, exactly as \S\ref{sec:exact} does for the per-frame offset $\delta_t$;
+\item supply something that makes $T_k$ identifiable --- a co-observed static anchor, or a
+      revisit of the same object from a different viewpoint. Without it, an unobservable
+      parameter has merely been added, and the identifiability argument of \S\ref{sec:exact}(2)
+      applies to it verbatim.
+\end{enumerate}
+Worth doing only when $\theta_i$ gains degrees of freedom a single frame cannot determine: a
+non-parametric surface, an articulated object, an open-set detection with no shape prior. For a
+six-DOF box with priors, no.
+
+
+\section{Relation to Khronos}
+\label{sec:khronos}
+
+For readers coming from Khronos \cite{khronos}, whose eq.~(16) is
+\begin{equation}
+P(O,X,Y,A\given Z,\Phi)=
+\underbrace{\prod_i P(O_i\given \bar Y_i,X)}_{\text{reconciliation}}\;
+\underbrace{P(X,A\given Y,\Phi)}_{\text{SLAM}}\;
+\underbrace{\prod_k P(Y_k\given \bar Z_k,\bar\Phi_k)}_{\text{local estimation}} ,
+\end{equation}
+the correspondence with~\eqref{eq:result} is:
+
+\begin{center}
+\begin{tabular}{@{}p{4.2cm}p{2.2cm}p{7.4cm}@{}}
+\toprule
+Khronos & Here & Consequence \\
+\midrule
+$\prod_k P(Y_k\given\bar Z_k,\bar\Phi_k)$ \newline \emph{object fragments} &
+absent &
+Their $Y_k$ is the batch layer of \S\ref{sec:batch}, with $T_{RY_k}$ as the burst pose
+of~\eqref{eq:burstnuisance}. Necessary for them because $\Omega_k$ is a mesh; not for us
+(\S\ref{sec:consequences}(a)). \\[4pt]
+$P(X,A\given Y,\Phi)$ &
+$q(X)$ only &
+They maximise the trajectory jointly with the map, so a loop closure deforms object poses
+retroactively. \ref{as:meanfield} forecloses that. \\[4pt]
+$A:\ Y\mapsto \bar Y_i$ &
+\textbf{no counterpart} &
+$A$ associates \emph{fragments to objects}; with no $Y$ there is nothing for it to range over.
+Our $M_t$ is instead their \emph{in-window} $Z\!\to\!Y$ step, solved greedily by volumetric IoU
+and not named in eq.~(16) --- it lives inside the local-estimation term. \\[4pt]
+$\prod_i P(O_i\given\bar Y_i,X)$ &
+$q(e_i)$ &
+Existence runs live here, from occupancy-carve and silhouette evidence, rather than being
+recovered afterwards by geometric verification. \\[4pt]
+--- & $\prod_{c}$ &
+The class partition \ref{as:class} has no analogue there; neither does its arbitration hole. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+Their local-consistency premise (eq.~8) --- that the \emph{relative} pose error inside a window is
+bounded --- is the same statement as the failure mode of \ref{as:frames}: it is what licenses
+pooling in camera frame, and what forbids pooling in room frame.
+
+\begin{thebibliography}{9}
+\bibitem{khronos}
+L.~Schmid, M.~Abate, Y.~Chang and L.~Carlone.
+\emph{Khronos: A Unified Approach for Spatio-Temporal Metric-Semantic SLAM in Dynamic
+Environments.} Proc. Robotics: Science and Systems, 2024. arXiv:2402.13817.
+\end{thebibliography}
+
+\end{document}

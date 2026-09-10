@@ -1,0 +1,943 @@
+% agents-life-cycle.tex — Chapter 8 of the thesis: the life cycle of the concept-agents.
+%
+% Sources: CONCEPT_AGENT_LIFECYCLE.md (the normative contract), MODEL_HISTORY.md (stage 4 theory),
+% and LIFECYCLE.tex (the first, shorter draft, which this supersedes).
+% Reads the contract against the factorization of Chapter 7 (FACTORIZATION_ANCHORS.tex).
+%
+% Build standalone:  pdflatex agents-life-cycle.tex   (twice, for cross-references)
+% To include in main.tex: strip the preamble down to \chapter and drop the \setcounter.
+%
+\documentclass[11pt,a4paper]{report}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=2.6cm]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{empheq}
+\usepackage{pifont}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{microtype}
+
+\newcommand{\given}{\,|\,}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\stage}[1]{\textsc{#1}}
+\newcommand{\Create}{\stage{create}}
+\newcommand{\Update}{\stage{update}}
+\newcommand{\Remove}{\stage{remove}}
+\newcommand{\History}{\stage{history}}
+\newcommand{\Ownership}{\stage{ownership}}
+
+\begin{document}
+
+\setcounter{chapter}{7}
+\chapter{The life cycle of the concept-agents}
+
+\begin{flushleft}
+\textit{No\'e Zapata}
+\end{flushleft}
+
+\vspace{4pt}
+
+\section{Introduction}
+\label{sec:lc-intro}
+
+The previous chapter wrote down the distribution the agents approximate. It says what an instance
+\emph{is} --- a Gaussian over six geometric parameters and a log-odds of existence --- and it says
+how the measurements bear on it. It does not say when an instance should come into being, when it
+should stop existing, or what a process is allowed to do to the shared graph in the meantime. Those
+questions are answered by a second document, written independently and for a different reason.
+
+Every \texttt{<obj>\_concept} agent must satisfy a normative behavioural contract, stated once in
+\texttt{CONCEPT\_\allowbreak AGENT\_\allowbreak LIFECYCLE.md} and audited per agent. Its five stages
+are \Create, \Update, \Remove, \History{} and \Ownership. It is not a description of what the agents
+do; it is a specification of what they are permitted to do, and several agents are in breach of it
+at the time of writing (\S\ref{sec:audit}).
+
+That contract was written from experience rather than from theory. It exists because the same defect
+class was found and fixed three separate times in three different agents --- an existence channel
+voting to delete objects through a wall, in \textsf{refrigerator}, then \textsf{door}, then
+\textsf{table} and \textsf{cabinet} --- and because a threshold that removed objects the sensor
+provably could not see survived inside a hand-rolled copy of a stage that already had a shared,
+correct implementation. Both were possible because the life cycle was structure without a contract.
+Its purpose is that a stage stated once is a stage a new agent cannot forget.
+
+The two documents therefore approach one system from opposite directions: Chapter~7 from the joint
+distribution and the seven approximations that make it computable, this chapter from the failures
+and the rules written to prevent them. They were produced independently, which is what makes their
+comparison worth something. Where they agree, the contract acquires a derivation and stops being a
+list of house rules. Where they disagree, one of them is missing a piece --- and in this case both
+are, in different places.
+
+The result of the comparison is the structure of this chapter. Four of the five stages restate
+factors or assumptions of Chapter~7, and one of them, \History, improves on the assumption as
+stated (\S\ref{sec:mapping}). The fifth, \Create, has no counterpart in the model at all: birth adds
+a term to a product that contains nothing deciding it should be added (\S\ref{sec:create}). \Update{}
+carries a hard admissibility gate that looks like a second gap of the same kind and, on closer
+reading, is not --- the one exactly-solvable factor of Chapter~7 rules against the continuous
+alternative, and the gate turns out to be a runtime defence of assumption A2
+(\S\ref{sec:update}). \Remove{} contributes a correction \emph{back} to Chapter~7: the defect found
+three times is a missing argument in one factor of the joint (\S\ref{sec:remove}). \History{} is a
+single move --- a constant becomes an inferred latent --- applied to the two constants that govern
+accumulation (\S\ref{sec:history}). \Ownership{} is an assumption of the factorization wearing
+administrative clothes, and its failures are the failures of an assumption that no process is
+enforcing (\S\ref{sec:ownership}).
+
+\section{What Chapter 7 leaves on the table}
+\label{sec:recap}
+
+Three results of the previous chapter are used throughout, and are restated here so this chapter can
+be read on its own.
+
+\paragraph{The seven assumptions.} With $\theta_i\in\R^6$ the geometry of instance $i$, $e_i$ its
+existence log-odds, $\mathcal{I}_c$ the instances of class $c$, $M_t$ the per-cycle mask-to-instance
+matching, $X$ the trajectory and $R$ the room polygon:
+
+\begin{center}
+\begin{tabular}{@{}l l p{8.6cm}@{}}
+\toprule
+& Acts on & What it assumes \\
+\midrule
+A1 & localisation & objects and pose are updated alternately, each holding the other fixed \\
+A2 & masks & the trajectory marginal factorises frame by frame \\
+A3 & matching & one matching $\hat M$, not a distribution over matchings \\
+A4 & masks & object classes are independent --- one agent each \\
+A5 & masks & instances within a class are independent \\
+A6 & masks & geometry and existence factorise: $q(\theta_i)\,q(e_i)$ \\
+A7 & masks & the state is Markov in time \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{The free energy an agent minimises.} Per instance,
+\begin{equation}
+F_i\;=\;
+\underbrace{\mathbb{E}_{q}\!\left[-\ln P\!\left(\bar Z_i\given\theta_i,\hat X\right)\right]}_{\text{accuracy}}
+\;+\;
+\underbrace{\mathrm{KL}\!\left[\,q(\theta_i)\,\|\,P(\theta_i\given e_i)\,\right]}_{\text{complexity}} ,
+\label{eq:lc-F}
+\end{equation}
+where the accuracy term is the negative log of a \emph{mixture}: each mask point is explained by the
+object's surface, by a uniform clutter component, or by a known wall. The clutter component's weight
+is a configured constant; \S\ref{sec:pfa} argues it should not be.
+
+\paragraph{The ceiling.} The single factor of Chapter~7 evaluated without approximation is the
+per-frame marginalisation of the localisation error $\delta_t$. Stacking $N$ point residuals of one
+mask with Jacobian $G$ with respect to that shared offset,
+\begin{equation}
+\mathcal{I}_t \;=\; G^{\!\top}\!\left(\sigma^2 I+G\Sigma_\delta^t G^{\!\top}\right)^{-1}\!G
+\;=\;
+\left(\sigma^2\left(G^{\!\top}G\right)^{-1}+\Sigma_\delta^t\right)^{-1}
+\;\xrightarrow[\ N\to\infty\ ]{}\;
+\Lambda_c \;:=\; \left(\Sigma_\delta^t\right)^{-1}.
+\label{eq:lc-sat}
+\end{equation}
+One frame's information about $\theta_i$ saturates at $\Lambda_c$, however many points it carries.
+Two clauses of the contract are consequences of \eqref{eq:lc-sat} --- one in \Update{}
+(\S\ref{sec:whygate}) and one in \Remove{} (\S\ref{sec:saturation}) --- and neither was derived that
+way. They were found by debugging, twice, in two different channels.
+
+\section{Where the five stages land in the model}
+\label{sec:mapping}
+
+\begin{center}
+\begin{tabular}{@{}l l p{8.0cm}@{}}
+\toprule
+Stage & In the model & \\
+\midrule
+\Create & \textbf{nothing} &
+  birth adds an index to $\mathcal{I}_c$, and therefore a term to $\prod_{i\in\mathcal{I}_c}$.
+  No factor decides that the term should be added. \S\ref{sec:create} \\[4pt]
+\Update & accuracy term; A2, A5, A7 &
+  ``a frame must earn the right to move geometry'' is the admissibility side of the measurement
+  likelihood; the module the contract mandates is the recursive-Laplace engine itself. The gate
+  itself defends A2. \S\ref{sec:update} \\[4pt]
+\Remove & $q(e_i)$, A6; visibility &
+  ``evidence, never a miss-counter'' requires removal to be driven by the existence factor, which
+  A6 is what makes separable from geometry in the first place. Its evidence comes from the
+  visibility factor Chapter~7 declares inert. \S\ref{sec:remove} \\[4pt]
+\History & A7; the clutter rate &
+  ``no constant may stand in for experience'' refines the Markov transition --- it forbids a constant
+  process noise $Q$ --- and applies the same move to the mixture's false-alarm weight.
+  \S\ref{sec:history} \\[4pt]
+\Ownership & A4 &
+  one agent owns the instances of one class, which is well defined only because A4 made the classes
+  independent. \S\ref{sec:ownership} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+\History{} is the clearest case of the contract being ahead of a naive reading of the model. A7 as
+stated permits any transition $P(\theta_i^t\given\theta_i^{t-1})$, and the deployed choice --- a
+constant process noise applied every frame, observed or not --- satisfies it. The contract observes
+that such a $Q$ inflates covariance on the agent's clock rather than on evidence, and requires the
+growth to depend on what actually happened. That is a strictly better model, arrived at from a
+symptom rather than from the algebra.
+
+\Ownership{} is the opposite case: an assumption of the factorization that has no probabilistic
+content left in it by the time it reaches the code, only a configuration file that can be wrong.
+
+\section{\Create: the stage with no factor}
+\label{sec:create}
+
+\subsection{What the question actually is}
+
+Deciding whether an object exists is a comparison between two models of \emph{different order}: the
+world with $n$ instances of this class and the world with $n+1$. Under the variational treatment of
+Chapter~7 that comparison has a definite form. Writing $F^{(n)}$ for the total free energy of the
+class under $n$ instances,
+\begin{align}
+\Delta F \;=\; F^{(n+1)}-F^{(n)}
+\;=\;&
+\underbrace{\mathbb{E}_{q}\big[-\ln P(\bar Z\given\theta_{1:n+1})\big]
+          -\mathbb{E}_{q}\big[-\ln P(\bar Z\given\theta_{1:n})\big]}_{\text{accuracy gained by explaining those points}}
+\nonumber\\[4pt]
+&+\;
+\underbrace{\mathrm{KL}\!\left[\,q(\theta_{n+1})\,\|\,P(\theta_{n+1}\given e)\,\right]}_{\text{complexity paid for the new object}} .
+\label{eq:lc-deltaF}
+\end{align}
+The new instance is warranted exactly when $\Delta F<0$: when the measurements it claims are
+explained better by a new object than by the clutter component and by the instances already present,
+by more than the cost of instantiating a new set of parameters. The second term is not a penalty
+bolted on for regularisation --- it is the same complexity term that already appears in
+\eqref{eq:lc-F} for every live instance, and it is what stops the model from explaining every stray
+mask with a new refrigerator.
+
+Nothing in the assembled posterior of Chapter~7 computes \eqref{eq:lc-deltaF}, because
+$\mathcal{I}_c$ enters that posterior as a \emph{fixed} index set. This is a choice, not a necessity:
+the random-finite-set formulations of multi-target tracking carry a birth intensity as an explicit
+term of the model \cite{mahler}, and the classical alternative --- M-of-N track initiation
+\cite{barshalom} --- is a surrogate of exactly the kind described next, adopted for exactly the same
+reason.
+
+\subsection{What is computed instead}
+
+\paragraph{Birth is tracker-only.} The contract's first invariant is architectural: no agent may
+birth an instance from its own logic. Birth happens in one shared module,
+\texttt{common/instance\_tracker}, and an agent must never create a graph node for an instance the
+tracker has not birthed. This is what stops the birth criterion from being re-derived, differently,
+eight times.
+
+\paragraph{Birth is evidence-accumulating, not a counter.} A detection matures a \emph{pending
+candidate} over \texttt{birth\_frames}, and each frame contributes a weight,
+\texttt{Detection::birth\_evidence}, defaulting to $1.0$. That weight is the only sanctioned hook for
+a birth prior, and it is continuous: a corroborated detection matures faster, a suspect one slower.
+Two further rules make the stage well-posed in a multi-sensor system: a detection may be marked
+\emph{non-birthable}, allowing it to refine an existing track but never to start one --- one sensor
+births, peripheral sensors only cue attention --- and a candidate must stand clear of
+\texttt{birth\_min\_sep\_m} from every existing track \emph{and} every other pending candidate.
+
+In the refrigerator agent the per-frame weight is a product of several factors, each a proxy for a
+term of \eqref{eq:lc-deltaF}:
+
+\begin{center}
+\begin{tabular}{@{}l p{9.4cm}@{}}
+\toprule
+Factor & What it stands in for \\
+\midrule
+detector confidence & the likelihood's weight on the class label \\
+range attenuation   & measurement precision, which falls with distance \\
+frame admissibility & whether this frame may move geometry at all (\S\ref{sec:update}) \\
+shape plausibility  & the prior term $P(\theta_{n+1}\given e)$, evaluated on the raw cloud \\
+room-envelope support & the same prior, evaluated against the wall polygon \\
+residual surprise (optional) & unexplained occupancy under the detection: the accuracy term \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+The list is a reasonable decomposition. Every entry corresponds to a term that would appear in
+$\Delta F$, and the shared implementation means all agents birth on the same terms.
+
+\subsection{What the surrogate costs}
+
+Three things are lost by accumulating a weighted count rather than evaluating
+\eqref{eq:lc-deltaF}.
+
+\paragraph{The units are gone.} A streak is a dimensionless number compared against a frame count.
+$\Delta F$ is in nats, and can therefore be traded against any other quantity in the model --- the
+existence log-odds, a merge decision, the expected free energy of a viewpoint. Because the birth
+score is not in nats, birth cannot participate in any of those trades, and the boundary it is
+compared against is a threshold with no principled value.
+
+\paragraph{Birth and death are not the same currency.} Removal is driven by an existence log-odds
+accumulated from occupancy carve and silhouette evidence (\S\ref{sec:remove}). Birth is driven by a
+streak. The two decisions concern the same proposition --- does this object exist --- and are taken
+in incommensurable units, so an object can be born on evidence that would not have kept it alive,
+and the asymmetry is invisible to both mechanisms. The visible symptom is a whole corrective
+subsystem: the refrigerator agent carries shape-plausibility evidence routed into the existence
+channel plus a soft singleton inhibition, so that a strongly-supported instance suppresses weaker
+duplicates. It works, and it is carefully built. It is also a loop whose sole purpose is to undo
+births that should not have happened, and its own criterion is, again, in different units from the
+one that created the object.
+
+\paragraph{The comparison is available and not made.} $\Delta F$ is not out of reach. A candidate
+that has matured has an associated set of measurements; instantiating a provisional instance, fitting
+it, and reading off the resulting free energy against the null is the same computation the agent
+already performs every cycle for its live instances. What is missing is the plumbing, not the theory.
+A birth gate that computed \eqref{eq:lc-deltaF} on the candidate's accumulated measurements would
+subsume the plausibility multiplier, the envelope support, the residual-surprise fusion and the
+retraction subsystem, because all four are estimating parts of the same scalar.
+
+\subsection{The model has no birth time either}
+\label{sec:provenance}
+
+There is a second, quieter absence at this stage. The posterior of Chapter~7 is a distribution over
+what exists; it has no notion of \emph{when} an index entered the product, and the shared graph
+inherits that silence. The CRDT's own per-attribute timestamps do not fill it: they move on every
+write, so they date the last update, not the birth.
+
+The contract therefore requires the missing quantity to be recorded outside the model. Every node
+this fleet inserts carries its birth time, written once, immediately before insertion, and never
+refreshed --- as a millisecond epoch for arithmetic and as a local civil ISO-8601 string for the
+graph viewer. The scope is every node, not just instances: affordance children, room, wall and floor
+nodes, the controller's temporary obstacles, the retina's channel nodes. A stale node in the
+shared graph can then always be dated against the run that leaked it.
+
+One rule follows from taking the model seriously: a re-acquired object gets a \emph{new} stamp. It is
+a new node, with a new identifier, and only its name carried over. ``When did this object first
+appear, across deaths'' is a question about $e_i$ over time --- an existence-belief question --- not
+a question about node provenance, and conflating the two would put a persistent identity into a
+factor that does not have one.
+
+\subsection{Why the gap matters more in this variant}
+\label{sec:variant}
+
+Chapter~7 is the variant in which converged objects are published back to the localiser as SE(2)
+landmarks. That closes a loop the baseline cuts, and it has a consequence for this stage that is
+worth stating plainly: with the loop closed, the cost of a bad birth stops being local. A phantom
+instance perturbs $\hat X$, and $\hat X$ enters every other agent's $\Sigma_\delta^t$ through
+\eqref{eq:lc-sat}. A5 --- instances are independent because they own disjoint measurement sets ---
+is no longer even approximately true, since all of them now share a pose.
+
+The birth criterion is the fleet's only defence against that, and it is the one stage with no
+principled criterion. A system that feeds objects back into localisation should be \emph{more}
+demanding about model-order selection than one that does not, and this one is currently less. That
+asymmetry is the strongest argument in this chapter for closing the \Create{} gap first, and it is
+also part of why the room-side landmark switch is off today.
+
+\section{\Update: a frame must earn the right to move geometry}
+\label{sec:update}
+
+The required module is the recursive-Laplace engine, \texttt{rc::ai::update}, driven by the agent's
+own generative model. The Bayesian mathematics lives in the engine exactly once; an agent supplies a
+residual and its Jacobian, and nothing else. That much is a straight restatement of
+\eqref{eq:lc-F}.
+
+The contract then adds something the model does not contain. A frame may touch the geometric mean
+only when it is
+
+\begin{enumerate}[label=\arabic*.,leftmargin=1.9em,itemsep=3pt]
+\item \textbf{resolvable} --- enough un-cluttered surface to constrain the state, judged on point
+      mass, clutter fraction and truncation. \emph{Not} distance: a dense far view beats a starved
+      near one;
+\item \textbf{centred} --- the object lies in the sensor's reliable region, not clipping the
+      periphery;
+\item \textbf{still} --- ego-motion smear is below the level at which the mask is a shared blur.
+\end{enumerate}
+
+\noindent
+Otherwise the cycle is \texttt{predict()}-only: the mean is held and $\Sigma_{\theta_i}$ inflates.
+This is a hard predicate --- a boundary, in a system whose stated preference is for continuous
+precisions --- and it is flagged as such in the contract.
+
+\subsection{Why a covariance cannot do this job}
+\label{sec:whygate}
+
+The obvious objection is that a poor frame should carry a large observation covariance and lose to
+the prior on its own, continuously and without a boundary. This is the repair the project applies
+everywhere else, and it is the one an earlier draft of this chapter recommended. It does not work
+here, and \eqref{eq:lc-sat} is why.
+
+Suppose an inadmissible frame carries not merely extra noise but a systematic offset $b$: motion
+smear displaces the mask's centroid in the direction of travel, truncation biases the fitted extent
+towards the visible side, an off-centre object is deprojected with the periphery's distortion. Let
+the prior information be $\lambda_0$, and let $n$ such frames each contribute information $\lambda$
+about the affected degree of freedom. The posterior mean is displaced by
+\begin{equation}
+\Delta\mu_n \;=\; \frac{n\lambda}{\lambda_0+n\lambda}\;b
+\;\xrightarrow[\ n\to\infty\ ]{}\; b .
+\label{eq:lc-bias}
+\end{equation}
+Attenuation multiplies $\lambda$ by some $\alpha\in(0,1]$. It changes the \emph{rate} at which
+\eqref{eq:lc-bias} approaches $b$ and does not change the limit, for any $\alpha>0$. Only $\alpha=0$
+--- a gate --- bounds the displacement. And $\alpha$ cannot be driven arbitrarily close to zero by
+the covariance model, because \eqref{eq:lc-sat} guarantees the frame's information saturates at
+$\Lambda_c$, a \emph{nonzero} asymptote: the engine will not let a frame contribute more than
+$\Lambda_c$, but neither does it let a downweighted frame contribute nothing. A bad frame is
+attenuated and still moves the mean, and accumulation over hundreds of frames beats attenuation.
+
+The argument turns entirely on $b$ being \emph{shared across the run of frames}. If the per-frame
+offsets were independent and zero-mean, averaging would dispose of them at rate $n^{-1/2}$ and a
+covariance would be the right and sufficient answer. They are not independent: the robot moves
+smoothly, so consecutive frames smear the same way; an object off the optical axis stays off it for
+a run of frames; a truncated view is truncated on the same side until the robot turns.
+
+That is precisely the assumption A2 makes and the justification A2 offers. A2 marginalises the
+localisation error frame by frame on the grounds that each frame is deprojected with its own
+capture-stamp transform, so its offset is drawn afresh --- and Chapter~7 records that this is
+\textbf{false across short windows}, measured: pooling eight frames' raw points into one estimate
+inflated a refrigerator's footprint from $0.669$ to $0.915$\,m while \emph{lowering} its reported
+$\sigma_H$ from $0.300$ to $0.190$. The inadmissible frames of this section are the same failure
+arriving through a different door. They do not break the likelihood; they break the
+independence A2 assumes between one frame's offset and the next.
+
+\begin{quote}
+The admissibility gate is not a missing term in the measurement model. It is a runtime guard on the
+justification of A2, applied to the frames where that justification is known to fail.
+\end{quote}
+
+\noindent
+This reading also says what the principled version would be, and it is not ``fold the three
+covariates into $R$''. It is to give the correlated part of the offset its own nuisance variable ---
+a per-window pose with a prior, marginalised as $\delta_t$ is marginalised --- and to make it
+identifiable. Chapter~7 sets out the three requirements for that construction and concludes it is
+not worth the cost for a six-parameter box with tight priors. Given that conclusion, the gate is the
+correct engineering answer and not a compromise: it costs a few frames of intake to avoid a bias the
+model has no coordinate for.
+
+\subsection{What the gate does not touch}
+
+The gate is deliberately narrow. Association and existence do \emph{not} read it: an inadmissible
+frame still confirms an instance, still updates $\hat M$, and still feeds the existence channel.
+Only the geometry moves are frozen.
+
+In the terms of \eqref{eq:lc-F}, the gate suppresses the accuracy term of the geometry block for one
+cycle and leaves the rest of the posterior running. This is not a detail of implementation. A gate
+that also froze existence would turn every occluded or blurred stretch into evidence of absence,
+which is precisely the failure \Remove{} spends its whole specification avoiding
+(\S\ref{sec:remove}); and a gate that froze association would drop tracks across exactly the
+manoeuvres where the robot is moving.
+
+\subsection{Per-frame quality is a covariance, never a gate}
+
+The narrowness cuts the other way too. Everything that is genuinely a \emph{precision} question ---
+range, obliquity, coverage, ego-motion magnitude --- enters through the per-frame common-mode
+$\Sigma_\delta^t$, Woodbury-marginalised in the engine as in \eqref{eq:lc-sat}, so that $N$
+correlated points cannot collapse $\sigma$. New quality signals go there, not into a new \texttt{if}.
+The gate is reserved for the one situation the covariance provably cannot express: a shared bias
+across a run of frames.
+
+\subsection{Observability covariates must not be circular}
+\label{sec:circular}
+
+One further rule belongs to this stage, and it is the subtlest in the contract.
+
+A covariate that decides whether a degree of freedom is observable must not be computed from the
+point estimate of that same degree of freedom. If it is, a wrong estimate declares its own error
+unobservable and protects itself: the belief stops updating precisely because it is wrong, and the
+mechanism that would have corrected it reads its own mistake as a reason not to look.
+
+The live precedent is the chair agent. Its backrest-normal obliquity --- the angle at which the
+sensor sees the backrest, and hence how much a frame can say about yaw --- was computed from the
+belief's own yaw. With that yaw about $45^\circ$ wrong, the covariate reported
+$\mathrm{oblq\_cos}=0.001$: from where the belief thought the backrest was, the backrest was almost
+edge-on and the frame was declared uninformative. The yaw froze at the wrong value and stayed there.
+
+Stated variationally, the rule is that such a covariate must be evaluated \emph{under the posterior}
+$q(\theta_i)$, or from the data directly, rather than at $\mu_i$. A quantity that is a function of
+what we do not yet know is a quantity whose uncertainty must be carried, and the cheap substitution
+$f(\mathbb{E}_q[\theta])$ for $\mathbb{E}_q[f(\theta)]$ is exactly what removes the uncertainty that
+would have kept the door open. The same structure appears again in \S\ref{sec:attribution}, in a
+completely different stage, and the contract forbids it in both places for the same reason.
+
+\subsection{The gate and the planner are one mechanism}
+
+A hard admissibility predicate is only defensible in a system that can go and produce admissible
+frames. On its own it is starvation: an object seen badly is never updated, and nothing changes
+that.
+
+The other half is already present. Chapter~7's expected-free-energy term is implemented as the
+next-best-view planner, which scores each face of the fitted box by the D-optimal expected entropy
+reduction on $\Sigma_{\theta_i}$ and proposes the standoff pose that observes the winner. The
+covariance the gate inflates on a frozen cycle is the same covariance the planner reads to decide
+where to look, so a run of inadmissible frames does not merely suppress intake --- it raises the
+epistemic value of going to look properly, and the planner acts on it.
+
+That is the sense in which the gate is the attention analogue the contract claims: intake is
+suppressed \emph{outside} a fixation and sought \emph{inside} one, rather than being uniformly
+down-weighted everywhere. Perception and action are scored in one currency, and the gate is what
+makes the currency worth having.
+
+\section{\Remove: evidence, never a miss-counter}
+\label{sec:remove}
+
+The required module is the shared existence belief, \texttt{common/existence\_belief}. One scalar
+log-odds $L$ per instance --- this is $e_i$, and A6 is what makes it separable from the geometry ---
+clamped to $\pm L_{\max}$ so that it stays finite and, more importantly, recoverable.
+
+\subsection{One scalar, three verdicts}
+
+\begin{center}
+\begin{tabular}{@{}p{6.4cm} l p{5.1cm}@{}}
+\toprule
+Observation & Verdict & \\
+\midrule
+occupancy: a return, or a lit mask inside the volume & \textbf{confirms} & holds $L$ up \\[2pt]
+predicted-visible but absent & \textbf{removes} & the only removal evidence there is \\[2pt]
+occluded, out of field of view, or not probed & \textbf{holds} & never absence \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+The whole stage is contained in the third row. A miss is not evidence of absence; a miss
+\emph{where the object would have been seen} is. Everything else in this section is the consequence
+of taking that seriously.
+
+\subsection{The missing argument}
+\label{sec:walls}
+
+``Where the object would have been seen'' is a visibility computation, and Chapter~7 has a factor for
+it: $P(M\given\theta,e,X)$, the block that says what is visible from where. That block is declared
+inert in the free energy, and correctly so --- A3 collapses $M$ to a delta, and a delta contributes
+neither entropy nor expectation, so the matching is free in the literal sense that $F$ cannot see it.
+
+But \Remove{} does not read $M$. It reads the \emph{visibility} that block encodes, and it reads it
+as the weight on every removal increment. The factor Chapter~7 declares free is the one this stage
+depends on entirely, and nobody was checking it, because in the free energy there was nothing to
+check.
+
+Now write the factor out and look at its arguments. It is a function of $\theta$, $e$ and $X$. It is
+not a function of $R$ --- and the room polygon is exactly what tells you that the object is behind a
+wall.
+
+\begin{quote}
+A wall is not a detector class. With visibility computed from masked occluders alone, an object in
+the next room projects into the frustum, lands on unmasked wall pixels, finds no mask there, and
+votes for its own removal \emph{at full strength}.
+\end{quote}
+
+\noindent
+That is the defect found three times --- refrigerator, then door, then table and cabinet --- and it
+is legible in the joint as a missing argument. The correct factor is
+\begin{equation}
+P\!\left(M\given\theta,e,X,\mathbf{R}\right),
+\label{eq:lc-visR}
+\end{equation}
+and the shared implementation the contract mandates, \texttt{rc::occlusion::walls\_block()}, is
+\eqref{eq:lc-visR} rather than its predecessor. This is the one place where this chapter amends the
+previous one rather than deriving from it. It is also a small vindication of writing the joint down:
+a factor whose argument list is wrong is a bug that recurs in every process that recomputes it, and
+there is no amount of per-agent testing that finds it, because each agent's version is locally
+self-consistent.
+
+\subsection{Weighting on the wrong side of a ceiling}
+\label{sec:saturation}
+
+Absence must be weighted by $P(\text{detect}\given\text{present})$: a miss argues for removal only to
+the degree the sensor could have resolved a present object from here. The clause is obvious. Its
+implementation was wrong for a reason that is not.
+
+The weight must scale the \emph{saturated} per-cycle log-odds increment, not the raw pixel or point
+count that produced it. Scaling the count is a no-op. The per-cycle evidence hits its ceiling
+$\pm\ell_{\mathrm{occ}}$ long before the count runs out, so even a $2\%$-resolvable view still lands
+at the full increment, and the weight --- carefully computed, correctly motivated --- had no effect
+whatsoever on the outcome.
+
+This is \eqref{eq:lc-sat} again, in a channel that has nothing to do with geometry. The lesson
+generalises past both instances: \textbf{in a system built out of saturating evidence, a modulation
+applied upstream of the saturation is invisible.} It is worth stating as a rule, because both
+occurrences were found by noticing an effect that should have been there and was not, and neither was
+found by reading the code.
+
+\subsection{No floor, and where the unresolvable go}
+
+Any constant added underneath $P(\text{detect})$ re-creates removal-without-evidence: it guarantees
+that an object never probed will eventually decay, and it does so silently, on the agent's clock. The
+contract forbids it.
+
+That leaves a real question --- an instance that is never resolvable is never reaped --- and the
+answer is again the epistemic half of the formulation rather than a threshold. An unresolvable
+instance is routed to a \emph{verification pull}: it raises the expected information gain of going to
+look at it, the planner schedules the view, and the existence channel then decides on evidence
+acquired for the purpose. Uncertainty that cannot be resolved from here becomes a reason to move,
+not a reason to forget. A decay constant would have been the same decision taken without the
+evidence.
+
+Two smaller clauses complete the stage. Debouncing counts \emph{evidence cycles} rather than
+wall-clock, so that mixed sensor rates do not bias removal towards whichever sensor is fastest. And
+an agent may substitute the tracker's negative-information death only if it has no existence channel
+at all --- a deviation that must be declared, because it changes what its deaths mean
+(\S\ref{sec:attribution}).
+
+\section{\History: no constant may stand in for experience}
+\label{sec:history}
+
+The stage that makes a model \emph{settle}, and the one where the contract is furthest ahead of both
+the model and the code: nothing in \S\ref{sec:volatility} is implemented, by design, and the
+recording described in \S\ref{sec:pfa} is what ships first.
+
+The question it asks is one the belief theory of Chapter~7 does not address at all: after hours of
+touring an apartment, what has the robot actually learned, and what makes a settled model resist a
+spurious mask?
+
+\subsection{The root cause is a constant}
+\label{sec:constantQ}
+
+A7 makes the state Markov, and the deployed transition for static furniture is $F=I$ with a fixed
+per-frame process noise: $\Sigma\leftarrow\Sigma+Q$, applied every frame regardless of whether
+anything was observed. Two consequences follow, and neither depends on how long the object has been
+tracked.
+
+\paragraph{(a) Unobserved, precision decays linearly in frames.} $\Sigma(n)=\Sigma_0+Qn$, so the
+variance-doubling time is $\tau=\Sigma_0/Q$. With the shipped $\texttt{AI2ProcessStdM}=0.005$, i.e.
+$Q=2.5\times10^{-5}\,\mathrm{m^2/frame}$:
+
+\begin{center}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+& $\Sigma$ & $\tau=\Sigma/Q$ \\
+\midrule
+converged ($\sigma_w\approx0.03$\,m) & $9.0\times10^{-4}\,\mathrm{m^2}$ & 36 frames $\approx$ \textbf{3.6\,s} \\
+prior ($\sigma_w=0.30$\,m)           & $9.0\times10^{-2}\,\mathrm{m^2}$ & 3600 frames $\approx$ 6\,min \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+A converged belief returns all the way to its prior after roughly $5.9$ minutes of not being looked
+at, and that ceiling is the same whether the object was tracked for thirty seconds or three hours,
+because nothing shrinks $Q$.
+
+Measured, not asserted. In \texttt{table\_concept}'s log, instance \texttt{table\_9} ran cycles
+$970\rightarrow2290$ --- $1320$ consecutive predict-only cycles with no assigned points throughout.
+Predicted $\sigma_w=\sqrt{9.0\times10^{-4}+2.5\times10^{-5}\cdot1320}=0.184$\,m; observed
+$\mathbf{0.170}$\,m, with $\sigma_{\mathrm{yaw}}$ going from $0.101$ to $0.348$\,rad over the same
+stretch. The next sparse mask --- $178$ points at $2.39$\,m --- then landed on that five-times
+loosened belief and re-cut the table.
+
+\paragraph{(b) Observed, precision does not accumulate; it sits at a floor.} In information form the
+update is $\Sigma^{-1}\leftarrow\Sigma^{-1}+i$, with $i$ capped at $\Lambda_c$ by
+\eqref{eq:lc-sat}. The fixed point of one predict followed by one update,
+$1/y=1/(y+i)+q$, is $qy^2+qiy-i=0$, giving for $qi\ll1$
+\begin{equation}
+y\;\approx\;\sqrt{i/q}
+\qquad\Longrightarrow\qquad
+\sigma_{\text{steady}}\;\approx\;\left(q/i\right)^{1/4}.
+\label{eq:lc-floor}
+\end{equation}
+A ratio of two rates: \textbf{elapsed time does not appear}. Evidence is discarded by $Q$ at exactly
+the rate it is acquired, so three hours of observation leave the belief in the same state as thirty
+seconds. As an order-of-magnitude check, with $i$ at the cap $\Lambda_c=1/0.02^2=2500\,\mathrm{m^{-2}}$
+and $q=2.5\times10^{-5}$, \eqref{eq:lc-floor} gives $\sigma_{\text{steady}}\approx0.01$\,m; the
+observed converged $\sigma_w\approx0.03$\,m is looser because the real per-frame information sits
+well below the cap once range, coverage and gating apply.
+
+\paragraph{What is not being claimed.} $\tau=\Sigma/Q$ is \emph{not} identical across instances --- a
+converged belief has the \emph{shorter} $\tau$, since a small variance doubles sooner. What is
+identical is $Q$ itself, the absolute forgetting rate, and hence the retention ceiling
+$\Sigma_{\text{prior}}/Q$. The load-bearing statement is that resistance to disturbance is a function
+of \emph{current} $\Sigma$; current $\Sigma$ is pinned to a floor by (b) while the object is
+observed, and decays to the prior by (a) when it is not, at a rate independent of history. Nothing an
+agent learns extends how long it stays resistant.
+
+This is also why clamping $\Sigma$ is not a substitute. A clamp caps the worst case of (a) and does
+nothing whatever about (b). Hysteresis must be earned by evidence rather than imposed by a bound,
+and recoverability must then come from something other than the bound as well.
+
+\subsection{The move, and the first constant: volatility}
+\label{sec:volatility}
+
+Both halves of this stage are the same operation applied to two different constants:
+
+\begin{quote}
+A constant becomes an inferred, covariate-dependent latent, regularised by a hyperprior whose
+pull-back keeps it recoverable.
+\end{quote}
+
+For the process noise, each instance carries a per-degree-of-freedom log-volatility $\omega$ with
+$Q=\exp(\omega)$, updated after each cycle by
+\begin{equation}
+\omega \;\leftarrow\; \omega \;+\; \eta\left(\tfrac{1}{2}e^{-\omega}d \;-\; \tfrac{k}{2} \;-\; \frac{\omega-\omega_0}{\sigma_\omega^2}\right),
+\label{eq:lc-omega}
+\end{equation}
+where $d=\delta\theta^{\!\top}\Sigma^{-1}\delta\theta$ is the normalised surprise of this cycle's
+belief motion --- already available from the update step --- $k$ is the group's degree-of-freedom
+count, and $(\omega_0,\sigma_\omega^2)$ is the hyperprior.
+
+The test any candidate fix has to pass is that it repairs \emph{both} consequences of
+\S\ref{sec:constantQ}, and \eqref{eq:lc-omega} does: $\tau\approx\Sigma e^{-\omega}$ grows as $\omega$
+falls, so the retention ceiling is no longer pinned at six minutes; and
+$\sigma_{\text{steady}}\approx(e^{\omega}/i)^{1/4}$ falls as $\omega$ falls, so precision genuinely
+accumulates instead of resting at a fixed floor. A $\Sigma$-clamp moves only the first; an
+evidence-count stiffener moves only the second. Making $Q$ itself the inferred quantity moves both,
+because both are functions of $q$.
+
+The behaviour this produces is the one the system has been approximating with tuned machinery:
+consistent observation over hours keeps $d$ small, drives $\omega$ down, grows $\tau$ towards hours,
+and a spurious mask can no longer move the belief --- hysteresis, earned by evidence rather than
+imposed. If the object genuinely moves, sustained large $d$ raises $\omega$, $\tau$ collapses to
+seconds, and the model adapts: stiffness is never a lock. Recoverability is structural rather than
+thresholded, since the $(\omega-\omega_0)/\sigma_\omega^2$ term pulls $\omega$ back whenever the
+evidence stops supporting extreme stiffness. And because $\omega$ is per degree of freedom, a table's
+extent may freeze while its pose stays adaptive --- the correct physics for furniture, currently
+asserted by hand as a zero process noise on the extent.
+
+There is one failure mode, and it is worth flagging because it is not obvious: a persistently
+\emph{biased} observation looks perfectly consistent. It drives $d$ down, drives $\omega$ down, and
+stiffens the model around the bias. Volatility and the common-mode $\Sigma_\delta$ must therefore be
+reasoned about together --- $\Sigma_\delta$ is exactly what prevents a shared per-frame error from
+being read as agreement --- and this is the same coupling, from the other side, that
+\S\ref{sec:whygate} used to justify the admissibility gate.
+
+\subsection{The second constant: the clutter rate}
+\label{sec:pfa}
+
+The mixture in the accuracy term of \eqref{eq:lc-F} explains each point by the surface, by a wall, or
+by a uniform clutter component --- and the clutter component's weight is a configured constant. That
+is the second constant standing in for experience, and the same move applies.
+
+The motivating observation is that classifiers make \emph{confident} mistakes under partial
+occlusion. Part of a radiator reads as a chair with a high score, births a phantom, and the phantom
+survives until a good run of masks from a proper pose kills it. Score cannot filter this, because the
+score is high. But the \emph{recurrence} is learnable: the same place, seen from the same bearing,
+lies the same way on every tour.
+
+The contract therefore specifies a per-class false-alarm field $p_{\mathrm{FA}}$, indexed on
+\textbf{(world cell $\times$ view bearing)}, which lowers \texttt{Detection::birth\_evidence} at
+\Create. Three properties of that specification are load-bearing:
+
+\begin{itemize}[leftmargin=1.4em,itemsep=3pt]
+\item \textbf{Indexed on the pair, never on place alone.} The failure is viewpoint-dependent. A
+      place-only index would suppress a \emph{genuine} object placed there from every direction;
+      with bearing in the key, an unpoisoned viewpoint still births it promptly. The memory is
+      never a permanent blacklist.
+\item \textbf{It scales evidence and never vetoes.} The detection stays birthable; a poisoned view
+      merely raises the bar, so a close, centred fixation still births a real object --- it just has
+      to work harder. This is what keeps the memory falsifiable. It also reuses a hook that already
+      ships, since the tracker's birth fusion moves the same scalar in the \emph{raise} direction
+      from the residual field's corroboration.
+\item \textbf{Same hyperprior pull-back as $\omega$}, so the field decays when unsupported. The
+      world changes; a radiator can be replaced by a real chair.
+\end{itemize}
+
+\subsection{Attribution, and why recording ships first}
+\label{sec:attribution}
+
+Every agent must \emph{record}, from day one: every birth and every death, with world cell, robot
+pose, view bearing, age at death, and the existence state at death --- $p_{\text{detect}}$, in field
+of view, centred, fixated. Consuming the field is optional; recording is not.
+
+The reason for that ordering is an attribution problem, and it is the same circularity
+\S\ref{sec:circular} forbids in \Update. A birth followed by a death is evidence of \emph{either} a
+detector false positive \emph{or} a removal false positive. Attributing it to the detector is sound
+only when removal is trustworthy --- and three independent removal defects found in July 2026
+(the line-of-sight threshold that deleted objects the sensor could not see, silhouettes voting
+through walls per \S\ref{sec:walls}, and the inert $P(\text{detect})$ weight of
+\S\ref{sec:saturation}) all produce exactly the birth-then-death signature this field would learn
+from. An agent trained on those events learns its own removal bugs and calls them phantoms.
+
+The rule that follows is stated as a hard clause: count a death as a phantom event only when the
+disconfirmation was \emph{confident} --- high $p_{\text{detect}}$, fixated, close. And the error
+would be self-sealing if the rule were dropped, because suppressed births generate no contradicting
+evidence, so the prior becomes unfalsifiable: a wrong belief protecting itself, exactly as the
+chair's obliquity covariate did.
+
+One consequence for the audit: an agent that retires instances on \emph{divergence} rather than on
+sensor absence --- because it has no existence channel at all --- has no $p_{\text{detect}}$ to
+report, and its deaths are unattributable. Those events must be excluded when testing whether phantom
+deaths cluster in (place $\times$ bearing), since they cannot distinguish a classifier phantom from a
+model mismatch. They are marked as such in the log rather than silently mixed in.
+
+\section{\Ownership: one mechanism, one policy}
+\label{sec:ownership}
+
+A4 partitions the object classes and gives one agent to each. That is a conditional-independence
+assumption in Chapter~7 and an administrative fact here: an agent owns the graph nodes of its class,
+and no other process may create or delete them.
+
+It is worth saying why this stage is in a contract about beliefs at all. The shared graph is the only
+place where the factorised posterior is reassembled --- each agent minimises its own $\sum_i F_i$ in
+its own process, and what the rest of the system reads is the union of their outputs. A node whose
+owner has exited is therefore a term in that product with no $q$ behind it: a factor nothing is
+minimising, and one that no longer answers to any evidence. Every other stage of the contract is
+about keeping the belief honest; this one is about not leaving fragments of it lying around after the
+process that was maintaining it is gone.
+
+The mechanism is a declaration in the agent's configuration --- the nodes it owns --- plus a shared
+presence coordinator that removes them on shutdown. No agent may hand-roll node cleanup. It has three
+ways to fail silently, and all three have been observed:
+
+\begin{itemize}[leftmargin=1.4em,itemsep=3pt]
+\item \textbf{A name that matches nothing.} Ownership entries match exact names, or a prefix when the
+      entry ends in a star. An agent's own node is named after its class \emph{and its configured
+      identifier}, so an entry copied from another agent --- \texttt{door\_concept 20} against a
+      configured id of $15$ --- matches nothing at all, and the agent's own node leaks into the
+      persistent graph on every \emph{graceful} shutdown. Found by audit, not by symptom, because a
+      graceful shutdown is exactly the case nobody watches.
+\item \textbf{A missing glob.} The declaration must list both the agent node and the object pattern.
+      Omitting the pattern leaks every object node the agent created, or forces a bespoke sweep that
+      duplicates the shared one and then drifts from it.
+\item \textbf{An uncatchable signal.} Cleanup runs on \texttt{SIGTERM}/\texttt{SIGINT}. A
+      \texttt{SIGKILL} cannot be caught, so nothing runs and everything owned leaks. The safety net
+      is a startup stale-sweep --- run twice, because nodes may still be syncing from the persistent
+      server at initialisation, so the sweep is repeated once on first entry to the operating state.
+\end{itemize}
+
+\section{What the two documents owe each other}
+\label{sec:summary}
+
+Four of the five life-cycle stages turn out to be assumptions of the factorization wearing
+operational clothes, and one of them --- \History{} --- improves on the assumption as stated. That
+much was the expected result of the comparison. The interesting outcome is the list of things each
+document was missing that the other supplies.
+
+\begin{center}
+\begin{tabular}{@{}p{6.6cm} p{7.6cm}@{}}
+\toprule
+The contract gains a derivation & The model gains a correction \\
+\midrule
+\Update, \Remove, \Ownership{} restate the accuracy term, $q(e_i)$ and A4 --- they are not house
+rules \S\ref{sec:mapping} &
+The visibility factor is missing an argument: it must be conditioned on the room polygon
+\eqref{eq:lc-visR} \S\ref{sec:walls} \\[5pt]
+The admissibility gate is justified, not merely flagged: \eqref{eq:lc-sat} rules out the continuous
+alternative \S\ref{sec:whygate} &
+The gate is not a term of the likelihood but a guard on A2, whose own justification Chapter~7
+records as false across short windows \S\ref{sec:whygate} \\[5pt]
+Birth has a form --- the free-energy difference \eqref{eq:lc-deltaF} --- and so a currency shared
+with removal \S\ref{sec:create} &
+$\mathcal{I}_c$ is a fixed index set; the posterior has no birth term at all, and no birth time
+\S\ref{sec:create}, \S\ref{sec:provenance} \\[5pt]
+\History{} names the two constants and the single move that removes them
+\S\ref{sec:volatility}, \S\ref{sec:pfa} &
+A7's transition and the mixture's clutter weight are both constants that should be inferred,
+covariate-dependent latents \S\ref{sec:history} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+Two threads run through the list and are worth separating from it.
+
+The first is that \eqref{eq:lc-sat} --- the one factor Chapter~7 evaluates exactly --- turned up
+three times in three unrelated places: as the reason a denser mask stops helping, as the reason a
+downweighted bad frame still moves the mean (\S\ref{sec:whygate}), and as the reason a carefully
+computed detection weight had no effect at all (\S\ref{sec:saturation}). Saturation is the
+characteristic behaviour of this architecture, and a modulation applied upstream of a saturation is
+invisible. Both bugs were found by noticing a missing effect; neither was found by reading code.
+
+The second is that the two remaining heuristics are of genuinely different kinds, which the first
+draft of this chapter got wrong by grouping them. The admissibility gate is a threshold that
+\emph{should} be a threshold: it defends an assumption against a bias the model has no coordinate
+for, and the continuous version provably cannot do the job. The birth criterion is a threshold that
+should not be: it approximates a quantity in nats with a dimensionless streak, it is the only stage
+whose decision cannot be traded against any other, and closing it would subsume four separate
+corrective mechanisms. Under the landmark variant of Chapter~7 it is also the stage whose errors stop
+being local (\S\ref{sec:variant}). It is the first thing to fix, and the model already computes
+everything it needs.
+
+\clearpage
+\appendix
+\renewcommand{\thesection}{\Alph{section}}
+\setcounter{section}{0}
+
+\begin{center}
+{\Large\bfseries Appendices}\\[4pt]
+\rule{0.32\textwidth}{0.4pt}
+\end{center}
+
+\medskip\noindent
+The body above is the contract and its reading against the model. What follows is its state on the
+running system: which agents conform, where they do not, and the checklist a new agent is written
+against.
+
+\section{Conformance audit}
+\label{sec:audit}
+
+Derived by reading each agent's source, not inferred from its includes. A dash means the stage does
+not apply to that agent's sensing. State as of 2026-07-31.
+
+\begin{center}
+\small
+\begin{tabular}{@{}l c c c c c c c@{}}
+\toprule
+Agent & \Create & \Update & admissibility & \Remove & $P(\text{detect})$ & wall LoS & \Ownership \\
+\midrule
+table        & \ding{51} & \ding{51} & \ding{51} & \ding{51} & \ding{51} & \ding{51} & \ding{51} \\
+chair        & \ding{51} & \ding{51} & \ding{51} & \ding{55}$^{a}$ & \ding{51} & --- & \ding{51} \\
+bottle       & \ding{51} & \ding{51} & \ding{51} & \ding{55}$^{b}$ & --- & --- & \ding{51} \\
+cabinet      & \ding{51} & \ding{51} & \ding{51} & \ding{51} & \ding{51} & \ding{51} & \ding{51} \\
+door         & \ding{51} & \ding{51} & \ding{51} & \ding{51} & \ding{51} & \ding{51} & \ding{51} \\
+refrigerator & \ding{51} & \ding{51} & \ding{51} & \ding{51} & \ding{51} & \ding{51} & \ding{51} \\
+residual     & \ding{51} & \ding{51} & ---$^{c}$ & \ding{51} & --- & --- & \ding{51} \\
+human        & \ding{55} & \ding{55} & \ding{55} & \ding{55} & \ding{55} & \ding{55} & \ding{51} \\
+\bottomrule
+\end{tabular}
+\\[4pt]
+\footnotesize
+$^{a}$ hand-rolled, private accumulator \quad
+$^{b}$ tracker negative-information death only \quad
+$^{c}$ field model, no per-frame gate
+\end{center}
+
+\noindent
+The \History{} column is omitted because it would be uninformative: \S\ref{sec:volatility} is
+unimplemented in \emph{all} agents by design --- it ships after the baseline run --- and the
+recording of \S\ref{sec:attribution} is live everywhere except \textsf{human\_concept}, with the
+bottle and residual agents' events marked unattributable for the reason given there.
+
+\medskip\noindent
+Open deviations, in priority order:
+
+\begin{enumerate}[leftmargin=1.6em,itemsep=3pt]
+\item \textbf{\textsf{human\_concept} is on a different lineage entirely} --- no shared tracker, no
+      shared belief engine, no existence channel, and the sole remaining user of the abandoned
+      stabiliser module. It must either be migrated or declared out of contract explicitly; today it
+      is neither, which is the worst of the three states.
+\item \textbf{\textsf{chair\_concept} hand-rolls \Remove}, with a private existence accumulator and
+      private gains. This is where the line-of-sight threshold of \S\ref{sec:attribution} lived. Port
+      it to the shared channel.
+\item \textbf{\textsf{bottle\_concept} has no existence channel}, relying on the tracker's
+      negative-information death. This is permitted by \S\ref{sec:remove} but must be a conscious
+      declaration, and it is why its phantom deaths are unattributable.
+\item Two agents still write a legacy event schema alongside the new one. Harmless, and redundant
+      once the baseline confirms the new schema captures what is wanted.
+\end{enumerate}
+
+\section{Checklist for a new agent}
+\label{sec:checklist}
+
+\begin{enumerate}[leftmargin=1.6em,itemsep=3pt]
+\item \Create{} through the shared tracker; nothing else may birth. Stamp every inserted node with
+      its creation time before insertion.
+\item \Update{} through the shared recursive-Laplace engine. Per-frame quality into the common-mode
+      covariance, never into an \texttt{if}; one stated admissibility gate, justified as in
+      \S\ref{sec:whygate}; no observability covariate derived from the point estimate of the degree
+      of freedom it gates.
+\item \Remove{} through the shared existence channel: occupancy confirms, predicted-visible absence
+      removes, occlusion holds. Absence weighted by $P(\text{detect})$ applied to the
+      \emph{saturated} increment; line of sight through \texttt{walls\_block}; no floor under
+      $P(\text{detect})$ --- route the unresolvable to a verification pull.
+\item \History: no constant process noise once \S\ref{sec:volatility} ships; record births and
+      deaths with their attribution fields from day one.
+\item \Ownership: declare the agent node with the \emph{correct} identifier and the object pattern;
+      terminate on catchable signals only; sweep stale nodes at startup, twice.
+\item Add a row to the audit of \S\ref{sec:audit} and justify every failing entry.
+\end{enumerate}
+
+\begin{thebibliography}{9}
+
+\bibitem{barshalom}
+Y.~Bar-Shalom, X.-R.~Li and T.~Kirubarajan.
+\emph{Estimation with Applications to Tracking and Navigation.} Wiley, 2001.
+
+\bibitem{mahler}
+R.~P.~S.~Mahler.
+\emph{Statistical Multisource-Multitarget Information Fusion.} Artech House, 2007.
+
+\bibitem{minka}
+T.~P.~Minka.
+\emph{Expectation Propagation for Approximate Bayesian Inference.}
+Proc. Uncertainty in Artificial Intelligence, 2001.
+
+\bibitem{friston}
+K.~Friston, F.~Rigoli, D.~Ognibene, C.~Mathys, T.~FitzGerald and G.~Pezzulo.
+\emph{Active inference and epistemic value.} Cognitive Neuroscience, 6(4):187--214, 2015.
+
+\end{thebibliography}
+
+\end{document}

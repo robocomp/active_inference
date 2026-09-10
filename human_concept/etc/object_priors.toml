@@ -1,0 +1,12 @@
+# human_concept priors.
+#
+# human_concept primarily scaffolds "person_<id>" nodes on demand from live skeleton track ids, so
+# this file is usually empty. Add a [[humans]] entry only to pre-seed an expected person (e.g. a
+# greeter location). Schema:
+#
+#   [[humans]]
+#   node_name = "person_1"
+#   track_id  = 0
+#   room_x_m  = 0.0
+#   room_y_m  = 0.0
+#   room_z_m  = 0.0

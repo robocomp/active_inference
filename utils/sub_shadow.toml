@@ -1,0 +1,63 @@
+[[components]]
+name = "bridge"
+cwd = "~/robocomp/components/webots-bridge"
+cmd = "bin/Webots2Robocomp etc/config.toml"
+ice_name = "Webots2Robocomp:tcp -h localhost -p 10006"
+
+[[components]]
+name = "camera360"
+cwd = "~/robocomp/components/robocomp-robolab/components/hardware/camera/ricoh_omni_dds"
+cmd = "bin/ricoh_omni_dds etc/config_webots.toml"
+ice_name = "Camera360RGB:tcp -h localhost -p 10097"
+
+[[components]]
+name = "helios"
+cwd = "~/robocomp/components/robocomp-robolab/components/hardware/laser/lidar3d_dds"
+cmd = "bin/lidar3d_dds etc/config_helios_webots.toml"
+ice_name = "Lidar3D:tcp -h localhost -p 10098"
+
+[[components]]
+name = "pearl"
+cwd = "~/robocomp/components/robocomp-robolab/components/hardware/laser/lidar3d_dds"
+cmd = "bin/lidar3d_dds etc/config_bpearl_webots.toml"
+ice_name = "Lidar3D:tcp -h localhost -p 11990"
+
+# Bridges the Webots IMU (bridge's Endpoints.IMU = 10007) onto the DDS media plane
+# (domain 7, rc/imu/data). robot_concept adopts it via Proxies.MediaPlaneDDS4 and then
+# stops bridging the IMU itself. ice_name pings its MediaPlaneDDS descriptor endpoint.
+[[components]]
+name = "imu"
+cwd = "~/robocomp/components/robocomp-robolab/components/hardware/imu/imu_dds"
+cmd = "bin/imu_dds etc/config.toml"
+ice_name = "mediaplanedds:tcp -h localhost -p 11891"
+
+#[[components]]
+#name = "filter"
+#cwd = "~/robocomp/components/robocomp-robolab/components/hardware/laser/lidar3DFilter"
+#cmd = "bin/lidar3DFilter etc/config_shadow_webots"
+#ice_name = "Lidar3DFilter:tcp -h localhost -p 11995"
+
+#[[components]]
+#name = "rgbd360"
+#cwd = "~/robocomp/components/robocomp-shadow/insect/RGBD_360"
+#cmd = "bin/RGBD_360 etc/config_wb"
+#ice_name = "RGBD360:tcp -h localhost -p 10100"
+
+#[[components]]
+#name = "vision_segmentation"
+#cwd = "~/robocomp/components/beta-robotica-class/vision_segmentation"
+#cmd = "bin/vision_segmentation etc/config"
+#ice_name = "VisionSegmentation:tcp -h localhost -p 14111"
+
+[[components]]
+name = "zed"
+cwd = "~/robocomp/components/robocomp-robolab/components/hardware/camera/zed_camera"
+cmd = "bin/zed_camera etc/configShadowWebot.toml"
+ice_name = "Zed:tcp -h localhost -p 12001"
+
+
+[[components]]
+name = "joy"
+cwd = "~/robocomp/components/robocomp-robolab/components/hardware/external_control/python_xbox_controller"
+cmd = "bin/python_xbox_controller etc/config_shadow"
+ce_name = "python_xbox_controller:tcp -h localhost -p 11230"

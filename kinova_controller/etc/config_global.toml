@@ -1,0 +1,168 @@
+[Proxies]
+# Proxies for required interfaces
+KinovaArm = "kinovaarm:tcp -h localhost -p 15005"
+Webots2Robocomp = "webots2robocomp:tcp -h localhost -p 15010"
+
+# --- Common Agent Data ---
+[Agent]
+id = 9 # Change id
+name = "kinova_controller"
+
+# --- Single Instance Configuration ---
+# Use this if you only have one graph.
+configFile = "/home/robocomp/robocomp/components/active_inference/kinova_controller/kinova2.json"
+domain = 1 # so it does not interfere with other experiments
+tree = false
+graph = true
+2d = false
+3d = false
+
+# --- Multiple Instance Template ---
+# If you define multiple instances, the single instance config above will be ignored.
+# [Agent.instance_name]
+# configFile = ""
+# domain = 1
+# tree = true
+# graph = true
+# 2d = true
+# 3d = true
+
+[Controller]
+global_confidence = true   # A/B: single shared confidence
+auto_start = true
+tip_log    = false  # disabled: [ctrl] lines below are the validation log
+# EXPERIMENT 1 — natural fine-tuning from a specialized sequence:
+# run the full pick→place loop and let model precision (c) accumulate from confirmed
+# grasps over round_cycles reps. false ⇒ the approach+hold baseline (Tracking holds).
+learn_pick_place = true
+# Pragmatic resolved-rate backend: "dls" (closed form, default) or "qp" (proxQP).
+# The QP with no inequalities reproduces DLS exactly — A/B it, then later steps move
+# joint-limit/obstacle terms into hard QP constraints. See EFE_CONTROLLER_MATH.md §4.
+solver = "qp"
+# QP only: weight on the μ/elbow linear term. 0 (or ≤0) ⇒ λ² = reproduces the old
+# null-space projection (redundancy strictly off the task). Larger ⇒ genuine NEO: μ/elbow
+# assert in the objective and the task slack yields. Try ~0.05–0.2 to A/B the difference.
+qp_redundancy_weight = 0.0
+force_confidence = -1.0   # normal learning
+# Look-ahead coarticulation: within this radius (m) of a transit via-point (lift-top,
+# place-hover) the EE velocity is steered toward the NEXT waypoint so it ROUNDS the corner
+# instead of stopping. Effective = skill_c()·this (0 for novice = baseline exact stops).
+# Usable band is REACH_TOLERANCE(0.02) < r ≲ 0.05: below 0.02 the gate fires before the
+# blend acts (inert); above ~0.05 the lift corner-cut nears the rise confirm and speed
+# carried into the set-down hurts SPARC. 0.04 = swept optimum (skilled-rep J=time−SPARC
+# best of {0,0.02,0.04,0.06}; SPARC −5.48→−4.77, cycle 6.1→5.3s, success 19/20). 0 = off.
+blend_radius = 0.04
+# ── Preference-field mode (option (c) prototype, steps 1–2) ───────────────────────────
+# Replace the hand-coded look-ahead blend on the transit legs with a 2-via Gaussian-mixture
+# preference field. ONE precision per via expresses stop-vs-pass: λ=exp(−Π/ref) is the
+# terminal-speed fraction at the via. The current transit via's Π interpolates stop→pass
+# with skill: novice ⇒ field_prec_stop ⇒ exact stop (PARITY with the discrete leg, step 1);
+# skilled ⇒ field_prec_pass ⇒ cruise-through (EMERGENT blend, step 2). A/B: leave false to
+# use the committed blend; set true to drive the same legs from the field instead. To check
+# step-1 parity in isolation, set field_prec_pass = field_prec_stop (always-stop).
+use_preference_field = false
+field_prec_pass = 1.0     # Π of a transit via at full skill (low ⇒ pass through)
+field_prec_stop = 30.0    # Π at novice / of the next attractor (high ⇒ stop)
+field_prec_ref  = 6.0     # λ = exp(−Π/ref): precision → terminal-speed map
+field_overlap   = 0.06    # [m] RBF width: how near the via the next-via pull ramps in
+# ── Tactile re-centering (anti-tip grasp) ─────────────────────────────────────────────
+# Use the per-finger fingertip tip-force asymmetry (ltipforce−rtipforce) during Inserting to
+# shift the seat target laterally toward the harder-pushing finger, centring the bottle
+# between the pads instead of pushing it over, and commit to Closing only when seated AND not
+# pushing. Off ⇒ the old gate (commit on any single contact). recenter_sign maps the L/R
+# force-asymmetry sign onto tool +X — flip it if re-centring makes tipping worse.
+tactile_recenter = false
+recenter_gain    = 0.02   # [m] max lateral seat shift at full L/R asymmetry
+recenter_sign    = 1.0    # ±1: calibrate in sim
+# Stop-and-rectify reflex on a tip-BUMPER collision during Inserting: halt, back off, and
+# shift laterally toward the contacting finger so the object enters the gripper on retry.
+# Needs the tip bumpers + TGripper.{l,r}tipcontact. recenter_sign also flips this reflex's
+# lateral direction — if it makes misalignment worse, flip the sign.
+tip_reflex = false
+# ── Bottle-as-obstacle (set-down withdrawal safety) ───────────────────────────────────
+# Hard QP velocity-damper constraint on the TOOL vs the bottle cylinder, active ONLY in
+# PlaceRetreating — the gripper has released the bottle on the table and is backing off to
+# rest, so it must not knock the standing bottle over. OFF during the pick approach/grasp.
+# QP solver only.
+bottle_obstacle        = true   # ON: don't tip the just-placed bottle on the way back to rest
+bottle_obstacle_margin = 0.04   # [m] repel within this distance of the bottle surface
+elbow_gain = 2.0
+elbow_target_xy = ""
+# Controlled-experiment harness: pin pick AND place so every rep repeats the same
+# pick→place motion (isolates a regression from pick/place-location variance). Empty
+# string ⇒ normal R2/predictive sweep. Pick = arm_base.wbt authored bottle xy.
+fixed_pick_xy = "0.1 -0.25"
+fixed_place_xy = "0.15 -0.25"
+round_cycles = 10
+# Rest pose "j1 .. j7" (rad). Tune the "ready over the table, camera-up" posture
+# here without recompiling; relaunch to apply. Startup prints [rest-pose] metrics
+# (EE pos, upperarm_dz≈0 = first link parallel to table, toolY_up≈+1 = camera up).
+rest_pose = "0.0 0.0 0.0 1.0 0.0 1.65 -1.5705"   # in sync with kinova-bridge startup pose
+grasp_align_tol_deg = 15.0  # approach-axis only metric (tool+Z angle); 15° gives headroom for the new mount
+
+# ── Skill-learning instrumentation ───────────────────────────────────────────
+# Probe each pick with a small STRUCTURED perturbation of the grasp command
+# (Halton sweep, not noise) and log one row per rep to dataset_path. Offline this
+# yields the grasp-pose bias, the actuation response, and the per-region tolerance
+# budget needed to move from closed-loop to model-based open-loop reaching.
+# Leave probe_variations = false for a plain round (zero perturbation).
+probe_variations = false      # VALIDATION: no perturbation
+probe_pos_amp    = 0.015      # m,   half-range of tangential/axial grasp offset
+probe_azi_amp    = 0.15       # rad, half-range of approach-azimuth rotation
+probe_speed_amp  = 0.25       # ±fraction of nominal approach/insert speed
+dataset_path     = "/tmp/kinova_skill_dataset.csv"
+# Per-cycle commanded-vs-measured joint velocity log (for the actuation model G, τ).
+joint_log_path   = "/tmp/kinova_joint_actuation.csv"
+# Per-cycle EE speed over the whole pick-place → offline SPARC + stop-count (fluidity).
+fluid_log_path   = "/tmp/kinova_fluidity.csv"
+
+# ── Precision learning from doing (novice→skilled = accumulated model precision) ──
+# confidence c = Π_m/(Π_m+Π_s) is NOT a scripted ramp: Π_m accumulates from CONFIRMED
+# outcomes (Π_m += evidence_unit·quality per clean grasp) and deflates by conf_decay on a
+# surprise (miss). c then reshapes the action geometry/timing (standoff_collapse, settle
+# dwell, speed) — so the agent gets skilled purely by doing, and self-calibrates (it only
+# speeds up as fast as the outcomes keep confirming). Π_m is persisted across rounds.
+precision_reweighting = true       # EXP1: precision learning ON
+sensory_precision     = 2.0        # Π_s (fixed): c ≈ n/(n+Π_s) over n clean reps → gradual saturation
+evidence_unit         = 1.0        # Π_m added by one cleanly-confirmed rep
+conf_decay            = 0.5        # Π_m ×= this on a surprise (miss)
+perception_noise_std  = 0.0        # m, σ of injected bottle-observation noise (sim2real; 0 = ideal sim)
+conf_gain             = 0.15       # (legacy ramp; unused by the surprise-driven update)
+skilled_sample_period = 12         # cycles between observations at full confidence
+speed_conf_gain       = 0.6        # approach speed ×(1+this·confidence) — "more speed" when skilled
+standoff_collapse     = 0.6        # at full c, slide the Tracking waypoint 60% from standoff toward grasp
+insert_conf_gain      = 1.0        # insert speed ×(1+this·confidence) — skilled creeps in twice as fast
+confidence_path       = "/tmp/kinova_confidence.txt"   # persist Π_m across rounds
+metrics_path          = "/tmp/kinova_skill_metrics.csv" # per-rep: success, c, cycle time
+# Fresh upright bottle teleported to the fixed pick spot at each rep start — REQUIRED for
+# the 10-rep loop (after a place the pick spot would otherwise be empty).
+respawn_each_rep = true       # EXP1: re-stand the bottle at the fixed pick each rep
+
+# ── Retreat sub-skill (leaving the placed bottle) — learnable like the grasp ──────
+# Retreat is a pure back-off along the gripper's own forward axis (perpendicular to the
+# upright bottle), started only once the fingers are confirmed open. Explore the timing/
+# speed per rep and score by the bottle's post-retreat tilt to LEARN a tip-free retreat.
+retreat_speed     = 0.18        # m/s — envelope showed tip-free to 0.20
+release_ticks     = 8           # cycles opening-in-place before the retreat latches (overlaps the open); was 25
+predictive_place  = true    # score candidate place spots by predicted manipulability+clearance; pick best-conditioned
+precompute_reach_map = true   # 0.1s — recompute every startup for this static scene
+reach_map_path = "experiments/reach_map.csv"
+predictive_grasp  = false   # choose grasp (side azimuth or TOP-DOWN) by scoring candidates with predict_reach
+gripper_open_conf = 0.85        # gs.opening ≥ this ⇒ fingers clear → safe to move
+probe_retreat     = false       # exploration done; retreat envelope is wide-open
+probe_rspeed_amp  = 0.8         # speed sweep 0.024..0.216 m/s
+probe_open_amp    = 0.25        # open-threshold sweep ~0.60..0.99
+retreat_log_path  = "/tmp/kinova_retreat.csv"   # params → post-retreat tilt ("" disables)
+
+[Period]
+Compute = 20
+Emergency = 500
+
+[Component.Debug]
+Verbose = false
+
+[Ice]
+Warn.Connections = "0"
+Trace.Network = "0"
+Trace.Protocol = "0"
+MessageSizeMax = "20004800"
