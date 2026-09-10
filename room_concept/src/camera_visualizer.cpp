@@ -754,92 +754,53 @@ std::optional<Eigen::Affine3d> CameraVisualizer::predicted_camera_from_room(std:
     const auto& robot_node = robot_nodes.front();
     const std::string robot_name = robot_node.name();
 
-    // room←robot at the frame time (DSR clamps/interpolates), and the static robot←zed mount.
-    // ★LISTENING ONLY — no behaviour change, and deliberately placed BESIDE the hand-rolled
-    // prediction below rather than replacing it. rt_bracket_total_/before_oldest_/after_newest_ (the
-    // "TEST 2026-09-07" counters in the header) already classify this query by hand; cortex now
-    // reports the same thing natively through TimeQueryInfo. Running BOTH for a while is the point:
-    // if they disagree, one of them is wrong, and finding that out is cheaper than trusting either.
-    // ★WHY NOT JUST SWITCH TO TimeQuery::Extrapolated AND DELETE predicted_camera_from_room(). That
-    // swap bundles THREE changes — the extrapolation itself, a different horizon (cortex bounds by
-    // the edge's own ring span, ~1.2 s here, where this file caps at kMaxPredictHorizonS), and a
-    // BACKWARD walk this file explicitly refuses ("Only forward-predict"). The camera overlay is what
-    // would shift, and with three changes at once a shift is uninterpretable. before_oldest_ is the
-    // only existing record of how often the backward case even fires — and HISTORY_SIZE = 25 was set
-    // to suppress it — so deleting the counter that produces that number, in the same commit that
-    // starts relying on it, is the wrong order.
+    // ── room←robot AT THE FRAME STAMP, EXTRAPOLATED BY THE QUERY ITSELF ──────────────────────
+    // This replaces ~60 lines of hand-rolled dead reckoning — the FIFTH copy of the same SE(2)
+    // twist step in this fleet, after the controller, retina, viewer3d and media_transport. Four of
+    // the five carried the identical 90-degree axis bug (adv belongs on the frame's y, not its x)
+    // and it was found and fixed separately on four dates over a month. RT_API::TimeQuery::
+    // Extrapolated is the one implementation now, and it reads the twist in AXIS order so no
+    // consumer re-encodes a body-frame convention.
+    //
+    // ★MIGRATED ON THIS CALL SITE'S OWN MEASURED NUMBERS, not on the assumption that a camera path
+    // must need it. The opposite assumption was tested first and failed twice: retina has logged
+    // ZERO extrapolation events in two months, so its copy was inert and its removal was free. This
+    // one is not. With the abandoned root->robot edge no longer swamping the instrument, the probe
+    // beside this query reads, on a driving robot:
+    //     exact 66.9%   interp 9%   CLAMPED 24.1%   max|gap| 112 ms
+    // 112 ms at the 0.65 m/s and 0.53 rad/s measured in that same window is 7.3 cm and 3.4 degrees
+    // of overlay error, on a quarter of frames. Visible, and worth correcting.
+    //
+    // ★WHAT CORTEX DOES THAT THE HAND-ROLLED VERSION DID NOT:
+    //   - the SE(2) left Jacobian, so the step is the CHORD of the arc rather than its tangent
+    //     (the old code did t += R*v*dt, cutting the corner by phi^2/24);
+    //   - a BACKWARD walk when the frame predates the ring, which the old code refused outright
+    //     ("Only forward-predict") and which rt_bracket_before_oldest_ exists to count;
+    //   - a bound derived from the edge's OWN ring span rather than a constant.
+    // ★kMaxPredictHorizonS IS STILL APPLIED HERE, because cortex reports how far it walked and
+    // refuses to invent a cap: past the horizon we take the un-extrapolated pose rather than
+    // predict across a stalled producer.
     static rc::rtprobe::Probe rt_probe{"room_concept camera room<-robot"};
     DSR::RT_API::TimeQueryInfo rt_info;
-    const auto room_T_robot = inner_eigen_api_->get_transformation_matrix(
-        room_frame_name_, robot_name, frame_ts, "RT", DSR::RT_API::TimeQuery::Interpolated,
-        &rt_info);
+    const auto tq = overlay_predict_pose_ ? DSR::RT_API::TimeQuery::Extrapolated
+                                          : DSR::RT_API::TimeQuery::Interpolated;
+    auto room_T_robot = inner_eigen_api_->get_transformation_matrix(
+        room_frame_name_, robot_name, frame_ts, "RT", tq, &rt_info);
+    if (room_T_robot.has_value()
+        and std::abs(rt_info.applied_dt_ms) > static_cast<std::int64_t>(kMaxPredictHorizonS * 1000.0))
+        room_T_robot = inner_eigen_api_->get_transformation_matrix(
+            room_frame_name_, robot_name, frame_ts, "RT", DSR::RT_API::TimeQuery::Interpolated);
     rt_probe.note(rt_info, graph_);
     const auto robot_T_zed = inner_eigen_api_->get_transformation_matrix(
         robot_name, camera_node_name_, 0, "RT", DSR::RT_API::TimeQuery::Nearest);
     if (!room_T_robot.has_value() || !robot_T_zed.has_value())
         return std::nullopt;
 
-    Eigen::Affine3d room_T_robot_pred = room_T_robot.value();
+    const Eigen::Affine3d room_T_robot_pred = room_T_robot.value();
 
-    // Dead-reckon room←robot forward by (frame_ts − leading_edge_stamp) using the body twist
-    // written on the room→robot RT edge (rt_translation_velocity=[adv,side,0] m/s, body frame;
-    // rt_rotation_euler_xyz_velocity=[0,0,rot] rad/s). SE2 increment: t += R·v·dt, θ += rot·dt.
-    if (const auto rt_edge = graph_->get_edge(room_node->id(), robot_node.id(), "RT"); rt_edge.has_value())
-    {
-        const auto vel_t  = graph_->get_attrib_by_name<rt_translation_velocity_att>(rt_edge.value());
-        const auto vel_r  = graph_->get_attrib_by_name<rt_rotation_euler_xyz_velocity_att>(rt_edge.value());
-        const auto stamps = graph_->get_attrib_by_name<rt_timestamps_att>(rt_edge.value());
-
-        if (vel_t.has_value() && vel_r.has_value() && stamps.has_value()
-            && vel_t->get().size() >= 2 && vel_r->get().size() >= 3 && !stamps->get().empty())
-        {
-            std::uint64_t t_leading = 0;
-            std::uint64_t t_oldest  = std::numeric_limits<std::uint64_t>::max();
-            for (const auto s : stamps->get())
-            {
-                t_leading = std::max(t_leading, s);
-                t_oldest  = std::min(t_oldest, s);
-            }
-
-            // TEST 2026-09-07: classify this query against the retained window before doing
-            // anything with it — see the counters' doc comment in the header.
-            ++rt_bracket_total_;
-            if (frame_ts <= t_oldest)
-                ++rt_bracket_before_oldest_;
-            else if (frame_ts > t_leading)
-                ++rt_bracket_after_newest_;
-            if (const auto now_ms = QDateTime::currentMSecsSinceEpoch();
-                now_ms - rt_bracket_diag_last_log_ms_ >= 5000 and rt_bracket_total_ > 0)
-            {
-                rt_bracket_diag_last_log_ms_ = now_ms;
-                qInfo().nospace()
-                    << "[RTBracketDiag] " << rt_bracket_total_ << " queries: "
-                    << QString::number(100.0 * rt_bracket_before_oldest_ / rt_bracket_total_, 'f', 1)
-                    << "% before-oldest (HISTORY_SIZE-limited), "
-                    << QString::number(100.0 * rt_bracket_after_newest_ / rt_bracket_total_, 'f', 1)
-                    << "% after-newest (dead-reckoned below regardless)";
-            }
-
-            // Only forward-predict: if the frame predates the leading edge the pose was already
-            // bracketed/interpolated exactly, so dt=0. Clamp to the safety horizon.
-            double dt = (frame_ts > t_leading) ? (static_cast<double>(frame_ts - t_leading) * 1e-3) : 0.0;
-            dt = std::clamp(dt, 0.0, kMaxPredictHorizonS);
-
-            if (dt > 1e-4)
-            {
-                const float adv  = vel_t->get()[0];
-                const float side = vel_t->get()[1];
-                const float rot  = vel_r->get()[2];
-
-                const Eigen::Matrix3d R_old = room_T_robot->linear();
-                const Eigen::Vector3d t_old = room_T_robot->translation();
-                room_T_robot_pred.linear() =
-                    Eigen::AngleAxisd(rot * dt, Eigen::Vector3d::UnitZ()).toRotationMatrix() * R_old;
-                room_T_robot_pred.translation() =
-                    t_old + R_old * Eigen::Vector3d(side, adv, 0.0) * dt;  // FIX 2026-09-03: era (adv, side) -- body frame +Y forward/+X lateral, ver room_scene_graph.cpp
-            }
-        }
-    }
+    // (rt_bracket_total_/before_oldest_/after_newest_ lived here — the "TEST 2026-09-07" hand
+    // classification of this same query. TimeQueryInfo reports it natively now, per outcome and with
+    // the gap, so the counters are superseded rather than merely duplicated.)
 
     const Eigen::Affine3d room_T_zed_pred = room_T_robot_pred * robot_T_zed.value();
     return room_T_zed_pred.inverse();   // camera_T_room: maps room points → camera frame
