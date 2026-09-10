@@ -286,58 +286,6 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
 
 ///////////////////////////////////////////////////////////////////////////////
 
-// ── FREEZE root->robot ONCE THE ROOM TAKES OVER AS THE POSE CHANNEL ─────────────────────────────
-// Until the room node exists this agent publishes the robot's pose as root->robot (see the
-// parent/child switch in dsr_update_pose). The moment the room is created it publishes robot->room
-// instead and NEVER WRITES root->robot AGAIN — leaving a timestamped ring whose newest block is the
-// instant of the switch, ageing for the life of the run.
-//
-// ★THAT ABANDONED RING POISONS EVERY CHAIN IN THE GRAPH, AND CHANGES NO GEOMETRY. `root` is a dummy
-// node — it exists only because cortex assumes a named root — so its transform carries no physical
-// meaning, and InnerEigenAPI walks BOTH branches up to the common ancestor, which for any pair under
-// the robot is root. root->robot therefore appears on both sides of the composition and CANCELS.
-// But the clamp verdict does not cancel: a chain reports its WORST edge whether or not that edge
-// influenced the answer. Measured here: all 50 nodes hang off the robot, so one abandoned edge gave
-// every timestamped query in the fleet a Stale verdict with a gap growing one second per second,
-// drowning the ~25% real clamp rate of the live edge beside it.
-//
-// So at the switch the edge is rewritten ONCE as rt_static: same transform, no ring, no timestamps.
-// ★THE VALUE IS KEPT, NOT ZEROED. Identity would be tidier for a dummy root, but any consumer that
-// renders in root coordinates (the 3-D scene builder walks "root") would see the whole world jump by
-// the robot's start pose. Freezing what is already there changes nothing anyone can observe.
-// ★AND FREEZING A SLIGHTLY-WRONG DATUM IS HARMLESS HERE, which it would not be for a real frame:
-// nothing measures against root, so the residual is an offset of an arbitrary world origin.
-void RoomSceneGraph::freeze_world_to_robot_edge()
-{
-    if (world_edge_frozen_ or G_ == nullptr or rt_api_ == nullptr) return;
-    const auto world = G_->get_node(dsr_world_id_);
-    const auto robot = G_->get_node(dsr_robot_id_);
-    if (not world.has_value() or not robot.has_value()) return;
-    const auto e = rt_api_->get_edge_RT(world.value(), robot->id());
-    if (not e.has_value()) return;
-    const auto tr  = G_->get_attrib_by_name<rt_translation_att>(e.value());
-    const auto rot = G_->get_attrib_by_name<rt_rotation_euler_xyz_att>(e.value());
-    if (not tr.has_value() or not rot.has_value()
-        or tr->get().size() < 3 or rot->get().size() < 3)
-        return;
-    // Take the CURRENT head block, not block 0: the ring is 25 deep and block 0 is the oldest.
-    const auto latest = rt_api_->get_edge_RT_as_rtmat(e.value(), 0);
-    std::vector<float> t3{tr->get()[0], tr->get()[1], tr->get()[2]};
-    std::vector<float> r3{rot->get()[0], rot->get()[1], rot->get()[2]};
-    if (latest.has_value())
-    {
-        const Eigen::Vector3d p = latest->translation();
-        const Eigen::Matrix3d R = latest->linear();
-        t3 = {static_cast<float>(p.x()), static_cast<float>(p.y()), static_cast<float>(p.z())};
-        r3 = {0.f, 0.f, static_cast<float>(std::atan2(R(1, 0), R(0, 0)))};
-    }
-    auto world_node = world.value();
-    rt_api_->insert_or_assign_edge_RT_static(world_node, robot->id(), t3, r3);
-    world_edge_frozen_ = true;
-    qInfo() << "[RT] root->robot frozen as rt_static at the room handover — it is no longer written,"
-            << "and an abandoned ring would report a growing clamp on every chain in the graph.";
-}
-
 void RoomSceneGraph::dsr_update_pose(const rc::RoomConcept::UpdateResult& res)
 {
     write_robot_room_rt(res.robot_pose, res.covariance, static_cast<std::uint64_t>(res.timestamp_ms));
@@ -643,7 +591,6 @@ void RoomSceneGraph::dsr_create_room_and_reparent(const rc::RoomConcept::UpdateR
     {
         dsr_room_id_ = room_nodes.front().id();
         room_node_created_ = true;
-        freeze_world_to_robot_edge();   // root->robot stops being written from here on
         stable_frames_ = 0;
         // Idempotent polygon write: a room node ADOPTED here (persisted from a prior session, or created bare by
         // another agent) may LACK the delimiting polygon — it is only set on the create path below. Every
@@ -692,7 +639,6 @@ void RoomSceneGraph::dsr_create_room_and_reparent(const rc::RoomConcept::UpdateR
 
     dsr_room_id_ = room_id_opt.value();
     room_node_created_ = true;
-    freeze_world_to_robot_edge();   // root->robot stops being written from here on
     stable_frames_ = 0;
     published_polygon_verts_ = room_polygon.size();
     trigger_layout_();

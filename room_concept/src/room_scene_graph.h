@@ -294,10 +294,6 @@ private:
     std::string overlay_robot_name_, overlay_scenario_name_;   ///< resolve_overlays_from_graph() runs once, from whichever site reaches it first
     std::uint64_t dsr_room_id_  = 0;
     bool          room_node_created_ = false;
-    // One-shot: root->robot is rewritten as rt_static at the room handover, because this agent stops
-    // writing it there and an abandoned ring reports a growing clamp on every chain (see the .cpp).
-    bool          world_edge_frozen_ = false;
-    void freeze_world_to_robot_edge();
     int           stable_frames_     = 0;
     std::size_t published_polygon_verts_ = 0;   // Estimate mode: vertex count last written to the room node
     // Sustained-stability counter for the object-anchor PIN guard. Distinct from stable_frames_, which
