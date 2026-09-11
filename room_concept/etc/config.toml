@@ -1500,6 +1500,40 @@ mountVertexOffsetSigmaPx = 5.3
 #   with this off has absorbed each corner's own detection bias, and must not be written into an
 #   extrinsic. The solve REFUSES to be applied unless this is on.
 mountApply = true
+
+# ── mountPublish: write the measured mount into the SHARED body->camera RT edge ──────────────────
+# OFF until the loop has been watched for a session or two on this robot. With mountApply on, the
+# correction exists only inside room_concept's own camera model: retina, the controller and every
+# other consumer still read the nominal mount, so the fleet disagrees with the estimator by exactly
+# the amount the estimator has measured. Turning this on makes the graph tell everyone the same
+# thing.
+#
+# ★ It is an OUTPUT only. The estimator keeps measuring against the extrinsic it read at BIND and
+#   the prior stays anchored there, so publishing cannot change any number the loop produces. See
+#   SpecificWorker::publish_mount_to_graph — that separation, not a magnitude limit, is what makes
+#   it safe to leave running.
+#
+# ⚠⚠ NOT BUILT, AND THE REASON THIS IS OFF BY DEFAULT: THE VALUE IS NOT PERSISTED, AND ACROSS A
+#    RESTART IT STOPS BEING AN OUTPUT. A new process binds to whatever the edge holds, so today's
+#    published value becomes tomorrow's prior anchor and tomorrow's nominal. Within a session the
+#    loop is stationary; across sessions it can random-walk by its own posterior sigma, because
+#    after the first publish nothing outside the loop still holds the mount's independently measured
+#    value. Two consequences, both deliberate:
+#      · the graph is PERSISTENT, so the published value already survives a room_concept restart —
+#        it is not lost, it is simply no longer distinguishable from the nominal.
+#      · robot_concept rewrites body->camera from Transforms.boresight_yaw_<cam> at every start. That
+#        write now treats a configured 0 as "never measured" and leaves a non-zero edge alone, so it
+#        can no longer silently revert a published correction (robot_concept/src/specificworker.cpp).
+#
+#    THE STEP THAT CLOSES IT, and it is the right place for it: write the converged mount back into
+#    the ROBOT'S JSON (robot_concept/shadow.json), which is the description of the physical mount.
+#    Then the prior is anchored on a measurement the loop never writes, a cold start begins
+#    calibrated, and "has it converged?" becomes a question about a file rather than about a graph
+#    the estimator itself edits. robot_concept owns that file and already traps SIGINT/SIGTERM ->
+#    request_shutdown(), so doing it ON A GRACEFUL STOP is the natural home: read body->camera, write
+#    the mount block, log what changed. Not implemented. Until it is, treat a published value as
+#    good for the session and re-derivable from etc/camera_calib_<robot>_<cam>.txt.
+mountPublish = false
 # ★ 2026-09-03: the camera extrinsic is now CLOSED-LOOP. The pooled solve is fed back into the mount
 #   on the camera's own axes (the ones J differentiates), the evidence is re-referenced to the mount
 #   that results, and the prior stays anchored on the GRAPH extrinsic so the total is always the

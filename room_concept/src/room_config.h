@@ -415,6 +415,11 @@ struct RoomConfig
     //   (ImageEdge.mountVertexOffsetSigmaPx > 0) — an estimate that has absorbed per-corner detector
     //   bias must not be written into an extrinsic, and that refusal is the whole safety argument.
     bool  IMAGE_EDGE_MOUNT_APPLY       = false;   // ImageEdge.mountApply
+    /// ImageEdge.mountPublish — mirror the measured mount into the SHARED body->camera RT edge, so
+    /// every other agent reads the corrected extrinsic instead of the nominal one. An OUTPUT only:
+    /// the estimator keeps measuring against the extrinsic it read at bind (see
+    /// SpecificWorker::publish_mount_to_graph for why that separation is the whole safety argument).
+    bool  IMAGE_EDGE_MOUNT_PUBLISH     = false;   // ImageEdge.mountPublish
     // Per-CONTOUR map-position uncertainty — nuisance column [4]. Not a mount property: how well any
     // single wall's place in the room polygon is known. MEASURED, see image_edge_types.h.
     float IMAGE_EDGE_WALL_POS_SIGMA    = 0.015f;  // ImageEdge.wallPositionSigma (m)

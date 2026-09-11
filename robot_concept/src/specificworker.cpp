@@ -491,6 +491,23 @@ void SpecificWorker::initialize()
 			if (not rot.has_value() or not tr.has_value() or rot.value().get().size() < 3) continue;
 			const float cur = rot.value().get()[2];
 			if (std::abs(cur - yaw) < 1e-9f) continue;                // already right: touch nothing
+			// ⚠ A CONFIGURED ZERO MEANS "NEVER MEASURED", NOT "MEASURED AND FOUND TO BE ZERO", so it
+			//   must not overwrite a non-zero edge. room_concept's camera self-calibration can now
+			//   publish its converged mount into this same edge (ImageEdge.mountPublish), and with
+			//   the old test this function reverted it on every robot_concept start: Shadow's
+			//   configured boresight is 0, the edge held the measured value, they differed, and the
+			//   measurement lost to a placeholder. The asymmetry is deliberate — a REAL configured
+			//   value still wins, because that is the persisted nominal and this is where it is
+			//   applied from.
+			if (yaw == 0.f)
+			{
+				qInfo().noquote() << QString::asprintf(
+					"[mount] %s boresight: config says 0 (never measured) and body->%s holds "
+					"%+.5f rad (%+.3f deg) — LEAVING IT. A measured mount is not overwritten by a "
+					"placeholder; if that value is wrong, clear it in the graph or configure the "
+					"number you mean.", cam, cam, cur, cur * 180.0 / M_PI);
+				continue;
+			}
 			std::vector<float> r = rot.value().get();
 			r[2] = yaw;
 			const std::vector<float> tvec = tr.value().get();

@@ -417,6 +417,22 @@ class SpecificWorker : public GenericWorker
     void apply_mount_solve(rc::camcal::Estimator& pool, rc::CameraIngestor& ing,
                            const rc::mount::Accum::Solution& sol, const std::string& cam);
     bool mount_apply_refused_logged_ = false;
+    /// Mirror a camera's measured mount into the shared body->camera RT edge. OUTPUT ONLY — nothing
+    /// here is read back by the estimator; see the definition for why, and for the one thing that
+    /// changes across a restart.
+    void publish_mount_to_graph(const rc::CameraIngestor& ing, const std::string& cam);
+    /// Per camera: the mount this SESSION started from, plus the last correction written. The
+    /// nominal is captured once so a later window composes `nominal x correction` and never
+    /// `edge x correction`, which would compound this function's own previous write.
+    struct MountPublishState
+    {
+        Eigen::Vector3f nominal_t = Eigen::Vector3f::Zero();   ///< rt_translation as first seen
+        Eigen::Vector3f nominal_r = Eigen::Vector3f::Zero();   ///< rt_rotation_euler_xyz as first seen
+        Eigen::Vector3f last      = Eigen::Vector3f::Zero();   ///< last correction published
+        bool have_nominal = false, have_last = false;
+    };
+    std::map<std::string, MountPublishState> mount_publish_;
+    bool mount_publish_refused_logged_ = false;
     static void write_pair_row(std::ofstream& csv, const std::string& cam, std::int64_t ts,
                                const rc::mount::PairObs& pr, bool ceiling, float angle_deg,
                                float assoc_chi2, int n_rivals, float runnerup_chi2,

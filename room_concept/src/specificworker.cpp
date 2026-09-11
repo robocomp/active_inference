@@ -1137,6 +1137,168 @@ void SpecificWorker::apply_mount_solve(rc::camcal::Estimator &pool, rc::CameraIn
     if (not dp.allFinite() or dp.isZero()) return;
     pool.apply_correction(dp);         // evidence first: the ingestor must never lead the evidence
     push_mount_correction(ing, pool.applied(), cam, "applied");
+    // The shared extrinsic LAST, and only ever mirroring what the local correction already is.
+    publish_mount_to_graph(ing, cam);
+}
+
+/// Mirror the measured mount into the SHARED body->camera RT edge, so retina, the controller and
+/// every other consumer read the corrected extrinsic instead of the nominal one. Until this existed
+/// the loop corrected only room_concept's own copy, which was deliberate containment while the loop
+/// was young and never the end state.
+///
+/// ★★★ THIS IS AN OUTPUT AND NOTHING BUT AN OUTPUT, AND THAT IS THE WHOLE SAFETY ARGUMENT. The
+///     estimator keeps measuring against the extrinsic it read at bind: CameraIngestor freezes that
+///     base, Accum's prior stays anchored on it, and neither is re-read after a write. So publishing
+///     cannot move a single number the loop produces — it only tells the fleet what the loop already
+///     decided. Re-reading the edge after writing it would make the graph both the input and the
+///     output of one estimator and re-centre the prior on its own last answer, which is exactly the
+///     ratchet the feedback path was designed to avoid (a weakly informed axis then walks away one
+///     honest step at a time).
+/// ⚠⚠ ACROSS A RESTART IT STOPS BEING ONLY AN OUTPUT, and that is the open end of this feature. A
+///     new process binds to whatever the edge now holds, so today's published value becomes the next
+///     session's prior anchor and its nominal. Within a session the loop is stationary; across
+///     sessions it can random-walk by its own posterior sigma, because nothing outside the loop
+///     still holds the mount's independently measured value. THE CURE IS NOT HERE: the nominal
+///     belongs in the robot's JSON — the description of the physical mount — so that the prior is
+///     anchored on a measurement the loop never writes. See ImageEdge.mountPublish in etc/config.toml
+///     for the persistence step that closes it, which is NOT BUILT.
+/// ★ Composes from the NOMINAL captured on the first write, never from the edge's current value: the
+///   edge is always `nominal x correction`, so a second window cannot compound the first one's write.
+/// ★ Refuses an unmarginalised solve for the same reason apply_mount_solve does, and refuses if
+///   composing the edge does not reproduce cortex's own chain — a convention this file believed
+///   rather than checked would land a pitch on a roll and still look plausible.
+void SpecificWorker::publish_mount_to_graph(const rc::CameraIngestor &ing, const std::string &cam)
+{
+    if (not params.IMAGE_EDGE_MOUNT_PUBLISH) return;
+    const Eigen::Vector3f corr = ing.mount_correction();          // pitch rad, height m, yaw rad
+    if (not corr.allFinite()) return;
+    MountPublishState &st = mount_publish_[cam];
+    // Nothing moved since the last write. An RT write is a graph signal to every peer, so a window
+    // that changed the mount by less than a microradian must not cost one.
+    if (st.have_last and (corr - st.last).cwiseAbs().maxCoeff() < 1e-6f) return;
+
+    auto cn = G->get_node(cam);
+    if (not cn.has_value()) return;                               // ALWAYS check (CLAUDE.md)
+    const auto pid = G->get_attrib_by_name<parent_att>(cn.value());
+    if (not pid.has_value()) return;
+    auto pn = G->get_node(pid.value());
+    if (not pn.has_value()) return;
+    const auto e = G->get_edge(pn->id(), cn->id(), "RT");
+    if (not e.has_value()) return;
+    const auto rot = G->get_attrib_by_name<rt_rotation_euler_xyz_att>(e.value());
+    const auto tr  = G->get_attrib_by_name<rt_translation_att>(e.value());
+    if (not rot.has_value() or not tr.has_value()
+        or rot.value().get().size() < 3 or tr.value().get().size() < 3) return;
+
+    // Rx * Ry * Rz, the composition the whole fleet uses for rt_rotation_euler_xyz.
+    const auto euler_to_R = [](const Eigen::Vector3f &r) -> Eigen::Matrix3f
+    {
+        return (Eigen::AngleAxisf(r.x(), Eigen::Vector3f::UnitX())
+              * Eigen::AngleAxisf(r.y(), Eigen::Vector3f::UnitY())
+              * Eigen::AngleAxisf(r.z(), Eigen::Vector3f::UnitZ())).toRotationMatrix();
+    };
+
+    if (not st.have_nominal)
+    {
+        st.nominal_t = Eigen::Vector3f(tr.value().get()[0],  tr.value().get()[1],  tr.value().get()[2]);
+        st.nominal_r = Eigen::Vector3f(rot.value().get()[0], rot.value().get()[1], rot.value().get()[2]);
+        // ── The convention, checked against cortex's own chain instead of asserted ───────────────
+        // ★ MAIN THREAD ONLY (ts == 0 touches InnerEigenAPI's unlocked cache — CLAUDE.md). Both call
+        //   sites are in compute()'s pump; if that ever changes, skip the check rather than corrupt
+        //   the cache, and say the check was skipped rather than let silence imply it passed.
+        if (QThread::currentThread() == QCoreApplication::instance()->thread())
+        {
+            if (auto inner = G->get_inner_eigen_api())
+            {
+                const auto chain = inner->get_transformation_matrix(
+                    cam, pn->name(), 0, "RT", DSR::RT_API::TimeQuery::Nearest);
+                if (chain.has_value())                            // ALWAYS check the optional
+                {
+                    Eigen::Matrix4f parent_T_cam = Eigen::Matrix4f::Identity();
+                    parent_T_cam.block<3, 3>(0, 0) = euler_to_R(st.nominal_r);
+                    parent_T_cam.block<3, 1>(0, 3) = st.nominal_t;
+                    const Eigen::Matrix4f prod =
+                        chain.value().matrix().cast<float>() * parent_T_cam;
+                    const float err = (prod - Eigen::Matrix4f::Identity()).cwiseAbs().maxCoeff();
+                    if (err > 1e-3f)
+                    {
+                        if (not mount_publish_refused_logged_)
+                        {
+                            mount_publish_refused_logged_ = true;
+                            qWarning().noquote() << QString::asprintf(
+                                "[camcal] mountPublish REFUSES on %s: composing the body->camera edge "
+                                "as Rx*Ry*Rz does not reproduce cortex's own chain (max residual "
+                                "%.2e). A mount written under the wrong euler convention puts a pitch "
+                                "on a roll and looks plausible. Fix the composition, do not relax "
+                                "this.", cam.c_str(), static_cast<double>(err));
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+        else
+            qInfo() << "[camcal] mountPublish: euler-convention check SKIPPED for"
+                    << QString::fromStdString(cam) << "— not on the main thread, so the ts==0 chain"
+                    << "query is unsafe here (CLAUDE.md). The write below is unverified.";
+        st.have_nominal = true;
+    }
+
+    // ── The correction, as the ingestor applies it ───────────────────────────────────────────────
+    // rebuild_extrinsic_(), verbatim: p_cam' = Rx(pitch)*Rz(yaw) * p_cam + height * z_cam. So the
+    // camera<-parent transform is premultiplied by A, and parent->camera is postmultiplied by A^-1.
+    // The correction lives entirely in the CAMERA frame, so it localises to this one link whatever
+    // sits above it in the tree — which is why nothing here needs to know about Shadow->body.
+    Eigen::Matrix4f A = Eigen::Matrix4f::Identity();
+    A.block<3, 3>(0, 0) = (Eigen::AngleAxisf(corr.x(), Eigen::Vector3f::UnitX())
+                         * Eigen::AngleAxisf(corr.z(), Eigen::Vector3f::UnitZ())).toRotationMatrix();
+    A.block<3, 1>(0, 3) = corr.y() * Eigen::Vector3f::UnitZ();
+    Eigen::Matrix4f T_nom = Eigen::Matrix4f::Identity();
+    T_nom.block<3, 3>(0, 0) = euler_to_R(st.nominal_r);
+    T_nom.block<3, 1>(0, 3) = st.nominal_t;
+    const Eigen::Matrix4f T_new = T_nom * A.inverse();
+    const Eigen::Vector3f t_new = T_new.block<3, 1>(0, 3);
+    const Eigen::Matrix3f R_new = T_new.block<3, 3>(0, 0);
+    // ★ NOT Eigen::eulerAngles(0,1,2). It constrains the MIDDLE angle to [0,pi], and both of this
+    //   robot's cameras have a nominal Y of about -2e-5 rad, so it returns the other valid
+    //   decomposition — roughly (pi, +y, pi). That composes to the same rotation and would pass any
+    //   round-trip check, while writing a triple in which r[2] is no longer readable as a yaw. Every
+    //   consumer that reads a component by index — robot_concept's boresight write does — would then
+    //   be reading nonsense from a mathematically correct edge. Closed form instead, valid for
+    //   |pitch| < pi/2, which a camera mount is:
+    //     R = Rx(a)Ry(b)Rz(c)  =>  b = asin(R02), a = atan2(-R12, R22), c = atan2(-R01, R00)
+    const Eigen::Vector3f r_new(std::atan2(-R_new(1, 2), R_new(2, 2)),
+                                std::asin(std::clamp(R_new(0, 2), -1.f, 1.f)),
+                                std::atan2(-R_new(0, 1), R_new(0, 0)));
+    // Round-trip the extraction: a write whose own decomposition does not reproduce the matrix is a
+    // different mount, not a rounding. (Measured on both cameras' real values: 4.7e-07.)
+    if ((euler_to_R(r_new) - R_new).cwiseAbs().maxCoeff() > 1e-5f)
+    {
+        qWarning() << "[camcal] mountPublish: euler decomposition did not round-trip for"
+                   << QString::fromStdString(cam) << "— refusing to write.";
+        return;
+    }
+    if (not t_new.allFinite() or not r_new.allFinite()) return;
+
+    if (auto rt = G->get_rt_api())
+    {
+        // ★ STATIC, NOT TIMESTAMPED. robot_concept's reasoning applies unchanged: this is a fixed
+        //   physical mount whose ESTIMATE is being refined, so the newest value is the best answer
+        //   for every frame including older ones — and a timestamped write would stamp the blocks
+        //   with the moment of calibration, putting every later query through body->camera outside
+        //   the ring for ever and reporting a clamp it did not earn.
+        rt->insert_or_assign_edge_RT_static(pn.value(), cn->id(),
+            std::vector<float>{t_new.x(), t_new.y(), t_new.z()},
+            std::vector<float>{r_new.x(), r_new.y(), r_new.z()});
+        st.last = corr;
+        st.have_last = true;
+        qInfo().noquote() << QString::asprintf(
+            "[camcal] %s mount PUBLISHED into %s->%s: pitch %+.4f deg, height %+.4f m, yaw %+.4f deg "
+            "on top of the nominal — t [%+.4f %+.4f %+.4f] euler [%+.5f %+.5f %+.5f]. Every agent "
+            "reads this now.", cam.c_str(), pn->name().c_str(), cam.c_str(),
+            corr.x() * 180.0 / M_PI, corr.y(), corr.z() * 180.0 / M_PI,
+            t_new.x(), t_new.y(), t_new.z(), r_new.x(), r_new.y(), r_new.z());
+    }
 }
 
 void SpecificWorker::open_pair_log(std::ofstream &csv, const std::string &cam,
