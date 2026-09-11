@@ -1533,7 +1533,7 @@ mountApply = true
 #    request_shutdown(), so doing it ON A GRACEFUL STOP is the natural home: read body->camera, write
 #    the mount block, log what changed. Not implemented. Until it is, treat a published value as
 #    good for the session and re-derivable from etc/camera_calib_<robot>_<cam>.txt.
-mountPublish = false
+mountPublish = true
 # ★ 2026-09-03: the camera extrinsic is now CLOSED-LOOP. The pooled solve is fed back into the mount
 #   on the camera's own axes (the ones J differentiates), the evidence is re-referenced to the mount
 #   that results, and the prior stays anchored on the GRAPH extrinsic so the total is always the
