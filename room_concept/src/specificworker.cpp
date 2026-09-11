@@ -701,16 +701,18 @@ void SpecificWorker::log_pose_trace(int type, std::int64_t valid_ts_ms,
     if (G != nullptr)
         if (const auto robots = G->get_nodes_by_type("robot"); not robots.empty())
             cap = rc::read_base_capability(*G, robots.front().id());
-    // ★EACH BOUND IS USED IF PUBLISHED, AND THE ABSENCE OF ONE DOES NOT DISABLE THE OTHER. On this
-    // robot only the rotational bound exists today: the base config (SVD48VBase config_diferential)
-    // declares maxRotSpeed=2 rad/s, baseType, wheelRadius and axesLength, but NO maximum linear
-    // speed. A first version of this required the linear bound and would therefore have logged
-    // nothing, for ever, while looking like it was working -- an empty file reads as "no jumps".
-    // ★THE ROTATIONAL BOUND ALONE IS ENOUGH TO CATCH WHAT WAS SEEN. Both 2026-09-10 events carried
-    // 43.6 and 89.2 degrees of heading step (89 deg in 34 ms is ~46 rad/s against a 2 rad/s base),
-    // so either bound would have flagged them. A pure translation jump on a robot that publishes no
-    // linear bound is the one case still missed, and the `trigger` column makes that visible rather
-    // than leaving a reader to assume both were checked.
+    // ★EACH BOUND IS USED IF PUBLISHED, AND THE ABSENCE OF ONE DOES NOT DISABLE THE OTHER.
+    // ⚠CORRECTION (2026-09-11): the commit that added this block, and an earlier version of this
+    // comment, both asserted that the base declares no maximum linear speed. That was WRONG and the
+    // error was mine: SVD48VBase config_diferential.toml has always carried `maxLinSpeed`, and a
+    // grep pattern of mine failed to match the key. Both bounds have been published all along
+    // (maxLinSpeed, now 1500 mm/s; maxRotSpeed 2 rad/s), so the linear check was never inert.
+    // The independent-bounds design below is kept anyway, because it is right for a robot that
+    // declares only one -- but it was not, as claimed, necessary here.
+    // ★EITHER BOUND ALONE WOULD HAVE CAUGHT WHAT WAS SEEN. Both 2026-09-10 events carried 43.6 and
+    // 89.2 degrees of heading step (89 deg in 34 ms is ~46 rad/s against a 2 rad/s base) as well as
+    // impossible translation. The `trigger` column records which fired, so a reader never has to
+    // assume both were checked.
     if (not cap.max_linear_speed_mps.has_value() and not cap.max_rot_speed_rps.has_value())
     {
         if (not pose_jump_no_capability_warned_)
