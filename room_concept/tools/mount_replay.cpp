@@ -91,14 +91,29 @@ constexpr double kRad2Deg = 180.0 / M_PI;
 //   2 t_depth   translation along ŷ_cam
 //   3 NULL      a deterministic pseudo-random column, the negative control. Whatever the real
 //               candidates score that this scores too is the fit's slack and not a parameter.
+//   4 LIDAR_yaw   } the LIDAR'S OWN mount, rotated about the robot vertical / the robot x axis and
+//   5 LIDAR_pitch } THROUGH THE LIDAR'S OWN ORIGIN. The centre is the whole content of the
+//               parameter: it is what makes a LiDAR error something other than a camera error.
+//               d p_robot / d delta = axis x (p_robot - t_lidar), then into camera coordinates
+//               through cam_R_robot -- inject_lidar()'s geometry, differentiated.
+//               ★ Per camera this is NOT exactly degenerate with that camera's own yaw. A camera
+//                 rotation is a constant bearing shift; a LiDAR rotation about a DISPLACED centre is
+//                 range-dependent, which is the same mechanism that separates pitch from height. So
+//                 the question is not whether it is identifiable in principle but whether the corner
+//                 weighting leaves any of it -- which the cond number and the two cameras' agreement
+//                 answer, and no argument can.
+//               ★ The closure's 3.2% parallax band is a statement about the camera-vs-camera
+//                 DIFFERENCE, not about this. Do not carry it over.
 int          g_probe = -1;          ///< -1 = the live 3-parameter model, unchanged
 float        g_probe_sigma = 0.f;   ///< the candidate's prior sigma, so it stays in prior-sigma units
 int          g_skip_vertex = -9999; ///< leave-one-CORNER-out: the corner is the sample unit
 std::int64_t g_win_lo = 0, g_win_hi = 0;   ///< 0,0 = no window filter
 
+constexpr int kProbeCount = 6;
 const char* probe_name(int i)
-{ return i == 0 ? "roll" : i == 1 ? "t_lateral" : i == 2 ? "t_depth" : i == 3 ? "NULL-control" : "?"; }
-const char* probe_unit(int i) { return i == 0 ? "deg" : i == 3 ? "-" : "m"; }
+{ return i == 0 ? "roll" : i == 1 ? "t_lateral" : i == 2 ? "t_depth" : i == 3 ? "NULL-control"
+       : i == 4 ? "LIDAR_yaw" : i == 5 ? "LIDAR_pitch" : "?"; }
+const char* probe_unit(int i) { return (i == 0 or i >= 4) ? "deg" : i == 3 ? "-" : "m"; }
 
 /// One replayable row. Everything the agent wrote that the rebuild needs, and nothing else.
 struct Row
@@ -556,6 +571,16 @@ CamResult solve_leg(const Camera& c, const Leg& leg, double offset_sigma_px, boo
             if      (g_probe == 0) col = o.P * y_cam.cross(pc);
             else if (g_probe == 1) col = o.P * x_cam;
             else if (g_probe == 2) col = o.P * y_cam;
+            else if (g_probe == 4 or g_probe == 5)
+            {
+                // ROBOT axes on purpose (inject_lidar's reasoning: the helios hangs inverted, so
+                // "its own z" needs a sign convention the sidecar does not carry, while a yaw as a
+                // physical rotation is unambiguous), about the LIDAR'S OWN ORIGIN, then mapped into
+                // camera coordinates by cam_R_robot.
+                const Eigen::Vector3f axis = (g_probe == 4) ? Eigen::Vector3f(0.f, 0.f, 1.f)
+                                                            : Eigen::Vector3f(1.f, 0.f, 0.f);
+                col = o.P * (Rr * axis.cross(p - c.ctx.lidar_t_robot));
+            }
             else if (g_probe == 3)
             {
                 // Deterministic in the row — a failing probe has to be reproducible — and built
@@ -1310,21 +1335,40 @@ int main(int argc, char** argv)
         std::printf("\n── parameter probe: the live 3 DOF + ONE candidate in the dead dt column ──\n"
                     "   a candidate the data needs must come out many sigmas from zero, drop"
                     " chi2/dof,\n   and SURVIVE the jackknife — while the NULL control does none of"
-                    " it.\n");
+                    " it.\n"
+                    "   ★ cond IS NOT THE DEGENERACY TEST. It is the condition number of the"
+                    " POSTERIOR\n     correlation matrix, so where both members of a degenerate pair"
+                    " are prior-dominated the\n     prior fills the gap and cond stays SMALL — the"
+                    " posterior is well conditioned precisely\n     because it is not answering the"
+                    " question (measured: ricoh LIDAR_yaw cond 2.6 while the\n     camera's own yaw"
+                    " moved 0.29 deg). What does catch it: a COMPENSATING PARTNER moving by\n"
+                    "     the same magnitude with the opposite sign, chi2/dof NOT moving while"
+                    " parameters move\n     degrees, and — strongest — the two cameras DISAGREEING"
+                    " about a quantity they must share.\n");
         for (size_t ci = 0; ci < cams.size(); ++ci)
         {
             const Camera& c = cams[ci];
             std::printf("  %s: baseline chi2/dof %.4f over %d corners\n",
                         c.name.c_str(), base[ci].sol.chi2_dof, base[ci].sol.clusters);
-            for (int pi = 0; pi < 4; ++pi)
+            for (int pi = 0; pi < kProbeCount; ++pi)
             {
+                // A LiDAR rotation about the WRONG centre is a DIFFERENT parameter, not an
+                // approximation of this one, so it refuses rather than assuming the robot origin.
+                if (pi >= 4 and not c.ctx.lidar_known)
+                {
+                    std::printf("    %-12s REFUSED: the sidecar carries no lidar_t_robot, and the"
+                                " rotation centre IS the parameter\n", probe_name(pi));
+                    continue;
+                }
                 g_probe = pi;
                 // A rotation is asked on pitch/yaw's own prior and a translation on height's, so the
                 // candidate is asked on the same terms as the parameter it would sit beside.
-                g_probe_sigma = (pi == 0) ? c.ctx.sigma_pitch : (pi == 3) ? 1.f : c.ctx.sigma_height;
+                g_probe_sigma = (pi == 0 or pi >= 4) ? c.ctx.sigma_pitch
+                              : (pi == 3) ? 1.f : c.ctx.sigma_height;
                 bool refused = false; std::string why;
                 const CamResult r = solve_leg(c, base_leg, sigma_px, fixed_cov, refused, why);
-                const double sc  = (pi == 0) ? g_probe_sigma * kRad2Deg : (pi == 3) ? 1.0 : g_probe_sigma;
+                const double sc  = (pi == 0 or pi >= 4) ? g_probe_sigma * kRad2Deg
+                                 : (pi == 3) ? 1.0 : g_probe_sigma;
                 const double val = -r.sol.p(3) * sc, sig = r.sol.sigma(3) * sc;
                 std::printf("    %-12s %+9.4f %-3s ± %.4f (%6.2f σ) | chi2/dof %.4f (%+.4f)"
                             " | cond %5.1f | pitch/height/yaw now %+.4f %+.4f %+.4f\n",
