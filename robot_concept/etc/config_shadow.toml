@@ -225,7 +225,7 @@ boresight_yaw_ricoh = 0.0
 #   self-calibration (ImageEdge.mountPublish); a hand-edited edge would be persisted just the same.
 # ⚠ kill -9 never reaches this. The overlay then keeps its previous version, which is the conservative
 #   outcome: an unrecorded session is a session whose calibration is simply not adopted.
-persist_mounts_on_stop = false
+persist_mounts_on_stop = true
 
 [Component.Debug]
 Verbose = false
