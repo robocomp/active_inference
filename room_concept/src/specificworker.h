@@ -420,7 +420,13 @@ class SpecificWorker : public GenericWorker
     /// Mirror a camera's measured mount into the shared body->camera RT edge. OUTPUT ONLY — nothing
     /// here is read back by the estimator; see the definition for why, and for the one thing that
     /// changes across a restart.
-    void publish_mount_to_graph(const rc::CameraIngestor& ing, const std::string& cam);
+    void publish_mount_to_graph(rc::camcal::Estimator& pool, const rc::CameraIngestor& ing,
+                                const std::string& cam);
+    /// Reconcile the nominal the evidence was measured against with the extrinsic just bound from the
+    /// graph, and decide which one the ingestor's base must be. Called once per camera, after load()
+    /// and BEFORE the resumed correction is pushed.
+    void reconcile_mount_nominal(rc::camcal::Estimator& pool, rc::CameraIngestor& ing,
+                                 const std::string& cam);
     /// Per camera: the mount this SESSION started from, plus the last correction written. The
     /// nominal is captured once so a later window composes `nominal x correction` and never
     /// `edge x correction`, which would compound this function's own previous write.
@@ -430,6 +436,7 @@ class SpecificWorker : public GenericWorker
         Eigen::Vector3f nominal_r = Eigen::Vector3f::Zero();   ///< rt_rotation_euler_xyz as first seen
         Eigen::Vector3f last      = Eigen::Vector3f::Zero();   ///< last correction published
         bool have_nominal = false, have_last = false;
+        bool checked = false;      ///< the euler-convention check has run for this camera
     };
     std::map<std::string, MountPublishState> mount_publish_;
     bool mount_publish_refused_logged_ = false;

@@ -207,6 +207,26 @@ interpolate_rt = true
 boresight_yaw_zed   = 0.0
 boresight_yaw_ricoh = 0.0
 
+# ── persist_mounts_on_stop: keep a MEASURED camera mount across a restart ────────────────────────
+# Agent.configFile seeds the whole graph on every start, so the mount in shadow.json is restored each
+# time and a measured mount is otherwise reverted. With this on, robot_concept writes the live
+# body->camera transforms into etc/mount_calib_<robot>.txt on a GRACEFUL stop and applies that file
+# back over the seeded JSON at the next start.
+#
+# ★ An OVERLAY, not an edit of shadow.json. The JSON's failure mode is "the graph does not seed", i.e.
+#   the fleet does not start, so a writer in a shutdown path is the last place to risk a reformat or a
+#   half-write. Recovery is `rm etc/mount_calib_<robot>.txt` — one file — and the original mount stays
+#   in the JSON by construction rather than by discipline.
+# ★ Versioned, with the history in the same file: `version` increments per write and every revision
+#   leaves a `hist` row, so both "what did it look like originally" and "how has it moved" are
+#   answerable from the file alone. Version 1's rows are the mount as found in the graph, which is the
+#   JSON's own.
+# ⚠ It records whatever the edge HOLDS, whoever wrote it. Today that is room_concept's camera
+#   self-calibration (ImageEdge.mountPublish); a hand-edited edge would be persisted just the same.
+# ⚠ kill -9 never reaches this. The overlay then keeps its previous version, which is the conservative
+#   outcome: an unrecorded session is a session whose calibration is simply not adopted.
+persist_mounts_on_stop = false
+
 [Component.Debug]
 Verbose = false
 

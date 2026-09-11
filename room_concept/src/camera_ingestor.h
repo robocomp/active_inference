@@ -103,6 +103,14 @@ public:
     /// Safe to call at any time: the graph extrinsic is kept untouched and the mount is rebuilt from
     /// it, so corrections replace rather than accumulate and there is no drift through re-application.
     void set_mount_correction(float pitch_rad, float height_m, float yaw_rad);
+    /// Override the frozen base — the extrinsic the correction is applied ON TOP OF.
+    /// ★ Used on resume when the evidence carries the nominal it was measured against. Binding takes
+    ///   the base from the GRAPH, which is right only while nothing writes the graph; once the
+    ///   measured mount is published into that same edge, the graph holds `base ⊕ applied` and
+    ///   binding to it would apply the correction twice. The evidence knows better, so it wins.
+    void set_base(const Eigen::Matrix3f& R, const Eigen::Vector3f& t);
+    [[nodiscard]] const Eigen::Matrix3f& base_R() const noexcept { return cam_R_robot_base_; }
+    [[nodiscard]] const Eigen::Vector3f& base_t() const noexcept { return cam_t_robot_base_; }
     [[nodiscard]] Eigen::Vector3f mount_correction() const noexcept { return mount_corr_; }
 
     /// Convert at most one frame per `ms`. 0 = every delivered frame (the old behaviour).

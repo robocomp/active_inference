@@ -124,6 +124,15 @@ private:
 		// copy (room_concept's ImageEdge.mountYawCorrection was exactly that, and its own header
 		// said the value "belongs in the robot geometry" once confirmed).
 		// 0 = leave the graph's extrinsic untouched.
+		/// Transforms.persist_mounts_on_stop — on a GRACEFUL stop, write the live body->camera mounts
+		/// into etc/mount_calib_<robot>.txt, and apply that file over the seeded JSON at every start.
+		/// ★ AN OVERLAY, NOT AN EDIT OF THE ROBOT'S JSON, and deliberately: the JSON seeds the whole
+		///   graph on every start, so a writer that reformats or half-writes it takes the fleet down,
+		///   and recovery has to be "delete one file" rather than "restore from a backup you hope is
+		///   pristine". It is the same shape as Transforms.boresight_yaw_<cam> above, which is already
+		///   a measured mount correction living outside the JSON — this extends it from one angle to
+		///   the whole mount, and gives it a version and a history.
+		bool        PERSIST_MOUNTS_ON_STOP = false;
 		float       BORESIGHT_YAW_ZED   = 0.f;   // Transforms.boresight_yaw_zed   (rad)
 		float       BORESIGHT_YAW_RICOH = 0.f;   // Transforms.boresight_yaw_ricoh (rad)
 		bool        ENABLE_LIDAR  = true;   // 3D LiDAR cloud    (rc/lidar3d/points)
@@ -368,6 +377,12 @@ private:
 	void on_optional_peer_lost(const std::string &name, std::uint32_t id);
 	void on_optional_peer_ready(const std::string &name, std::uint32_t id);
 	std::atomic<bool> shutting_down_{false};
+	/// Path of the mount overlay for this robot: etc/mount_calib_<robot>.txt.
+	[[nodiscard]] std::string mount_overlay_path() const;
+	/// Apply the overlay over the mounts the JSON just seeded. Startup, after the boresight block.
+	void apply_mount_overlay();
+	/// Write the live body->camera mounts into the overlay, versioned. GRACEFUL stop only.
+	void persist_mount_overlay();
 
 	// DSR graph-structure tracking for the viewer relayout (main-thread only). update_node_signal fires on
 	// creation AND every attribute update, so we relayout only when `id` is not yet in `known_node_ids_`.

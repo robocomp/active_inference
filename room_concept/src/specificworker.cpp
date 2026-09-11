@@ -1138,7 +1138,99 @@ void SpecificWorker::apply_mount_solve(rc::camcal::Estimator &pool, rc::CameraIn
     pool.apply_correction(dp);         // evidence first: the ingestor must never lead the evidence
     push_mount_correction(ing, pool.applied(), cam, "applied");
     // The shared extrinsic LAST, and only ever mirroring what the local correction already is.
-    publish_mount_to_graph(ing, cam);
+    publish_mount_to_graph(pool, ing, cam);
+}
+
+/// Decide what the ingestor's base must be: the nominal the evidence was measured against, or the
+/// extrinsic just read from the graph.
+///
+/// ★★★ THIS IS WHAT MAKES PUBLISHING AND RESUMING BOTH CORRECT. `applied` is a total relative to a
+///     nominal. Binding takes the base from the graph, which is right only until something writes
+///     that edge — and mountPublish writes exactly it. Without this the next restart binds to
+///     `nominal ⊕ applied`, pushes `applied` again, and the correction lands TWICE with the prior
+///     anchored at the doubled total: one correction per restart, which is the ratchet.
+/// ★ The stored nominal WINS over the graph, and that is the point. It is also checked rather than
+///   trusted: the graph should read either the nominal (nothing published, or robot_concept reseeded
+///   the robot's JSON over it) or `nominal ⊕ applied` (our publish still standing). Anything else came
+///   from OUTSIDE this loop.
+/// ⚠ An external nominal is ADOPTED and the correction it absorbs is dropped; our own published value
+///   never is. Re-centring the prior on the estimator's own last answer removes the prior's pull, and
+///   publishes happen every window — that asymmetry is the whole reason this function is not two
+///   lines.
+void SpecificWorker::reconcile_mount_nominal(rc::camcal::Estimator &pool, rc::CameraIngestor &ing,
+                                             const std::string &cam)
+{
+    const Eigen::Matrix3f graph_R = ing.base_R();       // as just bound, i.e. what the graph says
+    const Eigen::Vector3f graph_t = ing.base_t();
+    const Eigen::Vector4d ap = pool.applied();
+    const bool has_corr = ap.head<3>().cwiseAbs().maxCoeff() > 1e-12;
+
+    if (not pool.have_base())
+    {
+        // First run on this camera, or a pre-format-3 file. The graph is the only nominal there is.
+        if (has_corr and params.IMAGE_EDGE_MOUNT_PUBLISH)
+        {
+            // ⚠ AMBIGUOUS, AND IT MUST NOT BE GUESSED. The file carries a correction, publishing is
+            //   on, and nothing records whether the graph already contains it. Applying it again
+            //   doubles the mount; not applying it discards a measurement. So the correction is
+            //   dropped and the graph adopted: the evidence (H, b) is KEPT, only its anchor moves,
+            //   and the next save records the nominal so this cannot recur.
+            pool.adopt_external_nominal(graph_R, graph_t);
+            qWarning().noquote() << QString::asprintf(
+                "[camcal] %s: evidence predates the stored nominal (format < 3) and carries a"
+                " correction of pitch %+.4f / height %+.4f / yaw %+.4f prior sigmas while mountPublish"
+                " is ON. Nothing records whether the graph already holds it, so the correction is"
+                " DROPPED and the current extrinsic adopted as the nominal. H and b are kept; the"
+                " total re-converges from here and the nominal is saved from now on.",
+                cam.c_str(), ap(0), ap(1), ap(2));
+        }
+        else
+            pool.set_base(graph_R, graph_t);
+        return;
+    }
+
+    // What the graph would read under each hypothesis.
+    const Eigen::Matrix3f nom_R = pool.base_R();
+    const Eigen::Vector3f nom_t = pool.base_t();
+    const float d_nominal = (graph_R - nom_R).cwiseAbs().maxCoeff()
+                          + (graph_t - nom_t).cwiseAbs().maxCoeff();
+    // `nominal ⊕ applied`, built the way the ingestor builds it (rebuild_extrinsic_).
+    const float pitch = static_cast<float>(ap(0)) * params.IMAGE_EDGE_MOUNT_PITCH_SIGMA;
+    const float height = static_cast<float>(ap(1)) * params.IMAGE_EDGE_MOUNT_HEIGHT_SIGMA;
+    const float yaw = static_cast<float>(ap(2)) * params.IMAGE_EDGE_MOUNT_YAW_SIGMA;
+    const Eigen::Matrix3f Rc = (Eigen::AngleAxisf(pitch, Eigen::Vector3f::UnitX())
+                              * Eigen::AngleAxisf(yaw, Eigen::Vector3f::UnitZ())).toRotationMatrix();
+    const Eigen::Matrix3f pub_R = Rc * nom_R;
+    const Eigen::Vector3f pub_t = Rc * nom_t + height * Eigen::Vector3f::UnitZ();
+    const float d_published = (graph_R - pub_R).cwiseAbs().maxCoeff()
+                            + (graph_t - pub_t).cwiseAbs().maxCoeff();
+
+    constexpr float kTol = 1e-4f;      // 1e-4 rad is 0.006 deg, far below any correction here
+    if (d_nominal < kTol or d_published < kTol)
+    {
+        // Either the graph still holds the nominal or it holds our own published total. Both mean the
+        // stored nominal is the mount this evidence describes, so it becomes the base and the
+        // correction is pushed on top exactly as it was measured.
+        ing.set_base(nom_R, nom_t);
+        qInfo().noquote() << QString::asprintf(
+            "[camcal] %s: base taken from the EVIDENCE's nominal, not the graph (graph %s;"
+            " |graph-nominal| %.2e, |graph-published| %.2e). This is what stops the resumed"
+            " correction being applied twice.", cam.c_str(),
+            d_published < kTol ? "still holds our published total" : "holds the nominal",
+            static_cast<double>(d_nominal), static_cast<double>(d_published));
+        return;
+    }
+    // Neither: the extrinsic changed from outside this loop — the robot's JSON reseeded with a mount
+    // that now carries a measurement, or someone edited it. Adopt it, and drop the correction it
+    // absorbs rather than stacking ours on top of theirs.
+    pool.adopt_external_nominal(graph_R, graph_t);
+    qWarning().noquote() << QString::asprintf(
+        "[camcal] %s: the extrinsic changed OUTSIDE this loop (|graph-nominal| %.2e,"
+        " |graph-published| %.2e, both over %.0e). Adopting it as the new nominal and DROPPING the"
+        " stored correction, which the new mount is assumed to absorb. H and b are kept. If that"
+        " assumption is wrong the total simply re-converges; stacking would not.",
+        cam.c_str(), static_cast<double>(d_nominal), static_cast<double>(d_published),
+        static_cast<double>(kTol));
 }
 
 /// Mirror the measured mount into the SHARED body->camera RT edge, so retina, the controller and
@@ -1167,7 +1259,8 @@ void SpecificWorker::apply_mount_solve(rc::camcal::Estimator &pool, rc::CameraIn
 /// ★ Refuses an unmarginalised solve for the same reason apply_mount_solve does, and refuses if
 ///   composing the edge does not reproduce cortex's own chain — a convention this file believed
 ///   rather than checked would land a pitch on a roll and still look plausible.
-void SpecificWorker::publish_mount_to_graph(const rc::CameraIngestor &ing, const std::string &cam)
+void SpecificWorker::publish_mount_to_graph(rc::camcal::Estimator &pool,
+                                            const rc::CameraIngestor &ing, const std::string &cam)
 {
     if (not params.IMAGE_EDGE_MOUNT_PUBLISH) return;
     const Eigen::Vector3f corr = ing.mount_correction();          // pitch rad, height m, yaw rad
@@ -1198,10 +1291,36 @@ void SpecificWorker::publish_mount_to_graph(const rc::CameraIngestor &ing, const
               * Eigen::AngleAxisf(r.z(), Eigen::Vector3f::UnitZ())).toRotationMatrix();
     };
 
+    if (not st.have_nominal and pool.have_edge_nominal())
+    {
+        // ★ FROM THE EVIDENCE, not from the edge. After a room_concept restart the edge holds LAST
+        //   session's published total, so capturing it here would compose this session's correction
+        //   on top of it and compound the publish once per restart. The nominal travels with the
+        //   evidence for the same reason the base does.
+        st.nominal_t = pool.edge_nominal_t();
+        st.nominal_r = pool.edge_nominal_r();
+        st.have_nominal = true;
+        qInfo().noquote() << QString::asprintf(
+            "[camcal] %s: publish nominal restored from the evidence, t [%+.4f %+.4f %+.4f]"
+            " euler [%+.5f %+.5f %+.5f] — the edge's current value is NOT used as a base.",
+            cam.c_str(), st.nominal_t.x(), st.nominal_t.y(), st.nominal_t.z(),
+            st.nominal_r.x(), st.nominal_r.y(), st.nominal_r.z());
+    }
     if (not st.have_nominal)
     {
         st.nominal_t = Eigen::Vector3f(tr.value().get()[0],  tr.value().get()[1],  tr.value().get()[2]);
         st.nominal_r = Eigen::Vector3f(rot.value().get()[0], rot.value().get()[1], rot.value().get()[2]);
+        // Persist it with the evidence so the next session composes from the same place.
+        pool.set_edge_nominal(st.nominal_t, st.nominal_r);
+        st.have_nominal = true;
+    }
+    // ★ THE CONVENTION CHECK RUNS ONCE PER CAMERA AND INDEPENDENTLY OF WHERE THE NOMINAL CAME FROM.
+    //   It used to sit inside the capture branch, so a nominal restored from the evidence skipped it
+    //   — i.e. it would only ever run on a camera's first-ever session, which is the one run where a
+    //   convention error is least likely to have been introduced since.
+    if (not st.checked)
+    {
+        st.checked = true;
         // ── The convention, checked against cortex's own chain instead of asserted ───────────────
         // ★ MAIN THREAD ONLY (ts == 0 touches InnerEigenAPI's unlocked cache — CLAUDE.md). Both call
         //   sites are in compute()'s pump; if that ever changes, skip the check rather than corrupt
@@ -1241,7 +1360,6 @@ void SpecificWorker::publish_mount_to_graph(const rc::CameraIngestor &ing, const
             qInfo() << "[camcal] mountPublish: euler-convention check SKIPPED for"
                     << QString::fromStdString(cam) << "— not on the main thread, so the ts==0 chain"
                     << "query is unsafe here (CLAUDE.md). The write below is unverified.";
-        st.have_nominal = true;
     }
 
     // ── The correction, as the ingestor applies it ───────────────────────────────────────────────
@@ -1448,6 +1566,7 @@ void SpecificWorker::mount_pair_update(const rc::ImageEdgeObs &obs,
         // A correction restored from disk must reach the mount BEFORE the first frame is measured
         // against it, or this session's first window is referenced to an extrinsic the evidence
         // does not describe.
+        reconcile_mount_nominal(mp_pool_, *camera_ingestor_, params.IMAGE_EDGE_CAMERA);
         push_mount_correction(*camera_ingestor_, mp_pool_.applied(), params.IMAGE_EDGE_CAMERA, "resumed");
     }
 
@@ -1930,6 +2049,7 @@ void SpecificWorker::pump_calib_channels()
             ch.calib.set_vertex_offset_sigma_px(params.IMAGE_EDGE_MOUNT_VERTEX_OFFSET_SIGMA_PX);
             const std::string path = ch.calib.path();
             const std::size_t k_aux = ch.calib.load(path);
+            reconcile_mount_nominal(ch.calib, *ch.ingestor, ch.name);
             push_mount_correction(*ch.ingestor, ch.calib.applied(), ch.name, "resumed");
             if (k_aux > 0)
                 qInfo().nospace() << "[camcal] " << QString::fromStdString(ch.name)

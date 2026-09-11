@@ -428,6 +428,15 @@ void rc::CameraIngestor::rebuild_extrinsic_()
     cam_t_robot_ = R * cam_t_robot_base_ + mount_corr_.y() * Eigen::Vector3f::UnitZ();
 }
 
+void rc::CameraIngestor::set_base(const Eigen::Matrix3f &R, const Eigen::Vector3f &t)
+{
+    if (not R.allFinite() or not t.allFinite()) return;
+    cam_R_robot_base_ = R;
+    cam_t_robot_base_ = t;
+    rebuild_extrinsic_();                 // the correction in force is re-applied to the new base
+    extrinsic_ok_ = cam_R_robot_.allFinite() and cam_t_robot_.allFinite();
+}
+
 void rc::CameraIngestor::set_mount_correction(float pitch_rad, float height_m, float yaw_rad)
 {
     const Eigen::Vector3f next(pitch_rad, height_m, yaw_rad);

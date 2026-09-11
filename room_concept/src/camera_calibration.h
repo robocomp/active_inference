@@ -136,6 +136,34 @@ namespace rc::camcal
         { return "etc/camera_calib_" + (robot_.empty() ? std::string("unknown") : robot_)
                  + "_" + camera_ + ".txt"; }
 
+        // ── THE MOUNT THIS EVIDENCE'S `applied` IS MEASURED AGAINST ──────────────────────────────
+        // ★★★ WITHOUT THIS, PUBLISHING AND RESUMING CANNOT BOTH BE CORRECT. `applied` is a total
+        //     relative to a nominal mount. Read the nominal from the GRAPH at bind and it is right
+        //     only until someone writes the graph — and ImageEdge.mountPublish writes exactly this
+        //     edge. The next restart then binds to `nominal ⊕ applied`, pushes `applied` on top of
+        //     it, and applies the correction TWICE, with the prior anchored at the doubled total: the
+        //     ratchet, one correction per restart. So the nominal travels WITH the evidence.
+        // ★ Two frames, because two different consumers need it. `base_*` is cam ← robot_frame, which
+        //   is what the ingestor measures against. `edge_*` is the parent → camera RT edge, which is
+        //   what the publish composes. Deriving one from the other needs the rest of the RT chain, so
+        //   both are stored rather than reconstructed.
+        void set_base(const Eigen::Matrix3f& R, const Eigen::Vector3f& t) noexcept
+        { base_R_ = R; base_t_ = t; have_base_ = true; }
+        [[nodiscard]] bool have_base() const noexcept { return have_base_; }
+        [[nodiscard]] const Eigen::Matrix3f& base_R() const noexcept { return base_R_; }
+        [[nodiscard]] const Eigen::Vector3f& base_t() const noexcept { return base_t_; }
+        void set_edge_nominal(const Eigen::Vector3f& t, const Eigen::Vector3f& r) noexcept
+        { edge_t_ = t; edge_r_ = r; have_edge_ = true; }
+        [[nodiscard]] bool have_edge_nominal() const noexcept { return have_edge_; }
+        [[nodiscard]] const Eigen::Vector3f& edge_nominal_t() const noexcept { return edge_t_; }
+        [[nodiscard]] const Eigen::Vector3f& edge_nominal_r() const noexcept { return edge_r_; }
+        /// Adopt a nominal that came from OUTSIDE (the robot's JSON reseeding the graph with a mount
+        /// that now carries a measurement) and drop the correction that the new nominal absorbs.
+        /// ⚠ NEVER call this for our OWN published value: re-centring the prior on the estimator's
+        ///   last answer removes the prior's pull, and publishes happen every window.
+        void adopt_external_nominal(const Eigen::Matrix3f& R, const Eigen::Vector3f& t) noexcept
+        { set_base(R, t); acc_.applied.setZero(); have_edge_ = false; }
+
         void add(const rc::mount::PairObs& o) { acc_.add(o); }
         /// Prior sigma on a corner's own image offset, in pixels. 0 = the nuisance is off and the
         /// solve is the old one exactly. Set it on the pool AND on every calib channel, or two
@@ -192,13 +220,27 @@ namespace rc::camcal
             //   gets exactly what it got before. What it CANNOT do is marginalise, and `format` is
             //   how a newer reader knows the difference — an aggregate carries no vertex, and a
             //   cluster structure cannot be recovered from a sum over clusters.
-            f << "format,2\n";
+            f << "format,3\n";
             // ★ THE APPLIED CORRECTION IS PART OF THE EVIDENCE. Restoring H and b without it would
             //   resume a measurement referenced to a mount the agent no longer has, and the loop
             //   would re-apply the same correction on every restart — a ratchet across sessions
             //   rather than within one.
             f << "applied," << acc_.applied(0) << ',' << acc_.applied(1) << ','
               << acc_.applied(2) << ',' << acc_.applied(3) << '\n';
+            // ── THE NOMINAL (format 3) ───────────────────────────────────────────────────────────
+            // Written whenever known. Its ABSENCE is meaningful and the loader says so rather than
+            // assuming the graph still holds the nominal — see load().
+            if (have_base_)
+            {
+                for (int i = 0; i < 3; ++i)
+                    for (int j = 0; j < 3; ++j) f << "base_R," << i << ',' << j << ',' << base_R_(i, j) << '\n';
+                f << "base_t," << base_t_.x() << ',' << base_t_.y() << ',' << base_t_.z() << '\n';
+            }
+            if (have_edge_)
+            {
+                f << "edge_t," << edge_t_.x() << ',' << edge_t_.y() << ',' << edge_t_.z() << '\n';
+                f << "edge_r," << edge_r_.x() << ',' << edge_r_.y() << ',' << edge_r_.z() << '\n';
+            }
             for (const auto& [vtx, v] : acc_.per_vertex)
             {
                 if (v.n <= 0 or not v.finite()) continue;
@@ -225,6 +267,10 @@ namespace rc::camcal
         /// Returns the pair count restored; 0 means "no file", the ordinary first-run state.
         std::size_t load(const std::string& path)
         {
+            // format 3: the nominal. All nine cells and both vectors, or it is not a nominal — a
+            // partially written one would be a mount nobody measured.
+            int  base_R_cells = 0;
+            bool got_base_t = false, got_edge_t = false, got_edge_r = false;
             std::ifstream f(path);
             if (not f.is_open()) return 0;
             rc::mount::Accum in;
@@ -274,6 +320,34 @@ namespace rc::camcal
                     double a0 = 0, a1 = 0, a2 = 0, a3 = 0;
                     if (num(tok[1], a0) and num(tok[2], a1) and num(tok[3], a2) and num(tok[4], a3))
                         in.applied = Eigen::Vector4d(a0, a1, a2, a3);
+                }
+                else if (tok[0] == "base_R" and tok.size() == 4)
+                {
+                    double di = 0, dj = 0;
+                    if (num(tok[1], di) and num(tok[2], dj) and num(tok[3], v))
+                    {
+                        const int i = static_cast<int>(di), j = static_cast<int>(dj);
+                        if (i >= 0 and i < 3 and j >= 0 and j < 3)
+                        { base_R_(i, j) = static_cast<float>(v); ++base_R_cells; }
+                    }
+                }
+                else if (tok[0] == "base_t" and tok.size() == 4)
+                {
+                    double a = 0, b = 0, c = 0;
+                    if (num(tok[1], a) and num(tok[2], b) and num(tok[3], c))
+                    { base_t_ = Eigen::Vector3f(a, b, c); got_base_t = true; }
+                }
+                else if (tok[0] == "edge_t" and tok.size() == 4)
+                {
+                    double a = 0, b = 0, c = 0;
+                    if (num(tok[1], a) and num(tok[2], b) and num(tok[3], c))
+                    { edge_t_ = Eigen::Vector3f(a, b, c); got_edge_t = true; }
+                }
+                else if (tok[0] == "edge_r" and tok.size() == 4)
+                {
+                    double a = 0, b = 0, c = 0;
+                    if (num(tok[1], a) and num(tok[2], b) and num(tok[3], c))
+                    { edge_r_ = Eigen::Vector3f(a, b, c); got_edge_r = true; }
                 }
                 else if (tok[0] == "H" and tok.size() == 4)
                 {
@@ -356,11 +430,22 @@ namespace rc::camcal
             const double keep_sigma = acc_.offset_sigma_px;
             acc_ = in;
             acc_.offset_sigma_px = keep_sigma;
+            // ★ ALL NINE CELLS AND BOTH VECTORS, or there is no nominal. A half-written one is a
+            //   mount nobody measured, and silently completing it from the graph is the very
+            //   substitution this field exists to prevent.
+            have_base_ = (base_R_cells == 9 and got_base_t);
+            have_edge_ = (got_edge_t and got_edge_r);
             return static_cast<std::size_t>(acc_.n);
         }
 
     private:
         rc::mount::Accum acc_;
         std::string      camera_, robot_;
+        /// The nominal `applied` is measured against — see set_base(). cam ← robot_frame for the
+        /// ingestor, and the parent → camera RT edge for the publish.
+        Eigen::Matrix3f  base_R_ = Eigen::Matrix3f::Identity();
+        Eigen::Vector3f  base_t_ = Eigen::Vector3f::Zero();
+        Eigen::Vector3f  edge_t_ = Eigen::Vector3f::Zero(), edge_r_ = Eigen::Vector3f::Zero();
+        bool             have_base_ = false, have_edge_ = false;
     };
 }   // namespace rc::camcal
