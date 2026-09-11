@@ -20,8 +20,8 @@
  *                 edge is short and its continuation competes for the same returns. This is corner 1,
  *                 and the case the disagreement factor exists for.
  *
- *  Run both arms:  ../bin/corner_gather_test                          (explain-away, the default)
- *                  RC_CORNER_NO_EXPLAIN_AWAY=1 ../bin/corner_gather_test  (committed gather)
+ *  Run both arms:  ../bin/corner_gather_test                       (committed gather, the default)
+ *                  RC_CORNER_EXPLAIN_AWAY=1 ../bin/corner_gather_test   (explain-away, OFF by default)
  */
 #include "corner_detector.h"
 
@@ -145,8 +145,8 @@ namespace
 
 int main()
 {
-    const bool on = std::getenv("RC_CORNER_NO_EXPLAIN_AWAY") == nullptr;
-    std::printf("=== corner gather: explain-away %s ===\n", on ? "ON (default)" : "OFF (committed)");
+    const bool on = std::getenv("RC_CORNER_EXPLAIN_AWAY") != nullptr;
+    std::printf("=== corner gather: explain-away %s ===\n", on ? "ON" : "OFF (committed, the default)");
 
     // A plain room. Nothing here may get worse.
     const std::vector<Vector2f> rect{{-3,-2}, {3,-2}, {3,2}, {-3,2}};
@@ -160,8 +160,15 @@ int main()
     const std::vector<Vector2f> split{{-3,-2}, {2.5,-2}, {3,-2}, {3,2}, {-3,2}};
     const std::vector<Vector2f> split_surface{{-3,-2}, {3,-2}, {3,2}, {-3,2}};
 
+    // A narrow recess with 0.5-0.6 m walls — the pillar/notch scale where the live failures live
+    // (corner 11 was offered 51 returns, corner 13 just 97). Short walls put a corner's whole gather
+    // within reach of its own partner edge, which is what let the two of them starve each other.
+    const std::vector<Vector2f> pillar{{-3,-2}, {3,-2}, {3,2}, {0.6,2}, {0.6,1.5},
+                                       {0.0,1.5}, {0.0,2}, {-3,2}};
+
     run({"CLEAN",      rect,  rect,          {0.f, 0.f}});
     run({"STEP",       step,  step,          {0.f, 0.f}});
     run({"SUBDIVIDED", split, split_surface, {1.5f, 0.f}});
+    run({"PILLAR",     pillar, pillar,       {0.f, 0.f}});
     return 0;
 }

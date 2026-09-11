@@ -274,24 +274,34 @@ CornerDetector::DetectionResult CornerDetector::detect(
         const std::size_t vi     = static_cast<std::size_t>(std::max(0, mc.original_index)) % std::max<std::size_t>(1, nv);
         const std::size_t ei_in  = (vi + nv - 1) % std::max<std::size_t>(1, nv);
         const std::size_t ei_out = vi;
-        // ON by default since tools/corner_gather_test.cpp measured it (3 synthetic geometries, 20
-        // noise seeds each, mean distance from the corner that generated the points):
-        //                        committed     explain-away
-        //     plain rectangle      0.0038 m       0.0053 m    the corner wedge is genuinely shared
-        //     the notch/step       0.0161 m       0.0057 m    2.8x better — the defect it is for
-        //     wall split in two    0.0041 m       0.0058 m    kept 0.80, identical to the rectangle
-        // The third row is the one that earns the default: an earlier version used a plain softmax
-        // over edges, which let the two halves of one straight wall fight over the same returns and
-        // starved corner 1 to 5.6% of its points. The direction-disagreement denominator above is
-        // what fixed it, and that row is the proof it stays fixed.
-        // Set RC_CORNER_NO_EXPLAIN_AWAY to get the committed path back: with the explain-away off the
-        // weights are all 1 and every step below — the fit, info_phi_d, min_points_per_line — reduces
-        // exactly to the arithmetic it replaced, so the two arms stay comparable.
-        // ⚠ The model-error constants (base_sigma + map_sigma, which double-count one quantity) are
-        // still UNCALIBRATED AGAINST THIS GATHER. The honest single value moves with the gather —
-        // 0.0375 m measured on the committed one — so it needs one tour of tmp/corner_probe.csv with
-        // this path live before it can be set.
-        static const bool explain_on = (std::getenv("RC_CORNER_NO_EXPLAIN_AWAY") == nullptr);
+        // ⚠ NEGATIVE RESULT — OFF BY DEFAULT, AND DO NOT RE-TRY IT WITHOUT READING THIS.
+        // The explain-away removes returns that ANOTHER MODEL EDGE explains better. It was built for
+        // a diagnosis — "the gather band swallows a surface at right angles" — that the live data does
+        // not support. Three arms, same room, same statistic (share of evaluations whose detection
+        // covariance collapsed to the merge prior):
+        //     committed gather            15.6%
+        //     softmax over edges          21.9%
+        //     + direction disagreement    24.0%
+        // No arm ever beat doing nothing. If the contaminant were a modelled face, competition between
+        // model edges would remove it; it does not, which is evidence against the mechanism. The
+        // contaminant is not in the model — clutter, or a traced vertex with no physical wall.
+        //
+        // And the corners it was aimed at are ALREADY HANDLED. etc/corner_stats.csv, same run:
+        // vertex 28 retired outright (yield 2e-4 against a bar of 11.1), 11 and 13 suppressed on 40%
+        // and 24% of their frames. `160d36d` established on 23400 frames that NO GEOMETRIC RULE
+        // separates a good pillar corner from a bad one — wall length has counterexamples in BOTH
+        // directions (v27/v28 and v12/v13 have identical walls and yields differing by 10^7), because
+        // which corners alias is a property of the TRAJECTORY'S visibility, not of the layout. The
+        // rule that works is retirement on observed information yield, and it is already running.
+        // A bad corner producing a merge-prior covariance is that rule's INPUT, not a bug.
+        //
+        // What survives: the weighted fit itself. fit_line_pca and info_phi_d take responsibilities,
+        // so Σw replaces N, and with the flag unset every weight is 1 and each reduces exactly to the
+        // arithmetic it replaced. tools/corner_gather_test.cpp keeps both arms runnable — note it
+        // shows ZERO collapses on the committed path in all four synthetic rooms while the live room
+        // collapses on 15.6%, i.e. the harness does not contain the live defect and cannot be used to
+        // justify switching this on. That mistake cost two tours.
+        static const bool explain_on = (std::getenv("RC_CORNER_EXPLAIN_AWAY") != nullptr);
         const bool can_explain   = explain_on and (edges_r.size() == nv and nv >= 3);
         // 1 − |t_claim·t_f| per edge: 0 for a collinear surface (takes nothing), 1 for a perpendicular
         // face (takes everything it can explain). Fixed for this corner, so it is computed once here
@@ -362,16 +372,31 @@ CornerDetector::DetectionResult CornerDetector::detect(
                 }
                 for (std::size_t e = 0; e < edges_r.size(); ++e)
                     edge_q[e] = std::exp(-(edge_q[e] - dmin) / assign_var);   // max-subtracted
-                // How much each rival takes is its likelihood TIMES how differently it points.
+                // THIRD-PARTY SURFACES ONLY. The corner's own two edges are excluded from each other's
+                // competition, and that exclusion is the whole correction: a corner's two walls are not
+                // rival explanations, they are the two things being fitted, and letting them bid for
+                // each other's returns starved the corners this was built to rescue. Measured live over
+                // 826 frames with them bidding: in EVERY failing corner the top thief was the corner's
+                // own partner edge — #1 slot 0 lost 73% of its theft to edge 1 and kept 0.23 of its
+                // returns, #6 slot 1 lost 89% to edge 5 and kept 0.18, #12 and #13 lost 100% to their
+                // own partners — and the degenerate share rose 15.6% → 24.0%, worse than no fix at all.
                 float steal_in = 0.f, steal_out = 0.f;
                 for (std::size_t e = 0; e < edges_r.size(); ++e)
                 {
-                    if (e != ei_in)  { const float t = edge_q[e] * dis_in[e];  steal_in  += t; steal_e_in[e]  += t; }
-                    if (e != ei_out) { const float t = edge_q[e] * dis_out[e]; steal_out += t; steal_e_out[e] += t; }
+                    if (e == ei_in or e == ei_out) continue;
+                    const float ti = edge_q[e] * dis_in[e];  steal_in  += ti; steal_e_in[e]  += ti;
+                    const float to = edge_q[e] * dis_out[e]; steal_out += to; steal_e_out[e] += to;
                 }
+                // Between the corner's OWN pair, keep the committed rule: nearest band takes the point,
+                // whole. A return in the wedge is ambiguous between two walls that meet there, and
+                // splitting it would also hand the same return to both line fits — which the corner
+                // covariance, a sum of two INDEPENDENT line contributions, is not entitled to assume.
+                const bool in_wins = in_candidate and (not out_candidate or dist_to_in < dist_to_out);
                 const float qi = edge_q[ei_in], qo = edge_q[ei_out];
-                if (in_candidate  and qi + steal_in  > 1e-12f) w_in  = qi / (qi + steal_in);
-                if (out_candidate and qo + steal_out > 1e-12f) w_out = qo / (qo + steal_out);
+                use_in  = in_wins;
+                use_out = (not in_wins) and out_candidate;
+                w_in  = (use_in  and qi + steal_in  > 1e-12f) ? qi / (qi + steal_in)  : (use_in  ? 1.f : 0.f);
+                w_out = (use_out and qo + steal_out > 1e-12f) ? qo / (qo + steal_out) : (use_out ? 1.f : 0.f);
             }
             else
             {   // Committed behaviour: nearest band wins, exclusively, at full weight.
