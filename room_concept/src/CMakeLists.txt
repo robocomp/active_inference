@@ -155,7 +155,7 @@ set_target_properties(gn_selftest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CU
 # WITHOUT letting a collinear neighbour starve it (see the file header for the two live failures it
 # isolates). EXCLUDE_FROM_ALL. Build and run both arms with:
 #   make -C build corner_gather_test && ./bin/corner_gather_test \
-#     && RC_CORNER_EXPLAIN_AWAY=1 ./bin/corner_gather_test
+#     && RC_CORNER_NO_EXPLAIN_AWAY=1 ../bin/corner_gather_test
 add_executable(corner_gather_test EXCLUDE_FROM_ALL
   ../tools/corner_gather_test.cpp
   ../src/corner_detector.cpp

@@ -20,8 +20,8 @@
  *                 edge is short and its continuation competes for the same returns. This is corner 1,
  *                 and the case the disagreement factor exists for.
  *
- *  Run both arms:  ./bin/corner_gather_test           (committed gather)
- *                  RC_CORNER_EXPLAIN_AWAY=1 ./bin/corner_gather_test
+ *  Run both arms:  ../bin/corner_gather_test                          (explain-away, the default)
+ *                  RC_CORNER_NO_EXPLAIN_AWAY=1 ../bin/corner_gather_test  (committed gather)
  */
 #include "corner_detector.h"
 
@@ -145,8 +145,8 @@ namespace
 
 int main()
 {
-    const bool on = std::getenv("RC_CORNER_EXPLAIN_AWAY") != nullptr;
-    std::printf("=== corner gather: explain-away %s ===\n", on ? "ON" : "OFF (committed)");
+    const bool on = std::getenv("RC_CORNER_NO_EXPLAIN_AWAY") == nullptr;
+    std::printf("=== corner gather: explain-away %s ===\n", on ? "ON (default)" : "OFF (committed)");
 
     // A plain room. Nothing here may get worse.
     const std::vector<Vector2f> rect{{-3,-2}, {3,-2}, {3,2}, {-3,2}};

@@ -274,16 +274,24 @@ CornerDetector::DetectionResult CornerDetector::detect(
         const std::size_t vi     = static_cast<std::size_t>(std::max(0, mc.original_index)) % std::max<std::size_t>(1, nv);
         const std::size_t ei_in  = (vi + nv - 1) % std::max<std::size_t>(1, nv);
         const std::size_t ei_out = vi;
-        // ⚠ OFF BY DEFAULT. The explain-away is a real improvement on the corners it was built for
-        // (13, 27 and 11 collapsed on 98/76/98% of their evaluations and fell to 73/24/25%; overall
-        // rms‖ν‖ halved, 0.240 → 0.118 m) but it REGRESSED others in the same run — corner 1 starved
-        // at 5.6% responsibility kept and collapsed on 91%, and the degenerate share rose 15.6% →
-        // 21.9%. The direction-disagreement denominator above is aimed at exactly that failure and has
-        // not yet been measured. Until it is, the shipped path stays the committed one: corners were
-        // working, and an unverified change to the gather is not worth it. Set RC_CORNER_EXPLAIN_AWAY
-        // to measure the new one; with it unset the weights are all 1 and every step below — the fit,
-        // info_phi_d, min_points_per_line — reduces exactly to the arithmetic it replaced.
-        static const bool explain_on = (std::getenv("RC_CORNER_EXPLAIN_AWAY") != nullptr);
+        // ON by default since tools/corner_gather_test.cpp measured it (3 synthetic geometries, 20
+        // noise seeds each, mean distance from the corner that generated the points):
+        //                        committed     explain-away
+        //     plain rectangle      0.0038 m       0.0053 m    the corner wedge is genuinely shared
+        //     the notch/step       0.0161 m       0.0057 m    2.8x better — the defect it is for
+        //     wall split in two    0.0041 m       0.0058 m    kept 0.80, identical to the rectangle
+        // The third row is the one that earns the default: an earlier version used a plain softmax
+        // over edges, which let the two halves of one straight wall fight over the same returns and
+        // starved corner 1 to 5.6% of its points. The direction-disagreement denominator above is
+        // what fixed it, and that row is the proof it stays fixed.
+        // Set RC_CORNER_NO_EXPLAIN_AWAY to get the committed path back: with the explain-away off the
+        // weights are all 1 and every step below — the fit, info_phi_d, min_points_per_line — reduces
+        // exactly to the arithmetic it replaced, so the two arms stay comparable.
+        // ⚠ The model-error constants (base_sigma + map_sigma, which double-count one quantity) are
+        // still UNCALIBRATED AGAINST THIS GATHER. The honest single value moves with the gather —
+        // 0.0375 m measured on the committed one — so it needs one tour of tmp/corner_probe.csv with
+        // this path live before it can be set.
+        static const bool explain_on = (std::getenv("RC_CORNER_NO_EXPLAIN_AWAY") == nullptr);
         const bool can_explain   = explain_on and (edges_r.size() == nv and nv >= 3);
         // 1 − |t_claim·t_f| per edge: 0 for a collinear surface (takes nothing), 1 for a perpendicular
         // face (takes everything it can explain). Fixed for this corner, so it is computed once here
