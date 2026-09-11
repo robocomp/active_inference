@@ -2748,7 +2748,7 @@ namespace rc
                     {
                         nis_csv_.imbue(std::locale::classic());
                         nis_csv_ << "frame,nis_pre,n,over,tour_nis_pre,tour_se,tour_n,tour_over_frac,"
-                                    "tour_nis_acc,sigma_det,sigma_pred,sigma_map,resid_mean,resid_max,"
+                                    "tour_nis_acc,sigma_det,sigma_pred,sigma_model,resid_mean,resid_max,"
                                     "ori_mean,ori_min,line_sigma_phi_deg,line_sigma_d_m,npts,resid_sig_m,"
                                     "lever_m,corner_angle_deg,corners_in_fov,accepted,rej_dist\n";
                     }
@@ -2761,7 +2761,7 @@ namespace rc
                              << T.nis_pre_mean() << ',' << T.nis_pre_se() << ',' << T.nis_pre_n << ','
                              << (T.nis_pre_n ? static_cast<float>(T.nis_pre_over) / T.nis_pre_n : 0.f) << ','
                              << T.nis_acc_mean() << ','
-                             << T.s_det_sigma() << ',' << T.s_pred_sigma() << ',' << T.s_map_sigma() << ','
+                             << T.s_det_sigma() << ',' << T.s_pred_sigma() << ',' << T.s_model_sigma() << ','
                              << det.resid_mean << ',' << det.resid_max << ','
                              << T.ori_mean() << ',' << T.ori_min << ','
                              << T.sphi_deg() << ',' << T.sd_m() << ',' << T.npts_mean() << ','
@@ -2788,7 +2788,7 @@ namespace rc
                         probe_csv_.imbue(std::locale::classic());   // es_ES would write commas (CLAUDE.md)
                         probe_csv_ << "frame,model_index,propagated,over_gate,d2,"
                                       "det_x,det_y,pred_x,pred_y,nu_x,nu_y,"
-                                      "sdet_xx,sdet_xy,sdet_yy,sprd_xx,sprd_xy,sprd_yy,smap_xx,smap_yy,"
+                                      "sdet_xx,sdet_xy,sdet_yy,sprd_xx,sprd_xy,sprd_yy,smodel_xx,smodel_yy,"
                                       "angle_deg,sin_theta,"
                                       "npts0,nraw0,rival0,rival_share0,ori0,resid_sig0,s_mean0,s_std0,s_span0,lever0,c00_0,c01_0,c11_0,"
                                       "npts1,nraw1,rival1,rival_share1,ori1,resid_sig1,s_mean1,s_std1,s_span1,lever1,c00_1,c01_1,c11_1\n";
@@ -2804,7 +2804,7 @@ namespace rc
                                    << pr.nu_x << ',' << pr.nu_y << ','
                                    << pr.sdet_xx << ',' << pr.sdet_xy << ',' << pr.sdet_yy << ','
                                    << pr.sprd_xx << ',' << pr.sprd_xy << ',' << pr.sprd_yy << ','
-                                   << pr.smap_xx << ',' << pr.smap_yy << ','
+                                   << pr.smodel_xx << ',' << pr.smodel_yy << ','
                                    << pr.angle_deg << ',' << pr.sin_theta;
                         for (int k = 0; k < 2; ++k)
                             probe_csv_ << ',' << pr.npts[k] << ',' << pr.nraw[k] << ',' << pr.rival[k] << ',' << pr.rival_share[k] << ',' << pr.ori[k] << ',' << pr.resid_sig[k]

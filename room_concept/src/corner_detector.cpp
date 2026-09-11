@@ -162,10 +162,27 @@ CornerDetector::DetectionResult CornerDetector::detect(
     auto pos_cov = [&](const Eigen::Matrix2f& Lambda) -> Eigen::Matrix2f {
         return (Lambda + prior_info).inverse();
     };
-    // Map error: the layout is a traced hypothesis, so a detection can legitimately sit ~0.1-0.3 m off
-    // its predicted corner with nothing wrong. Enters every innovation covariance isotropically.
-    const Eigen::Matrix2f map_cov =
-        Eigen::Matrix2f::Identity() * (params_.map_sigma * params_.map_sigma);
+    // ── ONE model-error term, added ONCE (was base_sigma AND map_sigma, which are the same thing) ──
+    // The layout is a traced hypothesis, so a detection can legitimately sit some way off its
+    // predicted corner with nothing wrong. That error was being counted twice under two names:
+    // base_sigma (0.04) inside Σ_det, and map_sigma (0.06) again in every innovation — 0.072 m of
+    // assumed error against a MEASURED per-axis residual of 0.042-0.048 m. Over a 4389-frame tour
+    // (55803 evaluations, tmp/corner_probe.csv) that put NIS/dof at 0.471 against a target of 1.0:
+    // the channel claimed 2.1x the error in variance that it actually had, so every corner pulled
+    // about half as hard as its evidence entitled it to.
+    //   as built (both)      0.471        one term at 0.0375 m   1.000
+    //   map_sigma dropped    0.927        base_sigma dropped     0.489
+    // base_sigma is the term that stays, because Σ_det is what the LOSS weights a corner by
+    // (cand.information = Σ_det⁻¹): model error has to be in there or a wall with thousands of
+    // points claims a sub-millimetre corner and refuses its own re-observations. Dropping base_sigma
+    // instead leaves the loss reading pure propagated precision (σ 0.017 m) and calibrates WORSE.
+    // Its 0.04 m is within 6% of the 0.0375 m the bisection asked for — inside this calibration's
+    // own resolution, so it is left alone rather than fitted to the third digit.
+    // Expect the association gate to refuse more: ~1% of candidates today, and a HONEST χ²₂ @95%
+    // gate refuses 5% by construction. That rise is the point, not a regression.
+    // map_sigma keeps its other three jobs — landmark admissibility, the gather band's lower bound,
+    // and the retirement bar — which are all "how wrong can the map be", not an innovation term.
+    const float base_var = params_.base_sigma * params_.base_sigma;
     // Squared Mahalanobis distance of δ under S, plus |S| for the PDA likelihood normalisation.
     auto mahalanobis2 = [](const Eigen::Vector2f& delta, const Eigen::Matrix2f& S, float* det_out) {
         const Eigen::Matrix2f Sinv = S.inverse();
@@ -499,7 +516,6 @@ CornerDetector::DetectionResult CornerDetector::detect(
         // Near-parallel walls (shallow corner) → n_in ≈ ±n_out → Λ_det collapses to rank-1: the
         // bisector direction is left UNCONSTRAINED (aperture ambiguity falls out of the geometry,
         // replacing the old min/max angle gate). Perpendicular walls, clean fit → ~isotropic.
-        const float base_var = params_.base_sigma * params_.base_sigma;
         const float tau = std::max(1e-3f, params_.orient_tau_deg * static_cast<float>(M_PI) / 180.f);
         const auto ori_of = [&](float raw_dot) {
             const float dev = std::acos(std::min(1.0f, std::abs(raw_dot)));   // 0 = aligned with the model edge
@@ -638,7 +654,7 @@ CornerDetector::DetectionResult CornerDetector::detect(
         // ── Mahalanobis self-consistency gate: is this intersection plausibly THIS model corner,
         //    given both the detection noise and how far the pose itself could be wrong? ──
         {
-            const Eigen::Matrix2f S = pos_cov(Lambda) + fov_corners.back().pred_cov + map_cov;
+            const Eigen::Matrix2f S = pos_cov(Lambda) + fov_corners.back().pred_cov;
             const float d2 = mahalanobis2(*intersection - predicted, S, nullptr);
             {   // The raw record, emitted whether or not the gate keeps this candidate — a covariance
                 // audited only on what its own gate admitted is not audited at all.
@@ -652,7 +668,7 @@ CornerDetector::DetectionResult CornerDetector::detect(
                 probe.over_gate = (params_.assoc_chi2 > 0.f and d2 > params_.assoc_chi2) ? 1 : 0;
                 probe.sdet_xx = Sd(0,0); probe.sdet_xy = Sd(0,1); probe.sdet_yy = Sd(1,1);
                 probe.sprd_xx = Sp(0,0); probe.sprd_xy = Sp(0,1); probe.sprd_yy = Sp(1,1);
-                probe.smap_xx = map_cov(0,0); probe.smap_yy = map_cov(1,1);
+                probe.smodel_xx = base_var; probe.smodel_yy = base_var;   // inside sdet_*, not added again
                 result.probes.push_back(probe);
             }
             // NIS, recorded BEFORE the gate can truncate it (see DetectionResult::nis_pre_*), and
@@ -669,7 +685,7 @@ CornerDetector::DetectionResult CornerDetector::detect(
                 {
                     result.s_det_sum  += rms(Sdet);
                     result.s_pred_sum += rms(fov_corners.back().pred_cov);
-                    result.s_map_sum  += rms(map_cov);
+                    result.s_model_sum += std::sqrt(base_var);
                     result.s_terms_n++;
                 }
             }
@@ -785,7 +801,7 @@ CornerDetector::DetectionResult CornerDetector::detect(
     for (int r = 0; r < R; ++r)
         for (int c = 0; c < C; ++c)
         {
-            const Eigen::Matrix2f S = pos_cov(candidates[c].information) + fov_corners[r].pred_cov + map_cov;
+            const Eigen::Matrix2f S = pos_cov(candidates[c].information) + fov_corners[r].pred_cov;
             float detS = 1.f;
             const float d2 = mahalanobis2(candidates[c].detected - fov_corners[r].predicted, S, &detS);
             if (params_.assoc_chi2 <= 0.f or d2 <= params_.assoc_chi2)
@@ -971,7 +987,7 @@ CornerDetector::DetectionResult CornerDetector::detect(
     tour_.nis_pre_over += result.nis_pre_over;
     tour_.nis_acc_sum += result.nis_acc_sum; tour_.nis_acc_n += result.nis_acc_n;
     tour_.s_det_sum += result.s_det_sum; tour_.s_pred_sum += result.s_pred_sum;
-    tour_.s_map_sum += result.s_map_sum; tour_.s_terms_n += result.s_terms_n;
+    tour_.s_model_sum += result.s_model_sum; tour_.s_terms_n += result.s_terms_n;
     tour_.ori_sum += result.ori_sum; tour_.ori_n += result.ori_n;
     tour_.ori_min = std::min(tour_.ori_min, result.ori_min);
     tour_.sphi_sum += result.sphi_sum; tour_.sd_sum += result.sd_sum;

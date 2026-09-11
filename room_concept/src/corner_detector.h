@@ -43,7 +43,11 @@ public:
                                        // PREDICTED wall line. Must exceed the chronic model misfit (~0.32 m
                                        // here) or the true wall points fall outside the band and NO detection
                                        // forms (the real reason corners almost never fired). Was hardcoded 0.12.
-        float base_sigma    = 0.04f;   // meters — corner detection noise floor σ0 (per-wall).
+        float base_sigma    = 0.04f;   // meters — THE model-error term of the corner channel, added
+                                       // once to Σ_det so both the association gate and the GN loss
+                                       // weight read it. Measured: a single term of 0.0375 m puts
+                                       // NIS/dof at exactly 1.0, so 0.04 is inside the calibration's
+                                       // own resolution. See the ONE-model-error note in detect().
         float orient_tau_deg = 20.0f;  // degrees — smooth orientation-trust scale: ori_scale = exp(−(dev/τ)²).
                                        // dev=τ → 37% weight, 2τ → 2%. Replaces the 20° hard cut.
 
@@ -80,8 +84,16 @@ public:
         //      precision rather than a cap: unambiguous corners keep full weight, aliasing ones mute
         //      themselves, and nothing has to be discarded by rank.
         float assoc_chi2 = 5.991f;     // χ²₂ @95% — association gate on the innovation covariance.
+        // ⚠ NO LONGER AN INNOVATION TERM. map_sigma and base_sigma were the same physical quantity
+        // — how far the traced layout sits from the real wall — and BOTH were added, which is why the
+        // channel reported 2.1x the error in variance that it had (NIS/dof 0.471 over 55803
+        // evaluations). base_sigma carries it now, once, inside Σ_det where the LOSS can see it too.
+        // map_sigma survives as the map's error SCALE for the three jobs that are not innovations:
+        // landmark admissibility (min_wall_map_sigmas), the gather band's lower bound, and the
+        // retirement bar (min_yield_map_sigmas). Do not add it back to S.
         float map_sigma  = 0.06f;      // meters — MODEL error: how far the traced SVG layout sits from
-                                       // the real wall. Without it S would hold only sensor noise
+                                       // the real wall. Historic note on its value below; it no longer
+                                       // widens the gate. Without a model term S would hold only sensor noise
                                        // (σ≈0.04 m ⇒ a 0.10 m gate), and the layout's own ~0.3 m misfit
                                        // would reject every corner. It belongs in the generative model:
                                        // the map is a hypothesis, not ground truth. Raise it if the
@@ -236,7 +248,7 @@ public:
     {
         double nis_pre_sum = 0.0; int nis_pre_n = 0; int nis_pre_over = 0;
         double nis_acc_sum = 0.0; int nis_acc_n = 0;
-        double s_det_sum = 0.0, s_pred_sum = 0.0, s_map_sum = 0.0; int s_terms_n = 0;
+        double s_det_sum = 0.0, s_pred_sum = 0.0, s_model_sum = 0.0; int s_terms_n = 0;
         // ori_scale = exp(−(dev/τ)²) multiplies each line's INFORMATION, so it divides the covariance:
         // C = Λ⁻¹/ori. It is the last hand-set term in the corner path, and after removing the
         // base_sigma double count the detection σ was still 0.156 m against 0.049 m residuals — an
@@ -266,7 +278,10 @@ public:
         [[nodiscard]] float nis_pre_se() const { return nis_pre_n ? 1.f / std::sqrt(static_cast<float>(nis_pre_n)) : 0.f; }
         [[nodiscard]] float s_det_sigma()  const { return s_terms_n ? static_cast<float>(s_det_sum  / s_terms_n) : 0.f; }
         [[nodiscard]] float s_pred_sigma() const { return s_terms_n ? static_cast<float>(s_pred_sum / s_terms_n) : 0.f; }
-        [[nodiscard]] float s_map_sigma()  const { return s_terms_n ? static_cast<float>(s_map_sum  / s_terms_n) : 0.f; }
+        /// The single model-error σ (base_sigma). A COMPONENT of s_det_sigma(), not a third
+        /// independent term: map_sigma stopped being added to the innovation when the double
+        /// count was found (NIS/dof 0.471 → 0.927 measured over 55803 evaluations).
+        [[nodiscard]] float s_model_sigma() const { return s_terms_n ? static_cast<float>(s_model_sum / s_terms_n) : 0.f; }
     };
 
     /// Totals since construction; see TourStats. Read-only to callers, folded in by detect().
@@ -293,7 +308,7 @@ public:
         float d2 = 0.f;                     // Mahalanobis² against S = S_det + S_pred + S_map
         float sdet_xx = 0.f, sdet_xy = 0.f, sdet_yy = 0.f;
         float sprd_xx = 0.f, sprd_xy = 0.f, sprd_yy = 0.f;
-        float smap_xx = 0.f, smap_yy = 0.f;
+        float smodel_xx = 0.f, smodel_yy = 0.f;  // the ONE model-error term; already inside sdet_*
         float angle_deg = 0.f;              // corner opening angle
         float sin_theta = 0.f;              // |det M| — the 1/sin(θ) amplification of the propagation
         // Per adjacent line, slot 0 = incoming edge, 1 = outgoing.
@@ -339,7 +354,7 @@ public:
                                // ≪1 ⇒ map_sigma too large (gate needlessly loose, aliasing invited).
         // ── NIS: is the corner channel's covariance the right SIZE? ───────────────────────────────
         // NIS = νᵀ S⁻¹ ν with ν the innovation (detected − predicted) and S = Λ_det⁻¹ + pred_cov +
-        // map_cov — the same S the association gate uses. Divided by its 2 degrees of freedom, an
+        // the same S the association gate uses. Divided by its 2 degrees of freedom, an
         // honest covariance averages 1.0: above ⇒ overconfident (or a real bias/misassociation),
         // below ⇒ we are discarding information we have.
         // ⚠ MEASURED BEFORE THE GATE, ON PURPOSE, AND FOR TWO REASONS. The gate is a cut on this very
@@ -356,11 +371,11 @@ public:
         double nis_acc_sum = 0.0;    // Σ over accepted matches (argmin-biased — see above)
         int    nis_acc_n = 0;
         // ── WHICH TERM MAKES S TOO BIG? ───────────────────────────────────────────────────────────
-        // S = pos_cov(Λ_det) + pred_cov + map_cov. A NIS below 1 says the SUM is too large; it cannot
+        // S = pos_cov(Λ_det) + pred_cov (the model error is inside Λ_det). A NIS below 1 says the SUM is too large; it cannot
         // say which of the three is at fault, and they have different owners — the detector's own
         // propagated covariance, the pose covariance, and map_sigma (a model-error constant last set
         // from data against the OLD constant-σ detector). Mean per-axis σ of each term, in metres.
-        double s_det_sum = 0.0, s_pred_sum = 0.0, s_map_sum = 0.0;
+        double s_det_sum = 0.0, s_pred_sum = 0.0, s_model_sum = 0.0;
         int    s_terms_n = 0;
         double ori_sum = 0.0; int ori_n = 0; double ori_min = 1.0;   // orientation-trust weight actually applied
         [[nodiscard]] float ori_mean() const { return ori_n ? static_cast<float>(ori_sum / ori_n) : 0.f; }
@@ -382,7 +397,10 @@ public:
         [[nodiscard]] float angle_deg()  const { return angle_n ? static_cast<float>(angle_sum / angle_n) : 0.f; }
         [[nodiscard]] float s_det_sigma()  const { return s_terms_n ? static_cast<float>(s_det_sum  / s_terms_n) : 0.f; }
         [[nodiscard]] float s_pred_sigma() const { return s_terms_n ? static_cast<float>(s_pred_sum / s_terms_n) : 0.f; }
-        [[nodiscard]] float s_map_sigma()  const { return s_terms_n ? static_cast<float>(s_map_sum  / s_terms_n) : 0.f; }
+        /// The single model-error σ (base_sigma). A COMPONENT of s_det_sigma(), not a third
+        /// independent term: map_sigma stopped being added to the innovation when the double
+        /// count was found (NIS/dof 0.471 → 0.927 measured over 55803 evaluations).
+        [[nodiscard]] float s_model_sigma() const { return s_terms_n ? static_cast<float>(s_model_sum / s_terms_n) : 0.f; }
         [[nodiscard]] float nis_pre_mean() const
         { return nis_pre_n > 0 ? static_cast<float>(nis_pre_sum / nis_pre_n) : 0.f; }
         [[nodiscard]] float nis_acc_mean() const
