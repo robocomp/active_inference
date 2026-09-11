@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vector>
+#include <cmath>
 #include <optional>
 #include <Eigen/Dense>
 #include "line_fit.h"
@@ -228,9 +229,91 @@ public:
         return m.model_index >= 0 and m.detected.allFinite() and m.assoc_prob >= 0.5f;
     }
 
+    /// Running totals since construction — the per-frame DetectionResult resets every detect(), and
+    /// fourteen samples cannot settle a calibration question (χ²₂/2 has unit variance, so the s.e. on
+    /// a mean of 14 is 0.27). These accumulate over the whole tour.
+    struct TourStats
+    {
+        double nis_pre_sum = 0.0; int nis_pre_n = 0; int nis_pre_over = 0;
+        double nis_acc_sum = 0.0; int nis_acc_n = 0;
+        double s_det_sum = 0.0, s_pred_sum = 0.0, s_map_sum = 0.0; int s_terms_n = 0;
+        // ori_scale = exp(−(dev/τ)²) multiplies each line's INFORMATION, so it divides the covariance:
+        // C = Λ⁻¹/ori. It is the last hand-set term in the corner path, and after removing the
+        // base_sigma double count the detection σ was still 0.156 m against 0.049 m residuals — an
+        // excess of about 2.5x in variance, which an ori of 0.3-0.6 would produce exactly. Logged
+        // before being touched, because the two previous culprits were guessed wrong.
+        double ori_sum = 0.0; int ori_n = 0; double ori_min = 1.0;
+        [[nodiscard]] float ori_mean() const { return ori_n ? static_cast<float>(ori_sum / ori_n) : 0.f; }
+        // ── EVERY INPUT TO THE PROPAGATION, so one tour can settle where the excess lives ─────────
+        // corner sigma^2 is built from each line's (phi,d) covariance through a Jacobian whose phi
+        // column is the LEVER ARM |t.p_corner| — the corner's tangent coordinate from the robot
+        // origin. So the phi contribution to corner position is roughly sigma_phi * lever, and a
+        // corner 4 m out turns a 1 deg line-angle error into 7 cm. These record each factor on its
+        // own: the fit's sigma_phi/sigma_d, what it was fitted from (points, scatter), the lever,
+        // and the corner's opening angle whose 1/sin amplifies all of it. Guessing cost three tours.
+        double sphi_sum = 0.0, sd_sum = 0.0, npts_sum = 0.0, resid_sig_sum = 0.0, lever_sum = 0.0;
+        int    line_n = 0;
+        double angle_sum = 0.0; int angle_n = 0;
+        [[nodiscard]] float sphi_deg()   const { return line_n ? static_cast<float>(sphi_sum / line_n) : 0.f; }
+        [[nodiscard]] float sd_m()       const { return line_n ? static_cast<float>(sd_sum / line_n) : 0.f; }
+        [[nodiscard]] float npts_mean()  const { return line_n ? static_cast<float>(npts_sum / line_n) : 0.f; }
+        [[nodiscard]] float resid_sig()  const { return line_n ? static_cast<float>(resid_sig_sum / line_n) : 0.f; }
+        [[nodiscard]] float lever_m()    const { return line_n ? static_cast<float>(lever_sum / line_n) : 0.f; }
+        [[nodiscard]] float angle_deg()  const { return angle_n ? static_cast<float>(angle_sum / angle_n) : 0.f; }
+        [[nodiscard]] float nis_pre_mean() const { return nis_pre_n ? static_cast<float>(nis_pre_sum / nis_pre_n) : 0.f; }
+        [[nodiscard]] float nis_acc_mean() const { return nis_acc_n ? static_cast<float>(nis_acc_sum / nis_acc_n) : 0.f; }
+        /// Standard error of nis_pre_mean under the χ²₂/2 null (unit variance per sample).
+        [[nodiscard]] float nis_pre_se() const { return nis_pre_n ? 1.f / std::sqrt(static_cast<float>(nis_pre_n)) : 0.f; }
+        [[nodiscard]] float s_det_sigma()  const { return s_terms_n ? static_cast<float>(s_det_sum  / s_terms_n) : 0.f; }
+        [[nodiscard]] float s_pred_sigma() const { return s_terms_n ? static_cast<float>(s_pred_sum / s_terms_n) : 0.f; }
+        [[nodiscard]] float s_map_sigma()  const { return s_terms_n ? static_cast<float>(s_map_sum  / s_terms_n) : 0.f; }
+    };
+
+    /// Totals since construction; see TourStats. Read-only to callers, folded in by detect().
+    [[nodiscard]] const TourStats& tour_stats() const { return tour_; }
+    void reset_tour_stats() { tour_ = TourStats{}; }
+
+
+    /// ── ONE ROW PER CORNER EVALUATION — the raw record, not a moment of it ───────────────────
+    /// Three separate hypotheses about the corner covariance have now been aimed at the wrong term,
+    /// every one of them from a tour MEAN. A mean over a heavy-tailed per-line quantity says nothing
+    /// about the typical line, and no further accumulator recovers a distribution from its first
+    /// moment. So this carries the whole state of one candidate at the association gate — both lines'
+    /// inputs, both their covariances, the Jacobian's amplifiers, the three terms of S and the
+    /// innovation — and room_concept dumps it verbatim. Every remaining question about the
+    /// calibration is then arithmetic on a file instead of another tour.
+    struct CornerProbe
+    {
+        int   model_index = -1;
+        int   propagated  = 0;   // 1 = Jacobian propagation, 0 = rank-1 fallback (is the new path live?)
+        int   over_gate   = 0;
+        float det_x = 0.f,  det_y = 0.f;    // detected intersection, robot frame
+        float pred_x = 0.f, pred_y = 0.f;   // predicted model corner, robot frame
+        float nu_x = 0.f,   nu_y = 0.f;     // innovation = detected − predicted
+        float d2 = 0.f;                     // Mahalanobis² against S = S_det + S_pred + S_map
+        float sdet_xx = 0.f, sdet_xy = 0.f, sdet_yy = 0.f;
+        float sprd_xx = 0.f, sprd_xy = 0.f, sprd_yy = 0.f;
+        float smap_xx = 0.f, smap_yy = 0.f;
+        float angle_deg = 0.f;              // corner opening angle
+        float sin_theta = 0.f;              // |det M| — the 1/sin(θ) amplification of the propagation
+        // Per adjacent line, slot 0 = incoming edge, 1 = outgoing.
+        int   npts[2]      = {0, 0};    // EFFECTIVE count Σw the fit was made of
+        int   nraw[2]      = {0, 0};    // returns the gather band offered; npts/nraw = responsibility kept
+        int   rival[2]     = {-1, -1}; // polygon edge that took the most responsibility from this fit
+        float rival_share[2] = {0.f, 0.f}; // its share of everything taken — 1 means a single culprit
+        float ori[2]       = {0.f, 0.f};    // exp(−(dev/τ)²), the orientation-trust divisor on C
+        float resid_sig[2] = {0.f, 0.f};    // √resid_var — per-point perpendicular scatter (the σ fed in)
+        float s_mean[2]    = {0.f, 0.f};    // mean tangent coord t·p, measured from the ROBOT ORIGIN
+        float s_std[2]     = {0.f, 0.f};    // along-wall spread — what C(φ,φ) actually lives on
+        float s_span[2]    = {0.f, 0.f};    // max − min tangent coord: the segment's real extent
+        float lever[2]     = {0.f, 0.f};    // |t·p_corner| — the φ column of the Jacobian
+        float c00[2] = {0.f, 0.f}, c01[2] = {0.f, 0.f}, c11[2] = {0.f, 0.f};   // line covariance on (φ, d)
+    };
+
     struct DetectionResult
     {
         std::vector<CornerMatch> matches;
+        std::vector<CornerProbe> probes;   // one per candidate reaching the gate; see CornerProbe
         int corners_in_fov = 0;
         int corners_detected = 0;
         int corners_accepted = 0;
@@ -254,6 +337,56 @@ public:
         float resid_max  = 0.f;      // worst ‖detected − predicted‖ (m)
         float resid_chi2_mean = 0.f; // mean whitened residual (χ² units) — 1.0 ⇒ map_sigma is honest,
                                // ≪1 ⇒ map_sigma too large (gate needlessly loose, aliasing invited).
+        // ── NIS: is the corner channel's covariance the right SIZE? ───────────────────────────────
+        // NIS = νᵀ S⁻¹ ν with ν the innovation (detected − predicted) and S = Λ_det⁻¹ + pred_cov +
+        // map_cov — the same S the association gate uses. Divided by its 2 degrees of freedom, an
+        // honest covariance averages 1.0: above ⇒ overconfident (or a real bias/misassociation),
+        // below ⇒ we are discarding information we have.
+        // ⚠ MEASURED BEFORE THE GATE, ON PURPOSE, AND FOR TWO REASONS. The gate is a cut on this very
+        // quantity, so an accepted-only mean is truncated by construction. But the larger bias is the
+        // ASSIGNMENT: nis_acc_* is built from the Hungarian cost of the CHOSEN pairing, i.e. a minimum
+        // over pairings, and an argmin is biased low however wide the gate is. Measured on a live
+        // tour with nothing rejected at all — 0 of 14 over the gate — pre read 0.51 and accepted 0.33,
+        // a 35% gap with zero truncation. So: nis_pre_* is the CALIBRATION statistic, counting every
+        // detection against the model corner it was formed from; nis_acc_* diagnoses assignment
+        // quality only and must never be read as a covariance check.
+        double nis_pre_sum = 0.0;    // Σ NIS/dof over all gate evaluations
+        int    nis_pre_n = 0;
+        int    nis_pre_over = 0;     // how many exceeded assoc_chi2 (i.e. would be/were rejected)
+        double nis_acc_sum = 0.0;    // Σ over accepted matches (argmin-biased — see above)
+        int    nis_acc_n = 0;
+        // ── WHICH TERM MAKES S TOO BIG? ───────────────────────────────────────────────────────────
+        // S = pos_cov(Λ_det) + pred_cov + map_cov. A NIS below 1 says the SUM is too large; it cannot
+        // say which of the three is at fault, and they have different owners — the detector's own
+        // propagated covariance, the pose covariance, and map_sigma (a model-error constant last set
+        // from data against the OLD constant-σ detector). Mean per-axis σ of each term, in metres.
+        double s_det_sum = 0.0, s_pred_sum = 0.0, s_map_sum = 0.0;
+        int    s_terms_n = 0;
+        double ori_sum = 0.0; int ori_n = 0; double ori_min = 1.0;   // orientation-trust weight actually applied
+        [[nodiscard]] float ori_mean() const { return ori_n ? static_cast<float>(ori_sum / ori_n) : 0.f; }
+        // ── EVERY INPUT TO THE PROPAGATION, so one tour can settle where the excess lives ─────────
+        // corner sigma^2 is built from each line's (phi,d) covariance through a Jacobian whose phi
+        // column is the LEVER ARM |t.p_corner| — the corner's tangent coordinate from the robot
+        // origin. So the phi contribution to corner position is roughly sigma_phi * lever, and a
+        // corner 4 m out turns a 1 deg line-angle error into 7 cm. These record each factor on its
+        // own: the fit's sigma_phi/sigma_d, what it was fitted from (points, scatter), the lever,
+        // and the corner's opening angle whose 1/sin amplifies all of it. Guessing cost three tours.
+        double sphi_sum = 0.0, sd_sum = 0.0, npts_sum = 0.0, resid_sig_sum = 0.0, lever_sum = 0.0;
+        int    line_n = 0;
+        double angle_sum = 0.0; int angle_n = 0;
+        [[nodiscard]] float sphi_deg()   const { return line_n ? static_cast<float>(sphi_sum / line_n) : 0.f; }
+        [[nodiscard]] float sd_m()       const { return line_n ? static_cast<float>(sd_sum / line_n) : 0.f; }
+        [[nodiscard]] float npts_mean()  const { return line_n ? static_cast<float>(npts_sum / line_n) : 0.f; }
+        [[nodiscard]] float resid_sig()  const { return line_n ? static_cast<float>(resid_sig_sum / line_n) : 0.f; }
+        [[nodiscard]] float lever_m()    const { return line_n ? static_cast<float>(lever_sum / line_n) : 0.f; }
+        [[nodiscard]] float angle_deg()  const { return angle_n ? static_cast<float>(angle_sum / angle_n) : 0.f; }
+        [[nodiscard]] float s_det_sigma()  const { return s_terms_n ? static_cast<float>(s_det_sum  / s_terms_n) : 0.f; }
+        [[nodiscard]] float s_pred_sigma() const { return s_terms_n ? static_cast<float>(s_pred_sum / s_terms_n) : 0.f; }
+        [[nodiscard]] float s_map_sigma()  const { return s_terms_n ? static_cast<float>(s_map_sum  / s_terms_n) : 0.f; }
+        [[nodiscard]] float nis_pre_mean() const
+        { return nis_pre_n > 0 ? static_cast<float>(nis_pre_sum / nis_pre_n) : 0.f; }
+        [[nodiscard]] float nis_acc_mean() const
+        { return nis_acc_n > 0 ? static_cast<float>(nis_acc_sum / nis_acc_n) : 0.f; }
         // Rival statistics. An accepted corner either HAS a competing model corner inside the gate or it
         // does not; averaging the two cases is meaningless (the old version averaged the INFEASIBLE
         // sentinel and reported "583334", which only ever encoded "58% had no rival"). Report the count
@@ -322,6 +455,7 @@ public:
 
 private:
     Params params_;
+    TourStats tour_;   // running totals over the whole run (see tour_stats())
 
     /// Full room polygon (world frame) — retained for the ray-cast occlusion/visibility test so an
     /// occluded corner (behind a wall or the notch step) is excluded before detection.

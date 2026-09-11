@@ -150,6 +150,20 @@ target_include_directories(gn_selftest PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
 target_link_libraries(gn_selftest ${LIBS})
 set_target_properties(gn_selftest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
 
+# ── corner_gather_test ────────────────────────────────────────────────────────
+# Offline check that the layout-wide explain-away removes a perpendicular face from a wall fit
+# WITHOUT letting a collinear neighbour starve it (see the file header for the two live failures it
+# isolates). EXCLUDE_FROM_ALL. Build and run both arms with:
+#   make -C build corner_gather_test && ./bin/corner_gather_test \
+#     && RC_CORNER_EXPLAIN_AWAY=1 ./bin/corner_gather_test
+add_executable(corner_gather_test EXCLUDE_FROM_ALL
+  ../tools/corner_gather_test.cpp
+  ../src/corner_detector.cpp
+)
+target_include_directories(corner_gather_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
+target_link_libraries(corner_gather_test ${LIBS})
+set_target_properties(corner_gather_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
+
 # ── wall_slam_selftest ────────────────────────────────────────────────────────
 # Offline validation of the wall-SLAM layer (wall_segmenter + wall_map + the wall factor family in
 # room_gn_solver): segmenter recall on ray-cast scans of a known L-shaped room, analytic Jacobians of

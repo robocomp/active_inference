@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <ranges>
 #include <fstream>
+#include <filesystem>
 #include <limits>
 #include <locale>
 #include <print>
@@ -2724,6 +2725,99 @@ namespace rc
             auto det = corner_detector_.detect(all_points, cx, cy, cth, current_covariance);
             res.corners_in_fov = det.corners_in_fov;
             res.corner_matches = det.matches;
+
+            // ── NIS and every input to it → tmp/corner_nis.csv, one row per frame ────────────
+            // This was a terminal line and it had grown to two dense rows of numbers nobody could
+            // read while a tour was running. A file is the right place: it keeps the whole history
+            // rather than the throttled 1-in-20 sample, and it can be plotted.
+            // NIS/dof averages 1.0 when the covariance is honest; nis_pre is measured BEFORE the
+            // gate and against the corner each detection was formed from, so it is the calibration
+            // number. nis_acc comes from the chosen assignment — an argmin, biased low — and
+            // diagnoses assignment quality only. The sigma_* columns split S into its three terms
+            // so a value below 1 can be attributed; the input columns say which factor of the
+            // propagation carries it.
+            // ⚠ imbued with the classic locale: this machine runs es_ES and a comma decimal
+            // separator would make the file unreadable by from_chars (CLAUDE.md).
+            if (det.nis_pre_n > 0)
+            {
+                if (not nis_csv_.is_open())
+                {
+                    std::filesystem::create_directories("tmp");
+                    nis_csv_.open("tmp/corner_nis.csv", std::ios::out | std::ios::trunc);
+                    if (nis_csv_.is_open())
+                    {
+                        nis_csv_.imbue(std::locale::classic());
+                        nis_csv_ << "frame,nis_pre,n,over,tour_nis_pre,tour_se,tour_n,tour_over_frac,"
+                                    "tour_nis_acc,sigma_det,sigma_pred,sigma_map,resid_mean,resid_max,"
+                                    "ori_mean,ori_min,line_sigma_phi_deg,line_sigma_d_m,npts,resid_sig_m,"
+                                    "lever_m,corner_angle_deg,corners_in_fov,accepted,rej_dist\n";
+                    }
+                }
+                if (nis_csv_.is_open())
+                {
+                    const auto& T = corner_detector_.tour_stats();
+                    nis_csv_ << nis_log_tick_++ << ','
+                             << det.nis_pre_mean() << ',' << det.nis_pre_n << ',' << det.nis_pre_over << ','
+                             << T.nis_pre_mean() << ',' << T.nis_pre_se() << ',' << T.nis_pre_n << ','
+                             << (T.nis_pre_n ? static_cast<float>(T.nis_pre_over) / T.nis_pre_n : 0.f) << ','
+                             << T.nis_acc_mean() << ','
+                             << T.s_det_sigma() << ',' << T.s_pred_sigma() << ',' << T.s_map_sigma() << ','
+                             << det.resid_mean << ',' << det.resid_max << ','
+                             << T.ori_mean() << ',' << T.ori_min << ','
+                             << T.sphi_deg() << ',' << T.sd_m() << ',' << T.npts_mean() << ','
+                             << T.resid_sig() << ',' << T.lever_m() << ',' << T.angle_deg() << ','
+                             << det.corners_in_fov << ',' << det.corners_accepted << ',' << det.rej_dist << '\n';
+                    if ((nis_log_tick_ % 50) == 0) nis_csv_.flush();
+                }
+            }
+
+            // ── The RAW per-candidate dump → tmp/corner_probe.csv ────────────────────────────
+            // The frame file above is all means, and means are what sent the last three diagnoses to
+            // the wrong term. This writes one row per candidate evaluated at the association gate,
+            // with no aggregation at all: both lines' point counts, scatter, along-wall spread and
+            // (φ,d) covariance, the Jacobian's lever and sin(θ), the three terms of S, and the
+            // innovation. Capped at 300k rows (~40 MB) because it is a diagnostic, not a log.
+            if (not det.probes.empty() and probe_rows_ < 300000u)
+            {
+                if (not probe_csv_.is_open())
+                {
+                    std::filesystem::create_directories("tmp");
+                    probe_csv_.open("tmp/corner_probe.csv", std::ios::out | std::ios::trunc);
+                    if (probe_csv_.is_open())
+                    {
+                        probe_csv_.imbue(std::locale::classic());   // es_ES would write commas (CLAUDE.md)
+                        probe_csv_ << "frame,model_index,propagated,over_gate,d2,"
+                                      "det_x,det_y,pred_x,pred_y,nu_x,nu_y,"
+                                      "sdet_xx,sdet_xy,sdet_yy,sprd_xx,sprd_xy,sprd_yy,smap_xx,smap_yy,"
+                                      "angle_deg,sin_theta,"
+                                      "npts0,nraw0,rival0,rival_share0,ori0,resid_sig0,s_mean0,s_std0,s_span0,lever0,c00_0,c01_0,c11_0,"
+                                      "npts1,nraw1,rival1,rival_share1,ori1,resid_sig1,s_mean1,s_std1,s_span1,lever1,c00_1,c01_1,c11_1\n";
+                    }
+                }
+                if (probe_csv_.is_open())
+                {
+                    for (const auto& pr : det.probes)
+                    {
+                        probe_csv_ << probe_frame_ << ',' << pr.model_index << ','
+                                   << pr.propagated << ',' << pr.over_gate << ',' << pr.d2 << ','
+                                   << pr.det_x << ',' << pr.det_y << ',' << pr.pred_x << ',' << pr.pred_y << ','
+                                   << pr.nu_x << ',' << pr.nu_y << ','
+                                   << pr.sdet_xx << ',' << pr.sdet_xy << ',' << pr.sdet_yy << ','
+                                   << pr.sprd_xx << ',' << pr.sprd_xy << ',' << pr.sprd_yy << ','
+                                   << pr.smap_xx << ',' << pr.smap_yy << ','
+                                   << pr.angle_deg << ',' << pr.sin_theta;
+                        for (int k = 0; k < 2; ++k)
+                            probe_csv_ << ',' << pr.npts[k] << ',' << pr.nraw[k] << ',' << pr.rival[k] << ',' << pr.rival_share[k] << ',' << pr.ori[k] << ',' << pr.resid_sig[k]
+                                       << ',' << pr.s_mean[k] << ',' << pr.s_std[k] << ',' << pr.s_span[k]
+                                       << ',' << pr.lever[k] << ',' << pr.c00[k] << ',' << pr.c01[k]
+                                       << ',' << pr.c11[k];
+                        probe_csv_ << '\n';
+                        ++probe_rows_;
+                    }
+                    ++probe_frame_;
+                    if ((probe_rows_ % 500u) < det.probes.size()) probe_csv_.flush();
+                }
+            }
 
             // Per-model-corner attribution → etc/corner_stats.csv. This is what decides whether a
             // given pillar earns its landmark status or should follow the trace artefacts out of

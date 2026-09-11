@@ -13,6 +13,7 @@
 #pragma once
 
 #include <Eigen/Dense>
+#include <algorithm>
 #include <cmath>
 #include <optional>
 #include <vector>
@@ -65,6 +66,43 @@ namespace rc::linefit
         return line;
     }
 
+    /// Weighted PCA line fit. `w[i]` is point i's RESPONSIBILITY for this line — the posterior that
+    /// the return came off THIS wall rather than any other surface the layout knows about (see the
+    /// explain-away in CornerDetector::detect). A return on a face perpendicular to this wall carries
+    /// ~0 and cannot rotate the fit; one in the wedge where two walls meet carries ~½ to each, which
+    /// is what it is worth. The effective count Σw, not pts.size(), is what the fit is made of, so it
+    /// is Σw that sets both the minimum and the per-point scatter.
+    inline std::optional<Line2D> fit_line_pca(const std::vector<Eigen::Vector2f>& pts,
+                                              const std::vector<float>& w, float min_eff)
+    {
+        if (pts.size() != w.size() or pts.size() < 2)
+            return std::nullopt;
+        float wsum = 0.f;
+        for (const float wi : w) wsum += wi;
+        if (not (wsum >= min_eff) or not std::isfinite(wsum))
+            return std::nullopt;
+
+        Eigen::Vector2f centroid = Eigen::Vector2f::Zero();
+        for (std::size_t i = 0; i < pts.size(); ++i)
+            centroid += w[i] * pts[i];
+        centroid /= wsum;
+
+        Eigen::Matrix2f scatter = Eigen::Matrix2f::Zero();
+        for (std::size_t i = 0; i < pts.size(); ++i)
+        {
+            const Eigen::Vector2f dp = pts[i] - centroid;
+            scatter += w[i] * dp * dp.transpose();
+        }
+
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix2f> eig(scatter);
+        Line2D line;
+        line.normal = eig.eigenvectors().col(0);
+        line.d = line.normal.dot(centroid);
+        line.npts = static_cast<int>(std::lround(wsum));   // EFFECTIVE count
+        line.resid_var = std::max(0.f, eig.eigenvalues()(0)) / wsum;
+        return line;
+    }
+
     /// Intersect two lines.  Returns nullopt if (nearly) parallel.
     inline std::optional<Eigen::Vector2f> intersect(const Line2D& a, const Line2D& b,
                                                     float* angle_deg = nullptr)
@@ -105,6 +143,28 @@ namespace rc::linefit
             L(0, 0) += s * s;
             L(0, 1) -= s;
             L(1, 1) += 1.f;
+        }
+        L(1, 0) = L(0, 1);
+        return L / sigma2;
+    }
+
+    /// Responsibility-weighted Λ(φ, d). Same construction as above with Σ_i → Σ_i w_i, so a point
+    /// shared between two walls contributes its share of information to each and a point explained
+    /// by a third surface contributes none. Σw replaces N, which is the whole point: a gather whose
+    /// returns mostly belong to someone else is a gather that knows little about this wall, and the
+    /// covariance now says so instead of reporting the confidence of a full point count.
+    inline Eigen::Matrix2f info_phi_d(const std::vector<Eigen::Vector2f>& pts,
+                                      const std::vector<float>& w, const Line2D& line, float sigma2)
+    {
+        Eigen::Matrix2f L = Eigen::Matrix2f::Zero();
+        if (sigma2 <= 0.f or pts.size() != w.size()) return L;
+        const Eigen::Vector2f t = line.direction();
+        for (std::size_t i = 0; i < pts.size(); ++i)
+        {
+            const float s = t.dot(pts[i]);
+            L(0, 0) += w[i] * s * s;
+            L(0, 1) -= w[i] * s;
+            L(1, 1) += w[i];
         }
         L(1, 0) = L(0, 1);
         return L / sigma2;

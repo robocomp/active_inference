@@ -2,6 +2,8 @@
 #include "corner_visibility.h"
 #include "assignment.h"
 #include <cmath>
+#include <cstdlib>
+#include <limits>
 #include <algorithm>
 #include <ranges>
 
@@ -171,6 +173,70 @@ CornerDetector::DetectionResult CornerDetector::detect(
         return delta.dot(Sinv * delta);
     };
 
+    // ── Model edges in the robot frame: let every wall compete for a return ──────────────────────
+    // A gather is a band around ONE model edge, and a band wide enough to reach the real wall through
+    // the layout's own error is also wide enough to swallow a face PERPENDICULAR to it — the notch
+    // step, the pillar sides. A PCA over those returns a direction ACROSS the wall instead of along
+    // it. Measured over a 4389-frame tour (55803 evaluations, tmp/corner_probe.csv): model corner 13
+    // fitted a line orthogonal to its own model edge on 98% of its evaluations, corner 11 on 98%,
+    // corner 27 on 76%. Both groups then land on the same physical wall, the fitted pair comes out
+    // parallel (|n_in × n_out| = 0), the propagation refuses, and the rank-1 fallback returns
+    // pos_cov of a rank-deficient Λ — the merge prior, 1.06 m. That is not a covariance, it is "no
+    // information", handed to the loss as though it were a measurement. 15.6% of all evaluations.
+    //
+    // The layout already knows those faces are there, so the fix needs no new test: a return is
+    // evidence about SOME wall, and the walls compete for it.
+    //     w_e(p) = q_e / (q_e + Σ_{f≠e} q_f·(1 − |t_e·t_f|)),   q_f = exp(−dist(p,f)²/2σ²), σ = base_sigma
+    // A competitor steals only to the extent its ORIENTATION differs. That factor is the whole idea:
+    // what can corrupt a line fit is a return off a surface pointing a different way, and a collinear
+    // edge — a wall the trace subdivided, or its continuation past a vertex that lost landmark status
+    // — is the SAME surface and carries the same direction evidence, so it must not take anything.
+    // Measured with a plain softmax over edges (which does let collinear edges split the point): the
+    // fits kept a median 64% of their returns and corner 1 starved on 5.6%, collapsing on 91% of its
+    // evaluations — the cure's own failure mode, and worse than the disease it fixed.
+    // base_sigma is exactly the right scale here — it is how far the layout can be from the surface,
+    // so it is also the distance below which the layout cannot tell two surfaces apart. A return on
+    // the step is explained by the step and contributes ~0 to its neighbour; one on the wall itself
+    // has no competitor and contributes ~1; one in the wedge where two walls genuinely meet is shared
+    // ~½ / ~½, which is what it is worth. No angle test and no cut-off: the fit simply stops being
+    // told about surfaces that belong to somebody else, and where that leaves it with little to go on,
+    // Σw falls and info_phi_d reports the large σ_φ that is then the truth.
+    // A duplicated polygon vertex (SVG authoring artefact — set_model_corners counts them in
+    // model_dup_dropped) makes a ZERO-LENGTH edge that sits exactly ON the wall it degenerated from.
+    // Left in the competition it would be a perfect explanation for every point near it and would
+    // steal half their responsibility from the real wall. Mark them non-competing instead of
+    // renumbering, so edge i still means vertex i → i+1 and the corner's own indices stay valid.
+    std::vector<std::pair<Eigen::Vector2f, Eigen::Vector2f>> edges_r;
+    std::vector<char> edge_ok;
+    const std::size_t nv = polygon_.size();
+    if (nv >= 3)
+    {
+        edges_r.reserve(nv); edge_ok.reserve(nv);
+        for (std::size_t i = 0; i < nv; ++i)
+        {
+            const Eigen::Vector2f a = to_robot(polygon_[i] - t_world);
+            const Eigen::Vector2f b = to_robot(polygon_[(i + 1) % nv] - t_world);
+            edges_r.emplace_back(a, b);
+            edge_ok.push_back((b - a).squaredNorm() > 1e-8f ? 1 : 0);
+        }
+    }
+    const float assign_var = 2.f * std::max(1e-6f, params_.base_sigma * params_.base_sigma);
+    const auto seg_dist2 = [](const Eigen::Vector2f& p, const Eigen::Vector2f& a, const Eigen::Vector2f& b)
+    {
+        const Eigen::Vector2f ab = b - a;
+        const float L2 = ab.squaredNorm();
+        const float u = L2 > 1e-9f ? std::clamp(ab.dot(p - a) / L2, 0.f, 1.f) : 0.f;
+        return (p - (a + u * ab)).squaredNorm();
+    };
+    std::vector<Eigen::Vector2f> edge_t;               // unit direction of each edge, robot frame
+    edge_t.reserve(edges_r.size());
+    for (const auto& e : edges_r)
+    {
+        const Eigen::Vector2f ab = e.second - e.first;
+        edge_t.push_back(ab.squaredNorm() > 1e-9f ? ab.normalized() : Eigen::Vector2f(1.f, 0.f));
+    }
+    std::vector<float> edge_q(edges_r.size(), 0.f);    // scratch, reused per point
+
     for (const auto& mc : model_corners_)
     {
         const Eigen::Vector2f dw = mc.position - t_world;
@@ -198,8 +264,40 @@ CornerDetector::DetectionResult CornerDetector::detect(
         // Gather neighbourhood, clipped to each wall's actual length
         // (+ 0.2 m slack for localisation error).
         std::vector<Eigen::Vector2f> group_in, group_out;
+        std::vector<float> w_in_v, w_out_v;   // per-point responsibility for this corner's two edges
         group_in.reserve(128);
         group_out.reserve(128);
+        w_in_v.reserve(128);
+        w_out_v.reserve(128);
+        // This corner's own two edges in the polygon's edge numbering (edge i runs vertex i → i+1),
+        // so the competition below can tell which share belongs to the incoming and outgoing wall.
+        const std::size_t vi     = static_cast<std::size_t>(std::max(0, mc.original_index)) % std::max<std::size_t>(1, nv);
+        const std::size_t ei_in  = (vi + nv - 1) % std::max<std::size_t>(1, nv);
+        const std::size_t ei_out = vi;
+        // ⚠ OFF BY DEFAULT. The explain-away is a real improvement on the corners it was built for
+        // (13, 27 and 11 collapsed on 98/76/98% of their evaluations and fell to 73/24/25%; overall
+        // rms‖ν‖ halved, 0.240 → 0.118 m) but it REGRESSED others in the same run — corner 1 starved
+        // at 5.6% responsibility kept and collapsed on 91%, and the degenerate share rose 15.6% →
+        // 21.9%. The direction-disagreement denominator above is aimed at exactly that failure and has
+        // not yet been measured. Until it is, the shipped path stays the committed one: corners were
+        // working, and an unverified change to the gather is not worth it. Set RC_CORNER_EXPLAIN_AWAY
+        // to measure the new one; with it unset the weights are all 1 and every step below — the fit,
+        // info_phi_d, min_points_per_line — reduces exactly to the arithmetic it replaced.
+        static const bool explain_on = (std::getenv("RC_CORNER_EXPLAIN_AWAY") != nullptr);
+        const bool can_explain   = explain_on and (edges_r.size() == nv and nv >= 3);
+        // 1 − |t_claim·t_f| per edge: 0 for a collinear surface (takes nothing), 1 for a perpendicular
+        // face (takes everything it can explain). Fixed for this corner, so it is computed once here
+        // rather than per point.
+        std::vector<float> dis_in(edges_r.size(), 1.f), dis_out(edges_r.size(), 1.f);
+        std::vector<float> steal_e_in(edges_r.size(), 0.f), steal_e_out(edges_r.size(), 0.f);
+        int probe_rival_in = -1, probe_rival_out = -1;
+        float probe_rival_share_in = 0.f, probe_rival_share_out = 0.f;
+        if (can_explain)
+            for (std::size_t e = 0; e < edges_r.size(); ++e)
+            {
+                dis_in[e]  = 1.f - std::min(1.f, std::abs(edge_t[e].dot(edge_t[ei_in])));
+                dis_out[e] = 1.f - std::min(1.f, std::abs(edge_t[e].dot(edge_t[ei_out])));
+            }
         const float in_limit  = mc.wall_in_length  + 0.2f;
         const float out_limit = mc.wall_out_length + 0.2f;
         // ── Neighbourhood scaled to THIS corner's own walls ────────────────────────────────────────
@@ -237,18 +335,80 @@ CornerDetector::DetectionResult CornerDetector::detect(
             const bool out_candidate = (along_out >= -0.2f && along_out <= out_limit &&
                                         dist_to_out <= wall_band);
 
-            if (in_candidate && (!out_candidate || dist_to_in < dist_to_out))
-                group_in.push_back(p);
-            else if (out_candidate)
-                group_out.push_back(p);
+            if (not in_candidate and not out_candidate)
+                continue;
+            bool use_in = in_candidate, use_out = out_candidate;
+
+            // Responsibility of this corner's two edges for the return, against every OTHER wall in
+            // the layout. Without a competitor this reduces to 1 for the only edge that claims the
+            // point; the old rule (nearest band wins, exclusively) is its argmax, and it is exactly
+            // the argmax that put a perpendicular face into a wall's fit at full weight.
+            float w_in = in_candidate ? 1.f : 0.f, w_out = out_candidate ? 1.f : 0.f;
+            if (can_explain)
+            {
+                float dmin = std::numeric_limits<float>::max();
+                for (std::size_t e = 0; e < edges_r.size(); ++e)
+                {
+                    edge_q[e] = edge_ok[e] ? seg_dist2(p, edges_r[e].first, edges_r[e].second) : 1e30f;
+                    dmin = std::min(dmin, edge_q[e]);
+                }
+                for (std::size_t e = 0; e < edges_r.size(); ++e)
+                    edge_q[e] = std::exp(-(edge_q[e] - dmin) / assign_var);   // max-subtracted
+                // How much each rival takes is its likelihood TIMES how differently it points.
+                float steal_in = 0.f, steal_out = 0.f;
+                for (std::size_t e = 0; e < edges_r.size(); ++e)
+                {
+                    if (e != ei_in)  { const float t = edge_q[e] * dis_in[e];  steal_in  += t; steal_e_in[e]  += t; }
+                    if (e != ei_out) { const float t = edge_q[e] * dis_out[e]; steal_out += t; steal_e_out[e] += t; }
+                }
+                const float qi = edge_q[ei_in], qo = edge_q[ei_out];
+                if (in_candidate  and qi + steal_in  > 1e-12f) w_in  = qi / (qi + steal_in);
+                if (out_candidate and qo + steal_out > 1e-12f) w_out = qo / (qo + steal_out);
+            }
+            else
+            {   // Committed behaviour: nearest band wins, exclusively, at full weight.
+                if (in_candidate and (not out_candidate or dist_to_in < dist_to_out))
+                    { use_in = true;  use_out = false; w_in = 1.f; w_out = 0.f; }
+                else
+                    { use_in = false; use_out = true;  w_in = 0.f; w_out = 1.f; }
+            }
+            // With the explain-away on, a point may belong PARTLY to both adjacent walls — near the
+            // vertex it genuinely does — so it is offered to both groups with its share rather than
+            // awarded whole to one of them by a coin flip.
+            if (use_in)  { group_in.push_back(p);  w_in_v.push_back(w_in); }
+            if (use_out) { group_out.push_back(p); w_out_v.push_back(w_out); }
+            // KNOWN CONSERVATISM, logged rather than hidden: two COLLINEAR edges (a wall the trace
+            // subdivided, or a continuation past a vertex that lost landmark status) are one physical
+            // surface, and the competition splits a point's responsibility between them even though
+            // both carry the same direction evidence. That costs Σw — σ_φ grows by ~√2 on a wall
+            // split in two — but it is symmetric, so it inflates the covariance without biasing the
+            // fit. nraw vs npts in the probe measures exactly how much is being given up.
         }
 
-        if (static_cast<int>(group_in.size())  < params_.min_points_per_line ||
-            static_cast<int>(group_out.size()) < params_.min_points_per_line)
+        // Name the rival. When a fit starves, the question is always WHICH surface took its returns —
+        // a collinear neighbour means the disagreement factor is not doing its job, a perpendicular
+        // face means it is. Recording it costs an argmax and saves a tour of guessing.
+        {
+            const auto worst = [](const std::vector<float>& st, int& idx, float& share) {
+                float tot = 0.f, best = -1.f; idx = -1;
+                for (std::size_t e = 0; e < st.size(); ++e)
+                    { tot += st[e]; if (st[e] > best) { best = st[e]; idx = static_cast<int>(e); } }
+                share = tot > 1e-12f ? best / tot : 0.f;
+            };
+            worst(steal_e_in,  probe_rival_in,  probe_rival_share_in);
+            worst(steal_e_out, probe_rival_out, probe_rival_share_out);
+        }
+
+        // Counted in RESPONSIBILITY, not in returns: a hundred points that all belong to the step
+        // next door are not a wall, and the formation counter should say so rather than waving them
+        // through to a fit that cannot use them.
+        const float min_eff = static_cast<float>(params_.min_points_per_line);
+        const auto wsum = [](const std::vector<float>& w) { float s = 0.f; for (const float x : w) s += x; return s; };
+        if (wsum(w_in_v) < min_eff or wsum(w_out_v) < min_eff)
             { result.rej_fewpoints++; continue; }   // FORMATION failure — see counter doc
 
-        auto line_in  = fit_line_pca(group_in,  params_.min_points_per_line);
-        auto line_out = fit_line_pca(group_out, params_.min_points_per_line);
+        auto line_in  = linefit::fit_line_pca(group_in,  w_in_v,  min_eff);
+        auto line_out = linefit::fit_line_pca(group_out, w_out_v, min_eff);
         if (!line_in || !line_out)
             continue;
 
@@ -308,15 +468,133 @@ CornerDetector::DetectionResult CornerDetector::detect(
         // replacing the old min/max angle gate). Perpendicular walls, clean fit → ~isotropic.
         const float base_var = params_.base_sigma * params_.base_sigma;
         const float tau = std::max(1e-3f, params_.orient_tau_deg * static_cast<float>(M_PI) / 180.f);
-        auto line_info = [&](const Line2D& L, float raw_dot) -> Eigen::Matrix2f {
-            const float cos_dev = std::min(1.0f, std::abs(raw_dot));
-            const float dev = std::acos(cos_dev);                 // 0 = aligned with model edge
-            const float ori_scale = std::exp(-(dev * dev) / (tau * tau));
-            const float sigma2 = base_var + L.resid_var;
-            return (ori_scale / sigma2) * (L.normal * L.normal.transpose());
+        const auto ori_of = [&](float raw_dot) {
+            const float dev = std::acos(std::min(1.0f, std::abs(raw_dot)));   // 0 = aligned with the model edge
+            return std::exp(-(dev * dev) / (tau * tau));
         };
-        const Eigen::Matrix2f Lambda = line_info(*line_in, raw_dot_in)
-                                     + line_info(*line_out, raw_dot_out);
+        // ── PROPAGATED, NOT ASSUMED: points → line → corner ───────────────────────────────────────
+        // The rank-1 form below used σ_L² = base_sigma² + resid_var, so a line through 400 returns and
+        // one through 12 were trusted equally as long as their scatter matched — and the fitted line's
+        // uncertainty falls as 1/N. The segmenter has always known better: linefit::info_phi_d gives
+        // Λ(φ,d) from the points themselves, and its φ row is dominated by how far they spread ALONG
+        // the wall, which is exactly what an intersection needs to know. The association gate already
+        // used that covariance; only the LOSS was still reading a constant, so the same segment was a
+        // full covariance when deciding WHETHER it matched and a 4 cm floor when deciding how hard it
+        // pulled the pose.
+        // Corner covariance is then the textbook propagation through the intersection (the same
+        // construction as WallMap::intersect_walls): Σ = Jₐ Cₐ Jₐᵀ + J_b C_b J_bᵀ. The shallow-corner
+        // degeneracy the rank-1 form was built to produce now falls out of the geometry instead — Jₐ
+        // carries 1/sin(θ) between the lines, so a near-parallel pair yields a huge covariance along
+        // the bisector and almost no precision there, with no angle term of its own.
+        // The base_sigma floor stays, added to the corner covariance rather than to each line: it is
+        // MODEL error between views, and without it a wall with thousands of points would claim a
+        // sub-millimetre corner and refuse its own re-observations (the map_sigma lesson).
+        // Raw per-candidate record (see CornerProbe): every input the propagation reads, kept
+        // unaggregated so the calibration question can be answered off a file.
+        CornerProbe probe;
+        probe.model_index = mc.original_index;
+        probe.angle_deg   = angle_deg;
+        probe.rival[0] = probe_rival_in;  probe.rival_share[0] = probe_rival_share_in;
+        probe.rival[1] = probe_rival_out; probe.rival_share[1] = probe_rival_share_out;
+        const auto line_cov = [&](const Line2D& L, const std::vector<Eigen::Vector2f>& pts,
+                                  const std::vector<float>& w,
+                                  float raw_dot, int slot) -> std::optional<Eigen::Matrix2f> {
+            const float ori = ori_of(raw_dot);
+            probe.ori[slot]       = ori;
+            probe.npts[slot]      = L.npts;                          // EFFECTIVE count Σw
+            probe.nraw[slot]      = static_cast<int>(pts.size());    // returns the band offered it
+            probe.resid_sig[slot] = std::sqrt(std::max(0.f, L.resid_var));
+            probe.lever[slot]     = std::abs(L.direction().dot(*intersection));
+            {   // Tangent coordinates s = t·p as info_phi_d sees them — FROM THE ROBOT ORIGIN.
+                // C(φ,φ) = σ²/(N·Var(s)) and C(d,d) = (σ²/N)(1 + mean(s)²/Var(s)), so the spread
+                // of s is the entire scale of the line covariance and the offset of s is what
+                // makes the two marginals hugely correlated. Neither is recoverable from the
+                // covariance after the fact; both are one pass over the points.
+                const Eigen::Vector2f t = L.direction();
+                double m = 0.0, m2 = 0.0, wt = 0.0; float lo = 1e30f, hi = -1e30f;
+                for (std::size_t i = 0; i < pts.size(); ++i)
+                {
+                    const float sv = t.dot(pts[i]);
+                    const double wi = (i < w.size() ? w[i] : 1.f);
+                    m += wi * sv; m2 += wi * static_cast<double>(sv) * sv; wt += wi;
+                    if (wi >= 0.5) { lo = std::min(lo, sv); hi = std::max(hi, sv); }   // extent this wall OWNS
+                }
+                const double n = std::max(1e-6, wt);
+                probe.s_mean[slot] = static_cast<float>(m / n);
+                probe.s_std[slot]  = static_cast<float>(std::sqrt(std::max(0.0, m2 / n - (m / n) * (m / n))));
+                probe.s_span[slot] = (hi > lo ? hi - lo : 0.f);
+            }
+            result.ori_sum += static_cast<double>(ori); result.ori_n++;
+            result.ori_min = std::min(result.ori_min, static_cast<double>(ori));
+            if (not (ori > 1e-4f)) return std::nullopt;           // orthogonal to the model edge: no trust
+            // ⚠ PER-POINT VARIANCE IS THE OBSERVED SCATTER, AND NOTHING ELSE. This read
+            // base_var + L.resid_var, which double-counted base_sigma: it inflated the point-level
+            // fit AND was added again to the corner covariance below. base_sigma is between-view
+            // MODEL error, not sensor noise on a point, so it belongs only at the corner. The
+            // inflation was not small — on a clean wall resid_var ≈ (2 cm)² against base_var =
+            // (4 cm)², so the per-point variance was ~5x too large and the line covariance with it.
+            // Measured over a full tour before the fix: NIS/dof 0.48 ± 0.01 over 28884 evaluations
+            // (a covariance 2.1x too large), with this term carrying 87% of it at σ = 0.189 m
+            // against map 0.060 and pose 0.041. The segmenter has always passed resid_var alone.
+            const Eigen::Matrix2f Lam = linefit::info_phi_d(pts, w, L, std::max(L.resid_var, 1e-6f)) * ori;
+            if (not Lam.allFinite() or Lam.determinant() < 1e-12f) return std::nullopt;
+            const Eigen::Matrix2f C = Lam.inverse();
+            probe.c00[slot] = C(0, 0); probe.c01[slot] = C(0, 1); probe.c11[slot] = C(1, 1);
+            if (C.allFinite())
+            {
+                result.sphi_sum      += std::sqrt(std::max(0.f, C(0, 0))) * 180.0 / M_PI;
+                result.sd_sum        += std::sqrt(std::max(0.f, C(1, 1)));
+                result.npts_sum      += static_cast<double>(L.npts);
+                result.resid_sig_sum += std::sqrt(std::max(0.f, L.resid_var));
+                result.lever_sum     += std::abs(static_cast<double>(L.direction().dot(*intersection)));
+                result.line_n++;
+            }
+            return C.allFinite() ? std::optional<Eigen::Matrix2f>(C) : std::nullopt;
+        };
+        Eigen::Matrix2f Lambda = Eigen::Matrix2f::Zero();
+        {
+            result.angle_sum += static_cast<double>(angle_deg); result.angle_n++;
+            const auto Cin  = line_cov(*line_in,  group_in,  w_in_v,  raw_dot_in,  0);
+            const auto Cout = line_cov(*line_out, group_out, w_out_v, raw_dot_out, 1);
+            bool propagated = false;
+            if (Cin and Cout)
+            {
+                Eigen::Matrix2f M;
+                M.row(0) = line_in->normal.transpose();
+                M.row(1) = line_out->normal.transpose();
+                probe.sin_theta = std::abs(M.determinant());   // |n_in × n_out| = sin of the wall angle
+                if (std::abs(M.determinant()) > 1e-6f)
+                {
+                    const Eigen::Matrix2f Mi = M.inverse();
+                    const auto Jof = [&](const Line2D& L, int row) {
+                        Eigen::Matrix2f J;
+                        const Eigen::Vector2f col = Mi.col(row);
+                        J.col(0) = -col * L.direction().dot(*intersection);   // ∂p/∂φ
+                        J.col(1) =  col;                                      // ∂p/∂d
+                        return J;
+                    };
+                    const Eigen::Matrix2f Ja = Jof(*line_in, 0), Jb = Jof(*line_out, 1);
+                    Eigen::Matrix2f S = Ja * (*Cin) * Ja.transpose() + Jb * (*Cout) * Jb.transpose();
+                    S += base_var * Eigen::Matrix2f::Identity();              // between-view model error
+                    if (S.allFinite() and S.determinant() > 1e-12f)
+                    {
+                        const Eigen::Matrix2f L2 = S.inverse();
+                        if (L2.allFinite()) { Lambda = L2; propagated = true; probe.propagated = 1; }
+                    }
+                }
+            }
+            if (not propagated)
+            {
+                // Fallback: the previous rank-1 sum. Reached when a line's fit is degenerate (all its
+                // points at one tangent coordinate), when the pair is parallel to numerical precision,
+                // or when a line is orthogonal to its model edge — cases where the propagation has
+                // nothing to say and silence would be worse than a coarse estimate.
+                const auto rank1 = [&](const Line2D& L, float raw_dot) {
+                    return (ori_of(raw_dot) / (base_var + L.resid_var)) * (L.normal * L.normal.transpose());
+                };
+                Lambda = rank1(*line_in, raw_dot_in) + rank1(*line_out, raw_dot_out);
+            }
+        }
         {   // observability: heavily-downweighted (near-orthogonal to model) detections
             const float dev_in  = std::acos(std::min(1.0f, std::abs(raw_dot_in)));
             const float dev_out = std::acos(std::min(1.0f, std::abs(raw_dot_out)));
@@ -329,6 +607,39 @@ CornerDetector::DetectionResult CornerDetector::detect(
         {
             const Eigen::Matrix2f S = pos_cov(Lambda) + fov_corners.back().pred_cov + map_cov;
             const float d2 = mahalanobis2(*intersection - predicted, S, nullptr);
+            {   // The raw record, emitted whether or not the gate keeps this candidate — a covariance
+                // audited only on what its own gate admitted is not audited at all.
+                const Eigen::Matrix2f Sd = pos_cov(Lambda);
+                const Eigen::Matrix2f Sp = fov_corners.back().pred_cov;
+                const Eigen::Vector2f nu = *intersection - predicted;
+                probe.det_x = intersection->x();  probe.det_y = intersection->y();
+                probe.pred_x = predicted.x();     probe.pred_y = predicted.y();
+                probe.nu_x = nu.x();              probe.nu_y = nu.y();
+                probe.d2 = d2;
+                probe.over_gate = (params_.assoc_chi2 > 0.f and d2 > params_.assoc_chi2) ? 1 : 0;
+                probe.sdet_xx = Sd(0,0); probe.sdet_xy = Sd(0,1); probe.sdet_yy = Sd(1,1);
+                probe.sprd_xx = Sp(0,0); probe.sprd_xy = Sp(0,1); probe.sprd_yy = Sp(1,1);
+                probe.smap_xx = map_cov(0,0); probe.smap_yy = map_cov(1,1);
+                result.probes.push_back(probe);
+            }
+            // NIS, recorded BEFORE the gate can truncate it (see DetectionResult::nis_pre_*), and
+            // the three terms of S separately, because a NIS below 1 says the SUM is too big and
+            // cannot say whose fault that is.
+            if (std::isfinite(d2))
+            {
+                result.nis_pre_sum += static_cast<double>(d2) * 0.5;   // /dof, dof = 2
+                result.nis_pre_n++;
+                if (params_.assoc_chi2 > 0.f and d2 > params_.assoc_chi2) result.nis_pre_over++;
+                const Eigen::Matrix2f Sdet = pos_cov(Lambda);
+                const auto rms = [](const Eigen::Matrix2f& M) { return std::sqrt(std::max(0.f, M.trace() * 0.5f)); };
+                if (Sdet.allFinite())
+                {
+                    result.s_det_sum  += rms(Sdet);
+                    result.s_pred_sum += rms(fov_corners.back().pred_cov);
+                    result.s_map_sum  += rms(map_cov);
+                    result.s_terms_n++;
+                }
+            }
             if (params_.assoc_chi2 > 0.f and d2 > params_.assoc_chi2)
                 { result.rej_dist++; continue; }
         }
@@ -538,6 +849,8 @@ CornerDetector::DetectionResult CornerDetector::detect(
             rs   += m.distance;
             rmax  = std::max(rmax, m.distance);
             chi  += m.assoc_chi2_val;
+            if (std::isfinite(m.assoc_chi2_val))
+            { result.nis_acc_sum += static_cast<double>(m.assoc_chi2_val) * 0.5; result.nis_acc_n++; }
             pmin  = std::min(pmin, m.assoc_prob);
             // Only corners that actually HAVE a rival in gate contribute to the rival statistic.
             if (m.runnerup_chi2 < INFEASIBLE * 0.5f) { ru += m.runnerup_chi2; ++nru; }
@@ -617,6 +930,21 @@ CornerDetector::DetectionResult CornerDetector::detect(
 
     // Candidates that passed every quality gate but lost the 1-to-1 assignment.
     result.rej_unassigned = C - result.corners_accepted;
+
+    // ── Fold this frame into the run-long totals ────────────────────────────────────────────────
+    // A frame carries ~14 gate evaluations; χ²₂/2 has unit variance, so the standard error on a mean
+    // of 14 is 0.27 and a single frame cannot separate 0.5 from 1.0. The tour can.
+    tour_.nis_pre_sum += result.nis_pre_sum; tour_.nis_pre_n += result.nis_pre_n;
+    tour_.nis_pre_over += result.nis_pre_over;
+    tour_.nis_acc_sum += result.nis_acc_sum; tour_.nis_acc_n += result.nis_acc_n;
+    tour_.s_det_sum += result.s_det_sum; tour_.s_pred_sum += result.s_pred_sum;
+    tour_.s_map_sum += result.s_map_sum; tour_.s_terms_n += result.s_terms_n;
+    tour_.ori_sum += result.ori_sum; tour_.ori_n += result.ori_n;
+    tour_.ori_min = std::min(tour_.ori_min, result.ori_min);
+    tour_.sphi_sum += result.sphi_sum; tour_.sd_sum += result.sd_sum;
+    tour_.npts_sum += result.npts_sum; tour_.resid_sig_sum += result.resid_sig_sum;
+    tour_.lever_sum += result.lever_sum; tour_.line_n += result.line_n;
+    tour_.angle_sum += result.angle_sum; tour_.angle_n += result.angle_n;
 
     return result;
 }

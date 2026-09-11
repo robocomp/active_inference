@@ -1707,6 +1707,11 @@ private:
 
     // ===== Wall-SLAM state (Estimate mode) =====
     wallmap::WallMap wall_map_;
+    unsigned nis_log_tick_ = 0;      // row counter for tmp/corner_nis.csv
+    std::ofstream nis_csv_;          // corner-NIS diagnostics (see the writer for the columns)
+    std::ofstream probe_csv_;        // tmp/corner_probe.csv — ONE ROW PER CANDIDATE (see CornerProbe).
+    unsigned probe_rows_ = 0;        // capped: this is a diagnostic dump, not a permanent log.
+    unsigned probe_frame_ = 0;       // its own frame counter (the NIS tick only advances when NIS does)
     std::mt19937     wall_rng_{12345};
     mutable std::mutex wall_map_mutex_;              // guards derived_polygon_ (read by the main thread)
     std::vector<Eigen::Vector2f> derived_polygon_;   // the published polygon (map frame, CCW)
