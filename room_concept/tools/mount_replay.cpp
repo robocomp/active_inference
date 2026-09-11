@@ -1015,7 +1015,21 @@ void run_bootstrap(std::vector<Camera>& cams, const std::vector<CamResult>& base
     std::uint32_t rng = 20260904u;
     const auto rnd = [&] { rng = rng * 1664525u + 1013904223u; return rng >> 8; };
     std::vector<double> dm, dc, dd;             // mount difference, closure, and their difference
-    dm.reserve(reps); dc.reserve(reps); dd.reserve(reps);
+    // ── AND THE COMMON MODE, which is the quantity a LiDAR mount parameter would estimate ────────
+    // ★★★ The closure is the DIFFERENCE of the two cameras and is therefore blind to anything they
+    //     share; the MEAN is the other half of the same basis, and a yaw common to both cameras is
+    //     not a camera fault at all — it is where a LiDAR yaw error appears. That matters the moment
+    //     the measured mount is published into the shared body->camera edge (ImageEdge.mountPublish):
+    //     publishing charges the WHOLE camera-vs-LiDAR disagreement to the camera, so a non-zero
+    //     common mode is a LiDAR error being written into two camera mounts, where it will look
+    //     self-consistent and be externally wrong.
+    // ⚠ It is only an INDICATION of a LiDAR error, never a measurement of one: a rotation common to
+    //   all three devices is unobservable by construction, and the parallax that separates a LiDAR
+    //   rotation from a matched pair of camera rotations is 3.2% of the signal (arm 7's own
+    //   falsifier band). So read it as "is there something the cameras share?", and note that a
+    //   common mode consistent with zero is exactly the licence the publish needs.
+    std::vector<double> cmn;
+    dm.reserve(reps); dc.reserve(reps); dd.reserve(reps); cmn.reserve(reps);
     for (int r = 0; r < reps; ++r)
     {
         std::vector<int> pick;
@@ -1028,9 +1042,11 @@ void run_bootstrap(std::vector<Camera>& cams, const std::vector<CamResult>& base
             if (const auto it = by_vertex.find(v); it != by_vertex.end())
             { du += it->second.du_sum; n += it->second.n; }
         if (n == 0) continue;
-        const double mount = param_deg(sa, 2, cams[0].ctx) - param_deg(sb, 2, cams[1].ctx);
+        const double ya = param_deg(sa, 2, cams[0].ctx), yb = param_deg(sb, 2, cams[1].ctx);
+        const double mount = ya - yb;
         const double clo   = du / static_cast<double>(n) * kRad2Deg;
         dm.push_back(mount); dc.push_back(clo); dd.push_back(mount - clo);
+        cmn.push_back(0.5 * (ya + yb));
     }
     const auto stat = [](const std::vector<double>& v) {
         double m = 0; for (double x : v) m += x; m /= static_cast<double>(v.size());
@@ -1058,6 +1074,19 @@ void run_bootstrap(std::vector<Camera>& cams, const std::vector<CamResult>& base
                 std::hypot(sm, sc), std::abs(md) / std::hypot(sm, sc),
                 (sd < std::hypot(sm, sc)) ? "so independence UNDERSTATES the disagreement"
                                           : "so independence OVERSTATES the disagreement");
+    // ── The common mode: what the two cameras SHARE, i.e. where a LiDAR yaw would sit ────────────
+    {
+        const auto [mk, sk] = stat(cmn);
+        std::printf("\n  common mode (mean of the two camera yaws) %+.4f +/- %.4f deg = %.2f sigma"
+                    " from zero\n", mk, sk, sk > 0 ? std::abs(mk / sk) : 0.0);
+        std::printf("    the closure differences the cameras and cannot see this; a yaw they SHARE is"
+                    " not a camera\n    fault but where a LiDAR yaw error appears. Publishing a mount"
+                    " charges the whole\n    camera-vs-LiDAR disagreement to the CAMERA, so this is"
+                    " the number that licenses it.\n");
+        std::printf("    ⚠ an INDICATION, not a measurement: a rotation common to all three devices is"
+                    " unobservable,\n      and parallax separates a LiDAR rotation from a matched"
+                    " camera pair by only 3.2%% of the signal.\n");
+    }
 }
 
 void usage()
