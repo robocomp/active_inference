@@ -33,6 +33,22 @@ namespace DSR { class DSRGraph; }
 
 namespace rc {
 
+/// What the wall-SLAM estimator knows about ITSELF this frame — the HUD line's inputs.
+/// Namespace scope, not nested in Viewer2D: a nested class's default member initializers cannot be
+/// used by a default argument declared inside the same (still incomplete) enclosing class.
+struct WallMapStatus
+{
+    bool  have_result = false;   ///< a localiser frame exists at all (false ⇒ seed only)
+    int   candidates  = 0;       ///< lines under trial, not yet born
+    int   births      = 0;       ///< walls born on this frame
+    bool  theta0_born = false;
+    float theta0      = 0.f;     ///< rad, the room's reference direction
+    /// Per-segment association: index of the wall it was matched to, or −1 for a segment no wall
+    /// explains. A raw pointer, not a reference, so the struct keeps a default: it is borrowed from
+    /// the caller's WallView for the duration of one draw_wall_map() call and never stored.
+    const std::vector<int>* seg_to_wall = nullptr;
+};
+
 /**
  * @brief 2D scene viewer for the SLAMO component.
  *
@@ -178,10 +194,18 @@ class Viewer2D : public QObject
         /// `publish_bar` is Params::publish_corner_sigma — the σ every corner must reach to be
         /// publishable. It is drawn, not just tested: a corner disc is green under it and orange
         /// over it, so "is the layout trustworthy yet" is answered on the canvas rather than in a log.
+        ///
+        /// EVERY layer here survives an OPEN polygon. WallMap::build_from() fills verts/corners only
+        /// inside its `if (closed)` branch, so before the cycle closes the polygon carries nothing at
+        /// all — and gating the outline, the edge bands and the HUD on `polygon.closed` left the first
+        /// minutes of an Estimate run with the wall landmarks as the only thing on screen. The walls
+        /// now carry their OWN offset band (σ_d = 1/√Λ_dd), which exists from the frame a wall is born,
+        /// and the HUD reports the open state instead of hiding until it is over.
         void draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segments,
                            const std::vector<rc::wallmap::WallLandmark>& walls,
                            const rc::wallmap::Polygon& polygon, bool map_ready,
-                           const Eigen::Affine2f& robot_pose, float publish_bar = 0.06f);
+                           const Eigen::Affine2f& robot_pose, float publish_bar = 0.06f,
+                           const WallMapStatus& status = WallMapStatus{});
 
         /// Draw the epistemic score grid as semi-transparent coloured cells.
         /// cell_size is in world-frame meters.
@@ -243,7 +267,16 @@ class Viewer2D : public QObject
         // the last few published outlines, which is how CHURN becomes visible on a live canvas:
         // a settled map shows one outline, a churning one shows a fan.
         std::vector<QGraphicsEllipseItem*>    wall_sigma_items_;
+        std::vector<QGraphicsSimpleTextItem*> wall_sigma_label_items_;   // σ of a corner drawn off the scale
         std::vector<QGraphicsLineItem*>       wall_band_items_;
+        // The per-WALL band, drawn from the frame a wall is born and long before any polygon closes:
+        // same σ_d = 1/√Λ_dd as the per-edge band, but attached to the landmark's own observed extent
+        // instead of to a polygon edge that does not exist yet.
+        std::vector<QGraphicsLineItem*>       wall_lm_band_items_;
+        // The polygon as an OPEN chain: QGraphicsPolygonItem always closes its outline, so a partial
+        // cycle needs its own line pool. Visible only while the cycle is not closed — the two never
+        // draw the same edge twice.
+        std::vector<QGraphicsLineItem*>       wall_chain_items_;
         std::vector<QGraphicsPolygonItem*>    wall_ghost_items_;
         std::deque<QPolygonF>                 wall_ghosts_;
         QGraphicsSimpleTextItem*              wall_hud_item_ = nullptr;

@@ -421,9 +421,18 @@ void Viewer2D::update_frame(const FrameData& fd)
         cov_ellipse_item_->setVisible(false);
     }
 
-    if (fd.have_loc && !fd.has_room_polygon)
+    // ── THE FIRST FRAMES ─────────────────────────────────────────────────────────────────────────
+    // The room rect no longer waits for a localiser fix: its dimensions come from the model's own
+    // state, which exists as soon as the seed box is built from the first scan (RoomViewer supplies
+    // them when the frame carries no result). This call also performs the ONLY fit_view() in Estimate
+    // mode, so gating it on have_loc left the canvas at the view's construction scale of one scene
+    // unit per pixel — a 6 m room drawn 6 px wide, which is the blank the run used to start with.
+    if (not fd.has_room_polygon and fd.room_width > 0.f and fd.room_length > 0.f)
         update_estimated_room_rect(fd.room_width, fd.room_length, false);
-
+    else if (polygon_item_ == nullptr and estimated_room_item_ == nullptr and not fd.lidar_points.empty())
+        // Nothing with an extent exists yet — not even a seed box. Frame the robot and its scan so
+        // the first sweep is readable rather than a handful of pixels around the origin.
+        fit_to_robot_and_points(lidar_pose, fd.lidar_points, 12.f);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1029,13 +1038,21 @@ void Viewer2D::draw_landmark_lines(const std::vector<Eigen::Vector2f>& landmarks
 void Viewer2D::draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segments,
                              const std::vector<rc::wallmap::WallLandmark>& walls,
                              const rc::wallmap::Polygon& polygon, bool map_ready,
-                             const Eigen::Affine2f& robot_pose, float publish_bar)
+                             const Eigen::Affine2f& robot_pose, float publish_bar,
+                             const WallMapStatus& status)
 {
     auto resize_pool = [&](auto& pool, size_t count, auto make_item)
     {
         while (pool.size() < count) pool.push_back(make_item());
         for (size_t i = 0; i < pool.size(); ++i) pool[i]->setVisible(i < count);
     };
+
+    // Decided once, up front: every layer below has an OPEN branch now, and the per-wall band needs
+    // to know whether the polygon already draws that same wall as an edge.
+    const bool poly_closed = polygon.closed and polygon.verts.size() >= 3;
+    const std::unordered_set<std::uint64_t> edge_walls =
+        poly_closed ? std::unordered_set<std::uint64_t>(polygon.wall_of_edge.begin(), polygon.wall_of_edge.end())
+                    : std::unordered_set<std::uint64_t>{};
 
     // This frame's segments: thin cyan, in the room frame through the pose.
     resize_pool(wall_seg_items_, segments.size(), [&]() {
@@ -1048,6 +1065,15 @@ void Viewer2D::draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segmen
         const Eigen::Vector2f a = robot_pose * segments[i].p0;
         const Eigen::Vector2f b = robot_pose * segments[i].p1;
         wall_seg_items_[i]->setLine(a.x(), a.y(), b.x(), b.y());
+        // ASSOCIATED (cyan) vs UNEXPLAINED (amber, dotted). The unexplained ones are the interesting
+        // half early on: they are what feeds the candidates, and a wall is born out of them once the
+        // Bayes factor clears birth_nats. Drawn apart, the canvas shows evidence turning into
+        // structure instead of walls simply appearing.
+        const bool assoc = status.seg_to_wall != nullptr and i < status.seg_to_wall->size()
+                           and (*status.seg_to_wall)[i] >= 0;
+        QPen pen(assoc ? QColor(0, 200, 220) : QColor(230, 150, 30), 0.05);
+        if (not assoc) pen.setStyle(Qt::DotLine);
+        wall_seg_items_[i]->setPen(pen);
     }
 
     // Wall landmarks: thick lines over their observed extent; colour by Manhattan class, grey when
@@ -1064,6 +1090,15 @@ void Viewer2D::draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segmen
         QFont f = item->font(); f.setPointSizeF(0.35); item->setFont(f);
         return item;
     });
+    // Each landmark's OWN offset band. The polygon's edge bands below say the same thing, but only
+    // once a cycle closes; this one exists from the frame the wall is born, which is the whole stretch
+    // the canvas used to spend empty. A wall held by a handful of points draws a stripe you cannot
+    // miss, and it narrows as the evidence arrives — the build-up is the point.
+    resize_pool(wall_lm_band_items_, walls.size(), [&]() {
+        auto* item = agv_->scene.addLine(0, 0, 0, 0, QPen(QColor(14, 116, 144, 70), 0.05));
+        item->setZValue(7);
+        return item;
+    });
     for (size_t i = 0; i < walls.size(); ++i)
     {
         const auto& w = walls[i];
@@ -1072,9 +1107,21 @@ void Viewer2D::draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segmen
         const Eigen::Vector2f a = n * w.d + t * s0, b = n * w.d + t * s1;
         wall_line_items_[i]->setLine(a.x(), a.y(), b.x(), b.y());
         wall_line_items_[i]->setPen(QPen(w.k >= 0 ? kClass[w.k] : QColor(120, 120, 120), 0.12));
+        const float lam_d = w.information(1, 1);
+        const float sigma_d = (lam_d > 1e-9f) ? 1.f / std::sqrt(lam_d) : -1.f;
+        wall_lm_band_items_[i]->setLine(a.x(), a.y(), b.x(), b.y());
+        wall_lm_band_items_[i]->setPen(QPen(QColor(14, 116, 144, 70),
+                                            (sigma_d > 0.f) ? std::max(2.f * sigma_d, 0.02f) : 0.02f));
+        // Suppressed once the closed polygon draws this same wall as an edge, or the two bands stack
+        // and the alpha reads as twice the uncertainty.
+        wall_lm_band_items_[i]->setVisible(sigma_d > 0.f and not edge_walls.contains(w.id));
         const Eigen::Vector2f mid = (a + b) * 0.5f + n * 0.25f;
-        wall_label_items_[i]->setText(QString("w%1 k=%2%3").arg(static_cast<qulonglong>(w.id))
-                                          .arg(w.k).arg(w.room_factor_dF > 4.6f ? QString(" dF=%1").arg(w.room_factor_dF, 0, 'f', 1) : ""));
+        // σ_d rides in the label because early on it is the ONLY uncertainty the map has: no corner
+        // exists to carry a disc until three walls meet.
+        wall_label_items_[i]->setText(QString("w%1 k=%2%3%4").arg(static_cast<qulonglong>(w.id))
+                                          .arg(w.k)
+                                          .arg(sigma_d > 0.f ? QString(" sd=%1").arg(sigma_d, 0, 'f', 2) : QString())
+                                          .arg(w.room_factor_dF > 4.6f ? QString(" dF=%1").arg(w.room_factor_dF, 0, 'f', 1) : ""));
         wall_label_items_[i]->setPos(mid.x(), mid.y());
         wall_label_items_[i]->setTransform(QTransform::fromScale(1, -1));   // scene y is up
     }
@@ -1099,7 +1146,7 @@ void Viewer2D::draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segmen
         wall_poly_item_ = agv_->scene.addPolygon(QPolygonF(), QPen(Qt::magenta, 0.10), QBrush(Qt::NoBrush));
         wall_poly_item_->setZValue(9);
     }
-    if (polygon.closed and polygon.verts.size() >= 3)
+    if (poly_closed)
     {
         QPolygonF poly;
         for (const auto& v : polygon.verts) poly << QPointF(v.x(), v.y());
@@ -1112,6 +1159,24 @@ void Viewer2D::draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segmen
     }
     else
         wall_poly_item_->setVisible(false);
+
+    // The SAME outline while the cycle is still OPEN. build_from() abandons a cycle that self-crosses
+    // or runs the wrong way AFTER it has already filled the vertices, so those verts are the most
+    // informative thing on the canvas exactly when the old code hid them: they show WHERE the layout
+    // is refusing to close. Dotted and thin, so an open chain can never be read as a published outline.
+    const size_t n_chain = (not poly_closed and polygon.verts.size() >= 2) ? polygon.verts.size() - 1 : 0;
+    resize_pool(wall_chain_items_, n_chain, [&]() {
+        QPen p(QColor(200, 0, 200, 170), 0.05);
+        p.setStyle(Qt::DotLine);
+        auto* item = agv_->scene.addLine(0, 0, 0, 0, p);
+        item->setZValue(9);
+        return item;
+    });
+    for (size_t e = 0; e < n_chain; ++e)
+    {
+        const Eigen::Vector2f a = polygon.verts[e], b = polygon.verts[e + 1];
+        wall_chain_items_[e]->setLine(a.x(), a.y(), b.x(), b.y());
+    }
 
     // ── THE UNCERTAINTY LAYER ────────────────────────────────────────────────────────────────────
     // Ghosts of the last published outlines: a settled map draws one line, a churning one draws a
@@ -1141,7 +1206,10 @@ void Viewer2D::draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segmen
 
     // Per-edge band: half-width = that wall's own offset σ_d (1/√Λ_dd). A well-observed wall draws a
     // hairline; one held by a handful of points draws a stripe you cannot miss.
-    const size_t n_edges = (polygon.closed and polygon.verts.size() >= 3) ? polygon.verts.size() : 0;
+    // An open chain has one edge fewer than it has vertices; a closed one wraps. Both are drawn —
+    // the band is a property of the WALL behind the edge, and that wall is just as uncertain, and
+    // just as worth seeing, before the cycle closes as after.
+    const size_t n_edges = poly_closed ? polygon.verts.size() : n_chain;
     resize_pool(wall_band_items_, n_edges, [&]() {
         auto* item = agv_->scene.addLine(0, 0, 0, 0, QPen(QColor(14, 116, 144, 70), 0.05));
         item->setZValue(7);
@@ -1174,19 +1242,50 @@ void Viewer2D::draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segmen
         item->setZValue(6);
         return item;
     });
+    // A σ of 2.7 m must LOOK like 2.7 m. The disc used to be clipped at 1.5 m, which redrew the
+    // worst corner as merely the second-worst and made the provisional stretch look tighter than it
+    // was; what varies with size now is the FILL ALPHA — a metre-wide flat wash hides everything
+    // under it, a faint one with a solid rim does not — and the radius is the number itself, up to a
+    // sensor-range sanity cap that only a non-finite σ can reach.
+    resize_pool(wall_sigma_label_items_, polygon.corners.size(), [&]() {
+        auto* item = agv_->scene.addSimpleText("");
+        item->setZValue(36);
+        QFont f = item->font(); f.setPointSizeF(0.28); item->setFont(f);
+        item->setBrush(QBrush(QColor(150, 50, 10)));
+        item->setTransform(QTransform::fromScale(1, -1));
+        return item;
+    });
+    constexpr float kSigmaDrawCap = 12.f;   // m — LiDAR range; beyond this the number is not a position
     float worst = 0.f, med = 0.f;
     std::vector<float> sig;
     for (size_t i = 0; i < polygon.corners.size(); ++i)
     {
         const float sg = polygon.corners[i].sigma;
         const bool ok = std::isfinite(sg) and sg > 0.f;
-        const float r = ok ? std::min(sg, 1.5f) : 1.5f;         // clipped so one wild corner cannot fill the view
+        const float r = std::min(ok ? sg : kSigmaDrawCap, kSigmaDrawCap);
         if (ok) { worst = std::max(worst, sg); sig.push_back(sg); }
-        const QColor c = (ok and sg <= publish_bar) ? QColor(23, 114, 69, 90) : QColor(194, 65, 12, 70);
+        // alpha ~ 1/r so the area painted stays roughly constant: a big disc is a wide faint halo,
+        // a settled one a small solid dot, and neither can hide the map under it.
+        const int alpha = std::clamp(static_cast<int>(90.f * std::min(1.f, 0.25f / std::max(r, 1e-3f))), 12, 90);
+        const bool under_bar = ok and sg <= publish_bar;
+        QColor c = under_bar ? QColor(23, 114, 69) : QColor(194, 65, 12);
+        c.setAlpha(under_bar ? 90 : alpha);
         wall_sigma_items_[i]->setRect(-r, -r, 2 * r, 2 * r);
         wall_sigma_items_[i]->setPos(polygon.corners[i].p.x(), polygon.corners[i].p.y());
         wall_sigma_items_[i]->setBrush(QBrush(c));
-        wall_sigma_items_[i]->setPen(QPen(c.darker(140), 0.02));
+        QPen rim(QColor(c.red(), c.green(), c.blue(), 200), 0.02);
+        rim.setStyle(ok ? Qt::SolidLine : Qt::DashLine);   // dashed rim = σ is not a finite number
+        wall_sigma_items_[i]->setPen(rim);
+        // The value in metres beside any disc too big to read off the scale. Under the bar the disc
+        // is already smaller than the robot and the number would be noise.
+        const bool label_it = not under_bar;
+        wall_sigma_label_items_[i]->setVisible(label_it);
+        if (label_it)
+        {
+            wall_sigma_label_items_[i]->setText(ok ? QString("s=%1").arg(sg, 0, 'f', 2) : QString("s=?"));
+            wall_sigma_label_items_[i]->setPos(polygon.corners[i].p.x() + 0.10,
+                                               polygon.corners[i].p.y() + 0.10);
+        }
     }
     if (not sig.empty())
     {
@@ -1206,13 +1305,31 @@ void Viewer2D::draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segmen
     {
         const int over = static_cast<int>(std::count_if(polygon.corners.begin(), polygon.corners.end(),
             [&](const rc::wallmap::Corner& c) { return not(std::isfinite(c.sigma) and c.sigma <= publish_bar); }));
-        wall_hud_item_->setText(QString("walls %1  edges %2  corner sigma worst %3 m  median %4 m  over bar %5  %6")
-            .arg(walls.size()).arg(n_edges)
-            .arg(worst, 0, 'f', 3).arg(med, 0, 'f', 3).arg(over)
-            .arg(polygon.closed ? (polygon.publishable ? "PUBLISHABLE" : "not publishable") : "OPEN"));
-        const QRectF br = agv_->scene.sceneRect();
-        wall_hud_item_->setPos(br.left() + 0.2, br.top() + 0.6);
-        wall_hud_item_->setVisible(map_ready or polygon.closed);
+        // Candidates and births are COUNTS: the candidate lines themselves live in WallMap and are
+        // not exported to the viewer, so the HUD says how many are under trial rather than drawing
+        // them. Reported from the first frame — "0 walls, 3 candidates, waiting" is a state worth
+        // reading, and it was exactly the state the old visibility test hid.
+        // Two lines rather than one long one: the state of the map, then its uncertainty. The line is
+        // drawn in SCENE units, so a single 120-character string would run wider than the room it
+        // describes.
+        const QString head = status.have_result ? QString() : QStringLiteral("seed only (no localiser frame yet)\n");
+        wall_hud_item_->setText(head
+            + QString("walls %1  cand %2  births %3  edges %4  %5  th0 %6\n")
+                  .arg(walls.size()).arg(status.candidates).arg(status.births).arg(n_edges)
+                  .arg(polygon.closed ? (polygon.publishable ? "PUBLISHABLE" : "not publishable") : "OPEN")
+                  .arg(status.theta0_born ? QString("%1 deg").arg(status.theta0 * 180.f / static_cast<float>(M_PI), 0, 'f', 1)
+                                          : QStringLiteral("unborn"))
+            + QString("corner sigma worst %1 m  median %2 m  over bar %3")
+                  .arg(worst, 0, 'f', 3).arg(med, 0, 'f', 3).arg(over));
+        // Pinned to the VISIBLE viewport, not to scene.sceneRect(). AbstractGraphicViewer sets the
+        // scene rect to (-100000, -100000, 200000, 200000) for unlimited panning, so the old anchor
+        // put this line 100 km from anything ever looked at: the HUD had no chance of being seen even
+        // on the frames its visibility test allowed. Scene y is up and the item carries its own
+        // (1, -1) flip, so the visually-top-left corner is (left, bottom) of the mapped rect.
+        const QRectF view_rect = agv_->mapToScene(agv_->viewport()->rect()).boundingRect();
+        wall_hud_item_->setPos(view_rect.left() + 0.02 * view_rect.width(),
+                               view_rect.bottom() - 0.02 * view_rect.height());
+        wall_hud_item_->setVisible(true);
     }
 }
 

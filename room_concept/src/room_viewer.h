@@ -147,6 +147,11 @@ private:
     rc::RoomConfig*     params_       = nullptr;   // shared config
     bool                     has_room_polygon_ = false;
     rc::RoomConcept*         room_concept_ = nullptr;
+    // The wall-SLAM overlay travels inside UpdateResult, so a compute tick that finds no result
+    // carries an EMPTY WallView. Cached here the canvas keeps the map it last had instead of
+    // blinking out — which, in Estimate mode, is the entire picture.
+    rc::RoomConcept::UpdateResult::WallView last_wall_view_;
+    bool                     have_wall_view_ = false;
     rc::EpistemicController* epistemic_    = nullptr;
 
     QPointer<Custom_widget>      custom_widget_;

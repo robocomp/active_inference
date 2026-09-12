@@ -83,6 +83,19 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
     viewer_2d_->show();
     viewer_2d_->add_robot(params_->ROBOT_WIDTH, params_->ROBOT_LENGTH, 0.f, 0.f, QColor("blue"));
 
+    // ── Estimate mode starts with nothing on the canvas ──────────────────────────────────────────
+    // No layout is loaded, so until the walls close the only things with a shape are the scan and
+    // the seed box. The LiDAR overlay defaults OFF (btn_lidar_points_viz), which over a drawn room
+    // merely hides a detail but here leaves the whole build-up invisible. The BUTTON is what is set,
+    // not just the viewer flag: SpecificWorker syncs the viewer from isChecked() right after this
+    // constructor returns, so flipping only the flag would be undone a few lines later.
+    if (room_concept_ != nullptr and room_concept_->estimating()
+        and custom_widget_->btn_lidar_points_viz != nullptr)
+    {
+        custom_widget_->btn_lidar_points_viz->setChecked(true);
+        viewer_2d_->set_lidar_points_visible(true);
+    }
+
     // RT publish-rate readout in the controls row (updated ~1 Hz from the worker's compute loop).
     rt_rate_label_ = new QLabel(QStringLiteral("RT: --"), custom_widget_);
     rt_rate_label_->setStyleSheet("QLabel { font-weight: bold; }");
@@ -323,6 +336,19 @@ void RoomViewer::update_viewer(const std::optional<rc::RoomConcept::UpdateResult
     if (!viewer_2d_)
         return;
 
+    // Placeholder-box dimensions. With no result yet the model's own state is the only source — and
+    // in Estimate mode that state IS the seed box built from the first scan, which is exactly what
+    // the early canvas should show. Viewer2D fits the view to this box, so leaving it at 0 until the
+    // first localiser result is what kept the whole scene at the view's 1-unit-per-pixel default.
+    float room_w = have_loc ? loc_res->state[0] : 0.f;
+    float room_l = have_loc ? loc_res->state[1] : 0.f;
+    if ((room_w <= 0.f or room_l <= 0.f) and room_concept_ != nullptr and room_concept_->is_initialized())
+    {
+        const auto s = room_concept_->get_current_state();
+        room_w = s[0];
+        room_l = s[1];
+    }
+
     viewer_2d_->update_frame({
         .lidar_points     = lidar_for_canvas,
         .display_pose     = pose_for_draw,
@@ -331,8 +357,8 @@ void RoomViewer::update_viewer(const std::optional<rc::RoomConcept::UpdateResult
         .have_loc         = have_loc,
         .is_initialized   = room_concept_ && room_concept_->is_initialized(),
         .has_room_polygon = has_room_polygon_,
-        .room_width       = have_loc ? loc_res->state[0] : 0.f,
-        .room_length      = have_loc ? loc_res->state[1] : 0.f,
+        .room_width       = room_w,
+        .room_length      = room_l,
         .loc_pose         = loc_pose,
         .use_loc_pose     = use_loc,
     });
@@ -345,10 +371,32 @@ void RoomViewer::update_viewer(const std::optional<rc::RoomConcept::UpdateResult
         viewer_2d_->draw_corners({}, pose_for_draw);
 
     // Wall-SLAM overlay (Estimate mode): the walls as they are born, the derived polygon, the corners.
-    if (have_loc && room_concept_ && room_concept_->estimating())
-        viewer_2d_->draw_wall_map(loc_res->wall_view.segments, loc_res->wall_view.walls,
-                                  loc_res->wall_view.polygon, loc_res->wall_view.map_ready, pose_for_draw,
-                                  room_concept_->params.wall_map.publish_corner_sigma);
+    // Drawn on EVERY estimating frame, not only on the ones that carried a localiser result. The
+    // overlay travels inside UpdateResult, so a frame without one carries an EMPTY WallView; the old
+    // have_loc gate simply skipped the call, which also meant the HUD — the only thing that can say
+    // "3 walls, 2 candidates, cycle still open" — never appeared before the first fix. The view is
+    // cached so a resultless frame redraws the last map instead of erasing it; the segments are NOT
+    // cached, because they are this frame's measurements and redrawing them through a newer pose
+    // would put them somewhere the LiDAR never saw.
+    if (room_concept_ != nullptr and room_concept_->estimating())
+    {
+        if (have_loc)
+        {
+            last_wall_view_ = loc_res->wall_view;
+            have_wall_view_ = true;
+        }
+        const std::vector<wallseg::WallSegment> no_segments;
+        viewer_2d_->draw_wall_map(have_loc ? last_wall_view_.segments : no_segments,
+                                  last_wall_view_.walls,
+                                  last_wall_view_.polygon, last_wall_view_.map_ready, pose_for_draw,
+                                  room_concept_->params.wall_map.publish_corner_sigma,
+                                  {.have_result = have_wall_view_,
+                                   .candidates  = last_wall_view_.candidates,
+                                   .births      = last_wall_view_.births,
+                                   .theta0_born = last_wall_view_.theta0_born,
+                                   .theta0      = last_wall_view_.theta0,
+                                   .seg_to_wall = have_loc ? &last_wall_view_.seg_to_wall : nullptr});
+    }
 
     // RGB triple points beside them. Read through triple_points(), NOT image_edges(): that holder is
     // emptied by take_image_edges() the moment a slot consumes it, so peeking there would draw
