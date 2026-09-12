@@ -1782,6 +1782,13 @@ private:
     /// Set once, at the first publishable polygon, when WallMap::Params::freeze_when_publishable is
     /// on. From then on the layout is GIVEN: see the four guards that read it in room_concept.cpp.
     bool wall_frozen_ = false;
+    /// The published polygon as it stood at the instant of the freeze. LOCALIZING publishes THIS,
+    /// not a fresh projection: manhattan_polygon() ends in decorate(), the level-2 stage, which
+    /// re-decides every frame from the free-space grid and so kept changing the published SHAPE while
+    /// the walls themselves were frozen — the "republished delimiting_polygon with 6 vertices (was
+    /// 10)" flip-flop, and the notches seen on the canvas where a doorway leaves free space just
+    /// outside a wall. A frozen layout that still changes shape is not frozen.
+    std::optional<rc::wallmap::Polygon> frozen_pub_;
     std::vector<wallseg::WallSegment> last_wall_segments_;   // this frame's segments (viewer)
     wallmap::FrameResult last_wall_frame_;
     std::string last_wall_status_;                   // last polygon status logged (log on change only)

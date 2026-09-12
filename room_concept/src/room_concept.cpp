@@ -2261,7 +2261,9 @@ namespace rc
         // on a COPY (WallMap::manhattan_polygon). The raw polygon keeps every in-loop role
         // (re-anchor trigger and bbox, model update, status): six in-loop hard-Manhattan
         // variants were measured to degrade estimation; only what leaves the agent is projected.
-        auto pub = wall_map_.manhattan_polygon();
+        // LOCALIZING republishes the polygon it froze, rather than projecting and decorating afresh.
+        // See frozen_pub_ for why: decorate() re-decides level-2 features from the grid every frame.
+        auto pub = frozen_pub_.has_value() ? *frozen_pub_ : wall_map_.manhattan_polygon();
         if (poly.closed and poly.verts.size() >= 3)
         {
             if (poly.publishable and not wall_reanchored_)
@@ -2279,6 +2281,7 @@ namespace rc
                 pub  = wall_map_.manhattan_polygon();
                 map_ready_ = true;
                 wall_frozen_ = wall_map_.params.freeze_when_publishable;
+                if (wall_frozen_) frozen_pub_ = pub;   // this shape, from here on
                 res.covariance = current_covariance;
                 qInfo() << "[room][wall-slam] polygon CLOSED and publishable:" << poly.verts.size()
                         << "vertices, worst corner sigma" << poly.worst_corner_sigma << "m. Map frame re-anchored:"

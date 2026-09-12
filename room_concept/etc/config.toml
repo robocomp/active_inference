@@ -1116,6 +1116,12 @@ WallMapSigmaD        = 0.04     # m
 # model room is re-seeded from that layout — so the localiser solves against a fixed room it measured
 # itself. Answers "does the rest behave as predicted when the map stops changing?". Off = normal SLAM.
 FreezeLayoutWhenPublishable = true
+# Level-2 features: wall columns, alcoves and corner steps, found from residual free space just
+# OUTSIDE the published polygon. On by default and worth having in a real flat. ⚠ A DOORWAY is free
+# space outside a wall, so in a plain room with an opening it is read as an alcove and the published
+# outline grows a notch that the walls themselves do not have. Set false when the room is known to be
+# a simple polygon and you want exactly what the walls say.
+EnableLevel2 = true
 WallMapSigmaPhiDeg   = 1.0      # deg
 SensorRange          = 15.0     # m — extent of the uniform prior on a wall's offset (Occam term)
 # ⚠ Decision constants that could not be modelled away (each is a discrete decision):
