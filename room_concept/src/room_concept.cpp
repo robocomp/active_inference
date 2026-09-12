@@ -2230,11 +2230,19 @@ namespace rc
             if (layout_csv_.is_open())
             {
                 layout_csv_.imbue(std::locale::classic());
-                layout_csv_ << "# frame;ts_ms;est_x,est_y,est_th;verts;corner_sigma;edge_sigma_d;closed,publishable\n";
+                layout_csv_ << "# frame;ts_ms;model_room_x,model_room_y,model_room_phi;verts;corner_sigma;"
+                               "edge_sigma_d;closed,publishable\n";
             }
         }
         if (layout_csv_.is_open() and not poly.verts.empty())
         {
+            // ⚠ get_state() is [width, length, x, y, phi] of the ROOM MODEL — NOT the robot pose.
+            // Mislabelling this column as the robot's cost an hour: in estimate mode the model room
+            // is not optimised at all (no_sdf), it exists for the viewer and the SDF paths, so it
+            // drifts away from the wall landmarks that ARE the estimate. Measured in Webots room 2:
+            // model room phi 0.5-1.1 deg against a wall-map polygon tilted 3.8 deg, i.e. ~3 deg
+            // apart, which is ~40 cm at a far corner of a 6 m room — and the viewer draws both.
+            // All-zero here means has_state() == false, not a room at the origin.
             const auto st = (model_ != nullptr and model_->has_state()) ? model_->get_state()
                                                                        : Eigen::Matrix<float, 5, 1>::Zero().eval();
             layout_csv_ << layout_trace_tick_++ << ';' << wall_frame_ts_ << ';'
