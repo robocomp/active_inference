@@ -264,26 +264,23 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
                 if (auto rn = G_->get_node(dsr_room_id_); rn.has_value())
                 {
                     G_->add_or_modify_attrib_local<room_height_att>(rn.value(), mz);
-                    // ⚠ OWED: PUBLISH THE UNCERTAINTY BESIDE THE VALUE, so the ceiling becomes a belief
-                    //   on the room node and not just a number. RoomConcept already carries it
-                    //   (measured_ceiling_sigma(), the plane's spread from LidarIngestor), and the
-                    //   camera's mount fit can REFINE it: solving the mount from floor corners alone
-                    //   and from ceiling corners alone differs by exactly the ceiling's error, with a
-                    //   measured gain of -0.81 (ricoh) / -0.99 (zed) mm per mm. A refinement needs a
-                    //   prior WITH A WIDTH, which is why the second number has to be shared and not
-                    //   only logged.
-                    //   It needs ONE line in cortex, and the user owns that reinstall (CLAUDE.md):
-                    //       REGISTER_TYPE(room_height_sigma, float, false)
-                    //   in core/include/dsr/core/types/type_checking/dsr_attr_name.h. Then here:
-                    //       G_->add_or_modify_attrib_local<room_height_sigma_att>(
-                    //           rn.value(), room_concept_->measured_ceiling_sigma());
-                    //   Until that lands the width exists in-process and in the log only, so nothing
-                    //   outside this agent can weigh the ceiling against anything else.
+                    // ★ THE WIDTH TRAVELS WITH THE VALUE, so the ceiling is a BELIEF on the room node
+                    //   and not just a number. It is what lets the height be RE-MEASURED rather than
+                    //   only read: a camera's mount fit is a direct readout of the ceiling — solve the
+                    //   mount from floor corners alone and from ceiling corners alone and the two
+                    //   differ by exactly the ceiling's error, at a measured -0.81 mm/mm (ricoh) and
+                    //   -0.99 (zed) — so a camera can refine this, and a refinement needs a prior with
+                    //   a width. A value alone cannot say how far it may move.
+                    // ⚠ It is the PLANE'S SPREAD, not a standard error. See
+                    //   LidarIngestor::update_ceiling_cap: the histogram is leaky, so its count is the
+                    //   same ceiling seen again each scan and n is a weight rather than a sample size.
+                    G_->add_or_modify_attrib_local<room_height_sigma_att>(
+                        rn.value(), room_concept_->measured_ceiling_sigma());
                     G_->update_node(rn.value());
                     qInfo() << "[room] room_height republished:" << published_room_height_ << "m ->" << mz
                             << "m +/-" << room_concept_->measured_ceiling_sigma()
-                            << "m (the LiDAR's ceiling; every agent reading the attribute follows —"
-                            << "the sigma is NOT yet on the node, see the note above)";
+                            << "m (the LiDAR's ceiling, value AND width; every agent reading the"
+                            << "attributes follows)";
                     published_room_height_ = mz;
                 }
                 ceiling_disagree_frames_ = 0;
@@ -715,9 +712,17 @@ void RoomSceneGraph::dsr_create_room_and_reparent(const rc::RoomConcept::UpdateR
     const float ceiling_at_birth = room_concept_->measured_ceiling() > 1.5f
                                  ? room_concept_->measured_ceiling() : params_->room_height;
     G_->add_or_modify_attrib_local<room_height_att>(room_node, ceiling_at_birth);
+    // ★ AT BIRTH TOO, and a STATED ceiling is born with a width of 0 on purpose: 0 reads as "never
+    //   measured", which is the honest description of a number typed into a scenario file. It is not
+    //   the same as a measured ceiling that happens to be very well known, and a consumer that treats
+    //   a missing width as "perfect" would tighten on a guess.
+    G_->add_or_modify_attrib_local<room_height_sigma_att>(
+        room_node, room_concept_->measured_ceiling() > 1.5f ? room_concept_->measured_ceiling_sigma() : 0.f);
     published_room_height_ = ceiling_at_birth;
-    qInfo() << "[room] room node born with room_height" << ceiling_at_birth << "m"
-            << (room_concept_->measured_ceiling() > 1.5f ? "(measured by the LiDAR)" : "(stated in the scenario)");
+    qInfo() << "[room] room node born with room_height" << ceiling_at_birth << "m +/-"
+            << (room_concept_->measured_ceiling() > 1.5f ? room_concept_->measured_ceiling_sigma() : 0.f)
+            << "m" << (room_concept_->measured_ceiling() > 1.5f ? "(measured by the LiDAR)"
+                                                               : "(stated in the scenario; width 0 = never measured)");
 
     rc::provenance::stamp_creation(*G_, room_node);   // birth stamp: epoch ms + local ISO-8601
     const auto room_id_opt = G_->insert_node(room_node);
