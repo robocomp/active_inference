@@ -1,0 +1,307 @@
+\documentclass[conference,letterpaper,10pt]{IEEEtran}
+\IEEEoverridecommandlockouts
+\usepackage{amsmath,amssymb,graphicx,booktabs,siunitx,balance}
+\usepackage[hidelinks]{hyperref}
+\sisetup{detect-weight=true,detect-family=true}
+\newcommand{\nis}{\ensuremath{\mathrm{NIS}}}
+
+\begin{document}
+
+\title{Calibrated Uncertainty for Active Room-Layout Estimation}
+
+\author{\IEEEauthorblockN{Anonymous}\IEEEauthorblockA{Anonymous Institution}}
+
+\maketitle
+
+\begin{abstract}
+A robot that estimates the layout of a room usually reports geometry and little else. Downstream
+consumers---planners, scene graphs, other agents---must then decide how far to trust it, with nothing
+to go on. We present an online room-layout estimator whose reported uncertainty is calibrated against
+ground truth, and which uses that uncertainty as a decision variable: it gates which corners are
+published, and it is what the robot acts to reduce. Parameters, structure (how many walls there are)
+and viewpoint selection are all obtained by minimising one variational free energy, so the same
+quantity in nats prices the data fit, the model complexity and the next observation. On 594 annotated
+floor plans the estimator reaches \num{0.983} mean IoU, and---the claim of the paper---a corner it
+declares publishable has a median true error of \SI{2.0}{\centi\meter} and lies within its declared
+\SI{6}{\centi\meter} in \SI{86}{\percent} of cases, against \SI{3.6}{\centi\meter} and
+\SI{64}{\percent} for corners it withholds. Holding the system to that standard proved diagnostic:
+it exposed three distinct precision defects in three different modules, all instances of uncertainty
+that averages away past an error that does not, one of them in a module the instrument was not
+measuring. We show that no scalar precision can be correct for this problem---the irreducible error
+varies by \num{5}$\times$ between environments and \num{2}$\times$ between moving and standing
+still---and argue that this is why precision must be inferred rather than tuned.
+\end{abstract}
+
+\section{Introduction}
+
+Room-layout estimation is mature enough that accuracy alone no longer separates methods. What
+separates them for a robot is whether the estimate can be \emph{acted on}: whether a planner can tell
+a wall that is known to a centimetre from one that is a guess, whether a scene graph should commit a
+corner to shared memory, whether the robot should look again before deciding. All of these are
+questions about uncertainty, and almost no layout system answers them with a number that has been
+checked.
+
+This is not an oversight of presentation. An uncertainty that is never validated tends to be wrong, and
+wrong in a way that is invisible: an estimator that overstates its error is merely timid, while one
+that understates it is confidently incorrect, and neither shows up in a mean IoU. We found both
+failure modes in our own system, and we found them only because something downstream was made to
+depend on the number being right.
+
+Our estimator maintains a room as a cyclic polygon of wall landmarks in Hesse normal form, inferred
+jointly with the robot pose over a sliding window. Three decisions that are usually taken by three
+separate mechanisms are here taken by one. \emph{What the walls are} is variational inference over
+their parameters. \emph{How many walls there are} is Bayesian model comparison: a structural change
+is adopted when it pays for its own description length, priced in nats on the same scale as the data
+fit, rather than by a merge threshold. \emph{Where to look next} is the epistemic term of the expected
+free energy, so the robot moves to reduce the uncertainty that is currently blocking it from
+committing to a layout. Because all three are denominated in the same currency, every precision in
+the model is load-bearing: get one wrong and the comparisons it feeds are priced in a corrupt unit.
+That is the property we exploit.
+
+\textbf{Contributions.}
+\begin{enumerate}
+  \item An online layout estimator whose per-corner and per-edge uncertainty is \emph{validated
+  against ground truth} on 594 annotated floor plans, and is \emph{actionable}: it gates publication
+  and drives exploration (\S\ref{sec:exp}).
+  \item A propagation from returns to corner covariance that separates the error that averages down
+  with more observation from the error that does not, and a measurement of both terms on real sensor
+  data (\S\ref{sec:unc}).
+  \item Evidence that a scalar precision cannot be calibrated for this problem: the irreducible
+  component varies by \num{5}$\times$ across environments and \num{2}$\times$ between motion states,
+  which we argue is a general property of map-relative estimation rather than a quirk of our system
+  (\S\ref{sec:notconstant}).
+  \item Three precision defects found by calibration, including one localised in a module the
+  statistic was not measuring---offered as evidence that a free-energy formulation earns its keep
+  diagnostically, not just descriptively.
+\end{enumerate}
+
+\section{Related Work}
+
+\textbf{Learned layout estimation.} Panorama-based methods recover room shape from a single
+view and are strong under Manhattan or Atlanta priors. They produce a layout per image, not a
+belief a robot can accumulate, and report no per-corner uncertainty that a consumer could gate on.
+
+\textbf{Floor-plan reconstruction.} Methods that reconstruct floor plans from accumulated point
+clouds or density maps optimise a global objective over a whole scan and are evaluated by corner and
+room F1. They are typically offline, and the structural decision---how many corners---is taken by a
+search with hand-set costs rather than a likelihood.
+
+\textbf{Structured SLAM.} Situational and hierarchical scene-graph SLAM systems introduce planes,
+rooms and floors as explicit entities and demonstrate the benefit of structure for drift. Their
+covariances are those of the underlying least-squares problem and, to our knowledge, are not
+validated against layout ground truth; the model error between a mapped plane and the real surface is
+not represented.
+
+\textbf{Uncertainty and calibration.} Conformal prediction has recently been applied to LiDAR-based
+mapping to produce distribution-free guarantees. The guarantee is on a coverage set rather than on a
+covariance a estimator can consume, and the underlying precision is not itself audited. Our position
+is complementary: we keep a parametric covariance, because that is what a joint estimator and a
+consumer both need, and we check it.
+
+\textbf{Active perception.} Next-best-view and active SLAM select viewpoints by information gain.
+Our selection rule is the epistemic term of expected free energy, which is the same quantity when the
+model is Gaussian; the contribution here is not the rule but that the precision it consumes is
+verified, so the gain it predicts is a gain that exists.
+
+\section{Generative Model}
+
+A room is a cyclic sequence of wall landmarks. Wall $w$ is a line in Hesse normal form,
+$\mathbf{n}(\phi_w)\cdot\mathbf{p} = d_w$, with belief $\mathcal{N}\!\left([\phi_w, d_w]^\top,
+\Lambda_w^{-1}\right)$. The robot pose over a sliding window of $K$ frames is $x_{1:K}$. Given
+returns $z$, perception minimises the variational free energy
+\begin{equation}
+F = \underbrace{-\log p(z \mid x, \Phi)}_{\text{accuracy}} + \underbrace{D_{\mathrm{KL}}\!\left(q(x,\Phi)\,\|\,p(x,\Phi)\right)}_{\text{complexity}},
+\end{equation}
+which under a Gaussian $q$ reduces to the sparse nonlinear least-squares problem we solve by
+Gauss--Newton over the window.
+
+\textbf{Structure as model comparison.} The number of walls is not fixed. A candidate structural
+change---birth, death, or the splice of a new edge into the cycle---is a different model $m'$, and is
+adopted when $F(m') < F(m)$. The complexity term charges each additional edge a fixed description
+length: with a room of radius $R$ discretised at resolution $c$, an edge costs
+$\ln 4 + \ln(2R/c)$ nats to name. There is no merge threshold and no minimum wall length; a thin
+partition survives exactly when the returns that support it pay for the nats it costs.
+
+\textbf{Action.} A viewpoint $v$ is scored by the expected information gain
+$\mathbb{E}_{o}\!\left[H(x,\Phi) - H(x,\Phi \mid o)\right]$, predicted through the model's own
+forward sensor: beams are cast against the current belief, and each wall's expected Fisher
+contribution $J_w(v)$ gives a Gaussian gain $\tfrac{1}{2}\ln\left(\det(\Lambda_w + J_w)/\det
+\Lambda_w\right)$. Because publication is gated on corner $\sigma$ (\S\ref{sec:unc}), the robot
+acts, in effect, to make its own map publishable.
+
+\section{What a Layout Estimate Is Worth}
+\label{sec:unc}
+
+A corner is the intersection of two walls, so its covariance follows from theirs. With
+$M = [\mathbf{n}_a^\top; \mathbf{n}_b^\top]$ and the intersection $\mathbf{p}$,
+\begin{equation}
+\Sigma_{\mathbf{p}} = J_a \Lambda_a^{-1} J_a^\top + J_b \Lambda_b^{-1} J_b^\top + \sigma_m^2 I,
+\label{eq:corner}
+\end{equation}
+where $J$'s $\phi$ column carries the lever arm $\mathbf{t}\cdot\mathbf{p}$ and $M^{-1}$ contributes
+$1/\sin\theta$ between the walls, so a shallow corner is correctly reported as uncertain along its
+bisector without any angle test.
+
+The term that matters for this paper is the last one. The first two shrink as $1/N$ with the returns
+behind each wall: observe longer and they go to zero. \textbf{The true error does not follow them
+down.} What remains when the statistics are exhausted is systematic---the offset between the mapped
+wall and the real surface, identical on every look from a given viewpoint---and it is what
+$\sigma_m$ represents. Omitting it produces an estimator that grows arbitrarily confident about a
+corner whose error is bounded below; double-counting it produces one that is timid. We measure it
+rather than tune it, and \S\ref{sec:notconstant} shows why it cannot be a constant.
+
+\section{Experiments}
+\label{sec:exp}
+
+\subsection{Geometric generality: 594 annotated floor plans}
+
+We evaluate on 594 room annotations from a large real-building layout corpus, spanning 6 to 18
+ground-truth corners. Observations are simulated from the annotated polygon; this tests the
+estimator against the \emph{shape distribution of real buildings} rather than against a generator's
+idea of a room, and \S\ref{sec:real} validates the sensor model used to do it.
+
+\begin{table}[t]
+\centering
+\caption{Layout accuracy, 594 annotated floor plans, one run.}
+\label{tab:iou}
+\begin{tabular}{lS}
+\toprule
+IoU, mean & 0.9827 \\
+IoU, median & 0.9870 \\
+IoU, 10th percentile & 0.9690 \\
+$\text{IoU} \ge 0.95$ & 95.2\% \\
+$\text{IoU} \ge 0.90$ & 98.8\% \\
+Hausdorff, median (\si{\meter}) & 0.0705 \\
+Coverage of truth interior, mean & 0.9996 \\
+Failures (no closed polygon) & 8 / 594 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Is the reported uncertainty honest?}
+
+For every room we take the final published polygon and match its corners one-to-one to the truth
+corners by Hungarian assignment. Surplus corners on either side remain unmatched and are counted as
+\emph{structure} errors---never as position error. This matters: nearest-vertex matching instead
+yields a mean error of \SI{0.43}{\meter} against a median of \SI{0.023}{\meter}, because a spurious
+corner has no truth counterpart and its ``error'' is meaningless.
+
+Table~\ref{tab:calib} shows the effect of the systematic term of \eqref{eq:corner}. Without it, the
+true error is flat at about \SI{2}{\centi\meter} across every band of declared $\sigma$: a corner
+claiming \SI{1}{\centi\meter} is no more accurate than one claiming \SI{5}{\centi\meter}, and the
+declared uncertainty ranks corners without predicting their error. The measured floor is
+\SI{0.019}{\meter}, against a simulated sensor of \SI{0.020}{\meter} per return. Adding it as a
+variance term---not a clamp---calibrates the bound at almost no cost in yield.
+
+\begin{table}[t]
+\centering
+\caption{Calibration of the published corner $\sigma$ against ground truth. 4344 matched corners.
+$\sigma$ is the largest-axis standard deviation, so this tests a bound.}
+\label{tab:calib}
+\begin{tabular}{lccccc}
+\toprule
+& $\le 1\sigma$ & $\le 2\sigma$ & $\le 3\sigma$ & publishable & claim holds \\
+\midrule
+no $\sigma_m$              & 46.7\% & 70.5\% & 81.2\% & 89.0\% & 85.8\% \\
+$\sigma_m=\SI{0.02}{\meter}$ & \textbf{65.3\%} & \textbf{85.0\%} & \textbf{91.2\%} & 89.0\% & 86.1\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{The actionable claim.} Publication is gated at $\sigma \le \SI{6}{\centi\meter}$. A corner the
+system declares publishable has a median true error of \SI{2.0}{\centi\meter} and lies within the
+\SI{6}{\centi\meter} it claims in \SI{86.1}{\percent} of cases; a corner it withholds has a median
+error of \SI{3.6}{\centi\meter} and satisfies the same bound only \SI{63.7}{\percent} of the time.
+The gate discriminates, and the number it gates on now means something.
+
+\subsection{The real-sensor split}
+\label{sec:real}
+
+The decomposition in \eqref{eq:corner} claims that error separates into a part that averages away and
+a part that does not. We measure both on real data: real building-scale depth against annotated
+walls, fitting each wall from the returns that land on it (588 segments, 120 rooms).
+
+\begin{table}[t]
+\centering
+\caption{The two components, measured on real depth against annotated walls.}
+\label{tab:real}
+\begin{tabular}{lSS}
+\toprule
+& {median (\si{\meter})} & {p90} \\
+\midrule
+scatter about the fitted wall (averages down) & 0.0149 & 0.0382 \\
+fitted wall vs.\ annotated wall (does not) & 0.0181 & 0.0572 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Two consequences. First, the simulated sensor used in \S\ref{sec:exp} is honest, indeed slightly
+conservative: real depth scatters at \SI{1.5}{\centi\meter} against the \SI{2.0}{\centi\meter}
+simulated, so the calibration above rests on a noise model that does not flatter it. Second, the
+systematic component is a property of \emph{the map}, not of the sensor---which sets up the next
+result.
+
+\subsection{Why no scalar precision can be correct}
+\label{sec:notconstant}
+
+On the robot we log, for every corner candidate at the association gate, the innovation and each term
+of its covariance: \num{126008} candidates over a \SI{200}{\meter} tour. Normalised innovation
+squared ($\nis$, divided by its two degrees of freedom) equals 1 when a covariance matches the error
+it claims.
+
+Recovering inter-frame motion from the predicted corners themselves reveals that $\nis$ depends on
+what the robot is \emph{doing}, not where it is: at rest, $\nis = 3.05$ with the gate refusing
+\SI{32}{\percent} of candidates; while turning, $\nis = 1.50$. The detection covariance is flat
+across both ($\sigma_{\text{det}} = \SI{0.043}{\meter}$), so the defect is upstream. Decomposing the
+innovation for a fixed corner across stationary frames separates it cleanly: the part that
+\emph{repeats} is \SI{0.0952}{\meter} and the part that \emph{scatters} is \SI{0.0113}{\meter}, a
+ratio of \num{8.1}, with the bias exceeding the scatter in \SI{97}{\percent} of cases. Averaging
+\SI{1.1}{\centi\meter} of genuine scatter earns exactly the \SI{1.5}{\centi\meter} pose uncertainty
+the estimator reports; the remaining \SI{9.5}{\centi\meter} is a map offset represented nowhere in
+the model.
+
+Combined with Table~\ref{tab:real}, the systematic term measures \SI{1.8}{\centi\meter} against a
+carefully annotated building and \SI{9.5}{\centi\meter} against a hand-traced layout---a factor of
+\num{5} for the same sensor and the same estimator---and varies by a factor of \num{2} between
+standing still and moving, because in motion the per-wall offsets partially cancel in the pose
+solution. A constant tuned in one environment is wrong in the next; a constant tuned while the robot
+moves is wrong when it stops. This is the argument for representing the offset as an inferred state
+with a prior rather than a compiled-in number.
+
+\subsection{Calibration as a diagnostic}
+
+Requiring precisions to mean what they say found three defects of one kind---uncertainty that
+averages down past an error that does not. In the layout channel the systematic term was absent
+(Table~\ref{tab:calib}). In the localisation channel it was present twice under two names, making the
+channel \num{2.1}$\times$ too timid; removing the duplicate and measuring the survivor moved $\nis$
+from \num{0.47} to \num{1.03}. In the pose estimator it is absent again, and was found by an
+instrument pointed at the layout. We regard the third as the strongest evidence that the formulation
+does work rather than description: nothing in a pipeline of separately-tuned heuristics depends on a
+precision being right, so nothing in it would have flagged any of the three.
+
+\section{Limitations}
+
+Observations in \S\ref{sec:exp} are simulated from the annotated polygons; \S\ref{sec:real} validates
+the noise model but not the full pipeline on recorded data. We attempted an evaluation on a real
+building-scale RGB-D dataset with annotated rooms and report a negative result that we believe is
+useful: because such datasets annotate \emph{rooms inside open-plan buildings} while a
+\SI{360}{\degree} depth sensor sees through every doorway, a median \SI{57}{\percent} of returns fall
+outside the polygon being scored, and taking the union of a floor's rooms still leaves
+\SI{50}{\percent} outside because corridors are unannotated. No granularity makes the annotation and
+the observation describe the same region, so such a corpus cannot grade a bounded-room method.
+Finally, the pose-covariance defect of \S\ref{sec:notconstant} is measured but not fixed; the cure we
+argue for---a per-wall offset state with the measured prior---is future work.
+
+\section{Conclusion}
+
+A layout estimate that a robot can act on needs an uncertainty a robot can check. We have shown that
+such an uncertainty can be maintained online, that it can be validated against ground truth at scale,
+and that it is useful precisely because something depends on it. The discipline of making precisions
+honest is not bookkeeping: it exposed three defects, and it showed that the quantity everyone tunes
+as a constant is not one.
+
+\balance
+\bibliographystyle{IEEEtran}
+\bibliography{refs}
+
+\end{document}
