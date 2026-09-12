@@ -2385,13 +2385,10 @@ namespace rc
                 projection_failed_logged_ = true;
             }
         }
-        if (poly.status != last_wall_status_)
-        {
-            qInfo().noquote() << "[room][wall-slam]" << wall_map_.walls.size() << "walls," << wall_map_.candidates.size()
-                              << "candidates, polygon" << (poly.closed ? "closed" : "open")
-                              << (poly.status.empty() ? "" : QString::fromStdString("— " + poly.status));
-            last_wall_status_ = poly.status;
-        }
+        // The per-status line is gone from the terminal: every one of its numbers — walls, candidates,
+        // closed, publishable, worst corner sigma — is a column of etc/wall_slam.csv, written every
+        // frame, and the status string changes often enough during estimation to bury everything else.
+        last_wall_status_ = poly.status;
         res.wall_view.segments    = last_wall_segments_;
         // The canvas shows the WORKING SET, not the graveyard: walls in the polygon plus walls a
         // segment touched in the last two seconds. Everything else still exists in the map (and in

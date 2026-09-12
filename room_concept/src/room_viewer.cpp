@@ -3,6 +3,10 @@
  *    This file is part of RoboComp — see room_viewer.h.
  */
 
+#include <QElapsedTimer>
+#include <QCoreApplication>
+#include <fstream>
+#include <locale>
 #include "room_viewer.h"
 
 #include <algorithm>
@@ -75,12 +79,31 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
     // Own top-level window (parent == nullptr), NOT docked into the DSR graph viewer. This
     // decouples the layout GUI from Agent.graph, so the agent runs with graph=false (no
     // DSRViewer created at all). Mirrors retina's independent custom drawing windows.
+    // ── SUB-PHASES OF THIS CONSTRUCTOR, APPENDED TO tmp/startup_timing.csv ───────────────────────
+    // Everything here runs on the GUI thread inside initialize(), so it is all hang time before the
+    // window can paint. Measured from the log: 15 s between "No DSR viewer" (immediately before this
+    // constructor) and "RGB media plane discovery started" (at its end) — one of the steps below owns
+    // that, and the point of these rows is to say WHICH rather than reason about it. The file is
+    // opened by SpecificWorker::initialize() with trunc just before this, so append here.
+    QElapsedTimer vphase_timer;
+    vphase_timer.start();
+    std::ofstream vcsv("tmp/startup_timing.csv", std::ios::out | std::ios::app);
+    if (vcsv.is_open()) vcsv.imbue(std::locale::classic());
+    const auto vphase = [&](const char* name)
+    {
+        const auto ms = vphase_timer.restart();
+        if (vcsv.is_open()) vcsv << "viewer:" << name << ',' << ms << ",\n" << std::flush;
+        QCoreApplication::processEvents();
+    };
+
     custom_widget_ = new Custom_widget();
+    vphase("custom_widget");
     custom_widget_->setWindowTitle(QStringLiteral("room_concept — layout"));
     restore_window_geometry();
     custom_widget_->show();
     viewer_2d_ = new rc::Viewer2D(custom_widget_->frame, params_->GRID_MAX_DIM, true);
     viewer_2d_->show();
+    vphase("viewer_2d");
     viewer_2d_->add_robot(params_->ROBOT_WIDTH, params_->ROBOT_LENGTH, 0.f, 0.f, QColor("blue"));
 
     // ── Estimate mode starts with nothing on the canvas ──────────────────────────────────────────
@@ -98,6 +121,7 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
 
     // RT publish-rate readout in the controls row (updated ~1 Hz from the worker's compute loop).
     rt_rate_label_ = new QLabel(QStringLiteral("RT: --"), custom_widget_);
+    vphase("rt_label");
     rt_rate_label_->setStyleSheet("QLabel { font-weight: bold; }");
     if (custom_widget_->controlsLayout != nullptr)
         custom_widget_->controlsLayout->addWidget(rt_rate_label_);
@@ -227,6 +251,7 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
     // knows nothing about this window. Building it here costs one hidden QDialog and makes the trace
     // an honest record of the whole run rather than of how long you have been watching.
     calib_viewer_ = new rc::CalibrationViewer(custom_widget_);
+    vphase("calibration_viewer");
     calib_viewer_->hide();
     // ★ EVERY CAMERA GETS ITS COLUMN NOW, fed or not. Declaring the list here rather than letting a
     // column appear when the first solve arrives is what lets the window show "no evidence" for a
@@ -309,6 +334,7 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
     //   fire, since nothing called it.
     ricoh_viz_->start_media_plane();
     camera_media_plane_initialized_ = true;
+    vphase("camera_visualizers");
     qInfo() << "[room][camera] RGB media plane discovery started (waits for 'zed' descriptor)";
 }
 
