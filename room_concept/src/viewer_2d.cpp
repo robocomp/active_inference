@@ -1458,6 +1458,11 @@ void Viewer2D::draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segmen
         wall_hud_item_->setBrush(QBrush(QColor(31, 35, 40)));
         wall_hud_item_->setTransform(QTransform::fromScale(1, -1));
     }
+    // Nothing to report when the estimator is not running: an emptied overlay must not leave a HUD
+    // reading "walls 0  cand 0  OPEN" standing over a room that is finished and correct.
+    if (walls.empty() and polygon.verts.empty())
+        wall_hud_item_->setVisible(false);
+    else
     {
         const int over = static_cast<int>(std::count_if(polygon.corners.begin(), polygon.corners.end(),
             [&](const rc::wallmap::Corner& c) { return not(std::isfinite(c.sigma) and c.sigma <= publish_bar); }));

@@ -452,7 +452,34 @@ void RoomViewer::update_viewer(const std::optional<rc::RoomConcept::UpdateResult
     // cached so a resultless frame redraws the last map instead of erasing it; the segments are NOT
     // cached, because they are this frame's measurements and redrawing them through a newer pose
     // would put them somewhere the LiDAR never saw.
-    if (room_concept_ != nullptr and room_concept_->estimating())
+    // ── SEARCHING DRAWS THE MACHINERY; LOCALIZING DRAWS THE ROOM ─────────────────────────────────
+    // Once the layout is frozen there is no estimate in progress to show. The wall landmarks, the
+    // derived polygon, the corner sigma discs and the ghost trail all answer "how is the estimate
+    // coming along", and that question is closed — leaving them up puts three superimposed outlines
+    // on the canvas and buries the two things a localizing agent is actually about: where the robot
+    // is, and how the scan and the corner detections line up with a KNOWN room.
+    // So LOCALIZING draws the layout as the room model — one axis-aligned outline with its floor —
+    // plus the scan and the LiDAR/ricoh corners, and nothing else.
+    if (room_concept_ != nullptr and room_concept_->localizing())
+    {
+        // Empty inputs retire every pool in the overlay: no wall lines, no polygon, no corner discs,
+        // no bands, no ghosts. One call, so nothing can be left behind by a layer added later.
+        const std::vector<wallseg::WallSegment> none_seg;
+        const std::vector<wallmap::WallLandmark> none_walls;
+        viewer_2d_->draw_wall_map(none_seg, none_walls, rc::wallmap::Polygon{}, true, pose_for_draw,
+                                  room_concept_->params.wall_map.publish_corner_sigma, {});
+        // The frozen layout, in the room frame — where it is axis-aligned and centred on the origin
+        // by construction, because that is what the re-anchor made true.
+        if (have_wall_view_ and last_wall_view_.polygon.verts.size() >= 3)
+        {
+            std::vector<Eigen::Vector2f> room_verts;
+            room_verts.reserve(last_wall_view_.polygon.verts.size());
+            for (const auto& v : last_wall_view_.polygon.verts)
+                room_verts.push_back(canvas_from_map * v);
+            viewer_2d_->draw_room_polygon(room_verts, false);
+        }
+    }
+    else if (room_concept_ != nullptr and room_concept_->estimating())
     {
         // (the cache was already refreshed above, under the not-empty guard)
         const std::vector<wallseg::WallSegment> no_segments;
