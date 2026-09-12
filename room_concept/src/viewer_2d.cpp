@@ -30,6 +30,27 @@ Viewer2D::Viewer2D(QWidget* parent, const QRectF& grid_dim, bool show_axis)
 {
     agv_ = new AbstractGraphicViewer(parent, grid_dim, show_axis);
 
+    // ── A STALE OR UNPAINTED PIXEL MUST NOT BE REPRESENTABLE ─────────────────────────────────────
+    // AbstractGraphicViewer leaves the view on BoundingRectViewportUpdate with NO background brush,
+    // and both halves of that are how this canvas goes dark or holds an old image while the estimator
+    // is plainly working:
+    //   · BoundingRectViewportUpdate repaints only the accumulated dirty rect and lets Qt scroll the
+    //     viewport by BLITTING, so a repaint that never arrives leaves the previous frame's pixels
+    //     where they were copied to — and during Estimate startup the view is being fitted and
+    //     re-centred repeatedly, which is exactly when those blits happen.
+    //   · with the brush at Qt::NoBrush nothing erases the viewport, so a frame that draws NOTHING
+    //     leaves whatever was underneath — an unpainted widget at startup, i.e. a blank or black
+    //     rectangle, and later the last good frame for ever. A single non-finite item transform
+    //     poisons the QPainter and silently turns every later draw in that paintEvent into a no-op,
+    //     which is not hypothetical here: the wall map draws sigma discs whose radius comes from a
+    //     covariance that is legitimately huge before the map converges.
+    // Full updates plus an opaque background erase and redraw the whole viewport from the scene every
+    // paint, so what is on screen is always THIS frame — never a ghost and never the widget's
+    // undrawn background. Verified as the cure in controller/src/viewer_2d.cpp (2026-09-10), where
+    // force_repaint() did NOT fix it and this pair did.
+    agv_->setViewportUpdateMode(QGraphicsView::FullViewportUpdate);   // AbstractGraphicViewer IS a QGraphicsView
+    agv_->setBackgroundBrush(QBrush(QColor(255, 255, 255)));
+
     // Forward all AGV signals as Viewer2D signals
     connect(agv_, &AbstractGraphicViewer::robot_moved,
             this, &Viewer2D::robot_moved);
