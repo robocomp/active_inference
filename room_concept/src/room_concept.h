@@ -1709,6 +1709,7 @@ private:
     wallmap::WallMap wall_map_;
     unsigned nis_log_tick_ = 0;      // row counter for tmp/corner_nis.csv
     std::ofstream nis_csv_;          // corner-NIS diagnostics (see the writer for the columns)
+    std::ofstream resid_csv_;        // tmp/wall_residual.csv — per-association point-to-wall residual
     std::ofstream layout_csv_;       // tmp/layout_trace.csv — the PUBLISHED polygon + its per-corner
     unsigned layout_trace_tick_ = 0; // and per-edge sigma, one row per frame (see the writer).
     std::ofstream probe_csv_;        // tmp/corner_probe.csv — ONE ROW PER CANDIDATE (see CornerProbe).

@@ -2214,6 +2214,34 @@ namespace rc
             wall_csv_.flush();
         }
 
+        // ── DO THE RETURNS FALL SHORT OF THE WALL WE FITTED TO THEM? ────────────────────────
+        // One row per associated segment: the median signed perpendicular residual of its returns
+        // about the wall, in the map frame. Positive = the returns sit on the room side, i.e. short
+        // of the fitted wall. This is the systematic component the paper's corner floor represents,
+        // and it was only ever measured offline (the harness prints it per wall; the live agent had
+        // nothing) or inferred indirectly from recovered room dimensions.
+        if (not last_wall_frame_.assoc.empty())
+        {
+            if (not resid_csv_.is_open())
+            {
+                std::filesystem::create_directories("tmp");
+                resid_csv_.open("tmp/wall_residual.csv", std::ios::out | std::ios::trunc);
+                if (resid_csv_.is_open())
+                {
+                    resid_csv_.imbue(std::locale::classic());
+                    resid_csv_ << "frame,ts_ms,wall_id,npts,pda,resid_med_m\n";
+                }
+            }
+            if (resid_csv_.is_open())
+            {
+                for (const auto& a : last_wall_frame_.assoc)
+                    if (a.resid_n > 0)
+                        resid_csv_ << layout_trace_tick_ << ',' << wall_frame_ts_ << ',' << a.wall_id
+                                   << ',' << a.resid_n << ',' << a.pda << ',' << a.resid_med << '\n';
+                if ((layout_trace_tick_ % 20u) == 0) resid_csv_.flush();
+            }
+        }
+
         // ── THE PUBLISHED LAYOUT, WITH THE UNCERTAINTY ATTACHED TO IT ────────────────────────
         // etc/wall_slam.csv above records only the WORST corner sigma, which cannot be checked
         // against anything: grading a layout's uncertainty needs each vertex and the sigma claimed

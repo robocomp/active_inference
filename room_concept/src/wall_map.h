@@ -433,6 +433,21 @@ namespace rc::wallmap
         Eigen::Matrix<float, Eigen::Dynamic, 2> pts;
         Eigen::VectorXf weights;            // range/incidence weights, mean 1 over the slot
         float pda = 1.f;                    // association posterior
+        // Median SIGNED perpendicular residual of this segment's returns about the wall they were
+        // associated to, in metres, map frame: n·(R p + t) − d. Positive = the returns sit on the
+        // ROOM side of the fitted wall, i.e. they fall SHORT of it. This is the systematic term the
+        // corner floor exists to represent, and until now it was only measurable offline — the
+        // harness's forward referee prints it per wall, the live agent had nothing.
+        // ⚠ THIS IS A POST-FIT RESIDUAL AND CANNOT MEASURE ACCURACY. The wall was fitted to these
+        // same returns, so the solver's job was to make this small; a small value is close to
+        // circular. It is a FIT-HEALTH instrument: it says whether a wall is still being fitted at
+        // all, and would have exposed the 657 s in Webots room 2 where five segments associated per
+        // frame and the walls absorbed nothing. Accuracy needs ground truth — there, recovered width
+        // 5.994 m against a true 6.000 m from the world's wall solids, with no optimiser on the
+        // truth side. The same objection applies to the SDF prediction error, which is likewise
+        // measured after the pose was optimised against the points it is scored on.
+        float resid_med = 0.f;
+        int   resid_n   = 0;
     };
 
     struct Corner

@@ -2119,15 +2119,24 @@ namespace rc::wallmap
             a.pts.resize(static_cast<long>(sg.inliers.size()), 2);
             a.weights.resize(static_cast<long>(sg.inliers.size()));
             const Eigen::Vector2f tv = wl.tangent();
+            const Eigen::Vector2f nv = wl.normal();
+            std::vector<float> resid;  resid.reserve(sg.inliers.size());
             for (size_t i = 0; i < sg.inliers.size(); ++i)
             {
                 const Eigen::Vector2f& p = pts_robot[static_cast<size_t>(sg.inliers[i])];
+                resid.push_back(nv.dot(R * p + t) - wl.d);
                 a.pts(static_cast<long>(i), 0) = p.x();
                 a.pts(static_cast<long>(i), 1) = p.y();
                 a.weights(static_cast<long>(i)) = (weights.size() > sg.inliers[i]) ? weights(sg.inliers[i]) : 1.f;
                 const float sc = tv.dot(R * p + t);
                 if (not wl.has_extent) { wl.s_min = wl.s_max = sc; wl.has_extent = true; }
                 else { wl.s_min = std::min(wl.s_min, sc); wl.s_max = std::max(wl.s_max, sc); }
+            }
+            if (not resid.empty())
+            {
+                std::ranges::nth_element(resid, resid.begin() + static_cast<long>(resid.size() / 2));
+                a.resid_med = resid[resid.size() / 2];
+                a.resid_n   = static_cast<int>(resid.size());
             }
             wl.frames_seen++;
             wl.points_seen += sg.npts;
