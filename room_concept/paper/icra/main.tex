@@ -204,6 +204,19 @@ declared uncertainty ranks corners without predicting their error. The measured 
 \SI{0.019}{\meter}, against a simulated sensor of \SI{0.020}{\meter} per return. Adding it as a
 variance term---not a clamp---calibrates the bound at almost no cost in yield.
 
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{fig/calibration}
+\caption{\textbf{Is the declared uncertainty honest?} Every matched corner of 594 annotated floor
+plans: declared $\sigma$ against the error it actually made. \emph{Left}, propagating only the
+walls' statistical uncertainty: the red median is flat, so a corner claiming \SI{1}{\centi\meter} is
+no more accurate than one claiming \SI{5}{\centi\meter}, and the cloud sits far above
+$\mathrm{error}=\sigma$ at the tight end. \emph{Right}, with the irreducible term of
+\eqref{eq:corner}: the median tracks the diagonal and the bound holds. The dotted line is the
+publication gate.}
+\label{fig:calib}
+\end{figure*}
+
 \begin{table}[t]
 \centering
 \caption{Calibration of the published corner $\sigma$ against ground truth. 4344 matched corners.
@@ -255,6 +268,17 @@ simulated, so the calibration above rests on a noise model that does not flatter
 systematic component is a property of \emph{the map}, not of the sensor---which sets up the next
 result.
 
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{fig/motion_nis}
+\caption{\textbf{The channel is calibrated only while the robot moves.} $\nis$ per rotation band
+over a \SI{200}{\meter} tour, with the pose-induced corner uncertainty $\sigma_{\mathrm{pred}}$
+overlaid. Three independent bands of genuine motion sit at \numrange{0.90}{0.97}. At rest
+$\sigma_{\mathrm{pred}}$ collapses while the innovation grows, and under fast rotation the
+innovation grows again---two distinct mechanisms bracketing a correctly calibrated middle.}
+\label{fig:motion}
+\end{figure}
+
 \subsection{Why no scalar precision can be correct}
 \label{sec:notconstant}
 
@@ -263,16 +287,23 @@ of its covariance: \num{126008} candidates over a \SI{200}{\meter} tour. Normali
 squared ($\nis$, divided by its two degrees of freedom) equals 1 when a covariance matches the error
 it claims.
 
-Recovering inter-frame motion from the predicted corners themselves reveals that $\nis$ depends on
-what the robot is \emph{doing}, not where it is: at rest, $\nis = 3.05$ with the gate refusing
-\SI{32}{\percent} of candidates; while turning, $\nis = 1.50$. The detection covariance is flat
-across both ($\sigma_{\text{det}} = \SI{0.043}{\meter}$), so the defect is upstream. Decomposing the
-innovation for a fixed corner across stationary frames separates it cleanly: the part that
+Recovering inter-frame motion from the predicted corners themselves (a rigid fit between consecutive
+frames, so no pose log is needed) reveals that $\nis$ depends on what the robot is \emph{doing}
+rather than on where it is (Fig.~\ref{fig:motion}). \textbf{While the robot moves, the channel is
+calibrated}: \num{0.90}, \num{0.97} and \num{0.92} across three independent rotation bands. It
+departs from \num{1} only at the extremes---\num{1.65} at rest and \num{1.88} under fast
+rotation---and the detection covariance is flat throughout
+($\sigma_{\text{det}} = \SI{0.043}{\meter}$), so neither departure belongs to the corner channel.
+
+The two extremes have different causes, and the stationary one is the instructive one. Decomposing
+the innovation for a fixed corner across stationary frames separates it cleanly: the part that
 \emph{repeats} is \SI{0.0952}{\meter} and the part that \emph{scatters} is \SI{0.0113}{\meter}, a
 ratio of \num{8.1}, with the bias exceeding the scatter in \SI{97}{\percent} of cases. Averaging
-\SI{1.1}{\centi\meter} of genuine scatter earns exactly the \SI{1.5}{\centi\meter} pose uncertainty
-the estimator reports; the remaining \SI{9.5}{\centi\meter} is a map offset represented nowhere in
-the model.
+\SI{1.1}{\centi\meter} of genuine scatter earns exactly the \SI{1.56}{\centi\meter} pose
+uncertainty the estimator reports---it is not mishandling the noise. The remaining
+\SI{9.5}{\centi\meter} is a map offset, identical on every look from a fixed viewpoint, and
+represented nowhere in the model: standing still, the estimator accumulates confidence from
+observations that carry no new information about it.
 
 Combined with Table~\ref{tab:real}, the systematic term measures \SI{1.8}{\centi\meter} against a
 carefully annotated building and \SI{9.5}{\centi\meter} against a hand-traced layout---a factor of

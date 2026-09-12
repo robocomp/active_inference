@@ -24,14 +24,14 @@
 \bibitem{zou2021manhattan}
 C.~Zou \emph{et~al.}, ``Manhattan room layout reconstruction from a single
   360$^\circ$ image: A comparative study of state-of-the-art methods,''
-  \emph{International Journal of Computer Vision}, 2021, ⚠ VERIFY: source of
+  \emph{International Journal of Computer Vision}, 2021, [VERIFY]: source of
   the MatterportLayout annotations.
 
 \bibitem{chang2017matterport3d}
 A.~Chang, A.~Dai, T.~Funkhouser, M.~Halber, M.~Nie{\ss}ner, M.~Savva, S.~Song,
   A.~Zeng, and Y.~Zhang, ``Matterport3d: Learning from {RGB-D} data in indoor
   environments,'' in \emph{International Conference on 3D Vision (3DV)}, 2017,
-  ⚠ VERIFY.
+  [VERIFY].
 
 \bibitem{solarte2022dfpe}
 
