@@ -241,7 +241,13 @@ void SpecificWorker::initialize()
     run_ctx.high_lidar_buffer = &lidar_ingestor_->buffer();
     // The ceiling the LiDAR measured travels with the model, not through a second wire: the scene
     // graph publishes it on the room node and the image-edge module projects the contour at it.
-    room_concept_.set_measured_ceiling(lidar_ingestor_->measured_ceiling_z_.load(std::memory_order_relaxed));
+    // ⚠ NOT HERE ANY MORE. This ran in initialize(), reading an atomic that starts at 0 before the
+    //   LiDAR thread has ever produced a scan, so RoomConcept held 0 for the life of the process and
+    //   every consumer took its `> 1.5f` fallback: the room node's room_height was never published
+    //   from the measurement, and the camera's wall-ceiling corners sat at the STATED 3.0 m for ever.
+    //   Measured 2026-09-12: pz read exactly 3.0000 on all 16607 ceiling rows, and the camera's own
+    //   floor-vs-ceiling disagreement put the real ceiling ~14 cm lower. The copy now happens per
+    //   cycle in compute(), where the measurement can actually exist.
     run_ctx.velocity_buffer = &velocity_buffer_;
     run_ctx.odometry_buffer = &odometry_buffer_;
     run_ctx.imu_buffer      = &imu_buffer_;
@@ -2102,7 +2108,28 @@ void SpecificWorker::pump_calib_channels()
             }
         }
 
-        rc::GrayFrame frame;
+        // ── The ceiling the contour is projected at, REFRESHED ──────────────────────────────────────
+    // ★ It used to be set only inside the bind block above, so a ceiling measured one second after
+    //   binding never reached the projection — and with the wire broken it never arrived at all. The
+    //   room polygon beside it was already refreshed every tick for exactly this reason.
+    // ⚠ A change here moves every wall-ceiling corner, which is what the mount's HEIGHT parameter
+    //   reads, so it is logged when it moves rather than changing the geometry quietly.
+    if (image_edge_bound_)
+    {
+        const float mz = room_concept_.measured_ceiling();
+        const float want = mz > 1.5f ? mz : params.room_height;
+        if (auto ic = image_edge_source_->config(); std::abs(ic.room_height - want) > 1e-4f)
+        {
+            qInfo().noquote() << QString::asprintf(
+                "[imgedge] wall-ceiling contour re-projected: room_height %.4f -> %.4f m (%s;"
+                " the scenario states %.4f)", ic.room_height, want,
+                mz > 1.5f ? "MEASURED by the LiDAR" : "stated in the scenario", params.room_height);
+            ic.room_height = want;
+            image_edge_source_->set_config(ic);
+        }
+    }
+
+    rc::GrayFrame frame;
         if (not ch.ingestor->take_latest(frame)) continue;
 
         const Eigen::Affine2f &rp = res->robot_pose;
@@ -2348,6 +2375,15 @@ void SpecificWorker::compute()
     const auto now_ms = QDateTime::currentMSecsSinceEpoch();
     QElapsedTimer compute_timer;
     compute_timer.start();
+    // ── The ceiling the LiDAR measured, into the model, EVERY CYCLE ──────────────────────────────
+    // The producer is a LiDAR-thread atomic that only becomes valid once the ceiling check has seen
+    // a scan, so a one-shot copy at start-up can only ever move a zero. From here the existing
+    // machinery does the rest: room_scene_graph publishes it on the room node (debounced, so an
+    // attribute is not rewritten every frame) and pump_image_edges projects the wall-ceiling contour
+    // at it instead of at the stated constant.
+    if (lidar_ingestor_)
+        room_concept_.set_measured_ceiling(
+            lidar_ingestor_->measured_ceiling_z_.load(std::memory_order_relaxed));
     auto init_time = std::chrono::steady_clock::now();
     // MICROSECONDS, not milliseconds. These were qint64 *_ms read off QElapsedTimer::elapsed(),
     // which is integer ms — and every stage here is sub-millisecond, so every section column in
