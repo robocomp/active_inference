@@ -1742,6 +1742,7 @@ private:
     unsigned nis_log_tick_ = 0;      // row counter for tmp/corner_nis.csv
     std::ofstream nis_csv_;          // corner-NIS diagnostics (see the writer for the columns)
     std::ofstream resid_csv_;        // tmp/wall_residual.csv — per-association point-to-wall residual
+    std::int64_t symmetry_last_log_ms_ = 0;   // rate limit: the CSV keeps every check
     unsigned resid_tick_ = 0;        // its own row counter: the layout trace's stalls when the solve early-exits
     std::ofstream wallgeom_csv_;     // tmp/wall_geometry.csv — every wall's (phi, d, extent) every frame
     std::ofstream layout_csv_;       // tmp/layout_trace.csv — the PUBLISHED polygon + its per-corner

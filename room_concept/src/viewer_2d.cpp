@@ -1243,7 +1243,11 @@ void Viewer2D::draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segmen
     {
         QPolygonF poly;
         for (const auto& v : polygon.verts) { const auto q = X(v); poly << QPointF(q.x(), q.y()); }
-        poly << QPointF(polygon.verts.front().x(), polygon.verts.front().y());
+        // ⚠ The closing vertex goes through room<-map like every other one. Left untransformed it
+        // stayed in MAP coordinates, so the outline drew the real room and then ran off to wherever
+        // that point landed and back — a magenta V with its apex outside the room, which is what a
+        // half-applied frame change looks like on a canvas.
+        { const auto q0 = X(polygon.verts.front()); poly << QPointF(q0.x(), q0.y()); }
         wall_poly_item_->setPolygon(poly);
         QPen pen(Qt::magenta, 0.10);
         pen.setStyle(map_ready ? Qt::SolidLine : Qt::DashLine);

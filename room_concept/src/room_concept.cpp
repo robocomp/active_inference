@@ -1244,9 +1244,19 @@ namespace rc
 
                     if (flip_triggered)
                     {
-                        qWarning() << "[SymmetryCheck]" << best->name << "flip — evidence"
-                                   << symmetry_flip_evidence_ << "> thresh" << thresh
-                                   << "(streak" << good_fit_streak_ << ")";
+                        // Rate-limited to one line per 5 s. Every check already writes a row to
+                        // tmp/sdf_localizer/symmetry_check_*.csv with all four candidate losses, the
+                        // advantage, the evidence and the threshold — so nothing is lost by not
+                        // printing, and in a SYMMETRIC room (a plain rectangle) this fires on
+                        // essentially every check and buries everything else in the terminal.
+                        if (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() - symmetry_last_log_ms_ > 5000)
+                        {
+                            symmetry_last_log_ms_ = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+                            qWarning() << "[SymmetryCheck]" << best->name << "flip — evidence"
+                                       << symmetry_flip_evidence_ << "> thresh" << thresh
+                                       << "(streak" << good_fit_streak_ << ") — per-check detail in"
+                                       << "tmp/sdf_localizer/symmetry_check_*.csv";
+                        }
                         set_robot_pose(best->x, best->y, best->theta);
                         recovery_.reset();
                         window_mgr_.clear(); reset_stride_state();
