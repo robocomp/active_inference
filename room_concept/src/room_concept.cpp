@@ -2940,7 +2940,7 @@ namespace rc
             // ... unless the layout is frozen. This is the ONLY place a wall's information grows,
             // so skipping it is what actually holds the geometry still; the guards above only stop
             // the structure from changing around it.
-            if (estimating() and not wall_frozen_ and not window_mgr_.empty()
+            if (searching() and not window_mgr_.empty()
                 and static_cast<int>(window_mgr_.size()) >= params.rfe_window_size)
             {
                 gn::Input ain; ain.params = &params; ain.walls = &wall_map_;
@@ -4794,7 +4794,7 @@ void RoomConcept::log_hessian_check(const UpdateResult& res)
         // pinned by the re-anchor, so there is nothing left to gauge-fix. From here the room is GIVEN
         // in the full sense rather than in name, and the pose is solved against its SDF — the same
         // channel, the same terms and the same constants a layout loaded from file uses.
-        if (estimating() and not wall_frozen_)
+        if (searching())
         {
             in.walls             = &wall_map_;
             in.no_sdf            = true;     // the polygon is derived from these walls: no SDF on it

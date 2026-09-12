@@ -1080,9 +1080,37 @@ public:
     /// learnt from the LiDAR replace it as soon as they close.
     void configure_room_estimate();
     bool estimating() const { return params.map_mode == Params::MapMode::Estimate; }
-    /// The learnt layout has been frozen (RoomShape.FreezeLayoutWhenPublishable): it closed, passed
-    /// the publish bar, was re-anchored, and no longer changes. From that moment the map is GIVEN in
-    /// every sense that matters to a consumer — which is why the stability test switches with it.
+
+    /// ── THE TWO STATES THIS AGENT IS EVER IN ─────────────────────────────────────────────────────
+    /// SEARCHING   the layout is unknown and is being estimated. The walls ARE the estimate: they are
+    ///             landmarks in the solver, the derived polygon has no independent standing (scoring
+    ///             a pose against it would score the walls against themselves), and the map frame
+    ///             needs a gauge because it is otherwise unobservable.
+    /// LOCALIZING  the layout is known and FROZEN. Nothing about it is optimised any more — no
+    ///             births, deaths, merges, re-derivations, wall updates or theta0 motion — and the
+    ///             robot localises against it exactly as it does against a layout loaded from file:
+    ///             the room's SDF, the same terms, the same constants, the same stability test.
+    ///
+    /// The transition is one-way and happens the first time the polygon closes, is re-anchored and
+    /// every corner passes the publish bar. A layout loaded from file starts in LOCALIZING.
+    ///
+    /// ⚠ TODO (deliberately not built yet): a SLOW REFINEMENT channel for the LOCALIZING state — a
+    /// low-rate thread that accumulates residuals against the frozen layout and proposes small LOCAL
+    /// amendments (a column that was never seen from the exploring trajectory, an alcove behind
+    /// furniture, a wall whose extent was cut short by occlusion) without ever reopening the global
+    /// estimate. The distinction that makes it safe is the one this state machine draws: a local
+    /// amendment is evidence about one edge, whereas re-derivation replaces the whole cycle, and it
+    /// was re-derivation storms that destroyed a correct map on 2026-09-12. Whatever that channel
+    /// proposes must be adopted the way the level-2 operators are — priced against what it explains,
+    /// on a frozen population — never accepted because a residual was large.
+    enum class LayoutState { Searching, Localizing };
+    LayoutState layout_state() const
+    { return (not estimating() or wall_frozen_) ? LayoutState::Localizing : LayoutState::Searching; }
+    bool searching()  const { return layout_state() == LayoutState::Searching; }
+    bool localizing() const { return layout_state() == LayoutState::Localizing; }
+    /// The LEARNT layout specifically has been frozen — i.e. this run reached LOCALIZING by
+    /// estimating the room rather than by being given one. Prefer localizing() unless the difference
+    /// actually matters to the caller.
     bool layout_frozen() const { return wall_frozen_; }
     /// Estimate mode: the polygon closed, was re-anchored and may be published. Given mode: always.
     bool map_ready() const { return not estimating() or map_ready_.load(); }

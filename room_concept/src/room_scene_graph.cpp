@@ -204,8 +204,7 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
     // never left 0, the room node was never created, the UI never reported the room as stabilised and
     // no consumer downstream of that node ever engaged — while the layout itself was correct to
     // within 40 mm and had stopped moving entirely.
-    const bool map_is_given = not room_concept_->estimating() or room_concept_->layout_frozen();
-    const bool stable   = map_is_given
+    const bool stable   = room_concept_->localizing()
                           ? ((res.iterations_used == 0)
                              && sdf_mse < params_->STABLE_SDF_MSE_MAX
                              && cov_tt  < params_->STABLE_COV_TT_MAX)
