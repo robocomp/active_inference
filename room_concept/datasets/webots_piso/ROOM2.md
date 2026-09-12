@@ -1,13 +1,22 @@
-# Room 2 of `tworooms-piso.wbt` — a known rectangle, and why that matters
+# Room 2 of `tworooms-piso.wbt` — a known rectangle
 
-Ground truth taken verbatim from the world's own generator,
-`webots-shadow/worlds/piso/make_floor_tworooms.py`:
+## Ground truth: 6.000 x 4.000 m interior
 
-    ROOM2 = [(-7.88, 9.20), (-1.66, 9.20), (-1.66, 13.59), (-7.88, 13.59)]
+Taken from the **wall solids** in the world, not from the floor slab:
 
-That array is the **air polygon** (the generator's floor slab is "exactly the air polygon"), so these
-are the INNER wall faces — exactly what the estimator should recover. **6.22 m x 4.39 m, 27.3 m²**,
-consistent with the docstring's 27.233 m² after the difference with the apartment.
+| wall | centre | thickness | inner face |
+|---|---|---|---|
+| WEST  | x = -7.825 | 0.110 | x = -7.770 |
+| EAST  | x = -1.715 | 0.110 | x = -1.770 |
+| SOUTH | y =  9.425 | 0.110 | y =  9.480 |
+| NORTH | y = 13.535 | 0.110 | y = 13.480 |
+
+**Interior 6.000 m x 4.000 m.** The south wall is split (`ROOM2_WALL_SOUTH_WEST/EAST`) leaving a
+**1.06 m doorway** between x = -5.300 and x = -4.240.
+
+⚠ **An earlier version of this file said 6.22 x 4.39 and was WRONG.** That came from the `ROOM2`
+array in `make_floor_tworooms.py`, which is the FLOOR SLAB — it extends under the walls. The name of
+a variable is not a statement about which surface it describes; check the walls.
 
 ## Why this room is worth more than another tour of the flat
 
@@ -37,8 +46,29 @@ Width, 6.22 m, has neither problem and is the cleanest single number to check.
 ## Pre-registered predictions, before the run
 
 - The polygon closes on 4 corners.
-- Recovered width within ~2 sigma of 6.22 m.
+- Recovered width within ~2 sigma of 6.000 m.
 - **If the parked-covariance defect extends to the layout channel, the declared corner sigma will
   fall BELOW the realised edge error while the robot is stationary**, and keep falling the longer it
   sits. That is the interesting outcome and the one to watch; a sigma that stops falling is evidence
   the layout channel does not inherit the defect.
+
+
+## RESULT (2026-09-12, Webots, closed loop)
+
+| | measured | truth | error | declared sigma | error/sigma |
+|---|---|---|---|---|---|
+| width | 5.994 m | 6.000 m | **-0.006 m** | 0.0283 m | 0.21 |
+| height | 4.003 m | 4.000 m | **+0.003 m** | 0.0283 m | 0.11 |
+
+**And the shape was right before the uncertainty was.** Parked, the estimate was already
+5.994 x 4.013 — but corner sigma sat at 0.9313 m and edge sigma_d at exactly its 0.5000 prior for
+**657 seconds**, through five associated segments per frame, moving by one part in ten thousand.
+One rotation in place dropped corner sigma **33x** to 0.0283 and sigma_d to 0.0096, while the
+geometry moved by millimetres.
+
+So the estimator had the room correct and **refused to claim precision it had not earned from
+motion**. That is the epistemic claim demonstrated in a closed loop rather than argued: repeated
+looks from a fixed pose are correlated evidence and buy nothing, and the covariance says so.
+Contrast [[pose-covariance-collapses-when-parked]], where the POSE covariance does the opposite and
+shrinks on exactly that evidence — the same run shows both the right behaviour and the wrong one in
+two different channels.
