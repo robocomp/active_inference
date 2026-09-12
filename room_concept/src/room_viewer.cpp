@@ -370,6 +370,32 @@ void RoomViewer::update_viewer(const std::optional<rc::RoomConcept::UpdateResult
     }
     const bool wall_poly_ready = have_wall_view_ and last_wall_view_.polygon.verts.size() >= 3;
 
+    // ── PIN THE ROOM AT (0, 0, 0) AND DRAW EVERYTHING ELSE RELATIVE TO IT ────────────────────────
+    // room<-map is exactly what RoomConcept::reanchor_map_frame computes and applies once, for real,
+    // at the first publishable polygon: rotate by -theta0, put the origin on the Manhattan bbox
+    // centre. Applied here as a VIEW it holds from the first closed cycle instead of from the first
+    // publishable one, which is the whole stretch that was impossible to read — a layout drawn in a
+    // frame pinned to wherever the robot started looks skewed and offset however good it is, and the
+    // robot moves against a room that is itself sliding. After the agent re-anchors, theta0 is 0 and
+    // the centre is the origin, so this becomes identity and the two can never disagree.
+    Eigen::Affine2f canvas_from_map = Eigen::Affine2f::Identity();
+    if (wall_poly_ready)
+    {
+        const float rot = last_wall_view_.theta0_born ? last_wall_view_.theta0 : 0.f;
+        const Eigen::Rotation2Df Rm(-rot);
+        Eigen::Vector2f lo = Rm * last_wall_view_.polygon.verts.front(), hi = lo;
+        for (const auto& v : last_wall_view_.polygon.verts)
+        {
+            const Eigen::Vector2f q = Rm * v;
+            lo = lo.cwiseMin(q);
+            hi = hi.cwiseMax(q);
+        }
+        const Eigen::Vector2f c = Eigen::Rotation2Df(rot) * ((lo + hi) * 0.5f);
+        canvas_from_map.linear() = Rm.toRotationMatrix();
+        canvas_from_map.translation() = -(Rm * c);
+    }
+    viewer_2d_->set_canvas_from_map(canvas_from_map);
+
     viewer_2d_->update_frame({
         .lidar_points     = lidar_for_canvas,
         .display_pose     = pose_for_draw,

@@ -1866,6 +1866,26 @@ namespace rc
             if (static_cast<int>(candidates.size()) > TOP_K)
                 candidates.resize(TOP_K);
 
+            // ⚠ THE LATTICE CAN BE EMPTY, AND front() ON IT IS A SEGFAULT (measured 2026-09-12,
+            // room_concept.cpp:1872, core from a recovery after 10 bad frames at avg_sdf_err 2.28 m).
+            // min/max come from the room model's own extent, so a degenerate or not-yet-valid model —
+            // width or length zero, or a polygon that was mid-republish between 6 and 10 vertices —
+            // makes every `for (x = min_x; x <= max_x; ...)` loop body run zero times. Recovery is
+            // exactly when the model is least trustworthy, which is why this fires there and nowhere
+            // else. A search with nothing to search has failed; it must say so and leave the
+            // incumbent pose alone, not dereference an empty vector.
+            if (candidates.empty())
+            {
+                qWarning().noquote() << QString("[room][grid-search] no candidates: the search box is empty "
+                                                "(x %1..%2, y %3..%4, step %5). Model extent is degenerate — "
+                                                "keeping the incumbent pose.")
+                                            .arg(min_x, 0, 'f', 2).arg(max_x, 0, 'f', 2)
+                                            .arg(min_y, 0, 'f', 2).arg(max_y, 0, 'f', 2)
+                                            .arg(coarse_step, 0, 'f', 2);
+                ep.stage = 1; ep.success = false;
+                return false;
+            }
+
             // Only stop here if the COARSE grid already clears the bar outright. On a 1 m/90° lattice
             // that is rare by construction, which is the point: the usual path is to fall through to
             // the fine refinement rather than commit a lattice point as if it were a solution.
@@ -2042,11 +2062,24 @@ namespace rc
         // whatever new mutation is added inside observe() next month is frozen too, by construction.
         if (wall_frozen_)
         {
+            // θ₀ FREEZES WITH THE WALLS. Restoring only walls+order left update_theta0() free to keep
+            // moving the room's reference direction from every segment — and manhattan_polygon(), the
+            // polygon that is actually PUBLISHED, projects the walls onto θ₀'s classes. So a frozen
+            // wall set still produced a changing published layout: measured live, the agent flip-
+            // flopped "republished delimiting_polygon with 6 vertices (was 10)" and back, every few
+            // frames, each one a structure change that restales the wall_i nodes for every consumer.
+            // Freezing the geometry means freezing everything the published geometry is a function of.
             const auto saved_walls = wall_map_.walls;
             const auto saved_order = wall_map_.order;
+            const float saved_theta0 = wall_map_.theta0;
+            const float saved_theta0_info = wall_map_.theta0_information;
+            const bool  saved_theta0_born = wall_map_.theta0_born;
             last_wall_frame_ = wall_map_.observe(seg, pts, weights, pose, current_covariance, timestamp_ms);
             wall_map_.walls = saved_walls;
             wall_map_.order = saved_order;
+            wall_map_.theta0 = saved_theta0;
+            wall_map_.theta0_information = saved_theta0_info;
+            wall_map_.theta0_born = saved_theta0_born;
             wall_map_.candidates.clear();
         }
         else

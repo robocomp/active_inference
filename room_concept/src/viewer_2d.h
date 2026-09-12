@@ -108,6 +108,31 @@ class Viewer2D : public QObject
                        const Eigen::Affine2f& robot_pose,
                        int max_points_high);
         void set_lidar_points_visible(bool visible);
+
+        /// Draw the DIAGNOSTIC layers of the wall-map overlay, or only the estimate itself.
+        /// Off (the default) the canvas carries four things and no more: the scan, the wall
+        /// landmarks coloured by Manhattan class, the published polygon, and the corner sigma discs.
+        /// On, it adds this frame's segments (cyan associated, amber dotted unexplained), the
+        /// per-wall offset bands, the open chain while the cycle has not closed, and the ghost trail
+        /// of recent outlines. Each of those answers a real question during development, and
+        /// together they make the canvas unreadable for anyone trying to see whether the room is
+        /// right — which is what it is for.
+        void set_overlay_verbose(bool on) { overlay_verbose_ = on; }
+
+        /// ── THE CANVAS IS DRAWN IN THE ROOM FRAME, NOT THE MAP FRAME ─────────────────────────────
+        /// Everything the wall map holds lives in the MAP frame, whose origin and orientation are
+        /// wherever the robot happened to start. So the room is drawn at an arbitrary offset and an
+        /// arbitrary tilt, the robot with it, and a reader cannot tell a genuinely skewed estimate
+        /// from a perfectly good one seen in a rotated frame. The agent's one-shot re-anchor fixes
+        /// this eventually, but only once, only after the first publishable polygon, and never for
+        /// what happens before that — which is most of what there is to watch.
+        /// This transform takes map points to canvas points and pins the room at (0, 0, 0): the
+        /// layout sits at the origin, square to the axes, at every stage of estimation, and the robot
+        /// and its scan are drawn through room←map∘map←robot so they move correctly against it.
+        /// Purely a view: nothing in the estimate is touched, and it is identity until a layout
+        /// exists. After the agent re-anchors it is identity anyway — the same transform, applied
+        /// once for real — so the two can never fight.
+        void set_canvas_from_map(const Eigen::Affine2f& T) { canvas_from_map_ = T; }
         bool lidar_points_visible() const;
 
         // ----- Composite per-frame update -----
@@ -288,6 +313,11 @@ class Viewer2D : public QObject
         /// detects a re-derive, after which the older outlines belong to a hypothesis that is gone.
         struct Ghost { QPolygonF poly; qint64 ms = 0; size_t nverts = 0; };
         std::deque<Ghost>                     wall_ghosts_;
+        /// What the view frames in Estimate mode: the wall map's own extent. See fit_view() for why
+        /// itemsBoundingRect() cannot be used there — one far corner disc zooms the room to nothing.
+        bool                                  overlay_verbose_ = false;
+        Eigen::Affine2f                       canvas_from_map_ = Eigen::Affine2f::Identity();
+        QRectF                                wall_fit_bounds_;
         QGraphicsSimpleTextItem*              wall_hud_item_ = nullptr;
         int                                   wall_ghost_tick_ = 0;
         QGraphicsPolygonItem* polygon_item_         = nullptr;

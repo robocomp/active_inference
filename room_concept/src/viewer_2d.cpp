@@ -7,6 +7,8 @@
 #include <QPolygonF>
 #include <QLayout>
 #include <QDateTime>
+#include <QPalette>
+#include <QFont>
 #include <QtMath>
 
 #include <dsr/api/dsr_api.h>
@@ -51,6 +53,40 @@ Viewer2D::Viewer2D(QWidget* parent, const QRectF& grid_dim, bool show_axis)
     agv_->setViewportUpdateMode(QGraphicsView::FullViewportUpdate);   // AbstractGraphicViewer IS a QGraphicsView
     agv_->setBackgroundBrush(QBrush(QColor(255, 255, 255)));
 
+    // ── AND THE VIEWPORT MUST BE WHITE BEFORE ANYTHING IS EVER DRAWN ─────────────────────────────
+    // setBackgroundBrush only decides what a PAINT fills with; it cannot help before the first paint.
+    // AbstractGraphicViewer installs `setViewport(new QWidget())` — a bare widget with no palette
+    // background and no autoFillBackground — so between the window appearing and the first
+    // update_viewer() the viewport is simply never painted and shows whatever the backing store held,
+    // which is the black rectangle seen at startup. Those seconds are not idle: they are the DSR
+    // join, the presence handshake and the media subscriber coming up, i.e. always several seconds
+    // before any frame exists to draw. Filling the viewport widget itself from its own palette makes
+    // the canvas white from the moment it is mapped, and the scene brush then keeps it white on every
+    // later paint including ones that draw nothing.
+    if (QWidget* vp = agv_->viewport(); vp != nullptr)
+    {
+        QPalette pal = vp->palette();
+        pal.setColor(vp->backgroundRole(), QColor(255, 255, 255));
+        pal.setColor(QPalette::Window, QColor(255, 255, 255));
+        pal.setColor(QPalette::Base, QColor(255, 255, 255));
+        vp->setPalette(pal);
+        vp->setAutoFillBackground(true);
+        vp->update();
+    }
+    agv_->scene.setBackgroundBrush(QBrush(QColor(255, 255, 255)));
+
+    // Something on the canvas from frame zero, so "the agent is up and waiting for data" is
+    // distinguishable from "the agent is dead" without reading a log. Replaced by the real HUD as
+    // soon as the wall map reports anything.
+    wall_hud_item_ = agv_->scene.addSimpleText(QStringLiteral("waiting for the first scan…"));
+    wall_hud_item_->setZValue(40);
+    QFont hud_font = wall_hud_item_->font();
+    hud_font.setPointSizeF(0.35);
+    wall_hud_item_->setFont(hud_font);
+    wall_hud_item_->setBrush(QBrush(QColor(90, 90, 90)));
+    wall_hud_item_->setTransform(QTransform::fromScale(1, -1));
+    agv_->fitToScene(QRectF(-4, -3, 8, 6));
+
     // Forward all AGV signals as Viewer2D signals
     connect(agv_, &AbstractGraphicViewer::robot_moved,
             this, &Viewer2D::robot_moved);
@@ -89,6 +125,16 @@ void Viewer2D::fit_view(float margin_ratio)
     QRectF bounds;
     if (polygon_item_ != nullptr)
         bounds = polygon_item_->boundingRect().translated(polygon_item_->pos());
+    else if (wall_fit_bounds_.isValid() and not wall_fit_bounds_.isEmpty())
+        // ── ESTIMATE MODE FITS TO THE WALL MAP, NOT TO EVERY ITEM ON THE SCENE ───────────────────
+        // itemsBoundingRect() is the union of EVERYTHING drawn, and during estimation that legitimately
+        // includes objects that are metres or tens of metres out: a corner sigma disc is drawn at the
+        // sigma the map actually claims (up to the 12 m cap), a provisional corner can land far outside
+        // the room (one was measured at y = -38.9 m), and a wall landmark keeps its full observed
+        // extent. Fitting to that union zooms out until the room itself is a few pixels — a canvas that
+        // looks blank while every item on it is healthy. The wall polygon is the estimate, so it is what
+        // the view frames; the outliers stay visible by panning, which is what panning is for.
+        bounds = wall_fit_bounds_;
     else if (estimated_room_item_ != nullptr)
         bounds = estimated_room_item_->boundingRect().translated(estimated_room_item_->pos());
     else
@@ -413,28 +459,33 @@ bool Viewer2D::lidar_points_visible() const
 // ─────────────────────────────────────────────────────────────────────────────
 void Viewer2D::update_frame(const FrameData& fd)
 {
-    const Eigen::Affine2f& lidar_pose = fd.use_loc_pose ? fd.loc_pose : fd.display_pose;
+    // Room frame, not map frame: the scan and the robot are carried by room<-map so they land on a
+    // layout that is pinned at the origin. Composition order matters — canvas_from_map_ * pose is
+    // room<-map . map<-robot, i.e. the robot expressed in the room.
+    const Eigen::Affine2f lidar_pose = canvas_from_map_ * (fd.use_loc_pose ? fd.loc_pose : fd.display_pose);
+    const Eigen::Affine2f draw_pose  = canvas_from_map_ * fd.display_pose;
     draw_lidar_points(fd.lidar_points, {}, lidar_pose, fd.max_lidar_points);
 
     if (fd.have_loc || fd.is_initialized)
-        update_robot(fd.display_pose);
+        update_robot(draw_pose);
 
     // 1-sigma translation covariance ellipse aligned with the robot axis.
     if (fd.have_loc)
     {
-        const float theta = std::atan2(fd.display_pose.linear()(1, 0), fd.display_pose.linear()(0, 0));
+        const float theta = std::atan2(draw_pose.linear()(1, 0), draw_pose.linear()(0, 0));
         const float c = std::cos(theta);
         const float s = std::sin(theta);
         Eigen::Matrix2f R;
         R << c, -s,
              s,  c;
 
-        const Eigen::Matrix2f cov_xy_world = fd.covariance.topLeftCorner<2, 2>();
+        const Eigen::Matrix2f Rc = canvas_from_map_.linear();
+        const Eigen::Matrix2f cov_xy_world = Rc * fd.covariance.topLeftCorner<2, 2>() * Rc.transpose();
         const Eigen::Matrix2f cov_xy_robot = R.transpose() * cov_xy_world * R;
 
         const float sigma_x = std::sqrt(std::max(1e-9f, cov_xy_robot(0, 0))) * 2.0f;
         const float sigma_y = std::sqrt(std::max(1e-9f, cov_xy_robot(1, 1))) * 2.0f;
-        const auto t = fd.display_pose.translation();
+        const auto t = draw_pose.translation();
         update_covariance_ellipse(t.x(), t.y(), sigma_x, sigma_y, qRadiansToDegrees(theta));
     }
     else if (cov_ellipse_item_ != nullptr)
@@ -746,6 +797,7 @@ void Viewer2D::draw_rgb_corners(const std::vector<rc::TriplePoint>& points,
         }
     }
     const size_t n = shown.size();
+
 
     auto resize_pool = [&](auto& pool, size_t count, auto make_item)
     {
@@ -1063,6 +1115,13 @@ void Viewer2D::draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segmen
                              const Eigen::Affine2f& robot_pose, float publish_bar,
                              const WallMapStatus& status)
 {
+    // Everything below is drawn in the ROOM frame: map points through room<-map, and the robot pose
+    // pre-composed so segments (which are in the robot frame) land correctly too. See
+    // set_canvas_from_map() for why the canvas is not drawn in the map frame.
+    const Eigen::Affine2f& C = canvas_from_map_;
+    const auto X = [&C](const Eigen::Vector2f& p) { return Eigen::Vector2f(C * p); };
+    const Eigen::Affine2f pose_c = C * robot_pose;
+
     auto resize_pool = [&](auto& pool, size_t count, auto make_item)
     {
         while (pool.size() < count) pool.push_back(make_item());
@@ -1077,15 +1136,15 @@ void Viewer2D::draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segmen
                     : std::unordered_set<std::uint64_t>{};
 
     // This frame's segments: thin cyan, in the room frame through the pose.
-    resize_pool(wall_seg_items_, segments.size(), [&]() {
+    resize_pool(wall_seg_items_, overlay_verbose_ ? segments.size() : 0, [&]() {
         auto* item = agv_->scene.addLine(0, 0, 0, 0, QPen(QColor(0, 200, 220), 0.05));
         item->setZValue(26);
         return item;
     });
-    for (size_t i = 0; i < segments.size(); ++i)
+    for (size_t i = 0; overlay_verbose_ and i < segments.size(); ++i)
     {
-        const Eigen::Vector2f a = robot_pose * segments[i].p0;
-        const Eigen::Vector2f b = robot_pose * segments[i].p1;
+        const Eigen::Vector2f a = pose_c * segments[i].p0;
+        const Eigen::Vector2f b = pose_c * segments[i].p1;
         wall_seg_items_[i]->setLine(a.x(), a.y(), b.x(), b.y());
         // ASSOCIATED (cyan) vs UNEXPLAINED (amber, dotted). The unexplained ones are the interesting
         // half early on: they are what feeds the candidates, and a wall is born out of them once the
@@ -1116,7 +1175,7 @@ void Viewer2D::draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segmen
     // once a cycle closes; this one exists from the frame the wall is born, which is the whole stretch
     // the canvas used to spend empty. A wall held by a handful of points draws a stripe you cannot
     // miss, and it narrows as the evidence arrives — the build-up is the point.
-    resize_pool(wall_lm_band_items_, walls.size(), [&]() {
+    resize_pool(wall_lm_band_items_, overlay_verbose_ ? walls.size() : 0, [&]() {
         auto* item = agv_->scene.addLine(0, 0, 0, 0, QPen(QColor(14, 116, 144, 70), 0.05));
         item->setZValue(7);
         return item;
@@ -1126,18 +1185,21 @@ void Viewer2D::draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segmen
         const auto& w = walls[i];
         const Eigen::Vector2f n = w.normal(), t = w.tangent();
         const float s0 = w.has_extent ? w.s_min : -1.f, s1 = w.has_extent ? w.s_max : 1.f;
-        const Eigen::Vector2f a = n * w.d + t * s0, b = n * w.d + t * s1;
+        const Eigen::Vector2f a = X(n * w.d + t * s0), b = X(n * w.d + t * s1);
         wall_line_items_[i]->setLine(a.x(), a.y(), b.x(), b.y());
         wall_line_items_[i]->setPen(QPen(w.k >= 0 ? kClass[w.k] : QColor(120, 120, 120), 0.12));
         const float lam_d = w.information(1, 1);
         const float sigma_d = (lam_d > 1e-9f) ? 1.f / std::sqrt(lam_d) : -1.f;
-        wall_lm_band_items_[i]->setLine(a.x(), a.y(), b.x(), b.y());
-        wall_lm_band_items_[i]->setPen(QPen(QColor(14, 116, 144, 70),
-                                            (sigma_d > 0.f) ? std::max(2.f * sigma_d, 0.02f) : 0.02f));
         // Suppressed once the closed polygon draws this same wall as an edge, or the two bands stack
         // and the alpha reads as twice the uncertainty.
-        wall_lm_band_items_[i]->setVisible(sigma_d > 0.f and not edge_walls.contains(w.id));
-        const Eigen::Vector2f mid = (a + b) * 0.5f + n * 0.25f;
+        if (overlay_verbose_)
+        {
+            wall_lm_band_items_[i]->setLine(a.x(), a.y(), b.x(), b.y());
+            wall_lm_band_items_[i]->setPen(QPen(QColor(14, 116, 144, 70),
+                                                (sigma_d > 0.f) ? std::max(2.f * sigma_d, 0.02f) : 0.02f));
+            wall_lm_band_items_[i]->setVisible(sigma_d > 0.f and not edge_walls.contains(w.id));
+        }
+        const Eigen::Vector2f mid = (a + b) * 0.5f + Eigen::Vector2f(C.linear() * n) * 0.25f;
         // σ_d rides in the label because early on it is the ONLY uncertainty the map has: no corner
         // exists to carry a disc until three walls meet.
         wall_label_items_[i]->setText(QString("w%1 k=%2%3%4").arg(static_cast<qulonglong>(w.id))
@@ -1171,7 +1233,7 @@ void Viewer2D::draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segmen
     if (poly_closed)
     {
         QPolygonF poly;
-        for (const auto& v : polygon.verts) poly << QPointF(v.x(), v.y());
+        for (const auto& v : polygon.verts) { const auto q = X(v); poly << QPointF(q.x(), q.y()); }
         poly << QPointF(polygon.verts.front().x(), polygon.verts.front().y());
         wall_poly_item_->setPolygon(poly);
         QPen pen(Qt::magenta, 0.10);
@@ -1186,7 +1248,40 @@ void Viewer2D::draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segmen
     // or runs the wrong way AFTER it has already filled the vertices, so those verts are the most
     // informative thing on the canvas exactly when the old code hid them: they show WHERE the layout
     // is refusing to close. Dotted and thin, so an open chain can never be read as a published outline.
-    const size_t n_chain = (not poly_closed and polygon.verts.size() >= 2) ? polygon.verts.size() - 1 : 0;
+    // The bounds the view frames in Estimate mode: the polygon when there is one, otherwise the
+    // wall landmarks' own extents. Re-fitted only when it moves by more than a tenth of itself, so a
+    // converged map holds still on screen instead of breathing with every millimetre of jitter.
+    {
+        QRectF b;
+        for (const auto& vm : polygon.verts)
+        {
+            const auto v = X(vm);
+            b = b.isNull() ? QRectF(v.x(), v.y(), 0.01, 0.01) : b.united(QRectF(v.x(), v.y(), 0.01, 0.01));
+        }
+        if (b.isNull())
+            for (const auto& w : walls)
+            {
+                if (not w.has_extent) continue;
+                const Eigen::Vector2f n = w.normal(), t = w.tangent();
+                for (const float sc : {w.s_min, w.s_max})
+                {
+                    const Eigen::Vector2f e = X(n * w.d + t * sc);
+                    b = b.isNull() ? QRectF(e.x(), e.y(), 0.01, 0.01) : b.united(QRectF(e.x(), e.y(), 0.01, 0.01));
+                }
+            }
+        if (not b.isNull() and b.width() > 0.5 and b.height() > 0.5)
+        {
+            const bool moved = not wall_fit_bounds_.isValid()
+                or std::abs(b.width()  - wall_fit_bounds_.width())  > 0.1 * wall_fit_bounds_.width()
+                or std::abs(b.height() - wall_fit_bounds_.height()) > 0.1 * wall_fit_bounds_.height()
+                or (b.center() - wall_fit_bounds_.center()).manhattanLength() > 0.1 * wall_fit_bounds_.width();
+            wall_fit_bounds_ = b;
+            if (moved) fit_view();
+        }
+    }
+
+    const size_t n_chain = (overlay_verbose_ and not poly_closed and polygon.verts.size() >= 2)
+                               ? polygon.verts.size() - 1 : 0;
     resize_pool(wall_chain_items_, n_chain, [&]() {
         QPen p(QColor(200, 0, 200, 170), 0.05);
         p.setStyle(Qt::DotLine);
@@ -1196,7 +1291,7 @@ void Viewer2D::draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segmen
     });
     for (size_t e = 0; e < n_chain; ++e)
     {
-        const Eigen::Vector2f a = polygon.verts[e], b = polygon.verts[e + 1];
+        const Eigen::Vector2f a = X(polygon.verts[e]), b = X(polygon.verts[e + 1]);
         wall_chain_items_[e]->setLine(a.x(), a.y(), b.x(), b.y());
     }
 
@@ -1218,15 +1313,17 @@ void Viewer2D::draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segmen
     constexpr int   kGhosts    = 6;
     constexpr qint64 kGhostMs  = 5000;   // a ghost older than this describes a map that is gone
     const qint64 now_ghost_ms = QDateTime::currentMSecsSinceEpoch();
-    if (polygon.closed and polygon.verts.size() >= 3)
+    if (not overlay_verbose_) wall_ghosts_.clear();
+    if (overlay_verbose_ and polygon.closed and polygon.verts.size() >= 3)
     {
         if (not wall_ghosts_.empty() and wall_ghosts_.back().nverts != polygon.verts.size())
             wall_ghosts_.clear();
         if ((++wall_ghost_tick_ % 15) == 0)
         {
             QPolygonF g;
-            for (const auto& v : polygon.verts) g << QPointF(v.x(), v.y());
-            g << QPointF(polygon.verts.front().x(), polygon.verts.front().y());
+            for (const auto& v : polygon.verts) { const auto q = X(v); g << QPointF(q.x(), q.y()); }
+            const auto q0 = X(polygon.verts.front());
+            g << QPointF(q0.x(), q0.y());
             wall_ghosts_.push_back({std::move(g), now_ghost_ms, polygon.verts.size()});
             while (wall_ghosts_.size() > kGhosts) wall_ghosts_.pop_front();
         }
@@ -1255,7 +1352,7 @@ void Viewer2D::draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segmen
     // An open chain has one edge fewer than it has vertices; a closed one wraps. Both are drawn —
     // the band is a property of the WALL behind the edge, and that wall is just as uncertain, and
     // just as worth seeing, before the cycle closes as after.
-    const size_t n_edges = poly_closed ? polygon.verts.size() : n_chain;
+    const size_t n_edges = not overlay_verbose_ ? 0 : (poly_closed ? polygon.verts.size() : n_chain);
     resize_pool(wall_band_items_, n_edges, [&]() {
         auto* item = agv_->scene.addLine(0, 0, 0, 0, QPen(QColor(14, 116, 144, 70), 0.05));
         item->setZValue(7);
@@ -1317,7 +1414,8 @@ void Viewer2D::draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segmen
         QColor c = under_bar ? QColor(23, 114, 69) : QColor(194, 65, 12);
         c.setAlpha(under_bar ? 90 : alpha);
         wall_sigma_items_[i]->setRect(-r, -r, 2 * r, 2 * r);
-        wall_sigma_items_[i]->setPos(polygon.corners[i].p.x(), polygon.corners[i].p.y());
+        const Eigen::Vector2f cp = X(polygon.corners[i].p);
+        wall_sigma_items_[i]->setPos(cp.x(), cp.y());
         wall_sigma_items_[i]->setBrush(QBrush(c));
         QPen rim(QColor(c.red(), c.green(), c.blue(), 200), 0.02);
         rim.setStyle(ok ? Qt::SolidLine : Qt::DashLine);   // dashed rim = σ is not a finite number
@@ -1329,8 +1427,7 @@ void Viewer2D::draw_wall_map(const std::vector<rc::wallseg::WallSegment>& segmen
         if (label_it)
         {
             wall_sigma_label_items_[i]->setText(ok ? QString("s=%1").arg(sg, 0, 'f', 2) : QString("s=?"));
-            wall_sigma_label_items_[i]->setPos(polygon.corners[i].p.x() + 0.10,
-                                               polygon.corners[i].p.y() + 0.10);
+            wall_sigma_label_items_[i]->setPos(cp.x() + 0.10, cp.y() + 0.10);
         }
     }
     if (not sig.empty())
