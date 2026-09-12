@@ -548,6 +548,14 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose,
     // xi_child = -Ad_{T_room<-robot}(v_b, w), and Ad_(R,t)(v, w) = (R*v + w*(t_y, -t_x), w). The
     // rotation alone is not enough -- a robot turning in place at a distance t from the room origin
     // makes the room sweep an arc about it, and that is the w*(t_y,-t_x) term.
+    // ★★AND THE SAME ARM RETURNS IN THE SECOND MOMENT, which is worth knowing because meeting one
+    // makes the other obvious. Here it moves the MEAN: a yaw rate becomes a linear velocity on the
+    // child edge, measured at 2.27 m/s in the ring against 0.24 m/s of body speed. In
+    // get_edge_RT_covariance under TimeQuery::Extrapolated it moves the COVARIANCE by the identical
+    // geometry: yaw-rate UNCERTAINTY becomes position uncertainty at range, so the widening there is
+    // almost all in x and doubles with a doubling of range. See the measured table on that
+    // declaration in cortex's dsr_rt_api.h. Two moments, one arm -- which is the argument that the
+    // direction an RT edge is anchored is geometric and measurable, not bookkeeping.
     // ★AND THE COVARIANCE TAKES THE SAME MAP, Ad * Sigma * Ad^T. The sign drops out (it is a
     // quadratic form) but the rotation and lever arm do not, and the result is DENSE: on this edge
     // the velocity uncertainty is no longer the body-fixed diagonal it is in the robot's own frame,
