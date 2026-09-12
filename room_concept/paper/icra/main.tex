@@ -1,5 +1,7 @@
 \documentclass[conference,letterpaper,10pt]{IEEEtran}
 \IEEEoverridecommandlockouts
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
 \usepackage{amsmath,amssymb,graphicx,booktabs,siunitx,balance}
 \usepackage[hidelinks]{hyperref}
 \sisetup{detect-weight=true,detect-family=true}
@@ -77,31 +79,55 @@ That is the property we exploit.
 
 \section{Related Work}
 
-\textbf{Learned layout estimation.} Panorama-based methods recover room shape from a single
-view and are strong under Manhattan or Atlanta priors. They produce a layout per image, not a
-belief a robot can accumulate, and report no per-corner uncertainty that a consumer could gate on.
+\textbf{Floor-plan reconstruction from complete scans.} A large family of methods recovers a floor
+plan from an accumulated point cloud or density image, from the early unified
+formulation~\cite{liu2018floornet} and its shortest-path successor~\cite{chenfloorsp} through
+attention and query-based architectures~\cite{chen2022heat,yue2023roomformer}, room-wise implicit and
+slicing representations~\cite{xufrinet,su2023slibonet}, room-aware
+transformers~\cite{liu2024polyroom}, continuity-aware edges~\cite{liu2025cage}, guided set
+diffusion~\cite{chen2023polydiffuse}, autoregressive polygon
+sequences~\cite{phung2026raster2seq}, and segmentation-guided
+fusion~\cite{ye2025floorsam}. They are evaluated by corner and room F1 on a finished scan. Two
+properties distinguish them from our setting: they are offline, so no decision is taken while the
+estimate is still uncertain; and the number of corners is chosen by a search with hand-set costs
+rather than by a likelihood, so there is no quantity in which structure and data fit are commensurate.
 
-\textbf{Floor-plan reconstruction.} Methods that reconstruct floor plans from accumulated point
-clouds or density maps optimise a global objective over a whole scan and are evaluated by corner and
-room F1. They are typically offline, and the structural decision---how many corners---is taken by a
-search with hand-set costs rather than a likelihood.
+\textbf{Panoramic room layout.} Single- and multi-view layout estimation recovers room shape from
+$360^\circ$ imagery~\cite{hu2021mvlayoutnet,su2022gprnet,wangpsmnet}, with self-training and
+multi-view consistency removing the need for per-scene labels~\cite{solarte2022mlc,
+solarte2024raycasting}, and related work registering panoramas or verifying their
+alignment~\cite{hutchcroftcovispose,lambertsalve}. These produce a layout per view rather than a
+belief a robot accumulates, and report no per-corner uncertainty a consumer could gate on. Unbounded
+and general (non-Manhattan) variants relax the shape prior~\cite{howardjenkins2019unconstrained,
+fayyazsanaviu2rle,bieri2025houselayout3d}. \emph{Sequential} floor-plan estimation from a moving
+camera~\cite{solarte2022dfpe} is the closest in spirit to ours: it, too, must decide room
+membership and shape while the scene is still incomplete. Autoregressive scene
+description~\cite{avetisyan2024scenescript} likewise produces structure from a walkthrough, as
+language rather than as a belief with a covariance.
 
-\textbf{Structured SLAM.} Situational and hierarchical scene-graph SLAM systems introduce planes,
-rooms and floors as explicit entities and demonstrate the benefit of structure for drift. Their
-covariances are those of the underlying least-squares problem and, to our knowledge, are not
-validated against layout ground truth; the model error between a mapped plane and the real surface is
-not represented.
+\textbf{Exploration that predicts structure.} A complementary line predicts unobserved layout to
+drive exploration---room shape from partial observation~\cite{luperto2020exploration}, walls beyond
+the frontier learned from floor plans~\cite{ericson2024floorist}, information gain from global map
+predictions~\cite{ho2025mapex}, and generative layout prediction for
+planning~\cite{wang2025cogniplan}---together with the question of when a map is
+finished~\cite{luperto2024mapcompleteness}. These share our premise that a layout belief should
+inform where to go next; the predicted structure is used to \emph{score} viewpoints rather than to be
+published with an uncertainty a downstream consumer must trust.
 
-\textbf{Uncertainty and calibration.} Conformal prediction has recently been applied to LiDAR-based
-mapping to produce distribution-free guarantees. The guarantee is on a coverage set rather than on a
-covariance a estimator can consume, and the underlying precision is not itself audited. Our position
-is complementary: we keep a parametric covariance, because that is what a joint estimator and a
-consumer both need, and we check it.
-
-\textbf{Active perception.} Next-best-view and active SLAM select viewpoints by information gain.
-Our selection rule is the epistemic term of expected free energy, which is the same quantity when the
-model is Gaussian; the contribution here is not the rule but that the precision it consumes is
+\textbf{Active SLAM.} Surveys of the field~\cite{ahmed2023aslamreview,placed2023survey} formalise
+viewpoint selection by information-theoretic utility, and the question of whether the usual
+uncertainty criteria are the right ones has itself been raised~\cite{placed2022enough}. Our selection
+rule is the epistemic term of an expected free energy, which coincides with information gain under a
+Gaussian model; the contribution here is not the rule but that the precision it consumes has been
 verified, so the gain it predicts is a gain that exists.
+
+\textbf{Uncertainty and calibration.} Uncertainty estimation is well studied in dense depth
+prediction, where predicted confidence can be compared against realised error~\cite{poggiuncertainty},
+and in photogrammetric modelling~\cite{jarzabek2022uncertainty,liu2024point2building}. To our
+knowledge no online room-layout estimator reports a per-corner covariance that has been validated
+against layout ground truth, which is the gap this paper addresses. Our position is deliberately
+parametric: we keep a covariance rather than a coverage set, because a joint estimator and a
+downstream consumer both need one, and we check it.
 
 \section{Generative Model}
 
