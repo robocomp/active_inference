@@ -155,10 +155,20 @@ rather than tune it, and \S\ref{sec:notconstant} shows why it cannot be a consta
 
 \subsection{Geometric generality: 594 annotated floor plans}
 
-We evaluate on 594 room annotations from a large real-building layout corpus, spanning 6 to 18
-ground-truth corners. Observations are simulated from the annotated polygon; this tests the
-estimator against the \emph{shape distribution of real buildings} rather than against a generator's
-idea of a room, and \S\ref{sec:real} validates the sensor model used to do it.
+We evaluate on 594 room annotations from \textbf{MatterportLayout}~\cite{zou2021manhattan}, the
+Manhattan room-layout annotations on Matterport3D~\cite{chang2017matterport3d} panoramas, spanning 6
+to 18 ground-truth corners.
+
+\textbf{We state plainly what this does and does not measure.} Our observations are \emph{simulated
+from the annotated polygon}: a range sensor is driven through the annotated room and the estimator
+never sees a photograph. \textbf{The IoU in Table~\ref{tab:iou} is therefore not comparable with
+single-image layout methods evaluated on the same corpus}, which solve a harder problem---recovering
+shape from appearance---and should not be scored against these numbers in either direction. What the
+594 rooms do provide is the \emph{shape distribution of real buildings}: real aspect ratios, real
+sizes, and non-convex plans with up to 18 corners, in place of a generator's idea of a room. The
+quantity under test here is the estimator's geometry and, in \S\ref{sec:calib}, its uncertainty---
+for which the annotated corners are ground truth regardless of how the returns were produced.
+\S\ref{sec:real} then validates the sensor model itself on real depth.
 
 \begin{table}[t]
 \centering
@@ -179,6 +189,7 @@ Failures (no closed polygon) & 8 / 594 \\
 \end{table}
 
 \subsection{Is the reported uncertainty honest?}
+\label{sec:calib}
 
 For every room we take the final published polygon and match its corners one-to-one to the truth
 corners by Hungarian assignment. Surplus corners on either side remain unmatched and are counted as
@@ -218,8 +229,11 @@ The gate discriminates, and the number it gates on now means something.
 \label{sec:real}
 
 The decomposition in \eqref{eq:corner} claims that error separates into a part that averages away and
-a part that does not. We measure both on real data: real building-scale depth against annotated
-walls, fitting each wall from the returns that land on it (588 segments, 120 rooms).
+a part that does not. We measure both on \textbf{MP3D-FPE}~\cite{solarte2022dfpe}, which provides
+real Matterport depth with camera trajectories and per-room annotated corners. Slicing the depth to a
+horizontal band and fitting each annotated wall from the returns that land on it gives both terms
+directly (588 segments, 120 rooms; the slice registers to the annotations with a median modal offset
+of \SI{7.5}{\milli\meter}).
 
 \begin{table}[t]
 \centering
@@ -282,13 +296,16 @@ precision being right, so nothing in it would have flagged any of the three.
 \section{Limitations}
 
 Observations in \S\ref{sec:exp} are simulated from the annotated polygons; \S\ref{sec:real} validates
-the noise model but not the full pipeline on recorded data. We attempted an evaluation on a real
-building-scale RGB-D dataset with annotated rooms and report a negative result that we believe is
-useful: because such datasets annotate \emph{rooms inside open-plan buildings} while a
-\SI{360}{\degree} depth sensor sees through every doorway, a median \SI{57}{\percent} of returns fall
-outside the polygon being scored, and taking the union of a floor's rooms still leaves
-\SI{50}{\percent} outside because corridors are unannotated. No granularity makes the annotation and
-the observation describe the same region, so such a corpus cannot grade a bounded-room method.
+the noise model but not the full pipeline on recorded data. We attempted a full pipeline evaluation on
+MP3D-FPE~\cite{solarte2022dfpe} and report a negative result we believe is useful to others. Because
+it annotates \emph{rooms inside open-plan buildings} while a \SI{360}{\degree} depth sensor sees
+through every doorway, a median \SI{57}{\percent} of returns fall outside the room being scored
+(\num{0} of its \num{401} rooms fall below \SI{10}{\percent}); taking the union of a floor's rooms
+still leaves \SI{50}{\percent} outside, because corridors and stairwells are unannotated. No
+granularity makes the annotation and the observation describe the same region, so this corpus---and,
+we expect, any room-annotated building corpus---cannot grade a method that models a \emph{bounded}
+room. We report it rather than quoting the \num{0.14} IoU it yields, which measures the task
+mismatch and not the estimator.
 Finally, the pose-covariance defect of \S\ref{sec:notconstant} is measured but not fixed; the cure we
 argue for---a per-wall offset state with the measured prior---is future work.
 
