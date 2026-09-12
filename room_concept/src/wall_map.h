@@ -83,6 +83,26 @@ namespace rc::wallmap
         int   birth_min_frames = 2;         // a jump needs a second view (tracker-only birth)
         int   max_candidates = 32;
         float publish_corner_sigma = 0.06f; // m — every derived corner must be this sharp to publish
+        // ── The corner's IRREDUCIBLE error, the part more looking cannot remove ─────────────────
+        // intersect_walls propagates only the two walls' STATISTICAL uncertainty, which averages
+        // down with the returns behind them — so a well-seen corner's σ slides toward zero. The
+        // truth does not follow it down. Measured against the MatterportLayout ground truth (594
+        // rooms, 4350 Hungarian-matched corners): the true error is FLAT at ~2 cm across every σ
+        // band, so a corner claiming 1 cm is no more accurate than one claiming 5 cm, and only
+        // 59.8% of the tightest band fell within 2σ where ~90% should. What is left when the
+        // statistics are exhausted is systematic — grid resolution, returns landing inside the
+        // surface, a small pose bias — and it biases a wall the same way on every look.
+        //     σ_eff² = σ_statistical² + corner_model_sigma²
+        // Irrelevant where the corner is poorly seen (0.5 m does not notice 2 cm) and decisive
+        // where it was overclaiming. Measured floor 0.019 m against a harness sensor of 0.020 m per
+        // return; ⚠ RE-MEASURE IT on real data (MP3D-FPE) rather than carrying this value over.
+        // Coverage on those 594 rooms, ≤1σ/≤2σ/≤3σ:
+        //     0.000 m   46.7% / 70.5% / 81.2%      publishable 89.0%
+        //     0.020 m   64.9% / 85.3% / 91.1%      publishable 88.4%   ← honest at almost no cost
+        //     0.030 m   74.8% / 89.6% / 94.0%      publishable 87.1%
+        // Not a threshold: a variance term in the generative model, the same role base_sigma plays
+        // in CornerDetector, which this channel simply never had.
+        float corner_model_sigma = 0.02f;   // m
         // ── Model-first initialisation: the OBB rectangle prior on shape and size ────────────────
         // HONEST about what an OBB knows: on a non-convex cloud (an L) PCA tilts the box by 15-20°,
         // and a 5° prior then REFUSED the true walls' segments at the gate — the sides never rotated
@@ -676,7 +696,13 @@ namespace rc::wallmap
         struct ClassChoice { int k = -1; float eps = 0.f; float cost = 0.f; };
         ClassChoice classify(float phi) const;
 
-        static Corner intersect_walls(const WallLandmark& a, const WallLandmark& b, bool inferred);
+        /// `model_sigma` is Params::corner_model_sigma — the irreducible floor above. It is
+        /// DEFAULTED rather than required so the explorer's own σ-ratio prediction, which
+        /// calls this to price a look, saturates on the same floor the published corner does.
+        /// An explorer that believes σ can reach zero keeps driving after looking has stopped
+        /// paying.
+        static Corner intersect_walls(const WallLandmark& a, const WallLandmark& b, bool inferred,
+                                      float model_sigma = 0.02f);
 
         /// Segment (robot frame) → map-frame (φ, d) and the 2×3 Jacobian w.r.t. the pose.
         static void to_map(float phi_r, float d_r, const Eigen::Vector3f& pose,

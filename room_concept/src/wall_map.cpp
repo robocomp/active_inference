@@ -706,7 +706,8 @@ namespace rc::wallmap
         return w;
     }
 
-    Corner WallMap::intersect_walls(const WallLandmark& a, const WallLandmark& b, bool inferred)
+    Corner WallMap::intersect_walls(const WallLandmark& a, const WallLandmark& b, bool inferred,
+                                    float model_sigma)
     {
         Corner c;
         c.wall_a = a.id; c.wall_b = b.id; c.inferred = inferred;
@@ -726,7 +727,10 @@ namespace rc::wallmap
         };
         const auto ca = cov_of(a.information), cb = cov_of(b.information);
         if (not ca or not cb) return c;
-        const Eigen::Matrix2f Sp = Ja(a, 0) * (*ca) * Ja(a, 0).transpose() + Ja(b, 1) * (*cb) * Ja(b, 1).transpose();
+        Eigen::Matrix2f Sp = Ja(a, 0) * (*ca) * Ja(a, 0).transpose() + Ja(b, 1) * (*cb) * Ja(b, 1).transpose();
+        // The part of the error that more returns cannot remove (Params::corner_model_sigma).
+        if (std::isfinite(model_sigma) and model_sigma > 0.f)
+            Sp += (model_sigma * model_sigma) * Eigen::Matrix2f::Identity();
         Eigen::SelfAdjointEigenSolver<Eigen::Matrix2f> eig(Sp);
         const float lmax = eig.eigenvalues().maxCoeff();
         c.sigma = (std::isfinite(lmax) and lmax >= 0.f) ? std::sqrt(lmax) : std::numeric_limits<float>::infinity();
@@ -3491,7 +3495,7 @@ namespace rc::wallmap
             const auto* A = find(ord[static_cast<size_t>((i + n - 1) % n)]);
             const auto* B = find(ord[static_cast<size_t>(i)]);
             if (A == nullptr or B == nullptr) { st << "edge " << i << " references a missing wall; "; closed = false; break; }
-            Corner c = intersect_walls(*A, *B, false);
+            Corner c = intersect_walls(*A, *B, false, params.corner_model_sigma);
             if (not c.p.allFinite() or (c.p.x() == 0.f and c.p.y() == 0.f and not linefit::intersect(A->line(), B->line())))
             { st << "edges " << (i + n - 1) % n << " and " << i << " are parallel (no corner); "; closed = false; break; }
             corners.push_back(c);
