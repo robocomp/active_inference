@@ -1175,7 +1175,9 @@ void SpecificWorker::reconcile_mount_nominal(rc::camcal::Estimator &pool, rc::Ca
             //   doubles the mount; not applying it discards a measurement. So the correction is
             //   dropped and the graph adopted: the evidence (H, b) is KEPT, only its anchor moves,
             //   and the next save records the nominal so this cannot recur.
-            pool.adopt_external_nominal(graph_R, graph_t);
+            pool.adopt_external_nominal(graph_R, graph_t, params.IMAGE_EDGE_MOUNT_PITCH_SIGMA,
+                                        params.IMAGE_EDGE_MOUNT_HEIGHT_SIGMA,
+                                        params.IMAGE_EDGE_MOUNT_YAW_SIGMA);
             qWarning().noquote() << QString::asprintf(
                 "[camcal] %s: evidence predates the stored nominal (format < 3) and carries a"
                 " correction of pitch %+.4f / height %+.4f / yaw %+.4f prior sigmas while mountPublish"
@@ -1223,14 +1225,22 @@ void SpecificWorker::reconcile_mount_nominal(rc::camcal::Estimator &pool, rc::Ca
     // Neither: the extrinsic changed from outside this loop — the robot's JSON reseeded with a mount
     // that now carries a measurement, or someone edited it. Adopt it, and drop the correction it
     // absorbs rather than stacking ours on top of theirs.
-    pool.adopt_external_nominal(graph_R, graph_t);
+    Eigen::Vector3f delta = Eigen::Vector3f::Zero();
+    float res = 0.f;
+    const bool rebased = pool.adopt_external_nominal(
+        graph_R, graph_t, params.IMAGE_EDGE_MOUNT_PITCH_SIGMA,
+        params.IMAGE_EDGE_MOUNT_HEIGHT_SIGMA, params.IMAGE_EDGE_MOUNT_YAW_SIGMA, &delta, &res);
     qWarning().noquote() << QString::asprintf(
         "[camcal] %s: the extrinsic changed OUTSIDE this loop (|graph-nominal| %.2e,"
-        " |graph-published| %.2e, both over %.0e). Adopting it as the new nominal and DROPPING the"
-        " stored correction, which the new mount is assumed to absorb. H and b are kept. If that"
-        " assumption is wrong the total simply re-converges; stacking would not.",
+        " |graph-published| %.2e, both over %.0e). Adopting it as the new nominal. The change is"
+        " pitch %+.4f deg / height %+.4f m / yaw %+.4f deg with a family residual of %.2e, so the"
+        " evidence was %s.",
         cam.c_str(), static_cast<double>(d_nominal), static_cast<double>(d_published),
-        static_cast<double>(kTol));
+        static_cast<double>(kTol), delta.x() * 180.0 / M_PI, delta.y(), delta.z() * 180.0 / M_PI,
+        static_cast<double>(res),
+        rebased ? "RE-ANCHORED onto it — b is untouched because the MOUNT did not move, only the point it is measured from, and no information is lost"
+                : "RESET: the change is not expressible as a mount correction, so evidence measured"
+                  " against the old mount is not evidence about this one");
 }
 
 /// Mirror the measured mount into the SHARED body->camera RT edge, so retina, the controller and

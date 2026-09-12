@@ -150,6 +150,29 @@ target_include_directories(gn_selftest PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
 target_link_libraries(gn_selftest ${LIBS})
 set_target_properties(gn_selftest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
 
+# ── mp3d_replay ───────────────────────────────────────────────────────────────
+# Drives the estimator from RECORDED MP3D-FPE scans (real Matterport depth + real trajectories)
+# instead of simulated ones, and scores the closed polygon against the annotated corners.
+# EXCLUDE_FROM_ALL. Build and run with:
+#   make -C build mp3d_replay && ../bin/mp3d_replay datasets/mp3d_fpe
+add_executable(mp3d_replay EXCLUDE_FROM_ALL
+  ../tools/mp3d_replay.cpp
+  ../src/room_gn_solver.cpp
+  ../src/room_model.cpp
+  ../src/room_concept.cpp
+  ../src/object_anchor_factor.cpp
+  ../src/image_edge_factor.cpp
+  ../src/image_edge_source.cpp
+  ../src/corner_detector.cpp
+  ../src/wall_segmenter.cpp
+  ../src/wall_map.cpp
+  ../src/pointcloud_center_estimator.cpp
+  ../src/rerun_logger.cpp
+)
+target_include_directories(mp3d_replay PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
+target_link_libraries(mp3d_replay ${LIBS})
+set_target_properties(mp3d_replay PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)
+
 # ── corner_gather_test ────────────────────────────────────────────────────────
 # Offline check that the layout-wide explain-away removes a perpendicular face from a wall fit
 # WITHOUT letting a collinear neighbour starve it (see the file header for the two live failures it
@@ -207,4 +230,11 @@ set_target_properties(motion_calib PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_C
 #   make -C build mount_replay && ../bin/mount_replay --help
 add_executable(mount_replay EXCLUDE_FROM_ALL ../tools/mount_replay.cpp)
 target_include_directories(mount_replay PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
+# ★ QtCore ONLY, and only because camera_calibration.h logs through QDebug. The point of this target
+#   is that it calls the AGENT'S OWN estimator rather than a replica of it, and the rebase-on-adopt
+#   selftest needs rc::camcal::Estimator itself — the decision about whether a nominal change is
+#   expressible as a mount correction lives there. QtCore is cheap; no widgets, no DSR, no torch, so
+#   the target still builds in seconds.
+find_package(Qt6 COMPONENTS Core REQUIRED)
+target_link_libraries(mount_replay PRIVATE Qt6::Core)
 set_target_properties(mount_replay PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../bin)

@@ -158,11 +158,79 @@ namespace rc::camcal
         [[nodiscard]] const Eigen::Vector3f& edge_nominal_t() const noexcept { return edge_t_; }
         [[nodiscard]] const Eigen::Vector3f& edge_nominal_r() const noexcept { return edge_r_; }
         /// Adopt a nominal that came from OUTSIDE (the robot's JSON reseeding the graph with a mount
-        /// that now carries a measurement) and drop the correction that the new nominal absorbs.
+        /// that now carries a measurement) and drop the correction the new nominal absorbs.
         /// ⚠ NEVER call this for our OWN published value: re-centring the prior on the estimator's
         ///   last answer removes the prior's pull, and publishes happen every window.
-        void adopt_external_nominal(const Eigen::Matrix3f& R, const Eigen::Vector3f& t) noexcept
-        { set_base(R, t); acc_.applied.setZero(); have_edge_ = false; }
+        ///
+        /// ★★★ THE EVIDENCE MUST MOVE WITH THE MOUNT OR IT DESCRIBES ONE THAT NO LONGER EXISTS.
+        ///     H and b were accumulated against the old base. Changing the base and zeroing `applied`
+        ///     without re-referencing them leaves a pool that answers about a mount nobody has — and
+        ///     with millions of pairs behind it, it answers with a certainty no window can outvote:
+        ///     measured 2026-09-12, a pool at 0.00 +/- 0.03 mm of height against a fresh window
+        ///     saying 52.8 +/- 7.3 mm. Accum::rebase exists for exactly this and its own note says the
+        ///     pair must happen together; this used to do one alone.
+        /// ★ REBASE IF THE CHANGE IS IN THE MODEL'S FAMILY, RESET IF IT IS NOT. The family is
+        ///   `Rx(pitch)*Rz(yaw)` plus `height*z_cam` — the transformation the J columns are the
+        ///   derivative of. A change expressible in it is re-referenced exactly and no information is
+        ///   lost. A change that is NOT (a real re-mount, an x/y shift) cannot be expressed as a
+        ///   correction at all, so the evidence is dropped instead of re-referenced approximately:
+        ///   information measured against a mount that no longer exists is not information.
+        /// ⚠ The composition of two corrections is first-order in their product (rotations do not
+        ///   commute), which at these magnitudes — under a degree — is ~1e-5 rad of slop. The residual
+        ///   of the decomposition is CHECKED against a tolerance rather than assumed small.
+        /// @return true if the evidence was rebased, false if it was reset.
+        bool adopt_external_nominal(const Eigen::Matrix3f& R1, const Eigen::Vector3f& t1,
+                                    float sigma_pitch, float sigma_height, float sigma_yaw,
+                                    Eigen::Vector3f* delta_out = nullptr, float* residual_out = nullptr)
+        {
+            if (not have_base_ or acc_.n <= 0)
+            {
+                // No old base to move FROM. The caller's branch states the assumption that the new
+                // base is the mount the evidence already describes, so the evidence stays where it is
+                // and only the anchor moves.
+                // ⚠ `applied` is zeroed rather than reduced by a measured delta, because without an
+                //   old base there is no delta to measure. That is the caller's stated assumption —
+                //   the new base IS the mount in force — and it is exactly the assumption that was
+                //   applied unconditionally before this function knew the difference.
+                set_base(R1, t1); acc_.applied.setZero(); have_edge_ = false;
+                if (delta_out) delta_out->setZero();
+                if (residual_out) *residual_out = 0.f;
+                return true;
+            }
+            const Eigen::Matrix3f Rc = R1 * base_R_.transpose();
+            // Rx(p)*Rz(y) has a zero in (0,2); recover p and y from the same entries that build it.
+            const float p = std::atan2(-Rc(1, 2), Rc(2, 2));
+            const float y = std::atan2(-Rc(0, 1), Rc(0, 0));
+            const Eigen::Matrix3f chk =
+                (Eigen::AngleAxisf(p, Eigen::Vector3f::UnitX())
+                 * Eigen::AngleAxisf(y, Eigen::Vector3f::UnitZ())).toRotationMatrix();
+            const Eigen::Vector3f dt = t1 - Rc * base_t_;
+            const float rot_res = (chk - Rc).cwiseAbs().maxCoeff();
+            const float xy_res  = std::max(std::abs(dt.x()), std::abs(dt.y()));
+            const float res = std::max(rot_res, xy_res);
+            if (delta_out) *delta_out = Eigen::Vector3f(p, dt.z(), y);
+            if (residual_out) *residual_out = res;
+            set_base(R1, t1);
+            have_edge_ = false;
+            if (res < 1e-5f and sigma_pitch > 0.f and sigma_height > 0.f and sigma_yaw > 0.f)
+            {
+                const Eigen::Vector4d d(static_cast<double>(p) / sigma_pitch,
+                                        static_cast<double>(dt.z()) / sigma_height,
+                                        static_cast<double>(y) / sigma_yaw, 0.0);
+                // ★★★ NO rebase HERE, AND THAT DISTINCTION IS THE WHOLE OPERATION. Accum::rebase is
+                //     for when the MOUNT moves: the residuals then refer to a mount that no longer
+                //     exists and b must move with it. Here the mount is untouched — only the point it
+                //     is measured FROM has moved — so b is still correct and re-referencing it would
+                //     subtract the change a second time. Measured by the selftest before this comment
+                //     existed: rebasing drifted the estimated mount by -0.355 deg on a +0.400 deg
+                //     re-reference, i.e. almost exactly twice the change.
+                //     Only the accumulated total is expressed against the new base.
+                acc_.applied -= d;
+                return true;
+            }
+            acc_.reset();                // includes applied; offset_sigma_px is configuration and survives
+            return false;
+        }
 
         void add(const rc::mount::PairObs& o) { acc_.add(o); }
         /// Prior sigma on a corner's own image offset, in pixels. 0 = the nuisance is off and the

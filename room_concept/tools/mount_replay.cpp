@@ -74,6 +74,7 @@
 #include <Eigen/Dense>
 
 #include "mount_lidar_pair.h"
+#include "camera_calibration.h"
 
 namespace
 {
@@ -861,6 +862,108 @@ int run_loop()
     return failures;
 }
 
+std::string fmt2(const char* f, double a, double b = 0.0)
+{ char buf[200]; std::snprintf(buf, sizeof buf, f, a, b); return std::string(buf); }
+
+/// ── RE-ANCHORING THE TOTAL WHEN THE NOMINAL MOVES ──────────────────────────────────────────
+/// Does Estimator::adopt_external_nominal leave the ESTIMATE OF THE PHYSICAL MOUNT unchanged?
+///
+/// ★★★ THIS IS THE TEST THAT WOULD HAVE CAUGHT THE 2026-09-12 DEFECT. Moving the base and zeroing
+///     `applied` without re-referencing H and b left a pool describing a mount nobody had: 36.9M pairs
+///     insisting on 0.00 +/- 0.03 mm of height while a fresh window said 52.8 +/- 7.3 mm. The pool
+///     cannot be outvoted, so the loop dies silently rather than loudly.
+/// The invariant: `base + (applied + x)` is the mount the estimator believes in, and re-referencing to
+/// a new base `base + d` must leave that belief where it was. It cannot be exact — the residual is
+/// `2(H+I)^-1 d`, which is the prior's share — so the check is against a fraction of d on an axis the
+/// data actually informs, and the residual is printed rather than hidden.
+int run_reanchor()
+{
+    std::printf("\nre-anchor-on-adopt selftest — is the estimate of the mount invariant?\n\n");
+    int failures = 0;
+    const auto check = [&](const char* what, bool ok, const std::string& detail) {
+        std::printf("  %-58s %s   %s\n", what, ok ? "PASS" : "FAIL", detail.c_str());
+        if (not ok) ++failures;
+    };
+    const Eigen::Vector3f lidar(0.f, 0.f, 1.075f);
+    Camera cam = make_camera("zed", Eigen::Vector3f(0.18f, 0.09f, 0.945f), lidar, 23, 40, false);
+    const Eigen::Matrix3f R0 = cam.ctx.cam_R_robot;
+    const Eigen::Vector3f t0 = cam.ctx.cam_t_robot;
+    const float sp = cam.ctx.sigma_pitch, sh = cam.ctx.sigma_height, sy = cam.ctx.sigma_yaw;
+
+    // Rows whose IMAGE came from a mount 1 degree out in yaw, predicted by the nominal.
+    Eigen::Matrix3f Rt = R0; Eigen::Vector3f tt = t0;
+    inject_camera(Axis::Yaw, static_cast<float>(1.0 / kRad2Deg), Rt, tt);
+    const auto fill = [&](rc::camcal::Estimator& e, const Eigen::Matrix3f& R, const Eigen::Vector3f& t)
+    {
+        for (const Row& r : cam.rows)
+        {
+            const rc::mount::PairObs truth = rc::mount::make_pair_from(
+                r.vertex, r.assoc_prob, r.p_robot, r.uv_image, r.cov, cam.ctx.cam, Rt, tt, sp, sh, sy);
+            if (not truth.ok) continue;
+            const rc::mount::PairObs o = rc::mount::make_pair_from(
+                r.vertex, r.assoc_prob, r.p_robot, truth.uv_lidar, r.cov, cam.ctx.cam, R, t, sp, sh, sy);
+            if (o.ok) e.add(o);
+        }
+    };
+    rc::camcal::Estimator e;
+    e.set_vertex_offset_sigma_px(5.3);
+    e.set_base(R0, t0);
+    fill(e, R0, t0);
+    const auto s0 = e.solve();
+    if (not s0.ok) { check("the baseline solve works", false, "solve failed"); return 1; }
+    const Eigen::Vector4d total0 = e.applied() - s0.p;    // p = -x, so the total is applied + x
+
+    // A nominal change that IS in the family: pitch +0.10 deg, height +3 mm, yaw +0.40 deg.
+    const Eigen::Vector3f d(static_cast<float>(0.10 / kRad2Deg), 0.003f,
+                            static_cast<float>(0.40 / kRad2Deg));
+    Eigen::Matrix3f R1 = R0; Eigen::Vector3f t1 = t0;
+    inject_camera(Axis::Yaw,    d.z(), R1, t1);
+    inject_camera(Axis::Pitch,  d.x(), R1, t1);
+    inject_camera(Axis::Height, d.y(), R1, t1);
+    Eigen::Vector3f got = Eigen::Vector3f::Zero(); float res = 0.f;
+    const bool rebased = e.adopt_external_nominal(R1, t1, sp, sh, sy, &got, &res);
+    check("a change inside the family RE-ANCHORS rather than resets", rebased and e.pairs() > 0,
+          fmt2("family residual %.2e, %.0f pairs kept", static_cast<double>(res),
+               static_cast<double>(e.pairs())));
+    check("the delta is recovered from the two mounts alone",
+          (got - d).cwiseAbs().maxCoeff() < 2e-5f,
+          fmt2("recovered pitch %+.4f deg vs %+.4f", got.x() * kRad2Deg, d.x() * kRad2Deg));
+    const auto s1 = e.solve();
+    const Eigen::Vector4d total1 = e.applied() - s1.p;
+    const Eigen::Vector4d dv(static_cast<double>(d.x()) / sp, static_cast<double>(d.y()) / sh,
+                             static_cast<double>(d.z()) / sy, 0.0);
+    // The belief about the mount, expressed against the ORIGINAL base, must not have moved — and the
+    // residual is PREDICTED rather than tolerated. Re-anchoring moves the prior's centre, so the
+    // estimate follows by the prior's own share of the change: drift = C d, whose diagonal is
+    // sigma_posterior^2 * d in these units. Checking against that instead of against a round number
+    // is the difference between a test and a threshold: it fails when the ALGEBRA is wrong, not when
+    // the axis happens to be less informed than whoever wrote the tolerance assumed.
+    const Eigen::Vector4d drift = total1 - (total0 - dv);
+    for (const int i : {1, 2})
+    {
+        const double predicted = s1.sigma(i) * s1.sigma(i) * dv(i);
+        const double scale = (i == 1) ? sh * 1000.0 : sy * kRad2Deg;
+        check(i == 2 ? "the estimated MOUNT moves only by the prior's share (yaw)"
+                     : "...and on height",
+              std::abs(drift(i) - predicted) < 0.25 * std::abs(dv(i)) + 1e-3,
+              fmt2("drift %.4f vs predicted C*d %.4f prior sigmas", drift(i), predicted)
+              + fmt2(" (%.4f vs %.4f in physical units)", drift(i) * scale, predicted * scale));
+    }
+
+    // A change OUTSIDE the family — a lateral shift is not a mount correction — must RESET.
+    rc::camcal::Estimator e2;
+    e2.set_vertex_offset_sigma_px(5.3);
+    e2.set_base(R0, t0);
+    fill(e2, R0, t0);
+    const Eigen::Vector3f t_lat = t0 + Eigen::Vector3f(0.02f, 0.f, 0.f);
+    const bool reb2 = e2.adopt_external_nominal(R0, t_lat, sp, sh, sy, &got, &res);
+    check("a change OUTSIDE the family RESETS instead of approximating",
+          not reb2 and e2.pairs() == 0,
+          fmt2("residual %.2e, %.0f pairs kept", static_cast<double>(res),
+               static_cast<double>(e2.pairs())));
+    return failures;
+}
+
 int run()
 {
     std::printf("mount_replay selftest — a drive whose truth is known\n\n");
@@ -1178,7 +1281,7 @@ int main(int argc, char** argv)
         const std::string a = argv[i];
         const auto next = [&]() -> std::string { return (i + 1 < argc) ? argv[++i] : std::string(); };
         if (a == "--help") { usage(); return 0; }
-        else if (a == "--selftest") return selftest::run();
+        else if (a == "--selftest") { const int f = selftest::run(); return f + selftest::run_reanchor(); }
         else if (a == "--pair") pair_files.push_back(next());
         else if (a == "--legacy-pair") legacy_files.push_back(next());
         else if (a == "--legacy-equirect")
